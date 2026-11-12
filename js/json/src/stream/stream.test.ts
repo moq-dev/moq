@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { StreamCode, Time, Track } from "@moq/net";
 import * as z from "zod/mini";
 import { Consumer, Producer, Rolled } from "./index.ts";
@@ -28,7 +28,7 @@ test("plaintext roundtrip in order", async () => {
 });
 
 test("compressed roundtrip in order", async () => {
-	const track = new Track.Producer("test").accept({ compress: true });
+	const track = new Track.Producer("test").accept({ compression: "deflate" });
 	const producer = new Producer<Rec>({ track });
 	for (let n = 0; n < 20; n++) producer.append({ value: { n } });
 	producer.finish();
@@ -37,7 +37,7 @@ test("compressed roundtrip in order", async () => {
 });
 
 test("a record whose worst-case slice outgrows the frame cap is refused, leaving the track open", async () => {
-	const track = new Track.Producer("test").accept({ compress: true });
+	const track = new Track.Producer("test").accept({ compression: "deflate" });
 	const producer = new Producer<string>({ track });
 	// 32 MiB of JSON fits the plain cap, but its DEFLATE bound does not.
 	expect(() => producer.append({ value: "x".repeat(32 * 1024 * 1024 - 2) })).toThrow(
@@ -51,7 +51,7 @@ test("a record whose worst-case slice outgrows the frame cap is refused, leaving
 });
 
 test("the whole log rides one group, never rolled", async () => {
-	const track = new Track.Producer("test").accept({ compress: true });
+	const track = new Track.Producer("test").accept({ compression: "deflate" });
 	const producer = new Producer<Rec>({ track });
 	for (let n = 0; n < 50; n++) producer.append({ value: { n } });
 	producer.finish();
@@ -67,7 +67,7 @@ test("the whole log rides one group, never rolled", async () => {
 test("records with embedded newlines round-trip (JSON escapes the newline)", async () => {
 	// Each record is its own frame (one JSON object), and JSON.stringify escapes control characters,
 	// so a string value containing a newline round-trips cleanly.
-	const track = new Track.Producer("test").accept({ compress: true });
+	const track = new Track.Producer("test").accept({ compression: "deflate" });
 	const producer = new Producer<{ s: string }>({ track });
 	const value = { s: "line1\nline2\ttab" };
 	for (let i = 0; i < 4; i++) producer.append({ value: value });
@@ -99,7 +99,7 @@ test("a second group is reported while the first is still open", async () => {
 
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max delay budget once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ delay: { max: Milli(30_000) } }) });
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ delay: { max: Duration.millis(30_000) } }) });
 	expect((await consumer.next())?.value).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toBeInstanceOf(Rolled);
 
@@ -115,7 +115,7 @@ test("a second group is reported while the first is still open", async () => {
 
 for (const compress of [false, true]) {
 	test(`schema validation stays inside the read (compress=${compress})`, async () => {
-		const track = new Track.Producer("test").accept({ compress });
+		const track = new Track.Producer("test").accept({ compression: compress ? "deflate" : "none" });
 		const producer = new Producer<Rec>({ track });
 		producer.append({ value: { n: 1 } });
 		producer.finish();
@@ -207,7 +207,7 @@ test("an untimed record reads back untimed", async () => {
 });
 
 test("each record reads back with its capture timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compress: true });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compression: "deflate" });
 	const producer = new Producer<number>({ track });
 	producer.append({ value: 1, at: Time.Timestamp.fromMillis(1_000) });
 	producer.append({ value: 2, at: Time.Timestamp.fromMillis(2_000) });
@@ -224,7 +224,7 @@ test("each record reads back with its capture timestamp", async () => {
 
 for (const compress of [false, true]) {
 	test(`a stream has no record ceiling (compress=${compress})`, async () => {
-		const track = new Track.Producer("test").accept({ compress });
+		const track = new Track.Producer("test").accept({ compression: compress ? "deflate" : "none" });
 		const producer = new Producer<Rec>({ track });
 		for (let n = 0; n < 9000; n++) producer.append({ value: { n } });
 		producer.finish();
@@ -234,7 +234,7 @@ for (const compress of [false, true]) {
 	});
 
 	test(`a live stream passes several tails and refuses a truncated replay (compress=${compress})`, async () => {
-		const track = new Track.Producer("test").accept({ compress });
+		const track = new Track.Producer("test").accept({ compression: compress ? "deflate" : "none" });
 		const producer = new Producer<{ n: number; pad: string }>({ track });
 		const fast = new Consumer<{ n: number; pad: string }>({ track: track.subscribe() });
 		const slow = new Consumer<Rec>({ track: track.subscribe() });
@@ -250,3 +250,15 @@ for (const compress of [false, true]) {
 		expect(await fast.next()).toBeUndefined();
 	});
 }
+
+// Mirrors the Rust `stream::Finished` doctest: the log `finish` returns takes no record, at
+// compile time and at run time.
+test("finishing returns a log that appends nothing", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Rec>({ track });
+	producer.append({ value: { n: 0 } });
+	const finished = producer.finish();
+	// @ts-expect-error a finished log appends no record
+	expect(() => finished.append({ value: { n: 1 } })).toThrow();
+	expect(await drain(track.subscribe())).toEqual([0]);
+});

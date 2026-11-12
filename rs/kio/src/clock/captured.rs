@@ -168,7 +168,7 @@ mod tests {
 			tokio::time::advance(Duration::from_secs(5)).await;
 			assert_eq!(Clock::current(), clock);
 		});
-		assert_eq!(clock.now(), at + Duration::from_secs(5));
+		assert_eq!(clock.now(), at.saturating_add(Duration::from_secs(5)));
 	}
 
 	/// An installed manual clock is read wherever its capture goes.
@@ -194,9 +194,12 @@ mod tests {
 		crate::clock::sim::run(async move {
 			let sim = Clock::current();
 			crate::clock::sleep(Duration::from_secs(10)).await;
-			assert_eq!(sim.now(), crate::clock::Instant::ZERO + Duration::from_secs(10));
+			assert_eq!(
+				sim.now(),
+				crate::clock::Instant::ZERO.saturating_add(Duration::from_secs(10))
+			);
 			assert_eq!(sim.wall(), crate::clock::Manual::WALL_START + Duration::from_secs(10));
-			assert!(host.now() > crate::clock::Instant::ZERO + Duration::from_secs(1 << 31));
+			assert!(host.now() > crate::clock::Instant::ZERO.saturating_add(Duration::from_secs(1 << 31)));
 			assert_ne!(sim, host);
 		});
 	}

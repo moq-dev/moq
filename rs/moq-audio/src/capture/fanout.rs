@@ -110,26 +110,6 @@ pub struct Consumer {
 }
 
 impl Consumer {
-	pub(crate) fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		ready!(self.state.poll_closed(waiter));
-		Poll::Ready(
-			self.state
-				.read()
-				.failure
-				.clone()
-				.unwrap_or_else(|| Error::Capture("audio capture stopped".into())),
-		)
-	}
-
-	/// The shared failure, if capture has already ended, without waiting.
-	pub(crate) fn failure(&self) -> Option<Error> {
-		self.state.read().failure.clone()
-	}
-
-	pub(crate) fn skip_to_live(&mut self) {
-		self.next = self.state.read().next;
-	}
-
 	/// The PCM format shared by every consumer of this capture.
 	pub fn input(&self) -> &Input {
 		&self.input

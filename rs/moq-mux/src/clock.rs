@@ -24,13 +24,13 @@
 use kio::clock::Wall;
 use std::time::Duration;
 
-use hang::catalog::{MAX_SAFE_INTEGER, MOQ_EPOCH_UNIX_MILLIS};
+use hang::catalog::MAX_SAFE_INTEGER;
 use kio::clock::Instant;
 
 /// Microseconds from the moq epoch (2020) to `wall`, negative before it.
 fn moq_micros(wall: Wall) -> i128 {
-	let moq_epoch = MOQ_EPOCH_UNIX_MILLIS as i128 * 1000;
-	wall.saturating_duration_since(Wall::UNIX_EPOCH).as_micros() as i128 - moq_epoch
+	let since = |from: Wall, to: Wall| to.saturating_duration_since(from).as_micros() as i128;
+	since(Wall::MOQ_EPOCH, wall) - since(wall, Wall::MOQ_EPOCH)
 }
 
 /// The host's wall clock, or `None` while it reads before the moq epoch (2020): unset.
@@ -288,7 +288,7 @@ mod tests {
 	}
 
 	fn moq_epoch() -> Wall {
-		Wall::UNIX_EPOCH + Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS)
+		Wall::MOQ_EPOCH
 	}
 
 	fn us(v: u64) -> moq_net::Timestamp {
@@ -301,15 +301,18 @@ mod tests {
 	async fn a_capture_maps_onto_the_clock() {
 		kio::clock::sleep(Duration::from_secs(6)).await;
 		let now = kio::clock::now();
-		let clock = Clock::at(now - Duration::from_secs(5), moq_epoch()).unwrap();
-		assert_eq!(clock.capture(now - Duration::from_secs(2)).unwrap(), us(3_000_000));
+		let clock = Clock::at(now.saturating_sub(Duration::from_secs(5)), moq_epoch()).unwrap();
+		assert_eq!(
+			clock.capture(now.saturating_sub(Duration::from_secs(2))).unwrap(),
+			us(3_000_000)
+		);
 
 		assert!(matches!(
-			clock.capture(kio::clock::now() + Duration::from_secs(1)),
+			clock.capture(kio::clock::now().saturating_add(Duration::from_secs(1))),
 			Err(crate::Error::InvalidCapture)
 		));
 		assert!(matches!(
-			clock.capture(now - Duration::from_secs(6)),
+			clock.capture(now.saturating_sub(Duration::from_secs(6))),
 			Err(crate::Error::InvalidCapture)
 		));
 	}
@@ -341,14 +344,14 @@ mod tests {
 			"a new mapping samples the corrected wall"
 		);
 
-		let captured = epoch + Duration::from_secs(2);
+		let captured = epoch.saturating_add(Duration::from_secs(2));
 		assert_eq!(clock.capture(captured).unwrap(), us(2_000_000));
 		assert!(matches!(
-			clock.capture(epoch + Duration::from_secs(4)),
+			clock.capture(epoch.saturating_add(Duration::from_secs(4))),
 			Err(crate::Error::InvalidCapture)
 		));
 		assert!(matches!(
-			clock.capture(epoch - Duration::from_secs(1)),
+			clock.capture(epoch.saturating_sub(Duration::from_secs(1))),
 			Err(crate::Error::InvalidCapture)
 		));
 	}
@@ -368,8 +371,7 @@ mod tests {
 	#[test]
 	fn unrepresentable_walls_are_refused() {
 		// One micro past the JSON-safe integer range: browsers would read a different number.
-		let past_safe = MOQ_EPOCH_UNIX_MILLIS * 1000 + MAX_SAFE_INTEGER + 1;
-		let far = Wall::UNIX_EPOCH + Duration::from_micros(past_safe);
+		let far = Wall::MOQ_EPOCH + Duration::from_micros(MAX_SAFE_INTEGER + 1);
 		assert!(Clock::at(epoch(), far).is_err());
 
 		// Before 2020 cannot be named on the wire; saturating to the epoch would lie.
@@ -404,7 +406,9 @@ mod tests {
 		assert!(drift < Duration::from_secs(1), "the first timestamp is live on arrival");
 
 		// A capture from before the arrival still maps, down to PTS zero.
-		let earlier = clock.capture(kio::clock::now() - Duration::from_secs(1)).unwrap();
+		let earlier = clock
+			.capture(kio::clock::now().saturating_sub(Duration::from_secs(1)))
+			.unwrap();
 		assert!(earlier.as_micros() < now.as_micros());
 
 		// PTS zero before 2020 cannot be named on the wire.

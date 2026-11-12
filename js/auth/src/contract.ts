@@ -9,7 +9,7 @@
 
 import { Pattern } from "@moq/pattern";
 import * as z from "zod/mini";
-import { decodeRoles, encodeRoles, WireRoleSchema } from "./wire.ts";
+import { decodeRoles, encodeRoles, UnixSecondsSchema, WireRoleSchema } from "./wire.ts";
 
 const PathSchema = z.string().check(
 	z.refine(
@@ -32,19 +32,7 @@ const TierSchema = z.string().check(z.regex(/^([A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+
 export const TransportSchema = z.pipe(
 	z.string(),
 	z.catch(
-		z.enum([
-			"quic",
-			"iroh",
-			"websocket",
-			"tcp",
-			"unix",
-			"http",
-			"rtmp",
-			"srt",
-			"webrtc",
-			"webtransport",
-			"unknown",
-		]),
+		z.enum(["quic", "websocket", "tcp", "unix", "http", "rtmp", "srt", "webrtc", "webtransport", "unknown"]),
 		"unknown",
 	),
 );
@@ -120,6 +108,12 @@ const BaseRequestSchema = z.object({
 	 * server binds the tenant to the credential, not to this alone.
 	 */
 	server_name: z.optional(z.string()),
+	/**
+	 * The host the client dialed, without its port: the `Host` header or URL authority on
+	 * HTTP, WebSocket, and WebTransport, the SNI on raw QUIC and `tls://`. Client-chosen
+	 * even over plaintext, so bind the tenant to the credential, not to this alone.
+	 */
+	host: z.optional(z.string()),
 	/** The negotiated application protocol, including the moq version. */
 	alpn: z.optional(z.string()),
 	/** The path exactly as dialed. */
@@ -195,7 +189,7 @@ export const GrantSchema = z
 			/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
 			mounts: z.optional(z.record(z.string(), z.string())),
 			/** When the session closes, as whole unix seconds. */
-			expires: z.optional(z.int()),
+			expires: z.optional(UnixSecondsSchema),
 			/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
 			revalidate: z.optional(z.int().check(z.positive())),
 			/** The stats tier this session's traffic is bucketed under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`. */

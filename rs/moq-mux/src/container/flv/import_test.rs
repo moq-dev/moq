@@ -95,7 +95,7 @@ async fn import_populates_catalog() {
 	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(synth_flv().as_slice());
 	importer.decode(&buf).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
@@ -121,7 +121,7 @@ async fn import_emits_frames() {
 	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(synth_flv().as_slice());
 	importer.decode(&buf).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let video_name = snap.video.renditions.keys().next().unwrap().clone();
@@ -155,7 +155,7 @@ async fn public_container_preserves_loc_for_flv() {
 	let reserved = catalog.reserve();
 	let mut import = super::Import::new(broadcast, reserved).with_container(hang::catalog::Container::Loc);
 	import.decode(&data).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.video.renditions.iter().next().unwrap();
@@ -186,7 +186,7 @@ async fn import_handles_split_input() {
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(head)).unwrap();
 	importer.decode(&bytes::BytesMut::from(tail)).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
@@ -218,7 +218,7 @@ async fn import_enhanced_vp9() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
@@ -258,7 +258,7 @@ async fn import_enhanced_opus() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.audio.renditions.len(), 1);
@@ -293,7 +293,7 @@ async fn import_legacy_mp3() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.audio.renditions.len(), 1);
@@ -343,7 +343,7 @@ async fn legacy_mp3_channel_change_starts_a_new_track() {
 	let (name, a) = snap.audio.renditions.iter().next().unwrap();
 	assert_ne!(name, &first, "the mono frames publish under a new name");
 	assert_eq!(a.channel_count, 1);
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 }
 
 /// A minimal avcC like [`avcc`], but with a caller-chosen level byte so two video
@@ -423,7 +423,7 @@ async fn import_multitrack_video_many_tracks() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 2, "one rendition per multitrack track id");
@@ -463,7 +463,7 @@ async fn import_multitrack_video_many_codecs() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	assert_eq!(catalog.snapshot().video.renditions.len(), 2);
 }
@@ -566,7 +566,7 @@ async fn import_enhanced_av1() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let (name, v) = snap.video.renditions.iter().next().unwrap();
@@ -605,7 +605,7 @@ async fn import_explicit_sbr_names_its_output() {
 		let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 		let mut importer = Import::new(producer, catalog.reserve());
 		importer.decode(&bytes::BytesMut::from(data)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let snap = catalog.snapshot();
 		let a = snap.audio.renditions.values().next().expect("an AAC track");
@@ -627,7 +627,7 @@ async fn import_enhanced_ac3() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let a = snap.audio.renditions.values().next().unwrap();
@@ -649,7 +649,7 @@ async fn import_enhanced_eac3() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let a = snap.audio.renditions.values().next().unwrap();
@@ -706,7 +706,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 		}
 	));
 	importer.decode(&[]).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let name = snap.video.renditions.keys().next().unwrap();
@@ -749,7 +749,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let name = snap.video.renditions.keys().next().unwrap();
@@ -854,7 +854,7 @@ async fn import(chunks: &[Vec<u8>]) -> Imported {
 			after = kio::clock::wall();
 		}
 	}
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	Imported {
@@ -928,7 +928,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert!(!published.is_empty(), "the first frame publishes the catalog");
 	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
 
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
 }
 
@@ -948,8 +948,8 @@ fn script_metadata_drops_warn_once() {
 		);
 	}
 	import.decode(&data).unwrap();
-	import.finish().unwrap();
 	assert_eq!(import.dropped_metadata(), 2);
+	let _import = import.finish().unwrap();
 	assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
 	logs_assert(|lines| {
 		let warnings = lines
@@ -1000,7 +1000,7 @@ fn unsupported_codecs_fail_at_the_public_importer_boundary() {
 						import.decode(chunk)?;
 					}
 				}
-				import.finish()
+				import.finish().map(drop)
 			})();
 			assert!(
 				matches!(result, Err(crate::Error::UnknownFormat(_))),
@@ -1008,4 +1008,33 @@ fn unsupported_codecs_fail_at_the_public_importer_boundary() {
 			);
 		}
 	}
+}
+
+/// A restart that cannot shift onto a shared catalog clock, because another source anchored it
+/// behind this one, is a publish failure like a rewind: it refuses all later input.
+#[tokio::test]
+async fn an_unmappable_restart_refuses_later_input() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	catalog
+		.timebase()
+		.anchor(moq_net::Timestamp::from_secs(1).unwrap())
+		.unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+
+	importer.decode(&session(true, 3_600_000, 5)).unwrap();
+	// The sequence headers and first video frame of a session: a tag header, a 14-byte body, and
+	// its trailing size.
+	let first_frame = |start_ms| {
+		let mut data = session(false, start_ms, 1);
+		data.truncate(session(false, start_ms, 0).len() + 11 + 14 + 4);
+		data
+	};
+	let err = importer.decode(&first_frame(0)).unwrap_err();
+	assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err:?}");
+	let err = importer.decode(&first_frame(3_700_000)).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::UnmappableTimestamp(_)),
+		"refused with the cause: {err:?}"
+	);
 }

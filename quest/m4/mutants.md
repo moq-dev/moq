@@ -1,31 +1,40 @@
-# [S] Weekly mutation testing on critical modules
+# [L] No mutation of the route and resume code survives its tests
 
 ## Goal
 
-A weekly scheduled job runs cargo-mutants on `moq-auth` and on `moq-net`'s
-path permission, resume, and expiry code, and reports surviving mutants,
-so assertions that never notice a behavior change get found.
+cargo-mutants changes `rs/moq-net/src/route/` and
+`rs/moq-net/src/model/resume.rs` one small edit at a time, and the tests fail
+on every edit that changes behaviour. Nightly runs it and fails on any
+survivor, so logic that lands without a test that would notice it breaking is
+caught the next morning.
 
 ## Plan
 
-From the 2026-10-27 coverage audit. The failure drills already use
-mutation-style negative controls; nothing does it systematically.
+Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about
+moq-net). Milestone m4. Coverage says which lines ran; this says whether a
+bug on those lines would fail anything, for the two modules behind most
+production issues.
 
-Decided 2026-10-27 (maintainer):
-
-- Weekly, not nightly: the scoped code changes slowly and each mutant
-  rebuilds and reruns its crate's tests.
-- Scope to the modules above with cargo-mutants' file filters, and bound each
-  mutant with its timeout so one hung mutant cannot eat the job.
-- Survivors go to the job summary, and a run with survivors alerts through
-  `alert.yml`.
-- No mutation-score gate. The PR that adds the job fixes or annotates the
-  first run's survivors: add a test where one is worth killing, or exclude the
-  mutant in cargo-mutants' config with the reason (an equivalent mutant, or
-  logging only).
-
-`mutants.yml` runs the job: `just rs mutants` over `.cargo/mutants.toml`'s
-scope, in 24 shards. What remains is fixing or annotating the first full run's
-survivors, about 1,800 mutants; a short local sample of 14 saw none.
+- ✅ Nightly fails on any survivor (rejected: a report the test coverage
+  audit reads, which nothing forces anyone to open; loom faded the same way).
+  This PR first kills or excludes every survivor of the first run.
+- A survivor is killed with a test, or excluded by a pattern in
+  `.cargo/mutants.toml` with a comment saying why the edit cannot change
+  behaviour. Prefer the config file over `#[mutants::skip]`, which needs a
+  dependency. An edit that makes the tests hang counts as caught.
+- Run only the tests that exercise the two modules, with the sweeps on fixed
+  seeds: a mutant caught by one random seed and missed by the next would make
+  the job flaky.
+- Shard it across a Nightly matrix (`--shard k/n`) and report the mutant
+  count, survivors found, and wall time in the PR. If the full run does not
+  fit Nightly, say what does and rotate the rest.
+- The other modelled code (`reconnect.rs`, `lite/publisher.rs`,
+  `lite/subscriber.rs`, `tail.rs`) joins once this run's cost is known; say
+  in the PR whether it fits.
 
 Public API: none. Wire: none.
+
+## Related
+
+- [Test coverage audit](/quest/m3/audit-test-coverage.md) - the line-coverage reports this complements
+- [Resume as producer replacement](/quest/m4/resume-redesign.md) - rewrites `resume.rs`; whichever lands second carries the other's survivors

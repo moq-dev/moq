@@ -555,7 +555,7 @@ impl Programs {
 				program = program.number,
 				"TS program left the PAT; retiring its broadcast"
 			);
-			program.import.finish()?;
+			program.import.finish_in_place()?;
 			self.announced |= program.announce_if_listed()?;
 			program.catalog.finish()?;
 		}
@@ -873,35 +873,89 @@ impl Programs {
 		stats
 	}
 
-	/// Finish each program's tracks, then its catalog while it still lists them.
+	/// Finish each program's tracks, then its catalog while it still lists them, and return the
+	/// [`Finished`] programs.
 	///
-	/// Returns each running program's broadcast; a retired one has already closed. The finished
-	/// tracks stay servable while this importer is held, so hand both to a
-	/// [`Linger`](crate::Linger) to keep them up for late subscribers. Fails when the input
-	/// ended before its PAT listed a program or any program declared a track.
-	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Producer>> {
+	/// The finished tracks stay servable while the [`Finished`] programs are held, so hand them and
+	/// their [`broadcasts`](Finished::broadcasts) to a [`Linger`](crate::Linger) to keep them up for
+	/// late subscribers. Fails when the input ended before its PAT listed a program or any program
+	/// declared a track. A finish that fails aborts every program with the cause, so it can't be
+	/// retried.
+	pub fn finish(mut self) -> anyhow::Result<Finished> {
+		if let Err(err) = self.end() {
+			// The copy keeps the whole chain in its message, since only the first report can move the
+			// original.
+			self.fail(crate::Error::from(anyhow::anyhow!("{err:#}")));
+			return Err(err);
+		}
+		Ok(Finished { programs: self })
+	}
+
+	/// Finish every program, stopping at the first failure.
+	fn end(&mut self) -> anyhow::Result<()> {
 		self.demux.finish();
 		anyhow::ensure!(self.pat.is_some(), "input ended before its PAT listed a program");
 		let mut announced = self.announced;
 		for program in &mut self.programs {
-			program.import.finish()?;
+			program.import.finish_in_place()?;
 			announced |= program.announce_if_listed()?;
 			program.catalog.finish()?;
 		}
 		anyhow::ensure!(announced, "input ended before any program declared a track");
-		Ok(self
-			.programs
+		Ok(())
+	}
+
+	/// Each running program's broadcast.
+	fn broadcasts(&self) -> Vec<moq_net::broadcast::Producer> {
+		self.programs
 			.iter()
 			.map(|program| program.route.broadcast().clone())
-			.collect())
+			.collect()
 	}
 
 	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.
-	pub fn abort(self, err: moq_net::Error) {
-		for program in self.programs {
-			program.catalog.abort(err.clone());
-			program.import.abort(err.clone());
+	pub fn abort(mut self, err: moq_net::Error) {
+		self.fail(err.into());
+	}
+
+	/// Abort every program's catalog and media tracks with `cause`.
+	fn fail(&mut self, cause: crate::Error) {
+		for program in &mut self.programs {
+			program.catalog.clone().abort(cause.reason());
+			program.import.fail(cause.clone());
 		}
+	}
+}
+
+/// Every program of a multiplex [finished](Programs::finish): every track has ended, and they can
+/// still be read or aborted, but it takes no more input.
+///
+/// Dropping it releases every program's tracks, which leave their broadcasts' listings.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut programs: moq_mux::container::ts::programs::Finished) {
+/// programs.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it releases every program's tracks"]
+pub struct Finished {
+	programs: Programs,
+}
+
+impl Finished {
+	/// Each running program's broadcast; a retired one has already closed.
+	pub fn broadcasts(&self) -> Vec<moq_net::broadcast::Producer> {
+		self.programs.broadcasts()
+	}
+
+	/// Every program's counters in one map; see [`Programs::stats`].
+	pub fn stats(&self) -> stats::Snapshot {
+		self.programs.stats()
+	}
+
+	/// Abort every program's catalog and media tracks with `err`; see [`Programs::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.programs.abort(err);
 	}
 }
 
@@ -1011,7 +1065,9 @@ mod test {
 		assert_eq!(back[1].0, 2);
 		assert_ne!(back[1].1, both[1].1, "the returning program is a new instance");
 
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+
+		let programs = &finished.programs;
 		let stats = programs.stats();
 		assert_eq!(stats.streams[&0x61].units, 8, "program 1 delivered every frame");
 		assert_eq!(stats.streams[&0x71].units, 4, "the returning program counts on");
@@ -1037,7 +1093,8 @@ mod test {
 		}
 		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2]);
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert_eq!(programs.stats().streams[&0x71].units, 4, "program 2 read on");
 	}
 
@@ -1098,8 +1155,9 @@ mod test {
 		assert_eq!(units(&programs), 1, "program 2 still holds the second picture");
 		programs.decode(&pictures.next().unwrap()).unwrap();
 		assert_eq!(units(&programs), 2, "the second picture counts once");
-		programs.finish().unwrap();
-		assert_eq!(units(&programs), 3);
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
+		assert_eq!(units(programs), 3);
 	}
 
 	/// A program leaving the PAT counts the picture its finish flushes on a PID the programs
@@ -1359,7 +1417,7 @@ mod test {
 		mux.packet(0x1fff, Flags::default());
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 		assert_eq!(programs.stats().pts_error, 1);
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1404,7 +1462,7 @@ mod test {
 				assert_eq!(stats.pmt_error, 2 * u64::from(!continuing), "{stats:?}");
 				assert_eq!(stats.pts_error, u64::from(!continuing), "{stats:?}");
 				assert_eq!(stats.streams[&0x61].pts_error, stats.pts_error);
-				programs.finish().unwrap();
+				let _finished = programs.finish().unwrap();
 			}
 		}
 	}
@@ -1468,7 +1526,8 @@ mod test {
 			}
 		}
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		let stats = programs.stats();
 		assert_eq!(stats.streams[&0x61].units, 8, "program 2 delivers every frame");
 		assert_eq!(stats.pcr_repetition_error, 1, "program 1 grades its clock");
@@ -1505,8 +1564,9 @@ mod test {
 		assert_eq!(units(&programs), 1, "program 2 still holds the second picture");
 		programs.decode(&pictures.next().unwrap()).unwrap();
 		assert_eq!(units(&programs), 2, "the second picture counts once");
-		programs.finish().unwrap();
-		assert_eq!(units(&programs), 3);
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
+		assert_eq!(units(programs), 3);
 	}
 
 	/// One PAT dropping programs on either side of those it keeps rebuilds who reads each PID
@@ -1535,8 +1595,9 @@ mod test {
 		assert_eq!(programs.programs.len(), 4);
 		step(&mut mux, &[(2, 0x100), (4, 0x100)], 1);
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
-		programs.finish().unwrap();
-		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
+		let running: Vec<_> = instances(programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2, 4]);
 		let units = |pid| programs.stats().streams[&pid].units;
 		assert_eq!([0x61, 0x72, 0x74].map(units), [4; 3], "the programs kept read on");
@@ -1563,7 +1624,7 @@ mod test {
 		mux.pat(&[]);
 		programs.decode(&mux.out).unwrap();
 		assert!(programs.programs.is_empty());
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 	}
 
 	/// A PAT naming another transport stream is refused while a program runs, before it retires
@@ -1693,7 +1754,8 @@ mod test {
 		for chunk in input.chunks(100) {
 			programs.decode(chunk).unwrap();
 		}
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert_eq!(programs.programs.len(), 1, "only program 50 has a PMT");
 
 		let consumer = origin.consume().request("event/50.hang", None).await.unwrap();
@@ -1758,7 +1820,8 @@ mod test {
 			catalog::Config::default(),
 		);
 		programs.decode(&two_section_pat()).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert_eq!(programs.programs.len(), 2);
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 		assert_eq!(renditions(&origin, "event/2.hang").await, 1);
@@ -1799,7 +1862,8 @@ mod test {
 			data.extend(mp2_pes(pid, 0, 90_000, fills));
 		}
 		programs.decode(&data).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 
 		let started: Vec<_> = programs.programs.iter().map(|program| program.number).collect();
 		assert_eq!(started, [7, 900]);
@@ -1831,7 +1895,8 @@ mod test {
 		}
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 
 		let started: Vec<_> = programs.programs.iter().map(|program| program.number).collect();
 		assert_eq!(started, [1]);
@@ -1853,7 +1918,7 @@ mod test {
 		data.extend(psi_packets(0x0100, &mut 0, &[], &sections));
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 	}
 
@@ -1875,7 +1940,7 @@ mod test {
 		data.extend(packets);
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 	}
 
@@ -2012,7 +2077,8 @@ mod test {
 			catalog::Config::default(),
 		);
 		programs.decode(&two_section_pat()).unwrap();
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert!(
 			programs.programs.iter().all(|program| program.route.is_announced()),
 			"every program announces"
@@ -2050,7 +2116,8 @@ mod test {
 		for packet in packets {
 			programs.decode(packet).unwrap();
 		}
-		programs.finish().unwrap();
+		let finished = programs.finish().unwrap();
+		let programs = &finished.programs;
 		assert!(
 			programs.programs.iter().all(|program| program.route.is_announced()),
 			"every program is announced once it has declared its tracks"
@@ -2086,7 +2153,8 @@ mod test {
 		let input = two_programs();
 		programs.decode(&input[..3 * 188]).unwrap();
 
-		let Err(err) = programs.finish() else {
+		// The finish's own steps, so the programs can be inspected after the failure.
+		let Err(err) = programs.end() else {
 			panic!("the PMTs have no configured media")
 		};
 		assert!(err.to_string().contains("declared a track"), "{err:#}");
@@ -2189,7 +2257,7 @@ mod test {
 			"no program is known before the PAT is whole"
 		);
 		programs.decode(&input[100..]).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		let after = kio::clock::wall();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {

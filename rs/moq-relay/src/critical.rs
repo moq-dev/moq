@@ -12,7 +12,6 @@
 use std::{future::Future, panic::AssertUnwindSafe, task::Poll};
 
 use futures::{FutureExt, future::BoxFuture};
-use moq_net::kio;
 
 /// A named future polled as a [`kio::Tasks`] child, whose panic becomes an error
 /// instead of unwinding through the owner's poll.

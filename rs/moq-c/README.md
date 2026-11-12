@@ -47,6 +47,17 @@ int32_t moq_viewer_rate(uint32_t viewer, uint64_t *bps, bool *present);
 int32_t moq_viewer_update(uint32_t viewer, uint64_t max_bps);
 int32_t moq_viewer_close(uint32_t viewer);
 
+// Session: Auth (a dialed session's tokens, and the grant the peer answers with)
+int32_t moq_session_tokens_set(uint32_t session, const moq_string *tokens, uintptr_t tokens_len);
+int32_t moq_session_tokens_answered(uint32_t session, moq_status_callback on_answer, void *user_data);
+int32_t moq_session_grants(uint32_t session, moq_status_callback on_grant, void *user_data);
+int32_t moq_session_grants_cancel(uint32_t watcher);
+int32_t moq_grant_info(uint32_t grant, moq_grant *dst);
+int32_t moq_grant_free(uint32_t grant);
+int32_t moq_session_credential(uint32_t session, const uint8_t *token, uintptr_t token_len);
+int32_t moq_credential_answered(uint32_t credential, moq_status_callback on_answer, void *user_data);
+int32_t moq_credential_free(uint32_t credential);
+
 // Server
 int32_t moq_server_listen(const moq_server_config *config, moq_status_callback on_request, void *user_data);
 int32_t moq_server_addr(uint32_t server, moq_string *dst);
@@ -61,9 +72,9 @@ int32_t moq_session_request_free(uint32_t request);
 // Origin
 int32_t moq_origin_create(void);
 int32_t moq_origin_close(uint32_t origin);
-int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, uint32_t instance, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_request_cancel(uint32_t task);
-int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_follow_callback on_follow, void *user_data);
+int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, uint32_t instance, moq_follow_callback on_follow, void *user_data);
 int32_t moq_origin_follow_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
@@ -71,16 +82,32 @@ int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
 // config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.
 
+// Instances (0 means none: unpinned, or a fresh one in route options; a route's or claim's is the caller's to free, an announcement's lives with it)
+int32_t moq_instance_parse(const char *text, uintptr_t text_len);
+int32_t moq_instance_text(uint32_t instance, moq_string *dst);
+int32_t moq_instance_minted(uint32_t instance);
+int32_t moq_instance_equal(uint32_t a, uint32_t b);
+int32_t moq_instance_free(uint32_t instance);
+
 // Publishing: Routes (freeing one retracts it; moq_publish_close on its broadcast ends both)
 int32_t moq_origin_route(uint32_t origin, const char *path, uintptr_t path_len, const moq_route_options *options);
-int32_t moq_origin_route_prefix(uint32_t origin, const char *prefix, uintptr_t prefix_len, const moq_route_options *options, moq_status_callback on_request, void *user_data);
-// options (NULL for the default): hidden until moq_route_announce, a cost, and an optional stable instance with its epoch. Hops are the origin's to add.
+// options (NULL for the default): hidden until announced, a cost, and an optional stable instance with its epoch. Hops are the origin's to add.
 int32_t moq_route_broadcast(uint32_t route);
-int32_t moq_route_instance(uint32_t route, moq_string *dst);
+int32_t moq_route_instance(uint32_t route);
 int32_t moq_route_announce(uint32_t route);
 int32_t moq_route_withdraw(uint32_t route);
 int32_t moq_route_set_cost(uint32_t route, uint64_t cost);
+int32_t moq_route_set_auth(uint32_t route, uint32_t credential);
 int32_t moq_route_free(uint32_t route);
+
+// Publishing: Claims (a prefix answered on demand; freeing one retracts it)
+int32_t moq_origin_claim(uint32_t origin, const char *prefix, uintptr_t prefix_len, const moq_route_options *options, moq_status_callback on_request, void *user_data);
+int32_t moq_claim_instance(uint32_t claim);
+int32_t moq_claim_announce(uint32_t claim);
+int32_t moq_claim_withdraw(uint32_t claim);
+int32_t moq_claim_set_cost(uint32_t claim, uint64_t cost);
+int32_t moq_claim_set_auth(uint32_t claim, uint32_t credential);
+int32_t moq_claim_free(uint32_t claim);
 int32_t moq_broadcast_request_path(uint32_t request, moq_string *dst);
 int32_t moq_broadcast_request_serve(uint32_t request, uint32_t broadcast);
 int32_t moq_broadcast_request_route(uint32_t request, const moq_route_options *options);
@@ -101,7 +128,12 @@ int32_t moq_publish_track_group(uint32_t track);
 int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_finish(uint32_t group);
+int32_t moq_publish_group_ready(uint32_t group, uint64_t size, moq_status_callback on_ready, void *user_data);
 int32_t moq_publish_track_finish(uint32_t track);
+int32_t moq_publish_track_largest(uint32_t track, uint64_t *group, uint64_t *frame, bool *present);
+int32_t moq_publish_timebase(uint32_t broadcast);
+int32_t moq_publish_timebase_free(uint32_t timebase);
+// moq_container_init.timebase (0 for none) shares one source clock across containers.
 
 // Publishing: Demand
 int32_t moq_publish_track_demand(uint32_t track, moq_status_callback on_demand, void *user_data);
@@ -131,6 +163,8 @@ int32_t moq_group_request_free(uint32_t request);
 
 // Consuming
 int32_t moq_consume_close(uint32_t consume);
+int32_t moq_consume_closed(uint32_t broadcast, moq_status_callback on_closed, void *user_data);
+int32_t moq_consume_closed_cancel(uint32_t watcher);
 
 // Consuming: Catalog
 int32_t moq_consume_catalog(uint32_t broadcast, moq_status_callback on_catalog, void *user_data);
@@ -150,13 +184,48 @@ int32_t moq_consume_audio(uint32_t catalog, uint32_t index, const moq_delay *del
 int32_t moq_consume_audio_cancel(uint32_t track);
 
 // Consuming: Frames
-int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
-int32_t moq_consume_frame_free(uint32_t frame);
+int32_t moq_consume_read(uint32_t read, moq_media_read *dst);
+int32_t moq_consume_read_free(uint32_t read);
 moq_subscription moq_subscription_defaults(void);
 int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_track_frame_free(uint32_t frame);
 int32_t moq_consume_track_cancel(uint32_t track);
+
+// Sockets: two-way sessions between endpoints sharing an origin
+int32_t moq_socket_create(uint32_t origin, const char *prefix, uintptr_t prefix_len, const char *id, uintptr_t id_len);
+int32_t moq_socket_close(uint32_t endpoint);
+int32_t moq_socket_dial_tcp(uint32_t endpoint, const char *peer, uintptr_t peer_len, moq_status_callback on_stream, void *user_data);
+int32_t moq_socket_dial_track(uint32_t endpoint, const char *peer, uintptr_t peer_len, const moq_track_info *info, moq_status_callback on_stream, void *user_data);
+int32_t moq_socket_accept_tcp(uint32_t endpoint, moq_status_callback on_incoming, void *user_data);
+int32_t moq_socket_accept_track(uint32_t endpoint, moq_status_callback on_incoming, void *user_data);
+int32_t moq_socket_cancel(uint32_t task);
+int32_t moq_socket_incoming_info(uint32_t incoming, moq_string *peer, moq_string *session);
+int32_t moq_socket_incoming_accept(uint32_t incoming, const moq_track_info *info, moq_status_callback on_stream, void *user_data);
+int32_t moq_socket_incoming_reject(uint32_t incoming);
+int32_t moq_socket_stream_info(uint32_t stream, moq_string *peer, moq_string *session);
+int32_t moq_socket_stream_writer(uint32_t stream);  // a group (tcp) or raw track (track) handle
+int32_t moq_socket_stream_reader(uint32_t stream, moq_status_callback on_frame, void *user_data);  // read like moq_consume_track
+int32_t moq_socket_stream_free(uint32_t stream);
+
+// Codecs without a broadcast: encode, then publish or store the packets yourself
+int32_t moq_audio_encoder_create(const moq_audio_encoder_output *output);
+int32_t moq_audio_encoder_frame_size(uint32_t encoder);
+int32_t moq_audio_encoder_init(uint32_t encoder, moq_audio_init *dst);
+int32_t moq_audio_encoder_bitrate(uint32_t encoder, uint64_t bitrate);
+int32_t moq_audio_encoder_encode(uint32_t encoder, const float *pcm, uintptr_t pcm_len);
+int32_t moq_audio_encoder_receive(uint32_t encoder, moq_frame *dst);
+int32_t moq_audio_encoder_flush(uint32_t encoder);
+int32_t moq_audio_encoder_finish(uint32_t encoder, const float *pcm, uintptr_t pcm_len, uint64_t *discard_padding);
+int32_t moq_audio_encoder_packet(uint32_t encoder, uint32_t index, moq_frame *dst);
+int32_t moq_audio_encoder_free(uint32_t encoder);
+int32_t moq_video_encoder_create(const moq_video_encoder_input *input, const moq_video_encoder_output *output);
+int32_t moq_video_encoder_encode(uint32_t encoder, const moq_video_encoder_frame *frame);
+int32_t moq_video_encoder_receive(uint32_t encoder, moq_frame *dst);
+int32_t moq_video_encoder_cut(uint32_t encoder);
+int32_t moq_video_encoder_bitrate(uint32_t encoder, uint64_t bitrate);
+int32_t moq_video_encoder_flush(uint32_t encoder);
+int32_t moq_video_encoder_free(uint32_t encoder);
 ```
 
 Raw track frames use the same `moq_frame` record as media frames. Timestamps

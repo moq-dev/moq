@@ -18,13 +18,18 @@ type Handle interface {
 
 // run races a blocking FFI call against ctx.
 //
-// `cancel` is the object's own cancel() for a call that owns a stream, session,
-// or listener, so a cancelled Next still ends the stream and a cancelled Connect
-// still tears the client down. The generated binding is given a context that
-// does not cancel with the caller (see objectCallContext); otherwise it can
-// return ctx.Err() into the result channel first and skip that abort. The
-// blocked goroutine then unwinds on its own; the result channel is buffered so
-// its send never blocks and it can't leak.
+// `cancel` is the object's own cancel() for a call that owns a session or
+// listener, so a cancelled Connect still tears the client down. For such a call
+// the generated binding is given a context that does not cancel with the
+// caller (see objectCallContext); otherwise it can return ctx.Err() into the
+// result channel first and skip that abort. The blocked goroutine then unwinds
+// on its own; the result channel is buffered so its send never blocks and it
+// can't leak.
+//
+// Stream reads pass nil: a cancel aborts only that read and leaves the stream
+// usable. The generated binding cancels its own future on ctx, so run waits for
+// it instead of racing. Returning early would leave the abandoned read still
+// polling, free to take the next item and lose it to release.
 //
 // release, for a call that returns a native handle, disposes of a result nobody
 // received. Cancelling is not a retraction: select picks at random when the
@@ -39,6 +44,9 @@ func run[T any](ctx context.Context, cancel func(), call func() (T, error), rele
 		var zero T
 		return zero, err
 	}
+	if cancel == nil {
+		return call()
+	}
 
 	type result struct {
 		val T
@@ -52,9 +60,7 @@ func run[T any](ctx context.Context, cancel func(), call func() (T, error), rele
 
 	select {
 	case <-ctx.Done():
-		if cancel != nil {
-			cancel()
-		}
+		cancel()
 		if release != nil {
 			// Exactly one receiver takes the result, so it is this one once the
 			// caller has given up. Waiting here would put the native unwind on
@@ -75,25 +81,19 @@ func run[T any](ctx context.Context, cancel func(), call func() (T, error), rele
 // Call runs a blocking FFI call that yields no handle of its own, so a
 // result the caller never sees costs nothing to drop.
 //
-// cancel is the object's own cancel() for a call that owns its stream, session,
-// or listener. One-shot calls pass ctx straight to the generated binding.
+// cancel is the object's own cancel() for a call that owns its session or
+// listener. One-shot calls pass ctx straight to the generated binding.
 func Call[T any](ctx context.Context, cancel func(), call func(context.Context) (T, error)) (T, error) {
 	return run(ctx, cancel, func() (T, error) { return call(objectCallContext(ctx, cancel)) }, nil)
 }
 
 // CallHandle is Call for a call that returns a native handle, which is
-// destroyed rather than abandoned when the caller has already given up. Left to
+// destroyed rather than abandoned when an object-owned call has already given
+// up (the generated binding destroys its own for a call without cancel). Left to
 // the Go finalizer it would stay live in the meantime: a subscription still
 // running on the wire, or an incoming request accepted and never answered.
 func CallHandle[T Handle](ctx context.Context, cancel func(), call func(context.Context) (T, error)) (T, error) {
 	return run(ctx, cancel, func() (T, error) { return call(objectCallContext(ctx, cancel)) }, releaseHandle[T])
-}
-
-// CallRelease is CallHandle for a result that may hold a native handle without
-// being one, such as an enum with a handle in one variant: release disposes of
-// whatever a result nobody received holds.
-func CallRelease[T any](ctx context.Context, cancel func(), call func(context.Context) (T, error), release func(T)) (T, error) {
-	return run(ctx, cancel, func() (T, error) { return call(objectCallContext(ctx, cancel)) }, release)
 }
 
 // objectCallContext is the context the generated binding sees. Object-owned
@@ -130,6 +130,10 @@ func releaseHandle[T Handle](val T) {
 // into a Go 1.23 range-over-func sequence. It yields (value, nil) for each item,
 // yields (nil, err) once if a call fails, and stops cleanly when Next returns nil
 // (the stream ended) or when the consumer breaks out of the range loop.
+// cancel, the stream's own Cancel (or nil), runs when a read fails because ctx
+// ended: each read cancels only itself, but a range loop over a cancelled
+// context is done with the stream. A loop the consumer breaks, or a stream that
+// ends, leaves it alone.
 //
 //	for frame, err := range consumer.All(ctx) {
 //	    if err != nil {
@@ -138,12 +142,15 @@ func releaseHandle[T Handle](val T) {
 //	    }
 //	    // use frame
 //	}
-func Seq[T comparable](ctx context.Context, next func(context.Context) (T, error)) iter.Seq2[T, error] {
+func Seq[T comparable](ctx context.Context, cancel func(), next func(context.Context) (T, error)) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
 		var zero T
 		for {
 			val, err := next(ctx)
 			if err != nil {
+				if cancel != nil && ctx.Err() != nil {
+					cancel()
+				}
 				yield(zero, err)
 				return
 			}

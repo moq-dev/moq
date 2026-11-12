@@ -115,19 +115,22 @@ later one goes in, and for the tail `finish()` drains. Bring your own pixels wit
 
 Group boundaries are automatic: `Config::join` is the time between join points
 (a keyframe every two seconds by default, rounded to whole frames, and a join of
-zero is refused at open), so an application never has to think about them.
+zero is refused at open), so an application never has to think about them. It
+is measured by the frames' timestamps, so a source running slower than
+`Config::framerate` still keys every join.
 `Encoder::cut()` opens a group at the next frame when something outside the
 encoder needs a decodable starting point there: a source group boundary, a scene
 change, a source switch. The request is held until a frame
 arrives, so it is safe to call before you have one. It fails with
 `Error::CutUnsupported` on a backend that cannot force a boundary (a V4L2
 driver without the force-keyframe control), and queues nothing then: groups
-keep falling where `Config::join` puts them. `encode::Sink` answers the same
+keep falling every `Config::join`'s worth of frames at `Config::framerate`. `encode::Sink` answers the same
 way, awaited.
 
 Public entry points:
 
-- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes it:
+- `encode::publish_capture(...)` captures a webcam, encodes it, and publishes it,
+  returning a `Publication` that reports its state and the `Driver` to run:
   the track and catalog are advertised up front, and the camera stays open
   whether or not anyone is watching. With `Capture::on_demand`, the camera opens
   only while a subscriber is watching and is released when the last one leaves.
@@ -193,13 +196,10 @@ it to take a GPU path for a representation you recognize, and fall back to
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
 `Surface::into_i420()` returns typed pixels with size and color intact;
 `I420::into_data()` explicitly extracts the packed bytes. `Surface::to_rgba(config)`
-and `Surface::to_bgra(config)` are the portable exits for CPU
-image and UI toolkits, returning owned, tightly packed pixels with the surface's
-color metadata applied. Both orders are there because toolkits disagree and the
-conversion is a full pass over the frame: producing the order the caller wants
-costs nothing extra, while producing the other one and swapping two channels
-afterwards costs a second pass. They borrow the surface, so a frame held behind
-an `Arc` shared with something else converts without being unwrapped first.
+is the portable exit for CPU image and UI toolkits, returning owned, tightly
+packed pixels with the surface's color metadata applied. It borrows the surface,
+so a frame held behind an `Arc` shared with something else converts without
+being unwrapped first.
 Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux | Android |

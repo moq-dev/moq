@@ -23,7 +23,7 @@
 //! // A timed track, since every write is stamped. JSON is small and repetitive, so compress it.
 //! let info = moq_net::track::Info::default()
 //!     .with_timescale(moq_net::Timescale::MILLI)
-//!     .with_compress(true);
+//!     .with_compression(moq_net::track::Compression::Deflate);
 //! let track = broadcast.create_track("chat", info)?;
 //! let mut chat = catalog.json_stream::<Message>(track, moq_mux::json::Config::default())?;
 //! chat.append(&Message { text: "hello".to_string() }, catalog.clock().now())?;
@@ -229,8 +229,10 @@ impl<T: Serialize> Snapshot<T> {
 	/// Consumes the handle, so a write after finishing cannot be expressed. Leaving the entry
 	/// advertising a closed track would only mislead a consumer that subscribed afterwards, so
 	/// dropping the handle without finishing retires the entry too.
-	pub fn finish(mut self) -> crate::Result<()> {
-		Ok(self.inner.finish()?)
+	pub fn finish(self) -> crate::Result<()> {
+		// Retired along with the entry, as promised.
+		drop(self.inner.finish()?);
+		Ok(())
 	}
 
 	/// Abort the track with `err`, which consumers see in place of a clean end, and retire its
@@ -328,8 +330,10 @@ impl<T: Serialize> Stream<T> {
 	/// Consumes the handle, so a write after finishing cannot be expressed. Leaving the entry
 	/// advertising a closed track would only mislead a consumer that subscribed afterwards, so
 	/// dropping the handle without finishing retires the entry too.
-	pub fn finish(mut self) -> crate::Result<()> {
-		Ok(self.inner.finish()?)
+	pub fn finish(self) -> crate::Result<()> {
+		// Retired along with the entry, as promised.
+		drop(self.inner.finish()?);
+		Ok(())
 	}
 
 	/// Abort the track with `err`, which consumers see in place of a clean end, and retire its
@@ -520,7 +524,9 @@ mod test {
 
 	/// Create the moq-net track a data producer publishes on, as a caller does for a media track.
 	fn track(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> moq_net::track::Producer {
-		broadcast.create_track(name, timed().with_compress(true)).unwrap()
+		broadcast
+			.create_track(name, timed().with_compression(moq_net::track::Compression::Deflate))
+			.unwrap()
 	}
 
 	fn entry(catalog: &crate::catalog::Producer, name: &str) -> JsonConfig {
@@ -917,7 +923,7 @@ mod test {
 		let entry = entry(&catalog, "chat");
 		let consumer = read(broadcast.consume().track("chat").unwrap(), &entry).unwrap();
 
-		let oversized = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize));
+		let oversized = Value::String("x".repeat(crate::jitter::MAX_BYTES));
 		assert!(matches!(
 			chat.append(&oversized, catalog.clock().now()),
 			Err(crate::Error::Json(moq_json::Error::Net(moq_net::Error::FrameTooLarge)))

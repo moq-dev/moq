@@ -167,7 +167,10 @@ export default defineConfig({
 						{
 							text: "moq-cli",
 							link: "/bin/cli",
-							items: [{ text: "Inspect a relay", link: "/bin/inspect" }],
+							items: [
+								{ text: "MPEG-TS", link: "/bin/ts" },
+								{ text: "Inspect a relay", link: "/bin/inspect" },
+							],
 						},
 						{ text: "moq-studio", link: "/bin/studio" },
 						{
@@ -208,7 +211,6 @@ export default defineConfig({
 								{ text: "moq-video", link: "/lib/rs/moq-video" },
 								{ text: "moq-audio", link: "/lib/rs/moq-audio" },
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
-								{ text: "moq-room", link: "/lib/rs/moq-room" },
 								{ text: "moq-json", link: "/lib/rs/moq-json" },
 								{ text: "kio", link: "/lib/rs/kio" },
 							],
@@ -227,6 +229,7 @@ export default defineConfig({
 								{ text: "@moq/signals", link: "/lib/js/signals" },
 								{ text: "@moq/clock", link: "/lib/js/clock" },
 								{ text: "@moq/json", link: "/lib/js/json" },
+								{ text: "@moq/stats", link: "/lib/js/api/stats" },
 								{ text: "API reference", link: "/lib/js/api/" },
 							],
 						},

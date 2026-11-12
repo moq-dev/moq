@@ -18,7 +18,7 @@ use crate::clock::{Instant, Wall};
 
 /// How far past [`Instant::ZERO`] a runtime clock reads at its origin.
 ///
-/// Like std's since-boot `Instant`, so `now() - d` names a moment before the
+/// Like std's since-boot `Instant`, so `now().checked_sub(d)` names a moment before the
 /// process started instead of underflowing during its first seconds. 2^32 s
 /// (~136 years) outlasts any lookback, and leaves ~448 years of range ahead.
 const LEAD: std::time::Duration = std::time::Duration::from_secs(1 << 32);
@@ -120,19 +120,23 @@ pub(crate) fn from_std(at: std::time::Instant) -> Instant {
 pub(crate) struct Timer {
 	origin: host::Instant,
 	sleep: Pin<Box<host::Sleep>>,
+	/// When it was last armed, so firing can tell whether it waited.
+	armed: host::Instant,
 }
 
 #[cfg(feature = "runtime")]
 impl Timer {
 	pub(crate) fn new(at: Instant) -> Self {
-		let (origin, _) = read();
+		let (origin, armed) = read();
 		Self {
 			origin,
 			sleep: Box::pin(host::sleep_until(origin + at.since_origin().saturating_sub(LEAD))),
+			armed,
 		}
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
+		self.armed = host::Instant::now();
 		self.sleep
 			.as_mut()
 			.reset(self.origin + at.since_origin().saturating_sub(LEAD));
@@ -141,10 +145,92 @@ impl Timer {
 	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
 		// Checked first, so a reached deadline fires at once rather than at the
 		// host timer's next tick.
-		if host::Instant::now() >= self.sleep.deadline() {
-			return Poll::Ready(());
+		if host::Instant::now() < self.sleep.deadline() {
+			std::task::ready!(self.sleep.as_mut().poll(cx));
 		}
-		self.sleep.as_mut().poll(cx)
+		if let Some(waited) = self.sleep.deadline().checked_duration_since(self.armed)
+			&& !waited.is_zero()
+		{
+			guard::fired(waited);
+		}
+		Poll::Ready(())
+	}
+}
+
+/// Let timers wait on the host clock in this process, as real I/O does: real sockets, devices, or processes.
+///
+/// With `KIO_DENY_HOST_TIMERS=1` in the environment, a timer that waits on the host clock
+/// aborts the process unless it called this. It lasts for the process, which is one test
+/// under nextest. `@moq/clock/test`'s `hostTime()` is the JS counterpart.
+pub fn host_time() {
+	#[cfg(feature = "runtime")]
+	guard::ALLOWED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Fails a test whose timer waits on the host clock, switched on by the environment.
+///
+/// Only the host backend waits in real time; paused tokio, the simulator, a
+/// [`Manual`](crate::clock::Manual) clock, and a [`Deadlines`](crate::clock::Deadlines)
+/// queue all move only when told. A watchdog that its future beats never fires, so
+/// only waits that ran out count: a negative proof, a settle sleep, a real interval.
+#[cfg(feature = "runtime")]
+mod guard {
+	use std::{
+		io::Write,
+		sync::{
+			OnceLock,
+			atomic::{AtomicBool, Ordering},
+		},
+		time::Duration,
+	};
+
+	use super::host;
+
+	/// The variable that denies host timers, which the repository's test runner sets.
+	const VAR: &str = "KIO_DENY_HOST_TIMERS";
+
+	pub(super) static ALLOWED: AtomicBool = AtomicBool::new(false);
+
+	fn denied() -> bool {
+		static DENIED: OnceLock<bool> = OnceLock::new();
+		*DENIED.get_or_init(|| match std::env::var_os(VAR) {
+			None => false,
+			Some(value) if value == "1" => true,
+			Some(value) => panic!("{VAR} must be 1 or unset, not {value:?}"),
+		})
+	}
+
+	/// Whether the calling runtime's tokio clock runs, as opposed to paused.
+	///
+	/// A paused clock reads the same until a pause or advance moves it, which cannot happen
+	/// mid-poll on the current-thread runtime pausing needs. A running one, resumed included,
+	/// moves whenever std's does.
+	fn running() -> bool {
+		let first = host::Instant::now();
+		let std = std::time::Instant::now();
+		while std::time::Instant::now() == std {
+			std::hint::spin_loop();
+		}
+		host::Instant::now() > first
+	}
+
+	/// A host timer that waited `waited` fired.
+	pub(super) fn fired(waited: Duration) {
+		if !denied() || ALLOWED.load(Ordering::Relaxed) || !running() {
+			return;
+		}
+		// Abort rather than panic: a panic in a spawned task never reaches the test.
+		// Written to the handle, since libtest's capture of `eprintln!` dies with the process.
+		let _ = writeln!(
+			std::io::stderr(),
+			"kio: a {waited:?} timer fired on the host clock, which {VAR}=1 denies.\n\
+			 Run the test on a mocked clock (`#[tokio::test(start_paused = true)]`, `#[kio::test]`, \
+			 or `kio::clock::Manual`), or await the event it waits for. A test on real sockets, \
+			 devices, or processes calls `kio::clock::host_time()`, and clears {VAR} from \
+			 any process it spawns.\n{}",
+			std::backtrace::Backtrace::force_capture()
+		);
+		std::process::abort();
 	}
 }
 
@@ -271,13 +357,13 @@ mod tests {
 		runtime.block_on(async {
 			let start = crate::clock::now();
 			crate::clock::sleep(Duration::from_secs(5)).await;
-			assert_eq!(crate::clock::now(), start + Duration::from_secs(5));
+			assert_eq!(crate::clock::now(), start.saturating_add(Duration::from_secs(5)));
 			tokio::time::advance(Duration::from_secs(60)).await;
-			assert_eq!(crate::clock::now(), start + Duration::from_secs(65));
-			let at = crate::clock::sleep_until(start + Duration::from_secs(70));
-			assert_eq!(at.deadline(), start + Duration::from_secs(70));
+			assert_eq!(crate::clock::now(), start.saturating_add(Duration::from_secs(65)));
+			let at = crate::clock::sleep_until(start.saturating_add(Duration::from_secs(70)));
+			assert_eq!(at.deadline(), start.saturating_add(Duration::from_secs(70)));
 			at.await;
-			assert_eq!(crate::clock::now(), start + Duration::from_secs(70));
+			assert_eq!(crate::clock::now(), start.saturating_add(Duration::from_secs(70)));
 		});
 	}
 
@@ -349,7 +435,7 @@ mod tests {
 		let host = now.into_std();
 		assert!(before <= host && host <= after, "{before:?} <= {host:?} <= {after:?}");
 		assert_eq!(crate::clock::Instant::from_std(host), now);
-		let earlier = now - Duration::from_secs(3_600);
+		let earlier = now.saturating_sub(Duration::from_secs(3_600));
 		assert_eq!(crate::clock::Instant::from_std(earlier.into_std()), earlier);
 	}
 
@@ -369,7 +455,7 @@ mod tests {
 			assert_eq!(later.into_std() - host, Duration::from_secs(60));
 			assert_eq!(
 				crate::clock::Instant::from_std(host + Duration::from_secs(5)),
-				start + Duration::from_secs(5)
+				start.saturating_add(Duration::from_secs(5))
 			);
 		});
 	}
@@ -379,7 +465,7 @@ mod tests {
 	fn std_conversion_saturates() {
 		let now = crate::clock::now();
 		let far = now.into_std() + Duration::from_secs(1 << 40);
-		assert!(crate::clock::Instant::from_std(far) > now + Duration::from_secs(1 << 33));
+		assert!(crate::clock::Instant::from_std(far) > now.saturating_add(Duration::from_secs(1 << 33)));
 	}
 
 	/// A fresh clock names moments before the process started, as std's does, so
@@ -396,6 +482,135 @@ mod tests {
 			assert!(now.checked_sub(Duration::from_secs(3_600)).is_some(), "{now:?}");
 		});
 		assert!(crate::clock::now().checked_sub(Duration::from_secs(3_600)).is_some());
+	}
+
+	/// Set in the child process [`guard`] starts, which runs the case itself.
+	const GUARD_CHILD: &str = "KIO_GUARD_TEST_CHILD";
+
+	/// Run `case` in a child process that denies host timers, and assert whether the guard
+	/// aborted it. In that child, run `case` and return.
+	///
+	/// Call it from the test's own thread, which libtest names after the test.
+	fn guard(aborts: bool, case: fn()) {
+		if std::env::var_os(GUARD_CHILD).is_some() {
+			case();
+			return;
+		}
+		let test = std::thread::current()
+			.name()
+			.expect("guard runs on the test's own thread")
+			.to_owned();
+		let output = std::process::Command::new(std::env::current_exe().unwrap())
+			.args([&test, "--exact", "--test-threads=1"])
+			.env("KIO_DENY_HOST_TIMERS", "1")
+			.env(GUARD_CHILD, "1")
+			.output()
+			.unwrap();
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		let stderr = String::from_utf8_lossy(&output.stderr);
+		assert!(stdout.contains("running 1 test"), "no test named {test}: {stdout}");
+		let aborted = stderr.contains("timer fired on the host clock");
+		assert_eq!(output.status.success(), !aborted, "{stdout}{stderr}");
+		assert_eq!(aborted, aborts, "{stdout}{stderr}");
+	}
+
+	fn real() -> tokio::runtime::Runtime {
+		tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.unwrap()
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_wait_on_the_host_clock_aborts() {
+		guard(true, || {
+			real().block_on(async { crate::clock::sleep(Duration::from_millis(1)).await });
+		});
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_real_interval_aborts() {
+		guard(true, || {
+			real().block_on(async {
+				let mut interval = crate::clock::interval(Duration::from_millis(1));
+				interval.set_missed_tick_behavior(crate::clock::MissedTickBehavior::Delay);
+				// A descheduled tick re-arms already due and fires without waiting, so tick
+				// until one waits; returning means none did.
+				for _ in 0..1_000 {
+					interval.tick().await;
+				}
+			});
+		});
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_resumed_runtime_aborts() {
+		guard(true, || {
+			tokio::runtime::Builder::new_current_thread()
+				.enable_time()
+				.start_paused(true)
+				.build()
+				.unwrap()
+				.block_on(async {
+					tokio::time::advance(Duration::from_secs(3_600)).await;
+					tokio::time::resume();
+					crate::clock::sleep(Duration::from_millis(1)).await;
+				});
+		});
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_wait_in_a_spawned_task_aborts() {
+		guard(true, || {
+			let runtime = real();
+			let task = runtime.spawn(async { crate::clock::sleep(Duration::from_millis(1)).await });
+			// The task's panic would reach the test only through its handle.
+			let _ = runtime.block_on(task);
+		});
+	}
+
+	/// A first interval tick, a zero sleep, and a watchdog its future beats.
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn waits_that_never_run_out_pass() {
+		guard(false, || {
+			real().block_on(async {
+				crate::clock::interval(Duration::from_secs(1)).tick().await;
+				crate::clock::sleep(Duration::ZERO).await;
+				let mut sleep = std::pin::pin!(crate::clock::sleep(Duration::from_secs(3_600)));
+				sleep.as_mut().reset(crate::clock::now());
+				sleep.await;
+				crate::clock::timeout(Duration::from_secs(3_600), tokio::task::yield_now())
+					.await
+					.unwrap();
+			});
+		});
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_paused_runtime_passes() {
+		guard(false, || {
+			tokio::runtime::Builder::new_current_thread()
+				.enable_time()
+				.start_paused(true)
+				.build()
+				.unwrap()
+				.block_on(async { crate::clock::sleep(Duration::from_secs(3_600)).await });
+		});
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn an_allowed_wait_passes() {
+		guard(false, || {
+			crate::clock::host_time();
+			real().block_on(async { crate::clock::sleep(Duration::from_millis(1)).await });
+		});
 	}
 
 	/// Every worker of a multi-thread runtime, and a thread outside any runtime,

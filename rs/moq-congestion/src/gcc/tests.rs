@@ -59,12 +59,11 @@ struct Sim {
 
 impl Sim {
     fn new(rate: u64, source: Source) -> Self {
-        let epoch = Instant::ZERO + Duration::from_secs(1000);
+        let epoch = Instant::ZERO.saturating_add(Duration::from_secs(1000));
         let gcc = Gcc::new(Init {
             now: epoch,
             mtu: MTU,
             rtt: Duration::from_millis(333),
-            max_pacing_rate: None,
             seed: 0,
         });
         Self {
@@ -95,7 +94,7 @@ impl Sim {
             self.ack();
             self.write();
             self.send();
-            self.now += Duration::from_millis(1);
+            self.now = self.now.saturating_add(Duration::from_millis(1));
         }
     }
 
@@ -103,7 +102,7 @@ impl Sim {
         if let Source::Media(rate) = self.source {
             while self.next_frame <= self.now {
                 self.backlog += rate / 30;
-                self.next_frame += Duration::from_secs(1) / 30;
+                self.next_frame = self.next_frame.saturating_add(Duration::from_secs(1) / 30);
             }
         }
     }
@@ -144,10 +143,10 @@ impl Sim {
             let start = self.busy_until.max(self.now);
             let wait = start - self.now;
             let arrival = (wait <= self.queue).then(|| {
-                self.busy_until =
-                    start + Duration::from_secs_f64(f64::from(MTU) / self.rate as f64);
+                self.busy_until = start
+                    .saturating_add(Duration::from_secs_f64(f64::from(MTU) / self.rate as f64));
                 self.queued.push((self.elapsed(), wait));
-                self.busy_until + DELAY
+                self.busy_until.saturating_add(DELAY)
             });
             self.flight.push_back(Flight {
                 sent: self.now,
@@ -161,7 +160,7 @@ impl Sim {
     /// Acknowledges what arrived a propagation delay ago, and declares lost a packet the
     /// bottleneck dropped once three later packets were acknowledged or [`LOSS_TIMEOUT`] passed
     fn ack(&mut self) {
-        let acked_by = |arrival: Instant| arrival + DELAY;
+        let acked_by = |arrival: Instant| arrival.saturating_add(DELAY);
         let mut acked = Vec::new();
         let mut lost = Vec::new();
         while let Some(front) = self.flight.front() {
@@ -176,7 +175,7 @@ impl Sim {
                         .take(3)
                         .filter(|f| f.arrival.is_some_and(|a| acked_by(a) <= self.now))
                         .count();
-                    if acked_later < 3 && self.now < front.sent + LOSS_TIMEOUT {
+                    if acked_later < 3 && self.now < front.sent.saturating_add(LOSS_TIMEOUT) {
                         break;
                     }
                 }
@@ -372,12 +371,11 @@ fn probes_aim_at_the_target() {
 /// holding the sender to the bytes and leaving it unfinished
 #[test]
 fn probe_inflight_rounds_up_to_a_packet() {
-    let now = Instant::ZERO + Duration::from_secs(1000);
+    let now = Instant::ZERO.saturating_add(Duration::from_secs(1000));
     let mut gcc = Gcc::new(Init {
         now,
         mtu: MTU,
         rtt: Duration::from_millis(100),
-        max_pacing_rate: None,
         seed: 0,
     });
     // 3000 bytes, two and a half packets
@@ -444,12 +442,11 @@ fn restart_ids_never_alias_googcc_ids() {
 /// leave the estimate outside GoogCC's bounds
 #[test]
 fn survives_hostile_receive_times() {
-    let mut now = Instant::ZERO + Duration::from_secs(1000);
+    let mut now = Instant::ZERO.saturating_add(Duration::from_secs(1000));
     let mut gcc = Gcc::new(Init {
         now,
         mtu: MTU,
         rtt: Duration::from_millis(100),
-        max_pacing_rate: None,
         seed: 0,
     });
     let times = [
@@ -462,7 +459,7 @@ fn survives_hostile_receive_times() {
         Some(Duration::from_nanos(1)),
     ];
     for round in 0..2000 {
-        now += Duration::from_millis(1);
+        now = now.saturating_add(Duration::from_millis(1));
         let packet = gcc.on_sent(Sent {
             now,
             bytes: MTU,
@@ -488,21 +485,20 @@ fn survives_hostile_receive_times() {
     }
 }
 
-/// A rate cap that shrinks GoogCC's window below two datagrams of a large MTU leaves the window
-/// at two datagrams, which `kMinCwnd`'s 1500-byte packets fall short of.
+/// A GoogCC window below two datagrams of the largest MTU leaves the window at two datagrams,
+/// which `kMinCwnd`'s 1500-byte packets fall short of.
 #[test]
 fn window_floor_tracks_mtu() {
-    const LARGE: u16 = 16384;
-    let mut now = Instant::ZERO + Duration::from_secs(1000);
+    const LARGE: u16 = 65527;
+    let mut now = Instant::ZERO.saturating_add(Duration::from_secs(1000));
     let mut gcc = Gcc::new(Init {
         now,
         mtu: LARGE,
         rtt: Duration::from_millis(10),
-        max_pacing_rate: Some(10_000),
         seed: 0,
     });
     for _ in 0..200 {
-        now += Duration::from_millis(10);
+        now = now.saturating_add(Duration::from_millis(10));
         let packet = gcc.on_sent(Sent {
             now,
             bytes: MTU,

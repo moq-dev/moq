@@ -184,8 +184,7 @@ mod tests {
 	async fn a_named_instance_follows_a_minted_one() {
 		let origin = produce_origin();
 		let _catalog = origin.route("a/pub", Default::default()).unwrap();
-		let minted: moq_net::Instance = "~minted".parse().unwrap();
-		assert!(minted.is_minted());
+		let minted = moq_net::fuzz::minted_instance();
 		let _sibling = origin.route("a/source", route(&minted)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;

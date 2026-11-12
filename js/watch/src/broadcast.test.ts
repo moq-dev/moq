@@ -6,6 +6,8 @@ import * as Msf from "@moq/msf";
 import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import * as Mint from "../../net/src/mint.ts";
+import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
 
 function publish(origin: Origin.Producer, path: Path.Valid) {
@@ -34,7 +36,7 @@ function broadcast(name: string, paths: string[] = [name]): { source: Broadcast;
 }
 
 // Answer every request `claim` receives with a new exact broadcast, returning the answers.
-function serve(claim: Origin.Route): Moq.Broadcast.Producer[] {
+function serve(claim: Origin.Claim): Moq.Broadcast.Producer[] {
 	const answers: Moq.Broadcast.Producer[] = [];
 	void (async () => {
 		for await (const request of claim.requested()) answers.push(request.route().broadcast);
@@ -108,7 +110,7 @@ describe("unsupported catalog", () => {
 			const owner = new Origin.Producer();
 			const name = Path.from("room/live.hang");
 			const published = publish(owner, name);
-			const track = published.createTrack(Catalog.TRACK, { compress });
+			const track = published.createTrack(Catalog.TRACK, { compression: compress ? "deflate" : "none" });
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 			const enabled = new Signal(true);
 			const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled });
@@ -145,6 +147,8 @@ describe("unsupported catalog", () => {
 // broadcast cut every viewer off before it drained the tail the broadcast still served.
 it("keeps playing a finished catalog until the broadcast ends", async () => {
 	const owner = new Origin.Producer();
+	// A session that could announce the broadcast, so its absence reads offline.
+	wireOf(owner).attach(true);
 	const name = Path.from("room/live.hang");
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
@@ -176,6 +180,7 @@ it("keeps playing a finished catalog until the broadcast ends", async () => {
 // A catalog track that ends before its first snapshot has nothing to play, so it reads as offline.
 it("reports a catalog that ends empty as offline", async () => {
 	const owner = new Origin.Producer();
+	wireOf(owner).attach(true);
 	const name = Path.from("room/live.hang");
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
@@ -337,12 +342,12 @@ describe("relativeBroadcast", () => {
 			Moq.Instance.random(),
 			Moq.Instance.random(),
 		];
-		const catalogRoute = owner.route(Path.from("a/b"), { instance: catalogInstance });
+		const catalogRoute = owner.route(Path.from("a/b"), { instance: { id: catalogInstance, epoch: 0n } });
 		const catalog = catalogRoute.broadcast;
-		const siblingRoute = owner.route(Path.from("a/source"), { instance: siblingInstance });
+		const siblingRoute = owner.route(Path.from("a/source"), { instance: { id: siblingInstance, epoch: 0n } });
 		const sibling = siblingRoute.broadcast;
 		// A route over a wire that carries no instance has one its session minted.
-		const plainRoute = owner.route(Path.from("a/plain"), { instance: Moq.Instance.minted() });
+		const plainRoute = owner.route(Path.from("a/plain"), { instance: { id: Mint.fresh(), epoch: 0n } });
 		const plain = plainRoute.broadcast;
 		const source = new Broadcast({
 			origin: owner,
@@ -381,7 +386,7 @@ describe("relativeBroadcast", () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
 		const [oldInstance, newInstance] = [Moq.Instance.random(), Moq.Instance.random()];
-		const oldRoute = owner.route(Path.from("a/source"), { instance: oldInstance });
+		const oldRoute = owner.route(Path.from("a/source"), { instance: { id: oldInstance, epoch: 0n } });
 		const old = oldRoute.broadcast;
 		const source = new Broadcast({
 			origin: owner,
@@ -406,7 +411,7 @@ describe("relativeBroadcast", () => {
 
 			// The announcement is the online signal: the plain reference follows the restart,
 			// while one naming the old instance never reads the new one.
-			const replacementRoute = owner.route(Path.from("a/source"), { instance: newInstance });
+			const replacementRoute = owner.route(Path.from("a/source"), { instance: { id: newInstance, epoch: 0n } });
 			const replacement = replacementRoute.broadcast;
 			await settle();
 			expect(following?.instance).toBe(newInstance);
@@ -425,7 +430,7 @@ describe("relativeBroadcast", () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
 		const [oldInstance, newInstance] = [Moq.Instance.random(), Moq.Instance.random()];
-		const oldRoute = owner.route(Path.from("a/source"), { instance: oldInstance });
+		const oldRoute = owner.route(Path.from("a/source"), { instance: { id: oldInstance, epoch: 0n } });
 		const old = oldRoute.broadcast;
 		const named = { ...video("avc1.64001f", "./source"), instance: oldInstance } as Catalog.VideoConfig;
 		const source = new Broadcast({
@@ -439,7 +444,7 @@ describe("relativeBroadcast", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["named", "plain"]);
 
-			const replacementRoute = owner.route(Path.from("a/source"), { instance: newInstance });
+			const replacementRoute = owner.route(Path.from("a/source"), { instance: { id: newInstance, epoch: 0n } });
 			const replacement = replacementRoute.broadcast;
 			await withoutWarnings(settle);
 			expect(videoRenditions(source)).toEqual(["plain"]);
@@ -488,7 +493,7 @@ describe("blind resolution", () => {
 		await settle();
 
 		// Stand in for a claim answering the request.
-		const route = owner.routePrefix(Path.from("blind.hang"));
+		const route = owner.claim(Path.from("blind.hang"));
 		const requests = route.requested();
 		const next = await requests.next();
 		if (!next.value) throw new Error("expected a request");
@@ -600,7 +605,7 @@ describe("restart", () => {
 	it("moves to a more specific announcement of another instance", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
-		const pool = owner.routePrefix(Path.from("pool"));
+		const pool = owner.claim(Path.from("pool"));
 		const answers = serve(pool);
 		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
 		await settle();
@@ -628,6 +633,33 @@ describe("restart", () => {
 		await settle();
 	});
 
+	it("plays a claim's job on the instance it resolved", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("pool/job.hang");
+		const pool = owner.claim(Path.from("pool"));
+		const answers = serve(pool);
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
+		const handed: unknown[] = [];
+		const stop = source.out.active.subscribe((active) => {
+			if (active) handed.push(active);
+		});
+		await settle();
+		const active = source.out.active.peek();
+		expect(active?.instance).toBe(pool.instance);
+
+		// The job's exact route carries the pool's instance, so the player never restarts.
+		for (let i = 0; i < 5; i++) await settle();
+		expect(handed).toEqual([active]);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		stop();
+		for (const answer of answers) answer.close();
+		pool.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+
 	it("resumes on a covering prefix after a gap", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
@@ -641,7 +673,7 @@ describe("restart", () => {
 		// The exact route goes, which ends the request on it, and a prefix answers before the table
 		// is read again. The player still has to ask again.
 		exact.close();
-		const pool = owner.routePrefix(Path.from("pool"));
+		const pool = owner.claim(Path.from("pool"));
 		const answers = serve(pool);
 		await settle();
 		const resumed = source.out.active.peek();
@@ -659,7 +691,7 @@ describe("restart", () => {
 	it("falls back to a covering prefix when the exact route ends", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
-		const pool = owner.routePrefix(Path.from("pool"));
+		const pool = owner.claim(Path.from("pool"));
 		const answers = serve(pool);
 		const exact = publish(owner, name);
 		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
@@ -692,7 +724,7 @@ describe("refusal", () => {
 	it("reports an unroutable refusal of a restarted publisher", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("room/live.hang");
-		const first = owner.routePrefix(Path.from("room"));
+		const first = owner.claim(Path.from("room"));
 		const answers = serve(first);
 		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
 		await settle();
@@ -701,7 +733,7 @@ describe("refusal", () => {
 		// The publisher restarts, and refuses with the same code an ended instance reports.
 		first.close();
 		for (const answer of answers) answer.close();
-		const second = owner.routePrefix(Path.from("room"));
+		const second = owner.claim(Path.from("room"));
 		const refused = await second.requested().next();
 		refused.value?.reject(new Moq.Error.Stream(Moq.StreamCode.Unroutable, { message: "refused" }));
 		await settle();
@@ -737,7 +769,8 @@ describe("refusal", () => {
 	for (const follow of [true, false]) {
 		it(`reports a refusal until a fresh request (follow: ${follow})`, async () => {
 			const owner = new Origin.Producer();
-			const route = owner.routePrefix(Path.from("room"));
+			wireOf(owner).attach(true);
+			const route = owner.claim(Path.from("room"));
 			const requests = route.requested();
 			const name = new Signal(Path.from("room/refused.hang"));
 			const enabled = new Signal(true);
@@ -1019,7 +1052,7 @@ describe("wildcard renditions", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source"]);
 
-			const worker = owner.routePrefix(Path.from(".pro/transcode"));
+			const worker = owner.claim(Path.from(".pro/transcode"));
 			const requests = worker.requested();
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
@@ -1066,8 +1099,8 @@ describe("wildcard renditions", () => {
 
 		try {
 			// A catch-all (an archive) and a narrower pool both cover the derived path.
-			const archive = owner.routePrefix(Path.empty());
-			const worker = owner.routePrefix(Path.from(".pro/transcode"));
+			const archive = owner.claim(Path.empty());
+			const worker = owner.claim(Path.from(".pro/transcode"));
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
 

@@ -1,4 +1,4 @@
-//! SCReAMv2 ([`congestion::Scream`]) on the seeded sim: an encoder that follows the controller's
+//! SCReAMv2 ([`congestion::scream::Scream`]) on the seeded sim: an encoder that follows the controller's
 //! estimate sends up through a bottleneck shaped like each cellular moq-shaper preset, and the run
 //! reports the queue it built, what it carried, and how fast it answered each step.
 //!
@@ -183,8 +183,8 @@ fn run(scenario: &Scenario) -> Outcome {
 	pair.client_conn_mut(client_ch).set_probe_target(scenario.probe_target);
 
 	let start = pair.time;
-	let end = start + path.duration;
-	let frame_at = |n: u64| start + Duration::from_nanos(n * 1_000_000_000 / FPS);
+	let end = start.saturating_add(path.duration);
+	let frame_at = |n: u64| start.saturating_add(Duration::from_nanos(n * 1_000_000_000 / FPS));
 	let mut outcome = Outcome::default();
 	let mut groups: Vec<Group> = Vec::new();
 	let mut reading: HashMap<StreamId, (u64, usize)> = HashMap::new();
@@ -195,7 +195,7 @@ fn run(scenario: &Scenario) -> Outcome {
 	loop {
 		let now = pair.time;
 		if let Some(&(at, rate)) = path.rates.get(next_rate)
-			&& now >= start + at
+			&& now >= start.saturating_add(at)
 		{
 			pair.to_server.bottleneck.as_mut().unwrap().set_rate(rate);
 			next_rate += 1;
@@ -278,7 +278,7 @@ fn run(scenario: &Scenario) -> Outcome {
 				estimate: estimate.unwrap_or(0),
 			});
 			outcome.read.push((now - start, read));
-			next_sample += SAMPLE;
+			next_sample = next_sample.saturating_add(SAMPLE);
 		}
 		if now >= end {
 			break;
@@ -289,7 +289,7 @@ fn run(scenario: &Scenario) -> Outcome {
 			pair.server.next_wakeup(),
 			Some(frame_at(next_frame)),
 			Some(next_sample),
-			path.rates.get(next_rate).map(|&(at, _)| start + at),
+			path.rates.get(next_rate).map(|&(at, _)| start.saturating_add(at)),
 		];
 		pair.time = pair.time.max(wakeups.into_iter().flatten().min().unwrap());
 	}

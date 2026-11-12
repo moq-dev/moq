@@ -1,10 +1,10 @@
-import { Nano, Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
+import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
@@ -13,11 +13,11 @@ import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
-import { AuthMessage, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
 import type { RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
@@ -26,7 +26,6 @@ import { malformed, refuse } from "./request_stream.ts";
 import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace } from "./subscribe_namespace.ts";
-import { SubscribeTracks } from "./subscribe_tracks.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -41,13 +40,17 @@ function handed(task: Promise<void>): Promise<void> {
 	return task.catch((err: unknown) => console.error("error processing bidi stream", err));
 }
 
+/** Where a session is: open, delivering what it owes before it closes, or closed. */
+/** `leaving` is open but draining at this side's own request; see the wire view's `leave`. */
+type Phase = { kind: "open" } | { kind: "leaving" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
  *
  * @internal
  */
-export class Connection implements Established {
-	#closing?: Promise<void>;
+export class Connection implements Session {
+	#phase: Phase = { kind: "open" };
 	// The URL of the connection.
 	readonly url: URL;
 
@@ -57,15 +60,15 @@ export class Connection implements Established {
 	// The wire transport this session runs over.
 	readonly transport: Transport;
 
-	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
+	/** moq-transport has no PROBE, so this stays empty; see {@link Session.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
-	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
+	/** Our tokens, which requests carry; see {@link Session.auth}. */
 	get auth(): Auth.Handle {
 		return this.#auth.handle;
 	}
 
-	// Our tokens and grants, and the answers to the peer's (MoQ Auth).
+	// Our tokens, for the requests that carry them.
 	#auth: AuthSession;
 
 	// The established WebTransport session.
@@ -95,10 +98,7 @@ export class Connection implements Established {
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
 
-	// Just to avoid logging when `close()` is called.
-	#closed = false;
-
-	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
 
 	/**
@@ -125,7 +125,6 @@ export class Connection implements Established {
 		maxAge = false,
 		activeCount = false,
 		cluster,
-		auth = false,
 		handle,
 		early = [],
 		extensions,
@@ -155,8 +154,6 @@ export class Connection implements Established {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
-		/** Whether MoQ Auth is negotiated: offered by both SETUPs. */
-		auth?: boolean;
 		/** The auth handle to build the session on, or undefined for one of its own. */
 		handle?: Auth.Handle;
 		/** Uni streams that arrived before the peer's SETUP, type unread. */
@@ -180,16 +177,14 @@ export class Connection implements Established {
 
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
-		const session = this.#session;
 		this.#auth = new AuthSession({
-			wire: auth ? new IetfAuthWire(session) : undefined,
 			requests: true,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
+			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -211,7 +206,6 @@ export class Connection implements Established {
 			cluster,
 			grant: this.#auth.scope,
 			auth: this.#auth,
-			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;
 		this.#declaredSolicit = extensions?.solicit ?? true;
@@ -232,38 +226,50 @@ export class Connection implements Established {
 			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
+			// Drained locally only: this compatibility layer sends no client GOAWAY.
+			leave: () => {
+				if (this.#phase.kind === "open") this.#phase = { kind: "leaving" };
+			},
 			auth: this.#auth,
 		});
 
 		void this.#run(early);
 	}
 
-	/** Snapshot the transport's counters; see {@link Established.stats}. */
+	/** Snapshot the transport's counters; see {@link Session.stats}. */
 	async stats(): Promise<Stats> {
 		return transportStats(this.#quic);
 	}
 
 	/** Withdraw announcements and wait up to one second for delivery before closing. */
 	close(): Promise<void> {
-		this.#closing ??= withTimeout(
-			this.#publisher.withdraw(),
-			Nano.fromSecond(Second(1)),
-			"session close timed out",
-		).finally(() => this.abort());
-		return this.#closing;
+		switch (this.#phase.kind) {
+			case "open":
+			case "leaving": {
+				const done = withTimeout(
+					this.#publisher.withdraw(),
+					Duration.secs(1),
+					"session close timed out",
+				).finally(() => this.abort());
+				this.#phase = { kind: "closing", done };
+				return done;
+			}
+			case "closing":
+				return this.#phase.done;
+			case "closed":
+				return Promise.resolve();
+		}
 	}
 
 	/** End the session immediately without waiting for delivery. */
 	abort(): void {
-		if (this.#closed) return;
 		this.#close();
 	}
 
 	// Close with the session code the peer should see, a clean close by default.
 	#close(info?: WebTransportCloseInfo) {
-		if (this.#closed) return;
-
-		this.#closed = true;
+		if (this.#phase.kind === "closed") return;
+		this.#phase = { kind: "closed" };
 
 		this.#publisher.close();
 		this.#auth.close();
@@ -301,7 +307,7 @@ export class Connection implements Established {
 			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered(), this.#auth));
 			await Promise.all(tasks);
 		} catch (err) {
-			if (!this.#closed) {
+			if (this.#phase.kind !== "closed") {
 				console.error("fatal error running connection", err);
 			}
 		} finally {
@@ -309,11 +315,11 @@ export class Connection implements Established {
 			// a tracked withdrawal, so a failure in it ends this driver while close() is
 			// still waiting on the sibling loops; closing here would drop their
 			// withdrawals. close() aborts once its barrier settles or the deadline hits.
-			if (!this.#closing) this.#close();
+			if (this.#phase.kind !== "closing") this.#close();
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
+	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
 		return announce.list(this.#subscriber.routes(scope, options));
 	}
@@ -364,9 +370,19 @@ export class Connection implements Established {
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
-				const decoded = SubscribeTracks.decode(stream.reader, this.#session.version);
-				const msg = await this.#request(stream, "subscribe_namespace", decoded);
-				if (msg) await handed(this.#publisher.runSubscribeTracks(msg, stream));
+				// We list no tracks by PUBLISH, so each listing is refused on its own. Only its
+				// Request ID is read; the rest of the body goes unread.
+				const requestId = await Message.decode(stream.reader, async (body) => {
+					const id = await body.u62();
+					await body.discard();
+					return id;
+				}).catch((err: unknown) => {
+					throw malformed(err, "subscribe_tracks");
+				});
+				this.#spend(requestId);
+				await handed(
+					this.#refuseUnsupported(stream, "subscribe_namespace", "SUBSCRIBE_TRACKS is not supported"),
+				);
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
@@ -378,7 +394,8 @@ export class Connection implements Established {
 			case BigInt(Fetch.id): {
 				const decoded = Fetch.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "fetch", decoded);
-				if (msg) await handed(this.#publisher.runFetch(msg, stream));
+				// Only a relay answers a FETCH, from its cache.
+				if (msg) await handed(this.#refuseUnsupported(stream, "fetch", "FETCH is not supported"));
 				break;
 			}
 
@@ -404,12 +421,6 @@ export class Connection implements Established {
 				}
 
 				await handed(this.#subscriber.runPublishNamespace(msg, stream));
-				break;
-			}
-			case BigInt(AuthMessage.id): {
-				// Only a peer that negotiated MoQ Auth may send one.
-				if (!this.#auth.negotiated) throw new ProtocolViolation("AUTH without MoQ Auth");
-				await this.#auth.serve(stream);
 				break;
 			}
 			case BigInt(Publish.id): {
@@ -451,6 +462,11 @@ export class Connection implements Established {
 	/** Spend a request's ID, closing the session if it was already used. */
 	#spend(requestId: bigint) {
 		this.#session.checkRequestId(requestId);
+	}
+
+	/** Refuse a request we never serve NOT_SUPPORTED, ending its stream. */
+	async #refuseUnsupported(stream: Stream, kind: RequestKind, reasonPhrase: string) {
+		await refuse(stream, this.#session.version, kind, { condition: "not_supported", reasonPhrase });
 	}
 
 	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */
@@ -573,7 +589,7 @@ export class Connection implements Established {
 			});
 			await race([read(), stopped]);
 		} catch (err) {
-			if (!this.#closed && !sessionClosed(err))
+			if (this.#phase.kind !== "closed" && !sessionClosed(err))
 				this.#violated(
 					err instanceof ProtocolViolation
 						? err
@@ -593,12 +609,12 @@ export class Connection implements Established {
 		return GoAway.decode(controlStream.reader, version);
 	}
 
-	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
 	get draining(): GetPromise<Drain> {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */
+	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
 	get closed(): Promise<Error | null> {
 		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
 	}

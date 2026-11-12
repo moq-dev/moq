@@ -12,8 +12,9 @@ Decided 2026-10-13, replacing the unconditional direct-first policy:
 
 - Applications explicitly choose which discovered peers to connect to and
   assign per-connection priority. Priority wins before configured additive
-  cost; links cost one by default and zero is refused (decided 2026-10-13). No automatic dial-all, cache price,
-  warm/cold route state, or RTT-based repricing by default.
+  cost; links cost one by default and zero is refused (decided 2026-10-13). No automatic dial-all or
+  RTT-based repricing by default. A browser sends no warm routes; those pass
+  only between relays ([cache-aware routing](/quest/m3/cache-routing/README.md)).
 - Within a priority, compare complete route cost including the origin's
   prefix seed. A direct routing node loses when its total route is more
   expensive. Equal distinct routes retain deterministic path hashing; newest
@@ -50,7 +51,3 @@ in Peers and native configuration. Wire: none beyond shared routing and existing
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - route identities and route ordering
 - [Signaling and policy](/quest/m4/p2p/signal.md) - explicit application peer selection
 - [moq-cli joins](/quest/m4/p2p/cli.md) - matching native controls
-
-## Related
-
-- [Route health](/quest/m5/route-health/README.md) - automatic epoch-only stalled-delivery recovery

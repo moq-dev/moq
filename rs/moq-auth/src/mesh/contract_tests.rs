@@ -183,10 +183,18 @@ async fn refresh_issues_a_new_token_until_revoked() {
 
 #[tokio::test]
 async fn renew_refreshes_before_expiry() {
-	let mesh = Mesh::with_ttl(Duration::from_secs(3)).await;
+	// A clock only the test moves, which the coordinator reads too; the HTTP between them is real.
+	let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
+	let ttl = Duration::from_secs(3);
+	let mesh = Mesh::with_ttl(ttl).await;
 	let device = mesh.device();
 	let enrollment = device.enroll(&mesh.key(true), None).await.unwrap();
-	let renewed = device.renew(&enrollment).await.unwrap();
+	let mut renew = std::pin::pin!(device.renew(&enrollment));
+	// The first poll arms the wait for two thirds of the token's life, before any request.
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	assert!(std::future::Future::poll(renew.as_mut(), &mut cx).is_pending());
+	clock.advance(ttl * 2 / 3);
+	let renewed = renew.await.unwrap();
 	assert!(kio::clock::wall() < enrollment.expires);
 	assert!(renewed.expires > enrollment.expires);
 }
@@ -217,6 +225,7 @@ async fn only_an_issued_challenge_is_accepted() {
 
 #[tokio::test]
 async fn renew_retries_a_transient_refusal() {
+	kio::clock::host_time(); // real HTTP, and the backoff is armed only after its refusal
 	use wiremock::matchers::{method, path};
 	use wiremock::{Mock, MockServer, ResponseTemplate};
 

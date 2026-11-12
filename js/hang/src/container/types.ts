@@ -1,11 +1,11 @@
-import { type Micro, Milli } from "@moq/clock";
+import type { Duration, Instant } from "@moq/clock";
 
 /** A decoded media frame: codec payload plus its presentation timestamp and keyframe flag. */
 export interface Frame {
 	/** The codec bitstream payload. */
 	payload: Uint8Array;
-	/** Presentation timestamp in microseconds. */
-	timestamp: Micro;
+	/** Presentation timestamp: how far into the media timeline this frame starts. */
+	timestamp: Duration;
 	/** Whether this frame opens a group, or is a video keyframe. Audio carries it only on a group start. */
 	keyframe: boolean;
 
@@ -16,21 +16,21 @@ export interface Frame {
 	 * so it can advance to a newer group as soon as the gap is covered instead of
 	 * waiting out the max delay budget.
 	 */
-	duration?: Micro;
+	duration?: Duration;
 }
 
 /** A media frame carrying its local transport ingress time. */
 export interface ReceivedFrame extends Frame {
-	/** Monotonic ingress time in milliseconds, before reordering or decoder backpressure. */
-	arrival: Milli;
+	/** When the frame came off the transport, before reordering or decoder backpressure. */
+	arrival: Instant;
 }
 
-/** A contiguous span of buffered media, in milliseconds. */
+/** A contiguous span of buffered media, on the presentation timeline. */
 export interface BufferedRange {
-	/** Start of the range in milliseconds. */
-	start: Milli;
-	/** End of the range in milliseconds. */
-	end: Milli;
+	/** Start of the range. */
+	start: Duration;
+	/** End of the range. */
+	end: Duration;
 }
 
 /** An ordered list of buffered time ranges. */
@@ -42,12 +42,12 @@ export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): Buffe
 	if (b.length === 0) return a;
 
 	const result: BufferedRanges = [];
-	const all = [...a, ...b].sort((x, y) => x.start - y.start);
+	const all = [...a, ...b].sort((x, y) => x.start.cmp(y.start));
 
 	for (const range of all) {
 		const last = result.at(-1);
-		if (last && last.end >= range.start) {
-			last.end = Milli(Math.max(last.end, range.end));
+		if (last?.end.ge(range.start)) {
+			last.end = last.end.max(range.end);
 		} else {
 			result.push({ ...range });
 		}

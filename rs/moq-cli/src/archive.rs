@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use object_store::path::{Path, PathPart};
 use object_store::{ObjectStore, ObjectStoreScheme};
 use url::Url;
@@ -92,12 +91,15 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 							old.abort();
 						}
 					}
-					moq_net::announce::Event::Absent(announce) => {
+					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
 						if let Some(follower) = followers.remove(&announce.prefix) {
 							follower.abort();
 						}
 					}
-					moq_net::announce::Event::Present(_) => {}
+					// A follower rides out its path being held.
+					moq_net::announce::Event::Present(_)
+					| moq_net::announce::Event::Available(_)
+					| moq_net::announce::Event::Unavailable(_) => {}
 				}
 				continue;
 			}
@@ -385,7 +387,7 @@ mod tests {
 
 	/// `export archive` records each broadcast announced under its prefix into its own
 	/// `<path>/@<instance>`, and leaves out what is announced elsewhere.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
@@ -420,7 +422,7 @@ mod tests {
 				.await
 				.expect("the export subscribes")
 				.unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			broadcast.broadcast().close();
 		}
 		let complete = [
@@ -462,7 +464,7 @@ mod tests {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin
-			.route_prefix("live/a", moq_net::origin::RouteOptions::default())
+			.claim("live/a", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
 
@@ -481,7 +483,7 @@ mod tests {
 
 	/// `import archive` republishes a recording `export archive` wrote under the given name and
 	/// instance, serving its stored groups.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn an_exported_broadcast_imports() {
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
@@ -499,7 +501,7 @@ mod tests {
 			group.write_frame(pts, format!("frame {sequence}")).unwrap();
 			group.finish().unwrap();
 		}
-		video.finish().unwrap();
+		let _video = video.finish().unwrap();
 		let recording =
 			tokio::spawn(moq_archive::Producer::new(open(&url).unwrap(), source.consume(), Default::default()).run());
 		// Its objects, then the markers once the broadcast ends.

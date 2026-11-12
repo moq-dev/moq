@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { Milli } from "@moq/clock";
-import Session from "@moq/qmux";
+import { Duration } from "@moq/clock";
+import { Session } from "@moq/qmux";
 import { connect } from "../../js/net/src/connection/connect.ts";
 import { Producer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
@@ -13,7 +13,7 @@ if (!address || !protocol || !["publish", "subscribe"].includes(mode))
 	throw new Error("expected URL ALPN publish|subscribe");
 const origin = new Producer();
 // `null` is an explicit unlimited: an omitted max age is the zero authored default.
-const ages = [null, Milli(0), Milli(30_000)];
+const ages = [null, Duration.millis(0), Duration.millis(30_000)];
 if (mode === "publish") {
 	const broadcastRoute = origin.route(Path.from("age"), { hidden: true });
 	const broadcast = broadcastRoute.broadcast;
@@ -46,10 +46,11 @@ try {
 		let broadcast = request.active.peek();
 		while (!broadcast) broadcast = await request.active.changed();
 		assert(broadcast);
-		for (const [i, age] of ages.entries()) {
+		for (const i of ages.keys()) {
 			const track = broadcast.track(String(i)).subscribe();
-			// A track received without a max age has no publisher limit: absent, not null.
-			assert.equal((await track.info()).maxAge, age ?? undefined, `${protocol} track ${i}`);
+			// moq-transport never sends MAX_CACHE_DURATION (it would expire the newest group too),
+			// so every track arrives without a publisher limit.
+			assert.equal((await track.info()).maxAge?.asMillis(), undefined, `${protocol} track ${i}`);
 			track.close();
 		}
 		request.close();

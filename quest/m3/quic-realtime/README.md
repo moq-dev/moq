@@ -176,14 +176,6 @@ the upstream encoder, so a GStreamer pipeline at a fixed bitrate still queues
 when capacity drops; [its own quest](/quest/m3/quic-realtime/moqsink-feedback.md)
 owns that feedback.
 
-## Required
-
-- [io_uring runs an application's controller](/quest/m3/quic-realtime/uring-controller.md) - moq-uring takes a controller factory, so the winner installs the same way on both runtimes
-- [moqsink encoder feedback](/quest/m3/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate
-
 ## Related
 
-- [Per-stream and per-datagram deadlines](/quest/m5/quic-deadline.md) - also consumes the forward-delay estimate
-- [BBR media study](/quest/m5/quic-bbr-study.md) - BBR3 behavior under media, the baseline here
-- [Measure ECN on the backbone](/quest/m5/quic-ecn-measure.md) - decides whether SCReAMv2's L4S path is worth porting
 - [QUIC on the sim](/quest/m4/quic-sim.md) - deterministic successor to the moq-shaper harness once it lands

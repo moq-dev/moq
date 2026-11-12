@@ -6,7 +6,7 @@
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
@@ -22,7 +22,7 @@ import type { Tab, UiState } from "./state";
 import styles from "./styles/index.css?inline";
 
 // How long the chrome lingers after the pointer stops moving (while playing).
-const HIDE = Nano.fromMilli(Milli(2800));
+const HIDE = Duration.millis(2800);
 
 // Whether `el` is the element the browser has actually put fullscreen. Unlike
 // `document.fullscreenElement`, this is not retargeted to the shadow host. `matches` throws on a

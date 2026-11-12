@@ -26,8 +26,6 @@
 
 use std::time::Duration;
 
-use moq_tokio::moq_net;
-
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -144,7 +142,7 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 	// The final group, a clean group end and a clean track end, innermost first and with
 	// no await in between: the session has sent none of it yet.
 	write_group(&track);
-	track.finish().expect("finish track");
+	let track = track.finish().expect("finish track");
 	drop(track);
 
 	// The publisher is done, so it disconnects. Nothing it could have awaited first.

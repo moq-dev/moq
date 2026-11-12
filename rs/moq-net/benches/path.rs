@@ -16,7 +16,7 @@ use futures::FutureExt;
 use moq_net::{
 	Path, Pattern, Patterns,
 	fuzz::{Announced, Messages, decode_announces, decode_namespaces, encode_announces, encode_namespaces},
-	kio, origin,
+	origin,
 };
 
 struct Counting;
@@ -102,12 +102,20 @@ fn decode() {
 	];
 	for (name, shape) in shapes {
 		let paths: Vec<Path> = (0..1000).map(|i| moq_net::Path::try_from(shape(i)).unwrap()).collect();
-		let stream: Vec<Announced> = paths
-			.iter()
-			.enumerate()
-			.map(|(i, path)| Announced::Start(path.clone(), vec![0x1111 + i as u64, 0x2222]))
-			.collect();
 		for compress in [false, true] {
+			// Lite-07 names a claim's route in place of its hop chain.
+			let stream: Vec<Announced> = paths
+				.iter()
+				.enumerate()
+				.map(|(i, path)| {
+					let hops = if compress {
+						vec![]
+					} else {
+						vec![0x1111 + i as u64, 0x2222]
+					};
+					Announced::Start(path.clone(), hops)
+				})
+				.collect();
 			let data = encode_announces(&stream, compress);
 			let version = if compress { "lite07" } else { "lite06" };
 			allocs(&format!("decode/announce_{version}/{name}"), 50, 1000, || {

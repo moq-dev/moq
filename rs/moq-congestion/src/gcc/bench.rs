@@ -10,18 +10,17 @@ const PACKET: u16 = 1200;
 /// Times the controller callbacks for `flight` packets acknowledged `batch` at a time, refilled as
 /// they are acknowledged if `steady`, each with a receive time
 fn measure(flight: usize, batch: usize, steady: bool) -> Duration {
-    let base = Instant::ZERO + Duration::from_secs(1);
+    let base = Instant::ZERO.saturating_add(Duration::from_secs(1));
     let mut gcc = Gcc::new(Init {
         now: base,
         mtu: PACKET,
         rtt: Duration::from_millis(10),
-        max_pacing_rate: None,
         seed: 0,
     });
     let bytes = u64::from(PACKET);
     let mut sent = Vec::with_capacity(2 * flight);
     for pn in 0..flight {
-        let now = base + Duration::from_micros(pn as u64);
+        let now = base.saturating_add(Duration::from_micros(pn as u64));
         sent.push((
             now,
             gcc.on_sent(Sent {
@@ -35,7 +34,9 @@ fn measure(flight: usize, batch: usize, steady: bool) -> Duration {
     let mut elapsed = Duration::ZERO;
     for first in (0..flight).step_by(batch) {
         let end = (first + batch).min(flight);
-        let now = base + Duration::from_millis(10) + Duration::from_micros(first as u64);
+        let now = base
+            .saturating_add(Duration::from_millis(10))
+            .saturating_add(Duration::from_micros(first as u64));
         let in_flight = if steady {
             flight - (end - first)
         } else {
@@ -48,7 +49,7 @@ fn measure(flight: usize, batch: usize, steady: bool) -> Duration {
             sent: at,
             bytes: PACKET,
             packet,
-            received: Some(at - base + Duration::from_millis(5)),
+            received: Some((at - base).saturating_add(Duration::from_millis(5))),
         }));
         gcc.on_ack(Ack {
             now,

@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { type Installed, Instant, Manual, Milli, Nano, now } from "@moq/clock";
+import { Duration, type Installed, Instant, Manual } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import { GRACE as TAIL_GRACE_MS } from "./ledger.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair, textFrame } from "./mock.ts";
+import { createMockTransportPair, manual, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Tail } from "./tail.ts";
@@ -17,7 +17,7 @@ const url = new URL("https://localhost:4443/test");
 
 // Long enough that no group is skipped as stale, and the moq-lite grace for the one group the
 // IETF case never produces.
-const MAX_DELAY = Milli(100);
+const MAX_DELAY = Duration.millis(100);
 
 async function session(protocol: string) {
 	const pair = createMockTransportPair(protocol);
@@ -87,6 +87,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 // declared an end past the groups it produced, and the Stream Count lets the subscriber stop
 // waiting for streams at once.
 test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", async (alpn) => {
+	using clock = manual();
 	const { video, reader, close } = await session(alpn);
 	try {
 		video.writeFrame(textFrame("0"));
@@ -95,22 +96,24 @@ test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", asy
 		video.finishAt({ group: 4n, frame: 0 });
 		video.writeFrame(textFrame("1"));
 		video.writeFrame(textFrame("2"));
-		const ended = now();
+		const ended = clock.now();
 		video.finish();
 		video.close();
 
-		expect(await readAll(reader)).toEqual(["1", "2"]);
+		const read = readAll(reader);
+		await clock.drive(reader.closed);
+		// Every counted stream arrived, so nothing waited out the grace.
+		expect(clock.now().since(ended).lt(TAIL_GRACE_MS)).toBe(true);
+		expect(await read).toEqual(["1", "2"]);
 		expect(await reader.closed).toBeNull();
 		expect(await reader.finished()).toEqual({ group: 4n, frame: 0 });
-		// Every counted stream arrived, so nothing waited out the grace.
-		expect(Nano.toMilli(Instant.durationSince(now(), ended))).toBeLessThan(TAIL_GRACE_MS);
 	} finally {
 		close();
 	}
 });
 
 describe("Tail", () => {
-	const GRACE = Milli(1000);
+	const GRACE = Duration.millis(1000);
 
 	let installed: Installed | undefined;
 	afterEach(() => installed?.close());
@@ -119,7 +122,7 @@ describe("Tail", () => {
 	function tail(grace = GRACE) {
 		const clock = new Manual();
 		installed = clock.install();
-		const at = (ms: number) => clock.jump(Nano(Nano.fromMilli(Milli(ms)) - clock.now()));
+		const at = (to: Duration) => clock.jump(Instant.ZERO.saturatingAdd(to).since(clock.now()));
 		return { at, clock, tail: new Tail({ grace: () => grace }) };
 	}
 
@@ -127,7 +130,7 @@ describe("Tail", () => {
 		const { at, tail: t } = tail();
 		t.account(0n, 1n);
 		t.account(2n, 3n);
-		at(GRACE / 2);
+		at(GRACE.div(2));
 		t.account(4n, 5n);
 		expect(t.covers(0n, 3n)).toBe(false);
 
@@ -143,7 +146,7 @@ describe("Tail", () => {
 		const { at, tail: t } = tail();
 		t.account(0n, 1n);
 		t.account(9n, 10n);
-		at(GRACE / 2);
+		at(GRACE.div(2));
 		t.account(5n, 6n);
 		expect(t.covers(0n, 10n)).toBe(false);
 
@@ -157,20 +160,20 @@ describe("Tail", () => {
 		t.account(3n, 4n);
 		t.account(9n, 10n);
 
-		at(GRACE * 2);
+		at(GRACE.mul(2));
 		t.demand(1n, 3n);
 		t.account(1n, 2n);
 		expect(t.covers(1n, 4n)).toBe(false);
 		// Only the gap the floor reached restarts.
 		expect(t.covers(3n, 10n)).toBe(true);
 
-		at(GRACE * 3);
+		at(GRACE.mul(3));
 		t.account(9n, 10n);
 		expect(t.covers(1n, 10n)).toBe(true);
 	});
 
 	test("the grace waits for a stream being read", async () => {
-		const { clock, tail: t } = tail(Milli(10));
+		const { clock, tail: t } = tail(Duration.millis(10));
 		const read = t.open(0n);
 		let settled = false;
 		const settling = t
@@ -179,7 +182,7 @@ describe("Tail", () => {
 				settled = true;
 			});
 
-		await clock.advance(Nano.fromMilli(Milli(50)));
+		await clock.advance(Duration.millis(50));
 		expect(settled).toBe(false);
 		read();
 		await settling;

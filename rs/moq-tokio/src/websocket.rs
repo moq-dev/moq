@@ -3,15 +3,17 @@
 //! Used when QUIC is unreachable: UDP blocked by a firewall, a proxy in the way, a
 //! network that only passes TCP/443. The client races this against QUIC and gives QUIC
 //! a small head start ([`Config::delay`]), so WebSocket only wins when QUIC can't get
-//! through. A session that lands on WebSocket stays on it for its lifetime. Servers
-//! accept it on a separate TCP port via [`Listener`], or pass an HTTP server's
-//! upgraded socket to [`accept`] before admitting the returned request.
+//! through. A reconnecting [`Connection`](crate::Connection) that lands on WebSocket
+//! keeps probing QUIC on a slow backoff and moves back once a probe connects, handing
+//! over make-before-break like a GOAWAY migration. Servers accept it on a separate TCP
+//! port via [`Listener`], or pass an HTTP server's upgraded socket to [`accept`] before
+//! admitting the returned request.
 
-use qmux::ws::tokio_tungstenite;
-use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use url::Url;
 
 use crate::cli::Duration as CliDuration;
@@ -114,7 +116,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct Options {
 	pub(crate) url: Url,
 	pub(crate) server: moq_net::Server,
-	pub(crate) active: moq_net::server::Active,
+	pub(crate) active: moq_net::server::Admitted,
 	/// The addresses and negotiated subprotocol captured before the upgrade.
 	pub link: crate::server::Link,
 	/// The verified TLS peer, when the HTTP server requested a certificate.
@@ -129,7 +131,7 @@ pub struct Options {
 
 impl Options {
 	/// Carry an accepted connection's guard, URL, and MoQ policy through its upgrade.
-	pub fn new(url: Url, server: moq_net::Server, active: moq_net::server::Active) -> Self {
+	pub fn new(url: Url, server: moq_net::Server, active: moq_net::server::Admitted) -> Self {
 		Self {
 			url,
 			server,
@@ -142,32 +144,14 @@ impl Options {
 	}
 }
 
-/// The largest WebSocket message or frame [`accept`] reads: one qmux record.
+/// Read SETUP on a connection an HTTP server upgraded to WebSocket, leaving admission
+/// to the returned request.
 ///
-/// Cap the socket at this before upgrading it, so a peer cannot make it buffer more.
-pub fn max_message_size() -> usize {
-	qmux::ws::max_message_size(&crate::qmux_default())
-}
-
-/// A socket config capped at [`max_message_size`], for the sockets upgraded here.
-fn socket_config() -> tungstenite::protocol::WebSocketConfig {
-	let max = max_message_size();
-	tungstenite::protocol::WebSocketConfig::default()
-		.max_message_size(Some(max))
-		.max_frame_size(Some(max))
-}
-
-/// Read SETUP on an upgraded WebSocket, leaving admission to the returned request.
-///
-/// The accept deadline runs from here, set by `options`' server
-/// ([`moq_net::Server::with_timeout`]). Cap the socket at [`max_message_size`] before the upgrade.
-pub async fn accept<T>(socket: T, options: Options) -> crate::Result<crate::server::Request>
+/// `io` is the raw upgraded connection, past the 101 response. The accept deadline runs
+/// from here, set by `options`' server ([`moq_net::Server::with_timeout`]).
+pub async fn accept<T>(io: T, options: Options) -> crate::Result<crate::server::Request>
 where
-	T: futures::Stream<Item = std::result::Result<tungstenite::Message, tungstenite::Error>>
-		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
-		+ Send
-		+ Unpin
-		+ 'static,
+	T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
 	crate::runtime::scope(async move {
 		let deadline = options.server.deadline(kio::clock::now());
@@ -175,7 +159,7 @@ where
 		// lifetime that QUIC's idle timeout bounds on the native path.
 		// The subprotocol names the QMux version; an upgrade without one has no wire format.
 		let alpn = options.link.alpn.as_deref().unwrap_or_default();
-		let mut upgraded = qmux::ws::Upgraded::new(socket, alpn)
+		let mut upgraded = qmux::ws::Upgraded::new(io, alpn)
 			.with_keep_alive(qmux::ws::KeepAlive::default())
 			.with_session_config(crate::qmux_config(&options.quic));
 		if let Some(stats) = &options.socket_stats {
@@ -191,8 +175,9 @@ where
 
 /// Servers (host, port) where WebSocket won the race, so later dials skip QUIC's head start.
 ///
-/// Both arms still race on those dials, and a QUIC win clears the entry through [`forget`],
-/// since UDP gets through after all.
+/// Both arms still race on those dials. The entry is provisional: a QUIC win or probe
+/// clears it through [`forget`], since UDP gets through after all, and so does the end of
+/// the WebSocket session that won, so a redial after an outage gives QUIC its head start.
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// The [`WEBSOCKET_WON`] key for a dial URL: the host and port the fallback dials.
@@ -447,21 +432,15 @@ pub(crate) async fn connect(
 			.await?
 		}
 		_ => {
-			// Use the existing TLS config (which respects tls-disable-verify) for secure connections.
-			let connector = if needs_tls {
-				tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()))
-			} else {
-				tokio_tungstenite::Connector::Plain
-			};
-
 			// Most moq ALPNs can ride on any QMux draft (`&[]` lets the polyfill expand
 			// to every version it knows). `qmux_versions_for` pins the few that the spec
 			// restricts. qmux also offers the bare ALPNs (`qmux-02`, `qmux-01`,
 			// `qmux-00`) by default so we still interop with relays that only know a
 			// wire-format version.
+			// The existing TLS config (which respects tls-disable-verify) for secure connections.
 			qmux::ws::Client::new()
 				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
-				.with_connector(connector)
+				.with_tls(Arc::new(tls.clone()))
 				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline; TCP backs off retransmits too far for QUIC's 10s
 				.with_session_config(session.clone())
 				.connect(url.as_str())
@@ -486,52 +465,123 @@ async fn connect_tls_override(
 	alpns: &[&str],
 	session: &qmux::Config,
 ) -> Result<qmux::Session> {
-	let original_request = url
+	let mut request = url
 		.as_str()
 		.into_client_request()
 		.map_err(|err| Error::BuildRequest(crate::error::message(err)))?;
-	let original_host = original_request
-		.headers()
-		.get(http::header::HOST)
-		.cloned()
-		.ok_or(Error::MissingHostname)?;
-	// tokio-tungstenite takes the TLS name from the URL host, so a bare IPv6 override
-	// needs the URL brackets that `set_host` refuses to add.
-	let mut tls_url = url.clone();
-	match tls_host_name.parse::<net::IpAddr>() {
-		Ok(ip) => tls_url.set_ip_host(ip),
-		Err(_) => tls_url.set_host(Some(tls_host_name)).map_err(|_| ()),
-	}
-	.map_err(|_| Error::BuildRequest(format!("invalid TLS host name: {tls_host_name}")))?;
-	let mut request = tls_url
-		.as_str()
-		.into_client_request()
-		.map_err(|err| Error::BuildRequest(crate::error::message(err)))?;
-	request.headers_mut().insert(http::header::HOST, original_host);
 	let protocols = supported_subprotocols(alpns).join(", ");
 	request.headers_mut().insert(
 		http::header::SEC_WEBSOCKET_PROTOCOL,
 		http::HeaderValue::from_str(&protocols).map_err(|err| Error::ProtocolHeader(crate::error::message(err)))?,
 	);
 
-	let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()));
-	let (websocket, response) =
-		tokio_tungstenite::client_async_tls_with_config(request, stream, Some(socket_config()), Some(connector))
-			.await
-			.map_err(qmux::Error::from)
-			.map_err(Error::connect)?;
+	// URL brackets delimit IPv6 literals, but aren't part of the TLS server name.
+	let bare = tls_host_name.trim_start_matches('[').trim_end_matches(']');
+	let name = rustls::pki_types::ServerName::try_from(bare.to_string())
+		.map_err(|_| Error::BuildRequest(format!("invalid TLS host name: {tls_host_name}")))?;
+	let mut stream = tokio_rustls::TlsConnector::from(Arc::new(tls.clone()))
+		.connect(name, stream)
+		.await
+		.map_err(|err| Error::WebSocketConnect(crate::error::message(err)))?;
+	let negotiated = upgrade(&mut stream, &request).await?;
 
-	let negotiated = response
-		.headers()
-		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
-		.and_then(|value| value.to_str().ok());
-	qmux::ws::Upgraded::new(websocket, negotiated.unwrap_or_default())
+	qmux::ws::Upgraded::new(stream, &negotiated)
 		.with_keep_alive(qmux::ws::KeepAlive::default())
 		.with_session_config(session.clone())
 		.connect()
 		.await
 		.map(crate::spawn_qmux)
 		.map_err(Error::connect)
+}
+
+/// The most response header bytes [`upgrade`] reads before giving up on the server.
+const MAX_RESPONSE: usize = 16 * 1024;
+
+/// Send the WebSocket upgrade `request` on `stream` and read the 101 that answers it,
+/// returning the subprotocol the server chose from those the request offered.
+///
+/// The response is read a byte at a time so nothing past it is consumed: the server may
+/// send QMux frames right behind its 101, and those belong to the session.
+async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, request: &http::Request<()>) -> Result<String> {
+	let key = request
+		.headers()
+		.get(http::header::SEC_WEBSOCKET_KEY)
+		.expect("a client request carries its key")
+		.clone();
+	let path = request.uri().path_and_query().map_or("/", |path| path.as_str());
+	let mut head = format!("GET {path} HTTP/1.1\r\n").into_bytes();
+	for (name, value) in request.headers() {
+		head.extend_from_slice(name.as_str().as_bytes());
+		head.extend_from_slice(b": ");
+		head.extend_from_slice(value.as_bytes());
+		head.extend_from_slice(b"\r\n");
+	}
+	head.extend_from_slice(b"\r\n");
+	stream.write_all(&head).await?;
+	stream.flush().await?;
+
+	let mut response = Vec::new();
+	while !response.ends_with(b"\r\n\r\n") {
+		if response.len() == MAX_RESPONSE {
+			return Err(Error::WebSocketConnect("upgrade response headers too large".into()));
+		}
+		response.push(stream.read_u8().await?);
+	}
+
+	let mut headers = [httparse::EMPTY_HEADER; tungstenite::handshake::headers::MAX_HEADERS];
+	let mut parsed = httparse::Response::new(&mut headers);
+	parsed
+		.parse(&response)
+		.map_err(|err| Error::WebSocketConnect(format!("invalid upgrade response: {err}")))?;
+	let status = parsed.code.unwrap_or_default();
+	if status != 101 {
+		return Err(Error::Connect {
+			message: format!("upgrade refused with HTTP {status}"),
+			status: Some(status),
+		});
+	}
+	let invalid = |reason: &str| Err(Error::WebSocketConnect(format!("invalid upgrade response: {reason}")));
+	if parsed.version != Some(1) {
+		return invalid("not HTTP/1.1");
+	}
+	let header = |name: http::header::HeaderName| {
+		parsed
+			.headers
+			.iter()
+			.find(|header| header.name.eq_ignore_ascii_case(name.as_str()))
+			.and_then(|header| std::str::from_utf8(header.value).ok())
+	};
+	if !header(http::header::UPGRADE).is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket")) {
+		return invalid("no Upgrade: websocket");
+	}
+	// `Connection` may arrive as several fields; the upgrade token can sit in any of them.
+	let upgrades = parsed
+		.headers
+		.iter()
+		.filter(|header| header.name.eq_ignore_ascii_case(http::header::CONNECTION.as_str()))
+		.filter_map(|header| std::str::from_utf8(header.value).ok())
+		.flat_map(|value| value.split(','))
+		.any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+	if !upgrades {
+		return invalid("no Connection: upgrade");
+	}
+	let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+	if header(http::header::SEC_WEBSOCKET_ACCEPT) != Some(accept.as_str()) {
+		return invalid("wrong accept key");
+	}
+
+	// The subprotocol pairs the QMux draft with the moq version, so one the request never
+	// offered could pair them in a way we refuse, such as moqt-22 over qmux-00.
+	let offered = request
+		.headers()
+		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
+		.and_then(|value| value.to_str().ok())
+		.unwrap_or_default();
+	match header(http::header::SEC_WEBSOCKET_PROTOCOL).map(str::trim) {
+		Some(protocol) if offered.split(',').any(|offer| offer.trim() == protocol) => Ok(protocol.to_string()),
+		Some(_) => invalid("subprotocol was not offered"),
+		None => invalid("no subprotocol"),
+	}
 }
 
 /// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::ws::Client::with_protocols`.
@@ -674,22 +724,15 @@ impl Listener {
 	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
 	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
 	/// retried, because the caller has no better answer than to ask again. A
-	/// per-connection upgrade failure is still yielded as `Some(Err(..))`.
-	///
-	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
-	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		crate::runtime::scope(async move {
-			self.accept_with_url()
-				.await
-				.map(|result| result.map(|(session, _, _)| session))
-		})
-		.await
+	/// per-connection upgrade failure is still returned as an error.
+	pub async fn accept(&self) -> Result<qmux::Session> {
+		crate::runtime::scope(async move { self.accept_with_url().await.map(|(session, _, _)| session) }).await
 	}
 
 	/// Accept the next connection and retain the WebSocket request URL, the chosen
 	/// sub-protocol, and the peer's address.
-	pub(crate) async fn accept_with_url(&self) -> Option<Result<(qmux::Session, Url, Accepted)>> {
-		Some(self.accept_pending().await.await)
+	pub(crate) async fn accept_with_url(&self) -> Result<(qmux::Session, Url, Accepted)> {
+		self.accept_pending().await.await
 	}
 
 	/// Accept a socket and return its independently driven WebSocket upgrade, so a
@@ -742,16 +785,18 @@ impl Listener {
 		};
 
 		async move {
-			let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(socket_config()))
+			// The client waits for the 101 before it sends a frame, so the handshake reads
+			// nothing past the request and the stream underneath holds only frames.
+			let stream = tokio_tungstenite::accept_hdr_async(stream, callback)
 				.await
-				.map_err(qmux::Error::from)
-				.map_err(Error::accept)?;
+				.map_err(|err| Error::Accept(crate::error::message(err)))?
+				.into_inner();
 			let (protocol, url) = accepted
 				.lock()
 				.unwrap()
 				.take()
 				.expect("successful upgrade selected a protocol");
-			let session = qmux::ws::Upgraded::new(websocket, &protocol)
+			let session = qmux::ws::Upgraded::new(stream, &protocol)
 				.with_keep_alive(qmux::ws::KeepAlive::default())
 				.with_session_config(session)
 				.accept()
@@ -857,7 +902,7 @@ mod tests {
 	async fn listener_refuses_a_client_without_subprotocol() {
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = listener.local_addr().unwrap();
-		let accepted = tokio::spawn(async move { listener.accept_with_url().await.unwrap() });
+		let accepted = tokio::spawn(async move { listener.accept_with_url().await });
 
 		let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
 		let err = tokio_tungstenite::client_async(format!("ws://{addr}/room"), stream)
@@ -881,26 +926,31 @@ mod tests {
 
 	#[tokio::test]
 	async fn tls_host_name_override_dials_url_address() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("127.0.0.1", false, Some("relay.example")).await;
 	}
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("relay.example", true, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_literal() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", false, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_literal_fixed_addresses() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", true, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_tls_host_name_override() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", false, Some("::1")).await;
 	}
 
@@ -983,10 +1033,13 @@ mod tests {
 				}
 				Ok(response)
 			};
-			let websocket = tokio_tungstenite::accept_hdr_async(tls, callback).await.unwrap();
+			let tls = tokio_tungstenite::accept_hdr_async(tls, callback)
+				.await
+				.unwrap()
+				.into_inner();
 			let protocol = protocol.lock().unwrap().take().unwrap();
 			// The client returns once QMux is established, so answer with its parameters.
-			let (session, driver) = qmux::ws::Upgraded::new(websocket, &protocol).accept().await.unwrap();
+			let (session, driver) = qmux::ws::Upgraded::new(tls, &protocol).accept().await.unwrap();
 			tokio::spawn(driver);
 			let host = host.lock().unwrap().take();
 			(server_name, host, session)
@@ -1022,25 +1075,21 @@ mod tests {
 	/// the `[quic]` windows its [`Options`] carry rather than the defaults.
 	#[tokio::test]
 	async fn an_upgraded_session_starts_at_the_options_windows() {
-		use tungstenite::protocol::Role;
 		const TIMEOUT: time::Duration = time::Duration::from_secs(10);
 
 		let alpn = supported_subprotocols(moq_net::ALPNS).remove(0);
-		let (server_io, client_io) = tokio::io::duplex(1 << 20);
-		let server_ws =
-			tokio_tungstenite::WebSocketStream::from_raw_socket(server_io, Role::Server, Some(socket_config())).await;
-		let client_ws = tokio_tungstenite::WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+		let (server_ws, client_ws) = tokio::io::duplex(1 << 20);
 
 		let quic = crate::quic::Config {
 			receive_window: Some(moq_net::transport::MIN_RECEIVE_WINDOW * 2),
 			stream_receive_window: Some(256 * 1024),
 			..Default::default()
 		};
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let mut options = Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new().with_versions(moq_net::Versions::all()),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
 		options.quic = quic.resolve();
@@ -1062,18 +1111,114 @@ mod tests {
 			.expect("accept task")
 			.expect("accept");
 		let window = request.qmux_window();
-		assert_eq!(window.connection, moq_net::transport::MIN_RECEIVE_WINDOW * 2);
+		assert_eq!(
+			window.connection,
+			std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW * 2)
+		);
 		assert_eq!(window.stream, 256 * 1024);
 		client.abort();
+	}
+
+	/// Answer an upgrade offering only `qmux-01.moqt-22` with `response`, followed by
+	/// `trailer`, and return what [`upgrade`] made of it plus the bytes left on the stream.
+	async fn check_upgrade(response: impl Fn(&str) -> String, trailer: &[u8]) -> (Result<String>, Vec<u8>) {
+		let (result, rest, _) = check_upgrade_request(response, trailer).await;
+		(result, rest)
+	}
+
+	/// [`check_upgrade`], also returning the request head [`upgrade`] wrote.
+	async fn check_upgrade_request(
+		response: impl Fn(&str) -> String,
+		trailer: &[u8],
+	) -> (Result<String>, Vec<u8>, String) {
+		let mut request = "ws://relay.example/room?jwt=token".into_client_request().unwrap();
+		request.headers_mut().insert(
+			http::header::SEC_WEBSOCKET_PROTOCOL,
+			http::HeaderValue::from_static("qmux-01.moqt-22"),
+		);
+		let key = request.headers()[http::header::SEC_WEBSOCKET_KEY].clone();
+		let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+
+		let (mut client, mut server) = tokio::io::duplex(1 << 16);
+		server.write_all(response(&accept).as_bytes()).await.unwrap();
+		server.write_all(trailer).await.unwrap();
+		let result = upgrade(&mut client, &request).await;
+		let mut rest = vec![0; trailer.len()];
+		client.read_exact(&mut rest).await.unwrap();
+		drop(client);
+		let mut head = String::new();
+		server.read_to_string(&mut head).await.unwrap();
+		(result, rest, head)
+	}
+
+	fn switching(accept: &str, protocol: &str) -> String {
+		format!(
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
+		)
+	}
+
+	#[tokio::test]
+	async fn upgrade_leaves_frames_behind_the_101() {
+		let (result, rest) = check_upgrade(|accept| switching(accept, "qmux-01.moqt-22"), b"frames").await;
+		assert_eq!(result.unwrap(), "qmux-01.moqt-22");
+		assert_eq!(rest, b"frames");
+	}
+
+	#[tokio::test]
+	async fn upgrade_requests_the_path_and_query() {
+		let (result, _, head) = check_upgrade_request(|accept| switching(accept, "qmux-01.moqt-22"), b"").await;
+		result.unwrap();
+		assert!(head.starts_with("GET /room?jwt=token HTTP/1.1\r\n"), "{head}");
+	}
+
+	#[tokio::test]
+	async fn upgrade_finds_the_token_in_a_later_connection_field() {
+		let (result, _) = check_upgrade(
+			|accept| {
+				switching(accept, "qmux-01.moqt-22")
+					.replace("Connection: Upgrade", "Connection: keep-alive\r\nConnection: Upgrade")
+			},
+			b"",
+		)
+		.await;
+		assert_eq!(result.unwrap(), "qmux-01.moqt-22");
+	}
+
+	#[tokio::test]
+	async fn upgrade_refuses_an_unoffered_subprotocol() {
+		let (result, _) = check_upgrade(|accept| switching(accept, "qmux-00.moqt-22"), b"").await;
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn upgrade_refuses_a_missing_subprotocol() {
+		let (result, _) = check_upgrade(
+			|accept| {
+				format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n")
+			},
+			b"",
+		)
+		.await;
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn upgrade_refuses_a_101_that_is_not_a_websocket() {
+		let (result, _) = check_upgrade(
+			|accept| switching(accept, "qmux-01.moqt-22").replace("Upgrade: websocket", "Upgrade: h2c"),
+			b"",
+		)
+		.await;
+		assert!(result.is_err());
 	}
 
 	#[test]
 	fn moqt_18_and_newer_pin_to_qmux01() {
 		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
 		// otherwise the pin silently stops matching.
-		let drafts: Vec<_> = [0xff000012, 0xff000014, 0xff000016]
+		let drafts: Vec<_> = ["moq-transport-18", "moq-transport-20", "moq-transport-22"]
 			.into_iter()
-			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
+			.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
 			.collect();
 		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 		for &alpn in QMUX01_ONLY_ALPNS {
@@ -1160,18 +1305,15 @@ mod timeout_tests {
 	#[tokio::test(start_paused = true)]
 	async fn silent_qmux_peer_is_refused_at_the_deadline() {
 		const ALPN: &str = "qmux-01.moq-lite-06";
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let timeout = time::Duration::from_secs(1);
 		let mut options = Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new().with_timeout(Some(timeout)),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(ALPN.into());
 		let (server, _peer) = tokio::io::duplex(4096);
-		let server =
-			tokio_tungstenite::WebSocketStream::from_raw_socket(server, tungstenite::protocol::Role::Server, None)
-				.await;
 		let start = kio::clock::now();
 		let result = accept(server, options).await;
 		assert!(
@@ -1187,29 +1329,23 @@ mod timeout_tests {
 		const ALPN: &str = "qmux-01.moq-lite-06";
 		let short = time::Duration::from_secs(1);
 		for (timeout, expires) in [(Some(short), true), (None, false)] {
-			let activity = moq_net::server::Activity::default();
+			let admission = moq_net::server::Admission::default();
 			let mut options = Options::new(
 				"ws://localhost/".parse().unwrap(),
 				moq_net::Server::new().with_timeout(timeout),
-				activity.enter().unwrap(),
+				admission.enter().unwrap(),
 			);
 			options.link.alpn = Some(ALPN.into());
 			// Complete QMux over an in-memory WebSocket, then withhold MoQ SETUP.
 			// A silent transport would expire QMux's own parameter deadline first.
 			let (server, peer) = tokio::io::duplex(4096);
-			let server =
-				tokio_tungstenite::WebSocketStream::from_raw_socket(server, tungstenite::protocol::Role::Server, None)
-					.await;
-			let peer =
-				tokio_tungstenite::WebSocketStream::from_raw_socket(peer, tungstenite::protocol::Role::Client, None)
-					.await;
 			let mut accept = Box::pin(accept(server, options));
 			// Each end waits for the other's QMux parameters, so the accept runs meanwhile.
 			let peer = tokio::select! {
 				peer = qmux::ws::Upgraded::new(peer, ALPN).connect() => crate::spawn_qmux(peer.unwrap()),
 				result = accept.as_mut() => panic!("accepted before SETUP: {:?}", result.map(|_| ())),
 			};
-			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
+			let _stream = kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
 			tokio::time::advance(timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT)).await;

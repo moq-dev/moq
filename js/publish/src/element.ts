@@ -14,6 +14,7 @@ import * as Preview from "./preview";
 import * as Source from "./source";
 import { clearSourceState } from "./source-state";
 import * as Video from "./video";
+import { normalizeSource } from "./video/types";
 
 function invalidAttribute(name: string, value: unknown, expected: string): Error {
 	return new Error(`moq-publish: invalid ${name}="${value}", expected ${expected}`);
@@ -72,8 +73,8 @@ export type AnnounceMode = "always" | "source";
  * What a muted or invisible track does with its capture.
  *
  * `hold` keeps the device open, so resuming is instant but the browser's capture indicator stays lit.
- * `release` closes it, so the indicator goes dark and resuming reopens it. A screen share or file
- * stops only once both tracks are off. Defaults to `hold`.
+ * `release` closes it, so the indicator goes dark and resuming reopens it; the track reads as disabled
+ * in the catalog until it has. A screen share or file stops only once both tracks are off. Defaults to `hold`.
  */
 export type CaptureMode = "hold" | "release";
 
@@ -123,6 +124,31 @@ function parseBackend(value: string | null): Preview.Backend {
 	throw invalidAttribute("backend", value, '"auto", "webgpu", or "2d"');
 }
 
+/**
+ * The element's `connection.enabled`, which the page may also write. The page's writes set what it
+ * wants and the element sets whether it can run (connected to a document, every attribute valid); it
+ * reads as on only while both hold. Kept apart, a page's disable survives the element suspending and
+ * resuming, whenever the page writes it: an explicit page choice wins.
+ */
+class Enabled extends Signal<boolean> {
+	#wanted = true;
+	#running = false;
+
+	constructor() {
+		super(false);
+	}
+
+	override set(value: boolean, notify?: boolean): void {
+		this.#wanted = value;
+		super.set(value && this.#running, notify);
+	}
+
+	run(running: boolean): void {
+		this.#running = running;
+		super.set(this.#wanted && running);
+	}
+}
+
 /** The `<moq-publish>` element: captures a source and publishes it as a broadcast. */
 export default class MoqPublish extends HTMLElement {
 	/** The attributes the browser reports changes to. */
@@ -141,9 +167,8 @@ export default class MoqPublish extends HTMLElement {
 		preview: new Signal<Preview.Mode>("source"),
 		// Which graphics API draws a <canvas> preview.
 		backend: new Signal<Preview.Backend>("auto"),
-		// When to advertise the broadcast: always, or only once a source is live. Undefined while the
-		// `announce` attribute is invalid, which never announces.
-		announce: new Signal<AnnounceMode | undefined>("source"),
+		// When to advertise the broadcast: always, or only once a source is live.
+		announce: new Signal<AnnounceMode>("source"),
 		// Whether to publish a stats track named in the catalog.
 		stats: new Signal(false),
 		// Where viewers may publish feedback, relative to the broadcast, or undefined to solicit none.
@@ -157,18 +182,18 @@ export default class MoqPublish extends HTMLElement {
 	 * same URL. The broadcast publishes into its `origin`, so a `<moq-watch>` on the same
 	 * page and URL resolves it locally with no round trip.
 	 */
-	connection: Moq.Connection;
+	readonly connection: Moq.Connection;
 	#capture: Video.Capture;
 	/** The broadcast being published. */
-	broadcast: Broadcast;
+	readonly broadcast: Broadcast;
 
 	/**
 	 * The single video encoder, tuned via `video.config`. For multiple renditions (e.g. simulcast), drop
 	 * the element and register your own encoders on a Broadcast via the JS API.
 	 */
-	video: Video.Encoder;
+	readonly video: Video.Encoder;
 	/** The single audio encoder, tuned via its knobs (`codec`, `volume`, ...). */
-	audio: Audio.Encoder;
+	readonly audio: Audio.Encoder;
 
 	// The selected input sources: the Camera/Screen, Microphone/Screen, and File holders driving capture.
 	// Read by the UI (device pickers) and written by #runSource.
@@ -197,7 +222,8 @@ export default class MoqPublish extends HTMLElement {
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
 	// Whether each track publishes: connected and allowed by `muted` and `invisible`. Video encodes only
-	// while it does; muted audio stays served and sends nothing, so an unmute needs no catalog update.
+	// while it does; muted audio stays served and sends nothing, so an unmute with its capture held needs
+	// no catalog update.
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
 
@@ -207,13 +233,12 @@ export default class MoqPublish extends HTMLElement {
 	#audioCapture = new Signal(false);
 	#eitherCapture = new Signal(false);
 
-	// Set when the element is connected to the DOM.
-	#enabled = new Signal(false);
+	// The document the element is connected to, if any.
 	#root = new Signal<Document | ShadowRoot | undefined>(undefined);
+	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether clearing the last invalid attribute re-enables media: false when the page had
-	// already disabled the connection, so recovery does not override that.
-	#resume = false;
+	// Whether to connect and capture: `#update` gates it on the element's state, and the page may turn it off.
+	#enabled = new Enabled();
 	#reflecting = false;
 
 	// Whether to advertise the broadcast, driven by the `announce` mode.
@@ -404,7 +429,7 @@ export default class MoqPublish extends HTMLElement {
 			};
 			effect.event(preview, "loadedmetadata", resize);
 			effect.event(preview, "resize", resize);
-			preview.srcObject = new MediaStream([Video.normalizeSource(source).track]);
+			preview.srcObject = new MediaStream([normalizeSource(source).track]);
 
 			effect.cleanup(() => {
 				preview.srcObject = null;
@@ -445,14 +470,13 @@ export default class MoqPublish extends HTMLElement {
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#root.set(this.getRootNode() as Document | ShadowRoot);
-		if (this.#invalid.peek().size) this.#resume = true;
-		else this.#enabled.set(true);
+		this.#update();
 	}
 
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#root.set(undefined);
-		this.#enabled.set(false);
+		this.#update();
 	}
 
 	/** Called by the browser when an observed attribute changes. */
@@ -476,25 +500,24 @@ export default class MoqPublish extends HTMLElement {
 				throw new Error(`Invalid attribute: ${exhaustive}`);
 			}
 		} catch (error) {
-			if (this.#invalid.peek().size === 0) this.#resume = this.#enabled.peek();
-			if (name === "announce") this.controls.announce.set(undefined);
 			this.#invalid.update((previous) => new Set(previous).add(name));
-			this.#enabled.set(false);
+			this.#update();
 			throw error;
 		}
 	}
 
 	#accept(name: string) {
-		// Ordinary edits must preserve an explicitly disabled connection.
 		if (!this.#invalid.peek().has(name)) return;
 		this.#invalid.update((previous) => {
 			const next = new Set(previous);
 			next.delete(name);
 			return next;
 		});
-		if (this.#invalid.peek().size || !this.#resume) return;
-		this.#resume = false;
-		this.#enabled.set(this.#root.peek() !== undefined);
+		this.#update();
+	}
+
+	#update() {
+		this.#enabled.run(this.#root.peek() !== undefined && this.#invalid.peek().size === 0);
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {
@@ -697,8 +720,8 @@ export default class MoqPublish extends HTMLElement {
 		this.#accept("backend");
 	}
 
-	/** When to announce the broadcast, mirrored by the `announce` attribute; undefined while that attribute is invalid. */
-	get announce(): AnnounceMode | undefined {
+	/** When to announce the broadcast, mirrored by the `announce` attribute. */
+	get announce(): AnnounceMode {
 		return this.controls.announce.peek();
 	}
 

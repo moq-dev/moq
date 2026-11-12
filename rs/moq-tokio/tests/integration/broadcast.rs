@@ -8,7 +8,6 @@
 //! This covers raw QUIC (moqt://) and WebTransport (https://) transports,
 //! exercising every protocol version the library supports.
 
-use moq_tokio::moq_net;
 use std::time::Duration;
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -43,7 +42,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	// Write a group containing a single frame.
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -140,7 +139,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 /// Lite05 publisher↔subscriber round-trip exercising the per-frame timestamp
 /// delta encoding, including negative deltas (B-frame ordering).
 async fn lite05_timestamp_roundtrip(scheme: &str) {
-	use moq_tokio::moq_net::{Timescale, Timestamp};
+	use moq_net::{Timescale, Timestamp};
 
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin
@@ -258,7 +257,7 @@ async fn broadcast_moq_lite_05_timestamps_webtransport() {
 /// fetched frames are Deflate-compressed (matching TRACK_INFO) and inflated by the
 /// subscriber, exercising fetch/TRACK_INFO codec consistency.
 async fn lite05_fetch_roundtrip(scheme: &str) {
-	use moq_tokio::moq_net::{Timescale, Timestamp};
+	use moq_net::{Timescale, Timestamp};
 
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin
@@ -490,7 +489,7 @@ async fn fetch_moq_transport_22() {
 /// subscription. Older relays served a subscription OR a fetch, never both, so
 /// this fetch would have hung.
 async fn lite05_fetch_during_subscribe(scheme: &str) {
-	use moq_tokio::moq_net::{Timescale, Timestamp};
+	use moq_net::{Timescale, Timestamp};
 
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin
@@ -616,7 +615,7 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 /// `Some(ts)` at that scale.
 #[tokio::test]
 async fn broadcast_moq_lite_05_untimed_track() {
-	use moq_tokio::moq_net::Timescale;
+	use moq_net::Timescale;
 
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin
@@ -819,11 +818,15 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 		.expect("announce timeout")
 		.expect("origin closed");
 	match event {
-		moq_net::origin::RouteEvent::End(announce) => (announce, false),
-		moq_net::origin::RouteEvent::Start(announce)
-		| moq_net::origin::RouteEvent::Update(announce)
-		| moq_net::origin::RouteEvent::Restart(announce)
-		| moq_net::origin::RouteEvent::Takeover { announce, .. } => (announce, true),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+			announce,
+		} => (announce, false),
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce,
+		} => (announce, true),
 	}
 }
 
@@ -947,6 +950,58 @@ async fn announce_lifecycle_test(version: &str) {
 		.await
 		.expect("server task panicked")
 		.expect("server task failed");
+}
+
+/// A lite-07 route carries the publisher's RTT, 0 at its own node, and the subscriber
+/// adds its own link's.
+#[tokio::test]
+async fn broadcast_moq_lite_07_route_rtt() {
+	let version = "moq-lite-07-wip";
+	let pub_origin = moq_tokio::origin::spawn();
+	let _route = pub_origin
+		.route("room/first", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec![version.parse().unwrap()];
+	let server = server_config.init(Default::default()).expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let addr = server.local_addr().expect("local addr");
+
+	let sub_origin = moq_tokio::origin::spawn();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	client_config.version = vec![version.parse().unwrap()];
+	let client = client_config.init(Default::default()).expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+	let (update, active) = next_announce(&mut announcements).await;
+	assert_eq!(update.prefix.as_str(), "room/first");
+	assert!(active, "expected the initial announce");
+
+	drop(connection);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+	let rtt = update.route.rtt().expect("QUIC reports an RTT");
+	assert!(rtt > std::time::Duration::ZERO, "rounded up to a whole millisecond");
 }
 
 /// Read `count` groups (one frame each) off the subscriber, returning the sorted
@@ -1155,10 +1210,8 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 		"moq-lite-04",
 		"moq-lite-05",
 	];
-	let every = (0xff0dad00..=0xff0dadff)
-		.chain(0xff000000..=0xff0000ff)
-		.filter_map(moq_net::Version::from_code);
-	for version in every
+	for version in moq_net::Version::ALL
+		.iter()
 		.map(|version| version.as_str())
 		.filter(|version| !pre06.contains(version))
 	{
@@ -1290,11 +1343,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 /// open (a JSON log appending frames to group 0), on every version.
 #[tokio::test]
 async fn broadcast_rejoin_replays_a_current_warm_cache() {
-	for version in (0xff0dad00..=0xff0dadff)
-		.chain(0xff000000..=0xff0000ff)
-		.filter_map(moq_net::Version::from_code)
-		.map(|version| version.as_str())
-	{
+	for version in moq_net::Version::ALL.iter().map(|version| version.as_str()) {
 		for open in [false, true] {
 			rejoin_replays_a_current_warm_cache(version, open).await;
 		}
@@ -1315,9 +1364,10 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"v0".as_ref())
 		.expect("write frame");
-	if !open {
-		group.finish().expect("finish group");
-	}
+	let (mut group, _finished) = match open {
+		true => (Some(group), None),
+		false => (None, Some(group.finish().expect("finish group"))),
+	};
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("[::]:0".parse().unwrap());
@@ -1389,6 +1439,8 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 				assert_eq!(read(&mut reading, &ctx).await, format!("v{frame}"), "{ctx}");
 			}
 			group
+				.as_mut()
+				.expect("open")
 				.write_frame(moq_net::Timestamp::ZERO, update.as_bytes())
 				.expect("write frame");
 		} else {
@@ -1692,13 +1744,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 
 #[tokio::test]
 async fn broadcast_max_age() {
-	for version in [
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-18",
-		"moq-transport-22",
-	] {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 			assert_eq!(max_age_test(version, age).await, age, "{version}");
 		}
@@ -1706,8 +1752,9 @@ async fn broadcast_max_age() {
 }
 
 #[tokio::test]
-async fn broadcast_max_age_legacy_omits_property() {
-	for version in ["moq-lite-01"] {
+async fn broadcast_max_age_omitted() {
+	// moq-transport's MAX_CACHE_DURATION would expire the newest group too, so it is never sent.
+	for version in ["moq-lite-01", "moq-transport-18", "moq-transport-22"] {
 		assert_eq!(
 			max_age_test(version, Some(Duration::from_secs(30))).await,
 			None,
@@ -1812,7 +1859,7 @@ async fn broadcast_websocket() {
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -1930,7 +1977,7 @@ async fn broadcast_websocket_fallback() {
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -2058,7 +2105,7 @@ async fn broadcast_websocket_uses_newest_version() {
 		.expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -2138,7 +2185,7 @@ async fn quic_driver_task_inherits_connection_span() {
 		.expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -2263,7 +2310,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 
 	let mut group0 = track.append_group().expect("append group 0");
 	group0
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"a".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"a".as_ref())
 		.expect("write frame 0");
 	group0.finish().expect("finish group 0");
 
@@ -2340,7 +2387,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	// A new group published after the resubscribe must reach the consumer.
 	let mut group1 = track.append_group().expect("append group 1");
 	group1
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"b".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"b".as_ref())
 		.expect("write frame 1");
 	group1.finish().expect("finish group 1");
 
@@ -2404,7 +2451,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 
 	let mut group = track.append_group().expect("append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -2419,7 +2466,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 	let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
 	let stats = registry
 		.tier(moq_net::stats::Tier::default())
-		.session(moq_net::Path::empty());
+		.session(moq_net::stats::SessionInfo::new(moq_net::Path::empty()));
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
@@ -2747,7 +2794,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -3050,7 +3097,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 		.expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -3218,13 +3265,13 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 	// Trigger the drain and observe the GOAWAY.
 	start_drain_tx.send(()).expect("send drain signal");
-	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
 	assert_eq!(goaway.uri(), "https://elsewhere.example/");
 	assert!(matches!(
-		draining.poll(&moq_net::kio::Waiter::noop()),
+		draining.poll(&kio::Waiter::noop()),
 		std::task::Poll::Ready(Ok(_))
 	));
 	if expect_wire_timeout {
@@ -3305,7 +3352,7 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 
 	// Observe the GOAWAY but do NOT leave.
 	let draining = connection.draining().expect("connected");
-	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
@@ -3515,8 +3562,11 @@ async fn abort_carries_its_code_to_the_peer() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	match announced.next().await? {
-		moq_net::announce::Event::Present(route) => Some((route, true)),
-		moq_net::announce::Event::Absent(route) => Some((route, false)),
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
+			moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+		};
 	}
 }

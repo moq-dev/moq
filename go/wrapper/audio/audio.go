@@ -207,8 +207,14 @@ func (e *Encoder) TrackInit() (media.AudioInit, error) { return e.inner.TrackIni
 // SetBitrate retunes the live encoder in bits per second.
 func (e *Encoder) SetBitrate(value uint64) error { return e.inner.SetBitrate(value) }
 
-// Encode encodes one codec-sized interleaved f32 frame.
-func (e *Encoder) Encode(pcm []float32) (Packet, error) { return e.inner.Encode(pcm) }
+// Encode submits one codec-sized interleaved f32 frame, whose packet Receive returns.
+func (e *Encoder) Encode(pcm []float32) error { return e.inner.Encode(pcm) }
+
+// Receive pops the oldest ready packet, or nil while the codec holds the rest; call it until nil.
+func (e *Encoder) Receive() (*Packet, error) { return e.inner.Receive() }
+
+// Flush marks the end of input, so Receive returns every packet the codec still holds, without closing the encoder.
+func (e *Encoder) Flush() error { return e.inner.Flush() }
 
 // Finish pads an optional partial frame, drains the codec, and closes the encoder.
 func (e *Encoder) Finish(pcm []float32) (EncoderFinish, error) { return e.inner.Finish(pcm) }
@@ -234,7 +240,7 @@ func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, id string,
 
 // Next returns the next decoded frame, gap, or encoder end, or (nil, nil) when the track ends.
 func (d *Consumer) Next(ctx context.Context) (Read, error) {
-	raw, err := bridge.Call(ctx, d.inner.Cancel, d.inner.Next)
+	raw, err := bridge.Call(ctx, nil, d.inner.Next)
 	if err != nil || raw == nil {
 		return nil, err
 	}
@@ -242,7 +248,9 @@ func (d *Consumer) Next(ctx context.Context) (Read, error) {
 }
 
 // All ranges over every read until the track ends or the loop breaks.
-func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] { return bridge.Seq(ctx, d.Next) }
+func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] {
+	return bridge.Seq(ctx, d.inner.Cancel, d.Next)
+}
 
 // Delay is the playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
 // The estimate measures when Next returns, so call it again as soon as the previous frame is handled.

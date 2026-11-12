@@ -8,18 +8,19 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
 use kio::clock::Instant;
-use moq_net::kio::{self, Pending, Waiter};
+use kio::{Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
 use moq_net::track::Resolving;
 use moq_net::{Instance, Path, broadcast, origin};
 
 use crate::{
-	Epoch, Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
-	parse_node_path, prefix_track, presence_track, totals_track,
+	Bucket, BucketFrame, Epoch, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage,
+	parse_bucket_track, parse_node_path, prefix_track, presence_track, totals_track,
 };
 
 /// Configuration for an [`Consumer`]. Construct with [`Config::new`] and chain
@@ -74,10 +75,10 @@ impl Default for Config {
 /// Folds every node's stats broadcast into one merged view.
 ///
 /// Hand it an [`origin::Consumer`] that sees the node broadcasts (e.g. scoped
-/// to `.stats`); each [`Self::totals`] / [`Self::group`] / [`Self::presence`]
+/// to `.stats`); each [`Self::totals`] / [`Self::bucket`] / [`Self::presence`]
 /// / [`Self::prefix`] call opens its own announce cursor and subscribes to that
 /// track on every node broadcast, summing the cumulative counters per key, so
-/// the merged track has the same format as one node's. A group's track is
+/// the merged track has the same format as one node's. A bucket's track is
 /// read only while the node's track listing lists it, so it needs a hop that
 /// carries listings (moq-lite 07, or moq-transport draft 18 and later).
 ///
@@ -89,14 +90,14 @@ impl Default for Config {
 /// retired total and the node is forgotten, so memory follows live nodes and
 /// the keys ever reported, not every node ever seen. Each route instance is its
 /// own node: a restarted producer announces a new instance whose counters add to
-/// the old one's kept contribution instead of regressing it, and a group
-/// track's new [`GroupFrame::epoch`] adds to the old epoch's counters the same
+/// the old one's kept contribution instead of regressing it, and a bucket
+/// track's new [`BucketFrame::epoch`] adds to the old epoch's counters the same
 /// way. A reader stays pinned to its broadcast instance, so a
 /// replacement never feeds it. A wire that carries no instance has its relay
 /// mint one per announcement, so a node reached through one announces anew each
 /// time it is announced again.
 ///
-/// A group's per-label sessions are the exception: they are a gauge, so a
+/// A bucket's per-label sessions are the exception: they are a gauge, so a
 /// departed node stops counting them immediately.
 ///
 /// The totals, presence, and prefix counters never regress: a node's counter
@@ -106,7 +107,7 @@ impl Default for Config {
 /// the exception: they sum the live nodes' current children, so a child leaves
 /// the merged map with the last node carrying it while its tail stays in the
 /// rollup. A node that resumes after its departure closed its open pairs
-/// reopens them as new starts rather than lowering their ends. A group's
+/// reopens them as new starts rather than lowering their ends. A bucket's
 /// per-path traffic also reopens pairs when a node resumes without regressing,
 /// but keeps the reset contract of a single node: one that returns within the
 /// grace with a lower counter regresses the merged counter.
@@ -131,11 +132,12 @@ impl Consumer {
 		}
 	}
 
-	/// A merged reader over group `group`'s track on every node broadcast that
+	/// A merged reader over bucket `bucket`'s track on every node broadcast that
 	/// lists it; see [`Self::totals`].
-	pub fn group(&self, group: impl Into<Path>) -> GroupConsumer {
-		GroupConsumer {
-			inner: self.merged(group_track(group)),
+	pub fn bucket(&self, bucket: impl Into<Path>) -> BucketConsumer {
+		BucketConsumer {
+			// Each counter run is its own track, found through the listing.
+			inner: self.merged(bucket.into().as_str().to_string()),
 		}
 	}
 
@@ -176,17 +178,17 @@ impl TotalsConsumer {
 	}
 }
 
-/// A merged reader over one group's track across every node; see
+/// A merged reader over one bucket's track across every node; see
 /// [`TotalsConsumer`].
-pub struct GroupConsumer {
-	inner: Merged<Grouped>,
+pub struct BucketConsumer {
+	inner: Merged<Bucketed>,
 }
 
-impl GroupConsumer {
-	/// The next merged frame, each tier's [`Group`] keyed by tier label as in
-	/// [`GroupFrame::tiers`], or `None` once the announce stream ends.
+impl BucketConsumer {
+	/// The next merged frame, each tier's [`Bucket`] keyed by tier label as in
+	/// [`BucketFrame::tiers`], or `None` once the announce stream ends.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<BTreeMap<String, Group>>>> {
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<BTreeMap<String, Bucket>>>> {
 		self.inner.poll_next(waiter)
 	}
 }
@@ -358,7 +360,7 @@ impl Mergeable for Presence {
 	}
 }
 
-/// One label's sessions on a group track, merged as a gauge: a departed
+/// One label's sessions on a bucket track, merged as a gauge: a departed
 /// node's contribution leaves at once rather than staying with its pairs
 /// closed, and a label leaving a node's frame is not a reset.
 #[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize)]
@@ -415,7 +417,7 @@ impl Mergeable for Totals {
 	}
 }
 
-/// One broadcast path's traffic on a group track. Like any per-path entry, a
+/// One broadcast path's traffic on a bucket track. Like any per-path entry, a
 /// path leaves the frame and restarts its counters when its entry ends, which
 /// is not a reset.
 impl Mergeable for Usage {
@@ -491,7 +493,8 @@ trait Shape: Default {
 	/// The merged frame.
 	type Merged: Default + Clone;
 	/// Whether the track is read only while the node's broadcast lists it, so
-	/// a reader waits for its next listing instead of re-resolving.
+	/// a reader waits for its next listing instead of re-resolving. A listed
+	/// shape's name is the bucket it reads, under whichever run's track is listed.
 	const LISTED: bool;
 
 	/// Take a fresh frame.
@@ -620,23 +623,23 @@ impl<V: Mergeable> Shape for Keyed<V> {
 	}
 }
 
-/// One node's fold of a group track: the tiers' totals, each `(tier, path)`'s
+/// One node's fold of a bucket track: the tiers' totals, each `(tier, path)`'s
 /// traffic, and each `(tier, label)`'s sessions.
 #[derive(Default)]
-struct Grouped {
-	/// The group counter epoch the last frame came from.
+struct Bucketed {
+	/// The bucket counter epoch the last frame came from.
 	epoch: Option<Epoch>,
 	totals: Keyed<Totals>,
 	paths: Keyed<Usage, (String, String)>,
 	labels: Keyed<Gauge, (String, String)>,
 }
 
-impl Shape for Grouped {
-	type Frame = GroupFrame;
-	type Merged = BTreeMap<String, Group>;
+impl Shape for Bucketed {
+	type Frame = BucketFrame;
+	type Merged = BTreeMap<String, Bucket>;
 	const LISTED: bool = true;
 
-	fn observe(&mut self, frame: GroupFrame) {
+	fn observe(&mut self, frame: BucketFrame) {
 		// A new epoch counts from zero, whatever its counters read by the time
 		// this reader sees them.
 		let reset = self.epoch.as_ref().is_some_and(|epoch| *epoch != frame.epoch);
@@ -644,19 +647,19 @@ impl Shape for Grouped {
 		let mut totals = BTreeMap::new();
 		let mut paths = BTreeMap::new();
 		let mut labels = BTreeMap::new();
-		for (tier, group) in frame.tiers {
-			for (path, usage) in group.paths {
+		for (tier, bucket) in frame.tiers {
+			for (path, usage) in bucket.paths {
 				paths.insert((tier.clone(), path), usage);
 			}
-			for (label, presence) in group.labels {
+			for (label, presence) in bucket.labels {
 				labels.insert((tier.clone(), label), Gauge(presence));
 			}
 			totals.insert(
 				tier,
 				Totals {
-					publisher: group.publisher,
-					subscriber: group.subscriber,
-					sessions: group.sessions,
+					publisher: bucket.publisher,
+					subscriber: bucket.subscriber,
+					sessions: bucket.sessions,
 				},
 			);
 		}
@@ -671,18 +674,18 @@ impl Shape for Grouped {
 
 	fn contribute(&self, acc: &mut Self::Merged) {
 		self.totals.each(|tier, totals| {
-			let group = acc.entry(tier.clone()).or_default();
-			group.publisher.add(totals.publisher);
-			group.subscriber.add(totals.subscriber);
-			group.sessions.add(totals.sessions);
+			let bucket = acc.entry(tier.clone()).or_default();
+			bucket.publisher.add(totals.publisher);
+			bucket.subscriber.add(totals.subscriber);
+			bucket.sessions.add(totals.sessions);
 		});
 		self.paths.each(|(tier, path), usage| {
-			let group = acc.entry(tier.clone()).or_default();
-			group.paths.entry(path.clone()).or_default().add(usage);
+			let bucket = acc.entry(tier.clone()).or_default();
+			bucket.paths.entry(path.clone()).or_default().add(usage);
 		});
 		self.labels.each(|(tier, label), gauge| {
-			let group = acc.entry(tier.clone()).or_default();
-			group.labels.entry(label.clone()).or_default().add(gauge.0);
+			let bucket = acc.entry(tier.clone()).or_default();
+			bucket.labels.entry(label.clone()).or_default().add(gauge.0);
 		});
 	}
 
@@ -717,8 +720,8 @@ struct Node<S: Shape> {
 	reader: Reader<S::Frame>,
 	/// The resolved broadcast's track listing, for a [`Shape::LISTED`] track.
 	listing: Option<broadcast::Tracks>,
-	/// Whether the listing offered the track since the reader last subscribed.
-	offered: bool,
+	/// The track the listing offered since the reader last subscribed.
+	offered: Option<Arc<str>>,
 	/// The announced path, relative to the announce cursor: what a re-resolve
 	/// after the reader ends requests again.
 	path: Path,
@@ -740,7 +743,7 @@ impl<S: Shape> Node<S> {
 	fn depart(&mut self) -> bool {
 		self.reader = Reader::Ended;
 		self.listing = None;
-		self.offered = false;
+		self.offered = None;
 		self.shape.depart()
 	}
 
@@ -769,7 +772,8 @@ struct Merged<S: Shape> {
 	origin: origin::Consumer,
 	announce: moq_net::origin::Routes,
 	prefix: Path,
-	/// Track name subscribed on each node broadcast.
+	/// Track name subscribed on each node broadcast, or the bucket a
+	/// [`Shape::LISTED`] shape reads.
 	name: String,
 	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live or recently departed node broadcast, keyed by
@@ -810,22 +814,26 @@ impl<S: Shape> Merged<S> {
 		// unannounce. A closed stream ends the merged view.
 		loop {
 			match self.announce.poll_next(waiter) {
-				// A takeover continues what was read through its predecessor, like an update.
-				Poll::Ready(Some(
-					moq_net::origin::RouteEvent::Start(update)
-					| moq_net::origin::RouteEvent::Update(update)
-					| moq_net::origin::RouteEvent::Takeover { announce: update, .. },
-				)) => {
+				Poll::Ready(Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
+					announce: update,
+				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true)
 				}
-				Poll::Ready(Some(moq_net::origin::RouteEvent::End(update))) => {
+				Poll::Ready(Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+					announce: update,
+				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, false)
 				}
 				// Another instance: the one tracked at the path ends, then the new one
 				// starts, so its reader resolves afresh.
-				Poll::Ready(Some(moq_net::origin::RouteEvent::Restart(update))) => {
+				Poll::Ready(Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					announce: update,
+				})) => {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
 					if let Some(previous) = absolute.and_then(|absolute| self.last_announced.get(&absolute).cloned()) {
@@ -914,9 +922,9 @@ impl<S: Shape> Merged<S> {
 		}
 
 		self.last_announced.insert(key.0.clone(), key.1.clone());
-		// A route update on a node already tracked (a reprice, or a takeover
-		// with different metadata) keeps the live reader: existing
-		// subscriptions survive a takeover, and the reader re-resolves through
+		// A route update on a node already tracked (a reprice, or another route
+		// of the same instance) keeps the live reader: existing
+		// subscriptions survive it, and the reader re-resolves through
 		// the current best route the moment it actually ends. Only an ended
 		// node re-arms here, since a fresh route is new evidence that a
 		// re-resolve could succeed. A sticky contribution carries across the
@@ -937,7 +945,7 @@ impl<S: Shape> Merged<S> {
 				entry.insert(Node {
 					reader: resolve(&self.origin, path, instance.clone()),
 					listing: None,
-					offered: false,
+					offered: None,
 					instance,
 					path: path.clone(),
 					shape: S::default(),
@@ -978,13 +986,17 @@ fn advance<S: Shape>(
 		while let Some(listing) = &mut node.listing {
 			match listing.poll_next(waiter) {
 				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added { name: listed, .. }))) => {
-					node.offered |= &*listed == name;
+					if parse_bucket_track(&listed).is_some_and(|(bucket, _)| bucket.as_str() == name) {
+						node.offered = Some(listed);
+					}
 				}
 				Poll::Ready(Ok(Some(
 					broadcast::TracksEvent::Removed { name: listed }
 					| broadcast::TracksEvent::Finished { name: listed },
 				))) => {
-					node.offered &= &*listed != name;
+					if node.offered.as_ref() == Some(&listed) {
+						node.offered = None;
+					}
 				}
 				Poll::Ready(Ok(Some(broadcast::TracksEvent::Synced))) => {}
 				Poll::Ready(result) => {
@@ -1002,7 +1014,7 @@ fn advance<S: Shape>(
 				Poll::Ready(Ok(broadcast)) if S::LISTED => match broadcast.tracks() {
 					Ok(listing) => {
 						node.listing = Some(listing);
-						node.offered = false;
+						node.offered = None;
 						node.reader = Reader::Waiting;
 					}
 					Err(err) => {
@@ -1035,11 +1047,10 @@ fn advance<S: Shape>(
 					node.reader = resolve(origin, &node.path, node.instance.clone());
 					continue;
 				};
-				if !node.offered {
+				let Some(offered) = node.offered.take() else {
 					return changed;
-				}
-				node.offered = false;
-				match listing.broadcast().track(name) {
+				};
+				match listing.broadcast().track(&offered) {
 					Ok(track) => node.reader = subscribing(track, config),
 					Err(err) => {
 						tracing::debug!(?err, name, "stats: node missing track");
@@ -1145,11 +1156,17 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route)
-			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 
@@ -1166,9 +1183,9 @@ mod tests {
 	type TrafficFrame = BTreeMap<String, Traffic>;
 	type SessionsFrame = BTreeMap<String, Presence>;
 
-	/// The default tier's egress per path, off group `acme`'s merged track.
+	/// The default tier's egress per path, off bucket `acme`'s merged track.
 	struct TrafficConsumer {
-		inner: Merged<Grouped>,
+		inner: Merged<Bucketed>,
 	}
 
 	impl TrafficConsumer {
@@ -1178,14 +1195,14 @@ mod tests {
 		}
 	}
 
-	fn publisher(tiers: &BTreeMap<String, Group>) -> TrafficFrame {
-		let paths = tiers.get("").map(|group| &group.paths).into_iter().flatten();
+	fn publisher(tiers: &BTreeMap<String, Bucket>) -> TrafficFrame {
+		let paths = tiers.get("").map(|bucket| &bucket.paths).into_iter().flatten();
 		paths.map(|(path, usage)| (path.clone(), usage.publisher)).collect()
 	}
 
 	fn traffic(agg: &Consumer) -> TrafficConsumer {
 		TrafficConsumer {
-			inner: agg.group(moq_net::Path::from_static("acme")).inner,
+			inner: agg.bucket(moq_net::Path::from_static("acme")).inner,
 		}
 	}
 
@@ -1194,21 +1211,21 @@ mod tests {
 		publisher(&traffic.inner.retired).get(path).map(|t| t.bytes)
 	}
 
-	/// The default tier's sessions per label, off group `acme`'s merged track.
+	/// The default tier's sessions per label, off bucket `acme`'s merged track.
 	struct SessionsConsumer {
-		inner: GroupConsumer,
+		inner: BucketConsumer,
 	}
 
 	impl SessionsConsumer {
 		async fn next(&mut self) -> Result<Option<SessionsFrame>> {
 			let frame = self.inner.next().await?;
-			Ok(frame.map(|mut tiers| tiers.remove("").map(|group| group.labels).unwrap_or_default()))
+			Ok(frame.map(|mut tiers| tiers.remove("").map(|bucket| bucket.labels).unwrap_or_default()))
 		}
 	}
 
 	fn sessions(agg: &Consumer) -> SessionsConsumer {
 		SessionsConsumer {
-			inner: agg.group(moq_net::Path::from_static("acme")),
+			inner: agg.bucket(moq_net::Path::from_static("acme")),
 		}
 	}
 
@@ -1232,15 +1249,15 @@ mod tests {
 		}
 	}
 
-	/// The group epoch every hand-published group frame carries, so a new
-	/// [`NodeBroadcast`] at the same path resumes that group's counters.
-	fn group_epoch() -> Epoch {
+	/// The bucket epoch every hand-published bucket frame carries, so a new
+	/// [`NodeBroadcast`] at the same path resumes that bucket's counters.
+	fn bucket_epoch() -> Epoch {
 		"01900000-0000-7000-8000-0000000000ff".parse().unwrap()
 	}
 
-	/// A stats producer publishing one node's broadcast on `origin`, grouped at
-	/// depth 1 (so feeding a broadcast under `<group>/...` publishes a
-	/// `<group>/group.json` track on `.stats/node/<node>`).
+	/// A stats producer publishing one node's broadcast on `origin`, bucketed at
+	/// depth 1 (so feeding a broadcast under `<bucket>/...` publishes a
+	/// `<bucket>/bucket.<epoch>.json` track on `.stats/node/<node>`).
 	fn node_producer(origin: &origin::Producer, node: &str) -> Producer {
 		crate::produce::spawned(Producer::new(
 			produce::Config::new()
@@ -1268,7 +1285,7 @@ mod tests {
 		let ctx = producer
 			.registry()
 			.tier(tier)
-			.session(moq_net::Path::new(label).unwrap());
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::new(label).unwrap()));
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
@@ -1332,7 +1349,7 @@ mod tests {
 	}
 
 	/// A hand-published node broadcast at `.stats/node/<node>` with one plain
-	/// group track carrying default-tier egress per path, so a test controls
+	/// bucket track carrying default-tier egress per path, so a test controls
 	/// the exact frames and can fail one node's reader alone (the
 	/// registry-driven producer only publishes whole broadcasts). Its route
 	/// carries one instance per node name, so a new one at the same path is that
@@ -1341,27 +1358,30 @@ mod tests {
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct NodeBroadcast {
 		source: origin::Route,
-		group: moq_json::snapshot::Producer<GroupFrame>,
+		bucket: moq_json::snapshot::Producer<BucketFrame>,
 		track: track::Producer,
 		frame: TrafficFrame,
 	}
 
 	impl NodeBroadcast {
-		fn new(origin: &origin::Producer, group: &str, node: &str) -> Self {
-			Self::with_instance(origin, group, node, format!("node-{node}").parse().unwrap())
+		fn new(origin: &origin::Producer, bucket: &str, node: &str) -> Self {
+			Self::with_instance(origin, bucket, node, format!("node-{node}").parse().unwrap())
 		}
 
-		fn with_instance(origin: &origin::Producer, group: &str, node: &str, instance: moq_net::Instance) -> Self {
+		fn with_instance(origin: &origin::Producer, bucket: &str, node: &str, instance: moq_net::Instance) -> Self {
 			let path = format!(".stats/node/{node}");
 			let options = origin::RouteOptions::default().with_instance(instance, 0);
 			let source = origin.route(path.as_str(), options).expect("announce");
 			let track = source
 				.broadcast()
-				.create_track(group_track(moq_net::Path::new(group).unwrap()), timed())
+				.create_track(
+					crate::bucket_track(moq_net::Path::new(bucket).unwrap(), &bucket_epoch()),
+					timed(),
+				)
 				.expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
-				group: moq_json::snapshot::Producer::new(track.clone(), config),
+				bucket: moq_json::snapshot::Producer::new(track.clone(), config),
 				track,
 				source,
 				frame: TrafficFrame::new(),
@@ -1373,15 +1393,15 @@ mod tests {
 		fn publish(&mut self, path: &str, bytes: u64) {
 			let entry = self.frame.entry(path.to_string()).or_default();
 			entry.bytes += bytes;
-			let mut group = Group::default();
+			let mut bucket = Bucket::default();
 			for (path, traffic) in &self.frame {
-				group.paths.entry(path.clone()).or_default().publisher = *traffic;
+				bucket.paths.entry(path.clone()).or_default().publisher = *traffic;
 			}
-			let frame = GroupFrame {
-				epoch: group_epoch(),
-				tiers: BTreeMap::from([(String::new(), group)]),
+			let frame = BucketFrame {
+				epoch: bucket_epoch(),
+				tiers: BTreeMap::from([(String::new(), bucket)]),
 			};
-			self.group
+			self.bucket
 				.update(moq_net::Timed::from(&frame).at(moq_net::Timestamp::now()))
 				.expect("publish");
 		}
@@ -1785,17 +1805,17 @@ mod tests {
 		let node_b = node_producer(&origin, "b");
 
 		// Each node needs a live broadcast to announce; the sessions ride the same
-		// group.
+		// bucket.
 		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
 		let _sa = node_a
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		let _sb = node_b
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new());
@@ -1824,11 +1844,11 @@ mod tests {
 		let _sa = node_a
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		let sb = node_b
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new());
@@ -1910,8 +1930,8 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn a_relisted_group_adds_its_new_epoch() {
-		// A group's track that lingers out and is listed again starts a new epoch
+	async fn a_relisted_bucket_adds_its_new_epoch() {
+		// A bucket's track that lingers out and is listed again starts a new epoch
 		// counted from zero: the reader follows the listing to it, and its totals
 		// add to the old epoch's instead of regressing.
 		let origin = produce_origin();
@@ -1923,17 +1943,19 @@ mod tests {
 				.with_linger(Duration::ZERO),
 		));
 		let agg = Consumer::new(origin.consume(), Config::new());
-		let mut group = agg.group(moq_net::Path::from_static("acme"));
+		let mut bucket = agg.bucket(moq_net::Path::from_static("acme"));
 
 		let session = node
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme/live"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static(
+				"acme/live",
+			)));
 		drive_tick().await;
 		let mut started = 0;
 		let mut read_until = async |want: u64, active: u64| loop {
-			let frame = group.next().await.expect("read").expect("frame");
-			let sessions = frame.get("").map(|group| group.sessions).unwrap_or_default();
+			let frame = bucket.next().await.expect("read").expect("frame");
+			let sessions = frame.get("").map(|bucket| bucket.sessions).unwrap_or_default();
 			assert!(sessions.sessions_started >= started, "regressed: {sessions:?}");
 			started = sessions.sessions_started;
 			if (started, sessions.active()) == (want, active) {
@@ -1950,7 +1972,9 @@ mod tests {
 		let _session = node
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme/live"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static(
+				"acme/live",
+			)));
 		drive_tick().await;
 		read_until(2, 1).await;
 	}
@@ -2029,7 +2053,7 @@ mod tests {
 			&moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: Default::default(),
+				route: moq_net::fuzz::route_info([], 0, None),
 			},
 			instance.clone(),
 			true,
@@ -2051,7 +2075,7 @@ mod tests {
 			&moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: Default::default(),
+				route: moq_net::fuzz::route_info([], 0, None),
 			},
 			"b".parse().unwrap(),
 			true,

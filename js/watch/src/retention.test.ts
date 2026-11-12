@@ -1,12 +1,22 @@
-import { expect, spyOn, test } from "bun:test";
-import { type Micro, Milli, Nano, now, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { Duration, type Installed, Instant, Manual, now, yieldNow } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
 import { nextMedia, subscribeMedia } from "./media";
 import { Sync } from "./sync";
+
+// The clock's sleeps fire on a Manual clock, which each test moves through its run.
+let clock: Manual;
+let installed: Installed;
+beforeEach(() => {
+	clock = new Manual();
+	installed = clock.install();
+});
+afterEach(() => {
+	installed.close();
+});
 
 // These count what is still attached rather than the heap: `Bun.gc` scans the stack conservatively,
 // so a stale pointer can pin thousands of dead cells and fail a heap count under load.
@@ -59,21 +69,20 @@ async function pendingListeners(run: () => Promise<void>): Promise<number> {
 // Frames sleep on the clock once each, so a sleep that keeps anything on a clock that never changes
 // piles it up for the life of the player.
 test("waits on a stable clock leave nothing behind", async () => {
-	hostTime();
-	const sync = new Sync({ delay: Milli(10) });
-	const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
+	const sync = new Sync({ delay: Duration.millis(10) });
+	const video = sync.track({ target: new Signal<Duration | undefined>(undefined) });
 	// Let the delay effect run before anchoring.
 	await yieldNow();
-	video.received(Nano.toMilli(Nano(now())));
+	video.received(now().since(Instant.ZERO));
 
 	const wait = async () => {
 		for (let round = 0; round < 10; round++) {
-			const at = Nano.toMilli(Nano(now()));
+			const at = now().since(Instant.ZERO);
 			await Promise.all(Array.from({ length: 100 }, () => video.wait(at)));
 		}
 	};
-	expect(await pendingReactions(wait)).toBe(0);
-	expect(await pendingListeners(wait)).toBe(0);
+	expect(await pendingReactions(() => clock.drive(wait()))).toBe(0);
+	expect(await pendingListeners(() => clock.drive(wait()))).toBe(0);
 
 	sync.close();
 });
@@ -82,7 +91,6 @@ test("waits on a stable clock leave nothing behind", async () => {
 // reads each frame, the shared clock anchors on it, and presentation waits on the clock against
 // the effect's teardown. Retention anywhere along it grows with the frame count.
 test("a long subscription through the player path leaves nothing behind", async () => {
-	hostTime();
 	const broadcast = new Moq.Broadcast.Producer();
 	// The track's cache keeps every group here for its fixed 30s idle window whatever maxAge the
 	// track declares, and holds no reactions or listeners while it does.
@@ -90,8 +98,8 @@ test("a long subscription through the player path leaves nothing behind", async 
 	const format = new Container.Legacy.Format("audio");
 	const producer = new Container.Legacy.Producer(track, format);
 
-	const sync = new Sync({ delay: Milli(10) });
-	const audio = sync.track({ target: new Signal<Milli | undefined>(undefined) });
+	const sync = new Sync({ delay: Duration.millis(10) });
+	const audio = sync.track({ target: new Signal<Duration | undefined>(undefined) });
 	const effect = new Effect();
 	const sub = subscribeMedia(effect, {
 		broadcast: broadcast.consume(),
@@ -109,19 +117,25 @@ test("a long subscription through the player path leaves nothing behind", async 
 	const presenting = new Set<Promise<unknown>>();
 	const play = async (count: number) => {
 		for (let i = 0; i < count; i++) {
-			producer.encode(new Uint8Array([i & 0xff]), Math.round(Nano.toMicro(Nano(now()))) as Micro, true);
+			producer.encode(
+				new Uint8Array([i & 0xff]),
+				Duration.micros(Math.round(now().since(Instant.ZERO).asMicros())),
+				true,
+			);
 			// Pass over any gap or end.
 			let next = await nextMedia(consumer);
 			while (next && next.kind !== "frame") next = await nextMedia(consumer);
 			if (!next) throw new Error("the track ended");
 
-			const timestamp = Milli.fromMicro(next.frame.timestamp);
+			const timestamp = next.frame.timestamp;
 			audio.received(timestamp);
 			const presented = effect.race(audio.wait(timestamp));
 			presenting.add(presented);
 			void presented.finally(() => presenting.delete(presented));
+			// Frames land a millisecond apart, so earlier presentations wake while later ones wait.
+			await clock.advance(Duration.millis(1));
 		}
-		await Promise.all(presenting);
+		await clock.drive(Promise.all(presenting));
 	};
 
 	// What stays is bounded by the track's window of open groups, not the frame count.

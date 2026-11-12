@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli, Nano, sleep } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Duration, Manual } from "@moq/clock";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { hooks } from "../../../net/src/internal.ts";
 import { Consumer } from "./consumer.ts";
@@ -11,7 +10,7 @@ type Value = Record<string, unknown>;
 
 // These tests inspect complete finished timelines through raw ordered reads, so request a
 // replay window instead of the transport's live-edge default. A snapshot consumer ignores it.
-const REPLAY_LATENCY = Milli(30_000);
+const REPLAY_LATENCY = Duration.millis(30_000);
 
 // Reconstruct every state a consumer reading `track` yields from `next()`, in order.
 async function drain(track: Track.Producer | Consumer<Value>): Promise<Value[]> {
@@ -196,7 +195,7 @@ test("next skips every superseded group, whatever budget another reader asks for
 	for (let n = 1; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 1_000) });
 	producer.finish();
 
-	for (const max of [Milli.zero, Milli(500), REPLAY_LATENCY, null]) {
+	for (const max of [Duration.ZERO, Duration.millis(500), REPLAY_LATENCY, null]) {
 		const other = track.subscribe({ delay: { max } });
 		expect(await drain(track)).toEqual([{ n: 3 }]);
 		other.close();
@@ -207,34 +206,40 @@ test("next skips every superseded group, whatever budget another reader asks for
 // group 2 arriving while group 1 is still owed supersedes it at once, whatever budget another
 // reader of the track, such as the caller's own, asks for.
 test("reads skip a group the subscription still owes", async () => {
-	hostTime();
-	for (const max of [Milli.zero, Milli(1_000), null]) {
-		const track = new Track.Producer("test").accept({});
-		hooks.receiveTrack(track);
-		const other = track.subscribe({ delay: { max } });
-		const latest = new Consumer<Value>({ track });
-		const next = new Consumer<Value>({ track });
-		const put = (sequence: bigint) => {
-			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: new TextEncoder().encode(`{"n":${sequence}}`) });
-			group.finish();
-		};
+	// Time never moves, so a read that waited on the owed group would hang the test.
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		for (const max of [Duration.ZERO, Duration.millis(1_000), null]) {
+			const track = new Track.Producer("test").accept({});
+			hooks.receiveTrack(track);
+			const other = track.subscribe({ delay: { max } });
+			const latest = new Consumer<Value>({ track });
+			const next = new Consumer<Value>({ track });
+			const put = (sequence: bigint) => {
+				const group = track.createGroup(sequence);
+				group.writeFrame({ payload: new TextEncoder().encode(`{"n":${sequence}}`) });
+				group.finish();
+			};
 
-		put(0n);
-		expect((await latest.latest())?.value).toEqual({ n: 0 });
-		expect((await next.next())?.value).toEqual({ n: 0 });
-		const reads = [latest.latest(), next.next()];
-		await sleep(Nano.fromMilli(Milli(1)));
-		put(2n);
-		expect((await Promise.all(reads)).map((state) => state?.value)).toEqual([{ n: 2 }, { n: 2 }]);
+			put(0n);
+			expect((await latest.latest())?.value).toEqual({ n: 0 });
+			expect((await next.next())?.value).toEqual({ n: 0 });
+			const reads = [latest.latest(), next.next()];
+			await clock.advance(Duration.ZERO);
+			put(2n);
+			expect((await Promise.all(reads)).map((state) => state?.value)).toEqual([{ n: 2 }, { n: 2 }]);
 
-		// The owed group landing late is superseded, not delivered.
-		put(1n);
-		const ends = [latest.latest(), next.next()];
-		track.finish();
-		expect(await Promise.all(ends)).toEqual([undefined, undefined]);
-		other.close();
-		track.close();
+			// The owed group landing late is superseded, not delivered.
+			put(1n);
+			const ends = [latest.latest(), next.next()];
+			track.finish();
+			expect(await Promise.all(ends)).toEqual([undefined, undefined]);
+			other.close();
+			track.close();
+		}
+	} finally {
+		installed.close();
 	}
 });
 
@@ -522,7 +527,7 @@ test("no ratio never refreshes", async () => {
 });
 
 test("a compressed refresh opens a fresh group", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 0, compress: true, maxAge: null });
+	const track = new Track.Producer("test").accept({ refresh: 0, compression: "deflate", maxAge: null });
 	const producer = new Producer<Value>({ track });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
@@ -713,7 +718,7 @@ test("an untimed state reads back untimed", async () => {
 // Each state carries the timestamp of the frame that produced it, snapshot or delta, so a caller can
 // hold it back until a playhead reaches it. `latest()` reports the head's own frame.
 test("each state reads back with its frame's timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compress: true });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compression: "deflate" });
 	const producer = new Producer<Value>({ track, deltas: true });
 	for (let n = 1; n <= 3; n++) {
 		producer.update({ value: { n, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(n * 1_000) });
@@ -733,4 +738,14 @@ test("each state reads back with its frame's timestamp", async () => {
 	const head = await latest.latest();
 	expect(head?.value.n).toBe(3);
 	expect(head?.at?.as(Time.Timescale.MILLI)).toBe(3_000);
+});
+
+// Mirrors the Rust `snapshot::Finished` doctest: the value `finish` returns takes no update, at
+// compile time and at run time.
+test("finishing returns a value that publishes nothing", () => {
+	const producer = new Producer<Value>({ track: new Track.Producer("test") });
+	producer.update({ value: { a: 1 } });
+	const finished = producer.finish();
+	// @ts-expect-error a finished value takes no update
+	expect(() => finished.update({ value: { a: 2 } })).toThrow();
 });

@@ -77,14 +77,6 @@ pub enum GroupOrder {
 }
 
 impl GroupOrder {
-	/// Map `Any` (0x0) to `Descending`, leaving other values unchanged.
-	pub fn any_to_descending(self) -> Self {
-		match self {
-			Self::Any => Self::Descending,
-			other => other,
-		}
-	}
-
 	/// The model's order: `Any` leaves the choice to the publisher, which serves newest
 	/// first.
 	pub fn to_order(self) -> crate::track::Order {

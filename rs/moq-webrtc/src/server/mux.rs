@@ -19,6 +19,7 @@
 //! (session ended) evicts the address-cache entry; the ufrag entry is removed by
 //! the [`Registration`] guard the accept path holds for the session's lifetime.
 
+use crate::vendor::str0m;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -45,7 +46,6 @@ struct Registry {
 struct Entry {
 	ufrag: String,
 	sender: mpsc::Sender<Packet>,
-	wire: crate::ice::Wire,
 }
 
 /// The shared media socket plus its demux routing table.
@@ -82,7 +82,7 @@ impl Drop for Registration {
 }
 
 impl Registry {
-	fn route(&mut self, len: usize, src: SocketAddr, ufrag: Option<&str>) -> Option<Arc<Entry>> {
+	fn route(&mut self, src: SocketAddr, ufrag: Option<&str>) -> Option<Arc<Entry>> {
 		let entry = self.by_addr.get(&src).cloned().or_else(|| {
 			let entry = self.by_ufrag.get(ufrag?).cloned()?;
 			self.by_addr.insert(src, entry.clone());
@@ -92,9 +92,6 @@ impl Registry {
 			self.by_addr.remove(&src);
 			return None;
 		}
-		// Count before the bounded inbox, even when it drops a received packet.
-		// The routing lock also prevents a late bump after unregistration.
-		entry.wire.received(len);
 		Some(entry)
 	}
 }
@@ -126,11 +123,9 @@ impl Mux {
 	pub(crate) fn register(&self) -> (IceCreds, Inbound, Registration) {
 		let creds = IceCreds::new();
 		let (tx, rx) = mpsc::channel(crate::ice::INBOX);
-		let wire = crate::ice::Wire::default();
 		let entry = Arc::new(Entry {
 			ufrag: creds.ufrag.clone(),
 			sender: tx,
-			wire: wire.clone(),
 		});
 		self.registry
 			.lock()
@@ -141,7 +136,7 @@ impl Mux {
 			ufrag: creds.ufrag.clone(),
 			registry: self.registry.clone(),
 		};
-		(creds, Inbound { packets: rx, wire }, registration)
+		(creds, Inbound { packets: rx }, registration)
 	}
 
 	/// The shared socket, handed to each session for sending.
@@ -176,10 +171,10 @@ async fn demux(socket: Arc<UdpSocket>, registry: Arc<Mutex<Registry>>) {
 		let data = &buf[..len];
 
 		// Cached peers need one routing lock; only a new address parses STUN.
-		let entry = registry.lock().unwrap().route(data.len(), src, None);
+		let entry = registry.lock().unwrap().route(src, None);
 		let entry = entry.or_else(|| {
 			let ufrag = local_ufrag(data)?;
-			registry.lock().unwrap().route(data.len(), src, Some(&ufrag))
+			registry.lock().unwrap().route(src, Some(&ufrag))
 		});
 		let Some(entry) = entry else {
 			continue;
@@ -218,9 +213,9 @@ mod tests {
 
 	/// SHA1-HMAC for a STUN MESSAGE-INTEGRITY, matching what str0m signs with.
 	fn sha1_hmac(key: &[u8], payloads: &[&[u8]]) -> [u8; 20] {
-		use aws_lc_rs::hmac;
+		use rind::hmac;
 
-		let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
+		let key = hmac::Key::new(&hmac::legacy::HMAC_SHA1, key);
 		let mut ctx = hmac::Context::with_key(&key);
 		for payload in payloads {
 			ctx.update(payload);
@@ -245,111 +240,44 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn wire_sources_are_per_peer_and_count_full_inbox_drops() {
+	async fn routes_per_peer_until_unregistered() {
 		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
-		let (a, inbound_a, registration_a) = mux.register();
-		let (b, inbound_b, _registration_b) = mux.register();
-		let source_a = inbound_a.wire.clone();
-		let source_b = inbound_b.wire.clone();
+		let (a, mut inbound_a, registration_a) = mux.register();
+		let (b, mut inbound_b, _registration_b) = mux.register();
 		let address_a = "127.0.0.1:10001".parse().unwrap();
 		let address_b = "127.0.0.1:10002".parse().unwrap();
 		let mut registry = mux.registry.lock().unwrap();
-		assert!(registry.route(100, address_a, Some("unknown")).is_none());
-		for _ in 0..crate::ice::INBOX {
-			let entry = registry.route(11, address_a, Some(&a.ufrag)).unwrap();
-			entry.sender.try_send((vec![0; 11], address_a)).unwrap();
-		}
-		let entry = registry.route(23, address_a, None).unwrap();
-		assert!(matches!(
-			entry.sender.try_send((vec![0; 23], address_a)),
-			Err(mpsc::error::TrySendError::Full(_))
-		));
-		registry.route(37, address_b, Some(&b.ufrag)).unwrap();
+		assert!(registry.route(address_a, Some("unknown")).is_none());
+		registry
+			.route(address_a, Some(&a.ufrag))
+			.unwrap()
+			.sender
+			.try_send((vec![1], address_a))
+			.unwrap();
+		// A cached address routes without a ufrag.
+		registry
+			.route(address_a, None)
+			.unwrap()
+			.sender
+			.try_send((vec![2], address_a))
+			.unwrap();
+		registry
+			.route(address_b, Some(&b.ufrag))
+			.unwrap()
+			.sender
+			.try_send((vec![3], address_b))
+			.unwrap();
 		drop(registry);
-		assert_eq!(
-			source_a.stats(),
-			crate::ice::Stats {
-				tx: 0,
-				rx: 11 * crate::ice::INBOX as u64 + 23
-			}
-		);
-		assert_eq!(source_b.stats(), crate::ice::Stats { tx: 0, rx: 37 });
+		assert_eq!(inbound_a.packets.try_recv().unwrap().0, [1]);
+		assert_eq!(inbound_a.packets.try_recv().unwrap().0, [2]);
+		assert_eq!(inbound_b.packets.try_recv().unwrap().0, [3]);
 
 		// Unregister even while an inbox is still held: cached addresses cannot
-		// keep attributing traffic after the peer ends.
+		// keep routing traffic after the peer ends.
 		drop(registration_a);
-		let final_stats = source_a.stats();
 		let mut registry = mux.registry.lock().unwrap();
-		assert!(registry.route(59, address_a, None).is_none());
-		assert!(registry.route(59, address_a, Some(&a.ufrag)).is_none());
-		drop(registry);
-		drop(inbound_a);
-		assert_eq!(source_a.stats(), final_stats);
-	}
-
-	#[test]
-	#[expect(
-		clippy::disallowed_methods,
-		clippy::disallowed_types,
-		reason = "the test measures route lookup cost on the host clock"
-	)]
-	fn wire_routes_scale_with_peers_and_packets() {
-		use std::hint::black_box;
-		use std::time::Instant;
-
-		for peers in [1, 16, 256] {
-			for packets in [1_000, 10_000, 100_000] {
-				let registry = Arc::new(Mutex::new(Registry::default()));
-				let mut receivers = Vec::new();
-				let mut sources = Vec::new();
-				let mut addresses = Vec::new();
-				for peer in 0..peers {
-					let (sender, receiver) = mpsc::channel(1);
-					let wire = crate::ice::Wire::default();
-					let address = SocketAddr::from(([127, 0, 0, 1], peer as u16 + 1));
-					let entry = Arc::new(Entry {
-						ufrag: peer.to_string(),
-						sender,
-						wire: wire.clone(),
-					});
-					registry.lock().unwrap().by_addr.insert(address, entry);
-					receivers.push(receiver);
-					sources.push(wire);
-					addresses.push(address);
-				}
-				let start = Instant::now();
-				for packet in 0..packets {
-					let entry = registry
-						.lock()
-						.unwrap()
-						.by_addr
-						.get(&addresses[packet % peers])
-						.cloned()
-						.unwrap();
-					black_box(entry);
-				}
-				let lookup = start.elapsed();
-				let start = Instant::now();
-				for packet in 0..packets {
-					let entry = registry
-						.lock()
-						.unwrap()
-						.route(17, addresses[packet % peers], None)
-						.unwrap();
-					black_box(entry);
-				}
-				let counted = start.elapsed();
-				eprintln!(
-					"wire-route peers={peers} packets={packets} lookup_ns={} counted_ns={}",
-					lookup.as_nanos(),
-					counted.as_nanos()
-				);
-				for (peer, wire) in sources.iter().enumerate() {
-					let expected = packets / peers + usize::from(peer < packets % peers);
-					assert_eq!(wire.stats().rx, 17 * expected as u64);
-				}
-			}
-		}
+		assert!(registry.route(address_a, None).is_none());
+		assert!(registry.route(address_a, Some(&a.ufrag)).is_none());
 	}
 
 	/// An IPv4 peer reaching a dual-stack (`[::]`) mux must route to its session
@@ -366,7 +294,6 @@ mod tests {
 		let mux = Mux::bind(bind, &advertise).await.expect("dual-stack bind");
 		let port = mux.socket.local_addr().unwrap().port();
 		let (creds, mut rx, registration) = mux.register();
-		let wire = rx.wire.clone();
 
 		// Dial the mux over IPv4, which a dual-stack socket accepts as v4-mapped.
 		let peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -383,9 +310,6 @@ mod tests {
 
 		assert_eq!(src, peer_addr, "an IPv4 peer's source must arrive unmapped");
 		assert!(src.is_ipv4());
-		assert_eq!(wire.stats().rx, request.len() as u64);
 		drop(registration);
-		drop(rx);
-		assert_eq!(wire.stats().rx, request.len() as u64);
 	}
 }

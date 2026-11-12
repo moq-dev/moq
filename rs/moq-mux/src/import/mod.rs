@@ -18,12 +18,12 @@
 //! `broadcast.unique_track(suffix, catalog.track_info())`, so the max age the catalog
 //! declares reaches the track.
 
-mod container;
+pub mod container;
 mod format;
 mod init;
 mod track;
 
-pub use container::*;
+pub use container::Container;
 pub use format::{AudioFormat, ContainerFormat, Format, Kind, VideoFormat};
 pub use init::{AudioInit, ContainerInit, VideoInit};
 pub use track::*;
@@ -149,7 +149,7 @@ mod tests {
 			for chunk in data.chunks(chunk) {
 				import.decode(chunk).unwrap();
 			}
-			import.finish().unwrap();
+			let import = import.finish().unwrap();
 			Box::new(import)
 		}
 	}
@@ -165,12 +165,11 @@ mod tests {
 
 		assert_released("fmp4", &container(ContainerFormat::Fmp4, &data, CHUNK));
 		assert_released("fmp4 passthrough", &|broadcast, catalog| {
-			let mut import =
-				crate::container::fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_passthrough(true);
+			let mut import = crate::container::fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_cmaf(true);
 			for chunk in data.chunks(CHUNK) {
 				import.decode(chunk).unwrap();
 			}
-			import.finish().unwrap();
+			let import = import.finish().unwrap();
 			Box::new(import)
 		});
 	}

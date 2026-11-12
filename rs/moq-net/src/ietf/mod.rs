@@ -16,7 +16,6 @@
 #[macro_use]
 mod parameters;
 pub mod active_count;
-pub(crate) mod auth;
 pub mod cluster;
 #[cfg(feature = "async")]
 mod control;
@@ -101,7 +100,6 @@ mod tests {
 			("RELAY_COST", cluster::RELAY_COST, 0x40B56),
 			("SOLICIT", solicit::SOLICIT, 0x40B5A),
 			("HIDDEN", hidden::HIDDEN, 0x40B5C),
-			("AUTH", auth::AUTH, 0x40B70),
 			("ACTIVE_COUNT", active_count::ACTIVE_COUNT, 0x40B64),
 		] {
 			assert_eq!(key, spec, "{name}");

@@ -1,4 +1,5 @@
-//! QUIC with no sockets: endpoints on kio's simulator, joined by seeded, impaired paths
+//! Test support, enabled by the `sim` feature: QUIC with no sockets, endpoints on kio's
+//! simulator joined by seeded, impaired paths
 //!
 //! A [`Network`] binds a [`Socket`] per address for [`Endpoint::new`](super::endpoint::Endpoint::new).
 //! Each datagram crosses the [`Path`] from its sender to its destination: the [`Link`]'s
@@ -6,8 +7,9 @@
 //! reordering, all drawn from the network's seed. With each endpoint's `rng_seed` set too, a
 //! seed replays a run exactly. A destination nobody bound drops the datagram, as UDP does.
 //!
-//! Not part of the public API. It runs only inside `kio::clock::sim::run`, where every
-//! arrival is a simulated timer.
+//! It runs only inside `kio::clock::sim::run`, where every arrival is a simulated timer.
+//!
+//! It tracks the crate's internals, so it can change in any release.
 
 use std::{
 	collections::{HashMap, VecDeque},

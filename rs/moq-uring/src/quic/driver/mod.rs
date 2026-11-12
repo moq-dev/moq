@@ -21,12 +21,9 @@ pub(crate) use connection::Shared;
 
 use std::{num::NonZeroU64, sync::Arc};
 
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-
 #[cfg(feature = "qlog")]
 use super::qlog;
-use super::{Congestion, Error, Identity, client, server, transport};
+use super::{Error, client, server, transport};
 use crate::udp;
 
 /// Streams of each kind a peer may have open at once.
@@ -117,50 +114,7 @@ pub(crate) fn endpoint_config(
 
 /// Dial as `config` says.
 pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client::Config, Error> {
-	// Built explicitly rather than read from the process-wide default, so a
-	// consumer that never installed one still gets working TLS.
-	let provider = moq_crypto::provider::provider()?;
-	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-		.with_protocol_versions(&[&rustls::version::TLS13])
-		.map_err(|err| Error::Tls(err.to_string()))?;
-
-	// Nothing is checked with verification off, so nothing is loaded: a root
-	// path that does not exist must not fail a connection that was never
-	// going to look at it.
-	let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = match (config.verify, config.system_roots) {
-		(false, _) => Arc::new(NoVerify(provider.clone())),
-		// The platform verifier reads the OS trust store the way the OS means
-		// it, so extra roots go through it rather than around it.
-		(true, true) if config.roots.is_empty() => Arc::new(
-			rustls_platform_verifier::Verifier::new(provider.clone()).map_err(|err| Error::Tls(err.to_string()))?,
-		),
-		(true, true) => Arc::new(
-			rustls_platform_verifier::Verifier::new_with_extra_roots(read_roots(&config.roots)?, provider.clone())
-				.map_err(|err| Error::Tls(err.to_string()))?,
-		),
-		// Trusting only the configured roots means a store built from
-		// scratch, never the platform's with ours added on top.
-		(true, false) => rustls::client::WebPkiServerVerifier::builder_with_provider(
-			Arc::new(root_store(&config.roots)?),
-			provider.clone(),
-		)
-		.build()
-		.map_err(|err| Error::Tls(err.to_string()))?,
-	};
-	let builder = builder.dangerous().with_custom_certificate_verifier(verifier);
-
-	let mut tls = match &config.identity {
-		Some(identity) => {
-			let (chain, key) = keypair(identity)?;
-			builder
-				.with_client_auth_cert(chain, key)
-				.map_err(|err| Error::Tls(err.to_string()))?
-		}
-		None => builder.with_no_client_auth(),
-	};
-	tls.alpn_protocols = alpn(&config.alpn);
-
-	let mut client = moq_quic::client::Config::new(Arc::new(tls));
+	let mut client = moq_quic::client::Config::new(config.tls.clone());
 	client.transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	with_qlog(&mut client.transport, &config.transport, qlog::Side::Client);
@@ -175,50 +129,6 @@ pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::server:
 	#[cfg(feature = "qlog")]
 	with_qlog(&mut server.transport, &config.transport, qlog::Side::Server);
 	Ok(server)
-}
-
-/// A TLS 1.3 policy presenting `identity`, speaking `alpn`, and checking clients as `auth` says.
-pub(crate) fn identity_server_config(
-	identity: &Identity,
-	alpn: Vec<Vec<u8>>,
-	auth: &server::ClientAuth,
-) -> Result<Arc<rustls::ServerConfig>, Error> {
-	// Built explicitly rather than read from the process-wide default, so a
-	// consumer that never installed one still gets working TLS.
-	let provider = moq_crypto::provider::provider()?;
-	let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
-		.with_protocol_versions(&[&rustls::version::TLS13])
-		.map_err(|err| Error::Tls(err.to_string()))?;
-
-	let verifier = match auth.roots() {
-		None => rustls::server::WebPkiClientVerifier::no_client_auth(),
-		// An empty store rejects every chain, so asking for a certificate with
-		// nothing to check it against refuses exactly the clients that obey.
-		Some(([], _)) => {
-			return Err(Error::Tls(
-				"client authentication needs at least one root certificate".to_string(),
-			));
-		}
-		Some((roots, required)) => {
-			// Client certificates chain to the roots configured here, never to
-			// the platform store for public sites.
-			let builder =
-				rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(root_store(roots)?), provider);
-			let builder = match required {
-				true => builder,
-				false => builder.allow_unauthenticated(),
-			};
-			builder.build().map_err(|err| Error::Tls(err.to_string()))?
-		}
-	};
-
-	let (chain, key) = keypair(identity)?;
-	let mut tls = builder
-		.with_client_cert_verifier(verifier)
-		.with_single_cert(chain, key)
-		.map_err(|err| Error::Tls(err.to_string()))?;
-	tls.alpn_protocols = alpn;
-	Ok(Arc::new(tls))
 }
 
 /// Attach the configured qlog sink, if any.
@@ -255,103 +165,10 @@ fn transport_config(config: &transport::Config) -> Result<moq_quic::transport::C
 	if !config.mtu_discovery {
 		transport.mtu = None;
 	}
-	transport.congestion = match config.congestion {
-		Congestion::Loss => {
-			Arc::new(moq_congestion::cubic::Config::default()) as Arc<dyn moq_congestion::Factory + Send + Sync>
-		}
-		Congestion::Delay => Arc::new(moq_congestion::bbr3::Config::default()),
-		Congestion::None => Arc::new(moq_congestion::Unlimited),
-	};
+	transport.congestion = config.congestion.clone();
 	// A value that cannot go on the wire is an error: clamping it would ignore what was set.
 	transport.validate()?;
 	Ok(transport)
-}
-
-/// ALPN protocols on the wire, which is a length-prefixed list of byte
-/// strings rather than the `String`s a caller configures.
-fn alpn(protocols: &[String]) -> Vec<Vec<u8>> {
-	protocols.iter().map(|proto| proto.as_bytes().to_vec()).collect()
-}
-
-/// Split an [`Identity`] into the chain and key rustls wants.
-fn keypair(identity: &Identity) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Error> {
-	let chain = CertificateDer::pem_slice_iter(identity.cert())
-		.collect::<Result<Vec<_>, _>>()
-		.map_err(|err| Error::Tls(format!("certificate: {err}")))?;
-	if chain.is_empty() {
-		return Err(Error::Tls("certificate chain holds no certificates".to_string()));
-	}
-	let key = PrivateKeyDer::from_pem_slice(identity.key()).map_err(|err| Error::Tls(format!("key: {err}")))?;
-	Ok((chain, key))
-}
-
-/// Read every PEM certificate in each root file, naming the one that fails.
-///
-/// A root is routinely a bundle of several CAs, and taking only the first
-/// would reject a peer chaining to any of the others while looking configured.
-/// A file holding none is an error rather than a store that trusts nothing.
-fn read_roots(paths: &[std::path::PathBuf]) -> Result<Vec<CertificateDer<'static>>, Error> {
-	let mut roots = Vec::new();
-	for path in paths {
-		let pem = std::fs::read(path).map_err(|err| Error::Tls(format!("{}: {err}", path.display())))?;
-		let certs = CertificateDer::pem_slice_iter(&pem)
-			.collect::<Result<Vec<_>, _>>()
-			.map_err(|err| Error::Tls(format!("{}: {err}", path.display())))?;
-		if certs.is_empty() {
-			return Err(Error::Tls(format!("{}: no certificates", path.display())));
-		}
-		roots.extend(certs);
-	}
-	Ok(roots)
-}
-
-/// A store holding exactly the roots `paths` names, and nothing else.
-fn root_store(paths: &[std::path::PathBuf]) -> Result<rustls::RootCertStore, Error> {
-	let mut store = rustls::RootCertStore::empty();
-	for root in read_roots(paths)? {
-		store.add(root).map_err(|err| Error::Tls(err.to_string()))?;
-	}
-	Ok(store)
-}
-
-/// Accepts any server certificate, for
-/// [`verify`](client::Config::verify) turned off.
-#[derive(Debug)]
-struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for NoVerify {
-	fn verify_server_cert(
-		&self,
-		_end_entity: &CertificateDer<'_>,
-		_intermediates: &[CertificateDer<'_>],
-		_server_name: &rustls::pki_types::ServerName<'_>,
-		_ocsp: &[u8],
-		_now: rustls::pki_types::UnixTime,
-	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-		Ok(rustls::client::danger::ServerCertVerified::assertion())
-	}
-
-	fn verify_tls12_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
-	}
-
-	fn verify_tls13_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
-	}
-
-	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-		self.0.signature_verification_algorithms.supported_schemes()
-	}
 }
 
 #[cfg(test)]

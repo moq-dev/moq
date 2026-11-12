@@ -4,7 +4,7 @@
 //! may depend on how many came before.
 //!
 //! Each viewer excludes its own hop the way a session serves its peer. That view
-//! is crate-private, so this reaches it through the hidden `fuzz` module. Its own
+//! is crate-private, so this reaches it through the `fuzz` module. Its own
 //! target keeps the counting allocator out of the `origin` bench.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench viewers`.
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Timestamp, kio, origin};
+use moq_net::{Timestamp, origin};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -188,7 +188,7 @@ fn bench_churn(c: &mut Criterion) {
 			b.iter(|| {
 				let covering = room
 					.producer
-					.route_prefix("room", moq_net::origin::RouteOptions::default())
+					.claim("room", moq_net::origin::RouteOptions::default())
 					.unwrap();
 				room.poll();
 				drop(covering);

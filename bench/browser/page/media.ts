@@ -1,5 +1,5 @@
 /** Publish a synthetic picture with @moq/publish and watch it with @moq/watch through the relay. */
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import * as Watch from "@moq/watch";
@@ -70,7 +70,7 @@ async function publish(config: Media): Promise<void> {
 			codec: config.codec,
 			frameRate: config.fps,
 			maxPixels: config.width * config.height,
-			join: Milli(config.keyframe_ms),
+			join: Duration.millis(config.keyframe_ms),
 			maxBitrate: config.bitrate,
 		},
 	});
@@ -193,7 +193,7 @@ async function watch(config: Media): Promise<{ first_frame_ms: number }> {
 	}, 250);
 	const first = new Promise<number>((resolve) => {
 		let last: number | undefined;
-		const stop = player?.renderer.out.frame.subscribe((frame) => {
+		const stop = player?.renderer.painted.subscribe((frame) => {
 			// A resize or catalog change repaints the same frame; count each frame once.
 			if (!frame || frame.timestamp === last) return;
 			last = frame.timestamp;

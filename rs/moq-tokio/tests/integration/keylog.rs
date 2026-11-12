@@ -93,7 +93,7 @@ fn keylog_files_are_private_and_existing_permissions_are_not_changed() {
 /// Independently configured endpoints can append to the same destination without splitting lines.
 #[test]
 fn independent_keylog_writers_append_whole_records() {
-	use moq_tokio::rustls::KeyLog as _;
+	use rustls::KeyLog as _;
 	let dir = tempfile::tempdir().unwrap();
 	let path = dir.path().join("keys.log");
 	let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));

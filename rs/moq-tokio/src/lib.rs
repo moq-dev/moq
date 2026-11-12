@@ -26,9 +26,6 @@ mod abort;
 pub mod accept;
 pub use moq_sock::bind;
 pub mod cli;
-/// The congestion-controller traits, for a [`quic::Controller`] of the application's own.
-#[cfg(feature = "driver")]
-pub use moq_congestion as congestion;
 #[cfg(feature = "net")]
 pub mod client;
 #[cfg(feature = "net")]
@@ -61,8 +58,9 @@ mod runtime;
 pub mod secret;
 #[cfg(feature = "_transport")]
 pub mod server;
-#[doc(hidden)]
 pub mod settings;
+#[cfg(all(feature = "sim", feature = "net"))]
+pub mod sim;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;
@@ -123,21 +121,6 @@ pub use log::{Log, RedactedUrl};
 pub use server::{Listener, Server};
 #[cfg(feature = "net")]
 pub use transport::Transport;
-
-// Re-export these crates.
-#[cfg(feature = "net")]
-pub use moq_net;
-pub use rustls;
-
-/// Re-exported because [`watch::Files`] surfaces `notify::Result`/`notify::Error`
-/// in its API; a major `notify` bump is therefore a breaking change for this crate.
-#[cfg(feature = "watch")]
-pub use notify;
-
-/// Re-exported because [`tls::init_android`] takes a `jni::Env` handle; a major
-/// `jni` bump is therefore a breaking change for this crate.
-#[cfg(target_os = "android")]
-pub use jni;
 
 #[cfg(feature = "mdns")]
 pub mod mdns;

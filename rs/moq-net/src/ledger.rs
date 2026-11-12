@@ -27,6 +27,13 @@ pub(crate) fn grace(max_delay: Duration) -> Duration {
 	}
 }
 
+/// Heap a ledger keeps per run: the run, its age entry, and its two entries in [`Changes`].
+/// Doubled for half-full `BTreeMap` nodes, as the cache's own overheads are. A track bills
+/// its arrivals at this per run, so a peer fragmenting them costs what the cache would hold.
+pub(crate) const RUN_OVERHEAD: u64 = 2
+	* (size_of::<(u64, Run)>() + size_of::<(Instant, u64)>() + size_of::<(u64, (u64, u64))>() + size_of::<(u64, u64)>())
+		as u64;
+
 /// A run of accounted sequences, keyed by its inclusive start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Run {
@@ -155,6 +162,52 @@ impl Ledger {
 		self.changes.insert(first..end);
 	}
 
+	/// Take `groups` back out of what is accounted for, owed again from `now`: a verdict that
+	/// accounted for them was reversed. The gap they leave opens now, so it is waited for a
+	/// fresh grace, even where it joins an older gap.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
+		if groups.is_empty() {
+			return;
+		}
+		let overlapping: Vec<u64> = self.accounted(groups.clone()).map(|run| run.start).collect();
+		if overlapping.is_empty() {
+			return;
+		}
+		for clipped in overlapping {
+			let start = self
+				.runs
+				.range(..=clipped)
+				.next_back()
+				.map(|(&start, _)| start)
+				.expect("an accounted run");
+			let run = self.remove(start);
+			if start < groups.start {
+				self.ages.insert((run.since, start));
+				self.runs.insert(
+					start,
+					Run {
+						end: groups.start,
+						since: run.since,
+					},
+				);
+				self.changes.insert(start..groups.start);
+			}
+			if groups.end < run.end {
+				self.ages.insert((now, groups.end));
+				self.runs.insert(
+					groups.end,
+					Run {
+						end: run.end,
+						since: now,
+					},
+				);
+				self.changes.insert(groups.end..run.end);
+			}
+		}
+		self.demand(groups, now);
+	}
+
 	/// Account a live arrival, refreshing a cached incarnation even if its sequence was
 	/// accounted before. Its gap ages stay unchanged, but readers must revisit a refusal.
 	pub fn arrive(&mut self, sequence: u64, now: Instant) {
@@ -186,9 +239,27 @@ impl Ledger {
 		}
 	}
 
+	/// Fold the oldest gap into the runs around it however young, giving up on it early,
+	/// and return the sequences it held; `None` when no gap is left to fold.
+	pub fn fold_oldest(&mut self) -> Option<Range<u64>> {
+		let first = self.first()?;
+		let &(_, start) = self.ages.iter().find(|(_, start)| *start != first)?;
+		let run = self.remove(start);
+		let (&lower, previous) = self.runs.range_mut(..start).next_back().expect("not the first run");
+		let gap = previous.end..start;
+		previous.end = run.end;
+		self.changes.insert(lower..run.end);
+		Some(gap)
+	}
+
 	/// Whether a gap separates two runs, so [`Self::expire`] has anything to fold.
 	pub fn has_gaps(&self) -> bool {
 		self.runs.len() > 1
+	}
+
+	/// How many runs it holds: one more than its gaps.
+	pub fn len(&self) -> usize {
+		self.runs.len()
 	}
 
 	/// The lowest sequence accounted for.
@@ -203,6 +274,11 @@ impl Ledger {
 			.next_back()
 			.filter(|(_, run)| sequence < run.end)
 			.map(|(_, run)| run.end)
+	}
+
+	/// The exclusive end of the highest accounted run starting at or below `sequence`.
+	pub fn end_below(&self, sequence: u64) -> Option<u64> {
+		self.runs.range(..=sequence).next_back().map(|(_, run)| run.end)
 	}
 
 	/// The accounted runs overlapping `groups`, clipped to it, lowest first.
@@ -318,11 +394,11 @@ mod tests {
 		let revision = ledger.changes().revision();
 		ledger.account(1..4, now);
 		assert_eq!(ledger.changes().since(revision).collect::<Vec<_>>(), vec![0..5]);
-		ledger.expire(now + GRACE);
+		ledger.expire(now.saturating_add(GRACE));
 		assert_eq!(ledger.changes().since(0).collect::<Vec<_>>(), vec![0..9]);
 		assert_eq!(ledger.changes.changed.len(), ledger.runs.len());
 		let revision = ledger.changes().revision();
-		ledger.account(2..7, now + GRACE);
+		ledger.account(2..7, now.saturating_add(GRACE));
 		assert_eq!(ledger.changes().revision(), revision, "already accounted is unchanged");
 	}
 
@@ -366,7 +442,7 @@ mod tests {
 	#[test]
 	fn gaps_within_a_span() {
 		let now = Instant::now();
-		let later = now + GRACE;
+		let later = now.saturating_add(GRACE);
 		let mut ledger = Ledger::default();
 		assert_eq!(ledger.gaps(2..5).collect::<Vec<_>>(), vec![(2..5, None)]);
 		arrive(&mut ledger, 2..3, now);
@@ -387,21 +463,41 @@ mod tests {
 		let mut ledger = Ledger::new(GRACE);
 		arrive(&mut ledger, 0..1, start);
 		arrive(&mut ledger, 2..3, start);
-		arrive(&mut ledger, 4..5, start + GRACE / 2);
+		arrive(&mut ledger, 4..5, start.saturating_add(GRACE / 2));
 		assert_eq!(groups(&ledger), vec![0..1, 2..3, 4..5]);
 
 		// Splitting the younger gap keeps it as late as it was.
-		arrive(&mut ledger, 6..7, start + GRACE / 2);
-		arrive(&mut ledger, 8..9, start + GRACE);
+		arrive(&mut ledger, 6..7, start.saturating_add(GRACE / 2));
+		arrive(&mut ledger, 8..9, start.saturating_add(GRACE));
 		assert_eq!(
 			groups(&ledger),
 			vec![0..3, 4..5, 6..7, 8..9],
 			"only the oldest gap expired"
 		);
 
-		ledger.expire(start + GRACE * 2);
+		ledger.expire(start.saturating_add(GRACE * 2));
 		assert_eq!(groups(&ledger), vec![0..9]);
 		assert!(ledger.covers(0..9));
+	}
+
+	/// A reclaim folds the oldest gap first however young, never the leading one, which
+	/// has no run below to fold into.
+	#[test]
+	fn fold_oldest_gives_up_the_oldest_gap_first() {
+		let start = Instant::ZERO;
+		let mut ledger = Ledger::new(Duration::MAX);
+		ledger.account(2..3, start);
+		ledger.account(4..5, start.saturating_add(GRACE));
+		ledger.account(6..7, start.saturating_add(GRACE * 2));
+		// Demand restarts the gap below 4, so the one above it is now the older.
+		ledger.demand(3..4, start.saturating_add(GRACE * 3));
+		assert_eq!(groups(&ledger), vec![2..3, 4..5, 6..7]);
+		assert_eq!(ledger.len(), 3);
+		assert_eq!(ledger.fold_oldest(), Some(5..6));
+		assert_eq!(ledger.fold_oldest(), Some(3..4));
+		assert_eq!(groups(&ledger), vec![2..7]);
+		assert_eq!(ledger.fold_oldest(), None, "the leading gap stays");
+		assert_eq!(ledger.changes().since(0).collect::<Vec<_>>(), vec![2..7]);
 	}
 
 	/// A missing group is given up on a grace after a later one opened its gap, and not
@@ -414,8 +510,11 @@ mod tests {
 		assert_eq!(ledger.folds_at(0, GRACE), None, "accounted for");
 		assert_eq!(ledger.folds_at(1, GRACE), None, "nothing later arrived");
 
-		arrive(&mut ledger, 2..3, start + GRACE / 2);
-		assert_eq!(ledger.folds_at(1, GRACE), Some(start + GRACE / 2 + GRACE));
+		arrive(&mut ledger, 2..3, start.saturating_add(GRACE / 2));
+		assert_eq!(
+			ledger.folds_at(1, GRACE),
+			Some(start.saturating_add(GRACE / 2).saturating_add(GRACE))
+		);
 		assert_eq!(ledger.folds_at(3, GRACE), None);
 	}
 
@@ -426,10 +525,10 @@ mod tests {
 		let mut ledger = Ledger::new(GRACE);
 		arrive(&mut ledger, 0..1, start);
 		arrive(&mut ledger, 9..10, start);
-		arrive(&mut ledger, 5..6, start + GRACE / 2);
+		arrive(&mut ledger, 5..6, start.saturating_add(GRACE / 2));
 		assert_eq!(groups(&ledger), vec![0..1, 5..6, 9..10]);
 
-		ledger.expire(start + GRACE);
+		ledger.expire(start.saturating_add(GRACE));
 		assert_eq!(groups(&ledger), vec![0..10], "both halves opened at the start");
 	}
 
@@ -441,7 +540,7 @@ mod tests {
 		arrive(&mut ledger, 3..4, start);
 		arrive(&mut ledger, 9..10, start);
 
-		let lowered = start + GRACE * 2;
+		let lowered = start.saturating_add(GRACE * 2);
 		ledger.demand(1..3, lowered);
 		arrive(&mut ledger, 1..2, lowered);
 		assert_eq!(
@@ -451,22 +550,57 @@ mod tests {
 		);
 		assert!(!ledger.covers(1..4));
 
-		ledger.expire(lowered + GRACE);
+		ledger.expire(lowered.saturating_add(GRACE));
 		assert!(ledger.covers(1..10));
 	}
+	/// Unaccounting reopens what a reversed verdict accounted for, as a gap waited for a fresh
+	/// grace, and leaves the rest of the run accounted.
+	#[test]
+	fn unaccount_reopens_a_gap_for_a_fresh_grace() {
+		let start = Instant::now();
+		let mut ledger = Ledger::new(GRACE);
+		arrive(&mut ledger, 0..10, start);
+		ledger.unaccount(3..5, start.saturating_add(GRACE));
+		assert!(ledger.covers(0..3) && ledger.covers(5..10));
+		assert!(!ledger.covers(3..5));
+		ledger.expire(start.saturating_add(GRACE * 3 / 2));
+		assert!(!ledger.covers(3..5), "its grace runs from the reversal");
+		ledger.expire(start.saturating_add(GRACE * 2));
+		assert!(ledger.covers(0..10));
+	}
+
+	/// A reopened gap that joins an older one is waited for a fresh grace as a whole, rather
+	/// than folding with the older gap's age.
+	#[test]
+	fn unaccount_restarts_the_older_gap_it_joins() {
+		let start = Instant::now();
+		let mut ledger = Ledger::new(GRACE);
+		arrive(&mut ledger, 0..2, start);
+		arrive(&mut ledger, 4..6, start);
+		let reversed = start.saturating_add(GRACE * 9 / 10);
+		ledger.unaccount(1..2, reversed);
+		ledger.expire(start.saturating_add(GRACE));
+		assert!(!ledger.covers(1..2), "its grace runs from the reversal");
+		ledger.expire(reversed.saturating_add(GRACE));
+		assert!(ledger.covers(0..6));
+	}
+
 	#[test]
 	fn demand_can_move_an_older_gap_after_a_newer_one() {
 		let start = Instant::now();
 		let mut ledger = Ledger::new(GRACE);
 		arrive(&mut ledger, 0..1, start);
 		arrive(&mut ledger, 4..5, start);
-		arrive(&mut ledger, 8..9, start + GRACE / 4);
-		ledger.demand(1..4, start + GRACE / 2);
+		arrive(&mut ledger, 8..9, start.saturating_add(GRACE / 4));
+		ledger.demand(1..4, start.saturating_add(GRACE / 2));
 
-		ledger.expire(start + GRACE + GRACE / 4);
+		ledger.expire(start.saturating_add(GRACE).saturating_add(GRACE / 4));
 		assert_eq!(groups(&ledger), vec![0..1, 4..9]);
-		assert_eq!(ledger.folds_at(1, GRACE), Some(start + GRACE + GRACE / 2));
-		ledger.expire(start + GRACE + GRACE / 2);
+		assert_eq!(
+			ledger.folds_at(1, GRACE),
+			Some(start.saturating_add(GRACE).saturating_add(GRACE / 2))
+		);
+		ledger.expire(start.saturating_add(GRACE).saturating_add(GRACE / 2));
 		assert_eq!(groups(&ledger), vec![0..9]);
 	}
 
@@ -477,15 +611,15 @@ mod tests {
 		arrive(&mut ledger, 0..1, start);
 		arrive(&mut ledger, 2..3, start);
 		ledger.set_grace(GRACE * 2);
-		ledger.expire(start + GRACE);
+		ledger.expire(start.saturating_add(GRACE));
 		assert_eq!(groups(&ledger), vec![0..1, 2..3]);
 
 		ledger.set_grace(GRACE / 2);
-		ledger.expire(start + GRACE);
+		ledger.expire(start.saturating_add(GRACE));
 		assert_eq!(groups(&ledger), vec![0..3]);
 		ledger.set_grace(GRACE * 2);
-		arrive(&mut ledger, 4..5, start + GRACE);
-		ledger.expire(start + GRACE * 2);
+		arrive(&mut ledger, 4..5, start.saturating_add(GRACE));
+		ledger.expire(start.saturating_add(GRACE * 2));
 		assert_eq!(groups(&ledger), vec![0..3, 4..5]);
 	}
 
@@ -494,9 +628,9 @@ mod tests {
 		let start = Instant::now();
 		let mut ledger = Ledger::new(GRACE);
 		arrive(&mut ledger, 10..11, start);
-		ledger.expire(start + GRACE * 2);
+		ledger.expire(start.saturating_add(GRACE * 2));
 		assert_eq!(groups(&ledger), vec![10..11]);
-		arrive(&mut ledger, 0..1, start + GRACE * 2);
+		arrive(&mut ledger, 0..1, start.saturating_add(GRACE * 2));
 		assert_eq!(groups(&ledger), vec![0..11]);
 	}
 	#[test]
@@ -508,7 +642,7 @@ mod tests {
 				arrive(
 					&mut ledger,
 					arrival * 2..arrival * 2 + 1,
-					start + Duration::from_millis(arrival),
+					start.saturating_add(Duration::from_millis(arrival)),
 				);
 				let runs = groups(&ledger);
 				assert_eq!(runs.len() as u64, (arrival + 1).min(retained + 1));

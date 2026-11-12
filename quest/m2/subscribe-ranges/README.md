@@ -6,7 +6,8 @@ A moq-lite-07 SUBSCRIBE replaces FETCH for anything wider than one group. One su
 of group ranges, past or live, bounded by group or by time, in ascending or
 descending order, and the
 publisher serves their union from one cursor without sending a group twice.
-Every sequence in range either arrives or is named by a SUBSCRIBE_DROP, so
+Every sequence in range either arrives or is named by a SUBSCRIBE_SKIP or
+SUBSCRIBE_DROP, so
 nothing blocks on a cache miss. Relays fill misses upstream with ranges, not
 one request per group, including over moq-transport where group numbers may be
 sparse. Lite-07 FETCH is single-group only: one group, or a slice within one
@@ -30,9 +31,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   not accidentally give it the live SUBSCRIBE zero-delay default. SUBSCRIBE_UPDATE
   replaces the list. Lite-07 FETCH is single-group only (decided 2026-11-03,
   replacing its removal); published versions keep it, answered through the same model.
-- **Holes.** SUBSCRIBE_DROP (restored in lite-07) names every sequence in the
-  requested ranges the publisher won't deliver: never existed, expired, or
-  refused upstream. On lite-01..06 datagram groups are always dropped in a past range (#4982); on lite-07 ranges never cover datagrams, which have their own track kind. The
+- **Holes.** Lite-07 names every sequence in the requested ranges the
+  publisher won't deliver: SUBSCRIBE_SKIP one that never existed, and
+  SUBSCRIBE_DROP (restored in lite-07) one expired or refused upstream. On lite-01..06 datagram groups are always dropped in a past range (#4982); on lite-07 ranges never cover datagrams, which have their own track kind. The
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
@@ -47,9 +48,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   group's existing prefix but never wait for its future objects. Downstream,
   our publishers answer only a one-group FETCH or fill and refuse wider ones
   (maintainer, 2026-10-28,
-  [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), until
-  [hole markers](/quest/m5/ietf-hole-marker.md) let a cache that knows every
-  group answer a range. A FETCH of the track's newest live group is refused
+  [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), and the
+  [IETF scope freeze](/quest/m2/ietf-scope/README.md) adds no hole-marker
+  extension that would let a cache answer a range. A FETCH of the track's newest live group is refused
   unless its range ends below that group's live edge
   ([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944),
   `poll_settle` in `rs/moq-net/src/ietf/publisher.rs`), replacing the
@@ -98,12 +99,6 @@ relay bounds a sparse FETCH only if the model can request ranges:
 This line owns the end-to-end test: a relay with a sparse cache answers a
 wide past range plus live in both orders, over lite-07 and moq-transport, with
 every sequence delivered or dropped.
-
-## Required
-
-- [JS head fills and time lookups](/quest/m2/subscribe-ranges/js-fills.md) - JS readers fill a cached group's missing head before handing it out, and look a time start up through `Fill.time`
-- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups, in Rust, JS, and the draft, with JS multi-group fills moving onto the subscription
-- [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - what each lite cursor is owed and dropped lives in the model, and `TrackRun` only translates it per version
 
 ## Related
 

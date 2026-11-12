@@ -31,7 +31,6 @@
 		"qmux",
 		"webtransport",
 		"websocket",
-		"polyfill",
 		"quic",
 		"streams"
 	]

@@ -21,5 +21,5 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [kio channel contention](/quest/m4/perf/kio-channel-contention/README.md) - the epic both spikes reported to
+- [kio channel contention](/quest/m4/kio-channel-contention/README.md) - the epic both spikes reported to
 - [Announce interest streams share one route table](/quest/m4/announce-interest-memory.md) - the same per-stream announce state, from a subscriber's side

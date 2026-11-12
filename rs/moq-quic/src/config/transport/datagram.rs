@@ -21,7 +21,7 @@ pub struct Config {
 	/// than the link, or even the underlying hardware, can transmit them. This limits the amount of
 	/// memory that may be consumed in that case. When the send buffer is full and a new datagram is
 	/// sent, the oldest datagram of the lowest-priority send group is dropped until the new
-	/// one fits; see [`Datagrams::send`](crate::Datagrams::send).
+	/// one fits; see [`Datagrams::send`](crate::connection::Datagrams::send).
 	///
 	/// Counts each datagram's frame bytes, so the payload buffered is a little smaller than this.
 	/// Defaults to 1 MiB.

@@ -16,7 +16,7 @@ Decided 2026-10-22 from the security audit, with the maintainer:
 
 The point is the invariant, not the coverage number: a target that only checks for a panic would miss the bugs this audit is about.
 
-Each crate follows moq-net's shape (`rs/moq-net/fuzz/README.md`): the target body in a hidden `fuzz` module so the crate's own tests replay `fuzz/regressions/` on stable, a one-line shim per target, an `--exclude` in the `no_fuzz` list of `rs/justfile`, and a row in `nightly.yml`'s fuzz matrix. Target names must stay unique across crates.
+Each crate follows moq-net's shape (`rs/moq-net/fuzz/README.md`): the target body in a `fuzz` module, documented as test support behind the `fuzz` feature, so the crate's own tests replay `fuzz/regressions/` on stable, a one-line shim per target, an `--exclude` in the `no_fuzz` list of `rs/justfile`, and a row in `nightly.yml`'s fuzz matrix. Target names must stay unique across crates.
 
 Ordering:
 
@@ -29,4 +29,3 @@ Public API: none. Wire: none.
 
 - [CI cost and latency](/quest/m0/ci/README.md) - where the nightly budget lives
 - [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) - fixes the moq-sock overread a cmsg target would hit
-- [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the media parser targets beside these, and the bugs they found

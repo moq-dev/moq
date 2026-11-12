@@ -25,10 +25,12 @@ checks done at that call; the Required list is the work already known to land
 first, not a closed freeze set.
 
 The route layer of [Cluster routing](/quest/m2/cluster-routing/README.md)
-(ROUTE_START/UPDATE/END, path-less ANNOUNCE, the hop list dropped) lands in
+(ROUTE_START/UPDATE/END, path-less ANNOUNCE, the native hop list dropped) lands in
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
-has to plan for a lite-07 without hop lists. Only
+has to plan for a lite-07 without native hop lists; only the temporary Lite-06
+Chain, negotiated by its Setup Parameter, rides announcements until the lite-07
+to lite-08 migration. Only
 [Routes and announces](/quest/m2/cluster-routing/routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
@@ -65,8 +67,12 @@ The cut:
   treat a longer SETUP as a protocol violation" stays. The lite-07 changelog
   names that rejection, not only the cap.
 
-Decided 2026-10-20 (maintainer): [Drop set](/quest/m1/drop-set.md) joins
-Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Nothing
+Decided 2026-10-20 (maintainer): the drop set joined Required, because it
+changes lite-07's SUBSCRIBE_DROP. That wire work, SUBSCRIBE_SKIP and the
+`Update` number on SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP, landed in
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670); what remains of
+the drop set is memory accounting with no wire change, so it no longer gates
+the cut. Nothing
 else from the auth line gates the cut: its lite-07 wire work, the SETUP Token
 parameter, has landed, and the rest is API work that does not block the rename.
 
@@ -107,15 +113,27 @@ Timestamp provenance landed in
 [#6150](https://github.com/moq-dev/moq/pull/6150), and the 2^61 - 1
 timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): Required names every quest that may still change lite-07 bytes.
+The explicit `Oldest` anchor rides [time addressing's model](/quest/m2/time-addressing/model.md),
+whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries.
+
+Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about
+moq-net): ✅ the cut waits for the symbolic model of the Route Key Parameter
+(rejected: neither proof gating, as the TLA+ models do not; the inductive
+routing invariant gating too, which sits behind the mesh model). The signed
+transcript freezes at the cut and a flaw in it can only be fixed on the wire.
+
 ## Required
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - the job's route inherits the claim's instance, with no new wire message
 - [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
+- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
+- [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
+- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - may add the warm-route message to lite-07; leaves this list if the proof places it in a SETUP extension
+- [Route latency in js/net](/quest/m2/route-latency.md) - js/net reads and writes ROUTE's RTT
 
 ## Related
 

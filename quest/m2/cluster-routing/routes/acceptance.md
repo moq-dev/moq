@@ -21,16 +21,14 @@ replace are retired.
   quarantine, [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s
   dedup, and the 300 ms hold only once the fixtures below demonstrate their
   replacement (see the epic's hold-down note).
-- Add a transit fixture for routes scoped to interested origins (the
-  session child's "scope route state to interested origins"). The router
-  sends every route to every watching neighbor today, so a client is sent
-  the CDN's whole node table. The fixture decides when a route must still
-  go out to a stream whose interest meets none of the origin's claims:
-  - a transit node forwarding requests for paths outside its own interest;
-  - a node holding or forwarding a seqno request for that identity;
-  - a sender that cannot certify the interest, which must still close the
-    batch with a floor that certifies nothing
-    (`a_disjoint_interest_is_answered_with_nothing`).
+- Add a session-level fixture for routes scoped to interested origins
+  (Plan item 15 of the epic, implemented on the router): a client watching
+  one prefix holds routes only to the origins whose claims meet it, a
+  request for a path outside its interest still resolves through the relay
+  (Node ID 0), and an origin leaving the interest ends its route after the
+  batch withdrawing its last claim there, closed by its floor: one that
+  certifies the withdrawal where the relay certifies the request, and one
+  certifying nothing where it knows only part of it.
 
 The counterexamples from #4349 (closed; this epic still owns the fix) are the `residual_*` tests in
 `rs/moq-net/tests/integration/mesh_withdraw.rs`. They pin today's hunting on lite-06:
@@ -74,6 +72,13 @@ wildcards, a hidden exportable alternative under one selection, epochless Restar
 grant union crossing the scoped boundary each way (a `**` token added, then expiring). Fixtures are
 public and time-mocked, wired into CI alongside Rust/JS interop.
 
+Mounts get the same continuity checks (`rs/moq-net/tests/integration/mount.rs`):
+a claim whose predecessor covers a mount's target arrives beneath the mount
+point exactly as it does unmounted, on lite-06 and lite-07. This replaces
+the deleted mount-takeover quest, whose `Takeover` event
+[moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) removes in
+favor of the claim's instance; if #8063 closes unmerged, restore that quest.
+
 Benchmark origins, broadcasts per origin, neighbors, active tracks/fronts,
 and announce cursors independently. A route update must not expand back into
 per-broadcast table rewrites or poll unrelated fronts. Measure messages, bytes,
@@ -84,7 +89,6 @@ regressions. Bound pending requests and freshness state under same-clock churn.
 
 ## Required
 
-- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - the implementation under test
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - the JS side of the interop checks
 
 ## Related

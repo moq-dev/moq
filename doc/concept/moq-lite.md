@@ -67,9 +67,9 @@ with its fixed properties, a synced mark, then tracks as they
 come and go. Listing is discovery, not delivery: subscribe to each track you
 want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path
-served under a prefix claim has nothing to list. Like announcements, a relay
-syncs on what it holds now, so a fresh relay syncs empty and its upstream's
-tracks follow.
+served under a prefix claim has nothing to list. A relay lists its upstream's
+tracks as they arrive and syncs when its upstream does, so a track listed after
+the synced mark is new at the source, through any number of hops.
 
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks
@@ -111,13 +111,13 @@ hidden names work exactly as before.
 - **One stream, one instance.** Every broadcast mints a random instance and
   keeps it across reconnects. Replicas of the same content announce that same
   instance. A prefix claim is its own stream: its worker answers each requested
-  path by announcing that exact path under the output's own instance.
-  Restarting one output is then a new instance every hop sees, so a viewer
-  returning within a relay's cache window never gets the old output's groups.
-  On moq-lite 07 that announcement is a takeover of the claim: what a viewer
-  already resolved through the claim keeps playing from the output rather than
-  being reset to the new route. A different worker, or a replacement output,
-  never inherits those viewers.
+  path by announcing that exact path under the claim's instance, so on
+  moq-lite 07 a viewer resolved through the claim keeps playing (a claim that
+  names a stable instance gives each output a fresh one instead). When that
+  output ends, the claim takes a fresh instance, so a restarted output is a
+  new stream every hop sees, and a viewer returning within a relay's cache
+  window never gets the old output's groups. A different worker has its own
+  instance, so it never inherits those viewers.
 - **Most specific, then highest epoch, then rank.** The most specific prefix
   wins. Within one instance only its highest epoch is eligible, ahead of cost.
   Among instances the order is link preference, cost, a broadcast published
@@ -138,19 +138,17 @@ hidden names work exactly as before.
   sequence. A relay drops its copy of the old stream, so a new subscriber never
   sees its cached groups.
 
-The instance, the epoch, and the restart and takeover messages travel on
-moq-lite 07, which is opt-in. `ANNOUNCE_START`, `ANNOUNCE_RESTART` and
-`ANNOUNCE_TAKEOVER` carry the instance and epoch, and `TRACK`, `TRACKS`,
-`SUBSCRIBE` and `FETCH` name the instance they pin. A restart onto another
-instance, or a higher epoch of the same one, is advertised before the old one
-is withdrawn, so the path is never absent. Older versions carry a takeover as
-an ordinary announcement, so the first subscription through a claim is reset
-once the output's route arrives. Older moq-lite versions and moq-transport
-carry no instance, so the receiving session mints one for each announcement,
-marked with a leading `~`: a reconnect or a re-announcement through such a hop
-is another stream. A peer that ignores the end and start may keep cached
-objects of the old run under the same names, so an end and a start is not a
-cache flush.
+The instance, the epoch, and the restart message travel on moq-lite 07, which
+is opt-in. `ANNOUNCE_START` and `ANNOUNCE_RESTART` carry the instance and
+epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
+pin. A restart onto another instance, or a higher epoch of the same one, is
+advertised before the old one is withdrawn, so the path is never absent. Older
+moq-lite versions and moq-transport carry no instance, so the receiving session
+mints one for each announcement, flagged as minted: a reconnect or a
+re-announcement through such a hop is another stream, and the first
+subscription through a claim is reset once the output's route arrives. A peer
+that ignores the end and start may keep cached objects of the old run under
+the same names, so an end and a start is not a cache flush.
 
 Independent importers use distinct instances, even when fed one stream. Only
 replicas of one publisher's bytes share its instance, such as one publisher
@@ -246,11 +244,10 @@ A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
-and reconnect, rather than treating the credential as invalid. moq-transport carries the same
-exchange through the [MoQ Auth extension](/draft/moq-auth), with
-the same patterns. Older versions have no grant; the URL token keeps working
-everywhere. On moq-transport an added token is kept even without the extension,
-so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
+and reconnect, rather than treating the credential as invalid. Older versions
+and moq-transport have no grant; the URL token keeps working everywhere. On
+moq-transport an added token is kept for the requests that name it, so an
+announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
 `REQUEST_UPDATE`, so it can outlive the token it started with. A token added to a reconnecting
 connection's auth handle is presented on every session it makes, so the
@@ -374,15 +371,16 @@ the groups it limits itself to, and ends once the track does.
 
 The publisher may declare a max age per track: how long a superseded group stays
 fresh. On the wire, omission sets no limit; zero makes a group stale as soon as
-its successor arrives. Relays preserve that declaration, and may still cap it
-lower under their own ceiling. The Rust and JS libraries give an authored track
+its successor arrives. Relays preserve that declaration across moq-lite hops, and
+may still cap it lower under their own ceiling. The Rust and JS libraries give an authored track
 zero, the live edge only, unless its publisher asks for more or for no limit;
 media tracks declare 30 seconds, so a segmented egress can still find its
 segments. A relay bounds what it keeps with its own cache, not the publisher's
 default. Max age ages a group by the
 same two clocks as max delay and never makes the newest group stale. A fetch
 obeys the same bound, and may name a tighter max delay of its own.
-IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
+moq-transport drops it: its `MAX_CACHE_DURATION` would also expire the newest group,
+so a hop past one keeps superseded groups only as long as its own cache allows.
 
 Put together, a conference might use:
 

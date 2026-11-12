@@ -351,6 +351,10 @@ pub struct moq_container_init {
 	pub init: *const u8,
 	/// Length of `init` in bytes.
 	pub init_len: usize,
+
+	/// A source timebase from [moq_publish_timebase] on the same broadcast, shared with the
+	/// other containers given it, or 0 for an independent timestamp offset.
+	pub timebase: u32,
 }
 
 /// Validate an audio format code from C.
@@ -432,6 +436,26 @@ pub struct moq_video_config {
 	pub label_len: usize,
 	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
 	pub preference: i32,
+
+	/// Microseconds of media a decoder needs before its output is clean: after a join, decode
+	/// from the group start and present at the start plus this. The media consumers already
+	/// start this much earlier. Meaningless unless `has_warmup`.
+	pub warmup_us: u64,
+	/// Whether `warmup_us` is present; absent means none.
+	pub has_warmup: bool,
+	/// The broadcast holding the rendition's track, relative to the catalog's own broadcast
+	/// (`./source`), or NULL when it is the catalog's broadcast.
+	pub broadcast: *const c_char,
+	/// Length of `broadcast` in bytes.
+	pub broadcast_len: usize,
+	/// The stream instance `broadcast` must resolve to, or NULL for whichever resolves first.
+	pub instance: *const c_char,
+	/// Length of `instance` in bytes.
+	pub instance_len: usize,
+	/// The track's name in its broadcast, or NULL when it is `name`.
+	pub track: *const c_char,
+	/// Length of `track` in bytes.
+	pub track_len: usize,
 }
 
 /// Catalog properties shared by every video rendition.
@@ -493,6 +517,29 @@ pub struct moq_audio_config {
 	pub label: *const c_char,
 	/// Length of `label` in bytes.
 	pub label_len: usize,
+
+	/// The publisher's worst-case delay in microseconds between a frame being ready and its
+	/// flush, which floors an estimated playout delay. Meaningless unless `has_jitter`.
+	pub jitter_us: u64,
+	/// Whether `jitter_us` is present; absent means frames flush at once.
+	pub has_jitter: bool,
+	/// As [moq_video_config]'s `warmup_us`.
+	pub warmup_us: u64,
+	/// Whether `warmup_us` is present; absent means none.
+	pub has_warmup: bool,
+	/// The broadcast holding the rendition's track, relative to the catalog's own broadcast
+	/// (`./source`), or NULL when it is the catalog's broadcast.
+	pub broadcast: *const c_char,
+	/// Length of `broadcast` in bytes.
+	pub broadcast_len: usize,
+	/// The stream instance `broadcast` must resolve to, or NULL for whichever resolves first.
+	pub instance: *const c_char,
+	/// Length of `instance` in bytes.
+	pub instance_len: usize,
+	/// The track's name in its broadcast, or NULL when it is `name`.
+	pub track: *const c_char,
+	/// Length of `track` in bytes.
+	pub track_len: usize,
 }
 
 /// Options for a JSON snapshot producer (lossy latest-value mode).
@@ -671,9 +718,20 @@ pub struct moq_track_info {
 	/// Whether `refresh` is set. When false, a joining subscriber never asks for a new group.
 	pub refresh_present: bool,
 
-	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
-	/// Readers always see the original frames.
-	pub compress: bool,
+	/// `moq_compression` discriminant: how each group is compressed on the wire to peers that
+	/// support it. Zero sends frames as written. Readers always see the original frames.
+	pub compression: u32,
+}
+
+/// How a track's frames are compressed, with the values TRACK_INFO carries.
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_compression {
+	/// Frames travel as written.
+	MOQ_COMPRESSION_NONE = 0,
+	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
+	MOQ_COMPRESSION_DEFLATE = 1,
 }
 
 impl TryFrom<&moq_track_info> for moq_net::track::Info {
@@ -691,7 +749,12 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		if info.refresh_present {
 			out = out.with_refresh(info.refresh);
 		}
-		Ok(out.with_compress(info.compress))
+		let compression = match info.compression {
+			v if v == moq_compression::MOQ_COMPRESSION_NONE as u32 => moq_net::track::Compression::None,
+			v if v == moq_compression::MOQ_COMPRESSION_DEFLATE as u32 => moq_net::track::Compression::Deflate,
+			_ => return Err(Error::InvalidCode),
+		};
+		Ok(out.with_compression(compression))
 	}
 }
 
@@ -830,6 +893,8 @@ pub enum moq_anchor_kind {
 	MOQ_ANCHOR_RELATIVE = 1,
 	/// The group containing a presentation time. An untimed track refuses it.
 	MOQ_ANCHOR_TIME = 2,
+	/// The oldest group still around, as far back as `delay.max_us` allows. A start only.
+	MOQ_ANCHOR_OLDEST = 3,
 }
 
 /// Which of a subscription's pending groups the publisher sends first. Zero is the default.
@@ -848,6 +913,7 @@ fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Absolute(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => moq_net::track::Anchor::Time(anchor.timestamp.try_into()?),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_OLDEST as u32 => moq_net::track::Anchor::Oldest,
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -920,10 +986,10 @@ pub struct moq_section {
 /// How a route advertises itself: its visibility at creation, a static cost and, optionally,
 /// a stable instance.
 ///
-/// Pass one to [moq_origin_route], [moq_origin_route_prefix], or [moq_broadcast_request_route].
+/// Pass one to [moq_origin_route], [moq_origin_claim], or [moq_broadcast_request_route].
 /// The hop chain is the origin's to build, so a local publisher cannot claim relay hops it
 /// never took. Zeroed (or NULL) is the default: visible at once, cost 0, under a fresh
-/// instance. `instance` is borrowed for the duration of the call.
+/// instance. The `instance` handle is borrowed for the duration of the call.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_route_options {
@@ -931,50 +997,44 @@ pub struct moq_route_options {
 	/// sets its production cost here: zero for content it is already producing,
 	/// larger for content it would have to start producing on demand.
 	pub cost: u64,
-	/// A stable instance for the stream, NOT NULL terminated, or NULL (or empty) to mint a
-	/// fresh one when the route is created.
+	/// A stable instance for the stream, as an instance handle ([moq_instance_parse], or one a
+	/// route or announcement reported, to forward that stream as is), or 0 to mint a fresh one
+	/// when the route is created.
 	///
 	/// A route keeps its instance for its lifetime, across [moq_route_withdraw] and
 	/// [moq_route_announce], so a new route is a new stream viewers restart onto. Set one only
 	/// for a publisher that continues its group sequences across restarts and raises `epoch`
 	/// on each: readers stitch every route of one instance together, so restarting the
 	/// sequences under an old instance splices unrelated groups into their tracks.
-	pub instance: *const c_char,
-	/// The length in bytes of `instance`.
-	pub instance_len: usize,
+	pub instance: u32,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
 	/// or not. Ignored without one.
 	pub epoch: u64,
-	/// Create the route hidden: it exists for nobody until [moq_route_announce]. For a
-	/// publisher that fills its catalog first.
+	/// Create the route or claim hidden: it exists for nobody until [moq_route_announce] or
+	/// [moq_claim_announce]. For a publisher that fills its catalog first.
 	pub hidden: bool,
 }
 
-/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
+/// The read-only facts on a received route: a static cost and the stream's instance.
 ///
 /// Carried by [moq_announce_event]. Its pointers borrow the announcement's storage.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_route_info {
-	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
-	/// anonymous mark, which ranks the route below every fully identified one.
-	/// A route announced on this origin has none.
-	pub hops: *const u64,
-	/// The number of entries in `hops`.
-	pub hops_len: usize,
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
-	/// The stream the route serves: routes with one instance are one continuous stream.
-	pub instance: moq_string,
+	/// The stream the route serves, as an instance handle the announcement owns: valid until
+	/// [moq_origin_announced_free], and never passed to [moq_instance_free]. Routes with one
+	/// instance are one continuous stream.
+	pub instance: u32,
+	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
+	pub available: bool,
 }
 
 /// Parse [moq_route_options], treating NULL as the default.
 ///
-/// The instance parses as at every API that takes one: NULL or empty names none.
-///
 /// # Safety
-/// `options` may be NULL, or must point at a readable [moq_route_options] whose `instance`
-/// pointer is valid for `instance_len` bytes.
+/// `options` may be NULL, or must point at a readable [moq_route_options].
 unsafe fn parse_route_options(options: *const moq_route_options) -> Result<moq_net::origin::RouteOptions, Error> {
 	let hidden = unsafe { options.as_ref() }.is_some_and(|options| options.hidden);
 	unsafe { route_options(options, hidden) }
@@ -1006,7 +1066,7 @@ unsafe fn route_options(
 		return Ok(out);
 	};
 	out = out.with_cost(options.cost);
-	if let Some(instance) = unsafe { parse_instance(options.instance, options.instance_len)? } {
+	if let Some(instance) = lookup_instance(options.instance)? {
 		out = out.with_instance(instance, options.epoch);
 	}
 	Ok(out)
@@ -1042,11 +1102,20 @@ pub enum moq_announce_kind {
 	/// A route now covers the path, which was absent. Another instance taking it over keeps it
 	/// present: follow it with [moq_origin_follow] to see the broadcast change.
 	MOQ_ANNOUNCE_KIND_PRESENT = 0,
-	/// No route covers the path any more.
+	/// The origin withdrew the path: no route covers it any more.
 	MOQ_ANNOUNCE_KIND_ABSENT = 1,
+	/// This origin let go of the path, and no route covers it any more: the session it arrived
+	/// on closed, or the network lost every path to it. Its origin may still serve it.
+	MOQ_ANNOUNCE_KIND_OFFLINE = 2,
+	/// The present path lost every usable path to its origin but may recover one: it stays
+	/// present while requests for it may fail.
+	MOQ_ANNOUNCE_KIND_UNAVAILABLE = 3,
+	/// The present path recovered a usable path: request it again.
+	MOQ_ANNOUNCE_KIND_AVAILABLE = 4,
 }
 
-/// An announce event from an origin: a path becoming present or absent.
+/// An announce event from an origin: a path becoming present, absent, or offline, or its
+/// availability changing.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -1063,8 +1132,8 @@ pub struct moq_announce_event {
 	/// Which event this is.
 	pub kind: moq_announce_kind,
 
-	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` it carries the last
-	/// advertised route.
+	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` and
+	/// `MOQ_ANNOUNCE_KIND_OFFLINE` it carries the last advertised route.
 	pub route: moq_route_info,
 }
 
@@ -1085,30 +1154,72 @@ pub enum moq_connection_phase {
 	MOQ_CONNECTION_PHASE_CLOSED = 4,
 }
 
+/// The data of a phase with no live connection: [moq_connection_phase_data]'s `connecting`,
+/// `disconnected`, and `closed`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_connection_offline {
+	/// Zero, or the negative code of the latest failed dial, dropped connection, or terminal
+	/// error, which [moq_error] and [moq_error_protocol] describe during the callback. A
+	/// terminal zero is a clean close.
+	pub failure: i32,
+}
+
+/// The data of `MOQ_CONNECTION_PHASE_CONNECTED`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_connection_connected {
+	/// The live connection's negotiated draft name, backed by static storage.
+	pub version: moq_string,
+}
+
+/// The data of `MOQ_CONNECTION_PHASE_MIGRATING`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_connection_migrating {
+	/// The serving connection's negotiated draft name, backed by static storage.
+	pub version: moq_string,
+	/// Zero, or the negative code of the replacement's latest failed dial, which [moq_error]
+	/// and [moq_error_protocol] describe during the callback.
+	pub failure: i32,
+}
+
+/// A [moq_connection_state]'s phase data: read only the member its `phase` names.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union moq_connection_phase_data {
+	/// Set by `MOQ_CONNECTION_PHASE_CONNECTING`.
+	pub connecting: moq_connection_offline,
+	/// Set by `MOQ_CONNECTION_PHASE_CONNECTED`.
+	pub connected: moq_connection_connected,
+	/// Set by `MOQ_CONNECTION_PHASE_DISCONNECTED`.
+	pub disconnected: moq_connection_offline,
+	/// Set by `MOQ_CONNECTION_PHASE_MIGRATING`.
+	pub migrating: moq_connection_migrating,
+	/// Set by `MOQ_CONNECTION_PHASE_CLOSED`.
+	pub closed: moq_connection_offline,
+}
+
 /// One coherent snapshot of a session's lifecycle, delivered to its `moq_state_callback`.
 ///
-/// The struct and its `protocol` are valid only during the callback, so copy what you keep.
+/// The struct is valid only during the callback, so copy what you keep.
 #[repr(C)]
 pub struct moq_connection_state {
-	/// The lifecycle phase.
+	/// The lifecycle phase, which names the `data` member to read.
 	pub phase: moq_connection_phase,
 	/// How many connections have been established, including reconnects.
 	pub connects: u64,
-	/// Zero, or the negative code of the latest failed dial, dropped connection, or terminal
-	/// error, which [moq_error] and [moq_error_protocol] describe during the callback. A
-	/// connect clears it; a terminal zero is a clean close.
-	pub failure: i32,
-	/// The live connection's negotiated draft name, or empty while none is serving.
-	pub protocol: moq_string,
+	/// The phase's own data.
+	pub data: moq_connection_phase_data,
 }
 
-/// Statistics and protocol sampled from the same connection by [moq_session_snapshot].
+/// Statistics and version sampled from the same connection by [moq_session_snapshot].
 #[repr(C)]
 pub struct moq_connection_snapshot {
 	/// Transport statistics, with per-metric availability flags.
 	pub stats: moq_connection_stats,
 	/// Negotiated draft name, backed by static storage valid for the process lifetime.
-	pub protocol: moq_string,
+	pub version: moq_string,
 }
 
 /// A snapshot of connection statistics, filled in by [moq_session_stats].
@@ -1445,7 +1556,7 @@ pub struct moq_client_config {
 	pub backoff_max_us: u64,
 	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
-	/// How long reconnection keeps trying before giving up for good.
+	/// How long reconnection keeps trying before giving up for good; zero retries forever.
 	pub backoff_timeout_us: u64,
 	/// Whether `backoff_timeout_us` is present.
 	pub has_backoff_timeout: bool,
@@ -1502,6 +1613,10 @@ pub struct moq_client_config {
 	pub tokens: *const moq_string,
 	/// The number of entries in `tokens`.
 	pub tokens_len: usize,
+
+	/// Dial once instead of redialing with backoff whenever the transport drops; the
+	/// transport's close then ends the session. False redials.
+	pub once: bool,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -1530,7 +1645,7 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		let config = crate::client::Config::default();
 
 		let connect = config.connect.resolve();
-		dst.connect_timeout_us = micros(connect.timeout);
+		dst.connect_timeout_us = micros(connect.timeout.unwrap_or_default());
 		dst.has_connect_timeout = true;
 		dst.failover_delay_us = micros(connect.race);
 		dst.has_failover_delay = true;
@@ -1547,15 +1662,15 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max());
+		dst.backoff_max_us = micros(config.connect.backoff.max().unwrap_or_default());
 		dst.has_backoff_max = true;
-		dst.backoff_timeout_us = micros(config.connect.backoff.timeout());
+		dst.backoff_timeout_us = micros(config.connect.backoff.timeout().unwrap_or_default());
 		dst.has_backoff_timeout = true;
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;
 		dst.has_quic_max_streams = true;
-		dst.quic_idle_timeout_us = micros(quic.idle_timeout);
+		dst.quic_idle_timeout_us = micros(quic.idle_timeout.unwrap_or_default());
 		dst.has_quic_idle_timeout = true;
 		if let Some(keep_alive) = quic.keep_alive {
 			dst.quic_keep_alive_us = micros(keep_alive);
@@ -1629,16 +1744,18 @@ unsafe fn connect_session(
 /// Returns a non-zero handle to the session on success, or a negative code on (immediate) failure.
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
-/// The session reconnects automatically with exponential backoff if the connection drops.
-/// Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
+/// Once connected, the session reconnects automatically with exponential backoff if the
+/// connection drops. A first dial that reaches no session ends it instead, with that dial's
+/// error as the terminal snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
 /// since the origins outlive the underlying connection.
 ///
 /// `on_state` receives a [moq_connection_state] whenever the lifecycle changes: each
-/// connect, drop, migration, and failed dial, carrying the phase, the connect count, and
-/// why the latest attempt failed. Changes that land together arrive as one snapshot.
+/// connect, drop, migration, and failed dial, carrying the phase with its data and the
+/// connect count. Changes that land together arrive as one snapshot.
 ///
-/// The last call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after
-/// [moq_session_close] or the negative code that made reconnecting give up. By then the
+/// The last call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `data.closed.failure` zero after
+/// [moq_session_close], or the negative code of the failed first dial or of the failure that
+/// made reconnecting give up. By then the
 /// session handle is already released, and `on_state` and `user_data` are never touched
 /// again, so that terminal snapshot is the point to release `user_data`. It fires even
 /// after [moq_session_close], so do not free `user_data` on the close call itself.
@@ -1712,10 +1829,10 @@ pub unsafe extern "C" fn moq_session_stats(session: u32, dst: *mut moq_connectio
 	})
 }
 
-/// Snapshot statistics and the negotiated protocol from the same live connection.
+/// Snapshot statistics and the negotiated version from the same live connection.
 ///
 /// Returns zero on success, or a negative code when the handle is unknown or offline
-/// between reconnects. On failure, `dst` is untouched. The protocol string points at
+/// between reconnects. On failure, `dst` is untouched. The version string points at
 /// static storage valid for the process lifetime and must not be freed.
 ///
 /// # Safety
@@ -1729,7 +1846,7 @@ pub unsafe extern "C" fn moq_session_snapshot(session: u32, dst: *mut moq_connec
 		let name = version.as_str();
 		*dst = moq_connection_snapshot {
 			stats: moq_connection_stats::from(&stats),
-			protocol: moq_string {
+			version: moq_string {
 				data: name.as_ptr().cast::<c_char>(),
 				len: name.len(),
 			},
@@ -1776,13 +1893,48 @@ pub struct moq_server_config {
 	pub implementation: *const c_char,
 	/// The length in bytes of `implementation`.
 	pub implementation_len: usize,
+
+	/// Protocol versions to accept, spelled like [moq_versions]; empty accepts every supported one.
+	pub versions: *const moq_string,
+	/// The number of entries in `versions`.
+	pub versions_len: usize,
+
+	/// QUIC tuning, as in [moq_client_config]: each value applies only with its `has_*` flag,
+	/// and a NULL string leaves its knob at the default.
+	pub quic_max_streams: u64,
+	/// Whether `quic_max_streams` is set.
+	pub has_quic_max_streams: bool,
+	/// The QUIC idle timeout in microseconds.
+	pub quic_idle_timeout_us: u64,
+	/// Whether `quic_idle_timeout_us` is set.
+	pub has_quic_idle_timeout: bool,
+	/// The QUIC keep-alive interval in microseconds; zero derives it from the idle timeout.
+	pub quic_keep_alive_us: u64,
+	/// Whether `quic_keep_alive_us` is set.
+	pub has_quic_keep_alive: bool,
+	/// Whether to use UDP generic segmentation offload.
+	pub quic_gso: bool,
+	/// Whether `quic_gso` is set.
+	pub has_quic_gso: bool,
+	/// Whether to run path MTU discovery.
+	pub quic_mtu_discovery: bool,
+	/// Whether `quic_mtu_discovery` is set.
+	pub has_quic_mtu_discovery: bool,
+	/// The congestion controller, as in [moq_client_config], or NULL for the default.
+	pub quic_congestion_control: *const c_char,
+	/// The length in bytes of `quic_congestion_control`.
+	pub quic_congestion_control_len: usize,
+	/// A directory to write qlog traces into, or NULL for none; see [moq_qlog_supported].
+	pub quic_qlog: *const c_char,
+	/// The length in bytes of `quic_qlog`.
+	pub quic_qlog_len: usize,
 }
 
 /// Build the listener `config` describes, binding its socket.
 ///
 /// # Safety
 /// - Every non-NULL pointer in `config` must be valid for its length.
-unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, Error> {
+pub(crate) unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, Error> {
 	let mut listen = moq_tokio::listen::Config::default();
 	let prefix = unsafe { ffi::parse_str_optional(config.implementation, config.implementation_len)? };
 	listen.implementation = Some(crate::client::implementation(prefix)?);
@@ -1800,11 +1952,25 @@ unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, 
 		.map(Into::into)
 		.collect();
 	listen.tls.generate = unsafe { ffi::parse_strings(config.tls_generate, config.tls_generate_len)? };
+	listen.version =
+		crate::client::parse_versions(&unsafe { ffi::parse_strings(config.versions, config.versions_len)? })?;
 
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.keylog = config
-		.quic_keylog
-		.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
+	let quic = unsafe {
+		crate::client::Quic {
+			max_streams: config.has_quic_max_streams.then_some(config.quic_max_streams),
+			idle_timeout_us: config.has_quic_idle_timeout.then_some(config.quic_idle_timeout_us),
+			keep_alive_us: config.has_quic_keep_alive.then_some(config.quic_keep_alive_us),
+			gso: config.has_quic_gso.then_some(config.quic_gso),
+			mtu_discovery: config.has_quic_mtu_discovery.then_some(config.quic_mtu_discovery),
+			congestion_control: ffi::parse_str_optional(
+				config.quic_congestion_control,
+				config.quic_congestion_control_len,
+			)?,
+			qlog: ffi::parse_str_optional(config.quic_qlog, config.quic_qlog_len)?,
+			keylog: config.quic_keylog,
+		}
+	}
+	.parse()?;
 	listen.init(quic).map_err(|err| Error::InvalidConfig(err.to_string()))
 }
 
@@ -1959,7 +2125,7 @@ pub unsafe extern "C" fn moq_session_request_peer_implementation(request: u32, d
 ///
 /// `on_state` reports the lifecycle like [moq_session_connect]'s: one connected snapshot
 /// once the handshake completes, since an accepted session is a single connection that
-/// never reconnects, then the terminal closed snapshot. Its `failure` is zero only after
+/// never reconnects, then the terminal closed snapshot. Its `data.closed.failure` is zero only after
 /// [moq_session_close], and otherwise the negative code of a failed handshake or the
 /// peer's close; read [moq_error_protocol] during the callback for the peer's close code.
 ///
@@ -2064,29 +2230,29 @@ pub unsafe extern "C" fn moq_origin_route(
 	})
 }
 
-/// Create a route over `prefix` that serves the requests beneath it.
+/// Claim `prefix` on an origin, serving the requests beneath it.
 ///
-/// A route claims `prefix` and every path beneath it (the empty prefix claims
+/// A claim covers `prefix` and every path beneath it (the empty prefix claims
 /// every path). A service that only serves some of them advertises the
 /// covering prefix and rejects the rest as they are requested. NULL `options` is the
 /// default.
 ///
-/// `on_request` is required: a NULL callback is refused before the route is advertised.
+/// `on_request` is required: a NULL callback is refused before the claim is advertised.
 /// It is invoked with a positive request handle for each pending broadcast (answer it with
 /// [moq_broadcast_request_serve], [moq_broadcast_request_route], or
 /// [moq_broadcast_request_reject]), then exactly once more with a terminal code: `0`
-/// (stopped cleanly, after [moq_route_free] or the origin closing) or a negative error.
+/// (stopped cleanly, after [moq_claim_free] or the origin closing) or a negative error.
 /// After the terminal (`<= 0`) callback, `user_data` is never touched again.
 ///
-/// Returns a positive route handle on success, or a negative code on failure.
+/// Returns a positive claim handle on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that prefix is a valid pointer to prefix_len bytes of data.
 /// - `options` may be NULL, or must point at a readable [moq_route_options].
-/// - `on_request` must be non-NULL; a missing callback is refused before the route is advertised.
+/// - `on_request` must be non-NULL; a missing callback is refused before the claim is advertised.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_route_prefix(
+pub unsafe extern "C" fn moq_origin_claim(
 	origin: u32,
 	prefix: *const c_char,
 	prefix_len: usize,
@@ -2099,43 +2265,37 @@ pub unsafe extern "C" fn moq_origin_route_prefix(
 		let prefix = unsafe { ffi::parse_str(prefix, prefix_len)? };
 		let options = unsafe { parse_route_options(options)? };
 		let on_request = unsafe { ffi::OnStatus::new(user_data, on_request)? };
-		State::lock().origin.route_prefix(origin, prefix, options, on_request)
+		State::lock().origin.claim(origin, prefix, options, on_request)
 	})
 }
 
-/// The broadcast an exact route owns, to fill with the `moq_publish_*` functions.
+/// The broadcast a route owns, to fill with the `moq_publish_*` functions.
 ///
-/// Returns the same positive broadcast handle on every call, or a negative code: a prefix
-/// route owns none (`MOQ_ERROR_BROADCAST_NOT_FOUND`), and neither does a route whose
-/// broadcast [moq_publish_close] ended.
+/// Returns the same positive broadcast handle on every call, or a negative code:
+/// `MOQ_ERROR_BROADCAST_NOT_FOUND` once [moq_publish_close] ended the broadcast.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_route_broadcast(route: u32) -> i32 {
 	ffi::enter(move || {
 		let route = ffi::parse_id(route)?;
-		let state = State::lock();
-		let broadcast = state.origin.route_broadcast(route)?;
-		match state.publish.contains(broadcast) {
-			true => Ok(broadcast),
-			false => Err(Error::BroadcastNotFound),
-		}
+		State::lock().origin.route_broadcast(route)
 	})
 }
 
-/// The stream a route serves, minted at creation unless its options named one.
+/// The stream a route serves now, as a new instance handle the caller frees with
+/// [moq_instance_free].
 ///
-/// Kept across [moq_route_withdraw] and [moq_route_announce]. The destination borrows the
-/// route's storage until [moq_route_free].
+/// Named options keep one instance. A route from [moq_broadcast_request_route] takes its
+/// claim's current one when it first announces or when this first reads it. Read first,
+/// the job announces under it, and [moq_route_announce] fails with an unroutable error once the
+/// claim has moved past it, so a signer built from it stays valid.
+/// Withdrawing and announcing again keep it.
 ///
-/// Returns zero on success, or a negative code on failure.
-///
-/// # Safety
-/// - `dst` must point at a writable [moq_string].
+/// Returns a non-zero instance handle on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_route_instance(route: u32, dst: *mut moq_string) -> i32 {
+pub extern "C" fn moq_route_instance(route: u32) -> i32 {
 	ffi::enter(move || {
 		let route = ffi::parse_id(route)?;
-		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().origin.route_instance(route, dst)
+		State::lock().origin.route_instance(route)
 	})
 }
 
@@ -2143,7 +2303,7 @@ pub unsafe extern "C" fn moq_route_instance(route: u32, dst: *mut moq_string) ->
 ///
 /// A route from [moq_broadcast_request_route] also answers the requesters waiting on its
 /// path. Fails once its broadcast closed, and when a request's route can never announce
-/// because the request was released or its prefix route retracted meanwhile.
+/// because the request was released or its claim retracted meanwhile.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2182,12 +2342,28 @@ pub extern "C" fn moq_route_set_cost(route: u32, cost: u64) -> i32 {
 	})
 }
 
+/// Swap the credential a route's announcing request carries, renewing that request in place.
+///
+/// `credential` is a [crate::moq_session_credential] handle, or zero to announce under the
+/// session's scope. Only the session it was minted on carries it, a dialed one across every
+/// reconnect; any other session announces the route under its own scope. The route keeps
+/// its own reference, so the handle can be freed after this call. Fails, keeping the
+/// route's credential as it was, once its broadcast closed or the origin's background task
+/// stopped. Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_route_set_auth(route: u32, credential: u32) -> i32 {
+	ffi::enter(move || {
+		let route = ffi::parse_id(route)?;
+		let credential = ffi::parse_id_optional(credential)?;
+		let state = State::lock();
+		let credential = credential.map(|id| state.auth.credential(id)).transpose()?;
+		state.origin.route_with(route, |route| route.set_auth(credential))
+	})
+}
+
 /// Release a route handle, retracting the route.
 ///
-/// An exact route's broadcast handle stays the caller's until [moq_publish_close]. A prefix
-/// route stops serving: requests not yet delivered are rejected, and its `on_request`
-/// callback fires once more with a terminal `0`, which is where `user_data` should be
-/// released.
+/// The broadcast handle stays the caller's until [moq_publish_close].
 ///
 /// Returns zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
@@ -2201,7 +2377,96 @@ pub extern "C" fn moq_route_free(route: u32) -> i32 {
 	})
 }
 
-/// The path of a broadcast request delivered to a [moq_origin_route_prefix] callback.
+/// The stream a claim serves now, as a new instance handle the caller frees with
+/// [moq_instance_free].
+///
+/// Named options keep one instance. Unnamed, the claim moves to a fresh one each time a job
+/// holding its current one ends.
+///
+/// Returns a non-zero instance handle on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_instance(claim: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		State::lock().origin.claim_instance(claim)
+	})
+}
+
+/// Make a claim visible, or keep it so.
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_announce(claim: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		State::lock().origin.claim_with(claim, |claim| claim.announce())
+	})
+}
+
+/// Hide a claim from everyone, keeping its instance.
+///
+/// Requests beneath it are rejected meanwhile, and [moq_claim_announce] brings it back.
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_withdraw(claim: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		State::lock().origin.claim_with(claim, |claim| {
+			claim.withdraw();
+			Ok(())
+		})
+	})
+}
+
+/// Re-price a claim in place: lower wins among routes covering the same prefix.
+///
+/// A hidden claim keeps the price for when it next announces. Returns zero on success, or
+/// a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_set_cost(claim: u32, cost: u64) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		State::lock().origin.claim_with(claim, |claim| claim.set_cost(cost))
+	})
+}
+
+/// Swap the credential a claim's announcing request carries, renewing that request in place.
+///
+/// `credential` is a [crate::moq_session_credential] handle, or zero to announce under the
+/// session's scope. Only the session it was minted on carries it, a dialed one across every
+/// reconnect; any other session announces the claim under its own scope. The claim keeps
+/// its own reference, so the handle can be freed after this call. Fails, keeping the
+/// claim's credential as it was, once the origin's background task stopped. Returns zero on
+/// success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_set_auth(claim: u32, credential: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		let credential = ffi::parse_id_optional(credential)?;
+		let state = State::lock();
+		let credential = credential.map(|id| state.auth.credential(id)).transpose()?;
+		state.origin.claim_with(claim, |claim| claim.set_auth(credential))
+	})
+}
+
+/// Release a claim handle, retracting the claim.
+///
+/// Requests not yet delivered are rejected, and its `on_request` callback fires once more
+/// with a terminal `0`, which is where `user_data` should be released.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_free(claim: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		// Dropped outside the lock: retracting refuses the requests still waiting.
+		let claim = State::lock().origin.claim_take(claim)?;
+		drop(claim);
+		Ok(())
+	})
+}
+
+/// The path of a broadcast request delivered to a [moq_origin_claim] callback.
 ///
 /// The destination borrows the request's storage: copy it out before
 /// [moq_broadcast_request_serve], [moq_broadcast_request_route],
@@ -2220,10 +2485,11 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 	})
 }
 
-/// Serve a held consumer under the prefix route's instance without announcing an exact route.
+/// Serve a held consumer under the claim's instance without announcing an exact route.
 ///
 /// Every answer at this path must continue the same sequences and bytes. Start a new
-/// prefix route for different content, or route a job with its own instance.
+/// claim for different content, or route a job, whose end moves the claim to another
+/// instance.
 /// Consumes the request handle; the consumer remains owned by the caller.
 /// Returns zero on success, or a negative error.
 #[unsafe(no_mangle)]
@@ -2244,8 +2510,11 @@ pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i
 /// Answer a broadcast request with the path's own exact route, owning a new broadcast.
 ///
 /// Consumes the request handle and returns a positive route handle, or a negative error.
-/// The route serves a fresh instance unless `options` names one, so a job that restarts is
-/// a new stream. Created visible, it announces now and answers the waiting requesters;
+/// Unless `options` names an instance, the route takes the one its claim lends when it first
+/// announces or [moq_route_instance] first reads it, so readers that resolved the path through
+/// the claim continue on it; its end then moves the claim to a fresh instance, so a job that
+/// restarts is a new stream. A claim that names its instance lends none, and the route mints
+/// its own. Created visible, it announces now and answers the waiting requesters;
 /// created hidden, they wait until [moq_route_announce], so the job can fill its catalog
 /// first, and freeing the route before then refuses them. Ending the route withdraws only
 /// this path. Unreadable `options` fail without consuming the request.
@@ -2415,9 +2684,10 @@ pub enum moq_follow_event {
 /// instead, use [moq_origin_request]. A broadcast created on this origin resolves once it is
 /// announced, like a remote one.
 ///
-/// `instance` is the only stream to follow, or NULL (or empty) to follow every instance serving
-/// the path. A pinned follow never delivers another instance taking over: that ends it, and its
-/// own instance is delivered again when it returns.
+/// `instance` is an instance handle naming the only stream to follow, or 0 to follow every
+/// instance serving the path; pass the one an announcement reported to follow that stream. A
+/// pinned follow never delivers another instance taking over: that ends it, and its own
+/// instance is delivered again when it returns.
 ///
 /// `on_follow` receives a [moq_follow_event] and a code. `MOQ_FOLLOW_EVENT_ONLINE` carries a
 /// broadcast handle once announced, and again a new one each time another publisher instance
@@ -2434,22 +2704,20 @@ pub enum moq_follow_event {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-/// - `instance` may be NULL, or must point at `instance_len` readable bytes.
 /// - The caller must keep `user_data` valid until the `MOQ_FOLLOW_EVENT_END` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_follow(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	instance: *const c_char,
-	instance_len: usize,
+	instance: u32,
 	on_follow: ffi::moq_follow_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
-		let instance = unsafe { parse_instance(instance, instance_len)? };
+		let instance = lookup_instance(instance)?;
 		let on_follow = unsafe { ffi::OnFollow::new(user_data, on_follow)? };
 		State::lock().origin.follow(origin, path, instance, on_follow)
 	})
@@ -2476,10 +2744,11 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 /// Owns discovery of the path and retries route churn while resolving one publisher instance.
 /// It fails as unroutable once discovery has synced without a covering route, including a
 /// hidden route not announced yet. No separate announcement stream is needed.
-/// Serve on-demand paths with [moq_origin_route_prefix].
+/// Serve on-demand paths with [moq_origin_claim].
 ///
-/// `instance` is the only stream to accept, or NULL (or empty) for any. A request pinned to an
-/// instance that does not serve the path is unroutable.
+/// `instance` is an instance handle naming the only stream to accept, or 0 for any; pass the one
+/// an announcement reported to pin that stream. A request pinned to an instance that does not
+/// serve the path is unroutable.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2491,22 +2760,20 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-/// - `instance` may be NULL, or must point at `instance_len` readable bytes.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_request(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	instance: *const c_char,
-	instance_len: usize,
+	instance: u32,
 	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
-		let instance = unsafe { parse_instance(instance, instance_len)? };
+		let instance = lookup_instance(instance)?;
 		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
 		State::lock().origin.request(origin, path, instance, on_broadcast)
 	})
@@ -2526,18 +2793,92 @@ pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 	})
 }
 
-/// Parse an optional publisher instance, where NULL or empty means unpinned.
+/// The instance a handle names, or none for 0.
+fn lookup_instance(instance: u32) -> Result<Option<moq_net::Instance>, Error> {
+	if instance == 0 {
+		return Ok(None);
+	}
+	let instance = ffi::parse_id(instance)?;
+	Ok(Some(State::lock().origin.instance(instance)?.clone()))
+}
+
+/// Parse a named instance from `text`, refusing an empty one.
+///
+/// Only a session mints an instance, for a route whose wire (moq-lite 06 or older, or
+/// moq-transport) carries none, so text always names one: pass the handle a route or an
+/// announcement reported to pin or forward a minted stream.
+///
+/// Returns a non-zero instance handle the caller frees with [moq_instance_free], or a negative
+/// code on failure.
 ///
 /// # Safety
-/// - `instance` may be NULL, or must point at `instance_len` readable bytes.
-unsafe fn parse_instance(instance: *const c_char, instance_len: usize) -> Result<Option<moq_net::Instance>, Error> {
-	unsafe { ffi::parse_str_optional(instance, instance_len)? }
-		.map(|instance| {
-			instance
-				.parse()
-				.map_err(|_| Error::InvalidConfig("an instance is never empty".into()))
-		})
-		.transpose()
+/// - `text` must point at `text_len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_instance_parse(text: *const c_char, text_len: usize) -> i32 {
+	ffi::enter(move || {
+		let instance = unsafe { ffi::parse_str(text, text_len)? }
+			.parse()
+			.map_err(|_| Error::InvalidConfig("an instance is never empty".into()))?;
+		State::lock().origin.instance_insert(instance)
+	})
+}
+
+/// The instance's text, which alone does not tell a minted instance from a named one.
+///
+/// The destination borrows the handle's storage until [moq_instance_free] (or, for an
+/// announcement's, [moq_origin_announced_free]).
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_instance_text(instance: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let instance = ffi::parse_id(instance)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let state = State::lock();
+		let text = state.origin.instance(instance)?.as_str();
+		*dst = moq_string {
+			data: text.as_ptr().cast::<c_char>(),
+			len: text.len(),
+		};
+		Ok(())
+	})
+}
+
+/// Whether a session minted the instance for a route whose wire carries none: 1 if minted, 0 if
+/// named, or a negative code on failure. A minted instance names the announcement, not the
+/// publisher's stream, so signing refuses it and a catalog's instance check skips it.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_instance_minted(instance: u32) -> i32 {
+	ffi::enter(move || {
+		let instance = ffi::parse_id(instance)?;
+		Ok(i32::from(State::lock().origin.instance(instance)?.is_minted()))
+	})
+}
+
+/// Whether two instance handles name the same stream: 1 when their text and whether a session
+/// minted them both match, 0 otherwise, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_instance_equal(a: u32, b: u32) -> i32 {
+	ffi::enter(move || {
+		let (a, b) = (ffi::parse_id(a)?, ffi::parse_id(b)?);
+		let state = State::lock();
+		Ok(i32::from(state.origin.instance(a)? == state.origin.instance(b)?))
+	})
+}
+
+/// Free an instance handle the caller owns: one from [moq_instance_parse], [moq_route_instance],
+/// or [moq_claim_instance]. An announcement's instance goes with [moq_origin_announced_free].
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_instance_free(instance: u32) -> i32 {
+	ffi::enter(move || {
+		let instance = ffi::parse_id(instance)?;
+		State::lock().origin.instance_free(instance)
+	})
 }
 
 /// Close an origin and clean up its resources.
@@ -2706,8 +3047,34 @@ pub unsafe extern "C" fn moq_publish_container(broadcast: u32, config: *const mo
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
 
+		let timebase = ffi::parse_id_optional(config.timebase)?;
+
 		let container = moq_mux::import::ContainerInit::new(container_format_from_u32(config.format)?, init.to_vec());
-		State::lock().publish.container(broadcast, container)
+		State::lock().publish.container(broadcast, container, timebase)
+	})
+}
+
+/// Create a source timebase on a broadcast, so containers publishing one source share its
+/// timestamp offset.
+///
+/// Pass it as [moq_container_init]'s `timebase` to each container importing the same source,
+/// such as a camera's video and audio in separate files, so their tracks stay aligned. The
+/// broadcast owns it: it ends with [moq_publish_close]. Returns a positive handle, or a
+/// negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_timebase(broadcast: u32) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		State::lock().publish.timebase(broadcast)
+	})
+}
+
+/// Release a timebase handle; containers already sharing it keep their offset.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_timebase_free(timebase: u32) -> i32 {
+	ffi::enter(move || {
+		let timebase = ffi::parse_id(timebase)?;
+		State::lock().publish.timebase_free(timebase)
 	})
 }
 
@@ -3011,9 +3378,51 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 		video.coded_width = (config.coded_width > 0).then_some(config.coded_width);
 		video.coded_height = (config.coded_height > 0).then_some(config.coded_height);
 		video.container = unsafe { parse_container(&config.container)? };
+		video.warmup = config
+			.has_warmup
+			.then(|| std::time::Duration::from_micros(config.warmup_us));
+		(video.broadcast, video.instance, video.track) = unsafe {
+			parse_reference(
+				(config.broadcast, config.broadcast_len),
+				(config.instance, config.instance_len),
+				(config.track, config.track_len),
+			)?
+		};
 
 		State::lock().publish.video_config(broadcast, name, video)
 	})
+}
+
+/// A rendition's broadcast reference, instance, and track name.
+type Reference = (
+	Option<moq_net::path::Relative>,
+	Option<moq_net::Instance>,
+	Option<String>,
+);
+
+/// A rendition's reference fields, as [moq_video_config] and [moq_audio_config] carry them.
+///
+/// # Safety
+/// - Each non-NULL pointer must be valid for its length.
+unsafe fn parse_reference(
+	broadcast: (*const c_char, usize),
+	instance: (*const c_char, usize),
+	track: (*const c_char, usize),
+) -> Result<Reference, Error> {
+	let broadcast = unsafe { ffi::parse_str_optional(broadcast.0, broadcast.1)? }
+		.filter(|broadcast| !broadcast.is_empty())
+		.map(moq_net::path::Relative::new)
+		.transpose()
+		.map_err(|err| Error::InvalidConfig(err.to_string()))?;
+	let instance = unsafe { ffi::parse_str_optional(instance.0, instance.1)? }
+		.filter(|instance| !instance.is_empty())
+		.map(moq_net::Instance::from_str)
+		.transpose()
+		.map_err(|err| Error::InvalidConfig(err.to_string()))?;
+	let track = unsafe { ffi::parse_str_optional(track.0, track.1)? }
+		.filter(|track| !track.is_empty())
+		.map(str::to_string);
+	Ok((broadcast, instance, track))
 }
 
 /// Add or replace an audio rendition in a broadcast's catalog.
@@ -3057,6 +3466,19 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
 			audio.description = Some(bytes::Bytes::copy_from_slice(description));
 		}
+		audio.jitter = config
+			.has_jitter
+			.then(|| std::time::Duration::from_micros(config.jitter_us));
+		audio.warmup = config
+			.has_warmup
+			.then(|| std::time::Duration::from_micros(config.warmup_us));
+		(audio.broadcast, audio.instance, audio.track) = unsafe {
+			parse_reference(
+				(config.broadcast, config.broadcast_len),
+				(config.instance, config.instance_len),
+				(config.track, config.track_len),
+			)?
+		};
 
 		State::lock().publish.audio_config(broadcast, name, audio)
 	})
@@ -3220,6 +3642,20 @@ pub extern "C" fn moq_publish_track_group_at(track: u32, sequence: u64) -> i32 {
 	})
 }
 
+/// Declare that a raw track will never produce groups `start` up to the exclusive `end`.
+///
+/// Readers waiting on them move past without ending. The skip is final: creating a group
+/// there with [moq_publish_track_group_at] then fails, though a group already written stays.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_skip(track: u32, start: u64, end: u64) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		State::lock().publish.track_skip(track, start, end)
+	})
+}
+
 /// Write a single-frame group to a raw track with a timestamp.
 ///
 /// Convenience for the common one-frame-per-group pattern. Equivalent to
@@ -3298,6 +3734,34 @@ pub extern "C" fn moq_publish_track_finish_at(track: u32, final_sequence: u64) -
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().publish.track_finish_at(track, final_sequence)
+	})
+}
+
+/// The newest content a raw track holds: its newest group, at that group's newest frame.
+///
+/// `present` is false before any group was written; `frame` is 0 while the newest group is
+/// empty. A publisher compares it with [moq_publish_demand_wanted]'s group to tell whether a
+/// join is already served by a group it wrote. Returns zero, or a negative code on failure.
+///
+/// # Safety
+/// - `group`, `frame`, and `present` must point at writable values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_track_largest(
+	track: u32,
+	group: *mut u64,
+	frame: *mut u64,
+	present: *mut bool,
+) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let group = unsafe { group.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let frame = unsafe { frame.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let largest = State::lock().publish.track_largest(track)?;
+		*group = largest.map_or(0, |largest| largest.group);
+		*frame = largest.map_or(0, |largest| largest.frame);
+		*present = largest.is_some();
+		Ok(())
 	})
 }
 
@@ -3642,6 +4106,64 @@ pub extern "C" fn moq_publish_group_finish(group: u32) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		State::lock().publish.group_finish(group)
+	})
+}
+
+/// Wait until a raw group can take a frame of `size` bytes without outrunning its fastest
+/// reader, for backpressure.
+///
+/// `on_ready` fires exactly once: `0` once a reader holds the group and the frame fits, at
+/// once while a reader has taken every frame, and once the group is finished or aborted, so
+/// the next write reports why; or a negative code. Wait before each [moq_publish_group_frame]
+/// and that reader paces the writer, instead of the group shedding frames it has not taken;
+/// slower readers are not waited on. Writing without waiting never fails; the group sheds its
+/// front instead. Closing the broadcast ends the group, and so the wait, unless its track
+/// declared an end with [moq_publish_track_finish_at]: such a track still takes groups below
+/// its end, so the wait lasts until a reader takes the group or the group ends.
+///
+/// Returns zero once the wait started, or a negative code, in which case `on_ready` never fires.
+///
+/// # Safety
+/// - `on_ready` must be non-NULL, and `user_data` valid until it fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_group_ready(
+	group: u32,
+	size: u64,
+	on_ready: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let group = ffi::parse_id(group)?;
+		let callback = unsafe { ffi::OnStatus::new(user_data, on_ready)? };
+		let wait = group_ready(group, size)?;
+		tokio::spawn(async move {
+			let res = ffi::run(async {
+				wait.await;
+				Ok(())
+			})
+			.await;
+			callback.call(res);
+		});
+		Ok(())
+	})
+}
+
+/// The wait behind [moq_publish_group_ready]: resolves once raw `group` can take a frame of
+/// `size` bytes, or its handle ends.
+pub(crate) fn group_ready(group: crate::Id, size: u64) -> Result<impl Future<Output = ()> + Send + 'static, Error> {
+	let (group, mut ended) = State::lock().publish.group(group)?;
+	let frame = moq_net::frame::Info { size, timestamp: None };
+	Ok(async move {
+		let ready = kio::wait(|waiter| match group.lock().as_ref() {
+			Some(group) => group.poll_ready(waiter, &frame),
+			// Finished or aborted: the next write reports why.
+			None => std::task::Poll::Ready(()),
+		});
+		// The handle ending also resolves it: a finish does not wake `poll_ready`.
+		tokio::select! {
+			() = ready => {}
+			_ = ended.changed() => {}
+		}
 	})
 }
 
@@ -4247,6 +4769,38 @@ pub extern "C" fn moq_consume_read_free(read: u32) -> i32 {
 	ffi::enter(move || {
 		let read = ffi::parse_id(read)?;
 		State::lock().consume.read_free(read)
+	})
+}
+
+/// Wait until a broadcast ends: its publisher closed it, or every producer of it left.
+///
+/// `on_closed` fires exactly once: `0` when the broadcast ended or [moq_consume_closed_cancel]
+/// stopped the wait, or a negative error when the session driving it failed first. Release
+/// `user_data` there. Returns a positive watcher handle, or a negative code on failure.
+///
+/// # Safety
+/// - `on_closed` must be non-NULL, and `user_data` valid until it fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_closed(
+	broadcast: u32,
+	on_closed: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let on_closed = unsafe { ffi::OnStatus::new(user_data, on_closed)? };
+		State::lock().consume.closed(broadcast, on_closed)
+	})
+}
+
+/// Stop a wait started by [moq_consume_closed]; its callback still fires once with `0`.
+///
+/// Returns zero, or a negative code if the wait already ended.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_closed_cancel(watcher: u32) -> i32 {
+	ffi::enter(move || {
+		let watcher = ffi::parse_id(watcher)?;
+		State::lock().consume.closed_cancel(watcher)
 	})
 }
 

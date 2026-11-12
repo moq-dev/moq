@@ -5,8 +5,13 @@
 //! are written with a trailing `/` where the contract means a wildcard; every
 //! lite-07 claim already covers the paths below it, so the slash is dropped.
 
+mod compare;
+mod copies;
 mod handoff;
+mod paths;
+mod residual;
 mod routing;
+mod rtt;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -53,6 +58,11 @@ fn fnv(label: &str, ids: &[u64]) -> u64 {
 	hash
 }
 
+/// How `node` names itself in a route's hops, fresh for each restart like its process.
+pub(super) fn hop(node: Node, restarts: u32) -> Id {
+	1_000 * (u64::from(restarts) + 1) + node as u64
+}
+
 /// One side's configuration of a link.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SimLink {
@@ -97,7 +107,7 @@ enum Msg {
 	Batch {
 		id: Id,
 		changes: Vec<(Path, Option<Item>)>,
-		floors: BTreeMap<Path, Rev>,
+		floor: Option<Rev>,
 		interest: u32,
 	},
 	Request {
@@ -123,6 +133,8 @@ pub(super) struct SimEvent {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Stats {
 	pub route_msgs: usize,
+	/// Route messages that changed nothing but the hops: what naming them costs.
+	pub hop_updates: usize,
 	pub claim_msgs: usize,
 	pub claim_items: usize,
 	pub requests: usize,
@@ -155,6 +167,8 @@ pub(super) struct Sim {
 	history: BTreeMap<Id, Vec<Change>>,
 	/// Every request sent, to spot a repeat.
 	requested: BTreeSet<(Node, Node, Id, Seqno)>,
+	/// The last finite route each node sent each neighbor, to spot a change of hops alone.
+	routed: BTreeMap<(Node, Node, Id), Advert>,
 	pub stats: Stats,
 	pub events: Vec<SimEvent>,
 }
@@ -162,7 +176,9 @@ pub(super) struct Sim {
 impl Sim {
 	pub fn new(nodes: usize) -> Self {
 		Self {
-			nodes: (0..nodes).map(|node| Router::new(node as u64 + 1)).collect(),
+			nodes: (0..nodes)
+				.map(|node| Router::new(hop(node, 0), node as u64 + 1))
+				.collect(),
 			leaf: vec![false; nodes],
 			watch: vec![Path::empty(); nodes],
 			restarts: vec![0; nodes],
@@ -175,6 +191,7 @@ impl Sim {
 			held: BTreeSet::new(),
 			history: BTreeMap::new(),
 			requested: BTreeSet::new(),
+			routed: BTreeMap::new(),
 			stats: Stats::default(),
 			events: Vec::new(),
 		}
@@ -257,7 +274,9 @@ impl Sim {
 		}
 		self.restarts[node] += 1;
 		self.declared[node] = None;
-		self.nodes[node] = Router::new(fnv("restart", &[node as u64, u64::from(self.restarts[node])]));
+		let restarts = self.restarts[node];
+		let seed = fnv("restart", &[node as u64, u64::from(restarts)]);
+		self.nodes[node] = Router::new(hop(node, restarts), seed);
 		let watch = self.watch[node].clone();
 		self.nodes[node].watch(watch);
 		self.flush();
@@ -284,8 +303,14 @@ impl Sim {
 		self.flush();
 	}
 
+	/// `node` advertises `id` as if serving it, claiming the root.
 	pub fn forge(&mut self, node: Node, id: Id, seqno: Seqno) {
-		self.nodes[node].forge(id, seqno);
+		let item = Item {
+			seed: 0,
+			epoch: None,
+			since: 0,
+		};
+		self.nodes[node].forge(id, seqno, Path::empty(), item);
 		self.flush();
 	}
 
@@ -368,6 +393,22 @@ impl Sim {
 		self.flush();
 	}
 
+	/// `node` measures its link to `peer` at `ms`, or nothing.
+	pub fn rtt(&mut self, node: Node, peer: Node, ms: Option<u64>) {
+		self.nodes[node].rtt(peer, ms.map(std::time::Duration::from_millis));
+		self.flush();
+	}
+
+	/// What `node` last sent `peer` for `id`.
+	pub fn sent(&self, node: Node, peer: Node, id: Id) -> Option<Reach> {
+		self.nodes[node].sent.get(&(id, peer)).cloned()
+	}
+
+	/// The streams `node` sends a route for `id` on.
+	pub fn sending(&self, node: Node, id: Id) -> usize {
+		Router::<Node, Item>::of(&self.nodes[node].sent, id).count()
+	}
+
 	pub fn hold(&mut self, from: Node, to: Node) {
 		self.held.insert((from, to));
 	}
@@ -387,9 +428,9 @@ impl Sim {
 			Msg::Batch {
 				id,
 				changes,
-				floors,
+				floor,
 				interest,
-			} => router.batch(from, id, changes, floors, interest),
+			} => router.batch(from, id, changes, floor, interest),
 			Msg::Request { id, seqno } => router.request(from, id, seqno),
 		}
 		self.stats.delivered += 1;
@@ -465,15 +506,27 @@ impl Sim {
 			for out in self.nodes[node].drain() {
 				let (to, msg) = match out {
 					Out::Route { to, id, reach } => {
+						// A route names every node it crossed once, the sender last.
+						if let Some(Reach::Finite(advert)) = &reach {
+							let me = hop(node, self.restarts[node]);
+							assert_eq!(advert.hops.last(), Some(&me), "node {node}'s hops for {id}");
+							let named: BTreeSet<Id> = advert.hops.iter().copied().collect();
+							assert_eq!(named.len(), advert.hops.len(), "node {node} sent {id} round a loop");
+							let was = self.routed.insert((node, to, id), advert.clone());
+							let same = |was: Advert| {
+								Advert {
+									hops: advert.hops.clone(),
+									..was
+								} == *advert
+							};
+							self.stats.hop_updates += usize::from(was.is_some_and(same));
+						} else {
+							self.routed.remove(&(node, to, id));
+						}
 						self.stats.route_msgs += 1;
 						(to, Msg::Route { id, reach })
 					}
-					Out::Batch {
-						to,
-						id,
-						changes,
-						floors,
-					} => {
+					Out::Batch { to, id, changes, floor } => {
 						self.stats.claim_msgs += 1;
 						self.stats.claim_items += changes.len();
 						let interest = self.nodes[to].interest();
@@ -482,7 +535,7 @@ impl Sim {
 							Msg::Batch {
 								id,
 								changes,
-								floors,
+								floor,
 								interest,
 							},
 						)
@@ -526,7 +579,7 @@ impl Sim {
 				let origin = self.source(event.id).unwrap_or(event.id);
 				let since = event.item.since;
 				let withdrawn = self
-					.truth(origin, event.claim.as_str(), self.revision(origin))
+					.covering(origin, &event.claim, self.revision(origin))
 					.is_none_or(|item| item.since != since);
 				self.events.push(SimEvent {
 					node,
@@ -618,6 +671,39 @@ impl Sim {
 			.and_then(|change| change.item)
 	}
 
+	/// The origin's most specific claim at or above `claim` as of revision `rev`:
+	/// what a stream answering `claim` presents there.
+	pub fn covering(&self, id: Id, claim: &Path, rev: Rev) -> Option<Item> {
+		let history = self.history.get(&id)?;
+		let ancestors: BTreeSet<&Path> = history
+			.iter()
+			.map(|change| &change.claim)
+			.filter(|known| within(claim, known))
+			.collect();
+		ancestors
+			.into_iter()
+			.rev()
+			.filter_map(|known| self.truth(id, known.as_str(), rev))
+			.next()
+	}
+
+	/// The origin's claims as of revision `rev` as a stream answering `prefix`
+	/// presents them.
+	pub fn presented(&self, id: Id, prefix: &Path, rev: Rev) -> BTreeMap<Path, Item> {
+		let claims: BTreeSet<&Path> = (self.history.get(&id).into_iter().flatten())
+			.map(|change| &change.claim)
+			.filter(|claim| within(claim, prefix))
+			.collect();
+		let mut out: BTreeMap<Path, Item> = claims
+			.into_iter()
+			.filter_map(|claim| Some((claim.clone(), self.truth(id, claim.as_str(), rev)?)))
+			.collect();
+		if let Some(item) = self.covering(id, prefix, rev) {
+			out.entry(prefix.clone()).or_insert(item);
+		}
+		out
+	}
+
 	pub fn revision(&self, id: Id) -> Rev {
 		self.history
 			.get(&id)
@@ -635,10 +721,11 @@ impl Sim {
 					continue;
 				};
 				checked.insert((node, key));
-				let claims: BTreeSet<&Path> = self.history[&id].iter().map(|change| &change.claim).collect();
-				if let Some(claim) = view.items.keys().find(|claim| !claims.contains(claim)) {
-					return Err(format!("node {node} holds {key}'s {claim} with no origin history"));
-				}
+				// A floor's region presents the most specific claim covering it.
+				let claims: BTreeSet<&Path> = (self.history[&id].iter().map(|change| &change.claim))
+					.chain(view.items.keys())
+					.chain(view.floors.keys())
+					.collect();
 				for claim in claims {
 					let Some(rev) = view.as_of(claim) else {
 						if view.items.contains_key(claim) {
@@ -647,7 +734,10 @@ impl Sim {
 						continue;
 					};
 					let known = view.items.get(claim).copied();
-					let truth = self.truth(id, claim.as_str(), rev);
+					let truth = match view.floors.contains_key(claim) {
+						true => self.covering(id, claim, rev),
+						false => self.truth(id, claim.as_str(), rev),
+					};
 					if known != truth {
 						return Err(format!(
 							"node {node} holds {key}'s {claim} as {known:?} at revision {rev}, where the origin had {truth:?}"

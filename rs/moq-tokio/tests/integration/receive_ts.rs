@@ -53,7 +53,7 @@ struct Recorder {
 impl Controller for Recorder {
 	fn on_sent(&mut self, sent: congestion::Sent) -> congestion::Packet {
 		let start = self.next.map_or(sent.now, |next| next.max(sent.now));
-		self.next = Some(start + Duration::from_secs_f64(f64::from(sent.bytes) / self.rate as f64));
+		self.next = Some(start.saturating_add(Duration::from_secs_f64(f64::from(sent.bytes) / self.rate as f64)));
 		Default::default()
 	}
 
@@ -167,11 +167,14 @@ async fn run(preset: &str) -> Run {
 		.expect("handshake");
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	let chunk = Bytes::from(vec![0; 64 * 1024]);
-	let _ = kio::clock::timeout_at(Instant::now() + duration.saturating_sub(start.elapsed()), async {
-		loop {
-			send.write_all(chunk.clone()).await.unwrap();
-		}
-	})
+	let _ = kio::clock::timeout_at(
+		Instant::now().saturating_add(duration.saturating_sub(start.elapsed())),
+		async {
+			loop {
+				send.write_all(chunk.clone()).await.unwrap();
+			}
+		},
+	)
 	.await;
 	conn.close(0u32.into(), "done");
 	shaper.verify().expect("the shaper acted");

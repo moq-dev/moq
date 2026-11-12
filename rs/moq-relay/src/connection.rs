@@ -95,6 +95,15 @@ impl<R: Incoming> Connection<R> {
 
 	/// Admit the request and answer its SETUP, returning the session's supervision.
 	async fn start(mut request: R, lifecycle: &Lifecycle) -> anyhow::Result<Supervision> {
+		// Only this relay's origin holds its identity, so a session declaring it is this
+		// relay dialing itself under a spelling its self filter missed. Every route
+		// from it would be dropped as reflected, so refuse it rather than serve it.
+		if let Some(id) = request.peer_hop().filter(|id| lifecycle.cluster.origin.is_own(*id)) {
+			request.reject(moq_net::SessionError::Internal).await;
+			anyhow::bail!(
+				"refused a session declaring this relay's own identity {id}: a cluster peer URL reaches this relay itself"
+			);
+		}
 		let shared = request.shared().cloned();
 		let admit = {
 			let admission = request.admission(&lifecycle.auth);
@@ -329,7 +338,7 @@ impl Lifecycle {
 			let Some(presented) = cluster::Cluster::lan_credential(&request.path) else {
 				return Err(Rejection {
 					code: moq_net::SessionError::Unauthorized,
-					refusal: Some(RefusalKind::Lan),
+					refusal: Some(RefusalKind::Membership),
 					source: anyhow::anyhow!("LAN peer did not present a membership proof"),
 				});
 			};
@@ -342,14 +351,14 @@ impl Lifecycle {
 				Some(false) => {
 					return Err(Rejection {
 						code: moq_net::SessionError::Unauthorized,
-						refusal: Some(RefusalKind::Lan),
+						refusal: Some(RefusalKind::Membership),
 						source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
 					});
 				}
 				None => {
 					return Err(Rejection {
 						code: moq_net::SessionError::Unauthorized,
-						refusal: Some(RefusalKind::Lan),
+						refusal: Some(RefusalKind::Membership),
 						source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
 					});
 				}

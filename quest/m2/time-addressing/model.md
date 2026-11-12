@@ -64,13 +64,26 @@ a producer would need per-track memory of its last number.
   one FETCH per tick in the hole. Accepted: "This was a lingering problem.
   The entire point of (multiple) ranges is to avoid this issue."
 
+- **Skips are declared, never inferred** (decided 2026-11-03, maintainer,
+  /quest-complete, replacing that day's "eager skips";
+  [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)). A gap tells
+  moq-net nothing, since groups may be created out of order. SKIP comes only
+  from the producer: an explicit `skip_groups`, or `append_group`, which
+  means "the next group" and so skips every key below it that never arrived
+  and was not given up, since the producer's last append. `create_group`
+  implies no skip. A skip is final: creating a group at a skipped key is
+  refused. Today `append_group` leaves no gap of its own, so its skip only
+  names holes earlier `create_group` calls left. `append_group(timestamp)`
+  keeps the rule, and there it names the span between consecutive starts:
+  every key between the previous group's start and the new one.
+
 Every current role of the sequence needs a replacement or a reason to drop
 it:
 
 - The cache key, the duplicate check, the hand-out-once record
   (`delivered.rs`), and slot stamps.
 - Successor, reach, expiry, the arrival ledger, tail accounting, fills and
-  misses, and SUBSCRIBE_DROP accounting. Successor and reach already scan the
+  misses, and SUBSCRIBE_SKIP and SUBSCRIBE_DROP accounting. Successor and reach already scan the
   cache by range, so they tolerate sparse keys; `delivered.rs` runs, fills,
   misses, and `subscription/window.rs` treat `sequence + 1` as the next group
   and must follow previous-start links instead.
@@ -79,7 +92,8 @@ it:
   refresh.
 - Not datagrams: they are their own track kind with their own sequence.
 - The legacy codecs: lite GROUP, SUBSCRIBE and SUBSCRIBE_UPDATE bounds,
-  SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_DROP, FETCH, and
+  SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_SKIP,
+  SUBSCRIBE_DROP, FETCH, and
   every IETF Location, Filter, FETCH, Largest, and NEW_GROUP_REQUEST.
 
 ### Timestamps are required and legacy IDs pass through
@@ -114,6 +128,44 @@ recorded only sequencing.
   stamps the catalog from the broadcast clock and refuses to list a track off
   that clock's timescale, or a scale-less track beside timed ones. moq-net
   tracks stay independent.
+- **No local clock in the model.** Added 2026-11-07 (maintainer,
+  /quest-plan from the API shape audit): `Timestamp::now()`, the only model
+  API that reads the local clock, is removed, and its callers stamp from
+  their own clock: moq-boy, moq-hls, moq-stats, moq-bench, hang's
+  video example, moq-tokio's examples, and tests across moq-net, moq-json,
+  moq-mux, and moq-hls. `Timed<P>` moves from moq-net's root to moq-json,
+  since moq-net never uses it internally, and its `at` becomes required under
+  the rule above. Every crate that names `moq_net::Timed` follows the move:
+  moq-mux, moq-ffi, moq-c, moq-cli, moq-boy, moq-hls, moq-stats,
+  and moq-net-tests.
+- **One anchor rule.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ collapse `Anchor` to `{Oldest,
+  Relative(n), Time(ts)}` with every end inclusive (rejected: keep
+  `Absolute` and make it inclusive; only add `Oldest`). Today an `Absolute`
+  end is exclusive while `Relative` and `Time` ends include their group
+  (`rs/moq-net/src/model/subscription.rs`), and "oldest" is the sentinel
+  `Relative(u64::MAX)`. Once keys are starts, `Absolute(key)` and `Time(ts)`
+  name the same group, so `Absolute` goes; a legacy exclusive end `E` maps
+  to `Time(E - 1)`, since legacy keys pass through. A legacy inclusive
+  start `S` keeps its bound: it resolves to the first group keyed at or
+  above `S`, never to an earlier group that covers `S`, and a regression
+  covers sparse keys (4 and 7 with a start of 5 selects 7). An exclusive end of 0
+  (today `sequence_bounds(..0)` and an empty range list's
+  `Subscription::end()`) selects nothing, so it is dropped as an empty range
+  before conversion, never saturated to `Time(0)`, which would include
+  group 0. Regressions cover `E = 0` and `E = 1` beside the legacy round
+  trips. `Oldest` is explicit and
+  encoded the same on every wire (lite-07, lite-06 and earlier, IETF), where
+  today the lite encoder treats any `back > MAX_QUIC` as oldest and the
+  model does not. `Range::groups(RangeBounds<u64>)` and
+  `Subscription::with_range` go. JS's omitted start keeps meaning `Oldest`.
+  This absorbs the deleted anchor-oldest quest (from the 2026-11-07
+  invariant audit, model-4).
+- **Fence what grows after the cut.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `Position` becomes
+  `#[non_exhaustive]`, so byte-holes can add a byte offset without a break.
+- **Wires without a start.** Check which moq-lite versions can encode a
+  historical start; lite-01/02 may not. On any that can't, an `Oldest` or
+  earlier start gets the live feed, and the PR documents that exception
+  rather than changing the old format.
 - **Open, for whoever starts this, with the maintainer:** how lite-05/06,
   which carry both a sequence and frame timestamps, map on the way out.
 
@@ -160,7 +212,9 @@ The PR's Impact section says how to migrate.
 Public API: breaking. `group::Info`, `create_group`, `append_group`,
 `Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, and group consumers
 address by start timestamp, every producer write takes a required
-timestamp, and untimed tracks become scale-less.
+timestamp, untimed tracks become scale-less, `Timestamp::now` is gone, and
+`Timed` is moq-json's, and `Anchor` is `{Oldest, Relative, Time}` with inclusive
+ends.
 Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required

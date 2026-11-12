@@ -77,7 +77,7 @@ on their own retransmission across a link drop.
 
 The [compression migration](https://github.com/moq-dev/moq/pull/7046) deleted the
 moq-flate snapshot and stream helpers. Keep these framing rules on plain
-tracks, setting `compress` when useful, rather than depending on those helpers.
+tracks, setting `compression` when useful, rather than depending on those helpers.
 
 ### Deliberately out of scope
 
@@ -89,5 +89,5 @@ small, real contribution and its own future quest.
 
 ## Required
 
-- [Robot teleoperation primitive](/quest/m5/teleop-robot.md)
+- [Robot teleoperation conventions](/quest/m5/teleop-robot.md)
 - [Operator arbitration](/quest/m5/teleop-arbitration.md)

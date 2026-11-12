@@ -448,14 +448,16 @@ impl Model {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(10 * (instance as u64 + 1) + slot as u64).unwrap())
 			.unwrap();
-		let route = RouteInfo::default()
+		let route = RouteInfo::new()
 			.with_instance(self::instance(instance), 0)
 			.with_hops(hops)
 			// The second instance's routes all undercut the first's.
 			.with_cost(((INSTANCES - instance) * SLOTS - slot) as u64);
-		let requests = self.origin.forward(PATH, route, None).unwrap();
+		let requests = self.origin.forward(PATH, route).unwrap();
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
+		// The route's live feed, received from its publisher: its groups land in any order.
+		track.received();
 		let upstream = broadcast.consume();
 		let serving = kio::clock::sim::spawn(async move {
 			while let Some(request) = kio::wait(|waiter| requests.poll_requested(waiter)).await {
@@ -566,7 +568,7 @@ impl Model {
 		let Some(copy) = &publisher.routes[slot] else {
 			return;
 		};
-		if copy.groups.contains_key(&(GROUPS - 1)) && copy.track.finish().is_ok() {
+		if copy.groups.contains_key(&(GROUPS - 1)) && copy.track.finish_shared().is_ok() {
 			publisher.ended = true;
 		}
 	}
@@ -719,7 +721,7 @@ impl Model {
 					if reader.reading.contains_key(&group) {
 						return Err(fail(
 							index,
-							format!("dropped {range:?} ({err}) after handing out {group}"),
+							format!("dropped {range:?} ({err:?}) after handing out {group}"),
 						));
 					}
 				}

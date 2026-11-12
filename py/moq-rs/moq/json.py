@@ -6,7 +6,7 @@ long as they live, while the catalog has no window mode. A consumer takes over a
 :class:`~moq.TrackConsumer` that has not read a group yet. Either track can come from a request
 as well as by name. Values are any JSON-serializable Python object.
 
-Compression is the track's: publish it with ``TrackInfo(compress=True)``, which JSON benefits from,
+Compression is the track's: publish it with ``TrackInfo(compression=Compression.DEFLATE)``, which JSON benefits from,
 and a consumer reads it with no option of its own.
 
 Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
@@ -48,10 +48,10 @@ __all__ = [
     "Timed",
     "WindowConsumer",
     "WindowEvent",
-    "WindowPop",
+    "WindowEventPop",
+    "WindowEventPush",
+    "WindowEventSkip",
     "WindowProducer",
-    "WindowPush",
-    "WindowSkip",
 ]
 
 
@@ -223,7 +223,7 @@ class WindowProducer:
 
 
 @dataclass(frozen=True)
-class WindowPush:
+class WindowEventPush:
     """A record joined the window at absolute ``index``."""
 
     index: int
@@ -231,14 +231,14 @@ class WindowPush:
 
 
 @dataclass(frozen=True)
-class WindowPop:
+class WindowEventPop:
     """The records at these absolute indices left the window."""
 
     range: range
 
 
 @dataclass(frozen=True)
-class WindowSkip:
+class WindowEventSkip:
     """The records at these absolute indices will never be delivered.
 
     They were pushed and dropped while this reader was behind, or fell outside the producer's
@@ -248,7 +248,7 @@ class WindowSkip:
     range: range
 
 
-WindowEvent = WindowPush | WindowPop | WindowSkip
+WindowEvent = WindowEventPush | WindowEventPop | WindowEventSkip
 """One change to a window, as a :class:`WindowConsumer` sees it."""
 
 
@@ -258,11 +258,11 @@ def _window_event(timed: MoqJsonWindowTimed | None) -> Timed | None:
     event = timed.event
     value: WindowEvent
     if isinstance(event, MoqJsonWindowEvent.PUSH):
-        value = WindowPush(index=event.index, value=json.loads(event.value))
+        value = WindowEventPush(index=event.index, value=json.loads(event.value))
     elif isinstance(event, MoqJsonWindowEvent.POP):
-        value = WindowPop(range(event.start, event.end))
+        value = WindowEventPop(range(event.start, event.end))
     elif isinstance(event, MoqJsonWindowEvent.SKIP):
-        value = WindowSkip(range(event.start, event.end))
+        value = WindowEventSkip(range(event.start, event.end))
     else:
         raise TypeError(f"unknown window event: {event!r}")
     return Timed(value=value, timestamp=_opt_from_ts(timed.timestamp))
@@ -271,11 +271,11 @@ def _window_event(timed: MoqJsonWindowTimed | None) -> Timed | None:
 class WindowConsumer(_Stream[Timed]):
     """Async iterator over a JSON window track, yielding each change in order.
 
-    Each item is a :class:`Timed` whose ``value`` is a :class:`WindowPush`, :class:`WindowPop`, or
-    :class:`WindowSkip`. Group rolls never surface: a restated record this reader already has
-    yields nothing. A record first learned of from a restatement (after a join, or while behind)
-    carries that frame's timestamp, not its original push time. Usable as an async context manager
-    that cancels on exit.
+    Each item is a :class:`Timed` whose ``value`` is a :class:`WindowEventPush`,
+    :class:`WindowEventPop`, or :class:`WindowEventSkip`. Group rolls never surface: a restated
+    record this reader already has yields nothing. A record first learned of from a restatement
+    (after a join, or while behind) carries that frame's timestamp, not its original push time.
+    Usable as an async context manager that cancels on exit.
     """
 
     def __init__(self, track: subscribe.TrackConsumer) -> None:

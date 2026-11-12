@@ -1,4 +1,4 @@
-import Session from "@moq/qmux";
+import { Session } from "@moq/qmux";
 
 // The entrypoint has already loaded the fallback before a connection is requested.
 Object.assign(globalThis, {

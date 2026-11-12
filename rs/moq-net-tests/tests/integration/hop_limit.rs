@@ -2,7 +2,7 @@
 //! forwards one it has no room to stamp.
 //!
 //! Only a peer's route arrives with hops, so the routes under test land through the
-//! hidden `fuzz` module as a session lands them.
+//! `fuzz` module as a session lands them.
 
 use crate::support::{
 	Kind, drain,
@@ -18,16 +18,17 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	config.pool = cache::Pool::unbounded();
 	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Land a peer's route at `path` on `origin`, as its session does.
-fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> origin::Route {
+fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> origin::Claim {
 	moq_net::fuzz::requests_route(origin, moq_net::Path::new(path).unwrap(), route).unwrap()
 }
 
 /// A permissive source sends an over-limit path to prove ingress refusal; an
-/// accepted boundary path then proves egress counts the relay's own stamp.
+/// accepted boundary path then proves egress counts the relay's own stamp. Lite-07
+/// carries no hop chain: its routes are loop-free by feasibility instead.
 #[kio::test]
 async fn hop_limit_bounds_receive_and_send() {
 	for name in [
@@ -35,7 +36,6 @@ async fn hop_limit_bounds_receive_and_send() {
 		"moq-lite-04",
 		"moq-lite-05",
 		"moq-lite-06",
-		"moq-lite-07-wip",
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
@@ -46,6 +46,7 @@ async fn hop_limit_bounds_receive_and_send() {
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
+		let relay = relay.with_proxy(true);
 		let sink = produce_origin(3);
 		let _upstream = peer(version, &source, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
@@ -95,8 +96,9 @@ async fn hop_limit_bounds_receive_and_send() {
 /// withdraws only once no in-cap route is left.
 #[kio::test]
 async fn hop_limit_falls_back_to_a_forwardable_route() {
-	// Only wires carrying a route cost can rank a longer route first.
-	for name in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	// Only wires carrying a route cost can rank a longer route first, and only those
+	// carrying a hop chain cap it: lite-07 carries none.
+	for name in ["moq-lite-06", "moq-transport-18", "moq-transport-22"] {
 		let version = name.parse().unwrap();
 		let near = produce_origin(1);
 		let far = produce_origin(4);
@@ -105,6 +107,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
+		let relay = relay.with_proxy(true);
 		let sink = produce_origin(3);
 		let _near = peer(version, &near, &relay).await;
 		let _far = peer(version, &far, &relay).await;

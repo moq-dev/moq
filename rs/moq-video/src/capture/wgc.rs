@@ -97,7 +97,7 @@ struct Startup {
 impl Startup {
 	fn new(now: Instant) -> Self {
 		Self {
-			deadline: Some(now + Duration::from_secs(5)),
+			deadline: Some(now.saturating_add(Duration::from_secs(5))),
 		}
 	}
 
@@ -160,7 +160,7 @@ impl<T> Delivery<T> {
 		let elapsed =
 			u64::try_from(now.saturating_duration_since(started).as_micros()).map_err(|_| moq_net::TimeOverflow)?;
 		let timestamp = timestamp.checked_add(Timestamp::from_micros(elapsed)?)?;
-		self.next = now + self.interval;
+		self.next = now.saturating_add(self.interval);
 		Ok(Some((frame, timestamp)))
 	}
 }
@@ -196,9 +196,9 @@ mod tests {
 	fn startup_without_frame_events_expires() {
 		let now = Instant::now();
 		let startup = Startup::new(now);
-		let deadline = now + Duration::from_secs(5);
+		let deadline = now.saturating_add(Duration::from_secs(5));
 		assert_eq!(startup.deadline, Some(deadline));
-		assert!(startup.check(deadline - Duration::from_nanos(1)).is_ok());
+		assert!(startup.check(deadline.saturating_sub(Duration::from_nanos(1))).is_ok());
 		// Model WGC silence after minimizing between StartCapture and its first
 		// frame. No callback is required to reach the failure boundary.
 		assert!(matches!(startup.check(deadline), Err(Error::SourceUnavailable(_))));
@@ -215,8 +215,11 @@ mod tests {
 			assert_eq!(signal.wait(startup.deadline), Event::Borderless);
 			assert_eq!(signal.wait(startup.deadline), Event::Frame);
 			// Empty pools and invalid content sizes do not deliver a frame.
-			assert_eq!(startup.deadline, Some(now + Duration::from_secs(5)));
-			assert_eq!(startup.check(now + Duration::from_secs(second)).is_err(), second == 5);
+			assert_eq!(startup.deadline, Some(now.saturating_add(Duration::from_secs(5))));
+			assert_eq!(
+				startup.check(now.saturating_add(Duration::from_secs(second))).is_err(),
+				second == 5
+			);
 		}
 	}
 
@@ -224,15 +227,15 @@ mod tests {
 	fn first_delivery_removes_the_startup_deadline() {
 		let now = Instant::now();
 		let mut startup = Startup::new(now);
-		assert!(startup.check(now + Duration::from_secs(1)).is_ok());
+		assert!(startup.check(now.saturating_add(Duration::from_secs(1))).is_ok());
 		startup.delivered();
 		assert_eq!(startup.deadline, None);
-		assert!(startup.check(now + Duration::from_secs(10)).is_ok());
+		assert!(startup.check(now.saturating_add(Duration::from_secs(10))).is_ok());
 	}
 
 	#[test]
 	fn terminal_events_take_precedence_over_expired_startup() {
-		let startup = Startup::new(Instant::now() - Duration::from_secs(5));
+		let startup = Startup::new(Instant::now().saturating_sub(Duration::from_secs(5)));
 		let signal = Signal::default();
 		assert_eq!(signal.wait(startup.deadline), Event::Deadline);
 		signal.notify(Event::Frame);
@@ -252,7 +255,7 @@ mod tests {
 		delivery.replace(pixels.clone(), Timestamp::from_micros(1_000_000).unwrap(), now);
 
 		for step in 0..10 {
-			let now = now + interval * step;
+			let now = now.saturating_add(interval * step);
 			assert_eq!(delivery.deadline(), Some(now));
 			let (frame, timestamp) = delivery.next(now).unwrap().unwrap();
 			assert!(
@@ -260,7 +263,7 @@ mod tests {
 				"reuse the owned output without a conversion"
 			);
 			assert_eq!(timestamp.as_micros(), 1_000_000 + u128::from(step) * 20_000);
-			assert!(delivery.next(now + interval / 2).unwrap().is_none());
+			assert!(delivery.next(now.saturating_add(interval / 2)).unwrap().is_none());
 		}
 	}
 
@@ -271,24 +274,24 @@ mod tests {
 		let mut delivery = Delivery::new(interval, now);
 		delivery.replace(1, Timestamp::from_micros(1_000_000).unwrap(), now);
 		delivery.next(now).unwrap().unwrap();
-		let repeated = now + interval * 5;
+		let repeated = now.saturating_add(interval * 5);
 		assert_eq!(delivery.next(repeated).unwrap().unwrap().1.as_micros(), 1_100_000);
 		// This changed frame was acquired before the most recent repeated delivery.
 		delivery.replace(2, Timestamp::from_micros(1_090_000).unwrap(), repeated);
-		let (frame, timestamp) = delivery.next(repeated + interval).unwrap().unwrap();
+		let (frame, timestamp) = delivery.next(repeated.saturating_add(interval)).unwrap().unwrap();
 		assert_eq!(*frame, 2);
 		assert_eq!(timestamp.as_micros(), 1_120_000);
 
 		// Minimized, empty, or resizing sources stop repeating until new content arrives.
 		delivery.clear();
 		assert_eq!(delivery.deadline(), None);
-		let resumed = now + Duration::from_secs(1);
+		let resumed = now.saturating_add(Duration::from_secs(1));
 		assert!(delivery.next(resumed).unwrap().is_none());
 		delivery.replace(3, Timestamp::from_micros(1_990_000).unwrap(), resumed);
 		let (frame, timestamp) = delivery.next(resumed).unwrap().unwrap();
 		assert_eq!(*frame, 3);
 		assert_eq!(timestamp.as_micros(), 2_000_000);
-		assert_eq!(delivery.deadline(), Some(resumed + interval));
+		assert_eq!(delivery.deadline(), Some(resumed.saturating_add(interval)));
 	}
 
 	#[tokio::test]
@@ -319,17 +322,19 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
 		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
 		let reserved = catalog.reserve().with_interval(config.effective_join());
-		let mut producer = Producer::with_track(track, reserved, rendition).unwrap();
+		let mut producer = Producer::new(track, reserved, rendition).unwrap();
 		assert!(producer.demand().wanted().is_some());
 
 		// Only one captured picture arrives; more than three intervals of paced
 		// output must still reach a real video subscriber with advancing timestamps.
 		for step in 0..10 {
-			let now = now + interval * step;
+			let now = now.saturating_add(interval * step);
 			assert_eq!(delivery.deadline(), Some(now));
 			let (surface, timestamp) = delivery.next(now).unwrap().unwrap();
 			let frame = crate::Frame::new(crate::Surface::I420(surface.clone()), timestamp);
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
 			let received = loop {
 				if let moq_mux::container::Read::Frame { frame, .. } = subscriber.read().await.unwrap().unwrap() {
 					break frame;

@@ -44,10 +44,11 @@ async fn finish(order: Order) {
 			publisher.route.broadcast().close();
 		}
 		Order::EndBeforeEof => {
-			publisher.media.finish().expect("finish media");
+			let track = publisher.media.take().expect("open");
+			publisher.finished = Some(track.finish().expect("finish media"));
 			publisher.route.broadcast().close();
 			// The server stops serving the instance once `End` reaches it.
-			let deadline = kio::clock::now() + TIMEOUT;
+			let deadline = kio::clock::now().saturating_add(TIMEOUT);
 			while get(&app, &media).await.status() != StatusCode::NOT_FOUND {
 				assert!(kio::clock::now() < deadline, "End never reached the export");
 				kio::clock::sleep(Duration::from_millis(50)).await;

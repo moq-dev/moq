@@ -7,18 +7,10 @@
 # name stays announced with nothing behind it. Explicit withdrawals still consume
 # the handle, so only the implicit retraction on session loss is removed.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
+index 45654a5656..8af799f04c 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -7730,7 +7730,7 @@ impl Announced {
- 		let in_place = predecessor == Some(&path);
- 		// An error means the prefix is outside our origin's scope, so don't serve it.
- 		let predecessor = predecessor.and_then(|previous| match self.routes.get(previous)? {
--			Held::Attached(attached) => Some(&attached.dynamic),
-+			Held::Attached(attached) => Some(&*attached.dynamic),
- 			_ => None,
- 		});
- 		match subscriber.origin.forward(&path, route.clone(), predecessor) {
-@@ -7819,7 +7819,7 @@ impl Announced {
+@@ -9749,7 +9749,7 @@ impl Announced {
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -27,22 +19,44 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		}
  	}
  
-@@ -7921,7 +7921,8 @@ struct AnnouncedRoute {
+@@ -9831,7 +9831,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
+ 		let validity = if subscriber.version.has_instance() {
+ 			Default::default()
+ 		} else {
+-			crate::model::broadcast::RequestValidity::for_source(&entry.dynamic, request.path())
++			crate::model::broadcast::RequestValidity::for_source(&*entry.dynamic, request.path())
+ 		};
+ 		let source = subscriber.origin.create_source(path.clone(), validity);
+ 		// The handler exists before the requester sees the source, so a track it
+@@ -9859,7 +9859,8 @@ struct AnnouncedRoute<K = Path> {
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
--	dynamic: crate::origin::Route,
+-	dynamic: crate::origin::Claim,
 +	// MUTATION: never dropped, so a route outlives the session that announced it.
-+	dynamic: std::mem::ManuallyDrop<crate::origin::Route>,
++	dynamic: std::mem::ManuallyDrop<crate::origin::Claim>,
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
- 	/// Whether the GOAWAY drain already re-priced this route.
-@@ -7941,7 +7942,7 @@ impl AnnouncedRoute {
+ 	/// Queues this route on its prefix's ready set when its request queue wakes.
+@@ -9877,7 +9878,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
  	) -> Self {
  		Self {
  			route,
 -			dynamic,
 +			dynamic: std::mem::ManuallyDrop::new(dynamic),
  			live: Default::default(),
- 			drained: false,
  			waker: std::task::Waker::from(wake.clone()),
+ 			wake,
+diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
+index 20fe66dd38..91675a0b9b 100644
+--- a/rs/moq-net/src/lite/subscriber/routed.rs
++++ b/rs/moq-net/src/lite/subscriber/routed.rs
+@@ -402,7 +402,7 @@ impl Routed {
+ 				if let Some(served) = self.served.remove(&(id, claim))
+ 					&& ended
+ 				{
+-					served.route.dynamic.withdrawn();
++					std::mem::ManuallyDrop::into_inner(served.route.dynamic).withdrawn();
+ 				}
+ 			}
+ 			// The ROUTE_END echo goes out as the peer's ROUTE_END is read, and a stream

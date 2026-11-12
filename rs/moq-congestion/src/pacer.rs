@@ -21,14 +21,13 @@ pub(crate) struct Pacer {
     /// The transport checks a datagram while the previous packet is still being built,
     /// so one packet can leave beyond the burst budget.
     debt: u64,
-    max_bytes_per_second: Option<u64>,
     prev: Instant,
 }
 
 /// Inputs a window-derived [`Pacer::capacity`] was calculated from
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 struct WindowInputs {
-    /// Congestion window in bytes, after [`rate_limited_window`] has clamped it
+    /// Congestion window in bytes
     window: u64,
     /// MTU of the path in bytes
     mtu: u16,
@@ -36,21 +35,13 @@ struct WindowInputs {
 
 impl Pacer {
     /// Obtains a new [`Pacer`].
-    pub(crate) fn new(
-        smoothed_rtt: Duration,
-        window: u64,
-        mtu: u16,
-        max_bytes_per_second: Option<u64>,
-        now: Instant,
-    ) -> Self {
-        let window = rate_limited_window(smoothed_rtt, window, max_bytes_per_second);
+    pub(crate) fn new(smoothed_rtt: Duration, window: u64, mtu: u16, now: Instant) -> Self {
         let capacity = optimal_capacity(smoothed_rtt, window, mtu);
         Self {
             capacity,
             last_window_inputs: Some(WindowInputs { window, mtu }),
             tokens: capacity,
             debt: 0,
-            max_bytes_per_second,
             prev: now,
         }
     }
@@ -103,7 +94,6 @@ impl Pacer {
             return self.delay_at_rate(pacing_rate, bytes_to_send, mtu, now);
         }
 
-        let window = rate_limited_window(smoothed_rtt, window, self.max_bytes_per_second);
         let inputs = WindowInputs { window, mtu };
         if self.last_window_inputs != Some(inputs) {
             self.capacity = optimal_capacity(smoothed_rtt, window, mtu);
@@ -154,7 +144,7 @@ impl Pacer {
 
         // divisions come before multiplications to prevent overflow
         // this is the time at which the pacing window becomes empty
-        Some(now + (unscaled_delay / 5) * 4)
+        Some(now.saturating_add((unscaled_delay / 5) * 4))
     }
 
     /// Return how long we need to wait before sending `bytes_to_send` when the congestion
@@ -170,14 +160,8 @@ impl Pacer {
         mtu: u16,
         now: Instant,
     ) -> Option<Instant> {
-        // An explicit rate is clamped directly. The 1.25 correction in
-        // `rate_limited_window` exists only to cancel out the legacy refill speedup, which
-        // this path does not apply. A rate of zero would divide by zero below.
-        let rate = match self.max_bytes_per_second {
-            Some(max_bytes_per_second) => Ord::min(pacing_rate, max_bytes_per_second),
-            None => pacing_rate,
-        }
-        .max(1);
+        // A rate of zero would divide by zero below.
+        let rate = pacing_rate.max(1);
 
         let capacity = rate_capacity(rate, mtu);
         if capacity != self.capacity {
@@ -214,7 +198,9 @@ impl Pacer {
         // a nanosecond, and truncating that to zero would re-arm the timer at `now` forever.
         let deficit = target.saturating_sub(self.tokens) + self.debt;
         let nanos = (u128::from(deficit) * 1_000_000_000).div_ceil(u128::from(rate));
-        Some(now + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)))
+        Some(now.saturating_add(Duration::from_nanos(
+            u64::try_from(nanos).unwrap_or(u64::MAX),
+        )))
     }
 }
 
@@ -256,27 +242,6 @@ fn optimal_capacity(smoothed_rtt: Duration, window: u64, mtu: u16) -> u64 {
     let rtt = smoothed_rtt.as_nanos().max(1);
     let rate = u64::try_from(window as u128 * 1_000_000_000 / rtt).unwrap_or(u64::MAX);
     rate_capacity(rate, mtu)
-}
-
-/// Clamps the window to limit the sending rate to `max_bytes_per_second`.
-///
-/// If `max_bytes_per_second` is `None`, the original window is returned.
-fn rate_limited_window(
-    smoothed_rtt: Duration,
-    window: u64,
-    max_bytes_per_second: Option<u64>,
-) -> u64 {
-    let Some(max_bytes_per_second) = max_bytes_per_second else {
-        return window;
-    };
-
-    let rate_window = max_bytes_per_second as f64 * smoothed_rtt.as_secs_f64();
-
-    // the pacer refills tokens at x1.25 speed, so we shrink the window to cancel out the speedup
-    // (otherwise the actual sending rate could be higher than `max_bytes_per_second`)
-    let adjusted_rate_window = (rate_window / 1.25).round();
-
-    Ord::min(window, Ord::max(adjusted_rate_window as u64, 1))
 }
 
 /// Period of traffic to batch together on a reasonably fast connection
@@ -359,7 +324,7 @@ mod tests {
         /// pacer needs for ten seconds at [`TEST_PACING_RATE`].
         const MAX_POLLS: u64 = 1_000_000;
 
-        let deadline = start + duration;
+        let deadline = start.saturating_add(duration);
         let mut at = start;
         let mut sent = 0;
         let mut polls = 0;
@@ -389,7 +354,7 @@ mod tests {
         let window = 2_000_000;
         let now = Instant::now();
         let metrics = paced_metrics(window, TEST_PACING_RATE);
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
 
         // Honouring a finite rate is only possible by delaying, so a sender polling at a
         // single instant must eventually be told to wait.
@@ -407,7 +372,7 @@ mod tests {
         let window = 2_000_000;
         let now = Instant::now();
         let metrics = paced_metrics(window, TEST_PACING_RATE);
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
 
         let (resume, _) = burst_until_blocked(&mut pacer, rtt, mtu, now, metrics)
             .expect("pacer must block once the burst budget is spent");
@@ -430,7 +395,7 @@ mod tests {
         // 33 GB/s, as BBR3's Startup derives from a microsecond RTT: three bytes take under a
         // nanosecond to earn.
         let metrics = paced_metrics(window, 33_000_000_000);
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
         pacer.delay(rtt, u64::from(mtu), mtu, now, metrics);
         pacer.tokens = u64::from(mtu) - 3;
 
@@ -451,7 +416,7 @@ mod tests {
         let start = Instant::now();
         for rate in [1_250, 12_500, 62_500, 125_000] {
             let metrics = paced_metrics(1_000_000, rate);
-            let mut pacer = Pacer::new(rtt, 1_000_000, mtu, None, start);
+            let mut pacer = Pacer::new(rtt, 1_000_000, mtu, start);
             assert_eq!(
                 pacer.delay(rtt, 2 * u64::from(mtu), mtu, start, metrics),
                 None
@@ -461,14 +426,20 @@ mod tests {
             pacer.on_transmit(mtu);
 
             let packet_time = Duration::from_nanos((u64::from(mtu) * 1_000_000_000).div_ceil(rate));
-            let resume = start + packet_time * 2;
+            let resume = start.saturating_add(packet_time * 2);
             assert_eq!(
                 pacer.delay(rtt, u64::from(mtu), mtu, start, metrics),
                 Some(resume)
             );
             // Earning one packet repays the overdraw; the next packet still needs credit.
             assert_eq!(
-                pacer.delay(rtt, u64::from(mtu), mtu, start + packet_time, metrics),
+                pacer.delay(
+                    rtt,
+                    u64::from(mtu),
+                    mtu,
+                    start.saturating_add(packet_time),
+                    metrics
+                ),
                 Some(resume),
             );
             assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, resume, metrics), None);
@@ -482,7 +453,7 @@ mod tests {
         let start = Instant::now();
         for rate in [1_250, 12_500, 62_500, 125_000] {
             for explicit_rate in [false, true] {
-                let mut pacer = Pacer::new(rtt, 2_000_000, mtu, None, start);
+                let mut pacer = Pacer::new(rtt, 2_000_000, mtu, start);
                 burst_until_blocked(
                     &mut pacer,
                     rtt,
@@ -502,8 +473,9 @@ mod tests {
                     window: rate / 25,
                     pacing_rate: explicit_rate.then_some(rate),
                 };
-                let resume = start
-                    + Duration::from_nanos((2 * u64::from(mtu) * 1_000_000_000).div_ceil(rate));
+                let resume = start.saturating_add(Duration::from_nanos(
+                    (2 * u64::from(mtu) * 1_000_000_000).div_ceil(rate),
+                ));
                 assert_eq!(
                     pacer.delay(rtt, u64::from(mtu), mtu, start, metrics),
                     Some(resume)
@@ -534,7 +506,7 @@ mod tests {
         ] {
             for batch in [1, 2] {
                 let metrics = paced_metrics(window, rate);
-                let mut pacer = Pacer::new(rtt, window, mtu, None, start);
+                let mut pacer = Pacer::new(rtt, window, mtu, start);
                 let sent = bytes_sent_over(
                     &mut pacer,
                     rtt,
@@ -563,11 +535,11 @@ mod tests {
     #[test]
     fn does_not_panic_on_bad_instant() {
         let old_instant = Instant::now();
-        let new_instant = old_instant + Duration::from_micros(15);
+        let new_instant = old_instant.saturating_add(Duration::from_micros(15));
         let rtt = Duration::from_micros(400);
 
         assert!(
-            Pacer::new(rtt, 30000, 1500, None, new_instant)
+            Pacer::new(rtt, 30000, 1500, new_instant)
                 .delay(
                     Duration::from_micros(0),
                     0,
@@ -578,7 +550,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            Pacer::new(rtt, 30000, 1500, None, new_instant)
+            Pacer::new(rtt, 30000, 1500, new_instant)
                 .delay(
                     Duration::from_micros(0),
                     1600,
@@ -589,7 +561,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            Pacer::new(rtt, 30000, 1500, None, new_instant)
+            Pacer::new(rtt, 30000, 1500, new_instant)
                 .delay(
                     Duration::from_micros(0),
                     1500,
@@ -608,18 +580,18 @@ mod tests {
         let rtt = Duration::from_millis(50);
         let now = Instant::now();
 
-        let pacer = Pacer::new(rtt, window, mtu, None, now);
+        let pacer = Pacer::new(rtt, window, mtu, now);
         assert_eq!(
             pacer.capacity,
             (window as u128 * TARGET_BURST_INTERVAL.as_nanos() / rtt.as_nanos()) as u64
         );
         assert_eq!(pacer.tokens, pacer.capacity);
 
-        let pacer = Pacer::new(Duration::from_millis(0), window, mtu, None, now);
+        let pacer = Pacer::new(Duration::from_millis(0), window, mtu, now);
         assert_eq!(pacer.capacity, MAX_BURST_SIZE * mtu as u64);
         assert_eq!(pacer.tokens, pacer.capacity);
 
-        let pacer = Pacer::new(rtt, 1, mtu, None, now);
+        let pacer = Pacer::new(rtt, 1, mtu, now);
         assert_eq!(pacer.capacity, mtu as u64);
         assert_eq!(pacer.tokens, pacer.capacity);
     }
@@ -631,7 +603,7 @@ mod tests {
         let rtt = Duration::from_millis(50);
         let now = Instant::now();
 
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
         assert_eq!(
             pacer.capacity,
             (window as u128 * TARGET_BURST_INTERVAL.as_nanos() / rtt.as_nanos()) as u64
@@ -670,7 +642,7 @@ mod tests {
         let rtt = Duration::from_millis(50);
         let old_instant = Instant::now();
 
-        let mut pacer = Pacer::new(rtt, window, mtu, None, old_instant);
+        let mut pacer = Pacer::new(rtt, window, mtu, old_instant);
         let packet_capacity = pacer.capacity / mtu as u64;
 
         for _ in 0..packet_capacity {
@@ -703,7 +675,7 @@ mod tests {
                 rtt,
                 mtu as u64,
                 mtu,
-                old_instant + pace_duration / 2,
+                old_instant.saturating_add(pace_duration / 2),
                 unpaced_metrics(window),
             ),
             None
@@ -726,49 +698,12 @@ mod tests {
                 rtt,
                 mtu as u64,
                 mtu,
-                old_instant + pace_duration * 3 / 2,
+                old_instant.saturating_add(pace_duration * 3 / 2),
                 unpaced_metrics(window),
             ),
             None
         );
         assert_eq!(pacer.tokens, pacer.capacity);
-    }
-
-    #[test]
-    fn computes_pause_correctly_for_rate_limited() {
-        let window = 2_000_000u64;
-        let mtu = 1000;
-        let rtt = Duration::from_millis(50);
-        let old_instant = Instant::now();
-
-        let mut pacer = Pacer::new(rtt, window, mtu, Some(2_000), old_instant);
-        assert_eq!(
-            pacer.delay(rtt, 1_000, mtu, old_instant, unpaced_metrics(window)),
-            None,
-            "When capacity is available packets should be sent immediately"
-        );
-        pacer.on_transmit(mtu);
-
-        let actual_delay = pacer
-            .delay(rtt, 1_000, mtu, old_instant, unpaced_metrics(window))
-            .expect("Send must be delayed")
-            .duration_since(old_instant);
-
-        let expected_delay = Duration::from_millis(500);
-        let diff = actual_delay.abs_diff(expected_delay);
-
-        // Allow up to 2ns difference due to rounding
-        assert!(
-            diff < Duration::from_nanos(2),
-            "expected ≈ {expected_delay:?}, got {actual_delay:?} (diff {diff:?})"
-        );
-
-        // Should be able to send after a while
-        let now = old_instant + expected_delay / 2;
-        assert_eq!(
-            pacer.delay(rtt, 500, mtu, now, unpaced_metrics(window)),
-            None
-        );
     }
 
     #[test]
@@ -780,7 +715,7 @@ mod tests {
         // A window twice the one the pacer was built with must not disturb a budget the
         // controller's rate determines.
         let metrics = paced_metrics(window * 2, TEST_PACING_RATE);
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
 
         pacer.delay(rtt, u64::from(mtu), mtu, now, metrics);
 
@@ -799,7 +734,7 @@ mod tests {
         let rtt = Duration::from_millis(50);
         let now = Instant::now();
         let metrics = paced_metrics(window, RATE);
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
 
         let (resume, _) = burst_until_blocked(&mut pacer, rtt, mtu, now, metrics)
             .expect("pacer must block once the burst budget is spent");
@@ -820,7 +755,7 @@ mod tests {
         let rtt = Duration::from_millis(50);
         let now = Instant::now();
         let metrics = paced_metrics(window, TEST_PACING_RATE);
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
 
         let (_, burst) = burst_until_blocked(&mut pacer, rtt, mtu, now, metrics)
             .expect("pacer must block once the burst budget is spent");
@@ -847,7 +782,7 @@ mod tests {
         let now = Instant::now();
         let fast = paced_metrics(window, TEST_PACING_RATE);
         let slow = paced_metrics(window, TEST_PACING_RATE / 10);
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
 
         // Earn credit at the high rate, as during a ProbeBW_UP phase...
         assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, now, fast), None);
@@ -872,7 +807,7 @@ mod tests {
         let mtu = 1500;
         let rtt = Duration::from_millis(50);
         let now = Instant::now();
-        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
 
         // A controller free to report a rate on some calls and not on others is within what
         // `Rate` allows. The rate path leaves its own budget behind...
@@ -893,42 +828,6 @@ mod tests {
             pacer.capacity,
             optimal_capacity(rtt, window, mtu),
             "the window path kept a burst budget the rate path derived"
-        );
-    }
-
-    #[test]
-    fn max_bytes_per_second_overrides_a_higher_controller_rate() {
-        const SECONDS: u64 = 1;
-        /// 1 Mbit/s in bytes/sec, two orders of magnitude under [`TEST_PACING_RATE`].
-        const LIMIT: u64 = 125_000;
-
-        let window = 2_000_000;
-        let mtu = 1500;
-        let rtt = Duration::from_millis(50);
-        let start = Instant::now();
-        let metrics = paced_metrics(window, TEST_PACING_RATE);
-        let mut pacer = Pacer::new(rtt, window, mtu, Some(LIMIT), start);
-
-        let sent = bytes_sent_over(
-            &mut pacer,
-            rtt,
-            mtu,
-            start,
-            Duration::from_secs(SECONDS),
-            metrics,
-            1,
-        );
-
-        // The configured ceiling binds even though the controller asks for far more.
-        let expected = LIMIT * SECONDS;
-        let slack = expected / 20;
-        assert!(
-            sent <= expected + slack,
-            "emitted {sent} bytes in {SECONDS}s, over the {expected} byte ceiling"
-        );
-        assert!(
-            sent + slack >= expected,
-            "emitted {sent} bytes in {SECONDS}s, underrunning the {expected} byte ceiling"
         );
     }
 }

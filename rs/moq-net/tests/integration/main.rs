@@ -1,6 +1,6 @@
 //! Integration tests without feature-enabling dependencies, linked into one binary.
 //!
-//! Tests needing JSON consumers or the hidden `fuzz` module live in `moq-net-tests`.
+//! Tests needing JSON consumers or the `fuzz` module live in `moq-net-tests`.
 //! Each `tests/*.rs` file is its own crate that links this package and its
 //! dependencies again, so add new integration tests here as a module.
 //! `send.rs` stays apart because it builds on another toolchain.
@@ -8,13 +8,14 @@
 //! apply to every test in the binary.
 
 mod announce_covering_route;
-mod announce_takeover;
 mod announce_to_serve;
+mod answer_behind_cache;
 mod auth;
 mod broadcast_close;
 mod catalog_acquisition;
 mod catalog_churn;
 mod catalog_handover;
+mod claim_continues;
 mod compress;
 mod control_stats;
 mod datagram;
@@ -23,6 +24,7 @@ mod drained_claim;
 mod empty_group;
 mod errored_end;
 mod extensions;
+mod failover_chain;
 mod fastest_reader;
 mod fetch_cancel;
 mod fetch_fanout;
@@ -41,8 +43,10 @@ mod implementation;
 mod instance;
 mod late_lower_group;
 mod lazy_discovery;
+mod mesh_sweep;
 mod mesh_withdraw;
 mod model;
+mod mount;
 mod multi_cdn;
 mod partial_group;
 mod quiet_catalog;
@@ -59,7 +63,6 @@ mod route_health;
 mod routing_contracts;
 mod segmented_frame;
 mod session_close;
-mod session_idle;
 mod session_panic;
 mod settled_end_survives_abort;
 mod setup_negotiation;
@@ -86,7 +89,6 @@ mod unannounce_release;
 mod untimed;
 mod viewer_target;
 mod warm_backfill;
-mod wide_hop;
 mod wide_sequence;
 mod widened_max_age;
 mod zero_copy;

@@ -9,7 +9,7 @@
  *
  * @module
  */
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
@@ -42,15 +42,15 @@ interface Command {
 }
 
 /** A driver session: pending until the truck accepts, `null` once the dial or the session failed. */
-type Session = Moq.Signals.Signal<Moq.socket.TrackStream | null | undefined>;
+type Session = Moq.Signals.Signal<Moq.Socket.TrackStream | null | undefined>;
 
-const CONTROL_HEARTBEAT = Milli(250);
+const CONTROL_HEARTBEAT = Duration.millis(250);
 const MAX_PENDING_ACKS = 64;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /** Send one command as its own message, so a late one never holds up the next. */
-function write(stream: Moq.socket.TrackStream, command: Command) {
+function write(stream: Moq.Socket.TrackStream, command: Command) {
 	// A session that already ended has nothing to send to; its reply reader reports the end.
 	if (stream.producer.closed.peek() !== undefined) return;
 	const message = { ...command.cmd, sequence: command.sequence, timestamps: command.timestamps };
@@ -120,7 +120,7 @@ export class Truck {
 		this.#signals.run(this.#runActive.bind(this));
 		this.#signals.run(this.#runControlLease.bind(this));
 		this.#signals.run(this.#runRespawn.bind(this));
-		this.#signals.interval(() => this.#heartbeat(), Nano.fromMilli(CONTROL_HEARTBEAT));
+		this.#signals.interval(() => this.#heartbeat(), CONTROL_HEARTBEAT);
 
 		// Video pipeline.
 		this.broadcast = new Watch.Broadcast({
@@ -313,11 +313,11 @@ export class Truck {
 	#timestamps(): { label: string; ts: number }[] {
 		const entries: { label: string; ts: number }[] = [];
 		const received = this.sync.out.timestamp.peek();
-		if (received != null) entries.push({ label: "received", ts: received });
+		if (received != null) entries.push({ label: "received", ts: received.asMillis() });
 		const decoded = this.videoDecoder.out.timestamp.peek();
-		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
+		if (decoded != null) entries.push({ label: "decoded", ts: decoded.asMillis() });
 		const rendered = this.videoRenderer.out.timestamp.peek();
-		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
+		if (rendered != null) entries.push({ label: "rendered", ts: rendered.asMillis() });
 		return entries;
 	}
 
@@ -473,8 +473,8 @@ export class Truck {
 
 	/** Dial the truck from a new endpoint `id`, both closed with `effect`. */
 	#dial(effect: Moq.Signals.Effect, id: string): Session {
-		const session: Session = new Moq.Signals.Signal<Moq.socket.TrackStream | null | undefined>(undefined);
-		const endpoint = new Moq.socket.Endpoint(this.#origin, SOCKET, id);
+		const session: Session = new Moq.Signals.Signal<Moq.Socket.TrackStream | null | undefined>(undefined);
+		const endpoint = new Moq.Socket.Endpoint(this.#origin, SOCKET, id);
 		effect.cleanup(() => {
 			// Finishing first ends the session cleanly rather than resetting it.
 			session.peek()?.producer.finish();
@@ -493,7 +493,7 @@ export class Truck {
 	}
 
 	/** Read the truck's acknowledgements, returning true once the session ends unless `effect` closed it. */
-	async #readReplies(effect: Moq.Signals.Effect, stream: Moq.socket.TrackStream): Promise<boolean> {
+	async #readReplies(effect: Moq.Signals.Effect, stream: Moq.Socket.TrackStream): Promise<boolean> {
 		// An acknowledgement a heartbeat late is superseded by the next one.
 		stream.consumer.update({ order: "ascending", delay: { max: CONTROL_HEARTBEAT } });
 		const replies = stream.consumer.ordered();

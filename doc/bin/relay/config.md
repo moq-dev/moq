@@ -19,7 +19,6 @@ Precedence is CLI, then env, then file, then defaults.
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
 version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all but moq-lite-07-wip.
 timeout = "10s"                      # Handshake deadline. "0" waits forever.
-implementation = "edge/1"            # SETUP name for the relay. Omit for moq-relay/<v> moq-net-rs/<v>, "" to send none.
 
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
@@ -49,7 +48,6 @@ allow.uid = [1001]
 
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
                                      # The relay always offers ietf, for moq-lite-07 relay links.
-auth = false                         # Decline MoQ Auth.
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
 ```
 
@@ -58,10 +56,11 @@ admission, so a peer that connects and never speaks, or whose admission never
 gets an answer, is closed instead of held open by keep-alives. An HTTP read's
 admission is bounded by the same value from the request's arrival.
 
-`implementation` names the relay in its SETUP, on accepted sessions and cluster dials
-alike. A client that advertises its own name (moq-lite-05+ or any moq-transport draft)
-reaches the [auth server](/bin/relay/auth#the-contract) with it as `implementation`,
-which is where to count client versions; older clients arrive without one.
+The relay names itself `moq-relay/<v> moq-net-rs/<v>` in its SETUP, on accepted
+sessions and cluster dials alike. A client that advertises its own name (moq-lite-05+
+or any moq-transport draft) reaches the [auth server](/bin/relay/auth#the-contract)
+with it as `implementation`, which is where to count client versions; older clients
+arrive without one.
 
 `bind` is the relay's one UDP port. Beside QUIC it carries WebRTC media for an
 [embedder](/bin/relay/#embed) that takes it; otherwise that traffic is dropped,
@@ -209,11 +208,11 @@ By default one work-stealing runtime serves every connection off one UDP
 socket. On Linux, QUIC can instead run on single-threaded workers, each with
 its own socket on the listen address (`SO_REUSEPORT`), so a connection is
 handled start to finish by one worker thread and its packets never cross
-threads. `pin = true` also keeps that thread on one core.
+threads. `pin = true` also keeps that thread on one core, and needs `workers`.
 
 ```toml
 [runtime]
-workers = 8                          # Single-threaded QUIC workers. Omit for the shared runtime.
+workers = 8                          # Single-threaded QUIC workers: "shared" (default), "auto" (one per core), or a count.
 pin = false                          # Pin each worker to a core. Off by default.
 io_uring = false                     # Drive them with io_uring instead of tokio.
 ```
@@ -305,7 +304,6 @@ See [Authentication](/bin/relay/auth).
 connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token, upstream} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
-id = 12345                                            # Stable Hop ID across restarts.
 route_key = "route.key"                               # Route key; relays sharing the file fail over as one to scoped peers.
 max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).
 
@@ -333,8 +331,7 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
-extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
-extensions.solicit = false           # Decline MoQ Solicit. All default to on, as in [listen.extensions].
+extensions.solicit = false           # Decline MoQ Solicit on outbound moq-transport sessions, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
@@ -389,20 +386,20 @@ defaults that is two streams per client session and eight per peer link.
 enabled = true
 prefix = ".stats"                    # The broadcast appears at <prefix>/node/<node>.
 interval = "1s"                      # Time between snapshots. Default.
-node = "sjc/1"                       # Disambiguates relays sharing a cluster.
-depth = 1                            # One group track per first N path segments (per tenant).
-linger = "5m"                        # Keep an empty group's track listed this long. Default.
+node = "sjc/1"                       # Required with stats enabled on a clustered relay, so nodes do not overwrite each other.
+depth = 1                            # One bucket track per first N path segments (per tenant).
+linger = "5m"                        # Keep an empty bucket's track listed this long. Default.
 ```
 
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
 Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
-so a restart is a new broadcast at the same path. Each group is a
-[track](/concept/stats#group-tracks) of that broadcast, and one returning after
+so a restart is a new broadcast at the same path. Each bucket is a
+[track](/concept/stats#bucket-tracks) of that broadcast, and one returning after
 its linger restarts its counters under a new run id without an announce. The
 node's totals count everything since its run began, so billing reads those;
-a group's per-path traffic and per-label sessions and HTTP requests are for
+a bucket's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them

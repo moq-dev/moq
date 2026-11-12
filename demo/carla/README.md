@@ -53,12 +53,12 @@ carla/{truck}/{camera}.hang       <- one media broadcast per camera (hang catalo
   hd                                 720p H.264, for the focused view
   status                             JSON Snapshot telemetry
 
-carla/.socket/{truck}             <- the truck's socket endpoint, which drivers dial
-carla/.socket/driver-{id}         <- one endpoint per driver lease
+carla/.server/{truck}             <- the truck's server socket endpoint, which drivers dial
+carla/.client/{id}                <- one client endpoint per driver lease
 ```
 
-Each truck accepts `track` sessions on its endpoint. A driver dials from an
-endpoint of its own, one session per lease, and sends one control per message;
+Each truck accepts `track` sessions on its server endpoint. A driver dials from
+a client endpoint of its own, one session per lease, and sends one control per message;
 the truck answers each control it accepted from the lease holder on the same
 session. Cameras are sibling broadcasts, so switching views never creates a
 second claim on the same wheel.
@@ -131,8 +131,8 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
 - **E-stop latches** until an explicit reset, from any viewer. The lease
   holder sends it on its session; any other viewer dials a short-lived session
   of its own, so a bystander's stop neither takes the lease nor waits behind
-  the holder's controls. A latched truck nobody drives is also cleared when it respawns
-  as wedged, below.
+  the holder's controls. A latched truck is also cleared when it respawns as
+  stopped, below.
 - **Gear changes are interlocked**: the gate keeps the current gear unless the
   command releases throttle and applies some brake.
 - **Takeover starts braking**: the player keeps measured steering and gear,
@@ -145,21 +145,23 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
   coasts onto the nearest lane running its way (`handback.py`), because
   Traffic Manager steers a truck it takes back toward the nearest waypoint
   whatever its heading.
-- **A wedged truck respawns**: a truck nobody drives, autonomous or with its
-  e-stop latched, that has not moved 2 m in 5 minutes of a running world
-  returns to a free spawn point under autonomy, its e-stop cleared.
+- **A stopped truck respawns**: any truck that has not moved 2 m in 2 minutes
+  of a running world, whether autonomous, e-stopped, or parked under a driver,
+  returns to a free spawn point under autonomy, its e-stop cleared. The worker
+  ends the holder's driving session, so the player lets go instead of
+  reclaiming the fresh spawn.
 
 The lease is cooperative. Anonymous drivers share one grant to publish
-`carla/.socket/driver-*`, so an endpoint id is all it takes to announce in a
-driver's place and win the relay's route to its next dial. Each driver's id is
+`carla/.client/*`, so an endpoint id is all it takes to announce in a driver's
+place and win the relay's route to its next session. Each driver's id is
 therefore 128 random bits, and `status` names the holder and the e-stop's
 sender by a handle instead: `driver-` and 8 hex digits of the SHA-256 of the
 session's secret id, which the driver derives the same way to recognize its
-own lease. Truck names must not look like driver ids, or the same grant would
-let anyone impersonate a truck; the worker refuses one. Anyone may still claim
-a free truck or press its e-stop, so the lease stops two honest drivers
-fighting over a truck, not a deliberate disruption. Anything beyond a simulator
-needs per-driver tokens scoped to the driver's own endpoint.
+own lease. The grant covers only client endpoints, so no driver can announce a
+truck's server endpoint, whatever its name. Anyone may still claim a free truck
+or press its e-stop, so the lease stops two honest drivers fighting over a
+truck, not a deliberate disruption. Anything beyond a simulator needs
+per-driver tokens scoped to the driver's own endpoint.
 
 ## The simulator
 
@@ -204,7 +206,7 @@ worker exits for systemd to restart.
   packets only up to the next keyframe.
 - **Tested without CARLA.** A Vulkan stand-in for the plugin drives the
   bridge: `just carla bridge-gpu` runs it on an NVIDIA host, and
-  `cargo run -p moq-carla-bridge --example standin -- <socket> truck1/front`
+  `cargo run --manifest-path demo/carla/bridge/Cargo.toml --example standin -- <socket> truck1/front`
   feeds a worker by hand. The plugin itself compiles only in the CARLA build.
 
 The C ABI the plugin calls is `bridge/include/carla_bridge.h`. moq-dev/carla
@@ -222,7 +224,7 @@ just carla venv
 just carla service-install
 
 # The units read this. MOQ_URL carries a token allowed to publish `carla/**`,
-# which covers the trucks' endpoints, and subscribe `carla/.socket/driver-*`,
+# which covers the trucks' server endpoints, and subscribe `carla/.client/**`,
 # the endpoints drivers dial from; keeping it here keeps it off the command
 # line. CARLA_IMAGE is the tag the moq-dev/carla build printed, since the worker
 # refuses a stock simulator.
@@ -268,5 +270,5 @@ unfamiliar layout; the result is stored per device.
 ## Checks
 
 `just carla check` lints and tests the worker and its launchers without CARLA
-or a GPU. `just js` and `just rs` cover the player and the bridge, and
+or a GPU. `just js` covers the player, `just carla bridge-check` the bridge, and
 `just carla bridge-gpu` runs the bridge's hardware test.

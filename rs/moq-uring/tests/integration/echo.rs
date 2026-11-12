@@ -50,12 +50,7 @@ fn echo_tokio_peer() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[moq_tokio::quic::web::ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let server = quic::server::Config::new(certs.server(&[moq_tokio::quic::web::ALPN]));
 	let socket = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
@@ -75,7 +70,7 @@ fn echo_tokio_peer() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
+			let request = web_transport_proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
 			);
 			let session = crate::support::web_connect(request, Default::default())

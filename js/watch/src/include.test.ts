@@ -4,11 +4,13 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Instance, Origin, Path, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import * as Mint from "../../net/src/mint.ts";
+import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
 
 function publish(origin: Origin.Producer, path: string, instance?: Instance.Valid) {
-	const publication = origin.route(Path.from(path), { instance });
+	const publication = origin.route(Path.from(path), { instance: instance && { id: instance, epoch: 0n } });
 	return publication.broadcast;
 }
 
@@ -102,8 +104,10 @@ it("opens a listed include only on selection, keeping its rendition IDs its own"
 
 it("reads an unavailable include as offline without touching the parent", async () => {
 	const origin = new Origin.Producer();
+	// A session that could announce the include, so its absence reads offline.
+	wireOf(origin).attach(true);
 	publish(origin, "room/main.hang");
-	const claim = origin.routePrefix(Path.from("room/absent.hang"));
+	const claim = origin.claim(Path.from("room/absent.hang"));
 	const requests = claim.requested();
 	const source = new Broadcast({
 		origin,
@@ -219,6 +223,8 @@ it("tracks the include entry without reopening it on unrelated catalog updates",
 
 it("follows a restarted contributor only for an entry that names no instance", async () => {
 	const origin = new Origin.Producer();
+	// A session that could announce the include, so its absence reads offline.
+	wireOf(origin).attach(true);
 	publish(origin, "room/main.hang");
 	const [oldInstance, newInstance] = [Instance.random(), Instance.random()];
 	const old = publish(origin, "room/extra.hang", oldInstance);
@@ -296,7 +302,7 @@ it("never reads an include of another instance, but reads a minted one", async (
 	const proven = publish(origin, "room/proven.hang", served);
 	const track = proven.createTrack(Catalog.TRACK);
 	// A route over a wire that carries no instance has one its session minted.
-	publish(origin, "room/plain.hang", Instance.minted());
+	publish(origin, "room/plain.hang", Mint.fresh());
 	const named = Instance.random();
 	const include = (instance: Instance.Valid) =>
 		Catalog.RootSchema.parse({

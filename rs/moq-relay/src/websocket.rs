@@ -1,9 +1,8 @@
 use bytes::Bytes;
 use hyper_util::rt::TokioIo;
-use qmux::ws::tokio_tungstenite::WebSocketStream;
-use qmux::ws::tungstenite::{self, protocol::Role};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::tungstenite;
 
 use axum::{
 	extract::{ConnectInfo, Extension, OriginalUri, Request, State},
@@ -41,10 +40,9 @@ pub(crate) async fn serve_ws(
 	// upgrade enters here; after the drain commits, it receives 503 instead.
 	let active = admission
 		.and_then(|Extension(admission)| admission.take())
-		.or_else(|| state.shutdown.activity.enter())
+		.or_else(|| state.shutdown.admission.enter())
 		.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-	let alpns = versions.alpns();
-	let protocol = negotiate_subprotocol(request.headers(), &alpns)?;
+	let protocol = negotiate_subprotocol(request.headers(), &versions)?;
 
 	let headers = request.headers();
 	let host = uri
@@ -119,15 +117,6 @@ fn switching_protocols(key: &HeaderValue, protocol: &str) -> Response {
 		.expect("every header is a valid value")
 }
 
-/// The socket config for an upgraded connection: a message is one qmux record, so the socket
-/// buffers no more than one before qmux sees it.
-fn socket_config() -> tungstenite::protocol::WebSocketConfig {
-	let max = moq_tokio::websocket::max_message_size();
-	tungstenite::protocol::WebSocketConfig::default()
-		.max_message_size(Some(max))
-		.max_frame_size(Some(max))
-}
-
 /// How many upgrades reclaimed the listener's socket, so a test can tell the direct path ran.
 #[cfg(test)]
 pub(crate) static RECLAIMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -154,13 +143,23 @@ async fn serve_upgraded(
 	}
 }
 
-/// Run a MoQ session over the WebSocket on `io`, whose first bytes, `read`, were already read.
+/// Run a MoQ session over the WebSocket on `io`, after `read`, the bytes hyper already
+/// read past the request.
+///
+/// A client sends no frame until it has the 101, so bytes already read past the request
+/// came from a peer that broke the handshake, and the connection is dropped.
 async fn serve_socket<S>(io: S, read: Bytes, options: moq_tokio::websocket::Options, state: Arc<WebState>)
 where
 	S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-	let socket = WebSocketStream::from_partially_read(io, read.to_vec(), Role::Server, Some(socket_config())).await;
-	let handshake = moq_tokio::websocket::accept(socket, options);
+	if !read.is_empty() {
+		tracing::debug!(
+			bytes = read.len(),
+			"dropped a WebSocket client that sent frames before the upgrade"
+		);
+		return;
+	}
+	let handshake = moq_tokio::websocket::accept(io, options);
 	let Some(request) = state.shutdown.until_deadline(handshake).await else {
 		return;
 	};
@@ -192,8 +191,8 @@ where
 /// client MUST treat a missing `Sec-WebSocket-Protocol` response header as a
 /// failure anyway, so upgrading only wastes a connection that has already agreed
 /// on nothing. A client that offers none at all names no QMux version either.
-fn negotiate_subprotocol(headers: &HeaderMap, alpns: &[&str]) -> Result<String, StatusCode> {
-	let supported = supported_subprotocols(alpns);
+fn negotiate_subprotocol(headers: &HeaderMap, versions: &moq_net::Versions) -> Result<String, StatusCode> {
+	let supported = supported_subprotocols(versions);
 	let requested = headers
 		.get_all(header::SEC_WEBSOCKET_PROTOCOL)
 		.iter()
@@ -219,29 +218,29 @@ fn select_subprotocol<'a, 'b>(
 /// Newest first so axum's exact-string match picks the freshest one.
 const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::QMux00];
 
-/// moq-transport-18 and newer require qmux-01, so we never pair them with qmux-00.
-/// Mirrors `js/net`'s `connect.ts` and moq-tokio's `websocket_subprotocols`.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-20", "moqt-22"];
-
 /// Subprotocols to advertise on the WebSocket upgrade.
 ///
-/// Generates the cross product of `alpns` × [`QMUX_VERSIONS`], with
+/// Generates the cross product of `versions` × [`QMUX_VERSIONS`], with
 /// the bare qmux fallbacks (`qmux-02`, `qmux-01`, `qmux-00`) appended last so
 /// versioned subprotocols always win the exact-string match axum performs.
 /// Without the versioned entries, axum picks a bare fallback, qmux can't
 /// resolve a moq version from it, and the relay silently downgrades clients to
 /// Lite02 via SETUP-based negotiation.
 ///
-/// `qmux-00.moqt-{18,20,22}` is excluded: moq-transport-18 and newer require
-/// qmux-01, so those pairs are illegal.
-fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
-	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * alpns.len() + qmux::Version::ALL.len());
-	for &alpn in alpns {
-		for &version in QMUX_VERSIONS {
-			if version == qmux::Version::QMux00 && QMUX01_ONLY_ALPNS.contains(&alpn) {
+/// No moq-transport version pairs with qmux-00: every draft this build speaks is
+/// 18 or newer, and those require qmux-01.
+fn supported_subprotocols(versions: &moq_net::Versions) -> Vec<String> {
+	let mut out = Vec::new();
+	for version in versions.iter() {
+		for &qmux in QMUX_VERSIONS {
+			if qmux == qmux::Version::QMux00 && !version.is_lite() {
 				continue;
 			}
-			out.push(format!("{}{alpn}", version.prefix()));
+			// Versions that share an ALPN (moq-lite-01 and -02) advertise it once.
+			let entry = format!("{}{}", qmux.prefix(), version.alpn());
+			if !out.contains(&entry) {
+				out.push(entry);
+			}
 		}
 	}
 	for version in qmux::Version::ALL {
@@ -254,7 +253,6 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 mod tests {
 	use super::*;
 	use axum::{Router, routing::any};
-	use futures::{Sink, Stream};
 	use std::{
 		pin::Pin,
 		sync::atomic::{AtomicBool, Ordering},
@@ -277,17 +275,22 @@ mod tests {
 		QMUX_VERSIONS.first().expect("QMUX_VERSIONS is empty").prefix()
 	}
 
+	fn versions(names: &[&str]) -> moq_net::Versions {
+		names
+			.iter()
+			.map(|name| name.parse().unwrap())
+			.collect::<Vec<moq_net::Version>>()
+			.into()
+	}
+
 	#[test]
 	fn supported_subprotocols_lists_full_matrix() {
-		// Guard the literals: they must stay the IETF draft-18-and-newer ALPNs
-		// (wire 0xff000012, 0xff000014, and 0xff000016).
-		let drafts: Vec<_> = [0xff000012, 0xff000014, 0xff000016]
+		let drafts: Vec<_> = ["moq-transport-18", "moq-transport-20", "moq-transport-22"]
 			.into_iter()
-			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
+			.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
 			.collect();
-		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 
-		let list = supported_subprotocols(moq_net::ALPNS);
+		let list = supported_subprotocols(&moq_net::Versions::all());
 
 		// Newest moq ALPN under the preferred prefix must come first so axum
 		// picks it whenever the client offers it.
@@ -299,7 +302,7 @@ mod tests {
 		for &version in QMUX_VERSIONS {
 			for &alpn in moq_net::ALPNS {
 				let entry = format!("{}{alpn}", version.prefix());
-				if version == qmux::Version::QMux00 && QMUX01_ONLY_ALPNS.contains(&alpn) {
+				if version == qmux::Version::QMux00 && drafts.contains(&alpn) {
 					assert!(!list.contains(&entry), "illegal pair {entry} must not be advertised");
 					continue;
 				}
@@ -329,7 +332,7 @@ mod tests {
 
 	#[test]
 	fn supported_subprotocols_only_lists_configured_alpns() {
-		let list = supported_subprotocols(&["moqt-18"]);
+		let list = supported_subprotocols(&versions(&["moq-transport-18"]));
 
 		assert!(list.contains(&"qmux-01.moqt-18".to_string()));
 		assert!(!list.contains(&"qmux-00.moqt-18".to_string()));
@@ -339,7 +342,7 @@ mod tests {
 
 	#[test]
 	fn supported_subprotocols_preserves_moq_preference_across_qmux_versions() {
-		let list = supported_subprotocols(&["moq-lite-06", "moqt-18"]);
+		let list = supported_subprotocols(&versions(&["moq-lite-06", "moq-transport-18"]));
 		let preferred = list
 			.iter()
 			.position(|entry| entry == "qmux-00.moq-lite-06")
@@ -357,7 +360,7 @@ mod tests {
 
 	#[test]
 	fn select_subprotocol_requires_a_match_when_any_are_offered() {
-		let supported = supported_subprotocols(moq_net::ALPNS);
+		let supported = supported_subprotocols(&moq_net::Versions::all());
 		let known = supported.first().expect("no supported subprotocols").clone();
 		let select = |requested: &[&[u8]]| select_subprotocol(requested.iter().copied(), &supported).cloned();
 
@@ -438,7 +441,7 @@ mod tests {
 		);
 
 		// A supported identifier still upgrades.
-		let supported = supported_subprotocols(moq_net::ALPNS);
+		let supported = supported_subprotocols(&moq_net::Versions::all());
 		let known = supported.first().expect("no supported subprotocols");
 		let status = handshake_status(addr, Some(&format!("bogus-99, {known}"))).await;
 		assert!(
@@ -474,13 +477,12 @@ mod tests {
 			let tx = tx.clone();
 			async move {
 				let key = upgrade_key(&request).ok_or(StatusCode::BAD_REQUEST)?;
-				let wire = negotiate_subprotocol(request.headers(), moq_net::ALPNS)?;
+				let wire = negotiate_subprotocol(request.headers(), &moq_net::Versions::all())?;
 				let upgrade = hyper::upgrade::on(&mut request);
 				let response = switching_protocols(&key, &wire);
 				tokio::spawn(async move {
 					let upgraded = upgrade.await.expect("upgrade");
-					let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-					let (session, driver) = qmux::ws::Upgraded::new(socket, &wire)
+					let (session, driver) = qmux::ws::Upgraded::new(TokioIo::new(upgraded), &wire)
 						.accept()
 						.await
 						.expect("the upgrade selected a QMux subprotocol");
@@ -564,7 +566,7 @@ mod tests {
 		let (addr, mut rx) = spawn_test_server().await;
 		let url = format!("ws://{addr}/");
 
-		for entry in supported_subprotocols(moq_net::ALPNS) {
+		for entry in supported_subprotocols(&moq_net::Versions::all()) {
 			// Bare fallbacks can't be offered in isolation via the qmux client API;
 			// they're covered by `axum_ws_negotiates_newest_moq_alpn`.
 			let Some((version, app)) = split_pair(&entry) else {
@@ -613,63 +615,52 @@ mod tests {
 		drop(session);
 	}
 
-	/// One leg of an in-memory WebSocket pair.
+	/// One end of an in-memory connection.
 	///
 	/// Reading can be frozen: once the flag is set the stream parks forever
-	/// instead of yielding `None`. That is the failure this is here to model --
+	/// instead of yielding data or EOF. That is the failure this is here to model --
 	/// a peer whose host or network vanished sends no close frame and no FIN, so
 	/// the socket stays readable-but-silent indefinitely.
 	struct Pipe {
-		incoming: mpsc::UnboundedReceiver<tungstenite::Message>,
-		outgoing: mpsc::UnboundedSender<tungstenite::Message>,
+		io: tokio::io::DuplexStream,
 		frozen: Arc<AtomicBool>,
 	}
 
 	impl Pipe {
-		fn new(
-			incoming: mpsc::UnboundedReceiver<tungstenite::Message>,
-			outgoing: mpsc::UnboundedSender<tungstenite::Message>,
-			frozen: Arc<AtomicBool>,
-		) -> Self {
-			Self {
-				incoming,
-				outgoing,
-				frozen,
-			}
+		fn new(io: tokio::io::DuplexStream, frozen: Arc<AtomicBool>) -> Self {
+			Self { io, frozen }
 		}
 	}
 
-	impl Stream for Pipe {
-		type Item = Result<tungstenite::Message, tungstenite::Error>;
-
-		fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+	impl AsyncRead for Pipe {
+		fn poll_read(
+			mut self: Pin<&mut Self>,
+			cx: &mut Context<'_>,
+			buf: &mut tokio::io::ReadBuf<'_>,
+		) -> Poll<std::io::Result<()>> {
 			if self.frozen.load(Ordering::Relaxed) {
 				return Poll::Pending;
 			}
-			self.incoming.poll_recv(cx).map(|msg| msg.map(Ok))
+			Pin::new(&mut self.io).poll_read(cx, buf)
 		}
 	}
 
-	impl Sink<tungstenite::Message> for Pipe {
-		type Error = tungstenite::Error;
-
-		fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
+	impl AsyncWrite for Pipe {
+		fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+			// A peer that went away is hanging up, not an error to surface here: the
+			// read half reports the close it sent first.
+			match Pin::new(&mut self.io).poll_write(cx, buf) {
+				Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => Poll::Ready(Ok(buf.len())),
+				other => other,
+			}
 		}
 
-		fn start_send(self: Pin<&mut Self>, message: tungstenite::Message) -> Result<(), Self::Error> {
-			// A receiver that went away is the peer hanging up, not an error we
-			// need to surface: the read half reports the close.
-			let _ = self.outgoing.send(message);
-			Ok(())
+		fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+			Pin::new(&mut self.io).poll_flush(cx)
 		}
 
-		fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
-		}
-
-		fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
+		fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+			Pin::new(&mut self.io).poll_shutdown(cx)
 		}
 	}
 
@@ -684,21 +675,20 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn keep_alive_reaps_a_silent_peer() {
 		let alpn = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
-		let (client_to_server, server_incoming) = mpsc::unbounded_channel();
-		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
+		let (server_io, client_io) = tokio::io::duplex(1 << 16);
 		let frozen = Arc::new(AtomicBool::new(false));
 
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let mut options = moq_tokio::websocket::Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new()
 				.with_versions(moq_net::Versions::all())
 				.with_timeout(None),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
 		let server = tokio::spawn(moq_tokio::websocket::accept(
-			Pipe::new(server_incoming, server_to_client, frozen.clone()),
+			Pipe::new(server_io, frozen.clone()),
 			options,
 		));
 
@@ -706,13 +696,10 @@ mod tests {
 		// timeout is out of the picture before we go silent. It never speaks moq,
 		// so the server is parked awaiting SETUP -- exactly where an idle
 		// publisher's session sits between groups.
-		let (client, driver) = qmux::ws::Upgraded::new(
-			Pipe::new(client_incoming, client_to_server, Arc::new(AtomicBool::new(false))),
-			&alpn,
-		)
-		.connect()
-		.await
-		.unwrap();
+		let (client, driver) = qmux::ws::Upgraded::new(Pipe::new(client_io, Arc::new(AtomicBool::new(false))), &alpn)
+			.connect()
+			.await
+			.unwrap();
 		tokio::spawn(driver);
 
 		// Paused time only advances once every task is idle, so this resolves
@@ -738,33 +725,29 @@ mod tests {
 		use moq_net::transport::Error as _;
 
 		let alpn = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
-		let (client_to_server, server_incoming) = mpsc::unbounded_channel();
-		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
+		let (server_io, client_io) = tokio::io::duplex(1 << 16);
 		let timeout = Duration::from_secs(10);
 
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let mut options = moq_tokio::websocket::Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new()
 				.with_versions(moq_net::Versions::all())
 				.with_timeout(Some(timeout)),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
 		let start = kio::clock::now();
 		let server = tokio::spawn(moq_tokio::websocket::accept(
-			Pipe::new(server_incoming, server_to_client, Arc::new(AtomicBool::new(false))),
+			Pipe::new(server_io, Arc::new(AtomicBool::new(false))),
 			options,
 		));
 
 		// A live qmux peer that answers keep-alives but never speaks moq.
-		let (client, driver) = qmux::ws::Upgraded::new(
-			Pipe::new(client_incoming, client_to_server, Arc::new(AtomicBool::new(false))),
-			&alpn,
-		)
-		.connect()
-		.await
-		.unwrap();
+		let (client, driver) = qmux::ws::Upgraded::new(Pipe::new(client_io, Arc::new(AtomicBool::new(false))), &alpn)
+			.connect()
+			.await
+			.unwrap();
 		tokio::spawn(driver);
 
 		let err = server

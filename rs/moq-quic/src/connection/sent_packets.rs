@@ -84,7 +84,8 @@ impl SentPackets {
 	}
 }
 
-/// `SentPackets` over packets of only a size and an ACK-eliciting flag, for the benches.
+/// Test support for the sent-packet bench, enabled by the `fuzz` feature: `SentPackets` over
+/// packets of only a size and an ACK-eliciting flag.
 #[cfg(feature = "fuzz")]
 pub struct Bench {
 	packets: SentPackets,

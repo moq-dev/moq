@@ -69,6 +69,14 @@ impl Closing {
 		sent.get_or_insert_with(|| (code, cause.cloned()));
 	}
 
+	/// Whether this side closed the transport.
+	pub(crate) fn is_sent(&self) -> bool {
+		self.sent
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.is_some()
+	}
+
 	/// Whether the handles closed the transport by dropping or draining.
 	pub(crate) fn is_local(&self) -> bool {
 		self.local.load(std::sync::atomic::Ordering::Relaxed)
@@ -406,21 +414,21 @@ impl Session {
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
 	/// [`poll`](goaway::Consumer::poll) it with a no-op waiter for a synchronous check, or
-	/// wait on it for one. Once a GOAWAY arrives, this
-	/// session's routes cost [`Cost::DRAIN`](crate::origin::Cost::DRAIN): requests
-	/// keep opening on it until a replacement session's route outranks it, and
-	/// existing subscriptions keep flowing until the session closes.
+	/// wait on it for one. Once a GOAWAY arrives, this session's routes rank below
+	/// every other eligible route, whatever their preference or cost, on this node
+	/// only: requests keep opening on it until a replacement session's route
+	/// outranks it, and existing subscriptions keep flowing until the session
+	/// closes. A relay still forwards the routes at their real cost.
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
 
-	/// Resolves once the session carries no subscription or fetch, in either direction.
+	/// Ready once the session carries no subscription or fetch, in either direction.
 	///
 	/// Ready at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+	pub(crate) fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
 	}
 
@@ -430,9 +438,8 @@ impl Session {
 	/// The handle passed to [`Client::with_auth`](crate::Client::with_auth), or else one
 	/// this session created for itself, which ends with it.
 	///
-	/// On moq-lite-07-wip, and on moq-transport when both sides negotiate the MoQ Auth
-	/// extension, each side presents its connection's credential right after setup.
-	/// Older versions, and peers that do not negotiate it, leave the grant `None`.
+	/// On moq-lite-07-wip each side presents its connection's credential right after setup.
+	/// Older versions and moq-transport leave the grant `None`.
 	pub fn auth(&self) -> auth::Handle {
 		self.auth.clone()
 	}
@@ -1089,6 +1096,11 @@ impl Slots {
 		}
 	}
 
+	/// A count of its own under the same cap, starting empty and reported nowhere.
+	pub(crate) fn split(&self) -> Self {
+		Self::new(self.max)
+	}
+
 	/// Report how many are held to `stats`, as `cap`'s peak.
 	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session, cap: crate::stats::Cap) -> Self {
 		stats.track_held(cap, &self.live);
@@ -1147,3 +1159,6 @@ impl Drop for Slot {
 		self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
 	}
 }
+
+#[cfg(all(test, feature = "async"))]
+mod tests;

@@ -65,7 +65,7 @@ describe("Truck status", () => {
 
 	function statusBroadcast() {
 		const broadcast = new Moq.Broadcast.Producer();
-		const track = broadcast.createTrack("status", { compress: true });
+		const track = broadcast.createTrack("status", { compression: "deflate" });
 		const producer = new Json.Snapshot.Producer<TruckStatus>({ track });
 		return { broadcast, producer };
 	}
@@ -432,7 +432,7 @@ describe("Truck sessions", () => {
 			driving,
 			focused,
 		});
-		const endpoint = new Moq.socket.Endpoint(origin, SOCKET, "truck1");
+		const endpoint = new Moq.Socket.Endpoint(origin, SOCKET, "truck1");
 		const close = () => {
 			truck.close();
 			endpoint.close();
@@ -442,7 +442,7 @@ describe("Truck sessions", () => {
 		return { truck, driving, endpoint, close };
 	}
 
-	async function read(stream: Moq.socket.TrackStream, reader = stream.consumer.ordered()) {
+	async function read(stream: Moq.Socket.TrackStream, reader = stream.consumer.ordered()) {
 		const frame = await reader.readFrame();
 		return frame && JSON.parse(decoder.decode(frame.payload));
 	}
@@ -525,7 +525,7 @@ describe("Truck sessions", () => {
 			// The truck's status echoing the latch is what lets the session go.
 			const broadcast = new Moq.Broadcast.Producer();
 			const producer = new Json.Snapshot.Producer<TruckStatus>({
-				track: broadcast.createTrack("status", { compress: true }),
+				track: broadcast.createTrack("status", { compression: "deflate" }),
 			});
 			try {
 				(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(
@@ -563,7 +563,7 @@ describe("Truck safety sessions", () => {
 			driving,
 			focused,
 		});
-		const endpoint = new Moq.socket.Endpoint(origin, SOCKET, "truck1");
+		const endpoint = new Moq.Socket.Endpoint(origin, SOCKET, "truck1");
 		try {
 			const incoming = endpoint.acceptTrack();
 			truck.emergencyStop();

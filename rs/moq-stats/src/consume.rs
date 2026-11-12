@@ -5,10 +5,7 @@ use std::task::{Poll, ready};
 use moq_net::{Path, broadcast};
 use serde::de::DeserializeOwned;
 
-use crate::{
-	GroupFrame, PrefixFrame, PresenceFrame, Result, TotalsFrame, group_track, prefix_track, presence_track,
-	totals_track,
-};
+use crate::{PrefixFrame, PresenceFrame, Result, TotalsFrame, prefix_track, presence_track, totals_track};
 
 /// Configuration for a [`Consumer`]. Empty for now; construct with
 /// [`Config::new`]. The struct is `#[non_exhaustive]`, so new options stay
@@ -28,11 +25,8 @@ impl Config {
 /// yielding typed frames per track.
 ///
 /// Subscribe to the tracks you care about with [`Self::totals`],
-/// [`Self::group`], [`Self::presence`], and [`Self::prefix`]. A label's
-/// presence track and a prefix's track are produced only while subscribed.
-/// At depth 0 the one group is the empty one; otherwise discover live groups
-/// from the broadcast's [track listing](moq_net::broadcast::Consumer::tracks)
-/// with [`crate::parse_group_track`].
+/// [`Self::presence`], and [`Self::prefix`]. A label's presence track and a
+/// prefix's track are produced only while subscribed.
 pub struct Consumer {
 	broadcast: broadcast::Consumer,
 }
@@ -67,12 +61,13 @@ impl Consumer {
 		})
 	}
 
-	/// Subscribe to group `group`'s track; see [`Self::totals`]. The first read
-	/// fails with [`NotFound`](moq_net::Error::NotFound) unless the group is
+	/// Subscribe to bucket `bucket`'s track; see [`Self::totals`]. The first read
+	/// fails with [`NotFound`](moq_net::Error::NotFound) unless the bucket is
 	/// listed.
-	pub fn group(&self, group: impl Into<Path>) -> Result<GroupConsumer> {
-		Ok(GroupConsumer {
-			inner: self.subscribe(&group_track(group))?,
+	#[cfg(test)]
+	pub(crate) async fn bucket(&self, bucket: impl Into<Path>) -> Result<BucketConsumer> {
+		Ok(BucketConsumer {
+			inner: self.subscribe(&crate::listed_bucket_track(&self.broadcast, &bucket.into()).await)?,
 		})
 	}
 
@@ -139,18 +134,20 @@ impl PrefixConsumer {
 	}
 }
 
-/// A typed reader over one group's track; see [`TotalsConsumer`].
-pub struct GroupConsumer {
-	inner: Reader<GroupFrame>,
+/// A typed reader over one bucket's track; see [`TotalsConsumer`].
+#[cfg(test)]
+pub(crate) struct BucketConsumer {
+	inner: Reader<crate::BucketFrame>,
 }
 
-impl GroupConsumer {
+#[cfg(test)]
+impl BucketConsumer {
 	/// The next frame, or `None` once the track ends (the producer went away
-	/// or the group lingered out of the listing). Fails with
+	/// or the bucket lingered out of the listing). Fails with
 	/// [`FrameTooLarge`](moq_net::Error::FrameTooLarge) once the frame outgrows
 	/// the cache.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<GroupFrame>>> {
+	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::BucketFrame>>> {
 		self.inner.poll_latest(waiter)
 	}
 }
@@ -178,11 +175,17 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route)
-			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 
@@ -190,7 +193,9 @@ mod tests {
 
 	use moq_net::{Consume, Path, Timestamp, origin, track};
 
-	use crate::{Producer, Tier, produce};
+	use moq_net::stats::Tier;
+
+	use crate::{Producer, produce};
 
 	use super::*;
 
@@ -230,7 +235,7 @@ mod tests {
 		let ctx = producer
 			.registry()
 			.tier(tier)
-			.session(moq_net::Path::new(label).unwrap());
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::new(label).unwrap()));
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
@@ -294,9 +299,12 @@ mod tests {
 		assert_eq!(frame[""].publisher.bytes, 50);
 		assert_eq!(frame[""].sessions.active(), 1);
 
-		// At depth 0 the one group is the empty one.
-		let mut group = consumer.group(moq_net::Path::from_static("")).expect("subscribe group");
-		let frame = group.next().await.expect("read").expect("frame");
+		// At depth 0 the one bucket is the empty one.
+		let mut bucket = consumer
+			.bucket(moq_net::Path::from_static(""))
+			.await
+			.expect("subscribe bucket");
+		let frame = bucket.next().await.expect("read").expect("frame");
 		let tier = &frame.tiers[""];
 		assert_eq!(tier.publisher.bytes, 50);
 		assert_eq!(tier.paths["foo/bar"].publisher.bytes, 50);

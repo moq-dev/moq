@@ -8,8 +8,9 @@ const AGES: [Option<Duration>; 3] = [None, Some(Duration::ZERO), Some(Duration::
 
 async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::Result<()> {
 	let mut cache = moq_net::origin::Config::default();
-	cache.cache_duration = Duration::from_secs(1);
-	let relay = moq_tokio::origin::spawn_config(cache);
+	cache.cache_duration = Some(Duration::from_secs(1));
+	// A relay carries what it learned on to its other peers (moq-lite-07).
+	let relay = moq_tokio::origin::spawn_config(cache).with_proxy(true);
 	let ws = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?)
 		.await?
 		.with_protocols([version.alpn()])?;
@@ -109,6 +110,8 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 		let front = consumer.request("age", None).await?;
 		for (i, age) in AGES.into_iter().enumerate() {
 			let track = front.track(&i.to_string())?.subscribe(None).await?;
+			// moq-transport never sends MAX_CACHE_DURATION: it would expire the newest group too.
+			let age = if version.is_lite() { age } else { None };
 			anyhow::ensure!(
 				track.info().max_age == age,
 				"{version}: track {i} age {:?}, wanted {age:?}",
@@ -140,7 +143,9 @@ async fn max_age_relay_rust() {
 #[tokio::test]
 #[ignore = "requires Bun; run by just test max-age in the interop workflow"]
 async fn max_age_relay_javascript() {
-	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	// moq-lite-07-wip returns once js/net speaks its route layer
+	// (quest/m2/cluster-routing/routes/js.md).
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		for publish in [false, true] {
 			kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap(), Some(publish)))
 				.await

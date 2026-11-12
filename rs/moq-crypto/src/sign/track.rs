@@ -90,7 +90,7 @@ impl Producer {
 	///
 	/// A net error if the track is already closed.
 	pub fn finish(self) -> Result<()> {
-		self.inner.finish()?;
+		drop(self.inner.finish()?);
 		Ok(())
 	}
 

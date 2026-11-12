@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Milli, Nano, sleep } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { yieldNow } from "@moq/clock";
 import { Effect } from "@moq/signals";
 import { Fanout } from "./fanout";
 
@@ -20,8 +19,8 @@ function pushable<T>(): { stream: ReadableStream<T>; push: (value: T) => void; c
 }
 
 // Let the fanout's pump drain everything pushed so far, so a test that asserts on the queue's
-// contents isn't racing it.
-const flush = () => sleep(Nano.fromMilli(Milli(10)));
+// contents isn't racing it. The pump runs on promise chains alone, which a host task drains.
+const flush = () => yieldNow();
 
 const INVALID_QUEUES = [
 	0,
@@ -33,13 +32,13 @@ const INVALID_QUEUES = [
 	Number.MAX_SAFE_INTEGER + 1,
 ];
 
-// Read up to `count` values, giving up once the stream goes quiet.
+// Read up to `count` values, stopping at the first that the pump has not delivered after a flush.
 async function take<T>(stream: ReadableStream<T>, count: number): Promise<T[]> {
 	const reader = stream.getReader();
 	const out: T[] = [];
 
 	for (let i = 0; i < count; i++) {
-		const next = await Promise.race([reader.read(), sleep(Nano.fromMilli(Milli(50))).then(() => undefined)]);
+		const next = await Promise.race([reader.read(), flush().then(() => undefined)]);
 		if (!next || next.done) break;
 		out.push(next.value);
 	}
@@ -153,7 +152,6 @@ describe("Fanout", () => {
 	// A reader closes what it receives, so handing the same VideoFrame to two renditions would
 	// close it out from under the other. Content equality can't catch that; identity can.
 	test("gives each reader its own copy", async () => {
-		hostTime();
 		const source = pushable<{ id: number }>();
 		const fanout = new Fanout(source.stream, {
 			clone: (value) => ({ ...value }),
@@ -180,7 +178,6 @@ describe("Fanout", () => {
 
 	// Everything the fanout discards has to be released, or a VideoFrame's buffers leak.
 	test("releases what it discards", async () => {
-		hostTime();
 		const source = pushable<{ id: number }>();
 		const released: number[] = [];
 
@@ -210,7 +207,6 @@ describe("Fanout", () => {
 	});
 
 	test("releases values that arrive with nobody attached", async () => {
-		hostTime();
 		const source = pushable<{ id: number }>();
 		const released: number[] = [];
 
@@ -226,7 +222,6 @@ describe("Fanout", () => {
 	// Without this the pump just logged and stopped, leaving every reader parked on read() forever:
 	// the encoders stalled with no terminal signal while still reporting themselves active.
 	test("surfaces a source failure to every reader", async () => {
-		hostTime();
 		let control!: ReadableStreamDefaultController<number>;
 		const source = new ReadableStream<number>({
 			start: (controller) => {
@@ -260,7 +255,6 @@ describe("Fanout", () => {
 	// FrameSource and SampleSource both document that their stream is cancelled when dropped, and a
 	// one-shot decode keeps running (and holding the stream locked) if we don't.
 	test("cancels its source on close", async () => {
-		hostTime();
 		let cancelled = 0;
 		const source = new ReadableStream<number>({
 			cancel: () => {
@@ -279,6 +273,44 @@ describe("Fanout", () => {
 		fanout.close();
 		await flush();
 		expect(cancelled).toBe(1);
+	});
+
+	test("a reader that wasn't waiting drains its queue before the source's end", async () => {
+		const source = pushable<number>();
+		const fanout = new Fanout(source.stream);
+		const effect = new Effect();
+
+		const stream = fanout.subscribe(effect);
+		source.push(1);
+		source.push(2);
+		source.close();
+		await flush();
+
+		const reader = stream.getReader();
+		expect((await reader.read()).value).toBe(1);
+		expect((await reader.read()).value).toBe(2);
+		expect((await reader.read()).done).toBe(true);
+
+		effect.close();
+		fanout.close();
+	});
+
+	test("the owner's close after a clean end still discards what readers queued", async () => {
+		const source = pushable<number>();
+		const released: number[] = [];
+		const fanout = new Fanout(source.stream, { release: (value) => released.push(value) });
+		const effect = new Effect();
+
+		const stream = fanout.subscribe(effect);
+		source.push(1);
+		source.close();
+		await flush();
+
+		fanout.close();
+		expect(released).toEqual([1]);
+		expect((await stream.getReader().read()).done).toBe(true);
+
+		effect.close();
 	});
 
 	test("closes its readers when the source ends", async () => {

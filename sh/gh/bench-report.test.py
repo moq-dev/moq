@@ -63,6 +63,7 @@ class ReportTest(unittest.TestCase):
                 "peak_bytes",
                 "mib_per_s",
                 "overflowed_packets",
+                "max_messages",
                 "payload_bytes",
                 "bytes",
                 "frames_per_chunk",
@@ -81,6 +82,7 @@ class ReportTest(unittest.TestCase):
                 "peak_bytes": "bytes",
                 "mib_per_s": "MiB/s",
                 "overflowed_packets": "packets",
+                "max_messages": "messages",
                 # Workload dimensions, as the JS benchmarks name them.
                 "payload_bytes": None,
                 "bytes": None,
@@ -255,6 +257,78 @@ class ReportTest(unittest.TestCase):
                 {"name": "size/release/moq-relay/moq-relay.tar.gz", "unit": "bytes", "value": 900},
             ],
         )
+
+    def gate_cost(self, modules="300 250000 check rs\n120 410500 test rs\n420 660500 whole run\n"):
+        raw = self.root / "raw"
+        (raw / "cold" / "js" / "js" / "net").mkdir(parents=True)
+        (raw / "toolchains.txt").write_text("rustc 1.98.1\ncargo 1.98.1\n")
+        (raw / "cold" / "loadavg").write_text("0.52 0.30 0.12 1/200 4242\n")
+        (raw / "cold" / "modules.txt").write_text(modules)
+        ours = ROOT / "rs" / "moq-net"
+        (raw / "cold" / "rustc.tsv").write_text(
+            f"moq-net\t{ours}\tlib\t9000\t300\n"
+            f"moq-net\t{ours}\ttest\t4000\t200\n"
+            f"moq-net\t{ours}\tlib\t1000\t100\n"
+            "aws-lc-sys\t/cargo/registry/src/aws-lc-sys-0.30.0\tbuild\t500\t50\n"
+            "aws-lc-sys\t/cargo/registry/src/aws-lc-sys-0.30.0\tlib\t1500\t70\n"
+            f"moq-ffi\t{ROOT / '.tmp' / 'fixture'}\tbin\t7000\t900\n"
+            "moq-ffi\t/tmp/fixture\tlib\t7000\t900\n"
+        )
+        (raw / "cold" / "nextest.xml").write_text(
+            '<testsuites><testsuite name="moq-net">'
+            '<testcase classname="moq-net" name="a" time="1.5"/><testcase classname="moq-net" name="b" time="0.25"/>'
+            '</testsuite><testsuite name="moq-net::integration">'
+            '<testcase classname="moq-net::integration" name="c" time="2"/></testsuite></testsuites>'
+        )
+        (raw / "cold" / "js" / "js" / "net" / "junit.xml").write_text(
+            '<testsuites><testsuite name="src/a.test.ts" file="src/a.test.ts" time="0.5">'
+            '<testcase name="x" time="0.25"/><testsuite name="nested" file="src/a.test.ts" time="0.5">'
+            '<testcase name="y" time="0.5"/></testsuite></testsuite></testsuites>'
+        )
+        common = (
+            '<testsuite name="js/common/api.test.ts" file="js/common/api.test.ts" time="0.125">'
+            '<testcase name="z" time="0.125"/></testsuite>'
+        )
+        (raw / "cold" / "js" / "junit.xml").write_text(f"<testsuites>{common}</testsuites>")
+        return report.cost(self.root)
+
+    def test_gate_cost_records_modules_crates_and_tests(self):
+        entries = {entry["name"]: entry for entry in self.gate_cost()}
+        values = {name: (entry["unit"], entry["value"]) for name, entry in entries.items()}
+        self.assertEqual(
+            values,
+            {
+                "cold/module/rs/check/wall": ("s", 300),
+                "cold/module/rs/check/cpu": ("s", 250),
+                "cold/module/rs/test/wall": ("s", 120),
+                "cold/module/rs/test/cpu": ("s", 410.5),
+                "cold/total/wall": ("s", 420),
+                "cold/total/cpu": ("s", 660.5),
+                "cold/rustc/cpu": ("s", 16),
+                "cold/rustc/instructions": ("instructions", 720),
+                # Our crate splits by target kind; the dependency's build script and library sum;
+                # the tooling tests' fixture crates, whatever their names, are left out.
+                "cold/crate/moq-net/lib/instructions": ("instructions", 400),
+                "cold/crate/moq-net/test/instructions": ("instructions", 200),
+                "cold/crate/aws-lc-sys/instructions": ("instructions", 120),
+                "cold/rust-test/moq-net": ("s", 1.75),
+                "cold/rust-test/moq-net::integration": ("s", 2),
+                # A file sums its tests, nested describe blocks included, rather than its elapsed time.
+                "cold/js-test/js/net/src/a.test.ts": ("s", 0.75),
+                "cold/js-test/js/common/api.test.ts": ("s", 0.125),
+            },
+        )
+        self.assertEqual(
+            entries["cold/total/wall"]["extra"],
+            "Load average 0.52 0.30 0.12 before the scenario; rustc 1.98.1; cargo 1.98.1",
+        )
+
+    def test_gate_cost_refuses_a_phase_that_did_not_pass(self):
+        for status in ("failed", "cancelled", "skipped"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                self.root = Path(directory)
+                with self.assertRaisesRegex(ValueError, "did not pass"):
+                    self.gate_cost(f"300 250000 check rs ({status})\n300 250000 whole run\n")
 
     def test_criterion_requires_fresh_measured_estimates(self):
         run = self.root / "runs" / "one"

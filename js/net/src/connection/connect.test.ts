@@ -1,12 +1,12 @@
-import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { expect, test } from "bun:test";
+import { Duration, Instant, Manual, sleep, yieldNow } from "@moq/clock";
 import { hostTime } from "@moq/clock/test";
-import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
+import { Session as Qmux, selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
 import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as Lite } from "../lite/version.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, manual } from "../mock.ts";
 import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
@@ -141,7 +141,7 @@ function fingerprintServer(respond: (request: Request) => Response | Promise<Res
 
 // Wait, bounded, for `ready` to hold; a real socket needs more than a microtask turn.
 async function until(ready: () => boolean) {
-	for (let i = 0; i < 200 && !ready(); i++) await sleep(Nano.fromMilli(Milli(5)));
+	for (let i = 0; i < 200 && !ready(); i++) await sleep(Duration.millis(5));
 }
 
 test("an http:// URL pins the fetched fingerprint and dials https", async () => {
@@ -171,6 +171,47 @@ test("an http:// URL pins the fetched fingerprint and dials https", async () => 
 	expect(hashes?.map((hash) => [hash.algorithm, [...(hash.value as Uint8Array)]])).toEqual([
 		["sha-256", Array(32).fill(0xab)],
 	]);
+});
+
+test("a fingerprint fetch slower than the hedge starts no second dial", async () => {
+	using clock = manual();
+	// Hold the fingerprint until the clock has passed the 500 ms hedge: the hedge arms only once
+	// the fingerprint resolves, so a slow fetch neither fires it nor fetches or dials twice.
+	const requested = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const server = fingerprintServer(async () => {
+		requested.resolve();
+		await release.promise;
+		return new Response("ab".repeat(32));
+	});
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let dials = 0;
+	function StubWebTransport(this: unknown) {
+		dials++;
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+	const captured = captureConsole();
+
+	try {
+		const connecting = connect(server.url, { websocket: { enabled: false } });
+		await requested.promise;
+		await clock.advance(Duration.millis(1_000));
+		// The hedge logs inside its timer callback, so this catches it as deterministically as the
+		// clock; the dial/request counts below race connect() cancelling the hedge once one dial wins.
+		expect(captured.lines.filter((line) => line.includes("dialing a second"))).toEqual([]);
+		release.resolve();
+		const connection = await connecting;
+		connection.abort();
+	} finally {
+		captured.restore();
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+
+	expect(dials).toBe(1);
+	expect(server.requests()).toBe(1);
 });
 
 test("an http:// fingerprint longer than a SHA-256 is refused without reading the rest", async () => {
@@ -279,9 +320,9 @@ test("connect logs the relay URL without its credentials", async () => {
 		restoreTransport();
 	}
 
-	// The diagnostics must still identify the relay, just without the query.
+	// The diagnostics must still identify the relay, just without the path or query.
 	expect(captured.lines.length).toBeGreaterThan(0);
-	expect(captured.lines.every((line) => line.includes("https://example.com/test"))).toBe(true);
+	expect(captured.lines.every((line) => line.includes("https://example.com:443"))).toBe(true);
 
 	for (const line of captured.lines) {
 		expect(line).not.toContain(SECRET);
@@ -455,7 +496,7 @@ test("SETUP preserves a delayed session close code", async () => {
 		(cause: unknown) => cause,
 	);
 	try {
-		await clock.advance(Nano.fromMilli(Milli(1_000)));
+		await clock.advance(Duration.millis(1_000));
 		expect(localCloses).toBe(0);
 		closed.resolve({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		const cause = await result;
@@ -555,18 +596,37 @@ for (const protocol of ["", undefined]) {
 }
 
 test("SETUP refuses a version the client did not name", async () => {
-	hostTime();
+	using clock = manual();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
-		const server = accept({ url, transport: pair.server, version: Lite.DRAFT_05 }).catch(() => undefined);
-		await expect(
-			connect(url, { versions: ["moq-lite-07-wip", "moq-lite-06"], websocket: { enabled: false } }),
-		).rejects.toThrow("unsupported server version: 0xff0dad05");
-		(await server)?.abort();
+		const connecting = connect(url, {
+			versions: ["moq-lite-07-wip", "moq-lite-06"],
+			websocket: { enabled: false },
+		});
+		// Handled now, since the refusal can land while the write below yields.
+		connecting.catch(() => {});
+		const stream = await Stream.accept(pair.server, Lite.DRAFT_02);
+		if (!stream) throw new Error("no SETUP stream");
+		await ClientSetup.decode(stream.reader);
+		await new ServerSetup(Lite.DRAFT_05).encode(stream.writer);
+		// The refusal waits out the grace a peer's close code gets. Driven outside `expect`, as
+		// `Manual.drive` asks.
+		await clock.drive(connecting.catch(() => {}));
+		await expect(connecting).rejects.toThrow("unsupported server version: 0xff0dad05");
 	} finally {
 		restore();
 	}
+});
+
+test("a server pinned to a version the client did not offer refuses the SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const accepting = accept({ url, transport: pair.server, version: Lite.DRAFT_05 });
+	// Handled now, since the refusal can land while the write below yields.
+	accepting.catch(() => {});
+	const stream = await Stream.open(pair.client, { version: Lite.DRAFT_02 });
+	await new ClientSetup([Lite.DRAFT_07, Lite.DRAFT_06]).encode(stream.writer);
+	await expect(accepting).rejects.toThrow("no common version found");
 });
 
 test("a peer without an ALPN is refused when no named version negotiates in SETUP", async () => {
@@ -585,7 +645,7 @@ test("a peer without an ALPN is refused when no named version negotiates in SETU
 const IETF_VERSIONS = Object.values(Ietf.Version).map((v) => [Ietf.versionName(v), v] as const);
 
 test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async (_, version) => {
-	hostTime();
+	using clock = manual();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
@@ -596,6 +656,8 @@ test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async
 		if (!stream) throw new Error("no SETUP stream");
 		await ClientSetup.decode(stream.reader);
 		await new ServerSetup(version).encode(stream.writer);
+		// The refusal waits out the grace a peer's close code gets.
+		await clock.drive(connecting.catch(() => {}));
 		await expect(connecting).rejects.toThrow(`unsupported server version: 0x${version.toString(16)}`);
 	} finally {
 		restore();
@@ -820,13 +882,13 @@ test("a dial nothing answers fails with ConnectTimeout after the default timeout
 	const silent = silentWebTransport();
 	try {
 		const attempt = track(connect(url, { websocket: { enabled: false } }));
-		await clock.advance(Nano.fromMilli(Milli(29_999)));
+		await clock.advance(Duration.millis(29_999));
 		expect(attempt.outcome()).toBeUndefined();
 
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		await settle();
 		expect(attempt.outcome()).toBeInstanceOf(ConnectTimeout);
-		expect((attempt.outcome() as ConnectTimeout).timeout).toBe(Milli(30_000));
+		expect((attempt.outcome() as ConnectTimeout).timeout).toEqual(Duration.millis(30_000));
 		// The dial and its hedge.
 		expect(silent.closes()).toBe(2);
 	} finally {
@@ -842,9 +904,9 @@ test("a timeout of 0 waits for the caller", async () => {
 	try {
 		const controller = new AbortController();
 		const attempt = track(
-			connect(url, { websocket: { enabled: false }, timeout: Milli(0), signal: controller.signal }),
+			connect(url, { websocket: { enabled: false }, timeout: Duration.millis(0), signal: controller.signal }),
 		);
-		await clock.advance(Nano.fromMilli(Milli(600_000)));
+		await clock.advance(Duration.millis(600_000));
 		expect(attempt.outcome()).toBeUndefined();
 
 		const reason = new Error("teardown");
@@ -864,13 +926,13 @@ test("the caller's abort wins over the timeout and disarms it", async () => {
 	try {
 		const controller = new AbortController();
 		const attempt = track(connect(url, { websocket: { enabled: false }, signal: controller.signal }));
-		await clock.advance(Nano.fromMilli(Milli(10_000)));
+		await clock.advance(Duration.millis(10_000));
 		const reason = new Error("teardown");
 		controller.abort(reason);
 		await settle();
 		expect(attempt.outcome()).toBe(reason);
 
-		await clock.advance(Nano.fromMilli(Milli(60_000)));
+		await clock.advance(Duration.millis(60_000));
 		expect(attempt.outcome()).toBe(reason);
 		// The dial and its hedge.
 		expect(silent.closes()).toBe(2);
@@ -892,11 +954,11 @@ test("a handshake the peer never answers times out on a supplied transport too",
 			() => (transportClosed = true),
 		);
 
-		const attempt = track(connect(url, { transport: pair.client, timeout: Milli(5_000) }));
-		await clock.advance(Nano.fromMilli(Milli(4_999)));
+		const attempt = track(connect(url, { transport: pair.client, timeout: Duration.millis(5_000) }));
+		await clock.advance(Duration.millis(4_999));
 		expect(attempt.outcome()).toBeUndefined();
 
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		await settle();
 		expect(attempt.outcome()).toBeInstanceOf(ConnectTimeout);
 		expect(transportClosed).toBe(true);
@@ -905,7 +967,7 @@ test("a handshake the peer never answers times out on a supplied transport too",
 	}
 });
 
-type Dial = "hang" | "ok" | { failAfter: Milli } | { openWhen: Promise<void> };
+type Dial = "hang" | "ok" | { failAfter: Duration } | { openWhen: Promise<void> };
 
 // Stub WebTransport so each dial behaves as `plan` says, recording when it was dialed (on
 // the Manual clock) and how often it was closed.
@@ -914,14 +976,14 @@ function webTransportPlan(clock: Manual, plan: (dial: number) => Dial) {
 	const dials: { at: number; closes: number }[] = [];
 	globalThis.WebTransport = function StubWebTransport() {
 		const index = dials.length;
-		const record = { at: Nano.toMilli(Nano(clock.now())), closes: 0 };
+		const record = { at: clock.now().since(Instant.ZERO).asMillis(), closes: 0 };
 		dials.push(record);
 		const dial = plan(index);
 		if (dial === "hang" || (typeof dial === "object" && "failAfter" in dial)) {
 			const ready =
 				dial === "hang"
 					? new Promise<void>(() => {})
-					: sleep(Nano.fromMilli(dial.failAfter)).then(() => {
+					: sleep(dial.failAfter).then(() => {
 							throw new Error(`refused ${index}`);
 						});
 			ready.catch(() => {});
@@ -951,10 +1013,10 @@ test("a dial still unopened after 500 ms is hedged, and the hedge wins when the 
 	const plan = webTransportPlan(clock, (dial) => (dial === 0 ? "hang" : "ok"));
 	try {
 		const attempt = connect(url, { websocket: { enabled: false } });
-		await clock.advance(Nano.fromMilli(Milli(499)));
+		await clock.advance(Duration.millis(499));
 		expect(plan.dials.length).toBe(1);
 
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		const connection = await attempt;
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
 		await settle();
@@ -972,7 +1034,7 @@ test("a dial that opens within 500 ms is not hedged", async () => {
 	const plan = webTransportPlan(clock, () => "ok");
 	try {
 		const connection = await connect(url, { websocket: { enabled: false } });
-		await clock.advance(Nano.fromMilli(Milli(5_000)));
+		await clock.advance(Duration.millis(5_000));
 		expect(plan.dials.length).toBe(1);
 		connection.abort();
 	} finally {
@@ -984,10 +1046,10 @@ test("a dial that opens within 500 ms is not hedged", async () => {
 test("a dial that fails outright is not hedged", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
-	const plan = webTransportPlan(clock, () => ({ failAfter: Milli(100) }));
+	const plan = webTransportPlan(clock, () => ({ failAfter: Duration.millis(100) }));
 	try {
 		const attempt = track(connect(url, { websocket: { enabled: false } }));
-		await clock.advance(Nano.fromMilli(Milli(5_000)));
+		await clock.advance(Duration.millis(5_000));
 		await settle();
 		expect(plan.dials.length).toBe(1);
 		expect((attempt.outcome() as Error).message).toBe("no transport connected: refused 0");
@@ -1001,10 +1063,10 @@ test("when a dial and its hedge both fail, the first dial's reason is reported",
 	const clock = new Manual();
 	const installed = clock.install();
 	// The hedge dials at 500 ms and fails at 600 ms; the first fails at 1.5 s.
-	const plan = webTransportPlan(clock, (dial) => ({ failAfter: Milli(dial === 0 ? 1_500 : 100) }));
+	const plan = webTransportPlan(clock, (dial) => ({ failAfter: Duration.millis(dial === 0 ? 1_500 : 100) }));
 	try {
 		const attempt = track(connect(url, { websocket: { enabled: false } }));
-		await clock.advance(Nano.fromMilli(Milli(2_000)));
+		await clock.advance(Duration.millis(2_000));
 		await settle();
 		expect(plan.dials.length).toBe(2);
 		expect((attempt.outcome() as Error).message).toBe("no transport connected: refused 0");
@@ -1027,7 +1089,7 @@ test("when a dial and its hedge open in the same turn, one wins and the other is
 	});
 	try {
 		const attempt = connect(url, { websocket: { enabled: false } });
-		await clock.advance(Nano.fromMilli(Milli(500)));
+		await clock.advance(Duration.millis(500));
 		const connection = await attempt;
 		await settle();
 		expect(plan.dials.length).toBe(2);
@@ -1044,11 +1106,11 @@ test("a hedge that opens after the first dial failed still wins", async () => {
 	const installed = clock.install();
 	// The hedge dials at 500 ms and opens at 2 s; the first fails at 1.5 s in between.
 	const plan = webTransportPlan(clock, (dial) =>
-		dial === 0 ? { failAfter: Milli(1_500) } : { openWhen: sleep(Nano.fromMilli(Milli(1_500))) },
+		dial === 0 ? { failAfter: Duration.millis(1_500) } : { openWhen: sleep(Duration.millis(1_500)) },
 	);
 	try {
 		const attempt = connect(url, { websocket: { enabled: false } });
-		await clock.advance(Nano.fromMilli(Milli(2_000)));
+		await clock.advance(Duration.millis(2_000));
 		const connection = await attempt;
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
 		connection.abort();
@@ -1067,7 +1129,7 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = sleep(Nano.fromMilli(Milli(100))).then(qmuxStreams);
+		opened = sleep(Duration.millis(100)).then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -1078,7 +1140,7 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	try {
 		// Its own host: a WebSocket win drops WebTransport's head start for that host and port afterwards.
 		const pending = connect(new URL("https://websocket-wins.example.com/"), { signal: controller.signal });
-		await clock.advance(Nano.fromMilli(Milli(700)));
+		await clock.advance(Duration.millis(700));
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
 
@@ -1117,7 +1179,7 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	try {
 		// Its own host: a WebSocket win drops WebTransport's head start for that host and port afterwards.
 		const pending = connect(new URL("https://same-turn.example.com/"), {
-			websocket: { delay: Milli(0) },
+			websocket: { delay: Duration.millis(0) },
 			signal: controller.signal,
 		});
 		await settle();
@@ -1148,7 +1210,7 @@ test("the caller's abort wins over a timeout that fires in the same turn", async
 		await settle();
 		const reason = new Error("teardown");
 		// Fire the timeout without running any task, then abort before one runs.
-		clock.jump(Nano.fromMilli(Milli(30_000)));
+		clock.jump(Duration.millis(30_000));
 		controller.abort(reason);
 		await settle();
 		expect(attempt.outcome()).toBe(reason);
@@ -1165,8 +1227,8 @@ test("a connected session outlives its connect timeout", async () => {
 		const pair = createMockTransportPair(ALPN_06);
 		let closed = false;
 		void pair.client.closed.then(() => (closed = true));
-		const connection = await connect(url, { transport: pair.client, timeout: Milli(1_000) });
-		await clock.advance(Nano.fromMilli(Milli(2_000)));
+		const connection = await connect(url, { transport: pair.client, timeout: Duration.millis(1_000) });
+		await clock.advance(Duration.millis(2_000));
 		await settle();
 		expect(closed).toBe(false);
 		connection.abort();
@@ -1187,13 +1249,13 @@ test("timeout race never returns a closed connection", async () => {
 			void pair.client.closed.then(() => {
 				transportClosed = true;
 			});
-			const outcome = connect(url, { transport: pair.client, timeout: Milli(1) }).then(
+			const outcome = connect(url, { transport: pair.client, timeout: Duration.millis(1) }).then(
 				(connection) => ({ connection }),
 				(err: unknown) => ({ err }),
 			);
 			void (async () => {
 				for (let i = 0; i < hops; i++) await Promise.resolve();
-				clock.jump(Nano.fromMilli(Milli(1)));
+				clock.jump(Duration.millis(1));
 			})();
 			const result = await outcome;
 			await settle();
@@ -1210,19 +1272,6 @@ test("timeout race never returns a closed connection", async () => {
 	}
 });
 
-test("an invalid timeout throws before touching the caller's signal", async () => {
-	const controller = new AbortController();
-	const added = spyOn(controller.signal, "addEventListener");
-	for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-		await expect(
-			connect(url, { websocket: { enabled: false }, timeout: timeout as Milli, signal: controller.signal }),
-		).rejects.toThrow(RangeError);
-	}
-	expect(added).not.toHaveBeenCalled();
-	// In the caller's unit, not the nanoseconds it is converted to.
-	await expect(connect(url, { timeout: -1 as Milli })).rejects.toThrow("invalid time: -1");
-});
-
 /** An opened WebSocketStream whose QMux server sent only its TRANSPORT_PARAMETERS (all
  *  defaults), which a session's `ready` waits for. */
 function qmuxStreams() {
@@ -1237,7 +1286,7 @@ function qmuxStreams() {
 	};
 }
 
-type WebSocketDial = "hang" | "open" | { failAfter: Milli } | { openAfter: Milli };
+type WebSocketDial = "hang" | "open" | { failAfter: Duration } | { openAfter: Duration };
 
 // Their own host: a WebSocket that wins drops WebTransport's head start for its host and port afterwards.
 const websocketUrl = new URL("https://websocket-only.example.com/");
@@ -1260,16 +1309,16 @@ function webSocketPlan(clock: Manual, plan: (dial: number) => WebSocketDial) {
 		constructor(url: string) {
 			this.url = url;
 			const index = dials.length;
-			this.#record = { at: Nano.toMilli(Nano(clock.now())), closes: 0 };
+			this.#record = { at: clock.now().since(Instant.ZERO).asMillis(), closes: 0 };
 			dials.push(this.#record);
 			const dial = plan(index);
 			if (dial === "hang") this.opened = new Promise(() => {});
 			else if (dial === "open") this.opened = Promise.resolve(streams());
 			else if ("failAfter" in dial)
-				this.opened = sleep(Nano.fromMilli(dial.failAfter)).then(() => {
+				this.opened = sleep(dial.failAfter).then(() => {
 					throw new Error(`refused ${index}`);
 				});
-			else this.opened = sleep(Nano.fromMilli(dial.openAfter)).then(streams);
+			else this.opened = sleep(dial.openAfter).then(streams);
 			this.opened.catch(() => {});
 		}
 		close() {
@@ -1292,13 +1341,13 @@ test("a WebSocket dial still unopened after 10 s is closed and dialed again", as
 	const controller = new AbortController();
 	try {
 		const pending = connect(websocketUrl, { signal: controller.signal });
-		await clock.advance(Nano.fromMilli(Milli(9_999)));
+		await clock.advance(Duration.millis(9_999));
 		expect(plan.dials.length).toBe(1);
 
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Duration.millis(1));
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 10_000]);
 		// The session flushes its close for 100 ms before closing the socket.
-		await clock.advance(Nano.fromMilli(Milli(100)));
+		await clock.advance(Duration.millis(100));
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 0]);
 
 		// The second dial opened; its SETUP is never answered.
@@ -1316,8 +1365,8 @@ test("each WebSocket redial within an attempt waits twice as long", async () => 
 	const plan = webSocketPlan(clock, () => "hang");
 	const controller = new AbortController();
 	try {
-		const pending = connect(websocketUrl, { timeout: Milli(0), signal: controller.signal });
-		await clock.advance(Nano.fromMilli(Milli(75_000)));
+		const pending = connect(websocketUrl, { timeout: Duration.millis(0), signal: controller.signal });
+		await clock.advance(Duration.millis(75_000));
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 10_000, 30_000, 70_000]);
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1, 1, 0]);
 
@@ -1332,10 +1381,10 @@ test("each WebSocket redial within an attempt waits twice as long", async () => 
 test("a WebSocket dial that fails outright is not redialed", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
-	const plan = webSocketPlan(clock, () => ({ failAfter: Milli(100) }));
+	const plan = webSocketPlan(clock, () => ({ failAfter: Duration.millis(100) }));
 	try {
 		const attempt = track(connect(websocketUrl, {}));
-		await clock.advance(Nano.fromMilli(Milli(20_000)));
+		await clock.advance(Duration.millis(20_000));
 		await settle();
 		expect(plan.dials.length).toBe(1);
 		expect((attempt.outcome() as Error).message).toBe("no transport connected: refused 0");
@@ -1348,11 +1397,11 @@ test("a WebSocket dial that fails outright is not redialed", async () => {
 test("a WebSocket dial that opens within 10 s is not redialed", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
-	const plan = webSocketPlan(clock, () => ({ openAfter: Milli(5_000) }));
+	const plan = webSocketPlan(clock, () => ({ openAfter: Duration.millis(5_000) }));
 	const controller = new AbortController();
 	try {
 		const pending = connect(websocketUrl, { signal: controller.signal });
-		await clock.advance(Nano.fromMilli(Milli(15_000)));
+		await clock.advance(Duration.millis(15_000));
 		expect(plan.dials.length).toBe(1);
 
 		controller.abort();
@@ -1369,7 +1418,7 @@ test("with the default timeout, a silent WebSocket is redialed once and the atte
 	const plan = webSocketPlan(clock, () => "hang");
 	try {
 		const attempt = track(connect(websocketUrl, {}));
-		await clock.advance(Nano.fromMilli(Milli(30_100)));
+		await clock.advance(Duration.millis(30_100));
 		await settle();
 		expect(attempt.outcome()).toBeInstanceOf(ConnectTimeout);
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 10_000]);
@@ -1392,11 +1441,11 @@ async function raceOnce(
 	// `webSocketPlan` removes WebTransport; `webTransportPlan` puts a stub back over it.
 	const sockets = webSocketPlan(clock, () => websocket);
 	const transports = webTransportPlan(clock, () => webtransport);
-	const start = Nano.toMilli(Nano(clock.now()));
+	const start = clock.now().since(Instant.ZERO).asMillis();
 	const controller = new AbortController();
 	try {
 		const pending = connect(target, { signal: controller.signal, ...props });
-		await clock.advance(Nano.fromMilli(Milli(600)));
+		await clock.advance(Duration.millis(600));
 		// A WebSocket winner is still in SETUP, which nothing answers; a WebTransport one connected.
 		controller.abort();
 		const connection = await pending.catch(() => undefined);
@@ -1449,7 +1498,7 @@ test("a WebTransport win restores the head start", async () => {
 	try {
 		expect(await raceOnce(clock, target, "hang", "open")).toEqual([500]);
 		// WebSocket won last, so it dials at once, but WebTransport opens first and wins.
-		expect(await raceOnce(clock, target, { openWhen: sleep(Nano.fromMilli(Milli(100))) }, "hang")).toEqual([0]);
+		expect(await raceOnce(clock, target, { openWhen: sleep(Duration.millis(100)) }, "hang")).toEqual([0]);
 		expect(await raceOnce(clock, target, "hang", "open")).toEqual([500]);
 	} finally {
 		installed.close();

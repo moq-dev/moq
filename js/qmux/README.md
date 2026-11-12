@@ -1,6 +1,6 @@
 # @moq/qmux
 
-A [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API) implementation using WebSockets as the underlying transport with [QMux](https://www.ietf.org/archive/id/draft-ietf-quic-qmux-02.html) (draft-ietf-quic-qmux-02, negotiating down to draft-01 and draft-00) framing: a polyfill in browsers, and a server on any runtime that can accept a WebSocket.
+A [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API) implementation using WebSockets as the underlying transport with [QMux](https://www.ietf.org/archive/id/draft-ietf-quic-qmux-02.html) (draft-ietf-quic-qmux-02, negotiating down to draft-01 and draft-00) framing: a WebTransport-compatible client in browsers, and a server on any runtime that can accept a WebSocket.
 
 QMux brings QUIC's multiplexed streams and flow control to reliable, ordered byte-stream transports like WebSockets. This allows WebTransport applications to seamlessly fall back when QUIC/UDP is blocked by network middleboxes.
 
@@ -15,7 +15,7 @@ npm install @moq/qmux
 Use as a drop-in `WebTransport` replacement:
 
 ```ts
-import Session from "@moq/qmux"
+import { Session } from "@moq/qmux"
 
 const transport = new Session("https://example.com/endpoint")
 await transport.ready
@@ -46,7 +46,7 @@ the value to accept from what the client offered, and the session reads the wire
 off the socket.
 
 ```ts
-import Session, { selectSubprotocol } from "@moq/qmux"
+import { Session, selectSubprotocol } from "@moq/qmux"
 
 Deno.serve((req) => {
 	const protocol = selectSubprotocol(req.headers.get("sec-websocket-protocol"), {
@@ -66,6 +66,11 @@ Any already-accepted `WebSocket` works - `Deno.upgradeWebSocket`, Node's `ws`, o
 `WebSocketStream`. The session refuses missing or unsupported subprotocols. Reject the upgrade
 when `selectSubprotocol` returns `undefined`. If your host doesn't expose the
 negotiated value on the socket, pass it explicitly as `{ protocol }`.
+
+Each WebSocket message carries one QMux record, so cap the host's message size at one record where it
+allows it, and an oversized message is refused before it is buffered. With `ws`, set `maxPayload` to
+the larger of `config.maxRecordSize` (16382 by default) and 16384, draft-00's frame limit. The
+session refuses a larger message anyway, but only after the host buffered it whole.
 
 The result is an ordinary `WebTransport`: the only difference from a client session is which half of
 the stream-id space each side owns.
@@ -118,20 +123,6 @@ try {
 The outgoing code comes off the reason passed to `abort()` / `cancel()`, so any `WebTransportError`
 (native or the exported `StreamError`) sends its `streamErrorCode` and anything else sends 0.
 `STOP_SENDING` works the same way, erroring the sender's writable with the code the peer chose.
-
-### Polyfill
-
-Install as a global `WebTransport` polyfill:
-
-```ts
-import { install } from "@moq/qmux"
-
-// Only installs if native WebTransport is unavailable
-install()
-
-// Now use the standard WebTransport API
-const transport = new WebTransport("https://example.com/endpoint")
-```
 
 ## License
 

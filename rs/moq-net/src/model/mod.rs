@@ -47,30 +47,33 @@ use request_queue::RequestQueue;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-// The payload type stays flat at the crate root beside `Timestamp`.
-pub use datagram::Datagram;
 pub use time::*;
 pub use timed::Timed;
 
 /// Routing broadcasts into an origin, and consuming them through it.
 pub mod origin {
 	pub use super::follow::Following;
+	#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+	pub(crate) use super::origin_impl::Footprint;
 	pub(crate) use super::origin_impl::HiddenWithheld;
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::HiddenWithholding;
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::Mounted;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
+		Claim, Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
 		RouteOptions, Source,
 	};
 	pub use crate::route::RouteKey;
 
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.
-	#[doc(hidden)]
-	pub use super::origin_impl::{RouteEvent, Routes};
+	pub use super::origin_impl::{RouteEvent, RouteKind, Routes};
 }
 
 /// Listing the paths announced on an origin.

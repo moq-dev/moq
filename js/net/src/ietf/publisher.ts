@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
+import { Duration, type Instant, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -22,7 +22,7 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, WireRoute } from "../hop.ts";
-import { finalSequence, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
+import { datagramTrackInfo, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
@@ -43,14 +43,14 @@ import { toNumber } from "../util/bigint.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { GivenUp } from "../util/given_up.ts";
-import { max, min, saturatingSub } from "../util/sequence.ts";
+import { max, saturatingSub } from "../util/sequence.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
 import { type RequestCondition, requestReason, SubscribeRefused } from "./error.ts";
-import { type Fetch, FetchHeader, FetchOk, type FetchType } from "./fetch.ts";
+import { FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { MAX_AGE_PARAMETER } from "./max_age.ts";
 import * as Message from "./message.ts";
@@ -78,7 +78,6 @@ import {
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
 } from "./subscribe_namespace.ts";
-import type { SubscribeTracks } from "./subscribe_tracks.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, type TrackStatusRequest } from "./track.ts";
 import type { IetfVersion } from "./version.ts";
@@ -145,14 +144,11 @@ function sameHops(a: Hop[], b: Hop[]): boolean {
  * loop just as effectively as one it never grants.
  */
 const ADVERTISE_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
-const ADVERTISE_TIMEOUT = Nano.fromMilli(Milli(ADVERTISE_TIMEOUT_MS));
-
-/** How long a joining FETCH waits for the subscription it names to arrive and resolve. */
-const JOIN_TIMEOUT = Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS));
+const ADVERTISE_TIMEOUT = Duration.millis(ADVERTISE_TIMEOUT_MS);
 
 /** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
 function retryAfter(delay: number): Promise<void> {
-	return sleep(Nano.fromMilli(Milli(delay * (0.5 + Math.random() / 2))));
+	return sleep(Duration.millis(delay * (0.5 + Math.random() / 2)));
 }
 
 /**
@@ -161,9 +157,9 @@ function retryAfter(delay: number): Promise<void> {
  * A peer answers a request it declines with a retry interval, and ignoring it is how a
  * permanent refusal (unauthorized, uninterested) turns into a request every few seconds
  * for the life of the session. `"never"` is an interval of 0 or a terminal local failure;
- * a number is the epoch milliseconds before which we must not come back.
+ * an instant is when we may come back.
  */
-type Refused = "never" | number;
+type Refused = "never" | Instant;
 
 /**
  * How the peer answered an advertisement or an update: it holds the namespace, it does
@@ -362,12 +358,6 @@ export class Publisher {
 	#datagramWriter?: ReturnType<typeof DatagramStream.datagramWriter>;
 	#session: Session;
 	#requiresSolicitation: boolean;
-	// What a joining FETCH needs from each draft-18 SUBSCRIBE, by its request ID, while it lasts:
-	// pending from its arrival until it resolves. Request streams race, so a joining FETCH can
-	// arrive before the subscription it names has.
-	#joins = new Map<bigint, Joinable | "pending">();
-	// Bumped on every change to #joins, which a waiting joining FETCH rechecks.
-	#joinsChanged = new Signal(0);
 
 	#hidden: boolean;
 	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
@@ -389,16 +379,12 @@ export class Publisher {
 	// back came from us. `undefined` when nothing negotiated it.
 	#advert?: Cluster.Advert;
 
-	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
+	// Our grant: only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
 	// allows everything.
 	#grant: Getter<Grant | undefined>;
 	// Holds every incoming request to that grant from dispatch to its end.
 	#gate: Gate;
-
-	// Resolves once the tokens this session presented at setup are answered, so nothing is
-	// advertised before the grant it would be checked against.
-	#ready: Promise<void>;
 
 	// The bytes a request carries for a route's token, for only the tokens this session issued.
 	#auth?: Carrier;
@@ -418,7 +404,6 @@ export class Publisher {
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		auth,
-		ready = Promise.resolve(),
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -434,19 +419,16 @@ export class Publisher {
 		activeCount?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
-		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
+		/** The union of our tokens' grants, which bounds what we publish. */
 		grant?: Getter<Grant | undefined>;
 		/** This session's tokens, which a route names for its request to carry. */
 		auth?: Carrier;
-		/** Resolves once the setup tokens are answered (MoQ Auth). */
-		ready?: Promise<void>;
 	}) {
 		this.#quic = quic;
 		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 		this.#grant = grant;
 		this.#gate = new Gate(grant);
 		this.#auth = auth;
-		this.#ready = ready;
 		this.#session = session;
 		const origin = publish && wireOf(publish);
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
@@ -475,19 +457,11 @@ export class Publisher {
 	}
 
 	async #runSubscribe(msg: Subscribe, request: RequestStream) {
-		// Draft-22 replaced joining FETCH with fills.
-		const joinable = !Filter.isDraft20(this.#session.version);
-		if (joinable) this.#setJoin(msg.requestId, "pending");
-		try {
-			if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
-				await refuseReserved(request);
-				return;
-			}
-			await this.#serveSubscribe(msg, request);
-		} finally {
-			// A joining FETCH arriving after the subscription ended has no edge to end at.
-			if (joinable) this.#setJoin(msg.requestId, undefined);
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(request);
+			return;
 		}
+		await this.#serveSubscribe(msg, request);
 	}
 
 	async #serveSubscribe(msg: Subscribe, request: RequestStream) {
@@ -535,7 +509,7 @@ export class Publisher {
 		const subscribe = (source: broadcast.Consumer) => {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
-			const fixed = filterRange(msg.filter, {});
+			const fixed = filterRange(msg.filter, {}, this.#session.version);
 			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
 			return hooks.parked(
 				source.track(msg.trackName).subscribe({
@@ -543,7 +517,7 @@ export class Publisher {
 					order: msg.groupOrder,
 					// An absent budget preserves everything retained by the producer.
 					// moq-transport has no field for a minimum.
-					delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
+					delay: { max: Duration.millis(msg.maxAge ?? Varint.MAX_U53), min: null },
 					ranges: fixed.start ? serveRanges(fixed) : undefined,
 				}),
 			);
@@ -582,6 +556,7 @@ export class Publisher {
 				track.close();
 				datagramTrack = new TrackProducer(msg.trackName).accept(selected.info);
 				track = hooks.parked(datagramTrack.subscribe({ priority: fromWire(msg.subscriberPriority) }));
+				return datagramTrackInfo(selected.info);
 			}
 			return selected.info;
 		};
@@ -801,7 +776,7 @@ export class Publisher {
 				msg.fill && msg.forward && Filter.isDraft20(version)
 					? fillRange(msg.fill, msg.filter, edge.largest)
 					: undefined;
-			const requested = filterRange(msg.filter, edge);
+			const requested = filterRange(msg.filter, edge, version);
 			// A copy, since an update moves the cursor in place and must not move the bounds too.
 			const range = { ...afterFill(requested, fill, edge) };
 			// What the subscriber asked for, which only a narrowing changes: the fill's split
@@ -817,7 +792,7 @@ export class Publisher {
 				priority,
 				order,
 				// moq-transport has no field for a minimum.
-				delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
+				delay: { max: Duration.millis(msg.maxAge ?? Varint.MAX_U53), min: null },
 				ranges: serveRanges(range),
 			});
 			const startGroup = range.start ? range.start.group : hooks.latestSequence(track);
@@ -831,32 +806,12 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			cache =
 				fill && fill.kind !== "empty"
-					? track.fork({ priority, order, delay: { max: Milli(Varint.MAX_U53), min: null } })
+					? track.fork({ priority, order, delay: { max: Duration.millis(Varint.MAX_U53), min: null } })
 					: undefined;
 
 			const ranked = new Priority(track, info.priority);
 			ranking = ranked;
 			const properties = trackProperties(info, msg.propertiesWanted);
-			// Draft-22 replaced joining FETCH with fills. Older drafts save the Largest Object the
-			// subscription starts after, again on every resume, so a joining FETCH ends exactly
-			// where the subscription begins. Saved before the answer names it.
-			if (!Filter.isDraft20(version)) {
-				this.#setJoin(
-					msg.requestId,
-					msg.filter.kind === "nextObject"
-						? {
-								kind: "join",
-								track,
-								largest: edge.largest,
-								namespace: name,
-								properties,
-								timescale,
-								publisherPriority,
-								ranking: ranked,
-							}
-						: { kind: "unsupported" },
-				);
-			}
 
 			if (answer) {
 				// The resuming update learns where the subscription now joins.
@@ -868,8 +823,8 @@ export class Publisher {
 				const ok = new SubscribeOk({
 					trackAlias: msg.requestId,
 					// Required once the track has content. A Next Object subscription starts right
-					// after it, and recovers the group's head with a FILL on draft-22 or a joining
-					// FETCH before it, both of which end here.
+					// after it and recovers the group's head with a FILL from draft 20, which ends
+					// here. On draft 18 it carries the group whole from object 0 instead.
 					largest: edge.largest && { groupId: edge.largest.group, objectId: edge.largest.object },
 					properties,
 				});
@@ -890,7 +845,9 @@ export class Publisher {
 						timescale,
 						priority: datagramPriority,
 					}).then(
-						() => datagramTrack?.finish(),
+						() => {
+							datagramTrack?.finish();
+						},
 						(err: unknown) => {
 							if (datagramTrack) datagramTrack.abort(error(err));
 							else console.debug(`stopping datagrams on this subscription: ${reason(err)}`);
@@ -912,9 +869,10 @@ export class Publisher {
 					resolve();
 				};
 			});
-			let filling = Promise.resolve();
+			// The fill in flight. It never rejects.
+			let filling: Promise<void> | undefined;
 			const startFill = (requestId: bigint, selected: FillServe, source: TrackSubscriber) => {
-				filling = this.#runFill({
+				const fill: Promise<void> = this.#runFill({
 					requestId,
 					priority: fromWire(msg.subscriberPriority),
 					publisherPriority,
@@ -925,8 +883,13 @@ export class Publisher {
 					unsubscribed,
 					cancelled: fillAbort.signal,
 					streams,
+				}).finally(() => {
+					if (filling === fill) filling = undefined;
 				});
+				filling = fill;
 			};
+			// The update being applied, from its decode until it is answered or fails.
+			let updating: Promise<void> | undefined;
 			if (fill && cache) startFill(answer?.requestId ?? msg.requestId, fill, cache);
 
 			// Every group started, until its stream finishes or resets, and the data streams
@@ -958,97 +921,105 @@ export class Publisher {
 					const framed = await request.next();
 					// The requester sent its last message, which ends the request only where FIN cancels.
 					if (framed === undefined) return request.ended;
-					const { params, requestId: ownRequestId } = await this.#decodeUpdate(request, framed);
-					// update() replaces every option, so carry the rest over as Rust does.
-					if (params.subscriberPriority !== undefined) {
-						const priority = fromWire(params.subscriberPriority);
-						track.update({ ...track.subscription.peek(), priority });
-						datagramPriority.set(priority);
-						if (datagramDemand) datagrams?.setPriority(priority);
-					}
-					const maxAge = params.maxAge;
-					if (maxAge !== undefined) {
-						const current = track.subscription.peek();
-						track.update({ ...current, delay: { ...current?.delay, max: Milli(maxAge) } });
-					}
-					// A fill holds one cache view. At most this decoded update waits behind
-					// it; request parsing then backpressures any further fill requests.
-					if (params.fillParameters) await filling;
-					const snapshot = liveEdge(track);
-					this.#applyPublished(msg, params);
-					const selected =
-						msg.fill && Filter.isDraft20(version)
-							? fillRange(msg.fill, msg.filter, snapshot.largest)
-							: undefined;
-					if (params.subscriptionFilter !== undefined || selected) {
-						// An update's unfiltered range explicitly lowers the floor to zero;
-						// an initial unfiltered subscription still joins the live group. A
-						// fill-only update keeps the range it already has.
-						const requested: ServeRange =
-							params.subscriptionFilter === undefined
-								? bounds.peek()
-								: msg.filter.kind === "unfiltered"
-									? { start: { group: 0n, object: 0n } }
-									: filterRange(msg.filter, snapshot);
-						const tail = afterFill(requested, selected, snapshot);
-						range.start = tail.start;
-						range.end = tail.end;
-						bounds.set(requested, true);
-						track.update({ ...track.subscription.peek(), ranges: serveRanges(range) });
-						// Below its floor the live cursor already passed every group or never owned it,
-						// so lowering it for a fill-only update would hand those groups out a second time.
-						let start = range.start ? range.start.group : 0n;
-						if (params.subscriptionFilter === undefined) start = max(start, floor);
-						floor = start;
-						track.withRange({ ...rangeGroups(range), start: { included: start } });
-						// The fill took the current group's head. The cursor never hands a group out
-						// twice, so what its stream no longer carries resumes from the cache.
-						const next = tail !== requested ? tail.start : undefined;
-						const at = next?.group;
-						if (next && at !== undefined && hooks.handedOut(track, at)) {
-							const slice = groupSlice(range, at);
-							// A stream still serving this group from the fill's edge keeps what it
-							// covers, so the tail resumes where that stream stops.
-							const streaming =
-								live?.sequence === at &&
-								live.slice.skip <= slice.skip &&
-								!live.retired &&
-								!excludes(requested, at, live.slice)
-									? live
-									: undefined;
-							const resume = streaming ? streaming.slice.until : slice.skip;
-							if (resume !== undefined) slice.skip = Math.max(slice.skip, resume);
-							const group =
-								resume !== undefined &&
-								(!range.end || range.end.group >= next.group) &&
-								(slice.until === undefined || slice.until > slice.skip)
-									? hooks.cachedGroup(track, at)
-									: undefined;
-							if (group) serveGroup(group, slice);
-						}
-					}
-					if (params.groupOrder !== undefined)
-						track.update({ ...track.subscription.peek(), order: msg.groupOrder });
-					// Every data stream closes before the pause is answered.
-					if (params.forward === false) throw new Paused(true);
-					const parameters = new Parameters();
-					if (snapshot.largest)
-						parameters.largest = { groupId: snapshot.largest.group, objectId: snapshot.largest.object };
-					const source =
-						selected && selected.kind !== "empty"
-							? track.fork({
-									priority: fromWire(msg.subscriberPriority),
-									order: msg.groupOrder,
-									delay: { max: Milli(Varint.MAX_U53), min: null },
-								})
-							: undefined;
+					// A drained track waits this out, decode included, since the update may reopen its range.
+					const applied = Promise.withResolvers<void>();
+					updating = applied.promise;
 					try {
-						await Message.write(request.writer, RequestOk.id, new RequestOk({ parameters }), version);
-					} catch (err) {
-						source?.close();
-						throw err;
+						const { params, requestId: ownRequestId } = await this.#decodeUpdate(request, framed);
+						// update() replaces every option, so carry the rest over as Rust does.
+						if (params.subscriberPriority !== undefined) {
+							const priority = fromWire(params.subscriberPriority);
+							track.update({ ...track.subscription.peek(), priority });
+							datagramPriority.set(priority);
+							if (datagramDemand) datagrams?.setPriority(priority);
+						}
+						const maxAge = params.maxAge;
+						if (maxAge !== undefined) {
+							const current = track.subscription.peek();
+							track.update({ ...current, delay: { ...current?.delay, max: Duration.millis(maxAge) } });
+						}
+						// A fill holds one cache view. At most this decoded update waits behind
+						// it; request parsing then backpressures any further fill requests.
+						if (params.fillParameters) await filling;
+						const snapshot = liveEdge(track);
+						this.#applyPublished(msg, params);
+						const selected =
+							msg.fill && Filter.isDraft20(version)
+								? fillRange(msg.fill, msg.filter, snapshot.largest)
+								: undefined;
+						if (params.subscriptionFilter !== undefined || selected) {
+							// An update's unfiltered range explicitly lowers the floor to zero;
+							// an initial unfiltered subscription still joins the live group. A
+							// fill-only update keeps the range it already has.
+							const requested: ServeRange =
+								params.subscriptionFilter === undefined
+									? bounds.peek()
+									: msg.filter.kind === "unfiltered"
+										? { start: { group: 0n, object: 0n } }
+										: filterRange(msg.filter, snapshot, version);
+							const tail = afterFill(requested, selected, snapshot);
+							range.start = tail.start;
+							range.end = tail.end;
+							bounds.set(requested, true);
+							track.update({ ...track.subscription.peek(), ranges: serveRanges(range) });
+							// Below its floor the live cursor already passed every group or never owned it,
+							// so lowering it for a fill-only update would hand those groups out a second time.
+							let start = range.start ? range.start.group : 0n;
+							if (params.subscriptionFilter === undefined) start = max(start, floor);
+							floor = start;
+							track.withRange({ ...rangeGroups(range), start: { included: start } });
+							// The fill took the current group's head. The cursor never hands a group out
+							// twice, so what its stream no longer carries resumes from the cache.
+							const next = tail !== requested ? tail.start : undefined;
+							const at = next?.group;
+							if (next && at !== undefined && hooks.handedOut(track, at)) {
+								const slice = groupSlice(range, at);
+								// A stream still serving this group from the fill's edge keeps what it
+								// covers, so the tail resumes where that stream stops.
+								const streaming =
+									live?.sequence === at &&
+									live.slice.skip <= slice.skip &&
+									!live.retired &&
+									!excludes(requested, at, live.slice)
+										? live
+										: undefined;
+								const resume = streaming ? streaming.slice.until : slice.skip;
+								if (resume !== undefined) slice.skip = Math.max(slice.skip, resume);
+								const group =
+									resume !== undefined &&
+									(!range.end || range.end.group >= next.group) &&
+									(slice.until === undefined || slice.until > slice.skip)
+										? hooks.cachedGroup(track, at)
+										: undefined;
+								if (group) serveGroup(group, slice);
+							}
+						}
+						if (params.groupOrder !== undefined)
+							track.update({ ...track.subscription.peek(), order: msg.groupOrder });
+						// Every data stream closes before the pause is answered.
+						if (params.forward === false) throw new Paused(true);
+						const parameters = new Parameters();
+						if (snapshot.largest)
+							parameters.largest = { groupId: snapshot.largest.group, objectId: snapshot.largest.object };
+						const source =
+							selected && selected.kind !== "empty"
+								? track.fork({
+										priority: fromWire(msg.subscriberPriority),
+										order: msg.groupOrder,
+										delay: { max: Duration.millis(Varint.MAX_U53), min: null },
+									})
+								: undefined;
+						try {
+							await Message.write(request.writer, RequestOk.id, new RequestOk({ parameters }), version);
+						} catch (err) {
+							source?.close();
+							throw err;
+						}
+						if (selected && source) startFill(ownRequestId, selected, source);
+					} finally {
+						updating = undefined;
+						applied.resolve();
 					}
-					if (selected && source) startFill(ownRequestId, selected, source);
 				}
 			})();
 			const requestEnded = race([updates, request.ended]);
@@ -1060,12 +1031,19 @@ export class Publisher {
 				() => unsubscribe(),
 			);
 
-			// Serve groups until the track ends or the requester cancels.
+			// Serve groups until the track ends or the requester cancels. Serving ends with the
+			// track only once no update or fill is in flight: an update may reopen the range, and
+			// a reopened group the cursor never handed out is still the cursor's to serve.
 			const serving = (async () => {
 				for (;;) {
 					const group = await servingGroup(track);
-					if (!group) return;
-					serveGroup(group, groupSlice(range, group.sequence));
+					if (group) {
+						serveGroup(group, groupSlice(range, group.sequence));
+						continue;
+					}
+					const pending = updating ?? filling;
+					if (!pending) return;
+					await pending;
 				}
 			})();
 
@@ -1083,14 +1061,7 @@ export class Publisher {
 			let ended = false;
 			try {
 				const served = Symbol("served");
-				const end = await race([
-					serving.then(async () => {
-						await filling;
-						return served;
-					}),
-					requestEnded,
-					revoked,
-				]);
+				const end = await race([serving.then(() => served), requestEnded, revoked]);
 				if (end === "revoked") {
 					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
 					unauthorized = true;
@@ -1663,9 +1634,6 @@ export class Publisher {
 			const visible = (covered: Path.Valid) => !this.#hidden || msg.hidden || !hiddenBelow(prefix, covered);
 			const carries = (covered: Path.Valid) => visible(covered) && this.#gate.allows(covered);
 
-			// Nothing is advertised before the grant it would be checked against.
-			await this.#ready;
-
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
 			// replacement, so repricing one is just sending it again, a new original
 			// publisher included, as Rust does.
@@ -1814,9 +1782,6 @@ export class Publisher {
 
 		let dispose: Dispose | undefined;
 		try {
-			// Nothing is advertised before the grant it would be checked against.
-			if ((await Promise.race([this.#ready.then(() => "ready" as const), closed])) !== "ready") return;
-
 			// Keyed by path.
 			const ns: Namespaces = { active: new Map(), refused: new Map(), offered: new Map() };
 			// How long to stay away the next time the peer ends each advertisement while idle,
@@ -1843,7 +1808,7 @@ export class Publisher {
 					ns.active.delete(key);
 					const wait = lapses.get(key)?.wait ?? RETRY_BASE;
 					lapses.set(key, { snap, wait: Math.min(wait * 2, RETRY_MAX) });
-					ns.refused.set(key, Instant.add(now(), Nano.fromMilli(Milli(wait))));
+					ns.refused.set(key, now().saturatingAdd(Duration.millis(wait)));
 					ns.offered.set(key, snap);
 				}
 
@@ -1856,7 +1821,7 @@ export class Publisher {
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, candidates] of advertised) {
 					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
-					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
+					// nothing our grant does not cover reaches the peer at all.
 					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || !this.#gate.allows(covered)) continue;
 					const best = firstEligible(candidates);
 					if (best) updated.set(covered, best);
@@ -1998,7 +1963,7 @@ export class Publisher {
 	#offerable(key: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
 		const entry = refused.get(key);
 		if (entry === undefined) return true;
-		return entry !== "never" && now() >= entry;
+		return entry !== "never" && now().ge(entry);
 	}
 
 	/**
@@ -2015,12 +1980,11 @@ export class Publisher {
 
 	/**
 	 * What a REQUEST_ERROR's retry interval, in milliseconds, says about re-offering the
-	 * namespace: 0 means the peer does not want this again.
+	 * namespace: 0, or an interval past the clock's range, means the peer does not want this again.
 	 */
 	#refusal(err: RequestError): Answer {
-		return err.retryInterval === 0n
-			? "never"
-			: Instant.add(now(), Nano.fromMilli(Milli(toNumber(err.retryInterval))));
+		if (err.retryInterval === 0n) return "never";
+		return now().checkedAdd(Duration.millis(toNumber(err.retryInterval))) ?? "never";
 	}
 
 	/**
@@ -2047,7 +2011,7 @@ export class Publisher {
 		// leaving this one namespace unadvertised.
 		let request: RequestStream | undefined;
 		try {
-			const deadline = new Deadline(Milli(ADVERTISE_TIMEOUT_MS));
+			const deadline = new Deadline(Duration.millis(ADVERTISE_TIMEOUT_MS));
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
 					const opened = await RequestStream.open(this.#session, deadline, { quic: this.#quic });
@@ -2310,19 +2274,6 @@ export class Publisher {
 		}
 	}
 
-	/** Refuse a request to discover tracks under a namespace prefix: we list none by PUBLISH. @internal */
-	runSubscribeTracks(msg: SubscribeTracks, stream: Stream): Promise<void> {
-		const request = new RequestStream(stream, this.#session, this.#quic);
-		return request.serve(
-			Namespace.reserved(msg.prefix, this.#session.version)
-				? refuseReserved(request)
-				: request.refuse("subscribe_namespace", {
-						condition: "not_supported",
-						reasonPhrase: "SUBSCRIBE_TRACKS is not supported",
-					}),
-		);
-	}
-
 	async #subscriptionUpdate(framed: Framed): Promise<{ params: Parameters; requestId: bigint }> {
 		const version = this.#session.version;
 		const update = await Message.decode(framed.reader, async (body) => {
@@ -2366,388 +2317,6 @@ export class Publisher {
 				: undefined;
 		} catch (err) {
 			throw malformed(err, "FILL_PARAMETERS");
-		}
-	}
-
-	/**
-	 * Handles an incoming FETCH on a bidi stream: a range of the named track, or a joining
-	 * FETCH's head of its subscription's group. A named range missing from the cache asks
-	 * the producer's request handler; a joining head must already be cached.
-	 *
-	 * @internal
-	 */
-	runFetch(msg: Fetch, stream: Stream): Promise<void> {
-		const request = new RequestStream(stream, this.#session, this.#quic);
-		return request.serve(this.#runFetch(msg, request));
-	}
-
-	async #runFetch(msg: Fetch, request: RequestStream) {
-		// FILL_TIMEOUT does not truncate a group or time out its application fill. Both remain
-		// wanted until answered, refused, or cancelled by the requester or its grant.
-		const version = this.#session.version;
-		const type = msg.type;
-		const named = type.kind === "standalone" || type.kind === "filtered" ? type : undefined;
-		const joining = type.kind === "relativeJoining" || type.kind === "absoluteJoining" ? type : undefined;
-		if (named && Namespace.reserved(named.trackNamespace, version)) {
-			await refuseReserved(request);
-			return;
-		}
-		// Serving a Range Filter unfiltered would deliver objects the requester excluded.
-		if (msg.rangeFilters) {
-			await request.refuse("fetch", {
-				condition: "invalid_filter",
-				reasonPhrase: "Range Filters exceed MAX_FILTER_RANGES=0",
-			});
-			return;
-		}
-		// A joining FETCH was authorized with its subscription; a standalone one is checked
-		// here, so a denied request never reaches the origin.
-		const denied: Refusal = { condition: "unauthorized", reasonPhrase: "not granted" };
-		if (named && !this.#gate.allows(named.trackNamespace)) {
-			await request.refuse("fetch", denied);
-			return;
-		}
-
-		// Everything that ends the answer early: the requester leaving, our grant narrowing,
-		// or the subscription a joining FETCH named ending before it resolved.
-		const stop = new AbortController();
-		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
-		void request.ended.then(() => stop.abort(cancel));
-		// Nothing may follow the request.
-		void request.next().then(
-			(framed) => framed && request.abort(new ProtocolViolation("unexpected message on a FETCH")),
-			// The request ended, which the stop already heard.
-			() => undefined,
-		);
-
-		let join: Joinable | undefined;
-		if (joining) {
-			let found: Joinable | Refusal;
-			try {
-				found = await this.#joinOf(joining.subscription, stop.signal);
-			} catch (err: unknown) {
-				if (stop.signal.reason !== cancel) throw err;
-				request.abort(cancel);
-				return;
-			}
-			if ("condition" in found) {
-				await request.refuse("fetch", found);
-				return;
-			}
-			join = found;
-		}
-		const namespace = named?.trackNamespace ?? (join?.kind === "join" ? join.namespace : undefined);
-		// A resolved answer owns its group reader independently of the subscription. Ending
-		// that subscription alone does not cancel the head; source failure or eviction still can.
-		let resolved = false;
-		const lapsed = new Error("subscription ended");
-		const lapse =
-			joining &&
-			this.#joinsChanged.subscribe(() => {
-				if (!resolved && !this.#joins.has(joining.subscription)) stop.abort(lapsed);
-			});
-		const watch = namespace && this.#gate.watch(namespace, () => stop.abort(unauthorized(namespace)));
-		if (namespace && watch?.revoked()) stop.abort(unauthorized(namespace));
-
-		let answer: FetchAnswer | Refusal | undefined;
-		try {
-			try {
-				if (named) answer = await this.#fetchRange(msg, named, stop.signal);
-				else if (joining && join) answer = this.#fetchJoin(joining, join);
-				else throw new Error("unknown FETCH type");
-			} catch (err: unknown) {
-				if (stop.signal.reason === cancel) {
-					request.abort(cancel);
-					return;
-				}
-				answer =
-					stop.signal.reason === lapsed
-						? { condition: "invalid_joining_request_id", reasonPhrase: "subscription ended" }
-						: stop.signal.aborted && namespace && !this.#gate.allows(namespace)
-							? denied
-							: this.#failed(err);
-			}
-			if ("condition" in answer) {
-				await request.refuse("fetch", answer);
-				return;
-			}
-			resolved = true;
-			await this.#answerFetch(msg, request, answer, stop.signal);
-		} finally {
-			lapse?.();
-			watch?.dispose();
-			stop.abort();
-			if (answer && "owned" in answer && answer.owned) answer.cache.close();
-		}
-	}
-
-	/**
-	 * Resolve a standalone or draft-22 FETCH to its group reader and end metadata, filling
-	 * uncached history through the producer's request handler, or the refusal to answer with.
-	 *
-	 * A whole-group request waits for the group to finish, so a downstream cache never
-	 * mistakes a prefix for a complete group.
-	 */
-	async #fetchRange(
-		msg: Fetch,
-		named: Extract<FetchType, { kind: "standalone" | "filtered" }>,
-		signal: AbortSignal,
-	): Promise<FetchAnswer | Refusal> {
-		const version = this.#session.version;
-		// Every filter but a bounded absolute one ends at the Largest Object, which resolves
-		// once the track does.
-		let relative: Filter.Filter | undefined;
-		let requested: FetchRange;
-		if (named.kind === "standalone") {
-			requested = { start: named.start, end: named.end };
-		} else if (named.filter.kind === "absolute" && named.filter.endGroup !== undefined) {
-			// The filter's End Object is inclusive, where a standalone one is the last object
-			// plus one. Without one, both include the whole End Group.
-			const { startGroup, startObject, endGroup, endObject } = named.filter;
-			requested = {
-				start: { group: startGroup, object: startObject },
-				end: { group: endGroup, object: endObject === undefined ? 0n : endObject + 1n },
-			};
-		} else {
-			relative = named.filter;
-			// Placeholders until the filter resolves against the Largest Object.
-			requested = { start: { group: 0n, object: 0n }, end: { group: 0n, object: 0n } };
-		}
-		// End Object 0 includes the entire End Group.
-		const { start, end } = requested;
-		if (
-			!relative &&
-			(start.group > end.group || (start.group === end.group && end.object !== 0n && start.object >= end.object))
-		) {
-			return { condition: "invalid_range", reasonPhrase: "empty range" };
-		}
-
-		if (!relative && start.group !== end.group)
-			return { condition: "not_supported", reasonPhrase: "FETCH spans more than one group" };
-
-		const broadcast = await this.#resolve(named.trackNamespace, signal);
-		const priority = fromWire(msg.subscriberPriority);
-		const track = broadcast.track(named.trackName);
-		const cache = track.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
-		let answer: FetchAnswer | undefined;
-		try {
-			const info = await untilAborted(cache.info(), signal);
-			const position = hooks.objectLargest(cache);
-			const largest = position && { group: position.group, object: BigInt(position.frame) };
-			const range = { ...requested };
-			if (relative) {
-				if (!largest) {
-					return {
-						condition: "not_supported",
-						reasonPhrase: "FETCH relative to Largest Object needs a known publisher edge",
-					};
-				}
-				range.start = fetchStart(relative, largest);
-				range.end = { group: largest.group, object: 0n };
-			}
-			if (range.start.group !== range.end.group)
-				return { condition: "not_supported", reasonPhrase: "FETCH spans more than one group" };
-
-			if (largest) {
-				// A start past Largest Object in a group the cache holds is refused INVALID_RANGE
-				// (draft-22 section 9.11), rather than waiting on the live group. A group past
-				// every one held does not exist yet.
-				if (after(range.start, largest)) {
-					return hooks.holdsGroup(cache, range.start.group)
-						? { condition: "invalid_range", reasonPhrase: "start past Largest Object" }
-						: { condition: "does_not_exist", reasonPhrase: `group ${range.start.group}` };
-				}
-			}
-
-			const selected = range.start.group;
-			// A relayed track may hold the group even when its upstream cannot FETCH. Only a
-			// cache miss asks the producer's handler or fetches the group from its serving route.
-			const group =
-				hooks.cachedGroup(cache, selected) ?? (await track.fetchGroup(selected, { priority, signal }));
-			const slice = fetchSlice(range, selected);
-			// Wait for the selected headers or the group's end, through this reader's recovery
-			// and verdict. The reader holds only the normal tail, not a copied slice.
-			try {
-				const last = await untilAborted(hooks.groupEnd(group, slice.until), signal);
-
-				// Only a finished track's final object ends it, never a live track's Largest Object.
-				const final = hooks.subscriberEnd(cache);
-				const endOfTrack = last.complete && final !== undefined && finalSequence(final) === group.sequence + 1n;
-				const sequence = group.sequence;
-				const groupEnd = BigInt(Math.max(slice.skip, last.end));
-				const until = slice.until;
-				let endLocation: Location;
-				if (Filter.isDraft20(version)) {
-					// Draft-22's End Location is inclusive. An empty answer still covers its start.
-					const object =
-						until === undefined
-							? max(saturatingSub(groupEnd, 1n), BigInt(slice.skip))
-							: endOfTrack
-								? min(BigInt(until) - 1n, saturatingSub(groupEnd, 1n))
-								: BigInt(until) - 1n;
-					endLocation = { group: sequence, object };
-				} else if (endOfTrack && range.end.object > 0n) {
-					// A bounded response cannot promise objects past the track's end.
-					endLocation = { group: sequence, object: groupEnd };
-				} else {
-					endLocation = range.end;
-				}
-
-				answer = {
-					cache,
-					owned: true,
-					range,
-					group,
-					slice,
-					ok: new FetchOk({
-						endOfTrack,
-						endLocation,
-						properties: trackProperties(info, msg.propertiesWanted),
-					}),
-					// A Timestamp goes out only when FETCH_OK actually carries TIMESCALE.
-					timescale: msg.propertiesWanted ? (info.timescale ?? undefined) : undefined,
-					publisherPriority: toWire(info.priority),
-					// Its own rank, so it competes with group streams by its priority alone.
-					sendOrder: sendOrder({ priority }),
-				};
-				return answer;
-			} finally {
-				if (!answer) group.close();
-			}
-		} finally {
-			if (!answer) cache.close();
-		}
-	}
-
-	/** Record what a joining FETCH finds for subscription `id`, or remove it when absent. */
-	#setJoin(id: bigint, join: Joinable | "pending" | undefined) {
-		if (join) this.#joins.set(id, join);
-		else this.#joins.delete(id);
-		this.#joinsChanged.update((n) => n + 1);
-	}
-
-	/**
-	 * Wait for the subscription a joining FETCH names to resolve, or the refusal to answer
-	 * with. One not yet arrived or still resolving is waited on, bounded like any request,
-	 * since the FETCH's stream can beat its SUBSCRIBE's.
-	 */
-	async #joinOf(id: bigint, signal: AbortSignal): Promise<Joinable | Refusal> {
-		const missing: Refusal = { condition: "invalid_joining_request_id", reasonPhrase: "no such subscription" };
-		const done = new AbortController();
-		const expired = sleep(JOIN_TIMEOUT, { signal: done.signal }).then(
-			() => "expired" as const,
-			() => "expired" as const,
-		);
-		let pending = false;
-		try {
-			for (;;) {
-				const join = this.#joins.get(id);
-				if (join === "pending") pending = true;
-				else if (join) return join;
-				// Seen pending and now gone: it ended, or was refused, before it resolved.
-				else if (pending) return missing;
-				if ((await untilAborted(race([Signal.race(this.#joinsChanged), expired]), signal)) === "expired")
-					return pending ? { condition: "timeout", reasonPhrase: "subscription not ready" } : missing;
-			}
-		} finally {
-			// Settles the deadline, which releases the change listener a cancelled wait left.
-			done.abort();
-		}
-	}
-
-	/**
-	 * Resolve the head of a joining FETCH through its subscription's saved Largest Object,
-	 * or the refusal to answer with.
-	 */
-	#fetchJoin(
-		type: Extract<FetchType, { kind: "relativeJoining" | "absoluteJoining" }>,
-		join: Joinable,
-	): FetchAnswer | Refusal {
-		if (join.kind === "unsupported")
-			return { condition: "not_supported", reasonPhrase: "joining filter not supported" };
-		const largest = join.largest;
-		if (!largest) return { condition: "invalid_range", reasonPhrase: "no objects at subscription start" };
-		if (type.kind === "relativeJoining" && type.offset !== 0n)
-			return { condition: "not_supported", reasonPhrase: "joining FETCH reaches before the joined group" };
-		const start = type.kind === "relativeJoining" ? largest.group : type.group;
-		if (start > largest.group)
-			return { condition: "invalid_range", reasonPhrase: "joining group past the subscription" };
-		// The groups before the subscription's are a standalone FETCH's to ask for.
-		if (start !== largest.group)
-			return { condition: "not_supported", reasonPhrase: "joining FETCH spans more than one group" };
-
-		const end = { group: largest.group, object: largest.object + 1n };
-		const sequence = end.group;
-		const unavailable: Refusal = { condition: "does_not_exist", reasonPhrase: "joining prefix unavailable" };
-		const group = hooks.cachedGroup(join.track, sequence);
-		if (!group) return unavailable;
-		// The saved Largest Object proves this prefix's headers exist. Do not read their
-		// payloads ahead: eviction after FETCH_OK fails the stream, as for a live subgroup.
-		if (hooks.groupFate(group)() || hooks.groupIndex(group) !== 0 || group.frameCount < frameBound(end.object)) {
-			group.close();
-			return unavailable;
-		}
-		return {
-			cache: join.track,
-			owned: false,
-			range: { start: { group: end.group, object: 0n }, end },
-			group,
-			slice: { skip: 0, until: frameBound(end.object) },
-			// Where the subscription starts, never the end of the track.
-			ok: new FetchOk({ endOfTrack: false, endLocation: end, properties: join.properties }),
-			timescale: join.timescale,
-			publisherPriority: join.publisherPriority,
-			// Ranked as the group it heads, ahead of that group's live rest.
-			sendOrder: join.ranking.rank(sequence, 0),
-			ranking: join.ranking,
-		};
-	}
-
-	/**
-	 * Write FETCH_OK, then the group on a fetch stream named by the FETCH's own request ID. Nothing past FETCH_OK can be refused, so a failure
-	 * resets both streams instead.
-	 */
-	async #answerFetch(msg: Fetch, request: RequestStream, answer: FetchAnswer, cancel: AbortSignal) {
-		const version = this.#session.version;
-		const { range, group, slice, timescale, publisherPriority, ranking } = answer;
-
-		// The group failing for good ends the answer too, even while a write is parked on flow control.
-		const given = untilGivenUp(group, cancel);
-		const stop = given.signal;
-		let stream: Writer | undefined;
-		try {
-			// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
-			// REQUEST_ERROR in answer to a FETCH.
-			await untilAborted(Message.write(request.writer, FetchOk.id, answer.ok, version), stop);
-			const stopped = new Promise<undefined>((resolve) => {
-				if (stop.aborted) resolve(undefined);
-				stop.addEventListener("abort", () => resolve(undefined), { once: true });
-			});
-			stream = await Writer.tryOpen(this.#quic, { version, sendOrder: answer.sendOrder, cancel: stopped });
-			if (!stream) throw stop.reason ?? new Error("fetch stream failed to open");
-			ranking?.add(stream, range.start.group, frameBound(range.start.object));
-			await untilAborted(new FetchHeader({ requestId: msg.requestId }).encode(stream, version), stop);
-
-			const out = new FetchWriter({ stream, version, timescale, priority: publisherPriority });
-			await this.#writeFetchGroup({ out, group, slice, cancelled: stop });
-			stream.close();
-			// The stream holds every object it owes, so the group failing later no longer resets it.
-			given.release();
-			// The request stream ends once the answer is delivered.
-			await untilAborted(stream.closed, stop);
-		} catch (err: unknown) {
-			const e = stop.aborted ? error(stop.reason) : error(err);
-			console.debug(`fetch failed: request=${msg.requestId} error=${reason(e)}`);
-			stream?.reset(e);
-			request.abort(e);
-		} finally {
-			given.release();
-			group.close();
-			// Ranked until it settles, like a group stream.
-			if (stream && ranking) {
-				const opened = stream;
-				void opened.closed.catch(() => {}).then(() => ranking.remove(opened));
-			}
 		}
 	}
 
@@ -2828,89 +2397,11 @@ interface ServeRange {
 	end?: EndLocation;
 }
 
-/** What a draft-18 joining FETCH inherits from the SUBSCRIBE it names. */
-type Joinable =
-	/** The subscription's filter starts nowhere a joining FETCH could end. */
-	| { kind: "unsupported" }
-	| {
-			kind: "join";
-			/** The subscription's view of the track, whose cache holds the head. */
-			track: TrackSubscriber;
-			/** The Largest Object the subscription starts right after, absent when there was none. */
-			largest?: Location;
-			/** The subscription's namespace, which the fetch is held to the grant on. */
-			namespace: Path.Valid;
-			/** The Track Properties the subscription was answered with. */
-			properties: Properties.Properties;
-			/** The units the subscription stamps objects in, if any; see {@link RunGroup.timescale}. */
-			timescale?: Timescale;
-			/** The track's Publisher Priority on the wire, which the fetch's first object states. */
-			publisherPriority: number;
-			/** The subscription's ranking, which the fetch stream joins as the group it heads. */
-			ranking: Priority;
-	  };
-
-/** The span a FETCH answers, as a standalone FETCH spells it. */
-interface FetchRange {
-	/** The first Location. */
-	start: Location;
-	/** The exclusive end: End Object 0 includes the whole End Group. */
-	end: Location;
-}
-
-/** A FETCH resolved against its track, ready to answer. */
-interface FetchAnswer {
-	/** The track whose cache holds the answer's groups. */
-	cache: TrackSubscriber;
-	/** Whether the answer subscribed `cache` itself, and so closes it. */
-	owned: boolean;
-	range: FetchRange;
-	/** The reader held until the answer finishes; its normal tail bounds retained payloads. */
-	group: group.Consumer;
-	slice: GroupSlice;
-	ok: FetchOk;
-	/** The units objects are stamped in, if any; see {@link RunGroup.timescale}. */
-	timescale?: Timescale;
-	/** The track's Publisher Priority on the wire, which the stream's first object states. */
-	publisherPriority: number;
-	/** The fetch stream's send order. */
-	sendOrder: number;
-	/** The subscription ranking the fetch stream joins, if any. */
-	ranking?: Priority;
-}
-
 // A filter keeps its peer-chosen Object IDs as bigint. Its derived frame selection
 // bound can stop at the model's count ceiling: no object exists at or above it,
 // so clamping either a skip or an exclusive end selects exactly the same frames.
 function frameBound(object: bigint): number {
 	return object > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(object);
-}
-
-/** Whether `a` is past `b`. */
-function after(a: Location, b: Location): boolean {
-	return a.group > b.group || (a.group === b.group && a.object > b.object);
-}
-
-/** Where a draft-22 FETCH's filter starts, resolved against Largest Object. */
-function fetchStart(filter: Filter.Filter, largest: Location): Location {
-	switch (filter.kind) {
-		case "unfiltered":
-			return { group: 0n, object: 0n };
-		case "nextObject":
-			return { group: largest.group, object: largest.object + 1n };
-		case "relative":
-			return { group: saturatingSub(largest.group + 1n, filter.groups), object: 0n };
-		case "absolute":
-			return { group: filter.startGroup, object: filter.startObject };
-	}
-}
-
-/** The slice of one group a {@link FetchRange} selects. */
-function fetchSlice(range: FetchRange, sequence: bigint): GroupSlice {
-	return {
-		skip: range.start.group === sequence ? frameBound(range.start.object) : 0,
-		until: range.end.group === sequence && range.end.object > 0n ? frameBound(range.end.object) : undefined,
-	};
 }
 
 /** Write one group's fetch objects, inheriting the first object's priority. */
@@ -2983,8 +2474,12 @@ function untilGivenUp(group: group.Consumer, signal: AbortSignal): { signal: Abo
 	};
 }
 
-/** The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with. */
-function trackProperties(info: Info, wanted: boolean): Properties.Properties {
+/**
+ * The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with.
+ *
+ * @internal Exported for tests.
+ */
+export function trackProperties(info: Info, wanted: boolean): Properties.Properties {
 	// INCLUDE_PROPERTIES=0. The block stays present but empty, which also means the track opts
 	// out of timestamps for this requester.
 	if (!wanted) return {};
@@ -2995,7 +2490,8 @@ function trackProperties(info: Info, wanted: boolean): Properties.Properties {
 		priority: toWire(info.priority),
 		// The publisher's default, newest first.
 		groupOrder: Properties.DESCENDING,
-		maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+		// No MAX_CACHE_DURATION: our max age expires only superseded groups, while that
+		// property expires every object, the newest included, after the given time.
 	};
 }
 
@@ -3079,7 +2575,7 @@ function liveEdge(track: TrackSubscriber): LiveEdge {
 }
 
 /** The Locations a single Location Filter selects, resolved against the live edge. */
-function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
+function filterRange(filter: Filter.Filter, edge: LiveEdge, version: IetfVersion): ServeRange {
 	switch (filter.kind) {
 		// No restriction. moq-lite starts at the beginning of the latest group, which is the
 		// join point it is built around; a subscription passes objects as they are published,
@@ -3089,10 +2585,14 @@ function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
 			return {};
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the already
 		// published head of the current group, is outside the requested range, so the join is
-		// mid-group by construction. The draft pairs this with a fill, or a joining FETCH
-		// before draft-22, when the subscriber wants the head; see {@link Publisher.runFetch}.
+		// mid-group by construction. From draft-20 the draft pairs this with a fill when the
+		// subscriber wants the head. Before it, the head comes from a joining FETCH, which we
+		// refuse, so the subscription carries the current group whole instead: a subscriber
+		// starting at object 0 takes it as the whole group, and the head still reaches one that
+		// sends no joining FETCH.
 		case "nextObject":
-			return { start: edge.next };
+			if (!edge.next || Filter.isDraft20(version)) return { start: edge.next };
+			return { start: { group: edge.next.group, object: 0n } };
 		// `{Largest.Group + 1 - groups, 0}`: 0 is the next group and 1 is the current one.
 		// Counted from `Largest.Group`, which sits below the newest group while that group has
 		// no objects yet; only with no largest at all does the newest group stand in for it.

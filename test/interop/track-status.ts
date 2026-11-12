@@ -1,6 +1,6 @@
 // Answer Rust-encoded TRACK_STATUS requests with the JS publisher, returning each response.
 import assert from "node:assert/strict";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Publisher } from "../../js/net/src/ietf/publisher.ts";
 import { NativeSession } from "../../js/net/src/ietf/session.ts";
 import { TrackStatusRequest } from "../../js/net/src/ietf/track.ts";
@@ -21,7 +21,11 @@ const pair = createMockTransportPair();
 const origin = new OriginProducer();
 const broadcastRoute = origin.route(Path.from("room"));
 const broadcast = broadcastRoute.broadcast;
-const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(5000), priority: 2 });
+const track = broadcast.createTrack("video", {
+	timescale: Timescale.MILLI,
+	maxAge: Duration.millis(5000),
+	priority: 2,
+});
 const group = track.createGroup(4n);
 group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });

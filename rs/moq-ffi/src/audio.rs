@@ -335,13 +335,28 @@ impl MoqAudioEncoder {
 		Ok(())
 	}
 
-	/// Encode one codec-sized interleaved f32 PCM frame.
-	pub fn encode(&self, pcm: Vec<f32>) -> Result<MoqAudioPacket, MoqError> {
+	/// Submit one codec-sized interleaved f32 PCM frame, whose packet `receive` returns.
+	pub fn encode(&self, pcm: Vec<f32>) -> Result<(), MoqError> {
 		let mut guard = self.inner.lock().unwrap();
-		let packet = guard.as_mut().ok_or(MoqError::Closed)?.encode(&pcm)?;
-		Ok(MoqAudioPacket {
+		guard.as_mut().ok_or(MoqError::Closed)?.encode(&pcm)?;
+		Ok(())
+	}
+
+	/// Pop the oldest ready packet, or none while the codec holds the rest; call until none.
+	pub fn receive(&self) -> Result<Option<MoqAudioPacket>, MoqError> {
+		let mut guard = self.inner.lock().unwrap();
+		let packet = guard.as_mut().ok_or(MoqError::Closed)?.receive()?;
+		Ok(packet.map(|packet| MoqAudioPacket {
 			data: packet.payload.to_vec(),
-		})
+		}))
+	}
+
+	/// Mark the end of input, so `receive` returns every packet the codec still holds,
+	/// without padding or closing the encoder.
+	pub fn flush(&self) -> Result<(), MoqError> {
+		let mut guard = self.inner.lock().unwrap();
+		guard.as_mut().ok_or(MoqError::Closed)?.flush()?;
+		Ok(())
 	}
 
 	/// Drain the encoder, optionally padding one final partial frame.
@@ -461,14 +476,11 @@ impl MoqAudioProducer {
 		// Held through the flush, so a racing broadcast close waits it out instead of
 		// missing a track that still publishes.
 		let mut inner = self.inner.lock().unwrap();
-		let mut producer = inner.take().ok_or(MoqError::Closed)?;
+		let producer = inner.take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
-		if let Err(err) = producer.finish() {
-			// Readers see the failure rather than `Dropped`, as a failed video drain does.
-			producer.abort(moq_net::Error::Transport(err.to_string()));
-			return Err(err.into());
-		}
-		self.children.keep(producer);
+		// A failed finish already ended the track with an error, so readers see the failure
+		// rather than `Dropped`, as a failed video drain does.
+		self.children.keep(producer.finish()?);
 		Ok(())
 	}
 }
@@ -850,7 +862,11 @@ mod tests {
 		};
 		let encoder = MoqAudioEncoder::new(output).unwrap();
 		let samples = encoder.frame_size().unwrap() as usize * 2;
-		assert!(!encoder.encode(vec![0.0; samples]).unwrap().data.is_empty());
+		encoder.encode(vec![0.0; samples]).unwrap();
+		assert!(!encoder.receive().unwrap().unwrap().data.is_empty());
+		assert!(encoder.receive().unwrap().is_none(), "one packet per frame");
+		encoder.flush().unwrap();
+		assert!(encoder.receive().unwrap().is_none(), "libopus holds nothing");
 		encoder.finish(Vec::new()).unwrap();
 		assert!(matches!(encoder.frame_size(), Err(MoqError::Closed)));
 	}
@@ -889,7 +905,8 @@ mod tests {
 		let encoder = MoqAudioEncoder::new(opus_output(None)).unwrap();
 		encoder.set_bitrate(32_000).unwrap();
 		let samples = encoder.frame_size().unwrap() as usize * 2;
-		assert!(!encoder.encode(vec![0.0; samples]).unwrap().data.is_empty());
+		encoder.encode(vec![0.0; samples]).unwrap();
+		assert!(!encoder.receive().unwrap().unwrap().data.is_empty());
 		encoder.finish(Vec::new()).unwrap();
 		assert!(matches!(encoder.set_bitrate(64_000), Err(MoqError::Closed)));
 		assert!(matches!(encoder.track_init(), Err(MoqError::Closed)));

@@ -309,7 +309,8 @@ impl Reader {
 	{
 		use moq_quic::recv::Error::{Blocked, Reset};
 
-		if self.all_data_read {
+		// A reset stays the answer to every later read, never a clean end.
+		if self.all_data_read && self.reset.is_none() {
 			return Poll::Ready(Ok(None));
 		}
 

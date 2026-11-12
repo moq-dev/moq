@@ -1,20 +1,23 @@
-//! Fuzz target bodies for the wire codecs, plus the seeds they start from.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and
+//! sessions and their seeds, plus the hooks the benches and `moq-net-tests` reach private
+//! state through.
 //!
-//! Each `pub fn` here is one target: it takes raw fuzzer bytes, drives a decoder, and
-//! checks that whatever came out survives a re-encode. The bodies live in the crate
+//! Each codec target takes raw fuzzer bytes, drives a decoder, and checks that whatever
+//! came out survives a re-encode; the session targets are described in `session`. The bodies live in the crate
 //! rather than in `fuzz/fuzz_targets/` because the `lite` and `ietf` modules are
 //! private modules, so an outside harness cannot reach a single decoder. Keeping them
 //! here also lets the tests below replay them on stable, which is what turns a crash
 //! the fuzzer found into a regression `just check` runs.
 //!
-//! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
-//! the published API. See `fuzz/README.md` for the workflow.
+//! It tracks the crate's internals, so it can change in any release. See `fuzz/README.md` for the workflow.
 
 mod ingest;
 mod request;
+mod session;
 
 pub use ingest::ingest;
 pub use request::request;
+pub use session::{session_ietf, session_lite};
 
 /// A lite-07 publisher run loop waiting on SUBSCRIBE_START, for the publisher bench.
 pub use crate::lite::CoverageBench;
@@ -33,8 +36,90 @@ use crate::{
 /// [`seeds`] is checked against.
 pub type Target = fn(&[u8]) -> bool;
 
+/// A track holding a fragmented drop set, read by wire cursors, for the drop-set bench.
+pub struct DropSet {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	readers: Vec<track::Subscriber>,
+	shape: (usize, u64, u64, u64),
+	/// Runs added since the track was built, and since the readers subscribed.
+	added: u64,
+	fresh: u64,
+	next: u64,
+	waiter: kio::Waiter,
+}
+
+impl DropSet {
+	/// `runs` disjoint dropped runs of `span` sequences each, read by `readers` wire cursors
+	/// whose ranges hold the newest `reported` of them, each already reported.
+	pub fn new(readers: usize, runs: u64, reported: u64, span: u64) -> Self {
+		let broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let track = broadcast.create_track("drops", track::Info::default()).unwrap();
+		// One run short: subscribing adds it.
+		let built = runs.saturating_sub(1);
+		for run in 0..built {
+			track.drop_groups(run * (span + 1)..run * (span + 1) + span, crate::StreamError::Old);
+		}
+		let mut set = Self {
+			_broadcast: broadcast,
+			track,
+			readers: Vec::new(),
+			shape: (readers, runs, reported, span),
+			added: 0,
+			fresh: 0,
+			next: built * (span + 1),
+			waiter: kio::Waiter::noop(),
+		};
+		set.subscribe();
+		set.added = 0;
+		set
+	}
+
+	/// Replace every reader with one holding the newest `reported` runs, each reported.
+	///
+	/// The newest run is dropped after they subscribe, so the first drop a caller times
+	/// does not carry the one-off cost of a fresh track or cursor.
+	fn subscribe(&mut self) {
+		let (readers, _, reported, span) = self.shape;
+		self.readers.clear();
+		let from = self.next.saturating_sub(reported.saturating_sub(1) * (span + 1));
+		for _ in 0..readers {
+			let mut reader = self.track.subscribe(None).with_range(from..);
+			while reader.poll_drop(&self.waiter).is_ready() {}
+			self.readers.push(reader);
+		}
+		self.drop_one();
+		self.fresh = 0;
+	}
+
+	/// Restore the counts `new` was given before either grows by more than a sixteenth:
+	/// rebuild the track once its runs have, otherwise resubscribe once the readers' have.
+	pub fn hold(&mut self) {
+		let (readers, runs, reported, span) = self.shape;
+		if self.added >= (runs / 16).max(1) {
+			*self = Self::new(readers, runs, reported, span);
+		} else if self.fresh >= (reported / 16).max(1) {
+			self.subscribe();
+		}
+	}
+
+	/// Drop one more run above the rest, and have every reader report it.
+	pub fn drop_one(&mut self) {
+		let span = self.shape.3;
+		let start = self.next;
+		self.next += span + 1;
+		self.track.drop_groups(start..start + span, crate::StreamError::Old);
+		for reader in &mut self.readers {
+			assert!(reader.poll_drop(&self.waiter).is_ready(), "the new run is owed");
+			assert!(reader.poll_drop(&self.waiter).is_pending(), "nothing else is");
+		}
+		self.added += 1;
+		self.fresh += 1;
+	}
+}
+
 /// Build a cached group with optional private object fields for model benchmarks.
-pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
+pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Finished) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	// Object properties come from a moq-transport publisher, whose draft serialized them.
 	let info = track::Info {
@@ -78,8 +163,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		frame.write(payload.clone()).unwrap();
 		group = frame.finish().unwrap();
 	}
-	group.finish().unwrap();
-	(broadcast, track, group)
+	(broadcast, track, group.finish().unwrap())
 }
 
 /// A private frame batch for the model's batch read and write benchmarks.
@@ -134,9 +218,12 @@ impl<const N: usize> ObjectBatch<N> {
 pub struct CanonicalStorage(crate::model::group::StorageBench);
 
 impl CanonicalStorage {
+	/// A group of `frames` 64-byte frames, each held by `views` extra owners.
 	pub fn new(frames: usize, views: usize) -> Self {
 		Self(crate::model::group::StorageBench::new(frames, views))
 	}
+
+	/// The group's stored bytes.
 	pub fn size(&self) -> u64 {
 		self.0.size()
 	}
@@ -168,6 +255,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 	("pattern", pattern),
 	("ingest", ingest),
 	("request", request),
+	("session_lite", session_lite),
+	("session_ietf", session_ietf),
 ];
 
 /// The moq-lite versions a target decodes at, selected by the input's first byte.
@@ -364,6 +453,9 @@ fn hop_chain(ids: impl IntoIterator<Item = u64>) -> Hops {
 }
 
 /// One announcement on an announce stream, resolved: what the application sees.
+///
+/// The hop chain is lite-06's, and lite-07's trailing Lite-06 Chain: a lite-07 claim
+/// names its route instead, and carries a chain only when it was learned over lite-06.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
 	/// ANNOUNCE_START: a route's suffix and wire hop ids, taking the next id.
@@ -402,19 +494,20 @@ impl AnnounceWriter {
 	pub fn write(&mut self, announced: &Announced, data: &mut Vec<u8>) {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
-				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hop_chain(hops.iter().copied()));
+				let (_, suffix) = self.encoder.start(suffix.clone());
 				// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
 				lite::AnnounceBroadcast::Active {
+					route: 0,
 					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
 					epoch: 0,
 					suffix,
-					hops,
+					hops: hop_chain(hops.iter().copied()),
 					cost: Default::default(),
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
-				hops: self.encoder.update(*id, hop_chain(hops.iter().copied())),
+				hops: hop_chain(hops.iter().copied()),
 				cost: Default::default(),
 			},
 			Announced::End(id) => {
@@ -439,6 +532,12 @@ pub fn excluding(origin: crate::origin::Consumer, peer: u64) -> crate::origin::C
 	origin.excluding(crate::Hop::from_wire(peer))
 }
 
+/// A fresh instance as a session mints one for a route an older wire delivered, for tests
+/// outside the crate that route one without an older session.
+pub fn minted_instance() -> crate::Instance {
+	crate::Instance::minted()
+}
+
 /// A peer's wire route: its hop ids, cost, and instance at an epoch, as a session
 /// decodes one, for benches and tests that land or update forwarded routes.
 ///
@@ -449,7 +548,7 @@ pub fn route_info(
 	cost: u64,
 	instance: Option<(crate::Instance, u64)>,
 ) -> crate::origin::RouteInfo {
-	let info = crate::origin::RouteInfo::default()
+	let info = crate::origin::RouteInfo::new()
 		.with_hops(hop_chain(hops))
 		.with_cost(cost);
 	match instance {
@@ -458,28 +557,23 @@ pub fn route_info(
 	}
 }
 
+/// The hop ids a received route traversed, oldest first: crate-private chain state, for
+/// tests that check which path a route took.
+pub fn route_hops(route: &crate::origin::RouteInfo) -> Vec<u64> {
+	route.hops.iter().map(|hop| hop.id()).collect()
+}
+
 /// Land a claim with a peer's wire route, as a session does, for the origin bench.
 pub fn requests_route(
 	origin: &crate::origin::Producer,
 	prefix: impl Into<crate::Path>,
 	route: crate::origin::RouteInfo,
-) -> Result<crate::origin::Route, crate::Error> {
-	origin.forward(prefix, route, None)
-}
-
-/// Land a claim taking over the peer's `predecessor` claim, as a session lands an
-/// ANNOUNCE_TAKEOVER, for the origin bench.
-pub fn takeover_route(
-	origin: &crate::origin::Producer,
-	prefix: impl Into<crate::Path>,
-	route: crate::origin::RouteInfo,
-	predecessor: &crate::origin::Route,
-) -> Result<crate::origin::Route, crate::Error> {
-	origin.forward(prefix, route, Some(predecessor))
+) -> Result<crate::origin::Claim, crate::Error> {
+	origin.forward(prefix, route)
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
-pub fn update_route(dynamic: &crate::origin::Route, route: crate::origin::RouteInfo) -> Result<(), crate::Error> {
+pub fn update_route(dynamic: &crate::origin::Claim, route: crate::origin::RouteInfo) -> Result<(), crate::Error> {
 	dynamic.update(route)
 }
 
@@ -490,6 +584,220 @@ pub struct Snapshot(#[allow(dead_code, reason = "held for its drop, which lands 
 /// Start a snapshot under `prefix`, as a session requesting announcements there does.
 pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
 	Snapshot(origin.snapshot(prefix))
+}
+
+/// One origin's lite-07 route node answering announce streams, for the routes bench.
+pub struct RouteNode {
+	node: crate::route::Node,
+	streams: Vec<crate::route::node::Stream>,
+	instance: crate::Instance,
+}
+
+impl RouteNode {
+	/// A node holding `claims` claims of its own under `live/`, answering one stream
+	/// per prefix in `streams`, each already sent its snapshot.
+	pub fn new(claims: usize, streams: &[&str]) -> Self {
+		let node = crate::route::Node::new(1, 1);
+		let instance = crate::Instance::random();
+		for i in 0..claims {
+			node.own(Path::new(&format!("live/{i}")).unwrap(), Some(Self::claim(&instance)));
+		}
+		let streams = (streams.iter())
+			.map(|prefix| {
+				let link = crate::route::Link::default();
+				node.answer(link, Path::new(prefix).unwrap()).unwrap()
+			})
+			.collect();
+		let node = Self {
+			node,
+			streams,
+			instance,
+		};
+		node.drain();
+		node
+	}
+
+	fn claim(instance: &crate::Instance) -> crate::route::node::Claim {
+		crate::route::node::Claim {
+			instance: instance.clone(),
+			epoch: 0,
+			cost: 0,
+			upstream: false,
+			learned: false,
+			chain: crate::Hops::new(),
+		}
+	}
+
+	/// Start or withdraw the node's own claim at `path`.
+	pub fn own(&self, path: &str, start: bool) {
+		let claim = start.then(|| Self::claim(&self.instance));
+		self.node.own(Path::new(path).unwrap(), claim);
+	}
+
+	/// Take every output queued on the streams, returning how many there were.
+	pub fn drain(&self) -> usize {
+		(self.streams.iter())
+			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
+			.sum()
+	}
+}
+
+/// A relay's lite-07 route node hearing one origin's claims on streams it asked for,
+/// and forwarding them on streams it answers, for the routes bench.
+pub struct RouteRelay {
+	// Dropped first: a stream disconnects from its node on drop.
+	receive: Vec<crate::route::node::Stream>,
+	answer: Vec<crate::route::node::Stream>,
+	#[allow(dead_code, reason = "held so the streams keep a node to talk to")]
+	node: crate::route::Node,
+	instance: crate::Instance,
+	claims: usize,
+	/// The origin's revision as the first stream last heard it.
+	rev: u64,
+	/// The one-claim batches the first stream heard that the second has yet to: each
+	/// revision and the claim it changed.
+	behind: std::collections::VecDeque<(u64, usize)>,
+}
+
+impl RouteRelay {
+	/// The origin's identity as the relay hears it.
+	const ORIGIN: u64 = 1;
+
+	/// A relay that already heard the origin's `claims` claims under `live/` on each of
+	/// `streams` streams, and forwarded them on each of `answers` streams.
+	fn new(claims: usize, streams: usize, answers: usize) -> Self {
+		let node = crate::route::Node::new(2, 2);
+		let answer = (0..answers)
+			.map(|_| node.answer(crate::route::Link::default(), Path::empty()).unwrap())
+			.collect();
+		let instance = crate::Instance::random();
+		let rev = claims as u64;
+		let advert = crate::route::Advert {
+			seqno: 0,
+			metric: 0,
+			down_only: false,
+			rtt: None,
+			hops: [].into(),
+		};
+		let receive = (0..streams)
+			.map(|_| {
+				let receive = node.receive(crate::route::Link::default(), Path::empty()).unwrap();
+				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert.clone())));
+				let snapshot = (0..claims)
+					.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
+					.collect();
+				receive.batch(Self::ORIGIN, snapshot, Some(rev));
+				receive
+			})
+			.collect();
+		let relay = Self {
+			receive,
+			answer,
+			node,
+			instance,
+			claims,
+			rev,
+			behind: Default::default(),
+		};
+		relay.drain();
+		relay
+	}
+
+	/// A relay hearing the origin's `claims` claims on one stream.
+	pub fn heard(claims: usize) -> Self {
+		Self::new(claims, 1, 1)
+	}
+
+	/// A relay hearing the origin's `claims` claims on one stream and answering
+	/// `answers` streams, holding every claim back from them since none is confirmed
+	/// served.
+	pub fn held(claims: usize, answers: usize) -> Self {
+		Self::new(claims, 1, answers)
+	}
+
+	/// A relay hearing the origin's `claims` claims on two streams, the second `lag`
+	/// one-claim batches behind the first.
+	pub fn lagging(claims: usize, lag: usize) -> Self {
+		let mut relay = Self::new(claims, 2, 1);
+		for _ in 0..lag {
+			relay.advance();
+		}
+		relay.drain();
+		relay
+	}
+
+	fn path(i: usize) -> Path {
+		Path::new(&format!("live/{i}")).unwrap()
+	}
+
+	fn claim(instance: &crate::Instance, cost: u64) -> crate::route::node::Claim {
+		crate::route::node::Claim {
+			instance: instance.clone(),
+			epoch: 0,
+			cost,
+			upstream: false,
+			learned: false,
+			chain: crate::Hops::new(),
+		}
+	}
+
+	/// Hear one batch updating the first `changes` claims, returning how many outputs
+	/// the relay queued: what it serves into its origin, and what it forwards.
+	pub fn change(&mut self, changes: usize) -> usize {
+		self.rev += 1;
+		let claim = Self::claim(&self.instance, self.rev);
+		let batch = (0..changes).map(|i| (Self::path(i), Some(claim.clone()))).collect();
+		self.receive[0].batch(Self::ORIGIN, batch, Some(self.rev));
+		self.drain()
+	}
+
+	/// The first claim restarts at another epoch, then back at the one every other
+	/// claim shares, the relay confirming each, returning how many outputs it queued.
+	pub fn restart(&mut self) -> usize {
+		self.confirm(1) + self.confirm(0)
+	}
+
+	/// The first claim changes to `epoch`, and the relay confirms serving it.
+	fn confirm(&mut self, epoch: u64) -> usize {
+		self.rev += 1;
+		let claim = crate::route::node::Claim {
+			epoch,
+			..Self::claim(&self.instance, 0)
+		};
+		self.receive[0].batch(Self::ORIGIN, vec![(Self::path(0), Some(claim))], Some(self.rev));
+		let serves: Vec<_> = std::iter::from_fn(|| self.receive[0].try_output()).collect();
+		for serve in &serves {
+			if let crate::route::node::Output::Serve { id, claim, served, .. } = serve {
+				self.receive[0].serving(*id, claim, &served.claim);
+			}
+		}
+		serves.len() + self.drain()
+	}
+
+	/// The first stream hears the origin's next revision, which changes one claim.
+	fn advance(&mut self) {
+		self.rev += 1;
+		let i = self.rev as usize % self.claims;
+		let batch = vec![(Self::path(i), Some(Self::claim(&self.instance, self.rev)))];
+		self.receive[0].batch(Self::ORIGIN, batch, Some(self.rev));
+		self.behind.push_back((self.rev, i));
+	}
+
+	/// Each stream hears its next one-claim batch, the second still lagging, returning
+	/// how many outputs the relay queued.
+	pub fn step(&mut self) -> usize {
+		self.advance();
+		let (rev, i) = self.behind.pop_front().expect("the second stream lags");
+		let batch = vec![(Self::path(i), Some(Self::claim(&self.instance, rev)))];
+		self.receive[1].batch(Self::ORIGIN, batch, Some(rev));
+		self.drain()
+	}
+
+	fn drain(&self) -> usize {
+		(self.receive.iter().chain(&self.answer))
+			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
+			.sum()
+	}
 }
 
 /// What a client session fed into an origin hears it should ask its peer about, for
@@ -515,7 +823,7 @@ impl Interests {
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
 /// when the path is tracked. The stats producer bench marks a share of held
 /// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]
-/// drops the entry unless some guard still holds it. Not a public API.
+/// drops the entry unless some guard still holds it.
 pub fn bump_publisher_bytes(
 	registry: &crate::stats::Registry,
 	path: impl Into<crate::Path>,
@@ -560,7 +868,9 @@ impl Meter {
 
 /// Build a session-local payload meter without exposing the model's private stats carriers.
 pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, label: &str, path: &str) -> Meter {
-	let session = registry.tier(tier).session(Path::new(label).expect("label fits"));
+	let session = registry
+		.tier(tier)
+		.session(crate::stats::SessionInfo::new(Path::new(label).expect("label fits")));
 	Meter(session.egress(Path::new(path).expect("path fits")).meter())
 }
 
@@ -590,11 +900,11 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	while let Ok(msg) = lite::AnnounceBroadcast::decode(&mut data, version) {
 		let announced = match msg {
 			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
-				.start(suffix, hops)
-				.map(|(suffix, hops)| Announced::Start(suffix, hops.into_ids())),
-			lite::AnnounceBroadcast::Update { id, hops, .. } => decoder
-				.update(id, hops)
-				.map(|(_, hops)| Announced::Update(id, hops.into_ids())),
+				.start(suffix)
+				.map(|suffix| Announced::Start(suffix, hops.into_ids())),
+			lite::AnnounceBroadcast::Update { id, hops, .. } => {
+				decoder.get(id).map(|_| Announced::Update(id, hops.into_ids()))
+			}
 			lite::AnnounceBroadcast::EndedId { id } => decoder.end(id).map(|_| Announced::End(id)),
 			_ => continue,
 		};
@@ -697,6 +1007,7 @@ impl LiteSample {
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -704,6 +1015,7 @@ impl LiteSample {
 				max_delay: std::time::Duration::from_secs(10),
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
+				update: 0,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -895,6 +1207,7 @@ impl Default for Messages {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -905,6 +1218,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
 				}],
+				update: 0,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
@@ -917,6 +1231,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
+				update: 0,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -927,7 +1242,7 @@ impl Default for Messages {
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
-				compress: false,
+				compression: crate::track::Compression::None,
 			},
 			lite_group: lite::Group {
 				subscribe: 7,
@@ -1077,12 +1392,14 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			id: 0,
 			broadcast: broadcast.clone(),
 			instance: None,
+			node: 0,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,
 			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
+			update: 0,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),
@@ -1297,12 +1614,14 @@ pub fn pattern(data: &[u8]) -> bool {
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
 /// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message
 /// (the sweep sets ROUTE_START's type byte but fills its size byte with the body
-/// pattern, so none decodes whole), the ROUTE_END echo, and ROUTE_REQUEST.
+/// pattern, so none decodes whole), the ROUTE_END echo, ROUTE_REQUEST, and a DATAGRAMS
+/// request, whose seven fields outgrow the sweep's longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
+	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 4, 1, 0, 1, 0]),
-	(5, &[7, 4, 0, 1, 2, 0]),
+	(5, &[6, 6, 1, 0, 1, 0, 1, 1]),
+	(5, &[7, 6, 0, 1, 2, 0, 1, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),
@@ -1617,6 +1936,7 @@ pub fn seeds() -> Vec<Seed> {
 	seeds.extend(ingest::seeds());
 	seeds.extend(ingest::limit_seeds());
 	seeds.extend(request::seeds());
+	seeds.extend(session::seeds());
 
 	seeds
 }
@@ -1759,7 +2079,7 @@ impl FrameRecv {
 				if let std::task::Poll::Ready(res) = received {
 					res.unwrap();
 					let stream = slot.take().unwrap();
-					let mut group = stream.frame.finish().unwrap();
+					let group = stream.frame.finish().unwrap();
 					group.finish().unwrap();
 					open -= 1;
 				}
@@ -1865,11 +2185,9 @@ impl GroupRecv {
 		Ok(())
 	}
 
-	/// Finish the group, returning its producer, which keeps it cached until dropped or aborted.
-	pub fn finish(mut self) -> crate::Result<group::Producer> {
-		let mut group = self.group.take().ok_or(crate::Error::Closed)?;
-		group.finish()?;
-		Ok(group)
+	/// Finish the group, which stays cached until dropped or aborted.
+	pub fn finish(mut self) -> crate::Result<group::Finished> {
+		self.group.take().ok_or(crate::Error::Closed)?.finish()
 	}
 }
 
@@ -1909,7 +2227,7 @@ pub struct RequestValidity {
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
-	pub fn new(route: &crate::origin::Route, path: &crate::Path) -> Self {
+	pub fn new(route: &crate::origin::Claim, path: &crate::Path) -> Self {
 		Self {
 			watch: crate::model::broadcast::RequestValidity::for_source(route, path),
 			periods: Vec::new(),
@@ -1944,15 +2262,17 @@ mod tests {
 		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::default());
 		let _driver = driver;
 		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
-		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
+		let session = registry
+			.tier(tier.clone())
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("root")));
 		let _broadcast = origin.route("room/1", crate::origin::RouteOptions::default()).unwrap();
 		let mut cursor = origin.consume().with_stats(session).routes();
 		while cursor.next().now_or_never().flatten().is_some() {}
 
 		bump_publisher_bytes(&registry, crate::Path::from_static("room/1"), &tier, 5);
 		let mut report = crate::stats::Report::default();
-		registry.report(&mut report);
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
+		registry.report(&mut report, crate::time::Instant::now());
 		let entry = report
 			.traffic
 			.iter()

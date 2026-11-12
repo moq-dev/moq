@@ -5,7 +5,7 @@
 //! JSON object as one frame, and a [`Consumer`] yields every record in order.
 //!
 //! The whole log rides a **single group** that is never rolled: on a
-//! [`compress`](moq_net::track::Info::compress)ed track, that one group is one DEFLATE window, so
+//! [compressed](moq_net::track::Info::compression) track, that one group is one DEFLATE window, so
 //! every record compresses against all the earlier ones. There is deliberately no group rolling (and so no
 //! catch-up machinery): a moq-net group has no size cap. A caller that wants to bound the record rate throttles at
 //! the source (e.g. the timeline's segment cadence); a consumer that finds a gap can fetch or
@@ -18,7 +18,7 @@
 //! # Budget
 //!
 //! A log accepts appends for its track's life; only a record larger than one frame may be
-//! ([`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), 32 MiB) is refused, with
+//! (32 MiB) is refused, with
 //! [`moq_net::Error::FrameTooLarge`], before it is written. moq-net holds only the group's newest
 //! 32 MiB and sheds older records from its front, so a consumer that falls further behind, or
 //! joins after the front is shed, gets [`moq_net::Error::Evicted`].
@@ -37,7 +37,7 @@ pub mod producer;
 pub use consumer::Consumer;
 pub use decoder::Decoder;
 pub use encoder::{Config, Encoder, Pending};
-pub use producer::Producer;
+pub use producer::{Finished, Producer};
 
 #[cfg(test)]
 use futures::FutureExt;
@@ -69,7 +69,7 @@ mod test {
 		producer
 			.append(moq_net::Timed::from(&json!({ "n": 3 })).at(at))
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
 
@@ -90,7 +90,7 @@ mod test {
 		producer
 			.append(moq_net::Timed::from(&json!({ "n": 3 })).at(at))
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
 
@@ -147,7 +147,7 @@ mod test {
 
 	/// A compressed track.
 	fn compressed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_compress(true)
+		moq_net::track::Info::default().with_compression(moq_net::track::Compression::Deflate)
 	}
 
 	fn consume(track: moq_net::track::Subscriber) -> Consumer<Value> {
@@ -170,7 +170,7 @@ mod test {
 		for n in 0..5 {
 			producer.append(&json!({ "n": n })).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let records = drain(consume(track));
 		assert_eq!(records, (0..5).map(|n| json!({ "n": n })).collect::<Vec<_>>());
@@ -179,7 +179,10 @@ mod test {
 	/// Each record keeps its own capture time, and the returned size is the encoded frame.
 	#[test]
 	fn a_stamped_append_writes_its_capture_time() {
-		let (mut producer, _track) = producer_on(Config::default(), timed().with_compress(true));
+		let (mut producer, _track) = producer_on(
+			Config::default(),
+			timed().with_compression(moq_net::track::Compression::Deflate),
+		);
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let record = json!({ "n": 1 });
@@ -202,7 +205,7 @@ mod test {
 		for n in 0..50 {
 			producer.append(&json!({ "n": n })).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		// Never rolled: a single group holds the whole log.
 		assert_eq!(
@@ -226,7 +229,7 @@ mod test {
 			}
 		}
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 	}
 
 	/// A record the encoder rejects must not have published a group first: a live consumer would
@@ -356,7 +359,7 @@ mod test {
 	fn appending_after_finish_fails_without_aborting() {
 		let (mut producer, _track) = producer_on(Config::default(), compressed());
 		producer.append(&json!({ "n": 0 })).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.clone().finish().unwrap();
 
 		assert!(producer.append(&json!({ "n": 1 })).is_err());
 		assert_eq!(drain(consume(producer.consume())), vec![json!({ "n": 0 })]);
@@ -412,8 +415,8 @@ mod test {
 		));
 	}
 
-	fn info(compress: bool) -> moq_net::track::Info {
-		moq_net::track::Info::default().with_compress(compress)
+	fn info(compression: moq_net::track::Compression) -> moq_net::track::Info {
+		moq_net::track::Info::default().with_compression(compression)
 	}
 
 	fn refused(result: crate::Result<usize>) -> bool {
@@ -427,21 +430,21 @@ mod test {
 	/// the next record lands and decodes.
 	#[test]
 	fn an_oversized_record_is_refused_and_the_log_continues() {
-		for compression in [false, true] {
+		for compression in [moq_net::track::Compression::None, moq_net::track::Compression::Deflate] {
 			let (mut producer, track) = producer_on(Config::default(), info(compression));
 			producer.set_max_frame_bytes(BUDGET);
 			producer.append(&json!({ "n": 0 })).unwrap();
 
 			let oversized = Value::String("x".repeat(BUDGET as usize));
-			assert!(refused(producer.append(&oversized)), "compression={compression}");
+			assert!(refused(producer.append(&oversized)), "compression={compression:?}");
 
 			producer.append(&json!({ "n": 1 })).unwrap();
-			producer.finish().unwrap();
+			let _finished = producer.finish().unwrap();
 
 			assert_eq!(
 				drain(consume(track)),
 				vec![json!({ "n": 0 }), json!({ "n": 1 })],
-				"compression={compression}"
+				"compression={compression:?}"
 			);
 		}
 	}
@@ -449,15 +452,15 @@ mod test {
 	/// A log has no budget: it carries more records than a group once could, and reads back whole.
 	#[test]
 	fn a_log_accepts_every_append() {
-		for compression in [false, true] {
+		for compression in [moq_net::track::Compression::None, moq_net::track::Compression::Deflate] {
 			let (mut producer, track) = producer_on(Config::default(), info(compression));
 			for n in 0..10_000 {
 				producer.append(&json!({ "n": n })).unwrap();
 			}
-			producer.finish().unwrap();
+			let _finished = producer.finish().unwrap();
 
 			let records = drain(consume(track));
-			assert_eq!(records.len(), 10_000, "compression={compression}");
+			assert_eq!(records.len(), 10_000, "compression={compression:?}");
 			assert_eq!(records.last(), Some(&json!({ "n": 9_999 })));
 		}
 	}
@@ -471,7 +474,7 @@ mod test {
 		for _ in 0..4 {
 			producer.append(&value).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let records = drain(consume(track));
 		assert_eq!(records, vec![value.clone(), value.clone(), value.clone(), value]);

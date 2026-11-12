@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -43,7 +43,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		const active = request.active.peek();
 		if (!active) throw new Error("broadcast missing");
 		const remote = active.track("data");
-		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : undefined);
+		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : null);
 		const baseline = remote.subscribe();
 		const group = producer.appendGroup();
 		group.writeFrame({ payload: new Uint8Array(3) });
@@ -53,13 +53,13 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		expect((await received.readFrame())?.payload.length).toBe(3);
 		expect((await received.readFrame())?.payload.length).toBe(3);
 		const joins = [remote.subscribe()];
-		await clock.advance(Nano(0));
+		await clock.advance(Duration.nanos(0));
 		expect(producer.demand().wanted.peek()).toBe(0n);
 		updates.length = 0;
 		group.writeFrame({ payload: new Uint8Array(1) });
 		expect((await received.readFrame())?.payload.length).toBe(1);
 		for (let i = 0; i < 8; i++) joins.push(remote.subscribe());
-		await clock.advance(Nano(0));
+		await clock.advance(Duration.nanos(0));
 		if (alpn === ALPN_07_WIP) {
 			while (producer.demand().wanted.peek() !== 1n) await producer.demand().wanted.changed();
 		}
@@ -68,7 +68,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n] : []);
 		// A parameter change restates the wanted group rather than clearing it.
 		joins.push(remote.subscribe({ priority: 9 }));
-		await clock.advance(Nano(0));
+		await clock.advance(Duration.nanos(0));
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n, 1n] : []);
 		for (const join of joins) join.close();
 		received.close();
@@ -78,7 +78,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		spy.mockRestore();
 		for (const origin of [b, source]) origin.close();
 		for (const peer of peers) peer.abort();
-		await clock.advance(Nano(0));
+		await clock.advance(Duration.nanos(0));
 		installed.close();
 	}
 });

@@ -12,7 +12,7 @@ use crate::frame::d3d11;
 
 /// Wrap a `windows` error with context as a codec error.
 pub(crate) fn mf_err(ctx: &str, e: windows::core::Error) -> Error {
-	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
+	Error::codec(anyhow::anyhow!("{ctx}: {e}"))
 }
 
 /// Pack two 32-bit values into the high/low halves of a u64, the layout Media
@@ -42,7 +42,7 @@ pub(crate) fn create_d3d_device() -> Result<(ID3D11Device, IMFDXGIDeviceManager)
 	unsafe {
 		MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(|e| mf_err("MFCreateDXGIDeviceManager", e))?;
 	}
-	let manager = manager.ok_or_else(|| Error::Codec(anyhow::anyhow!("MFCreateDXGIDeviceManager returned null")))?;
+	let manager = manager.ok_or_else(|| Error::codec(anyhow::anyhow!("MFCreateDXGIDeviceManager returned null")))?;
 	unsafe {
 		manager
 			.ResetDevice(&device, token)

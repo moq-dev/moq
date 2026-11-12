@@ -7,7 +7,7 @@ use thiserror::Error;
 use tracing::trace;
 
 use super::{StreamsState, schedule::Slot};
-use crate::connection::{ConnectionTag, State as ConnState, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
+use crate::connection::{ConnectionTag, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
 use crate::{StreamId, VarInt, frame};
 
 #[derive(Debug)]
@@ -17,8 +17,6 @@ pub(super) struct Send {
 	pub(super) pending: SendBuffer,
 	pub(super) priority: i64,
 	pub(super) slot: Slot,
-	/// Whether a frame containing a FIN bit must be transmitted, even if we don't have any new data
-	pub(super) fin_pending: bool,
 	/// Value of `max_data` for which a `STREAM_DATA_BLOCKED` frame was most recently queued
 	///
 	/// A new frame is only queued once the peer has raised the limit.
@@ -39,7 +37,6 @@ impl Send {
 			pending: SendBuffer::new(),
 			priority: 0,
 			slot: Slot::default(),
-			fin_pending: false,
 			data_blocked_limit: None,
 			stop_reason: None,
 			notify: None,
@@ -56,8 +53,10 @@ impl Send {
 		if let Some(error_code) = self.stop_reason {
 			Err(Error::Stopped(error_code))
 		} else if self.state == SendState::Ready {
-			self.state = SendState::DataSent { finish_acked: false };
-			self.fin_pending = true;
+			self.state = SendState::DataSent {
+				finish_acked: false,
+				fin_pending: true,
+			};
 			Ok(())
 		} else {
 			Err(Error::Closed)
@@ -101,7 +100,7 @@ impl Send {
 		}
 		match self.state {
 			SendState::ResetSent { error_code, .. } => Some(End::Reset(error_code)),
-			SendState::DataSent { finish_acked: true } if self.pending.is_fully_acked() => Some(End::Finished),
+			SendState::DataSent { finish_acked: true, .. } if self.pending.is_fully_acked() => Some(End::Finished),
 			_ => None,
 		}
 	}
@@ -120,7 +119,6 @@ impl Send {
 		debug_assert!(reliable_size <= self.pending.offset());
 		let final_size = self.pending.offset();
 		self.pending.truncate(reliable_size);
-		self.fin_pending = false;
 		let send = at || self.pending.is_fully_acked();
 		self.state = ResetSent {
 			final_size,
@@ -240,7 +238,7 @@ impl Send {
 	pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
 		self.pending.ack(frame.offsets);
 		match &mut self.state {
-			SendState::DataSent { finish_acked } => {
+			SendState::DataSent { finish_acked, .. } => {
 				*finish_acked |= frame.fin;
 				*finish_acked && self.pending.is_fully_acked()
 			}
@@ -295,7 +293,7 @@ impl Send {
 	}
 
 	pub(super) fn is_pending(&self) -> bool {
-		self.pending.has_unsent_data() || self.fin_pending
+		self.pending.has_unsent_data() || matches!(self.state, SendState::DataSent { fin_pending: true, .. })
 	}
 
 	pub(super) fn is_writable(&self) -> bool {
@@ -308,7 +306,11 @@ pub(super) enum SendState {
 	/// Sending new data
 	Ready,
 	/// Stream was finished; now sending retransmits only
-	DataSent { finish_acked: bool },
+	DataSent {
+		finish_acked: bool,
+		/// A frame with the FIN bit is due, even without new data
+		fin_pending: bool,
+	},
 	/// Reset by the application, while data below `reliable_size` is still delivered
 	///
 	/// The peer gets RESET_STREAM_AT, or, without it, a RESET_STREAM `held` until it has
@@ -331,23 +333,19 @@ pub struct Stream<'a> {
 	pub(crate) id: StreamId,
 	pub(crate) state: &'a mut StreamsState,
 	pub(crate) pending: &'a mut Retransmits,
-	pub(crate) conn_state: &'a ConnState,
+	/// The connection ended, so nothing more is written
+	pub(crate) closed: bool,
 }
 
 impl<'a> Stream<'a> {
 	/// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
 	#[cfg(any(test, feature = "fuzz"))]
-	pub(crate) fn new(
-		id: StreamId,
-		state: &'a mut StreamsState,
-		pending: &'a mut Retransmits,
-		conn_state: &'a ConnState,
-	) -> Self {
+	pub(crate) fn new(id: StreamId, state: &'a mut StreamsState, pending: &'a mut Retransmits, closed: bool) -> Self {
 		Self {
 			id,
 			state,
 			pending,
-			conn_state,
+			closed,
 		}
 	}
 
@@ -357,7 +355,7 @@ impl<'a> Stream<'a> {
 	/// splits off without copying. Fails with [`Error::Blocked`] when nothing fits;
 	/// [`Self::poll_write`] waits for room instead.
 	pub fn write(&mut self, data: &mut impl Buf) -> Result<usize, Error> {
-		if self.conn_state.is_closed() {
+		if self.closed {
 			trace!(%self.id, "write blocked; connection draining");
 			return Err(Error::Blocked);
 		}
@@ -519,9 +517,8 @@ impl<'a> Stream<'a> {
 
 	/// Whether the peer acknowledged every byte before `offset`
 	///
-	/// A `false` notes to wake the stream's [`Self::poll_acked`] waiters once the answer changes.
-	/// The stream holds only its lowest waiting offset, so every waiter on it polls again then. Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack
-	/// holds the data, not that its application read it.
+	/// Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack holds the data,
+	/// not that its application read it.
 	///
 	/// Fails with [`Error::Closed`] once the peer will never acknowledge it, or no longer reads
 	/// it: a reset dropped the data before `offset`, the peer sent STOP_SENDING, or the
@@ -544,19 +541,21 @@ impl<'a> Stream<'a> {
 			},
 		};
 		match acked {
-			Ok(false) if self.conn_state.is_closed() => Err(Error::Closed),
+			Ok(false) if self.closed => Err(Error::Closed),
 			acked => acked,
 		}
 	}
 
 	/// Wait for the peer to acknowledge every byte before `offset`, as [`Self::acked`] answers it
 	///
-	/// Pending registers `waiter` until the answer changes. Fails with [`Error::ConnectionLost`]
+	/// Pending registers `waiter` until the answer changes. The stream holds only its lowest
+	/// waiting offset, so every waiter on it polls again then. Fails with [`Error::ConnectionLost`]
 	/// instead of [`Error::Closed`] once the connection is lost.
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
-	pub fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+	#[cfg(test)]
+	pub(crate) fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		match self.acked(offset) {
 			Ok(true) => Poll::Ready(Ok(())),
 			Ok(false) => {
@@ -642,9 +641,7 @@ impl<'a> Stream<'a> {
 	/// Set the priority within the stream's send group, or session-wide when ungrouped
 	///
 	/// Higher values go first; equal values share bytes round robin. A queued stream moves at
-	/// once, behind the streams already queued at its new priority. With
-	/// [`transport::Config::send_fairness`](crate::transport::Config::send_fairness) off, a stream
-	/// its group is partway through keeps going first until it runs out of data.
+	/// once, behind the streams already queued at its new priority.
 	pub fn set_priority(&mut self, priority: i64) -> Result<(), Error> {
 		let max_data = self.state.max_send_data(self.id);
 		let stream = StreamsState::send_mut(&mut self.state.send, self.id, max_data)?;
@@ -720,7 +717,7 @@ pub enum End {
 ///
 /// A higher priority group preempts every lower one, and groups of equal priority get an
 /// equal share of bytes no matter how many streams each has queued. Streams outside any group
-/// go before all of it. A group's datagrams, from [`Datagrams::send`](crate::Datagrams::send),
+/// go before all of it. A group's datagrams, from [`Datagrams::send`](crate::connection::Datagrams::send),
 /// share its bytes in the same order.
 pub struct Groups<'a> {
 	pub(crate) state: &'a mut StreamsState,

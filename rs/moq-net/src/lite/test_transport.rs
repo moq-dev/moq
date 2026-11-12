@@ -840,7 +840,7 @@ impl poll::Session for SinkSession {
 		let (Some(window), Some(connection)) = (window.as_mut(), limits.receive_window) else {
 			return Err(crate::transport::LimitsError::Unsupported);
 		};
-		window.connection = connection.get();
+		window.connection = Some(connection);
 		Ok(())
 	}
 }
@@ -974,8 +974,6 @@ pub struct ScriptedSession {
 	groups: bool,
 	/// Set by [`Self::with_send_window`].
 	send_window: Option<usize>,
-	/// Set by [`Self::with_receive_window`].
-	receive_window: Option<crate::transport::ReceiveWindow>,
 }
 
 impl ScriptedSession {
@@ -1016,15 +1014,7 @@ impl ScriptedSession {
 			unacked_unis: Default::default(),
 			groups: false,
 			send_window: None,
-			receive_window: None,
 		}
-	}
-
-	/// Report `window` as the receive windows in force, so a stream the session stops reading
-	/// holds credit.
-	pub fn with_receive_window(mut self, window: crate::transport::ReceiveWindow) -> Self {
-		self.receive_window = Some(window);
-		self
 	}
 
 	/// Let each opened bidi stream send only its first `bytes`, then park its writes for good,
@@ -1156,10 +1146,6 @@ impl poll::Session for ScriptedSession {
 	type SendStream = SinkSend;
 	type RecvStream = ScriptedRecv;
 	type Error = SinkError;
-
-	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
-		self.receive_window
-	}
 
 	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		let Some(script) = self.incoming_unis.lock().unwrap().pop_front() else {

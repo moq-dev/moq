@@ -46,6 +46,11 @@ pub struct Request {
 	/// server binds the tenant to the credential, not to this alone.
 	pub server_name: Option<String>,
 
+	/// The host the client dialed, without its port: the `Host` header or URL authority on
+	/// HTTP, WebSocket, and WebTransport, the SNI on raw QUIC and `tls://`. Client-chosen
+	/// even over plaintext, so bind the tenant to the credential, not to this alone.
+	pub host: Option<String>,
+
 	/// The negotiated application protocol, including the moq version.
 	pub alpn: Option<String>,
 
@@ -79,6 +84,7 @@ impl std::fmt::Debug for Request {
 			.field("remote", &self.remote)
 			.field("local", &self.local)
 			.field("server_name", &self.server_name)
+			.field("host", &self.host)
 			.field("alpn", &self.alpn)
 			.field("path", &self.path)
 			// The contract permits credentials under any query key.
@@ -109,6 +115,7 @@ impl Request {
 			remote: None,
 			local: None,
 			server_name: None,
+			host: None,
 			alpn: None,
 			path: path.into(),
 			query: None,
@@ -174,8 +181,6 @@ pub enum Event {
 pub enum Transport {
 	/// A native QUIC connection.
 	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
 	/// A TCP connection using qmux framing, plaintext or TLS.
@@ -203,7 +208,6 @@ impl Transport {
 	pub const fn as_str(self) -> &'static str {
 		match self {
 			Self::Quic => "quic",
-			Self::Iroh => "iroh",
 			Self::WebSocket => "websocket",
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
@@ -281,6 +285,7 @@ mod tests {
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request.local = Some("[::1]:443".parse().unwrap());
 		request.server_name = Some("relay.example".into());
+		request.host = Some("relay.example".into());
 		request.alpn = Some("moq-lite-05".into());
 		request.query = Some("jwt=abc".into());
 		request.role = Some(Role::Publisher);

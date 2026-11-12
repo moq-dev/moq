@@ -42,82 +42,14 @@ pub use moq_quic::{Limits, LimitsError, Rate};
 /// Stream identity, and the varint every QUIC code is.
 pub use moq_quic::{VarInt, stream};
 
-/// A TLS certificate chain and the private key that signs for it, as PEM.
-/// One value, so neither half can be configured alone.
-///
-/// The bytes are read once and held, not re-read per connection: a worker
-/// group builds one of these before it spawns, so replacing the files on disk
-/// afterwards cannot leave two workers serving different identities.
-#[derive(Clone)]
-pub struct Identity {
-	cert: Vec<u8>,
-	key: Vec<u8>,
-}
-
-impl Identity {
-	/// Read the PEM chain at `cert` and the PEM key at `key`.
-	pub fn open(cert: impl AsRef<std::path::Path>, key: impl AsRef<std::path::Path>) -> Result<Self, Error> {
-		let read = |path: &std::path::Path| {
-			std::fs::read(path).map_err(|err| Error::Tls(format!("{}: {err}", path.display())))
-		};
-		Ok(Self {
-			cert: read(cert.as_ref())?,
-			key: read(key.as_ref())?,
-		})
-	}
-
-	/// The same, from PEM already in hand.
-	pub fn from_pem(cert: impl Into<Vec<u8>>, key: impl Into<Vec<u8>>) -> Self {
-		Self {
-			cert: cert.into(),
-			key: key.into(),
-		}
-	}
-
-	/// A TLS 1.3 server policy presenting this identity, speaking `alpn` in
-	/// preference order, and checking clients as `client_auth` says.
-	pub fn server(
-		&self,
-		alpn: &[impl AsRef<str>],
-		client_auth: server::ClientAuth,
-	) -> Result<std::sync::Arc<rustls::ServerConfig>, Error> {
-		let alpn = alpn.iter().map(|proto| proto.as_ref().as_bytes().to_vec()).collect();
-		driver::identity_server_config(self, alpn, &client_auth)
-	}
-
-	/// The PEM certificate chain being presented, for a caller that publishes
-	/// its fingerprint. The key is deliberately not readable back out.
-	pub fn cert(&self) -> &[u8] {
-		&self.cert
-	}
-
-	/// The PEM private key, for the backend loading it into its TLS stack.
-	pub(crate) fn key(&self) -> &[u8] {
-		&self.key
-	}
-}
-
-impl std::fmt::Debug for Identity {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		// Whatever else gets logged, the private key does not.
-		f.debug_struct("Identity")
-			.field("cert", &format_args!("{} PEM bytes", self.cert.len()))
-			.finish_non_exhaustive()
-	}
-}
-
-/// The congestion control family a connection runs.
+/// A built-in congestion control family, which converts into the factory
+/// [`transport::Config::congestion`] holds.
 ///
 /// CUBIC is used for loss-based control and BBRv3 for delay-based control.
-///
-/// The default is [`Loss`](Self::Loss), which is what moq-quic runs
-/// unasked. An application carrying live media wants [`Delay`](Self::Delay)
-/// and should say so; the relay does.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Congestion {
 	/// Loss-based: grows until it drops packets, so the send rate sawtooths.
-	#[default]
 	Loss,
 	/// Delay-based: tracks the measured delivery rate and RTT instead of
 	/// waiting for loss, which keeps queues short and the send rate steady
@@ -127,11 +59,20 @@ pub enum Congestion {
 	None,
 }
 
+impl From<Congestion> for std::sync::Arc<dyn moq_congestion::Factory + Send + Sync> {
+	fn from(family: Congestion) -> Self {
+		match family {
+			Congestion::Loss => std::sync::Arc::new(moq_congestion::cubic::Config::default()),
+			Congestion::Delay => std::sync::Arc::new(moq_congestion::bbr3::Config::default()),
+			Congestion::None => std::sync::Arc::new(moq_congestion::Unlimited),
+		}
+	}
+}
+
 /// Why a connection could not be set up or has ended.
 ///
-/// One error type for the whole module: it is also what every
-/// [`moq_net::transport::poll`] session operation reports, which
-/// is how the close reason reaches `moq_net::Error::from_transport`.
+/// A [`web::Session`] reports it as [`web::Error::Connection`], decoding the
+/// peer's close code into the session's own.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -169,9 +110,6 @@ pub enum Error {
 	/// A lease wanted more than the connection receive window can hold.
 	#[error("want exceeds the receive window")]
 	TooLarge,
-	/// The TLS material a connection needs could not be loaded.
-	#[error("tls error: {0}")]
-	Tls(String),
 	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
 	#[error(transparent)]
 	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
@@ -186,20 +124,6 @@ pub enum Error {
 	/// without.
 	#[error("endpoint has no server configuration")]
 	NotServer,
-	/// The WebTransport (HTTP/3) layer failed: a broken handshake, or a
-	/// stream that could not be framed.
-	#[error("webtransport error: {0}")]
-	Web(String),
-	/// HTTP/3 failed with a code of its own, one that names no WebTransport
-	/// error (`H3_NO_ERROR`, say). Neither trait accessor reports it, because
-	/// it is not a code the peer's application chose.
-	#[error("http/3 closed: code={code} reason={reason:?}")]
-	Http3 {
-		/// The HTTP/3 error code.
-		code: u64,
-		/// The UTF-8 lossy close reason, empty for a stream-level code.
-		reason: String,
-	},
 	/// qlog traces were asked for and cannot be captured: the directory is
 	/// missing or unwritable, or the writer thread could not be started.
 	#[error("qlog error: {0}")]
@@ -246,7 +170,7 @@ mod outcome_tests {
 		assert_eq!(Error::Closed.close_kind(), CloseKind::Closed);
 		assert_eq!(web::recv::Error::Evicted.close_kind(), CloseKind::Evicted);
 		assert_eq!(
-			web::send::Error::SessionError(Error::TimedOut).close_kind(),
+			web::send::Error::Session(web::Error::Connection(Error::TimedOut)).close_kind(),
 			CloseKind::IdleTimeout
 		);
 		let outside = Error::App {

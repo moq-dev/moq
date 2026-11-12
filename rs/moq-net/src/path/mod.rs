@@ -651,8 +651,7 @@ impl From<Error> for crate::Error {
 	fn from(err: Error) -> Self {
 		match err {
 			Error::TooLong => crate::Error::BoundsExceeded(crate::BoundsExceeded),
-			Error::EmptySegment => crate::Error::EmptySegment,
-			Error::InvalidEscape => crate::Error::InvalidEscape,
+			err => crate::Error::Path(err),
 		}
 	}
 }
@@ -1145,6 +1144,7 @@ mod tests {
 		let tracks = crate::lite::Tracks {
 			broadcast: Path::new(&longest).unwrap(),
 			instance: None,
+			node: 0,
 		};
 		let buf = tracks.encode_bytes(Version::Lite07).unwrap();
 		let (decoded, _) = crate::lite::Tracks::decode_slice(&buf, Version::Lite07).unwrap();

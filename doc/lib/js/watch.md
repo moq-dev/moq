@@ -78,7 +78,10 @@ one, the player inserts a second recovery point with a zero count before its
 first slice. The slices are untouched; the stripes clear as the sweep
 completes.
 
-`el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
+`el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
+It reads `connecting` until a session could have announced the broadcast: while the
+connection dials, redials, or was refused (`el.connection.error` says why), and until the
+relay's initial announcements arrive. Only then does a missing broadcast read `offline`.
 On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
 On `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.
@@ -107,7 +110,9 @@ player publishes its own broadcast, reporting only what it counted, so a second
 player on one connection that resolves the same feedback path, for any catalog,
 publishes nothing and warns until the first one leaves; give each player its own
 name. The decoders'
-`out.stats` and the stats panel read the same counters. The token must allow
+`out.stats` and the stats panel read the same counters. Audio's `out.stats`
+also counts `skips`, each jump that dropped buffered audio rather than playing
+it faster, which the stats panel shows and the feedback track leaves out. The token must allow
 publishing under the echo path.
 
 ## Binding from a framework
@@ -213,36 +218,16 @@ leave the connection's estimate unclaimed. Without a claim, video selects the be
 `video.target` allows. To stop the relay probing while still adapting, keep the claim and call
 `connection.viewers.setTarget(0)`.
 
-To chart when each audio frame arrived against when it plays, open an
-`arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped
-when the frame came off the transport, and a gap wherever media after an earlier
-frame will never arrive (a latency skip, a hole):
-
-```ts
-const arrivals = player.audio.arrivals();
-for await (const entry of arrivals) {
-    if (entry.kind === "gap") {
-        // Break the plotted line; nothing arrived from `timestamp` for `duration`.
-        continue;
-    }
-    const { timestamp, arrival, late } = entry;
-    // `late`: arrived after its playback deadline.
-}
-```
-
-A gap's span is an upper bound: without per-frame durations it starts at the
-last frame's timestamp, and it covers any pause the publisher declared.
-
-Unread frames queue on the handle, so keep reading and keep your own window.
-Leaving the loop or calling `arrivals.close()` stops observing and releases
-them; nothing is retained without an open handle.
-
 ## Buffered playback
 
-By default the player minimizes latency: it skips ahead whenever media piles
-up past the delay. Content produced faster than real time, such as a TTS
+By default the player minimizes latency: audio plays at the delay, slows down
+slightly when the audio received ahead of it runs low, speeds back up once it
+recovers, and skips ahead only audio trailing by more than the subscription
+still delivers. Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
-`lookahead` to how far ahead it may run and it plays through at the encoded pace:
+`lookahead` to how far ahead it may run and it plays through at the encoded pace.
+If a stall leaves audio behind, it catches up by playing faster, as live
+playback does, and skips only what trails by more than the lookahead:
 
 ```html
 <moq-watch url="..." name="bot/tts.hang" delay="100ms" lookahead="30s"></moq-watch>
@@ -252,7 +237,9 @@ response emitted in one burst with future timestamps, wants the opposite. Set
 `delay`, since playback only skips ahead once media sits more than
 `delay + lookahead` past the playhead.
 
-Durations need a unit; a bare number is rejected. Audio holds the lookahead
+Durations need a unit; a bare number is rejected. From script, the `delay` and
+`lookahead` properties take a `Duration` from `@moq/clock`, such as
+`el.delay = Duration.millis(300)`. Audio holds the lookahead
 as encoded frames, so a large one is cheap; video waits as decoded pictures,
 which hold decoder memory, so a long video lookahead is not. The first video
 frame shows as a poster at once, and playback starts once every enabled track
@@ -272,6 +259,10 @@ import * as Watch from "@moq/watch";
 Watch.assets("/moq/");
 ```
 
-The URL must end with `/`. Copy the files again on every upgrade: the worklet
-changes with the package. `@moq/room` and `@moq/boy` play through
+The URL must end with `/` and have no query or fragment. Copy the files again
+on every upgrade: the worklet changes with the package. `@moq/room` plays through
 `@moq/watch`, so this one call covers them.
+
+A browser without `AudioDecoder` decodes through the libav polyfill, which
+loads its worker and WebAssembly from the same directory (they are among
+`assets/*`), so also allow `'wasm-unsafe-eval'` in `script-src`.

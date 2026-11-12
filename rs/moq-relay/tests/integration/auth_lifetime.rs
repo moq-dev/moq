@@ -22,15 +22,18 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
-use moq_relay::{Config, Connection, Relay, auth, cluster, web};
-use moq_tokio::moq_net;
-use moq_tokio::moq_net::stats;
+use moq_net::stats;
+#[cfg(feature = "websocket")]
+use moq_relay::web;
+use moq_relay::{Config, Connection, Relay, auth, cluster};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
+/// Bounds a wait on the host clock. Under `crate::manual()` it never fires, and nextest's
+/// `terminate-after` bounds the test instead.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the scripted server answers next, per event.
@@ -40,6 +43,10 @@ enum Answer {
 	Status(u16),
 	Token(Grant, moq_auth::Token),
 	/// A 403 carrying a typed refusal.
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	Refuse(moq_auth::refusal::Reason),
 }
 
@@ -85,6 +92,7 @@ impl Script {
 		*self.revalidate.lock().unwrap() = answer;
 	}
 
+	#[cfg(feature = "websocket")]
 	fn on_revalidate_http(&self, answer: Answer) {
 		*self.revalidate_http.lock().unwrap() = Some(answer);
 	}
@@ -169,11 +177,14 @@ fn all() -> Patterns {
 	[Pattern::all()].into_iter().collect()
 }
 
-/// Everything under the dialed path, re-checked every second, good for `expires_in`.
+/// How often [`grant`] asks to be re-checked.
+const CADENCE: Duration = Duration::from_secs(1);
+
+/// Everything under the dialed path, re-checked every [`CADENCE`], good for `expires_in`.
 fn grant(expires_in: Duration) -> Grant {
 	let mut grant = Grant::new(all(), all());
 	grant.expires = Some(kio::clock::wall() + expires_in);
-	grant.revalidate = Some(Duration::from_secs(1));
+	grant.revalidate = Some(CADENCE);
 	grant
 }
 
@@ -234,31 +245,31 @@ async fn spawn_relay_config(
 
 /// Stand up the relay's axum web stack with WebSocket enabled and return the
 /// port plus an abort handle.
+#[cfg(feature = "websocket")]
 async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
 	let cluster = crate::spawn_cluster(cluster::Options::default());
 	spawn_ws_relay_with(auth, cluster).await
 }
 
+#[cfg(feature = "websocket")]
 async fn spawn_ws_relay_with(
 	auth: moq_relay::auth::Auth,
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 
-	// Stream listeners bind lazily, so this server never opens a socket; only
-	// its certificate handle is used.
-	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
-	server_config.tls.generate = vec!["localhost".into()];
-	let certificates = server_config
-		.init(Default::default())
-		.expect("server init")
-		.certificates();
-
 	let mut web_config = web::Config::default();
 	web_config.ws = true;
 	web_config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
-	let web = web::Web::new(auth, cluster, certificates, web_config)
+	// Opt in to lite-07 beside the defaults, as `spawn_relay_config` does.
+	let mut listen = moq_tokio::listen::Config::default();
+	listen.version = moq_net::Versions::all()
+		.iter()
+		.copied()
+		.chain(["moq-lite-07-wip".parse().unwrap()])
+		.collect();
+	let web = web::Web::new(auth, cluster, crate::certificates(), web_config)
+		.with_listen(&listen)
 		.bind()
 		.expect("bind web listener");
 	let port = web.addrs().http.expect("HTTP listener is configured").port();
@@ -392,6 +403,7 @@ async fn assert_refused_with(client: moq_tokio::Client, url: &url::Url) {
 }
 
 /// A QUIC relay, verifying client certificates against `root` when given.
+#[cfg(feature = "quic")]
 async fn spawn_quic_relay(
 	auth: moq_relay::auth::Auth,
 	root: Option<std::path::PathBuf>,
@@ -401,6 +413,7 @@ async fn spawn_quic_relay(
 }
 
 /// [`spawn_quic_relay`] serving `cluster`.
+#[cfg(feature = "quic")]
 async fn spawn_quic_relay_with(
 	auth: moq_relay::auth::Auth,
 	root: Option<std::path::PathBuf>,
@@ -425,8 +438,8 @@ async fn spawn_quic_relay_with(
 	(addr, handle)
 }
 
-async fn assert_closed(session: moq_tokio::Connection, within: Duration, what: &str) {
-	let _ = kio::clock::timeout(within, session.closed())
+async fn assert_closed(session: moq_tokio::Connection, what: &str) {
+	let _ = kio::clock::timeout(TIMEOUT, session.closed())
 		.await
 		.unwrap_or_else(|_| panic!("relay should close the {what} session"));
 }
@@ -486,6 +499,7 @@ async fn admits_and_reports_the_session() {
 }
 
 /// Write all of `data` to a raw qmux stream.
+#[cfg(feature = "websocket")]
 async fn write_all(send: &mut qmux::SendStream, mut data: &[u8]) {
 	use moq_net::transport::poll::SendStream as _;
 	while !data.is_empty() {
@@ -495,6 +509,7 @@ async fn write_all(send: &mut qmux::SendStream, mut data: &[u8]) {
 }
 
 /// A moq-transport client's SETUP token reaches the auth server byte for byte.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn forwards_the_setup_token() {
 	use moq_net::transport::poll::{RecvStream as _, Session as _};
@@ -654,6 +669,7 @@ async fn refusals_and_outages_refuse_at_connect() {
 /// ones, and media sent afterwards records there in both directions.
 #[tokio::test]
 async fn a_moved_tier_retags_the_live_session() {
+	let clock = crate::manual();
 	let mut labeled = grant(Duration::from_secs(3600));
 	labeled.label = Some("project/key/1".into());
 	let script = Script::new(labeled);
@@ -683,7 +699,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	// Each label's (active sessions, sent bytes, received bytes), from one report.
 	let labels = || {
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::now());
 		report
 			.sessions
 			.into_iter()
@@ -777,10 +793,10 @@ async fn a_moved_tier_retags_the_live_session() {
 	moved_grant.label = Some("project/key/2".into());
 	script.on_revalidate(Answer::Grant(moved_grant));
 
-	let deadline = kio::clock::now() + TIMEOUT;
+	clock.advance(CADENCE);
+	// The stats signal no retag, so yield until both re-checks land; the clock stands still.
 	while active(&moved) < 2 {
-		assert!(kio::clock::now() < deadline, "the re-checked tier never applied");
-		kio::clock::sleep(Duration::from_millis(50)).await;
+		tokio::task::yield_now().await;
 	}
 	assert_eq!(active(&stats::Tier::default()), 0, "presence left the old tier");
 
@@ -818,10 +834,11 @@ async fn a_moved_tier_retags_the_live_session() {
 /// A re-check resizes the live session in place, over TCP and WebSocket: a narrower
 /// grant resets the deafened path with `Unauthorized` while a sibling under the same
 /// prefix keeps flowing, a wider one brings the path back, and neither session closes.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn a_rechecked_grant_resizes_live_sessions() {
-	// Each scheme waits out two re-check cadences, so run them side by side.
-	futures::future::join_all(["tcp", "ws"].map(|scheme| async move {
+	let clock = crate::manual();
+	for scheme in ["tcp", "ws"] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = match scheme {
@@ -890,7 +907,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			group
 				.write_frame(moq_net::Timestamp::ZERO, b"media".as_ref())
 				.expect("write frame");
-			group.finish().expect("finish group");
+			let group = group.finish().expect("finish group");
 			assert_eq!(group.sequence, sequence);
 		};
 		for (index, sub) in subs.iter_mut().enumerate() {
@@ -906,6 +923,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let mut narrow = grant(Duration::from_secs(3600));
 		narrow.subscribe = ["alice/video/**".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
+		clock.advance(CADENCE);
 
 		let err = loop {
 			match kio::clock::timeout(TIMEOUT, subs[0].recv_group())
@@ -935,6 +953,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Undeafen: the path is announced again and a new subscription flows.
 		script.on_revalidate(Answer::Grant(grant(Duration::from_secs(3600))));
+		clock.advance(CADENCE);
 		let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow("alice/audio", None).unwrap().available())
 			.await
 			.expect("the undeafened path was never announced again")
@@ -961,14 +980,14 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		assert_open_until_closed(&script, [pub_session, sub_session], &format!("{scheme}: a resize")).await;
 		relay.abort();
-	}))
-	.await;
+	}
 }
 
 /// A re-check that moves the root still closes the session: nothing it holds is
 /// named the same way under the new one.
 #[tokio::test]
 async fn a_moved_root_closes_live_sessions() {
+	let clock = crate::manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
@@ -977,8 +996,9 @@ async fn a_moved_root_closes_live_sessions() {
 	moved.root = Some("elsewhere".into());
 	script.on_revalidate(Answer::Grant(moved));
 
-	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
-	assert_closed(sub_session, Duration::from_secs(5), "subscriber").await;
+	clock.advance(CADENCE);
+	assert_closed(pub_session, "publisher").await;
+	assert_closed(sub_session, "subscriber").await;
 	relay.abort();
 }
 
@@ -986,21 +1006,22 @@ async fn a_moved_root_closes_live_sessions() {
 /// 403, 401, and an empty grant are all a no.
 #[tokio::test]
 async fn a_refusal_closes_live_sessions() {
-	// Each answer waits out a re-check cadence, so run them side by side.
+	let clock = crate::manual();
 	let answers = [
 		("403", Answer::Status(403)),
 		("401", Answer::Status(401)),
 		("empty grant", Answer::Grant(Grant::default())),
 	];
-	futures::future::join_all(answers.map(|(label, answer)| async move {
+	for (label, answer) in answers {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 		let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
 
 		script.on_revalidate(answer);
 
-		assert_closed(pub_session, Duration::from_secs(5), &format!("{label} publisher")).await;
-		assert_closed(sub_session, Duration::from_secs(5), &format!("{label} subscriber")).await;
+		clock.advance(CADENCE);
+		assert_closed(pub_session, &format!("{label} publisher")).await;
+		assert_closed(sub_session, &format!("{label} subscriber")).await;
 
 		let ends = script.ends_at_least(2, &format!("{label}: an end per session")).await;
 		for end in &ends {
@@ -1011,16 +1032,17 @@ async fn a_refusal_closes_live_sessions() {
 		}
 
 		relay.abort();
-	}))
-	.await;
+	}
 }
 
 /// The one-shot HTTP routes are sessions of their own: `/announced` is admitted
 /// as `http` and ended when it answers, and `/fetch` holds its lease for as long
 /// as the body streams, so a refusal on re-check cuts the transfer and the `end`
 /// says why.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn http_routes_hold_a_lease() {
+	let clock = crate::manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 
@@ -1130,7 +1152,8 @@ async fn http_routes_hold_a_lease() {
 
 	// A refusal on the fetch's re-check cuts the transfer; the publisher is untouched.
 	script.on_revalidate_http(Answer::Status(403));
-	let cut = kio::clock::timeout(Duration::from_secs(5), async {
+	clock.advance(CADENCE);
+	let cut = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match fetch.chunk().await {
 				Ok(Some(_)) => continue,
@@ -1157,6 +1180,7 @@ async fn http_routes_hold_a_lease() {
 
 /// A session the client closes reports `end` with its duration and byte counters.
 /// Over QUIC, the one transport whose connection reports its totals.
+#[cfg(feature = "quic")]
 #[tokio::test]
 async fn the_end_carries_duration_and_bytes() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
@@ -1190,7 +1214,7 @@ async fn the_end_carries_duration_and_bytes() {
 /// reporting its end, and holds both registrations until those reports finish.
 #[tokio::test]
 async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
-	let clock = manual();
+	let clock = crate::manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let gate = script.hold_ends();
 	let auth = build_auth(script.spawn().await);
@@ -1212,10 +1236,8 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 			Some(registration),
 		)));
 	}
-	assert_eq!(
-		observer.changed().await,
-		moq_relay::shutdown::Tally { open: 2, ending: 0 }
-	);
+	let tally = observer.changed().await;
+	assert_eq!((tally.open, tally.ending), (2, 0));
 	for view in registry.list(&Default::default()) {
 		assert_eq!(view.closed, None);
 		assert!(serde_json::to_value(view).unwrap().get("closed").is_none());
@@ -1224,7 +1246,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	trigger.start();
 	let started = kio::clock::now();
 	for client in &clients {
-		kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
+		kio::clock::timeout(TIMEOUT, kio::wait(|waiter| client.draining().poll(waiter)))
 			.await
 			.expect("GOAWAY timeout")
 			.expect("a GOAWAY");
@@ -1233,10 +1255,8 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	let closed = kio::clock::wall();
 	clients[0].abort(moq_net::Error::Cancel);
 	script.ends_at_least(1, "first end").await;
-	assert_eq!(
-		observer.changed().await,
-		moq_relay::shutdown::Tally { open: 1, ending: 1 }
-	);
+	let tally = observer.changed().await;
+	assert_eq!((tally.open, tally.ending), (1, 1));
 	let views = registry.list(&Default::default());
 	assert_eq!(views.iter().filter(|view| view.closed == Some(closed)).count(), 1);
 	let view = views.iter().find(|view| view.closed.is_some()).unwrap();
@@ -1250,10 +1270,8 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	});
 	clock.advance(drain_timeout - Duration::from_secs(1));
 	script.ends_at_least(2, "deadline end").await;
-	assert_eq!(
-		observer.changed().await,
-		moq_relay::shutdown::Tally { open: 0, ending: 2 }
-	);
+	let tally = observer.changed().await;
+	assert_eq!((tally.open, tally.ending), (0, 2));
 	assert!(
 		!drained.is_finished(),
 		"drain ended before the server answered the ends"
@@ -1271,12 +1289,8 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 		supervised.await.expect("supervisor task").expect("drained session");
 	}
 	assert_eq!(
-		summary,
-		moq_relay::shutdown::Drained {
-			forced: 1,
-			ending: 1,
-			elapsed: Duration::from_secs(6),
-		}
+		(summary.forced, summary.ending, summary.elapsed),
+		(1, 1, Duration::from_secs(6))
 	);
 	assert_eq!(observer.tally(), Default::default());
 	assert!(registry.list(&Default::default()).is_empty());
@@ -1300,6 +1314,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 /// A certificate is a fact: with no server grant for it, a verified peer is
 /// refused; with a narrow one, it is scoped to that and nothing more. Over QUIC
 /// with a client certificate, and over WebSocket where none can be presented.
+#[cfg(all(feature = "quic", feature = "websocket"))]
 #[tokio::test]
 async fn a_certificate_admits_only_what_the_server_grants() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
@@ -1383,6 +1398,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 
 /// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-link peer`,
 /// is a cluster peer: what it announces entered the cluster elsewhere.
+#[cfg(feature = "quic")]
 #[tokio::test]
 async fn an_mtls_peer_is_a_cluster_peer() {
 	let source = mtls_route_source(true).await;
@@ -1393,6 +1409,7 @@ async fn an_mtls_peer_is_a_cluster_peer() {
 }
 
 /// Without `--mtls-link peer`, a certificate identifies a client ingesting here.
+#[cfg(feature = "quic")]
 #[tokio::test]
 async fn an_mtls_client_ingests_here() {
 	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);
@@ -1400,6 +1417,7 @@ async fn an_mtls_client_ingests_here() {
 
 /// The source the relay records for a broadcast announced over a certificate
 /// session, admitted by `moq auth serve` with the peer link role when requested.
+#[cfg(feature = "quic")]
 async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -1450,6 +1468,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	update.route.source()
 }
 
+#[cfg(feature = "quic")]
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
 	let ca_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
 	let mut ca_params = rcgen::CertificateParams::new(Vec::new())
@@ -1536,7 +1555,7 @@ async fn an_embedded_decider_admits_and_revokes() {
 	// The publisher was admitted first; revoking its lease closes it alone.
 	let publisher = decider.producers.lock().unwrap().remove(0);
 	publisher.revoke(moq_auth::lease::Reason::Refused);
-	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
+	assert_closed(pub_session, "publisher").await;
 	// The subscriber's lease reports the client's own close, so the revocation had
 	// not ended it.
 	let subscriber = decider.producers.lock().unwrap().remove(0);
@@ -1572,7 +1591,7 @@ async fn an_embedded_decider_admits_and_revokes() {
 /// `supervise`, as `a_rechecked_grant_resizes_live_sessions` proves.
 #[tokio::test(start_paused = true)]
 async fn a_fixed_lease_still_expires() {
-	let clock = manual();
+	let clock = crate::manual();
 	closes_at_expires(&clock, moq_auth::lease::Consumer::fixed(expiring())).await;
 }
 
@@ -1624,7 +1643,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session, kio::Producer
 /// server's outage keeps the grant is `moq_auth::Client`'s to test.
 #[tokio::test(start_paused = true)]
 async fn an_outage_keeps_the_session_until_expires() {
-	let clock = manual();
+	let clock = crate::manual();
 	let (producer, consumer) = moq_auth::lease::Producer::new(expiring());
 	closes_at_expires(&clock, consumer).await;
 	let (reason, _) = producer.closed().await;
@@ -1633,12 +1652,6 @@ async fn an_outage_keeps_the_session_until_expires() {
 
 /// How long after the manual clock's start [`expiring`] grants run out.
 const EXPIRES: Duration = Duration::from_secs(3);
-
-/// Make the test runtime's clock one that only the test moves, wall time included,
-/// so a grant's life is measured exactly. Call it before anything reads the clock.
-fn manual() -> kio::clock::Installed {
-	kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
-}
 
 /// Everything under the dialed path, until [`EXPIRES`] from now on the ambient clock.
 fn expiring() -> Grant {
@@ -1682,7 +1695,8 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 	)]
 	let parked = tokio::time::timeout(Duration::from_secs(1), client.closed()).await;
 	assert!(parked.is_err(), "the paused driver closed the transport");
-	assert_eq!(observer.tally(), moq_relay::shutdown::Tally { open: 1, ending: 0 });
+	let tally = observer.tally();
+	assert_eq!((tally.open, tally.ending), (1, 0));
 	let views = registry.list(&Default::default());
 	assert_eq!(views.len(), 1, "registration left before its transport closed");
 	assert_eq!(views[0].closed, None);
@@ -1767,23 +1781,22 @@ async fn connect_through_embedded_admission(
 /// comes closes the connection at the deadline, not after a fixed cap of its own.
 #[tokio::test]
 async fn an_unanswered_admission_closes_at_the_handshake_deadline() {
-	let (relay, mut admissions, connecting) = connect_through_embedded_admission(Duration::from_secs(1)).await;
+	let clock = crate::manual();
+	let deadline = Duration::from_secs(1);
+	let (relay, mut admissions, connecting) = connect_through_embedded_admission(deadline).await;
 	let trigger = relay.shutdown_trigger().clone();
 	let running = tokio::spawn(relay.run());
 	let admission = admissions.next().await.expect("the admission is asked");
 
-	// Only timers decide what follows: the deadline passes with nobody answering.
-	tokio::time::pause();
-	tokio::time::advance(Duration::from_secs(2)).await;
-	tokio::time::resume();
-	// The close reaches the client over loopback within moments; the old fixed cap
-	// would have held the connection for another eight seconds.
+	// Only timers decide what follows: the deadline passes with nobody answering, then
+	// the clock stands still, so the close owes nothing to the old fixed cap.
+	clock.advance(deadline);
 	let connecting = kio::clock::timeout(TIMEOUT, connecting)
 		.await
 		.expect("the client never settled")
 		.expect("client task");
 	if let Ok(connection) = connecting {
-		kio::clock::timeout(Duration::from_secs(3), connection.closed())
+		kio::clock::timeout(TIMEOUT, connection.closed())
 			.await
 			.expect("the connection outlived the handshake deadline")
 			.expect_err("closed as refused, not cleanly");
@@ -1845,17 +1858,22 @@ async fn a_late_decision_within_the_deadline_admits() {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::origin::RouteEvent::Start(route)
-		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route)
-		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: route,
+		} => Some((route, true)),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+			announce: route,
+		} => Some((route, false)),
 	}
 }
 
 /// The auth server sees the accepted transport, independent of negotiated MoQ ALPN.
 /// An IP-literal dial sends no SNI, so neither reports a `server_name`: the
 /// WebTransport CONNECT host selected no certificate and never stands in for one.
+#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_and_webtransport_report_distinct_auth_transports() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
@@ -1879,7 +1897,9 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 }
 
 /// A token can reach a prefix outside the initial credential, and withdrawing it
-/// revokes only the streams that depended on it on both native and upgraded WS.
+/// revokes only the streams that depended on it on both native and upgraded WS. Only
+/// lite-07 carries a token in band.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
@@ -1894,7 +1914,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		};
 		let client = || {
 			let mut config = moq_tokio::connect::Config::default();
-			config.version = vec!["moq-transport-22".parse().unwrap()];
+			config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 			#[cfg(feature = "websocket")]
 			{
 				config.websocket.delay = Some((Duration::ZERO).into());
@@ -1939,10 +1959,8 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
 		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
-		let token = kio::clock::timeout(TIMEOUT, subscriber.auth().add("replacement"))
-			.await
-			.unwrap()
-			.unwrap();
+		let token = subscriber.auth().add("replacement").unwrap();
+		kio::clock::timeout(TIMEOUT, token.answered()).await.unwrap().unwrap();
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
@@ -2002,7 +2020,6 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
 	let mut config = moq_tokio::connect::Config::default();
 	config.version = vec!["moq-transport-22".parse().unwrap()];
-	config.extensions.auth = false;
 	config.extensions.solicit = false;
 	let client = config.init(Default::default()).unwrap().with_reconnect(false);
 	let origin = moq_tokio::origin::spawn();
@@ -2021,7 +2038,8 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 		.established()
 		.await
 		.unwrap();
-	let (token, _) = publisher.auth().add("shared").await.unwrap();
+	let token = publisher.auth().add("shared").unwrap();
+	token.answered().await.unwrap();
 	let first = origin
 		.route(
 			"first",
@@ -2088,6 +2106,7 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 }
 
 /// Both admission paths apply the selected cap before starting the session driver.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn relay_request_limits_distinguish_clients_and_peers() {
 	for scheme in ["tcp", "ws"] {
@@ -2097,7 +2116,7 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 			let script = Script::new(grant);
 			let auth = build_auth(script.spawn().await);
 			let mut options = cluster::Options::default();
-			options.session.announces = 1;
+			options.client.announces = 1;
 			options.peer.announces = 2;
 			let cluster = crate::spawn_cluster(options);
 			let consumer = cluster.origin.consume();
@@ -2148,6 +2167,7 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 }
 
 /// Browser-visible policy refusals happen after the WebSocket upgrade, in MoQ's close registry.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn websocket_refusal_is_in_band() {
 	use moq_auth::refusal::Reason;
@@ -2187,6 +2207,7 @@ async fn websocket_refusal_is_in_band() {
 }
 
 /// The role seen at SETUP reaches the shared admission gate on the WebSocket path.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
 	let script = Script::new(Grant::new(Patterns::new(), all()));
@@ -2222,6 +2243,7 @@ async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
 }
 
 /// The native reconnect loop treats an in-band unauthorized refusal as terminal too.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn websocket_unauthorized_stops_native_reconnect() {
 	let script = Script::new(grant(Duration::from_secs(3600)));

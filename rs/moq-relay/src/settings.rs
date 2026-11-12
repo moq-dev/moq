@@ -59,7 +59,7 @@ pub struct Settings {
 #[usage(prefix = "runtime")]
 struct Runtime {
 	#[usage(env = "MOQ_RUNTIME_WORKERS", cli("--runtime-workers"))]
-	workers: Option<u16>,
+	workers: Option<String>,
 
 	#[usage(env = "MOQ_RUNTIME_PIN", cli("--runtime-pin"))]
 	pin: Option<bool>,
@@ -71,9 +71,6 @@ struct Runtime {
 #[derive(usage_rs::Config)]
 #[usage(prefix = "cluster")]
 struct Cluster {
-	#[usage(env = "MOQ_CLUSTER_ID", cli("--cluster-id"))]
-	id: Option<u64>,
-
 	#[usage(env = "MOQ_CLUSTER_ROUTE_KEY", cli("--cluster-route-key"))]
 	route_key: Option<String>,
 

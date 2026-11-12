@@ -82,7 +82,7 @@ fn grant(path: &str) -> Grant {
 
 const LITE_07: &str = "moq-lite-07-wip";
 
-async fn node(id: u64, connect: Vec<Peer>) -> Node {
+async fn node(connect: Vec<Peer>) -> Node {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut tasks = tokio::task::JoinSet::new();
 
@@ -106,9 +106,9 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 	client.version = vec![LITE_07.parse().expect("lite-07")];
 
 	let mut config = cluster::Config::default();
-	config.id = Some(id);
 	config.connect = connect;
 	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(client, Default::default());
+	let id = cluster.id();
 
 	let (auth, mut admissions) = auth::Auth::embedded(format!("node-{id}"));
 	tasks.spawn(async move {
@@ -198,36 +198,37 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 		.expect("group closed");
 }
 
-/// Each path `origin` routes now, with its route's hop ids, oldest first.
+/// Wait until `origin`'s routes satisfy `ready`, and return each path it routes with
+/// its route's hop ids, oldest first.
 ///
-/// Read from a fresh cursor's initial set, which reflects the route table as it
+/// Each read is a fresh cursor's initial set, which reflects the route table as it
 /// stands, unlike a live cursor that holds a best-route change back briefly. The
-/// cursor replays that set when it registers, all starts and none held, so it
-/// drains without waiting.
-fn routes(origin: &origin::Producer) -> BTreeMap<String, Vec<u64>> {
-	let mut announced = origin.consume().routes();
-	let mut routes = BTreeMap::new();
-	while let Some(event) = announced.try_next() {
-		let origin::RouteEvent::Start(announce) = event else {
-			panic!("an initial set is only starts: got {event:?}");
-		};
-		let hops = announce.route.hops().collect();
-		routes.insert(announce.prefix.as_str().to_string(), hops);
-	}
-	routes
-}
-
-/// Wait until `origin`'s routes satisfy `ready`, and return them.
+/// cursor replays that set when it registers, all starts and none held, so it drains
+/// without waiting, and then waits on that same cursor. Having delivered no end, it
+/// quarantines no stale path, so every later change to the table wakes it. A cursor
+/// kept across reads would not: once it delivers a route's end, it holds back a
+/// worse path's return and drops it silently when that path is withdrawn too, while
+/// a read in between still sees it.
 async fn routes_when(
 	step: &str,
 	origin: &origin::Producer,
 	ready: impl Fn(&BTreeMap<String, Vec<u64>>) -> bool,
 ) -> BTreeMap<String, Vec<u64>> {
 	within(step, async {
-		// Created first, so a change landing between two reads still wakes us.
-		let mut changes = origin.consume().routes();
 		loop {
-			let routes = routes(origin);
+			let mut changes = origin.consume().routes();
+			let mut routes = BTreeMap::new();
+			while let Some(event) = changes.try_next() {
+				let origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					announce,
+				} = event
+				else {
+					panic!("an initial set is only starts: got {event:?}");
+				};
+				let hops = moq_net::fuzz::route_hops(&announce.route);
+				routes.insert(announce.prefix.as_str().to_string(), hops);
+			}
 			if ready(&routes) {
 				return routes;
 			}
@@ -241,53 +242,33 @@ fn has(routes: &BTreeMap<String, Vec<u64>>, paths: &[&str]) -> bool {
 	paths.iter().all(|path| routes.contains_key(*path))
 }
 
-const R: u64 = 1;
-const C1: u64 = 11;
-const C2: u64 = 12;
-const E1: u64 = 21;
-const E2: u64 = 22;
-
 /// Two regions: two edges whose links to two cores are upstream, and one relay
-/// that also serves clients. Both edges send a path to the same core, an edge's
-/// broadcast reaches the far relay, and losing a core moves only its paths.
+/// that also serves clients. The far region's broadcasts reach both edges, an edge's
+/// broadcast reaches the far relay, and losing a core leaves every path reachable
+/// through the other. Lite-07 carries no hop chain, so which core a path takes is the
+/// route layer's choice, not something this asserts.
 #[test]
 fn tiered_regions() {
 	run_cluster_test(tiered_regions_inner());
 }
 
 async fn tiered_regions_inner() {
-	let r = node(R, vec![]).await;
-	let c1 = node(C1, vec![r.dial(false, false)]).await;
-	let c2 = node(C2, vec![r.dial(false, false)]).await;
-	let e1 = node(E1, vec![c1.dial(true, false), c2.dial(true, false)]).await;
-	let e2 = node(E2, vec![c1.dial(true, false), c2.dial(true, false)]).await;
+	let r = node(vec![]).await;
+	let c1 = node(vec![r.dial(false, false)]).await;
+	let c2 = node(vec![r.dial(false, false)]).await;
+	let e1 = node(vec![c1.dial(true, false), c2.dial(true, false)]).await;
+	let e2 = node(vec![c1.dial(true, false), c2.dial(true, false)]).await;
 
 	let paths: Vec<String> = (0..8).map(|i| format!("live/{i}")).collect();
 	let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
 	let _published: Vec<_> = paths.iter().map(|path| publish(&r.origin, path)).collect();
-	routes_when("both cores learn the far region", &c1.origin, |routes| {
-		has(routes, &paths)
-	})
-	.await;
-	routes_when("both cores learn the far region", &c2.origin, |routes| {
-		has(routes, &paths)
-	})
-	.await;
-
-	// A route is delivered before a later one: once an edge holds both cores'
-	// markers, it holds both cores' routes to the far region too.
-	let _c1_mark = publish(&c1.origin, "zz/c1");
-	let _c2_mark = publish(&c2.origin, "zz/c2");
-	let marks = ["zz/c1", "zz/c2"];
-	let at_e1 = routes_when("edge 1 hears both cores", &e1.origin, |routes| has(routes, &marks)).await;
-	let at_e2 = routes_when("edge 2 hears both cores", &e2.origin, |routes| has(routes, &marks)).await;
-
-	// Every edge sends a given path to the same core, so the far region serves
-	// one subscription per broadcast whichever edges watch it.
-	let core = |routes: &BTreeMap<String, Vec<u64>>, path: &str| *routes[path].last().expect("hops");
-	for path in &paths {
-		assert_eq!(at_e1[*path].len(), 2, "{path} at edge 1: {:?}", at_e1[*path]);
-		assert_eq!(core(&at_e1, path), core(&at_e2, path), "{path} split across cores");
+	for (step, at) in [
+		("core 1 learns the far region", &c1),
+		("core 2 learns the far region", &c2),
+		("edge 1 learns the far region", &e1),
+		("edge 2 learns the far region", &e2),
+	] {
+		routes_when(step, &at.origin, |routes| has(routes, &paths)).await;
 	}
 	read_frame(&e1.origin, paths[0]).await;
 	read_frame(&e2.origin, paths[0]).await;
@@ -296,23 +277,17 @@ async fn tiered_regions_inner() {
 	let _edge = publish(&e1.origin, "edge/cam");
 	read_frame(&r.origin, "edge/cam").await;
 
-	// Losing a core moves only its paths.
-	let on = |core_id: u64| -> Vec<&str> { paths.iter().copied().filter(|p| core(&at_e1, p) == core_id).collect() };
-	let (on_c1, on_c2) = (on(C1), on(C2));
-	assert!(
-		!on_c1.is_empty() && !on_c2.is_empty(),
-		"paths all on one core: {at_e1:?}"
-	);
+	// Losing a core: once edge 1 sees core 1's own broadcast go, every route it had
+	// through core 1 went with it, and each path is still served through core 2.
+	let _c1_mark = publish(&c1.origin, "zz/c1");
+	routes_when("edge 1 hears core 1", &e1.origin, |routes| has(routes, &["zz/c1"])).await;
 	drop(c1);
-	let after = routes_when("edge 1 drops the lost core", &e1.origin, |routes| {
-		has(routes, &paths) && routes.values().all(|hops| !hops.contains(&C1))
+	routes_when("edge 1 drops the lost core", &e1.origin, |routes| {
+		has(routes, &paths) && !routes.contains_key("zz/c1")
 	})
 	.await;
-	for path in &on_c2 {
-		assert_eq!(after[*path], at_e1[*path], "{path} moved off the surviving core");
-	}
-	for path in &on_c1 {
-		assert_eq!(after[*path], [R, C2], "{path} did not fail over");
+	for path in &paths {
+		read_frame(&e1.origin, path).await;
 	}
 }
 
@@ -324,11 +299,11 @@ fn edges_never_transit_between_cores() {
 }
 
 async fn edges_never_transit_between_cores_inner() {
-	let c1 = node(C1, vec![]).await;
-	let e1 = node(E1, vec![c1.dial(true, false)]).await;
+	let c1 = node(vec![]).await;
+	let e1 = node(vec![c1.dial(true, false)]).await;
 	// The core dials this edge, which still treats it as upstream.
-	let c2 = node(C2, vec![e1.dial(false, true)]).await;
-	let e2 = node(E2, vec![c1.dial(true, false), c2.dial(true, false)]).await;
+	let c2 = node(vec![e1.dial(false, true)]).await;
+	let e2 = node(vec![c1.dial(true, false), c2.dial(true, false)]).await;
 
 	let _core = publish(&c1.origin, "live/c1");
 	routes_when("edge 1 learns core 1", &e1.origin, |routes| has(routes, &["live/c1"])).await;
@@ -358,9 +333,9 @@ fn uplink_transits_both_ways() {
 }
 
 async fn uplink_transits_both_ways_inner() {
-	let cdn = node(31, vec![]).await;
-	let uplink = node(32, vec![cdn.dial(true, false)]).await;
-	let mesh = node(33, vec![uplink.dial(false, false)]).await;
+	let cdn = node(vec![]).await;
+	let uplink = node(vec![cdn.dial(true, false)]).await;
+	let mesh = node(vec![uplink.dial(false, false)]).await;
 
 	let _mesh = publish(&mesh.origin, "mesh/cam");
 	let _cdn = publish(&cdn.origin, "cdn/cam");

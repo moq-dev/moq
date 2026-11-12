@@ -3,8 +3,8 @@
 ## Goal
 
 moq-relay's `acme` feature returns: it issues and renews certificates through
-instant-acme on `rind-instant-acme`, with no rustls-acme, and its graph holds
-no aws-lc-rs.
+instant-acme on a rind `CryptoProvider` adapter, with no rustls-acme, and its
+graph holds no aws-lc-rs.
 
 ## Plan
 
@@ -23,9 +23,20 @@ its cache because nobody used ACME yet (maintainer, 2026-11-03), so the cache
 needs no compatibility with the rustls-acme layout. Test against a local ACME
 server such as Pebble.
 
+Decided 2026-11-09 (maintainer, /quest-unblock): rind deleted
+`rind-instant-acme` on 2026-11-08
+([moq-dev/rind#510](https://github.com/moq-dev/rind/pull/510)) because no
+consumer used it, so this quest waits on instant-acme 0.9 directly instead of
+on that crate. Restore the adapter in rind from #510's parent commit, published
+this time (rejected: dropping relay ACME, and leaving the wait on the deleted
+crate).
+
 Public API: moq-relay regains the `acme` feature and an ACME config section.
 Wire: none.
 
-## Required
+## Waiting
 
-- [rind-instant-acme is on crates.io](/quest/m5/rind-instant-acme.md) - the adapter this uses, waiting on instant-acme 0.9
+- djc/instant-acme: a 0.9 release ships the pluggable `CryptoProvider`
+  ([djc/instant-acme#268](https://github.com/djc/instant-acme/pull/268),
+  merged 2026-03-30). Check `cargo info instant-acme`; it was 0.8.5 on
+  2026-11-09.

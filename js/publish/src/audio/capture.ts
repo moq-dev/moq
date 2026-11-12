@@ -1,4 +1,4 @@
-import { type Micro, Nano, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import * as Util from "@moq/hang/util";
 import {
 	type Computed,
@@ -10,7 +10,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-import { hostedAssets } from "../assets";
+import { hosted } from "../assets";
 import { Fanout } from "../fanout";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
@@ -19,9 +19,16 @@ import { isSampleSource, normalizeSource, type SampleSource, type Source, type S
 /** A chunk of planar PCM, timestamped against the shared wall clock. */
 export interface AudioFrame {
 	/** When the first sample was captured. */
-	timestamp: Micro;
+	timestamp: Duration;
 
 	/** One buffer per channel, all the same length. */
+	channels: Float32Array[];
+}
+
+/** @internal An {@link AudioFrame} as the capture worklet posts it: clock values cannot cross a port. */
+export interface WorkletFrame {
+	/** Microseconds on the shared clock. */
+	timestamp: number;
 	channels: Float32Array[];
 }
 
@@ -227,7 +234,7 @@ export class Capture {
 			// synchronously on Chrome (Firefox/Safari report "suspended").
 			try {
 				const ok = await effect.race(
-					CaptureWorklet(hostedAssets()).then(async (url) => {
+					CaptureWorklet(hosted.url).then(async (url) => {
 						await context.audioWorklet.addModule(url);
 						return true;
 					}),
@@ -258,7 +265,7 @@ export class Capture {
 					channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
 					// Stamp audio against the same wall clock as video (see video/processor.ts), so both
 					// tracks share an epoch and stay in sync.
-					processorOptions: { zero: Nano.toMicro(Nano(now())) },
+					processorOptions: { zero: now().since(Instant.ZERO).asMicros() },
 				});
 				// The edge originates at root, so only root can remove it; the worklet has no outputs.
 				root.connect(worklet);
@@ -282,8 +289,8 @@ export class Capture {
 			{
 				start: (controller) => {
 					effect.event(worklet.port, "message", (event: Event) => {
-						const frame = (event as MessageEvent<AudioFrame>).data;
-						const channelCount = frame.channels.length;
+						const posted = (event as MessageEvent<WorkletFrame>).data;
+						const channelCount = posted.channels.length;
 						if (!channelCount) return;
 
 						// The channel count is unreliable on some platforms (Apple's Safari), so
@@ -292,7 +299,11 @@ export class Capture {
 							this.#out.format.set({ sampleRate, channelCount });
 						}
 
-						if ((controller.desiredSize ?? 0) > 0) controller.enqueue(frame);
+						if ((controller.desiredSize ?? 0) > 0)
+							controller.enqueue({
+								timestamp: Duration.micros(posted.timestamp),
+								channels: posted.channels,
+							});
 					});
 					worklet.port.start();
 				},
@@ -320,7 +331,7 @@ function planar(): TransformStream<AudioData, AudioFrame> {
 				channels.push(plane);
 			}
 
-			controller.enqueue({ timestamp: data.timestamp as Micro, channels });
+			controller.enqueue({ timestamp: Duration.micros(data.timestamp), channels });
 			data.close();
 		},
 	});

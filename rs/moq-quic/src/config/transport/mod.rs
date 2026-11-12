@@ -90,22 +90,22 @@ pub struct Config {
 	///
 	/// Disabling fairness can reduce fragmentation and protocol overhead for workloads that use
 	/// many small streams.
-	pub send_fairness: bool,
+	pub(crate) send_fairness: bool,
 
 	/// Maximum reordering in packet number space before FACK style loss detection considers a
 	/// packet lost. Should not be less than 3, the default, per RFC 5681.
-	pub packet_threshold: u32,
+	pub(crate) packet_threshold: u32,
 
 	/// Maximum reordering in time space before time based loss detection considers a packet lost,
 	/// as a factor of RTT. Defaults to 9/8.
-	pub time_threshold: f32,
+	pub(crate) time_threshold: f32,
 
 	/// The RTT used before an RTT sample is taken, 333ms by default as RFC 9002 recommends
 	pub initial_rtt: Duration,
 
 	/// Number of consecutive PTOs after which the network is considered to be experiencing
 	/// persistent congestion, 3 by default
-	pub persistent_congestion_threshold: u32,
+	pub(crate) persistent_congestion_threshold: u32,
 
 	/// The maximum UDP payload size to use before running MTU discovery
 	///
@@ -113,7 +113,7 @@ pub struct Config {
 	/// applications. Larger values are more efficient, but increase the risk of packet loss due to
 	/// exceeding the network path's IP MTU. If the provided value is higher than what the network
 	/// path actually supports, packet loss will eventually trigger black hole detection and bring
-	/// it down to [`min_mtu`](Self::min_mtu).
+	/// it down to 1200.
 	pub initial_mtu: u16,
 
 	/// The maximum UDP payload size guaranteed to be supported by the network
@@ -129,14 +129,14 @@ pub struct Config {
 	/// connections may fail to be established because Initial datagrams cannot be delivered. Prefer
 	/// [`initial_mtu`](Self::initial_mtu) together with [`mtu`](Self::mtu) to set a maximum UDP
 	/// payload size that robustly adapts to the network.
-	pub min_mtu: u16,
+	pub(crate) min_mtu: u16,
 
 	/// Pad UDP datagrams carrying application data to current maximum UDP payload size, off by
 	/// default
 	///
 	/// UDP datagrams containing loss probes are exempt from padding. Enabling this helps mitigate
 	/// traffic analysis by network observers, but it increases bandwidth usage.
-	pub pad_to_mtu: bool,
+	pub(crate) pad_to_mtu: bool,
 
 	/// How MTU discovery runs, or `None` to stay at [`initial_mtu`](Self::initial_mtu)
 	///
@@ -161,24 +161,17 @@ pub struct Config {
 	/// How to construct each connection's congestion controller, BBRv3 by default
 	pub congestion: Arc<dyn congestion::Factory + Send + Sync>,
 
-	/// An outbound rate limit for each connection, in bytes per second, or `None` (the default)
-	/// for none
-	///
-	/// The congestion controller's pacer enforces it, so a controller that does not pace, such as
-	/// `Unlimited`, ignores it.
-	pub max_outgoing_bytes_per_second: Option<u64>,
-
 	/// How unreliable datagrams are buffered
 	pub datagram: datagram::Config,
 
 	/// Maximum quantity of out-of-order crypto layer data to buffer, 16 KiB by default
-	pub crypto_buffer_size: usize,
+	pub(crate) crypto_buffer_size: usize,
 
 	/// Whether the implementation is permitted to set the spin bit, on by default
 	///
 	/// This allows passive observers to easily judge the round trip time of a connection, which can
 	/// be useful for network administration but sacrifices a small amount of privacy.
-	pub allow_spin: bool,
+	pub(crate) allow_spin: bool,
 
 	/// Whether to use "Generic Segmentation Offload" to accelerate transmits, when supported by
 	/// the environment, on by default
@@ -309,7 +302,6 @@ impl Default for Config {
 			receive_timestamps: None,
 
 			congestion: Arc::new(congestion::bbr3::Config::default()),
-			max_outgoing_bytes_per_second: None,
 
 			datagram: datagram::Config {
 				receive_buffer: Some(STREAM_RWND as usize),
@@ -347,7 +339,6 @@ impl fmt::Debug for Config {
 			ack_frequency,
 			receive_timestamps,
 			congestion: _,
-			max_outgoing_bytes_per_second,
 			datagram,
 			crypto_buffer_size,
 			allow_spin,
@@ -375,7 +366,6 @@ impl fmt::Debug for Config {
 			.field("ack_frequency", ack_frequency)
 			.field("receive_timestamps", receive_timestamps)
 			// congestion not debug
-			.field("max_outgoing_bytes_per_second", max_outgoing_bytes_per_second)
 			.field("datagram", datagram)
 			.field("crypto_buffer_size", crypto_buffer_size)
 			.field("allow_spin", allow_spin)

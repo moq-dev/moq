@@ -36,4 +36,14 @@ rebuild and pin browser binaries outside nixpkgs.
 ## Waiting
 
 - nixpkgs: `playwright-driver` at 1.65.0 or later on `nixpkgs-unstable`;
-  check `pkgs/development/web/playwright/driver.nix` there.
+  check `pkgs/development/web/playwright/driver.nix` there. playwright-python
+  v1.65.0 shipped 2026-11-09, and an agent opened the bump from the
+  kixelated/nixpkgs fork the same day,
+  [NixOS/nixpkgs#585789](https://github.com/NixOS/nixpkgs/pull/585789) (it also
+  fixes `update.sh` for 1.65's SHA-pinned driver version and rebases the
+  python driver patch). Advance it by answering that PR's review; then wait
+  for it to reach `nixpkgs-unstable`. Decided 2026-11-11 (maintainer,
+  /quest-unblock): an agent drafts each review fix on the fork's branch with
+  an `Assisted-by:` trailer, as nixpkgs' CONTRIBUTING.md requires, plus a separate AI-disclosure line in
+  the reply itself, which that policy requires apart from commits; the
+  maintainer reviews the diff and reply before anything is pushed or posted.

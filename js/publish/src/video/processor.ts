@@ -1,5 +1,5 @@
-import { Micro, type Milli, Nano, now } from "@moq/clock";
-import { hostedAssets } from "../assets";
+import { Instant, now } from "@moq/clock";
+import { hosted } from "../assets";
 import type { FromWorker, ToWorker } from "./capture-worker";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorker from "./capture-worker.ts?worklet";
@@ -30,7 +30,7 @@ let probe: { base: URL | undefined; supported: Promise<boolean> } | undefined;
 
 /** Whether this engine can capture via a native MediaStreamTrackProcessor in a worker. */
 export async function workerSupported(): Promise<boolean> {
-	const base = hostedAssets();
+	const base = hosted.url;
 	if (probe === undefined || probe.base !== base) {
 		const supported = spawn().then((worker) => {
 			worker?.close();
@@ -88,7 +88,7 @@ function rewrite(source: ReadableStream<VideoFrame>): ReadableStream<VideoFrame>
 			async pull(controller) {
 				const { value } = await reader.read();
 				if (cancelled) value?.close();
-				else if (value) controller.enqueue(epoch.stamp(value, Nano.toMilli(Nano(now()))));
+				else if (value) controller.enqueue(epoch.stamp(value, now().since(Instant.ZERO).asMillis()));
 				else controller.close();
 			},
 			async cancel(reason) {
@@ -171,11 +171,11 @@ type Handle = {
 // Starts a capture worker and waits for its support report, returning undefined when the engine has
 // no MediaStreamTrackProcessor in a worker either, and throwing when a hosted file fails to load.
 async function spawn(): Promise<Handle | undefined> {
-	const hosted = hostedAssets();
+	const base = hosted.url;
 	let worker: Handle;
 
 	try {
-		worker = handle(new Worker(await CaptureWorker(hosted)));
+		worker = handle(new Worker(await CaptureWorker(base)));
 	} catch (err) {
 		// A strict CSP can refuse blob: workers, so treat it like an engine without the API. A hosted
 		// file that fails to load reports through onerror instead.
@@ -184,10 +184,10 @@ async function spawn(): Promise<Handle | undefined> {
 	}
 
 	const ready = await worker.next();
-	if (ready.type === "error" && hosted) {
+	if (ready.type === "error" && base) {
 		// The page opted into hosted files, so a load failure is a broken deploy, not a missing API.
 		worker.close();
-		throw new Error(`moq-publish: failed to load the hosted capture worker from ${hosted}: ${ready.message}`);
+		throw new Error(`moq-publish: failed to load the hosted capture worker from ${base}: ${ready.message}`);
 	}
 	if (ready.type !== "ready" || !ready.supported) {
 		worker.close();
@@ -272,8 +272,8 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 					handle = video.requestVideoFrameCallback((now, metadata) => {
 						// captureTime is the frame's capture instant; both it and now are DOM timestamps,
 						// which the host clock shares, so audio and video stay on one epoch.
-						const timestamp = (metadata.captureTime ?? now) as Milli;
-						controller.enqueue(new VideoFrame(video, { timestamp: Micro.fromMilli(timestamp) }));
+						const millis = metadata.captureTime ?? now;
+						controller.enqueue(new VideoFrame(video, { timestamp: millis * 1000 }));
 						resolve();
 					});
 				});

@@ -20,9 +20,8 @@ use std::{
 	time::Duration,
 };
 
+use bytes::{Buf, Bytes};
 use moq_net::{
-	bytes::{Buf, Bytes},
-	kio,
 	time::Instant,
 	transport::{memory, poll},
 };
@@ -63,7 +62,7 @@ impl Conn {
 	}
 
 	fn arrival(&self) -> Instant {
-		now() + self.latency()
+		now().saturating_add(self.latency())
 	}
 }
 

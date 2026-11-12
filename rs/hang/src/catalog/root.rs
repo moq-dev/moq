@@ -256,12 +256,12 @@ impl Catalog<()> {
 	/// Keeps moq-net's default zero max age rather than the media one: the catalog is
 	/// snapshot mode, so a join reads the newest snapshot, which never goes stale.
 	/// Timed in milliseconds, so snapshots share the broadcast clock with media, and
-	/// [`compress`](moq_net::track::Info::compress)ed, since catalog JSON is small and repetitive.
+	/// [compressed](moq_net::track::Info::compression), since catalog JSON is small and repetitive.
 	pub fn default_track_info() -> moq_net::track::Info {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_priority(PRIORITY.catalog)
-			.with_compress(true)
+			.with_compression(moq_net::track::Compression::Deflate)
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so
@@ -321,7 +321,7 @@ impl<E> Catalog<E> {
 	}
 
 	/// Copy the media sections into a catalog with no application extension.
-	pub fn media(&self) -> Catalog<()> {
+	pub fn without_ext(&self) -> Catalog<()> {
 		Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
@@ -400,11 +400,6 @@ impl<E: Serialize> Catalog<E> {
 	/// Serialize the catalog to a JSON string.
 	pub fn to_json(&self) -> Result<String> {
 		Ok(serde_json::to_string(self)?)
-	}
-
-	/// Serialize the catalog to a pretty-printed JSON string.
-	pub fn to_json_pretty(&self) -> Result<String> {
-		Ok(serde_json::to_string_pretty(self)?)
 	}
 
 	/// Serialize the catalog to a vector of bytes.
@@ -1230,8 +1225,7 @@ mod test {
 		assert_eq!(catalog.media.interval(), Some(std::time::Duration::from_secs(2)));
 
 		// PTS 2000 ms lands 2s after the wall epoch, whatever the track timescale.
-		let expected = kio::clock::Wall::UNIX_EPOCH
-			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
+		let expected = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_751_846_402_000);
 		assert_eq!(
 			clock
 				.wall_clock(moq_net::Timestamp::from_millis(2000).unwrap())

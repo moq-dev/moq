@@ -1,4 +1,4 @@
-import Session from "@moq/qmux";
+import { Session } from "@moq/qmux";
 
 /** The wire transport a session runs over. */
 export type Transport = "webtransport" | "websocket" | "webrtc";

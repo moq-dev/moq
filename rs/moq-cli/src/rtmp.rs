@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_rtmp::{Client, Request, Server};
 use url::Url;
 
@@ -66,13 +65,7 @@ impl ExportArgs {
 
 /// Accept incoming RTMP publishes into the Origin as `target.name`; reject plays (import).
 pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Result<()> {
-	let ImportTarget {
-		origin,
-		name,
-		max_age,
-		linger,
-		bandwidth,
-	} = target;
+	let ImportTarget { origin, name, ingest } = target;
 	let name = moq_net::Path::new(&name)?;
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (import)");
@@ -83,15 +76,9 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Re
 			Request::Publish(publish) => {
 				let origin = origin.clone();
 				let name = name.clone();
-				let bandwidth = bandwidth.clone();
+				let ingest = ingest.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish
-						.with_max_age(max_age)
-						.with_bandwidth(bandwidth)
-						.with_linger(linger)
-						.accept(&origin, &name)
-						.await
-					{
+					if let Err(err) = publish.accept(&origin, &name, &ingest).await {
 						tracing::warn!(%name, %err, "RTMP ingest ended with error");
 					}
 				});
@@ -113,7 +100,7 @@ pub async fn listen_export(
 	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
-	max_delay: Duration,
+	delay: Duration,
 ) -> anyhow::Result<()> {
 	let name = moq_net::Path::new(&name)?;
 	let mut server = Server::bind(addr).await?;
@@ -126,7 +113,7 @@ pub async fn listen_export(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = play.with_max_delay(max_delay).accept(&origin, &name).await {
+					if let Err(err) = play.with_delay(delay).accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "RTMP play ended with error");
 					}
 				});
@@ -153,12 +140,8 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	tracing::info!(%addr, %app, %name, "RTMP client pulling");
 	notify_ready();
 
-	let client = Client::connect(addr, &app)
-		.await?
-		.with_max_age(target.max_age)
-		.with_bandwidth(target.bandwidth)
-		.with_linger(target.linger);
-	Ok(client.pull(&key, &target.origin, name).await?)
+	let client = Client::connect(addr, &app).await?;
+	Ok(client.pull(&key, &target.origin, name, &target.ingest).await?)
 }
 
 /// Push a broadcast from the Origin to a remote RTMP server (export).
@@ -166,7 +149,7 @@ pub async fn connect_export(
 	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
-	max_delay: Duration,
+	delay: Duration,
 ) -> anyhow::Result<()> {
 	let name = moq_net::Path::new(&name)?;
 	let (addr, app, key) = parse_url(&url).await?;
@@ -184,7 +167,7 @@ pub async fn connect_export(
 	tracing::info!(%addr, %app, %name, "RTMP client pushing");
 	notify_ready();
 
-	let client = Client::connect(addr, &app).await?.with_max_delay(max_delay);
+	let client = Client::connect(addr, &app).await?.with_delay(delay);
 	Ok(client.publish(&key, source).await?)
 }
 

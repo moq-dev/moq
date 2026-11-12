@@ -154,6 +154,7 @@ Every importer takes a broadcast; single-track imports choose a `Named` or `Requ
    TrackStreamProducer
    ContainerProducer
    ContainerInit
+   VideoInit
    Timebase
    TrackConsumer
    GroupConsumer
@@ -194,6 +195,7 @@ broadcast, and producers advertise it in the catalog.
    OriginProducer
    OriginConsumer
    Route
+   Claim
    AnnounceConsumer
    Following
    Announce
@@ -239,6 +241,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    TrackInfo
    FetchGroupOptions
    RouteInfo
+   Instance
    ConnectionStats
 ```
 

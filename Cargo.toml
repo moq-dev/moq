@@ -1,7 +1,7 @@
 [workspace]
 # Keep source-only members discoverable in Maturin's dependency-pruned archive,
 # including the separately packaged UniFFI generator.
-members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-mux/fuzz", "rs/moq-net/fuzz", "rs/moq-quic/fuzz", "rs/moq-rtmp/fuzz"]
+members = ["rs/*", "rs/kio/macros", "rs/moq-mux/fuzz", "rs/moq-net/fuzz", "rs/moq-quic/fuzz", "rs/moq-rtmp/fuzz"]
 default-members = [
     "rs/bench-harness",
     "rs/kio",
@@ -25,12 +25,10 @@ default-members = [
     "rs/moq-net",
     "rs/moq-net-tests",
     "rs/moq-mux",
-    "rs/moq-native",
     "rs/moq-nvenc",
     "rs/moq-pattern",
     "rs/moq-quic",
     "rs/moq-relay",
-    "rs/moq-room",
     "rs/moq-rtmp",
     "rs/moq-rtsp",
     "rs/moq-shaper",
@@ -41,6 +39,7 @@ default-members = [
     "rs/moq-transcode",
     "rs/moq-uring",
     "rs/moq-v4l",
+    "rs/moq-vaapi",
     "rs/moq-video",
     "rs/moq-webrtc",
     "rs/qmux",
@@ -68,10 +67,11 @@ rust-version = "1.91"
 allow_attributes_without_reason = "warn"
 
 [workspace.dependencies]
+aes = "0.9"
 anyhow = "1"
+arrayvec = "0.7.6"
 ash = "0.38"
 async-trait = "0.1"
-aws-lc-rs = "1"
 # Keep axum's defaults except tower-log, which enables tracing-to-log macros workspace-wide.
 axum = { version = "0.8", default-features = false, features = [
     "form",
@@ -86,18 +86,23 @@ axum = { version = "0.8", default-features = false, features = [
 # Features off so each consumer picks its rustls provider.
 axum-server = "0.8"
 base64 = "0.23"
+base64ct = "1"
 bitflags = "2"
 # MSB-first bit reading for codec configs; the version h264-reader builds on.
 bitstream-io = "4.10"
 block2 = "0.6.2"
 bytes = "1"
+ccm = { version = "0.6", default-features = false }
 clap = { version = "4", features = ["derive"] }
+combine = "4.6.6"
+crc = "3"
 # CUDA driver bindings for the NVENC/NVDEC path. dlopen'd at runtime
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
 data-encoding = "2.11"
 dispatch2 = "0.3.1"
 ebml-iterable = "0.7.1"
+fastrand = "2"
 flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
 h2 = "0.4"
@@ -106,6 +111,7 @@ hashbrown = { version = "0.17.1", default-features = false }
 hashlink = "0.12.2"
 hex = "0.4"
 http-body = "1.0.1"
+httparse = "1.10"
 humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper = "1.11"
@@ -114,6 +120,7 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 if-addrs = "0.15"
 indexmap = "2.14.2"
 io-uring = "0.7.15"
+jni = "0.22"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
 kio-macros = { version = "0.1.0", path = "rs/kio/macros" }
@@ -164,9 +171,9 @@ moq-uring = { version = "0.0.12", path = "rs/moq-uring", default-features = fals
 # `capture` and `v4l2` need no libclang or kernel headers. Linux only; an empty
 # stub elsewhere.
 moq-v4l = { version = "0.1.0", path = "rs/moq-v4l" }
-# Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
+# In-tree fork of cros-libva + cros-codecs with the libva bindings checked in.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
-moq-vaapi = "0.2.0"
+moq-vaapi = { version = "0.2.1", path = "rs/moq-vaapi" }
 # `default-features = false` is here for `capture` (V4L2, libclang), which the
 # cross-compiled Python, Swift, Kotlin, and Go builds have no use for: adding
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the
@@ -177,6 +184,7 @@ moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = fals
 moq-webrtc = { version = "0.3.12", path = "rs/moq-webrtc" }
 mp4-atom = "0.17.1"
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
+nom = { version = "8", default-features = false, features = ["std"] }
 num_enum = "0.7"
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
@@ -186,7 +194,9 @@ objc2-screen-capture-kit = "0.3.2"
 # Default features off so a consumer that only needs InMemory does not pull the
 # local-filesystem stack; `fs` (and cloud backends) are opted in by the caller.
 object_store = { version = "0.14", default-features = false }
-pem = "3.0.6"
+once_cell = "1.21.3"
+pcap-file = "2"
+pem = "4.0.0"
 percent-encoding = "2"
 pkcs1 = { version = "0.7.5", features = ["alloc"] }
 pkcs8 = "0.11.0"
@@ -202,11 +212,11 @@ rcgen = { version = "0.14", default-features = false }
 # default-features off so each consumer picks its own TLS backend and body
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }
-rind = "0.1.12"
-rind-jsonwebtoken = "0.1.2"
-rind-object-store = "0.1.2"
-rind-rcgen = "0.1.12"
-rind-rustls = "0.1.12"
+rind = { version = "0.3.1", features = ["wipe"] }
+rind-jsonwebtoken = "11.0.2"
+rind-object-store = "0.14.2"
+rind-rcgen = "0.14.2"
+rind-rustls = "0.23.2"
 rustc-hash = "2.1.3"
 rustls-native-certs = "0.8.5"
 sd-notify = "0.5"
@@ -216,15 +226,15 @@ serde_json = "1"
 serde_with = "3"
 slab = "0.4.12"
 socket2 = "0.6"
-# Sans-IO WebRTC. The default `examples` feature pulls in a web server, and aws-lc-rs
-# is the provider rustls already brings.
-str0m = { version = "0.24.1", default-features = false, features = ["aws-lc-rs"] }
+spki = "0.8"
 stun-types = "2.0.3"
+subtle = "2.6"
 tempfile = "3"
 thiserror = "2"
 time = "0.3"
 tokio = "1.48"
 tokio-rustls = { version = "0.26", default-features = false }
+tokio-tungstenite = { version = "0.30", default-features = false }
 tokio-util = "0.7"
 toml = "1.1"
 tower-http = { version = "0.7", features = ["cors"] }
@@ -235,20 +245,15 @@ tracing-test = "0.2"
 # carries generator-only patches against this release in its own manifest.
 uniffi = "0.32"
 url = "2"
-usage-rs = "7.1.0"
+usage-rs = "7.3.0"
 uuid = { version = "1.26", features = ["v7"] }
 web-transport-proto = "0.6.4"
 web-transport-trait = "0.5"
+wgpu = "30"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
+x509-cert = { version = "0.3", default-features = false }
 x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
-
-[patch.crates-io]
-# The published moq-auth 0.2.1 compatibility fixture depends on kio from
-# crates.io. Without this, the lock carries a second kio whose pin drifts behind
-# the member, and the next publish that reaches both fails to resolve a single
-# version (#3551).
-kio = { path = "rs/kio" }
 
 [profile.dev]
 # Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`
@@ -260,24 +265,8 @@ kio = { path = "rs/kio" }
 # in lldb. `profile.test` inherits this.
 debug = "line-tables-only"
 
-# Optimize the bignum crates even in dev/test builds. RSA keygen is bignum
-# arithmetic in a loop, and unoptimized it is orders of magnitude slower: the
-# moq-auth key tests spend ~16s generating 2048-bit keys, versus well under a
-# second here. These are dependencies we never step through in a debugger, so
-# optimizing them costs nothing an unoptimized build was buying us, and the
-# tests keep exercising production key sizes rather than being weakened to
-# stay fast. `profile.test` inherits these overrides.
-[profile.dev.package.num-bigint-dig]
-opt-level = 3
-
-[profile.dev.package.crypto-bigint]
-opt-level = 3
-
-[profile.dev.package.rsa]
-opt-level = 3
-
-# Same for the sonora echo canceller. Its hot loops are `core::arch` NEON/SSE
-# intrinsics, which at opt-level 0 compile to out-of-line calls carrying the
+# Optimize the sonora echo canceller even in dev/test builds. Its hot loops
+# are `core::arch` NEON/SSE intrinsics, which at opt-level 0 compile to out-of-line calls carrying the
 # debug UB preconditions of `read_unaligned` and `copy_nonoverlapping`: a
 # profile of `aec::tests::survives_a_moving_echo_delay` spends 65% of its
 # samples in those checks and intrinsic shims and only 20% in sonora's own

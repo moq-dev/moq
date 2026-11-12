@@ -46,9 +46,10 @@ which covers only NVIDIA.
 - Added 2026-11-06 (maintainer, /quest-unblock) from
   [moq-dev/moq#8013](https://github.com/moq-dev/moq/pull/8013)'s follow-ups:
   - The VA-API tests open the first suitable render node, so a second GPU
-    is covered only when `MOQ_VAAPI_DEVICE` names it. `just rs gpu` runs the
-    VA-API tests once for each AMD or Intel render node, with
-    `MOQ_VAAPI_DEVICE` set; a node of either vendor without its VA-API
+    is covered only when `Config::vaapi` names it, which moq-video no longer
+    reads from the environment. `just rs gpu` runs the VA-API tests once for
+    each AMD or Intel render node, passing it to the tests through a test-only
+    knob ([env-knobs](/quest/m4/env-knobs.md) owns its name); a node of either vendor without its VA-API
     driver fails, and NVIDIA nodes are left to GPU CI. The renderer
     fixtures allocate their NV12 and I420 buffers on that node and pick the
     Vulkan adapter whose DRM render node matches it
@@ -58,6 +59,13 @@ which covers only NVIDIA.
     10-bit stream, which is refused, since moq-vaapi has no P010 output
     ([moq-dev/vaapi#11](https://github.com/moq-dev/vaapi/pull/11)).
   - Not chosen: dropping either gap.
+- Added 2026-11-08 (maintainer, approved follow-up): moq-vaapi's own
+  tests return early too. `rs/moq-vaapi/src/encode.rs`, `decode.rs`, and
+  `vpp.rs` print "skipping: ..." and pass when there is no VA-API display,
+  no encoder or decoder for the codec, no VPP entrypoint, or no
+  ffmpeg/ffprobe, so a host without libva or a driver reports them green. Give
+  them the same `#[ignore = "requires ..."]` treatment and run them in
+  `just rs gpu` per render node.
 
 ## Related
 

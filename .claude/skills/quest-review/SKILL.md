@@ -1,6 +1,6 @@
 ---
 name: quest-review
-description: Review a PR's branch locally with the other vendor's model, then mark it ready for review.
+description: Review a PR's branch locally with a model other than its latest writer, then mark it ready for review.
 ---
 
 Run `quest skill review` and follow its output.

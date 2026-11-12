@@ -138,24 +138,12 @@ impl Relay {
 	pub async fn load(config: Config) -> anyhow::Result<Self> {
 		moq_tokio::crypto::check()?;
 		// Keep the large debug state machine off the embedder's main-thread stack.
-		Box::pin(Self::load_inner(config)).await
+		Box::pin(Self::load_inner(config.resolve()?)).await
 	}
 
-	async fn load_inner(mut config: Config) -> anyhow::Result<Self> {
-		config.resolve()?;
-		// A relay keeps the moq-transport object state it forwards across a moq-lite hop to
-		// another relay. Only negotiated when both sides offer it, so other peers never see it.
-		config.listen.extensions.ietf = true;
-		config.connect.extensions.ietf = true;
-		// Name the relay ahead of its core unless the operator overrides it (empty omits it),
-		// and dial cluster peers under the same name.
-		let implementation = config
-			.listen
-			.implementation
-			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
-			.clone();
-		config.connect.implementation = Some(implementation);
-		let resolved_config = Box::new(config.clone());
+	async fn load_inner(resolved: crate::config::Resolved) -> anyhow::Result<Self> {
+		let resolved_config = Box::new(Config::clone(&resolved));
+		let config = resolved.into_inner();
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
 		// else the cluster node URL, else nothing.
@@ -178,37 +166,17 @@ impl Relay {
 			}
 		};
 
-		#[cfg(feature = "cluster-lan")]
-		if config.cluster.lan.enabled {
-			cluster::Cluster::validate_lan_versions(&config.connect, &config.listen)?;
-		}
-
 		// Every listener shares admission ownership before its workers can accept.
 		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
 		let handshake_timeout = config.listen.resolved_timeout();
 
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
+		#[cfg_attr(
+			not(feature = "_quic"),
+			allow(unused_variables, reason = "only the worker groups read it")
+		)]
 		let io_uring = config.runtime.io_uring();
-		anyhow::ensure!(
-			!io_uring || config.runtime.workers().is_some(),
-			"runtime.io_uring requires runtime.workers"
-		);
-		#[cfg(not(target_os = "linux"))]
-		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
-		#[cfg(all(target_os = "linux", not(feature = "_uring")))]
-		anyhow::ensure!(
-			!io_uring,
-			"runtime.io_uring needs moq-relay built with the `io-uring` feature"
-		);
-
-		// Refused rather than ignored: a group is the whole point of the setting, and
-		// silently serving from the shared runtime instead would look like it worked.
-		#[cfg(not(feature = "_quic"))]
-		anyhow::ensure!(
-			io_uring || config.runtime.workers().is_none(),
-			"runtime.workers needs moq-relay built with the `quic` feature"
-		);
 
 		// Workers and the stream server split one relay across listeners, so they share
 		// one loaded identity. A lone server loads its own, only if a listener needs it.
@@ -230,7 +198,7 @@ impl Relay {
 				server.listen = listen.clone();
 				server.tls = served.clone();
 				server.quic = config.quic.clone();
-				server.activity = shutdown.activity.clone();
+				server.admission = shutdown.admission.clone();
 				server.demux = demux.clone();
 				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
 			}
@@ -269,7 +237,7 @@ impl Relay {
 		server_config.listen = listen;
 		server_config.tls = served;
 		server_config.quic = config.quic.clone();
-		server_config.activity = shutdown.activity.clone();
+		server_config.admission = shutdown.admission.clone();
 		#[cfg(feature = "_quic")]
 		{
 			server_config.demux = demux.clone();
@@ -313,20 +281,26 @@ impl Relay {
 			(None, Some(certificates)) => certificates,
 			(None, None) => server.certificates(),
 		};
-		let mut advertise = crate::cluster::LanAdvertise::new(addr.map(|a| a.port()).unwrap_or(0));
+		// A stream-only relay has no port to advertise; `Config::resolve` refused LAN
+		// discovery for it.
 		let generated = !config.listen.tls.generate.is_empty() || config.listen.tls.identity.is_some();
-		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
-			advertise = advertise.with_fingerprint(fingerprint);
-		}
+		let advertise = addr.map(|addr| {
+			let advertise = crate::cluster::LanAdvertise::new(addr.port());
+			match certificates.fingerprints().into_iter().next() {
+				Some(fingerprint) if generated => advertise.with_fingerprint(fingerprint),
+				_ => advertise,
+			}
+		});
 		let mut cluster_options = cluster::Options::new(config.cluster)
 			.with_cache(cache)
 			.with_stats(config.stats);
-		cluster_options.session = config.limits.client;
+		cluster_options.client = config.limits.client;
 		cluster_options.peer = config.limits.peer;
 		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
-		let cluster = cluster
-			.with_connect(config.connect.clone(), config.quic.clone())
-			.with_advertise(advertise);
+		let mut cluster = cluster.with_connect(config.connect.clone(), config.quic.clone());
+		if let Some(advertise) = advertise {
+			cluster = cluster.with_advertise(advertise);
+		}
 
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(Startup::Starting);
@@ -455,21 +429,19 @@ impl Relay {
 	/// The WebRTC media path (ICE, DTLS, and RTP) arriving on the QUIC port,
 	/// for an embedder's WebRTC stack to serve and answer through the same port.
 	///
-	/// Until a feed is taken, and once every feed is dropped, that traffic is
-	/// dropped and counted. Fails when no tokio listener serves QUIC: a stream-only
-	/// relay, or one on the io_uring workers, which do not split the port yet.
+	/// Until it is taken, and once it is dropped, that traffic is
+	/// dropped and counted. `None` once taken, or when no tokio listener serves
+	/// QUIC: a stream-only relay, or one on the io_uring workers, which do not
+	/// split the port yet.
 	#[cfg(feature = "_quic")]
-	pub fn webrtc(&self) -> anyhow::Result<moq_tokio::quic::demux::WebRtc> {
-		let demux = self
-			.demux
-			.as_ref()
-			.context("the WebRTC media path needs QUIC served by the tokio runtime")?;
-		Ok(demux.webrtc())
+	pub fn webrtc(&mut self) -> Option<moq_tokio::quic::demux::WebRtc> {
+		self.demux.take().map(|demux| demux.webrtc())
 	}
 
 	/// The RTMP and RTMPS connections the public web listeners classify, for the
 	/// embedder to serve; see [`web::Web::rtmp`]. Untaken, they are logged and closed.
-	pub fn rtmp(&mut self) -> web::rtmp::Incoming {
+	/// `None` once taken.
+	pub fn rtmp(&mut self) -> Option<web::rtmp::Incoming> {
 		self.web.rtmp()
 	}
 
@@ -941,7 +913,7 @@ mod tests {
 		use futures::FutureExt;
 		let window = std::time::Duration::from_secs(10);
 		let (trigger, shutdown) = crate::shutdown::Observer::new(window);
-		let _pending = shutdown.activity.enter();
+		let _pending = shutdown.admission.enter();
 		trigger.start();
 		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
@@ -962,7 +934,7 @@ mod tests {
 		// Either arm is ready, so an unbiased wait would pass some runs.
 		for _ in 0..32 {
 			let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
-			let _active = shutdown.activity.enter();
+			let _active = shutdown.admission.enter();
 			trigger.start();
 			let mut signals = crate::shutdown::Signals::new().unwrap();
 			crate::shutdown::raise(libc::SIGTERM).await;
@@ -1005,15 +977,15 @@ mod tests {
 	async fn arrival_as_the_drain_empties_is_counted_or_refused() {
 		use futures::FutureExt;
 		let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
-		let activity = shutdown.activity.clone();
-		let last = activity.enter().expect("admission open before the drain");
+		let admission = shutdown.admission.clone();
+		let last = admission.enter().expect("admission open before the drain");
 		trigger.start();
 		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
 		// Arrives before the last connection leaves: it is counted.
-		let arrival = activity.enter().expect("admitted before the drain committed");
+		let arrival = admission.enter().expect("admitted before the drain committed");
 		drop(last);
 		assert!(
 			draining.as_mut().now_or_never().is_none(),
@@ -1024,7 +996,7 @@ mod tests {
 		drop(arrival);
 		assert!(draining.as_mut().now_or_never().is_some());
 		assert!(
-			activity.enter().is_none(),
+			admission.enter().is_none(),
 			"admitted a connection after the drain committed to exit"
 		);
 	}
@@ -1061,7 +1033,7 @@ mod tests {
 	#[tokio::test]
 	async fn workers_require_a_quic_backend() {
 		let mut config = crate::Config::default();
-		config.runtime.workers = Some(1);
+		config.runtime.workers = crate::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		let error = match super::Relay::load(config).await {
 			Ok(_) => panic!("workers accepted without a QUIC backend"),
 			Err(error) => error,

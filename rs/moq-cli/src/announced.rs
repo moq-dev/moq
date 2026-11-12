@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::io::IsTerminal;
 
 use anyhow::Context;
-use hang::moq_net::{self, announce::Event};
+use moq_net::announce::Event;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::args::MoqSide;
@@ -92,7 +92,9 @@ async fn follow(
 
 		let (announce, active) = match event {
 			Event::Present(announce) => (announce, true),
-			Event::Absent(announce) => (announce, false),
+			Event::Absent(announce) | Event::Offline(announce) => (announce, false),
+			// The set lists presence; a held path stays listed.
+			Event::Available(_) | Event::Unavailable(_) => continue,
 		};
 
 		let path = announce.prefix.as_str();

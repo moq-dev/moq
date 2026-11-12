@@ -4,8 +4,8 @@ The layout is the one `demo/carla/README.md` documents and the web player
 speaks:
 
     carla/{truck}/{camera}.hang              video (sd, hd) + status
-    carla/.socket/{truck}                    the truck's socket endpoint
-    carla/.socket/driver-{id}                each driver's socket endpoint
+    carla/.server/{truck}                    the truck's server socket endpoint
+    carla/.client/{id}                       each driver's client socket endpoint
 """
 
 from __future__ import annotations
@@ -185,7 +185,7 @@ class StatusPublisher:
     """
 
     def __init__(self, broadcast: moq.BroadcastProducer) -> None:
-        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
+        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE))
         self._catalog = moq.media.CatalogProducer(broadcast)
         self._producer = moq.json.SnapshotProducer(broadcast, track)
         # Weak: watching demand neither keeps the track open nor locks it.
@@ -294,7 +294,7 @@ def _number_or_none(value: Any) -> float | None:
 
 
 # Every endpoint the trucks and their drivers talk through sits under this
-# prefix, as `{prefix}/.socket/{id}`.
+# prefix: a truck's as `{prefix}/.server/{truck}`, a driver's as `{prefix}/.client/{id}`.
 SOCKET_PREFIX = "carla"
 
 # How far a control may fall behind the newest before it is skipped: one player
@@ -304,10 +304,10 @@ CONTROL_DELAY = timedelta(milliseconds=250)
 
 
 class Drivers:
-    """A truck's socket endpoint: accepts each driver's session, fans its controls
-    into the command queue, and answers the driver on the same session.
+    """A truck's server socket endpoint: accepts each driver's session, fans its
+    controls into the command queue, and answers the driver on the same session.
 
-    Each driver dials from an endpoint of its own, one `track` session per lease,
+    Each driver dials from a client endpoint of its own, one `track` session per lease,
     whose messages are one control per group. Replies go back the same way, so a
     driver's acknowledgements never reach anyone else.
     """
@@ -317,11 +317,13 @@ class Drivers:
         self._commands = commands
         # Keyed like the lease, by driver and session, since a dialer picks its own session id.
         self._replies: dict[tuple[str, str], moq.TrackProducer] = {}
+        # Sessions the truck ended, until the gate reads their `driver_left`.
+        self._revoked: set[tuple[str, str]] = set()
 
     @property
     def path(self) -> str:
-        """Where the truck's endpoint is announced."""
-        return f"{SOCKET_PREFIX}/.socket/{self._truck}"
+        """Where the truck's server endpoint is announced."""
+        return f"{SOCKET_PREFIX}/.server/{self._truck}"
 
     def reply(self, command: Command, message: dict[str, Any]) -> None:
         """Send `message` on the session that carried `command`, if it is still open.
@@ -339,6 +341,33 @@ class Drivers:
         # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
         except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
             log.info("%s: reply failed: %s", self._truck, err)
+
+    def revoke(self, driver: str, session: str) -> None:
+        """End a driver's session from the truck's side and drop what it still sends.
+
+        The player gives up control once its replies end, but heartbeats already
+        queued or in flight would otherwise claim the lease straight back.
+        """
+        self._revoked.add((driver, session))
+        producer = self._replies.get((driver, session))
+        if producer is not None:
+            with contextlib.suppress(moq.Error):  # pyright: ignore[reportGeneralTypeIssues]
+                producer.finish()
+
+    def revoked(self, command: Command) -> bool:
+        """Whether `command` came from a revoked session, which the gate must ignore.
+
+        The session's `driver_left` is the last command it queues, so reading it
+        forgets the session.
+        """
+        if command.session is None:
+            return False
+        key = (command.driver_id, command.session)
+        if key not in self._revoked:
+            return False
+        if command.kind == "driver_left":
+            self._revoked.discard(key)
+        return True
 
     async def run(self, origin: moq.OriginProducer) -> None:
         """Accept drivers until cancelled, each session in a task of its own,
@@ -385,6 +414,8 @@ class Drivers:
         log.info("driver %s connected", driver)
         try:
             while (frame := await stream.consumer.read_frame()) is not None:
+                if key in self._revoked:
+                    break
                 command = parse_command(driver, _decode(frame.payload), session)
                 if command is not None:
                     await self._commands.put(command)

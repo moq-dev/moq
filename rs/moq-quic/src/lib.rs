@@ -23,15 +23,10 @@ mod cid_queue;
 mod coding;
 mod constant_time;
 mod entropy;
-// Not part of the public API: compiled only for the crate's own tests, the benches, and
-// the `fuzz/` harness. The connection target uses rind for the endpoint's keys.
 #[cfg(any(test, feature = "fuzz"))]
-#[doc(hidden)]
 pub mod fuzz;
 mod range_set;
-// Not part of the public API: the network path the crate's tests and simulated drivers share.
 #[cfg(any(test, feature = "sim"))]
-#[doc(hidden)]
 pub mod sim;
 #[cfg(test)]
 mod tests;
@@ -44,16 +39,10 @@ mod bloom_token_log;
 use bloom_token_log::BloomTokenLog;
 
 pub mod connection;
-pub use crate::connection::{CreditStats, Datagrams, Event, FrameStats, PathStats, Streams, UdpStats, recv, send};
+pub use crate::connection::streams::{recv, send};
 
 pub mod stream;
-#[cfg(feature = "mux")]
-#[doc(hidden)]
-pub use connection::mux;
 pub(crate) use stream::{Dir, Id as StreamId};
-
-// The configs take and report rustls types, so callers name the same version.
-pub use rustls;
 
 mod config;
 mod limits;

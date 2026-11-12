@@ -34,6 +34,8 @@ fn an_older_complete_snapshot_revives_no_known_withdrawal() {
 	let (origin, a, b, node) = (0, 1, 2, 3);
 	let mut sim = two_relays();
 	sim.announce(origin, "live/x", 0, None);
+	// Keeps the routes up once `live/x` goes.
+	sim.announce(origin, "live/y", 0, None);
 	assert!(sim.run());
 	assert_eq!(sim.shows(node, 7, "live/x"), Some(true));
 
@@ -52,9 +54,8 @@ fn an_older_complete_snapshot_revives_no_known_withdrawal() {
 	sim.release(origin, b);
 	assert!(sim.run());
 	assert_eq!(sim.shows(node, 7, "live/x"), None);
-	let events = at(&sim, node);
-	assert_eq!(revivals(&events), 0);
-	assert_eq!(kinds(&events), [Kind::Start, Kind::End]);
+	assert_eq!(revivals(&at(&sim, node)), 0);
+	assert_eq!(life(&sim, node, "live/x"), [Kind::Start, Kind::End]);
 	sim.check().unwrap();
 }
 
@@ -173,9 +174,10 @@ fn widening_interest_needs_floors_scoped_to_what_they_cover() {
 	sim.check().unwrap();
 }
 
-/// Narrowing retires what a client knew outside the new interest. On rejoin a
-/// lagging relay's snapshot replays a withdrawal the client saw before it
-/// narrowed, as after a collection, and only until the newer snapshot lands.
+/// Narrowing to an interest the origin's claims do not meet ends its routes, so
+/// the client lets go of the origin and collects it. On rejoin a lagging relay's
+/// snapshot replays a withdrawal the client saw before it narrowed, as after any
+/// collection, and only until the newer snapshot lands.
 #[test]
 fn cancelling_interest_retires_its_region() {
 	let (origin, r1, r2, client) = (0, 1, 2, 3);
@@ -189,7 +191,9 @@ fn cancelling_interest_retires_its_region() {
 
 	sim.watch(client, "live/b/");
 	assert!(sim.run());
-	assert_eq!(sim.floors(client, 7), 1, "only the watched region");
+	assert!(!sim.holds(client, 7), "no relay meets the interest");
+	sim.collect(client, 7);
+	assert_eq!(sim.floors(client, 7), 0);
 	sim.hold(r1, client);
 	sim.watch(client, "");
 	assert!(sim.run());
@@ -198,11 +202,12 @@ fn cancelling_interest_retires_its_region() {
 		Some(true),
 		"the lagging relay replays"
 	);
+	// r1 carries nothing for the origin now, so only r2 delivers the withdrawal.
 	sim.release(r1, client);
 	assert!(sim.run());
-	assert_eq!(sim.shows(client, 7, "live/a/x"), None);
 	sim.release(origin, r2);
 	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/a/x"), None);
 	assert_eq!(
 		life(&sim, client, "live/a/x"),
 		[Kind::Start, Kind::End, Kind::Start, Kind::End]
@@ -411,10 +416,11 @@ fn two_scoped_uplinks() -> Sim {
 	sim
 }
 
-/// A relay forwards a key whose floors are all grant scopes, and its peer
-/// moves to an interest no scope meets. The relay still answers the new
-/// stream, certifying nothing, so the peer lets go of a claim it kept from the
-/// scoped view instead of waiting on an answer that never comes.
+/// A relay forwards a key whose floors are all grant scopes: each presents a
+/// claim above its scope at the scope itself, and certifies nothing across a
+/// peer's whole interest, so the peer shows both presentations uncertified.
+/// When the peer moves to an interest no scope meets, each relay ends the route
+/// on it, so the peer holds no route and waits on no certifier for the origin.
 #[test]
 fn a_disjoint_interest_is_answered_with_nothing() {
 	let (origin, z) = (0, 4);
@@ -422,12 +428,19 @@ fn a_disjoint_interest_is_answered_with_nothing() {
 	sim.announce(origin, "live/", 0, None);
 	assert!(sim.run());
 	let id = qualified("local", 7);
-	assert_eq!(sim.shows(z, id, "live/"), Some(true));
+	assert_eq!(sim.shows(z, id, "live/"), None);
+	assert_eq!(sim.shows(z, id, "live/a/"), Some(true));
+	assert_eq!(sim.shows(z, id, "live/b/"), Some(true));
+	assert!(
+		sim.nodes[z].views().all(|(_, view)| view.items.is_empty()),
+		"nothing certified"
+	);
 
 	sim.watch(z, "live/c");
 	assert!(sim.run());
-	assert_eq!(sim.shows(z, id, "live/"), None);
-	assert_eq!(life(&sim, z, "live/"), [Kind::Start, Kind::Offline]);
+	assert!(sim.shown(z).is_empty());
+	assert_eq!(life(&sim, z, "live/a/"), [Kind::Start, Kind::Unwatched]);
+	assert!(!sim.holds(z, id), "both relays ended the route");
 	sim.check().unwrap();
 }
 
@@ -484,11 +497,12 @@ fn a_lost_scope_keeps_newer_knowledge_where_still_certified() {
 	sim.check().unwrap();
 }
 
-/// When one scoped uplink closes, its relay is starved and holds, so the third
-/// relay shows that scope unavailable; once a seqno request recovers a route,
-/// nothing certifies the lost scope and the third lets it go. Certifiers are
-/// feasible neighbors only, so the two never keep the scope alive through each
-/// other.
+/// When one scoped uplink closes, its relay is starved and holds, and the
+/// third relay knows that scope's claims only uncertified, through the starved
+/// relay. Once the other relay's newer seqno makes the starved one infeasible,
+/// nothing carries the lost scope and the third lets it go, whether or not the
+/// starved relay's own requests get through. Certifiers are feasible neighbors
+/// only, so the two never keep the scope alive through each other.
 #[test]
 fn a_relay_lets_go_of_a_scope_its_uplinks_lost() {
 	let (origin, local, x, z) = (0, 1, 2, 4);
@@ -510,13 +524,17 @@ fn a_relay_lets_go_of_a_scope_its_uplinks_lost() {
 		sim.disconnect(x, local);
 		sim.unannounce(origin, "live/a/x");
 		assert!(sim.run());
-		let lost = if request { None } else { Some(false) };
 		if !request {
 			// Only the ROUTE update reaches z, not the requests.
 			while sim.deliver(x, z) {}
 			assert!(sim.run());
 		}
-		assert_eq!(sim.shows(z, id, "live/a/x"), lost, "request {request}");
+		assert_eq!(sim.shows(z, id, "live/a/x"), None, "request {request}");
+		assert_eq!(
+			life(&sim, z, "live/a/x").last(),
+			Some(&Kind::Offline),
+			"request {request}"
+		);
 		assert_eq!(sim.shows(z, id, "live/b/z"), Some(true), "request {request}");
 		assert_eq!(false_ends(&sim.events), 0, "request {request}");
 		sim.check().unwrap();
@@ -524,16 +542,27 @@ fn a_relay_lets_go_of_a_scope_its_uplinks_lost() {
 }
 
 /// Every lite-07 claim covers the paths below it, so a claim above an
-/// interest is inside it.
+/// interest covers it, and a stream answering the interest presents it there.
+/// Withdrawing it moves the presentation to the next claim up rather than
+/// ending it.
 #[test]
-fn a_claim_above_an_interest_overlaps_it() {
+fn a_claim_above_an_interest_is_presented_at_it() {
 	let (origin, client) = (0, 3);
 	let mut sim = lagging("live/a/x");
+	sim.announce(origin, "live", 0, None);
 	sim.announce(origin, "live/a", 0, None);
 	sim.announce(origin, "live/b", 0, None);
 	assert!(sim.run());
-	assert_eq!(sim.shows(client, 7, "live/a"), Some(true));
-	assert_eq!(sim.shows(client, 7, "live/b"), None);
+	assert_eq!(sim.shows(client, 7, "live/a/x"), Some(true));
+	assert_eq!(sim.shown(client).len(), 1);
+	let below = sim.shown(client)[&(7, p("live/a/x"))].item;
+	assert_eq!(Some(below), sim.truth(7, "live/a", sim.revision(7)));
+
+	sim.unannounce(origin, "live/a");
+	assert!(sim.run());
+	let above = sim.shown(client)[&(7, p("live/a/x"))].item;
+	assert_eq!(Some(above), sim.truth(7, "live", sim.revision(7)));
+	assert!(!life(&sim, client, "live/a/x").contains(&Kind::End), "moved, not ended");
 	sim.check().unwrap();
 }
 
@@ -560,21 +589,29 @@ fn wildcard_claims_end_per_origin_and_are_certified_below() {
 	sim.announce(o2, "live/", 0, Some(1));
 	assert!(sim.run());
 	assert_eq!(sim.shown(client).len(), 2);
+	assert_eq!(
+		sim.shows(client, 10, "live/a/"),
+		Some(true),
+		"presented at the interest"
+	);
 
 	sim.hold(o1, r2);
 	sim.unannounce(o1, "live/");
 	assert!(sim.run());
-	assert_eq!(sim.shows(client, 10, "live/"), None);
+	assert_eq!(sim.shows(client, 10, "live/a/"), None);
 	assert_eq!(
-		sim.shows(client, 11, "live/"),
+		sim.shows(client, 11, "live/a/"),
 		Some(true),
 		"the other origin's claim stays"
 	);
 
 	sim.disconnect(client, r1);
 	assert!(sim.run());
-	assert_eq!(sim.shows(client, 10, "live/"), None);
-	assert_eq!(sim.shows(client, 11, "live/"), Some(true));
+	assert_eq!(sim.shows(client, 10, "live/a/"), None);
+	assert_eq!(sim.shows(client, 11, "live/a/"), Some(true));
+	// Each origin's claim starts, and only the withdrawn one ends.
+	assert_eq!(life(&sim, client, "live/a/"), [Kind::Start, Kind::Start, Kind::End]);
+	assert_eq!(false_ends(&sim.events), 0);
 }
 
 /// An origin process restarts with a fresh identity: its claims start a new
@@ -651,8 +688,8 @@ fn stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it() {
 		if collect {
 			sim.collect(b, 7);
 		}
-		// The held ROUTE, an empty snapshot, then the one carrying `live/x`.
-		for _ in 0..3 {
+		// The held ROUTE, then the snapshot carrying `live/x`.
+		for _ in 0..2 {
 			assert!(sim.deliver(a, b));
 		}
 		assert_eq!(sim.shows(b, 7, "live/x").is_some(), collect);
@@ -707,6 +744,7 @@ fn exhausted_counters_rotate_the_identity() {
 	let rotated = |sim: &Sim| {
 		let fresh = sim.proven(origin);
 		assert_ne!(fresh, 7, "a fresh identity");
+		assert!(fresh <= crate::route::GENERATED, "a lite-06 hop carries it as itself");
 		assert_eq!(sim.shows(client, 7, "live/x"), None);
 		assert_eq!(sim.shows(client, fresh, "live/x"), Some(true));
 		assert!(sim.route(a, 7).is_none());
@@ -826,6 +864,8 @@ fn sweep_requests_reach_a_quiet_origin() {
 				}
 			}
 			sim.originate(origin, origin as u64, 0);
+			// A route goes out only while a claim meets the interest.
+			sim.announce(origin, "", 0, None);
 		}
 		assert!(sim.run());
 		for _ in 0..30 {
@@ -918,15 +958,16 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 		let sessions = 2 * relays + 2;
 		let retained = sim.retained();
 		assert_eq!(retained.items, relays * claims);
-		assert_eq!(retained.floors, relays + 1);
+		// The client's interest meets no claim, so it holds no route and no floor.
+		assert_eq!(retained.floors, relays);
 		assert_eq!(retained.heard, sessions * claims);
 		assert_eq!(retained.sent, retained.heard, "both ends cache the same view");
 
 		let (stats, events) = (sim.stats, sim.events.len());
 		sim.unannounce(origin, PREFIXES[0]);
 		assert!(sim.run());
-		// The client's session carries only the advanced floor.
-		assert_eq!(sim.stats.claim_msgs - stats.claim_msgs, sessions + 1);
+		// The client's session carries nothing.
+		assert_eq!(sim.stats.claim_msgs - stats.claim_msgs, sessions);
 		assert_eq!(sim.stats.claim_items - stats.claim_items, sessions);
 		assert_eq!(sim.events.len() - events, relays + 1, "once per node");
 
@@ -952,6 +993,9 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 			}
 			sim.watch(client, "none/");
 			assert!(sim.run());
+			// No relay meets the interest, so the client lets the origin go.
+			assert!(!sim.holds(client, 7));
+			sim.collect(client, 7);
 			assert_eq!(sim.retained(), after, "interest history after {cycles} cycles");
 		}
 		sim.check().unwrap();
@@ -1042,22 +1086,20 @@ fn sweep_scoped_handoff() {
 		sim.check().unwrap_or_else(|err| panic!("scenario {scenario}: {err}"));
 		let watch = sim.watching(client).clone();
 		let rev = sim.revision(7);
-		let expected: BTreeSet<Path> = CLAIMS
-			.into_iter()
-			.filter(|claim| sim.truth(7, claim, rev).is_some())
-			.map(p)
-			.filter(|claim| {
-				SCOPES.iter().map(|scope| p(scope)).any(|scope| {
-					let region = if within(&scope, &watch) {
-						scope
-					} else if within(&watch, &scope) {
-						watch.clone()
-					} else {
-						return false;
-					};
-					overlaps(claim, &region)
-				})
+		// Each relay presents its scope to the client's interest.
+		let expected: BTreeSet<Path> = SCOPES
+			.iter()
+			.map(|scope| p(scope))
+			.filter_map(|scope| {
+				if within(&scope, &watch) {
+					Some(scope)
+				} else if within(&watch, &scope) {
+					Some(watch.clone())
+				} else {
+					None
+				}
 			})
+			.flat_map(|region| sim.presented(7, &region, rev).into_keys())
 			.collect();
 		let id = qualified("local", 7);
 		let shown: BTreeSet<Path> = sim
@@ -1212,25 +1254,26 @@ fn settled(sim: &mut Sim, label: &str) {
 	sim.check().unwrap();
 	let live: Vec<Id> = (RELAYS..RELAYS + 2).map(|origin| sim.proven(origin)).collect();
 	for node in 0..RELAYS + 3 {
-		let mut expected = BTreeSet::new();
-		for &id in &live {
-			assert!(
+		let mut expected = BTreeMap::new();
+		for (origin, &id) in (RELAYS..).zip(&live) {
+			let presented = sim.presented(id, sim.watching(node), sim.revision(id));
+			// A route reaches a node only while a claim meets its interest.
+			assert_eq!(
 				sim.route(node, id).is_some(),
-				"{label}: node {node} has no route to {id}"
+				node == origin || !presented.is_empty(),
+				"{label}: node {node}'s route to {id}"
 			);
-			for claim in CLAIMS {
-				if overlaps(&p(claim), sim.watching(node)) && sim.truth(id, claim, sim.revision(id)).is_some() {
-					expected.insert((id, p(claim)));
-				}
+			for (claim, item) in presented {
+				expected.insert((id, claim), item);
 			}
 		}
-		let shown: BTreeSet<(Id, Path)> = sim.shown(node).keys().cloned().collect();
-		assert_eq!(shown, expected, "{label}: node {node}");
+		let shown: BTreeSet<&(Id, Path)> = sim.shown(node).keys().collect();
+		assert_eq!(shown, expected.keys().collect(), "{label}: node {node}");
 		for ((id, claim), shown) in sim.shown(node) {
 			assert!(shown.available, "{label}: node {node} {id} {claim}");
 			assert_eq!(
-				sim.truth(*id, claim.as_str(), sim.revision(*id)),
-				Some(shown.item),
+				expected.get(&(*id, claim.clone())),
+				Some(&shown.item),
 				"{label}: node {node} {id} {claim}"
 			);
 		}
@@ -1307,6 +1350,8 @@ fn a_restarted_route_sends_a_complete_snapshot() {
 	sim.join(relay, node, 1);
 	sim.originate(origin, 7, 0);
 	sim.announce(origin, "live/x", 0, None);
+	// Keeps the route up once `live/x` goes.
+	sim.announce(origin, "live/y", 0, None);
 	assert!(sim.run());
 	assert_eq!(sim.shows(node, 7, "live/x"), Some(true));
 
@@ -1324,14 +1369,13 @@ fn a_restarted_route_sends_a_complete_snapshot() {
 	sim.check().unwrap();
 }
 
-/// A claim covering both interests stays shown when a client moves to a
-/// disjoint interest: what it knows of that claim is current as of the old
-/// interest, which carried every change to it until the switch. A withdrawal
-/// still queued on the old stream is discarded with it and arrives on the
-/// new stream's snapshot instead: the claim ends once, never revives, and no
-/// END is false.
+/// A claim covering two disjoint interests is presented at each one's own
+/// path, so a client moving between them stops watching the old presentation
+/// at once. A withdrawal still queued on the old stream is discarded with it,
+/// and the new stream's snapshot never shows the withdrawn claim: nothing
+/// revives and no END is false.
 #[test]
-fn a_covering_claim_survives_a_disjoint_interest_until_the_new_snapshot() {
+fn a_covering_claim_moves_with_a_disjoint_interest() {
 	let (origin, relay, client) = (0, 1, 2);
 	let mut sim = Sim::new(3);
 	sim.leaf(origin);
@@ -1342,20 +1386,94 @@ fn a_covering_claim_survives_a_disjoint_interest_until_the_new_snapshot() {
 	sim.originate(origin, 7, 0);
 	sim.announce(origin, "live", 0, None);
 	assert!(sim.run());
-	assert_eq!(sim.shows(client, 7, "live"), Some(true));
+	assert_eq!(sim.shows(client, 7, "live/a"), Some(true));
 
 	sim.hold(relay, client);
 	sim.unannounce(origin, "live");
 	assert!(sim.run());
 	sim.watch(client, "live/b");
 	assert!(sim.run());
-	assert_eq!(sim.shows(client, 7, "live"), Some(true), "lags like any snapshot");
+	assert!(sim.shown(client).is_empty(), "nothing answers the new interest yet");
 
 	sim.release(relay, client);
 	assert!(sim.run());
-	assert_eq!(sim.shows(client, 7, "live"), None);
-	assert_eq!(life(&sim, client, "live"), [Kind::Start, Kind::End]);
+	assert!(sim.shown(client).is_empty());
+	assert_eq!(life(&sim, client, "live/a"), [Kind::Start, Kind::Unwatched]);
 	assert_eq!(revivals(&sim.events), 0);
 	assert_eq!(false_ends(&sim.events), 0);
 	sim.check().unwrap();
+}
+
+/// A scoped relay certifies nothing across the third relay's whole interest, so
+/// that relay holds its claims uncertified. When the scoped relay ends the route
+/// and restarts it, its new snapshot is complete: a claim it carried before the
+/// end and dropped while the route was down must not survive at the receiver.
+#[test]
+fn a_restarted_floorless_route_drops_what_it_no_longer_carries() {
+	let (origin, local, x, z) = (0, 1, 2, 4);
+	let mut sim = two_scoped_uplinks();
+	sim.announce(origin, "live/a/x", 0, None);
+	// Keeps the route up once `live/a/x` goes.
+	sim.announce(origin, "live/a/y", 0, None);
+	sim.announce(origin, "live/b/z", 0, None);
+	assert!(sim.run());
+	let id = qualified("local", 7);
+	assert_eq!(sim.shows(z, id, "live/a/x"), Some(true));
+
+	// Keeps x from rerouting through z, which would withdraw its claims first.
+	sim.hold(z, x);
+	sim.disconnect(x, local);
+	assert!(sim.run());
+	// The relay forgets the origin and ends its route on z.
+	sim.collect(x, id);
+	assert!(sim.run());
+	sim.unannounce(origin, "live/a/x");
+	assert!(sim.run());
+	while sim.deliver_ack(z, x) {}
+	sim.connect(x, local);
+	assert!(sim.run());
+	sim.release(z, x);
+	assert!(sim.run());
+	assert_eq!(sim.shows(z, id, "live/a/y"), Some(true));
+	assert_eq!(sim.shows(z, id, "live/a/x"), None);
+	assert_eq!(revivals(&sim.events), 0);
+	sim.check().unwrap();
+}
+
+/// Relay 4 hears origin 7's claims from relay 0, which certifies them all, and from
+/// relay 3, which asked only for `b`. While 4's own distance sets 0 aside, 0 moves
+/// between two equal routes and says so. That change of hops moves no certifier, so
+/// 4 lets go of nothing, where pruning on it lost the root claim for good.
+#[test]
+fn a_change_of_hops_alone_lets_go_of_no_claim() {
+	let (origin, other) = (6, 7);
+	let mut sim = Sim::new(8);
+	sim.join(other, 4, 1);
+	sim.join(other, 5, 1);
+	sim.join(origin, 3, 1);
+	sim.join(origin, 2, 1);
+	sim.join(0, 1, 1);
+	sim.link(0, 2, SimLink::cost(3), SimLink::cost(1));
+	sim.join(0, 3, 1);
+	sim.join(0, 4, 1);
+	sim.link(1, 2, SimLink::cost(2), SimLink::cost(1));
+	sim.join(2, 3, 1);
+	sim.join(2, 5, 1);
+	sim.link(3, 4, SimLink::cost(1), SimLink::cost(2));
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "", 0, None);
+	sim.originate(other, 8, 0);
+	sim.announce(other, "", 0, None);
+	sim.watch(3, "b");
+	assert!(sim.run());
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
+
+	let hops = sim.stats.hop_updates;
+	sim.disconnect(origin, 3);
+	assert!(sim.run());
+	assert!(sim.stats.hop_updates > hops, "a route changed its hops alone");
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
+	sim.disconnect(2, 3);
+	assert!(sim.run());
+	assert_eq!(sim.shows(4, 7, ""), Some(true));
 }

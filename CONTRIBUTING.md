@@ -25,7 +25,7 @@ Have at least these sections:
 
 - **Problem**: a summary of the problem and why this PR is needed.
 - **Approach**: a summary of the approach taken to solve the problem.
-- **Impact**: a bullet point for every public API/wire change made. A breaking one says how to migrate, and the PR title marks it with `!` (`feat(net)!: ...`).
+- **Impact**: a bullet point for every public API/wire change made. A breaking one says how to migrate, and the PR title marks it with `!` (`feat(net)!: ...`). A behavior change alone takes no `!`.
 - **Alternatives**: any alternative approaches considered.
 - **Follow-ups**: any issues encountered or quests created.
 
@@ -47,6 +47,13 @@ Request landing with `quest merge <pr> --land <full-head-sha>` once the review i
 An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
 `quest merge --land` enqueues the pinned head, or arms auto-merge bound to it while its checks are pending; a push removes it from the queue. A head GitHub refuses to enqueue, for a conflict or failing checks, fails the command: fix it and request landing again.
 Local and hosted checks select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
+Repository tooling tests run whole files in `just gh test`, listed explicitly in
+`.github/justfile`. Slow fixtures live in separate `*.slow.test.py` files;
+`just gh test-integration` runs those files and selector timing nightly. Only
+`bench/build.slow.test.py` leaves the gate: its paired Cargo builds took 211.91 s.
+The selector timing sweep took 3.56 s and collects performance samples; its
+correctness tests remain in the gate. All version, hakari, test-lint, and nightly
+helper tests remain in the gate, including their cheap static invariants.
 To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
 
 When the queue drops a PR for a failing build or a conflict, moq-dev/quest's queue watcher on the maintainer's host comments with the reason and the failing log's tail, runs a Codex fixer on it in the background, and re-enqueues the fixed head, or the unchanged head after a flaky failure, at the back of the queue. The fixer hands the PR back, with its diagnosis, when the fix needs a decision or stops making progress. `quest status` shows why a PR left the queue under `landing-stopped`.
@@ -93,7 +100,7 @@ For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/READM
 
 - Smoke clients call only the latest published APIs. A release cut updates `test/smoke/clients` to the APIs being published, then verifies the affected smoke lanes.
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit. After the pre-cut merge of `release` into `main`, run `just version 0.22.0` on `main` for the first shared cut, or the next shared minor for later cuts. Commit the resulting versions and lockfiles before opening the cut PR. Run `just version` to check them.
-- A breaking cut first writes, on `main`, each changed package's version-transition section in its `MIGRATE.md` (`## 0.3 -> 0.4`) from the migration audit: the `!` subjects since the `release` merge base, each of those PRs' Impact section, and the API diff.
+- A breaking cut first writes, on `main`, each changed package's version-transition section in its `MIGRATE.md` (`## 0.3 -> 0.4`), the only `MIGRATE.md` edit `just check` allows, from the migration audit: the `!` subjects since the `release` merge base, each of those PRs' Impact section, and the API diff.
 - Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch. A backport quest or PR names "the next release", never a version number, since the `release` bump can land first. The Release gate's API diff (`just api-diff --deny`) fails a backport that changes one; on the cut PR, whose head is `main`, it only reports.
 - A bench-only backport ports `main`'s benchmarks onto `release`, so a pairing against `release` (`just bench origin/release`) compares them. It carries only benchmarks and their harness: bench targets, bench-only dev-dependencies, and `bench/`. It changes no shipped code, and it shims locally any API that `release` lacks, keeping each case's ID the same as on `main`. A case that measures code `release` doesn't have is left out, and the PR lists it. Merging one makes release-plz propose patch bumps for the crates it touches, though no shipped code changed.
 - After any release publishes, patch or breaking, run `just test wire-compat --remeasure` on `main` and land the rewritten `test/interop/compat/planned-breaks.json` with refreshed reasons. Otherwise the nightly wire-compat check fails on the stale pins.
@@ -129,9 +136,9 @@ mismatched npm/Python lock entries, and stale bindings requirements.
 
 The nonpublishing fixture in `sh/version.test.py` verifies that release-plz's
 `update` engine, also used by `release-pr`, preserves a manually set unpublished
-minor despite breaking commits. `just gh test` runs it on every check, so a
-release-plz upgrade that breaks the cut fails before it lands. No publish, tag,
-or release workflow runs as part of `just version`.
+minor despite breaking commits. `just gh test` runs the whole version suite on
+every check, so a release-plz upgrade that breaks the cut fails before it lands.
+No publish, tag, or release workflow runs as part of `just version`.
 
 Each package's version lives in one place:
 

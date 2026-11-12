@@ -3,32 +3,8 @@ use std::pin::Pin;
 use futures::{StreamExt, stream::FuturesUnordered, try_join};
 use tokio::io::AsyncReadExt;
 
-use super::proto::StreamUni;
 use super::session::{PendingUni, log_header_error, read_uni_header};
-
-use thiserror::Error;
-
-#[derive(Error, Debug, Clone)]
-#[non_exhaustive]
-pub enum SettingsError {
-	#[error("quic stream was closed early")]
-	UnexpectedEnd,
-
-	#[error("protocol error: {0}")]
-	ProtoError(#[from] web_transport_proto::SettingsError),
-
-	#[error("WebTransport is not supported")]
-	WebTransportUnsupported,
-
-	#[error("connection error")]
-	ConnectionError(#[from] crate::quic::driver::connection::Error),
-
-	#[error("read error")]
-	ReadError(#[from] crate::quic::driver::recv::Error),
-
-	#[error("write error")]
-	WriteError(#[from] crate::quic::driver::send::Error),
-}
+use web_transport_proto::StreamUni;
 
 pub struct Settings {
 	#[allow(
@@ -48,7 +24,7 @@ pub struct Settings {
 
 impl Settings {
 	// Establish the H3 connection.
-	pub async fn connect(conn: &crate::quic::driver::connection::Connection) -> Result<Self, SettingsError> {
+	pub async fn connect(conn: &crate::quic::driver::connection::Connection) -> Result<Self, super::Error> {
 		let recv = Self::accept(conn);
 		let send = Self::open(conn);
 
@@ -70,7 +46,7 @@ impl Settings {
 	/// one kept holds the peer's stream credit, which bounds how many it can open first.
 	async fn accept(
 		conn: &crate::quic::driver::connection::Connection,
-	) -> Result<(crate::quic::driver::recv::Stream, Vec<Pin<Box<PendingUni>>>), SettingsError> {
+	) -> Result<(crate::quic::driver::recv::Stream, Vec<Pin<Box<PendingUni>>>), super::Error> {
 		let mut pending = FuturesUnordered::<Pin<Box<PendingUni>>>::new();
 		let mut early = Vec::<Pin<Box<PendingUni>>>::new();
 
@@ -93,14 +69,14 @@ impl Settings {
 		tracing::debug!(?settings, "received SETTINGS frame");
 
 		if settings.supports_webtransport() == 0 {
-			return Err(SettingsError::WebTransportUnsupported);
+			return Err(super::HandshakeError::Unsupported.into());
 		}
 
 		Ok((recv, early))
 	}
 	async fn open(
 		conn: &crate::quic::driver::connection::Connection,
-	) -> Result<crate::quic::driver::send::Stream, SettingsError> {
+	) -> Result<crate::quic::driver::send::Stream, super::Error> {
 		let mut settings = web_transport_proto::Settings::default();
 		settings.enable_webtransport(1);
 

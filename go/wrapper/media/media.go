@@ -565,7 +565,7 @@ type TrackConsumer struct {
 
 // Next returns the next read, or (nil, nil) once the track ends.
 func (m *TrackConsumer) Next(ctx context.Context) (Read, error) {
-	raw, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
+	raw, err := bridge.Call(ctx, nil, m.inner.Next)
 	if err != nil || raw == nil {
 		return nil, err
 	}
@@ -574,7 +574,7 @@ func (m *TrackConsumer) Next(ctx context.Context) (Read, error) {
 
 // All ranges over reads until the track ends or the loop breaks.
 func (m *TrackConsumer) All(ctx context.Context) iter.Seq2[Read, error] {
-	return bridge.Seq(ctx, m.Next)
+	return bridge.Seq(ctx, m.inner.Cancel, m.Next)
 }
 
 // Cancel stops the stream.
@@ -595,12 +595,12 @@ func (m *GroupConsumer) Sequence() uint64 {
 
 // Next returns the next decoded frame, or (nil, nil) when the group ends.
 func (m *GroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	return bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
+	return bridge.Call(ctx, nil, m.inner.Next)
 }
 
 // All ranges over decoded frames until the group ends or the loop breaks.
 func (m *GroupConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
-	return bridge.Seq(ctx, m.Next)
+	return bridge.Seq(ctx, m.inner.Cancel, m.Next)
 }
 
 // Cancel stops the stream.
@@ -615,12 +615,12 @@ type CatalogConsumer struct {
 
 // Next returns the next catalog, or (nil, nil) when the track ends.
 func (c *CatalogConsumer) Next(ctx context.Context) (*Catalog, error) {
-	return bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
+	return bridge.Call(ctx, nil, c.inner.Next)
 }
 
 // All ranges over catalog updates until the track ends or the loop breaks.
 func (c *CatalogConsumer) All(ctx context.Context) iter.Seq2[*Catalog, error] {
-	return bridge.Seq(ctx, c.Next)
+	return bridge.Seq(ctx, c.inner.Cancel, c.Next)
 }
 
 // Cancel stops the stream.

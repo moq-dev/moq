@@ -1,7 +1,7 @@
 //! A sans-IO client/server harness for the benchmarks, built from the public API so the suite
 //! compiles on both sides of a rewrite.
 //!
-//! Both sides run the hidden `fuzz` module's plaintext crypto, which skips TLS and leaves packets
+//! Both sides run the `fuzz` module's plaintext crypto, which skips TLS and leaves packets
 //! unprotected, and the congestion window is unlimited, so a benchmark measures protocol CPU
 //! rather than AES or a controller's model. Time is virtual: it only advances to
 //! the next timer once no datagram is in flight. Cases are timed in thread CPU time, so a busy
@@ -447,7 +447,7 @@ impl Pair {
 		let server = Peer::new(server, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 4433));
 
 		let mut pair = Self {
-			now: Instant::ZERO + Duration::from_secs(3600),
+			now: Instant::ZERO.saturating_add(Duration::from_secs(3600)),
 			server,
 			clients: Vec::new(),
 			server_cids,
@@ -492,7 +492,7 @@ impl Pair {
 					.conns
 					.values()
 					.chain(pair.clients.iter().flat_map(|c| c.conns.values()))
-					.all(|c| !c.is_handshaking())
+					.all(|c| !moq_quic::fuzz::is_handshaking(c))
 		});
 		pair.settle();
 		pair
@@ -553,7 +553,7 @@ impl Pair {
 				let received = self.server.received;
 				let next = next.unwrap_or_else(|| panic!("stalled with no timer: {received:?}"));
 				assert!(
-					next <= self.now + STALL,
+					next <= self.now.saturating_add(STALL),
 					"stalled with no timer due within {STALL:?}: {received:?}"
 				);
 				self.now = self.now.max(next);
@@ -568,7 +568,7 @@ impl Pair {
 				continue;
 			}
 			match self.next_timeout() {
-				Some(next) if next <= self.now + SETTLE => self.now = self.now.max(next),
+				Some(next) if next <= self.now.saturating_add(SETTLE) => self.now = self.now.max(next),
 				_ => return,
 			}
 		}
@@ -706,7 +706,7 @@ pub(crate) fn deliver(pair: &mut Pair, datagram: BytesMut) {
 /// A forged exchange never waits on a timer, so without this, state that expires with time, such
 /// as packets remembered as lost, would pile up across iterations.
 pub(crate) fn tick(pair: &mut Pair) {
-	pair.now += TICK;
+	pair.now = pair.now.saturating_add(TICK);
 	let conn = pair.server.conn();
 	if conn.poll_timeout().is_some_and(|at| at <= pair.now) {
 		conn.handle_timeout(pair.now);
@@ -745,8 +745,7 @@ fn transport(receive_window: VarInt, send_window: u64, probe: bool) -> transport
 	let mut transport = transport::Config::default();
 	transport.congestion = Arc::new(Unlimited { probe });
 	// Pinned, so black hole detection cannot shrink packets after a benchmark's losses.
-	transport.initial_mtu = 1452;
-	transport.min_mtu = 1452;
+	moq_quic::fuzz::pin_mtu(&mut transport, 1452);
 	transport.idle_timeout = None;
 	transport.limits.max_streams = NonZeroU64::new(4096);
 	transport.limits.stream_receive_window = NonZeroU64::new(16 << 20);

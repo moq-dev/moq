@@ -188,7 +188,7 @@ for (const [version, alpn] of versions) {
 				await entry(stream, "a");
 				expect((await announced.next())?.kind).toBe("start");
 				await entry(stream, "a", true);
-				expect((await announced.next())?.kind).toBe("end");
+				expect((await announced.next())?.kind).toBe("offline");
 				await entry(stream, "a");
 				expect((await announced.next())?.kind).toBe("start");
 				if (ending === "done") {

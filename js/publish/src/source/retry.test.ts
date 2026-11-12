@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { Camera } from "./camera";
 import { Microphone } from "./microphone";
@@ -150,8 +150,8 @@ async function settle(times = 20): Promise<void> {
 /** Wait out the longest backoff, so any reopen already scheduled has happened. */
 async function backoff(clock: Manual): Promise<void> {
 	// Let pending reruns arm their backoff before moving past it.
-	await clock.advance(Nano.zero);
-	await clock.advance(Nano.fromMilli(Milli(Retry.DELAY.max)));
+	await clock.advance(Duration.ZERO);
+	await clock.advance(Duration.millis(Retry.DELAY.max));
 }
 
 /**
@@ -202,7 +202,7 @@ for (const [kind, create] of [
 				expect(source.out.error.peek()).toBeUndefined();
 				expect(source.out.source.peek()).toBeUndefined();
 
-				await time.advance(Nano.fromMilli(Milli(Retry.DELAY.initial)));
+				await time.advance(Duration.millis(Retry.DELAY.initial));
 				await settle();
 				expect(media.attempts).toBe(2);
 				expect(published(source.out.source.peek())).toBe(media.latest());
@@ -235,7 +235,7 @@ for (const [kind, create] of [
 				expect(media.attempts).toBe(Retry.LIMIT + 1);
 				expect(source.out.source.peek()).toBeUndefined();
 				expect(source.out.error.peek()).toBe(errors.at(-1));
-				await time.advance(Nano.fromMilli(Milli(Retry.SETTLED)));
+				await time.advance(Duration.millis(Retry.SETTLED));
 				await settle();
 				expect(media.attempts).toBe(Retry.LIMIT + 1);
 				expect(source.out.error.peek()).toBe(errors.at(-1));
@@ -269,7 +269,7 @@ for (const [kind, create] of [
 				enabled.set(true);
 				await settle();
 				expect(source.out.error.peek()).toBe(error);
-				await time.advance(Nano.fromMilli(Milli(Retry.SETTLED)));
+				await time.advance(Duration.millis(Retry.SETTLED));
 				await settle();
 				expect(media.attempts).toBe(1);
 				expect(source.out.source.peek()).toBeUndefined();
@@ -296,7 +296,7 @@ for (const [kind, create] of [
 				if (close) source.close();
 				else enabled.set(false);
 				await settle();
-				await time.advance(Nano.fromMilli(Milli(Retry.SETTLED)));
+				await time.advance(Duration.millis(Retry.SETTLED));
 				await settle();
 				expect(media.attempts).toBe(1);
 				expect(source.out.source.peek()).toBeUndefined();
@@ -327,7 +327,7 @@ for (const [kind, create] of [
 				else pending.resolve({ getTracks: () => [track] } as unknown as MediaStream);
 				await settle();
 				if (!reject) expect(track.stopped).toBe(true);
-				await time.advance(Nano.fromMilli(Milli(Retry.SETTLED)));
+				await time.advance(Duration.millis(Retry.SETTLED));
 				await settle();
 				expect(open).toHaveBeenCalledTimes(1);
 				expect(source.out.error.peek()).toBeUndefined();
@@ -338,6 +338,29 @@ for (const [kind, create] of [
 			}
 		});
 	}
+
+	test(`${kind} retries a refusal after toggling enabled`, async () => {
+		using _time = fakeTime();
+		using media = install(new FakeMediaDevices());
+		media.denied = true;
+		const enabled = new Signal(true);
+		const source = create(enabled);
+		try {
+			await settle();
+			expect(source.out.error.peek()?.name).toBe("NotAllowedError");
+			media.denied = false;
+			enabled.set(false);
+			await settle();
+			enabled.set(true);
+			await settle();
+			expect(enabled.peek()).toBe(true);
+			expect(source.out.error.peek()).toBeUndefined();
+			expect(source.out.source.peek()).toBeDefined();
+			expect(media.attempts).toBe(2);
+		} finally {
+			source.close();
+		}
+	});
 
 	test(`${kind} reports a refusal and stops retrying until capture is reset`, async () => {
 		using time = fakeTime();
@@ -395,7 +418,7 @@ for (const [kind, create] of [
 			expect(error?.name).toBe("AbortError");
 			expect(error?.message).toBe("The media track ended");
 
-			await time.advance(Nano.fromMilli(Milli(Retry.SETTLED)));
+			await time.advance(Duration.millis(Retry.SETTLED));
 			await settle();
 			expect(media.attempts).toBe(Retry.LIMIT + 1);
 			expect(source.out.error.peek()).toBe(error);
