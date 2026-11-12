@@ -399,7 +399,7 @@ affected release changes or no longer offers a listed version, forcing a
 re-measure. Future WIP drafts receive no automatic exception.
 
 `just test wire-compat --remeasure` is that re-measure, run after each release
-publishes (see `CONTRIBUTING.md`). It runs the cells planned breaks cover
+publishes (see `RELEASE.md`). It runs the cells planned breaks cover
 without letting them fail the run, then rewrites `compat/planned-breaks.json`:
 a break with a failing cell is re-pinned to the releases just measured, and one
 with none is deleted. It prints each break's failing cells. Review the diff and
