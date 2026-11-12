@@ -349,7 +349,8 @@ async fn a_waiting_continuation_lets_a_newer_group_through() {
 	newest.finish().unwrap();
 	assert_eq!(next!().sequence, 2, "the newest group waits behind a continuation");
 
-	for (mut group, mut reader) in groups.into_iter().zip(readers) {
+	// The paused groups continue highest-ranked first: newest first in descending order.
+	for (mut group, mut reader) in groups.into_iter().zip(readers).rev() {
 		group.write_frame(Timestamp::ZERO, b"b".as_slice()).unwrap();
 		group.finish().unwrap();
 		let mut frames = Vec::new();

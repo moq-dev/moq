@@ -185,6 +185,9 @@ struct TrackEntry {
 	/// Lite-07: the groups a stream that a YIELDED reset would pause is reading, one per
 	/// stream, so stream credit bounds them.
 	yielding: BTreeMap<u64, Yielding>,
+	/// Lite-07: the last token handed to a stream in `yielding`, so a stream ending removes
+	/// only its own record, never that of a stream that replaced it.
+	yield_streams: u64,
 	/// The groups received so far, so the subscription's end can wait for the ones owed.
 	tail: kio::Producer<Tail>,
 	/// Lite-05/06: where the feed starts, from SUBSCRIBE_START.
@@ -259,6 +262,8 @@ impl PausedGroup {
 
 /// Whether a YIELDED reset of a stream being read pauses its group.
 struct Yielding {
+	/// The stream reading the group, as [`TrackEntry::read_yielding`] numbered it.
+	stream: u64,
 	/// The publisher still owed the group when the stream arrived: no drop named it first.
 	owed: bool,
 	/// The error a drop named the group with while the stream was read.
@@ -348,6 +353,7 @@ impl TrackEntry {
 			parked: None,
 			paused: None,
 			yielding: BTreeMap::new(),
+			yield_streams: 0,
 			tail,
 			start: None,
 			first: None,
@@ -560,13 +566,30 @@ impl TrackEntry {
 
 	/// Track a stream reading `sequence` that a YIELDED reset would pause, which `owed` says
 	/// the publisher owed when it arrived.
-	fn read_yielding(&mut self, sequence: u64, owed: bool) {
-		self.yielding.insert(sequence, Yielding { owed, dropped: None });
+	///
+	/// Returns the stream's token for [`Self::end_yielding`].
+	fn read_yielding(&mut self, sequence: u64, owed: bool) -> u64 {
+		self.yield_streams += 1;
+		let stream = self.yield_streams;
+		self.yielding.insert(
+			sequence,
+			Yielding {
+				stream,
+				owed,
+				dropped: None,
+			},
+		);
+		stream
 	}
 
 	/// Stop tracking the stream reading `sequence`, returning whether a YIELDED reset pauses it.
-	fn end_yielding(&mut self, sequence: u64) -> Option<Yielding> {
-		self.yielding.remove(&sequence)
+	/// A stream that a later one for the same group replaced finds nothing, leaving the
+	/// later stream's record in place.
+	fn end_yielding(&mut self, sequence: u64, stream: u64) -> Option<Yielding> {
+		match self.yielding.get(&sequence) {
+			Some(yielding) if yielding.stream == stream => self.yielding.remove(&sequence),
+			_ => None,
+		}
 	}
 
 	/// A SUBSCRIBE_DROP named `groups` with `err`: a paused group ends there, and one a stream
@@ -1734,9 +1757,15 @@ impl GroupRecv {
 			framing,
 			reading,
 		} = opened;
-		if yields && let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe) {
-			entry.read_yielding(hdr.sequence, arrived_owed);
-		}
+		let yield_stream: Option<u64> = match yields {
+			true => self
+				.subscriber
+				.subscribes
+				.lock()
+				.get_mut(&hdr.subscribe)
+				.map(|entry| entry.read_yielding(hdr.sequence, arrived_owed)),
+			false => None,
+		};
 		let (priority, order) = track
 			.subscription()
 			.map_or((0, Default::default()), |sub| (sub.priority, sub.order));
@@ -1764,15 +1793,13 @@ impl GroupRecv {
 			}
 		});
 
-		let yielding = match yields {
-			true => self
-				.subscriber
+		let yielding = yield_stream.and_then(|stream| {
+			self.subscriber
 				.subscribes
 				.lock()
 				.get_mut(&hdr.subscribe)
-				.and_then(|entry| entry.end_yielding(hdr.sequence)),
-			false => None,
-		};
+				.and_then(|entry| entry.end_yielding(hdr.sequence, stream))
+		});
 		let res = match res {
 			Ok(()) => {
 				// Only a lite-07 stale drop asks which groups arrived whole.
@@ -1795,6 +1822,7 @@ impl GroupRecv {
 					Some(Yielding {
 						owed: true,
 						dropped: None,
+						..
 					}) => None,
 					Some(Yielding { dropped: Some(err), .. }) => Some(err),
 					Some(Yielding { owed: false, .. }) => Some(Error::Stream(crate::StreamError::Old)),
@@ -5643,6 +5671,34 @@ mod tests {
 			assert!(group.read_frame().await.unwrap().is_none(), "overtakes: {overtakes}");
 			assert_eq!(tail.read().streams(), 2, "each stream counts toward the end");
 		}
+	}
+
+	/// Lite-07: a stream ending removes only its own record of the group it read, never that of
+	/// a later stream for the same group, which a YIELDED reset must still pause.
+	#[test]
+	fn a_replaced_stream_leaves_its_replacements_yielding_record() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		let framing = lite::Framing {
+			timescale: Some(Timescale::MILLI),
+			ietf: None,
+			compressed: false,
+			length_first: true,
+		};
+		let mut entry = TrackEntry::accepted(track, framing, kio::Producer::new(Tail::default()));
+		let replaced = entry.read_yielding(3, true);
+		let replacement = entry.read_yielding(3, true);
+		assert!(
+			entry.end_yielding(3, replaced).is_none(),
+			"the replaced stream's record is gone"
+		);
+		let yielding = entry
+			.end_yielding(3, replacement)
+			.expect("the replacement's record stays");
+		assert!(yielding.owed && yielding.dropped.is_none());
 	}
 
 	/// Lite-07: a paused group the cache gave up on lets go of the subscription's end once a

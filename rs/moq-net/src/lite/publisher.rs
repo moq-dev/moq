@@ -5128,7 +5128,8 @@ struct TrackRun {
 	// on its own stream as stream credit allows.
 	reoffered: std::collections::VecDeque<group::Consumer>,
 	// Lite-07: the paused groups, each continued on its own stream ahead of re-offers and new
-	// groups. Each paused while holding a stream, so stream credit bounds them.
+	// groups, the highest-ranked first. Each paused while holding a stream, so stream credit
+	// bounds them.
 	paused: std::collections::VecDeque<Paused>,
 	// Lite-07: the group `opening` holds continues a paused one.
 	continuing: bool,
@@ -5602,14 +5603,18 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// A paused group takes the next stream credit, ahead of re-offers and new groups. It is
-		// owed already, and the subscriber holds its group open until it continues. A group
-		// stashed behind a continuation goes first if it outranks the next one.
+		// A paused group takes the next stream credit, ahead of re-offers and new groups, the
+		// highest-ranked first. It is owed already, and the subscriber holds its group open until
+		// it continues. A group stashed behind a continuation goes first if it outranks them all.
+		let best = match self.opening.is_none() {
+			true => self.best_paused(),
+			false => None,
+		};
 		if self.opening.is_none()
 			&& let Some(stashed) = self.stashed.take()
 		{
 			let order = self.ctx.steer_current().order;
-			match self.paused.front() {
+			match best.map(|best| &self.paused[best]) {
 				Some(paused) if !Paused::outranks(order, &stashed, paused) => self.stashed = Some(stashed),
 				_ => {
 					self.open(stashed.group, stashed.frame_start);
@@ -5618,7 +5623,7 @@ impl TrackRun {
 			}
 		}
 		if self.opening.is_none()
-			&& let Some(Paused { group, frame_start }) = self.paused.pop_front()
+			&& let Some(Paused { group, frame_start }) = best.and_then(|best| self.paused.remove(best))
 		{
 			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, frame_start, "continuing paused group");
 			self.open(group, frame_start);
@@ -6059,7 +6064,7 @@ impl TrackRun {
 			return self.open(group, frame_start);
 		};
 		// Lite-07: handed out while a continuation waits for credit. The higher-ranked of the two
-		// waits for it, and the other right behind; a continuation keeps its place in line.
+		// waits for it, and the other right behind; a continuation goes back among the paused.
 		debug_assert!(self.continuing, "only a continuation shares the wait");
 		let serving = Paused { group, frame_start };
 		let continuation = Paused {
@@ -6069,12 +6074,24 @@ impl TrackRun {
 		if Paused::outranks(self.ctx.steer_current().order, &serving, &continuation) {
 			drop(waiting);
 			self.continuing = false;
-			self.paused.push_front(continuation);
+			self.paused.push_back(continuation);
 			self.open(serving.group, serving.frame_start);
 		} else {
 			self.opening = Some(waiting);
 			self.stashed = Some(serving);
 		}
+	}
+
+	/// The position of the highest-ranked paused group in this subscription's current order,
+	/// the next to continue.
+	fn best_paused(&mut self) -> Option<usize> {
+		let order = self.ctx.steer_current().order;
+		(0..self.paused.len()).reduce(|best, next| {
+			match Paused::outranks(order, &self.paused[next], &self.paused[best]) {
+				true => next,
+				false => best,
+			}
+		})
 	}
 
 	/// Open a group machine streaming `group` from `frame_start`, which waits for stream
