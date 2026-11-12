@@ -10,17 +10,18 @@ so it only needs to stay green.
 
 ## Waiting
 
-- moq-dev/moq: a scheduled Interop run on `main` passes. Check with
-  `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`.
+- moq-dev/moq: the next scheduled Interop run on `main` (the first after
+  [moq-dev/moq#8455](https://github.com/moq-dev/moq/pull/8455) and
+  [moq-dev/moq#8512](https://github.com/moq-dev/moq/pull/8512)) passes. Check
+  with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`.
   Then delete this quest. Its pass skips the datagram and replacement cases
   until [routes/js.md](/quest/m2/cluster-routing/routes/js.md) lands, as
   [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) set. Decided
   2026-11-09 (maintainer, AFK, accepting the recommendation): close this quest
   on that pass, because routes/js.md tracks restoring those cases. A red run
-  whose only failure is a stale planned break is not triage: the release
-  procedure's remeasure owns it, as [the release cut](/quest/m3/release/cut.md)
-  says. Run `just test wire-compat --remeasure` on `main` and land the
-  rewritten `test/interop/compat/planned-breaks.json`.
+  whose only failure is a stale planned break is not triage: the
+  [planned-break remeasure](/quest/m3/release/planned-break-remeasure.md)
+  owns it, and the release pipeline runs that remeasure with each release.
 
 ## Plan
 
