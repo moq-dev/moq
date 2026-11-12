@@ -15,7 +15,7 @@ Cause: #8507 keeps audio that trails the shared clock by up to the stretch's 2 s
 Evidence, `just test media --media-cases pause` in `test/interop/clients/js/media.ts`:
 
 - `main` at 18fc33ecc: 3 of 4 runs fail the resume sync (median skew 200 ms, or 0 of 79 in sync).
-- Parent of #8507 (ac73d9e0b): passes, median skew 0 ms (one run).
+- Parent of #8507 (ac73d9e0b): passes, median skew 0 ms (one run). On a host at load 30, four full `just test media` runs there passed 1, and the other 3 failed only `audio tone` (67 to 70 of 81 samples, the CI signature), never sync; the 11-11 head a4bc922c6 passed 4 of 6, failing the same way. #8507 itself (4262a0691) failed 4 of 4 on sync, median skew 400 to 600 ms after resume. So the CI step can stay red under load after this fix, from a tone flake older than #8507.
 - Experiment, not committed: a same-instance resubscribe calls the decoder's `reset()`, so the ring joins the clock again. 4 of 4 runs pass, median skew 0 ms. One full `just test media` run also passed the pause and rejoin steps, then failed the later `live incumbent fallback` case, which was not investigated.
 
 Recommendation: re-join the ring when a viewer returns from absence on the same instance, so resumed audio lands on the clock the way a tune-in does, and keep the 2 s bound for stalls. Rejected: relax the resume assertion. `js/watch/AGENTS.md` says to judge a player change by its lag first, and the lip sync this stretch was built to fix (#8031) is what a stretch-back costs.

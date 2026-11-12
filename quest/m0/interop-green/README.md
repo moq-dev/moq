@@ -169,13 +169,19 @@ Scheduled run
 (2026-11-12, at e9c6df852) failed three steps, each with its own cause:
 
 - Optional publisher retention: `max_age_relay_javascript` fails on lite-07
-  track 1, which reads a max age of 0 where the test expects none. Bisected to
-  [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443), whose parent
-  passes; its diff has no max-age code, so the mechanism is not traced yet.
-  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) changes the test
-  to expect lite-07 to carry the max age, and is open.
+  track 1, which reads a max age of 0 where the test expects none.
+  [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443) added
+  `moq-lite-07-wip` back to `max_age_relay_javascript` in `max_age.rs`, but the
+  JS subscriber kept its moq-transport-only expectation of no max age; lite
+  carries it, as the Rust side of the test expects.
+  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) fixes the
+  expectation, and is open.
 - Interop (full matrix): `go -> python` fails with `audio gap after 648 samples`
-  at 2 s of 30 s. It passed once locally. No open PR names this cell;
+  at 2 s of 30 s. It passed once locally, and 8 more local runs of
+  `--publishers go --subscribers python,rust,go` passed every cell. A lead, not
+  checked: [moq-dev/moq#8531](https://github.com/moq-dev/moq/pull/8531) now waits on
+  a missing group in moq-audio only for the playout delay, which is small at a
+  cold start, so a reordered group early on reads as a gap. No open PR names this cell;
   [moq-dev/moq#8587](https://github.com/moq-dev/moq/pull/8587) covers `python -> go`.
 - Media output and lifecycle: after the pause case resumes, the audio trails the
   picture by about 1.7 s. [moq-dev/moq#8507](https://github.com/moq-dev/moq/pull/8507)
