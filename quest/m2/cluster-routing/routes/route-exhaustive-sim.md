@@ -46,21 +46,18 @@ that nor the seeded sweeps on larger meshes
 search covers what a model check does, recommend in the PR what to do with the
 route model's TLC runs.
 
+Decided 2026-11-12 (maintainer, pick round): the search runs on the `Router`
+after [the router quest](/quest/m2/cluster-routing/routes/scope.md)'s rewrite to
+the path rule, so it checks the code that ships and nothing is built twice
+(rejected: today's Babel `Router`, which the rewrite throws away; the test-only
+`paths.rs` prototype). The storm self-check above then runs against a router
+from before the rewrite.
+
 Public API: none. Wire: none.
 
-## Waiting
+## Required
 
-- Maintainer: which router the search runs on. Since this quest was planned,
-  the model moved to the path rule ([#8487](https://github.com/moq-dev/moq/pull/8487)),
-  which `route/tests/paths.rs` prototypes, and
-  [the router quest](/quest/m2/cluster-routing/routes/scope.md) rewrites
-  `route::Router` to it. Options: wait for that rewrite and search the new
-  `Router` (recommended: the search then checks the code that ships, and
-  nothing is built twice), which moves this quest beside it in
-  `quest/m2/cluster-routing/routes/` with the router quest under `Required`;
-  search today's Babel `Router` now, which the rewrite discards; or search the
-  `paths.rs` prototype, which only tests exercise. An agent cannot pick: it
-  sets whether this spike stays in m1.
+- [The router quest](/quest/m2/cluster-routing/routes/scope.md) - rewrites `route::Router` to the path rule, the router this searches
 
 ## Related
 

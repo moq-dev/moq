@@ -59,4 +59,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Every delivery order of a small mesh runs on the real route layer](/quest/m1/route-exhaustive-sim.md) - the other spike, which checks the Rust instead of a faster model
+- [Every delivery order of a small mesh runs on the real route layer](/quest/m2/cluster-routing/routes/route-exhaustive-sim.md) - the other spike, which checks the Rust instead of a faster model
