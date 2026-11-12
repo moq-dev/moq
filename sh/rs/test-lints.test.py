@@ -34,6 +34,7 @@ class TestLints(unittest.TestCase):
             toolchain = Path(shutil.which("clippy-driver")).parent
             env = dict(
                 os.environ,
+                LOCAL_SUPERVISED="1",
                 CARGO_TARGET_DIR=str(root / "target"),
                 NEXTEST_PROFILE="default",
                 PATH=f"{toolchain}:{os.environ['PATH']}",
