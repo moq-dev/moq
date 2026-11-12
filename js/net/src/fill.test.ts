@@ -371,14 +371,20 @@ test("fill: an answer withheld after a probe judged it is asked again", async ()
 	broadcast.close();
 });
 
-// A gap a probe judged stale by its successor is judged again once that successor fails.
+// A gap a probe judged stale by its successor is judged again once that successor fails, past a
+// failed group below it, which was no successor.
 test("fill: a gap below a group that fails after a probe is asked", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
-	const group = track.createGroup(2n);
 	const requests = track.requests();
 	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Duration.millis(0) } });
 	const ordered = reader.ordered();
+	const failed = track.createGroup(2n);
+	const group = track.createGroup(4n);
+	group.writeFrame({ payload: enc.encode("live 4") });
+	failed.abort(new StreamError(StreamCode.Cancel));
+	await yieldNow();
+	// Judged stale against group 4, so not asked.
 	await reader.start();
 	group.abort(new StreamError(StreamCode.Cancel));
 	await yieldNow();

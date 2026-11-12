@@ -647,13 +647,11 @@ function intersect(runs: readonly Run[], start: bigint, end: bigint): Run[] {
 // How many runs a sink's `lost` keeps apart before folding them into one span.
 const LOST_KEPT = 16;
 
-// Record that `sink`'s timeline lost group `sequence`, for its reader's fill probe: the group, and
-// the gap below it, whose staleness it judged as their successor.
+// Record that `sink`'s timeline lost group `sequence`, for its reader's fill probe.
 function lose(sink: TrackState, sequence: bigint): void {
 	const lost = sink.lost;
 	if (!lost) return;
-	const at = timelineIndex(sink.timeline, sequence);
-	insertRun(lost, at > 0 ? sink.timeline[at - 1].sequence + 1n : 0n, sequence + 1n);
+	insertRun(lost, sequence, sequence + 1n);
 	if (lost.length > LOST_KEPT) lost.splice(0, lost.length, { start: lost[0].start, end: (lost.at(-1) as Run).end });
 }
 
@@ -720,8 +718,7 @@ class TrackState {
 	// arrival, searches it instead of scanning the whole retained window.
 	timeline: GroupConsumer[] = [];
 	// The groups `timeline` lost since this sink's reader last probed its fills (evicted, withheld,
-	// or failed), with the gap below each, which its probe judges again; undefined until it first
-	// probes. Past LOST_KEPT
+	// or failed), which its probe judges again; undefined until it first probes. Past LOST_KEPT
 	// runs they fold into the span covering them all, judged again whole.
 	lost?: Run[];
 	// First timestamps mutate group state rather than track state, so held groups
@@ -3641,7 +3638,8 @@ export class Subscriber {
 
 	// Take what changed since the last probe as unjudged again: every sequence once the terms it
 	// was judged under change, else the drop runs changed or forgotten, the groups the timeline
-	// lost, and what the received edge rose over, which arrives live no more.
+	// lost with the gaps they were successor to, and what the received edge rose over, which
+	// arrives live no more.
 	#reopen(producer: Producer, fills: FillState, budget: number, coverage: Coverage): void {
 		const state = this.#state;
 		const at = this.#judgedAt;
@@ -3660,8 +3658,22 @@ export class Subscriber {
 		) {
 			this.#unjudged = [{ start: 0n, end: UNBOUNDED }];
 		} else {
-			for (const run of [...removed, ...state.drops.since(at.drops), ...state.lost])
+			for (const run of [...removed, ...state.drops.since(at.drops)])
 				insertRun(this.#unjudged, run.start, run.end);
+			// A lost group was the successor the gap below it was judged stale by, back to the
+			// group below that #after would count instead.
+			const timeline = state.timeline;
+			for (const run of state.lost) {
+				let i = timelineIndex(timeline, run.start) - 1;
+				while (
+					i >= 0 &&
+					(hooks.groupFailed(timeline[i]) ||
+						!this.#judges(timeline[i].sequence) ||
+						!hooks.groupStarted(timeline[i]))
+				)
+					i--;
+				insertRun(this.#unjudged, i < 0 ? 0n : timeline[i].sequence + 1n, run.end);
+			}
 			if (edge > at.edge) insertRun(this.#unjudged, at.edge, edge);
 		}
 		state.lost = [];
