@@ -261,7 +261,7 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 				// A grant that ends with the process would make a token persisted
 				// through `Selection::restore_token` useless to the next one.
 				.set_persist_mode(PersistMode::ExplicitlyRevoked)
-				.set_restore_token(restore.as_deref()),
+				.set_restore_token(restore.as_ref().map(portal::RestoreToken::as_str)),
 		)
 		.await
 		.map_err(|e| err("portal select sources", e))?

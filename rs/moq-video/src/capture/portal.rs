@@ -1,7 +1,7 @@
 //! A system-picked source and the grant owned by one logical publication.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 /// The type of source the user may choose in the system picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,11 +52,35 @@ pub(crate) struct Grant<'a> {
 	pub token: Option<&'a str>,
 }
 
+/// A portal grant's restore token, which reopens its source without asking the user.
+///
+/// Store it like a credential. `Debug` redacts it so it never reaches a log.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RestoreToken(String);
+
+impl RestoreToken {
+	/// Wrap a token persisted from an earlier [`RestoreToken::as_str`].
+	pub fn new(token: impl Into<String>) -> Self {
+		Self(token.into())
+	}
+
+	/// The token, for the caller to persist.
+	pub fn as_str(&self) -> &str {
+		&self.0
+	}
+}
+
+impl fmt::Debug for RestoreToken {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str("RestoreToken(..)")
+	}
+}
+
 /// One user's selection, shared only across automatic reopens of that publication.
 #[derive(Clone)]
 pub struct Selection {
 	kind: Kind,
-	restore: Arc<Mutex<Option<String>>>,
+	restore: kio::Producer<Option<RestoreToken>>,
 }
 
 impl Selection {
@@ -64,36 +88,30 @@ impl Selection {
 	pub fn new(kind: Kind) -> Self {
 		Self {
 			kind,
-			restore: Arc::default(),
+			restore: kio::Producer::default(),
 		}
 	}
 
-	/// Seeds the selection with a restore token from [`Selection::restore_token`],
-	/// typically one persisted by an earlier process, so the first open can
-	/// skip the picker on a compositor that keeps grants. Clones share it.
-	pub fn with_restore_token(self, token: impl Into<String>) -> Self {
-		self.replace_restore(Some(token.into()));
+	/// Seed the selection with a token persisted by an earlier process, so the
+	/// first open can skip the picker on a compositor that keeps grants.
+	pub fn with_restore_token(self, token: RestoreToken) -> Self {
+		self.replace_restore(Some(token));
 		self
 	}
 
-	/// Returns the restore token the portal granted for the last open, for a
-	/// later process to pass to [`Selection::with_restore_token`].
+	/// Watch the restore token, to persist each change.
 	///
-	/// A token is single-use: an open takes it before asking the portal, and
-	/// stores the replacement once the portal grants a source. Returns `None`
-	/// before a grant, while an open is using the token, after an open that
-	/// used it and failed before a grant, and when the compositor does not
-	/// persist grants. The crate also clears it when the producer ends the
-	/// stream, whether the user stopped sharing, the stream failed, or the
-	/// source went away, so that the next open asks again.
-	///
-	/// To keep a grant across processes, read the token after every open
-	/// attempt, successful or not, and again when the stream ends. Store it, or
-	/// delete the stored copy on `None`, since the crate would not use that copy
-	/// either. The token lets the grant reopen without asking the user, so store
-	/// it like a credential.
-	pub fn restore_token(&self) -> Option<String> {
-		self.restore.lock().unwrap().clone()
+	/// The token is single-use: an open takes it before asking the portal, and
+	/// stores the replacement once the portal grants a source. It is `None`
+	/// before a grant, while an open holds it, after an open that failed before
+	/// a grant, on a compositor that does not persist grants, and once the
+	/// producer ends the stream (the user stopped sharing, the stream failed, or
+	/// the source went away). Persist every change and delete the stored copy
+	/// on `None`, since the crate would not use that copy either.
+	pub fn restore_token(&self) -> RestoreTokenConsumer {
+		let state = self.restore.consume();
+		let seen = state.read().clone();
+		RestoreTokenConsumer { state, seen }
 	}
 
 	pub(crate) fn kind(&self) -> Kind {
@@ -101,19 +119,27 @@ impl Selection {
 	}
 
 	// Restore tokens are single-use, including when the next request fails.
-	pub(crate) fn take_restore(&self) -> Option<String> {
-		self.restore.lock().unwrap().take()
+	pub(crate) fn take_restore(&self) -> Option<RestoreToken> {
+		self.replace_restore(None)
 	}
 
 	// Commit a validated grant before opening the remote can suspend or be cancelled.
 	pub(crate) fn accept(&self, version: u32, grant: Grant<'_>) -> Result<(), &'static str> {
 		self.kind.validate_stream(version, grant.streams, grant.source)?;
-		self.replace_restore(grant.token.map(str::to_string));
+		self.replace_restore(grant.token.map(RestoreToken::new));
 		Ok(())
 	}
 
-	pub(crate) fn replace_restore(&self, token: Option<String>) {
-		*self.restore.lock().unwrap() = token;
+	// Store `token` and return the previous one, waking watchers only on a change.
+	pub(crate) fn replace_restore(&self, token: Option<RestoreToken>) -> Option<RestoreToken> {
+		// Nothing closes the channel, and every `Selection` holds a producer.
+		let Ok(mut current) = self.restore.write() else {
+			return None;
+		};
+		if *current == token {
+			return token;
+		}
+		std::mem::replace(&mut *current, token)
 	}
 }
 
@@ -128,10 +154,49 @@ impl fmt::Debug for Selection {
 
 impl PartialEq for Selection {
 	fn eq(&self, other: &Self) -> bool {
-		self.kind == other.kind && Arc::ptr_eq(&self.restore, &other.restore)
+		self.kind == other.kind && self.restore.same_channel(&other.restore)
 	}
 }
 impl Eq for Selection {}
+
+/// Watches a [`Selection`]'s restore token without keeping the selection alive.
+#[derive(Clone)]
+pub struct RestoreTokenConsumer {
+	state: kio::Consumer<Option<RestoreToken>>,
+	seen: Option<RestoreToken>,
+}
+
+impl RestoreTokenConsumer {
+	/// Return the current token without waiting.
+	pub fn token(&self) -> Option<RestoreToken> {
+		self.state.read().clone()
+	}
+
+	/// Wait for the token to differ from the last one this consumer saw and
+	/// return it, `Some(None)` once cleared, or `None` after every clone of the
+	/// selection is dropped. Changes in between are coalesced into the latest.
+	pub async fn changed(&mut self) -> Option<Option<RestoreToken>> {
+		let seen = &self.seen;
+		let token = self
+			.state
+			.wait(|current| match **current != *seen {
+				true => Poll::Ready((**current).clone()),
+				false => Poll::Pending,
+			})
+			.await
+			.ok()?;
+		self.seen = token.clone();
+		Some(token)
+	}
+}
+
+impl fmt::Debug for RestoreTokenConsumer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("RestoreTokenConsumer")
+			.field("token", &*self.state.read())
+			.finish()
+	}
+}
 
 #[cfg(test)]
 mod tests {
@@ -141,11 +206,11 @@ mod tests {
 	fn demand_reopen_keeps_only_this_publications_grant() {
 		let selection = Selection::new(Kind::Window);
 		let reopened = selection.clone();
-		selection.replace_restore(Some("first".into()));
-		assert_eq!(reopened.take_restore().as_deref(), Some("first"));
+		selection.replace_restore(token("first"));
+		assert_eq!(reopened.take_restore(), token("first"));
 		assert_eq!(selection.take_restore(), None);
-		reopened.replace_restore(Some("replacement".into()));
-		assert_eq!(selection.take_restore().as_deref(), Some("replacement"));
+		reopened.replace_restore(token("replacement"));
+		assert_eq!(selection.take_restore(), token("replacement"));
 		assert_eq!(selection, reopened);
 	}
 
@@ -155,8 +220,8 @@ mod tests {
 		use std::task::{Context, Poll, Waker};
 
 		let selection = Selection::new(Kind::Window);
-		selection.replace_restore(Some("old".into()));
-		assert_eq!(selection.take_restore().as_deref(), Some("old"));
+		selection.replace_restore(token("old"));
+		assert_eq!(selection.take_restore(), token("old"));
 		let mut opening = Box::pin(async {
 			// Start has returned; opening the remote has not completed yet.
 			selection.accept(
@@ -175,7 +240,7 @@ mod tests {
 		);
 		drop(opening);
 
-		assert_eq!(selection.clone().take_restore().as_deref(), Some("replacement"));
+		assert_eq!(selection.clone().take_restore(), token("replacement"));
 		assert_eq!(selection.take_restore(), None);
 	}
 
@@ -200,7 +265,7 @@ mod tests {
 	#[test]
 	fn new_share_reselects_even_when_the_source_type_is_unchanged() {
 		let old = Selection::new(Kind::Window);
-		old.replace_restore(Some("old-window".into()));
+		old.replace_restore(token("old-window"));
 		let new = Selection::new(Kind::Window);
 		assert_ne!(old, new);
 		assert_eq!(new.take_restore(), None);
@@ -211,9 +276,9 @@ mod tests {
 	fn old_source_failure_cannot_clear_a_new_publications_grant() {
 		let old = Selection::new(Kind::Window);
 		let new = Selection::new(Kind::Window);
-		new.replace_restore(Some("new-window".into()));
+		new.replace_restore(token("new-window"));
 		old.replace_restore(None);
-		assert_eq!(new.take_restore().as_deref(), Some("new-window"));
+		assert_eq!(new.take_restore(), token("new-window"));
 	}
 
 	#[test]
@@ -272,20 +337,63 @@ mod tests {
 	}
 
 	#[test]
-	fn a_seeded_restore_token_is_used_once_and_reads_back() {
-		let selection = Selection::new(Kind::Screen).with_restore_token("saved");
-		assert_eq!(selection.restore_token().as_deref(), Some("saved"));
-		assert_eq!(selection.clone().take_restore().as_deref(), Some("saved"));
-		assert_eq!(selection.restore_token(), None);
-		selection.replace_restore(Some("granted".into()));
-		assert_eq!(selection.restore_token().as_deref(), Some("granted"));
+	fn a_watcher_sees_every_token_a_caller_must_persist() {
+		let selection = Selection::new(Kind::Screen).with_restore_token(RestoreToken::new("saved"));
+		let mut watch = selection.restore_token();
+		assert_eq!(watch.token(), token("saved"));
+		assert!(changed(&mut watch).is_pending());
+
+		// An open takes the seed, so a stored copy is dead even if the open fails.
+		assert_eq!(selection.clone().take_restore(), token("saved"));
+		assert_eq!(changed(&mut watch), Poll::Ready(Some(None)));
+		selection.accept(4, grant("granted")).unwrap();
+		assert_eq!(changed(&mut watch), Poll::Ready(Some(token("granted"))));
+
+		// Storing the same token is not a change.
+		selection.replace_restore(token("granted"));
+		assert!(changed(&mut watch).is_pending());
+
+		// A reopen the caller did not observe still ends at the newest grant.
+		selection.take_restore();
+		selection.accept(4, grant("rotated")).unwrap();
+		assert_eq!(changed(&mut watch), Poll::Ready(Some(token("rotated"))));
+
+		// The producer ended the stream.
+		selection.replace_restore(None);
+		assert_eq!(changed(&mut watch), Poll::Ready(Some(None)));
+
+		// The watcher does not keep the selection alive.
+		drop(selection);
+		assert_eq!(changed(&mut watch), Poll::Ready(None));
 	}
 
 	#[test]
 	fn diagnostic_output_does_not_expose_the_grant() {
 		let selection = Selection::new(Kind::Window);
-		selection.replace_restore(Some("private-grant".into()));
+		selection.replace_restore(token("private-grant"));
 		assert!(!format!("{selection:?}").contains("private-grant"));
+		assert!(!format!("{:?}", selection.restore_token()).contains("private-grant"));
+		assert!(!format!("{:?}", RestoreToken::new("private-grant")).contains("private-grant"));
 		assert_eq!(selection.kind(), Kind::Window);
+	}
+
+	fn token(token: &str) -> Option<RestoreToken> {
+		Some(RestoreToken::new(token))
+	}
+
+	fn grant(token: &str) -> Grant<'_> {
+		Grant {
+			streams: 1,
+			source: Some(Kind::Screen.bits()),
+			token: Some(token),
+		}
+	}
+
+	fn changed(watch: &mut RestoreTokenConsumer) -> Poll<Option<Option<RestoreToken>>> {
+		use std::future::Future;
+		let mut changed = Box::pin(watch.changed());
+		changed
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
 	}
 }
