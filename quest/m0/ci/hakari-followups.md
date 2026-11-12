@@ -87,14 +87,19 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: collect a second complete post-merge Nightly's mbx hit rate and
-  compiler-time fields for `Nightly (Rust benchmark tests)`, beside the
-  baseline and 2026-11-06 numbers in the Plan. If the cache
-  cost is material, present the measured tradeoff to the maintainer; recommend
-  keeping the narrow final exclusions unless the measurements justify another
-  design. That job timed out on five of the six scheduled runs from
-  2026-11-05 to 11-10 and on every one since 11-07. It is now two jobs,
-  `Nightly (Rust benchmark tests)` and `Nightly (Rust application benchmark
-  tests)`, each one release build grouping several crates, so none of their
-  builds match a baseline build's crates and features; compare only builds
-  that do.
+- Maintainer: decide how to finish without a second complete like-for-like
+  sample. `Nightly (Rust benchmark tests)` timed out on every scheduled run
+  from 2026-11-07 to 11-11 (runs 42377867523, 42487375545, 42659882487,
+  42842827718, 43041909115). [moq-dev/moq#8522](https://github.com/moq-dev/moq/pull/8522)
+  (merged 2026-11-12) splits it into `Nightly (Rust benchmark tests)` and
+  `Nightly (Rust application benchmark tests)`, each one release build
+  grouping several crates, so no later build matches a baseline build's
+  crates and features. Options: settle on the one complete sample plus the
+  2026-11-07 partial (recommended: both show a 7 to 11 point conditional
+  hit-rate drop with avoided compiler time near the baseline, which is not a
+  material cost against a ~58 minute job; keep the narrow exclusions and
+  delete this quest); take a fresh before/after on the new jobs by reverting
+  the exclusions on a branch and comparing its mbx summaries with a `main`
+  run of the same commit; or compare per-build summaries that the cancelled
+  runs printed for builds matching the baseline's, if their logs are still
+  retrievable (the 2026-11-11 run's log failed to download).
