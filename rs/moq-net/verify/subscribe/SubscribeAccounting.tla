@@ -17,6 +17,8 @@
 (* cursor's verdicts (hand a group out, give it up stale or final, skip    *)
 (* it) and whether the cache still holds a fresh copy on an update are     *)
 (* free choices, standing in for the cache, the clock, and the routes.     *)
+(* Under `Pressure`, so is when the pool's debt folds what each side keeps *)
+(* of the group: the publisher's record and the subscriber's tail.         *)
 (*                                                                         *)
 (* Scope: the subscription is already answered (SUBSCRIBE_OK) and covers   *)
 (* every group; ranges, starts, fills, and the tail's grace are left out.  *)
@@ -26,7 +28,8 @@ EXTENDS Integers, Sequences, FiniteSets
 CONSTANTS
     Groups,      \* group sequences in range
     MaxUpdates,  \* SUBSCRIBE_UPDATEs the subscriber sends
-    MaxStreams   \* Group Streams the publisher opens
+    MaxStreams,  \* Group Streams the publisher opens
+    Pressure     \* the cache pool may hand the readers debt, so each side folds
 
 \* A Group Stream: the publisher's side (`GroupState`), and the subscriber's.
 \*   pub: "open" (serving), "fin" (FIN sent, awaiting its acknowledgement),
@@ -50,6 +53,7 @@ VARIABLES
     redrop,     \* `redrop`: expired runs an update owes a drop again
     reoffered,  \* `reoffered`: expired groups an update serves again
     outq,       \* `GroupOutcomes::dropped`: failed streams not yet named
+    folded,     \* the record folded the group into its floor (`Record::folded`)
     \* The wire.
     streams,    \* every Group Stream opened, in order
     resp,       \* the Subscribe Stream, publisher to subscriber
@@ -64,7 +68,7 @@ VARIABLES
     got,        \* history: the subscriber read the group to its FIN
     violation   \* the subscriber closed the session with a PROTOCOL_VIOLATION
 
-pubVars == <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered, outq>>
+pubVars == <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered, outq, folded>>
 subVars == <<sup, acct, finished, sstale, rec, cached, got, violation>>
 vars == <<pubVars, streams, resp, ctrl, subVars>>
 
@@ -73,7 +77,7 @@ Init ==
     /\ late = [g \in Groups |-> FALSE]
     /\ pup = 0
     /\ served = {} /\ dropped = {} /\ dstale = {} /\ expired = {}
-    /\ redrop = {} /\ reoffered = {} /\ outq = <<>>
+    /\ redrop = {} /\ reoffered = {} /\ outq = <<>> /\ folded = {}
     /\ streams = <<>> /\ resp = <<>> /\ ctrl = <<>>
     /\ sup = 0
     /\ acct = {} /\ finished = {} /\ sstale = {}
@@ -107,6 +111,7 @@ Serve(g) ==
 \* the next stream ahead of the cursor's.
 CursorHand(g) ==
     /\ outq = <<>> /\ redrop = {} /\ reoffered = {}
+    /\ g \notin folded
     /\ \/ cur[g] = "pending" /\ UNCHANGED late
        \/ cur[g] \in {"stale", "final"} /\ ~late[g] /\ late' = [late EXCEPT ![g] = TRUE]
     /\ cur' = [cur EXCEPT ![g] = "handed"]
@@ -117,7 +122,7 @@ CursorHand(g) ==
             THEN UNCHANGED <<served, dropped, dstale, expired, redrop, streams>>
             ELSE /\ Serve(g)
                  /\ UNCHANGED <<dropped, dstale, expired, redrop>>
-    /\ UNCHANGED <<pup, reoffered, outq, resp, ctrl, subVars>>
+    /\ UNCHANGED <<pup, reoffered, outq, folded, resp, ctrl, subVars>>
 
 \* `poll_forward_drop`: the cursor gives g up stale ("old"), final ("evicted"), or
 \* declares it skipped, after `poll_step` named failed streams and dropped again. A later
@@ -147,7 +152,7 @@ CursorGiveUp(g, kind) ==
           /\ resp' = IF ~named THEN resp
                      ELSE IF kind = "skip" THEN Append(resp, SkipMsg(g))
                      ELSE Append(resp, DropMsg(g, kind, pup))
-    /\ UNCHANGED <<late, pup, reoffered, outq, streams, ctrl, subVars>>
+    /\ UNCHANGED <<late, pup, reoffered, outq, folded, streams, ctrl, subVars>>
 
 \* A serving stream writes its last frame and FINs (`GroupState::Closed`).
 StreamFinAt(i) ==
@@ -164,7 +169,7 @@ StreamFailAt(i, err) ==
                                   ![i].wasFin = (streams[i].pub = "fin")]
     /\ outq' = Append(outq, <<streams[i].g, err>>)
     /\ UNCHANGED <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered,
-                   resp, ctrl, subVars>>
+                   folded, resp, ctrl, subVars>>
 
 \* The peer acknowledged everything up to the FIN.
 StreamAckAt(i) ==
@@ -174,11 +179,12 @@ StreamAckAt(i) ==
     /\ UNCHANGED <<pubVars, resp, ctrl, subVars>>
 
 \* `poll_step` names the failed streams: a stale expiry is a stale drop the next
-\* update judges again, anything else a final one.
+\* update judges again, anything else a final one. A stale expiry of a group the
+\* record folded while its stream was open is final too: no update re-offers it.
 PubOutcomes ==
     /\ outq # <<>>
     /\ LET g == Head(outq)[1]
-           err == Head(outq)[2]
+           err == IF Head(outq)[2] = "old" /\ g \in folded THEN "evicted" ELSE Head(outq)[2]
        IN /\ outq' = Tail(outq)
           /\ resp' = Append(resp, DropMsg(g, err, pup))
           /\ IF err = "old"
@@ -186,7 +192,7 @@ PubOutcomes ==
                   /\ dropped' = dropped \cup {g}
                   /\ dstale' = dstale \cup {g}
              ELSE UNCHANGED <<expired, dropped, dstale>>
-    /\ UNCHANGED <<cur, late, pup, served, redrop, reoffered, streams, ctrl, subVars>>
+    /\ UNCHANGED <<cur, late, pup, served, redrop, reoffered, folded, streams, ctrl, subVars>>
 
 \* `poll_step` drops again, under the new number, what an update could not re-offer.
 PubRedrop ==
@@ -199,18 +205,34 @@ PubRedrop ==
           /\ dropped' = dropped \cup {g}
           /\ dstale' = dstale \cup {g}
           /\ served' = served \cup {g}
-    /\ UNCHANGED <<cur, late, pup, reoffered, outq, streams, ctrl, subVars>>
+    /\ UNCHANGED <<cur, late, pup, reoffered, outq, folded, streams, ctrl, subVars>>
 
-\* `poll_track` serves a re-offered group, unless a verdict since accounted for it.
+\* `poll_track` serves a re-offered group, unless a verdict since accounted for it. One
+\* the record folded while it waited is named in a final drop instead.
 PubReoffer ==
     /\ outq = <<>> /\ redrop = {}
     /\ reoffered # {}
     /\ LET g == CHOOSE x \in reoffered : \A y \in reoffered : x <= y
        IN /\ reoffered' = reoffered \ {g}
-          /\ IF g \in served
-             THEN UNCHANGED <<served, streams>>
-             ELSE Serve(g)
-    /\ UNCHANGED <<cur, late, pup, dropped, dstale, expired, redrop, outq, resp, ctrl, subVars>>
+          /\ CASE g \in folded ->
+                    /\ resp' = Append(resp, DropMsg(g, "evicted", pup))
+                    /\ UNCHANGED <<served, streams>>
+               [] g \in served -> UNCHANGED <<served, streams, resp>>
+               [] OTHER -> Serve(g) /\ UNCHANGED resp
+    /\ UNCHANGED <<cur, late, pup, dropped, dstale, expired, redrop, outq, folded, ctrl, subVars>>
+
+\* The pool hands the reader debt and its record folds the group into its floor: a group
+\* handed out or named final, once nothing about it is still to tell. The fold stops at a
+\* stale report the next update may reopen and at a failed stream not yet named.
+PubFold(g) ==
+    /\ Pressure
+    /\ g \notin folded
+    /\ cur[g] \in {"handed", "final", "skip"}
+    /\ g \notin dstale
+    /\ \A i \in 1..Len(outq) : outq[i][1] # g
+    /\ folded' = folded \cup {g}
+    /\ UNCHANGED <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered, outq,
+                   streams, resp, ctrl, subVars>>
 
 \* `TrackRun::update` applies a SUBSCRIBE_UPDATE: the cursor's stale verdicts reopen
 \* (`reoffer_stale`, then `owe`), and each expired stream is judged again: served
@@ -231,7 +253,7 @@ PubUpdate ==
                    /\ served' = served \ owed
                    /\ dropped' = dropped \ owed
                    /\ dstale' = dstale \ owed
-    /\ UNCHANGED <<late, outq, streams, resp, subVars>>
+    /\ UNCHANGED <<late, outq, folded, streams, resp, subVars>>
 
 -----------------------------------------------------------------------------
 (* Subscriber                                                              *)
@@ -304,6 +326,14 @@ Evict(g) ==
     /\ cached[g] = "whole"
     /\ cached' = [cached EXCEPT ![g] = "evicted"]
     /\ UNCHANGED <<pubVars, streams, resp, ctrl, sup, acct, finished, sstale, rec, got, violation>>
+
+\* The pool hands the tail debt and `Tail::rebill` forgets every finished run but the
+\* newest: one group stands for any of them, since a later group may have finished.
+TailFold(g) ==
+    /\ Pressure
+    /\ g \in finished
+    /\ finished' = finished \ {g}
+    /\ UNCHANGED <<pubVars, streams, resp, ctrl, sup, acct, sstale, rec, cached, got, violation>>
 
 \* `apply_response` for SUBSCRIBE_DROP. A stale drop under a replaced update is no
 \* verdict. Otherwise the tail accounts for the group; a stale drop records it in the
@@ -401,11 +431,13 @@ Next ==
     \/ PubRedrop
     \/ PubReoffer
     \/ PubUpdate
+    \/ \E g \in Groups : PubFold(g)
     \/ SubHeader
     \/ SubFin
     \/ SubReset
     \/ SubResetHeld
     \/ \E g \in Groups : Evict(g)
+    \/ \E g \in Groups : TailFold(g)
     \/ SubRecv
     \/ SubUpdate
     \/ Done

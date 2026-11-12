@@ -83,6 +83,10 @@ export const step = (action: string, from: Vars, to: Vars) => {
 			return "the publisher serves it again";
 		case "PubUpdate":
 			return "the update reaches the publisher";
+		case "PubFold":
+			return "the publisher's record folds the group under the pool's debt";
+		case "TailFold":
+			return "the subscriber's tail forgets the group finished, under the pool's debt";
 		case "SubHeader":
 			return "a Group Stream's header arrives";
 		case "SubFin":

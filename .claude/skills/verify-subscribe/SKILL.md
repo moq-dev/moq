@@ -5,7 +5,7 @@ description: Model-check how a lite-07 subscription accounts for each group (`rs
 
 # Verify subscription accounting
 
-`rs/moq-net/verify/subscribe/SubscribeAccounting.tla` models one group of one answered lite-07 subscription between the publisher's `TrackRun` and the subscriber's `TrackServe`. The draft promises that every sequence in range gets a Group Stream, a SUBSCRIBE_SKIP, or a SUBSCRIBE_DROP; that a stale (OLD) drop holds only under the update it names and the next SUBSCRIBE_UPDATE reopens it; and that a Group Stream wins over a stale drop, even one it overtook. Drops and skips travel in order on the Subscribe Stream, each Group Stream travels on its own, a reset can lose a stream's header, and a reset sent after the FIN may arrive after every byte. Each model step is one poll of the code that handles one event. The track cursor's verdicts (hand the group out, give it up stale or final, skip it) and whether the cache still holds a fresh copy on an update are free choices. TLC checks every ordering under the bounds in the config.
+`rs/moq-net/verify/subscribe/SubscribeAccounting.tla` models one group of one answered lite-07 subscription between the publisher's `TrackRun` and the subscriber's `TrackServe`. The draft promises that every sequence in range gets a Group Stream, a SUBSCRIBE_SKIP, or a SUBSCRIBE_DROP; that a stale (OLD) drop holds only under the update it names and the next SUBSCRIBE_UPDATE reopens it; and that a Group Stream wins over a stale drop, even one it overtook. Drops and skips travel in order on the Subscribe Stream, each Group Stream travels on its own, a reset can lose a stream's header, and a reset sent after the FIN may arrive after every byte. Each model step is one poll of the code that handles one event. The track cursor's verdicts (hand the group out, give it up stale or final, skip it) and whether the cache still holds a fresh copy on an update are free choices. With `Pressure`, so is when the cache pool's debt folds what each side keeps of the group: the publisher's record and the subscriber's tail. TLC checks every ordering under the bounds in the config.
 
 ## Rules
 
@@ -23,15 +23,20 @@ Each rule is an INVARIANT; the harm says why it matters.
 ```sh
 just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla
 just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/StreamWins.cfg
+just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/Pressure.cfg
 ```
 
-The first checks every rule but `StreamWins`: about 3.0M states, 20 to 30 seconds on 32 cores, and it passes at the sync commit. The second fails at the sync commit on the open finding below. `just test tla rs/moq-net/verify/subscribe` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.
+The first checks every rule but `StreamWins`: about 3.0M states, 20 to 30 seconds on 32 cores, and it passes at the sync commit. The second and third fail on the open findings below; under `Pressure`, `NoViolation` and `ServedOnce` still hold (about 6.8M states). `just test tla rs/moq-net/verify/subscribe` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.
 
 Read a counterexample with `/statechart`, passing it the spec, a config, and `SubscribeAccounting.view.ts`, which labels what each side holds for the group, which update each side is on, and each step as the event that happens. It gives the shortest path to each broken rule in those words.
 
 ## Open finding: a group read whole is named in a stale drop
 
 `StreamWins.cfg` fails. `GroupServe` in `GroupState::Closed` has written every frame and the FIN, and resets with OLD when the group goes stale before the acknowledgement; `settle_failed` then has `TrackRun::poll_step` name it in a stale drop under the update in effect, and record it in `expired`. The subscriber may already hold every byte. It ignores that drop only while the group is in `Tail::finished`, which `buffer_update` clears through `Tail::updated`, or while its copy still caches the group (`track::Producer::give_up` keeps an open group). So with an update sent between reading the FIN and the drop's arrival, and the copy having evicted the group, the subscriber records it stale and owes it again on the next update, while that update makes the publisher serve the whole group again (`reoffer_groups`) or drop it again under every later update. The draft says the publisher, having served a group, "neither serves it again nor names it in another drop". `residual_a_stale_unacknowledged_fin_drops_and_resends_a_served_group` in `lite/publisher.rs` replays the publisher's half, and `a_finished_group_wins_over_a_late_stale_drop_once_evicted` in `lite/subscriber.rs` pins the subscriber's half. Keeping `Tail::finished` across updates passes every rule in the model (about 1.9M states). Once it is fixed, flip the residual test, move `StreamWins` into `SubscribeAccounting.cfg`, and delete `StreamWins.cfg`.
+
+## Open finding: under pressure the tail owes a group it read whole
+
+`Pressure.cfg` fails `QuietIsSettled`. Under the pool's debt, `Tail::rebill` forgets every finished run but the newest. A stale drop the group's stream overtook (the cursor gave the group up stale, then handed it out over the drop) then finds no finished run, and, with the copy having evicted the group, `apply_response` records it stale. The next update's `buffer_update` owes it again, while the publisher, having served it, never sends it again, so the subscriber waits out its grace at the end. The publisher's fold alone (`Record::folded`) passes every rule. Once it is fixed, move `Pressure = TRUE` into `SubscribeAccounting.cfg` and delete `Pressure.cfg`.
 
 ## Reading a failure
 
@@ -52,6 +57,7 @@ Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07
 | `rs/moq-net/src/lite/subscriber.rs` `ServeLoop::apply_response` (`Drop`, `Skip`) | `OnDrop`, `OnSkip`, `SubRecv` |
 | `rs/moq-net/src/lite/subscriber.rs` `buffer_update`; `rs/moq-net/src/model/track.rs` `supersede_stale` | `SubUpdate` |
 | `rs/moq-net/src/tail.rs` `Reading::open`, `Reading::finish`, `Tail::finished`, `updated`, `account`, `unaccount` | `acct`, `finished` |
+| `rs/moq-net/src/tail.rs` `Tail::rebill`; `rs/moq-net/src/model/record.rs` `Record::folded` | `TailFold`, `PubFold`, `folded` |
 | `rs/moq-net/src/model/track.rs` `Producer::give_up`, `skip_received` | `rec`, `cached` |
 
 ## Not covered
