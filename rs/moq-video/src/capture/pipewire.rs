@@ -1094,11 +1094,13 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						return;
 					};
 					let offset = normalize_dma_buf_offset(chunk_offset, maxsize);
-					if !dma_buf_chunk_contains(required, chunk_size, maxsize) {
+					// The chunk size is advisory for a DMA-BUF; only a stated maxsize
+					// bounds the frame here. The allocation check below is the real one.
+					if !dma_buf_maxsize_contains(required, maxsize) {
 						tracing::warn!(
 							required,
-							available = size,
-							"DMA-BUF chunk does not contain a complete frame"
+							maxsize,
+							"DMA-BUF frame is larger than the buffer's stated maxsize"
 						);
 						return;
 					}
@@ -1371,8 +1373,13 @@ fn dma_buf_chunk_size(size: u32, maxsize: u32) -> usize {
 	}
 }
 
-fn dma_buf_chunk_contains(required: usize, size: u32, maxsize: u32) -> bool {
-	size == 0 || required <= dma_buf_chunk_size(size, maxsize)
+// A producer cannot always know a DMA-BUF's byte size: xdg-desktop-portal-hyprland
+// leaves maxsize 0 and writes a placeholder chunk size of 9, flagging bad frames
+// CORRUPTED instead (see `chunk_kind`). The chunk size is not used to read the
+// frame (the layout and the fd's own allocation size are), so only a nonzero
+// maxsize, the producer's stated allocation, bounds it here.
+fn dma_buf_maxsize_contains(required: usize, maxsize: u32) -> bool {
+	maxsize == 0 || required <= maxsize as usize
 }
 
 fn chunk_bytes(data: &[u8], offset: usize, size: usize) -> Option<Cow<'_, [u8]>> {
@@ -1894,9 +1901,33 @@ mod tests {
 		assert_eq!(clamp_chunk_size(8, 16), 8);
 		assert_eq!(dma_buf_chunk_size(8, 16), 8);
 		assert_eq!(dma_buf_chunk_size(8, 0), 8);
-		assert!(dma_buf_chunk_contains(16, 0, 0));
-		assert!(!dma_buf_chunk_contains(16, 8, 0));
-		assert!(dma_buf_chunk_contains(16, 16, 16));
+		assert!(dma_buf_maxsize_contains(16, 0));
+		assert!(dma_buf_maxsize_contains(16, 16));
+	}
+
+	// xdg-desktop-portal-hyprland's shape for a 4K BGRx frame.
+	#[test]
+	fn dma_buf_placeholder_chunk_size_is_accepted() {
+		let required = 3840 * 2160 * 4;
+		assert_eq!(required, 33_177_600);
+		assert_eq!(dma_buf_chunk_size(9, 0), 9);
+		assert!(dma_buf_maxsize_contains(required, 0));
+		assert_eq!(
+			chunk_kind(dma_buf_chunk_size(9, 0), spa::buffer::ChunkFlags::empty(), true),
+			ChunkKind::Data
+		);
+		// A bad frame is flagged, which still rejects it.
+		assert_eq!(
+			chunk_kind(9, spa::buffer::ChunkFlags::CORRUPTED, true),
+			ChunkKind::Invalid
+		);
+	}
+
+	#[test]
+	fn dma_buf_frame_larger_than_maxsize_is_rejected() {
+		assert!(!dma_buf_maxsize_contains(17, 16));
+		assert!(!dma_buf_maxsize_contains(33_177_600, 33_177_599));
+		assert!(dma_buf_maxsize_contains(33_177_600, 33_177_600));
 	}
 
 	#[test]
