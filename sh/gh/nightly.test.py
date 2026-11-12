@@ -363,7 +363,7 @@ class NightlyTest(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
         job = re.search(r"^  tla:\n(.*?)^  \S", workflow, re.M | re.S)
         self.assertIsNotNone(job)
-        paths = [p for line in re.findall(r"^ +paths: (.+)$", job[1], re.M) for p in line.strip("\"").split()]
+        paths = [p for line in re.findall(r"^ +paths: (.+)$", job[1], re.M) for p in line.strip('"').split()]
         self.assertTrue(paths)
         missing = [p for p in paths if not (ROOT / p.removeprefix(":!")).exists()]
         self.assertEqual(missing, [], "TLA+ matrix paths that no longer exist")
