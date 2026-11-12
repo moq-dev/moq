@@ -12,12 +12,15 @@ so it only needs to stay green.
 
 - moq-dev/moq: a scheduled Interop run on `main` passes. Check with
   `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`.
-  Triage any red run, then delete this quest once one passes. Its pass skips
-  the datagram and replacement cases until
-  [routes/js.md](/quest/m2/cluster-routing/routes/js.md) lands, as
+  Then delete this quest. Its pass skips the datagram and replacement cases
+  until [routes/js.md](/quest/m2/cluster-routing/routes/js.md) lands, as
   [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) set. Decided
   2026-11-09 (maintainer, AFK, accepting the recommendation): close this quest
-  on that pass, because routes/js.md tracks restoring those cases.
+  on that pass, because routes/js.md tracks restoring those cases. A red run
+  whose only failure is a stale planned break is not triage: the release
+  procedure's remeasure owns it, as [the release cut](/quest/m3/release/cut.md)
+  says. Run `just test wire-compat --remeasure` on `main` and land the
+  rewritten `test/interop/compat/planned-breaks.json`.
 
 ## Plan
 
@@ -126,6 +129,29 @@ this quest:
 datagram step and quarantined `replacement` by default, which this quest's
 triage confirms. On main's content, `just test media` passes; the datagram test
 still fails until the port lands. No new quest or retry is needed here.
+
+Scheduled run
+[42673842120](https://github.com/moq-dev/moq/actions/runs/42673842120)
+(2026-11-09) and
+[42851744235](https://github.com/moq-dev/moq/actions/runs/42851744235)
+(2026-11-10) failed Harness regressions and Released wire compatibility. The
+staging fixture's fake `cargo` lacked `tree`, which `test/interop/compat.sh`
+calls, so its test exited 2; [moq-dev/moq#8455](https://github.com/moq-dev/moq/pull/8455)
+stubs it. The planned break's pin, moq-cli 0.14.14, went stale when 0.14.15
+shipped.
+
+Scheduled run
+[43052960736](https://github.com/moq-dev/moq/actions/runs/43052960736)
+(2026-11-11, at a4bc922c6) failed the same two steps. The invalid-attribute
+browser case restored `lookahead` to the number `0` after its `try` block,
+which the setter refuses, so the evaluate threw.
+[moq-dev/moq#8512](https://github.com/moq-dev/moq/pull/8512) passes the page's
+own Duration and remeasures the pin to moq-cli 0.14.16.
+
+`main` at d3b6c2573 has both fixes, and every pin matches the latest release of
+its package (moq-cli 0.14.16, moq-relay 0.17.16, @moq/net 0.4.7). The stale pin
+is the recurring cause: each published release of a pinned package turns the
+next scheduled run red until someone remeasures.
 
 Public API: none. Wire: none.
 
