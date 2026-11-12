@@ -3407,7 +3407,7 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 // failure, even to a reader only watching `closed`, as does a duplicate starting past the reader's
 // frame or one that shed it. A re-offer that fails too hands over to the next. A reader closed while it waits ends its
 // read and can be closed again, and one closed with frames still buffered reads them first.
-test.each(["reoffer", "readable", "released", "observed", "unserved", "twice", "leaving", "closed", "past", "shed"])(
+test.each(["reoffer", "readable", "released", "observed", "shedObserved", "unserved", "twice", "leaving", "closed", "past", "shed"])(
 	"a failed copy continues on its held re-offer (%p)",
 	async (kind) => {
 		const producer = new TrackProducer("video").accept({ maxAge: null });
@@ -3461,6 +3461,23 @@ test.each(["reoffer", "readable", "released", "observed", "unserved", "twice", "
 			expect(await reader.readString()).toBe("b");
 			expect(await reader.readString()).toBeUndefined();
 			expect(await reader.closed).toBeNull();
+			producer.close();
+			return;
+		}
+		if (kind === "shedObserved") {
+			// A re-offer that could take over until it shed the reader's frame settles `closed` then.
+			const again = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+			arriving?.release();
+			for (const payload of ["a", "b", "c"]) again.writeFrame({ payload: enc.encode(payload) });
+			let closed: Error | null | undefined;
+			reader.closed.then((value) => {
+				closed = value;
+			});
+			await settle();
+			expect(closed).toBeUndefined();
+			hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
+			await settle();
+			expect(closed).toBe(failed);
 			producer.close();
 			return;
 		}

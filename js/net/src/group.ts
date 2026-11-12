@@ -715,6 +715,8 @@ export class Producer {
 		if (state.cacheBytes === bytes) return;
 		state.charge?.sub(bytes - state.cacheBytes);
 		state.flate?.shed(state.start);
+		// A failed copy's readers waiting on this one to take over may no longer find their frame.
+		if (state.succession?.next === this) state.succession.bump();
 		const lost = headShed(frames.first);
 		for (const mirror of this.#mirrors?.keys() ?? []) {
 			// A mirror that has not taken the front frame can no longer read it from its start.
