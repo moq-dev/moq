@@ -27,7 +27,7 @@ before the first frame after it. Existing callers need no change.
 `Sink::set_latency(duration)?` updates the device callback's playout target
 without replacing the sink. The duration must fit the current ring (the target
 at the last device open or rebuild plus three seconds, less a 30 ms window) and
-remain within `Input::LATENCY_MAX`. Existing callers need no change: sinks
+remain within `moq_mux::container::DELAY_MAX` (formerly `Input::LATENCY_MAX`). Existing callers need no change: sinks
 stretch toward `Input::latency` by default. `buffered()` includes output staged
 by the stretcher, and `finish()` drains it. Missing input still plays silence;
 this adds no packet loss concealment.

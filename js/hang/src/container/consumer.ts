@@ -265,7 +265,7 @@ export class Consumer {
 		this.#delay = getter(props.delay ?? {});
 		this.#wait = getter(props.wait);
 		this.#maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
-		this.#warmup = props.warmup ?? Duration.ZERO;
+		this.#warmup = (props.warmup ?? Duration.ZERO).min(DELAY_MAX);
 		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
 		this.#spread = new Signal(Duration.millis(this.#jitter.measured));
 		this.spread = this.#spread;
