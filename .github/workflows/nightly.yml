@@ -762,13 +762,21 @@ jobs:
           retention-days: 45
 
   # The merge gate's own build and test cost under fixed scenarios, for the
-  # benchmark history (see bench/README.md). x86 because hosted ARM runners
-  # expose no hardware counters, and no Rust cache, which would replay
-  # compilations rather than measure them. The scenarios run every module in
-  # turn, cold and then after a moq-net edit, so they take hours.
+  # benchmark history (see bench/README.md). On the merge queue's runner VMs,
+  # whose KVM guests see the host's PMU (`-cpu host`), because hosted VMs expose
+  # no hardware counters; NixOS keeps the kernel's perf_event_paranoid of 2,
+  # which allows user-space ones. No Rust cache, which would replay compilations
+  # rather than measure them, and checkout's clean leaves an empty target
+  # directory. The scenarios run every module in turn, cold and then after a
+  # moq-net edit, so they take hours.
   gate-cost:
     name: Gate cost
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, moq-queue]
+    # One measurement at a time, so a dispatch beside the schedule never holds
+    # both runners and stalls the merge queue.
+    concurrency:
+      group: gate-cost
+      cancel-in-progress: false
     timeout-minutes: 330
     permissions:
       contents: read
@@ -776,18 +784,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/nix
-      # The hosted image's default of 4 hides every hardware counter; 2 allows user-space ones.
-      - name: Allow user-space instruction counts
-        run: sudo sysctl -w kernel.perf_event_paranoid=2
-      # Ubuntu 24.04 confines the user namespaces Nix's unshare maps for the
-      # flake module's runner image build, as `just gh runner-vm-ci` handles.
-      # The runner is disposable, so the profile stays loaded.
-      - name: Allow Nix builders to map user namespaces
-        run: sudo apparmor_parser --add "$(nix build --no-link --print-out-paths .#runner-userns-profile)"
+      # The runner's home persists across jobs, so a Queue build's mbx Cargo
+      # shim and Cargo config are there, and the dev shell would put the shim
+      # back on PATH. A fresh home finds neither; the guest's Nix config is
+      # system-wide, so the cache still applies.
       - name: Measure the gate
         id: measure
-        run: nix develop --command just gh gate-cost
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          nix develop --command just gh gate-cost
       - name: Record benchmark outcome
         if: ${{ !cancelled() }}
         run: nix develop --command just gh benchmark-report status "${{ steps.measure.outcome }}" target/bench/nightly/gate-cost
