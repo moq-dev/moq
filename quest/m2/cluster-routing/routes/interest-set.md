@@ -72,7 +72,7 @@ Work:
   that PR's first commit (`81c0698295`) did: with one stream per side nothing
   overtakes anything.
 - The model has two prefixes and a scoped relay since
-  [it has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md).
+  it has a route per scope.
   Give it edits in flight: add, remove, widen, narrow, and an edit that
   crosses a claim change, a route change, a ROUTE_END, and its echo. Keep it
   tractable by bounding edits as it bounds flaps. Where Settled item 1 says
@@ -100,10 +100,6 @@ one key, which `Sim` and the tests use, so this changes no behaviour on its
 own.
 
 Public API: none (the router is crate-private). Wire: none.
-
-## Required
-
-- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the two prefixes and the rule for whose claims a relay believes, which an edit must preserve
 
 ## Related
 

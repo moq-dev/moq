@@ -45,10 +45,6 @@ stay constants the config states. Say both bounds in the `verify-route` skill.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the rule for whose claims a relay believes, which the claim rules rest on; an invariant found before it is found for a rule about to go
-
 ## Related
 
 - [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - ties the same spec to the code

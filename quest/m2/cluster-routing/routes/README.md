@@ -43,9 +43,9 @@ The items below were decided 2026-11-10 (maintainer, /quest-plan on lite-07 rout
 25. ✅ Asked how a relay safely forgets a publisher that is gone, after the model showed a per-neighbour echo is not enough once the origin sits behind a relay: **each route names the nodes it crossed, and a node never uses a route that names itself** ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487), which holds the counterexamples and the model results). Feasibility still selects routes; the list is one per origin route, not the per-claim Hop ID list item 6 removed, and the echo and the drain rule stay as they are. As built: Babel's feasibility condition is unchanged, and a node never selects or certifies through such a route. Where the condition refuses it, it still counts as infeasible, so a relay whose neighbours all route through it holds its claims while one of them finds another way. Under a qualified key it counts only while its hops extend those of the route the node last sent under that key: a copy that a scoped peer hands back under a key derived from the node's own route never moves, so nothing waits on it. The origin names itself too, so a rotated identity's route is refused where it began, and a node names itself by a Hop ID that a rotation leaves alone. The hop limit is the wire's 32 and no lower. A change of hops or RTT alone lets go of no region, unless it changes whether the node may use the route: by crossing it, or by reaching the hop limit. This supersedes the claim, in the handoff contract and in decision 6 below, that the echo alone makes forgetting safe. First decided as a relay echoing a ROUTE_END only once its own downstream had; the model ran that the same day and it fails when a session closes before answering. Rejected: that deferred echo; never dropping the distance; a timer; relays as the only origin nodes.
 
 
-26. ✅ Decided 2026-11-11 (maintainer, /quest-plan after [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)'s reviews), asked whose copy of a publisher's claims a relay believes: **a route is shared per publisher and per scope, and a relay believes a route by that route's own path** ([the prototype](https://github.com/moq-dev/moq/pull/8533), [the model](/quest/m2/cluster-routing/routes/scope-model.md), then [the router](/quest/m2/cluster-routing/routes/scope.md)). A scope is the prefix a relay asked a neighbour for when its grant there is narrower than its interest. Today only a feasible neighbour counts, one strictly cheaper than the distance the relay remembers, so a relay's claims move whenever a cost or seqno does: it can forget a claim for good, a mesh with two grants never settles after one seqno advance, and behind a scoped neighbour it never shows what a farther one knows. Only a broadcast some relay carries gets its own route, and that route propagates ([cache-aware routing](/quest/m3/cache-routing/README.md) Plan item 8). What keeps a route free of loops and stale copies is item 27. The contract's bullet on which neighbours certify stands until the model quest rewrites it. First decided the same day as any neighbour whose path to the publisher does not pass through the relay; tried on the router, two relays behind a scoped relay then keep a dead claim alive through each other, and the relay behind a scoped neighbour shows a claim it has no route to request. Rejected: that rule; believing a neighbour that is cheaper than the relay is now, which fixed the storm and the forgotten claim with no wire change but rests belief on distance; a path per broadcast as lite-06 has; link-state among relays; routes to relays.
+26. ✅ Decided 2026-11-11 (maintainer, /quest-plan after [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)'s reviews), asked whose copy of a publisher's claims a relay believes: **a route is shared per publisher and per scope, and a relay believes a route by that route's own path** ([the prototype](https://github.com/moq-dev/moq/pull/8533), the model (`rs/moq-net/verify/route/RouteHandoff.tla`), then [the router](/quest/m2/cluster-routing/routes/scope.md)). A scope is the prefix a relay asked a neighbour for when its grant there is narrower than its interest. Today only a feasible neighbour counts, one strictly cheaper than the distance the relay remembers, so a relay's claims move whenever a cost or seqno does: it can forget a claim for good, a mesh with two grants never settles after one seqno advance, and behind a scoped neighbour it never shows what a farther one knows. Only a broadcast some relay carries gets its own route, and that route propagates ([cache-aware routing](/quest/m3/cache-routing/README.md) Plan item 8). What keeps a route free of loops and stale copies is item 27. The contract's bullet on which neighbours certify now states the rule the model settled. First decided the same day as any neighbour whose path to the publisher does not pass through the relay; tried on the router, two relays behind a scoped relay then keep a dead claim alive through each other, and the relay behind a scoped neighbour shows a claim it has no route to request. Rejected: that rule; believing a neighbour that is cheaper than the relay is now, which fixed the storm and the forgotten claim with no wire change but rests belief on distance; a path per broadcast as lite-06 has; link-state among relays; routes to relays.
 
-27. ✅ Decided 2026-11-11 (maintainer, on [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533), which measured it), asked what keeps a route free of loops and stale copies: **the route's path, a withdrawal that names the hop that died, holds, and a timed doubt. Babel's distance, the seqno, ROUTE_REQUEST, and the ROUTE_END echo go.** None of it is built: [the model](/quest/m2/cluster-routing/routes/scope-model.md) proves it, [the router](/quest/m2/cluster-routing/routes/scope.md) builds it, and the contract below describes today's router until they do. The rule, as the prototype in `rs/moq-net/src/route/tests/paths.rs` runs it:
+27. ✅ Decided 2026-11-11 (maintainer, on [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533), which measured it), asked what keeps a route free of loops and stale copies: **the route's path, a withdrawal that names the hop that died, holds, and a timed doubt. Babel's distance, the seqno, ROUTE_REQUEST, and the ROUTE_END echo go.** None of it is built: the model (`rs/moq-net/verify/route/RouteHandoff.tla`) checks it, with dead hops kept until their timer fires, [the router](/quest/m2/cluster-routing/routes/scope.md) builds it, and the contract below describes today's router until they do. The rule, as the prototype in `rs/moq-net/src/route/tests/paths.rs` runs it:
     - A hop names a relay and the session it learned the route on. A relay uses the cheapest route whose path does not name it, at once.
     - A relay that loses a session names that hop, and every relay drops every route through it, whoever offered it. One message per session covers every publisher and lists the routes that moved to another path.
     - A relay with no route left holds its claims, unavailable, until each neighbour that learned the route from it has answered: with another way, or with nothing once those behind it have answered. Then it lets go.
@@ -350,41 +350,29 @@ loss never reports an END:
   since it may certify a wildcard above both at a later revision; and
   withdrawing one origin's wildcard leaves another origin's copy
   (`wildcard_claims_end_per_origin_and_are_certified_below`).
-- A node tracks the regions each neighbour's last view certifies. Only a
-  neighbour whose last advertisement is feasible here counts, held or
-  not: feasible edges strictly decrease the metric toward the origin, so two
-  nodes never keep a region alive through each other. While the node has a
-  usable route and every such neighbour has answered the current interest, a
-  region of its view that none of them certifies is let go: its last
-  certifier closed, ended its route, or no longer meets the interest. The
-  reader sees those claims go offline, not end. The view keeps what it knows
-  within the regions still certified when no lost floor is newer than every
-  kept one, so a lagging certifier cannot revive a withdrawal the departed one
-  delivered (`a_lost_scope_keeps_newer_knowledge_where_still_certified`).
-  Otherwise a wildcard above both was last learned through the lost floor and
-  is unknown at the kept floors' revision, so the view is rebuilt from the
-  neighbours' last views, a collection of that region. A sender sends a
-  route on a stream only while the route meets the stream's interest (Plan
-  item 15): it starts the route before its first claim in or covering the
-  interest, and when the last such claim goes it sends a floor certifying the
-  withdrawal, then ends the route; it starts the route there again only once
-  that end is echoed. A peer therefore holds no route, and
-  waits on no certifier, for an origin its interest does not meet
-  (`a_disjoint_interest_is_answered_with_nothing`), and a node presents each
-  stream only the claims that changed.
-  A claim is available only through a certifier that is not held; another
-  scope's usable route cannot serve it. A certifier that has not answered yet
-  counts as serving, as for a new next hop whose announcements trail its
-  route. Closing one of two grants
-  under one key takes its scope offline at the client
-  (`a_closed_grant_lets_its_scope_go`), and a relay downstream of two scoped
-  uplinks shows a lost scope unavailable while the starved relay holds, then
-  lets it go once a request recovers a route
-  (`a_relay_lets_go_of_a_scope_its_uplinks_lost`). An interest that meets no
-  grant scope certifies nothing, so its claims go offline
-  (`sweep_scoped_handoff`). Without this, the closed grant's claims stay
-  shown and available indefinitely, since no other grant can deliver their
-  withdrawal.
+- Not yet built ([the router](/quest/m2/cluster-routing/routes/scope.md)
+  builds it; the rest of this contract describes today's router until then),
+  settled by `rs/moq-net/verify/route/RouteHandoff.tla` with Plan item 27's
+  rule: a route is keyed by its publisher and the prefix it covers, and
+  carries its own path. A node that asks a neighbour for a narrower prefix
+  gets one route there, covering that prefix: the neighbour's live route for
+  that prefix if it has one, else its route for a prefix above it. A node
+  believes a route whose path does not name it, and keeps one view per
+  prefix: the newest floor any route covering that prefix gave it, kept
+  whole while it holds a route covering the prefix, so a lagging route
+  cannot revive a withdrawal another delivered, and a route that ends takes
+  only what no other route covers. A claim shows from the narrowest prefix's
+  view and is available while a live route covers it. A request starts on
+  the narrowest live route covering its claim, follows the route each node
+  offered the one it came from, and is never forwarded along a route whose
+  path names the node it came from. A node remembers a dead hop while a
+  neighbour's route names it and until the timer the hop's close started
+  fires, so no route through a hop it knows is dead returns. Selected routes
+  can loop only while the news that ends a stale route is on its way, and
+  only through stale routes. What its timer costs fired early, and the loop `Loop.cfg` pins, are in the `verify-route` skill.
+  A sender sends a route on a stream only while the route meets the
+  stream's interest (Plan item 15), and a node presents each stream only the
+  claims that changed.
 - Per identity, a node is usable (a feasible selected route: announcements
   shown available), held, or let go. It is held while starved, or while a
   neighbor's held route has a last advertisement feasible here; it

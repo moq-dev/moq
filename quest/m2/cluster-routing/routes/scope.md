@@ -4,7 +4,7 @@
 
 `route::Router` keys a route by its publisher and the prefix it covers, and
 believes a route that did not cross it, as
-[the model](/quest/m2/cluster-routing/routes/scope-model.md) settled. A relay
+the model (`rs/moq-net/verify/route/RouteHandoff.tla`) settled. A relay
 shows a claim exactly while such a route covers it and the newest revision a
 covering route gave it still has the claim, two relays never keep a
 dead route alive through each other, a change of path or seqno alone changes
@@ -70,7 +70,3 @@ Work:
   `rs/moq-net/tests/integration/mesh_sweep.rs`'s benchmark before and after.
 
 Public API: none (the router is crate-private). Wire: lite-07-wip.
-
-## Required
-
-- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the rule, proven on two prefixes and a scoped relay
