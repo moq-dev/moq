@@ -1,4 +1,5 @@
 import { Duration, Instant, now, sleep } from "@moq/clock";
+import { Container } from "@moq/hang";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 /**
@@ -18,12 +19,8 @@ export type Delay = "instant" | "auto" | Duration;
 /** The default {@link SyncInput.stretch}: how far live audio may trail the clock before it skips. @internal */
 export const STRETCH = Duration.secs(2);
 
-/**
- * The most an `"auto"` delay holds. The publisher advertises the jitter and delay it is measured
- * from, so the clock bounds them here, whatever the catalog says. Matches
- * `moq_audio::playback::Input::LATENCY_MAX`, which bounds `moq play`'s `--delay`. @internal
- */
-export const DELAY_MAX = Duration.secs(10);
+/** The most an `"auto"` delay holds, and how far catalog `warmup` reaches back. @internal */
+export const DELAY_MAX = Container.DELAY_MAX;
 
 /** Signals the sync reads. */
 export type SyncInput = {

@@ -9,12 +9,7 @@ use moq_mux::catalog::CatalogFormat;
 
 use crate::subscribe::{CatalogFormatArg, Mode, SelectArgs};
 
-/// The longest delay the speaker can hold, which is what bounds `--delay`.
-///
-/// Duplicated from `moq_audio::playback::Input::LATENCY_MAX` because this module
-/// compiles without the `play` feature, and so without that crate. The test
-/// below pins the two together in a build that has both.
-const DELAY_MAX: Duration = Duration::from_secs(10);
+use moq_mux::container::DELAY_MAX;
 
 /// How far playback trails the live edge under `auto` while audio holds no
 /// estimate, as when there is none: video has no estimator of its own.
@@ -307,11 +302,6 @@ mod tests {
 		assert!(err.contains("--delay must be at most"), "{err}");
 		parse(&["--delay", "10s"]).validate().unwrap();
 		parse(&["--delay", "auto"]).validate().unwrap();
-
-		// The bound has to be the sink's own, which only a build carrying the sink
-		// can say.
-		#[cfg(feature = "play")]
-		assert_eq!(DELAY_MAX, moq_audio::playback::Input::LATENCY_MAX);
 	}
 
 	/// The suffix picks the format, and the flag overrides it.

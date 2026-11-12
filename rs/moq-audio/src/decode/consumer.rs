@@ -219,7 +219,7 @@ impl Consumer {
 		}
 
 		let name = name.into();
-		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::WARMUP_MAX);
+		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
 		let playout = moq_mux::container::Playout::new(options.delay, warmup);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
 		// The whole delay from the start, as the container keeps it: the transport enforces the
@@ -1378,7 +1378,7 @@ mod tests {
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
 		producer.seek(1).unwrap();
-		let ceiling = moq_mux::container::WARMUP_MAX.as_micros() as u64;
+		let ceiling = moq_mux::container::DELAY_MAX.as_micros() as u64;
 		// Contiguous, so no gap re-arms the warmup.
 		for micros in (0..=ceiling).step_by(20_000) {
 			producer
@@ -1394,7 +1394,7 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		let options = Options {
 			delay: Delay {
-				max: Some(moq_mux::container::WARMUP_MAX),
+				max: Some(moq_mux::container::DELAY_MAX),
 				..Delay::default()
 			},
 			..Options::new()

@@ -173,7 +173,7 @@ impl Consumer {
 		let name = name.into();
 		let min = Reader::open(broadcast, catalog, &name, &options, options.delay, 0).await?;
 
-		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::WARMUP_MAX);
+		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
 		let max = if warmup.is_zero() {
 			None
 		} else {
@@ -1296,7 +1296,7 @@ mod tests {
 		.unwrap();
 		assert_eq!(
 			published.subscription().and_then(|sub| sub.delay.max),
-			Some(moq_mux::container::WARMUP_MAX)
+			Some(moq_mux::container::DELAY_MAX)
 		);
 	}
 
