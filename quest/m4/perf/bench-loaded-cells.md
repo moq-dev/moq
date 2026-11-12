@@ -18,7 +18,7 @@ One revision read 142.7k under load and 169k to 175k quiet.
 
 Guidance, for the implementer to confirm:
 
-- The load average cannot be the test. It counts the bench's own relay and generator, so a clean 16-worker cell reads higher than a contaminated 4-worker one, and no single threshold separates them. Measure the other work instead, such as CPU time over the window spent outside the bench's own processes, or `/proc/pressure/cpu`.
-- The one-minute average also lags: recorded cells at load 5.25 and 8.7 delivered 4 to 5% under the target rate with no lost groups (`.github/relay-cpu-bisect.md`). A cell that falls short of its target rate, or loses a group, is rejected whatever the host measure says; `bench/instructions.py` already has both numbers.
+- The load average cannot be the test. It counts the bench's own relay and generator, so a clean 16-worker cell reads higher than a contaminated 4-worker one, and no single threshold separates them. Measure the other work on the CPUs the bench pins its relay and generator to, such as CPU time there that is not the bench's own, or contention from `/proc/pressure/cpu`. Work on CPUs the bench does not use is not a reason to reject a cell.
+- The one-minute average also lags: recorded cells at load 5.25 and 8.7 delivered 4 to 5% under the target rate with no lost groups (`.github/relay-cpu-bisect.md`). A cell more than 2% under its target rate, the band the bisect already accepted, or one that loses a group, is rejected whatever the host measure says; `bench/instructions.py` already has both numbers. Clean cells read up to 1% under, so any shortfall at all is too strict.
 - Bound the reruns, and say in the failure which cells never got a clean window.
 - `bench/local.py` records `host_load` as well; decide whether it takes the same rule.
