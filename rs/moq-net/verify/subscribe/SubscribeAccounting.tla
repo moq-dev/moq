@@ -343,7 +343,8 @@ TailFold(g) ==
 \* verdict. Otherwise the tail accounts for the group; a stale drop records it in the
 \* copy unless its stream finished under this update or the copy holds it
 \* (`give_up` keeps an open group), and a final drop records it and ends its readers
-\* unless the copy holds it whole (`give_up` keeps a finished group).
+\* unless the copy holds it whole (`give_up` keeps a group a finished copy serves,
+\* the live one or a fetched head).
 \* A stale drop of a group inside the span a fold forgot that the ledger already
 \* accounted (`Tail::overtaken`) may be one a finished stream overtook, so the next
 \* update owes it nothing again.

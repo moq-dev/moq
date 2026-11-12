@@ -4447,9 +4447,10 @@ impl Producer {
 	}
 
 	/// Record `groups` given up as `hole` describes, returning the runs recorded: a drop
-	/// leaves a skipped sequence skipped, and a group that arrived and was not aborted, since
-	/// a group stream wins over its drop: a stale drop leaves it still arriving or not, and a
-	/// final one leaves it once it finished here.
+	/// leaves a skipped sequence skipped, and a group a copy still serves whole, since a group
+	/// stream wins over its drop: a stale drop leaves it still arriving or not, and a final one
+	/// ends the live copy still arriving but leaves a group finished here or served by a
+	/// fetched head.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn give_up(&self, groups: ops::Range<u64>, hole: Hole) -> RangeSet<u64> {
 		let error = match &hole {
@@ -4472,19 +4473,25 @@ impl Producer {
 				let mut left = RangeSet::new();
 				left.insert(groups.clone());
 				let mut open = Vec::new();
-				// Only the live feed's copy: a drop judges the subscription, so a fetched head
-				// or fetch-only backfill may still complete.
 				for (&sequence, slot) in state.lookup.range(groups) {
-					if !slot.visible || slot.group.is_aborted() {
+					if !slot.visible {
 						continue;
 					}
-					// A lite-07 publisher may serve a group after its stale drop, and the group's
-					// stream may land first. A final drop ends a group still arriving, but one that
-					// finished here stays whole, as a re-sent copy the subscriber refused leaves
-					// it: naming it given up would hide it from every reader.
-					if !stale && !slot.group.is_settled() {
+					// A final drop ends only the live feed's copy still arriving: a drop judges
+					// the subscription, so a fetched head or fetch-only backfill may still complete.
+					let arriving = !slot.group.is_aborted() && !slot.group.is_settled();
+					if !stale && arriving {
 						open.push(slot.group.clone());
-					} else if let Some(end) = sequence.checked_add(1) {
+					}
+					// A lite-07 publisher may serve a group after its stale drop, and the group's
+					// stream may land first. A group a copy still serves whole stays, whichever
+					// copy serves it, as a re-sent copy the subscriber refused leaves it: naming
+					// it given up would hide it from every reader.
+					let ended = !stale && arriving && std::ptr::eq(slot.serving(), &slot.group);
+					if !ended
+						&& slot.serves_end()
+						&& let Some(end) = sequence.checked_add(1)
+					{
 						left.remove(sequence..end);
 					}
 				}
@@ -10951,6 +10958,45 @@ mod test {
 		assert!(open.is_aborted(), "the group still arriving ends");
 		let mut consumer = producer.subscribe(None);
 		assert_eq!(consumer.assert_group().sequence, 0);
+	}
+
+	/// A drop leaves a group a fetched head serves whole, whatever its live copy is doing: a
+	/// final drop still ends a live copy still arriving, and the head serves in its place.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_leaves_a_group_a_fetched_head_serves() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut lives = Vec::new();
+		for sequence in 0..2 {
+			let mut live = producer.create_group(group::Info { sequence }).unwrap();
+			live.start_at(1).unwrap();
+			live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+				.unwrap();
+			let fetch = consumer.fetch_group(sequence, None);
+			let request = dynamic.requested_fill_group().await.unwrap();
+			let mut head = request.accept(Info::timed()).unwrap();
+			for payload in [&b"snapshot"[..], b"delta"] {
+				head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+					.unwrap();
+			}
+			head.finish().unwrap();
+			fetch.await.unwrap();
+			lives.push(live);
+		}
+		lives.pop().unwrap().abort(Error::Cancel).unwrap();
+
+		producer.drop_groups(0..1, StreamError::App(5));
+		producer.give_up(1..2, Hole::stale(Duration::from_millis(500)));
+
+		assert!(producer.state.read().drops.iter().next().is_none());
+		assert!(lives[0].is_aborted(), "the live copy still arriving ends");
+		let mut sub = producer.subscribe(None);
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+		for sequence in 0..2 {
+			assert_eq!(sub.assert_group().sequence, sequence);
+		}
 	}
 
 	/// Let `duration` pass on the cache pool `producer`'s groups charge into.
