@@ -175,28 +175,34 @@ Workspace builds (hits / misses / not looked up):
 - Windows: 123 / 636 / 415, 108 / 1,049 / 18, 112 / 1,043 / 14. Like macOS,
   the predictions now cover the build, but about 90% of looked-up keys miss,
   even with one lockfile change since a Nightly that uploaded 1.2 GiB from
-  the same job. Inheritance works; the keys a Windows build computes do not
-  match what the previous Windows build stored. The summary still names no
-  manifest identity. Down from 846 hits on 2026-11-05.
+  the same job. Inheritance works, but the cause of the misses is
+  unconfirmed: the keys may differ between builds, the previous job may not
+  have stored them, they may have expired, or the build may have loaded
+  another manifest. The summary still names no manifest identity, so
+  comparing the loaded manifest with the stored keys would tell these
+  apart. Down from 846 hits on 2026-11-05.
 - Linux depth-1 baselines, hits only per run (not the hits / misses / not
   looked up triple above): doctest 124, 502 (0 misses), 150; Media (firefox
   player) 58, 84 (11-11 cancelled before its build); Audio quality, hits of
   each of its three builds per night, 74, 77, 0 (11-09), 57, 97, 0 (11-10),
-  54, 25, 0 (11-11). The Nightly and Tests
-  matrix jobs have their own summaries in the same runs.
+  54, 25, 0 (11-11). The other two Linux Rust-cache jobs (the Nightly and
+  Tests matrix jobs) have no baseline recorded here; read each one's depth-1
+  baseline from its own cache summary in these three runs.
 
 ## Waiting
 
 - Maintainer: Windows Nightly misses about 90% of the keys it looks up
   (above), so R2 barely pays on Windows. Options: approve filing it upstream
-  on jdx/mr-boxington with the three runs' summaries, asking why Windows keys
-  differ between runs and for the summary to name the manifest identity
+  on jdx/mr-boxington with the three runs' summaries, asking why Windows
+  lookups miss between runs and for the summary to name the manifest identity
   (recommended, since #870 shows upstream fixes such issues quickly); or
   accept it until the 2026-11-26 numbers. Done when the issue is filed or
   the decision is recorded here.
 - GitHub Actions: the first scheduled Nightly after #8342 (2026-11-12 afternoon or
-  later) must show each Linux Rust-cache job's hits against the depth-1
-  baselines above and the 174-hit doctest run of 11-08, and scheduled runs
+  later) must show each Linux Rust-cache job's hits against its depth-1
+  baseline (above, or for the Nightly and Tests matrix jobs, their own
+  summaries in runs 42659882487, 42842827718 and 43041909115) and the
+  174-hit doctest run of 11-08, and scheduled runs
   must supply the same-commit restore-plus-build comparison and the
   rebuild-frequency count in the Goal.
 - moq-dev/moq: no earlier than 2026-11-26, an agent on the maintainer's
