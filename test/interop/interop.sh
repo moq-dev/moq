@@ -1824,6 +1824,14 @@ run_finishes() {
         return
     fi
     for pub in "${PUB_LIST[@]}"; do
+        # Quarantined: quest/m0/test-flakes-2/interop-finish-fallback.md.
+        if [[ "$QUARANTINED" -eq 0 && "$pub" == rust ]]; then
+            for sub in "${SUB_LIST[@]}"; do
+                echo "  SKIP  finish $pub -> $sub (quarantined)"
+                record skip case=finish publisher="$pub" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-finish-fallback.md"
+            done
+            continue
+        fi
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
         # moq-transport requests name prefixes alone.
