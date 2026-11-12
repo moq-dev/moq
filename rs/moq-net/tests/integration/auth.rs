@@ -1166,7 +1166,10 @@ async fn older_versions_have_no_grant(version: &'static str) {
 		let (pair, _broadcast) = connect_announced(version).await;
 		assert_eq!(pair.client.auth().grant().peek(), None);
 		match version.starts_with("moq-lite") {
-			true => assert!(matches!(added(&pair.client.auth(), "token").await, Err(Error::Unsupported))),
+			true => assert!(matches!(
+				added(&pair.client.auth(), "token").await,
+				Err(Error::Unsupported)
+			)),
 			false => {
 				let auth = added(&pair.client.auth(), "token").await.expect("kept for requests");
 				assert_eq!(auth.grant().peek(), None);

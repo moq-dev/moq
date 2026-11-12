@@ -249,7 +249,10 @@ criterion_group!(benches, refresh, queue);
 criterion_main!(benches);
 
 /// Present `token` on `handle` and wait for its first verdict.
-async fn added(handle: &moq_net::auth::Handle, token: impl Into<bytes::Bytes>) -> moq_net::Result<moq_net::auth::Credential> {
+async fn added(
+	handle: &moq_net::auth::Handle,
+	token: impl Into<bytes::Bytes>,
+) -> moq_net::Result<moq_net::auth::Credential> {
 	let credential = handle.add(token)?;
 	credential.answered().await?;
 	Ok(credential)

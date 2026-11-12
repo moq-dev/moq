@@ -8899,7 +8899,9 @@ async fn token_client(addr: std::net::SocketAddr, version: &str) -> Arc<MoqSessi
 }
 
 /// The next token the client presented.
-async fn next_token(tokens: &mut tokio::sync::mpsc::UnboundedReceiver<moq_net::auth::Request>) -> moq_net::auth::Request {
+async fn next_token(
+	tokens: &mut tokio::sync::mpsc::UnboundedReceiver<moq_net::auth::Request>,
+) -> moq_net::auth::Request {
 	kio::clock::timeout(TIMEOUT, tokens.recv())
 		.await
 		.expect("no token presented")
@@ -8912,7 +8914,10 @@ async fn next_token(tokens: &mut tokio::sync::mpsc::UnboundedReceiver<moq_net::a
 async fn a_credential_is_answered_over_auth_and_cancelled_while_held() {
 	let (addr, mut tokens, serving) = token_server("moq-lite-07-wip").await;
 	let session = token_client(addr, "moq-lite-07-wip").await;
-	assert!(matches!(session.credential(String::new()), Err(MoqError::Config { .. })));
+	assert!(matches!(
+		session.credential(String::new()),
+		Err(MoqError::Config { .. })
+	));
 
 	let granted = session.credential("granted".into()).unwrap();
 	let request = next_token(&mut tokens).await;
@@ -8928,7 +8933,11 @@ async fn a_credential_is_answered_over_auth_and_cancelled_while_held() {
 		.await
 		.unwrap()
 		.expect_err("refused");
-	assert_protocol(&err, crate::error::MoqErrorScope::Session, MoqProtocolKind::Unauthorized);
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Session,
+		MoqProtocolKind::Unauthorized,
+	);
 
 	let held = session.credential("held".into()).unwrap();
 	let request = next_token(&mut tokens).await;
@@ -8955,7 +8964,10 @@ async fn a_credential_is_answered_over_auth_and_cancelled_while_held() {
 	assert!(matches!(route.set_auth(Some(held.clone())), Err(MoqError::Cancelled)));
 
 	session.cancel(0);
-	kio::clock::timeout(TIMEOUT, serving).await.expect("server ended").unwrap();
+	kio::clock::timeout(TIMEOUT, serving)
+		.await
+		.expect("server ended")
+		.unwrap();
 }
 
 /// On moq-lite before 07 nothing can carry a credential.
@@ -8991,7 +9003,11 @@ async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
 	first.cancel();
 	route.announce().unwrap();
 	let presented = next_token(&mut tokens).await;
-	assert_eq!(presented.token().as_ref(), b"first", "the route keeps its own reference");
+	assert_eq!(
+		presented.token().as_ref(),
+		b"first",
+		"the route keeps its own reference"
+	);
 	let presented = presented.accept(moq_net::auth::Grant::all());
 
 	let second = session.credential("second".into()).unwrap();
@@ -9018,7 +9034,10 @@ async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
 	route.cancel();
 	claim.cancel();
 	session.cancel(0);
-	kio::clock::timeout(TIMEOUT, serving).await.expect("server ended").unwrap();
+	kio::clock::timeout(TIMEOUT, serving)
+		.await
+		.expect("server ended")
+		.unwrap();
 }
 
 /// A time anchor starts at the group containing it, and an untimed track refuses one.
