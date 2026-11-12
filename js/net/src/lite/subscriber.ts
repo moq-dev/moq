@@ -939,7 +939,10 @@ export class Subscriber {
 		let link = new LinkRtt();
 		let linkRtt: Duration | undefined;
 		let sampler: AbortController | undefined;
-		const sample = () => {
+		// The running sampler's first read, settled once it landed or the sampler stopped.
+		let firstRead = Promise.resolve();
+		// Returns whether it started a sampler.
+		const sample = (): boolean => {
 			if (routes.size === 0 && sampler) {
 				sampler.abort();
 				sampler = undefined;
@@ -948,10 +951,14 @@ export class Subscriber {
 			} else if (routes.size > 0 && !sampler) {
 				const ctrl = new AbortController();
 				sampler = ctrl;
-				void readLink(ctrl.signal, link);
+				const first = Promise.withResolvers<void>();
+				firstRead = first.promise;
+				void readLink(ctrl.signal, link, first.resolve);
+				return true;
 			}
+			return false;
 		};
-		const readLink = async (signal: AbortSignal, window: LinkRtt) => {
+		const readLink = async (signal: AbortSignal, window: LinkRtt, read: () => void) => {
 			try {
 				while (!signal.aborted && window.reading) {
 					const rtt = (await transportStats(this.#quic)).rtt;
@@ -966,10 +973,13 @@ export class Subscriber {
 						for (const wire of routes.values()) for (const path of wire.view.claims.keys()) paths.add(path);
 						for (const path of paths) refresh(path, false);
 					}
+					read();
 					await sleep(LinkRtt.INTERVAL, { signal });
 				}
 			} catch {
 				// Aborted: the routes went or the stream ended.
+			} finally {
+				read();
 			}
 		};
 
@@ -1134,9 +1144,14 @@ export class Subscriber {
 							owner: {},
 						};
 						routes.set(id, wire);
-						sample();
+						const started = sample();
 						nodes.add(msg.node);
 						this.#floors.join(msg.node, wire.carrier);
+						// The link's first read lands before the route's first claims show, as Rust
+						// reads the link before it serves them: a listing reports a path's route when
+						// it turns present and not again for an RTT, so a read landing after would
+						// never reach it.
+						if (started) await race([firstRead, announced.closed]);
 						break;
 					}
 					case "routeUpdate": {

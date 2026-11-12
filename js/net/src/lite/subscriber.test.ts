@@ -4064,19 +4064,22 @@ test("a lite-07 consume pinned to an instance names its route's node", async () 
 	await info;
 });
 
-// Forwarding code asks for each origin node's claim at a path as its own route.
 // A route's RTT is the relay's sum plus this link's own min RTT, unknown while either is, and it
 // moves no pick: it only updates the route reported.
 test("a lite-07 route reports its rtt as the relay's sum plus this link's", async () => {
-	const smoothedRtt = 10.2;
-	const { subscriber, announced, send } = await routedStream(undefined, async () => ({ smoothedRtt }));
+	// The link's first read answers only after the route's first batch is on the stream.
+	const stats = Promise.withResolvers<{ smoothedRtt: number }>();
+	const { subscriber, announced, send } = await routedStream(undefined, () => stats.promise);
 	const x = Path.from("x");
 	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
 	await send({ status: "active", suffix: x, route: 0n, instance: Instance.parse("a") });
 	await send({ status: "floor", id: 0n, revision: 0n });
-	let next = (await announced.next()) as { kind: string; route: WireRoute };
-	// The link's first read may land after the claim: then an update carries the sum.
-	if (next.route.rtt === undefined) next = (await announced.next()) as { kind: string; route: WireRoute };
+	const first = announced.next();
+	stats.resolve({ smoothedRtt: 10.2 });
+	// The claim waits for that read, so the path is first reported with the sum: a listing shows
+	// a route when its path turns present, and not again for an RTT.
+	let next = (await first) as { kind: string; route: WireRoute };
+	expect(next).toMatchObject({ kind: "start", route: { node: NODE_A } });
 	expect(next.route.rtt?.asMillis()).toBe(31);
 
 	// The relay could not measure a link on the path: the sum is unknown.
@@ -4089,6 +4092,7 @@ test("a lite-07 route reports its rtt as the relay's sum plus this link's", asyn
 	subscriber.close();
 });
 
+// Forwarding code asks for each origin node's claim at a path as its own route.
 test("a lite-07 stream reports each node's claim with claims", async () => {
 	const { subscriber, announced, send } = await routedStream({ claims: true });
 	const pool = Path.from("pool");

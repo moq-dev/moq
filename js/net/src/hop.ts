@@ -119,6 +119,9 @@ export interface RouteInfo {
 	 * Each link on the path adds its min RTT, the lowest smoothed RTT it measured over the last
 	 * 30 seconds, this session's own link included. Undefined on any other wire, on a route this
 	 * origin serves itself, and while any link on the path has no measurement.
+	 *
+	 * A listing reports it as of the event that carries the route: a change to the RTT alone is
+	 * no event.
 	 */
 	readonly rtt?: Duration;
 }
