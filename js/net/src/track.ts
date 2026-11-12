@@ -1482,33 +1482,29 @@ export class Producer {
 	// Record `[start, end)` given up as `hole` says, returning the runs recorded. A skip is final
 	// and the most authoritative verdict, so a drop never replaces one. An upstream drop (`open`)
 	// also ends the groups still arriving in it with its error, so their readers settle now
-	// rather than once the stream's reset lands; one that finished here stays whole. A skip names
-	// nothing produced.
+	// rather than once the stream's reset lands. A skip names nothing produced.
 	#drop(start: bigint, end: bigint, hole: Hole, open = false): Run[] {
 		if (start >= end) return [];
 		const skipped = hole.skip ? [] : this.#state.drops.overlapping(start, end).filter((run) => run.skip);
 		let runs = runGaps(skipped, start, end);
-		// A received stale verdict leaves a group that arrived and was not aborted: a lite-07
-		// publisher may serve a group after its stale drop, and the group's stream may land first.
-		// The group wins, still arriving or not.
-		if (open && hole.stale !== undefined) {
+		const arriving: GroupProducer[] = [];
+		if (open && !hole.skip) {
 			for (const [sequence, entry] of this.#cached) {
-				if (sequence >= start && sequence < end && !(entry.group.closed.peek() instanceof Error)) {
-					runs = removeRun(runs, sequence, sequence + 1n);
-				}
+				const closed = entry.group.closed.peek();
+				if (sequence < start || sequence >= end || closed instanceof Error) continue;
+				// A lite-07 publisher may serve a group after its stale drop, and the group's stream
+				// may land first. A final drop ends a group still arriving, but one that finished here
+				// stays whole, as a re-sent copy the subscriber refused leaves it: naming it given up
+				// would hide it from every reader.
+				if (hole.stale === undefined && closed === undefined) arriving.push(entry.group);
+				else runs = removeRun(runs, sequence, sequence + 1n);
 			}
 		}
 		// A fill no longer owes what the track gave up for good. A stale verdict settles only
 		// the readers it covers, so a fill asked by any other is still owed.
 		if (hole.stale === undefined) this.#fills.dropped(start, end);
 		for (const run of runs) this.#setDrops(run.start, run.end, hole);
-		if (open && !hole.skip && hole.stale === undefined) {
-			for (const [sequence, entry] of this.#cached) {
-				if (sequence >= start && sequence < end && entry.group.closed.peek() === undefined) {
-					entry.group.abort(hole.error);
-				}
-			}
-		}
+		for (const group of arriving) group.abort(hole.error);
 		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: new
 		// terms may supersede it, leaving those groups unknown again, as in Rust.
 		if (hole.stale === undefined) this.#arrive(start, end);

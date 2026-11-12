@@ -4447,8 +4447,9 @@ impl Producer {
 	}
 
 	/// Record `groups` given up as `hole` describes, returning the runs recorded: a drop
-	/// leaves a skipped sequence skipped, and a stale verdict leaves a group that arrived and
-	/// was not aborted, since a group stream wins over its drop.
+	/// leaves a skipped sequence skipped, and a group that arrived and was not aborted, since
+	/// a group stream wins over its drop: a stale drop leaves it still arriving or not, and a
+	/// final one leaves it once it finished here.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn give_up(&self, groups: ops::Range<u64>, hole: Hole) -> RangeSet<u64> {
 		let error = match &hole {
@@ -4467,38 +4468,32 @@ impl Producer {
 		}
 		let (runs, open): (_, Vec<group::Handle>) = match self.modify() {
 			Ok(mut state) => {
+				let stale = hole.stale_budget().is_some();
+				let mut left = RangeSet::new();
+				left.insert(groups.clone());
+				let mut open = Vec::new();
 				// Only the live feed's copy: a drop judges the subscription, so a fetched head
 				// or fetch-only backfill may still complete.
-				let open: Vec<_> = state
-					.lookup
-					.range(groups.clone())
-					.filter(|(_, slot)| slot.visible && !slot.group.is_aborted())
-					.map(|(&sequence, slot)| (sequence, slot.group.clone()))
-					.collect();
-				let recorded = match hole.stale_budget() {
-					// A lite-07 publisher may serve a group after its stale drop, and the group's
-					// stream may land first: the group wins, still arriving or not.
-					Some(_) => {
-						let mut left = RangeSet::new();
-						left.insert(groups);
-						for (sequence, _) in &open {
-							if let Some(end) = sequence.checked_add(1) {
-								left.remove(*sequence..end);
-							}
-						}
-						let mut runs = RangeSet::new();
-						for run in left.iter() {
-							runs.extend(state.drop_groups(run.clone(), hole.clone()).iter().cloned());
-						}
-						(runs, Vec::new())
+				for (&sequence, slot) in state.lookup.range(groups) {
+					if !slot.visible || slot.group.is_aborted() {
+						continue;
 					}
-					None => (
-						state.drop_groups(groups, hole),
-						open.into_iter().map(|(_, group)| group).collect(),
-					),
-				};
+					// A lite-07 publisher may serve a group after its stale drop, and the group's
+					// stream may land first. A final drop ends a group still arriving, but one that
+					// finished here stays whole, as a re-sent copy the subscriber refused leaves
+					// it: naming it given up would hide it from every reader.
+					if !stale && !slot.group.is_settled() {
+						open.push(slot.group.clone());
+					} else if let Some(end) = sequence.checked_add(1) {
+						left.remove(sequence..end);
+					}
+				}
+				let mut runs = RangeSet::new();
+				for run in left.iter() {
+					runs.extend(state.drop_groups(run.clone(), hole.clone()).iter().cloned());
+				}
 				state.charge_debt();
-				recorded
+				(runs, open)
 			}
 			Err(_) => return RangeSet::new(),
 		};
@@ -10927,11 +10922,8 @@ mod test {
 		indexed();
 		producer.drop_groups(15..25, StreamError::Cancel);
 		indexed();
-		producer
-			.create_group(group::Info { sequence: 17 })
-			.unwrap()
-			.finish()
-			.unwrap();
+		// Still arriving, so the next drop ends it and covers it again.
+		let _recreated = producer.create_group(group::Info { sequence: 17 }).unwrap();
 		indexed();
 		producer.drop_groups(14..26, StreamError::Old);
 		indexed();
@@ -10939,6 +10931,26 @@ mod test {
 			producer.state.read().drops_changes.since(0).collect::<Vec<_>>(),
 			vec![10..30]
 		);
+	}
+
+	/// A final drop ends a group still arriving, but leaves one that finished here to every
+	/// reader, as a group arriving after its drop replaces it.
+	#[test]
+	fn a_final_drop_leaves_a_finished_group() {
+		let producer = track_producer("test", Info::default());
+		producer
+			.create_group(group::Info { sequence: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let open = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer.drop_groups(0..2, StreamError::Cancel);
+
+		let drops: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.clone()).collect();
+		assert_eq!(drops, vec![1..2]);
+		assert!(open.is_aborted(), "the group still arriving ends");
+		let mut consumer = producer.subscribe(None);
+		assert_eq!(consumer.assert_group().sequence, 0);
 	}
 
 	/// Let `duration` pass on the cache pool `producer`'s groups charge into.
