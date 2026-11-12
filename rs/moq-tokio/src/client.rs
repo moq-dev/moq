@@ -394,10 +394,9 @@ impl Client {
 	) -> crate::Result<Dialed> {
 		let (addr, client) = self.attempt(&attempt);
 		// A configured certificate is never silently dropped. `http://` trusts a fingerprint
-		// fetched over plaintext and falls back to `ws://`, and `ws://` and `tcp://` carry
-		// no TLS, so none can present it to an authenticated server. `unix://` is local:
-		// the kernel identifies the client and the socket's permissions guard the server.
-		if self.client_cert && matches!(addr.url().scheme(), "http" | "ws" | "tcp") {
+		// fetched over plaintext and falls back to `ws://`, and `ws://`, `tcp://`, and
+		// `unix://` carry no TLS, so none can present it to an authenticated server.
+		if self.client_cert && matches!(addr.url().scheme(), "http" | "ws" | "tcp" | "unix") {
 			return Err(Error::ClientCertScheme(addr.url().scheme().to_string()));
 		}
 		#[cfg(test)]
@@ -760,15 +759,19 @@ mod tests {
 			Box::pin(async { Err(Error::ConnectFailed) })
 		}));
 
-		for scheme in ["http", "ws", "tcp", "https", "wss", "moqt", "moql", "tls", "unix"] {
+		for scheme in ["http", "ws", "tcp", "unix", "https", "wss", "moqt", "moql", "tls"] {
 			let url: Url = format!("{scheme}://relay.invalid:443/").parse().unwrap();
 			let Err(err) = client.connect(url).established().await else {
 				panic!("{scheme} connected");
 			};
 			let refused = matches!(err, Error::ClientCertScheme(_));
-			assert_eq!(refused, matches!(scheme, "http" | "ws" | "tcp"), "{scheme}: {err}");
+			assert_eq!(
+				refused,
+				matches!(scheme, "http" | "ws" | "tcp" | "unix"),
+				"{scheme}: {err}"
+			);
 		}
-		assert_eq!(*dialed.lock().unwrap(), ["https", "wss", "moqt", "moql", "tls", "unix"]);
+		assert_eq!(*dialed.lock().unwrap(), ["https", "wss", "moqt", "moql", "tls"]);
 	}
 
 	#[cfg(feature = "quic")]

@@ -585,8 +585,8 @@ pub struct Connect {
 	/// Only certificates are extracted; any private keys in the file are ignored.
 	/// Must be paired with `--connect-tls-key`. With the `watch` feature, both files
 	/// are hot reloaded for new connections, retaining the last valid pair while a
-	/// rotation is missing, malformed, or mismatched. Dialing `http://`, `ws://`, or
-	/// `tcp://` with a client certificate fails, since none can present it.
+	/// rotation is missing, malformed, or mismatched. Dialing `http://`, `ws://`,
+	/// `tcp://`, or `unix://` with a client certificate fails, since none can present it.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-tls-cert",
