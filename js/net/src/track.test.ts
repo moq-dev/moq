@@ -3404,9 +3404,10 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 
 // A reader on a received copy that fails waits out a duplicate still held for its group, then
 // continues on it from its frame with nothing repeated or missed. A released hold leaves the
-// failure, as does a duplicate starting past the reader's frame. A reader closed while it waits ends
-// its read and can be closed again, and one closed with frames still buffered reads them first.
-test.each(["reoffer", "readable", "released", "leaving", "closed", "past"])(
+// failure, even to a reader only watching `closed`, as does a duplicate starting past the reader's
+// frame. A re-offer that fails too hands over to the next. A reader closed while it waits ends its
+// read and can be closed again, and one closed with frames still buffered reads them first.
+test.each(["reoffer", "readable", "released", "observed", "twice", "leaving", "closed", "past"])(
 	"a failed copy continues on its held re-offer (%p)",
 	async (kind) => {
 		const producer = new TrackProducer("video").accept({ maxAge: null });
@@ -3431,6 +3432,38 @@ test.each(["reoffer", "readable", "released", "leaving", "closed", "past"])(
 			return;
 		}
 		first.abort(failed);
+		if (kind === "observed") {
+			let closed: Error | null | undefined;
+			reader.closed.then((value) => {
+				closed = value;
+			});
+			await settle();
+			expect(closed).toBeUndefined();
+			arriving?.release();
+			await settle();
+			expect(closed).toBe(failed);
+			producer.close();
+			return;
+		}
+		if (kind === "twice") {
+			// The reader reaches neither re-offer before the third copy takes over.
+			const second = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+			arriving?.release();
+			const held = hooks.arrivingGroup(producer, 3n);
+			second.abort(failed);
+			await settle();
+			expect(reader.closed.peek()).toBeUndefined();
+			const third = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+			held?.release();
+			third.writeFrame({ payload: enc.encode("a") });
+			third.writeFrame({ payload: enc.encode("b") });
+			third.finish();
+			expect(await reader.readString()).toBe("b");
+			expect(await reader.readString()).toBeUndefined();
+			expect(await reader.closed).toBeNull();
+			producer.close();
+			return;
+		}
 		let read: string | Uint8Array | undefined | Error;
 		// A readiness poll waits the same way, and adopts the re-offer rather than spinning on the
 		// failed copy.

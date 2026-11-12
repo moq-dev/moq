@@ -130,7 +130,8 @@ class GroupState {
 	// Tells the group this copy was mirrored from whether its reader will still read it, so a
 	// copy buffered for a reader that passed it stops keeping the group wanted.
 	reads?: (reads: boolean) => void;
-	// A received copy's, shared with every mirror: what may take the group over once it fails.
+	// A received copy's, shared with every mirror and incarnation: what may take the group over
+	// once it fails.
 	succession?: Succession;
 
 	constructor(sequence: bigint) {
@@ -138,13 +139,26 @@ class GroupState {
 	}
 }
 
-// Another copy of a received group's sequence that may take the group over once this one fails,
-// so its readers continue there (see `Consumer.#succeed`). A group's name fixes its content.
+// The copies of a received group's sequence in one track, shared by each incarnation and its
+// mirrors, so a reader of a failed copy continues on the latest (see `Consumer.#succeed`). A
+// group's name fixes its content. Only the latest is kept, so re-offers retain no chain of copies.
 class Succession {
-	// Duplicates waiting on this copy while it arrives (see `hooks.holdGroup`).
-	readonly holds = new Signal(0);
-	// The copy that took the sequence after this one failed.
+	// Duplicates held while a copy arrives (see `hooks.holdGroup`), any of which may take over.
+	holds = 0;
+	// The latest copy, once one took over a failed one.
 	next?: Producer;
+	// Bumped whenever a takeover may have become possible or impossible.
+	readonly changed = new Signal(0);
+
+	bump(): void {
+		this.changed.update((n) => n + 1);
+	}
+
+	// The latest copy, unless it failed too.
+	live(): Producer | undefined {
+		const next = this.next;
+		return next && !(next.closed.peek() instanceof Error) ? next : undefined;
+	}
 }
 
 // A written frame and when it landed. It keeps the writer's frame rather than copying it, so a
@@ -312,20 +326,30 @@ export class Producer {
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
 		hooks.receivedGroup = (group, failed) => {
-			group.#state.succession = new Succession();
-			if (failed === undefined) return;
-			const succession = failed.#state.succession;
-			if (succession) succession.next = group;
+			if (failed === undefined) {
+				group.#state.succession = new Succession();
+				return;
+			}
+			const succession = failed.#state.succession ?? new Succession();
+			group.#state.succession = succession;
+			succession.next = group;
+			succession.bump();
+			// A reader waiting on this copy gives up once it fails with nothing held.
+			group.#state.closed.changed((closed) => {
+				if (closed instanceof Error && succession.next === group) succession.bump();
+			});
 		};
 		hooks.holdGroup = (group) => {
-			const holds = group.#state.succession?.holds;
-			if (!holds) return () => {};
-			holds.update((n) => n + 1);
+			const succession = group.#state.succession;
+			if (!succession) return () => {};
+			succession.holds++;
+			succession.bump();
 			let held = true;
 			return () => {
 				if (!held) return;
 				held = false;
-				holds.update((n) => n - 1);
+				succession.holds--;
+				succession.bump();
 			};
 		};
 		hooks.startGroup = (group, start) => {
@@ -842,16 +866,26 @@ class CombinedClosed implements GetPromise<Error | null> {
 	#preferred: Once<Error>;
 	#source: () => Once<Error | null>;
 	#final: (value: Error | null) => boolean;
+	// What else may change `final`'s answer, watched like the source.
+	#wake: () => Signal<number> | undefined;
 	#value = new Once<Error | null>();
 	#watched?: Once<Error | null>;
 	// The watcher on `#watched`, replaced when a recovery moves to another copy's state.
 	#unwatch?: Dispose;
+	#woken?: Signal<number>;
+	#unwake?: Dispose;
 	#dispose: Dispose[] = [];
 
-	constructor(preferred: Once<Error>, source: () => Once<Error | null>, final: (value: Error | null) => boolean) {
+	constructor(
+		preferred: Once<Error>,
+		source: () => Once<Error | null>,
+		final: (value: Error | null) => boolean,
+		wake: () => Signal<number> | undefined,
+	) {
 		this.#preferred = preferred;
 		this.#source = source;
 		this.#final = final;
+		this.#wake = wake;
 		if (this.#sync()) return;
 		this.#dispose.push(preferred.changed(() => this.#sync()));
 	}
@@ -869,6 +903,12 @@ class CombinedClosed implements GetPromise<Error | null> {
 				this.#watched = source;
 				this.#unwatch = source.changed(() => this.#sync());
 			}
+			const wake = this.#wake();
+			if (this.#woken !== wake) {
+				this.#unwake?.();
+				this.#woken = wake;
+				this.#unwake = wake?.subscribe(() => this.#sync());
+			}
 			return false;
 		}
 
@@ -878,6 +918,9 @@ class CombinedClosed implements GetPromise<Error | null> {
 		this.#unwatch?.();
 		this.#unwatch = undefined;
 		this.#watched = undefined;
+		this.#unwake?.();
+		this.#unwake = undefined;
+		this.#woken = undefined;
 		return true;
 	}
 
@@ -980,6 +1023,7 @@ export class Consumer {
 			() => this.#state.closed,
 			(value) =>
 				value instanceof Error ? !this.#recovers(value) : this.#released || this.#bufferedFrames().length === 0,
+			() => this.#state.succession?.changed,
 		);
 		return this.#closed;
 	}
@@ -993,6 +1037,7 @@ export class Consumer {
 			(value) =>
 				(!(value instanceof Error) || !this.#recovers(value)) &&
 				(this.#released || this.#bufferedFrames().length === 0),
+			() => this.#state.succession?.changed,
 		);
 		return this.#finished;
 	}
@@ -1039,14 +1084,11 @@ export class Consumer {
 		return !this.#verdict.peek() && !this.#torn() && (this.#succeeds() || this.#recover?.wants(failed) === true);
 	}
 
-	// Whether another copy in the track may take over the failed one being read: one is held, or took it.
+	// Whether another copy in the track may take over the failed one being read: one took it and
+	// has not failed, or one is held.
 	#succeeds(): boolean {
 		const succession = this.#state.succession;
-		return (
-			!this.#released &&
-			succession !== undefined &&
-			(succession.holds.peek() > 0 || succession.next !== undefined)
-		);
+		return !this.#released && succession !== undefined && (succession.live() !== undefined || succession.holds > 0);
 	}
 
 	// Continue on the copy that took this group's sequence in its track once the one being read
@@ -1054,15 +1096,16 @@ export class Consumer {
 	async #succeed(): Promise<boolean> {
 		const succession = this.#state.succession;
 		if (!succession || this.#released || this.#verdict.peek() || this.#torn()) return false;
-		while (succession.holds.peek() > 0) {
+		let next = succession.live();
+		while (!next) {
+			if (succession.holds === 0) return false;
 			this.#leaving ??= new Once();
-			await Signal.race(succession.holds, this.#verdict, this.#leaving);
+			await Signal.race(succession.changed, this.#verdict, this.#leaving);
 			// A closed reader ends on the failure rather than continue elsewhere.
 			if (this.#released) return false;
 			if (this.#verdict.peek()) return true;
+			next = succession.live();
 		}
-		const next = succession.next;
-		if (!next) return false;
 		const group = next.mirror();
 		// It starts past the frame read next, which no copy holds now.
 		if (group.#state.start > this.#index()) {
