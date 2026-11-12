@@ -334,6 +334,119 @@ test("fill: a held answer that fails keeps its frames and its failure", async ()
 	broadcast.close();
 });
 
+// A reader judges each sequence once, so one it judged held and then lost is judged again: a fill
+// answer that fails after a probe saw it is asked once more. Mirrors the Rust `Misses` inbox.
+test("fill: an answer withheld after a probe judged it is asked again", async () => {
+	const { broadcast, track } = resumed(4n);
+	const requests = track.requests();
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 6n } }],
+		delay: { max: null },
+	});
+	const ordered = reader.ordered();
+	const first = ordered.nextGroup();
+	const fill = await requests.requestedFill();
+	expect(fill && [fill.start, fill.end]).toEqual([0n, 4n]);
+	if (!fill) throw new Error("no fill");
+	fill.accept(0n).finish();
+	const answer = fill.accept(2n);
+	answer.writeFrame({ payload: enc.encode("fill 2") });
+	expect((await first)?.sequence).toBe(0n);
+	// Waiting on group 1, the bounded window probes everything it names, group 2 held among it.
+	const second = ordered.nextGroup();
+	await yieldNow();
+	answer.abort(new Error("archive failed"));
+	fill.accept(1n).finish();
+	expect((await second)?.sequence).toBe(1n);
+
+	const third = ordered.nextGroup();
+	const again = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(again && [again.start, again.end]).toEqual([2n, 3n]);
+	if (again) serve(again, new Map([[2n, ["again"]]]));
+	expect((await third)?.sequence).toBe(2n);
+
+	fill.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A gap a probe judged stale by its successor is judged again once that successor fails, past a
+// failed group below it, which was no successor.
+test("fill: a gap below a group that fails after a probe is asked", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	const requests = track.requests();
+	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Duration.millis(0) } });
+	const ordered = reader.ordered();
+	const failed = track.createGroup(2n);
+	const group = track.createGroup(4n);
+	group.writeFrame({ payload: enc.encode("live 4") });
+	failed.abort(new StreamError(StreamCode.Cancel));
+	await yieldNow();
+	// Judged stale against group 4, so not asked.
+	await reader.start();
+	group.abort(new StreamError(StreamCode.Cancel));
+	await yieldNow();
+	const next = ordered.nextGroup();
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
+
+	fill?.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+	await next.catch(() => undefined);
+});
+
+// What lay above the newest group when a probe judged it is judged again once the feed passes it.
+test("fill: a gap the newest group rises over after a probe is asked", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	const reader = track.subscribe({ ranges: [{ start: { absolute: 2n } }], delay: { max: null } });
+	expect(reader.tryRecvGroup()?.sequence).toBe(2n);
+	expect(reader.tryRecvGroup()).toBeUndefined();
+	const group = track.createGroup(5n);
+	group.writeFrame({ payload: enc.encode("live 5") });
+	group.finish();
+	expect(reader.tryRecvGroup()?.sequence).toBe(5n);
+	reader.tryRecvGroup();
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([3n, 5n]);
+
+	fill?.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A miss judged while a fill was out but no handler open is asked once one opens.
+test("fill: a miss judged with no handler open is asked once one opens", async () => {
+	const { broadcast, track } = resumed(2n);
+	const first = track.requests();
+	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null } });
+	expect(reader.tryRecvGroup()?.sequence).toBe(2n);
+	reader.tryRecvGroup();
+	const out = await first.requestedFill();
+	expect(out && [out.start, out.end]).toEqual([0n, 2n]);
+	first.close();
+	const group = track.createGroup(5n);
+	group.finish();
+	expect(reader.tryRecvGroup()?.sequence).toBe(5n);
+	reader.tryRecvGroup();
+
+	const second = track.requests();
+	reader.tryRecvGroup();
+	const fill = await Promise.race([second.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([3n, 5n]);
+
+	fill?.close();
+	out?.close();
+	reader.close();
+	second.close();
+	broadcast.close();
+});
+
 test("fill: a reader reaching back for history gets the misses filled in order", async () => {
 	const { broadcast, track } = resumed(4n);
 	const requests = track.requests();
@@ -797,7 +910,7 @@ test("fill: a refusal under an old budget is asked afresh on each widening, neve
 		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 		if (!fill) throw new Error("no fill");
-		rejectGroups(fill, 0n, 5n, old, budget);
+		rejectGroups(fill, 0n, 5n, old, { budget, everyone: false });
 		fill.close();
 		reader.update(terms(budget * 2));
 	}
@@ -1260,4 +1373,63 @@ test("fill: a lite-07 ranged subscription reads history the publisher never cach
 	} finally {
 		peer.close();
 	}
+});
+
+// A fill's OLD answer under the publisher's max age binds every reader, so the track holds it as
+// a stale verdict under that age rather than a loss for good: the readers waiting now are refused,
+// a later reader no wider is settled without asking, and once new terms forget the verdict a
+// reader asks again. Mirrors the Rust `a_fills_old_answer_under_the_max_age_is_held_until_forgotten`.
+test("fill: an OLD answer under the max age is held as stale until forgotten", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: Duration.millis(10_000) });
+	const live = track.createGroup(3n);
+	live.writeFrame({ payload: enc.encode("live 3") });
+	live.finish();
+	const requests = track.requests();
+	const terms: Subscription = {
+		ranges: [{ start: { absolute: 0n } }],
+		delay: { max: Duration.millis(60_000) },
+		order: "ascending",
+	};
+	const asked = async () => {
+		const fills: bigint[][] = [];
+		for (;;) {
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+			if (!fill) return fills;
+			fills.push([fill.start, fill.end]);
+			fill.close();
+		}
+	};
+	const reader = track.subscribe(terms);
+	expect(reader.tryRecvGroup()?.sequence).toBe(3n);
+	reader.tryRecvGroup();
+	// A reader of the run alone, which the verdict does not settle, waits on the same fill.
+	const bounded = track.subscribe({ ...terms, ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
+	bounded.tryRecvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect([fill.start, fill.end]).toEqual([0n, 3n]);
+	const old = new StreamError(StreamCode.Old, { message: "old" });
+	rejectGroups(fill, 0n, 3n, old, { budget: 10_000, everyone: true });
+	expect(hooks.tryDrop(bounded)).toMatchObject({ kind: "drop", start: 0n, end: 3n, error: old });
+	fill.close();
+
+	const later = track.subscribe(terms);
+	expect(later.tryRecvGroup()?.sequence).toBe(3n);
+	later.tryRecvGroup();
+	expect(hooks.tryDrop(later)).toMatchObject({ kind: "drop", start: 0n, end: 3n, stale: 10_000 });
+	expect(await asked()).toEqual([]);
+
+	expect(hooks.supersedeStale(track, undefined)).toEqual([{ start: 0n, end: 3n }]);
+	const again = track.subscribe(terms);
+	expect(again.tryRecvGroup()?.sequence).toBe(3n);
+	again.tryRecvGroup();
+	expect(await asked()).toEqual([[0n, 3n]]);
+
+	reader.close();
+	bounded.close();
+	later.close();
+	again.close();
+	requests.close();
+	broadcast.close();
 });

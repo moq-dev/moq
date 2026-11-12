@@ -28,7 +28,8 @@ The API is the most important thing to get right: a bad shape costs a breaking c
 - Nest related API, configuration, and output fields under their shared role.
 - Mirror API names across Rust, JS, and the bindings.
 - Keep package boundaries modular and reusable; prefer a module in an existing package over a one-off package.
-- Never use a huge value like `u64::MAX` as a marker (it is the longest varint); use 0, a separate message or type, or a boolean.
+- Never mark a special case inside a value: not a huge number like `u64::MAX` (it is the longest varint), and not a reserved prefix or character in a string. Use 0, a separate message or type, a typed field, or a boolean.
+- Enforce a policy where the thing is created, not where it is checked: the signer bounds a token's lifetime, and the verifier accepts what a valid token carries. Don't add `allow-*` opt-out flags; move or generalize the rule.
 
 # Development
 

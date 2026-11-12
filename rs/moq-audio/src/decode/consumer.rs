@@ -219,7 +219,7 @@ impl Consumer {
 		}
 
 		let name = name.into();
-		let warmup = catalog.warmup.unwrap_or_default();
+		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::WARMUP_MAX);
 		let playout = moq_mux::container::Playout::new(options.delay, warmup);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
 		// The whole delay from the start, as the container keeps it: the transport enforces the
@@ -1363,6 +1363,54 @@ mod tests {
 		}
 		let expected: Vec<u128> = (4..=20).map(|packet| packet * 20_000).collect();
 		assert_eq!(stamps, expected, "the burst reached the decoder whole");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn the_join_trim_stops_at_the_warmup_ceiling() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_secs(3600));
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		producer.seek(1).unwrap();
+		let ceiling = moq_mux::container::WARMUP_MAX.as_micros() as u64;
+		// Contiguous, so no gap re-arms the warmup.
+		for micros in (0..=ceiling).step_by(20_000) {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(micros).unwrap(),
+					duration: None,
+					payload: vec![0; 960 * size_of::<f32>()].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+		let _finished = producer.finish().unwrap();
+		let options = Options {
+			delay: Delay {
+				max: Some(moq_mux::container::WARMUP_MAX),
+				..Delay::default()
+			},
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)
+			.await
+			.unwrap();
+		let mut stamps = Vec::new();
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
+			stamps.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(
+			stamps,
+			[ceiling as u128],
+			"an hour of warmup trims only up to the ceiling"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]

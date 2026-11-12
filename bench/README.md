@@ -853,7 +853,7 @@ The table includes these measurements:
   night its growth check fails. Release build times stay out.
 - The merge gate's own cost (`bench-gate-cost`), described below.
 
-The gate cost source runs `just gh gate-cost` on a hosted x86 runner in two
+The gate cost source runs `just gh gate-cost` on a merge queue runner VM in two
 scenarios: `cold`, a `just ci --all` from an empty target directory with no
 Rust cache, then `moq-net`, the diff-scoped `just ci` an agent runs after an
 edit to moq-net, on what `cold` built. Modules run one at a time
