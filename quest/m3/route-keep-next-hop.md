@@ -39,7 +39,7 @@ selection.
   down-only route still moves to an equal one it may export, and test that.
 - Check that every router test that names the next hop it expects still
   means what it says, rather than editing expectations to match.
-- [The prototype](/quest/m2/cluster-routing/routes/stale-copies.md) may
+- [The prototype](/quest/m1/route-stale-copies.md) may
   replace how a route is selected. If it has, apply this to the rule that
   stands.
 - Measure with `Sim`'s `hop_updates` count and, if it has landed,

@@ -27,7 +27,9 @@ wire, and the draft do not change here.
 
 Decided 2026-11-11 (maintainer, /quest-plan after #8487's two adversarial
 reviews, revised the same day once the first plan's rule was tried on the
-router).
+router). Moved here from the routes epic the same day (maintainer): the epic
+and m2 wait on m1 quests this needs nothing from, it changes tests only, and
+the m1 model quests wait on its outcome.
 
 Why: today a relay believes a neighbour's copy of a publisher's claims only
 while that neighbour is "feasible", which means strictly cheaper than the

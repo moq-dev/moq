@@ -87,7 +87,7 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    join a copy at a neighbour that is no closer to the publisher: the join
    the Goal wants, and why item 2 stopped at one hop. What keeps a warm route
    free of loops and stale copies is
-   [the prototype](/quest/m2/cluster-routing/routes/stale-copies.md)'s to
+   [the prototype](/quest/m1/route-stale-copies.md)'s to
    measure, and the proof then holds that rule. Items 1 and 3 stand.
    [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) proves items
    2 and 4 as first decided.

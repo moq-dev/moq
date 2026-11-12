@@ -220,11 +220,14 @@ leave the connection's estimate unclaimed. Without a claim, video selects the be
 
 ## Buffered playback
 
-By default the player minimizes latency: it time-stretches received audio
-that falls behind the delay back onto it, playing it slightly faster, and skips
-ahead only when media piles up far past it. Content produced faster than real time, such as a TTS
+By default the player minimizes latency: audio plays at the delay, slows down
+slightly when the audio received ahead of it runs low, speeds back up once it
+recovers, and skips ahead only audio trailing by more than the subscription
+still delivers. Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
-`lookahead` to how far ahead it may run and it plays through at the encoded pace:
+`lookahead` to how far ahead it may run and it plays through at the encoded pace.
+If a stall leaves audio behind, it catches up by playing faster, as live
+playback does, and skips only what trails by more than the lookahead:
 
 ```html
 <moq-watch url="..." name="bot/tts.hang" delay="100ms" lookahead="30s"></moq-watch>
