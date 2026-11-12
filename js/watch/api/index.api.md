@@ -1,27 +1,9 @@
 # `@moq/watch`
 
 ```ts
-export type Arrival = {
-	arrival: Clock.Instant;
-	kind: "frame";
-	late: boolean;
-	timestamp: Clock.Duration;
-} | {
-	duration: Clock.Duration;
-	kind: "gap";
-	timestamp: Clock.Duration;
-};
-
-export interface Arrivals {
-	[Symbol.asyncIterator](): AsyncIterator<Arrival>;
-	close(): void;
-	next(): Promise<Arrival | undefined>;
-}
-
 export namespace Audio {
 	export class Decoder {
 		constructor(props: Audio.DecoderProps);
-		arrivals(): Arrivals;
 		close(): void;
 		readonly in: Signals.Readonlys<Audio.DecoderInput>;
 		readonly out: Signals.Readonlys<Audio.DecoderOutput>;
@@ -125,7 +107,7 @@ export type BroadcastOutput = {
 	active: Signals.Signal<Net.Broadcast.Consumer | undefined>;
 	catalog: Signals.Signal<Hang.Catalog.Root | undefined>;
 	error: Signals.Signal<Error | undefined>;
-	status: Signals.Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
+	status: Signals.Signal<"connecting" | "offline" | "loading" | "live" | "error" | "unsupported">;
 };
 
 export { BufferedRange } from "@moq/hang/container";
@@ -174,6 +156,7 @@ export type PlayerInput = {
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
+	stretch: Signals.Getter<Clock.Duration>;
 	text: {
 		container: Signals.Getter<HTMLElement | undefined>;
 		target: Signals.Getter<string | undefined>;
@@ -206,6 +189,7 @@ export class Sync {
 export type SyncInput = {
 	delay: Signals.Getter<Delay>;
 	lookahead: Signals.Getter<Clock.Duration>;
+	stretch: Signals.Getter<Clock.Duration>;
 };
 
 export type SyncOutput = {

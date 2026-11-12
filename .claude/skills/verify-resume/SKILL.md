@@ -28,9 +28,7 @@ just rs tla moq-net/verify/resume/ResumeReader.tla
 just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/ThreeRoutes.cfg
 ```
 
-The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 14.3M distinct states, three minutes on 32 cores. The second trades a group for a third route, so a route can come up after another failed: about 7.1M states, under two minutes. Both pass at the sync commit.
-
-`Chart.cfg` is for `/statechart` only: a story (`Story`) small enough to draw whole, where the reader switches to a route that holds an older group and asks it for that group. Pass it the spec, `Chart.cfg`, and `ResumeReader.view.ts`, which labels which route serves, what the reader has, and each step as what happens to a route or the reader. For a counterexample, pass the config that broke instead.
+The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 14.3M distinct states, in minutes. The second trades a group for a third route, so a route can come up after another failed: about 7.1M states, in minutes. Both pass at the sync commit. `just test tla rs/moq-net/verify/resume` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes.
 
 ## Open findings
 
@@ -38,21 +36,21 @@ None at the sync commit.
 
 ## Reading a failure
 
-A counterexample is a path through the model, not yet a bug. Replay it as a test in `model/resume.rs`'s `mod test`, one call per step: `received_copy` for a route, `routes.serve(copy.consume())` for a switch, `write` for a landing group, `finish()` for a declared end, `abort(..)` for a route failing, and `drain` or `poll_recv_group` for a poll. If the code does not follow the path, the model is wrong: fix the model to match the code. If it does, report the path and the rule in the code's words, and pin it as a `residual_*` test with its own config so the others still pass. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
+Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a test in `model/resume.rs`'s `mod test`, one call per step: `received_copy` for a route, `routes.serve(copy.consume())` for a switch, `write` for a landing group, `finish()` for a declared end, `abort(..)` for a route failing, and `drain` or `poll_recv_group` for a poll. Pin a path the code follows as a `residual_*` test with its own config, marked with an `\* Open finding:` line, so the others still pass.
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
-| Code (`rs/moq-net/src/model/`) | Model |
+| Code | Model |
 | --- | --- |
-| `resume.rs` `Reader::sync` (reuse of a route's copy, new copy at `newest`) | `Sync`, `Serve` |
-| `resume.rs` `Reader::backfill`, `backfill_gaps` | `Backfill`, `BackfillGaps` |
-| `resume.rs` `Reader::poll_lowest`, `deliverable`, `take`, `observe` | `Poll`, `Scan`, `Peek`, `Deliverable`, `Take` |
-| `resume.rs` `Reader::bound_at_end`, `let_go`, `Copy::retains` | `BoundAtEnd`, `LetGo`, `Retains` |
-| `resume.rs` `Reader::poll_end` | `PollEnd` |
-| `resume.rs` `Producer::splice`, `serve_from`, the front's end | `Serve`, `FrontFinish`, `FrontFail` |
-| `track.rs` `TrackState::is_complete`, `may_land`, `latest_sequence`, `track::Subscriber::has_unread_group` | `Seal`, `Held`, `MayLand`, `Latest`, `HasUnread` |
+| `rs/moq-net/src/model/resume.rs` `Reader::sync` (reuse of a route's copy, new copy at `newest`) | `Sync`, `Serve` |
+| `rs/moq-net/src/model/resume.rs` `Reader::backfill`, `backfill_gaps` | `Backfill`, `BackfillGaps` |
+| `rs/moq-net/src/model/resume.rs` `Reader::poll_lowest`, `deliverable`, `take`, `observe` | `Poll`, `Scan`, `Peek`, `Deliverable`, `Take` |
+| `rs/moq-net/src/model/resume.rs` `Reader::bound_at_end`, `let_go`, `Copy::retains` | `BoundAtEnd`, `LetGo`, `Retains` |
+| `rs/moq-net/src/model/resume.rs` `Reader::poll_end` | `PollEnd` |
+| `rs/moq-net/src/model/resume.rs` `Producer::splice`, `serve_from`, the front's end | `Serve`, `FrontFinish`, `FrontFail` |
+| `rs/moq-net/src/model/track.rs` `TrackState::is_complete`, `may_land`, `latest_sequence`, `track::Subscriber::has_unread_group` | `Seal`, `Held`, `MayLand`, `Latest`, `HasUnread` |
 
 ## Not covered
 

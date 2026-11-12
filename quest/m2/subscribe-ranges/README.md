@@ -50,7 +50,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   (maintainer, 2026-10-28,
   [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), and the
   [IETF scope freeze](/quest/m2/ietf-scope/README.md) adds no hole-marker
-  extension that would let a cache answer a range. A FETCH of the track's newest live group is refused
+  extension that would let a cache answer a range.
+  [Range FETCH over known holes](/quest/m4/ietf-range-fetch.md) later answers
+  a range whose every group is cached or proven never produced. A FETCH of the track's newest live group is refused
   unless its range ends below that group's live edge
   ([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944),
   `poll_settle` in `rs/moq-net/src/ietf/publisher.rs`), replacing the
@@ -99,12 +101,6 @@ relay bounds a sparse FETCH only if the model can request ranges:
 This line owns the end-to-end test: a relay with a sparse cache answers a
 wide past range plus live in both orders, over lite-07 and moq-transport, with
 every sequence delivered or dropped.
-
-## Required
-
-- [JS head fills and time lookups](/quest/m2/subscribe-ranges/js-fills.md) - JS readers fill a cached group's missing head before handing it out, and look a time start up through `Fill.time`
-- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups, in Rust, JS, and the draft, with JS multi-group fills moving onto the subscription
-- [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - what each lite cursor is owed and dropped lives in the model, and `TrackRun` only translates it per version
 
 ## Related
 

@@ -136,6 +136,12 @@ it yet. Which roster peer serves an announce stays the application's explicit
 selection. If identity or signing is wanted later, moq-lite-07's route
 identity becomes a public key, independent of P2P.
 
+Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing): a browser
+that forwards for its peers on a local network is planned separately, in m5
+behind the Rust-to-TypeScript port
+([browser mesh](/quest/m5/browser-mesh.md)). Browsers in this epic stay
+non-transit until it lands.
+
 Decided 2026-10-13: priority then total cost selects among authorized routes;
 a direct connection does not always win. A watching tab never re-serves what
 it receives. Offloading a room of watchers is a local relay's job
@@ -162,15 +168,6 @@ Backend choice does not change the policy that watching tabs never re-serve.
 Before `@moq/p2p` is first published, add its entrypoints to the API
 Extractor declaration checks, which analyze only published packages since
 [moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
-
-## Required
-
-- [Signaling and policy](/quest/m4/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and per-peer `iceServers` decide whether STUN is used
-- [Native pairs over ICE and QUIC](/quest/m4/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
-- [moq-cli joins](/quest/m4/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
-- [Peer route policy](/quest/m4/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
-- [Watch opts in](/quest/m4/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route
-- [Harness](/quest/m4/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
 
 ## Related
 

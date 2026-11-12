@@ -39,7 +39,7 @@ m1 quest on 2026-10-22.
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,
   env vars, and config keys by hand. Add this manual pass to
-  CONTRIBUTING.md's Releases section, which already names the other sources.
+  RELEASE.md's Releases section, which already names the other sources.
 - Fill every gap the report and the manual pass show in the matching
   `MIGRATE.md`. Known gaps: breaking releases cut after the
   2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5

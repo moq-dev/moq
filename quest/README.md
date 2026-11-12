@@ -36,7 +36,7 @@ urgent work of either kind joins m0.
 
 After the next cut, each release cycle runs in three phases by kind of
 change (decided 2026-11-09, maintainer): additive work, then API breaks, then
-wire changes, as [Releases](/CONTRIBUTING.md#releases) describes. `main` is
+wire changes, as [Releases](/RELEASE.md#releases) describes. `main` is
 cut on demand in the first two phases, so their cuts are no longer gated on a
 milestone; the wire phase is short and its cut ends the cycle. An API break
 is what a published consumer adapts to when it rebuilds: the public Rust, JS,
@@ -50,7 +50,8 @@ The next cut performs a re-split, and each cut that ends a cycle shifts the
 milestones (decided 2026-10-19, rule replaced 2026-11-05 and 2026-11-09). The
 [release cut](/quest/m3/release/cut.md) does both:
 
-- The next cut moves remaining release-execution quests to m0 and sorts m3's
+- The next cut moves remaining release-execution quests to a release epic in
+  m0, where each cut re-creates its successor, and sorts m3's
   other quests by kind: additive into m1, API breaks into m2, wire changes
   stay in m3. m4 keeps its quests as later work of higher priority, m5 starts
   empty as later work of lower priority, and today's m5 moves to m6, the
@@ -77,12 +78,3 @@ that fails intermittently in CI, Nightly, or the merge queue becomes a child
 of m0's [test flakes](/quest/m0/test-flakes-2/README.md) epic. Skills that plan
 follow-ups plan a reported flake there without asking whether or where; the
 planning PR's review is the check.
-
-## Required
-
-- [m0: immediate priorities](/quest/m0/README.md) - urgent work of any kind, and maintenance of the current release
-- [m1: additive work](/quest/m1/README.md) - this cycle's improvements and fixes that need no breaking release; each ships with the next cut or as a backported patch
-- [m2: the next breaking release](/quest/m2/README.md) - every change that would need a breaking release if it landed after the cut, plus the cut gate; the cut waits on m2 alone
-- [m3: later work, higher priority](/quest/m3/README.md) - byte streams and mesh libraries first, release execution, what a named consumer needs, and bug fixes in shipped code
-- [m4: later work, lower priority](/quest/m4/README.md) - tests, tooling, benchmarks, optimizations, and features nobody waits on yet
-- [m5: deferred](/quest/m5/README.md) - gated on the outside world (hardware, a partner, a consumer, a provider's offer, or an upstream release), or speculative with no named consumer

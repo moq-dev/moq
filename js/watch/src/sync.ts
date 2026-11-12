@@ -5,8 +5,8 @@ import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, read
  * How far playback trails the live edge.
  *
  * `"auto"` (the default) holds the largest playout target the registered decoders measure from how
- * late their frames arrive (see doc/concept/audio-jitter.md). A `Duration` fixes the delay at
- * exactly that value and disables adaptation.
+ * late their frames arrive (see doc/concept/audio-jitter.md), at most 10 s. A `Duration` fixes the
+ * delay at exactly that value and disables adaptation.
  *
  * `"instant"` drops the buffer and the pacing together: nothing is held, and the wait before
  * presenting a frame never sleeps, so it presents as soon as it exists. It also overrides
@@ -14,6 +14,16 @@ import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, read
  * off: a ring with no depth underruns, so the audio decoder unsubscribes and flushes its ring.
  */
 export type Delay = "instant" | "auto" | Duration;
+
+/** The default {@link SyncInput.stretch}: how far live audio may trail the clock before it skips. @internal */
+export const STRETCH = Duration.secs(2);
+
+/**
+ * The most an `"auto"` delay holds. The publisher advertises the jitter and delay it is measured
+ * from, so the clock bounds them here, whatever the catalog says. Matches
+ * `moq_audio::playback::Input::LATENCY_MAX`, which bounds `moq play`'s `--delay`. @internal
+ */
+export const DELAY_MAX = Duration.secs(10);
 
 /** Signals the sync reads. */
 export type SyncInput = {
@@ -25,12 +35,29 @@ export type SyncInput = {
 	 *
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
-	 * timestamps) build up instead of being skipped. Always finite, so worst case the audio ring
-	 * drops its oldest samples rather than exhausting memory. With a nonzero lookahead, the first video
+	 * timestamps) build up instead of being skipped. Audio that falls behind, as after a stall,
+	 * catches up by playing faster, and skips only what trails by more than the larger of the
+	 * lookahead and {@link SyncInput.stretch}. Always
+	 * finite, so worst case the audio ring drops its oldest samples rather than exhausting memory.
+	 * With a nonzero lookahead, the first video
 	 * frame is a poster until every enabled media track holds the resolved delay; `lookahead` is
 	 * the most held ahead, not the amount required to start.
 	 */
 	lookahead: Getter<Duration>;
+
+	/**
+	 * How far audio may trail the clock before it skips ahead (default: 2 s).
+	 *
+	 * After a stall, audio slows down and falls behind the clock rather than dropping what arrives
+	 * late, then speeds up until it is back on it; only what trails by more than this is skipped. The
+	 * audio subscription asks for `delay + stretch`, so that late audio still arrives. A buffered
+	 * player already keeps its whole lookahead, so audio skips only past the larger of the two.
+	 *
+	 * Zero turns the time stretch off: received audio plays unaltered, late audio is skipped, an
+	 * underrun is silence, and drift against the publisher's clock is corrected by a small skip or
+	 * pad. Video is unaffected either way: it stays on the clock.
+	 */
+	stretch: Getter<Duration>;
 };
 
 /** Signals the sync derives. */
@@ -46,7 +73,7 @@ export type SyncOutput = {
 	reference: Signal<number | undefined>;
 
 	// The resolved delay from the live edge to the playhead: the configured number, or in "auto" the
-	// largest registered playout target. Zero for "instant".
+	// largest registered playout target, at most DELAY_MAX. Zero for "instant".
 	delay: Signal<Duration>;
 
 	// The media timestamp of the most recently received frame.
@@ -131,6 +158,7 @@ export class Clock {
 		this.in = {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
 			lookahead: getter(props?.lookahead ?? Duration.ZERO),
+			stretch: getter(props?.stretch ?? STRETCH),
 		};
 	}
 
@@ -467,6 +495,9 @@ export class Sync {
 			for (const { props } of effect.get(this.#clock.parts)) {
 				delay = delay.max(effect.get(props.target) ?? Duration.ZERO);
 			}
+			// Capped once, on the resolved delay, so audio and video stay on one clock. The
+			// subscription's max delay follows it.
+			delay = delay.min(DELAY_MAX);
 		}
 
 		this.#clock.out.delay.set(delay);

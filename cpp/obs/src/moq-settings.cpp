@@ -206,7 +206,8 @@ const std::vector<Field> &Fields()
 				   600000, 1000, "Ceiling on the growing reconnect delay."));
 		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout, BACKOFF_TIMEOUT), 0,
 				   3600000, 1000,
-				   "Total time to keep retrying before the stream fails. 0 retries forever."));
+				   "Total time to keep reconnecting after a drop before the stream fails. 0 retries "
+				   "forever. A first connect that reaches no server fails the stream at once."));
 
 		// QUIC transport.
 		f.push_back(Choose(

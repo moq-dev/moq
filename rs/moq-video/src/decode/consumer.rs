@@ -173,7 +173,7 @@ impl Consumer {
 		let name = name.into();
 		let min = Reader::open(broadcast, catalog, &name, &options, options.delay, 0).await?;
 
-		let warmup = catalog.warmup.unwrap_or_default();
+		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::WARMUP_MAX);
 		let max = if warmup.is_zero() {
 			None
 		} else {
@@ -587,7 +587,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -671,7 +671,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -744,7 +744,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -890,7 +890,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -989,7 +989,7 @@ mod tests {
 		read(&mut consumer).await;
 
 		producer.write(picture(200_000, b"new access unit")).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		read(&mut consumer).await;
 		read(&mut consumer).await;
 		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
@@ -1007,11 +1007,11 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(
+		let producer = moq_mux::container::Producer::new(
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 		);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -1098,7 +1098,7 @@ mod tests {
 					.unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let decode = Options {
 			decoder: Config {
@@ -1268,6 +1268,36 @@ mod tests {
 			write(&mut live, &[second]);
 			assert_eq!(read(&mut consumer).await, (second, Lane::Max));
 		}
+	}
+
+	/// A catalog warmup past the cap widens the max-delay decoder's subscription by the cap alone.
+	#[tokio::test]
+	async fn a_huge_warmup_reaches_back_by_the_cap() {
+		let (broadcast, mut track) = live_track();
+		let published = track.clone();
+		group(&mut track, 0, &[0]).finish().unwrap();
+		let _consumer = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(Some(std::time::Duration::from_secs(3600))),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
+					..Config::new()
+				},
+				start: Start::Latest,
+				delay: Delay {
+					max: Some(std::time::Duration::ZERO),
+					..Delay::default()
+				},
+			},
+		)
+		.await
+		.unwrap();
+		assert_eq!(
+			published.subscription().and_then(|sub| sub.delay.max),
+			Some(moq_mux::container::WARMUP_MAX)
+		);
 	}
 
 	/// On a cold network join the live edge's stream often lands first. The

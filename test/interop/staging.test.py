@@ -45,6 +45,7 @@ class Staging(unittest.TestCase):
             self.tools / "cargo",
             """
 case "$1" in
+    tree) echo "moq-net v0.1.0" ;;
     metadata) printf '{"target_directory":"%s"}\n' "$FIXTURE_TARGET" ;;
     install)
         while [[ "$1" != --root ]]; do shift; done

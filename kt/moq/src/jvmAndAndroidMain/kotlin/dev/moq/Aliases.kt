@@ -21,6 +21,13 @@ typealias ClientConfig = uniffi.moq.MoqClientConfig
 /** The credentials a [Client] presents, replaceable while it runs. */
 typealias Tokens = uniffi.moq.MoqTokens
 
+/**
+ * A request token a session presents, which a [Route] or [Claim] names with `setAuth`. Suspend on
+ * `answered()` for the peer's verdict; `cancel()` withdraws it unless a route or claim still names
+ * it.
+ */
+typealias Credential = uniffi.moq.MoqCredential
+
 /** Certificate trust and the mTLS identity for a [ClientConfig]. */
 typealias ClientTls = uniffi.moq.MoqClientTls
 
@@ -54,15 +61,15 @@ typealias OriginProducer = uniffi.moq.MoqOriginProducer
 
 /**
  * An exact route on an origin, owning one broadcast (`broadcast()` to fill it). `announce`,
- * `withdraw`, and `setCost` advertise it. Closing or cancelling it retracts it, as does ending its
- * broadcast; a broadcast handle alone does not keep it announced.
+ * `withdraw`, `setCost`, and `setAuth` advertise it. Closing or cancelling it retracts it, as does
+ * ending its broadcast; a broadcast handle alone does not keep it announced.
  */
 typealias Route = uniffi.moq.MoqRoute
 
 /**
  * A prefix route on an origin, from `OriginProducer.claim`: a claim that every path beneath a
- * prefix can be served, yielding each request (`requested()`). `announce`, `withdraw`, and
- * `setCost` advertise it. Closing or cancelling it retracts it and rejects the requests still
+ * prefix can be served, yielding each request (`requested()`). `announce`, `withdraw`, `setCost`,
+ * and `setAuth` advertise it. Closing or cancelling it retracts it and rejects the requests still
  * waiting.
  */
 typealias Claim = uniffi.moq.MoqClaim
@@ -189,7 +196,8 @@ typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
  * The read-only facts on a received route: the [Instance] of the stream it serves, relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * (oldest first), static production and link cost (lower wins), and its informational `rtt` to the
+ * origin node.
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
@@ -366,6 +374,8 @@ typealias ConnectionState = uniffi.moq.MoqConnectionState
 
 /**
  * Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
+ * It applies only once a session has been established: a first dial that reaches no session ends
+ * the connection with its error rather than retrying.
  */
 typealias Backoff = uniffi.moq.MoqBackoff
 

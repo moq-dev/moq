@@ -16,16 +16,9 @@ sibling in its milestone (rejected: merge its quests into the parent). The
 same PR that planned this promoted `quest/m4/kio-channel-contention/` and
 `quest/m4/stream-transports/` out of `quest/m4/perf/`.
 
-This one waits because `quest mv` refuses to move a quest with an open PR:
-the PR's branch is named after the quest's path. Once they land, run
-`quest mv quest/m2/cluster-routing/routes quest/m2/cluster-routes` and start
-no new quest under the old path first.
-
-## Waiting
-
-- moq-dev/moq: the open PRs under `quest/m2/cluster-routing/routes/` land or
-  close ([#8401](https://github.com/moq-dev/moq/pull/8401),
-  [#8397](https://github.com/moq-dev/moq/pull/8397) and
-  [#8375](https://github.com/moq-dev/moq/pull/8375) on 2026-11-09). Check
-  with `gh pr list -R moq-dev/moq --search "head:quest/m2/cluster-routing/routes/"`
-  printing nothing.
+It waited because `quest mv` refuses to move a quest with an open PR: the
+PR's branch is named after the quest's path. Checked 2026-11-12
+(/quest-unblock): no open PR's head is under
+`quest/m2/cluster-routing/routes/`. Run
+`quest mv quest/m2/cluster-routing/routes quest/m2/cluster-routes` before any
+quest under the old path is started.

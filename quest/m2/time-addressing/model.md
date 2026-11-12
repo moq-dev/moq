@@ -57,7 +57,7 @@ a producer would need per-track memory of its last number.
   wire, Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872),
   merged 2026-11-05) and
   [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md),
-  not the whole epic. [Drop set](/quest/m1/drop-set.md) lands first too: its
+  not the whole epic. Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)) lands first too: its
   runs keyed by group sequence convert mechanically to starts.
 - **Old relays** (decided 2026-10-26, maintainer): a released relay fills a
   hole over lite-05/06 with one FETCH per integer ID, so sparse IDs cost it
@@ -131,12 +131,12 @@ recorded only sequencing.
 - **No local clock in the model.** Added 2026-11-07 (maintainer,
   /quest-plan from the API shape audit): `Timestamp::now()`, the only model
   API that reads the local clock, is removed, and its callers stamp from
-  their own clock: moq-boy, moq-hls, moq-room, moq-stats, moq-bench, hang's
+  their own clock: moq-boy, moq-hls, moq-stats, moq-bench, hang's
   video example, moq-tokio's examples, and tests across moq-net, moq-json,
   moq-mux, and moq-hls. `Timed<P>` moves from moq-net's root to moq-json,
   since moq-net never uses it internally, and its `at` becomes required under
   the rule above. Every crate that names `moq_net::Timed` follows the move:
-  moq-mux, moq-ffi, moq-c, moq-cli, moq-room, moq-boy, moq-hls, moq-stats,
+  moq-mux, moq-ffi, moq-c, moq-cli, moq-boy, moq-hls, moq-stats,
   and moq-net-tests.
 - **One anchor rule.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ collapse `Anchor` to `{Oldest,
   Relative(n), Time(ts)}` with every end inclusive (rejected: keep
@@ -220,4 +220,3 @@ Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 ## Required
 
 - [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - the lite cursor state lives in the model before the cut rekeys it
-- [Drop set](/quest/m1/drop-set.md) - its dropped and expired runs convert mechanically from sequences to starts

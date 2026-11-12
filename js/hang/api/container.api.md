@@ -26,6 +26,7 @@ export interface ConsumerProps {
 	delay?: Signals.GetterInit<Net.Track.Delay>;
 	format: Format;
 	predecessor?: Consumer;
+	wait?: Signals.GetterInit<Net.Clock.Duration | undefined>;
 	warmup?: Net.Clock.Duration;
 }
 
@@ -45,6 +46,9 @@ export interface Frame {
 export namespace Legacy {
 	export { BufferedRange };
 	export { BufferedRanges };
+	export interface Finished {
+		abort(err: Error): void;
+	}
 	export class Format implements Format_1 {
 		constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data");
 		decode(frame: Uint8Array): Frame[];
@@ -55,9 +59,10 @@ export namespace Legacy {
 	export { Frame };
 	export class Producer {
 		constructor(track: Net.Track.Producer, format: Legacy.Format);
-		close(err?: Error): void;
+		abort(err: Error): void;
 		discontinuity(endpoint?: Net.Clock.Duration): void;
 		encode(data: Uint8Array | Legacy.Source, pts: Net.Clock.Duration, keyframe: boolean): void;
+		finish(): Legacy.Finished;
 	}
 	export interface Source {
 		byteLength: number;

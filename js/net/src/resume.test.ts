@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import * as cache from "./cache.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
@@ -3593,6 +3594,50 @@ test("a resumed reader takes back its stale reports", () => {
 	a.close();
 });
 
+// A stale run the reader queued and has yet to report is taken back by an update too, as a plain
+// reader's is: the new terms judge it anew, rather than an old verdict going out under the new
+// update number. The update widens past the verdict, so nothing goes out at all. Mirrors Rust
+// `a_resumed_reader_takes_back_its_queued_stale_runs`, which checks the queue directly.
+test("a resumed reader takes back its queued stale runs", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(1_000) } });
+		ta.write(0n);
+		expect(drain(sub)).toEqual([0n]);
+		hooks.dropTrackGroups(ta.producer, 2n, 3n, staleHole(1_000));
+		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 2n, end: 3n });
+
+		// The new route's stale run around the one already reported goes out in parts once the old
+		// route can no longer deliver it: the part below it first, with the rest queued.
+		front.serve(b.consume());
+		await settle();
+		hooks.dropTrackGroups(tb.producer, 1n, 5n, staleHole(1_000));
+		tb.write(5n);
+		expect(drain(sub)).toEqual([5n]);
+		await clock.advance(Duration.millis(1_000));
+		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 2n });
+
+		// An update that widens the budget past the verdict: nothing is stale under it.
+		sub.update({ delay: { max: Duration.millis(60_000) } });
+		expect(hooks.reofferStale(sub)).toEqual([{ start: 1n, end: 5n }]);
+		await settle();
+		expect(hooks.tryDrop(sub)).toBeUndefined();
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	} finally {
+		installed.close();
+	}
+});
+
 // A stale run one route reported is still taken back once another serves: the update reopened it
 // downstream, and the new route's copy knows nothing of it, so the groups it delivers there
 // afterwards are owed rather than kept reported. Mirrors Rust.
@@ -3683,4 +3728,32 @@ test("a group an inner front hands out already failed still continues on the out
 	inner.consumer.close();
 	a.close();
 	b.close();
+});
+
+// A routed reader's record bills the pool of the copy serving it, and follows a route change: the
+// replaced route's pool stops carrying it, so the pool serving the reader is the one whose debt can
+// fold it.
+test("a routed reader's record bills the serving route's pool across a route change", async () => {
+	const { a, b, active, swap, close } = await setup();
+	const pools = { a: new cache.Pool({ capacity: 1 << 30 }), b: new cache.Pool({ capacity: 1 << 30 }) };
+	const ta = copy(a);
+	const tb = copy(b);
+	hooks.poolTrack(ta.producer, pools.a);
+	hooks.poolTrack(tb.producer, pools.b);
+	const sub = active.track("seq").subscribe({ delay: { max: null } });
+	// Every other group, so the reader's record holds a run per gap.
+	const runs = 64n;
+	for (let group = 0n; group < runs; group++) ta.write(2n * group);
+	expect(drain(sub).length).toBe(Number(runs));
+
+	await swap();
+	tb.write(2n * runs);
+	const before = { a: pools.a.used, b: pools.b.used };
+	expect(drain(sub)).toEqual([2n * runs]);
+	const bill = Number(runs - 1n) * cache.READER_RUN_OVERHEAD;
+	expect(before.a - pools.a.used).toBeGreaterThanOrEqual(bill);
+	expect(pools.b.used - before.b).toBeGreaterThanOrEqual(bill);
+
+	sub.close();
+	close();
 });

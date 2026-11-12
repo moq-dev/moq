@@ -191,21 +191,4 @@ quests that require them.
 
 ## Required
 
-- [Drop set](/quest/m1/drop-set.md) - each cursor's disposition record is billed to the cache pool, as the track's drop runs are, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind` (held in m1 by an open claim)
-- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH for multi-group reads (single-group FETCH stays); merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
-- [Address groups by timestamp](/quest/m2/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
-- [Cluster routing](/quest/m2/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
-- [Promote the routes epic out of cluster routing](/quest/m2/promote-cluster-routes.md) - no epic holds another, once the open PRs under it land
-- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - the wire names every abandoned group and the drop signal is public, so readers count losses instead of stalling
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - warm routes and the eligibility rule hold in route-layer sweeps, and the warm message's wire placement is chosen before the lite-07 cut
-- [Route latency](/quest/m2/route-latency.md) - the maintainer decides whether a lite-07 ROUTE carries an informational latency sum, and it lands before the cut if so
-- [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
-- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
-- [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
-- [Finishing a media producer returns a Finished handle](/quest/m2/finished-handle.md) - `finish(self)` consumes the media crates' producers, as it does moq-net's, so appending after finish doesn't compile
-- [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
-- [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge
-- [A watcher reads connecting, not offline, while its connection is down](/quest/m2/watch-connecting-status.md) - `@moq/watch` status says OFFLINE only when connected and unannounced
-- [moq-transport is a compatibility layer again](/quest/m2/ietf-scope/README.md) - our extensions, JS FETCH serving, and track listing leave moq-transport; live media and joining FETCH stay
-- [The reconnect loop stops judging errors by kind](/quest/m2/reconnect-no-error-kinds.md) - after a first session every failure retries with backoff; `Verdict::Refused`, `Verdict::Fatal`, and `From<&Error> for Verdict` go

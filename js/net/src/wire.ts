@@ -16,6 +16,7 @@ import type * as Instance from "./instance.ts";
 import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
+import type { Own } from "./route.ts";
 import type * as track from "./track.ts";
 
 /** The protocol-facing operations behind a broadcast handle. */
@@ -104,6 +105,10 @@ export interface OriginConsumer {
 	local(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer | undefined;
 	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `instance`. */
 	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
+	/** The lite-07 route identity the advertisements are originated under. */
+	readonly own: Own;
+	/** Whether the handle's scope admits everything beneath the root-relative `prefix`. */
+	covers(prefix: Path.Valid): boolean;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
@@ -143,7 +148,11 @@ export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 
 /** The protocol-facing operations behind an established session. */
 export interface Established {
-	consume(path: Path.Valid): broadcast.Consumer;
+	/**
+	 * Consume `path` from the session: the route it ranks best, or with `instance`, the best
+	 * route of that instance alone, as a request pinned to it resolves.
+	 */
+	consume(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer;
 	/**
 	 * Whether the peer refuses an announce request overlapping one it still holds, so
 	 * discovery never holds two where one covers the other.

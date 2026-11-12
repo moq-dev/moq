@@ -13,11 +13,11 @@ import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
-import { AuthMessage, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
 import type { RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
@@ -26,7 +26,6 @@ import { malformed, refuse } from "./request_stream.ts";
 import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace } from "./subscribe_namespace.ts";
-import { SubscribeTracks } from "./subscribe_tracks.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -64,12 +63,12 @@ export class Connection implements Session {
 	/** moq-transport has no PROBE, so this stays empty; see {@link Session.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
-	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Session.auth}. */
+	/** Our tokens, which requests carry; see {@link Session.auth}. */
 	get auth(): Auth.Handle {
 		return this.#auth.handle;
 	}
 
-	// Our tokens and grants, and the answers to the peer's (MoQ Auth).
+	// Our tokens, for the requests that carry them.
 	#auth: AuthSession;
 
 	// The established WebTransport session.
@@ -126,7 +125,6 @@ export class Connection implements Session {
 		maxAge = false,
 		activeCount = false,
 		cluster,
-		auth = false,
 		handle,
 		early = [],
 		extensions,
@@ -156,8 +154,6 @@ export class Connection implements Session {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
-		/** Whether MoQ Auth is negotiated: offered by both SETUPs. */
-		auth?: boolean;
 		/** The auth handle to build the session on, or undefined for one of its own. */
 		handle?: Auth.Handle;
 		/** Uni streams that arrived before the peer's SETUP, type unread. */
@@ -181,9 +177,7 @@ export class Connection implements Session {
 
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
-		const session = this.#session;
 		this.#auth = new AuthSession({
-			wire: auth ? new IetfAuthWire(session) : undefined,
 			requests: true,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
@@ -212,7 +206,6 @@ export class Connection implements Session {
 			cluster,
 			grant: this.#auth.scope,
 			auth: this.#auth,
-			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;
 		this.#declaredSolicit = extensions?.solicit ?? true;
@@ -377,9 +370,19 @@ export class Connection implements Session {
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
-				const decoded = SubscribeTracks.decode(stream.reader, this.#session.version);
-				const msg = await this.#request(stream, "subscribe_namespace", decoded);
-				if (msg) await handed(this.#publisher.runSubscribeTracks(msg, stream));
+				// We list no tracks by PUBLISH, so each listing is refused on its own. Only its
+				// Request ID is read; the rest of the body goes unread.
+				const requestId = await Message.decode(stream.reader, async (body) => {
+					const id = await body.u62();
+					await body.discard();
+					return id;
+				}).catch((err: unknown) => {
+					throw malformed(err, "subscribe_tracks");
+				});
+				this.#spend(requestId);
+				await handed(
+					this.#refuseUnsupported(stream, "subscribe_namespace", "SUBSCRIBE_TRACKS is not supported"),
+				);
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
@@ -391,7 +394,8 @@ export class Connection implements Session {
 			case BigInt(Fetch.id): {
 				const decoded = Fetch.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "fetch", decoded);
-				if (msg) await handed(this.#publisher.runFetch(msg, stream));
+				// Only a relay answers a FETCH, from its cache.
+				if (msg) await handed(this.#refuseUnsupported(stream, "fetch", "FETCH is not supported"));
 				break;
 			}
 
@@ -417,12 +421,6 @@ export class Connection implements Session {
 				}
 
 				await handed(this.#subscriber.runPublishNamespace(msg, stream));
-				break;
-			}
-			case BigInt(AuthMessage.id): {
-				// Only a peer that negotiated MoQ Auth may send one.
-				if (!this.#auth.negotiated) throw new ProtocolViolation("AUTH without MoQ Auth");
-				await this.#auth.serve(stream);
 				break;
 			}
 			case BigInt(Publish.id): {
@@ -464,6 +462,11 @@ export class Connection implements Session {
 	/** Spend a request's ID, closing the session if it was already used. */
 	#spend(requestId: bigint) {
 		this.#session.checkRequestId(requestId);
+	}
+
+	/** Refuse a request we never serve NOT_SUPPORTED, ending its stream. */
+	async #refuseUnsupported(stream: Stream, kind: RequestKind, reasonPhrase: string) {
+		await refuse(stream, this.#session.version, kind, { condition: "not_supported", reasonPhrase });
 	}
 
 	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */

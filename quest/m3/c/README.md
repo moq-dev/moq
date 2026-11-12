@@ -36,7 +36,7 @@ Decided earlier, still standing:
   typedef, and unnamed variant fields are `v1`, as in C++.
 - The generated package takes over the `moq-c` name and `moq::c` target at
   the shared minor of the cut that ships it, after the hand-written crate's
-  0.22 (CONTRIBUTING.md's [Versions](/CONTRIBUTING.md#versions),
+  0.22 (RELEASE.md's [Versions](/RELEASE.md#versions),
   [moq-dev/moq#7610](https://github.com/moq-dev/moq/pull/7610)).
 - Docs change inline: the consumer quest rewrites `doc/lib/c`, and its Impact
   bullet carries the move for the package's `MIGRATE.md`.
@@ -56,5 +56,3 @@ publication; [old-crate retirement](/quest/m3/release/c-retire.md) follows.
 ## Required
 
 - [Switch to rust2's exporter](/quest/m3/ffi-exporter.md) - the C ABI comes from rust2's exporter instead of a UniFFI generator
-- [C consumers](/quest/m3/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
-- [Async failure contract](/quest/m3/c/async-failure-contract.md) - every generated async call returns a task and calls back exactly once, cancelled when its task was freed first

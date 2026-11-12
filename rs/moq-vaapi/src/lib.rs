@@ -17,6 +17,13 @@
 )]
 // VA-API and DMA-BUF are Linux-only, so elsewhere the crate is an empty stub and
 // moq-video only depends on it there.
+#![cfg_attr(
+	not(target_os = "linux"),
+	allow(
+		rustdoc::broken_intra_doc_links,
+		reason = "the items these docs link to are Linux-only"
+	)
+)]
 #![cfg(target_os = "linux")]
 
 mod bindings;

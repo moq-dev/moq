@@ -3,7 +3,7 @@ import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { decodeError } from "../util/decode_error.ts";
-import { decodePin, encodePin } from "./instance.ts";
+import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { TrackInfo } from "./track.ts";
 import { hasTracks, type Version } from "./version.ts";
@@ -26,10 +26,13 @@ export class Tracks {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. */
 	instance?: Instance.Valid;
+	/** The origin node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
+	node: bigint;
 
-	constructor(broadcast: Path.Valid, instance?: Instance.Valid) {
+	constructor(broadcast: Path.Valid, instance?: Instance.Valid, node = 0n) {
 		this.broadcast = broadcast;
 		this.instance = instance;
+		this.node = node;
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -37,6 +40,7 @@ export class Tracks {
 		return Message.encode(w, async (w) => {
 			await w.string(Path.encode(this.broadcast));
 			await encodePin(w, version, this.instance);
+			await encodeNode(w, version, this.node);
 		});
 	}
 
@@ -45,7 +49,7 @@ export class Tracks {
 		return Message.decode(r, async (r) => {
 			const broadcast = Path.decode(await r.string());
 			const instance = await decodePin(r, version);
-			return new Tracks(broadcast, instance);
+			return new Tracks(broadcast, instance, await decodeNode(r, version));
 		});
 	}
 }

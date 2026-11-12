@@ -70,7 +70,7 @@ test-changed list:
 coverage package="":
     python3 ../sh/js/coverage.py '{{ package }}'
 
-# Run one net benchmark: broadcasts, forward, requests, fills, fetch, reader, frames, track, resume, observed, drift, ledger, bandwidth, replay, varint, lite-varint, priority, subscribe-drop, refresh, compression, or datagrams.
+# Run one net benchmark: broadcasts, forward, requests, fills, fill-probe, reader, frames, track, resume, observed, drift, ledger, bandwidth, replay, varint, lite-varint, priority, subscribe-drop, refresh, compression, or datagrams.
 bench name:
     uv run --no-project python ../sh/js/install.py frozen
     bun net/bench/{{ name }}.ts
@@ -125,11 +125,6 @@ qmux-bench:
     uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project net/bench/tsconfig.json
     bun net/bench/qmux.ts
-
-# Sweep open arrival handles against their unread backlog.
-arrivals-bench:
-    uv run --no-project python ../sh/js/install.py frozen
-    bun watch/bench/arrivals.ts
 
 # Reduce and compare the worst known peer grant shapes, swept over AUTH_OK size.
 pattern-bench:

@@ -394,3 +394,67 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 		}
 	}
 });
+
+// A player waits on a hole for its playout delay, while groups that did arrive play until the max.
+test("a hole is waited for the wait while an arrived group plays up to the max delay", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const track = new Track.Producer("audio");
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+		format: new Format("audio"),
+		delay: { max: Duration.millis(1000) },
+		wait: Duration.millis(100),
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	const write = (sequence: bigint, ms: number, finish = true) => {
+		const group = track.createGroup(sequence);
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Duration.millis(ms)),
+			timestamp: Time.Timestamp.fromMicros(ms * 1000),
+		});
+		if (finish) group.finish();
+		return group;
+	};
+	const reads = () => results.map((read) => (read.kind === "frame" ? read.frame.timestamp.asMillis() : read.kind));
+	try {
+		// A stalled group 500 ms behind the newest content is still within the max delay.
+		const stalled = write(0n, 0, false);
+		write(1n, 500);
+		await flush();
+		await clock.advance(Duration.millis(500));
+		expect(reads()).toEqual([0]);
+		stalled.finish();
+		await flush();
+		expect(reads()).toEqual([0, 500]);
+
+		// A missing group expires the wait after the first group past it arrived.
+		write(3n, 520);
+		await flush();
+		await clock.advance(Duration.millis(99));
+		expect(reads()).toEqual([0, 500]);
+		await clock.advance(Duration.millis(1));
+		expect(reads()).toEqual([0, 500, "gap", 520]);
+
+		// Or at once, when the newest content is already the wait past where the group after it begins.
+		write(5n, 700);
+		write(6n, 800);
+		await flush();
+		expect(reads()).toEqual([0, 500, "gap", 520, "gap", 700, 800]);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
+	}
+});

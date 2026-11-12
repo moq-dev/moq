@@ -24,8 +24,7 @@ runtimes (`moq-tokio` and `moq-uring`).
   [quinn-udp](https://github.com/quinn-rs/quinn). All credit for it goes to
   the quinn developers; it stays under quinn's MIT or Apache-2.0 license. See
   [moq-quic](../moq-quic/README.md) for the upstream commit, carried changes,
-  and how fixes are ported. The `fast-apple-datapath` feature enables its
-  batched path on Apple's private `sendmsg_x`/`recvmsg_x`.
+  and how fixes are ported.
 
 This is infrastructure, not an entry point: build against `moq-tokio` or
 `moq-uring`, which own the worker groups formed from these pieces.

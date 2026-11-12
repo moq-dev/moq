@@ -39,7 +39,10 @@ Per-platform, picked at compile time:
   access is available (build 20348+) and granted.
 
 `capture::cameras()` lists AVFoundation, V4L2, or Media Foundation cameras with
-identifiers accepted by `capture::Source::Camera`. `capture::displays()` does
+identifiers accepted by `capture::Source::Camera`. With the `pipewire` feature,
+a Linux webcam that PipeWire fronts lists as `pipewire:<node name>` rather than
+`/dev/videoN`, because PipeWire lets several clients share it, and the default
+camera is PipeWire's when it lists one, else `/dev/video0`. `capture::displays()` does
 the same for macOS, Windows, and X11 displays. `capture::windows()` lists macOS,
 Windows, and X11 windows. Wayland display selection stays in the desktop portal
 picker, which does not expose a stable display identifier; ask it with
@@ -196,13 +199,10 @@ it to take a GPU path for a representation you recognize, and fall back to
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
 `Surface::into_i420()` returns typed pixels with size and color intact;
 `I420::into_data()` explicitly extracts the packed bytes. `Surface::to_rgba(config)`
-and `Surface::to_bgra(config)` are the portable exits for CPU
-image and UI toolkits, returning owned, tightly packed pixels with the surface's
-color metadata applied. Both orders are there because toolkits disagree and the
-conversion is a full pass over the frame: producing the order the caller wants
-costs nothing extra, while producing the other one and swapping two channels
-afterwards costs a second pass. They borrow the surface, so a frame held behind
-an `Arc` shared with something else converts without being unwrapped first.
+is the portable exit for CPU image and UI toolkits, returning owned, tightly
+packed pixels with the surface's color metadata applied. It borrows the surface,
+so a frame held behind an `Arc` shared with something else converts without
+being unwrapped first.
 Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux | Android |

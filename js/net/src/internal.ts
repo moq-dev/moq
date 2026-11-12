@@ -8,7 +8,7 @@
 import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Charge, Pool } from "./cache.ts";
+import type { Reader as CacheReader, Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -30,6 +30,7 @@ import type {
 	Request,
 	Subscriber,
 	Subscription,
+	WireRecord,
 } from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
@@ -174,8 +175,8 @@ export interface Run {
 /** Add `[start, end)` to sorted, disjoint, non-adjacent `runs`, merging every run it touches. */
 export function insertRun(runs: Run[], start: bigint, end: bigint): void {
 	if (start >= end) return;
-	let first = 0;
-	while (first < runs.length && runs[first].end < start) first++;
+	// Merging a run it touches, so the first that ends at or past `start`.
+	const first = runsFrom(runs, start - 1n);
 	let last = first;
 	while (last < runs.length && runs[last].start <= end) last++;
 	const merged =
@@ -191,6 +192,19 @@ export function removeRun<R extends Run>(runs: readonly R[], start: bigint, end:
 			{ ...run, start: max(run.start, end), end: run.end },
 		].filter((part) => part.start < part.end),
 	);
+}
+
+/** Take `[start, end)` out of sorted, disjoint `runs` in place, each part keeping its run's fields. */
+export function cutRun<R extends Run>(runs: R[], start: bigint, end: bigint): void {
+	if (start >= end) return;
+	const from = runsFrom(runs, start);
+	let to = from;
+	while (to < runs.length && runs[to].start < end) to++;
+	if (from === to) return;
+	const parts: R[] = [];
+	if (runs[from].start < start) parts.push({ ...runs[from], end: start });
+	if (runs[to - 1].end > end) parts.push({ ...runs[to - 1], start: end });
+	runs.splice(from, to - from, ...parts);
 }
 
 /**
@@ -262,16 +276,67 @@ export function insertDrop(
 	return merged;
 }
 
+/**
+ * The parts of sorted, disjoint `runs` that sorted, disjoint `cut` leaves, each keeping its run's
+ * fields, as {@link removeRun} of each cut would, in one pass.
+ */
+export function subtractRuns<R extends Run>(runs: readonly R[], cut: readonly Run[]): R[] {
+	const kept: R[] = [];
+	let first = 0;
+	for (const run of runs) {
+		while (first < cut.length && cut[first].end <= run.start) first++;
+		let from = run.start;
+		for (let i = first; i < cut.length && cut[i].start < run.end; i++) {
+			if (cut[i].start > from) kept.push({ ...run, start: from, end: cut[i].start });
+			from = max(from, cut[i].end);
+		}
+		if (from < run.end) kept.push({ ...run, start: from, end: run.end });
+	}
+	return kept;
+}
+
+/**
+ * `drops` with each of the sorted, disjoint `runs` inserted as {@link insertDrop} inserts it, in
+ * one pass: folding in a span of many runs costs the runs, not their square.
+ */
+export function insertDrops(drops: readonly DropRun[], runs: readonly DropRun[]): DropRun[] {
+	if (runs.length === 0) return [...drops];
+	const next = subtractRuns(drops, runs);
+	// Appended one by one: a peer controls how many runs there are, past any argument limit.
+	for (const run of runs) next.push(run);
+	next.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+	const merged: DropRun[] = [];
+	for (const run of next) {
+		const last = merged[merged.length - 1];
+		if (last && last.end === run.start && sameHole(last, run)) last.end = run.end;
+		else merged.push({ ...run });
+	}
+	return merged;
+}
+
 /** The error `drops` gave `sequence` up with, if any. */
 export function dropAt(drops: readonly DropRun[], sequence: bigint): Error | undefined {
 	return drops.find((run) => run.start <= sequence && sequence < run.end)?.error;
+}
+
+/** The index of the first of sorted, disjoint `runs` ending past `sequence`. */
+export function runsFrom(runs: readonly Run[], sequence: bigint): number {
+	let lo = 0;
+	let hi = runs.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (runs[mid].end <= sequence) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
 }
 
 /** The parts of `[start, end)` that sorted, disjoint `runs` do not cover, in order. */
 export function runGaps(runs: readonly Run[], start: bigint, end: bigint): Run[] {
 	const gaps: Run[] = [];
 	let next = start;
-	for (const run of runs) {
+	for (let i = runsFrom(runs, start); i < runs.length; i++) {
+		const run = runs[i];
 		if (next >= end) break;
 		if (run.start > next) gaps.push({ start: next, end: min(run.start, end) });
 		next = max(next, run.end);
@@ -452,6 +517,11 @@ export interface ResumeSource {
 	 * route change keeps, and those the serving copy reported.
 	 */
 	reofferStale(): Run[];
+	/**
+	 * The bill for the reader's record on the serving copy's account: `current` while it bills that
+	 * account, or else a new one. `current` without a serving copy.
+	 */
+	bill(current: CacheReader | undefined): CacheReader | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -572,8 +642,11 @@ export const hooks: {
 	 * ask below it. Assigned by `track.ts`.
 	 */
 	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
-	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
-	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number }) => GroupProducer;
+	/**
+	 * Create a received group at its wire offset before publishing it to readers; `fill` marks one a
+	 * fill's subscription answered, which the feed never promised. Assigned by `track.ts`.
+	 */
+	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number; fill?: boolean }) => GroupProducer;
 	/** How the copy of `sequence` still arriving ends, if one is, for a duplicate to wait on. Assigned by `track.ts`. */
 	arrivingGroup: (producer: Producer, sequence: bigint) => GetPromise<Error | null> | undefined;
 	/** The producer's largest reported location and its subsequent changes. */
@@ -706,10 +779,21 @@ export const hooks: {
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
 	/**
-	 * Take `[start, end)` back out of what a subscriber's wire cursor reported dropped: a drop
-	 * below where SUBSCRIBE_START resolved never goes out, so a wider budget may still serve it.
+	 * What a lite publisher told its wire about a subscriber's sequences, kept in the
+	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
-	unreport: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	wire: (subscriber: Subscriber) => WireRecord;
+	/**
+	 * Open a bill against a track's cache account for what a session keeps for it beside the
+	 * cache, such as its tail's record of finished streams, billed as a reader's record is, so
+	 * the pool can hand it debt. Mirrors the Rust crate-private `track::Producer::bill`.
+	 */
+	billTrack: (producer: Producer) => CacheReader;
+	/**
+	 * The bill on the account of the track `subscriber` reads: `current` while it bills that account,
+	 * or else a new one; undefined while it has none.
+	 */
+	billSubscriber: (subscriber: Subscriber, current: CacheReader | undefined) => CacheReader | undefined;
 	/**
 	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
 	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
@@ -802,6 +886,8 @@ export const hooks: {
 	 * the group joined accepted it.
 	 */
 	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
+	/** Call `fn` as a group aborts, before its readers can look; assigned by `group.ts`. */
+	onGroupAbort: (group: GroupProducer, fn: (error: Error) => void) => void;
 	/** Whether a group's bytes after its first frame exceed `ratio` times the first frame. */
 	overRefresh: (group: GroupProducer, ratio: number) => boolean;
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
@@ -812,6 +898,8 @@ export const hooks: {
 	 * Assigned by `group.ts`.
 	 */
 	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
+	/** Settles once a group reader read or released everything it holds, its {@link GroupConsumer.done}. Assigned by `group.ts`. */
+	groupDone: (group: GroupConsumer) => GetPromise<Error | null>;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
 	readsMirrored: (group: GroupConsumer) => boolean;
 	/**
@@ -827,8 +915,6 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
-	/** Wait for the selected headers or this reader's group end, without retaining payloads. */
-	groupEnd: (group: GroupConsumer, until?: number) => Promise<{ end: number; complete: boolean }>;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -1014,7 +1100,13 @@ export const hooks: {
 	forgetPastBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
-	unreport: () => {
+	wire: () => {
+		throw new Error("track.ts not loaded");
+	},
+	billTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	billSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	supersedeStale: () => {
@@ -1137,6 +1229,9 @@ export const hooks: {
 	admitGroupStart: () => {
 		throw new Error("group.ts not loaded");
 	},
+	onGroupAbort: () => {
+		throw new Error("group.ts not loaded");
+	},
 	overRefresh: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1147,6 +1242,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	releaseGroupReader: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupDone: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readsMirrored: () => {
@@ -1168,9 +1266,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStarted: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupEnd: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFate: () => {
@@ -1259,6 +1354,17 @@ export function spreadHash(path: string, instance: string): bigint {
 }
 
 /**
+ * The draft's Rendezvous Hash: FNV-1a 64 of `path` then the origin's Node ID as 8 little-endian
+ * bytes, so every node that knows the same lite-07 claims ranks them alike. Mirrors the node key
+ * of `route_order` in `rs/moq-net`.
+ */
+export function rendezvousHash(path: string, node: bigint): bigint {
+	const bytes: number[] = [];
+	for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((node >> shift) & 0xffn));
+	return fnv(path, bytes);
+}
+
+/**
  * Settles among one instance's routes: FNV-1a 64 of `path` then each hop, oldest first, as 8
  * little-endian bytes. Mirrors `chain_key` in `rs/moq-net`.
  */
@@ -1268,6 +1374,31 @@ export function chainHash(path: string, hops: readonly bigint[]): bigint {
 		for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((hop >> shift) & 0xffn));
 	}
 	return fnv(path, bytes);
+}
+
+/**
+ * The best of `candidates`, oldest first, at `prefix` for resolving `path`: `best_route` in
+ * rs/moq-net. Only an instance's highest epoch is eligible, ranked by
+ * {@link compareRouteCandidates} (`route_order`), and a full tie goes to the newest, as Rust's
+ * final `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or
+ * epoch), and keeps its place through a re-price. Every selector ranks through this, so the
+ * announcements and the consumes of one session never pick apart.
+ */
+export function bestCandidate<T>(
+	path: Path.Valid,
+	prefix: Path.Valid,
+	candidates: Iterable<T>,
+	route: (candidate: T) => WireRoute,
+): T | undefined {
+	const list = [...candidates];
+	const epochs = new Epochs(list.map(route));
+	let best: T | undefined;
+	for (const candidate of list) {
+		const next = route(candidate);
+		if (epochs.supersedes(next)) continue;
+		if (best === undefined || compareRouteCandidates(path, prefix, next, route(best)) <= 0) best = candidate;
+	}
+	return best;
 }
 
 /** Covering prefixes, most specific first, including the empty root. */
@@ -1321,26 +1452,44 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
 	return (
 		last(a) - last(b) ||
-		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
+		Number(a.node === undefined && isAnonymous(a)) - Number(b.node === undefined && isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
 	);
 }
 
 /**
  * Order eligible routes at `prefix` resolving `path` by preference, hop count, then the spread
- * hash of each instance, then, within one instance, the hash of its chain. The hashes only
- * spread a prefix's paths: at the prefix itself a tie is left for the newest to win, so a
- * publisher that restarts under a new instance takes over from its lingering session at once,
- * matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer, which
- * is every route here.
+ * hash of each instance, then, within one instance, the hash of its chain. A lite-07 route counts
+ * as the one hop to its origin node, and ranks by the rendezvous hash of that node instead. The
+ * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win
+ * (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over from
+ * its lingering session at once, matching `route_order` in rs/moq-net for routes a node did not
+ * get from a cluster peer, which is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+	const order = compareRoutes(a, b) || routeHops(a) - routeHops(b);
 	if (order !== 0 || path === prefix) return order;
-	const ha = spreadHash(path, a.instance ? Instance.text(a.instance) : "");
-	const hb = spreadHash(path, b.instance ? Instance.text(b.instance) : "");
-	if (ha !== hb) return ha < hb ? -1 : 1;
-	const ca = chainHash(path, a.hops);
-	const cb = chainHash(path, b.hops);
-	return ca < cb ? -1 : ca > cb ? 1 : 0;
+	const [a1, a2] = routeKey(path, a);
+	const [b1, b2] = routeKey(path, b);
+	if (a1 !== b1) return a1 < b1 ? -1 : 1;
+	return a2 < b2 ? -1 : a2 > b2 ? 1 : 0;
+}
+
+/**
+ * The hops a route ranks by: a lite-07 route counts as the one hop to its origin node, since the
+ * rest of its chain is the lite-06 one it carries only for loop detection. As `route_order` in
+ * rs/moq-net.
+ */
+export function routeHops(route: WireRoute): number {
+	return route.node !== undefined ? 1 : route.hops.length;
+}
+
+/**
+ * The hash pair `route_order` in rs/moq-net ranks a route by beneath its prefix, each route keyed
+ * on its own: a lite-07 claim by the rendezvous hash of its origin node, any other by the spread
+ * hash of its instance and then the hash of its chain.
+ */
+function routeKey(path: Path.Valid, route: WireRoute): [bigint, bigint] {
+	if (route.node !== undefined) return [rendezvousHash(path, route.node), 0n];
+	return [spreadHash(path, route.instance ? Instance.text(route.instance) : ""), chainHash(path, route.hops)];
 }

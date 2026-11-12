@@ -20,13 +20,6 @@ and Bun over WebSocket and WebTransport. Fresh readers request or follow the
 claim's own path and child paths. A reader-first case checks that an absent
 request ends while its follower waits for the publisher to arrive.
 
-Until [`js/net` speaks lite-07's route layer](../../quest/m2/cluster-routing/routes/js.md),
-native JS dials its defaults in the matrix, leaving its grant unchecked, and every
-lane that would run it on lite-07 records a skip naming that quest: claims, track
-replacement, sockets, the browser route key proof, and the lite-07 compress and
-drop legs. The compressed catalog runs without its lite-07 reader, and
-`--versions moq-lite-07-wip` refuses JS clients.
-
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
@@ -76,7 +69,9 @@ publisher and subscriber. Each reader fetches group 1 of a finished track, requi
 its three objects, each with its own bytes, and closes under the relay idle-out check. Each native JS runtime also serves
 that FETCH to all three subscribers from history (`CLI FETCH history`): its publisher writes only group 3 live and answers
 groups 0 through 2, which it never cached, from an in-memory responder on `track.requests()`.
-This runs on moq-lite and every supported IETF draft.
+Both lanes run on moq-lite and every supported IETF draft, except that a native JS
+publisher's cells are skipped on moq-transport: the relay fills its miss with an upstream
+FETCH, which a JS publisher refuses there by design.
 
 A late-join lane runs Rust-to-Rust and Rust/Node/Bun in both directions. The publisher
 writes the first two objects of group 0 before any subscriber exists and leaves the group
@@ -245,8 +240,6 @@ Firefox's exporter writes the session ID as a varint rather than the draft's 64
 bits, so `@moq/net` sends no proof from Firefox, and the tab passes when it
 connects unproven, a supported state the cut does not wait on. A build the
 table says cannot prove but that does fails, so the table follows the browsers.
-Until [routes/js.md](../../quest/m2/cluster-routing/routes/js.md) ports `js/net`
-to the route layer, the lane records a skip naming it.
 
 ## moq-transport
 
@@ -292,10 +285,8 @@ Some cases change shape on moq-transport:
   so a tail reader started before the publisher's groups may begin past group 0.
   The tails take any contiguous run of groups through group 3, each verified
   byte for byte, and still require the clean end at 4.
-- The AUTH extension carries prefixes alone, and a relay refuses a
-  grant narrower than a subtree, closing the session as Unauthorized. Pinned
-  passes mint `name/**` for both roles instead of the exact and `**/name`
-  patterns above.
+- Requests name prefixes alone, so pinned passes mint `name/**` for both roles
+  instead of the exact and `**/name` patterns above.
 
 The browser pins through the `versions` attribute on `<moq-watch>` and
 `<moq-publish>`, and GStreamer through the `versions` property on `moqsrc`.
@@ -408,7 +399,7 @@ affected release changes or no longer offers a listed version, forcing a
 re-measure. Future WIP drafts receive no automatic exception.
 
 `just test wire-compat --remeasure` is that re-measure, run after each release
-publishes (see `CONTRIBUTING.md`). It runs the cells planned breaks cover
+publishes (see `RELEASE.md`). It runs the cells planned breaks cover
 without letting them fail the run, then rewrites `compat/planned-breaks.json`:
 a break with a failing cell is re-pinned to the releases just measured, and one
 with none is deleted. It prints each break's failing cells. Review the diff and
@@ -555,14 +546,11 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The replacement case is quarantined from the default run on every engine until
-[the JS route-layer port](../../quest/m2/cluster-routing/routes/js.md) lands,
-because both publishers use lite-07. Firefox also has a separate quarantine for
-intermittent audio-tone failures; investigate those alongside
-[the audio playout work](https://github.com/moq-dev/moq/pull/8058) before restoring
-Firefox's default case. Run replacement explicitly with
-`just test media --media-cases replacement` (add `--media-engines firefox` for
-Firefox); its content, sync, switch, and fallback assertions remain active.
+Firefox's replacement case is quarantined from the default run after intermittent
+audio-tone failures. Investigate the missing tone samples alongside
+[the audio playout work](https://github.com/moq-dev/moq/pull/8058), then restore it.
+Run it explicitly with `just test media --media-engines firefox --media-cases replacement`;
+its content, sync, switch, and fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media

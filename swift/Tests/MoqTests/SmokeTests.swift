@@ -220,6 +220,57 @@ final class SmokeTests: XCTestCase {
         session.cancel(code: 0)
     }
 
+    /// A credential is answered by the peer, names a route and a claim, and cancels.
+    func testSessionCredentialLifecycle() async throws {
+        let version = ["moq-lite-07-wip"]
+        let server = try Server(bind: "127.0.0.1:0", versions: version, tls: ServerTls(generate: ["localhost"]))
+        defer { server.cancel() }
+        let addr = try await server.listen()
+        async let accepted = server.accept()
+
+        let client = try Client(bind: "127.0.0.1:0", versions: version, tls: ClientTls(insecure: true), once: true)
+        defer { client.cancel() }
+        let session = try await client.connect(to: "https://\(addr)")
+        guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        let peer = try await request.accept()
+
+        XCTAssertThrowsError(try session.credential("")) { error in
+            guard case MoqError.Config = error else {
+                return XCTFail("expected Config, got \(error)")
+            }
+        }
+        let credential = try session.credential("extra")
+        do {
+            try await credential.answered()
+            XCTFail("the default acceptor refuses a token")
+        } catch MoqError.Unsupported {}
+
+        let route = try session.publish.route(path: "room/x", hidden: true)
+        let claim = try session.publish.claim(prefix: "live", hidden: true)
+        for target in [route.setAuth, claim.setAuth] {
+            try target(credential)
+            try target(nil)
+        }
+
+        credential.cancel()
+        do {
+            try await credential.answered()
+            XCTFail("a cancelled credential has no answer")
+        } catch MoqError.Cancelled {}
+        for target in [route.setAuth, claim.setAuth] {
+            XCTAssertThrowsError(try target(credential)) { error in
+                guard case MoqError.Cancelled = error else {
+                    return XCTFail("expected Cancelled, got \(error)")
+                }
+            }
+        }
+        route.cancel()
+        claim.cancel()
+
+        peer.cancel(code: 0)
+        session.cancel(code: 0)
+    }
+
     /// Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back
     /// pins `request` and `follow`, while its text parsed is another, named instance that nothing
     /// serves.

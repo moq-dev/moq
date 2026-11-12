@@ -132,6 +132,9 @@ class FeaturesTest(unittest.TestCase):
         self.assertIn("moq-video minimal unexpectedly contains cpal", failed.stderr)
 
 
+RUST_TEST_GROUPS = ("rust-test", "rust-test-apps")
+
+
 class NightlyTest(unittest.TestCase):
     def run_group(self, group, fail="", cwd=ROOT, **environment):
         with tempfile.TemporaryDirectory() as directory:
@@ -143,10 +146,16 @@ class NightlyTest(unittest.TestCase):
                     "#!/usr/bin/env bash\n"
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
                     'printf "%s\n" "${BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
-                    # Nextest's bench profile writes a JUnit report, unless the test withholds it.
+                    # Nextest's bench profile writes a JUnit report with a case per filtered test,
+                    # unless the test withholds the report or one test.
                     'if [[ ${NEXTEST_PROFILE:-} == bench && "$*" != "$NIGHTLY_NO_JUNIT" ]]; then\n'
                     '    mkdir -p "$CARGO_TARGET_DIR/nextest/bench"\n'
-                    '    printf "<testsuites/>" > "$CARGO_TARGET_DIR/nextest/bench/junit.xml"\n'
+                    "    names=$(grep -oE 'test\\(=?[[:alnum:]_:]+\\)' <<<\"$*\" | sed -E 's/^test\\(=?//; s/\\)$//')\n"
+                    "    for name in $names; do\n"
+                    '        [[ $name == "${NIGHTLY_UNMATCHED:-}" ]] ||\n'
+                    '            printf \'<testcase name="mod::%s" classname="crate"/>\' "$name"\n'
+                    '    done > "$CARGO_TARGET_DIR/nextest/bench/junit.xml"\n'
+                    '    printf "<testsuites/>" >> "$CARGO_TARGET_DIR/nextest/bench/junit.xml"\n'
                     "fi\n"
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )
@@ -167,7 +176,7 @@ class NightlyTest(unittest.TestCase):
                 BASH_ENV="/dev/null",
                 CARGO_TARGET_DIR=str(scratch / "target"),
             )
-            for name in ("BENCH_BASE", "NEXTEST_PROFILE", "NIGHTLY_NO_JUNIT"):
+            for name in ("BENCH_BASE", "NEXTEST_PROFILE", "NIGHTLY_NO_JUNIT", "NIGHTLY_UNMATCHED"):
                 env.pop(name, None)
             env.update(environment)
             result = subprocess.run(
@@ -222,7 +231,7 @@ class NightlyTest(unittest.TestCase):
             self.assertEqual(calls, [])
 
     def test_paired_base_applies_only_to_rust_bench_groups(self):
-        for group in ("js", "rust-test", "bindings"):
+        for group in ("js", "rust-test", "rust-test-apps", "bindings"):
             result, calls = self.run_group(group, BENCH_BASE="HEAD")
             self.assertEqual(result.returncode, 2, group)
             self.assertEqual(calls, [])
@@ -342,39 +351,48 @@ class NightlyTest(unittest.TestCase):
     def test_dev_shell_jobs_trust_the_nix_cache(self):
         # Without the flake's substituter, the dev shell builds uncached tools from
         # source and outlasts short jobs: the benchmark site timed out before publishing.
+        # A self-hosted runner VM's own Nix already names the cache, as Queue relies on.
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
         jobs = re.split(r"^  (?=[\w-]+:\n)", workflow.split("\njobs:\n", 1)[1], flags=re.M)
         for job in jobs:
-            if "nix develop" in job:
+            if "nix develop" in job and "runs-on: [self-hosted" not in job:
                 self.assertIn("uses: ./.github/actions/nix", job, job.splitlines()[0])
 
     def test_benchmark_tests_stay_out_of_cargo_bench(self):
-        result, calls = self.run_group("rust-test")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        *runs, publish = calls
-        self.assertFalse(any(call.startswith(("cargo bench", "just gh")) for call in runs))
-        # Every benchmark measures a release build, and each run keeps its JUnit report.
-        self.assertTrue(all("--release" in call or " bench-" in call for call in runs), runs)
-        self.assertIn("just rs bench-feed-fetch", runs)
-        self.assertEqual(set(self.raw), {f"nextest-{index}.xml" for index in range(1, len(runs) + 1)})
-        self.assertTrue(publish.startswith("just gh benchmark-report rust-test "), publish)
+        workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
+        for group in RUST_TEST_GROUPS:
+            self.assertIn(f"recipe: gh nightly {group}\n", workflow)
+            result, calls = self.run_group(group)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            *runs, publish = calls
+            # One release build per group, keeping its JUnit report, so the benchmarks
+            # share the build and the report the publish step reads.
+            self.assertEqual(runs, [call for call in runs if call.startswith("just rs bench-tests ")])
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(self.raw, ["nextest-1.xml"])
+            self.assertTrue(publish.startswith("just gh benchmark-report rust-test "), publish)
 
     def test_benchmark_test_without_its_report_fails(self):
-        result, calls = self.run_group("rust-test", NIGHTLY_NO_JUNIT="rs bench-latency")
+        _, (run, _) = self.run_group("rust-test")
+        result, calls = self.run_group("rust-test", NIGHTLY_NO_JUNIT=run.removeprefix("just "))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("no JUnit report from: just rs bench-latency", result.stderr)
-        self.assertIn("just rs bench-feed-fetch", calls)
+        self.assertIn("no JUnit report from: just rs bench-tests", result.stderr)
+        self.assertFalse(any(call.startswith("just gh") for call in calls))
+
+    def test_benchmark_filter_that_runs_nothing_fails(self):
+        # A test behind a feature the build lacks matches nothing, and nextest still passes.
+        result, calls = self.run_group("rust-test", NIGHTLY_UNMATCHED="benchmark_feed_fetch_wakes")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no test ran for benchmark_feed_fetch_wakes", result.stderr)
         self.assertFalse(any(call.startswith("just gh") for call in calls))
 
     def test_every_nightly_benchmark_test_exists(self):
-        # A filter naming a removed test matches nothing, and nextest still passes.
-        recipes = (ROOT / "rs/justfile").read_text()
-        _, calls = self.run_group("rust-test")
+        # A filter naming a removed test matches nothing; this catches it without a build.
         named = set()
-        for call in calls:
-            if match := re.fullmatch(r"just rs (bench-[\w-]+)", call):
-                call = re.search(rf"^{match[1]}\b.*:\n    (.+)$", recipes, re.M)[1]
-            named |= set(re.findall(r"test\((\w+)\)", call))
+        for group in RUST_TEST_GROUPS:
+            _, calls = self.run_group(group)
+            for call in calls:
+                named |= set(re.findall(r"test\(=?(?:\w+::)*(\w+)\)", call))
         self.assertTrue(named)
         sources = "".join(path.read_text() for path in (ROOT / "rs").glob("*/**/*.rs") if "/target/" not in str(path))
         # A filter can name one test or a module containing several benchmark cases.

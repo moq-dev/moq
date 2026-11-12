@@ -588,7 +588,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		clock,
 		"the capture keeps its catalog clock"
 	);
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 	catalog.finish().unwrap();
 	export.output_past(mark).await;
 	let (status, errors) = export.wait().await;

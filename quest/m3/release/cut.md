@@ -7,12 +7,12 @@ package versions, and the release-triggered publication jobs complete.
 
 ## Plan
 
-Follow CONTRIBUTING.md's release procedure: merge release into main first,
+Follow RELEASE.md's release procedure: merge release into main first,
 then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Right after merging release into main, set
 every eligible package with `just version 0.22.0` for this cut, then one
 minor up per later API or wire cut, following
-[Versions](/CONTRIBUTING.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
+[Versions](/RELEASE.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
 exempt from that version (`version.json`), so check each against its
 registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
 from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
@@ -31,7 +31,7 @@ compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
 After publication, re-measure the planned wire-compat breaks against the
-published versions, as CONTRIBUTING.md's release procedure describes.
+published versions, as RELEASE.md's release procedure describes.
 
 This cut carries stats epochs, so it drops
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s release-only wall-clock
@@ -53,18 +53,19 @@ both fixes reach release.
 
 Recurs once per cut (decided 2026-10-19 as once per major release; per cut,
 in three kinds, 2026-11-09). The kinds, what each publishes, and which checks
-each runs are in [Releases](/CONTRIBUTING.md#releases). This run is the
+each runs are in [Releases](/RELEASE.md#releases). This run is the
 `0.22.0` cut: it still waits on all of m2, and its PR sets `phase` in
 `version.json` to `additive` and performs the re-split the root
 [questline](/quest/README.md) describes. This epic's remaining publication and
-adoption quests move to m0, m3's other quests sort by kind into m1 (additive),
-m2 (API breaks) and m3 (wire changes), m4 stays, m5 moves to m6 and m5 starts
-empty, and each audit's recurrence names m4 instead of m3.
+adoption quests move to a release epic in m0, m3's other quests sort by kind
+into m1 (additive), m2 (API breaks) and m3 (wire changes), m4 stays, m5 moves
+to m6 and m5 starts empty, each milestone README's Goal is rewritten for its
+new role, and each audit's recurrence names m4 instead of m3.
 
 Every cut's PR removes this path from every `Required`, which releases the
 audits waiting on it, rewrites every link to a moved path, and re-creates this
-quest at the same path under a fresh release epic in m3, keeping its Goal and
-this paragraph, with no `Required` and a `## Waiting` item for the
+quest as `/quest/m0/release/cut.md`, in m0's release epic (created if the
+cut moved nothing there), keeping its Goal and this paragraph, with no `Required` and a `## Waiting` item for the
 maintainer's instruction naming the next cut and its kind. Each later run
 follows that kind:
 
@@ -75,12 +76,14 @@ follows that kind:
   review](/quest/m3/release/api-review.md), the [feature
   review](/quest/m3/release/feature-review.md), the [Cargo feature
   review](/quest/m3/release/feature-flags.md), and the [migration
-  audit](/quest/m3/release/migrate-audit.md) at the same paths, each keeping
+  audit](/quest/m3/release/migrate-audit.md) beside it in m0's release
+  epic, each keeping
   its Goal and recurrence paragraph, scoped to what changed since the last
   breaking cut and requiring nothing, and add them to this quest's
   `Required`. Then advance the shared minor with `just version`.
 - **Wire**, which ends the cycle: also require `/quest/m2/README.md` and
-  `/quest/m3/README.md`, finalize the cycle's wire version, set `phase` back
+  `/quest/m3/README.md`, which the cut can wait on because it lives in m0,
+  not m3; finalize the cycle's wire version, set `phase` back
   to `additive`, and shift the milestones: remaining publication and adoption
   quests to m0, m4's quests by kind into m1, m2 and m3, m5's to m4, and m6
   stays the deferred bucket.

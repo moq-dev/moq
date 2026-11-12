@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { Duration, Instant, Manual } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Time, Track, Varint } from "@moq/net";
-import { AUTO_MAX_DELAY, target } from "./latency";
+import { Signal } from "@moq/signals";
+import { STRETCH } from "../sync";
+import { maxDelay, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 
 // Replay recorded-shape arrival traces through the ring and count what a listener would hear:
@@ -77,10 +79,12 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
-	const subscriber = track.subscribe({ delay: { max: budget(Duration.ZERO) } });
+	// One budget for both, as the decoder keeps: the container skips at the max delay it subscribes with.
+	const delay = new Signal<Track.Delay>({ max: budget(Duration.ZERO) });
+	const subscriber = track.subscribe({ delay: delay.peek() });
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
-		delay: { max: AUTO_MAX_DELAY },
+		delay,
 	});
 
 	const result: Measured = { targets: [], delivered: 0 };
@@ -109,7 +113,8 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 
 			const current = target({ measured: consumer.spread.peek(), frame: Duration.millis(CHUNK_MS) });
 			result.targets.push(current.asMillis());
-			subscriber.update({ delay: { max: budget(current) } });
+			delay.set({ max: budget(current) });
+			subscriber.update({ delay: delay.peek() });
 		}
 	} finally {
 		track.finish();
@@ -122,15 +127,18 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 	return result;
 }
 
+/** The subscription "auto" asks for at the default stretch: the target plus the stretch. */
+const stretched = (target: Duration) => maxDelay({ delay: target, maxDelay: target, stretch: STRETCH });
+
 /** The target the estimator settles on by the end of `t`, given the subscription "auto" asks for. */
 async function settled(t: Arrival[]): Promise<number> {
-	const { targets } = await measure(t, (target) => target.max(AUTO_MAX_DELAY));
+	const { targets } = await measure(t, stretched);
 	return targets[targets.length - 1];
 }
 
 /** The worklet's ring at `latencyMs`. */
 function build(latencyMs: number): AudioRingBuffer {
-	return new AudioRingBuffer({ rate: RATE, channels: 1, latency: latencyMs });
+	return new AudioRingBuffer({ rate: RATE, channels: 1, latency: latencyMs, bound: STRETCH.asMillis() });
 }
 
 interface Result {
@@ -236,7 +244,7 @@ describe("subscription budget", () => {
 	}
 
 	it("reaches a flush that starts after the target settled", async () => {
-		const { targets, delivered } = await measure(t, (target) => target.max(AUTO_MAX_DELAY));
+		const { targets, delivered } = await measure(t, stretched);
 		expect(targets[PACED - 1]).toBe(2 * CHUNK_MS);
 		expect(delivered).toBe(t.length);
 		// Every flush lands whole, so its 100ms reaches the 95th percentile within a few intervals.

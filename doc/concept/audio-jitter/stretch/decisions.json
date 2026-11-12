@@ -1,0 +1,360 @@
+{
+	"decisions": [
+		{
+			"name": "on-the-clock-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 900,
+			"raw": 900,
+			"lag": 0,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "behind-with-a-full-buffer-accelerates",
+			"rate": 8000,
+			"target": 800,
+			"level": 900,
+			"raw": 900,
+			"lag": 100,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Accelerate",
+			"allowance": 100
+		},
+		{
+			"name": "behind-in-the-band-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 700,
+			"raw": 900,
+			"lag": 100,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "behind-into-a-stall-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 900,
+			"raw": 500,
+			"lag": 100,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "a-low-level-expands-to-the-bound",
+			"rate": 8000,
+			"target": 800,
+			"level": 500,
+			"raw": 500,
+			"lag": 100,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Expand",
+			"allowance": 14300
+		},
+		{
+			"name": "a-low-level-at-the-bound-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 500,
+			"raw": 500,
+			"lag": 14400,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "a-low-level-without-a-bound-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 500,
+			"raw": 500,
+			"lag": 0,
+			"bound": 0,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "a-low-level-ahead-expands-to-the-bound",
+			"rate": 8000,
+			"target": 800,
+			"level": 500,
+			"raw": 500,
+			"lag": -100,
+			"bound": 0,
+			"cooldown": 0,
+			"decision": "Expand",
+			"allowance": 100
+		},
+		{
+			"name": "ahead-expands-onto-the-clock",
+			"rate": 8000,
+			"target": 800,
+			"level": 900,
+			"raw": 900,
+			"lag": -100,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Expand",
+			"allowance": 100
+		},
+		{
+			"name": "far-behind-fast-accelerates",
+			"rate": 8000,
+			"target": 800,
+			"level": 3300,
+			"raw": 3300,
+			"lag": 2000,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Fast",
+			"allowance": 2000
+		},
+		{
+			"name": "far-behind-fast-accelerates-in-cooldown",
+			"rate": 8000,
+			"target": 800,
+			"level": 3300,
+			"raw": 3300,
+			"lag": 2000,
+			"bound": 14400,
+			"cooldown": 1,
+			"decision": "Fast",
+			"allowance": 2000
+		},
+		{
+			"name": "behind-in-cooldown-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 900,
+			"raw": 900,
+			"lag": 100,
+			"bound": 14400,
+			"cooldown": 1,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "ahead-in-cooldown-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 900,
+			"raw": 900,
+			"lag": -100,
+			"bound": 14400,
+			"cooldown": 1,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "fast-needs-the-raw-depth-too",
+			"rate": 8000,
+			"target": 800,
+			"level": 3300,
+			"raw": 900,
+			"lag": 2000,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Accelerate",
+			"allowance": 2000
+		},
+		{
+			"name": "a-deep-buffer-on-the-clock-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 3300,
+			"raw": 3300,
+			"lag": 0,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "a-filtered-level-just-short-of-high-holds",
+			"rate": 8000,
+			"target": 800,
+			"level": 799.5,
+			"raw": 900,
+			"lag": 10,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "a-filtered-level-at-high-accelerates",
+			"rate": 8000,
+			"target": 800,
+			"level": 800.0,
+			"raw": 900,
+			"lag": 10,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Accelerate",
+			"allowance": 10
+		},
+		{
+			"name": "a-short-target-holds-above-it",
+			"rate": 8000,
+			"target": 160,
+			"level": 200,
+			"raw": 200,
+			"lag": 50,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "a-short-target-accelerates-past-the-band",
+			"rate": 8000,
+			"target": 160,
+			"level": 300,
+			"raw": 300,
+			"lag": 50,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Accelerate",
+			"allowance": 50
+		},
+		{
+			"name": "a-long-target-holds-within-85-ms",
+			"rate": 8000,
+			"target": 4000,
+			"level": 3400,
+			"raw": 3400,
+			"lag": 0,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Hold",
+			"allowance": 0
+		},
+		{
+			"name": "a-long-target-expands-past-85-ms",
+			"rate": 8000,
+			"target": 4000,
+			"level": 3300,
+			"raw": 3300,
+			"lag": 0,
+			"bound": 14400,
+			"cooldown": 0,
+			"decision": "Expand",
+			"allowance": 14400
+		},
+		{
+			"name": "rates-scale-the-limits",
+			"rate": 48000,
+			"target": 5760,
+			"level": 5760,
+			"raw": 5760,
+			"lag": 1,
+			"bound": 86400,
+			"cooldown": 0,
+			"decision": "Accelerate",
+			"allowance": 1
+		},
+		{
+			"name": "rates-scale-the-low-limit",
+			"rate": 48000,
+			"target": 5760,
+			"level": 4319,
+			"raw": 5760,
+			"lag": 0,
+			"bound": 86400,
+			"cooldown": 0,
+			"decision": "Expand",
+			"allowance": 86400
+		}
+	],
+	"filter": [
+		{
+			"name": "starts-at-the-first-level",
+			"rate": 8000,
+			"target": 800,
+			"steps": [[640, 0]],
+			"filtered": [640.0]
+		},
+		{
+			"name": "smooths-a-step",
+			"rate": 8000,
+			"target": 800,
+			"steps": [
+				[800, 0],
+				[1600, 0],
+				[1600, 0],
+				[1600, 0],
+				[1600, 0],
+				[1600, 0],
+				[1600, 0],
+				[1600, 0],
+				[1600, 0],
+				[1600, 0],
+				[1600, 0]
+			],
+			"filtered": [
+				800.0, 827.7966976165771, 854.62757473517, 880.5261896311965, 905.5249345685318, 929.6550763135957,
+				952.9467952417438, 975.4292230848718, 997.1304793674474, 1018.0777065765398, 1038.297104109836
+			]
+		},
+		{
+			"name": "factor-at-15-ms",
+			"rate": 8000,
+			"target": 120,
+			"steps": [[1000, 0], [0, 0]],
+			"filtered": [1000.0, 942.5432085990906]
+		},
+		{
+			"name": "factor-at-50-ms",
+			"rate": 8000,
+			"target": 400,
+			"steps": [[1000, 0], [0, 0]],
+			"filtered": [1000.0, 953.8536071777344]
+		},
+		{
+			"name": "factor-at-100-ms",
+			"rate": 8000,
+			"target": 800,
+			"steps": [[1000, 0], [0, 0]],
+			"filtered": [1000.0, 965.2541279792786]
+		},
+		{
+			"name": "factor-at-200-ms",
+			"rate": 8000,
+			"target": 1600,
+			"steps": [[1000, 0], [0, 0]],
+			"filtered": [1000.0, 976.7451286315918]
+		},
+		{
+			"name": "takes-out-what-the-stretch-removed",
+			"rate": 8000,
+			"target": 800,
+			"steps": [[800, 0], [760, 40], [760, 0]],
+			"filtered": [800.0, 758.6101651191711, 758.6584561440703]
+		},
+		{
+			"name": "adds-back-what-the-stretch-added",
+			"rate": 8000,
+			"target": 800,
+			"steps": [[800, 0], [840, -40], [840, 0]],
+			"filtered": [800.0, 841.3898348808289, 841.3415438559297]
+		},
+		{
+			"name": "never-falls-below-zero",
+			"rate": 8000,
+			"target": 800,
+			"steps": [[100, 0], [0, 500]],
+			"filtered": [100.0, 0.0]
+		}
+	]
+}

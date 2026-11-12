@@ -25,6 +25,7 @@ export namespace Announce {
 
 export namespace Auth {
 	export interface Credential {
+		readonly answered: PromiseLike<void>;
 		close(): void;
 		readonly closed: PromiseLike<Error | null>;
 		readonly grant: Signals.Getter<Auth.Grant | undefined>;
@@ -40,7 +41,7 @@ export namespace Auth {
 	export class Handle {
 		constructor();
 		abort(err?: Error): void;
-		add(token: string | Uint8Array): Promise<Auth.Credential>;
+		add(token: string | Uint8Array): Auth.Credential;
 		get grant(): Signals.Getter<Auth.Grant | undefined>;
 	}
 	export class Unsupported extends Error {
@@ -526,6 +527,7 @@ export namespace Origin {
 		readonly available: boolean;
 		readonly cost: Origin.Cost;
 		readonly instance?: Instance.Valid;
+		readonly rtt?: Clock.Duration;
 	}
 	export interface RouteOptions {
 		auth?: Auth.Credential;
@@ -630,6 +632,7 @@ export namespace Socket {
 		readonly producer: Track.Producer;
 		readonly session: string;
 	}
+	export function isEndpoint(path: Path.Valid): boolean;
 }
 
 export const StreamCode: ((code: number) => StreamCode) & {

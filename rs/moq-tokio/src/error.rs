@@ -146,6 +146,11 @@ pub enum Error {
 	#[error("connect timed out after {0:?}")]
 	ConnectTimeout(std::time::Duration),
 
+	/// A client certificate is configured, but the URL's scheme can't present it to a
+	/// server authenticated by a trusted root. The payload is the scheme.
+	#[error("{0}:// can't present the client certificate; dial https://, wss://, moqt://, moql://, or tls:// instead")]
+	ClientCertScheme(String),
+
 	/// The server rejected the connection with an auth status. See [`crate::ConnectError`].
 	#[cfg(feature = "net")]
 	#[error(transparent)]
@@ -288,6 +293,7 @@ impl Error {
 			| Self::KeylogUnset
 			| Self::BackoffHealthy
 			| Self::QlogUnsupported
+			| Self::ClientCertScheme(_)
 			| Self::Connect(_) => true,
 			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.is_terminal(),

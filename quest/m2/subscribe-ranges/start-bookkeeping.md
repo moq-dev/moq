@@ -8,7 +8,7 @@ the per-version start branches collapse into one start state that only
 translates into SUBSCRIBE_START per version, and on lite-07 the
 `requested == start` gate is gone, since a fresh START per update makes it
 unnecessary. What a cursor is owed or was served is out of scope: it stays
-with [Drop set](/quest/m1/drop-set.md).
+with Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)).
 
 ## Plan
 
@@ -22,7 +22,7 @@ folding it into Drop set, or doing it now on main.
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the wait on
 [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), Drop set's own
-PR, becomes a `Required` link to [Drop set](/quest/m1/drop-set.md), since
+PR, becomes a `Required` link to Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)), since
 #7670 rewrites the same lite publisher state (about 1,250 lines of
 `lite/publisher.rs`).
 
@@ -53,14 +53,9 @@ three wire generations of "start".
   edge at once (the "start past everything" branch in `TrackRun`'s poll) only
   sets `self.start`. So any drop collected while unresolved is never sent,
   and the subscriber waits out its grace for those groups. Reproduce this
-  first. Found by the 2026-11-07 audit of implicit state machines (see
-  [Lifecycles are explicit state](/quest/m1/explicit-state/README.md)).
+  first. Found by the 2026-11-07 audit of implicit state machines.
   Recommended: `enum Start { Legacy, Unresolved { skipped, first },
   Resolved { start, served } }`, with `skipped` moved out at the transition.
 
 Public API: none expected. Wire: lite-07 (unpublished) may send a START per
 update; published versions are unchanged.
-
-## Required
-
-- [Drop set](/quest/m1/drop-set.md) - rewrites the same lite publisher state

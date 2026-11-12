@@ -8,7 +8,6 @@ Trust this checkout's source over published API references, which may describe a
 
 # Required
 
-- Immediately disable a flaky test and plan a follow-up to investigate.
 - The same identity (ex. broadcast+track+group+frame) always has the same content. Use a new identity for new content.
 - A publisher that breaks that, such as by reusing or restarting group sequences, hurts only its own broadcast. Code spends no cycles detecting it: the violation must only never panic, cost unbounded work, or affect other broadcasts.
 - Never match on errors; it's brittle.
@@ -27,29 +26,26 @@ The API is the most important thing to get right: a bad shape costs a breaking c
 - A breaking PR puts its migration note in its Impact section; the release cut writes it into the package's `MIGRATE.md`.
 - Replace a callback parameter with a handle, an event, or a Producer/Consumer split.
 - Nest related API, configuration, and output fields under their shared role.
-- Propose alternatives when a name or shape feels awkward.
-- Short names under a module namespace (`encode::Config`, not `EncoderConfig`), mirrored across Rust, JS, and the bindings.
+- Mirror API names across Rust, JS, and the bindings.
 - Keep package boundaries modular and reusable; prefer a module in an existing package over a one-off package.
-- Never use a huge value like `u64::MAX` as a marker (it is the longest varint); use 0, a separate message or type, or a boolean.
+- Never mark a special case inside a value: not a huge number like `u64::MAX` (it is the longest varint), and not a reserved prefix or character in a string. Use 0, a separate message or type, a typed field, or a boolean.
+- Enforce a policy where the thing is created, not where it is checked: the signer bounds a token's lifetime, and the verifier accepts what a valid token carries. Don't add `allow-*` opt-out flags; move or generalize the rule.
 
 # Development
 
 PRs target `main`, where breaking API changes are allowed.
-`release` is what ships; touch it only to cut a release or backport a fix or benchmark (see `CONTRIBUTING.md`).
+`release` is what ships; touch it only to cut a release or backport a fix or benchmark (see `RELEASE.md`).
 Wire changes stay backwards compatible with *published* drafts/versions; an unpublished `-wip` version changes freely.
-moq.pro rolls out with relays on the newest and previous release side by side, so those two versions must interoperate as relays (today moq-lite-06 and moq-lite-07). A temporary migration for that is fine when it is clearly marked and easy to delete at the next version migration.
+moq.pro rolls out with relays on the newest and previous release side by side, so those two versions must interoperate as relays. A temporary migration for that is fine when it is clearly marked and easy to delete at the next version migration.
 Our libraries prefer moq-lite, so moq-transport compatibility only matters against third-party implementations.
 
 Build output may live outside the checkout and gets wiped, so scratch never goes in `target/`.
 
-```bash
-just check   # Lint, compile, and test what the branch changed
-just fix     # Auto-fix lint/formatting, same scope
-```
+`just check` and `just fix` cover only what the branch changed.
 
 Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary and its skills come from the moq-dev/quest flake input; change them upstream and bump the input.
-`quest init` refuses Claude Code's worktree hooks: drop them from `.claude/settings.json` for its run, then restore them.
+Review locally with one reviewer, not the pair: `quest review --harness codex`, or `--harness claude` when Codex wrote the change last. Pullfrog's online review already supplies the DeepSeek pass.
 
 # Cross-Package Sync
 

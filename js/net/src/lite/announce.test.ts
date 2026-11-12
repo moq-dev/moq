@@ -8,10 +8,15 @@ import {
 	type AnnounceBroadcast,
 	AnnounceHistory,
 	AnnounceOk,
+	type AnnounceReply,
 	AnnounceRequest,
 	decodeAnnounceBroadcast,
 	decodeAnnounceBroadcastMaybe,
+	decodeAnnounceReplyMaybe,
 	encodeAnnounceBroadcast,
+	encodeAnnounceReply,
+	ROUTE_MAX,
+	ROUTE_MAX_HOPS,
 } from "./announce.ts";
 import { Version } from "./version.ts";
 
@@ -75,21 +80,17 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 });
 
 test("AnnounceBroadcast carries a restart only on draft-07", async () => {
-	const hops = [HopSchema.parse(7n)];
 	const instance = Instance.random();
 	for (const msg of [
-		{ status: "restart" as const, id: 3n, instance, epoch: 0n, hops, cost: 12n },
-		{ status: "restart" as const, id: 3n, instance, epoch: 7n, hops, cost: 12n },
+		{ status: "restart" as const, id: 3n, instance, epoch: 0n, cost: 12n },
+		{ status: "restart" as const, id: 3n, instance, epoch: 7n, cost: 12n },
 	]) {
 		expect(await roundTrip(msg, Version.DRAFT_07)).toEqual(msg);
 	}
 
 	// Older versions send an end and a start instead, and skip the type as unknown.
 	await expect(
-		bytes(
-			(w) => encodeAnnounceBroadcast(w, { status: "restart", id: 1n, hops: [] }, Version.DRAFT_06),
-			Version.DRAFT_06,
-		),
+		bytes((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 1n }, Version.DRAFT_06), Version.DRAFT_06),
 	).rejects.toThrow();
 	const encoded = await bytes(async (w) => {
 		await w.u53(3);
@@ -236,20 +237,15 @@ test("AnnounceOk round-trips a declared origin", async () => {
 });
 
 // A QUIC varint stops at 2^62-1, so draft-06 carries a wider hop as unknown.
-test("a 64-bit hop is unknown on draft-06 and whole on draft-07", async () => {
+test("a 64-bit hop is unknown on draft-06", async () => {
+	const version = Version.DRAFT_06;
 	const wide = HopSchema.parse((1n << 64n) - 1n);
-	for (const [version, want] of [
-		[Version.DRAFT_06, UNKNOWN_HOP],
-		[Version.DRAFT_07, wide],
-	] as const) {
-		const instance = Instance.parse("a");
-		const got = await roundTrip({ status: "active", suffix: Path.from("room"), instance, hops: [wide] }, version);
-		expect(got).toMatchObject({ hops: [want] });
+	const got = await roundTrip({ status: "active", suffix: Path.from("room"), hops: [wide] }, version);
+	expect(got).toMatchObject({ hops: [UNKNOWN_HOP] });
 
-		const msg = new AnnounceOk(wide, 0);
-		const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version), version), version);
-		expect((await AnnounceOk.decode(reader, version)).hop).toBe(want);
-	}
+	const msg = new AnnounceOk(wide, 0);
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version), version), version);
+	expect((await AnnounceOk.decode(reader, version)).hop).toBe(UNKNOWN_HOP);
 });
 
 test("a hop chain that revisits a hop is refused in both directions", async () => {
@@ -314,11 +310,14 @@ async function resolveStream(data: Uint8Array) {
 		const msg = await decodeAnnounceBroadcastMaybe(reader, Version.DRAFT_07);
 		if (!msg) return out;
 		switch (msg.status) {
-			case "active":
-				out.push({ start: history.start(msg) });
+			case "active": {
+				const { route, instance, epoch, cost } = msg;
+				out.push({ start: history.start(msg), route, instance, epoch, cost });
 				break;
+			}
 			case "update":
-				out.push({ update: msg.id, hops: history.update(msg).hops });
+				history.get(msg.id);
+				out.push({ update: msg.id, cost: msg.cost });
 				break;
 			case "endedId":
 				out.push({ end: msg.id, suffix: history.end(msg.id) });
@@ -329,111 +328,227 @@ async function resolveStream(data: Uint8Array) {
 	}
 }
 
-const hop = (id: bigint) => HopSchema.parse(id);
-const relay = hop(0x2222n);
 const a = Instance.parse("a");
 const b = Instance.parse("b");
+const claim = { route: 0n, instance: a, epoch: 0n, cost: 0n };
 const GOLDEN_RESOLVED = [
-	{ start: { suffix: Path.from("room/a/cam"), hops: [hop(0x1111n), relay] } },
-	{ start: { suffix: Path.from("room/a/mic"), hops: [hop(0x3333n), relay] } },
-	{ update: 0n, hops: [hop(0x4444n), relay] },
+	{ start: Path.from("room/a/cam"), ...claim },
+	{ start: Path.from("room/a/mic"), ...claim },
+	{ update: 0n, cost: 0n },
 	{ end: 1n, suffix: Path.from("room/a/mic") },
-	{ start: { suffix: Path.from("room/b"), hops: [hop(0x5555n), relay] } },
+	{ start: Path.from("room/b"), ...claim },
 ];
 
-// Rust's compressed output (`lite::compress::tests::golden_stream_is_pinned`) before lite-07's
-// route layer, which js/net does not speak yet; quest/m2/cluster-routing/routes/js.md realigns
-// both streams with Rust's.
+// Rust's compressed output, pinned by `lite::compress::tests::golden_stream_is_pinned`.
 const GOLDEN =
-	"001900000a726f6f6d2f612f63616d0161000000029111a222000000100102036d6963016100000101b33301000208000101c044440100010101000f02010162016100000201c055550100";
+	"001300000a726f6f6d2f612f63616d000161000000000c0102036d696300016100000002020000010101000a02010162000161000000";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
 });
 
-// JS always encodes literally. Rust's `js_literal_stream_decodes` pins the route-layer form.
+// JS always encodes literally. Rust's `js_literal_stream_decodes` pins the same bytes.
 const JS_LITERAL =
-	"001900000a726f6f6d2f612f63616d0161000000029111a2220000001900000a726f6f6d2f612f6d6963016100000002b333a2220000020a000002c04444a22200000101010016000006726f6f6d2f62016100000002c05555a2220000";
+	"001300000a726f6f6d2f612f63616d000161000000001300000a726f6f6d2f612f6d6963000161000000020200000101010" +
+	"00f000006726f6f6d2f62000161000000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
 		const v = Version.DRAFT_07;
-		const cost = 0n;
-		await encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: Path.from("room/a/cam"), instance: a, hops: [hop(0x1111n), relay], cost },
-			v,
-		);
-		await encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: Path.from("room/a/mic"), instance: a, hops: [hop(0x3333n), relay], cost },
-			v,
-		);
-		await encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [hop(0x4444n), relay], cost }, v);
+		const start = (suffix: string): AnnounceBroadcast => ({
+			status: "active",
+			suffix: Path.from(suffix),
+			route: 0n,
+			instance: a,
+			epoch: 0n,
+			cost: 0n,
+		});
+		await encodeAnnounceBroadcast(w, start("room/a/cam"), v);
+		await encodeAnnounceBroadcast(w, start("room/a/mic"), v);
+		await encodeAnnounceBroadcast(w, { status: "update", id: 0n, cost: 0n }, v);
 		await encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, v);
-		await encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: Path.from("room/b"), instance: a, hops: [hop(0x5555n), relay], cost },
-			v,
-		);
+		await encodeAnnounceBroadcast(w, start("room/b"), v);
 	}, Version.DRAFT_07);
 	expect(hex(wire)).toBe(JS_LITERAL);
 	expect(await resolveStream(wire)).toEqual(GOLDEN_RESOLVED);
+});
+
+// `rs/moq-net/fixtures/lite.json` pins the same bytes on both sides.
+test("the route layer round-trips on draft-07", async () => {
+	const v = Version.DRAFT_07;
+	const advert = { seqno: 3n, metric: 5n, downOnly: true, rtt: undefined, hops: [7n, 9n] };
+	const cases: [AnnounceBroadcast, number[]][] = [
+		[{ status: "routeStart", node: 0x1234n, advert }, [6, 8, 0x92, 0x34, 3, 5, 1, 2, 7, 9]],
+		[{ status: "routeUpdate", id: 1n, advert: { ...advert, hops: [] } }, [7, 5, 1, 3, 5, 1, 0]],
+		// Flag 0x2: an RTT follows, 0 at the origin, whose Hops are its own alone.
+		[
+			{ status: "routeStart", node: 0x1234n, advert: { ...advert, downOnly: false, rtt: 0n, hops: [0x1234n] } },
+			[6, 9, 0x92, 0x34, 3, 5, 2, 0, 1, 0x92, 0x34],
+		],
+		[{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: 25n, hops: [] } }, [7, 6, 1, 3, 5, 3, 25, 0]],
+		[
+			{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: ROUTE_MAX, hops: [ROUTE_MAX] } },
+			[7, 23, 1, 3, 5, 3, ...Array(9).fill(0xff), 1, ...Array(9).fill(0xff)],
+		],
+		// As many hops as a route may carry.
+		[
+			{
+				status: "routeUpdate",
+				id: 1n,
+				advert: { ...advert, hops: Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => BigInt(i + 1)) },
+			},
+			[7, 37, 1, 3, 5, 1, ROUTE_MAX_HOPS, ...Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => i + 1)],
+		],
+		[{ status: "routeHold", id: 1n }, [0xb, 1, 1]],
+		[{ status: "routeEnd", id: 1n }, [8, 1, 1]],
+		// Revision 4 travels as 5: 0 certifies nothing.
+		[{ status: "floor", id: 1n, revision: 4n }, [9, 2, 1, 5]],
+		[{ status: "floor", id: 1n, revision: undefined }, [9, 2, 1, 0]],
+	];
+	for (const [msg, wire] of cases) {
+		const encoded = await bytes((w) => encodeAnnounceBroadcast(w, msg, v), v);
+		expect([...encoded]).toEqual(wire);
+		expect(await roundTrip(msg, v)).toEqual(msg);
+		// Older versions have none of it.
+		await expect(
+			bytes((w) => encodeAnnounceBroadcast(w, msg, Version.DRAFT_06), Version.DRAFT_06),
+		).rejects.toThrow();
+	}
+
+	// Lite-07 claims name their route and carry no hop chain.
+	const literal: AnnounceBroadcast = { status: "active", suffix: Path.from("x"), route: 2n, instance: a, epoch: 1n };
+	expect(await roundTrip(literal, v)).toEqual({ ...literal, cost: 0n });
+	await expect(bytes((w) => encodeAnnounceBroadcast(w, { ...literal, route: undefined }, v), v)).rejects.toThrow();
+	await expect(
+		bytes((w) => encodeAnnounceBroadcast(w, { ...literal, hops: [HopSchema.parse(1n)] }, v), v),
+	).rejects.toThrow();
+});
+
+test("the route layer refuses the last seqno and Node ID 0", async () => {
+	const v = Version.DRAFT_07;
+	const last = { seqno: ROUTE_MAX, metric: 0n, downOnly: false, rtt: undefined, hops: [] };
+	await expect(
+		bytes((w) => encodeAnnounceBroadcast(w, { status: "routeStart", node: 1n, advert: last }, v), v),
+	).rejects.toThrow();
+	const crowded = { ...last, seqno: 0n, hops: Array.from({ length: ROUTE_MAX_HOPS + 1 }, () => 1n) };
+	await expect(
+		bytes((w) => encodeAnnounceBroadcast(w, { status: "routeStart", node: 1n, advert: crowded }, v), v),
+	).rejects.toThrow();
+	await expect(
+		bytes((w) => encodeAnnounceReply(w, { kind: "request", node: 0n, seqno: 1n }, v), v),
+	).rejects.toThrow();
+
+	// Built by hand, as only a nonconforming peer sends them.
+	const forged = async (body: (w: Writer) => Promise<void>) => {
+		const inner = await bytes(body, v);
+		return bytes(async (w) => {
+			await w.u53(6);
+			await w.u53(inner.byteLength);
+			await w.write(inner);
+		}, v);
+	};
+	const zero = await forged(async (w) => {
+		await w.u62(0n);
+		await w.u62(0n);
+		await w.u62(0n);
+		await w.u8(0);
+	});
+	await expect(decodeAnnounceBroadcast(new Reader(undefined, zero, v), v)).rejects.toThrow(ProtocolViolation);
+	const maxed = await forged(async (w) => {
+		await w.u62(1n);
+		await w.u62(ROUTE_MAX);
+		await w.u62(0n);
+		await w.u8(0);
+	});
+	await expect(decodeAnnounceBroadcast(new Reader(undefined, maxed, v), v)).rejects.toThrow(ProtocolViolation);
+	// A flag no version defines, and the RTT flag without its field.
+	for (const flags of [4, 2]) {
+		const flagged = await forged(async (w) => {
+			await w.u62(1n);
+			await w.u62(0n);
+			await w.u62(0n);
+			await w.u8(flags);
+		});
+		await expect(decodeAnnounceBroadcast(new Reader(undefined, flagged, v), v)).rejects.toThrow();
+	}
+	// More hops than a route may carry, refused before reading them.
+	const overHops = await forged(async (w) => {
+		await w.u62(1n);
+		await w.u62(0n);
+		await w.u62(0n);
+		await w.u8(0);
+		await w.u53(ROUTE_MAX_HOPS + 1);
+	});
+	await expect(decodeAnnounceBroadcast(new Reader(undefined, overHops, v), v)).rejects.toThrow(ProtocolViolation);
+});
+
+test("the subscriber's replies round-trip on draft-07", async () => {
+	const v = Version.DRAFT_07;
+	for (const [msg, wire] of [
+		[{ kind: "request", node: 7n, seqno: 2n }, [0xa, 2, 7, 2]],
+		[{ kind: "echo", id: 3n }, [8, 1, 3]],
+	] as [AnnounceReply, number[]][]) {
+		const encoded = await bytes((w) => encodeAnnounceReply(w, msg, v), v);
+		expect([...encoded]).toEqual(wire);
+		expect(await decodeAnnounceReplyMaybe(new Reader(undefined, encoded, v), v)).toEqual(msg);
+	}
+	// Anything else is a violation.
+	const other = await bytes(async (w) => {
+		await w.u53(0);
+		await w.u53(0);
+	}, v);
+	await expect(decodeAnnounceReplyMaybe(new Reader(undefined, other, v), v)).rejects.toThrow(ProtocolViolation);
+	// A finished stream is no reply.
+	expect(await decodeAnnounceReplyMaybe(new Reader(undefined, new Uint8Array(), v), v)).toBeUndefined();
+	await expect(
+		bytes((w) => encodeAnnounceReply(w, { kind: "echo", id: 1n }, Version.DRAFT_06), Version.DRAFT_06),
+	).rejects.toThrow();
 });
 
 test("AnnounceHistory rejects a base that is not live", () => {
 	const history = new AnnounceHistory();
 	const base = { distance: 1n, keep: 0 };
 	// A new stream has nothing to copy from.
-	expect(() => history.start({ suffix: Path.from("a"), hops: [], pathBase: base })).toThrow(ProtocolViolation);
+	expect(() => history.start({ suffix: Path.from("a"), pathBase: base })).toThrow(ProtocolViolation);
 
 	const fresh = new AnnounceHistory();
-	fresh.start({ suffix: Path.from("a/b"), hops: [hop(1n)] });
-	fresh.start({ suffix: Path.from("c"), hops: [] });
+	fresh.start({ suffix: Path.from("a/b") });
+	fresh.start({ suffix: Path.from("c") });
 	fresh.end(0n);
 	// Id 0 is two back, and retired.
-	expect(() => fresh.start({ suffix: Path.from("x"), hops: [], pathBase: { distance: 2n, keep: 1 } })).toThrow(
+	expect(() => fresh.start({ suffix: Path.from("x"), pathBase: { distance: 2n, keep: 1 } })).toThrow(
 		ProtocolViolation,
 	);
 });
 
 test("AnnounceHistory rejects a keep longer than the base", () => {
 	const history = new AnnounceHistory();
-	history.start({ suffix: Path.from("a/b"), hops: [hop(1n)] });
-	expect(() => history.start({ suffix: Path.from("x"), hops: [], pathBase: { distance: 1n, keep: 3 } })).toThrow(
+	history.start({ suffix: Path.from("a/b") });
+	expect(() => history.start({ suffix: Path.from("x"), pathBase: { distance: 1n, keep: 3 } })).toThrow(
 		ProtocolViolation,
 	);
-	expect(() => history.update({ id: 0n, hops: [], hopBase: { distance: 1n, keep: 2 } })).toThrow(ProtocolViolation);
 });
 
 test("AnnounceHistory keeps segments split at an escaped slash", () => {
 	const history = new AnnounceHistory();
-	history.start({ suffix: Path.from("a\\/b"), hops: [] });
+	history.start({ suffix: Path.from("a\\/b") });
 	// The kept `a\` is half an escape, which the rest completes or nothing does.
-	const { suffix } = history.start({ suffix: Path.from("c"), hops: [], pathBase: { distance: 1n, keep: 1 } });
+	const suffix = history.start({ suffix: Path.from("c"), pathBase: { distance: 1n, keep: 1 } });
 	expect(suffix).toBe(Path.from("a\\/c"));
-	expect(() => history.start({ suffix: Path.empty(), hops: [], pathBase: { distance: 1n, keep: 1 } })).toThrow(
+	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 1n, keep: 1 } })).toThrow(
 		ProtocolViolation,
 	);
 });
 
 test("AnnounceHistory rejects a resolved path past the byte limit", () => {
 	const history = new AnnounceHistory();
-	history.start({ suffix: Path.from("x".repeat(Path.MAX_BYTES - 2)), hops: [] });
+	history.start({ suffix: Path.from("x".repeat(Path.MAX_BYTES - 2)) });
 	// `head/y` is exactly the limit, and one byte more is refused.
-	const { suffix } = history.start({ suffix: Path.from("y"), hops: [], pathBase: { distance: 1n, keep: 1 } });
+	const suffix = history.start({ suffix: Path.from("y"), pathBase: { distance: 1n, keep: 1 } });
 	expect(suffix.length).toBe(Path.MAX_BYTES);
-	expect(() => history.start({ suffix: Path.from("yz"), hops: [], pathBase: { distance: 1n, keep: 1 } })).toThrow(
+	expect(() => history.start({ suffix: Path.from("yz"), pathBase: { distance: 1n, keep: 1 } })).toThrow(
 		ProtocolViolation,
 	);
-});
-
-test("AnnounceHistory rejects a resolved chain that repeats a hop", () => {
-	const history = new AnnounceHistory();
-	history.start({ suffix: Path.from("a"), hops: [hop(1n), hop(2n)] });
-	expect(() =>
-		history.start({ suffix: Path.from("b"), hops: [hop(2n)], hopBase: { distance: 1n, keep: 1 } }),
-	).toThrow(ProtocolViolation);
 });
 
 test("a keep without a base is a violation on draft-07", async () => {
@@ -464,20 +579,19 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 	const ceiling = 2n ** 62n - 1n;
 	const huge = 2n ** 64n - 1n;
 	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-		const instance = Instance.parse("a");
-		const got = await roundTrip(
-			{ status: "active", suffix: Path.from("x"), instance, hops: [], cost: huge },
-			version,
-		);
-		expect(got).toMatchObject({ cost: ceiling });
+		const lite07 = version === Version.DRAFT_07;
+		const msg: AnnounceBroadcast = lite07
+			? { status: "active", suffix: Path.from("x"), route: 0n, instance: a, epoch: 0n, cost: huge }
+			: { status: "active", suffix: Path.from("x"), hops: [], cost: huge };
+		expect(await roundTrip(msg, version)).toMatchObject({ cost: ceiling });
 	}
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, instance "a", unminted, epoch 0, hop
-	// base, no hops, hop keep, then a cost of 2^64-1, which only lite-07's varints can carry.
+	// ANNOUNCE_START: path base, path keep, empty suffix, route 0, instance "a", unminted, epoch 0,
+	// then a cost of 2^64-1, which only lite-07's varints can carry.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
-		await w.u53(19);
-		for (const byte of [0, 0, 0, 1, 0x61, 0, 0, 0, 0, 0]) await w.u8(byte);
+		await w.u53(17);
+		for (const byte of [0, 0, 0, 0, 1, 0x61, 0, 0]) await w.u8(byte);
 		await w.u62(huge);
 	}, Version.DRAFT_07);
 	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
@@ -490,18 +604,15 @@ test("wip start and update carry one static cost", async () => {
 		(w) =>
 			encodeAnnounceBroadcast(
 				w,
-				{ status: "active", suffix: Path.empty(), instance: b, hops: [], cost: Cost.zero },
+				{ status: "active", suffix: Path.empty(), route: 0n, instance: b, cost: Cost.zero },
 				v,
 			),
 		v,
 	);
-	// Path base, path keep, empty suffix, instance "b", unminted, epoch 0, hop base, no hops, hop keep, cost.
-	expect([...start]).toEqual([0, 11, 0, 0, 0, 1, 0x62, 0, 0, 0, 0, 0, 0]);
-	const update = await bytes(
-		(w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [], cost: Cost.zero }, v),
-		v,
-	);
-	expect([...update]).toEqual([2, 5, 0, 0, 0, 0, 0]);
+	// Path base, path keep, empty suffix, route 0, instance "b", unminted, epoch 0, cost.
+	expect([...start]).toEqual([0, 9, 0, 0, 0, 0, 1, 0x62, 0, 0, 0]);
+	const update = await bytes((w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, cost: Cost.zero }, v), v);
+	expect([...update]).toEqual([2, 2, 0, 0]);
 });
 
 test("lite06 ignores a legacy cold price and writes its saturation ceiling", async () => {
@@ -541,9 +652,10 @@ test("SYNCED is empty and belongs only to lite-07", async () => {
 	await expect(roundTrip({ status: "synced" }, Version.DRAFT_06)).rejects.toThrow();
 });
 
-test("ANNOUNCE_OK omits Active Count only on lite-07", async () => {
+// Lite-07 drops both: the count for SYNCED, and the Hop ID for the route layer.
+test("ANNOUNCE_OK is empty on lite-07", async () => {
 	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		const wire = await bytes((w) => new AnnounceOk(HopSchema.parse(1n), 7).encode(w, version), version);
-		expect(wire).toEqual(new Uint8Array(version === Version.DRAFT_06 ? [2, 1, 7] : [1, 1]));
+		expect(wire).toEqual(new Uint8Array(version === Version.DRAFT_06 ? [2, 1, 7] : [0]));
 	}
 });
