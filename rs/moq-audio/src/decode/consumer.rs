@@ -265,7 +265,7 @@ impl Consumer {
 		// the max delay alone.
 		let track = playout.consumer(track, container);
 
-		Ok(Self {
+		let mut consumer = Self {
 			target: Target::new(delay, options.estimate, catalog.jitter),
 			decoder,
 			track,
@@ -298,7 +298,9 @@ impl Consumer {
 			boundary: None,
 			frame: Duration::ZERO,
 			declared: None,
-		})
+		};
+		consumer.track.set_wait(consumer.delay());
+		Ok(consumer)
 	}
 
 	/// The decoder backend name in use, e.g. `"libopus"` or `"symphonia"`.
@@ -641,6 +643,10 @@ impl Consumer {
 						}
 						_ => self.breaks += 1,
 					}
+					// A missing group is waited for only the playout delay, since past it the group
+					// would play late, and a reordered backlog's holes waited out to the max delay
+					// would read as jitter. Late groups that did arrive still play up to the max.
+					self.track.set_wait(self.delay());
 					self.pending.push_back((read, kio::clock::Instant::now()));
 				}
 				Some(Ok(None)) => self.ended = Some(None),
