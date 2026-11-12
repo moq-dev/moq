@@ -219,6 +219,84 @@ async fn a_reset_group_resumes_without_loss() {
 	assert_eq!(rest, [b"b".as_slice(), b"c".as_slice()]);
 }
 
+/// On lite-07 a paused group's continuation waiting for credit ranks below the stream it
+/// lost to, so it never holds back a newer group that outranks that stream: the newer group
+/// still resets it, and both paused groups then continue without loss.
+#[kio::test]
+async fn a_waiting_continuation_lets_a_newer_group_through() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = origin(1);
+	let viewer = origin(2);
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	let track = broadcast.broadcast().create_track("0", info).unwrap();
+	broadcast.announce().unwrap();
+
+	let mut options = MockConnectOptions::new(version);
+	options.transport.max_concurrent_uni_streams = Some(1);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(viewer.clone());
+	let _pair = connect_mock(options).await;
+
+	let remote = viewer
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	let prefs = track::Subscription::default()
+		.with_order(track::Order::Descending)
+		.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+	let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+	macro_rules! next {
+		() => {
+			kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+				.await
+				.expect("a group arrives")
+				.unwrap()
+				.unwrap()
+		};
+	}
+
+	// Groups 0 and 1 stay unfinished: 1 resets 0, whose continuation then waits for credit.
+	let mut groups = Vec::new();
+	let mut readers = Vec::new();
+	for sequence in 0..2 {
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, b"a".as_slice()).unwrap();
+		let reader = next!();
+		assert_eq!(reader.sequence, sequence);
+		groups.push(group);
+		readers.push(reader);
+	}
+
+	// The newest outranks group 1's stream, so it resets that one too.
+	let mut newest = track.append_group().unwrap();
+	newest.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
+	newest.finish().unwrap();
+	assert_eq!(next!().sequence, 2, "the newest group waits behind a continuation");
+
+	for (mut group, mut reader) in groups.into_iter().zip(readers) {
+		group.write_frame(Timestamp::ZERO, b"b".as_slice()).unwrap();
+		group.finish().unwrap();
+		let mut frames = Vec::new();
+		while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), reader.read_frame())
+			.await
+			.expect("the paused group continues")
+			.expect("the paused group is not given up")
+		{
+			frames.push(frame.payload);
+		}
+		assert_eq!(frames, [b"a".as_slice(), b"b".as_slice()], "group {}", reader.sequence);
+	}
+}
+
 /// A relay's upstream session out of request credit waits for it rather than refusing: a
 /// subscription past the publisher's credit is served once an earlier one leaves.
 #[kio::test]

@@ -43,7 +43,7 @@ A counterexample is a path through the model, not yet a bug. Replay it on the co
 
 ## Coverage
 
-Sync commit: `d9a88d2e3685f170e197c4e1623f26ccaa2c4c63`. Run `git log d9a88d2e36.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`), so each Code cell starts with a repo-relative path, then the symbols in it.
+Sync commit: `4265dc5b57797cb8bb2213e962abc3fa4ff7aa7d`. Run `git log 4265dc5b57.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`), so each Code cell starts with a repo-relative path, then the symbols in it.
 
 | Code | Model |
 | --- | --- |

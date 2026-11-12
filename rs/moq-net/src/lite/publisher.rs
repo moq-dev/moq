@@ -5024,6 +5024,15 @@ struct Paused {
 	frame_start: u64,
 }
 
+impl Paused {
+	/// Whether `a` ranks above `b` for a subscription's stream credit, by sequence in its
+	/// `order`, as [`crate::priority::in_group`] ranks them.
+	fn outranks(order: crate::track::Order, a: &Self, b: &Self) -> bool {
+		crate::priority::in_group(a.group.sequence, a.frame_start, order)
+			> crate::priority::in_group(b.group.sequence, b.frame_start, order)
+	}
+}
+
 impl Subscription {
 	fn group_context(&self) -> GroupContext {
 		GroupContext {
@@ -5111,9 +5120,13 @@ struct TrackRun {
 	// on its own stream as stream credit allows.
 	reoffered: std::collections::VecDeque<group::Consumer>,
 	// Lite-07: the paused groups, each continued on its own stream ahead of re-offers and new
-	// groups. Each paused while holding a stream, and the cursor hands out no group while
-	// one waits, so stream credit bounds them.
+	// groups. Each paused while holding a stream, so stream credit bounds them.
 	paused: std::collections::VecDeque<Paused>,
+	// Lite-07: the group `opening` holds continues a paused one.
+	continuing: bool,
+	// Lite-07: a group the cursor handed out while a continuation waited for credit, ranked
+	// below it. One at most: the cursor hands out no other until it opens.
+	stashed: Option<Paused>,
 	end_sent: bool,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
@@ -5179,6 +5192,8 @@ impl TrackRun {
 			redrop: RangeSet::new(),
 			reoffered: Default::default(),
 			paused: Default::default(),
+			continuing: false,
+			stashed: None,
 			end_sent: false,
 			opening: None,
 			children: kio::Tasks::new(),
@@ -5460,6 +5475,7 @@ impl TrackRun {
 			// The track side takes groups again.
 			Idle::disarm(&mut self.idle);
 			let mut opening = self.opening.take().expect("polled above");
+			self.continuing = false;
 			match res {
 				Ok(()) => self.children.push(opening),
 				Err(err) => opening.settle_failed(&err),
@@ -5579,12 +5595,26 @@ impl TrackRun {
 		}
 
 		// A paused group takes the next stream credit, ahead of re-offers and new groups. It is
-		// owed already, and the subscriber holds its group open until it continues.
+		// owed already, and the subscriber holds its group open until it continues. A group
+		// stashed behind a continuation goes first if it outranks the next one.
+		if self.opening.is_none()
+			&& let Some(stashed) = self.stashed.take()
+		{
+			let order = self.ctx.steer_current().order;
+			match self.paused.front() {
+				Some(paused) if !Paused::outranks(order, &stashed, paused) => self.stashed = Some(stashed),
+				_ => {
+					self.open(stashed.group, stashed.frame_start);
+					return Poll::Ready(Ok(ControlFlow::Continue(())));
+				}
+			}
+		}
 		if self.opening.is_none()
 			&& let Some(Paused { group, frame_start }) = self.paused.pop_front()
 		{
 			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, frame_start, "continuing paused group");
 			self.open(group, frame_start);
+			self.continuing = true;
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -5614,7 +5644,9 @@ impl TrackRun {
 
 		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
 		let emit_boundary = self.emit_range && !self.end_sent;
-		let groups = self.opening.is_none();
+		// A continuation waiting for credit ranks below every stream it could take, so it must
+		// not hold back a newer group that outranks one of them: the cursor hands one more out.
+		let groups = self.opening.is_none() || (self.continuing && self.stashed.is_none());
 		let end_error = self.ctx.version.has_end_error();
 		if let Poll::Ready(res) = poll_recv_next(&mut self.track, groups, emit_boundary, end_error, waiter) {
 			match res? {
@@ -5660,7 +5692,8 @@ impl TrackRun {
 					writer.buffer(&lite::SubscribeResponse::Finish(end))?;
 				}
 				Recv::Finished => {
-					if !self.children.is_empty() {
+					// A continuation waiting for credit is still in flight too.
+					if !self.children.is_empty() || self.opening.is_some() {
 						return Poll::Pending;
 					}
 					// Lite-07 sends no FIN to say nothing was served, so a track that ended
@@ -6014,7 +6047,26 @@ impl TrackRun {
 		let frame_start = group.index();
 		self.mark_served(sequence);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
-		self.open(group, frame_start);
+		let Some(waiting) = self.opening.take() else {
+			return self.open(group, frame_start);
+		};
+		// Lite-07: handed out while a continuation waits for credit. The higher-ranked of the two
+		// waits for it, and the other right behind; a continuation keeps its place in line.
+		debug_assert!(self.continuing, "only a continuation shares the wait");
+		let serving = Paused { group, frame_start };
+		let continuation = Paused {
+			group: waiting.group.clone(),
+			frame_start: waiting.frame_start,
+		};
+		if Paused::outranks(self.ctx.steer_current().order, &serving, &continuation) {
+			drop(waiting);
+			self.continuing = false;
+			self.paused.push_front(continuation);
+			self.open(serving.group, serving.frame_start);
+		} else {
+			self.opening = Some(waiting);
+			self.stashed = Some(serving);
+		}
 	}
 
 	/// Open a group machine streaming `group` from `frame_start`, which waits for stream

@@ -1463,6 +1463,55 @@ test.each([false, true])("a yielded group continues without loss (overtakes: %p)
 	}
 });
 
+// Lite-07: a continuation is reset with YIELDED too, pausing the group again, and a third stream
+// finishes it. Each pause keeps what arrived, and the reader gets every frame once.
+test("a group yielded twice continues without loss", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: Duration.millis(60_000) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		await (await opened(1)).reading;
+
+		const frames = ["zero", "one", "two"].map((text, i) => ({
+			delta: i === 0 ? 300 : 10,
+			payload: new TextEncoder().encode(text),
+		}));
+		const header = new Group({ subscribe: 0n, sequence: 3n, frameStart: 0 });
+		const group = (async () => track.recvGroup())();
+
+		// Each stream starts at frame 0 and carries one frame more than the last before its reset.
+		for (const sent of [1, 2]) {
+			const stream = handStream(version);
+			for (const { delta, payload } of frames.slice(0, sent)) stream.write(await liteFrame(delta, payload));
+			const running = subscriber.runGroup(header, stream.reader);
+			await drainReactions();
+			stream.reset(StreamCode.Yielded);
+			await running;
+			await drainReactions();
+			expect((await group)?.closed.peek(), `after ${sent} frames`).toBeUndefined();
+		}
+		const last = handStream(version);
+		for (const { delta, payload } of frames) last.write(await liteFrame(delta, payload));
+		last.finish();
+		await subscriber.runGroup(header, last.reader);
+
+		const reader = await group;
+		expect(reader?.sequence).toBe(3n);
+		for (const { payload } of frames) expect((await reader?.readFrame())?.payload).toEqual(payload);
+		expect(await reader?.readFrame()).toBeUndefined();
+		expect(await reader?.closed).toBeNull();
+	} finally {
+		track.close();
+		subscriber.close();
+	}
+});
+
 // Lite-07: a drop can overtake the YIELDED reset of the stream it names. The group ends with the
 // drop's error rather than waiting for a continuation the publisher never sends. Mirrors the Rust
 // `a_yielded_group_a_drop_named_ends`.

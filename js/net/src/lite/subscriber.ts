@@ -3212,6 +3212,8 @@ export class Subscriber {
 				if (paused) {
 					producer = paused.group;
 					ingest = { index: group.frameStart, partial: paused.partial };
+					// The publisher owes a paused group its continuation, which may yield again.
+					owed = true;
 					break;
 				}
 				const arriving = hooks.arrivingGroup(track, group.sequence);
