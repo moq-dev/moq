@@ -1,4 +1,4 @@
-// Labels for `/statechart` on SubscribeAccounting.tla: what each side holds for the
+// Statechart labels for SubscribeAccounting.tla: what each side holds for the
 // group, which update each side is on, and each step as the event that happens.
 
 type Stream = { g: number; pub: string; err: string; wasFin: boolean; sub: string };

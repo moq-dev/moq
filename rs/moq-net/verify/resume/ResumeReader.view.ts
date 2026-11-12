@@ -1,4 +1,4 @@
-// Labels for `/statechart` on ResumeReader.tla: which route the front serves,
+// Statechart labels for ResumeReader.tla: which route the front serves,
 // what the reader holds, and each step as what happens to a route or the reader.
 
 type Copy = { t: number; rep: boolean };

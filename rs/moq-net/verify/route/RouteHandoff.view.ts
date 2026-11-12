@@ -1,4 +1,4 @@
-// Labels for `/statechart` on RouteHandoff.tla: each relay's route and what its
+// Statechart labels for RouteHandoff.tla: each relay's route and what its
 // reader shows, and each step as the message that arrives.
 
 // A sequence such as `hops` is keyed from 1.
