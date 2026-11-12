@@ -39,31 +39,29 @@ just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/rout
 just test tla rs/moq-net/verify/route
 ```
 
-`just test tla rs/moq-net/verify/route` runs every config, as Nightly does, simulating each one with a `Simulate:` line and expecting `Loop.cfg` to break. Times are TLC 1.8.0 on Java 21 with `-workers 4` at `nice -n 19`, on a 24-core host under load from other work. `Patient` is TRUE unless the table says otherwise.
+`just test tla rs/moq-net/verify/route` runs every config, as Nightly does, simulating each one with a `Simulate:` line and expecting `Loop.cfg` to break. Times are with `-workers 4`. `Patient` is TRUE unless the table says otherwise.
 
 | Config | Mesh | Bounds | Distinct states | Run |
 | --- | --- | --- | --- | --- |
-| `RouteHandoff.cfg` | The publisher behind relay 1, in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 407,240 | 1.5 min |
-| `Early.cfg` | The same, with a timer that fires at any moment. | 1 claim change, 1 session change | 4,178,590 | 12 min |
-| `Twice.cfg` | The same, where two sessions close, as when relay 1 dies. Simulated: `num` counts behaviours per worker. | 1 claim change, 2 session changes | 40,000 behaviours, 4.0M states | 2 min |
-| `Ring.cfg` | The publisher and three relays in a ring, with a timer that fires at any moment. | 1 claim change, 1 session change | 426,409 | 1.5 min |
-| `Lag.cfg` | Relay 3 hears the publisher through relays 1 and 2: the lagging neighbour. | 2 claim changes, 1 session change | 1,299,405 | 5 min |
-| `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | 20 min |
-| `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | 11 min |
-| `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | 9 min |
-| `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Open finding: `RequestsLoopFree` breaks. | 3 session changes | 979,474 when it breaks | 2.6 min |
+| `RouteHandoff.cfg` | The publisher behind relay 1, in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 407,240 | a minute or two |
+| `Early.cfg` | The same, with a timer that fires at any moment. | 1 claim change, 1 session change | 4,178,590 | ten minutes |
+| `Twice.cfg` | The same, where two sessions close, as when relay 1 dies. Simulated: `num` counts behaviours per worker. | 1 claim change, 2 session changes | 40,000 behaviours, 4.0M states | a few minutes |
+| `Ring.cfg` | The publisher and three relays in a ring, with a timer that fires at any moment. | 1 claim change, 1 session change | 426,409 | a minute or two |
+| `Lag.cfg` | Relay 3 hears the publisher through relays 1 and 2: the lagging neighbour. | 2 claim changes, 1 session change | 1,299,405 | a few minutes |
+| `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | twenty minutes |
+| `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
+| `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
+| `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Open finding: `RequestsLoopFree` breaks. | 3 session changes | 979,474 when it breaks | a few minutes |
 
 Run them last, one at a time. First run what answers in seconds: the prototype's tests (`just rs test -p moq-net --lib -E 'test(/route::tests::(paths|compare|copies)/)'`), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
 
-Read a counterexample with `/statechart`, passing it the spec, a config, and `RouteHandoff.view.ts`, which labels each relay's routes and what it shows, and each step as the message that arrives.
-
 ## Reading a failure
 
-A counterexample is a path through the model, not yet a bug. Replay it on the prototype with `PathSim` (`deliver`, `disconnect`, `tick`), one call per step. If the prototype does not follow it where the model claims to, fix the model. If it does, report the path and the rule. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
+Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on the prototype with `PathSim` (`deliver`, `disconnect`, `tick`), one call per step.
 
 ## Coverage
 
-Sync commit: `d3b6c2573a30541402d396f8080488646f673594`. Run `git log d3b6c2573a.. -- rs/moq-net/src/route/tests/paths.rs` to see what changed since. The model describes the prototype, extended with a route per prefix and with dead hops kept until their timer fires; `route::Router` does not run this rule yet. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`).
+Sync commit: `d3b6c2573a30541402d396f8080488646f673594`. Run `git log d3b6c2573a.. -- rs/moq-net/src/route/tests/paths.rs` to see what changed since. The model describes the prototype, extended with a route per prefix and with dead hops kept until their timer fires; `route::Router` does not run this rule yet. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

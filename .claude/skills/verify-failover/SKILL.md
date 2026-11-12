@@ -27,7 +27,7 @@ just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/
 just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/EndedRelay.cfg
 ```
 
-The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 2.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 2.2M states. Each takes under 30 seconds on 24 cores and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop: it fails at the sync commit on the open finding below at depth 31, after about 50M distinct states and 11 minutes on 8 workers.
+The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 2.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 2.2M states. Each takes seconds and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop: it fails at the sync commit on the open finding below at depth 31, after about 50M distinct states and minutes.
 
 ## Open finding: an ended relay cannot move a fetch off a dying route
 
@@ -42,11 +42,11 @@ The model lets a fetch reach the serving route whenever that route lives, after 
 
 ## Reading a failure
 
-A counterexample is a path through the model, not yet a bug. Replay it on the real stack in `rs/moq-net/tests/integration/failover_chain.rs`: relays are `origin::Producer`s linked over the memory transport (`link`, `priced_link`, a cost to make a route win), a relay or hop dies by aborting its sessions, a group read past a failed copy is what makes `Recover` fetch, and time is simulated. If the code does not follow the path, the model is wrong: fix the model to match the code. If it does, report the path and the rule in the code's words, and pin it as a `residual_*` test with its own config so the others still pass. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
+Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on the real stack in `rs/moq-net/tests/integration/failover_chain.rs`: relays are `origin::Producer`s linked over the memory transport (`link`, `priced_link`, a cost to make a route win), a relay or hop dies by aborting its sessions, a group read past a failed copy is what makes `Recover` fetch, and time is simulated. Pin a path the code follows as a `residual_*` test with its own config so the others still pass.
 
 ## Coverage
 
-Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

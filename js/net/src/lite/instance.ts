@@ -1,7 +1,7 @@
 import * as Instance from "../instance.ts";
 import * as Mint from "../mint.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { hasInstance, type Version } from "./version.ts";
+import { hasInstance, hasRoutes, type Version } from "./version.ts";
 
 const encoder = new TextEncoder();
 // `ignoreBOM` keeps a leading U+FEFF, which is instance text like any other, as Rust does.
@@ -25,6 +25,17 @@ export async function decodePin(r: Reader, version: Version): Promise<Instance.V
 	const minted = await r.bool();
 	if (bytes.byteLength === 0 && !minted) return undefined;
 	return decode(bytes, minted);
+}
+
+/** Encode the origin node a request names, 0 letting the publisher select one. Only lite-07
+ * carries it, so an older peer always selects, and a node set here is dropped. Mirrors rs/moq-net. */
+export async function encodeNode(w: Writer, version: Version, node: bigint): Promise<void> {
+	if (hasRoutes(version)) await w.u62(node);
+}
+
+/** Decode the origin node a request names; see {@link encodeNode}. */
+export async function decodeNode(r: Reader, version: Version): Promise<bigint> {
+	return hasRoutes(version) ? await r.u62() : 0n;
 }
 
 /** Encode the instance, its minted flag, and the epoch an announcement serves. Every route

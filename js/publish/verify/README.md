@@ -1,7 +1,7 @@
 # Publish flow
 
 `Publish.tla` is a TLA+ model of going live with `<moq-publish source="camera">`, written to be
-drawn as a statechart with `/statechart`. It follows the camera and microphone capture (asking,
+drawn as a statechart. It follows the camera and microphone capture (asking,
 capturing, denied, a lost device reopening within its retry budget, failed), the encoders
 settling, the `source`-mode announce gate in `src/announce.ts`, and the relay connection. The
 chart labels each state with what the status badge says and whether viewers can find the
@@ -24,7 +24,7 @@ state has.
 just test tla js/publish
 ```
 
-This must pass, as Nightly checks. To draw the chart, run `/statechart` with
+This must pass, as Nightly checks. The chart draws from
 `Publish.tla`, `Publish.cfg`, and `Publish.view.ts`.
 
 ## Left out

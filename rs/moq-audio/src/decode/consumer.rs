@@ -127,6 +127,8 @@ pub struct Consumer {
 	remix: Option<Remix>,
 	options: Options,
 	max_delay: std::time::Duration,
+	/// The track's max age, which clamps the max delay.
+	max_age: Option<std::time::Duration>,
 	/// Prime after a join or loss, never after a declared endpoint or at the track's
 	/// first packet, which the codec's own delay already primes.
 	warmup: Duration,
@@ -273,6 +275,7 @@ impl Consumer {
 			remix,
 			options,
 			max_delay,
+			max_age,
 			warmup,
 			warmup_pending: !warmup.is_zero(),
 			warmup_until: None,
@@ -314,6 +317,16 @@ impl Consumer {
 	/// The effective skip budget after clamping to the track's max age, excluding decoder warmup.
 	pub fn max_delay(&self) -> std::time::Duration {
 		self.max_delay
+	}
+
+	/// Move [`Delay::max`] mid-stream, clamped to the track's max age like [`Options::delay`].
+	///
+	/// A player whose playout delay moves calls this to keep the subscription reaching as far
+	/// behind it, as `moq play` keeps it at the delay plus its time stretch.
+	pub fn set_max_delay(&mut self, max: std::time::Duration) {
+		self.options.delay = self.options.delay.with_max(max);
+		self.track.set_delay(self.options.delay);
+		self.max_delay = max.min(self.max_age.unwrap_or(std::time::Duration::MAX));
 	}
 
 	/// The playout delay to hold ahead of the playhead right now: the fixed
@@ -962,6 +975,45 @@ mod tests {
 			first.map(|sub| sub.delay),
 			Some(delay.with_max(Duration::from_millis(600)))
 		);
+	}
+
+	/// A moved max delay reaches the subscription, plus the warmup, clamped to the max age.
+	#[tokio::test(start_paused = true)]
+	async fn a_moved_max_delay_reaches_the_subscription() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(
+				"audio",
+				hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(Duration::from_secs(5)),
+			)
+			.unwrap();
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_millis(100));
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				delay: Delay {
+					max: Some(Duration::from_millis(500)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		assert_eq!(consumer.max_delay(), Duration::from_millis(500));
+
+		consumer.set_max_delay(Duration::from_secs(2));
+		assert_eq!(consumer.max_delay(), Duration::from_secs(2));
+		assert_eq!(
+			track.subscription().unwrap().delay.max,
+			Some(Duration::from_millis(2_100))
+		);
+
+		consumer.set_max_delay(Duration::from_secs(9));
+		assert_eq!(consumer.max_delay(), Duration::from_secs(5));
 	}
 
 	#[tokio::test(start_paused = true)]

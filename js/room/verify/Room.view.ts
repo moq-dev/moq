@@ -1,4 +1,4 @@
-// Labels for `/statechart` on Room.tla: what you publish, your connection, what Bob publishes, and
+// Statechart labels for Room.tla: what you publish, your connection, what Bob publishes, and
 // what of Bob is on your screen.
 
 type Vars = {

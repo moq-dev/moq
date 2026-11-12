@@ -1,4 +1,4 @@
-# [S] Nightly's relay session benchmarks fit their hour
+# [M] Nightly's relay session benchmarks fit their hour
 
 ## Goal
 
@@ -9,18 +9,56 @@ regression gate.
 
 ## Plan
 
-The job was cancelled at the timeout on the 2026-11-08, 11-09, and 11-10
-scheduled runs. Unlike the other cancelled jobs it does not hang:
+The job does not hang and the sweep did not grow: one cell's teardown went
+super-linear. In
 [the 11-10 run](https://github.com/moq-dev/moq/actions/runs/42842827718/job/129922278379)
-was still finishing `relay_session_join_broadcasts` cells seconds before the
-cancel. The scheduled runs from 11-01 to 11-05 failed inside the workload after
-14 to 20 minutes, the
-[11-01 job](https://github.com/moq-dev/moq/actions/runs/41313466339/job/124868517800)
-with `Evicted`. The
-[11-06](https://github.com/moq-dev/moq/actions/runs/42236107954) and
-[11-07](https://github.com/moq-dev/moq/actions/runs/42377867523) runs
-completed the sweep in about 25 and 23 minutes (their jobs failed later, at
-`Fail on paired regressions`). Find what grew between those sweeps and the
-60-minute cancellations from 11-08, then trim it or split the group across
-matrix entries, as the Rust benchmark tests did. The sweep still covers both
-fan-out axes.
+each pass (this commit, then the base) spent about 22 minutes between the
+`relay_session_delivery_prefixes/moq-lite-07-wip/broadcasts=1025/follow=1024`
+cell and the next one; on
+[11-07](https://github.com/moq-dev/moq/actions/runs/42377867523) that gap was
+under a second. A local run of
+`cargo bench -p moq-relay --features test-support --bench session -- --quick relay_session_delivery_prefixes/`
+reproduces it: one thread spins at 100% for over 10 minutes after the lite-07
+`follow=1024` cell, while the next cell alone finishes in 2 seconds.
+
+The spinning thread is the cell's `retire`, dropping the viewer's lite-07
+session driver. Each of its 1024 `AnnouncePrefix` streams drops a
+`route::node::Stream` (`rs/moq-net/src/route/node.rs` `Drop`), which calls
+`disconnect`, then `update`, `recompute`, `prune` (`route/mod.rs`), and
+`View::restrict_all` over every region still certified
+(`route/view.rs`). `restrict_all` merges one restriction per region, and each
+`merge_claims` costs claims x floors in `as_of` plus floors squared in its
+stale check and floor `retain`. With about 1024 regions, claims, and floors,
+that is about 1e9 steps per closed prefix and cubic or worse over the session.
+A relay pays this whenever a lite-07 peer holding many announce prefixes
+leaves, so it is a relay CPU cost a client controls, not only a benchmark
+problem.
+
+✅ Decided 2026-11-12 (maintainer, on
+[moq-dev/moq#8536](https://github.com/moq-dev/moq/pull/8536)): fix the route
+layer's teardown to about linear (single-pass `restrict_all`, indexed floors,
+batch disconnect), verified with `/verify-route` (rejected: temporarily drop
+the lite-07 `follow=1024` Nightly cell, which hides a relay cost a client
+controls).
+
+[Routes](/quest/m2/cluster-routing/routes/README.md) item 27 (decided
+2026-11-11) replaces Babel's distance, the seqno, ROUTE_REQUEST, and the
+ROUTE_END echo with per-scope paths, and
+[the router](/quest/m2/cluster-routing/routes/scope.md) that builds it
+deletes `prune` and the per-region floors this teardown spends its time in.
+This fix still lands first, unblocked: Nightly loses its paired gate every
+night until it does, the router waits behind its model, and the batch
+disconnect carries over to the rebuild. Spend least on what the rebuild
+deletes: prefer the batch disconnect and single-pass `restrict_all` over
+indexing the per-region floors, and add the latter only if the former leave
+the cell super-linear.
+
+Make the route layer's teardown of a neighbor's prefixes cost about linear in
+what it held: for example, let `restrict_all` build one view from all regions
+in a single pass instead of merging per region, index floors so `as_of` and
+the floor `retain` stop scanning every floor, and disconnect a session's
+prefixes as one batch. Keep `/verify-route` passing. Then confirm the Relay
+session group finishes inside the hour (the 11-06 and 11-07 sweeps took
+about 25 minutes) without dropping the `follow=1024` cell, which is the case
+that exposed this. Add a route-layer benchmark sweeping held prefixes on
+both axes if the session cell does not isolate the teardown cost.

@@ -79,9 +79,9 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 				const closing = server.close();
 				await fin.reached;
 				expect(closed).toBe(false);
-				// lite-07 withdraws its claims; moq-transport only ends the stream, which
-				// withdraws nothing without a NAMESPACE_DONE.
-				expect((await announced.next())?.kind).toBe(protocol === Lite.ALPN_07_WIP ? "end" : "offline");
+				// lite-07 lets go of its route with a ROUTE_END, and moq-transport only ends the
+				// stream: neither withdraws the origin's claims, so the path goes offline.
+				expect((await announced.next())?.kind).toBe("offline");
 				if (outcome === "timeout") {
 					// bun's `rejects` blocks on a pending promise, so catch first and advance.
 					const timedOut = closing.catch((err: unknown) => err);

@@ -3,7 +3,7 @@ import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
+import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks, staleHole } from "../internal.ts";
@@ -16,7 +16,14 @@ import { Reader, Stream, Writer, writeBudget } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
-import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
+import {
+	type AnnounceBroadcast,
+	AnnounceOk,
+	type AnnounceReply,
+	AnnounceRequest,
+	decodeAnnounceBroadcast,
+	encodeAnnounceReply,
+} from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -180,7 +187,11 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		const messages: AnnounceBroadcast[] = [];
 		while (!(await reader.done())) messages.push(await decodeAnnounceBroadcast(reader, version));
 		if (version === Version.DRAFT_07) {
-			expect(messages).toMatchObject([{ status: "restart", id: 0n }]);
+			// One batch under the route, closed by its floor.
+			expect(messages).toMatchObject([
+				{ status: "restart", id: 0n },
+				{ status: "floor", id: 0n },
+			]);
 		} else {
 			expect(messages).toMatchObject([
 				{ status: "endedId", id: 0n },
@@ -1794,9 +1805,15 @@ for (const skipped of ["failed", "stale"] as const) {
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 			expect(response.start.starts[0]).toBe(6n);
 			if (skipped === "failed") {
-				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
-				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
-				expect([dropped.drop.start, dropped.drop.end]).toEqual([7n, 8n]);
+				// The failed group below the start is final, so it is named all the same.
+				for (const run of [
+					[5n, 6n],
+					[7n, 8n],
+				]) {
+					const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+					if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+					expect([dropped.drop.start, dropped.drop.end]).toEqual(run);
+				}
 			}
 			expect(await sub.servedSequence()).toBe(6n);
 		} finally {
@@ -3669,12 +3686,15 @@ test("lite-07 SYNCED survives an initial removal and continuous earlier-prefix c
 		release.resolve();
 		expect((await AnnounceOk.decode(reader, version)).active).toBe(0);
 		const events: AnnounceBroadcast[] = [];
-		for (let i = 0; i < 3; i++) {
+		for (let i = 0; i < 5; i++) {
 			const event = await decodeAnnounceBroadcast(reader, version);
 			events.push(event);
 			if (event.status === "synced") break;
 		}
-		expect(events[0]).toMatchObject({ status: "active", suffix: "z/retained" });
+		// The route, its claims, and their floor, then SYNCED.
+		expect(events[0]).toMatchObject({ status: "routeStart" });
+		expect(events[1]).toMatchObject({ status: "active", suffix: "z/retained" });
+		expect(events.at(-2)).toMatchObject({ status: "floor", id: 0n });
 		expect(events.at(-1)).toEqual({ status: "synced" });
 		expect(events).not.toContainEqual(expect.objectContaining({ suffix: "z/removed" }));
 	} finally {
@@ -3853,3 +3873,262 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		}
 	});
 }
+
+// A lite-07 announce stream the test reads as the subscriber, and answers.
+function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>, prefix = Path.empty()) {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const auth = grant && { grant, ready: Promise.resolve() };
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume(), auth);
+	let replies!: ReadableStreamDefaultController<Uint8Array>;
+	let output!: ReadableStreamDefaultController<Uint8Array>;
+	const reader = new Reader(new ReadableStream<Uint8Array>({ start: (c) => (output = c) }), undefined, version);
+	const stream = new Stream({
+		version,
+		readable: new ReadableStream<Uint8Array>({ start: (c) => (replies = c) }),
+		writable: new WritableStream<Uint8Array>({ write: (chunk) => output.enqueue(new Uint8Array(chunk)) }),
+	});
+	const running = publisher.runAnnounce(new AnnounceRequest(prefix), stream);
+	return {
+		node: wireOf(origin.consume()).own.node,
+		running,
+		next: () => decodeAnnounceBroadcast(reader, version),
+		answer: async (msg: AnnounceReply) =>
+			replies.enqueue(await Writer.collect(version, (w) => encodeAnnounceReply(w, msg, version))),
+		ok: () => AnnounceOk.decode(reader, version),
+		// The peer finishes its replies, which ends the stream.
+		finish: () => replies.close(),
+		close: () => {
+			publisher.close();
+			pair.client.close();
+			pair.server.close();
+		},
+	};
+}
+
+test("a lite-07 answer carries this origin's claims under its own route", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("cam"));
+	const { node, running, next, answer, ok, close } = routedAnswer(origin);
+	try {
+		await ok();
+		// Answering a stream lengthens no path, so the seqno stays.
+		expect(await next()).toEqual({
+			status: "routeStart",
+			node,
+			advert: { seqno: 0n, metric: 0n, downOnly: false, rtt: 0n, hops: [node] },
+		});
+		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
+		expect(await next()).toEqual({ status: "synced" });
+
+		// Each change is a batch closed by the next revision.
+		const mic = publish(origin, Path.from("mic"));
+		expect(await next()).toMatchObject({ status: "active", suffix: "mic", route: 0n });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 1n });
+		cam.close();
+		expect(await next()).toEqual({ status: "endedId", id: 0n });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 2n });
+
+		// The last claim withdrawn ends the route after its batch.
+		mic.close();
+		expect(await next()).toEqual({ status: "endedId", id: 1n });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 3n });
+		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
+
+		// The route starts again only once the end is echoed, under the next Route ID.
+		const again = publish(origin, Path.from("again"));
+		await yieldNow();
+		await answer({ kind: "echo", id: 0n });
+		expect(await next()).toMatchObject({ status: "routeStart", node });
+		expect(await next()).toMatchObject({ status: "active", suffix: "again", route: 1n });
+		expect(await next()).toMatchObject({ status: "floor", id: 1n });
+
+		// A ROUTE_REQUEST for this origin raises its seqno; one for another node changes nothing.
+		await answer({ kind: "request", node: node + 1n, seqno: 20n });
+		await answer({ kind: "request", node, seqno: 10n });
+		expect(await next()).toEqual({
+			status: "routeUpdate",
+			id: 1n,
+			advert: { seqno: 10n, metric: 0n, downOnly: false, rtt: 0n, hops: [node] },
+		});
+
+		// An echo of a route that is not ending is a violation.
+		await answer({ kind: "echo", id: 0n });
+		await expect(running).rejects.toThrow(ProtocolViolation);
+		again.close();
+	} finally {
+		close();
+		origin.close();
+	}
+});
+
+// A browser forwards nothing, so every session its route went out on is a path to it: closing one
+// advances the seqno. A session that never carried the route changes no path.
+test("a lite-07 seqno advances only when a session carrying the route closes", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("cam"));
+	const first = routedAnswer(origin);
+	const second = routedAnswer(origin);
+	try {
+		for (const { ok, next } of [first, second]) {
+			await ok();
+			expect(await next()).toMatchObject({ status: "routeStart", advert: { seqno: 0n } });
+			expect(await next()).toMatchObject({ status: "active", suffix: "cam" });
+			expect(await next()).toMatchObject({ status: "floor" });
+			expect(await next()).toEqual({ status: "synced" });
+		}
+
+		first.finish();
+		await first.running;
+		expect(await second.next()).toMatchObject({ status: "routeUpdate", id: 0n, advert: { seqno: 1n } });
+
+		// The unmatched stream shows no claim, so no route goes out on it, and its close is no bump.
+		const unmatched = routedAnswer(origin, undefined, Path.from("other"));
+		await unmatched.ok();
+		expect(await unmatched.next()).toEqual({ status: "synced" });
+		unmatched.finish();
+		await unmatched.running;
+		const mic = publish(origin, Path.from("mic"));
+		expect(await second.next()).toMatchObject({ status: "active", suffix: "mic" });
+		mic.close();
+	} finally {
+		cam.close();
+		for (const answer of [first, second]) answer.close();
+		origin.close();
+	}
+});
+
+// A request for the last seqno rotates this origin's identity, which ends its route. A peer
+// that keeps rotating it and never echoes holds one ended route here, not one per rotation.
+test("a lite-07 route starts again only once every end is echoed", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("cam"));
+	const { node, running, next, answer, ok, close } = routedAnswer(origin);
+	const own = wireOf(origin.consume()).own;
+	const last = 2n ** 64n - 1n;
+	try {
+		await ok();
+		expect(await next()).toMatchObject({ status: "routeStart", node });
+		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
+		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toEqual({ status: "synced" });
+
+		await answer({ kind: "request", node, seqno: last });
+		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
+		await yieldNow();
+		expect(own.node).not.toBe(node);
+		await answer({ kind: "request", node: own.node, seqno: last });
+		await yieldNow();
+
+		// Nothing under the newer identities until the end is echoed, then only the latest.
+		await answer({ kind: "echo", id: 0n });
+		expect(await next()).toMatchObject({ status: "routeStart", node: own.node });
+		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 1n });
+		expect(await next()).toMatchObject({ status: "floor", id: 1n });
+	} finally {
+		cam.close();
+		close();
+		origin.close();
+		await running.catch(() => {});
+	}
+});
+
+// A floor certifies the requested prefix only while the grant covers all of it, so a grant
+// change that flips that re-floors the route even when it shows the same claims.
+test("a lite-07 grant change alone re-floors the route", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("a/x"));
+	const grant = new Signal<Grant | undefined>(grantOf("a/x"));
+	const { running, next, ok, close } = routedAnswer(origin, grant);
+	try {
+		await ok();
+		expect(await next()).toMatchObject({ status: "routeStart" });
+		expect(await next()).toMatchObject({ status: "active", suffix: "a/x", route: 0n });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
+		expect(await next()).toEqual({ status: "synced" });
+
+		grant.set({ ...grantOf("a/x"), publish: new Path.Patterns([Path.Pattern.subtree(Path.empty())]) });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
+		grant.set(grantOf("a/x"));
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
+	} finally {
+		cam.close();
+		close();
+		origin.close();
+		await running.catch(() => {});
+	}
+});
+
+// A request prefix that fits the wire alone may overflow once joined to the handle's root:
+// nothing the scope allows lies there, so the floor certifies nothing rather than failing.
+test("a lite-07 request beyond the scope's path limits floors uncertified", async () => {
+	const origin = new OriginProducer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/**")]));
+	// The claim at room covers the request, so the answer floors it.
+	const room = publish(scoped, Path.from("room"));
+	const prefix = Path.from(["room", ...Array.from({ length: Path.MAX_PARTS - 1 }, () => "a")].join("/"));
+	const { running, next, ok, close } = routedAnswer(scoped, undefined, prefix);
+	try {
+		await ok();
+		expect(await next()).toMatchObject({ status: "routeStart" });
+		expect(await next()).toMatchObject({ status: "active", suffix: "", route: 0n });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
+		expect(await next()).toEqual({ status: "synced" });
+	} finally {
+		room.close();
+		close();
+		origin.close();
+		await running.catch(() => {});
+	}
+});
+
+// The publishing origin closing ends its claims and route, and finishes the stream.
+test("a lite-07 answer finishes once the publishing origin closes", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("cam"));
+	const { running, next, ok, close } = routedAnswer(origin);
+	try {
+		await ok();
+		expect(await next()).toMatchObject({ status: "routeStart" });
+		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
+		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toEqual({ status: "synced" });
+
+		origin.close();
+		expect(await next()).toEqual({ status: "endedId", id: 0n });
+		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
+		await running;
+	} finally {
+		cam.close();
+		close();
+	}
+});
+
+test("a lite-07 request naming another origin node is unroutable", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("cam"));
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const node = wireOf(origin.consume()).own.node;
+	const resets = spyOn(Writer.prototype, "reset");
+	const stream = () =>
+		new Stream({
+			version: Version.DRAFT_07,
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>(),
+		});
+	try {
+		await publisher.runTrackInfo(new TrackMessage(Path.from("cam"), "video", undefined, node + 1n), stream());
+		const codes = resets.mock.calls.map(([reason]) => toStreamCode(reason as Error));
+		expect(codes).toContain(StreamCode.Unroutable);
+	} finally {
+		resets.mockRestore();
+		publisher.close();
+		cam.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});

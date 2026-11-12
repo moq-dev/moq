@@ -15,7 +15,7 @@ import { Video } from "@moq/watch";
 
 export default class extends HTMLElement {
 	constructor();
-	attributeChangedCallback(name: "delay" | "lookahead" | "url" | "echo" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "announced" | "buffer" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
+	attributeChangedCallback(name: "delay" | "lookahead" | "stretch" | "url" | "echo" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "announced" | "buffer" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
 	readonly audio: Audio.Decoder;
 	get backend(): Video.Backend;
 	set backend(value: Video.Backend);
@@ -37,6 +37,7 @@ export default class extends HTMLElement {
 		delay: Signals.Signal<Delay>;
 		lookahead: Signals.Signal<Clock.Duration>;
 		paused: Signals.Signal<boolean>;
+		stretch: Signals.Signal<Clock.Duration>;
 		text: {
 			target: Signals.Signal<string | undefined>;
 		};
@@ -63,12 +64,14 @@ export default class extends HTMLElement {
 	set muted(value: boolean);
 	get name(): Net.Path.Valid;
 	set name(value: string | Net.Path.Valid);
-	static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "follow", "announced", "buffer", "delay", "lookahead", "catalog-format", "captions", "echo"];
+	static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "follow", "announced", "buffer", "delay", "lookahead", "stretch", "catalog-format", "captions", "echo"];
 	get paused(): boolean;
 	set paused(value: boolean);
 	readonly renderer: Video.Renderer;
 	reset(): void;
 	readonly signals: Signals.Effect;
+	get stretch(): Clock.Duration;
+	set stretch(value: Clock.Duration);
 	readonly sync: Sync;
 	readonly text: Text.Source;
 	readonly textRenderer: Text.Renderer;

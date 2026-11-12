@@ -20,11 +20,7 @@ copy that fails continues on the re-offer with no duplicate or missing frame.
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the wait on
 [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), Drop set's own
-PR, becomes a `Required` link to [Drop set](/quest/m1/drop-set.md), since
+PR, becomes a `Required` link to Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)), since
 #7670 adds the held re-offer (its decision 24) this builds on.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Drop set](/quest/m1/drop-set.md) - adds the held re-offer this builds on

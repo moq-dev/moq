@@ -15,6 +15,9 @@ import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, read
  */
 export type Delay = "instant" | "auto" | Duration;
 
+/** The default {@link SyncInput.stretch}: how far live audio may trail the clock before it skips. @internal */
+export const STRETCH = Duration.secs(2);
+
 /** Signals the sync reads. */
 export type SyncInput = {
 	/** How far playback trails the live edge. See {@link Delay}. */
@@ -26,13 +29,28 @@ export type SyncInput = {
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
 	 * timestamps) build up instead of being skipped. Audio that falls behind, as after a stall,
-	 * catches up by playing faster, and skips only what trails by more than the lookahead. Always
+	 * catches up by playing faster, and skips only what trails by more than the larger of the
+	 * lookahead and {@link SyncInput.stretch}. Always
 	 * finite, so worst case the audio ring drops its oldest samples rather than exhausting memory.
 	 * With a nonzero lookahead, the first video
 	 * frame is a poster until every enabled media track holds the resolved delay; `lookahead` is
 	 * the most held ahead, not the amount required to start.
 	 */
 	lookahead: Getter<Duration>;
+
+	/**
+	 * How far audio may trail the clock before it skips ahead (default: 2 s).
+	 *
+	 * After a stall, audio slows down and falls behind the clock rather than dropping what arrives
+	 * late, then speeds up until it is back on it; only what trails by more than this is skipped. The
+	 * audio subscription asks for `delay + stretch`, so that late audio still arrives. A buffered
+	 * player already keeps its whole lookahead, so audio skips only past the larger of the two.
+	 *
+	 * Zero turns the time stretch off: received audio plays unaltered, late audio is skipped, an
+	 * underrun is silence, and drift against the publisher's clock is corrected by a small skip or
+	 * pad. Video is unaffected either way: it stays on the clock.
+	 */
+	stretch: Getter<Duration>;
 };
 
 /** Signals the sync derives. */
@@ -133,6 +151,7 @@ export class Clock {
 		this.in = {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
 			lookahead: getter(props?.lookahead ?? Duration.ZERO),
+			stretch: getter(props?.stretch ?? STRETCH),
 		};
 	}
 

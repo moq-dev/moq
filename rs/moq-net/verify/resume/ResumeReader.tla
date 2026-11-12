@@ -482,7 +482,7 @@ CopiesBounded ==
         Cardinality({i \in 1 .. Len(rd.copies) :
                         rd.copies[i].t = t /\ rd.copies[i].done = "no"}) <= 2
 
-\* Chart.cfg's story, for `/statechart`: route 1 carries only the newest group
+\* Chart.cfg's story: route 1 carries only the newest group
 \* and route 2 lands every group newest first, with no route failing, so a
 \* switch has to ask route 2 for the older group.
 Story ==

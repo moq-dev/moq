@@ -165,9 +165,10 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 			const body = await Writer.collect(version, async (w) => {
 				await w.string("room");
 				if (version === Lite.DRAFT_07) {
-					// No pinned instance: empty and unminted.
+					// No pinned instance: empty and unminted, and no origin node.
 					await w.u53(0);
 					await w.bool(false);
+					await w.u62(0n);
 				}
 				await w.string("video");
 				await w.u8(0);
