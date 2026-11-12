@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import { Producer } from "../group.ts";
-import { Reader } from "../stream.ts";
+import { concat, encodeVarint, Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
-import { readFrames } from "./group.ts";
-import { Version } from "./version.ts";
+import { frameDecoder, readFrames } from "./group.ts";
+import { frameHeader } from "./publisher.ts";
+import { hasLengthFirst, Version } from "./version.ts";
 
 const SCALE = 1000;
 
@@ -20,7 +22,7 @@ function encode(frames: { delta?: number; payload: number[] }[]): Uint8Array {
 	return new Uint8Array(bytes);
 }
 
-function streamOf(chunks: Uint8Array[]): Reader {
+function streamOf(chunks: Uint8Array[], version: Version = VERSION): Reader {
 	return new Reader(
 		new ReadableStream<Uint8Array>({
 			start(controller) {
@@ -29,7 +31,7 @@ function streamOf(chunks: Uint8Array[]): Reader {
 			},
 		}),
 		undefined,
-		VERSION,
+		version,
 	);
 }
 
@@ -96,4 +98,70 @@ test("stops once the group closes", async () => {
 	const done = readFrames(stream, producer, { scale: SCALE });
 	producer.finish();
 	await done;
+});
+
+// Lite-07 FRAME leads with its Payload Length, the payload size plus one, then the timestamp delta
+// and inflated size; an earlier one ends its header with the size. Each version decodes what the
+// publisher encodes, timestamps and inflated sizes included.
+test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", async (version) => {
+	const lengthFirst = hasLengthFirst(version);
+	expect(lengthFirst).toBe(version === Version.DRAFT_07);
+	const frames = [
+		{ delta: 100n, payload: [1] },
+		{ delta: 20_000n, payload: [2, 2] },
+		{ delta: -50n, payload: [] },
+	];
+	const encoded = frames.map(({ delta, payload }) =>
+		concat([frameHeader(version, delta, undefined, payload.length, lengthFirst), new Uint8Array(payload)]),
+	);
+	// The first field is the size plus one on lite-07, and the timestamp delta before it.
+	const first = encoded[0];
+	if (lengthFirst) expect(Array.from(first.subarray(0, 1))).toEqual(Array.from(encodeVarint(2, version)));
+	else expect(Array.from(first.subarray(first.length - 2))).toEqual([1, 1]);
+
+	const producer = new Producer(0n);
+	const consumer = producer.consume();
+	await readFrames(streamOf(encoded, version), producer, { scale: SCALE, lengthFirst });
+	producer.finish();
+	let ts = 0;
+	for (const { delta, payload } of frames) {
+		const frame = await consumer.readFrame();
+		ts += Number(delta);
+		expect(frame?.payload).toEqual(new Uint8Array(payload));
+		expect(frame?.timestamp?.value).toBe(ts);
+	}
+	expect(await consumer.readFrame()).toBeUndefined();
+
+	// A compressed track's inflated size follows the timestamp delta, and the size still leads.
+	const compressed = concat([frameHeader(version, 7n, 9, 2, lengthFirst), new Uint8Array([5, 6])]);
+	const decoded = await streamOf([compressed], version).decode(
+		frameDecoder({ scale: SCALE, compress: true, lengthFirst }),
+	);
+	expect(decoded.size).toBe(2);
+	expect(decoded.inflated).toBe(9);
+	expect(decoded.timestamp?.value).toBe(7);
+	expect(decoded.payload).toEqual(new Uint8Array([5, 6]));
+});
+
+// A lite-07 Payload Length of 0 is reserved for GROUP_END, which no version defines yet.
+test("a lite-07 FRAME with a Payload Length of 0 is a protocol violation", async () => {
+	const producer = new Producer(0n);
+	const bytes = concat([encodeVarint(0, Version.DRAFT_07), encodeVarint(0, Version.DRAFT_07)]);
+	await expect(
+		readFrames(streamOf([bytes], Version.DRAFT_07), producer, { scale: SCALE, lengthFirst: true }),
+	).rejects.toBeInstanceOf(ProtocolViolation);
+});
+
+// Stream end at the Payload Length ends a lite-07 group; within the rest of the header, it cut a frame.
+test("a lite-07 stream ending at the Payload Length ends the group", async () => {
+	const version = Version.DRAFT_07;
+	const whole = concat([frameHeader(version, 1n, undefined, 1, true), new Uint8Array([7])]);
+	const producer = new Producer(0n);
+	await readFrames(streamOf([whole], version), producer, { scale: SCALE, lengthFirst: true });
+	expect(producer.consume().frameCount).toBe(1);
+
+	const cut = frameHeader(version, 1n, undefined, 1, true).subarray(0, 1);
+	await expect(
+		readFrames(streamOf([cut], version), new Producer(0n), { scale: SCALE, lengthFirst: true }),
+	).rejects.toThrow("unexpected end of stream");
 });

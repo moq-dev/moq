@@ -40,7 +40,14 @@ export async function receiveFrame(
 		hooks.writeGroupFrame(producer, frame as group.Frame, inflated);
 		return true;
 	}
-	const open = producer.createFrame({ size: frame.size, timestamp: frame.timestamp });
+	return fillFrame(stream, producer, producer.createFrame({ size: frame.size, timestamp: frame.timestamp }));
+}
+
+/**
+ * Stream the rest of `open`, a frame of `producer`, from `stream`, then finish it. Resolves false
+ * if the group closed first, which already failed the frame.
+ */
+export async function fillFrame(stream: Reader, producer: group.Producer, open: frame.Producer): Promise<boolean> {
 	while (open.remaining > 0) {
 		const chunk = await race([stream.readChunk(Math.min(open.remaining, SEGMENT_BYTES)), producer.closed]);
 		if (!(chunk instanceof Uint8Array)) return false;

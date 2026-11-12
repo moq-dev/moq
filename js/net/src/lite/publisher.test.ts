@@ -36,7 +36,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, ALPN_06, ALPN_07_WIP, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
+import { ALPN_05, ALPN_06, ALPN_07_WIP, hasLengthFirst, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);
@@ -609,8 +609,10 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 		} else {
 			const payloads: string[] = [];
 			while (!(await client.reader.done())) {
+				// Lite-07 leads with the size plus one, then the zigzag timestamp delta.
+				const size = (await client.reader.u53()) - 1;
 				await client.reader.u62();
-				payloads.push(new TextDecoder().decode(await client.reader.read(await client.reader.u53())));
+				payloads.push(new TextDecoder().decode(await client.reader.read(size)));
 			}
 			expect(payloads).toEqual(["a", "b"].slice(startFrame - 5));
 		}
@@ -878,9 +880,13 @@ async function servedSubscription(
 
 			const payloads: string[] = [];
 			while (!(await reader.done())) {
-				// Each frame is a zigzag timestamp delta, then a length-prefixed payload.
+				// Each frame is a zigzag timestamp delta, then a length-prefixed payload. Lite-07
+				// leads with the size plus one instead.
+				const lengthFirst = hasLengthFirst(version);
+				const length = lengthFirst ? (await reader.u53()) - 1 : undefined;
 				await reader.u62();
-				payloads.push(new TextDecoder().decode(await reader.read(await reader.u53())));
+				const size = length ?? (await reader.u53());
+				payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
 			return { sequence: header.sequence, frameStart: header.frameStart, payloads };
 		},
