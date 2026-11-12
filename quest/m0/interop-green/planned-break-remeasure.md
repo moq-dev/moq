@@ -24,7 +24,7 @@ Decided 2026-11-12 (maintainer), since stale pins caused four of the last six re
 The job runs after the publish jobs for the three packages the planned-breaks
 file pins, in the workflows that publish from `release` (`.github/workflows/release-*.yml`).
 It re-measures the pins against the versions just published and lands the
-rewritten file on `main`, which CONTRIBUTING.md's release procedure does by
+rewritten file on `main`, which RELEASE.md's release procedure does by
 hand today. Check `main`'s ruleset first: where it requires a pull request, the
 job opens one. Its write credentials go in an environment limited to protected
 branches.
@@ -33,6 +33,6 @@ Verify it by running the job on its own against the current pins (moq-cli
 0.14.16, moq-relay 0.17.16, `@moq/net` 0.4.7). It should reproduce the file
 with no diff.
 
-The same PR updates CONTRIBUTING.md's release bullet, which says to run the
+The same PR updates RELEASE.md's release bullet, which says to run the
 remeasure by hand, to name the job. The nightly wire-compat check keeps
 running as it does now.

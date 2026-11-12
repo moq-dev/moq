@@ -10,21 +10,22 @@ so it only needs to stay green.
 
 ## Waiting
 
-- moq-dev/moq: the next scheduled Interop run on `main` (the first after
-  [moq-dev/moq#8455](https://github.com/moq-dev/moq/pull/8455) and
-  [moq-dev/moq#8512](https://github.com/moq-dev/moq/pull/8512)) passes. Check
-  with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`.
-  Its pass skips the datagram and replacement cases until
-  [routes/js.md](/quest/m2/cluster-routing/routes/js.md) lands, as
-  [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) set. Decided
-  2026-11-09 (maintainer, AFK, accepting the recommendation): close this quest
-  on that pass, because routes/js.md tracks restoring those cases. Decided
+- moq-dev/moq: the next scheduled Interop run on `main` passes, once
+  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) merges and the
+  [resumed-audio child](/quest/m0/interop-green/resume-sync.md) lands. Check
+  with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
+  then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
+  waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
+  so the pass now runs the datagram step; the `replacement` case stays
+  quarantined by default. Decided 2026-11-09 (maintainer, AFK, accepting the
+  recommendation): close this quest on a pass, which the maintainer set with
+  those cases skipped; the pass that closes it now runs them. Decided
   2026-11-12 (maintainer): this epic also waits for its
   [planned-break remeasure](/quest/m0/interop-green/planned-break-remeasure.md)
   child, so the pass closes the epic only once that child lands too. Until then,
   a red run whose only failure is a stale planned break is fixed by hand: run
   `just test wire-compat --remeasure` and land the rewritten
-  `test/interop/compat/planned-breaks.json`, as CONTRIBUTING.md's release
+  `test/interop/compat/planned-breaks.json`, as RELEASE.md's release
   procedure describes.
 
 ## Plan
@@ -124,8 +125,8 @@ Scheduled run
 [42491651687](https://github.com/moq-dev/moq/actions/runs/42491651687)
 (2026-11-08, at e2271bad9c) failed two steps, and neither is a flake. Both come
 from the JS lite-07 route wire, which Rust moved to but JS has not ported, so
-they are owned by [routes/js.md](/quest/m2/cluster-routing/routes/js.md), not
-this quest:
+they were owned by the JS route port, which landed as
+[moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443), not this quest:
 
 - Datagram tracks: `datagram_tracks_javascript` times out in its first case
   (relay false, JS publishes false). It fails every time on main's content
@@ -163,8 +164,27 @@ its package (moq-cli 0.14.16, moq-relay 0.17.16, @moq/net 0.4.7). The stale pin
 is the recurring cause: each published release of a pinned package turns the
 next scheduled run red until someone remeasures.
 
+Scheduled run
+[43260674067](https://github.com/moq-dev/moq/actions/runs/43260674067)
+(2026-11-12, at e9c6df852) failed three steps, each with its own cause:
+
+- Optional publisher retention: `max_age_relay_javascript` fails on lite-07
+  track 1, which reads a max age of 0 where the test expects none. Bisected to
+  [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443), whose parent
+  passes; its diff has no max-age code, so the mechanism is not traced yet.
+  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) changes the test
+  to expect lite-07 to carry the max age, and is open.
+- Interop (full matrix): `go -> python` fails with `audio gap after 648 samples`
+  at 2 s of 30 s. It passed once locally. No open PR names this cell;
+  [moq-dev/moq#8587](https://github.com/moq-dev/moq/pull/8587) covers `python -> go`.
+- Media output and lifecycle: after the pause case resumes, the audio trails the
+  picture by about 1.7 s. [moq-dev/moq#8507](https://github.com/moq-dev/moq/pull/8507)
+  keeps audio that trails the clock up to its 2 s stretch bound and plays it
+  faster, and a resume keeps the ring it had. Fixed by the child
+  [resumed audio snaps to the clock](/quest/m0/interop-green/resume-sync.md),
+  which waits on a maintainer decision.
+
+The 11-11 run, before #8507, passed all three steps.
+
 Public API: none. Wire: none.
 
-## Related
-
-- [The JS lite-07 route port](/quest/m2/cluster-routing/routes/js.md) - ports the JS route wire, which restores the datagram step and the `replacement` case
