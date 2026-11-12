@@ -32,8 +32,11 @@ export interface FillTrack {
 	readonly name: string;
 	/** Insert group `sequence` into the cache, committing `info` first if the track has none. */
 	accept(sequence: bigint, info: Info | undefined): GroupProducer;
-	/** Record `[start, end)` as never to be delivered. */
-	drop(start: bigint, end: bigint, error: Error): void;
+	/**
+	 * Record `[start, end)` as never to be delivered, with `error`. With `stale`, judged too old
+	 * under that budget in milliseconds: a verdict only on readers no more tolerant.
+	 */
+	drop(start: bigint, end: bigint, hole: { error: Error; stale?: number }): void;
 	/** Whether the track still caches group `sequence`, not failed. */
 	holds(sequence: bigint): boolean;
 	/** Whether the track closed, so nothing more can be served. */
@@ -67,7 +70,7 @@ export interface Asker {
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
 	accept(state: FillState, pending: Pending, sequence: bigint, info: Info | undefined): GroupProducer;
-	drop(state: FillState, pending: Pending, start: bigint, end: bigint, error?: Error): void;
+	drop(state: FillState, pending: Pending, start: bigint, end: bigint, hole?: { error: Error; stale?: number }): void;
 	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error, stale?: number): void;
 	settle(state: FillState, pending: Pending): void;
 	name(state: FillState): string;
@@ -283,7 +286,8 @@ export class FillState {
 
 	// Answer what `pending` still owes as dropped, then forget it.
 	#settle(pending: Pending): void {
-		for (const run of pending.owed()) this.#track.drop(run.start, run.end, new NotFound(`group ${run.start}`));
+		for (const run of pending.owed())
+			this.#track.drop(run.start, run.end, { error: new NotFound(`group ${run.start}`) });
 		this.#finish(pending);
 	}
 
@@ -315,9 +319,9 @@ export class FillState {
 				// Landing in the cache answers it, as `arrived` records.
 				return state.#track.accept(sequence, info);
 			},
-			drop: (state, pending, start, end, error) => {
+			drop: (state, pending, start, end, hole) => {
 				for (const run of pending.owed(start, end)) {
-					state.#track.drop(run.start, run.end, error ?? new NotFound(`group ${run.start}`));
+					state.#track.drop(run.start, run.end, hole ?? { error: new NotFound(`group ${run.start}`) });
 				}
 				state.#resolve(pending, start, end);
 			},
@@ -349,15 +353,27 @@ export let wantedRuns: (fill: Fill) => Run[];
 /** Wait for a change to the groups or readers of a fill. @internal */
 export let fillChanged: (fill: Fill) => Promise<unknown>;
 /**
- * Answer `[start, end)` of `fill` with its source's refusal of a request for them. An OLD one
- * says every older group of the fill is stale too, since a timed track's starts never rewind:
- * with `stale`, the budget in milliseconds the request carried, it is refused to the readers
- * waiting now, a verdict only on those no more tolerant, so a wider reader asks again; without,
- * the publisher's max age judged it, which binds every reader, so the track records it dropped.
- * Any other refusal answers only `[start, end)`, for now. Mirrors the Rust `Fill::reject_groups`.
+ * The budget in milliseconds an OLD answer was judged under, and whether that is the publisher's
+ * max age, which binds every reader, rather than the request's own budget.
+ *
  * @internal
  */
-export let rejectGroups: (fill: Fill, start: bigint, end: bigint, error: Error, stale: number | undefined) => void;
+export interface Judged {
+	budget: number;
+	everyone: boolean;
+}
+
+/**
+ * Answer `[start, end)` of `fill` with its source's refusal of a request for them. An OLD one
+ * says every older group of the fill is stale too, since a timed track's starts never rewind:
+ * judged under the request's own budget, or a max age not known here (`judged` undefined), it is
+ * refused to the readers waiting now, a verdict only on those no more tolerant, so a wider reader
+ * asks again; under the publisher's max age it binds every reader, so the track records it as a
+ * stale verdict under that age, which new terms or the drop set's expiry window forget. Any other
+ * refusal answers only `[start, end)`, for now. Mirrors the Rust `Fill::reject_groups`.
+ * @internal
+ */
+export let rejectGroups: (fill: Fill, start: bigint, end: bigint, error: Error, judged: Judged | undefined) => void;
 
 // Constructs the public handles from within this module; assigned in their static blocks.
 let makeFill: (state: FillState, pending: Pending) => Fill;
@@ -465,13 +481,13 @@ export class Fill {
 		makeFill = (state, pending) => new Fill(state, pending);
 		wantedRuns = (fill) => fill.#pending.owed();
 		fillChanged = (fill) => Promise.resolve(fill.#pending.revision.changed());
-		rejectGroups = (fill, start, end, error, stale) => {
+		rejectGroups = (fill, start, end, error, judged) => {
 			if (toStreamCode(error) !== StreamCode.Old) {
 				fill.refuseGroups(start, end, error);
-			} else if (stale === undefined) {
-				fillOps.drop(fill.#state, fill.#pending, fill.start, end, error);
+			} else if (judged?.everyone) {
+				fillOps.drop(fill.#state, fill.#pending, fill.start, end, { error, stale: judged.budget });
 			} else {
-				fillOps.refuse(fill.#state, fill.#pending, fill.start, end, error, stale);
+				fillOps.refuse(fill.#state, fill.#pending, fill.start, end, error, judged?.budget);
 			}
 		};
 	}

@@ -797,7 +797,7 @@ test("fill: a refusal under an old budget is asked afresh on each widening, neve
 		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 		if (!fill) throw new Error("no fill");
-		rejectGroups(fill, 0n, 5n, old, budget);
+		rejectGroups(fill, 0n, 5n, old, { budget, everyone: false });
 		fill.close();
 		reader.update(terms(budget * 2));
 	}
@@ -1260,4 +1260,57 @@ test("fill: a lite-07 ranged subscription reads history the publisher never cach
 	} finally {
 		peer.close();
 	}
+});
+
+// A fill's OLD answer under the publisher's max age binds every reader, so the track holds it as
+// a stale verdict under that age rather than a loss for good: a later reader no wider is settled
+// without asking, and once new terms forget the verdict a reader asks again. Mirrors the Rust
+// `a_fills_old_answer_under_the_max_age_is_held_until_forgotten`.
+test("fill: an OLD answer under the max age is held as stale until forgotten", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: Duration.millis(10_000) });
+	const live = track.createGroup(3n);
+	live.writeFrame({ payload: enc.encode("live 3") });
+	live.finish();
+	const requests = track.requests();
+	const terms: Subscription = {
+		ranges: [{ start: { absolute: 0n } }],
+		delay: { max: Duration.millis(60_000) },
+		order: "ascending",
+	};
+	const asked = async () => {
+		const fills: bigint[][] = [];
+		for (;;) {
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+			if (!fill) return fills;
+			fills.push([fill.start, fill.end]);
+			fill.close();
+		}
+	};
+	const reader = track.subscribe(terms);
+	void drain(reader);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect([fill.start, fill.end]).toEqual([0n, 3n]);
+	const old = new StreamError(StreamCode.Old, { message: "old" });
+	rejectGroups(fill, 0n, 3n, old, { budget: 10_000, everyone: true });
+	fill.close();
+
+	const later = track.subscribe(terms);
+	expect(later.tryRecvGroup()?.sequence).toBe(3n);
+	later.tryRecvGroup();
+	expect(hooks.tryDrop(later)).toMatchObject({ kind: "drop", start: 0n, end: 3n, stale: 10_000 });
+	expect(await asked()).toEqual([]);
+
+	expect(hooks.supersedeStale(track, undefined)).toEqual([{ start: 0n, end: 3n }]);
+	const again = track.subscribe(terms);
+	expect(again.tryRecvGroup()?.sequence).toBe(3n);
+	again.tryRecvGroup();
+	expect(await asked()).toEqual([[0n, 3n]]);
+
+	reader.close();
+	later.close();
+	again.close();
+	requests.close();
+	broadcast.close();
 });

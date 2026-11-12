@@ -1135,8 +1135,8 @@ export class Producer {
 				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
 				return this.#createGroup(sequence, 0, true);
 			},
-			drop: (start, end, error) => {
-				this.#drop(start, end, { error });
+			drop: (start, end, hole) => {
+				this.#drop(start, end, hole);
 				this.#chargeDebt();
 			},
 			holds: (sequence) => cachedHolds(this, sequence),

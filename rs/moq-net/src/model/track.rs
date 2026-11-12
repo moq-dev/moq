@@ -23929,6 +23929,58 @@ mod test {
 		assert!(matches!(dynamic.poll_requested_fill(&waiter), Poll::Ready(Ok(_))));
 	}
 
+	/// A fill's OLD answer under the publisher's max age binds every reader, so the track holds
+	/// it as a stale verdict under that age rather than a loss for good: a later reader no
+	/// wider is settled without asking, and once the verdict is forgotten, as new terms or the
+	/// drop set's expiry window forget one, a reader asks again. Mirrors JS.
+	#[test]
+	#[cfg(feature = "async")]
+	#[expect(clippy::single_range_in_vec_init, reason = "the forgotten runs are a set, here one")]
+	fn a_fills_old_answer_under_the_max_age_is_held_until_forgotten() {
+		let max_age = Duration::from_secs(10);
+		let mut producer = track_producer("test", Info::timed().with_max_age(max_age));
+		let dynamic = producer.requests();
+		producer.start_at(3).unwrap();
+		write_group(&producer, 3);
+		// No subscription feeds the copy, so nothing below the start arrives but what a fill does.
+		producer.set_unfed(true);
+		let terms = || {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(60)))
+				.with_ranges([Range::groups(0..)])
+		};
+		let mut subscriber = producer.subscribe(terms());
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), [3]);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("a fill is asked below the start");
+		};
+		fill.reject_groups(0..3, Error::Old);
+		drop(fill);
+		assert_eq!(drained_drops(&mut subscriber), [(0, 3)]);
+		assert_eq!(
+			producer.state.read().drops.get(&0),
+			Some(&Hole::stale(max_age)),
+			"held under the max age, which a widening reverses"
+		);
+
+		let mut later = producer.subscribe(terms());
+		assert_eq!(drain_groups(&mut later), [3]);
+		assert_eq!(drained_drops(&mut later), [(0, 3)]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the verdict is not asked again"
+		);
+
+		assert_eq!(producer.supersede_stale(None), RangeSet::from_iter([0..3]));
+		let mut again = producer.subscribe(terms());
+		assert_eq!(drain_groups(&mut again), [3]);
+		assert!(
+			matches!(dynamic.poll_requested_fill(&waiter), Poll::Ready(Ok(_))),
+			"a forgotten verdict is asked again"
+		);
+	}
+
 	/// Every group a set of ranges names, as a received copy's upstream terms judge them.
 	#[cfg(feature = "async")]
 	fn judged(runs: impl IntoIterator<Item = (u64, u64)>) -> Option<RangeSet<u64>> {
