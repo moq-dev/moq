@@ -683,11 +683,6 @@ class TrackState {
 	/** This sink's reader as the producer's fills know it, once it asked one. */
 	asker?: Asker;
 	/**
-	 * A one-group fetch, once it asked: a failed fill answer is its outcome, as a Rust fetch hears
-	 * its fill's, so the producer's `#withhold` leaves it this sink.
-	 */
-	fetch?: true;
-	/**
 	 * Whether this sink's reader will still read group `sequence`: only a buffered group it will
 	 * read keeps its source wanted. Set once the reader exists.
 	 */
@@ -715,7 +710,8 @@ class TrackState {
 	dropsAnchors = new Signal(false);
 	// Frames wake the sequence cursor only while an owed hole holds it.
 	waitingOrdered = false;
-	// One-shot group reads need FETCH, even when metadata has not reported a live edge.
+	// One-shot group reads need FETCH, even when metadata has not reported a live edge. A failed
+	// fill answer is a fetch's outcome, as a Rust fetch hears its fill's, so it is not withheld.
 	fetch = false;
 	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
 	// publisher holding its first group for that answer wakes.
@@ -895,6 +891,18 @@ interface Born extends Run {
 // Whether `a` and `b` give a sequence up alike, however each was folded in.
 function sameVerdict(a: DropRun, b: DropRun): boolean {
 	return sameHole({ ...a, received: undefined }, { ...b, received: undefined });
+}
+
+// The index of the first of `runs`, sorted and disjoint, ending past `sequence`.
+function endingPast(runs: readonly Run[], sequence: bigint): number {
+	let lo = 0;
+	let hi = runs.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (runs[mid].end <= sequence) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
 }
 
 // The runs of `drops` and a reader's `refused` overlapping `[start, end)`, lowest first. A drop
@@ -1764,6 +1772,7 @@ export class Producer {
 	// holding it keeps its frames and the fill's own failure while the pool still counts them.
 	#withhold(entry: CachedGroup): void {
 		for (const [sink, mirror] of entry.mirrors) {
+			// A fetch's own outcome.
 			if (sink.fetch) continue;
 			const index = sink.groups.peek().indexOf(mirror);
 			if (index < 0) continue;
@@ -3522,8 +3531,10 @@ export class Subscriber {
 			// update supersedes it: asked even above the newest group received. Only the runs that
 			// do not settle this reader are walked, never every run above the edge.
 			const above = max(low, edge);
-			for (const dropped of this.#unknownRuns(budget, coverage)) {
-				if (dropped.end <= above || dropped.start >= end) continue;
+			const unknown = this.#unknownRuns(budget, coverage);
+			for (let i = endingPast(unknown, above); i < unknown.length; i++) {
+				const dropped = unknown[i];
+				if (dropped.start >= end) break;
 				const span = { ...dropped, start: max(dropped.start, above), end: min(dropped.end, end) };
 				if (span.start < span.end && !settles(span, budget, coverage, this.#state.judged)) spans.push(span);
 			}
@@ -3579,28 +3590,41 @@ export class Subscriber {
 
 	// The received stale runs that do not settle this reader under `budget` and `coverage`,
 	// lowest first. While the terms hold, only what changed since is judged again: a run the
-	// track changed or forgot leaves the memo, and the runs the change left are judged anew, so a
-	// drop costs each probe the runs it touches. A later start only narrows what a run asks the
+	// track replaced or forgot leaves the memo, and the runs the change left are judged anew, so a
+	// drop costs the memo the runs it touches. Once the set no longer remembers what it removed
+	// that far back, the memo is rebuilt, at most once per a live set's worth of removals. A later start only narrows what a run asks the
 	// reader to read, so a run that settles here settles clipped too. Mirrors the Rust
 	// `Misses::unknown`.
 	#unknownRuns(budget: number, coverage: Coverage): readonly DropRun[] {
 		const { drops, judged } = this.#state;
 		const unsettled = (run: DropRun) => !settles(run, budget, coverage, judged);
 		const memo = this.#unknown;
-		let runs: DropRun[];
-		if (memo && memo.judged === judged && memo.budget === budget && sameCoverage(memo.coverage, coverage)) {
+		const removed =
+			memo &&
+			memo.judged === judged &&
+			memo.budget === budget &&
+			sameCoverage(memo.coverage, coverage) &&
+			drops.removedSince(memo.drops);
+		if (memo && removed) {
 			if (memo.drops === drops.revision) return memo.runs;
-			runs = memo.runs.filter((run) => drops.at(run.start) === run);
+			// Updated in place: its one caller is done with the last answer.
+			const runs = memo.runs;
+			for (const gone of removed) {
+				const from = endingPast(runs, gone.start);
+				let to = from;
+				while (to < runs.length && runs[to].start < gone.end) to++;
+				runs.splice(from, to - from);
+			}
 			for (const changed of drops.since(memo.drops)) {
 				for (const run of drops.overlapping(changed.start, changed.end)) {
-					if (!unsettled(run) || runs.includes(run)) continue;
-					const at = runs.findIndex((held) => held.start > run.start);
-					runs.splice(at < 0 ? runs.length : at, 0, run);
+					const at = endingPast(runs, run.start);
+					if (unsettled(run) && runs[at] !== run) runs.splice(at, 0, run);
 				}
 			}
-		} else {
-			runs = drops.all.filter(unsettled);
+			memo.drops = drops.revision;
+			return runs;
 		}
+		const runs = drops.all.filter(unsettled);
 		this.#unknown = { drops: drops.revision, judged, budget, coverage, runs };
 		return runs;
 	}
@@ -3611,7 +3635,6 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (!producer) return false;
 		if (this.#state.info.peek() === undefined && this.#state.closed.peek() === undefined) return "pending";
-		this.#state.fetch = true;
 		if (cachedHolds(producer, sequence)) return true;
 		// Joins a fill already bringing it, handler or not; asks a new one only while one is open.
 		const asked = fillsOf(producer).ask(sequence, sequence + 1n, this.#askerOf());
