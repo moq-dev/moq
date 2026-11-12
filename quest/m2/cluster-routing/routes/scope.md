@@ -9,8 +9,8 @@ shows a claim exactly while such a route covers it and the newest revision a
 covering route gave it still has the claim, two relays never keep a
 dead route alive through each other, a change of path or seqno alone changes
 no claim a reader sees, and a relay behind a scoped neighbour reaches what a
-farther one offers. The `residual_` tests
-[the prototype](/quest/m1/route-stale-copies.md) pinned pass
+farther one offers. The `residual_` tests in
+`rs/moq-net/src/route/tests/residual.rs` pass
 as plain tests, a sweep over meshes with scoped relays holds the rules at
 every quiet point, and the draft and the epic's contract say what the router
 does.
@@ -21,6 +21,18 @@ Decided 2026-11-11 (maintainer, /quest-plan): the prototype picks the rule
 for stale copies, the model settles the route per scope, and the router comes
 last (rejected: the router first, patched case by case; recording the
 findings as known limits and waiting for federation).
+
+Decided 2026-11-11 (maintainer, on
+[moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)): the route rule
+changes too. Babel's distance, the seqno, ROUTE_REQUEST, and the ROUTE_END
+echo go, for the rule in the
+[epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item 27. That
+removal is not planned yet. Plan it with `/quest-plan` before this quest
+starts, as its own quest or as work here: it touches the wire (a session in
+each hop, a message that names a dead hop, no ROUTE_REQUEST and no echo),
+the draft, `js/net`, and most of `route/mod.rs`. The prototype
+(`route/tests/paths.rs`, `compare.rs`, `copies.rs`) is then promoted or
+deleted.
 
 Work:
 
@@ -48,11 +60,11 @@ Work:
 - Draft: Routing says a route covers a prefix, and Floors says a floor
   certifies its route's prefix. Replace the Floors condition "every peer
   whose last advertised route to it is feasible here has answered the
-  current request" with the settled rule. The hold rule in Routing is not
-  about belief and stays unless the prototype's pick removes holds. Add a
-  changelog bullet.
+  current request" with the settled rule. The hold rule in Routing changes
+  with the route rule (epic Plan item 27). Add a changelog bullet.
 - Change js/net's route layer (`js/net/src/lite/publisher.ts`,
-  `js/net/src/lite/subscriber.ts`, `js/net/src/route.ts`) in the same PR.
+  `js/net/src/lite/subscriber.ts`, `js/net/src/lite/floors.ts`,
+  `js/net/src/route.ts`) in the same PR.
 - Rewrite the epic's bullet on who certifies as built, and update the
   `verify-route` skill's coverage and sync commit.
 - Measure route and claim messages per change with
