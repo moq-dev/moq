@@ -1107,8 +1107,9 @@ export class Consumer {
 			next = succession.live();
 		}
 		const group = next.mirror();
-		// It starts past the frame read next, which no copy holds now.
-		if (group.#state.start > this.#index()) {
+		// It no longer holds the frame read next: it starts past it, or shed it, which fails the
+		// mirror. The mirror shares this succession, so adopting a failed one would loop.
+		if (group.#state.closed.peek() instanceof Error || group.#state.start > this.#index()) {
 			group.close();
 			return false;
 		}

@@ -3405,9 +3405,9 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 // A reader on a received copy that fails waits out a duplicate still held for its group, then
 // continues on it from its frame with nothing repeated or missed. A released hold leaves the
 // failure, even to a reader only watching `closed`, as does a duplicate starting past the reader's
-// frame. A re-offer that fails too hands over to the next. A reader closed while it waits ends its
+// frame or one that shed it. A re-offer that fails too hands over to the next. A reader closed while it waits ends its
 // read and can be closed again, and one closed with frames still buffered reads them first.
-test.each(["reoffer", "readable", "released", "observed", "twice", "leaving", "closed", "past"])(
+test.each(["reoffer", "readable", "released", "observed", "twice", "leaving", "closed", "past", "shed"])(
 	"a failed copy continues on its held re-offer (%p)",
 	async (kind) => {
 		const producer = new TrackProducer("video").accept({ maxAge: null });
@@ -3501,6 +3501,17 @@ test.each(["reoffer", "readable", "released", "observed", "twice", "leaving", "c
 		}
 		const again = hooks.receiveGroup(producer, { sequence: 3n, start: kind === "past" ? 2 : 0 });
 		arriving?.release();
+		if (kind === "shed") {
+			// The re-offer drops frames 0 and 1 to cache pressure before the reader reaches it.
+			again.writeFrame({ payload: enc.encode("a") });
+			again.writeFrame({ payload: enc.encode("b") });
+			again.writeFrame({ payload: enc.encode("c") });
+			hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
+			await reading;
+			expect(read).toBe(failed);
+			producer.close();
+			return;
+		}
 		if (kind === "past") {
 			await reading;
 			expect(read).toBe(failed);
