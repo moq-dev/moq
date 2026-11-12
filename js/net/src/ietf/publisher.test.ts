@@ -1790,6 +1790,7 @@ class Tokens {
 		const token: Credential = {
 			grant: new Signal<Grant | undefined>(undefined),
 			closed: new Promise(() => {}),
+			answered: Promise.resolve(),
 			close: () => {
 				this.#issued.delete(token);
 				this.ended.update((n) => n + 1);

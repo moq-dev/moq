@@ -2274,7 +2274,10 @@ mod tests {
 		let auth = connection.auth();
 		let added = tokio::spawn({
 			let auth = auth.clone();
-			async move { auth.add("token").await }
+			async move {
+				let token = auth.add("token")?;
+				token.answered().await.map(|()| token)
+			}
 		});
 
 		// Held past each session's abort: dropping a grant closes its stream cleanly, which

@@ -1032,7 +1032,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 
 	const origin = new OriginProducer();
 	const reload = new Reload({ url, websocket: { enabled: false }, publish: origin.consume() });
-	await reload.auth.add("token");
+	await reload.auth.add("token").answered;
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });

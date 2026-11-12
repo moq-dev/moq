@@ -23,6 +23,11 @@ typedef Client = MoqClient;
 /// The credentials a [Client] presents, replaceable while it runs.
 typedef Tokens = MoqTokens;
 
+/// A request token a session presents, which a route or [Claim] names with
+/// `setAuth`. Await `answered()` for the peer's verdict; `cancel()` withdraws it
+/// unless a route or claim still names it.
+typedef Credential = MoqCredential;
+
 /// A live pub/sub session with a relay, exposing publish and consume origins.
 typedef Session = MoqSession;
 
