@@ -44,7 +44,6 @@ export class Capture {
 				const decoder = format(config);
 				const active = broadcast.relativeBroadcast(effect, config.broadcast);
 				if (!active) return;
-				const warmup = Duration.millis(config.warmup ?? 0);
 				const track = active.track(name).subscribe({
 					priority: Catalog.PRIORITY.audio,
 					delay: {
@@ -52,7 +51,7 @@ export class Capture {
 							delay: input.delay.peek(),
 							maxDelay: input.maxDelay.peek(),
 							stretch: input.stretch.peek(),
-						}).add(warmup),
+						}).add(Duration.millis(config.warmup ?? 0)),
 					},
 				});
 				const groups = new Set<Group.Consumer>();
@@ -68,7 +67,7 @@ export class Capture {
 								delay: inner.get(input.delay),
 								maxDelay: inner.get(input.maxDelay),
 								stretch: inner.get(input.stretch),
-							}).add(warmup),
+							}).add(Duration.millis(inner.get(input.config)?.warmup ?? 0)),
 						},
 					}),
 				);

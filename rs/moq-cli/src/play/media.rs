@@ -1000,7 +1000,11 @@ async fn play_audio<O: Output>(
 			// clock holds both while the sink keeps sizing for jitter alone. The
 			// clock holds the whole measured target, which the subscription follows,
 			// though the sink holds no more of it than its cap: the rest stays encoded.
-			let held = latency.max(delay.max(AUDIO_BUFFER_MIN));
+			// Capped as the catalog delay is, so a hostile advertised jitter cannot
+			// make playback retain media without bound.
+			let held = latency
+				.max(delay.max(AUDIO_BUFFER_MIN))
+				.min(moq_audio::playback::Input::LATENCY_MAX);
 			*jitter.lock().unwrap() = Some(held);
 			moved |= role.set_target(held + stated.borrow().unwrap_or_default());
 			// The consumer releases media due further out than the sink holds only
@@ -1228,6 +1232,17 @@ mod tests {
 		assert_on_time(
 			first_sound(jitter, Duration::from_millis(100), None, None).await,
 			jitter,
+		);
+	}
+
+	/// A target past the deepest delay a sink holds, such as a hostile advertised
+	/// jitter's, holds the clock at that depth instead.
+	#[tokio::test]
+	async fn audio_caps_a_target_past_the_deepest_delay() {
+		let latency = moq_audio::playback::Input::LATENCY_MAX;
+		assert_on_time(
+			first_sound(Duration::from_secs(20), Duration::from_secs(5), None, None).await,
+			latency,
 		);
 	}
 
