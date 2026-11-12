@@ -41,15 +41,15 @@ just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/rout
 just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Chord.cfg -simulate num=1000 -depth 600
 ```
 
-Times are TLC 1.8.0 on Java 21 with `-workers 4` at `nice -n 19`, on a 24-core host.
+Times are TLC 1.8.0 on Java 21 with `-workers 4` at `nice -n 19`, on a 24-core host under load from other work.
 
 | Config | Mesh | Bounds | Distinct states | Run |
 | --- | --- | --- | --- | --- |
 | `RouteHandoff.cfg` | The origin and two relays in a triangle. | 2 claim changes, 2 session changes, 1 collection | 24,192,399 | 39 min |
-| `Behind.cfg` | The origin behind relay 1, which sits in a triangle with relays 2 and 3. | 1 claim change, 1 session change | BEHIND_STATES | BEHIND_TIME |
-| `BehindDear.cfg` | The same, with relay 3 nearer the origin than relay 2. | 1 claim change, 1 session change | DEAR_STATES | DEAR_TIME |
+| `Behind.cfg` | The origin behind relay 1, which sits in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 9,384,796 | 25 min |
+| `BehindDear.cfg` | The same, with relay 3 nearer the origin than relay 2. | 1 claim change, 1 session change | 17,863,476 | 61 min |
 | `Line.cfg` | The origin, three relays, and a watching client in a line; also checks `Converges`. | 2 claim changes, 1 session change, 1 collection | 1,543,073 | 13 min |
-| `Ring.cfg` | The origin and three relays in a ring. | 2 claim changes, 1 session change | RING_STATES | RING_TIME |
+| `Ring.cfg` | The origin and three relays in a ring. | 2 claim changes, 1 session change | 18,437,833 | 61 min |
 | `Chord.cfg` | A publishing client on a ring of five relays with a chord, and two watching clients. Simulated: `num` counts behaviours per worker. | 2 claims, 4 claim changes, 4 session changes, 2 collections | 4,000 behaviours, 4.6M states | 9 min |
 
 All pass at the sync commit. Run them last, one at a time. First run what answers in seconds:

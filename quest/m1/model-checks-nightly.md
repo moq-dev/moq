@@ -16,7 +16,7 @@ added the models (`rs/moq-net/verify/*`, `js/*/verify/`) and their `verify-*`
 skills.
 
 - Nightly runs every config through the `tla` recipes. TLC runs take 20 s
-  to 35 min on 24 cores, so they stay out of the merge gate. A config its
+  to an hour on 4 workers, so they stay out of the merge gate. A config its
   skill says is simulated (the route model's `Chord.cfg`) runs with the
   `-simulate` arguments the skill gives. An open-finding
   config is one its skill lists under "Open finding"; the job expects TLC's
