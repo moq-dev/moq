@@ -373,7 +373,7 @@ loss never reports an END:
   neighbour's route names it and until the timer the hop's close started
   fires, so no route through a hop it knows is dead returns. Selected routes
   can loop only while the news that ends a stale route is on its way, and
-  only through stale routes. What its timer costs fired early, and the loop `Loop.cfg` pins, are in the `verify-route` skill.
+  only through at least one stale route. What its timer costs fired early, and the loop `Loop.cfg` pins, are in the `verify-route` skill.
   A sender sends a route on a stream only while the route meets the
   stream's interest (Plan item 15), and a node presents each stream only the
   claims that changed.

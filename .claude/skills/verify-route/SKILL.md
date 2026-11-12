@@ -27,7 +27,7 @@ Each rule is an INVARIANT; the harm says why it matters.
 | `Budget` | From one quiet point to the next, the messages sent stay within 4 each way over each configured session per prefix and per claim, for each external change. | One change sets off announce spam, or routing never goes quiet. |
 | `RequestsLoopFree` | A request never loops. | Only `Loop.cfg` checks it, as an open finding. |
 
-`Budget` also stands in for convergence: the message count is part of the state, so a cycle of deliveries that never goes quiet would outgrow it, and timers are finite. With it, `QuietIsSettled` says every hold ends.
+No config checks a liveness property: `Spec` has no fairness, so TLC does not show that a hold ends. That one does is an argument over what TLC does check. `Budget` bounds the messages a burst sends, each delivery takes one message off a queue, and a doubt starts only at a close or a delivery, so a burst is a finite number of steps. A delivery is enabled while a queue holds a message and a timer may fire once no news about its node is in flight, so a burst left alone reaches the state with nothing in flight and no doubt. `QuietIsSettled` says no relay holds there.
 
 What the timer costs, as the configs show it: fired late, it costs only the wait, and every rule holds (`RouteHandoff.cfg`). Fired early, a stale route can return, as with no doubt at all, and nothing else breaks (`Early.cfg`, which passes without `NoStaleReturn` and fails it within seconds with it). With two failures a stale route can return whatever the timer (`Twice.cfg` drops `NoStaleReturn`), and `StaleIsChased` is the bound.
 
@@ -57,7 +57,7 @@ Run them last, one at a time. First run what answers in seconds: the prototype's
 
 ## Reading a failure
 
-Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on the prototype with `PathSim` (`deliver`, `disconnect`, `tick`), one call per step.
+Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on the prototype with `PathSim` (`deliver`, `disconnect`, `tick`), one call per step, except a timer. `Lift(n, x)` fires one timer on one relay, where `tick` moves every running relay's clock by one hop of delay: call it until that doubt lifts, and where another doubt lifted with it, the replay took a different path, which is no defect in the model.
 
 ## Coverage
 

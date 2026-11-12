@@ -36,7 +36,7 @@ const relay = (s: Node) => {
 		.filter((r) => r !== null);
 	const shows = Object.entries(s.shown)
 		.filter(([, x]) => x.item >= 0)
-		.map(([c, x]) => `${c}${x.avail ? "" : " (unavailable)"}`);
+		.map(([c, x]) => `${c} item ${x.item}${x.avail ? "" : " (unavailable)"}`);
 	const doubt = s.doubt.length ? `, doubts ${s.doubt.map(name).join(" and ")}` : "";
 	return `${routes.join("; ") || "no route"}${shows.length ? `, shows ${shows.join(", ")}` : ""}${doubt}`;
 };

@@ -56,8 +56,9 @@ stay constants the config states. Say both bounds in the `verify-route` skill.
   the invariant also says a route is held only from a node the holder shares
   a link with: every route sent adds its sender to hops that did not name it
   ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)). Start there.
-- Apalache checks safety. That every hold ends is a liveness rule the model
-  checks with TLC; leave it there and say so in the skill.
+- Apalache checks safety. That every hold ends is no checked rule: the
+  model has no fairness, and the `verify-route` skill argues it from
+  `Budget` and `QuietIsSettled`. Leave it there.
 - Run it through the `tla` recipes with Apalache from the flake. If five
   relays does not fit Nightly, record the largest mesh that does and its time.
 
