@@ -971,6 +971,9 @@ mod tests {
 		connect.insecure = Some(true);
 		connect.identity = Some(identity);
 		let tls = connect.build().unwrap();
+		// No head start, so the dial that does run never waits on the clock.
+		let mut config = Config::default();
+		config.delay = Some(time::Duration::ZERO.into());
 
 		// Nothing listens here, so a dial that does run fails fast.
 		let port = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -982,9 +985,10 @@ mod tests {
 		let race = |scheme: &str| {
 			let url = Url::parse(&format!("{scheme}://127.0.0.1:{port}/anon")).unwrap();
 			let tls = tls.clone();
+			let config = config.clone();
 			async move {
 				race_handle(
-					&Config::default(),
+					&config,
 					&tls,
 					None,
 					url.into(),
