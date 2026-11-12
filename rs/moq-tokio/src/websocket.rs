@@ -986,17 +986,7 @@ mod tests {
 			let url = Url::parse(&format!("{scheme}://127.0.0.1:{port}/anon")).unwrap();
 			let tls = tls.clone();
 			let config = config.clone();
-			async move {
-				race_handle(
-					&config,
-					&tls,
-					None,
-					url.into(),
-					moq_net::ALPNS,
-					&crate::qmux_default(),
-				)
-				.await
-			}
+			async move { race_handle(&config, &tls, None, url.into(), moq_net::ALPNS, &crate::qmux_default()).await }
 		};
 
 		assert!(race("http").await.is_none());
