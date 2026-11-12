@@ -96,35 +96,34 @@ async fn nodes() -> Result<Vec<Node>, Error> {
 		};
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
 		let nodes = scan(&mainloop, &core, &registry)?;
-		let formats = match formats_each(&mainloop, &core, &registry, &nodes) {
-			Ok(formats) => formats,
-			Err(error) => {
-				tracing::debug!(%error, "could not list PipeWire camera formats");
-				return Ok(nodes);
-			}
-		};
+		let formats = formats_each(&mainloop, &core, &registry, &nodes)?;
 		Ok(convertible(nodes, formats).into_iter().map(|(node, _)| node).collect())
 	})
 	.await
 }
 
-/// Pairs each of `nodes` with its `formats` and drops the nodes that offer no
-/// format this backend converts, as the V4L2 listing does: an IR camera that
+/// Pairs each of `nodes` with its `formats` and keeps the nodes that offer a
+/// mode this backend converts, as the V4L2 listing does: an IR camera that
 /// offers only GREY would list an id `open` refuses. A node whose formats
-/// cannot be read stays, since opening it reports why.
-fn convertible(nodes: Vec<Node>, formats: Vec<Result<Vec<Format>, Error>>) -> Vec<(Node, Result<Vec<Format>, Error>)> {
+/// cannot be read is dropped too, so it neither shadows a working default nor
+/// hides its V4L2 device; opening it by name still reports why.
+fn convertible(nodes: Vec<Node>, formats: Vec<Result<Vec<Format>, Error>>) -> Vec<(Node, Vec<Format>)> {
+	let want = Request {
+		size: Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+		framerate: None,
+	};
 	nodes
 		.into_iter()
 		.zip(formats)
-		.filter(|(node, formats)| match formats {
-			Ok(formats) if formats.is_empty() => {
-				tracing::debug!(node = %node.name, "PipeWire camera offers no format we convert");
-				false
+		.filter_map(|(node, formats)| match formats {
+			Ok(formats) if select(&formats, want).is_some() => Some((node, formats)),
+			Ok(_) => {
+				tracing::debug!(node = %node.name, "PipeWire camera offers no mode we convert");
+				None
 			}
-			Ok(_) => true,
 			Err(error) => {
 				tracing::debug!(node = %node.name, %error, "could not list PipeWire camera formats");
-				true
+				None
 			}
 		})
 		.collect()
@@ -278,8 +277,7 @@ fn find(
 		return Ok((node.clone(), formats));
 	}
 	let formats = formats_each(mainloop, core, registry, &nodes)?;
-	let (node, formats) = highest(convertible(nodes, formats), |(node, _)| node.priority)?;
-	Ok((node, formats?))
+	highest(convertible(nodes, formats), |(node, _)| node.priority)
 }
 
 /// A PipeWire camera node.
@@ -1039,7 +1037,8 @@ mod tests {
 	}
 
 	/// The default camera comes from the listed cameras, so a higher-priority
-	/// camera that offers only GREY does not shadow the webcam.
+	/// camera that offers only GREY, or whose formats cannot be read, does not
+	/// shadow the webcam.
 	#[test]
 	fn the_default_camera_is_the_highest_priority_listed_one() {
 		let webcam = Node {
@@ -1052,14 +1051,25 @@ mod tests {
 			priority: 1000,
 			..webcam.clone()
 		};
+		let unreadable = Node {
+			id: 80,
+			name: "unreadable".to_string(),
+			priority: 1100,
+			..webcam.clone()
+		};
 		let grey = enum_format(MediaSubtype::Raw, Some(VideoFormat::GRAY8), rectangle(640, 360));
 		let listed = convertible(
-			vec![infrared, webcam],
-			vec![Ok(parse_format(&grey)), Ok(webcam_formats())],
+			vec![infrared, unreadable, webcam],
+			vec![
+				Ok(parse_format(&grey)),
+				Err(Error::SourceUnavailable("busy".to_string())),
+				Ok(webcam_formats()),
+			],
 		);
+		assert_eq!(listed.len(), 1);
 		let (node, formats) = highest(listed, |(node, _)| node.priority).unwrap();
 		assert_eq!(node.id, 62);
-		assert_eq!(formats.unwrap(), webcam_formats());
+		assert_eq!(formats, webcam_formats());
 	}
 
 	fn rectangle(width: u32, height: u32) -> spa::utils::Rectangle {
