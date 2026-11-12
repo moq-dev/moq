@@ -72,7 +72,7 @@ reach zero underruns, and some underruns during congestion are expected.
   records.
 - Tests: no gate may reward moving away from the rule, so the audio harness
   grades steady-state lag, the player's own trims, and recovery from a stall
-  before [the model](/quest/m1/audio-jitter-target/stretch.md) lands.
+  before [the model](https://github.com/moq-dev/moq/pull/8507) lands.
 - Milestone: ✅ every new child in m1, here (rejected: the model and grading
   in m0; the setting in m2).
 

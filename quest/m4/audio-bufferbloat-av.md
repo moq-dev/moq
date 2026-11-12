@@ -26,7 +26,7 @@ Decided in planning (2026-10-20):
   follows audio, so congested video lags it by design, and steady-state lip
   sync belongs to the audio ring's time stretch. Since 2026-11-09 audio may
   trail the clock through the congestion and catch up after it
-  ([stretch model](/quest/m1/audio-jitter-target/stretch.md)), so these rows
+  ([stretch model](https://github.com/moq-dev/moq/pull/8507)), so these rows
   gate audio dropped, not audio late.
 - Folded in: the native `pulse` rows become enforced. They report only
   because an intermittent two-second device stall voids about one AAC native

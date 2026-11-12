@@ -165,6 +165,7 @@ client = moq.Client(
   - `.viewers() → Viewers`. Divide the receive estimate between watched broadcasts: `.watch(max_bps) → Viewer` claims up to a ceiling, `Viewer.rate()` reads its slice (`None` while there is no estimate), and dropping the viewer releases it. The summed ceilings are the PROBE target; `.set_target(bps)` overrides it (`0` sends none, `None` follows the viewers again).
   - `.grants() → GrantConsumer`. On `moq-lite-07-wip`, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
   - `.tokens() → Tokens | None`. A client session's credentials: `.set([...])` replaces them without reconnecting and `await .answered()` raises the relay's refusal.
+  - `.credential(token) → Credential`. Present a request token for a route or claim to carry with `.set_auth(credential)`. `await .answered()` raises the peer's refusal (`Unsupported` on moq-lite without AUTH); `.cancel()`, or leaving an `async with`, withdraws it unless a route or claim still names it.
 
 ### Publishing
 
@@ -289,10 +290,10 @@ moq-transport on every relay hop; this API does not add pre-07 capability detect
 - **`Route`**. An exact route on an origin, owning one broadcast. Hold it: dropping or cancelling it retracts it, and so does closing its broadcast.
   - `.broadcast → BroadcastProducer`. The broadcast the route owns.
   - `.instance → Instance | None`. The stream it serves now, kept across `withdraw()` and `announce()`, or `None` once cancelled without one. Unless one is named, a job's route takes its claim's when it first announces or when `.instance` first reads it. Read first, the job announces under it, and `announce()` fails with `Unroutable` once the claim has moved past it.
-  - `.announce()`, `.withdraw()`, `.set_cost(cost)`. Show, hide, or re-price it in place; `announce` and `set_cost` raise `Closed` once the broadcast closed.
+  - `.announce()`, `.withdraw()`, `.set_cost(cost)`, `.set_auth(credential)`. Show, hide, re-price, or swap its request credential (`None` for the session's scope) in place; `announce`, `set_cost`, and `set_auth` raise `Closed` once the broadcast closed.
 - **`Claim`**. A prefix route on an origin. Hold it: dropping or cancelling it retracts it and rejects the requests still waiting.
   - `.instance → Instance`. The stream it serves now, kept across `withdraw()` and `announce()`. Unless one is named, it moves to a fresh one each time a job holding it ends.
-  - `.announce()`, `.withdraw()`, `.set_cost(cost)`. Show, hide, or re-price it in place.
+  - `.announce()`, `.withdraw()`, `.set_cost(cost)`, `.set_auth(credential)`. Show, hide, re-price, or swap its request credential (`None` for the session's scope) in place.
   - `await .requested() → BroadcastRequest | None`, or async iteration. Call `.serve(consumer)` to answer with held content under the claim's continuous sequence space, `.route(hidden=..., ...)` for the path's own route, which continues the claim's instance until the job ends and then moves the claim to a fresh one (unless either names an instance: a named claim lends none, and a named job keeps its own), or `.reject(code)` to fail the requester.
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent`, `AnnounceEventUnavailable`, `AnnounceEventAvailable`, `AnnounceEventAbsent`, or `AnnounceEventOffline`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards

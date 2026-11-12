@@ -22,10 +22,5 @@ with `Evicted`. The
 completed the sweep in about 25 and 23 minutes (their jobs failed later, at
 `Fail on paired regressions`). Find what grew between those sweeps and the
 60-minute cancellations from 11-08, then trim it or split the group across
-matrix entries, as
-[the Rust benchmark tests quest](/quest/m0/ci/nightly-rust-test-hour.md) does
-for its job. The sweep still covers both fan-out axes.
-
-## Related
-
-- [Rust benchmark tests fit their hour](/quest/m0/ci/nightly-rust-test-hour.md) - the same timeout, caused by builds
+matrix entries, as the Rust benchmark tests did. The sweep still covers both
+fan-out axes.

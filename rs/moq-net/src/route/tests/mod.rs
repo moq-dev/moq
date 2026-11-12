@@ -6,7 +6,11 @@
 //! lite-07 claim already covers the paths below it, so the slash is dropped.
 
 mod cache;
+mod compare;
+mod copies;
 mod handoff;
+mod paths;
+mod residual;
 mod routing;
 mod rtt;
 

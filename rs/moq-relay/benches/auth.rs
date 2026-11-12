@@ -56,6 +56,8 @@ impl Fixture {
 		});
 		let mut config = moq_tokio::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		// Only moq-lite-07 speaks AUTH, and no version offers it by default.
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
 		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
@@ -70,7 +72,7 @@ impl Fixture {
 			}
 		});
 		let mut config = moq_tokio::connect::Config::default();
-		config.version = vec!["moq-transport-22".parse().unwrap()];
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
 		let mut connections = Vec::new();
@@ -82,10 +84,10 @@ impl Fixture {
 			let connection = client.clone().connect(url.clone()).established().await.unwrap();
 			producers.push(receive.recv().await.unwrap().1);
 			let auth = connection.auth();
-			let added = futures::future::join_all((0..tokens).map(|index| auth.add(format!("token{index}")))).await;
+			let added = futures::future::join_all((0..tokens).map(|index| added(&auth, format!("token{index}")))).await;
 			let added: Vec<_> = added.into_iter().map(|added| added.unwrap()).collect();
 			if session == 0 {
-				// `add` resolves once the peer grants the token, so its grant is already current.
+				// `added` resolves once the peer grants the token, so its grant is already current.
 				let observed = added.last().unwrap().grant();
 				assert!(observed.peek().is_some());
 				watch = Some(observed);
@@ -169,6 +171,8 @@ impl Queue {
 		let (auth, mut admissions) = auth::Auth::embedded("bench");
 		let mut config = moq_tokio::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		// Only moq-lite-07 speaks AUTH, and no version offers it by default.
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
 		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
@@ -183,7 +187,7 @@ impl Queue {
 			}
 		});
 		let mut config = moq_tokio::connect::Config::default();
-		config.version = vec!["moq-transport-22".parse().unwrap()];
+		config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
 		let (connection, ()) = tokio::join!(async { client.connect(url).established().await.unwrap() }, async {
@@ -205,7 +209,7 @@ impl Queue {
 			let auth = self.auth.clone();
 			let token = format!("{:0>width$}", self.presented, width = bytes);
 			self.presented += 1;
-			tasks.push(tokio::spawn(async move { auth.add(token).await }));
+			tasks.push(tokio::spawn(async move { added(&auth, token).await }));
 		}
 		for _ in 0..offered {
 			self.admissions
@@ -247,3 +251,13 @@ fn queue(c: &mut Criterion) {
 
 criterion_group!(benches, refresh, queue);
 criterion_main!(benches);
+
+/// Present `token` on `handle` and wait for its first verdict.
+async fn added(
+	handle: &moq_net::auth::Handle,
+	token: impl Into<bytes::Bytes>,
+) -> moq_net::Result<moq_net::auth::Credential> {
+	let credential = handle.add(token)?;
+	credential.answered().await?;
+	Ok(credential)
+}

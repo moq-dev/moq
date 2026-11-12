@@ -38,6 +38,7 @@ normative:
 
 informative:
   I-D.lcurley-moq-cluster:
+  RFC7627:
   RFC8966:
   moqflate:
     title: "DEFLATE Compressed Tracks for MoQ"
@@ -497,6 +498,7 @@ A metric that overflows 64 bits makes the route unusable.
 
 A route carries its Hops: the Hop ID of every node it crossed, the origin node first and the sender last.
 A Hop ID is a non-zero 64-bit value a node names itself with for as long as its process runs, such as the Node ID it started with; a rotation does not change it.
+A receiver tolerates a zero or repeated Hop ID instead of closing the session: such a route harms only itself.
 A node sending its selected route appends its own Hop ID to the Hops it received, and an origin's own route starts with its Hop ID alone.
 A relay forwards the other entries unchanged and never qualifies them.
 A route that arrives with 32 Hops is unusable.
@@ -1129,8 +1131,10 @@ The sender's Ed25519 public key.
 The key's Ed25519 signature over the ASCII bytes `moq-lite route key`, then one byte naming the sender's side of the session (0 for the client, 1 for the server), then 32 bytes of keying material exported from the session with the label `EXPORTER-moq-lite-route-key` and an empty context.
 
 Binding 1 exports with the TLS exporter (Section 7.5 of [RFC8446]), and binding 2 with the WebTransport session's exporter [webtrans-h3] (see [Transports](#transports)).
-An endpoint MUST NOT send the parameter on a session that provides no exporter.
-The exported material and the sender's side keep a proof from being replayed on another session or reflected back to its sender.
+The exporter MUST yield material that only the session's two endpoints know and no other session shares.
+TLS 1.3's exporter provides this, after resumption too; its early exporter does not, since a replayed 0-RTT ClientHello reproduces it on another connection, nor does TLS 1.2 without the extended master secret [RFC7627], which lets an attacker give two of its sessions one secret.
+An endpoint MUST NOT send the parameter on a session that provides no such exporter.
+The exported material and the sender's side keep a proof from being replayed on another session, relayed by an attacker or an intermediary that terminates TLS, or reflected back to its sender.
 
 Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_VIOLATION if the value is not 96 bytes.
 A receiver that relies on the key MUST verify the signature first, closing the session with a PROTOCOL_VIOLATION if it does not verify; without an exporter on the session, it cannot rely on the key.
@@ -2410,7 +2414,7 @@ The `Message Length` describes the payload size on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
 - ROUTE_START and ROUTE_UPDATE carry Flags, whose 0x2 bit adds an optional RTT: the informational sum of each link's lowest smoothed RTT over the last 30 seconds to the origin node, which never selects a route.
-- Added Hops to ROUTE_START and ROUTE_UPDATE: the Hop ID of every node the route crossed, at most 32. A node never selects a route whose Hops name it, so one that dropped its feasibility distance cannot take back a copy of its own route.
+- Added Hops to ROUTE_START and ROUTE_UPDATE: the Hop ID of every node the route crossed, at most 32. A node never selects a route whose Hops name it, so one that dropped its feasibility distance cannot take back a copy of its own route. A zero or repeated Hop ID in a route's Hops is tolerated, where a repeated non-zero Hop ID in moq-lite-06's Hop ID list is a PROTOCOL_VIOLATION.
 - Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.

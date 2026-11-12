@@ -87,6 +87,8 @@ IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
+# 1 runs the quarantined cells too, to reproduce a flake its quest investigates.
+QUARANTINED="${INTEROP_QUARANTINED:-0}"
 
 # Binaries under test. Built from source below unless overridden to point at a
 # prebuilt (mirrors test/smoke's RELAY_BIN/CLI_BIN escape hatch).
@@ -1604,7 +1606,7 @@ run_round() {
     sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
-        if [[ "$case" == media && "$publisher" == python && "$sub" == go ]]; then
+        if [[ "$QUARANTINED" -eq 0 && "$case" == media && "$publisher" == python && "$sub" == go ]]; then
             echo "  SKIP  $pub -> $sub (quarantined)"
             record skip case="$case" publisher="$publisher" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-python-go.md"
             continue
@@ -1616,7 +1618,7 @@ run_round() {
             continue
         fi
         # Quarantined: quest/m0/test-flakes-2/interop-go-cpp.md.
-        if [[ "$pub/$sub" == go/cpp || "$pub/$sub" == rust-swapped/js || "$pub/$sub" == rust-swapped/js-native-node ]]; then
+        if [[ "$QUARANTINED" -eq 0 ]] && [[ "$pub/$sub" == go/cpp || "$pub/$sub" == rust-swapped/js || "$pub/$sub" == rust-swapped/js-native-node ]]; then
             echo "  SKIP  $pub -> $sub (quarantined)"
             record skip case="$case" publisher="$publisher" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-go-cpp.md"
             continue
@@ -2153,6 +2155,13 @@ run_fetch_round() {
     local label="CLI FETCH${3:+ $3}"
     local started=$SECONDS why=""
     local cell=(case="$label" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    # The relay fills its miss with an upstream FETCH, which a JS publisher refuses on
+    # moq-transport by design: it serves FETCH only over moq-lite.
+    if [[ "$VERSION" == moq-transport-* && "$pub" == js-native-* ]]; then
+        echo "  SKIP  $label $pub -> $sub (a JS publisher refuses moq-transport FETCH)"
+        record skip "${cell[@]}" detail="a JS publisher refuses moq-transport FETCH"
+        return
+    fi
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -2648,7 +2657,6 @@ run_hls_grid() {
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
 # Both roles and protocols share this lane; Python acknowledges Rust's drain before teardown.
 # Lite only: moq-net endpoints speak moq-lite to each other, never moq-transport.
-# shellcheck disable=SC2329  # quarantined until quest/m0/test-flakes-2/interop-go-cpp.md runs it again
 run_sockets() {
     needs python || return 0
     [[ "$VERSION" == auto ]] || return 0
@@ -2769,7 +2777,9 @@ else
             if [[ "$FINISH_ONLY" -eq 0 ]]; then
                 run_tails
                 # Quarantined: quest/m0/test-flakes-2/interop-go-cpp.md.
-                if needs python && [[ "$VERSION" == auto ]]; then
+                if [[ "$QUARANTINED" -eq 1 ]]; then
+                    run_sockets
+                elif needs python && [[ "$VERSION" == auto ]]; then
                     echo "  SKIP  Python/Rust sockets (quarantined)"
                     record skip case="Python Rust sockets" publisher=python subscriber=rust detail="quarantined: quest/m0/test-flakes-2/interop-go-cpp.md"
                 fi

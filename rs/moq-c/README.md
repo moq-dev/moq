@@ -54,6 +54,9 @@ int32_t moq_session_grants(uint32_t session, moq_status_callback on_grant, void 
 int32_t moq_session_grants_cancel(uint32_t watcher);
 int32_t moq_grant_info(uint32_t grant, moq_grant *dst);
 int32_t moq_grant_free(uint32_t grant);
+int32_t moq_session_credential(uint32_t session, const uint8_t *token, uintptr_t token_len);
+int32_t moq_credential_answered(uint32_t credential, moq_status_callback on_answer, void *user_data);
+int32_t moq_credential_free(uint32_t credential);
 
 // Server
 int32_t moq_server_listen(const moq_server_config *config, moq_status_callback on_request, void *user_data);
@@ -94,6 +97,7 @@ int32_t moq_route_instance(uint32_t route);
 int32_t moq_route_announce(uint32_t route);
 int32_t moq_route_withdraw(uint32_t route);
 int32_t moq_route_set_cost(uint32_t route, uint64_t cost);
+int32_t moq_route_set_auth(uint32_t route, uint32_t credential);
 int32_t moq_route_free(uint32_t route);
 
 // Publishing: Claims (a prefix answered on demand; freeing one retracts it)
@@ -102,6 +106,7 @@ int32_t moq_claim_instance(uint32_t claim);
 int32_t moq_claim_announce(uint32_t claim);
 int32_t moq_claim_withdraw(uint32_t claim);
 int32_t moq_claim_set_cost(uint32_t claim, uint64_t cost);
+int32_t moq_claim_set_auth(uint32_t claim, uint32_t credential);
 int32_t moq_claim_free(uint32_t claim);
 int32_t moq_broadcast_request_path(uint32_t request, moq_string *dst);
 int32_t moq_broadcast_request_serve(uint32_t request, uint32_t broadcast);

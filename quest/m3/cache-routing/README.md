@@ -29,7 +29,8 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    advertise a warm route for it. This revises Cluster routing's non-goal of
    cache-dependent route prices. (rejected: per-broadcast forwarding with a
    cache-only subscribe and no advertisement; keeping routing cache-agnostic)
-2. ✅ **A warm route is per neighbor and travels one hop.** It goes only to
+2. ✅ **A warm route is per neighbor and travels one hop.** Reopened by
+   item 13. It goes only to
    direct neighbors and is never forwarded. B is warm toward N only while B
    has demand besides N's (a local reader or another downstream session),
    and withdraws once that demand has been gone for the copy's existing
@@ -48,7 +49,8 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    the skipped relay pulls for its own reader, its neighbor joins it. With
    uniform prices both cases tie and fall to the hash. (rejected: a warm and
    a cold price per link; a warm price the carrier seeds)
-4. **Eligibility, which the proof must hold.** A relay may pull broadcast P
+4. **Eligibility, which the proof must hold.** Reopened by item 13. A relay
+   may pull broadcast P
    through neighbor N only when N's advertised route to the request's pinned
    origin has a newer seqno, or an equal seqno with
    `(cold metric, hash(P, N))` below `(feasibility distance, hash(P, self))`.
@@ -114,12 +116,11 @@ proof's proposals:
     plus that cost, an independent one pays the link alone, and a relay
     moves only for a strictly lower `(draining, price)`. With exact
     information that is a potential game on the forest's total link cost.
-    Under the sweep's churn, 2997 of 3000 scenarios settle; 3 (48, 582, and
-    2251, after [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)
-    changed feasibility; 4 before it) never do, as two carriers keep a narrowed
-    route standing while two relays swap between them. The sweep names them in
-    `UNSETTLED` and checks each still never settles, and
-    [the implementation](/quest/m3/cache-routing/select.md) settles them first.
+    Under the sweep's churn, with the draft's Rendezvous Hash, 2999 of 3000
+    scenarios settle; scenario 2251 never does, as two carriers keep a
+    narrowed route standing while two relays swap between them. The sweep names them in
+    `UNSETTLED` and checks each still never settles, and the
+    [proof's rewrite](/quest/m2/cache-routing-proof.md) settles them first.
 11. ✅ **The wire is in moq-lite-07 itself**, overturning the proof's choice
     of a SETUP extension. (rejected: an additive Warm Routes SETUP
     extension) Lite-07 is unpublished, so its shape can still change until
@@ -145,12 +146,39 @@ proof's proposals:
 Measured by the proof:
 
 12. **Costs the sweeps measured.** A full LAN mesh of 6 relays pulls one
-    uplink copy per broadcast; a ring of 6 keeps 13 copies for 8 broadcasts,
+    uplink copy per broadcast; a ring of 6 keeps 12 copies for 8 broadcasts,
     one per hash local minimum. An origin seqno advance that reaches a child
     before its warm parent makes the parent's older route ineligible, so the
     child moves off and back (2 moves in the chain fixture); origins advance
-    on every announce stream open and close, so fewer advances cut this
-    churn, which [seqno churn](/quest/m3/cache-routing/seqno-churn.md) takes up.
+    on every announce stream open and close. Item 13's paths drop the seqno
+    ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27),
+    and this churn with it.
+
+13. Reopened 2026-11-11 (maintainer, /quest-plan on the route redesign):
+    items 2 and 4. In the maintainer's words: "I think we need warm routes
+    propagating, that decision was made based on this flawed setup." ✅ **A
+    warm route is per broadcast and propagates**, for as long as it is
+    cheaper than the route its publisher's broadcasts share
+    ([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 26). A
+    broadcast no relay carries rides the shared route and costs no message of
+    its own. Item 4 rests safety on Babel's distance, which cannot let a relay
+    join a copy at a neighbour that is no closer to the publisher: the join
+    the Goal wants, and why item 2 stopped at one hop. Items 1 and 3 stand.
+    Decided 2026-11-11 (maintainer, on
+    [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)): what keeps a warm
+    route free of loops and stale copies is its path, as for every route
+    (routes epic Plan item 27), and the proof then holds that rule. The
+    prototype in `rs/moq-net/src/route/tests/copies.rs` showed three things
+    the proof starts from. A warm route carries the path its copy took and
+    names the relay that carries it, and a relay refuses one whose path names
+    it, so it joins a copy at a neighbour farther from the publisher than
+    itself. Two relays that start carrying in the same instant trade copies
+    for good unless they are ranked, so a relay already pulling moves onto
+    another's copy only if that carrier ranks below it. And when a carrier's
+    uplink closes, it and a relay pulling from it point at each other until
+    the news crosses their link.
+    [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) proves items
+    2 and 4 as first decided.
 
 Prior art: warm/cold route prices
 ([moq-dev/moq#2925](https://github.com/moq-dev/moq/pull/2925)) were deleted

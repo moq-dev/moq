@@ -245,7 +245,7 @@ test("a redirect moves the pool key while the handle keeps its origin", async ()
 	}
 });
 
-// Replays RedialsALiveRelay in js/watch/verify/Failover.tla under Redirect.cfg: a redirect is
+// Replays RedialsALiveRelay in js/watch/verify/Failover.tla under FailoverRedirect.cfg: a redirect is
 // sticky, so once the relay it named dies, every redial goes back to that dead relay and never
 // to the configured URL, which still answers.
 test("residual: a redirected connection redials only its dead target", async () => {
@@ -373,7 +373,8 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 		delay: { initial: Duration.millis(1) },
 	});
 	try {
-		const token = await reload.auth.add("token");
+		const token = reload.auth.add("token");
+		await token.answered;
 		const first = relays[0];
 		if (!first) throw new Error("no first dial");
 		expect(first.tokens).toContain("token");

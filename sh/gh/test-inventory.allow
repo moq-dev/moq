@@ -43,7 +43,4 @@ ignore moq-tokio::datagram_tracks::datagram_tracks_javascript /quest/m2/cluster-
 recipe test::datagram-tracks /quest/m2/cluster-routing/routes/js.md
 
 # Too slow for the merge gate; the quest runs it nightly once every scenario settles.
-ignore moq-net::route::tests::cache::sweep_cache_routing_long /quest/m3/cache-routing/select.md
-
-# Flaked under a loaded `just check`; disabled until fixed at its cause.
-ignore moq-gst::source::imp::session_tests::a_reannounced_sibling_instance_does_not_replay_its_finish /quest/m0/test-flakes-2/README.md
+ignore moq-net::route::tests::cache::sweep_cache_routing_long /quest/m2/cache-routing-proof.md

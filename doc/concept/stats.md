@@ -9,7 +9,9 @@ A relay publishes its traffic counters as ordinary MoQ broadcasts, so any
 subscriber can read them: a dashboard, a billing meter, an aggregator in
 another region. This page is the wire contract for those broadcasts, enough to
 read them in any language. [`moq-stats`](https://docs.rs/moq-stats) is the Rust
-producer and consumer, and the relay's [`[stats]`](/bin/relay/config#stats)
+producer and consumer, [`@moq/stats`](https://github.com/moq-dev/moq/tree/main/js/stats)
+the JavaScript consumer (node discovery, typed frames, and bucket runs followed
+through the track listing), and the relay's [`[stats]`](/bin/relay/config#stats)
 section turns it on.
 
 ## Media reports

@@ -2,7 +2,7 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-relay|rust-extra|rust-uring|js|bindings'
+usage='usage: just gh nightly rust-test|rust-test-apps|rust-bench|rust-shared|rust-relay|rust-extra|rust-uring|js|bindings'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
@@ -12,7 +12,7 @@ fi
 case "$1" in
     bindings) report= ;;
     rust-bench | rust-shared | rust-relay | rust-extra | rust-uring) report=rust ;;
-    rust-test) report=rust-test ;;
+    rust-test | rust-test-apps) report=rust-test ;;
     js) report=js ;;
     *)
         echo "$usage" >&2
@@ -73,42 +73,43 @@ javascript() {
 # The bench nextest profile stores each test's printed tables in its JUnit report,
 # which every run overwrites; keep each run's copy.
 nextest() {
-    local junit=${CARGO_TARGET_DIR:-$root/target}/nextest/bench/junit.xml
+    local junit=${CARGO_TARGET_DIR:-$root/target}/nextest/bench/junit.xml report name
     rm -f "$junit"
     run "$@"
-    if [[ -s $junit ]]; then
-        mv "$junit" "$out/raw/nextest-$((++nextest_runs)).xml"
-    else
+    if [[ ! -s $junit ]]; then
         failed+=("no JUnit report from: $*")
+        return
     fi
+    report=$out/raw/nextest-$((++nextest_runs)).xml
+    mv "$junit" "$report"
+    # A filter that matches nothing passes, as when its test needs a feature the build lacks.
+    while read -r name; do
+        if ! grep -qE "<testcase name=\"([^\"]*::)?$name(::[^\"]*)?\"" "$report"; then
+            failed+=("no test ran for $name in: $*")
+        fi
+    done < <(grep -oE 'test\(=?[[:alnum:]_:]+\)' <<<"$*" | sed -E 's/^test\(=?//; s/\)$//')
 }
 nextest_runs=0
 
 case "$1" in
     # Ignored benchmark tests under nextest, all in release builds and one at a time, so
     # none measures beside another. Each prints CSV tables whose unit-suffixed columns
-    # the report records (see bench/README.md).
+    # the report records (see bench/README.md). A release build links every test binary
+    # with fat LTO, so each group is one build of only the targets holding its benchmarks,
+    # and the transport stack and the crates above it split across jobs.
     rust-test)
         export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
-        nextest just rs bench-latency
-        nextest just rs test -p moq-bench --release --run-ignored only \
-            -E 'test(benchmark_readiness_establishment)' --success-output immediate
-        nextest just rs bench-playback
-        nextest just rs test --release -p moq-congestion -E 'test(benchmark_per_packet)' \
-            --run-ignored only --success-output immediate
-        nextest just rs bench-feed-fetch
-        nextest just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
-        nextest just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
-        nextest just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
-        nextest just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
-        nextest just rs test -p moq-net --release --features async --test integration -E 'test(=mesh_sweep::benchmark_route_mesh)' --run-ignored only --success-output immediate
-        # One build for the crates whose benchmarks need no features of their own.
-        nextest just rs test --release --no-fail-fast -p moq-relay -p moq-c -p moq-mux -p moq-cli \
-            -E 'test(benchmark_stun_sources) | test(benchmark_handles) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_stream_import)' \
-            --run-ignored only --success-output immediate
-        # Codecs are irrelevant to timebase reservation, so skip building them.
-        nextest just rs test -p moq-ffi --release --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
-            --run-ignored only --success-output immediate
+        nextest just rs bench-tests --no-fail-fast --run-ignored only \
+            -p moq-bench -p moq-congestion -p moq-quic -p moq-net -p moq-tokio -p moq-uring \
+            --features moq-net/async --lib --bin moq-bench --test integration \
+            -E 'test(benchmark_observation_contention) | test(benchmark_readiness_establishment) | test(benchmark_per_packet) | test(benchmark_feed_fetch_wakes) | test(=mesh_sweep::benchmark_route_mesh) | test(benchmark_route_rules) | test(benchmark_route_churn) | test(benchmark_receive_credit) | test(benchmark_receive_windows) | test(benchmark_datagram_delivery) | test(benchmark_socket_queues)'
+        ;;
+    rust-test-apps)
+        export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
+        nextest just rs bench-tests --no-fail-fast --run-ignored only \
+            -p moq-audio -p moq-mux -p moq-c -p moq-relay -p moq-cli -p moq-ffi \
+            --features moq-audio/playback --lib --bin moq \
+            -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stun_sources) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
         ;;
     # Measured Cargo bench targets, all in the bench profile. A paired run builds and
     # measures each group twice, so the groups split across jobs to fit an hour each.
@@ -161,14 +162,13 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills fetch forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams socket; do
+        for benchmark in broadcasts requests fills forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams socket; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
         javascript qmux-record just js qmux-record-bench
         javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
-        javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
         javascript json-stream just js json-stream-bench

@@ -376,6 +376,7 @@ impl Routed {
 		if self.drained {
 			stream.goaway();
 		}
+		self.stream.replaced_by(&stream);
 		drop(std::mem::replace(&mut self.stream, stream));
 		self.previous = previous;
 		self.outputs(subscriber);
@@ -483,7 +484,7 @@ impl Routed {
 			if same {
 				entry.named = named;
 				entry.route.update(route);
-				self.stream.serving(id, &key.1);
+				self.stream.serving(id, &key.1, &served.claim);
 				return;
 			}
 		}
@@ -495,7 +496,7 @@ impl Routed {
 				let entry = AnnouncedRoute::new(route, dynamic, wake);
 				entry.waker.wake_by_ref();
 				self.served.insert(key.clone(), ServedClaim { named, route: entry });
-				self.stream.serving(id, &key.1);
+				self.stream.serving(id, &key.1, &served.claim);
 			}
 			Err(_) => {
 				// Outside our origin's scope.

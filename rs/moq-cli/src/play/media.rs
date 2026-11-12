@@ -14,7 +14,7 @@ use kio::clock::Instant;
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, Track, joined};
-use super::timeline::{AudioTimeline, Playhead, fit};
+use super::timeline::{AudioTimeline, Playhead};
 use super::video::{Refresh, Video};
 use super::window::Event;
 use moq_mux::sync::{Producer as Presentation, Transition};
@@ -31,11 +31,6 @@ enum Crossing {
 /// pulls on a fixed clock, so a ring shallower than this drops out on ordinary
 /// network jitter, and one with no depth at all can never be read from.
 const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
-
-/// NetEq's delay adjustment granularity. The callback handles ordinary
-/// differences by stretching; the write path re-anchors only at four times
-/// the target plus this granularity.
-const AUDIO_SLACK: Duration = Duration::from_millis(20);
 
 /// Maximum sample frames per silence write, independent of the catalog rate.
 const AUDIO_SILENCE: usize = 960;
@@ -598,9 +593,9 @@ async fn play_audio<O: Output>(
 	// later. That estimate times each packet when `read` hands it over, so this
 	// receiver never waits on the speaker between reads. Live playback lets
 	// the callback stretch toward the target; a declared end plays comfort noise
-	// until the old media drains and its replacement is due. Each write steers
-	// the sink toward when the shared clock says its media is due, which keeps
-	// audio with video in the steady state without letting a stall hold video.
+	// until the old media drains and its replacement is due. Each write anchors
+	// the sink to when the shared clock says its media is due, so the callback
+	// plays onto that clock in the steady state without letting a stall hold video.
 	let role = presentation.track(moq_mux::container::Kind::Audio);
 	let received = Mutex::new(VecDeque::new());
 	let arrived = tokio::sync::Notify::new();
@@ -622,7 +617,6 @@ async fn play_audio<O: Output>(
 	// One sample across every channel, the unit a write has to stay aligned to.
 	let stride = channels as usize * size_of::<f32>();
 	let samples = |duration: Duration| (duration.as_secs_f64() * sample_rate as f64).round() as u64;
-	let slack = samples(AUDIO_SLACK);
 	let mut silence = Vec::new();
 
 	// The longest hole worth playing through, in samples. A hole this player would
@@ -661,15 +655,39 @@ async fn play_audio<O: Output>(
 		}
 	};
 	steer(None);
-	// The depth that makes media ending at `end` sound when the shared clock says it is due.
-	let hold = |end: Duration| {
-		moq_net::Timestamp::try_from(end)
-			.ok()
-			.and_then(|end| presentation.due(end))
-			.map(|due| {
-				due.saturating_duration_since(Instant::now())
-					.clamp(AUDIO_BUFFER_MIN, cap)
-			})
+	// What the sink holds against jitter: the shared delay, floored at what the
+	// device needs and capped at what the sink was sized for.
+	let target = || schedule.delay().clamp(AUDIO_BUFFER_MIN, cap);
+	// Anchor the sink to the shared clock: the media written so far ends at
+	// `end`, and sounds when the clock says it is due. The callback stretches
+	// onto that clock, and skips only what trails it past the age budget the
+	// subscription still delivers, which a fixed delay leaves none of.
+	// The last anchor, as when its end was due, the end, and the delay. The
+	// clock's reference is when media zero arrived, `at - end - delay`: one that
+	// moved earlier jumped the clock ahead, which the sink skips rather than
+	// speeds through, as video skips frames it passed over.
+	let mut anchored = None::<(Instant, Duration, Duration)>;
+	let anchor = |sink: &mut <O::Speaker as Speaker>::Sink,
+	              anchored: &mut Option<(Instant, Duration, Duration)>,
+	              end: Duration| {
+		let Ok(timestamp) = moq_net::Timestamp::try_from(end) else {
+			return;
+		};
+		if let Some(at) = presentation.due(timestamp) {
+			// The end as the clock placed it, so rounding never reads as a jump.
+			let end = Duration::from(timestamp);
+			let delay = schedule.delay();
+			let nanos = |duration: Duration| duration.as_nanos() as i128;
+			let jumped = anchored.replace((at, end, delay)).map_or(0, |(was, from, before)| {
+				let earlier = match was.checked_duration_since(at) {
+					Some(ahead) => nanos(ahead),
+					None => -nanos(at.duration_since(was)),
+				};
+				earlier + nanos(end) - nanos(from) + nanos(delay) - nanos(before)
+			});
+			let jumped = Duration::from_nanos(jumped.clamp(0, u64::MAX as i128) as u64);
+			sink.due(at, max_delay.saturating_sub(delay), jumped);
+		}
 	};
 
 	// Tracks whether the last read failed, so a stream the decoder can't read at
@@ -824,8 +842,9 @@ async fn play_audio<O: Output>(
 					// No write may come to carry a delay change, so the speaker follows it now.
 					_ = role.delay_changed(seen) => {
 						steer(wrote);
-						if let Some(held) = wrote.and_then(|(_, end)| hold(end)) {
-							sink.set_latency(held)?;
+						sink.set_latency(target())?;
+						if let Some((_, end)) = wrote {
+							anchor(&mut sink, &mut anchored, end);
 						}
 					}
 				}
@@ -968,8 +987,7 @@ async fn play_audio<O: Output>(
 			// the delay was known, and a held frame behind only what was already
 			// written, so the rest of the lead goes in as silence ahead of the frame,
 			// which already covers any hole before it. A frame starting an utterance is
-			// instead placed one target out by the sink itself, and `hold` below sizes
-			// that target to the due time.
+			// instead placed one target out by the sink itself.
 			let short = presentation
 				.due(mapped)
 				.filter(|_| (fresh || held_back) && !utterance)
@@ -978,24 +996,15 @@ async fn play_audio<O: Output>(
 						.saturating_sub(sink.buffered())
 				})
 				.map_or(0, samples);
-			// The depth that makes this frame's end sound when the shared clock says
-			// it is due, so the callback stretches the speaker onto the clock: behind
-			// it after a stall, it plays faster until it catches up. Floored at what
-			// the device needs, and capped at the age budget the sink was sized for;
-			// the consumer holds anything due later encoded.
-			let buffered = samples(sink.buffered());
-			let held = hold(timing.end).unwrap_or(input.latency.clamp(AUDIO_BUFFER_MIN, cap));
-			let target = samples(held);
-			sink.set_latency(held)?;
-			// Leave normal convergence to the callback. Only an excess at NetEq's
-			// fast threshold (four times target + granularity) is an emergency
-			// re-anchor; a 20 ms trim would compete with every pitch correction.
-			let fit = fit(buffered, target, slack, timing.silence.max(short), length as u64);
+			// Convergence is the callback's: it slows down when its buffer runs low and
+			// catches up with the clock once it holds more than its target, and only
+			// skips what trails the clock past what the subscription still delivers.
+			sink.set_latency(target())?;
 
 			// The packet pays for the channel count; the catalog cannot allocate
 			// a duration's worth of silence before any samples arrive.
 			silence.resize(length.min(AUDIO_SILENCE) * stride, 0);
-			let mut quiet = fit.silence;
+			let mut quiet = timing.silence.max(short);
 			while quiet > 0 && !silence.is_empty() {
 				let frames = quiet.min((silence.len() / stride) as u64) as usize;
 				let written = sink.write(&silence[..frames * stride])?;
@@ -1006,9 +1015,9 @@ async fn play_audio<O: Output>(
 				}
 				quiet -= frames as u64;
 			}
-			let skip = fit.skip as usize * stride;
-			let written = sink.write(&frame.data[skip.min(frame.data.len())..])?;
-			let trimmed = fit.skip + written.dropped_sample_frames as u64;
+			let written = sink.write(&frame.data)?;
+			anchor(&mut sink, &mut anchored, timing.end);
+			let trimmed = written.dropped_sample_frames as u64;
 			if trimmed > 0 {
 				output.send(Event::Trimmed {
 					audio: Duration::from_secs_f64(trimmed as f64 / sample_rate as f64),
@@ -1020,8 +1029,7 @@ async fn play_audio<O: Output>(
 			// A dropped write leaves the utterance to start on the next frame the sink accepts.
 			if utterance && written.accepted_sample_frames > 0 {
 				utterance = false;
-				let skipped = Duration::from_secs_f64(fit.skip as f64 / sample_rate as f64);
-				output.send(Event::Utterance(Duration::from(frame.timestamp) + skipped));
+				output.send(Event::Utterance(Duration::from(frame.timestamp)));
 			}
 			if std::mem::take(&mut declare) {
 				sink.end();

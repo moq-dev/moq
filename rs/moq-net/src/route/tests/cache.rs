@@ -103,9 +103,13 @@ pub(super) struct Mesh {
 	warm: Vec<usize>,
 }
 
-/// The rendezvous hash that orders a tie, by node index standing in for the Node ID.
+/// The draft's Rendezvous Hash that orders a tie, by node index standing in for the Node ID.
 fn hash(path: &str, node: Node) -> u64 {
-	fnv(path, &[node as u64])
+	let mut hash: u64 = 0x420C_0DEC_B00B;
+	for byte in path.bytes().chain((node as u64).to_le_bytes()) {
+		hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+	}
+	hash
 }
 
 /// A change to one subscription.
@@ -969,8 +973,8 @@ fn lan_relays_share_uplink_copies() {
 			assert_eq!(mesh.copies(b), if full { 1 } else { minima }, "{path}");
 			copies += mesh.copies(b);
 		}
-		// Recorded: one copy per broadcast in the full mesh, 13 for 8 in the ring.
-		assert_eq!(copies, if full { 8 } else { 13 });
+		// Recorded: one copy per broadcast in the full mesh, 12 for 8 in the ring.
+		assert_eq!(copies, if full { 8 } else { 12 });
 	}
 }
 
@@ -1029,7 +1033,7 @@ fn sweep_cache_routing_long() {
 /// The scenarios that stay loop-free but never settle: two carriers each keep a
 /// narrowed advert standing while two relays swap between them. The sweep checks
 /// that each still never settles, so the list shrinks as convergence is fixed.
-const UNSETTLED: [usize; 3] = [48, 582, 2251];
+const UNSETTLED: [usize; 1] = [2251];
 
 fn sweep(scenarios: usize) {
 	const RELAYS: usize = 6;

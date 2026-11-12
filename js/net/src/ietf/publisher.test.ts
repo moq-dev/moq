@@ -28,7 +28,7 @@ import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { SubscribeRefused, toRequestCode } from "./error.ts";
-import { Fetch, FetchHeader } from "./fetch.ts";
+import { FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
@@ -682,21 +682,18 @@ test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () =>
 	for (const version of [Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
-		for (const fetch of [false, true]) {
-			const request = requestStream(version);
-			try {
-				const name = [1, 4, ...new TextEncoder().encode("test"), 5, ...new TextEncoder().encode("video")];
-				const fields = [7, ...name, 1, 0x25, 0];
-				const encoded = new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version);
-				if (fetch) await pub.runFetch(await Fetch.decode(encoded, version), request.stream);
-				else await pub.runSubscribe(await Subscribe.decode(encoded, version), request.stream);
-				await request.stream.writer.closed;
-				const wire = request.wire();
-				expect(await wire.u53()).toBe(RequestError.id);
-				expect((await RequestError.decode(wire, version)).errorCode).toBe(0x36);
-			} finally {
-				request.cancel();
-			}
+		const request = requestStream(version);
+		try {
+			const name = [1, 4, ...new TextEncoder().encode("test"), 5, ...new TextEncoder().encode("video")];
+			const fields = [7, ...name, 1, 0x25, 0];
+			const encoded = new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version);
+			await pub.runSubscribe(await Subscribe.decode(encoded, version), request.stream);
+			await request.stream.writer.closed;
+			const wire = request.wire();
+			expect(await wire.u53()).toBe(RequestError.id);
+			expect((await RequestError.decode(wire, version)).errorCode).toBe(0x36);
+		} finally {
+			request.cancel();
 		}
 		origin.close();
 	}
@@ -1793,6 +1790,7 @@ class Tokens {
 		const token: Credential = {
 			grant: new Signal<Grant | undefined>(undefined),
 			closed: new Promise(() => {}),
+			answered: Promise.resolve(),
 			close: () => {
 				this.#issued.delete(token);
 				this.ended.update((n) => n + 1);
@@ -2851,8 +2849,8 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 }
 
 /**
- * LARGEST_OBJECT is the live edge on every draft: a Next Object subscription starts right
- * after it, and the head before it comes back by a fill or a joining FETCH that ends there.
+ * LARGEST_OBJECT is the live edge on every draft, even on draft 18, where a Next Object
+ * subscription carries that group whole from object 0 rather than starting right after it.
  */
 test("LARGEST_OBJECT is the live edge", async () => {
 	for (const version of IETF_VERSIONS) {

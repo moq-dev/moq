@@ -1959,10 +1959,8 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
 		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
-		let token = kio::clock::timeout(TIMEOUT, subscriber.auth().add("replacement"))
-			.await
-			.unwrap()
-			.unwrap();
+		let token = subscriber.auth().add("replacement").unwrap();
+		kio::clock::timeout(TIMEOUT, token.answered()).await.unwrap().unwrap();
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
@@ -2040,7 +2038,8 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 		.established()
 		.await
 		.unwrap();
-	let token = publisher.auth().add("shared").await.unwrap();
+	let token = publisher.auth().add("shared").unwrap();
+	token.answered().await.unwrap();
 	let first = origin
 		.route(
 			"first",
