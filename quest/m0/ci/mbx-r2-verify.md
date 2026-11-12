@@ -104,8 +104,10 @@ compilation is "not looked up".
   history (`fetch-depth: 0` with `filter: blob:none`) only once Windows hits
   after the mbx bump, which shows inheritance pays. Windows hit on
   2026-11-05 (above), so this quest's PR gives Nightly's five Linux
-  Rust-cache jobs full history. Compare their hits on the first scheduled
-  Nightly after it lands against the doctest baseline below.
+  Rust-cache jobs full history. On the first scheduled Nightly after it
+  lands, compare each job's hits with its own depth-1 hits: the doctest
+  job's with the baseline below, and each other job's with its last
+  completed depth-1 scheduled run, since the jobs build different workloads.
 - `Cargo.lock` changed 7, 2, 6, 10, 8 and 8 times between consecutive
   scheduled Nightlies from 2026-10-21 to 2026-10-27. Nightly is the only
   hosted writer for Windows and macOS, so after more than 8 changes the
@@ -160,7 +162,9 @@ runs, so every platform stayed within the 8-state lookback):
 ## Waiting
 
 - GitHub Actions: the first scheduled Nightly after Linux full history
-  lands must show Linux hits against the 174-hit doctest baseline, and
+  lands must show each Linux Rust-cache job's hits against its own depth-1
+  hits (the 174-hit doctest baseline, and each other job's last completed
+  depth-1 scheduled run), and
   scheduled runs must supply the remaining cross-platform reuse,
   restore-plus-build comparison and rebuild-frequency evidence in the Goal,
   plus why Windows fell to 163 hits on 2026-11-08. Current timings are not a matched-commit comparison, and macOS's
