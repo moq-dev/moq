@@ -17315,6 +17315,59 @@ mod test {
 		assert!(reader.read_frame().await.unwrap().is_none());
 	}
 
+	/// A capped reader that continued on a copy cut at its cap and then raises the cap reads
+	/// no clean end at the cut: the frames past it are missing from that copy, so it continues
+	/// on a copy that holds them, or fails without one.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_raised_cap_past_an_adopted_cut_finds_the_rest() {
+		for reoffer in [false, true] {
+			let producer = received_producer(Info::timed());
+			let at = |millis| Timestamp::from_millis(millis).unwrap();
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { sequence: 3 }, 1) else {
+				panic!("the first copy opens");
+			};
+			first.write_frame(at(301), &b"b"[..]).unwrap();
+			let mut reader = first.consume().with_range(..3);
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+
+			let mut head = producer
+				.state
+				.write()
+				.ok()
+				.unwrap()
+				.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
+				.unwrap();
+			for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
+				head.write_frame(at(millis), &payload[..]).unwrap();
+			}
+			head.finish().unwrap();
+			first.abort(Error::Cancel).unwrap();
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"c");
+
+			let mut reader = reader.with_end(None);
+			let mut finished = reader.clone();
+			if !reoffer {
+				let res = reader.read_frame().await;
+				assert!(res.is_err(), "frame 3 is in no copy: {res:?}");
+				let res = finished.finished().await;
+				assert!(res.is_err(), "nor is the group's end: {res:?}");
+				continue;
+			}
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the re-offer takes the group");
+			};
+			for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c"), (303, b"d")] {
+				again.write_frame(at(millis), &payload[..]).unwrap();
+			}
+			again.finish().unwrap();
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"d");
+			assert!(reader.read_frame().await.unwrap().is_none());
+			// Its end, from where that reader stood, on the copy holding the rest.
+			assert_eq!(finished.finished().await.unwrap(), 3);
+		}
+	}
+
 	/// A reader waiting out a held re-offer is stalled, so its budget still gives up on it.
 	#[kio::test]
 	#[cfg(feature = "async")]

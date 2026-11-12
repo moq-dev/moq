@@ -631,7 +631,7 @@ export const hooks: {
 	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number; fill?: boolean }) => GroupProducer;
 	/**
 	 * Hold the copy of `sequence` still arriving, if one is, for a duplicate to wait on: until
-	 * released, a reader of that copy that fails waits for the duplicate to take the group. Assigned
+	 * released, that copy's failure leaves its readers open for the duplicate to continue. Assigned
 	 * by `track.ts`.
 	 */
 	arrivingGroup: (producer: Producer, sequence: bigint) => Arriving | undefined;
@@ -915,12 +915,15 @@ export const hooks: {
 	 */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/**
-	 * Mark `group` a received copy, which a later copy of its sequence may take over once it fails,
-	 * and `failed`, if given, as the copy it took over from. Assigned by `group.ts`.
+	 * Hold a received copy still arriving for a duplicate: if it fails while held, its readers wait
+	 * for the duplicate to take over (see {@link Arriving}). Assigned by `group.ts`.
 	 */
-	receivedGroup: (group: GroupProducer, failed?: GroupProducer) => void;
-	/** Hold a received copy still arriving for a duplicate: see {@link Arriving}. Assigned by `group.ts`. */
 	holdGroup: (group: GroupProducer) => () => void;
+	/**
+	 * Hand `next` the readers `failed` kept open while held, teeing each from the frame it reached.
+	 * Fails those `next` cannot serve. Assigned by `group.ts`.
+	 */
+	succeedGroup: (next: GroupProducer, failed: GroupProducer) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
@@ -1192,7 +1195,7 @@ export const hooks: {
 	arrivingGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
-	receivedGroup: () => {
+	succeedGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	holdGroup: () => {

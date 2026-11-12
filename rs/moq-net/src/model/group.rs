@@ -1222,7 +1222,13 @@ impl GroupState {
 	/// (idle past the cache pool's expiry window, or evicted under its byte target). A reader
 	/// that already consumed every frame is missing nothing, so it gets the clean end of
 	/// group; one that fell short sees the abort rather than a silently truncated stream.
+	/// A copy cut short at the back holds nothing past its cut, which a reader reaches only
+	/// with its cap past it (one capped there ends before asking), so the frames it wants
+	/// are missing rather than the group ended.
 	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
+		if self.past_cut(index) {
+			return Poll::Ready(Err(Error::Evicted));
+		}
 		match &self.outcome {
 			Outcome::Released(total, err) if index < *total => Poll::Ready(Err(err.clone())),
 			Outcome::Finished(_) | Outcome::Released(..) => Poll::Ready(Ok(())),
@@ -1236,6 +1242,12 @@ impl GroupState {
 				Poll::Pending
 			}
 		}
+	}
+
+	/// Whether this copy settled at the back cut its transport bound made, with `index` at
+	/// or past it.
+	fn past_cut(&self, index: usize) -> bool {
+		!matches!(self.outcome, Outcome::Open | Outcome::Aborted(_)) && self.range_end.is_some_and(|end| index >= end)
 	}
 
 	/// The relay state once the ingest has settled it, which it does before the first frame,
@@ -4352,8 +4364,9 @@ impl Consumer {
 		}
 	}
 
-	/// Continue on another copy of this group in the same track once the copy read failed,
-	/// such as a re-offer held while that copy was still arriving (see [`track::successor`]).
+	/// Continue on another copy of this group in the same track once the copy read failed or
+	/// ended at a cut short of the reader's cap, such as a re-offer held while that copy was
+	/// still arriving (see [`track::successor`]).
 	/// Returns whether the reader moved to one, or [`Error::Old`] once its budget gives up
 	/// on the wait.
 	fn poll_successor(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
@@ -4361,10 +4374,11 @@ impl Consumer {
 			let state = self.cursor.state.read();
 			// Only a delivery failure: content that failed to inflate is the group's under its
 			// name, and a frame handed out partly is lost with the copy. Ordinals stand for
-			// frames only on a dense copy.
+			// frames only on a dense copy. A copy cut short at the back that the reader's
+			// raised cap passed lacks the rest, like a failed one.
 			if self.expired
 				|| self.carry.as_ref().is_some_and(|carry| carry.ride.is_some())
-				|| state.outcome.error().is_none()
+				|| (state.outcome.error().is_none() && !state.past_cut(self.cursor.index))
 				|| (!self.cursor.raw && state.malformed())
 				|| state.committed() < self.cursor.index
 				|| state.sparse()

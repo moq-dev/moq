@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Instant, Manual, Wall, yieldNow } from "@moq/clock";
-import { race, Signal } from "@moq/signals";
+import { race } from "@moq/signals";
 import { DEFAULT_EXPIRY } from "./cache.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -3405,9 +3405,9 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 // A reader on a received copy that fails waits out a duplicate still held for its group, then
 // continues on it from its frame with nothing repeated or missed. A released hold leaves the
 // failure, even to a reader only watching `closed`, as does a duplicate starting past the reader's
-// frame or one that shed it. A re-offer that fails too hands over to the next. A reader closed while it waits ends its
-// read and can be closed again, and one closed with frames still buffered reads them first. A route
-// replacement asked for while the copy stalled is moot once a re-offer takes over.
+// frame. One that sheds the reader's frame after taking over evicts it, as any copy does a reader
+// behind it. A re-offer that fails too hands over to the next. A reader closed while it waits ends
+// cleanly and can be closed again, and one closed with frames still buffered reads them first.
 test.each([
 	"reoffer",
 	"readable",
@@ -3420,7 +3420,6 @@ test.each([
 	"closed",
 	"past",
 	"shed",
-	"stalled",
 ])("a failed copy continues on its held re-offer (%p)", async (kind) => {
 	const producer = new TrackProducer("video").accept({ maxAge: null });
 	hooks.receiveTrack(producer);
@@ -3432,31 +3431,18 @@ test.each([
 	const arriving = hooks.arrivingGroup(producer, 3n);
 	expect(arriving).toBeDefined();
 	const failed = new Error("reset");
-	// A front whose route moved: a stalled read asks it for a replacement, held out until rejected.
-	const asked: PromiseWithResolvers<never>[] = [];
-	if (kind === "stalled") {
-		hooks.recoverGroup(reader, {
-			changed: new Signal(0),
-			wants: () => true,
-			replace: () => {
-				const attempt = Promise.withResolvers<never>();
-				asked.push(attempt);
-				return attempt.promise;
-			},
-		});
-	}
 	if (kind === "closed") {
 		// A frame still buffered when the copy fails stays readable after a close.
 		first.writeFrame({ payload: enc.encode("c") });
 		first.abort(failed);
 		reader.close();
 		expect(await reader.readString()).toBe("c");
-		await expect(reader.readString()).rejects.toBe(failed);
+		expect(await reader.readString()).toBeUndefined();
 		arriving?.release();
 		producer.close();
 		return;
 	}
-	if (kind !== "stalled") first.abort(failed);
+	first.abort(failed);
 	if (kind === "observed") {
 		let closed: Error | null | undefined;
 		reader.closed.then((value) => {
@@ -3495,7 +3481,7 @@ test.each([
 		return;
 	}
 	if (kind === "shedObserved") {
-		// A re-offer that could take over until it shed the reader's frame settles `closed` then.
+		// A re-offer that took over and then shed the reader's frame settles `closed` then.
 		const again = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
 		arriving?.release();
 		for (const payload of ["a", "b", "c"]) again.writeFrame({ payload: enc.encode(payload) });
@@ -3507,7 +3493,7 @@ test.each([
 		expect(closed).toBeUndefined();
 		hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
 		await settle();
-		expect(closed).toBe(failed);
+		expect(closed).toMatchObject({ code: StreamCode.Evicted });
 		producer.close();
 		return;
 	}
@@ -3538,16 +3524,10 @@ test.each([
 	expect(read).toBeUndefined();
 	expect(reader.closed.peek()).toBeUndefined();
 
-	if (kind === "stalled") {
-		// The stall's attempt is out before the copy fails.
-		expect(asked.length).toBe(1);
-		first.abort(failed);
-		await settle();
-	}
 	if (kind === "leaving") {
 		reader.close();
 		await reading;
-		expect(read).toBe(failed);
+		expect(read).toBeUndefined();
 		// Closing is idempotent, even after the wait was cancelled.
 		reader.close();
 		arriving?.release();
@@ -3571,7 +3551,7 @@ test.each([
 		again.writeFrame({ payload: enc.encode("c") });
 		hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
 		await reading;
-		expect(read).toBe(failed);
+		expect(read).toMatchObject({ code: StreamCode.Evicted });
 		producer.close();
 		return;
 	}
@@ -3583,9 +3563,6 @@ test.each([
 	}
 	await settle();
 	expect(read).toBeUndefined();
-	asked[0]?.reject(new Error("route refused"));
-	await settle();
-	expect(read).toBeUndefined();
 	again.writeFrame({ payload: enc.encode("a") });
 	again.writeFrame({ payload: enc.encode("b") });
 	again.finish();
@@ -3595,6 +3572,96 @@ test.each([
 	expect(await reader.closed).toBeNull();
 	producer.close();
 });
+
+// While a duplicate is held, a failed copy keeps each mirror open and the copy that takes over tees
+// into it from the frame it reached: a sink still buffering the group hands it out once, a frame cut
+// short is read whole from the successor unless a reader already took part of it, readers at
+// different frames each continue from their own, and with no takeover every mirror fails once.
+test.each(["buffered", "handed", "partial", "positions", "once"])(
+	"a held copy's mirrors continue on its successor (%p)",
+	async (kind) => {
+		const producer = new TrackProducer("video").accept({ maxAge: null });
+		hooks.receiveTrack(producer);
+		const track = producer.subscribe();
+		const first = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+		first.writeFrame({ payload: enc.encode("a") });
+		const arriving = hooks.arrivingGroup(producer, 3n);
+		const failed = new Error("reset");
+		const takeover = () => {
+			const again = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+			arriving?.release();
+			for (const payload of ["a", "b", "c"]) again.writeFrame({ payload: enc.encode(payload) });
+			again.finish();
+		};
+
+		if (kind === "buffered" || kind === "handed") {
+			// The sink hands the group out before or after its copy fails.
+			const handed = kind === "handed" ? await track.recvGroup() : undefined;
+			if (handed) expect(await handed.readString()).toBe("a");
+			first.abort(failed);
+			takeover();
+			const group = handed ?? (await track.recvGroup());
+			expect(group?.sequence).toBe(3n);
+			for (const payload of handed ? ["b", "c"] : ["a", "b", "c"])
+				expect(await group?.readString()).toBe(payload);
+			expect(await group?.readString()).toBeUndefined();
+			// The sink held one copy of the group, so it hands out nothing more.
+			expect(await settled(track.recvGroup())).toBe(false);
+		} else if (kind === "partial") {
+			const ahead = first.consume();
+			const behind = first.consume();
+			expect(await ahead.readString()).toBe("a");
+			const cut = first.createFrame({ size: 2 });
+			cut.write(enc.encode("b"));
+			// `ahead` joins the frame as it arrives; `behind` has yet to reach it.
+			const joining = ahead.readString();
+			await settle();
+			first.abort(failed);
+			await expect(joining).rejects.toBe(failed);
+			takeover();
+			for (const payload of ["a", "b", "c"]) expect(await behind.readString()).toBe(payload);
+			expect(await behind.readString()).toBeUndefined();
+		} else if (kind === "positions") {
+			first.writeFrame({ payload: enc.encode("b") });
+			const readers = [first.consume(), first.consume(), first.consume()];
+			expect(await readers[1].readString()).toBe("a");
+			expect(await readers[2].readString()).toBe("a");
+			expect(await readers[2].readString()).toBe("b");
+			first.abort(failed);
+			takeover();
+			const rest = [["a", "b", "c"], ["b", "c"], ["c"]];
+			for (const [i, reader] of readers.entries()) {
+				for (const payload of rest[i]) expect(await reader.readString()).toBe(payload);
+				expect(await reader.readString()).toBeUndefined();
+				expect(await reader.closed).toBeNull();
+			}
+		} else {
+			const group = await track.recvGroup();
+			const reader = first.consume();
+			first.writeFrame({ payload: enc.encode("b") });
+			first.abort(failed);
+			await settle();
+			expect(group?.closed.peek()).toBeUndefined();
+			expect(reader.closed.peek()).toBeUndefined();
+			arriving?.release();
+			// A released hold ends each mirror with the copy's failure, once, after what it buffered.
+			arriving?.release();
+			for (const mirror of [group, reader]) {
+				expect(await mirror?.readString()).toBe("a");
+				expect(await mirror?.readString()).toBe("b");
+				await expect(mirror?.readString()).rejects.toBe(failed);
+				expect(await mirror?.closed).toBe(failed);
+			}
+			// A re-offer arriving later serves new readers only.
+			const late = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+			late.writeFrame({ payload: enc.encode("a") });
+			await expect(reader.readString()).rejects.toBe(failed);
+			expect(await late.consume().readString()).toBe("a");
+		}
+		track.close();
+		producer.close();
+	},
+);
 
 // A subscriber's reader of a failed copy keeps its place when a re-offer replaces that copy in the
 // track, continuing on it, and its budget still gives up on it while it waits on a held re-offer.
