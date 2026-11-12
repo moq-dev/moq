@@ -71,8 +71,13 @@ test("a shown claim takes the newest certifying view's cost", () => {
 
 test("a regressed route's certified view decides only while a live floor certifies the path", () => {
 	const floors = new Floors();
-	const route = carrier("", 1n, [["live/x", A]]);
-	const view = route.view as { revision: bigint | undefined; claims: Map<Path.Valid, Claim> };
+	const view = {
+		prefix: Path.empty(),
+		hidden: false,
+		revision: 1n as bigint | undefined,
+		claims: new Map([[Path.from("live/x"), A]]),
+	};
+	const route = { view, reshow: () => {} };
 	floors.join(NODE, route);
 	// Its next floor certifies nothing and adds live/y: no floor certifies live/y now.
 	floors.regress(NODE, route);
