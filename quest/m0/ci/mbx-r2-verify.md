@@ -178,9 +178,11 @@ Workspace builds (hits / misses / not looked up):
   the same job. Inheritance works; the keys a Windows build computes do not
   match what the previous Windows build stored. The summary still names no
   manifest identity. Down from 846 hits on 2026-11-05.
-- Linux depth-1 baselines per job: doctest 124, 502 (0 misses), 150; Media
-  (firefox player) 58, 84 (11-11 cancelled before its build); Audio quality's
-  three builds 74 / 77 / 0, 57 / 97 / 0, 54 / 25 / 0. The Nightly and Tests
+- Linux depth-1 baselines, hits only per run (not the hits / misses / not
+  looked up triple above): doctest 124, 502 (0 misses), 150; Media (firefox
+  player) 58, 84 (11-11 cancelled before its build); Audio quality, hits of
+  each of its three builds per night, 74, 77, 0 (11-09), 57, 97, 0 (11-10),
+  54, 25, 0 (11-11). The Nightly and Tests
   matrix jobs have their own summaries in the same runs.
 
 ## Waiting
