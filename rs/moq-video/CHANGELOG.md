@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `capture::portal::Selection::restore_token` and `with_restore_token` read and seed a portal selection's restore token, so a caller can persist a screen-cast grant across processes and skip the picker on a compositor that keeps grants.
 - `encode::Config::resize` scales a frame at another size inside the encoder, so a `Sink` does it on its own thread rather than the caller's.
 
 ### Changed

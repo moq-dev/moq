@@ -68,6 +68,34 @@ impl Selection {
 		}
 	}
 
+	/// Seeds the selection with a restore token from [`Selection::restore_token`],
+	/// typically one persisted by an earlier process, so the first open can
+	/// skip the picker on a compositor that keeps grants. Clones share it.
+	pub fn with_restore_token(self, token: impl Into<String>) -> Self {
+		self.replace_restore(Some(token.into()));
+		self
+	}
+
+	/// Returns the restore token the portal granted for the last open, for a
+	/// later process to pass to [`Selection::with_restore_token`].
+	///
+	/// A token is single-use: an open takes it before asking the portal, and
+	/// stores the replacement once the portal grants a source. Returns `None`
+	/// before a grant, while an open is using the token, after an open that
+	/// used it and failed before a grant, and when the compositor does not
+	/// persist grants. The crate also clears it when the producer ends the
+	/// stream, whether the user stopped sharing, the stream failed, or the
+	/// source went away, so that the next open asks again.
+	///
+	/// To keep a grant across processes, read the token after every open
+	/// attempt, successful or not, and again when the stream ends. Store it, or
+	/// delete the stored copy on `None`, since the crate would not use that copy
+	/// either. The token lets the grant reopen without asking the user, so store
+	/// it like a credential.
+	pub fn restore_token(&self) -> Option<String> {
+		self.restore.lock().unwrap().clone()
+	}
+
 	pub(crate) fn kind(&self) -> Kind {
 		self.kind
 	}
@@ -241,6 +269,16 @@ mod tests {
 				assert!(Kind::Window.validate_stream(version, 1, None).is_err());
 			}
 		}
+	}
+
+	#[test]
+	fn a_seeded_restore_token_is_used_once_and_reads_back() {
+		let selection = Selection::new(Kind::Screen).with_restore_token("saved");
+		assert_eq!(selection.restore_token().as_deref(), Some("saved"));
+		assert_eq!(selection.clone().take_restore().as_deref(), Some("saved"));
+		assert_eq!(selection.restore_token(), None);
+		selection.replace_restore(Some("granted".into()));
+		assert_eq!(selection.restore_token().as_deref(), Some("granted"));
 	}
 
 	#[test]
