@@ -23930,8 +23930,8 @@ mod test {
 	}
 
 	/// A fill's OLD answer under the publisher's max age binds every reader, so the track holds
-	/// it as a stale verdict under that age rather than a loss for good: a later reader no
-	/// wider is settled without asking, and once the verdict is forgotten, as new terms or the
+	/// it as a stale verdict under that age rather than a loss for good: the readers waiting now
+	/// are refused, a later reader no wider is settled without asking, and once the verdict is forgotten, as new terms or the
 	/// drop set's expiry window forget one, a reader asks again. Mirrors JS.
 	#[test]
 	#[cfg(feature = "async")]
@@ -23952,12 +23952,21 @@ mod test {
 		let mut subscriber = producer.subscribe(terms());
 		let waiter = kio::Waiter::noop();
 		assert_eq!(drain_groups(&mut subscriber), [3]);
+		// A reader of the run alone, which the verdict does not settle, waits on the same fill.
+		let mut bounded = producer.subscribe(terms().with_ranges([Range::groups(0..3)]));
+		assert!(drain_groups(&mut bounded).is_empty());
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("a fill is asked below the start");
 		};
 		fill.reject_groups(0..3, Error::Old);
 		drop(fill);
 		assert_eq!(drained_drops(&mut subscriber), [(0, 3)]);
+		assert_eq!(
+			drained_drops(&mut bounded),
+			[(0, 3)],
+			"the readers waiting now are refused"
+		);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 		assert_eq!(
 			producer.state.read().drops.get(&0),
 			Some(&Hole::stale(max_age)),

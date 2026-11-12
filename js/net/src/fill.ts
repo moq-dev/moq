@@ -323,7 +323,11 @@ export class FillState {
 				for (const run of pending.owed(start, end)) {
 					state.#track.drop(run.start, run.end, hole ?? { error: new NotFound(`group ${run.start}`) });
 				}
-				state.#resolve(pending, start, end);
+				// A stale verdict settles only readers that read every group above it, so the readers
+				// waiting now are refused as well, as the Rust `Inner::drop_groups` does. It binds every
+				// reader, so the refusal carries no budget a wider one could see past.
+				if (hole?.stale !== undefined) fillOps.refuse(state, pending, start, end, hole.error);
+				else state.#resolve(pending, start, end);
 			},
 			refuse: (state, pending, start, end, error, stale) => {
 				for (const gap of pending.unresolved(start, end)) {

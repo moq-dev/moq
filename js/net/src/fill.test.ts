@@ -1263,9 +1263,9 @@ test("fill: a lite-07 ranged subscription reads history the publisher never cach
 });
 
 // A fill's OLD answer under the publisher's max age binds every reader, so the track holds it as
-// a stale verdict under that age rather than a loss for good: a later reader no wider is settled
-// without asking, and once new terms forget the verdict a reader asks again. Mirrors the Rust
-// `a_fills_old_answer_under_the_max_age_is_held_until_forgotten`.
+// a stale verdict under that age rather than a loss for good: the readers waiting now are refused,
+// a later reader no wider is settled without asking, and once new terms forget the verdict a
+// reader asks again. Mirrors the Rust `a_fills_old_answer_under_the_max_age_is_held_until_forgotten`.
 test("fill: an OLD answer under the max age is held as stale until forgotten", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: Duration.millis(10_000) });
@@ -1288,12 +1288,17 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 		}
 	};
 	const reader = track.subscribe(terms);
-	void drain(reader);
+	expect(reader.tryRecvGroup()?.sequence).toBe(3n);
+	reader.tryRecvGroup();
+	// A reader of the run alone, which the verdict does not settle, waits on the same fill.
+	const bounded = track.subscribe({ ...terms, ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
+	bounded.tryRecvGroup();
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill");
 	expect([fill.start, fill.end]).toEqual([0n, 3n]);
 	const old = new StreamError(StreamCode.Old, { message: "old" });
 	rejectGroups(fill, 0n, 3n, old, { budget: 10_000, everyone: true });
+	expect(hooks.tryDrop(bounded)).toMatchObject({ kind: "drop", start: 0n, end: 3n, error: old });
 	fill.close();
 
 	const later = track.subscribe(terms);
@@ -1309,6 +1314,7 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 	expect(await asked()).toEqual([[0n, 3n]]);
 
 	reader.close();
+	bounded.close();
 	later.close();
 	again.close();
 	requests.close();
