@@ -4317,7 +4317,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.4.25"
+version = "0.4.26"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
