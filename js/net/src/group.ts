@@ -938,6 +938,8 @@ export class Consumer {
 	// ends the consumer whatever its copy does. See `#fail`.
 	#verdict = new Once<Error>();
 	#closed?: CombinedClosed;
+	// Settles once {@link done}: its reader read or released everything it holds.
+	#finished?: CombinedClosed;
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
@@ -980,6 +982,24 @@ export class Consumer {
 				value instanceof Error ? !this.#recovers(value) : this.#released || this.#bufferedFrames().length === 0,
 		);
 		return this.#closed;
+	}
+
+	// Settles with its terminal state once {@link done}, unlike {@link closed}, which a failure
+	// settles while frames are still unread.
+	#done(): GetPromise<Error | null> {
+		this.#finished ??= new CombinedClosed(
+			this.#verdict,
+			() => this.#state.closed,
+			(value) =>
+				(!(value instanceof Error) || !this.#recovers(value)) &&
+				(this.#released || this.#bufferedFrames().length === 0),
+		);
+		return this.#finished;
+	}
+
+	#refresh(): void {
+		this.#closed?.refresh();
+		this.#finished?.refresh();
 	}
 
 	/**
@@ -1062,6 +1082,7 @@ export class Consumer {
 	static {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
+		hooks.groupDone = (group) => group.#done();
 		hooks.readsMirrored = (group) => group.#state === group.#mirrored;
 		hooks.groupReads = (group, reads) => group.#mirrored.reads?.(reads);
 		hooks.groupTimestamp = (group) =>
@@ -1250,7 +1271,7 @@ export class Consumer {
 		this.#state = group.#state;
 		this.#expiry = expiry;
 		this.#skip = index;
-		this.#closed?.refresh();
+		this.#refresh();
 		this.#expired?.refresh();
 	}
 
@@ -1290,7 +1311,7 @@ export class Consumer {
 				frames.shift();
 				const sequence = this.#state.start++;
 				this.#streamed = front;
-				this.#closed?.refresh();
+				this.#refresh();
 				this.#state.charge?.refresh();
 				return { sequence, frame: front, chunks: makeFrameConsumer(sequence, front) };
 			}
@@ -1308,12 +1329,12 @@ export class Consumer {
 			};
 		} catch (error) {
 			const verdict = this.#fail(error);
-			this.#closed?.refresh();
+			this.#refresh();
 			throw verdict;
 		}
 		if (frames.length === 0 && this.#state.closed.peek() !== undefined) this.#state.flate = undefined;
 		const sequence = this.#state.start++;
-		this.#closed?.refresh();
+		this.#refresh();
 		this.#state.charge?.refresh();
 		return { sequence, frame, inflated: slice?.inflated };
 	}
@@ -1381,7 +1402,7 @@ export class Consumer {
 				this.#abandon();
 				// Ends the reader, whose failure a copy that might have taken over left open.
 				if (closed instanceof Error) this.#fail(closed);
-				this.#closed?.refresh();
+				this.#refresh();
 				return;
 			}
 			if (this.#released || this.#expire()) return;
@@ -1452,7 +1473,7 @@ export class Consumer {
 			if (closed !== undefined) {
 				// The copy finished the group: a replacement asked for meanwhile is moot.
 				this.#abandon();
-				this.#closed?.refresh();
+				this.#refresh();
 				return;
 			}
 
@@ -1497,7 +1518,7 @@ export class Consumer {
 			return { sequence, frame: { payload, timestamp: chunks.timestamp, arrived: chunks.arrived } };
 		} catch (error) {
 			const verdict = this.#fail(error);
-			this.#closed?.refresh();
+			this.#refresh();
 			throw verdict;
 		}
 	}
@@ -1534,8 +1555,8 @@ export class Consumer {
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;
-		this.#leaving?.set(true);
+		if (this.#leaving?.peek() === undefined) this.#leaving?.set(true);
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
-		this.#closed?.refresh();
+		this.#refresh();
 	}
 }

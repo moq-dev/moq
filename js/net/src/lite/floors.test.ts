@@ -89,3 +89,21 @@ test("a regressed route's certified view decides only while a live floor certifi
 	floors.join(NODE, lagging);
 	expect(floors.shows(NODE, lagging.view, Path.from("live/y"))).toBeUndefined();
 });
+
+test("a route that leaves or floors reshows only the routes whose prefix meets its own", () => {
+	const floors = new Floors();
+	const reshown: string[] = [];
+	const route = (prefix: string) => {
+		const { view } = carrier(prefix, 1n, [[`${prefix}/x`, A]]);
+		return { view, reshow: () => reshown.push(prefix) };
+	};
+	const routes = ["live/a", "live/a/b", "live", "live/c"].map(route);
+	for (const r of routes) floors.join(NODE, r);
+
+	floors.floor(NODE, routes[0]);
+	expect(reshown.sort()).toEqual(["live", "live/a/b"]);
+
+	reshown.length = 0;
+	floors.leave(NODE, routes[3]);
+	expect(reshown).toEqual(["live"]);
+});

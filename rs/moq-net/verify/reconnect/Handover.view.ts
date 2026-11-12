@@ -1,4 +1,4 @@
-// Labels for `/statechart` on Handover.tla: what the connection handle reports, what
+// Statechart labels for Handover.tla: what the connection handle reports, what
 // the policy holds, and each step as the event that happens.
 
 type Sess = { ep: string; open: boolean; by: string; closing: boolean; goaway: string; age: number };

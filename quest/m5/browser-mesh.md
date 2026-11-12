@@ -16,7 +16,10 @@ on the local network so please plan that."
 
 - ✅ The forwarding engine is the Rust router, run in the tab through the
   [Rust-to-TypeScript port](/quest/m5/rs2ts-js.md) (rejected: handwriting
-  feasibility, route requests, holds, and echoes in `js/net`, a second
+  the forwarding rule in `js/net`, which was feasibility, route requests,
+  holds, and echoes when this was decided and is paths, withdrawals, holds,
+  and the doubt since the
+  [routes epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item 27, a second
   implementation of the part of the protocol that has produced the most
   bugs; pulling the port forward to m4). So the tab runs the router the route
   model checks, and the [P2P epic](/quest/m4/p2p/README.md)'s "no second
