@@ -247,11 +247,14 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				node: None,
 				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
 				// Filled by `lite::start` from the attached origin handles.
 				route_key: None,
+				// Filled by `lite::start` from the version.
+				lite06_chain: false,
 			}
 		} else {
 			lite::Setup::default()
@@ -312,7 +315,8 @@ impl Server {
 			Some(client_setup) => (
 				client_setup.setup.path.clone(),
 				client_setup.setup.role,
-				client_setup.setup.hop,
+				// Lite-07 declares a Node ID where older versions declare a Hop ID.
+				client_setup.setup.hop.or(client_setup.setup.node.map(crate::Hop::from)),
 				client_setup.setup.token.clone(),
 				client_setup.setup.implementation.clone(),
 				PausedHandshake::LiteSetup {
@@ -452,9 +456,8 @@ impl Server {
 			peer_implementation: options.implementation.clone(),
 			assigned_hop: crate::Hop::random(),
 			timer: Timer::new(None),
-			// The client's SETUP already settled whether it offered MoQ Auth, so it is
-			// negotiated exactly when we offer it too.
-			auth: crate::auth::Link::ietf(options.declared.auth && self.extensions.auth),
+			// moq-transport carries no AUTH: a token rides the requests that name it.
+			auth: crate::auth::Link::ietf(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -895,7 +898,7 @@ impl PausedIetf {
 
 		// The client's SETUP was read at the pause; hand the stream back
 		// for GOAWAY. A server never advertises a path, hence `None`.
-		let (protocol, goaway, credential) = ietf::start(ietf::Config {
+		let (protocol, goaway) = ietf::start(ietf::Config {
 			runtime: runtime.clone(),
 			stats: server.stats.clone(),
 			limits: server.limits,
@@ -930,7 +933,7 @@ impl PausedIetf {
 				stats: server.stats.clone(),
 				goaway,
 				auth,
-				credential,
+				credential: None,
 				estimate: None,
 				peer_target: None,
 				bandwidth: crate::bandwidth::Allocator::default(),
@@ -1096,11 +1099,12 @@ impl Handshake {
 		self.role
 	}
 
-	/// The Hop ID declared by the peer, when the negotiated protocol carries one.
+	/// The identity the peer declared for itself, when the negotiated protocol carries one.
 	///
 	/// A moq-lite-05+ endpoint declares this when it attaches a publish or subscribe
-	/// origin; a moq-transport endpoint declares it via the MoQ Cluster extension. Older
-	/// versions and endpoints without one return `None`.
+	/// origin: its Hop ID, or from moq-lite-07 its Node ID. A moq-transport endpoint
+	/// declares its Hop ID via the MoQ Cluster extension. Older versions and endpoints
+	/// without one return `None`. [`origin::Producer::is_own`] tells whether it is ours.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
@@ -1715,10 +1719,12 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			node: None,
 			token: None,
 			ietf: false,
 			implementation: None,
 			route_key: None,
+			lite06_chain: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();
@@ -1822,7 +1828,7 @@ mod tests {
 			.with_bi(moql_setup())
 			.withholding_credit();
 		let start = kio::clock::now();
-		let deadline = start + DEFAULT_TIMEOUT;
+		let deadline = start.saturating_add(DEFAULT_TIMEOUT);
 		let request = Server::new()
 			.accept_request(start, session.clone())
 			.await
@@ -1852,7 +1858,7 @@ mod tests {
 			FakeSession::new(ALPN_LITE_05, []),
 			FakeSession::new(ALPN_LITE, []),
 		] {
-			let deadline = kio::clock::now() + std::time::Duration::from_secs(3);
+			let deadline = kio::clock::now().saturating_add(std::time::Duration::from_secs(3));
 			let accept = Server::new()
 				.accept_request(kio::clock::now(), session.clone())
 				.with_deadline(Some(deadline));
@@ -1883,7 +1889,10 @@ mod tests {
 					.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 			);
 		request.expired().await;
-		assert_eq!(kio::clock::now(), start + std::time::Duration::from_secs(5));
+		assert_eq!(
+			kio::clock::now(),
+			start.saturating_add(std::time::Duration::from_secs(5))
+		);
 		let version = Version::Lite(lite::Version::Lite05);
 		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
 		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
@@ -2286,7 +2295,7 @@ mod tests {
 			token: None,
 			peer_implementation: None,
 			assigned_hop: Hop::random(),
-			auth: crate::auth::Link::ietf(false),
+			auth: crate::auth::Link::ietf(),
 			timer: Timer::new(None),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
@@ -2318,7 +2327,7 @@ mod tests {
 		let _echoed = origin
 			.announce(
 				"echoed-route",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
 			)
@@ -2327,7 +2336,7 @@ mod tests {
 		let mut local_hops = crate::Hops::new();
 		local_hops.push(other).unwrap();
 		let _local = origin
-			.announce("local-route", crate::origin::RouteInfo::default().with_hops(local_hops))
+			.announce("local-route", crate::origin::RouteInfo::new().with_hops(local_hops))
 			.unwrap();
 
 		let (session, driver) = request.ok().await.unwrap();

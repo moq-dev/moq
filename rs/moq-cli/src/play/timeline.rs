@@ -148,27 +148,6 @@ impl AudioTimeline {
 	}
 }
 
-/// Keep the silence before a frame unless the distance is an emergency.
-/// `buffered` excludes this frame, so normal packet cadence never skips it.
-pub(super) fn fit(buffered: u64, target: u64, slack: u64, silence: u64, frame: u64) -> Fit {
-	let ahead = buffered + silence;
-	let skip = if ahead >= 4 * (target + slack) {
-		(ahead - target).min(silence + frame)
-	} else {
-		0
-	};
-	Fit {
-		silence: silence.saturating_sub(skip),
-		skip: skip.saturating_sub(silence),
-	}
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct Fit {
-	pub silence: u64,
-	pub skip: u64,
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -179,15 +158,15 @@ mod tests {
 	/// end, which is what a speaker that ran dry is still sounding.
 	#[test]
 	fn the_playhead_projects_the_last_write_and_holds_at_its_end() {
-		let now = Instant::ZERO + Duration::from_secs(1);
+		let now = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let playhead = Playhead::default();
 		assert_eq!(playhead.at(now), None);
 
 		playhead.wrote(Duration::from_secs(10), Duration::from_millis(200), now);
 		assert_eq!(playhead.at(now), Some(Duration::from_millis(9_800)));
-		let later = now + Duration::from_millis(150);
+		let later = now.saturating_add(Duration::from_millis(150));
 		assert_eq!(playhead.at(later), Some(Duration::from_millis(9_950)));
-		let dry = now + Duration::from_secs(1);
+		let dry = now.saturating_add(Duration::from_secs(1));
 		assert_eq!(playhead.at(dry), Some(Duration::from_secs(10)));
 
 		playhead.clear();
@@ -197,7 +176,7 @@ mod tests {
 	/// A replaced broadcast's late writes never reach the reader.
 	#[test]
 	fn a_reset_playhead_isolates_the_old_broadcast() {
-		let now = Instant::ZERO + Duration::from_secs(1);
+		let now = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let reader = Playhead::default();
 		let old = reader.clone();
 		let new = reader.clone().reset();
@@ -211,18 +190,18 @@ mod tests {
 	/// so the playhead holds instead of replaying media already heard.
 	#[test]
 	fn the_playhead_holds_through_refill_padding() {
-		let now = Instant::ZERO + Duration::from_secs(1);
+		let now = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let playhead = Playhead::default();
 		playhead.wrote(Duration::from_secs(10), Duration::from_millis(200), now);
-		let dry = now + Duration::from_secs(1);
+		let dry = now.saturating_add(Duration::from_secs(1));
 		assert_eq!(playhead.at(dry), Some(Duration::from_secs(10)));
 
 		// 100 ms of padding, then a 20 ms frame continuing from 10 s.
 		playhead.wrote(Duration::from_millis(10_020), Duration::from_millis(120), dry);
 		assert_eq!(playhead.at(dry), Some(Duration::from_secs(10)));
-		let padded = dry + Duration::from_millis(100);
+		let padded = dry.saturating_add(Duration::from_millis(100));
 		assert_eq!(playhead.at(padded), Some(Duration::from_secs(10)));
-		let played = dry + Duration::from_millis(110);
+		let played = dry.saturating_add(Duration::from_millis(110));
 		assert_eq!(playhead.at(played), Some(Duration::from_millis(10_010)));
 
 		// A new timeline may start anywhere.
@@ -273,25 +252,5 @@ mod tests {
 		let next = timeline.push(Duration::from_millis(1_020), 960, 48_000, 4_800);
 		assert!(!next.reset_sink);
 		assert_eq!(next.silence, 0);
-	}
-
-	#[test]
-	fn emergency_skip_consumes_hole_silence_before_frame_audio() {
-		assert_eq!(fit(23_039, 4_800, 960, 0, 960), Fit { silence: 0, skip: 0 });
-		assert_eq!(fit(23_040, 4_800, 960, 0, 960), Fit { silence: 0, skip: 960 });
-		assert_eq!(
-			fit(6_000, 4_800, 960, 18_000, 2_400),
-			Fit {
-				silence: 0,
-				skip: 1_200
-			}
-		);
-		assert_eq!(
-			fit(1_000, 4_800, 960, 23_040, 960),
-			Fit {
-				silence: 3_800,
-				skip: 0
-			}
-		);
 	}
 }

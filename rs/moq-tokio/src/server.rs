@@ -472,31 +472,6 @@ impl Server {
 		server.serve().await
 	}
 
-	/// Accept sessions until the listener stops, ingesting each publisher into `origin`.
-	///
-	/// The mirror of [`serve_publish`](Self::serve_publish) for the consume direction.
-	pub async fn serve_consume(self, origin: moq_net::origin::Producer) -> crate::Result<()> {
-		let mut server = self;
-		server.moq = server.moq.with_subscriber(origin);
-		server.serve().await
-	}
-
-	/// Accept sessions until the listener stops, serving `publish` to each subscriber
-	/// and ingesting each publisher into `subscribe`.
-	///
-	/// The both-directions counterpart of [`serve_publish`](Self::serve_publish) and
-	/// [`serve_consume`](Self::serve_consume), so an inbound session can subscribe to
-	/// the origin and publish into it over one connection.
-	pub async fn serve_both(
-		self,
-		publish: moq_net::origin::Consumer,
-		subscribe: moq_net::origin::Producer,
-	) -> crate::Result<()> {
-		let mut server = self;
-		server.moq = server.moq.with_publisher(publish).with_subscriber(subscribe);
-		server.serve().await
-	}
-
 	/// Shared accept loop for the `serve_*` entry points; the origin is already
 	/// attached. Private so a server can't be served with no direction at all, which
 	/// would accept and handshake sessions that carry nothing.
@@ -1493,6 +1468,29 @@ pub struct Link {
 	pub alpn: Option<String>,
 }
 
+/// Changes one accepted QUIC connection's limits while its session runs, from
+/// [`Request::quic_limits`]. Cloning shares the connection.
+#[cfg(feature = "quic")]
+#[derive(Clone)]
+pub struct QuicLimits(crate::quic::driver::connection::Connection);
+
+#[cfg(feature = "quic")]
+impl QuicLimits {
+	/// Update the connection's limits, as [`Request::with_quic_limits`] does before SETUP.
+	///
+	/// A `None` field keeps its current limit; lift a rate cap with `moq_quic::Rate::Unlimited`.
+	pub fn set(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
+		self.0.set_limits(limits)
+	}
+}
+
+#[cfg(feature = "quic")]
+impl std::fmt::Debug for QuicLimits {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("QuicLimits").finish_non_exhaustive()
+	}
+}
+
 /// An incoming MoQ session that can be accepted or rejected.
 ///
 /// The transport connection and the MoQ SETUP are already complete, so [`path`](Self::path),
@@ -1608,12 +1606,13 @@ impl Request {
 		self
 	}
 
-	/// The QUIC connection under this request, to change its limits once the session runs.
-	/// `None` on a transport moq-quic does not drive (qmux streams).
+	/// A handle that changes this connection's QUIC limits while the session runs, such as
+	/// bitrate caps that change after acceptance. `None` on a transport moq-quic does not
+	/// drive (qmux streams).
 	#[cfg(feature = "quic")]
-	pub fn quic(&self) -> Option<&crate::quic::driver::connection::Connection> {
+	pub fn quic_limits(&self) -> Option<QuicLimits> {
 		match &self.under {
-			Under::Quic(quic) => Some(quic),
+			Under::Quic(quic) => Some(QuicLimits(quic.clone())),
 			#[allow(unreachable_patterns, reason = "a QUIC-only build has no other connection")]
 			_ => None,
 		}
@@ -1798,9 +1797,10 @@ impl Request {
 		self.handshake.requests()
 	}
 
-	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).
+	/// The identity the peer declared in its SETUP (moq-lite-05+).
 	///
-	/// A peer declares this when it attaches a publish or subscribe origin.
+	/// A peer declares this when it attaches a publish or subscribe origin:
+	/// its Hop ID, or from moq-lite-07 its Node ID.
 	/// Older versions and peers without one return `None`.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
@@ -1922,7 +1922,10 @@ mod tests {
 			.expect("accept");
 
 		let window = request.qmux_window();
-		assert_eq!(window.connection, moq_net::transport::MIN_RECEIVE_WINDOW * 2);
+		assert_eq!(
+			window.connection,
+			std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW * 2)
+		);
 		assert_eq!(window.stream, 256 * 1024);
 	}
 
@@ -1935,9 +1938,14 @@ mod tests {
 	/// The next route and whether it is active.
 	#[cfg(all(feature = "uds", unix))]
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		match announced.next().await? {
-			moq_net::announce::Event::Present(route) => Some((route, true)),
-			moq_net::announce::Event::Absent(route) => Some((route, false)),
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Present(route) => Some((route, true)),
+				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => {
+					Some((route, false))
+				}
+				moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+			};
 		}
 	}
 
@@ -2180,12 +2188,8 @@ mod tests {
 	/// paused clock.
 	#[cfg(feature = "websocket")]
 	async fn session_pair() -> (qmux::Session, qmux::Session) {
-		use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
-
 		const ALPN: &str = "qmux-01.moq-lite-06";
 		let (client, server) = tokio::io::duplex(64 * 1024);
-		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-		let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
 		let (client, server) = tokio::join!(
 			qmux::ws::Upgraded::new(client, ALPN).connect(),
 			qmux::ws::Upgraded::new(server, ALPN).accept(),
@@ -2198,11 +2202,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_preserves_request_metadata() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
-		use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
-
 		let (client, server) = tokio::io::duplex(64 * 1024);
-		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-		let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
 		let admission = moq_net::server::Admission::default();
 		let url = "wss://example.com/room?jwt=token".parse().unwrap();
 		let mut options = crate::websocket::Options::new(url, moq_net::Server::new(), admission.enter().unwrap());
@@ -2242,13 +2242,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_refuses_setup_path_presence() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
-		use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
-
 		for protocol in ["qmux-01.moq-lite-06", "qmux-01.moqt-18", "qmux-01.moqt-22"] {
 			for path in ["", "/room?jwt=url-token", "/other?jwt=setup-token"] {
 				let (client, server) = tokio::io::duplex(64 * 1024);
-				let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-				let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
 				let admission = moq_net::server::Admission::default();
 				let mut options = crate::websocket::Options::new(
 					"wss://example.com/room?jwt=url-token".parse().unwrap(),
@@ -2744,7 +2740,7 @@ mod tests {
 		// `serve` binds the socket; wait for it. Keep the last error, since a bind
 		// failure is the only clue to why it never showed up.
 		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-		let deadline = kio::clock::now() + std::time::Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(std::time::Duration::from_secs(5));
 		let mut delay = std::time::Duration::from_millis(1);
 		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
 			assert!(kio::clock::now() < deadline, "unix listener never bound: {err}");
@@ -2920,10 +2916,13 @@ mod tests {
 			let _connection = client.with_reconnect(false).connect(url);
 
 			let mut request = listener.accept().await.expect("no incoming connection");
-			let quic = request.quic().expect("a QUIC request").clone();
+			let Under::Quic(quic) = &request.under else {
+				panic!("a QUIC request");
+			};
+			let quic = quic.clone();
 			assert_eq!(
 				quic.receive_window().connection,
-				moq_net::transport::SETUP_RECEIVE_WINDOW
+				std::num::NonZeroU64::new(moq_net::transport::SETUP_RECEIVE_WINDOW)
 			);
 			if let Some(window) = named {
 				let mut limits = moq_quic::Limits::default();
@@ -2931,7 +2930,7 @@ mod tests {
 				request = request.with_quic_limits(limits).expect("valid limits");
 			}
 			let _session = request.ok().await.expect("server handshake");
-			let expected = named.map_or(moq_net::transport::MIN_RECEIVE_WINDOW * 2, |window| window.get());
+			let expected = named.or(std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW * 2));
 			assert_eq!(quic.receive_window().connection, expected, "{named:?}");
 		}
 	}

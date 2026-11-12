@@ -1,27 +1,9 @@
 # `@moq/watch`
 
 ```ts
-export type Arrival = {
-	arrival: Clock.Milli;
-	kind: "frame";
-	late: boolean;
-	timestamp: Clock.Milli;
-} | {
-	duration: Clock.Milli;
-	kind: "gap";
-	timestamp: Clock.Milli;
-};
-
-export interface Arrivals {
-	[Symbol.asyncIterator](): AsyncIterator<Arrival>;
-	close(): void;
-	next(): Promise<Arrival | undefined>;
-}
-
 export namespace Audio {
 	export class Decoder {
 		constructor(props: Audio.DecoderProps);
-		arrivals(): Arrivals;
 		close(): void;
 		readonly in: Signals.Readonlys<Audio.DecoderInput>;
 		readonly out: Signals.Readonlys<Audio.DecoderOutput>;
@@ -41,7 +23,7 @@ export namespace Audio {
 		sampleRate: Signals.Signal<number | undefined>;
 		stalled: Signals.Signal<boolean>;
 		stats: Signals.Signal<Audio.Stats | undefined>;
-		timestamp: Signals.Signal<Clock.Milli | undefined>;
+		timestamp: Signals.Signal<Clock.Duration | undefined>;
 	};
 	export type DecoderProps = Signals.Inputs<Audio.DecoderInput> & {
 		source: Audio.Source;
@@ -84,18 +66,18 @@ export namespace Audio {
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
-		accelerated: Clock.Milli;
+		accelerated: Clock.Duration;
 		arrival?: {
-			timestamp: Clock.Milli;
+			timestamp: Clock.Duration;
 			wall: Clock.Wall;
 		};
 		bytesReceived: number;
 		errors: number;
 		late: number;
 		skips: number;
-		stalled: Clock.Milli;
+		stalled: Clock.Duration;
 		stalls: number;
-		trimmed: Clock.Milli;
+		trimmed: Clock.Duration;
 		underruns: number;
 	}
 	export type Supported = (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
@@ -125,7 +107,7 @@ export type BroadcastOutput = {
 	active: Signals.Signal<Net.Broadcast.Consumer | undefined>;
 	catalog: Signals.Signal<Hang.Catalog.Root | undefined>;
 	error: Signals.Signal<Error | undefined>;
-	status: Signals.Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
+	status: Signals.Signal<"connecting" | "offline" | "loading" | "live" | "error" | "unsupported">;
 };
 
 export { BufferedRange } from "@moq/hang/container";
@@ -138,7 +120,7 @@ export type CatalogFormat = typeof CATALOG_FORMATS[number];
 
 export * as Clock from "@moq/clock";
 
-export type Delay = "instant" | "auto" | Clock.Milli;
+export type Delay = "instant" | "auto" | Clock.Duration;
 
 export * as Hang from "@moq/hang";
 
@@ -170,7 +152,7 @@ export type PlayerInput = {
 	delay: Signals.Getter<Delay>;
 	enabled: Signals.Getter<boolean>;
 	follow: Signals.Getter<boolean>;
-	lookahead: Signals.Getter<Clock.Milli>;
+	lookahead: Signals.Getter<Clock.Duration>;
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
@@ -198,23 +180,23 @@ export class Sync {
 	constructor(props?: Signals.Inputs<SyncInput>);
 	close(): void;
 	readonly in: Signals.Readonlys<SyncInput>;
-	now(): Clock.Milli | undefined;
+	now(): Clock.Duration | undefined;
 	readonly out: Signals.Readonlys<SyncOutput>;
 	reset(): void;
 }
 
 export type SyncInput = {
 	delay: Signals.Getter<Delay>;
-	lookahead: Signals.Getter<Clock.Milli>;
+	lookahead: Signals.Getter<Clock.Duration>;
 };
 
 export type SyncOutput = {
 	buffered: Signals.Signal<boolean>;
-	delay: Signals.Signal<Clock.Milli>;
+	delay: Signals.Signal<Clock.Duration>;
 	instant: Signals.Signal<boolean>;
-	maxDelay: Signals.Signal<Clock.Milli>;
+	maxDelay: Signals.Signal<Clock.Duration>;
 	reference: Signals.Signal<number | undefined>;
-	timestamp: Signals.Signal<Clock.Milli | undefined>;
+	timestamp: Signals.Signal<Clock.Duration | undefined>;
 };
 
 export namespace Text {
@@ -275,7 +257,7 @@ export namespace Video {
 		error: Signals.Signal<Error | undefined>;
 		stalled: Signals.Signal<boolean>;
 		stats: Signals.Signal<Video.Stats | undefined>;
-		timestamp: Signals.Signal<Clock.Milli | undefined>;
+		timestamp: Signals.Signal<Clock.Duration | undefined>;
 	};
 	export type DecoderProps = Signals.Inputs<Video.DecoderInput> & {
 		source: Video.Source;
@@ -295,7 +277,7 @@ export namespace Video {
 	};
 	export type RendererOutput = {
 		error: Signals.Getter<Error | undefined>;
-		timestamp: Signals.Getter<Clock.Milli | undefined>;
+		timestamp: Signals.Getter<Clock.Duration | undefined>;
 		visible: Signals.Getter<boolean>;
 	};
 	export type RendererProps = Signals.Inputs<Video.RendererInput> & {
@@ -322,14 +304,14 @@ export namespace Video {
 	};
 	export interface Stats {
 		arrival?: {
-			timestamp: Clock.Milli;
+			timestamp: Clock.Duration;
 			wall: Clock.Wall;
 		};
 		bytesReceived: number;
 		errors: number;
 		frameCount: number;
 		late: number;
-		stalled: Clock.Milli;
+		stalled: Clock.Duration;
 		stalls: number;
 	}
 	export type Supported = (config: Hang.Catalog.VideoConfig) => Promise<boolean>;

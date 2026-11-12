@@ -196,7 +196,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn close(&mut self) -> crate::Result<()> {
 		self.estimator.cut(None);
 		self.publish_estimate()?;
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
@@ -204,7 +204,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	/// Close the open group and finish the track, or abort both with the cause when that fails.
 	fn finish(&mut self) -> crate::Result<()> {
-		if let Err(err) = self.close().and_then(|()| Ok(self.track.finish()?)) {
+		// The importer keeps its own clone, whose appends the end refuses.
+		if let Err(err) = self.close().and_then(|()| Ok(self.track.clone().finish().map(drop)?)) {
 			if let Some(group) = self.group.take() {
 				let _ = group.abort(err.reason());
 			}
@@ -1602,7 +1603,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
 		}
 		let group = if start_group {
-			if let Some(mut prev) = self.group.take() {
+			if let Some(prev) = self.group.take() {
 				prev.finish()?;
 			}
 			match self.pending_sequence.take() {
@@ -1687,16 +1688,19 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
-	/// Finish all tracks, flushing current groups.
+	/// Finish all tracks, flushing current groups, and return the [`Finished`] import.
 	///
 	/// A fragment whose samples are still arriving was truncated: its open frames abort, failing
 	/// their groups, every track still finishes, and this returns
 	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof). After a decode error, this ends the
-	/// accepted media without reading more input; it does not clear that error for later decodes.
-	/// Either way every track has ended. A finish that failed returns the same error to every
-	/// later call; one that succeeded refuses later input with
-	/// [`Finished`](crate::Error::Finished), or with the decode error it followed.
-	pub fn finish(&mut self) -> Result<()> {
+	/// accepted media without reading more input. Either way every track has ended, so a failed
+	/// finish can't be retried.
+	pub fn finish(mut self) -> Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	fn finish_in_place(&mut self) -> Result<()> {
 		match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
@@ -1849,6 +1853,29 @@ struct Deferred {
 	discontinuity: bool,
 }
 
+/// An fMP4 import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::fmp4::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	import: Import<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// Release every track's cache, reporting `err` to readers that have not drained it; see
+	/// [`Import::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
+	}
+}
+
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	/// End each track, then retire its HLS records: every track takes a fresh name, so nothing
 	/// publishes it again, as when an HLS import replaces this init segment's importer.
@@ -1980,7 +2007,7 @@ mod tests {
 			assert!(matches!(err, crate::Error::Cmaf(Error::BackwardsDataOffset)), "{err:?}");
 			assert!(consumer.recv_group().now_or_never().is_none());
 			assert_eq!(import.decode(&[0xA5; 8]).unwrap_err().to_string(), err.to_string());
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert!(consumer.recv_group().now_or_never().unwrap().unwrap().is_none());
 		}
 	}
@@ -2014,12 +2041,8 @@ mod tests {
 			assert_eq!(import.cut().unwrap_err().to_string(), first);
 			assert_eq!(import.seek(100).unwrap_err().to_string(), first);
 			assert_eq!(import.discontinuity().unwrap_err().to_string(), first);
-			import.finish().unwrap();
-			assert_eq!(import.decode(&[]).unwrap_err().to_string(), first);
-			assert_eq!(
-				import.decode(&box_header(b"free", Some(0))).unwrap_err().to_string(),
-				first
-			);
+			// The accepted media still ends cleanly.
+			let _import = import.finish().unwrap();
 		}
 	}
 
@@ -2114,7 +2137,7 @@ mod tests {
 				import.decode(&box_header(b"mdat", Some(4))).unwrap_err().to_string(),
 				err.to_string()
 			);
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 		}
 
 		// A short moof declares one field-less sample per body byte past the base, and no more.
@@ -2323,7 +2346,7 @@ mod tests {
 						"unreferenced payload must not enter the output cache"
 					);
 				}
-				import.finish().unwrap();
+				let _finished = import.finish().unwrap();
 			}
 		}
 	}
@@ -2381,7 +2404,7 @@ mod tests {
 				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&sample).unwrap();
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert_eq!(groups(&mut consumer), [(100, Some(1))], "passthrough: {passthrough}");
 		}
 	}
@@ -2400,7 +2423,8 @@ mod tests {
 				.decode(&media_header(id, 1024, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE / 2]).unwrap();
-			let err = import.finish().unwrap_err();
+			// In place, so the tracks can be inspected after the failure.
+			let err = import.finish_in_place().unwrap_err();
 			assert!(matches!(err, crate::Error::Mp4(_)), "{err:?}");
 			assert_eq!(
 				groups(&mut consumer),
@@ -2436,7 +2460,7 @@ mod tests {
 				import.decode(&[0xA5; SIZE / 2]).unwrap_err().to_string(),
 				err.to_string()
 			);
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
 		}
 	}

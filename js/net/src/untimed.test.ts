@@ -128,7 +128,7 @@ test("a forwarded untimed track stays untimed", async () => {
 
 	// Serve the downstream session from the upstream one through a copy the forwarding
 	// node produces.
-	const dynamic = relay.routePrefix(Path.from("test"));
+	const dynamic = relay.claim(Path.from("test"));
 	const inputs: BroadcastConsumer[] = [];
 	const forwarding = (async () => {
 		for await (const request of dynamic.requested()) {

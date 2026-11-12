@@ -189,6 +189,11 @@ impl Children {
 		}
 	}
 
+	/// Whether the broadcast closed, ending its children.
+	pub(crate) fn is_closed(&self) -> bool {
+		matches!(*self.lock(), Family::Closed)
+	}
+
 	/// Stop tracking `child`, which ended on its own.
 	pub(crate) fn forget(&self, child: Child) {
 		if let Family::Open { open, .. } = &mut *self.lock() {
@@ -419,11 +424,6 @@ impl Publish {
 			timebases: Default::default(),
 		})?;
 		Ok(id)
-	}
-
-	/// Whether `id` names a broadcast fill handle that has not been closed.
-	pub fn contains(&self, id: Id) -> bool {
-		self.broadcasts.get(id).is_some()
 	}
 
 	/// Drop a fill handle that never reached the caller.
@@ -718,17 +718,24 @@ impl Publish {
 
 	pub fn container_finish(&mut self, container: Id) -> Result<(), Error> {
 		let id = container;
-		let mut container = self.containers.remove(id).ok_or(Error::MediaNotFound)?;
-		if let Err(err) = container.inner.finish() {
-			container.children.forget(Child::Container(id));
-			let driver = container.driver.clone();
-			container.abort(cause(&err));
-			driver.check()?;
-			return Err(err.into());
+		let Container {
+			inner,
+			driver,
+			children,
+		} = self.containers.remove(id).ok_or(Error::MediaNotFound)?;
+		match inner.finish() {
+			Ok(finished) => {
+				driver.check()?;
+				children.keep(Child::Container(id), finished);
+				Ok(())
+			}
+			// A failed finish already ended every track, with an error where it could not finish.
+			Err(err) => {
+				children.forget(Child::Container(id));
+				driver.check()?;
+				Err(err.into())
+			}
 		}
-		container.driver.check()?;
-		container.children.keep(Child::Container(id), container.inner);
-		Ok(())
 	}
 
 	/// Insert or replace a caller-authored video rendition in the broadcast's catalog.
@@ -1249,8 +1256,9 @@ impl Publish {
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
 		let Kept { inner: track, children } = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		// The kept handle stays a producer, whose appends the end refuses.
 		if track.finished().is_none() {
-			track.finish()?;
+			drop(track.clone().finish()?);
 		}
 		Kept { inner: track, children }.keep(Child::Track(id));
 		Ok(())
@@ -1486,15 +1494,17 @@ impl Publish {
 	pub fn json_window_finish(&mut self, window: Id) -> Result<(), Error> {
 		let id = window;
 		let window = self.json_window.remove(id).ok_or(Error::TrackNotFound)?;
-		let Data {
-			mut producer, children, ..
-		} = window.data;
-		if let Err(err) = producer.finish() {
-			children.forget(Child::JsonWindow(id));
-			return Err(err.into());
+		let Data { producer, children, .. } = window.data;
+		match producer.finish() {
+			Ok(finished) => {
+				children.keep(Child::JsonWindow(id), finished);
+				Ok(())
+			}
+			Err(err) => {
+				children.forget(Child::JsonWindow(id));
+				Err(err.into())
+			}
 		}
-		children.keep(Child::JsonWindow(id), producer);
-		Ok(())
 	}
 
 	/// Write a frame into a raw group, `None` when untimed.
@@ -1538,7 +1548,7 @@ impl Publish {
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let mut group = self
+		let group = self
 			.groups
 			.remove(group)
 			.and_then(|group| group.inner.take())

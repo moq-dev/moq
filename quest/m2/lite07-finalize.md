@@ -28,9 +28,9 @@ The route layer of [Cluster routing](/quest/m2/cluster-routing/README.md)
 (ROUTE_START/UPDATE/END, path-less ANNOUNCE, the native hop list dropped) lands in
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
-has to plan for a lite-07 without native hop lists; only the temporary lite-06
-compatibility chain from [Mixed-version ring](/quest/m1/mixed-version-ring.md)
-rides announcements until the lite-07 to lite-08 migration. Only
+has to plan for a lite-07 without native hop lists; only the temporary Lite-06
+Chain, negotiated by its Setup Parameter, rides announcements until the lite-07
+to lite-08 migration. Only
 [Routes and announces](/quest/m2/cluster-routing/routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
@@ -117,6 +117,12 @@ Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 The explicit `Oldest` anchor rides [time addressing's model](/quest/m2/time-addressing/model.md),
 whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries.
 
+Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about
+moq-net): ✅ the cut waits for the symbolic model of the Route Key Parameter
+(rejected: neither proof gating, as the TLA+ models do not; the inductive
+routing invariant gating too, which sits behind the mesh model). The signed
+transcript freezes at the cut and a flaw in it can only be fixed on the wire.
+
 ## Required
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
@@ -126,8 +132,8 @@ whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) c
 - [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 - [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
-- [Minted instances are a typed flag](/quest/m2/instance-provenance.md) - lite-07 carries an explicit minted flag beside each instance instead of the `~` prefix
-- [A withdrawn claim ends across mixed lite-06 and lite-07 relays](/quest/m1/mixed-version-ring.md) - lite-07 announcements carry a temporary lite-06 compatibility chain
+- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - may add the warm-route message to lite-07; leaves this list if the proof places it in a SETUP extension
+- [Route latency in js/net](/quest/m2/route-latency.md) - js/net reads and writes ROUTE's RTT
 
 ## Related
 

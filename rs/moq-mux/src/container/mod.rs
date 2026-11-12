@@ -35,7 +35,7 @@ pub mod ts;
 pub use consumer::{Consumer, Playout};
 pub use group::GroupConsumer;
 pub(crate) use input::Input;
-pub use producer::{Guard, Producer};
+pub use producer::{Finished, Guard, Producer};
 pub(crate) use source::{ExportSource, Resume};
 
 /// The media role that determines how a container represents frame durations.

@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from moq_ffi import (
     MoqAllocator,
     MoqBandwidthConsumer,
+    MoqCredential,
     MoqGrantConsumer,
     MoqRateControl,
     MoqRatePolicy,
@@ -112,6 +113,16 @@ class Session:
         each reconnect, reading ``None`` while offline."""
         return GrantConsumer(self._inner.grants())
 
+    def credential(self, token: str) -> Credential:
+        """Present a request token on this session, for a route or claim to carry with
+        :meth:`Route.set_auth` or :meth:`Claim.set_auth`.
+
+        On moq-transport it rides each naming route's announcing request; on moq-lite it
+        needs AUTH, where it earns a grant. A client session presents it again on every
+        reconnect, and with no session live it waits for the next one. Raises
+        ``moq.Error.Config`` for an empty token."""
+        return Credential(self._inner.credential(token))
+
     def tokens(self) -> Tokens | None:
         """The credentials a native client session presents, to replace while it runs.
 
@@ -148,9 +159,8 @@ class Session:
 class GrantConsumer:
     """Follows the grant a session's peer gave it, returned by :meth:`Session.grants`.
 
-    AUTH is only on ``moq-lite-07-wip`` and on moq-transport sessions that negotiate
-    the MoQ Auth extension; elsewhere the grant stays ``None``. Iterate it for the
-    current grant and then each change, until the session ends::
+    AUTH is only on ``moq-lite-07-wip``; elsewhere the grant stays ``None``. Iterate
+    it for the current grant and then each change, until the session ends::
 
         async for grant in session.grants():
             print(grant)
@@ -196,6 +206,37 @@ class GrantConsumer:
 
     def cancel(self) -> None:
         """Cancel all current and future :meth:`changed` calls."""
+        self._inner.cancel()
+
+
+class Credential:
+    """A request token a session presents, returned by :meth:`Session.credential`.
+
+    It stays presented until :meth:`cancel`, or until it is dropped and no route or claim
+    names it, answered or not. Usable as an async context manager that cancels it on exit.
+    """
+
+    def __init__(self, inner: MoqCredential) -> None:
+        self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
+    async def answered(self) -> None:
+        """Wait for the peer's first verdict on the token.
+
+        Returns once a peer accepts it, at once on moq-transport, where only the requests
+        that name it carry the token. Raises the peer's refusal carrying its code,
+        ``moq.Error.Unsupported`` when nothing can carry a token (moq-lite without AUTH), and
+        ``moq.Error.Cancelled`` once :meth:`cancel` ran."""
+        await self._inner.answered()
+
+    def cancel(self) -> None:
+        """Release the credential now: withdrawn at once unless a route or claim still
+        names it, and every :meth:`answered` call raises ``moq.Error.Cancelled``."""
         self._inner.cancel()
 
 

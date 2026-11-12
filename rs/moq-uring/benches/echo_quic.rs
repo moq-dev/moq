@@ -50,12 +50,7 @@ mod linux {
 		let mut worker = Worker::new(Config::default()).expect("worker");
 		let handle = worker.handle();
 		let certs = support::certs().expect("certificates");
-		let server = quic::server::Config::new(
-			quic::Identity::open(&certs.cert, &certs.key)
-				.expect("identity")
-				.server(&[moq_tokio::quic::web::ALPN], quic::server::ClientAuth::None)
-				.expect("tls"),
-		);
+		let server = quic::server::Config::new(certs.server(&[moq_tokio::quic::web::ALPN]));
 		let socket = handle
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp_config)
 			.expect("socket");

@@ -155,10 +155,7 @@ func benchThroughput(b *testing.B, c benchCase) {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { runtime.KeepAlive(route) })
-	broadcast, err := route.Broadcast()
-	if err != nil {
-		b.Fatal(err)
-	}
+	broadcast := route.Broadcast()
 	b.Cleanup(func() { _ = broadcast.Close() })
 	tracks := make([]*moq.TrackProducer, c.publishers)
 	consumers := make([]*moq.TrackConsumer, 0, c.publishers*c.subscribers)

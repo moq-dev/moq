@@ -561,27 +561,35 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			catalog,
-			media_deadline: kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
+			media_deadline: kio::clock::Instant::now().saturating_add(crate::server::PUBLISH_IDLE_TIMEOUT),
 			route,
 		})
 	}
 
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &Bytes) -> anyhow::Result<()> {
-		self.media_deadline = kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT;
+		self.media_deadline = kio::clock::Instant::now().saturating_add(crate::server::PUBLISH_IDLE_TIMEOUT);
 		flv::import(&mut self.importer, tag_type, timestamp, body)
 	}
 
 	/// Flush any buffered media and finish every track, the catalog included, keeping the
 	/// finished broadcast up for `linger`.
-	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
-		self.importer.finish()?;
-		self.catalog.finish()?;
-		Ok(moq_mux::Linger::new([self.route.broadcast().clone()], self, linger))
+	fn finish(self, linger: Duration) -> anyhow::Result<moq_mux::Linger<impl Sized>> {
+		let Self {
+			importer,
+			mut catalog,
+			route,
+			..
+		} = self;
+		let importer = importer.finish()?;
+		catalog.finish()?;
+		let broadcast = route.broadcast().clone();
+		Ok(moq_mux::Linger::new([broadcast], (importer, catalog, route), linger))
 	}
 
 	/// Flush any buffered media and finish the catalog, then end the broadcast so the origin unannounces it at once.
 	fn close(mut self) -> anyhow::Result<()> {
-		self.importer.finish()?;
+		// Held until the broadcast closes, so the route retracts before the tracks drop.
+		let _importer = self.importer.finish()?;
 		self.catalog.finish()?;
 		self.route.broadcast().close();
 		Ok(())
@@ -695,7 +703,13 @@ mod tests {
 
 	/// A broadcast with one AVC keyframe at `live/cam0` and its tracks finished, with the
 	/// importer that keeps them listed and the catalog to finish it with.
-	fn source(origin: &origin::Producer) -> (moq_net::origin::Route, moq_mux::catalog::Producer, FlvImport) {
+	fn source(
+		origin: &origin::Producer,
+	) -> (
+		moq_net::origin::Route,
+		moq_mux::catalog::Producer,
+		moq_mux::container::flv::Finished,
+	) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
@@ -712,8 +726,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		importer.finish().unwrap();
-		(broadcast, catalog, importer)
+		(broadcast, catalog, importer.finish().unwrap())
 	}
 
 	/// Resolve `live/cam0` on `origin` to push it.
@@ -976,7 +989,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		// Run the crate's own server, serving the one play request from that origin.
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();

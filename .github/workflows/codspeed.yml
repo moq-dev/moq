@@ -1,25 +1,12 @@
 name: CodSpeed
 
-# CPU-simulated instruction counts for the deterministic Criterion benches on
-# every main commit. An extra signal beside Nightly's paired timing, which still
+# CPU-simulated instruction counts for the deterministic Criterion benches,
+# nightly on main. An extra signal beside Nightly's paired timing, which still
 # measures every bench and is the only gate; see bench/README.md.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "rs/**"
-      - Cargo.toml
-      - Cargo.lock
-      - flake.nix
-      - flake.lock
-      - .github/workflows/codspeed.yml
+  schedule:
+    - cron: "0 7 * * *"
   workflow_dispatch:
-
-# A busy main queues one run behind the active one, so a burst of merges is
-# measured as one comparison instead of piling up runs.
-concurrency:
-  group: codspeed
-  cancel-in-progress: false
 
 jobs:
   codspeed:

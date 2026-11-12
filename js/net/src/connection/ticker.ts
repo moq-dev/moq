@@ -1,4 +1,4 @@
-import { Instant, type Nano, now, sleepUntil } from "@moq/clock";
+import { type Duration, now, sleepUntil } from "@moq/clock";
 
 /**
  * One page-wide ticker shared by every caller with the same period.
@@ -8,11 +8,11 @@ import { Instant, type Nano, now, sleepUntil } from "@moq/clock";
  * loops ticking out of phase. The loop runs only while a subscriber is registered.
  */
 class Ticker {
-	readonly #period: Nano;
+	readonly #period: Duration;
 	readonly #subscribers = new Set<() => void>();
 	#abort?: AbortController;
 
-	constructor(period: Nano) {
+	constructor(period: Duration) {
 		this.#period = period;
 	}
 
@@ -33,7 +33,7 @@ class Ticker {
 		const abort = new AbortController();
 		this.#abort = abort;
 		void (async () => {
-			let next = Instant.add(now(), this.#period);
+			let next = now().saturatingAdd(this.#period);
 			for (;;) {
 				await sleepUntil(next, { signal: abort.signal }).catch(() => {});
 				if (abort.signal.aborted) return;
@@ -45,21 +45,22 @@ class Ticker {
 						console.error("ticker callback error", err);
 					}
 				}
-				next = Instant.add(now(), this.#period);
+				next = now().saturatingAdd(this.#period);
 			}
 		})();
 	}
 }
 
-const tickers = new Map<Nano, Ticker>();
+// Keyed by nanoseconds, since equal durations are distinct objects.
+const tickers = new Map<number, Ticker>();
 
 /** Subscribes `fn` to the page-wide ticker for `period`; returns its dispose. */
-export function tick(period: Nano, fn: () => void): () => void {
-	if (period <= 0) throw new RangeError("ticker period must be positive");
-	let ticker = tickers.get(period);
+export function tick(period: Duration, fn: () => void): () => void {
+	if (period.isZero()) throw new RangeError("ticker period must be positive");
+	let ticker = tickers.get(period.asNanos());
 	if (!ticker) {
 		ticker = new Ticker(period);
-		tickers.set(period, ticker);
+		tickers.set(period.asNanos(), ticker);
 	}
 	return ticker.subscribe(fn);
 }

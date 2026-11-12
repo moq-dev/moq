@@ -103,7 +103,7 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
-	config.runtime.workers = Some(WORKERS);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(WORKERS).unwrap());
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
 	config.auth.public = vec![moq_auth::Pattern::all()];
@@ -362,7 +362,7 @@ async fn uring_workers_report_link_facts() {
 	}
 
 	// A client can see its session established before the relay lists it.
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	let views = loop {
 		let views = sessions.list(&Default::default());
 		if views.len() == 4 {
@@ -447,9 +447,9 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	let pending = admissions.next().await.expect("pending admission");
 	// The relay fixes its deadline inside `start`, so these bracket it: what is
 	// left of each bounds what the relay tells the arrival from below and above.
-	let earliest = kio::clock::now() + DRAIN;
+	let earliest = kio::clock::now().saturating_add(DRAIN);
 	trigger.start();
-	let deadline = kio::clock::now() + DRAIN;
+	let deadline = kio::clock::now().saturating_add(DRAIN);
 	let draining = established.draining().expect("connected");
 	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
 		.await
@@ -473,7 +473,7 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 		// distinguishable from a fresh one. Measured from the deadline, not from
 		// the first session leaving, so a slow close cannot push the admission
 		// past the deadline (where the relay rejects it).
-		kio::clock::sleep_until(deadline - DRAIN / 2).await;
+		kio::clock::sleep_until(deadline.saturating_sub(DRAIN / 2)).await;
 	}
 	let (_arrival_lease, arrival_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	let granted = kio::clock::now();
@@ -611,7 +611,7 @@ async fn workers_share_a_generated_identity() {
 		let mut config = Config::default();
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.generate = vec!["localhost".into()];
-		config.runtime.workers = Some(WORKERS);
+		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(WORKERS).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = io_uring;
 		config.auth.public = vec![moq_auth::Pattern::all()];
@@ -924,10 +924,15 @@ async fn spawn_auth_server(policy: moq_auth::serve::Policy) -> url::Url {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::origin::RouteEvent::Start(route)
-		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: route,
+		} => Some((route, true)),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
+			announce: route,
+		} => Some((route, false)),
 	}
 }
 
@@ -1073,71 +1078,6 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	drop(connections);
 	running.abort();
 	let _ = running.await;
-}
-
-/// `listen.extensions` reaches the workers' SETUP, as it does the tokio listener's.
-/// A moq-transport client's connection token reaches the decider while the relay
-/// offers MoQ Auth, and is refused as unsupported once it is turned off, since no
-/// request would carry it.
-#[tokio::test]
-async fn uring_workers_offer_the_configured_extensions() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
-	if !supported() {
-		return;
-	}
-	let dir = tempfile::tempdir().unwrap();
-	let (cert, key) = certificate(dir.path());
-	let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
-	let grant = || moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all.clone()));
-	for offered in [true, false] {
-		let mut config = uring_config(&cert, &key);
-		config.auth.public.clear();
-		config.listen.extensions.auth = offered;
-		let mut relay = Relay::load(config).await.unwrap().with_signals(false);
-		let port = relay.addr().unwrap().port();
-		let mut admissions = relay.admissions().expect("embedded auth");
-		let ready = relay.ready();
-		let running = tokio::spawn(relay.run());
-		ready.wait().await.expect("relay ready");
-
-		let mut dial = moq_tokio::connect::Config::default();
-		dial.tls.insecure = Some(true);
-		dial.bind = Some("127.0.0.1:0".parse().unwrap());
-		dial.version = vec!["moq-transport-22".parse().unwrap()];
-		let client = dial.init(Default::default()).unwrap();
-		let url = format!("moql://127.0.0.1:{port}/extensions").parse().unwrap();
-		let (connection, ()) = tokio::join!(connect(client, url), async {
-			let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
-			assert!(!admission.attached(), "offered {offered}: the session arrived attached");
-			admission.grant(grant());
-		});
-
-		let auth = connection.auth();
-		let presented = kio::clock::timeout(TIMEOUT, auth.add("token"));
-		match offered {
-			true => {
-				let (token, ()) = tokio::join!(presented, async {
-					let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
-					assert!(admission.attached(), "an AUTH token arrived as a new session");
-					admission.grant(grant());
-				});
-				let _ = token
-					.expect("the token was never answered")
-					.expect("the token was refused");
-			}
-			false => {
-				// Without MoQ Auth no AUTH stream carries it: only a request naming it does.
-				let _ = presented
-					.await
-					.expect("the token was never answered")
-					.expect("a moq-transport request can carry the token");
-			}
-		}
-
-		drop(connection);
-		running.abort();
-		let _ = running.await;
-	}
 }
 
 /// `listen.timeout` bounds every handshake phase from the first packet: TLS,

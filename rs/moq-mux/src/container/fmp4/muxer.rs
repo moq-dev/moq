@@ -357,7 +357,7 @@ impl Muxer {
 			&& last.duration.is_none()
 			// Quantized at the output scale like the gaps between samples, so any end gap is
 			// whole ticks; one within a tick falls back like a sample with no successor.
-			&& let Ok(Some(duration)) = timestamp_gap(last.timestamp, end, self.timescale)
+			&& let Some(duration) = timestamp_gap(last.timestamp, end, self.timescale)?
 		{
 			last.duration = Some(duration);
 		}
@@ -410,7 +410,7 @@ mod tests {
 		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 		producer.write(frame(10_000_000, true)).unwrap();
 		producer.write(frame(10_033_000, false)).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 
@@ -453,7 +453,7 @@ mod tests {
 		producer.write(frame(10_000_000, true)).unwrap();
 		producer.write(frame(10_033_000, false)).unwrap();
 		producer.cut(Some(Timestamp::from_micros(10_066_000).unwrap())).unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 		let mut muxer = video_muxer();
@@ -482,7 +482,7 @@ mod tests {
 				duration: None,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 
 		let config = VideoConfig::new(VideoCodec::VP8);

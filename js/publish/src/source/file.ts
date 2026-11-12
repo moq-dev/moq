@@ -1,9 +1,9 @@
-import { Micro, Second } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import * as Util from "@moq/hang/util";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { InputAudioTrack, InputVideoTrack, VideoSample } from "mediabunny";
 import { hosted } from "../assets";
-import { now, pace, sleepUntil } from "./pace";
+import { pace, sleepUntil } from "./pace";
 import { Timeline } from "./timeline";
 import type { Media } from "./types";
 
@@ -114,14 +114,13 @@ export class File {
 				async pull(controller) {
 					// Every repeat is the same picture, so a reader returning after a gap skips to the
 					// slot due now instead of replaying each one it missed.
-					const due = Math.floor(Second.fromMicro((now() - zero) as Micro) * IMAGE_FRAME_RATE);
+					const due = Math.floor(now().since(zero).asSecs() * IMAGE_FRAME_RATE);
 					index = Math.max(index, due);
 
-					const offset = Micro.fromSecond((index / IMAGE_FRAME_RATE) as Second);
-					const timestamp = (zero + offset) as Micro;
+					const at = zero.saturatingAdd(Duration.secs(index / IMAGE_FRAME_RATE));
 					index++;
 
-					await sleepUntil(timestamp, signal);
+					await sleepUntil(at, signal);
 
 					// The bitmap is closed on teardown, so stop before building a frame from a dead one.
 					if (signal.aborted) {
@@ -129,7 +128,9 @@ export class File {
 						return;
 					}
 
-					controller.enqueue(new VideoFrame(bitmap, { timestamp }));
+					controller.enqueue(
+						new VideoFrame(bitmap, { timestamp: Math.round(at.since(Instant.ZERO).asMicros()) }),
+					);
 				},
 			},
 			// Prefetching would park a stale frame in the queue while nothing reads, and hand it out on resume.

@@ -55,7 +55,7 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Rou
 		}
 		group.finish().unwrap();
 	}
-	track.finish().unwrap();
+	let _finished = track.clone().finish().unwrap();
 
 	let subscribed = Arc::new(AtomicBool::new(false));
 	let flag = subscribed.clone();

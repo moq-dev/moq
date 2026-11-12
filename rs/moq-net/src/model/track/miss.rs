@@ -94,6 +94,14 @@ pub(super) struct Misses {
 	evictions: u64,
 	/// Judged again after an eviction, within the judged span: never refilled twice.
 	refilled: RangeSet<u64>,
+	/// The last sequence of the highest received stale run above the newest group that this
+	/// reader cannot trust, as of [`Self::unknown_at`]; see [`Self::unknown`].
+	unknown: Option<u64>,
+	/// The drops revision, judged revision, budget, and coverage [`Self::unknown`] was found
+	/// under: while the terms hold, only the runs changed since are looked at.
+	unknown_at: Option<(u64, u64, Duration, super::Coverage)>,
+	/// The [`Forgotten`] revision this reader judged again up to.
+	forgotten: u64,
 }
 
 /// A run of misses the reader gives up, for the drop cursor to name, with the budget it was
@@ -135,6 +143,44 @@ impl Wake for JoinWake {
 		// Woken with no lock held: an executor may poll inline.
 		let mut tasks = answered.tasks.lock().unwrap_or_else(PoisonError::into_inner).take();
 		tasks.wake();
+	}
+}
+
+/// How many runs [`Forgotten`] keeps apart before it coalesces the oldest.
+const FORGOTTEN_KEPT: usize = 4;
+
+/// The runs a track reclaimed from its drop set, by revision, for each reader to judge again
+/// what it judged inside them. Past [`FORGOTTEN_KEPT`] runs the oldest two coalesce into the
+/// span covering both under the newer revision, so this stays a few entries however much is
+/// forgotten, and a reader that fell behind judges a wider span again, never a narrower one.
+#[derive(Default)]
+pub(super) struct Forgotten {
+	runs: std::collections::VecDeque<(u64, ops::Range<u64>)>,
+	revision: u64,
+}
+
+impl Forgotten {
+	/// Record `run` as forgotten.
+	pub fn record(&mut self, run: ops::Range<u64>) {
+		self.revision += 1;
+		self.runs.push_back((self.revision, run));
+		if self.runs.len() > FORGOTTEN_KEPT
+			&& let Some((_, oldest)) = self.runs.pop_front()
+			&& let Some((_, next)) = self.runs.front_mut()
+		{
+			*next = oldest.start.min(next.start)..oldest.end.max(next.end);
+		}
+	}
+
+	/// The runs forgotten after `revision`, possibly wider, with the revision they bring a
+	/// reader to.
+	fn since(&self, revision: u64) -> (impl Iterator<Item = ops::Range<u64>> + '_, u64) {
+		let runs = self
+			.runs
+			.iter()
+			.filter(move |(at, _)| *at > revision)
+			.map(|(_, run)| run.clone());
+		(runs, self.revision)
 	}
 }
 
@@ -595,6 +641,54 @@ impl Misses {
 		}
 	}
 
+	/// The last sequence of the highest received stale run above the newest group that `drift`
+	/// does not settle. While the terms hold and the run it found still stands, only the runs
+	/// changed since are looked at, so a drop costs each reader the runs it touches.
+	fn unknown(&mut self, state: &TrackState, drift: &Drift) -> Option<u64> {
+		let above = |run: &ops::Range<u64>| state.newest_produced.is_none_or(|newest| run.end - 1 > newest);
+		let unsettled = |run: &ops::Range<u64>, hole| above(run) && !drift.settles(state, run.start, hole);
+		let revision = state.drops_changes.revision();
+		let since = self
+			.unknown_at
+			.as_ref()
+			.filter(|(_, judged, budget, coverage)| {
+				*judged == state.judged_revision && *budget == drift.budget && *coverage == drift.coverage
+			})
+			.map(|(seen, ..)| *seen)
+			// The newest group only rises, so the run found stays the highest unless it fell
+			// below it or changed.
+			.filter(|_| {
+				self.unknown.is_none_or(|top| {
+					state
+						.drops
+						.get_key_value(&top)
+						.is_some_and(|(run, hole)| unsettled(run, hole))
+				})
+			});
+		self.unknown = match since {
+			Some(seen) => {
+				let mut unknown = self.unknown;
+				for changed in state.drops_changes.since(seen) {
+					for (run, hole) in state.drops.overlapping(&changed) {
+						if unsettled(run, hole) {
+							unknown = unknown.max(Some(run.end - 1));
+						}
+					}
+				}
+				unknown
+			}
+			None => state
+				.drops
+				.iter()
+				.rev()
+				.take_while(|(run, _)| above(run))
+				.find(|(run, hole)| !drift.settles(state, run.start, hole))
+				.map(|(run, _)| run.end - 1),
+		};
+		self.unknown_at = Some((revision, state.judged_revision, drift.budget, drift.coverage.clone()));
+		self.unknown
+	}
+
 	/// Judge the holes in `target` the last probe has not, returning the runs to ask a
 	/// fill for. Gives up a run already stale under this reader's budget. `named` is the
 	/// lowest group the reader's ranges name, which may reach below the feed's start,
@@ -630,13 +724,7 @@ impl Misses {
 		// it arrived: only an update brings it back otherwise, and a reader narrower than the
 		// upstream's terms changes none. See `TrackState::unfed`. Only runs above the newest
 		// group need a look.
-		let unknown = state
-			.drops
-			.iter()
-			.rev()
-			.take_while(|(run, _)| state.newest_produced.is_none_or(|newest| run.end - 1 > newest))
-			.find(|(run, hole)| !drift.settles(state, run.start, hole))
-			.map(|(run, _)| run.end - 1);
+		let unknown = self.unknown(state, drift);
 		let Some(newest) = state.newest_produced.max(bound).max(unknown) else {
 			return asks;
 		};
@@ -698,7 +786,7 @@ impl Misses {
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
 		let low = key.0;
-		let top = newest.min(u64::MAX - 1);
+		let top = newest;
 		let mut candidates = RangeSet::new();
 		if terms {
 			let mut span = RangeSet::new();
@@ -798,6 +886,22 @@ impl Misses {
 				candidates.insert(run.clone());
 			}
 		}
+		// A run the track forgot is unknown again, so what this reader judged inside it and has
+		// not taken is judged afresh: asked of a fill, or given up by its budget.
+		let (forgotten, revision) = state.forgotten.since(self.forgotten);
+		for run in forgotten {
+			let run = run.start.max(low)..run.end.min(top.saturating_add(1));
+			if run.is_empty() {
+				continue;
+			}
+			for judged in self.judged.overlapping(&run) {
+				let judged = judged.start.max(run.start)..judged.end.min(run.end);
+				for fresh in taken.gaps(judged) {
+					candidates.insert(fresh);
+				}
+			}
+		}
+		self.forgotten = revision;
 		// Current ledger runs are indexed by their last mutation. Coalescing retires the
 		// old entries, so a reader that was idle needs no shared mutation history.
 		for changed in ledger
@@ -1041,7 +1145,7 @@ impl Misses {
 		// The reader's floor, as the whole judgement takes it: a resumed copy's live floor
 		// can sit above history the reader still reads.
 		let low = key.0;
-		let top = newest.min(u64::MAX - 1);
+		let top = newest;
 		let first = judged_to.saturating_add(1).max(low);
 		let mut fresh = RangeSet::new();
 		if first <= top {
@@ -1474,7 +1578,7 @@ impl TrackState {
 /// reads by arrival never raises its floor, so without this every old group the cache
 /// evicts would land with it and count as an eviction to judge again.
 fn inbox_floor(low: u64, taken: &Delivered) -> u64 {
-	low.max(taken.floor().unwrap_or(u64::MAX))
+	low.max(taken.floor())
 }
 
 fn backfill(state: &TrackState, run: ops::Range<u64>) -> RangeSet<u64> {
@@ -1583,7 +1687,7 @@ mod tests {
 			let waiter = kio::Waiter::new(flag.clone().into());
 			assert!(misses.resolve(&state, Some(budget), &mut given_up, &waiter).is_empty());
 			if let Some(requests) = requests {
-				pool.poll(opened + budget / 2, &noop);
+				pool.poll(opened.saturating_add(budget / 2), &noop);
 				let Poll::Ready(Ok(fill)) = requests.poll_requested_fill_group(&noop) else {
 					panic!("the queued fill");
 				};
@@ -1593,8 +1697,11 @@ mod tests {
 			assert!(misses.refused.contains(&1));
 			assert!(given_up.is_empty(), "the live feed may still deliver the group");
 			flag.0.store(false, Ordering::Relaxed);
-			let deadline = opened + budget;
-			assert_eq!(pool.poll(deadline - Duration::from_micros(1), &noop), Some(deadline));
+			let deadline = opened.saturating_add(budget);
+			assert_eq!(
+				pool.poll(deadline.saturating_sub(Duration::from_micros(1)), &noop),
+				Some(deadline)
+			);
 			assert!(!flag.0.load(Ordering::Relaxed));
 			pool.poll(deadline, &noop);
 			assert!(
@@ -2058,7 +2165,7 @@ mod tests {
 		assert_eq!(misses.deferred.overlapping(0..5).collect::<Vec<_>>(), vec![3..4]);
 		assert_eq!(
 			misses.deferred.deadline(),
-			Some(opened + wider),
+			Some(opened.saturating_add(wider)),
 			"timed by the new grace"
 		);
 	}
@@ -2419,7 +2526,7 @@ mod tests {
 			.unwrap()
 			.finish()
 			.unwrap();
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		// Group 0 lies below where the feed starts: only a fill may deliver it.
 		let ranges = [crate::track::Range::groups(0..1), crate::track::Range::groups(8..)];
 		let mut reader = track.subscribe(
@@ -2461,11 +2568,36 @@ mod tests {
 		);
 	}
 
+	/// The forget log stays a few entries, and a reader behind its coalesced entries judges a
+	/// span covering every run it missed, while a current one judges only what is new.
+	#[test]
+	fn the_forget_log_coalesces_into_spans_covering_what_a_reader_missed() {
+		let mut forgotten = Forgotten::default();
+		for run in 0..10u64 {
+			forgotten.record(10 * run..10 * run + 1);
+		}
+		assert_eq!(forgotten.runs.len(), FORGOTTEN_KEPT);
+		let (runs, revision) = forgotten.since(0);
+		let mut missed = RangeSet::new();
+		for run in runs {
+			missed.insert(run);
+		}
+		for run in 0..10u64 {
+			assert!(missed.contains(&(10 * run)), "run {run} is judged again");
+		}
+		assert_eq!(revision, 10);
+		let (runs, _) = forgotten.since(9);
+		let runs: Vec<_> = runs.collect();
+		assert_eq!(runs.len(), 1);
+		assert_eq!(runs[0], 90..91);
+		assert_eq!(forgotten.since(10).0.count(), 0);
+	}
+
 	#[test]
 	fn deferred_splits_and_replacements_retire_the_old_age_entries() {
 		let mut deferred = Deferred::default();
-		let early = crate::time::Instant::ZERO + Duration::from_secs(1);
-		let late = early + Duration::from_secs(1);
+		let early = crate::time::Instant::ZERO.saturating_add(Duration::from_secs(1));
+		let late = early.saturating_add(Duration::from_secs(1));
 		deferred.insert(0..u64::MAX, Some(early));
 		deferred.insert(10..20, Some(late));
 		deferred.remove(5..25);

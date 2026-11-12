@@ -421,7 +421,7 @@ impl Server {
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
 						let wait = self.accept_delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
-						self.accept_retry = Some(kio::clock::Instant::now() + wait);
+						self.accept_retry = Some(kio::clock::Instant::now().saturating_add(wait));
 					}
 				},
 			}
@@ -1227,7 +1227,7 @@ async fn pump<S: Stream>(
 	peer: SocketAddr,
 ) -> anyhow::Result<End> {
 	let mut buffer = [0u8; READ_BUFFER];
-	let mut media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+	let mut media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 	loop {
 		let mut finished = false;
 		while let Some(result) = work.pop_front() {
@@ -1240,11 +1240,11 @@ async fn pump<S: Stream>(
 				ServerSessionResult::RaisedEvent(event) => match event {
 					// A timestamp restart ends this publisher; isolated malformed tags are skipped.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
-						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 						publisher.push(flv::TAG_AUDIO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
-						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now().saturating_add(PUBLISH_IDLE_TIMEOUT);
 						publisher.push(flv::TAG_VIDEO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,
@@ -1507,16 +1507,28 @@ impl Publisher {
 
 	/// Flush any buffered media and finish every track, the catalog included, keeping the
 	/// finished broadcast up for `linger`.
-	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
-		self.importer.finish()?;
-		self.catalog.finish()?;
-		Ok(moq_mux::Linger::new([self.route.broadcast().clone()], self, linger))
+	fn finish(self, linger: Duration) -> anyhow::Result<moq_mux::Linger<impl Sized>> {
+		let Self {
+			importer,
+			mut catalog,
+			metadata,
+			route,
+		} = self;
+		let importer = importer.finish()?;
+		catalog.finish()?;
+		let broadcast = route.broadcast().clone();
+		Ok(moq_mux::Linger::new(
+			[broadcast],
+			(importer, catalog, metadata, route),
+			linger,
+		))
 	}
 
 	/// Flush any buffered media, finish the catalog, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
 	fn close(mut self) -> anyhow::Result<()> {
-		self.importer.finish()?;
+		// Held until the broadcast closes, so the route retracts before the tracks drop.
+		let _importer = self.importer.finish()?;
 		self.catalog.finish()?;
 		self.route.broadcast().close();
 		Ok(())
@@ -2219,7 +2231,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2364,7 +2376,7 @@ mod tests {
 		vp9.extend_from_slice(b"vp09");
 		vp9.extend_from_slice(VP9_KEYFRAME_320X240);
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vp9)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2642,7 +2654,7 @@ mod tests {
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &seq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &frames)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2806,7 +2818,13 @@ mod tests {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
 		kio::clock::timeout(Duration::from_secs(5), async {
-			while !matches!(announced.next().await, Some(moq_net::origin::RouteEvent::Restart(_))) {}
+			while !matches!(
+				announced.next().await,
+				Some(moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Restart,
+					..
+				})
+			) {}
 		})
 		.await
 		.expect("the reconnect restarts the broadcast");

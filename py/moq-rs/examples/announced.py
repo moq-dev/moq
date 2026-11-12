@@ -16,7 +16,7 @@ async def run(url: str, prefix: str, insecure: bool) -> None:
         async for event in client.announced(prefix):
             if isinstance(event, moq.AnnounceEventPresent):
                 print(f"  + {event.announce.prefix}")
-            elif isinstance(event, moq.AnnounceEventAbsent):
+            elif isinstance(event, (moq.AnnounceEventAbsent, moq.AnnounceEventOffline)):
                 print(f"  - {event.announce.prefix}")
 
 

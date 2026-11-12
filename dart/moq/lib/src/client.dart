@@ -60,8 +60,9 @@ final class ConnectOptions {
   /// The WebSocket fallback raced against QUIC for `http(s)` URLs.
   final WebSocketConfig? websocket;
 
-  /// Set true for a one-shot dial. By default the session redials with
-  /// backoff whenever the transport drops.
+  /// Set true for a one-shot dial. By default an established session redials
+  /// with backoff whenever the transport drops; a first dial that reaches no
+  /// session ends it with that error instead.
   final bool once;
 
   /// Retry pacing for the automatic reconnect.
@@ -222,7 +223,7 @@ final class Moq {
   MoqRoute route(String path, {RouteOptions? options}) =>
       session.publish().route(path: path, options: options ?? RouteOptions());
 
-  /// List the paths matching [options] as each becomes present or absent;
+  /// List the paths matching [options] as each becomes present, absent, or offline, or changes availability;
   /// prefixes stay relative to the origin.
   ///
   /// Listen to `announced(...).updates()` for a [Stream] of [AnnounceEvent]
@@ -234,14 +235,14 @@ final class Moq {
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
   /// next instance serving it, such as a restarted publisher, or null once the
-  /// path goes offline. Pass an [instance] to follow only that stream; another
-  /// one taking over also resolves null.
-  Following follow(String path, {String? instance}) =>
+  /// path goes offline. Pass an [instance] a route reported to follow only that
+  /// stream; another one taking over also resolves null.
+  Following follow(String path, {Instance? instance}) =>
       session.consume().follow(path: path, instance: instance);
 
   /// Resolve one publisher instance of the broadcast at [path]. Pass an
-  /// [instance] to refuse any other stream.
-  Future<BroadcastConsumer> request(String path, {String? instance}) =>
+  /// [instance] a route reported to refuse any other stream.
+  Future<BroadcastConsumer> request(String path, {Instance? instance}) =>
       session.consume().request(path: path, instance: instance);
 
   /// The session's bandwidth allocator.
@@ -278,6 +279,14 @@ final class Moq {
   /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
   Tokens tokens() => session.tokens()!;
 
+  /// Present a request token, for a route or [Claim] to carry with `setAuth`.
+  ///
+  /// On moq-transport it rides each naming route's announcing request; on
+  /// moq-lite it needs AUTH, where it earns a grant. The session presents it
+  /// again on every reconnect. Await [Credential.answered] for the peer's
+  /// verdict. An empty token throws `ConfigMoqException`.
+  Credential credential(String token) => session.credential(token: token);
+
   /// Drain within one second, then stop the client.
   ///
   /// `moq-lite-05` and newer wait for the peer to receive finished tails; older
@@ -304,13 +313,20 @@ extension GrantConsumerUpdates on GrantConsumer {
 
 /// A route's instance under the name the other bindings use.
 extension RouteInstance on MoqRoute {
-  /// The stream this route serves now. A named instance never changes. Unnamed,
-  /// a prefix route moves to a fresh one each time a job holding its current one
-  /// ends. A job's route takes its prefix route's current one when it first
+  /// The stream this route serves now, or once cancelled, the last one it
+  /// reported or announced under (null if it did neither). A named instance
+  /// never changes. A job's route takes its claim's current one when it first
   /// announces or when this first reads it, so a hidden job route returns it
-  /// before announcing, and [MoqRoute.announce] fails with `Unroutable` once the
-  /// prefix route has moved past it.
-  String instance() => instanceId();
+  /// before announcing, and [MoqRoute.announce] fails with `Unroutable` once
+  /// the claim has moved past it.
+  Instance? instance() => instanceId();
+}
+
+/// A claim's instance under the name the other bindings use.
+extension ClaimInstance on MoqClaim {
+  /// The stream this claim serves now. A named instance never changes. Unnamed,
+  /// the claim moves to a fresh one each time a job holding its current one ends.
+  Instance instance() => instanceId();
 }
 
 /// A [Stream] view over an announcement cursor.

@@ -144,7 +144,7 @@ epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
 pin. A restart onto another instance, or a higher epoch of the same one, is
 advertised before the old one is withdrawn, so the path is never absent. Older
 moq-lite versions and moq-transport carry no instance, so the receiving session
-mints one for each announcement, marked with a leading `~`: a reconnect or a
+mints one for each announcement, flagged as minted: a reconnect or a
 re-announcement through such a hop is another stream, and the first
 subscription through a claim is reset once the output's route arrives. A peer
 that ignores the end and start may keep cached objects of the old run under
@@ -244,11 +244,10 @@ A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
-and reconnect, rather than treating the credential as invalid. moq-transport carries the same
-exchange through the [MoQ Auth extension](/draft/moq-auth), with
-the same patterns. Older versions have no grant; the URL token keeps working
-everywhere. On moq-transport an added token is kept even without the extension,
-so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
+and reconnect, rather than treating the credential as invalid. Older versions
+and moq-transport have no grant; the URL token keeps working everywhere. On
+moq-transport an added token is kept for the requests that name it, so an
+announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
 `REQUEST_UPDATE`, so it can outlive the token it started with. A token added to a reconnecting
 connection's auth handle is presented on every session it makes, so the
@@ -372,15 +371,16 @@ the groups it limits itself to, and ends once the track does.
 
 The publisher may declare a max age per track: how long a superseded group stays
 fresh. On the wire, omission sets no limit; zero makes a group stale as soon as
-its successor arrives. Relays preserve that declaration, and may still cap it
-lower under their own ceiling. The Rust and JS libraries give an authored track
+its successor arrives. Relays preserve that declaration across moq-lite hops, and
+may still cap it lower under their own ceiling. The Rust and JS libraries give an authored track
 zero, the live edge only, unless its publisher asks for more or for no limit;
 media tracks declare 30 seconds, so a segmented egress can still find its
 segments. A relay bounds what it keeps with its own cache, not the publisher's
 default. Max age ages a group by the
 same two clocks as max delay and never makes the newest group stale. A fetch
 obeys the same bound, and may name a tighter max delay of its own.
-IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
+moq-transport drops it: its `MAX_CACHE_DURATION` would also expire the newest group,
+so a hop past one keeps superseded groups only as long as its own cache allows.
 
 Put together, a conference might use:
 

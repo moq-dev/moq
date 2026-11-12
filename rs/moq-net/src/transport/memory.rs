@@ -343,6 +343,42 @@ impl Session {
 	}
 }
 
+/// What one side of a pair still holds, read without keeping it alive, for the session fuzz
+/// target's leak check.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) struct Held {
+	side: std::sync::Weak<Side>,
+	conn: Arc<Conn>,
+	local: usize,
+}
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl Held {
+	/// Whether any handle to this side's session is alive.
+	pub(crate) fn session(&self) -> bool {
+		self.side.strong_count() > 0
+	}
+
+	/// Streams the peer opened toward this side that this side is not done with, counted only
+	/// under [`Config::max_concurrent_uni_streams`] and [`Config::max_concurrent_bi_streams`].
+	pub(crate) fn streams(&self) -> usize {
+		let incoming = &self.conn.incoming[self.local];
+		incoming.uni_open.read().count + incoming.bi_open.read().count
+	}
+}
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl Session {
+	/// Watch what this side holds; see [`Held`].
+	pub(crate) fn held(&self) -> Held {
+		Held {
+			side: Arc::downgrade(&self.side),
+			conn: self.side.conn.clone(),
+			local: self.side.local,
+		}
+	}
+}
+
 impl poll::Session for Session {
 	type SendStream = SendStream;
 	type RecvStream = RecvStream;
@@ -425,10 +461,7 @@ impl poll::Session for Session {
 
 	/// Streams share no connection window, and one holds at most its buffer.
 	fn receive_window(&self) -> Option<super::ReceiveWindow> {
-		Some(super::ReceiveWindow::new(
-			u64::MAX,
-			self.conn().config.stream_buffer as u64,
-		))
+		Some(super::ReceiveWindow::new(None, self.conn().config.stream_buffer as u64))
 	}
 
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
@@ -465,7 +498,7 @@ struct Message {
 
 /// When something a writer sent `latency` ago reaches the reader: `None` at once.
 fn landing(latency: Duration) -> Option<kio::clock::Instant> {
-	(!latency.is_zero()).then(|| kio::clock::now() + latency)
+	(!latency.is_zero()).then(|| kio::clock::now().saturating_add(latency))
 }
 
 #[derive(Clone, Copy)]

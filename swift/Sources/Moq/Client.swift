@@ -65,6 +65,8 @@ public final class Client: Sendable {
     }
 
     /// Start a connection and return its session without waiting for the native first dial to succeed.
+    /// If that first dial reaches no session, the session closes with its error rather than retrying;
+    /// only an established session reconnects.
     public func connect(to url: String) async throws -> Session {
         Session(try await ffi.connect(url: url))
     }
@@ -151,6 +153,17 @@ public final class Session: Sendable {
     /// each reconnect, reading `nil` while offline.
     public func grants() -> GrantConsumer {
         GrantConsumer(ffi.grants())
+    }
+
+    /// Present a request token on this session, for a `Route` or `Claim` to carry with
+    /// `setAuth`.
+    ///
+    /// On moq-transport it rides each naming route's announcing request; on moq-lite it needs
+    /// AUTH, where it earns a grant. A client session presents it again on every reconnect,
+    /// and with no session live it waits for the next one.
+    /// - Throws: `MoqError.Config` for an empty token.
+    public func credential(_ token: String) throws -> Credential {
+        Credential(try ffi.credential(token: token))
     }
 
     /// The credentials a native client session presents, to replace while it runs;

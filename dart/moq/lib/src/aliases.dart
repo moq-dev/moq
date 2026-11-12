@@ -23,6 +23,11 @@ typedef Client = MoqClient;
 /// The credentials a [Client] presents, replaceable while it runs.
 typedef Tokens = MoqTokens;
 
+/// A request token a session presents, which a route or [Claim] names with
+/// `setAuth`. Await `answered()` for the peer's verdict; `cancel()` withdraws it
+/// unless a route or claim still names it.
+typedef Credential = MoqCredential;
+
 /// A live pub/sub session with a relay, exposing publish and consume origins.
 typedef Session = MoqSession;
 
@@ -38,8 +43,13 @@ typedef CongestionControl = MoqCongestionControl;
 /// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
 typedef ClientTls = MoqClientTls;
 
-/// The publish side of an origin: create routes so subscribers can discover their broadcasts.
+/// The publish side of an origin: create routes and claims so subscribers can discover their broadcasts.
 typedef OriginProducer = MoqOriginProducer;
+
+/// A prefix route from `OriginProducer.claim`: a claim that every path beneath a prefix can be
+/// served, yielding each request from `requested()`. Cancelling or disposing it retracts it and
+/// rejects the requests still waiting.
+typedef Claim = MoqClaim;
 
 /// Config for creating an origin, such as its total cache budget.
 typedef OriginConfig = MoqOriginConfig;
@@ -50,7 +60,7 @@ typedef OriginConsumer = MoqOriginConsumer;
 /// A requested broadcast not yet answered: serve a held broadcast, route a new one, or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
-/// How a route advertises itself: hidden until announced, its static cost, and a stable instance.
+/// How a route advertises itself: hidden until announced, its static cost, and a stable [Instance].
 typedef RouteOptions = MoqRouteOptions;
 
 /// A stream of announce events under a prefix.
@@ -62,24 +72,44 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
+/// The read-only facts on a received route: a static cost, the stream's instance, and
+/// its informational `rtt` to the origin node.
 typedef RouteInfo = MoqRouteInfo;
+
+/// One continuous stream at a path: `Instance.parse` names one, and only a session mints one.
+///
+/// Two are equal only when their text and minted flag both match, so pass an
+/// instance a route reported back as is, rather than re-parsing its text.
+typedef Instance = MoqInstance;
 
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
-/// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or
-/// [AnnounceEventAbsent].
+/// What an [AnnounceConsumer] yields: [AnnounceEventPresent],
+/// [AnnounceEventUnavailable], [AnnounceEventAvailable], [AnnounceEventAbsent],
+/// or [AnnounceEventOffline].
 ///
 /// Another publisher instance taking a path over keeps it present: hold a
 /// [Following] to see the broadcast change.
 typedef AnnounceEvent = MoqAnnounceEvent;
 
-/// A route now covers the path, which was absent.
+/// A route now covers the path, which was absent; it may arrive unavailable.
 typedef AnnounceEventPresent = PresentMoqAnnounceEvent;
 
-/// No route covers the path any more; carries its last route.
+/// The present path lost every usable path to its origin but may recover one:
+/// it stays present while requests for it may fail.
+typedef AnnounceEventUnavailable = UnavailableMoqAnnounceEvent;
+
+/// The present path recovered a usable path: request it again.
+typedef AnnounceEventAvailable = AvailableMoqAnnounceEvent;
+
+/// The origin withdrew the path; carries its last route.
 typedef AnnounceEventAbsent = AbsentMoqAnnounceEvent;
+
+/// This side let go of the path, which its origin may still serve: the session
+/// it arrived on closed, or the network lost every path to it. Carries its last
+/// route.
+typedef AnnounceEventOffline = OfflineMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -209,13 +239,30 @@ typedef GrantConsumer = MoqGrantConsumer;
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;
 
-/// A connection lifecycle transition reported by [Session.state].
+/// Where a connection is in its lifecycle, carrying that phase's failure or version.
 typedef ConnectionPhase = MoqConnectionPhase;
+
+/// No session has connected yet; carries the latest failed dial.
+typedef ConnectionPhaseConnecting = ConnectingMoqConnectionPhase;
+
+/// A session is serving; carries its negotiated version.
+typedef ConnectionPhaseConnected = ConnectedMoqConnectionPhase;
+
+/// No session is serving while the connection redials; carries why.
+typedef ConnectionPhaseDisconnected = DisconnectedMoqConnectionPhase;
+
+/// The old session serves while its replacement dials; carries its version and the replacement's failure.
+typedef ConnectionPhaseMigrating = MigratingMoqConnectionPhase;
+
+/// The connection has stopped for good; carries the terminal error, if any.
+typedef ConnectionPhaseClosed = ClosedMoqConnectionPhase;
 
 /// One coherent connection lifecycle snapshot.
 typedef ConnectionState = MoqConnectionState;
 
 /// Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
+/// It applies only once a session has been established: a first dial that
+/// reaches no session ends the connection with its error rather than retrying.
 typedef Backoff = MoqBackoff;
 
 /// Whether a protocol code is from the session or stream registry.

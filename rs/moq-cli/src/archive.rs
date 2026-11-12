@@ -91,12 +91,15 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 							old.abort();
 						}
 					}
-					moq_net::announce::Event::Absent(announce) => {
+					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
 						if let Some(follower) = followers.remove(&announce.prefix) {
 							follower.abort();
 						}
 					}
-					moq_net::announce::Event::Present(_) => {}
+					// A follower rides out its path being held.
+					moq_net::announce::Event::Present(_)
+					| moq_net::announce::Event::Available(_)
+					| moq_net::announce::Event::Unavailable(_) => {}
 				}
 				continue;
 			}
@@ -419,7 +422,7 @@ mod tests {
 				.await
 				.expect("the export subscribes")
 				.unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			broadcast.broadcast().close();
 		}
 		let complete = [
@@ -461,7 +464,7 @@ mod tests {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin
-			.route_prefix("live/a", moq_net::origin::RouteOptions::default())
+			.claim("live/a", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
 
@@ -498,7 +501,7 @@ mod tests {
 			group.write_frame(pts, format!("frame {sequence}")).unwrap();
 			group.finish().unwrap();
 		}
-		video.finish().unwrap();
+		let _video = video.finish().unwrap();
 		let recording =
 			tokio::spawn(moq_archive::Producer::new(open(&url).unwrap(), source.consume(), Default::default()).run());
 		// Its objects, then the markers once the broadcast ends.

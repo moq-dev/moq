@@ -25,7 +25,7 @@ Have at least these sections:
 
 - **Problem**: a summary of the problem and why this PR is needed.
 - **Approach**: a summary of the approach taken to solve the problem.
-- **Impact**: a bullet point for every public API/wire change made. A breaking one says how to migrate, and the PR title marks it with `!` (`feat(net)!: ...`).
+- **Impact**: a bullet point for every public API/wire change made. A breaking one says how to migrate, and the PR title marks it with `!` (`feat(net)!: ...`). A behavior change alone takes no `!`.
 - **Alternatives**: any alternative approaches considered.
 - **Follow-ups**: any issues encountered or quests created.
 
@@ -100,7 +100,7 @@ For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/READM
 
 - Smoke clients call only the latest published APIs. A release cut updates `test/smoke/clients` to the APIs being published, then verifies the affected smoke lanes.
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit. After the pre-cut merge of `release` into `main`, run `just version 0.22.0` on `main` for the first shared cut, or the next shared minor for later cuts. Commit the resulting versions and lockfiles before opening the cut PR. Run `just version` to check them.
-- A breaking cut first writes, on `main`, each changed package's version-transition section in its `MIGRATE.md` (`## 0.3 -> 0.4`) from the migration audit: the `!` subjects since the `release` merge base, each of those PRs' Impact section, and the API diff.
+- A breaking cut first writes, on `main`, each changed package's version-transition section in its `MIGRATE.md` (`## 0.3 -> 0.4`), the only `MIGRATE.md` edit `just check` allows, from the migration audit: the `!` subjects since the `release` merge base, each of those PRs' Impact section, and the API diff.
 - Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch. A backport quest or PR names "the next release", never a version number, since the `release` bump can land first. The Release gate's API diff (`just api-diff --deny`) fails a backport that changes one; on the cut PR, whose head is `main`, it only reports.
 - A bench-only backport ports `main`'s benchmarks onto `release`, so a pairing against `release` (`just bench origin/release`) compares them. It carries only benchmarks and their harness: bench targets, bench-only dev-dependencies, and `bench/`. It changes no shipped code, and it shims locally any API that `release` lacks, keeping each case's ID the same as on `main`. A case that measures code `release` doesn't have is left out, and the PR lists it. Merging one makes release-plz propose patch bumps for the crates it touches, though no shipped code changed.
 - After any release publishes, patch or breaking, run `just test wire-compat --remeasure` on `main` and land the rewritten `test/interop/compat/planned-breaks.json` with refreshed reasons. Otherwise the nightly wire-compat check fails on the stale pins.

@@ -32,5 +32,6 @@ window-only decision still stands after that backend lands.
 ## Related
 
 - [Windows.Graphics.Capture](/quest/m4/capture-wgc.md) - display and window capture with the cursor, which this quest no longer owns
+- [A capture listing a picker can draw](/quest/m3/capture-list.md) - lists apps on Windows and gives them the identity an app capture would name
 - [Linux capture parity](/quest/m3/capture-linux.md) - the same gaps, through
   the portal and PipeWire

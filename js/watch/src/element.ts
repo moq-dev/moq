@@ -6,7 +6,7 @@
  * @module
  */
 
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
@@ -100,8 +100,8 @@ function parseDelay(value: string | null): Delay {
 }
 
 // Parse the `lookahead` attribute: a duration, or zero when absent.
-function parseLookahead(value: string | null): Milli {
-	if (value === null) return Milli.zero;
+function parseLookahead(value: string | null): Duration {
+	if (value === null) return Duration.ZERO;
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
 	throw invalidAttribute("lookahead", value, 'a duration like "30s"');
@@ -208,7 +208,7 @@ export default class MoqWatch extends HTMLElement {
 		// How far playback trails the live edge.
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
-		lookahead: new Signal<Milli>(Milli.zero),
+		lookahead: new Signal<Duration>(Duration.ZERO),
 		video: {
 			// The desired video rendition (resolution/bitrate cap).
 			target: new Signal<Video.Target | undefined>(undefined),
@@ -368,7 +368,7 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run((effect) => this.#reflect(effect, "echo", effect.get(this.#echo)));
 		this.signals.run((effect) => {
 			const delay = effect.get(this.controls.delay);
-			this.#reflect(effect, "delay", typeof delay === "number" ? formatDuration(delay) : delay);
+			this.#reflect(effect, "delay", delay instanceof Duration ? formatDuration(delay) : delay);
 		});
 		this.signals.run((effect) =>
 			this.#reflect(effect, "lookahead", formatDuration(effect.get(this.controls.lookahead))),
@@ -585,7 +585,7 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	/**
-	 * How far playback trails the live edge, in milliseconds. See {@link Delay}.
+	 * How far playback trails the live edge. See {@link Delay}.
 	 *
 	 * `"auto"` (the default) sizes the jitter buffer from how late frames arrive. `"instant"` drops the
 	 * clock instead: video paints the moment it decodes and audio is disabled.
@@ -595,26 +595,28 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set delay(value: Delay) {
-		if (typeof value !== "number" && value !== "auto" && value !== "instant")
-			throw invalidAttribute("delay", value, '"auto", "instant", or non-negative milliseconds');
-		this.controls.delay.set(parseDelay(typeof value === "number" ? formatDuration(value) : value));
+		if (!(value instanceof Duration) && value !== "auto" && value !== "instant")
+			throw invalidAttribute("delay", value, '"auto", "instant", or a Duration');
+		this.controls.delay.set(parseDelay(value instanceof Duration ? formatDuration(value) : value));
 		this.#accept("delay");
 	}
 
 	/**
-	 * Future-dated media held beyond the live edge before playback skips ahead, in milliseconds.
+	 * Future-dated media held beyond the live edge before playback skips ahead.
 	 *
 	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up
 	 * future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
-	 * once they would sit further than `delay + lookahead` past the playhead. Call `reset()` at each
-	 * utterance boundary. Not a jitter buffer: live streams leave it at zero and tune `delay`.
+	 * once they would sit further than `delay + lookahead` past the playhead. Audio that falls
+	 * behind, as after a stall, catches up by playing faster, and skips only what trails by more
+	 * than the lookahead. Call `reset()` at each utterance boundary. Not a jitter buffer: live
+	 * streams leave it at zero and tune `delay`.
 	 */
-	get lookahead(): Milli {
+	get lookahead(): Duration {
 		return this.controls.lookahead.peek();
 	}
 
-	set lookahead(value: Milli) {
-		if (typeof value !== "number") throw invalidAttribute("lookahead", value, "non-negative milliseconds");
+	set lookahead(value: Duration) {
+		if (!(value instanceof Duration)) throw invalidAttribute("lookahead", value, "a Duration");
 		this.controls.lookahead.set(parseLookahead(formatDuration(value)));
 		this.#accept("lookahead");
 	}

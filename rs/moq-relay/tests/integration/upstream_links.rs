@@ -198,36 +198,37 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 		.expect("group closed");
 }
 
-/// Each path `origin` routes now, with its route's hop ids, oldest first.
+/// Wait until `origin`'s routes satisfy `ready`, and return each path it routes with
+/// its route's hop ids, oldest first.
 ///
-/// Read from a fresh cursor's initial set, which reflects the route table as it
+/// Each read is a fresh cursor's initial set, which reflects the route table as it
 /// stands, unlike a live cursor that holds a best-route change back briefly. The
-/// cursor replays that set when it registers, all starts and none held, so it
-/// drains without waiting.
-fn routes(origin: &origin::Producer) -> BTreeMap<String, Vec<u64>> {
-	let mut announced = origin.consume().routes();
-	let mut routes = BTreeMap::new();
-	while let Some(event) = announced.try_next() {
-		let origin::RouteEvent::Start(announce) = event else {
-			panic!("an initial set is only starts: got {event:?}");
-		};
-		let hops = announce.route.hops().collect();
-		routes.insert(announce.prefix.as_str().to_string(), hops);
-	}
-	routes
-}
-
-/// Wait until `origin`'s routes satisfy `ready`, and return them.
+/// cursor replays that set when it registers, all starts and none held, so it drains
+/// without waiting, and then waits on that same cursor. Having delivered no end, it
+/// quarantines no stale path, so every later change to the table wakes it. A cursor
+/// kept across reads would not: once it delivers a route's end, it holds back a
+/// worse path's return and drops it silently when that path is withdrawn too, while
+/// a read in between still sees it.
 async fn routes_when(
 	step: &str,
 	origin: &origin::Producer,
 	ready: impl Fn(&BTreeMap<String, Vec<u64>>) -> bool,
 ) -> BTreeMap<String, Vec<u64>> {
 	within(step, async {
-		// Created first, so a change landing between two reads still wakes us.
-		let mut changes = origin.consume().routes();
 		loop {
-			let routes = routes(origin);
+			let mut changes = origin.consume().routes();
+			let mut routes = BTreeMap::new();
+			while let Some(event) = changes.try_next() {
+				let origin::RouteEvent {
+					kind: origin::RouteKind::Start,
+					announce,
+				} = event
+				else {
+					panic!("an initial set is only starts: got {event:?}");
+				};
+				let hops = moq_net::fuzz::route_hops(&announce.route);
+				routes.insert(announce.prefix.as_str().to_string(), hops);
+			}
 			if ready(&routes) {
 				return routes;
 			}

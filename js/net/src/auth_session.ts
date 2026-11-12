@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep, wall, yieldNow } from "@moq/clock";
+import { Duration, type Instant, now, sleep, type Wall, wall, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
@@ -29,7 +29,9 @@ export async function decodePatterns(r: Reader): Promise<Path.Patterns> {
 /** Whether two grants allow the same paths and lapse together. */
 function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
 	if (a === undefined || b === undefined) return a === b;
-	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && a.expires === b.expires;
+	const expires =
+		a.expires === undefined || b.expires === undefined ? a.expires === b.expires : a.expires.eq(b.expires);
+	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && expires;
 }
 
 /** The session or peer carries no AUTH exchange, or takes no tokens in band. */
@@ -57,8 +59,8 @@ export class Duplicate extends Error {
  *
  * @internal
  */
-export const RETRY_INITIAL = Milli(1000);
-const RETRY_MAX = Milli(30_000);
+export const RETRY_INITIAL = Duration.millis(1000);
+const RETRY_MAX = Duration.millis(30_000);
 
 // Whether a refusal is the acceptor failing to decide rather than its verdict on the token,
 // such as an unreachable auth server or a full verification queue.
@@ -114,12 +116,13 @@ export interface AuthWire {
 function union(grants: Iterable<Grant>): Grant {
 	const publish: Path.Pattern[] = [];
 	const subscribe: Path.Pattern[] = [];
-	let expires: number | undefined;
+	let expires: Wall | undefined;
 	for (const grant of grants) {
 		for (const pattern of grant.publish) publish.push(pattern);
 		for (const pattern of grant.subscribe) subscribe.push(pattern);
 		// The earliest expiry is when the union next shrinks.
-		if (grant.expires !== undefined) expires = Math.min(expires ?? grant.expires, grant.expires);
+		if (grant.expires !== undefined && (expires === undefined || grant.expires.lt(expires)))
+			expires = grant.expires;
 	}
 	return { publish: new Path.Patterns(publish), subscribe: new Path.Patterns(subscribe), expires };
 }
@@ -157,12 +160,11 @@ class Presented {
 }
 
 /**
- * A token {@link Handle.present} returned before its answer.
+ * A token {@link Handle.present} returned, with what the connection's token rotation reads.
  *
  * @internal
  */
 export interface Pending extends Credential {
-	/** Resolves once a peer accepts the token, or rejects as {@link Handle.add} does. */
 	readonly answered: Promise<void>;
 	/** Whether any session holds a grant for it now, a draining one included. */
 	readonly held: boolean;
@@ -364,25 +366,21 @@ export class Handle {
 	}
 
 	/**
-	 * Present another token on every session of this handle, resolving once a peer answers it.
+	 * Present another token on every session of this handle, returning it at once; its
+	 * {@link Credential.answered} settles on the peer's first verdict, and closing it withdraws
+	 * it, answered or not.
 	 *
 	 * With no session live it waits for the next one. A refusal that may pass, such as an
 	 * unreachable auth server, is presented again after a backoff on moq-lite, and so is a token
-	 * whose stream the peer drops without a verdict. Rejects with
-	 * {@link Unsupported} when a session neither carries AUTH nor lets a request carry a token
-	 * (moq-lite without AUTH), with the peer's refusal as an `Error.Session`, or with the
-	 * handle's end. On moq-transport without AUTH it resolves at once with no grant: only a
-	 * request whose route names it carries it.
+	 * whose stream the peer drops without a verdict. Throws once the handle ended, or while its
+	 * own session drains with no successor.
 	 */
-	async add(token: string | Uint8Array): Promise<Credential> {
-		const added = this.present(token);
-		await added.answered;
-		return added;
+	add(token: string | Uint8Array): Credential {
+		return this.present(token);
 	}
 
 	/**
-	 * Present another token like {@link add}, returning it at once with its answer, so it can be
-	 * withdrawn before the peer answers.
+	 * Present another token like {@link add}, returning what the token rotation reads.
 	 *
 	 * @internal
 	 */
@@ -523,7 +521,7 @@ class IssuedGrant implements Issued {
 	}
 
 	async #send(grant: Grant): Promise<void> {
-		const expires = grant.expires === undefined ? undefined : grant.expires - wall();
+		const expires = grant.expires?.since(wall()).asMillis();
 		await this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires });
 	}
 
@@ -804,9 +802,7 @@ export class AuthSession {
 			return true;
 		} finally {
 			if (started !== undefined) {
-				console.debug(
-					`request waited for authorization: path=${path} waited=${Nano.toMilli(Instant.durationSince(now(), started))}ms`,
-				);
+				console.debug(`request waited for authorization: path=${path} waited=${now().since(started)}`);
 			}
 		}
 	}
@@ -884,7 +880,7 @@ export class AuthSession {
 		let granted = false;
 		// The peer replied to an earlier attempt, so it knows AUTH.
 		let replied = false;
-		let delay: Milli | undefined;
+		let delay: Duration | undefined;
 		for (;;) {
 			refused = false;
 			// Whether the peer answered this token, so a close is not the peer predating AUTH:
@@ -917,7 +913,10 @@ export class AuthSession {
 						break;
 					}
 					if ("grant" in reply) {
-						const expires = reply.grant.expires === undefined ? undefined : wall() + reply.grant.expires;
+						const expires =
+							reply.grant.expires === undefined
+								? undefined
+								: wall().add(Duration.millis(reply.grant.expires));
 						presented.grant = { publish: reply.grant.publish, subscribe: reply.grant.subscribe, expires };
 						answered = granted = replied = true;
 						delay = undefined;
@@ -980,9 +979,9 @@ export class AuthSession {
 			// might cover waits for the retry's verdict rather than being judged without it.
 			presented.isAnswered = false;
 			this.#recompute();
-			delay = delay === undefined ? RETRY_INITIAL : Milli(Math.min(delay * 2, RETRY_MAX));
+			delay = delay === undefined ? RETRY_INITIAL : delay.mul(2).min(RETRY_MAX);
 			presented.retry = new AbortController();
-			await sleep(Nano.fromMilli(delay), { signal: presented.retry.signal }).catch(() => void 0);
+			await sleep(delay, { signal: presented.retry.signal }).catch(() => void 0);
 			presented.retry = undefined;
 			if (this.#closed || presented.withdrawn || presented.ended) {
 				refused = false;

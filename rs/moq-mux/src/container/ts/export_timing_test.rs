@@ -189,7 +189,8 @@ impl Live {
 
 	/// The receivers' instant at which the source's clock reads media time `micros`.
 	fn sent(&self, micros: u64) -> Instant {
-		self.start + Duration::from_secs_f64(micros as f64 / 1e6 / self.scale)
+		self.start
+			.saturating_add(Duration::from_secs_f64(micros as f64 / 1e6 / self.scale))
 	}
 
 	/// When the source sends the video frame of media time `video` and the audio frame of
@@ -200,7 +201,7 @@ impl Live {
 			true => (Duration::ZERO, lag),
 			false => (lag, Duration::ZERO),
 		};
-		(self.sent(video) + v, self.sent(audio) + a)
+		(self.sent(video).saturating_add(v), self.sent(audio).saturating_add(a))
 	}
 
 	/// Declare that video decodes up to `jitter` before it is presented, as a deep B-pyramid's
@@ -233,7 +234,7 @@ impl Live {
 	/// same timeline from the next group, as its replacement or the other half of a 1+1 pair
 	/// would.
 	fn fall_silent(&mut self, gap: Duration, legs: &mut [&mut Leg]) {
-		let resume = kio::clock::now() + gap;
+		let resume = kio::clock::now().saturating_add(gap);
 		self.advance(resume, legs);
 		let media = (resume.duration_since(self.start).as_secs_f64() * self.scale * 1e6) as u64;
 		self.tick = media.div_ceil(VIDEO_US * GOP) * GOP;
@@ -254,6 +255,8 @@ impl Live {
 			waiter: kio::Waiter::new(Waker::from(woken.clone())),
 			woken,
 			out: Vec::new(),
+			sink: None,
+			busy: None,
 		}
 	}
 
@@ -275,10 +278,12 @@ impl Live {
 			} else {
 				let tick = self.tick;
 				let keyframe = tick.is_multiple_of(GOP);
-				if keyframe && let Some(mut group) = self.group.take() {
+				if keyframe && let Some(group) = self.group.take() {
 					match std::mem::take(&mut self.stalling) {
 						true => self.stalled.push(group),
-						false => group.finish().unwrap(),
+						false => {
+							group.finish().unwrap();
+						}
 					}
 				}
 				if keyframe {
@@ -344,23 +349,41 @@ impl Live {
 		}
 	}
 
-	/// End the broadcast and let every leg render what it holds.
+	/// End the broadcast and let every leg render what it holds, side by side: a leg left
+	/// unread while another drains would be a blocked sink.
 	fn finish(&mut self, legs: &mut [&mut Leg]) {
 		self.finish_media();
 		self.catalog.finish().unwrap();
-		for leg in legs.iter_mut() {
-			leg.drain(&self.clock);
+		let mut ended = vec![false; legs.len()];
+		loop {
+			for (leg, ended) in legs.iter_mut().zip(&mut ended) {
+				*ended = *ended || leg.poll();
+			}
+			let Some(deadline) = legs
+				.iter()
+				.zip(&ended)
+				.filter(|(_, ended)| !**ended)
+				.map(|(leg, _)| {
+					leg.export
+						.next_due()
+						.expect("export parked without ending or scheduled output")
+				})
+				.min()
+			else {
+				break;
+			};
+			self.clock.advance(deadline.max(self.clock.now()));
 		}
 	}
 
 	/// End the media tracks while the catalog can still announce more.
 	fn finish_media(&mut self) {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish().unwrap();
 		}
 		self.stalled.clear();
-		self.video.finish().unwrap();
-		self.audio.finish().unwrap();
+		drop(self.video.clone().finish().unwrap());
+		self.audio.end_with(None).unwrap();
 	}
 
 	/// Run the clock to `at`, letting every leg read whenever it would have on its own.
@@ -378,7 +401,7 @@ impl Live {
 					assert!(!leg.poll(), "export ended while the broadcast is live");
 					if !leg.every.is_zero() {
 						while leg.next_poll <= now {
-							leg.next_poll += leg.every;
+							leg.next_poll = leg.next_poll.saturating_add(leg.every);
 						}
 					}
 				}
@@ -404,6 +427,11 @@ struct Leg {
 	waiter: kio::Waiter,
 	woken: Arc<Woken>,
 	out: Vec<(Instant, Frame)>,
+	/// The rate its output drains at, in bits per second, if it drains slower than it is read:
+	/// each frame keeps it from reading again until the frame is written.
+	sink: Option<u64>,
+	/// It reads nothing until this instant, as a sink still writing or a blocked stdout.
+	busy: Option<Instant>,
 }
 
 struct Woken(AtomicBool);
@@ -421,6 +449,9 @@ impl Wake for Woken {
 impl Leg {
 	/// When this leg next reads on its own.
 	fn wake(&self) -> Option<Instant> {
+		if self.busy.is_some() {
+			return self.busy;
+		}
 		match self.every.is_zero() {
 			true => self.export.next_due(),
 			false => Some(self.next_poll),
@@ -430,18 +461,29 @@ impl Leg {
 	/// Read if anything woke the export since it last read, as the task polling it would: a read
 	/// nothing woke finds nothing new.
 	fn poll_now(&mut self) {
-		if self.every.is_zero() && self.woken.0.load(Ordering::Relaxed) {
+		if self.busy.is_none() && self.every.is_zero() && self.woken.0.load(Ordering::Relaxed) {
 			assert!(!self.poll(), "export ended while the broadcast is live");
 		}
 	}
 
 	/// Read everything ready now, returning whether the broadcast ended.
 	fn poll(&mut self) -> bool {
-		self.woken.0.store(false, Ordering::Relaxed);
 		let now = kio::clock::now();
+		if self.busy.is_some_and(|busy| busy > now) {
+			return false;
+		}
+		self.busy = None;
+		self.woken.0.store(false, Ordering::Relaxed);
 		while let std::task::Poll::Ready(frame) = self.export.poll_next(&self.waiter) {
 			match frame.expect("exporter error") {
-				Some(frame) => self.out.push((now, frame)),
+				Some(frame) => {
+					let bits = frame.payload.len() as u64 * 8;
+					self.out.push((now, frame));
+					if let Some(sink) = self.sink {
+						self.busy = Some(now.saturating_add(Duration::from_secs_f64(bits as f64 / sink as f64)));
+						return false;
+					}
+				}
 				None => return true,
 			}
 		}
@@ -1097,6 +1139,98 @@ async fn a_source_far_off_real_time_fails_within_seconds() {
 	let mut live = Live::new(1.0 / 1.22, 0).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(10_000_000 / VIDEO_US, &mut [&mut leg], |_| false);
+}
+
+// A padded output writes every slot of its grid, so a sink that stops reading, or reads slower
+// than the multiplex rate, would otherwise face every slot it missed at once, and the backlog's
+// own wait would read to the jitter buffer as a source clock running far slow.
+
+/// How far a padded export may fall behind before it sheds: half the delay.
+const BUDGET: Duration = Duration::from_millis(DELAY.as_millis() as u64 / 2);
+
+/// How long after the source's clock each slot written at or after `from` went out.
+fn holds(live: &Live, leg: &Leg, from: Instant) -> Vec<Duration> {
+	leg.out
+		.iter()
+		.filter(|(sent, _)| *sent >= from)
+		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros() as u64)))
+		.collect()
+}
+
+/// How many PCRs flag a discontinuity in the slots written at or after `from`.
+fn flagged(leg: &Leg, from: Instant) -> usize {
+	leg.out
+		.iter()
+		.filter(|(sent, _)| *sent >= from)
+		.flat_map(|(_, frame)| frame.payload.chunks(188).map(<[u8]>::to_vec).collect::<Vec<_>>())
+		.filter(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0 && packet[5] & 0x80 != 0)
+		.count()
+}
+
+/// A sink that blocks for ten seconds resumes on the current slot, the jump flagged once, rather
+/// than being handed every slot it missed.
+#[tokio::test(start_paused = true)]
+async fn a_blocked_sink_resumes_on_the_current_slot() {
+	let mut live = Live::new(1.0, 0).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(10 * GOP, &mut [&mut leg], |_| false);
+	let normal = *holds(&live, &leg, live.start).iter().max().unwrap();
+
+	let resume = kio::clock::now().saturating_add(Duration::from_secs(10));
+	leg.busy = Some(resume);
+	live.run(10 * GOP + 10_000_000 / VIDEO_US + 10 * GOP, &mut [&mut leg], |_| false);
+
+	let burst = leg.out.iter().filter(|(sent, _)| *sent == resume).count();
+	let slots = (BUDGET.as_millis() / PCR_INTERVAL.as_millis()) as usize + 2;
+	assert!(
+		burst <= slots,
+		"{burst} slots went out on resuming, past the {slots} the budget holds"
+	);
+	assert_eq!(flagged(&leg, resume), 1, "the jump is flagged once");
+	let worst = *holds(&live, &leg, resume.saturating_add(BUDGET)).iter().max().unwrap();
+	assert!(
+		worst <= normal + PCR_INTERVAL,
+		"held {worst:?} after resuming, {normal:?} before"
+	);
+	assert!(
+		leg.units()
+			.iter()
+			.any(|unit| unit.sent > resume && unit.pid == VIDEO_PID),
+		"video resumed"
+	);
+}
+
+/// A sink draining at half the multiplex rate keeps a bounded lag, shedding what it cannot
+/// write, and never reads to the jitter buffer as a slow source clock. The export lays at most
+/// the budget's worth of missed slots at once, which this sink takes twice as long to write, so
+/// it falls up to a delay behind.
+#[tokio::test(start_paused = true)]
+async fn a_slow_sink_sheds_and_keeps_its_lag() {
+	let mut live = Live::new(1.0, 0).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(10 * GOP, &mut [&mut leg], |_| false);
+	let normal = *holds(&live, &leg, live.start).iter().max().unwrap();
+
+	let slow = kio::clock::now();
+	leg.sink = Some(MUX_RATE / 2);
+	live.run(10 * GOP + 120_000_000 / VIDEO_US, &mut [&mut leg], |_| false);
+
+	let worst = *holds(&live, &leg, slow).iter().max().unwrap();
+	assert!(
+		worst <= normal + DELAY,
+		"held {worst:?} at half the rate, {normal:?} before"
+	);
+	let video = leg
+		.units()
+		.iter()
+		.filter(|unit| unit.sent > slow && unit.pid == VIDEO_PID)
+		.count();
+	assert!(video > 0, "no video went out");
+	assert_eq!(
+		leg.export.stats().release.out_of_tolerance,
+		0,
+		"the sink read as source drift"
+	);
 }
 
 // A 1+1 pair is two receivers of one broadcast whose outputs a seamless switch compares packet

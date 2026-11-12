@@ -840,7 +840,7 @@ impl poll::Session for SinkSession {
 		let (Some(window), Some(connection)) = (window.as_mut(), limits.receive_window) else {
 			return Err(crate::transport::LimitsError::Unsupported);
 		};
-		window.connection = connection.get();
+		window.connection = Some(connection);
 		Ok(())
 	}
 }

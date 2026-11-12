@@ -6,7 +6,7 @@ The relay's `moq-stats` egress side reports, per broadcast, how far behind
 its viewers are according to the frames the network has acknowledged: a
 byte-weighted cumulative `lag` histogram and `dropped` counters (the frames
 written after the newest acknowledged one when a group stream ends without
-delivering them), on the stats totals, a group's totals, and the prefix tracks
+delivering them), on the stats totals, a bucket's totals, and the prefix tracks
 (`<path>/prefix.json`). A spliced subscription stays exact across a route
 switch, and a closing subscription records its last partial interval.
 Subscriptions on a backend that cannot see acknowledgements report neither
@@ -35,8 +35,8 @@ Decided 2026-10-26 (maintainer, on #6791), each with its reason:
   acknowledged frame end through [poll_acked](/quest/m3/quic-ack-hook.md), so
   the sampler reads a frontier at most one frame stale. `dropped` counts only
   the frames written after the newest acknowledged one. This folds in the
-  frontier half of the former starvation-frames quest; the delivery-delay
-  histogram stays in [its own quest](/quest/m5/delivery-delay.md). Its sketch,
+  frontier half of the former starvation-frames quest; a delivery-delay
+  histogram is not planned. Its sketch,
   to adjust as the code dictates: the group stream's writer counts the bytes
   it writes, each frame end records its offset and timestamp, and one waiter
   per stream polls the oldest pending offset, interleaved with later writes so
@@ -98,7 +98,7 @@ re-exported by `moq-stats`. Wire: the stats JSON gains the egress fields.
 Update `doc/concept/stats.md` and the stats section of
 `doc/bin/relay/config.md`.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/net](/quest/m2/api-shape/net.md) makes `stats::Registry::report` take `now` and the handle's arguments `#[non_exhaustive]` before the cut, so this adds fields and is not breaking.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8266](https://github.com/moq-dev/moq/pull/8266) makes `stats::Registry::report` take `now` and the handle's arguments `#[non_exhaustive]` before the cut, so this adds fields and is not breaking.
 
 ## Required
 

@@ -19,7 +19,7 @@ minimized corpus, and uploads failure inputs as workflow artifacts.
 
 ## How it fits together
 
-The target bodies are not in `fuzz_targets/`; they are in `moq-mux`'s hidden `fuzz`
+The target bodies are not in `fuzz_targets/`; they are in `moq-mux`'s `fuzz`
 module (`src/fuzz.rs`), and the files here are shims that also register its counting
 allocator. `just check` replays the same bodies on the pinned stable toolchain, bound
 included, so a failure found here becomes a regression test that CI runs without anyone

@@ -33,8 +33,7 @@ full-mesh selection, roster churn, pending negotiations and cancellation.
 Report connection counts, signaling bytes, wakes, CPU and retained state;
 per-peer `iceServers` alone do not bound pairing. Verify the CDN control
 session survives peer handover while unused CDN payload demand stops.
-Real CDN/P2P route-health cases extend this harness from the m5
-[Route health](/quest/m5/route-health/README.md) line, not here.
+Route-health cases are out of scope.
 
 Metrics: sustained throughput ceiling, per-frame latency p50 and p99 from the
 timestamp `moq-bench` stamps into each keyframe (same host, so one clock),

@@ -680,30 +680,24 @@ impl<'de> Deserialize<'de> for Candidate {
 	}
 }
 
-#[doc(hidden)]
 /// Marker for a builder requiring a protocol selection.
 pub struct NoProtocol(());
 
-#[doc(hidden)]
 /// State indicating a transport protocol has been assigned to the builder.
 pub struct HasProtocol<P> {
 	_marker: PhantomData<P>,
 	protocol: Protocol,
 }
 
-#[doc(hidden)]
 /// Marker for a builder using the UDP protocol.
 pub struct Udp(());
 
-#[doc(hidden)]
 /// Marker for a builder using a TCP-based protocol.
 pub struct Tcp(());
 
-#[doc(hidden)]
 /// Marker indicating the candidate's network route (addresses and kind) is not yet defined.
 pub struct NoRoute(());
 
-#[doc(hidden)]
 /// State containing the network route and addresses required to build a candidate.
 pub struct HasRoute {
 	kind: CandidateKind,

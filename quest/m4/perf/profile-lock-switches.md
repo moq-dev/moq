@@ -28,7 +28,7 @@ nothing to do with route memory.
     other agent was running, so outside load is not an established cause.
   - [moq-dev/moq#7533](https://github.com/moq-dev/moq/pull/7533) could not
     record base chat at 16 workers.
-  - The [kio channel contention](/quest/m4/perf/kio-channel-contention/README.md)
+  - The [kio channel contention](/quest/m4/kio-channel-contention/README.md)
     notes, and the log lock profile quest #7742 deleted, also record
     refusals.
 - Check: the refusal is at `bench/profile.py:131`, with its test at

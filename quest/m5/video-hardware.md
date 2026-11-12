@@ -65,8 +65,7 @@ PipeWire node (spa-libcamera). Record the mode that opened, whether frames
 arrived, and whether the producer used one memory block or one per plane.
 No new capture API, and no libcamera source.
 
-A separate-plane producer belongs to
-[multi-plane cameras](/quest/m5/pipewire-camera-planes.md); if that is why a
+A separate-plane producer is not planned; if that is why a
 Pi produces nothing, write it down and stop. `doc/lib/rs/moq-video.md` says
 both paths are reachable; correct that sentence if one cannot capture.
 
@@ -100,5 +99,4 @@ is not a bug any amount of review finds.
 ## Related
 
 - [#2819](/quest/m4/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - the DMA-BUF import validation this capture feeds
-- [Capture multi-plane PipeWire cameras](/quest/m5/pipewire-camera-planes.md) - separate-plane I420 and NV12, when the Pi pass finds them
 - [Embedded video path](/quest/m5/video-embedded.md) - presenting on a Pi, which is a different gap

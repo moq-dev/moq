@@ -109,5 +109,5 @@ offset order, reset by sender, STOP_SENDING by the receiver, and session
 close.
 
 Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
-[viewer lag histogram](/quest/m3/qos/lag-histogram.md) and the
-[delivery-delay histogram](/quest/m5/delivery-delay.md).
+[viewer lag histogram](/quest/m3/qos/lag-histogram.md) and a
+delivery-delay histogram, whose plan was deleted on 2026-11-09.

@@ -19,7 +19,3 @@ saw cancels it. The JS lite publisher already coalesces this way
 Tests: churn on one path while the reader is idle leaves one pending event;
 a start then end before a read leaves nothing; a restart after a read is
 still delivered.
-
-## Related
-
-- [Announce credit](/quest/m5/announce-credit.md) - bounds how many paths there can be

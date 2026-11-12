@@ -220,6 +220,112 @@ final class SmokeTests: XCTestCase {
         session.cancel(code: 0)
     }
 
+    /// A credential is answered by the peer, names a route and a claim, and cancels.
+    func testSessionCredentialLifecycle() async throws {
+        let version = ["moq-lite-07-wip"]
+        let server = try Server(bind: "127.0.0.1:0", versions: version, tls: ServerTls(generate: ["localhost"]))
+        defer { server.cancel() }
+        let addr = try await server.listen()
+        async let accepted = server.accept()
+
+        let client = try Client(bind: "127.0.0.1:0", versions: version, tls: ClientTls(insecure: true), once: true)
+        defer { client.cancel() }
+        let session = try await client.connect(to: "https://\(addr)")
+        guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        let peer = try await request.accept()
+
+        XCTAssertThrowsError(try session.credential("")) { error in
+            guard case MoqError.Config = error else {
+                return XCTFail("expected Config, got \(error)")
+            }
+        }
+        let credential = try session.credential("extra")
+        do {
+            try await credential.answered()
+            XCTFail("the default acceptor refuses a token")
+        } catch MoqError.Unsupported {}
+
+        let route = try session.publish.route(path: "room/x", hidden: true)
+        let claim = try session.publish.claim(prefix: "live", hidden: true)
+        for target in [route.setAuth, claim.setAuth] {
+            try target(credential)
+            try target(nil)
+        }
+
+        credential.cancel()
+        do {
+            try await credential.answered()
+            XCTFail("a cancelled credential has no answer")
+        } catch MoqError.Cancelled {}
+        for target in [route.setAuth, claim.setAuth] {
+            XCTAssertThrowsError(try target(credential)) { error in
+                guard case MoqError.Cancelled = error else {
+                    return XCTFail("expected Cancelled, got \(error)")
+                }
+            }
+        }
+        route.cancel()
+        claim.cancel()
+
+        peer.cancel(code: 0)
+        session.cancel(code: 0)
+    }
+
+    /// Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back
+    /// pins `request` and `follow`, while its text parsed is another, named instance that nothing
+    /// serves.
+    func testAnnouncedInstancePinsRequestAndFollow() async throws {
+        let version = ["moq-lite-06"]
+        let published = OriginProducer()
+        let route = try published.route(path: "live")
+        defer { route.cancel() }
+        let server = try Server(
+            bind: "127.0.0.1:0", versions: version, tls: ServerTls(generate: ["localhost"]), publish: published)
+        defer { server.cancel() }
+        let addr = try await server.listen()
+        async let accepted = server.accept()
+
+        let viewer = OriginProducer()
+        let client = try Client(
+            bind: "127.0.0.1:0", versions: version, tls: ClientTls(insecure: true), once: true, consume: viewer)
+        defer { client.cancel() }
+        let session = try await client.connect(to: "https://\(addr)")
+        guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        let peer = try await request.accept()
+        defer {
+            peer.cancel(code: 0)
+            session.cancel(code: 0)
+        }
+
+        let consumer = viewer.consume()
+        guard case .present(let present) = try await nextRoute(try consumer.announced()) else {
+            return XCTFail("expected an announcement")
+        }
+        let minted = present.route.instance
+        XCTAssertTrue(minted.isMinted())
+
+        _ = try await consumer.request(path: "live", instance: minted)
+        let following = try consumer.follow(path: "live", instance: minted)
+        // Cancelling ends the wait below, so an instance that never resolves fails rather than hangs.
+        let watchdog = Task {
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+            following.cancel()
+        }
+        defer { watchdog.cancel() }
+        let followed = try await following.available()
+        XCTAssertNotNil(followed)
+        following.cancel()
+
+        let named = try Instance.parse(text: minted.text())
+        XCTAssertFalse(named.isMinted())
+        XCTAssertEqual(named.description, minted.text())
+        XCTAssertNotEqual(named, minted)
+        do {
+            _ = try await consumer.request(path: "live", instance: named)
+            XCTFail("the same text, named, is another instance")
+        } catch {}
+    }
+
     /// `cancel()` releases the listening socket before it returns, so the same
     /// address binds again with no retry.
     func testServerCloseReleasesPort() async throws {
@@ -237,9 +343,8 @@ final class SmokeTests: XCTestCase {
     func testOriginProducerIsConstructible() throws {
         let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()
-        let prefix = try origin.routePrefix(prefix: "")
-        XCTAssertThrowsError(try prefix.broadcast, "a prefix route owns no broadcast")
-        prefix.cancel()
+        let claim = try origin.claim(prefix: "")
+        claim.cancel()
     }
 
     func testBroadcastIsReachableOnlyWhileAnnounced() async throws {
@@ -286,8 +391,8 @@ final class SmokeTests: XCTestCase {
         let origin = OriginProducer()
         let consumer = origin.consume()
         let route = try origin.route(path: "live")
-        let broadcast = try route.broadcast
-        XCTAssertTrue(broadcast === (try route.broadcast))
+        let broadcast = route.broadcast
+        XCTAssertTrue(broadcast === route.broadcast)
         _ = try await consumer.request(path: "live")
 
         route.cancel()
@@ -351,12 +456,13 @@ final class SmokeTests: XCTestCase {
         guard case .present(let present) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertFalse(present.route.instance.isEmpty)
+        XCTAssertFalse(present.route.instance.isMinted())
         XCTAssertEqual(present.route.instance, first.instance)
         let firstBroadcast = try await following.available()
         XCTAssertNotNil(firstBroadcast)
 
-        let second = try origin.route(path: "instance", instance: "camera", epoch: 1)
+        let camera = try Instance.parse(text: "camera")
+        let second = try origin.route(path: "instance", instance: camera, epoch: 1)
         let takeover = try await following.available()
         XCTAssertNotNil(takeover)
 
@@ -366,9 +472,10 @@ final class SmokeTests: XCTestCase {
         guard case .absent(let absent) = try await nextRoute(announced) else {
             return XCTFail("expected the path to go absent")
         }
-        XCTAssertEqual(absent.route.instance, "camera")
+        XCTAssertEqual(absent.route.instance, camera)
+        XCTAssertEqual(absent.route.instance.description, "camera")
 
-        XCTAssertThrowsError(try origin.route(path: "refused", instance: "")) { error in
+        XCTAssertThrowsError(try Instance.parse(text: "")) { error in
             guard case MoqError.InvalidInstance = error else {
                 return XCTFail("expected InvalidInstance, got \(error)")
             }
@@ -399,7 +506,7 @@ final class SmokeTests: XCTestCase {
 
     func testDynamicServesARequestUnderAPrefix() async throws {
         let origin = OriginProducer()
-        let dynamic = try origin.routePrefix(prefix: "live")
+        let dynamic = try origin.claim(prefix: "live")
         let pending = Task {
             try await origin.consume().request(path: "live/cam")
         }
@@ -408,8 +515,8 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(try request.path, "live/cam")
         let served = try request.route(hidden: true)
         XCTAssertEqual(served.instance, dynamic.instance)
-        let broadcast = try served.broadcast
-        XCTAssertTrue(broadcast === (try served.broadcast))
+        let broadcast = served.broadcast
+        XCTAssertTrue(broadcast === served.broadcast)
         // Only announcing answers the requester.
         try served.announce()
         _ = try await pending.value
@@ -802,7 +909,7 @@ final class SmokeTests: XCTestCase {
         let origin = OriginProducer()
         let route = try origin.route(path: "audio-delay", hidden: true)
         defer { route.cancel() }
-        let broadcast = try route.broadcast
+        let broadcast = route.broadcast
         let audio = try Audio.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1),
@@ -853,7 +960,7 @@ final class SmokeTests: XCTestCase {
         let origin = OriginProducer()
         let route = try origin.route(path: "video-decode-frame", hidden: true)
         defer { route.cancel() }
-        let broadcast = try route.broadcast
+        let broadcast = route.broadcast
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(

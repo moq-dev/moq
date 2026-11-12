@@ -32,10 +32,9 @@ select_packages() {
     # A seed is the first path segment under `rs/`, so only a crate whose
     # manifest sits directly at `rs/<dir>/Cargo.toml` can be one. That drops
     # the `*-fuzz` crates (at `rs/<crate>/fuzz`), which a diff to their crate would
-    # otherwise select as a dependent and compile libFuzzer for. A demo's crate
-    # sits at `demo/<demo>/<dir>/Cargo.toml` and is a seed for its directory.
+    # otherwise select as a dependent and compile libFuzzer for.
     # The separator is normalized first so Windows paths split too.
-    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select((.manifest_path | split("/")) as $p | $p[-3] == "rs" or $p[-4] == "demo"))' <<<"$metadata")
+    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select((.manifest_path | split("/")) as $p | $p[-3] == "rs"))' <<<"$metadata")
 
     # A changed path under `rs/` is a seed only because every crate directory
     # there is named after its crate. Under-selecting checks nothing, so fall
@@ -71,8 +70,7 @@ select_packages() {
             | .packages[]
             | (.manifest_path | split("/")) as $p
             | ($p[:-1] | join("/") + "/") as $crate
-            | select(($p[-4] == "demo" and any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/")))
-                or any(.targets[].src_path | resolve | select(startswith($crate) | not)
+            | select(any(.targets[].src_path | resolve | select(startswith($crate) | not)
                     | ltrimstr($root) | sub("[^/]*$"; ""); . as $dir | any($paths[]; startswith($dir))))
             | .name' <<<"$metadata"
     } | sort -u)
@@ -253,10 +251,6 @@ case "$action" in
         # outside the selection; a change to anything they reach selects
         # moq-cli anyway.
         if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio"); fi
-        # Apple UDP batching is opt-in; compile its implementation and tests on macOS.
-        if [[ "$(uname -s)" == Darwin ]] && wants moq-sock; then
-            flags+=(--features moq-sock/fast-apple-datapath)
-        fi
         cargo check --locked "${flags[@]}" --all-targets
         ;;
     *)

@@ -639,7 +639,7 @@ mod tests {
                 now,
                 rate,
                 busy_until: now,
-                basis: now - Duration::from_secs(1),
+                basis: now.saturating_sub(Duration::from_secs(1)),
                 drift_ppm: 0.0,
                 media,
                 backlog: 0.0,
@@ -654,9 +654,9 @@ mod tests {
         /// Runs for `duration`, returning the bytes delivered and each packet's queueing delay
         fn run(&mut self, duration: Duration) -> (u64, Vec<Duration>) {
             let (delivered, queued) = (self.delivered, self.queue.len());
-            let end = self.now + duration;
+            let end = self.now.saturating_add(duration);
             while self.now < end {
-                self.now += TICK;
+                self.now = self.now.saturating_add(TICK);
                 self.deliver();
                 self.send();
             }
@@ -680,12 +680,13 @@ mod tests {
                 });
                 let start = Ord::max(self.busy_until, self.now);
                 self.queue.push(start - self.now);
-                self.busy_until = start + Duration::from_secs_f64(bytes as f64 / self.rate);
-                let arrival = self.busy_until + PROPAGATION;
+                self.busy_until =
+                    start.saturating_add(Duration::from_secs_f64(bytes as f64 / self.rate));
+                let arrival = self.busy_until.saturating_add(PROPAGATION);
                 self.flights.push_back(Flight {
                     sent: self.now,
                     arrival,
-                    acked: arrival + PROPAGATION,
+                    acked: arrival.saturating_add(PROPAGATION),
                 });
             }
         }
@@ -773,7 +774,7 @@ mod tests {
         let mut windows = Vec::new();
         for basis in [Duration::ZERO, Duration::from_secs(3600)] {
             let mut path = Path::new(250_000.0, None, Config::default());
-            path.basis = path.now - basis;
+            path.basis = path.now.saturating_sub(basis);
             path.run(Duration::from_secs(10));
             windows.push(path.scream.window());
         }
@@ -833,9 +834,13 @@ mod tests {
         let now = Instant::now();
         let mut base = BaseDelay::new(now);
         base.update(now, 1_000);
-        base.update(now + BASE_INTERVAL * 3, 5_000);
+        base.update(now.saturating_add(BASE_INTERVAL * 3), 5_000);
         assert_eq!(base.get(), 1_000, "a minimum inside the history expired");
-        base.update(now + BASE_INTERVAL * 3 + Duration::from_secs(600), 9_000);
+        base.update(
+            now.saturating_add(BASE_INTERVAL * 3)
+                .saturating_add(Duration::from_secs(600)),
+            9_000,
+        );
         assert_eq!(
             base.get(),
             9_000,
@@ -877,17 +882,29 @@ mod tests {
         let now = Instant::now();
         let mut scream = scream(now, Config::default());
         scream.ref_wnd = 100_000.0;
-        lose(&mut scream, now + ms(50), now + ms(1));
+        lose(
+            &mut scream,
+            now.saturating_add(ms(50)),
+            now.saturating_add(ms(1)),
+        );
         assert_eq!(scream.ref_wnd, 100_000.0 * BETA_LOSS);
 
-        lose(&mut scream, now + ms(200), now + ms(40));
+        lose(
+            &mut scream,
+            now.saturating_add(ms(200)),
+            now.saturating_add(ms(40)),
+        );
         assert_eq!(
             scream.ref_wnd,
             100_000.0 * BETA_LOSS,
             "reacted to a loss it answered"
         );
 
-        lose(&mut scream, now + ms(300), now + ms(100));
+        lose(
+            &mut scream,
+            now.saturating_add(ms(300)),
+            now.saturating_add(ms(100)),
+        );
         assert_eq!(scream.ref_wnd, 100_000.0 * BETA_LOSS * BETA_LOSS);
     }
 
@@ -903,7 +920,7 @@ mod tests {
         scream.bytes_newly_acked = 100_000;
         // Just past half the target: alpha 0.1
         scream.qdelay_avg = Duration::from_millis(33);
-        scream.update(now + Duration::from_millis(50));
+        scream.update(now.saturating_add(Duration::from_millis(50)));
 
         // At a 333ms RTT, a reaction every 25ms takes 1/13.3 of alpha / 2
         let reduced = 100_000.0 * (1.0 - 0.1 / 2.0 / (333.0 / 25.0));

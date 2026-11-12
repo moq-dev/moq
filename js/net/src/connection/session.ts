@@ -32,9 +32,8 @@ export interface Session {
 
 	/**
 	 * The tokens this side presented and the grant they earned, plus the tokens the peer
-	 * presents. On moq-lite-07-wip, and on moq-transport draft-18+ when both sides negotiate
-	 * MoQ Auth, each side presents its connection's credential right after setup.
-	 * Otherwise the grant stays undefined.
+	 * presents. On moq-lite-07-wip each side presents its connection's credential right after
+	 * setup. Otherwise the grant stays undefined.
 	 *
 	 * The handle passed to `connect` as `auth`, or else one the session created for itself,
 	 * which ends with it.

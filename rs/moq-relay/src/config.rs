@@ -493,14 +493,14 @@ mod tests {
 		let path = dir.path().join("relay.toml");
 		std::fs::write(
 			&path,
-			"[listen.extensions]\nauth = false\n\n[connect.extensions]\nsolicit = false\n",
+			"[listen.extensions]\nietf = true\n\n[connect.extensions]\nsolicit = false\n",
 		)
 		.unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
-		assert!(!config.listen.extensions.auth);
+		assert!(config.listen.extensions.ietf);
 		assert!(config.listen.extensions.solicit);
 		assert!(!config.connect.extensions.solicit);
-		assert!(config.connect.extensions.auth);
+		assert!(!config.connect.extensions.ietf);
 	}
 
 	#[cfg(feature = "stun")]
@@ -877,7 +877,7 @@ root = ["ca.pem"]
 
 		refuse("[runtime]\npin = true\n", "runtime.pin requires runtime.workers");
 		refuse(
-			"[runtime]\nworkers = 0\npin = true\n",
+			"[runtime]\nworkers = \"shared\"\npin = true\n",
 			"runtime.pin requires runtime.workers",
 		);
 
@@ -1084,7 +1084,10 @@ ws = false
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
-		assert_eq!(config.runtime.workers, Some(8));
+		assert_eq!(
+			config.runtime.workers,
+			crate::runtime::Workers::Count(8.try_into().unwrap())
+		);
 		assert!(!config.runtime.pin, "TOML's runtime.pin=false must survive the merge");
 		assert!(
 			!config.runtime.io_uring,
@@ -1102,12 +1105,14 @@ ws = false
 			std::ffi::OsString::from("moq-relay"),
 			std::ffi::OsString::from(&path),
 			std::ffi::OsString::from("--runtime-pin=true"),
+			std::ffi::OsString::from("--runtime-workers=auto"),
 			std::ffi::OsString::from("--web-ws=true"),
 			#[cfg(feature = "websocket")]
 			std::ffi::OsString::from("--connect-websocket-enabled=true"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.runtime.pin);
+		assert_eq!(config.runtime.workers, crate::runtime::Workers::Auto);
 		assert!(config.web.ws);
 		#[cfg(feature = "websocket")]
 		assert_eq!(config.connect.websocket.enabled, Some(true));

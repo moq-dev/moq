@@ -1,7 +1,6 @@
 import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { defineConfig } from "vite";
-import solidPlugin from "vite-plugin-solid";
 import { worklet } from "../../js/common/vite-plugin-worklet.ts";
 import { consoleOverlay } from "./console-overlay.ts";
 import { openTabs } from "./open-tabs.ts";
@@ -11,7 +10,6 @@ export default defineConfig({
 	envDir: resolve(import.meta.dirname),
 	plugins: [
 		tailwindcss(),
-		solidPlugin(),
 		worklet(),
 		consoleOverlay(),
 		// Open the stats, publish, and watch demos each in their own tab.

@@ -27,7 +27,7 @@ const TOLERANCE: Duration = Duration::from_millis(1);
 
 /// A capture imported whole, with what keeps its broadcast up.
 struct Imported {
-	_passthrough: Passthrough,
+	_passthrough: crate::container::ts::passthrough::Finished,
 	_catalog: crate::catalog::Producer,
 	_broadcast: moq_net::broadcast::Producer,
 	consumer: moq_net::broadcast::Consumer,
@@ -41,7 +41,7 @@ async fn import(data: &[u8]) -> Imported {
 	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
 	let name = passthrough.track().to_string();
 	passthrough.decode(data).unwrap();
-	passthrough.finish().unwrap();
+	let passthrough = passthrough.finish().unwrap();
 
 	let mut track = consumer
 		.track(&name)
@@ -116,7 +116,7 @@ fn republish_cut(
 		let mut due = Duration::ZERO;
 		for (i, object) in objects.into_iter().enumerate() {
 			due = due.max(at(i, &object));
-			kio::clock::sleep_until(start + due).await;
+			kio::clock::sleep_until(start.saturating_add(due)).await;
 			if group.as_ref().map(|(sequence, _)| *sequence) != Some(object.group) {
 				if let Some((sequence, group)) = group.take() {
 					end(sequence, group, &cut);
@@ -139,17 +139,19 @@ fn republish_cut(
 		if let Some((sequence, group)) = group {
 			end(sequence, group, &cut);
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		std::future::pending::<()>().await;
 	});
 	Republished { consumer, task }
 }
 
 /// Finish `group`, or abort it as evicted if it is one of the `cut`.
-fn end(sequence: u64, mut group: moq_net::group::Producer, cut: &[u64]) {
+fn end(sequence: u64, group: moq_net::group::Producer, cut: &[u64]) {
 	match cut.contains(&sequence) {
 		true => group.abort(moq_net::Error::Old).unwrap(),
-		false => group.finish().unwrap(),
+		false => {
+			group.finish().unwrap();
+		}
 	}
 }
 

@@ -105,10 +105,10 @@ async fn segments_match_their_manifests() {
 		recorder.caught_up(&seen.newest()).await;
 	}
 	seen.reload = true;
-	import.finish().expect("finish import");
+	let _finished = import.finish().expect("finish import");
 	catalog.finish().expect("finish catalog");
 
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	while seen.poll(&app).await != Polled::Ended {
 		assert!(kio::clock::now() < deadline, "the playlists never ended");
 		kio::clock::sleep(Duration::from_millis(50)).await;
@@ -282,7 +282,7 @@ impl Recorder {
 	/// Wait until each rendition's cursor has recorded the `newest` segment its playlist listed,
 	/// or failed.
 	async fn caught_up(&self, newest: &BTreeMap<&str, u64>) {
-		let deadline = kio::clock::now() + TIMEOUT;
+		let deadline = kio::clock::now().saturating_add(TIMEOUT);
 		loop {
 			let behind = {
 				let recorded = self.recorded.lock().unwrap();

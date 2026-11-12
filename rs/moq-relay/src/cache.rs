@@ -84,9 +84,8 @@ pub struct Cache {
 	pub pool: cache::Pool,
 
 	/// Ceiling on each track's max age (the latest group of every track never goes
-	/// stale). [`Duration::MAX`] imposes no ceiling, leaving each track's own max age
-	/// in force.
-	pub duration: Duration,
+	/// stale). `None` imposes no ceiling, leaving each track's own max age in force.
+	pub duration: Option<Duration>,
 
 	/// The headroom governor, not yet running.
 	pub(crate) governor: Option<futures::future::BoxFuture<'static, ()>>,
@@ -124,7 +123,7 @@ impl Config {
 
 		Ok(Cache {
 			pool,
-			duration: duration.unwrap_or(Duration::MAX),
+			duration,
 			governor: governed,
 		})
 	}
@@ -216,7 +215,7 @@ mod tests {
 	fn default_config_enables_expiry_without_clamping_media_time() {
 		let cache = Config::default().init().unwrap();
 		assert_eq!(cache.pool.expiry(), Some(cache::DEFAULT_EXPIRY));
-		assert_eq!(cache.duration, Duration::MAX);
+		assert_eq!(cache.duration, None);
 	}
 
 	#[test]
@@ -228,7 +227,7 @@ mod tests {
 		};
 		let cache = config.init().unwrap();
 		assert_eq!(cache.pool.expiry(), Some(duration));
-		assert_eq!(cache.duration, duration);
+		assert_eq!(cache.duration, Some(duration));
 	}
 
 	#[test]

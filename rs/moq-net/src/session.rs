@@ -414,10 +414,11 @@ impl Session {
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
 	/// [`poll`](goaway::Consumer::poll) it with a no-op waiter for a synchronous check, or
-	/// wait on it for one. Once a GOAWAY arrives, this
-	/// session's routes cost [`Cost::DRAIN`](crate::origin::Cost::DRAIN): requests
-	/// keep opening on it until a replacement session's route outranks it, and
-	/// existing subscriptions keep flowing until the session closes.
+	/// wait on it for one. Once a GOAWAY arrives, this session's routes rank below
+	/// every other eligible route, whatever their preference or cost, on this node
+	/// only: requests keep opening on it until a replacement session's route
+	/// outranks it, and existing subscriptions keep flowing until the session
+	/// closes. A relay still forwards the routes at their real cost.
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
@@ -437,9 +438,8 @@ impl Session {
 	/// The handle passed to [`Client::with_auth`](crate::Client::with_auth), or else one
 	/// this session created for itself, which ends with it.
 	///
-	/// On moq-lite-07-wip, and on moq-transport when both sides negotiate the MoQ Auth
-	/// extension, each side presents its connection's credential right after setup.
-	/// Older versions, and peers that do not negotiate it, leave the grant `None`.
+	/// On moq-lite-07-wip each side presents its connection's credential right after setup.
+	/// Older versions and moq-transport leave the grant `None`.
 	pub fn auth(&self) -> auth::Handle {
 		self.auth.clone()
 	}
@@ -1094,6 +1094,11 @@ impl Slots {
 			max,
 			stats: None,
 		}
+	}
+
+	/// A count of its own under the same cap, starting empty and reported nowhere.
+	pub(crate) fn split(&self) -> Self {
+		Self::new(self.max)
 	}
 
 	/// Report how many are held to `stats`, as `cap`'s peak.

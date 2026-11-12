@@ -12,11 +12,13 @@
 //! thread-bound with it; only the Apple `Sink::Inner` keeps the serialized
 //! `Send` wrapper, safe because `Sink` serializes every call.
 
+use std::collections::VecDeque;
 use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
 use std::slice;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use moq_net::Timestamp;
 use objc2_core_foundation::{
 	CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse, kCFBooleanTrue,
 };
@@ -50,13 +52,15 @@ use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
-/// Where the C output callback drops finished frames, read back after each
-/// `encode_frame` + `complete_frames`. Lives behind a `Box` so its address is
-/// stable for the lifetime of the session that holds it as a refcon.
+/// Where the C output callback queues finished frames, popped by `receive`.
+/// Lives behind a `Box` so its address is stable for the lifetime of the
+/// session that holds it as a refcon.
 struct Sink {
 	codec: Codec,
-	/// Each access unit, and whether it is a keyframe.
-	packets: Vec<(Bytes, bool)>,
+	/// The timestamp of the frame going in, which every access unit the callback
+	/// sees during its `complete_frames` came from.
+	timestamp: Timestamp,
+	ready: VecDeque<Encoded>,
 	error: Option<i32>,
 }
 
@@ -89,7 +93,8 @@ impl VideoToolbox {
 
 		let mut sink = Box::new(Sink {
 			codec: config.codec,
-			packets: Vec::new(),
+			timestamp: Timestamp::ZERO,
+			ready: VecDeque::new(),
 			error: None,
 		});
 		let refcon = (&mut *sink as *mut Sink).cast::<c_void>();
@@ -216,9 +221,12 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
-		self.sink.packets.clear();
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		self.sink.error = None;
+		// `complete_frames` below forces this frame out before returning, so every
+		// access unit the callback sees until then came from it.
+		self.sink.timestamp = frame.timestamp;
+		let before = self.sink.ready.len();
 
 		// Zero-copy when the capture handed us a surface; otherwise upload I420.
 		let pixel_buffer = match &frame.surface {
@@ -271,23 +279,17 @@ impl Backend for VideoToolbox {
 			)));
 		}
 		// A dropped frame comes back with no packet and no error.
-		self.keyframe_pending = cut && self.sink.packets.is_empty();
-		// `complete_frames` above forces this frame out before returning, so every
-		// packet collected here came from it and carries its timestamp.
-		Ok(std::mem::take(&mut self.sink.packets)
-			.into_iter()
-			.map(|(payload, keyframe)| Encoded::new(payload, frame.timestamp, keyframe))
-			.collect())
+		self.keyframe_pending = cut && self.sink.ready.len() == before;
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.sink.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		// complete_frames runs per-encode, so nothing is ever buffered.
-		Ok(Vec::new())
-	}
-
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-		// complete_frames runs per-encode, so nothing is buffered at shutdown.
-		Ok(Vec::new())
+		Ok(())
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
@@ -354,7 +356,7 @@ unsafe extern "C-unwind" fn output_callback(
 		return; // dropped frame
 	};
 	match annexb_from_sample(sample, sink.codec) {
-		Ok(Some(packet)) => sink.packets.push(packet),
+		Ok(Some((payload, keyframe))) => sink.ready.push_back(Encoded::new(payload, sink.timestamp, keyframe)),
 		Ok(None) => {}
 		Err(status) => sink.error = Some(status),
 	}
@@ -630,7 +632,7 @@ mod tests {
 						Surface::I420(I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap()),
 						timestamp,
 					);
-					let packets = encoder.encode(&frame, index == 1).unwrap();
+					let packets = encoder.encode_all(&frame, index == 1).unwrap();
 					assert_eq!(packets.len(), 1, "{codec:?} {preset:?}");
 					assert_eq!(packets[0].timestamp, timestamp);
 					if index <= 1 {
@@ -652,7 +654,7 @@ mod tests {
 						expected == Preset::Balanced
 					);
 				}
-				assert!(encoder.finish().unwrap().is_empty());
+				assert!(encoder.flush_all().unwrap().is_empty());
 			}
 		}
 	}

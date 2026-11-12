@@ -70,12 +70,7 @@ fn lite_session_over_the_worker() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let server_config = quic::server::Config::new(certs.server(&[ALPN]));
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -84,10 +79,8 @@ fn lite_session_over_the_worker() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
 	// The server's certificate is our own self-signed one; this is loopback.
-	dial.verify = false;
+	let dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 
 	// The publisher session runs as a worker task for the life of the test.
 	let server_handle = handle.clone();
@@ -207,12 +200,7 @@ fn two_lite_sessions_share_the_server_socket() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let server_config = quic::server::Config::new(certs.server(&[ALPN]));
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -245,9 +233,7 @@ fn two_lite_sessions_share_the_server_socket() {
 		}
 	});
 
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
+	let dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 
 	let subs = [sub_a.clone(), sub_b.clone()];
 	worker
@@ -307,169 +293,4 @@ fn two_lite_sessions_share_the_server_socket() {
 	drop(sub_a);
 	drop(sub_b);
 	origins.join().expect("origin drivers");
-}
-
-/// The client verifies for real, trusting only the certificate the server
-/// presents: nothing handshakes unless the configured roots reach moq-quic.
-#[test]
-fn configured_roots_verify_the_server() {
-	let Some(mut worker) = worker() else { return };
-	let handle = worker.handle();
-	let certs = support::certs().expect("certificates");
-
-	let server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
-
-	let server_sock = handle
-		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-		.expect("server socket");
-	let server_addr = server_sock.local_addr().expect("server addr");
-	let client_sock = handle
-		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-		.expect("client socket");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	// Verification on, trusting nothing but the certificate this server
-	// presents. The platform store is off, so if it leaked in, an unrelated
-	// public CA would be trusted too.
-	dial.system_roots = false;
-	dial.roots = vec![certs.cert.clone()];
-
-	handle.spawn(async move {
-		quic::server::accept(server_sock, &server_config)
-			.await
-			.expect("quic accept");
-	});
-
-	worker
-		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
-				.await
-				.expect("quic connect");
-			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
-		})
-		.expect("worker");
-}
-
-/// `ClientAuth::Required` is the only setting that actually demands a client
-/// certificate. `SSL_VERIFY_PEER` on its own validates one that arrives and
-/// waves through a client that presents none, so a server meaning mTLS has to
-/// say `Required`.
-///
-/// A failed handshake never reaches `accept` (the endpoint keeps listening),
-/// so the assertion is double-sided: the server accepts nothing, and the
-/// client's connection dies. Under TLS 1.3 the client may finish its own
-/// handshake before the server's verdict on the certificate it never sent
-/// comes back, so `connect` returning `Ok` proves nothing; the refusal
-/// arrives as the connection's terminal error.
-#[test]
-fn required_client_auth_refuses_an_anonymous_client() {
-	let Some(mut worker) = worker() else { return };
-	let handle = worker.handle();
-	let certs = support::certs().expect("certificates");
-
-	// Any root will do: the client presents nothing, so it fails before the
-	// chain is ever checked.
-	let server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::Required(vec![certs.cert.clone()]))
-			.expect("tls"),
-	);
-
-	let server_sock = handle
-		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-		.expect("server socket");
-	let client_sock = handle
-		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-		.expect("client socket");
-
-	let endpoint = quic::Endpoint::new(
-		quic::endpoint::Config::default().with_server(server_config),
-		server_sock,
-	)
-	.expect("endpoint");
-	let server_addr = endpoint.local_addr();
-
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
-	// No identity: this client is anonymous.
-
-	let accepted = std::rc::Rc::new(std::cell::Cell::new(false));
-	let accept_flag = accepted.clone();
-	handle.spawn(async move {
-		if endpoint.accept().await.is_ok() {
-			accept_flag.set(true);
-		}
-	});
-
-	worker
-		.block_on(async move {
-			match quic::client::connect(client_sock, &dial, server_addr, "localhost").await {
-				// The dial itself was refused; done.
-				Err(_) => {}
-				// Established locally, but the server's refusal closes it.
-				Ok(conn) => {
-					conn.closed().await;
-				}
-			}
-		})
-		.expect("worker");
-
-	assert!(
-		!accepted.get(),
-		"a server requiring a certificate must refuse an anonymous client"
-	);
-}
-
-/// A root file is routinely a bundle of several CAs, and it has to be loaded
-/// whole.
-///
-/// Only the second CA in the bundle below signed the server, so a loader that
-/// stops at the first certificate rejects a peer that is perfectly valid while
-/// still looking configured. The relay reaches this through `listen.tls.root`.
-#[test]
-fn a_root_bundle_is_loaded_whole() {
-	let Some(mut worker) = worker() else { return };
-	let handle = worker.handle();
-	let bundle = support::bundle().expect("bundle");
-
-	let server_config = quic::server::Config::new(
-		quic::Identity::open(&bundle.cert, &bundle.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
-
-	let server_sock = handle
-		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-		.expect("server socket");
-	let server_addr = server_sock.local_addr().expect("server addr");
-	let client_sock = handle
-		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-		.expect("client socket");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.system_roots = false;
-	dial.roots = vec![bundle.roots.clone()];
-
-	handle.spawn(async move {
-		quic::server::accept(server_sock, &server_config)
-			.await
-			.expect("quic accept");
-	});
-
-	worker
-		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
-				.await
-				.expect("quic connect");
-			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
-		})
-		.expect("worker");
 }

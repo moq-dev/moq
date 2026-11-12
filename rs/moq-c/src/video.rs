@@ -642,11 +642,11 @@ impl VideoEncoder {
 			return Ok(());
 		};
 		let frame = moq_video::Frame::new(surface, timestamp);
-		// A backend that pipelines hands back an earlier frame's output, so this is
-		// zero or more access units rather than one per call.
-		let encoded = block_on(encoder.encode(frame))?;
+		// A backend that pipelines readies an earlier frame's output, so `publish`
+		// drains zero or more access units rather than one per call.
+		block_on(encoder.encode(frame))?;
 		let before = self.producer.demand();
-		let published = self.producer.publish(&encoded);
+		let published = publish(encoder, &mut self.producer);
 		// A frame whose decoder identity changed, such as a resume at a ceiling past the declared
 		// level, moved the rendition to a newly named track, whose demand the claim has to watch.
 		// The claim moves even when publishing on the new track failed, so it never stays on the
@@ -702,7 +702,7 @@ impl VideoEncoder {
 				if let Some(encoder) = self.encoder.take() {
 					self.target = moq_mux::rate::Target::Disabled;
 					// The encoder is gone either way, so a lost tail only costs those frames.
-					let drained = block_on(encoder.finish()).and_then(|encoded| self.producer.publish(&encoded));
+					let drained = drain(encoder, &mut self.producer);
 					if let Err(err) = drained {
 						tracing::warn!(error = %err, "failed to drain a disabled rendition's encoder");
 					}
@@ -756,7 +756,7 @@ impl VideoEncoder {
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = match encoder {
-			Some(encoder) => block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded)),
+			Some(encoder) => drain(encoder, &mut producer),
 			None => Ok(()),
 		};
 		finalize(producer, drained, &children, crate::publish::Child::Video(id))?;
@@ -764,6 +764,26 @@ impl VideoEncoder {
 		// cleanly before the panic is reported.
 		follower.map_or(Ok(()), |follower| follower.check())
 	}
+}
+
+/// Publish every access unit `encoder` has ready.
+fn publish(
+	encoder: &mut moq_video::encode::Sink,
+	producer: &mut moq_video::encode::Producer,
+) -> Result<(), moq_video::Error> {
+	while let Some(encoded) = encoder.receive()? {
+		producer.publish(&encoded)?;
+	}
+	Ok(())
+}
+
+/// Flush `encoder` and publish its tail, closing it.
+fn drain(
+	mut encoder: moq_video::encode::Sink,
+	producer: &mut moq_video::encode::Producer,
+) -> Result<(), moq_video::Error> {
+	block_on(encoder.flush())?;
+	publish(&mut encoder, producer)
 }
 
 impl Video {
