@@ -322,9 +322,11 @@ export class Decoder {
 	}
 
 	// A group the relay expires is never observed, so a subscription cut to the target would cap the
-	// estimate at the target it already holds. The container consumer skips at the same max delay,
-	// since it observes each frame before applying it, so audio the ring could still catch up on is
-	// delivered, and carves out the warmup the subscription adds once it has warmed, as Rust's does.
+	// estimate at the target it already holds. The container consumer drops aged media at the same max
+	// delay, since it observes each frame before applying it, so audio the ring could still catch up on
+	// is delivered, and carves out the warmup the subscription adds once it has warmed, as Rust's does.
+	// It waits on a missing group only for the delay plus the lookahead: past that the group would play
+	// late, and a reordered backlog's holes waited out to the max would read as jitter to the estimator.
 	// See doc/concept/audio-jitter.md.
 	#runSubscribeMaxDelay(effect: Effect): void {
 		const delay = effect.get(this.sync.out.delay);
@@ -852,6 +854,7 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			delay: this.#delay,
+			wait: this.sync.out.maxDelay,
 			warmup: Duration.millis(config.warmup ?? 0),
 			predecessor: continues ? outgoing.consumer : undefined,
 		});
