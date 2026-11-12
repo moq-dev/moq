@@ -283,6 +283,33 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	broadcast.close();
 }
 
+// Withheld as it fails, so a read in the same turn cannot take it either.
+test("fill: a failed answer is withheld from a subscribed reader that reads at once", async () => {
+	for (const dispositions of [false, true]) {
+		const broadcast = new BroadcastProducer();
+		const track = broadcast.createTrack("video", { maxAge: null });
+		hooks.receiveTrack(track);
+		hooks.receiveGroup(track, { sequence: 2n, start: 0 }).finish();
+		const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null } });
+		const requests = track.requests();
+		const fetching = wireOf(broadcast).fetchGroup("video", 1n);
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		fill.accept(1n).abort(new Error("archive failed"));
+		const seen: unknown[] = [];
+		for (let recv = hooks.tryRecvGroup(reader, dispositions); recv.kind !== "idle"; ) {
+			seen.push(recv.kind === "group" ? recv.group.sequence : recv);
+			recv = hooks.tryRecvGroup(reader, dispositions);
+		}
+		expect(seen).toEqual([2n]);
+		fill.close();
+		await fetching.catch(() => undefined);
+		reader.close();
+		requests.close();
+		broadcast.close();
+	}
+});
+
 // A failed fill answer leaves the cache, but a reader already holding it keeps what it buffered and
 // sees the fill's own failure, never a cache eviction.
 test("fill: a held answer that fails keeps its frames and its failure", async () => {

@@ -859,6 +859,8 @@ export const hooks: {
 	 * the group joined accepted it.
 	 */
 	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
+	/** Call `fn` as a group aborts, before its readers can look; assigned by `group.ts`. */
+	onGroupAbort: (group: GroupProducer, fn: (error: Error) => void) => void;
 	/** Whether a group's bytes after its first frame exceed `ratio` times the first frame. */
 	overRefresh: (group: GroupProducer, ratio: number) => boolean;
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
@@ -1196,6 +1198,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	admitGroupStart: () => {
+		throw new Error("group.ts not loaded");
+	},
+	onGroupAbort: () => {
 		throw new Error("group.ts not loaded");
 	},
 	overRefresh: () => {

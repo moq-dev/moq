@@ -683,6 +683,11 @@ class TrackState {
 	/** This sink's reader as the producer's fills know it, once it asked one. */
 	asker?: Asker;
 	/**
+	 * A one-group fetch, once it asked: a failed fill answer is its outcome, as a Rust fetch hears
+	 * its fill's, so the producer's `#withhold` leaves it this sink.
+	 */
+	fetch?: true;
+	/**
 	 * Whether this sink's reader will still read group `sequence`: only a buffered group it will
 	 * read keeps its source wanted. Set once the reader exists.
 	 */
@@ -1759,6 +1764,7 @@ export class Producer {
 	// holding it keeps its frames and the fill's own failure while the pool still counts them.
 	#withhold(entry: CachedGroup): void {
 		for (const [sink, mirror] of entry.mirrors) {
+			if (sink.fetch) continue;
 			const index = sink.groups.peek().indexOf(mirror);
 			if (index < 0) continue;
 			sink.groups.mutate((groups) => {
@@ -1925,6 +1931,15 @@ export class Producer {
 		};
 		hooks.chargeGroup(group, entry.charge);
 		this.#undrop(group.sequence);
+		// No reader is handed a failed fill answer (see #withhold), withheld as it aborts so a
+		// read that follows at once cannot take it: its sequence is unknown again, owed while the
+		// feed owes it, else judged by budget or filled again.
+		if (fetched) {
+			hooks.onGroupAbort(group, (error) => {
+				// An eviction takes the mirrors out itself.
+				if (!EVICTED.has(error) && this.#cached.get(group.sequence) === entry) this.#withhold(entry);
+			});
+		}
 		group.closed.then((closed) => {
 			// An aborted live edge is no longer protected, so it may expire like any other.
 			if (closed instanceof Error) this.#account.demote(entry);
@@ -1934,12 +1949,7 @@ export class Producer {
 			if (current && current.group !== group) return;
 			// A failed fill answer says nothing of the feed, so it gives nothing up: the track's drops
 			// and arrivals hold only the feed's verdicts, as Rust records nothing for a failed fill.
-			// No reader is handed it either (see #withhold), so its sequence is unknown again: owed
-			// while the feed owes it, else judged by budget or filled again.
-			if (fetched) {
-				if (current) this.#withhold(entry);
-				return;
-			}
+			if (fetched) return;
 			if (HOLES.has(toStreamCode(closed))) return;
 			this.#drop(group.sequence, group.sequence + 1n, { error: closed });
 		});
@@ -3601,6 +3611,7 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (!producer) return false;
 		if (this.#state.info.peek() === undefined && this.#state.closed.peek() === undefined) return "pending";
+		this.#state.fetch = true;
 		if (cachedHolds(producer, sequence)) return true;
 		// Joins a fill already bringing it, handler or not; asks a new one only while one is open.
 		const asked = fillsOf(producer).ask(sequence, sequence + 1n, this.#askerOf());
