@@ -149,7 +149,7 @@ pub(super) struct FakeSink {
 	stride: usize,
 	sample_rate: u32,
 	latency: Duration,
-	/// How much the real ring holds, which a larger latency fails as it does there.
+	/// How much the real ring holds, past which a latency fails and a write drops as there.
 	capacity: Duration,
 	refill: bool,
 	/// Running dry is a declared silence rather than an underrun.
@@ -223,6 +223,12 @@ impl Sink for FakeSink {
 			.first_chunk::<4>()
 			.map(|bytes| f32::from_le_bytes(*bytes))
 			.unwrap_or_default();
+		let mut written = moq_audio::playback::Write::default();
+		// A write past the ring's capacity is dropped, as the real ring drops it.
+		if self.buffered() + duration > self.capacity {
+			written.dropped_sample_frames = frames as usize;
+			return Ok(written);
+		}
 		if self.refill {
 			self.pending.push((sample, duration));
 			self.queued += duration;
@@ -232,7 +238,6 @@ impl Sink for FakeSink {
 		} else {
 			self.play(sample, duration);
 		}
-		let mut written = moq_audio::playback::Write::default();
 		written.accepted_sample_frames = frames as usize;
 		Ok(written)
 	}

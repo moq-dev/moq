@@ -628,20 +628,6 @@ async fn play_audio<O: Output>(
 	let samples = |duration: Duration| (duration.as_secs_f64() * sample_rate as f64).round() as u64;
 	let mut silence = Vec::new();
 
-	// The longest hole worth playing through, in samples. A hole this player would
-	// rather sit through is one it is already willing to buffer, which is what the
-	// decoder's latency budget says: anything longer is what that budget chose to
-	// skip, so playing it as silence would hand back the delay the skip avoided.
-	// Past it the sink skips the hole and the clock re-anchors, as it does today.
-	let fill_max = samples(max_delay);
-
-	let mut timeline = AudioTimeline::default();
-
-	// A replacement's opening cushion and its timeline plan must agree. The
-	// callback now owns target convergence, rather than write-time padding
-	// subtracting the incoming frame before it reaches the sink.
-	let lead = |delay: Duration| latency.max(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
-
 	// The most the sink holds, within what its ring was sized for. A shared delay
 	// past it, such as a slow video encoder's or a measured target past a long
 	// stretch, stays encoded in the consumer until it is due instead, so the
@@ -650,6 +636,22 @@ async fn play_audio<O: Output>(
 		.max(AUDIO_BUFFER_MIN)
 		.min(latency + SINK_ROOM)
 		.min(moq_audio::playback::Input::LATENCY_MAX);
+
+	// The longest hole worth playing through, in samples. A hole this player would
+	// rather sit through is one it is already willing to buffer, which is what the
+	// decoder's latency budget says, within what the sink holds: anything longer
+	// is what that budget chose to skip, or silence the ring would drop along with
+	// the frame after it. Past it the sink skips the hole and the clock re-anchors.
+	let fill_max = samples(cap);
+
+	let mut timeline = AudioTimeline::default();
+
+	// A replacement's opening cushion and its timeline plan must agree. The
+	// callback now owns target convergence, rather than write-time padding
+	// subtracting the incoming frame before it reaches the sink. Like a hole,
+	// the cushion is silence the sink must hold.
+	let lead = |delay: Duration| latency.max(delay.min(cap).max(AUDIO_BUFFER_MIN));
+
 	let schedule = presentation.consume();
 	// The consumer decodes a packet once the sink has room for it. Its playhead is
 	// where the shared clock says the last write sounds, rather than what the sink
@@ -1252,6 +1254,71 @@ mod tests {
 	async fn audio_holds_a_target_past_its_ring_encoded() {
 		let jitter = Duration::from_secs(4);
 		assert_on_time(first_sound(jitter, Duration::from_secs(5), None, None).await, jitter);
+	}
+
+	/// A hole longer than the sink's ring holds is skipped rather than filled with
+	/// silence the ring would drop along with the frame after it.
+	#[tokio::test]
+	async fn a_hole_past_the_ring_is_skipped() {
+		tokio::time::pause();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
+		let mut options = moq_audio::decode::Options::new();
+		let jitter = Duration::from_millis(100);
+		// A budget past the ring, as a long `--stretch` asks for.
+		options.delay = moq_audio::decode::Delay {
+			min: Some(jitter),
+			max: Some(Duration::from_secs(5)),
+		};
+		options.estimate = false;
+		options.output.format = moq_audio::Format::F32;
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1),
+			"audio",
+			options,
+		)
+		.await
+		.unwrap();
+		let recorder = Recorder::default();
+		let (_catalog, stated) = tokio::sync::watch::channel(None);
+		let playback = AudioPlayback {
+			delay: stated,
+			changed: Default::default(),
+			speaker: recorder.clone(),
+			presentation: Presentation::new(jitter),
+			playhead: Default::default(),
+			latency: AUDIO_BUFFER_MIN,
+			output: recorder.clone(),
+			stretch: Duration::from_secs(5),
+		};
+		let task = tokio::spawn(async move {
+			play_audio(consumer, playback, std::future::pending())
+				.await
+				.unwrap()
+				.finish()
+				.await;
+		});
+		for index in 0..30 {
+			producer.write(packet(index, 0.25)).unwrap();
+			kio::clock::sleep(PACKET_DURATION).await;
+		}
+		// Three seconds of packets the publisher never sent, then live again.
+		let after = 30 + 3000 / PACKET_DURATION.as_millis() as u64;
+		producer.write(packet(after, 0.5)).unwrap();
+		for index in after + 1..after + 30 {
+			kio::clock::sleep(PACKET_DURATION).await;
+			producer.write(packet(index, 0.25)).unwrap();
+		}
+		let _finished = producer.finish().unwrap();
+		task.await.unwrap();
+		assert!(
+			recorder.played().iter().any(|part| part.sample == 0.5),
+			"the frame after the hole played"
+		);
 	}
 
 	fn assert_on_time(sounded: Duration, due: Duration) {
