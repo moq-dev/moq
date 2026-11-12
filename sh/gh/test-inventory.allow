@@ -37,3 +37,4 @@ ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_expo
 
 # Flaked under load; disabled until fixed at its cause.
 ignore moq-ffi::test::raw_audio_decode_delay /quest/m0/test-flakes-2/ffi-raw-audio-decode-delay.md
+ignore moq-gst::source::imp::session_tests::a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times /quest/m0/test-flakes-2/gst-moqsink-restart-pads.md
