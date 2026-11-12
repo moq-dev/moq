@@ -489,7 +489,7 @@ impl Connection {
 	}
 
 	/// The receive windows now in force: the connection's, and the most one stream holds.
-	#[cfg(feature = "net")]
+	#[cfg(feature = "quic")]
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
 		moq_net::transport::ReceiveWindow::new(Some(state.inner.receive_window()), state.inner.stream_receive_window())
@@ -497,7 +497,7 @@ impl Connection {
 
 	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,
 	/// or `None` before the handshake completes.
-	#[cfg(feature = "net")]
+	#[cfg(feature = "quic")]
 	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
 		self.0.state.lock().inner.export_keying_material(label, context)
 	}
@@ -516,13 +516,13 @@ impl Connection {
 	}
 
 	/// The wire counters the driver updates as it sends and receives.
-	#[cfg(feature = "net")]
+	#[cfg(feature = "quic")]
 	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
 		self.0.shared.wire.clone()
 	}
 
 	/// The target the driver probes up to, or `None` when the congestion controller cannot probe.
-	#[cfg(feature = "net")]
+	#[cfg(feature = "quic")]
 	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
 		self.0.shared.probe.clone()
 	}

@@ -38,6 +38,7 @@ fn run_cluster_test<F>(fut: F)
 where
 	F: std::future::Future<Output = ()> + Send + 'static,
 {
+	kio::clock::host_time(); // real relays on real sockets
 	std::thread::Builder::new()
 		.stack_size(32 * 1024 * 1024)
 		.spawn(move || {
