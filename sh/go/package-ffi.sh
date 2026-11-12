@@ -139,6 +139,60 @@ cp "$GENERATED_GO" "$PKG_STAGE/moq/moq.go"
 cp "$GENERATED_H" "$PKG_STAGE/moq/moq.h"
 
 # --- 3. Per-target static libraries ---
+# Go 1.26.11 and 1.27.4 refuse to link a cgo archive with LLVM bitcode or GCC LTO
+# sections ("disallowed LTO section"). Rust's prebuilt compiler_builtins embeds
+# bitcode and skips LTO, so every staticlib carries it; the linker never reads
+# it. llvm-objcopy can't rewrite the MSVC .lib in one pass (its raw-dylib
+# import members are unsupported), so strip the offending members one by one
+# and replace them in place. rustc's own llvm-tools read every target's format.
+LLVM_BIN="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ {print $2}')/bin"
+for tool in llvm-ar llvm-objcopy llvm-objdump; do
+    [[ -x "$LLVM_BIN/$tool" ]] || {
+        echo "Error: $LLVM_BIN/$tool missing; run: rustup component add llvm-tools" >&2
+        exit 1
+    }
+done
+
+# Print each archive member holding a section Go rejects (see isDisallowedLTOSection
+# in cmd/go/internal/work/security.go; Mach-O's __LLVM sections show unqualified).
+lto_members() {
+    "$LLVM_BIN/llvm-objdump" -h "$1" | awk '
+        /:\tfile format / { m = $0; sub(/^.*\(/, "", m); sub(/\):\tfile format .*$/, "", m) }
+        $2 ~ /^(\.llvmbc|\.llvmcmd|__bitcode|__cmdline|\.llvm\.lto.*|\.gnu\.lto_.*|\.gnu\.debuglto_.*)$/ { print m }
+    ' | sort -u
+}
+
+strip_lto() {
+    local lib="$1" work m dups members=()
+    # A read loop, not mapfile: macOS ships bash 3.2.
+    while IFS= read -r m; do members+=("$m"); done < <(lto_members "$lib")
+    [[ "${#members[@]}" -eq 0 ]] && return
+    # `llvm-ar x`/`r` address members by name, so a duplicate name is ambiguous.
+    dups=$("$LLVM_BIN/llvm-ar" t "$lib" | sort | uniq -d | grep -Fxf <(printf '%s\n' "${members[@]}") || true)
+    if [[ -n "$dups" ]]; then
+        echo "Error: $lib has duplicate members carrying LTO sections:" >&2
+        printf '  %s\n' "$dups" >&2
+        exit 1
+    fi
+    work=$(mktemp -d "$OUTPUT_DIR/strip.XXXXXX")
+    (
+        cd "$work"
+        "$LLVM_BIN/llvm-ar" x "$lib" "${members[@]}"
+        for m in "${members[@]}"; do
+            "$LLVM_BIN/llvm-objcopy" --remove-section=.llvmbc --remove-section=.llvmcmd \
+                --remove-section=__LLVM,__bitcode --remove-section=__LLVM,__cmdline "$m"
+        done
+        "$LLVM_BIN/llvm-ar" r "$lib" "${members[@]}"
+    )
+    rm -rf "$work"
+    m=$(lto_members "$lib")
+    if [[ -n "$m" ]]; then
+        echo "Error: $lib still has LTO sections Go rejects in:" >&2
+        printf '%s\n' "$m" | sed 's/^/  /' >&2
+        exit 1
+    fi
+}
+
 # Entries are "<cargo-target>:<goos>_<goarch>:<libname>"; the GOOS/GOARCH
 # subdir name matches the cgo build tags in moq/cgo.go.
 GO_LIBS=(
@@ -169,7 +223,9 @@ for entry in "${GO_LIBS[@]}"; do
         dest="$PKG_STAGE/moq/lib/$goarch"
         mkdir -p "$dest"
         cp "$src" "$dest/"
-        size=$(wc -c <"$src")
+        chmod u+w "$dest/$libname"
+        strip_lto "$dest/$libname"
+        size=$(wc -c <"$dest/$libname")
         echo "  go lib $goarch <- $target ($((size / 1024 / 1024)) MiB)"
         [[ "$size" -ge "$GITHUB_FILE_LIMIT" ]] && OVERSIZED+=("$goarch/$libname: $((size / 1024 / 1024)) MiB")
         STAGED_ANY=true
