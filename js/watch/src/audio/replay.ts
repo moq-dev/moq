@@ -203,7 +203,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	// Where each group's stream finishes.
 	const ends = new Map<number, number>();
-	const speech = new Speech(rate, Math.min(...trace.map((a) => a.timestamp)));
+	const origin = trace.reduce((min, a) => Math.min(min, a.timestamp), Infinity);
+	const speech = new Speech(rate, origin);
 	trace.forEach((arrival, i) => {
 		ends.set(arrival.group, i);
 	});
