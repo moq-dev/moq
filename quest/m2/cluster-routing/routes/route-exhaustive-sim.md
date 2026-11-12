@@ -23,7 +23,9 @@ out.
   serde_json, and tiny_http; building both and keeping the better). Add
   threads or symmetry only if the measurements call for them.
 - Bound the run as `RouteHandoff.cfg` does (`MaxRev`, `MaxFlaps`, one
-  claim), so the two counts compare.
+  claim), but on the triangle: `RouteHandoff.cfg` has four nodes, so the PR
+  runs TLC on a copy of that config cut to the same three nodes, and the two
+  counts compare.
 - The search converges only if equal situations hash equal. `Sim` and `Router`
   need a clone and a fingerprint, and the fingerprint must leave out what only
   records the past, such as `events`, `stats`, and `requested`. Check each
@@ -31,7 +33,10 @@ out.
 - The check that the search works: run on today's router before the switch to
   the path rule, it must find the storm
   `residual_a_seqno_advance_storms_between_two_grants` replays, or another
-  `residual_` test in `route/tests/residual.rs` that fits the bounds.
+  `residual_` test in `route/tests/residual.rs`. Those fixtures use 6 to 10
+  nodes, beyond the triangle, so the self-check searches the fixture's own
+  mesh, bounded by depth and by the fixture's scripted claims, rather than
+  the triangle's bounds; the search code takes the mesh as a parameter.
 - Then say which of the model's "Not covered" list (`verify-route` skill) the
   search can afford: wildcards, scoped grants, costs other than 1, a fourth
   node.

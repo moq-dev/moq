@@ -3,7 +3,8 @@
 ## Goal
 
 The `tla` recipes run a native TLA+ checker locally when one gives TLC's
-verdict and distinct-state count on every config in the tree and costs fewer
+verdict and distinct-state count on every config in the tree it can run
+(the rest stay on TLC, as the Plan says) and costs fewer
 core-seconds on the route and resume models. Nightly (`just test tla`, which
 `sh/tla.sh` drives) then runs both engines on every config and fails when they
 disagree. If no checker agrees, the PR
@@ -35,8 +36,11 @@ only by its authors:
 A checker bug shows as a rule passing that should break, so agreement is the
 bar, not speed:
 
-- Every config: the same verdict as TLC, the same broken rule for an
-  open-finding config, and the same distinct-state count. The specs use
+- Every config the checker runs: the same verdict as TLC, and the same broken
+  rule for an open-finding config. A passing config also matches TLC's
+  distinct-state count; a violating one does not, since each engine stops at
+  its first violation after exploring a different, order-dependent part of
+  the space. The specs use
   `RECURSIVE`, `CHOOSE`, `CASE`, `LAMBDA`, `Sequences`, `FiniteSets`,
   `CONSTRAINT`, and `VIEW`, unmodified.
 - Measure both engines at equal worker counts through `quest gate` on a quiet
