@@ -17,8 +17,12 @@ Found while iterating #8516: in `rs/moq-ffi/src/test.rs`,
 `a_credential_without_auth_is_unsupported` dials a `token_server("moq-lite-06")`
 whose task drains `request.requests()` in a `while let`. After the client's
 `session.cancel(0)`, that loop never ends, so the test calls
-`serving.abort()`. Not yet investigated: whether the stream misses the close,
-or the session the server holds keeps it alive.
+`serving.abort()` (the test lands with that PR). The queue behind
+`requests()` closes only through `auth::Handle::close`, which every moq-lite
+version reaches from `Driver::end` or `Driver`'s `Drop` in
+`rs/moq-net/src/lite/session.rs`. So suspect the lite-06 driver not ending
+(it has no session stream to see the peer leave) or the server keeping it
+alive, rather than the stream itself.
 
 - Reproduce in moq-net or moq-tokio with a lite-06 pair: the client cancels,
   and the server's `requests()` must yield `None` within the test's timeout.
