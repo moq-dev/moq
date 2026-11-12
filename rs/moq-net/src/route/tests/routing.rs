@@ -998,6 +998,56 @@ fn a_fresh_uncertified_claim_waits_on_an_older_floor() {
 	}
 }
 
+/// Closing a session's streams together leaves the node as closing them one at a
+/// time does: each stream asks its own prefix, and some share one, so a region one
+/// closes stays certified by another while the rest let go. Once none is left, the
+/// reader sees the same; the view stays, as a node with no route keeps it until a
+/// route returns or it collects the identity.
+#[test]
+fn closing_streams_together_matches_closing_them_in_turn() {
+	let finite = Some(Reach::Finite(Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: [].into(),
+	}));
+	let item = |seed| Item {
+		seed,
+		epoch: None,
+		since: 1,
+	};
+	let opened = || {
+		let mut router: Router<Node, Item> = Router::new(99, 1);
+		for stream in 0..6 {
+			let prefix = format!("live/{}", stream % 4);
+			router.connect(stream, Link::default()).unwrap();
+			router.asks(stream, Path::new(&prefix).unwrap()).unwrap();
+			router.route(stream, 7, finite.clone());
+			let claims = (0..3)
+				.map(|j| (Path::new(&format!("{prefix}/{j}")).unwrap(), Some(item(j))))
+				.collect();
+			router.batch(stream, 7, claims, Some(1), 0);
+		}
+		router
+	};
+	for closed in [vec![0, 1, 4], vec![0, 1, 2, 3, 4, 5]] {
+		let mut together = opened();
+		together.disconnect(closed.iter().copied());
+		let mut in_turn = opened();
+		for &stream in &closed {
+			in_turn.disconnect([stream]);
+		}
+		assert_eq!(together.shown(), in_turn.shown(), "closed {closed:?}");
+		if closed.len() < 6 {
+			assert_eq!(together.view(7), in_turn.view(7), "closed {closed:?}");
+			assert_eq!(together.retained(), in_turn.retained(), "closed {closed:?}");
+		} else {
+			assert!(together.shown().is_empty());
+		}
+	}
+}
+
 /// An echo travels apart from the echoing node's routes, so it can overtake a
 /// route that node derived from this one's. b learned its route from a and sent it
 /// back, then ended it on a's ROUTE_END. Its echo arrives first, so a drops its

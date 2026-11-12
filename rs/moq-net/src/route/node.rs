@@ -1003,7 +1003,10 @@ impl State {
 		for claim in shown.into_iter().rev() {
 			let shown = &self.router.shown()[&(id, claim.clone())];
 			let (item, available) = (shown.item.clone(), shown.available);
-			let mut indices: Vec<usize> = above(&asked, &claim).flat_map(|(_, indices)| indices).copied().collect();
+			let mut indices: Vec<usize> = above(&asked, &claim)
+				.flat_map(|(_, indices)| indices)
+				.copied()
+				.collect();
 			indices.sort_unstable();
 			let carrying: Vec<(Key, Metric, Option<std::time::Duration>, Id)> = (indices.into_iter())
 				.map(|index| routes[index])

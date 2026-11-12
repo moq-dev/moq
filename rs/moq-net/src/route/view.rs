@@ -166,8 +166,8 @@ impl<A: Clone + Eq> View<A> {
 		// Every floor of `other` lies within a newer one here, so it knows no claim at a
 		// newer revision and changes nothing: a lagging view costs nothing to merge,
 		// however far it lags.
-		let stale = (other.floors.iter())
-			.all(|(region, &floor)| above(&self.floors, region).any(|(_, &newer)| newer > floor));
+		let stale =
+			(other.floors.iter()).all(|(region, &floor)| above(&self.floors, region).any(|(_, &newer)| newer > floor));
 		if stale {
 			return Vec::new();
 		}
@@ -333,9 +333,7 @@ fn heads(path: &Path) -> impl Iterator<Item = &str> {
 /// wider one already does.
 fn settle(floors: &mut BTreeMap<Path, Rev>) {
 	let covered: Vec<Path> = (floors.iter())
-		.filter(|&(region, &floor)| {
-			above(floors, region).any(|(wider, &newer)| wider != region && newer >= floor)
-		})
+		.filter(|&(region, &floor)| above(floors, region).any(|(wider, &newer)| wider != region && newer >= floor))
 		.map(|(region, _)| region.clone())
 		.collect();
 	for region in covered {

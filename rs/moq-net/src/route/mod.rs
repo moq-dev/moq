@@ -333,7 +333,12 @@ impl<A: Clone + Eq> Heard<A> {
 		if let Some(merged) = merged {
 			for region in view.floors.keys() {
 				let exact = merged.items.get_key_value(region);
-				claims.extend(exact.into_iter().chain(below(&merged.items, region)).map(|(claim, _)| claim.clone()));
+				claims.extend(
+					exact
+						.into_iter()
+						.chain(below(&merged.items, region))
+						.map(|(claim, _)| claim.clone()),
+				);
 			}
 		}
 		self.differs.clear();
