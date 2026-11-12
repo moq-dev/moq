@@ -18,7 +18,7 @@ capture or playback is enabled.
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
 | `encode` | PCM to Opus (mono or stereo, with DTX and voice activity) or raw PCM |
 | `decode` | Opus (up to 7.1), PCM, and AAC-LC (mono or stereo) back to PCM, resampled to the rate you want |
-| `playback` | One output device mixing every track in a call, with click-free volume ramps |
+| `playback` | One output device mixing every track in a call, with click-free volume ramps, each track's received audio stretched onto the caller's clock (`Sink::due`) |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's) for caller-supplied PCM or the built-in devices |
 | `bus` | Routes sources into several mixes, each with its own meter and mix-minus, advanced on the caller's clock |
 

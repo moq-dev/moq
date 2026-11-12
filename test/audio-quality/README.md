@@ -94,8 +94,8 @@ buffer it plays into 128-frame quanta at the device rate and classifies each by 
 supplied (`moq_audio::playback::Observer`). The meanings are the browser's, with three differences
 in what the native player does:
 
-- Its ring stretches received PCM toward the target. A ring that still runs dry
-  emits emergency silence while received PCM refills it; `silence` counts that padding.
+- Its ring stretches received PCM onto the shared clock by the page's rule. A ring that still runs
+  dry emits silence until a cushion of received PCM arrives; `silence` counts that padding.
   Native `stalled` is only a sink with nothing written yet.
 - The playhead is projected from the player's last write at the wall rate and held at its end.
 - `device` is the host's reported output latency, with no `baseLatency`, and `render_load` is
@@ -234,7 +234,7 @@ writes the same samples a page does, so `analyze.ts` reduces both alike, and the
 and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
 its budgets are exactly what it measured.
 
-The ring time-stretches live playback as the page's does, but the replay's audio is a constant, so
+The ring time-stretches live and buffered playback as the page's does, but the replay's audio is a constant, so
 every seam admits at the shortest pitch period, 2.5 ms. Accelerate therefore moves less per stretch
 than it would from speech; only fast accelerate, which takes every whole period that fits, moves its
 most.
@@ -297,11 +297,11 @@ leaves the rest zero, so the tap reads every quantum's fill level from the outpu
 player's own count, which its stats panel shows, is read alongside:
 
 - `player_underruns`: `audio.out.stats.underruns`, each time the ring ran dry mid-playback and
-  re-stalled to refill, plus each quantum it filled only part-way. The tap files the quanta after a
+  re-stalled to wait for a cushion, plus each quantum it filled only part-way. The tap files the quanta after a
   run-dry as stalled time, so `underruns` leaves those out and this counts them. Unset natively.
 - `player_skips`: `audio.out.stats.skips`, each jump that dropped buffered audio rather than playing
-  it faster. Speeding up is not a skip. Natively, each trim of the ring, and each run of
-  consecutive frames `moq play` skipped at the stretch's fast threshold or a full ring refused.
+  it faster. Speeding up is not a skip. Natively, each skip of the ring past its bound, and each
+  run of consecutive frames a full ring refused.
 - `underruns`: quanta the ring filled only partly, or not at all, while playing.
 - `short_quanta`: the underruns that were partly filled: the ring ran dry part-way through.
 - `underrun_episodes`: maximal runs of consecutive underruns, one audible gap each.
