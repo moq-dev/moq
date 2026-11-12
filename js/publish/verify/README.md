@@ -1,11 +1,10 @@
 # Publish flow
 
-`Publish.tla` is a TLA+ model of going live with `<moq-publish source="camera">`, written to be
-drawn as a statechart. It follows the camera and microphone capture (asking,
+`Publish.tla` is a TLA+ model of going live with `<moq-publish source="camera">`.
+It follows the camera and microphone capture (asking,
 capturing, denied, a lost device reopening within its retry budget, failed), the encoders
-settling, the `source`-mode announce gate in `src/announce.ts`, and the relay connection. The
-chart labels each state with what the status badge says and whether viewers can find the
-broadcast.
+settling, the `source`-mode announce gate in `src/announce.ts`, and the relay connection, along
+with what the status badge says and whether viewers can find the broadcast.
 
 | Rule | Holds when | Today |
 | --- | --- | --- |
@@ -13,10 +12,9 @@ broadcast.
 | `StopStopsPublishing` | A publisher who stopped the camera publishes nothing. | Holds. |
 | `DenialIsShown` | A publisher who refused the camera is told so. | Holds. |
 
-The chart also shows that a camera lost after going live keeps the broadcast announced (by
+A camera lost after going live keeps the broadcast announced (by
 design, so a capture gap only edits the catalog) while the badge says NO SOURCE, then CAMERA
-FAILED once the reopen budget runs out. It hides "you stop the camera", which every selected
-state has.
+FAILED once the reopen budget runs out.
 
 ## Run
 
@@ -24,8 +22,7 @@ state has.
 just test tla js/publish
 ```
 
-This must pass, as Nightly checks. The chart draws from
-`Publish.tla`, `Publish.cfg`, and `Publish.view.ts`.
+This must pass, as Nightly checks.
 
 ## Left out
 

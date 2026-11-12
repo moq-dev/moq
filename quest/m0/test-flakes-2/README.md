@@ -273,12 +273,6 @@ session as publishing outside its grant once in
 passed on rerun. It is quarantined until its child fixes it.
 
 Added 2026-11-12 (maintainer's standing rule that flakes join this epic):
-moq-ffi's `raw_audio_decode_delay`, whose decoded read hung until the host-clock
-timeout aborted it in the merge queue for
-[moq-dev/moq#8525](https://github.com/moq-dev/moq/pull/8525). It is quarantined
-with `#[ignore]` until its child fixes it.
-
-Added 2026-11-12 (maintainer's standing rule that flakes join this epic):
 moq-gst's moqsink restart pad test, which failed the merge queue for
 [moq-dev/moq#8551](https://github.com/moq-dev/moq/pull/8551) on unchanged main,
 its third failure since 2026-10-16 and its first after

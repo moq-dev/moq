@@ -38,6 +38,7 @@ mod flights;
 mod goaway;
 mod group_order;
 mod history_groups;
+mod history_join;
 mod idle_cancel_refetch;
 mod idle_session;
 mod implementation;
