@@ -444,12 +444,14 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 				kio::clock::now() - started
 			);
 
+			// A later reader may subscribe afresh once the finished track's copies are gone,
+			// so only the update is held to asking nothing again.
+			let mut later = chain.subscribe(reading(None, [Range::groups(0..)])).await;
+			assert_eq!(drain(&mut later).await, got, "expiry={expiry}: the later reader");
 			let asked = chain.asked();
 			reader
 				.update(reading(Duration::from_secs(3600), [Range::groups(0..)]))
 				.unwrap();
-			let mut later = chain.subscribe(reading(None, [Range::groups(0..)])).await;
-			assert_eq!(drain(&mut later).await, got, "expiry={expiry}: the later reader");
 			assert_eq!(
 				drain(&mut reader).await,
 				BTreeSet::new(),
