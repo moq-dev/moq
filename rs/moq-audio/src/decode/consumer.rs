@@ -265,7 +265,7 @@ impl Consumer {
 		// the max delay alone.
 		let track = playout.consumer(track, container);
 
-		let mut consumer = Self {
+		Ok(Self {
 			target: Target::new(delay, options.estimate, catalog.jitter),
 			decoder,
 			track,
@@ -298,9 +298,7 @@ impl Consumer {
 			boundary: None,
 			frame: Duration::ZERO,
 			declared: None,
-		};
-		consumer.track.set_wait(consumer.delay());
-		Ok(consumer)
+		})
 	}
 
 	/// The decoder backend name in use, e.g. `"libopus"` or `"symphonia"`.
@@ -574,6 +572,11 @@ impl Consumer {
 	/// that arrives meanwhile, or `None` once the track ends.
 	async fn next(&mut self) -> Result<Option<Encoded>, Error> {
 		loop {
+			// A missing group is waited for only the playout delay, since past it the group
+			// would play late, and a reordered backlog's holes waited out to the max delay
+			// would read as jitter. Late groups that did arrive still play up to the max.
+			// Refreshed before every poll, since each arrival and each decoded frame can move it.
+			self.track.set_wait(self.delay());
 			// Read before judging the head, so any update after that wakes the wait.
 			let seen = self.gate.as_ref().map_or(0, |gate| gate.read().version);
 			let deadline = match self.pending.front() {
@@ -643,10 +646,6 @@ impl Consumer {
 						}
 						_ => self.breaks += 1,
 					}
-					// A missing group is waited for only the playout delay, since past it the group
-					// would play late, and a reordered backlog's holes waited out to the max delay
-					// would read as jitter. Late groups that did arrive still play up to the max.
-					self.track.set_wait(self.delay());
 					self.pending.push_back((read, kio::clock::Instant::now()));
 				}
 				Some(Ok(None)) => self.ended = Some(None),
