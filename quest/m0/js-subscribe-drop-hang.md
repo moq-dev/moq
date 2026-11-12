@@ -19,7 +19,3 @@ minutes, and the benchmarks after it never ran. The
 stalled at the same header. Reproduce it locally; if the
 hang is in `@moq/net` rather than the benchmark, a test in the merge gate
 covers it.
-
-## Related
-
-- [session_delivery_compression finishes on lite-07](/quest/m0/lite07-compression-bench-hang.md) - another Nightly benchmark that hangs
