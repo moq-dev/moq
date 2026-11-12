@@ -32,7 +32,3 @@ the title with `!` and give the migration in the PR's Impact section.
 
 Public API: one constant replaces `moq_mux::container::WARMUP_MAX` and
 `moq_audio::playback::Input::LATENCY_MAX`, plus its JS export. Wire: none.
-
-## Related
-
-- [Delay cap](/quest/m1/audio-jitter-target/delay-cap.md) - the quest whose PRs added the four copies
