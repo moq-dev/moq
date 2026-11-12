@@ -526,7 +526,7 @@ mod tests {
 
 	/// Measurement-only harness: no device and no timing acceptance threshold.
 	#[test]
-	#[ignore = "run with just rs bench-playback"]
+	#[ignore = "release benchmark, run by nightly"]
 	#[expect(
 		clippy::disallowed_methods,
 		clippy::disallowed_types,

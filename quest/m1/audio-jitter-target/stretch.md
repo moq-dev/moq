@@ -118,7 +118,8 @@ Carried from the native port
 ([moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856)): the
 maintainer listened on 2026-11-05 and found the stretch inaudible on speech,
 and it costs 16 to 43% of a callback, 1.02 ms of a 42.7 ms period at worst.
-Rerun `just rs bench-playback` and `bun watch/bench/ring.ts`, since the
+Rerun the playback benchmarks (`just rs bench-tests -p moq-audio --features playback
+--run-ignored only -E 'test(benchmark_mixer_callbacks)'`) and `bun watch/bench/ring.ts`, since the
 decision now runs a filter.
 
 Public API: none expected. Wire: none.
