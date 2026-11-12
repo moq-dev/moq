@@ -34,6 +34,25 @@ A relay pays this whenever a lite-07 peer holding many announce prefixes
 leaves, so it is a relay CPU cost a client controls, not only a benchmark
 problem.
 
+✅ Decided 2026-11-12 (maintainer, on
+[moq-dev/moq#8536](https://github.com/moq-dev/moq/pull/8536)): fix the route
+layer's teardown to about linear (single-pass `restrict_all`, indexed floors,
+batch disconnect), verified with `/verify-route` (rejected: temporarily drop
+the lite-07 `follow=1024` Nightly cell, which hides a relay cost a client
+controls).
+
+[Routes](/quest/m2/cluster-routing/routes/README.md) item 27 (decided
+2026-11-11) replaces Babel's distance, the seqno, ROUTE_REQUEST, and the
+ROUTE_END echo with per-scope paths, and
+[the router](/quest/m2/cluster-routing/routes/scope.md) that builds it
+deletes `prune` and the per-region floors this teardown spends its time in.
+This fix still lands first, unblocked: Nightly loses its paired gate every
+night until it does, the router waits behind its model, and the batch
+disconnect carries over to the rebuild. Spend least on what the rebuild
+deletes: prefer the batch disconnect and single-pass `restrict_all` over
+indexing the per-region floors, and add the latter only if the former leave
+the cell super-linear.
+
 Make the route layer's teardown of a neighbor's prefixes cost about linear in
 what it held: for example, let `restrict_all` build one view from all regions
 in a single pass instead of merging per region, index floors so `as_of` and
@@ -43,7 +62,3 @@ session group finishes inside the hour (the 11-06 and 11-07 sweeps took
 about 25 minutes) without dropping the `follow=1024` cell, which is the case
 that exposed this. Add a route-layer benchmark sweeping held prefixes on
 both axes if the session cell does not isolate the teardown cost.
-
-## Related
-
-- [Rust benchmark tests fit their hour](/quest/m0/ci/nightly-rust-test-hour.md) - the same timeout, caused by builds
