@@ -24,8 +24,10 @@ Decided the same day (maintainer, /quest-plan): ✅ plan it.
   ([epic](/quest/m2/cluster-routing/routes/README.md), handoff contract). If
   the fixture's `revivals` count misses an excuse, fix the count and say so.
 - Otherwise fix the cause and keep the shrunk case as a test.
-- If the cause is in what
-  [the route per scope](/quest/m2/cluster-routing/routes/scope.md) deletes,
-  pin it as a `residual_` test naming that quest instead of fixing it twice.
+- If the cause is in what the path rule replaces (the distance, the seqno,
+  route requests, the echo, or which neighbours certify a region), pin it as
+  a `residual_` test naming
+  [the route per scope](/quest/m2/cluster-routing/routes/scope.md), whose
+  router must pass it, instead of fixing it twice.
 
 Public API: none. Wire: none.

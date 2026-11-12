@@ -29,9 +29,15 @@ Decided 2026-11-10 (maintainer, a later /quest-plan the same day):
 This is TLA+ trace validation (Cirstea, Kuppe, Loillier, Merz, 2024, used on
 CCF and etcd's raft): `route::tests::Sim` records each step as the model
 action it corresponds to, with the variables the model keeps, and TLC checks
-that the recorded trace is a behaviour of the spec. The model fixes interest
-at the root and drops scopes, so the sweeps either restrict to what it models
-or the model grows to cover them; pick whichever costs less and say which.
+that the recorded trace is a behaviour of the spec. Where the model covers
+less than the sweeps do, the sweeps either restrict to what it models or the
+model grows to cover them; pick whichever costs less and say which.
+
+Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
+Babel): the traces come from the path router
+([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27).
+Once the model has the path rule, a trace of Babel's router is no behaviour
+of it, so this waits for the router too.
 
 Run it on the sweeps' existing seeds in CI only if it stays fast; otherwise in
 Nightly with the sweeps' fresh seeds.
@@ -41,3 +47,4 @@ Public API: none. Wire: none.
 ## Required
 
 - [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - replaces who a relay believes and adds two prefixes and a scoped relay, so traces are validated against the rule that stays
+- [The router runs the path rule with a route per scope](/quest/m2/cluster-routing/routes/scope.md) - the router `Sim` records, running the rule the model has
