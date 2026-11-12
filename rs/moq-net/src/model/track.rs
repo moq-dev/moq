@@ -857,13 +857,15 @@ impl Slot {
 	}
 
 	/// Why the publisher gave this group up, whichever copy serves it: the live copy's cut,
-	/// or a final drop that a fetched head outlived only while it filled. A copy that
-	/// finished won over the drop, even once freed.
+	/// or a final drop that a fetched head outlived only while it filled, once the head
+	/// failed. A copy that finished won over the drop, even once freed, and a head the cache
+	/// let go ages out like any group, as the slot it goes with does.
 	fn verdict(&self) -> Option<&Error> {
 		self.group.cut_error().or_else(|| {
-			self.dropped
-				.as_ref()
-				.filter(|_| !self.copies().any(group::Handle::is_settled))
+			self.dropped.as_ref().filter(|_| {
+				!self.copies().any(group::Handle::is_settled)
+					&& self.head.as_deref().is_some_and(|head| head.fate().failed())
+			})
 		})
 	}
 
@@ -3715,6 +3717,10 @@ impl TrackState {
 				if !protected {
 					group.handle().cache_demote();
 				}
+				// A replacing head inherits the drop the slot holds, announcing it if it dies.
+				if slot.dropped.is_some() {
+					group.handle().carry_drop();
+				}
 				if let Some(head) = slot.head.replace(Box::new(group.handle())) {
 					self.detach(&head);
 				}
@@ -4485,7 +4491,7 @@ impl Producer {
 		if groups.is_empty() {
 			return RangeSet::new();
 		}
-		let (runs, open, carried, cache): (_, Vec<group::Handle>, Vec<u64>, _) = match self.modify() {
+		let (runs, open, carried, cache): (_, Vec<group::Handle>, Vec<group::Handle>, _) = match self.modify() {
 			Ok(mut state) => {
 				let stale = hole.stale_budget().is_some();
 				let mut left = RangeSet::new();
@@ -4521,9 +4527,8 @@ impl Producer {
 							&& let Some(head) = slot.head.as_deref()
 						{
 							slot.dropped = Some(Error::Stream(error.clone()));
-							if head.carry_drop() {
-								carried.push(sequence);
-							}
+							head.carry_drop();
+							carried.push(head.clone());
 						}
 					}
 				}
@@ -4542,9 +4547,15 @@ impl Producer {
 		for group in open {
 			group.abort_open(Error::Stream(error.clone()));
 		}
-		// A head that died before it carried the drop announced nothing: the drop is its cut.
-		for sequence in carried {
-			cache.aborted(sequence, true);
+		// A head that died before the live copy above ended announced its drop while that copy
+		// still served, so a cursor may have passed it by: announce it again now that it is
+		// the cut. Pairs with the fence in the head's abort: a head this misses announces
+		// after it, seeing the live copy ended.
+		std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+		for head in carried {
+			if head.is_aborted() && head.fate().failed() {
+				cache.aborted(head.sequence, true);
+			}
 		}
 		runs
 	}
