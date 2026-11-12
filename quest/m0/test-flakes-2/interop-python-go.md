@@ -43,11 +43,6 @@ the lead above once the routing work lands (rejected: unquarantine to collect a
 nightly failing log; close the quest on the clean history). The routing work is
 [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) and
 [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443), which change the
-same path; this quest stays blocked until their quests finish.
+same path. This quest's PR lands after both, so the quest is ready once they are in.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - reworks the lite-07 claim routing the lead points at
-- [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - lands the matching lite-07 route layer changes
