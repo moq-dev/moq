@@ -54,6 +54,19 @@ pub(in crate::capture) async fn cameras(v4l2: Vec<Camera>) -> Result<Vec<Camera>
 	}
 }
 
+/// Returns whether PipeWire lists a camera, which decides whether the
+/// default camera opens through PipeWire. A host without a PipeWire session,
+/// or with a daemon that does not answer, lists none.
+pub(in crate::capture) async fn present() -> bool {
+	match nodes().await {
+		Ok(nodes) => !nodes.is_empty(),
+		Err(error) => {
+			tracing::debug!(%error, "listing PipeWire cameras failed");
+			false
+		}
+	}
+}
+
 /// Lists the PipeWire camera nodes with a format this backend converts, none
 /// on a host without a PipeWire session.
 async fn nodes() -> Result<Vec<Node>, Error> {
@@ -83,9 +96,6 @@ async fn nodes() -> Result<Vec<Node>, Error> {
 		};
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
 		let nodes = scan(&mainloop, &core, &registry)?;
-		// Hide a node with no format we convert, as the V4L2 listing does: an IR
-		// camera that offers only GREY would list an id `open` refuses. A node
-		// whose formats cannot be read stays, since `open` reports why.
 		let formats = match formats_each(&mainloop, &core, &registry, &nodes) {
 			Ok(formats) => formats,
 			Err(error) => {
@@ -93,23 +103,31 @@ async fn nodes() -> Result<Vec<Node>, Error> {
 				return Ok(nodes);
 			}
 		};
-		Ok(nodes
-			.into_iter()
-			.zip(formats)
-			.filter_map(|(node, formats)| match formats {
-				Ok(formats) if formats.is_empty() => {
-					tracing::debug!(node = %node.name, "PipeWire camera offers no format we convert");
-					None
-				}
-				Ok(_) => Some(node),
-				Err(error) => {
-					tracing::debug!(node = %node.name, %error, "could not list PipeWire camera formats");
-					Some(node)
-				}
-			})
-			.collect())
+		Ok(convertible(nodes, formats).into_iter().map(|(node, _)| node).collect())
 	})
 	.await
+}
+
+/// Pairs each of `nodes` with its `formats` and drops the nodes that offer no
+/// format this backend converts, as the V4L2 listing does: an IR camera that
+/// offers only GREY would list an id `open` refuses. A node whose formats
+/// cannot be read stays, since opening it reports why.
+fn convertible(nodes: Vec<Node>, formats: Vec<Result<Vec<Format>, Error>>) -> Vec<(Node, Result<Vec<Format>, Error>)> {
+	nodes
+		.into_iter()
+		.zip(formats)
+		.filter(|(node, formats)| match formats {
+			Ok(formats) if formats.is_empty() => {
+				tracing::debug!(node = %node.name, "PipeWire camera offers no format we convert");
+				false
+			}
+			Ok(_) => true,
+			Err(error) => {
+				tracing::debug!(node = %node.name, %error, "could not list PipeWire camera formats");
+				true
+			}
+		})
+		.collect()
 }
 
 /// Lists the PipeWire cameras first, then the V4L2 cameras no node fronts.
@@ -147,9 +165,7 @@ pub(in crate::capture) async fn modes(node: Option<&str>) -> Result<Vec<Mode>, E
 		let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| err("pipewire context", e))?;
 		let core = super::connect(&context, remote).map_err(|e| err("pipewire connect", e))?;
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-		let nodes = scan(&mainloop, &core, &registry)?;
-		let node = resolve(&nodes, node.as_deref())?;
-		let formats = formats(&mainloop, &core, &registry, node)?;
+		let (_, formats) = find(&mainloop, &core, &registry, node.as_deref())?;
 		Ok(mode::modes(formats.into_iter().flat_map(|format| {
 			format.sizes.into_iter().map(move |size| (size, format.rates.clone()))
 		})))
@@ -233,9 +249,7 @@ pub(super) fn choose(
 	want: Request,
 ) -> Result<(u32, Selected), Error> {
 	let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-	let nodes = scan(mainloop, core, &registry)?;
-	let node = resolve(&nodes, name)?;
-	let formats = formats(mainloop, core, &registry, node)?;
+	let (node, formats) = find(mainloop, core, &registry, name)?;
 	let selected = select(&formats, want).ok_or_else(|| {
 		Error::codec(anyhow::anyhow!(
 			"PipeWire camera {} offers no YUY2, NV12, RGB, or MJPEG mode",
@@ -243,6 +257,29 @@ pub(super) fn choose(
 		))
 	})?;
 	Ok((node.id, selected))
+}
+
+/// Finds the camera named `name`, or the default camera, with the formats it
+/// offers that this backend converts.
+///
+/// The default comes from the cameras [`cameras`] lists, the same ones
+/// [`present`] counts, so a higher-priority camera with no format we convert
+/// (an IR camera that offers only GREY) does not shadow a webcam that works.
+fn find(
+	mainloop: &pw::main_loop::MainLoopRc,
+	core: &pw::core::CoreRc,
+	registry: &pw::registry::RegistryRc,
+	name: Option<&str>,
+) -> Result<(Node, Vec<Format>), Error> {
+	let nodes = scan(mainloop, core, registry)?;
+	if let Some(name) = name {
+		let node = resolve(&nodes, name)?;
+		let formats = formats(mainloop, core, registry, node)?;
+		return Ok((node.clone(), formats));
+	}
+	let formats = formats_each(mainloop, core, registry, &nodes)?;
+	let (node, formats) = highest(convertible(nodes, formats), |(node, _)| node.priority)?;
+	Ok((node, formats?))
 }
 
 /// A PipeWire camera node.
@@ -384,23 +421,24 @@ fn scan(
 	Ok(nodes.take())
 }
 
-/// The camera named `name`, or the one with the highest session priority,
-/// which is the camera the session manager links by default. Fails when the
-/// camera is not there, rather than leaving the stream unlinked until the
-/// format wait runs out.
-fn resolve<'a>(nodes: &'a [Node], name: Option<&str>) -> Result<&'a Node, Error> {
-	let Some(name) = name else {
-		// `max_by_key` keeps the last of equals; the registry's first is wanted.
-		return nodes
-			.iter()
-			.rev()
-			.max_by_key(|node| node.priority)
-			.ok_or_else(|| Error::SourceUnavailable("PipeWire has no camera".to_string()));
-	};
+/// The camera named `name`. Fails when the camera is not there, rather than
+/// leaving the stream unlinked until the format wait runs out.
+fn resolve<'a>(nodes: &'a [Node], name: &str) -> Result<&'a Node, Error> {
 	nodes.iter().find(|node| node.name == name).ok_or_else(|| {
 		let found: Vec<_> = nodes.iter().map(|node| node.name.as_str()).collect();
 		Error::SourceUnavailable(format!("no PipeWire camera named {name} (found: {})", found.join(", ")))
 	})
+}
+
+/// The camera with the highest session priority, which is the camera the
+/// session manager links by default, or the first of equals in registry order.
+fn highest<T>(cameras: Vec<T>, priority: impl Fn(&T) -> i32) -> Result<T, Error> {
+	// `max_by_key` keeps the last of equals.
+	cameras
+		.into_iter()
+		.rev()
+		.max_by_key(priority)
+		.ok_or_else(|| Error::SourceUnavailable("PipeWire has no camera".to_string()))
 }
 
 /// The raw formats `convert` turns into I420.
@@ -927,11 +965,8 @@ mod tests {
 		global.push(("object.path", "libcamera:/base/soc/i2c0mux"));
 		assert_eq!(ids(&[node(&global).unwrap()]), both);
 		// Listing never removes nodes from explicit or priority-based resolution.
-		assert_eq!(
-			resolve(std::slice::from_ref(&webcam), Some(&webcam.name)).unwrap(),
-			&webcam
-		);
-		assert_eq!(resolve(std::slice::from_ref(&webcam), None).unwrap(), &webcam);
+		assert_eq!(resolve(std::slice::from_ref(&webcam), &webcam.name).unwrap(), &webcam);
+		assert_eq!(highest(vec![webcam.clone()], |node| node.priority).unwrap(), webcam);
 	}
 
 	#[test]
@@ -982,21 +1017,49 @@ mod tests {
 			..webcam.clone()
 		};
 		let nodes = [infrared.clone(), webcam.clone()];
-		assert_eq!(resolve(&nodes, Some(&infrared.name)).unwrap().id, 79);
-		assert_eq!(resolve(&nodes, None).unwrap().id, 62);
+		let priority = |node: &Node| node.priority;
+		assert_eq!(resolve(&nodes, &infrared.name).unwrap().id, 79);
+		assert_eq!(highest(nodes.to_vec(), priority).unwrap().id, 62);
 		// Equal priorities keep the registry's order.
-		let tied = [
+		let tied = vec![
 			Node {
 				priority: 1000,
 				..infrared
 			},
 			webcam,
 		];
-		assert_eq!(resolve(&tied, None).unwrap().id, 79);
+		assert_eq!(highest(tied, priority).unwrap().id, 79);
 
-		let error = resolve(&nodes, Some("missing")).unwrap_err().to_string();
+		let error = resolve(&nodes, "missing").unwrap_err().to_string();
 		assert!(error.contains("v4l2_input.pci-0000_00_14.0-usb-0_4_1.0"), "{error}");
-		assert!(matches!(resolve(&[], None), Err(Error::SourceUnavailable(_))));
+		assert!(matches!(
+			highest(Vec::new(), priority),
+			Err(Error::SourceUnavailable(_))
+		));
+	}
+
+	/// The default camera comes from the listed cameras, so a higher-priority
+	/// camera that offers only GREY does not shadow the webcam.
+	#[test]
+	fn the_default_camera_is_the_highest_priority_listed_one() {
+		let webcam = Node {
+			priority: 980,
+			..node(&WEBCAM).unwrap()
+		};
+		let infrared = Node {
+			id: 79,
+			name: "v4l2_input.pci-0000_00_14.0-usb-0_4_1.2".to_string(),
+			priority: 1000,
+			..webcam.clone()
+		};
+		let grey = enum_format(MediaSubtype::Raw, Some(VideoFormat::GRAY8), rectangle(640, 360));
+		let listed = convertible(
+			vec![infrared, webcam],
+			vec![Ok(parse_format(&grey)), Ok(webcam_formats())],
+		);
+		let (node, formats) = highest(listed, |(node, _)| node.priority).unwrap();
+		assert_eq!(node.id, 62);
+		assert_eq!(formats.unwrap(), webcam_formats());
 	}
 
 	fn rectangle(width: u32, height: u32) -> spa::utils::Rectangle {

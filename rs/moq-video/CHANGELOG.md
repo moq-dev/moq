@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - With the `pipewire` feature, `capture::cameras()` lists a webcam that a PipeWire node fronts as `pipewire:<node name>`, ahead of the V4L2 devices, instead of as `/dev/videoN`, since PipeWire shares the camera while V4L2 holds it exclusively. A `/dev/videoN` id still opens V4L2.
+- With the `pipewire` feature, `Source::Camera(None)` opens PipeWire's default camera outside a sandbox when PipeWire lists a camera, and `/dev/video0` otherwise.
 - [**breaking**] `encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the catalog, so a caller declares the encoder's GOP with `reserve().with_timeline_hint(gop)`.
 
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-video-v0.1.9...moq-video-v0.1.10) - 2026-10-05
