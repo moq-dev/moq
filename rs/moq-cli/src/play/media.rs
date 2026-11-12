@@ -32,6 +32,11 @@ enum Crossing {
 /// network jitter, and one with no depth at all can never be read from.
 const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 
+/// How far past the latency it opened on the sink may be asked to hold. Its ring
+/// reaches three seconds past that latency, less a 30 ms processing window
+/// (`Sink::set_latency`), so this leaves margin, and it covers the default stretch.
+const SINK_ROOM: Duration = Duration::from_secs(2);
+
 /// Maximum sample frames per silence write, independent of the catalog rate.
 const AUDIO_SILENCE: usize = 960;
 
@@ -637,11 +642,13 @@ async fn play_audio<O: Output>(
 	// subtracting the incoming frame before it reaches the sink.
 	let lead = |delay: Duration| latency.max(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
 
-	// The most the sink holds, within what it accepts. A shared delay past it,
-	// such as a slow video encoder's, stays encoded in the consumer until it is
-	// due instead, so the ring never grows with the delay.
+	// The most the sink holds, within what its ring was sized for. A shared delay
+	// past it, such as a slow video encoder's or a measured target past a long
+	// stretch, stays encoded in the consumer until it is due instead, so the
+	// ring never grows with the delay.
 	let cap = max_delay
 		.max(AUDIO_BUFFER_MIN)
+		.min(latency + SINK_ROOM)
 		.min(moq_audio::playback::Input::LATENCY_MAX);
 	let schedule = presentation.consume();
 	// The consumer decodes a packet once the sink has room for it. Its playhead is
@@ -1222,6 +1229,14 @@ mod tests {
 			first_sound(jitter, Duration::from_millis(100), None, None).await,
 			jitter,
 		);
+	}
+
+	/// A target past what the sink's ring was sized for, under a budget longer
+	/// still, holds the excess encoded rather than failing the sink.
+	#[tokio::test]
+	async fn audio_holds_a_target_past_its_ring_encoded() {
+		let jitter = Duration::from_secs(4);
+		assert_on_time(first_sound(jitter, Duration::from_secs(5), None, None).await, jitter);
 	}
 
 	fn assert_on_time(sounded: Duration, due: Duration) {

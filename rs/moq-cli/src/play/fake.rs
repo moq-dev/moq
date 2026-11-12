@@ -118,6 +118,7 @@ impl Speaker for Recorder {
 			stride: input.layout.channels() as usize * size_of::<f32>(),
 			sample_rate: input.sample_rate,
 			latency: input.latency,
+			capacity: input.latency + RING_HEADROOM,
 			refill: false,
 			declared: false,
 			next: false,
@@ -132,6 +133,11 @@ impl Speaker for Recorder {
 	}
 }
 
+/// The real ring's room past the latency it opens on, and the processing window
+/// a latency must leave free of it (`moq_audio::playback::Sink::set_latency`).
+const RING_HEADROOM: Duration = Duration::from_secs(3);
+const RING_WINDOW: Duration = Duration::from_millis(30);
+
 /// What an underrun waits for before playing again: the real ring's 30 ms
 /// stretch window and a 10 ms device period.
 const CUSHION: Duration = Duration::from_millis(40);
@@ -143,6 +149,8 @@ pub(super) struct FakeSink {
 	stride: usize,
 	sample_rate: u32,
 	latency: Duration,
+	/// How much the real ring holds, which a larger latency fails as it does there.
+	capacity: Duration,
 	refill: bool,
 	/// Running dry is a declared silence rather than an underrun.
 	declared: bool,
@@ -158,6 +166,7 @@ pub(super) struct FakeSink {
 
 impl Sink for FakeSink {
 	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()> {
+		anyhow::ensure!(latency + RING_WINDOW < self.capacity, "past the ring's capacity");
 		self.latency = latency;
 		Ok(())
 	}
