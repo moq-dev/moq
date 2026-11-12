@@ -876,9 +876,9 @@ A stream carrying the `ietf` extension's object records is never taken over.
 A publisher out of credit with no stream to take over MAY reset the lowest-priority Group Stream with YIELDED.
 
 A Group whose stream ended with GROUP_END or reset with YIELDED is paused, not given up: the subscriber keeps the frames it received, and the publisher MUST later continue the Group on another Group Stream or name it in [SUBSCRIBE_DROP](#subscribe-drop).
-A continuation is a Group Stream for the paused Group whose `Frame Start` is at most the index after the last frame the earlier stream delivered: exactly that index after a GROUP_END, and any index at or below the earlier stream's last acknowledged frame after a YIELDED reset.
+A continuation is a Group Stream for the paused Group whose `Frame Start` is the index after the last frame before the GROUP_END, or after a YIELDED reset, the reset stream's own `Frame Start`, since a reset can discard frames the transport acknowledged.
 The subscriber ignores the frames it already holds and appends the rest; a continuation that starts past the frames it holds is malformed.
-A continuation MAY overtake the end of the stream it continues, and waits unread until that stream ends.
+A continuation MAY overtake the earlier stream's GROUP_END or reset, and waits unread until the subscriber reads that GROUP_END or the stream ends.
 
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
