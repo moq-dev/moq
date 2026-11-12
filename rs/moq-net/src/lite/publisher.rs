@@ -3287,6 +3287,7 @@ impl Request for FetchServe {
 						}
 						buffer_frame_info(
 							writer,
+							shared.version,
 							batched.frame.timestamp,
 							batched.inflated,
 							batched.frame.payload.len() as u64,
@@ -3322,6 +3323,7 @@ impl Request for FetchServe {
 								}
 								buffer_frame_info(
 									writer,
+									shared.version,
 									next.timestamp,
 									next.inflated,
 									next.size,
@@ -4577,8 +4579,13 @@ mod announce_test {
 /// model layer (`group::Producer::create_frame`) already converted a timed frame into
 /// the track timescale, so its raw value goes straight onto the wire. Mirrors the
 /// decode in the subscriber's `run_group`.
+#[allow(
+	clippy::too_many_arguments,
+	reason = "one FRAME header's fields, each from its own source"
+)]
 fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
+	version: Version,
 	timestamp: Option<crate::Timestamp>,
 	inflated: Option<u64>,
 	size: u64,
@@ -4586,6 +4593,14 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	prev_ts: &mut u64,
 	runtime: &crate::time::Deadlines,
 ) -> Result<(), Error> {
+	// Lite-07 leads with the size plus one, leaving 0 for GROUP_END.
+	let length_first = version.has_length_first();
+	if length_first {
+		let length = size
+			.checked_add(1)
+			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		writer.buffer_varint(length)?;
+	}
 	if let Some(stamp) = stamp {
 		buffer_zigzag_delta(writer, stamp.wire(timestamp, runtime)?, prev_ts)?;
 	}
@@ -4593,7 +4608,9 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if let Some(inflated) = inflated {
 		writer.buffer_varint(inflated)?;
 	}
-	writer.buffer_varint(size)?;
+	if !length_first {
+		writer.buffer_varint(size)?;
+	}
 	Ok(())
 }
 
@@ -4993,6 +5010,18 @@ struct GroupOutcomes {
 	unencodable: Mutex<Option<Error>>,
 	/// Groups whose stream failed, with why, for the control stream to name.
 	dropped: Mutex<Vec<(u64, StreamError)>>,
+	/// Lite-07: groups whose stream the session reset to make room, for the run loop to
+	/// continue on a new stream.
+	paused: Mutex<Vec<Paused>>,
+}
+
+/// A group whose stream the session reset with YIELDED to make room for a higher-ranked
+/// open: the subscriber keeps what arrived, and a new stream continues the group.
+struct Paused {
+	/// An unread copy of the reset stream's cursor, at its `Frame Start`: the reset may have
+	/// discarded frames the transport acknowledged, so the continuation starts there.
+	group: group::Consumer,
+	frame_start: u64,
 }
 
 impl Subscription {
@@ -5081,6 +5110,10 @@ struct TrackRun {
 	// The expired groups an update re-offers, still cached and in range, each served again
 	// on its own stream as stream credit allows.
 	reoffered: std::collections::VecDeque<group::Consumer>,
+	// Lite-07: the paused groups, each continued on its own stream ahead of re-offers and new
+	// groups. Each paused while holding a stream, and the cursor hands out no group while
+	// one waits, so stream credit bounds them.
+	paused: std::collections::VecDeque<Paused>,
 	end_sent: bool,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
@@ -5145,6 +5178,7 @@ impl TrackRun {
 			update: 0,
 			redrop: RangeSet::new(),
 			reoffered: Default::default(),
+			paused: Default::default(),
 			end_sent: false,
 			opening: None,
 			children: kio::Tasks::new(),
@@ -5425,7 +5459,7 @@ impl TrackRun {
 		{
 			// The track side takes groups again.
 			Idle::disarm(&mut self.idle);
-			let opening = self.opening.take().expect("polled above");
+			let mut opening = self.opening.take().expect("polled above");
 			match res {
 				Ok(()) => self.children.push(opening),
 				Err(err) => opening.settle_failed(&err),
@@ -5446,6 +5480,12 @@ impl TrackRun {
 			return Poll::Ready(Err(err));
 		}
 
+		let paused = std::mem::take(&mut *self.ctx.outcomes.paused.lock().unwrap());
+		if !paused.is_empty() {
+			// The track side continues them.
+			Idle::disarm(&mut self.idle);
+			self.paused.extend(paused);
+		}
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
 			for (sequence, err) in dropped {
@@ -5535,6 +5575,16 @@ impl TrackRun {
 				starts: self.starts(start),
 			}))?;
 			self.raise_floor(start);
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
+
+		// A paused group takes the next stream credit, ahead of re-offers and new groups. It is
+		// owed already, and the subscriber holds its group open until it continues.
+		if self.opening.is_none()
+			&& let Some(Paused { group, frame_start }) = self.paused.pop_front()
+		{
+			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, frame_start, "continuing paused group");
+			self.open(group, frame_start);
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -5962,10 +6012,17 @@ impl TrackRun {
 	fn serve(&mut self, group: group::Consumer) {
 		let sequence = group.sequence;
 		let frame_start = group.index();
-		// The stream stops at the end frame, before the group may end.
-		let capped = self.frames.end(sequence).is_some();
 		self.mark_served(sequence);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
+		self.open(group, frame_start);
+	}
+
+	/// Open a group machine streaming `group` from `frame_start`, which waits for stream
+	/// credit before the cursor hands out another.
+	fn open(&mut self, group: group::Consumer, frame_start: u64) {
+		let sequence = group.sequence;
+		// The stream stops at the end frame, before the group may end.
+		let capped = self.frames.end(sequence).is_some();
 
 		// Use the latest steer for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let steer = self.ctx.steer_current();
@@ -6138,6 +6195,12 @@ struct GroupServe {
 	frame_start: u64,
 	/// The stream stops at a subscription's end frame, so its FIN cannot end the group.
 	capped: bool,
+	/// Lite-07 without the `ietf` extension's object records: an unread copy of `group` at
+	/// `frame_start`, which a new stream continues from if the session resets this one to
+	/// make room.
+	rewind: Option<group::Consumer>,
+	/// The session reset the stream to make room, pausing the group.
+	paused: bool,
 	// Lite05+ delta-encodes per-frame timestamps within the group. The first
 	// frame's delta is absolute (against an implicit prev value of 0), every
 	// subsequent delta is signed against the previous frame.
@@ -6190,7 +6253,10 @@ impl GroupServe {
 			true => group.compressed(),
 			false => group,
 		};
+		let rewind = Self::yields(&ctx).then(|| group.clone());
 		Self {
+			rewind,
+			paused: false,
 			ctx,
 			rank,
 			open: Default::default(),
@@ -6239,9 +6305,14 @@ impl GroupServe {
 				priority: handle.send_order().into(),
 			},
 		};
-		// A higher-priority open waiting for credit can reset this stream: the reader fell
-		// too far behind the publisher's streams, and the control stream drops the group.
-		let preempt = self.ctx.version.encode_stream_code(&StreamError::TooFarBehind);
+		// A higher-priority open waiting for credit can reset this stream. Lite-07 pauses the
+		// group, for a later stream to continue. Otherwise the reader fell too far behind the
+		// publisher's streams, and the control stream drops the group.
+		let preempt = match self.rewind.is_some() {
+			true => StreamError::Yielded,
+			false => StreamError::TooFarBehind,
+		};
+		let preempt = self.ctx.version.encode_stream_code(&preempt);
 		let stream = match ready!(session.poll_open_group(&mut self.open, waiter, options, preempt)) {
 			Ok(stream) => stream,
 			Err(err) => {
@@ -6403,6 +6474,7 @@ impl GroupServe {
 									.and_then(|()| {
 										buffer_frame_info(
 											writer,
+											self.ctx.version,
 											batched.frame.timestamp,
 											batched.inflated,
 											batched.frame.payload.len() as u64,
@@ -6457,6 +6529,7 @@ impl GroupServe {
 											.and_then(|()| {
 												buffer_frame_info(
 													writer,
+													self.ctx.version,
 													next.timestamp,
 													next.inflated,
 													next.size,
@@ -6500,6 +6573,9 @@ impl GroupServe {
 							}
 						}
 						Err(err) => {
+							// Read before the abort releases the stream.
+							self.paused =
+								self.rewind.is_some() && writer.stream().is_some_and(|stream| stream.preempted());
 							writer.abort(&err);
 							return Poll::Ready(Err(err));
 						}
@@ -6546,17 +6622,35 @@ impl kio::Task for GroupServe {
 }
 
 impl GroupServe {
+	/// Whether a stream reset to make room pauses its group: lite-07, unless the stream
+	/// carries the `ietf` extension's object records, which a continuation cannot resume.
+	fn yields(ctx: &GroupContext) -> bool {
+		ctx.version.has_yield() && !ctx.ietf
+	}
+
 	/// Account for a group that failed with `err`: a reset can lose its header, and a group
-	/// that never got a stream has none, so the control stream names it with that error.
-	fn settle_failed(&self, err: &Error) {
-		if self.ctx.version.has_track_stream() {
-			self.ctx
-				.outcomes
-				.dropped
-				.lock()
-				.unwrap()
-				.push((self.sequence, StreamError::from(err)));
+	/// that never got a stream has none, so the control stream names it with that error. A
+	/// group the session paused is continued instead.
+	fn settle_failed(&mut self, err: &Error) {
+		if !self.ctx.version.has_track_stream() {
+			return;
 		}
+		if self.paused
+			&& let Some(group) = self.rewind.take()
+		{
+			let paused = Paused {
+				group,
+				frame_start: self.frame_start,
+			};
+			self.ctx.outcomes.paused.lock().unwrap().push(paused);
+			return;
+		}
+		self.ctx
+			.outcomes
+			.dropped
+			.lock()
+			.unwrap()
+			.push((self.sequence, StreamError::from(err)));
 	}
 }
 

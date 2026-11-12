@@ -1,13 +1,24 @@
 // Labels for `/statechart` on SubscribeAccounting.tla: what each side holds for the
 // group, which update each side is on, and each step as the event that happens.
 
-type Stream = { g: number; pub: string; err: string; wasFin: boolean; sub: string };
+type Stream = {
+	g: number;
+	pub: string;
+	err: string;
+	wasFin: boolean;
+	sub: string;
+	of: number;
+	start: number;
+	wrote: number;
+	read: number;
+};
 type Msg = { type: string; g: number; err: string; u: number };
 type Vars = {
 	cur: Record<string, string>;
 	streams: Record<string, Stream>;
 	reoffered: number[];
 	redrop: number[];
+	paused: Record<string, number>;
 	resp: Record<string, Msg>;
 	sup: number;
 	pup: number;
@@ -15,6 +26,7 @@ type Vars = {
 	rec: Record<string, string>;
 	cached: Record<string, string>;
 	got: number[];
+	have: Record<string, number>;
 };
 
 const list = (seq: Record<string, Stream> | undefined) => Object.values(seq ?? {});
@@ -26,10 +38,16 @@ const publisher = (v: Vars) => {
 				open: "serving",
 				fin: "FIN sent, unacknowledged",
 				acked: "served, acknowledged",
-				reset: last.err === "old" ? "stream reset as stale" : "stream reset",
+				reset: { old: "stream reset as stale", yielded: "stream yielded" }[last.err] ?? "stream reset",
 			}[last.pub]
 		: { pending: "nothing sent", stale: "named stale", final: "named dropped", skip: "named skipped" }[v.cur["0"]];
-	const next = v.reoffered.length ? ", to serve again" : v.redrop.length ? ", to drop again" : "";
+	const next = v.paused["0"]
+		? ", paused, to continue or drop"
+		: v.reoffered.length
+			? ", to serve again"
+			: v.redrop.length
+				? ", to drop again"
+				: "";
 	return `${base}${next}`;
 };
 
@@ -38,6 +56,7 @@ const subscriber = (v: Vars) => {
 	const base = {
 		none: "nothing yet",
 		open: "receiving",
+		paused: `paused, holding ${v.have["0"]} frames`,
 		whole: "has it whole",
 		aborted: "reset mid-group",
 		evicted: got ? "had it whole, evicted" : "evicted",
@@ -67,8 +86,16 @@ export const step = (action: string, from: Vars, to: Vars) => {
 				final: "the publisher drops the group",
 				skip: "the publisher skips the group",
 			}[to.cur["0"]];
+		case "StreamWrite":
+			return "the publisher writes a frame";
 		case "StreamFin":
 			return "the publisher writes the FIN";
+		case "StreamYield":
+			return "out of stream credit, the publisher resets the stream with YIELDED";
+		case "PubContinue":
+			return "the publisher continues the paused group on a new stream";
+		case "PausedGiveUp":
+			return "the publisher gives the paused group up";
 		case "StreamFail": {
 			const failed = list(to.streams).find((s, i) => s.pub === "reset" && list(from.streams)[i]?.pub !== "reset");
 			return failed?.err === "old" ? "the group goes stale and its stream resets" : "the stream fails and resets";
@@ -89,9 +116,14 @@ export const step = (action: string, from: Vars, to: Vars) => {
 			return "the subscriber's tail forgets the group finished, under the pool's debt";
 		case "SubHeader":
 			return "a Group Stream's header arrives";
+		case "SubFrame":
+			return "the subscriber reads a frame";
 		case "SubFin":
 			return "the subscriber reads the stream to its FIN";
-		case "SubReset":
+		case "SubReset": {
+			const ended = list(to.streams).find((s, i) => s.sub === "reset" && list(from.streams)[i]?.sub !== "reset");
+			return ended?.err === "yielded" ? "the stream's YIELDED reset arrives" : "the stream's reset arrives";
+		}
 		case "SubResetHeld":
 			return "the stream's reset arrives";
 		case "Evict":

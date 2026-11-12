@@ -201,6 +201,11 @@ impl Tail {
 	pub fn streams(&self) -> u64 {
 		self.streams
 	}
+
+	/// Whether a stream or a drop accounted for `group` already.
+	pub fn accounts(&self, group: u64) -> bool {
+		self.ledger.covers(group..group.saturating_add(1))
+	}
 }
 
 /// A data stream whose header arrived, holding its subscription's end open until dropped.
