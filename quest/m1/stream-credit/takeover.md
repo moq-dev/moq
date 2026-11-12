@@ -1,74 +1,60 @@
-# [M] A higher-priority group takes over an acknowledged stream on lite-07
+# [L] A higher-priority group takes over an acknowledged stream on lite-07
 
 ## Goal
 
 On lite-07, when an open waits for credit and a lower-priority group stream's
 sent data is all acknowledged, the new group takes that stream over at once:
-the group stream ends one group and starts another, needing no credit. A
-group that lost its stream, by takeover or by the reset fallback (an open
-waiting for credit resets the lowest-ranked stream, reported in
-SUBSCRIBE_DROP as `TOO_FAR_BEHIND`), resumes from where it
-stopped when it is next served, under the duplicate rule of
-[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670). moq-transport
-and older lite versions keep reset only.
+the group stream ends one group with GROUP_END and starts another, needing no
+credit. The group that lost its stream pauses and a later stream continues
+it, as a YIELDED reset's group already does. moq-transport and older lite
+versions keep reset only.
 
 ## Plan
 
-Decided 2026-11-05 (maintainer, /quest-plan): split from "A higher-priority group makes room". Takeover first,
-as decided 2026-11-04: only a stream whose sent data is all acknowledged
-qualifies, since a QUIC stream is ordered and the new group's bytes would
-otherwise queue behind the old group's retransmissions. Add the takeover
-wire to `drafts/draft-lcurley-moq-lite.md` before lite-07 finalizes, and
-define where a reset or taken-over group resumes.
+Decided 2026-11-04 (maintainer): only a stream whose sent data is all
+acknowledged qualifies, since a QUIC stream is ordered and the new group's
+bytes would otherwise queue behind the old group's retransmissions.
 
-Choose from the session's open group streams: Rust's
-`transport::open::Lines::open_streams` (opened through
-`boxed::Session::poll_open_group`) and JS's `lines(quic).streams`, each lowest
-ranked first with whether the peer has acknowledged it. Each can already be
-reset to make room (Rust `boxed::Listed::preempt`, JS `OpenStream.preempt`);
-add the handle that hands a stream to a new group here, tried before the reset.
+Decided 2026-11-12 (coordinator on the maintainer's behalf, taking
+[moq-dev/moq#8545](https://github.com/moq-dev/moq/pull/8545)'s
+recommendations): ✅ GROUP_END is a FRAME whose `Payload Length` is 0
+(rejected: a new Group Stream type with a 1-byte type per frame; no in-band
+marker, reset only).
 
-Tests: a browser over WebTransport and a Rust relay, more live groups than
-the cap, the higher-priority group starting without waiting a round trip;
-a group that lost its stream resumes without loss.
+Decided 2026-11-12 (maintainer, scope of
+[moq-dev/moq#8545](https://github.com/moq-dev/moq/pull/8545)): ✅ split
+(rejected: one PR resized XL). #8545 lands the lite-07 FRAME reorder
+(`Payload Length` first, 0 malformed for now), the YIELDED (0x3C) reset that
+pauses a group, paused groups and continuations in Rust and JS, the
+`SubscribeAccounting.tla` model, and the resumes-without-loss test, with no
+takeover text in the draft. This quest owns takeover itself:
 
-Decided 2026-11-05 (maintainer, /quest-audit): ✅ the wait on
-[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), Drop set's own
-PR, becomes a `Required` link to Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)), since
-resuming a reset group sends a second stream for the same group, which #7670's
-hold-the-duplicate rule rewrites.
+- The draft's takeover text: a publisher out of credit writes GROUP_END after
+  a whole FRAME, then the new Group's GROUP message, on the same stream; it
+  SHOULD NOT take over a stream before every byte sent on it is acknowledged;
+  a stream carrying the `ietf` extension's object records is never taken
+  over. A GROUP_END on a Fetch Stream, or as a Group Stream's last bytes, is
+  malformed. The group a GROUP_END ends is paused, and its continuation starts
+  at the index after its last frame before the GROUP_END.
+- Rust: a handle on `transport::open::Lines` that hands a listed stream to a
+  waiting open, tried before `boxed::Listed::preempt`, and a stream handoff
+  between two `GroupServe` tasks at a frame boundary.
+- JS: the same on `OpenStream` (`js/net/src/open.ts`).
+- Subscriber: `GroupRecv` and its JS counterpart parse more than one group on
+  a stream, each GROUP message after a GROUP_END binding the stream to its own
+  subscription and group.
+- Tests: a browser over WebTransport and a Rust relay, more live groups than
+  the cap, the higher-priority group starting without waiting a round trip.
+  The epic's 300-track end-to-end test reuses this harness.
 
-Public API: none. Wire: lite-07 group stream takeover.
+Implementation guidance (recommended): take over only a stream whose writer is
+parked between frames (waiting for its group's next frame) and fully
+acknowledged; a stream mid-frame falls back to the YIELDED reset, so no frame
+waits on a handoff. `SubscribeAccounting.tla` gains GROUP_END the way it gained
+YIELDED.
 
-The draft specifies the wire ([Takeover](/drafts/draft-lcurley-moq-lite.md),
-GROUP_END, YIELDED): what remains is the Rust and JS publishers taking over
-and continuing paused Groups, the subscribers holding and continuing them,
-and the tests above.
-
-Decided 2026-11-12 (coordinator on the maintainer's behalf while away, taking
-the PR's recommendations; open to revision on review):
-
-- GROUP_END encoding: ✅ lite-07 FRAME leads with `Payload Length + 1`, 0 =
-  GROUP_END (rejected: a new Group Stream type with a 1-byte type per frame;
-  no in-band marker, reset only).
-- Reset fallback: ✅ a new YIELDED (0x3C) reset pauses the group, with no
-  SUBSCRIBE_DROP (rejected: TOO_FAR_BEHIND plus the drop, resuming only via a
-  fresh group).
-
-Implementation guidance (recommended, not yet settled by review):
-
-- Take over only a stream whose writer is parked between frames (waiting for
-  its group's next frame) and fully acknowledged; a stream mid-frame falls
-  back to the YIELDED reset, so no frame waits on a handoff.
-- A paused group re-enters its subscription's cursor at its own sequence,
-  ranked like any other group, so the delivery budget can still expire it
-  (then named in SUBSCRIBE_DROP as OLD).
-- The subscriber keeps a paused group's `group::Producer` open in its
-  subscription entry; a continuation takes it and skips the frames it holds.
-- `verify-subscribe`'s `SubscribeAccounting.tla` gains the YIELDED pause and
-  the continuation, since both change how a Group Stream accounts for a
-  sequence.
+Public API: none. Wire: lite-07 GROUP_END and group stream takeover.
 
 ## Waiting
 
-- Maintainer: scope. The implementation is about XL, not M: a FRAME codec reorder in Rust and JS (publisher, subscriber, Fetch, corpus), a paused-group state on both sides of both languages, a cross-task stream handoff at a frame boundary, multi-group Group Stream parsing, the `SubscribeAccounting.tla` model, and a new browser-over-WebTransport test harness. Options: (1) split: this quest (resized [L]) lands the FRAME reorder, YIELDED, paused groups and continuations, the model, and the resumes-without-loss test, with the Takeover text moved out of the draft; a new [L] follow-up adds takeover (the `Lines` handle before `Listed::preempt`, JS `OpenStream`, GROUP_END, multi-group streams) and the browser test; (2) keep one PR, resized [XL]. Recommend (1): YIELDED pausing is the machinery takeover builds on, each half keeps the draft matching the code at merge, and each stays reviewable.
+- Maintainer: whether the new Group may belong to any subscription on the session, or only to the subscription whose stream it takes over. Options: (1) any subscription; (2) the same subscription only. Recommend (1): stream credit is session-wide, and the higher-priority group waiting for it is usually another track's (a browser holding hundreds of tracks), so (2) would rarely find a stream to take; the cost is that `GroupRecv` rebinds a stream to another subscription at each GROUP message, which multi-group parsing needs anyway.
