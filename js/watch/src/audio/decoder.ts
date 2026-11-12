@@ -18,7 +18,7 @@ import { hosted } from "../assets";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-import type { Sync, Track } from "../sync";
+import { DELAY_MAX, type Sync, type Track } from "../sync";
 import { AudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
@@ -333,7 +333,7 @@ export class Decoder {
 		const budget = this.#budget(effect);
 		const delay = budget.delay;
 		const max = maxDelay(budget);
-		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0);
+		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0).min(DELAY_MAX);
 		this.#delay.set({ min: delay, max });
 		this.#subscribeMaxDelay.set(max.add(warmup));
 	}
@@ -858,7 +858,7 @@ export class Decoder {
 			format,
 			delay: this.#delay,
 			wait: this.sync.out.maxDelay,
-			warmup: Duration.millis(config.warmup ?? 0),
+			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
 		});
 		effect.cleanup(() => consumer.close());

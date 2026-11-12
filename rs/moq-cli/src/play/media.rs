@@ -716,9 +716,14 @@ async fn play_audio<O: Output>(
 	// The jitter target the last write held, so a rise in the stated delay applies
 	// at once rather than waiting on the next write.
 	let jitter = Mutex::new(None);
+	// The jitter target and the catalog delay are each capped, and so is their sum,
+	// so one ceiling bounds the clock however the publisher splits its advertisement.
+	let capped = |jitter: Duration, delay: Option<Duration>| {
+		(jitter + delay.unwrap_or_default()).min(moq_audio::playback::Input::LATENCY_MAX)
+	};
 	let retarget = |delay: Option<Duration>| {
 		let Some(jitter) = *jitter.lock().unwrap() else { return };
-		if role.set_target(jitter + delay.unwrap_or_default()) {
+		if role.set_target(capped(jitter, delay)) {
 			changed.notify_one();
 			output.send(Event::Wake);
 		}
@@ -1008,7 +1013,7 @@ async fn play_audio<O: Output>(
 				.max(delay.max(AUDIO_BUFFER_MIN))
 				.min(moq_audio::playback::Input::LATENCY_MAX);
 			*jitter.lock().unwrap() = Some(held);
-			moved |= role.set_target(held + stated.borrow().unwrap_or_default());
+			moved |= role.set_target(capped(held, *stated.borrow()));
 			// The consumer releases media due further out than the sink holds only
 			// when its timeline ends before the media behind it covers the hold, so
 			// that little waits here instead of overflowing the sink.
@@ -1246,6 +1251,15 @@ mod tests {
 			first_sound(Duration::from_secs(20), Duration::from_secs(5), None, None).await,
 			latency,
 		);
+	}
+
+	/// A capped jitter target plus a capped catalog delay still holds the clock at
+	/// one ceiling, the same the browser holds.
+	#[tokio::test]
+	async fn audio_caps_a_target_plus_catalog_delay_at_the_deepest_delay() {
+		let latency = moq_audio::playback::Input::LATENCY_MAX;
+		let hour = Duration::from_secs(3600);
+		assert_on_time(first_sound(latency, latency, Some(hour), None).await, latency);
 	}
 
 	/// A target past what the sink's ring was sized for, under a budget longer

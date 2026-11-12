@@ -324,9 +324,13 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Item {
 pub struct Playout {
 	/// The delay the consumer plays at, and skips past.
 	pub delay: Delay,
-	/// How much further back than [`Delay::min`] the start reaches.
+	/// How much further back than [`Delay::min`] the start reaches, at most 10 s.
 	pub warmup: std::time::Duration,
 }
+
+/// The most warmup a [`Playout`] reaches back for, so a catalog `warmup` cannot hold a reader's
+/// media without bound. Matches `moq_audio::playback::Input::LATENCY_MAX` and `@moq/watch`'s cap.
+const WARMUP_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Playout {
 	/// Play at `delay`, starting `warmup` further back.
@@ -346,7 +350,7 @@ impl Playout {
 	/// set to that delay here, widened or narrowed.
 	pub fn consumer<F: Container>(&self, track: moq_net::track::Subscriber, format: F) -> Consumer<F> {
 		let mut consumer = Consumer::new(track, format);
-		consumer.warmup = self.warmup;
+		consumer.warmup = self.reach();
 		consumer.set_delay(self.delay);
 		consumer
 	}
@@ -354,7 +358,12 @@ impl Playout {
 	/// The delay the subscription carries.
 	fn subscribed(&self) -> Delay {
 		self.delay
-			.with_max(self.delay.max.map(|max| max.saturating_add(self.warmup)))
+			.with_max(self.delay.max.map(|max| max.saturating_add(self.reach())))
+	}
+
+	/// The warmup, capped at [`WARMUP_MAX`].
+	fn reach(&self) -> std::time::Duration {
+		self.warmup.min(WARMUP_MAX)
 	}
 }
 
@@ -3923,6 +3932,23 @@ mod tests {
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 		assert_eq!(consumer.warmup, Duration::from_millis(300));
+	}
+
+	/// A catalog warmup past the cap reaches back, and widens the subscription, by the cap alone.
+	#[tokio::test]
+	async fn the_playout_caps_a_huge_warmup() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let delay = Delay::default().with_max(Some(Duration::from_millis(200)));
+		let playout = Playout::new(delay, Duration::from_secs(3600));
+		let consumer = playout.consumer(
+			track.subscribe(playout.subscription(moq_net::track::Subscription::default())),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		assert_eq!(
+			subscribed(&consumer).subscription().delay.max,
+			Some(Duration::from_millis(200) + WARMUP_MAX)
+		);
+		assert_eq!(consumer.warmup, WARMUP_MAX);
 	}
 
 	/// An unlimited max delay keeps the subscription unlimited, and the min delay still sets the

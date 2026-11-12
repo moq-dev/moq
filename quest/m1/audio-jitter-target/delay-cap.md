@@ -1,4 +1,4 @@
-# [XS] A publisher's advertised delay cannot hold a browser viewer without bound
+# [S] A publisher's advertised delay cannot hold a browser viewer without bound
 
 ## Goal
 
@@ -34,34 +34,25 @@ Recommendations, as implemented:
 - A fixed delay is left alone: the viewer chose it, not the publisher.
 - A catalog advertising an hour of `jitter` and `delay` resolves to the cap.
 
+Decided 2026-11-12 (coordinator, on the maintainer's behalf while away, from
+the PR's recommendations):
+
+- ✅ (a) cap `moq play`'s audio target sum, the held jitter target plus the
+  catalog delay, at `LATENCY_MAX` too, so one 10 s ceiling holds everywhere
+  (rejected: (b) raise the browser to 20 s; (c) keep the mismatch).
+- ✅ (a) clamp catalog `warmup` at `LATENCY_MAX` where the browser reads it,
+  and in Rust's `moq_mux::container::Playout` for parity (rejected: (b) reject
+  the rendition; (c) leave unbounded).
+
 Findings:
 
-- The premise that `moq play` caps at the same 10 s does not hold. It caps
-  each term on its own, the held jitter target and the catalog delay, each at
-  `LATENCY_MAX`, so its audio target can reach 20 s
-  (`rs/moq-cli/src/play/media.rs`). `moq_mux::sync` caps nothing itself: its
-  delay is the largest target its callers set.
 - The constants are pinned together in one place only: the `play` feature's
   test in `rs/moq-cli/src/play/args.rs` pins `DELAY_MAX` to
-  `moq_audio::playback::Input::LATENCY_MAX`. The browser constant is pinned to
-  it by its comment alone, since no test builds both.
-- Catalog `warmup` is added to the subscription's max delay in the browser
-  with no cap (`js/watch/src/audio/decoder.ts`, `js/watch/src/video/decoder.ts`).
-  It is not one of the `jitter` or `delay` fields the Goal names.
+  `moq_audio::playback::Input::LATENCY_MAX`. The browser's `DELAY_MAX` and
+  `moq-mux`'s `WARMUP_MAX` are pinned to it by comment alone, since no test
+  builds them together.
+- The warmup cap bounds what a reader buffers. A decoder's trim of a huge
+  `warmup` still discards that much of the publisher's own audio, which hurts
+  only its broadcast.
 
-Public API: none. The constant stays internal to `@moq/watch`. Wire: none.
-
-## Waiting
-
-- Maintainer: pick the ceiling for `moq play`'s audio target, which reaches 20 s
-  while the browser stops at 10 s. Options: (a) cap `moq play`'s target sum at
-  `LATENCY_MAX` too, recommended, so one ceiling holds everywhere; (b) raise
-  the browser to 20 s to match `moq play`'s worst case; (c) keep the mismatch.
-  Check: the answer is recorded here, and a follow-up quest exists for `moq play`.
-- Maintainer: pick how a catalog `warmup` above 10 s is bounded. Options: (a)
-  clamp it at `LATENCY_MAX` where the browser reads it, and in `rs/hang`'s
-  playout for parity, recommended, since only the publisher's own picture
-  suffers; (b) reject a rendition whose `warmup` exceeds it, which fails loud
-  but drops that rendition; (c) leave it unbounded, which misses this quest's
-  Goal for `warmup`. Check: the answer is recorded here, and a follow-up quest
-  exists for it.
+Public API: none. The constants stay internal. Wire: none.

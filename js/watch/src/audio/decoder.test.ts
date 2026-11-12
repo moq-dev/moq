@@ -7,7 +7,7 @@ import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { supportCacheKey } from "../support-probe";
-import { type Delay, STRETCH, Sync } from "../sync";
+import { DELAY_MAX, type Delay, STRETCH, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
 import { decoderConfigKey } from "./config";
@@ -634,6 +634,41 @@ describe("Decoder across a broadcast disable", () => {
 });
 
 describe("Decoder across a delay change", () => {
+	it("reaches back for a catalog warmup no further than the delay cap", async () => {
+		// The max delay each subscribe and update asked the publisher for, in order.
+		const asked: (Duration | null | undefined)[] = [];
+		const subscribe = Moq.Track.Consumer.prototype.subscribe;
+		const update = Moq.Track.Subscriber.prototype.update;
+		const subscribes = spyOn(Moq.Track.Consumer.prototype, "subscribe").mockImplementation(function (
+			this: Moq.Track.Consumer,
+			...args: Parameters<typeof subscribe>
+		) {
+			asked.push(args[0]?.delay?.max);
+			return subscribe.apply(this, args);
+		});
+		const updates = spyOn(Moq.Track.Subscriber.prototype, "update").mockImplementation(function (
+			this: Moq.Track.Subscriber,
+			...args: Parameters<typeof update>
+		) {
+			asked.push(args[0]?.delay?.max);
+			return update.apply(this, args);
+		});
+		const playback = await play(Duration.millis(100));
+		try {
+			await playback.play();
+			const base = asked.at(-1);
+			if (!base) throw new Error("no subscription");
+			playback.restore({ warmup: 3_600_000 });
+			await microtasks();
+			await playback.play();
+			expect(asked.at(-1)).toEqual(base.add(DELAY_MAX));
+		} finally {
+			subscribes.mockRestore();
+			updates.mockRestore();
+			playback.close();
+		}
+	});
+
 	for (const initial of [Duration.millis(100), "auto"] as const) {
 		it(`keeps the subscription and ring when ${initial} becomes a number`, async () => {
 			const playback = await play(initial);
