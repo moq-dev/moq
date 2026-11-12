@@ -41,9 +41,14 @@ code, out of scope for routing-free work.
 
 Decided 2026-11-12 by the maintainer: ✅ keep the lane quarantined and pick up
 the lead above once the routing work lands (rejected: unquarantine to collect a
-nightly failing log; close the quest on the clean history). The routing work is
-[moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) and
-[moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443), which change the
-same path. This quest's PR lands after both, so the quest is ready once they are in.
+nightly failing log; close the quest on the clean history).
+
+Decided 2026-11-12 by the maintainer (coordinator session): ✅ drop
+[moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) (cache-aware
+routing proof) from what this quest waits on (rejected: keep waiting on #8457;
+unquarantine to collect logs). The lead lives in lite-07's route layer, which
+[moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443) already landed,
+and #8457 is paused until the warm-route rule is re-picked. The quest is
+ready: start from the lead above.
 
 Public API: none expected. Wire: none.
