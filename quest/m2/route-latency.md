@@ -2,11 +2,9 @@
 
 ## Goal
 
-`js/net` reads a lite-07 route's RTT as Rust does: it decodes and encodes
-ROUTE_START's and ROUTE_UPDATE's Flags and optional RTT, a browser publishes
-its own route at 0, and its announced routes carry the sum the relay
-advertised plus its own first hop, unknown when the browser's transport
-reports no RTT. The sum never ranks or selects a route.
+`js/net` reports a lite-07 route's RTT as Rust does: its announced routes
+carry the sum the relay advertised plus its own first hop, unknown when the
+browser's transport reports no RTT. The sum never ranks or selects a route.
 
 ## Plan
 
@@ -25,20 +23,15 @@ bindings' `RouteInfo.rtt`, with no option to withhold it. Its PR body
 keeps the sizing simulation: one real shift sends one ROUTE_UPDATE per origin
 on each stream downstream of the link, and jitter sends none.
 
-What remains is the JS side, which needs the JS route layer first:
+[moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443) landed the
+JS route layer with the Flags and RTT codec: a browser advertises its own
+route at 0, and the subscriber decodes each route's RTT into its `Advert`
+and drops it. What remains:
 
-- Decode Flags (0x1 down-only, 0x2 RTT present, any other bit a
-  PROTOCOL_VIOLATION) and the RTT that follows, in milliseconds, and encode
-  a browser's own route with an RTT of 0.
 - Add `rtt` to `js/net`'s `RouteInfo`, named as Rust's: the advertised sum
   plus the same windowed minimum over WebTransport `getStats()`'s smoothed
   RTT, and `undefined` while either is unknown.
-- Pin the codec to Rust's with the shared corpus, and run
-  `just test interop --all`.
-
-## Required
-
-- [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - the ROUTE codec and route-backed `RouteInfo` this extends
+- Run `just test interop --all`.
 
 ## Related
 

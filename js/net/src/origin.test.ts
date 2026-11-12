@@ -6,7 +6,7 @@ import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, HopSchema, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { chainHash, presented, spreadHash } from "./internal.ts";
+import { chainHash, compareRouteCandidates, presented, rendezvousHash, spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -2109,6 +2109,35 @@ test("announced filters before rooting and retains lifecycle, routing and watch 
 	source.close();
 	origin.close();
 	expect(wireOf(reader).advertised.peek()).toBeUndefined();
+});
+
+// Rust keys each candidate on its own, a lite-07 claim by its node and any other by its instance
+// and chain, as `lite07_ties_match_js` in rs/moq-net pins: here the claim wins.
+test("a lite-07 and a lite-06 route beneath one prefix rank by each one's own key", () => {
+	const job = Path.from("pool/job");
+	const pool = Path.from("pool");
+	const claim = { ...WireRoute.default, instance: Instance.parse("a"), node: 0x7an, cost: 1n };
+	const legacy = { ...WireRoute.default, instance: Instance.parse("b"), hops: [HopSchema.parse(11n)], cost: 1n };
+	expect(rendezvousHash(job, 0x7an)).toBe(0xc376be7bf47aebbfn);
+	expect(spreadHash(job, "b")).toBe(0xd16a3821c67a2d25n);
+	expect(compareRouteCandidates(job, pool, claim, legacy)).toBeLessThan(0);
+	expect(compareRouteCandidates(job, pool, legacy, claim)).toBeGreaterThan(0);
+});
+
+// A lite-07 claim ranks as the one hop to its origin node in what the origin announces, as in
+// what a request resolves: tied with a newer one-hop route, the newer wins both.
+test("an announcement counts a lite-07 claim as one hop", async () => {
+	const origin = new Producer();
+	const room = Path.from("room");
+	const b = Instance.parse("b");
+	const older = wireOf(origin).receive(room, { ...WireRoute.default, instance: Instance.parse("a"), node: 0x7an });
+	const newer = wireOf(origin).receive(room, { ...WireRoute.default, instance: b, hops: [PEER] });
+	const announced = origin.consume().routes();
+	expect(await announced.next()).toMatchObject({ prefix: room, route: { instance: b } });
+	announced.close();
+	older.close();
+	newer.close();
+	origin.close();
 });
 
 test("the spread hash matches rs/moq-net byte for byte", () => {

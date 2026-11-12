@@ -26,8 +26,8 @@ on the local network so please plan that."
 This lifts three statements once it lands: the P2P epic's "A browser never
 carries another peer's traffic", the
 [cluster routing](/quest/m2/cluster-routing/README.md) plan's browser tabs
-keeping `proxy` off, and the [js/net route layer](/quest/m2/cluster-routing/routes/js.md)'s
-non-transit tab. Until then each stays true.
+keeping `proxy` off, and `js/net`'s non-transit
+tab. Until then each stays true.
 
 It also settles why every publisher stays an origin node (Plan item 18 of
 [Routes and announces](/quest/m2/cluster-routing/routes/README.md)): a tab
@@ -59,7 +59,3 @@ relay does.
 
 - [Ship JS-only @moq/net from Rust](/quest/m5/rs2ts-js.md) - the Rust router and model running in the tab
 - [P2P](/quest/m4/p2p/README.md) - direct browser sessions, their signaling, and `Peers`
-
-## Related
-
-- [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - the handwritten, non-forwarding route layer this replaces in the tab

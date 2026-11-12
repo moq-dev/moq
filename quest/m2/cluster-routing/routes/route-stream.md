@@ -96,9 +96,8 @@ Code this replaces, for lite-07 only:
 - `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
 - `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic
-  `Discovery` has. [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443)
-  ports the route layer with per-stream state; whichever lands second
-  adapts, and if it has landed, this PR changes `js/net` too.
+  `Discovery` has. Its route layer keeps per-stream state, so this PR changes `js/net`
+  too.
 
 Also touching the same files, to merge around:
 [moq-dev/moq#8458](https://github.com/moq-dev/moq/pull/8458) (its
@@ -132,6 +131,5 @@ Public API: none expected. Wire: lite-07-wip only.
 
 ## Related
 
-- [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - the JS side of the same wire
 - [Announce interest streams share one route table](/quest/m4/announce-interest-memory.md) - lite-07 then holds one interest stream per side; the bound still matters for older versions
 - [A regrant re-checks only the routes it can change](/quest/m4/regrant-route-recheck.md) - its per-stream product loses a factor on lite-07

@@ -411,7 +411,7 @@ mod tests {
 	}
 
 	/// A compressed stream pinned byte for byte. `js/net/src/lite/announce.test.ts` decodes
-	/// this hex once js/net speaks the route layer (quest/m2/cluster-routing/routes/js.md).
+	/// this hex too.
 	const GOLDEN: &str =
 		"001300000a726f6f6d2f612f63616d000161000000000c0102036d696300016100000002020000010101000a02010162000161000000";
 
@@ -437,8 +437,8 @@ mod tests {
 		assert_eq!(crate::fuzz::decode_announces(&encoded, true), golden());
 	}
 
-	/// The literal lite-07 stream `js/net` will write for the same announcements once it
-	/// speaks the route layer, never picking a base.
+	/// The literal lite-07 stream `js/net` writes for the same announcements, never picking a
+	/// base; `js/net/src/lite/announce.test.ts` pins its encoder to it.
 	const JS_LITERAL: &str = "001300000a726f6f6d2f612f63616d000161000000001300000a726f6f6d2f612f6d696300016100000002020000010101000f000006726f6f6d2f62000161000000";
 
 	#[test]

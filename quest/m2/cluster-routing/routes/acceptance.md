@@ -87,10 +87,6 @@ origin is an explicit case. Coordinate with Route wakes and Announce replay;
 benchmark smoke alone does not enforce complexity, so add operation-count
 regressions. Bound pending requests and freshness state under same-clock churn.
 
-## Required
-
-- [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - the JS side of the interop checks
-
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the contract and its fixtures

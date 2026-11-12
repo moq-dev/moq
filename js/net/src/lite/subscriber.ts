@@ -24,9 +24,10 @@ import {
 } from "../error.ts";
 import { fillChanged, rejectGroups, wantedRuns } from "../fill.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
+	bestCandidate,
 	type DropRun,
 	hiddenBelow,
 	hooks,
@@ -59,15 +60,19 @@ import { Budget } from "../util/yield.ts";
 import { hasTime, rangesStart, sameRanges, Window, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
+	type Advert,
 	AnnounceHistory,
 	AnnounceInit,
 	AnnounceOk,
 	AnnounceRequest,
 	decodeAnnounceBroadcastMaybe,
+	encodeAnnounceReply,
+	ROUTE_MAX_HOPS,
 } from "./announce.ts";
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
+import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
@@ -93,12 +98,14 @@ import {
 	hasDatagrams,
 	hasDatagramTracks,
 	hasFetchMaxDelay,
+	hasInstance,
 	hasMediaTime,
 	hasMinDelay,
 	hasOrder,
 	hasProbeRtt,
 	hasRanges,
 	hasRefresh,
+	hasRoutes,
 	hasSetupStream,
 	hasSkip,
 	hasSynced,
@@ -141,11 +148,20 @@ interface SubscribeSetup {
  */
 interface Consumed {
 	readonly instance?: Instance.Valid;
+	// The origin node every request names (lite-07): the one the route selected at consume
+	// reaches, or 0 to leave the choice to the publisher.
+	readonly node?: bigint;
 	readonly id?: number;
 	readonly valid?: AbortSignal;
 	// Aborted once another stream takes the path, which may answer a request without an instance
 	// still unanswered. A withdrawal alone leaves the peer to answer it.
 	readonly answering?: AbortSignal;
+}
+
+// What a request names to pin it: the serving instance, and on lite-07 its origin node.
+interface Pin {
+	readonly instance?: Instance.Valid;
+	readonly node?: bigint;
 }
 
 interface DatagramEntry {
@@ -329,8 +345,10 @@ export class Subscriber {
 	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
 	#subscribeNext = 0n;
 
+	// Lite-07: what this session's announce streams certify of each origin node's claims.
+	#floors = new Floors();
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
-	#consumes = new BroadcastCache();
+	#consumes = new BroadcastCache(this.#floors);
 	#consumeNext = 0;
 
 	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, instance, track, sequence].
@@ -428,9 +446,10 @@ export class Subscriber {
 	 * never hides anything, so the rule is also applied here.
 	 *
 	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
-	 * also asks for those whose subtree overlaps it.
+	 * also asks for those whose subtree overlaps it. A lite-07 stream reports the best claim at
+	 * each path, or each origin node's with `options.claims`.
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Routes {
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.RouteOptions): announce.Routes {
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
 		const consumer = announced.consume();
@@ -442,6 +461,7 @@ export class Subscriber {
 			scope,
 			options?.hidden ?? false,
 			options?.covering ?? false,
+			options?.claims ?? false,
 		);
 		return consumer;
 	}
@@ -452,6 +472,7 @@ export class Subscriber {
 		scope: Path.Pattern,
 		hidden: boolean,
 		covering: boolean,
+		claims: boolean,
 	): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
@@ -541,6 +562,13 @@ export class Subscriber {
 				// stay off this hop and are never forwarded.
 				responderOrigin = ok.hop;
 				initial = ok.active;
+			}
+
+			if (hasRoutes(this.version)) {
+				await this.#receiveRouted(stream, announced, { prefix, scope, hidden, visible, perNode: claims });
+				announced.close();
+				stream.close();
+				return;
 			}
 
 			switch (this.version) {
@@ -652,16 +680,16 @@ export class Subscriber {
 				let instance: Instance.Valid | undefined;
 				let epoch: bigint | undefined;
 				// The advertisement now serves another instance or epoch (lite-07).
-				let restart = false;
+				const restart = false;
 
 				switch (announce.status) {
 					case "active": {
-						const resolved = hasAnnounceId(this.version) ? history.start(announce) : announce;
+						const suffix = hasAnnounceId(this.version) ? history.start(announce) : announce.suffix;
 						// The wire names the suffix beneath the interest prefix; the consumer
 						// sees the covered path from the session root.
-						path = Path.join(prefix, resolved.suffix);
+						path = Path.join(prefix, suffix);
 						active = true;
-						hops = resolved.hops;
+						hops = announce.hops ?? [];
 						cost = announce.cost;
 						instance = announce.instance;
 						epoch = announce.epoch;
@@ -676,29 +704,18 @@ export class Subscriber {
 						path = Path.join(prefix, history.end(announce.id));
 						active = false;
 						break;
-					case "update": {
+					case "update":
 						// Resolve the id; it stays live (the replacement reuses it).
-						const resolved = history.update(announce);
-						path = Path.join(prefix, resolved.suffix);
+						path = Path.join(prefix, history.get(announce.id));
 						active = true;
-						hops = resolved.hops;
+						hops = announce.hops ?? [];
 						cost = announce.cost;
 						break;
-					}
-					case "restart": {
-						// Resolved like an update: the id stays live.
-						const resolved = history.update(announce);
-						path = Path.join(prefix, resolved.suffix);
-						active = true;
-						hops = resolved.hops;
-						cost = announce.cost;
-						instance = announce.instance;
-						epoch = announce.epoch;
-						restart = true;
-						break;
-					}
 					case "skipped":
 						continue;
+					default:
+						// The restart and the route layer are lite-07's, answered by #receiveRouted.
+						throw new ProtocolViolation(`unexpected ${announce.status} before lite-07`);
 				}
 
 				// Each suffix fits the wire limits alone, but the interest prefix can push the
@@ -861,6 +878,359 @@ export class Subscriber {
 		}
 	}
 
+	// Lite-07: the peer's routes and the claims under each, every route's claim changes applied
+	// whole at its floor. Each path reports the best claim the stream holds for it, ranked as the
+	// origin ranks routes, and a consume pins its requests to that claim's origin node. A claim
+	// another stream's newer floor withdrew or replaced is held back until this stream catches up
+	// (see `Floors`). Mirrors `subscriber/routed.rs` in rs/moq-net for a node that forwards
+	// nothing: it holds no feasibility distance, so it never sends a ROUTE_REQUEST.
+	async #receiveRouted(
+		stream: Stream,
+		announced: announce.Producer,
+		request: {
+			prefix: Path.Valid;
+			scope: Path.Pattern;
+			hidden: boolean;
+			visible: (path: Path.Valid) => boolean;
+			perNode: boolean;
+		},
+	): Promise<void> {
+		const { prefix, scope, hidden, visible, perNode } = request;
+		type Route = {
+			id: bigint;
+			node: bigint;
+			advert: Advert;
+			// ROUTE_HOLD: no usable path to the origin, until the next ROUTE_UPDATE.
+			held: boolean;
+			// The Announce ID of each live claim, by path: one per path, checked by lookup.
+			claims: Map<Path.Valid, bigint>;
+			// How the claims differ from the view's, applied whole at the next floor.
+			pending: Map<Path.Valid, Claim | undefined>;
+			// The claims as of the last floor, and the revision it certified them at, if any.
+			view: { prefix: Path.Valid; hidden: boolean; revision: bigint | undefined; claims: Map<Path.Valid, Claim> };
+			// The view's claims no other stream's newer floor withdrew or replaced, each as the
+			// newest floor certifying it has it, cost included.
+			shown: Map<Path.Valid, Claim>;
+			carrier: Carrier;
+			// Who the route's claims are filed under in the consume cache, which keeps every
+			// route's claim so a consume ranks them for its own path.
+			owner: object;
+		};
+		const same = (a: Claim | undefined, b: Claim | undefined) =>
+			a === b || (!!a && !!b && a.instance === b.instance && a.epoch === b.epoch && a.cost === b.cost);
+
+		// Each live route and claim holds one of the session's announce slots.
+		const routes = new SlotMap<bigint, Route>(this.#announces);
+		const claims = new SlotMap<bigint, { route: bigint; path: Path.Valid; claim: Claim }>(this.#announces);
+		// The origin nodes with a live route here: at most one route each.
+		const nodes = new Set<bigint>();
+		// The routes whose committed claims include each path.
+		const byPath = new Map<Path.Valid, Set<bigint>>();
+		// What each visible path reports; see `refresh`.
+		const reported = new Map<Path.Valid, Map<bigint | undefined, WireRoute>>();
+		const history = new AnnounceHistory();
+		let nextRoute = 0n;
+		let synced = false;
+		// Set once the stream lets go of its routes, which then show nothing anew.
+		let closing = false;
+
+		const route = (id: bigint): Route => {
+			const found = routes.get(id);
+			if (!found) throw new ProtocolViolation(`unknown route ${id}`);
+			return found;
+		};
+		const claimOf = (id: bigint) => {
+			const found = claims.get(id);
+			if (!found) throw new ProtocolViolation(`unknown announce id ${id}`);
+			return found;
+		};
+		// The claim at `path` under `id` is now `claim`, pending the route's next floor.
+		const change = (id: bigint, path: Path.Valid, claim: Claim | undefined) => {
+			const wire = route(id);
+			if (same(wire.view.claims.get(path), claim)) wire.pending.delete(path);
+			else wire.pending.set(path, claim);
+		};
+
+		// A route is no route at all once it crossed as many nodes as one may, or crossed us: a copy
+		// of our own route, come back.
+		const usable = (wire: Route) =>
+			wire.advert.hops.length < ROUTE_MAX_HOPS && !wire.advert.hops.includes(this.hop);
+
+		// A claim through this session: its cost plus the route's metric, past this session's link
+		// cost of 1 as Rust's default, and unavailable while the route is held.
+		const candidate = (wire: Route, claim: Claim): WireRoute =>
+			this.#drained(
+				WireRoute.normalize({
+					instance: claim.instance,
+					epoch: claim.epoch,
+					cost: claim.cost + wire.advert.metric + 1n,
+					node: wire.node,
+					available: !wire.held,
+				}),
+			);
+
+		// File the route's claim at `path` in the consume cache, or take it out. Every route's claim
+		// stays there, so each consume ranks them for its own path and its epochs. `restart` marks
+		// another instance or epoch, whose consumes subscribe fresh. An unusable route's claim is
+		// parked, keeping its place in a tie as `byPath` does, unless it just moved to the newest.
+		const serve = (wire: Route, path: Path.Valid, restart: boolean) => {
+			const claim = wire.shown.get(path);
+			if (!claim || !visible(path) || (!usable(wire) && restart)) this.#consumes.withdraw(path, wire.owner);
+			else if (!usable(wire)) this.#consumes.park(path, wire.owner);
+			else this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
+		};
+
+		// Report the best claim at `path`, or with `perNode` each origin node's, and each one's end.
+		// `lost` marks the routes leaving as let go rather than withdrawn, so they go offline
+		// rather than ending.
+		const refresh = (path: Path.Valid, lost: boolean) => {
+			// Keyed by origin node with `perNode`, and otherwise the one key `undefined`.
+			const now = new Map<bigint | undefined, WireRoute>();
+			if (visible(path)) {
+				const candidates: WireRoute[] = [];
+				for (const id of byPath.get(path) ?? []) {
+					const wire = route(id);
+					const claim = wire.shown.get(path);
+					if (claim && usable(wire)) candidates.push(candidate(wire, claim));
+				}
+				if (perNode) {
+					for (const next of candidates) now.set(next.node, next);
+				} else {
+					// The same pick a consume of `path` makes from the cache.
+					const best = bestCandidate(path, path, candidates, (next) => next);
+					if (best) now.set(undefined, best);
+				}
+			}
+
+			const captures = scopeCaptures(scope, path);
+			const prev = reported.get(path) ?? new Map<bigint | undefined, WireRoute>();
+			// Arrivals first, so a reader sees a claim replaced rather than the path gone between.
+			for (const [key, next] of now) {
+				const was = prev.get(key);
+				if (was && routesEqual(was, next)) continue;
+				const restart = !!was && (was.instance !== next.instance || was.epoch !== next.epoch);
+				const kind = !was ? "start" : restart ? "restart" : "update";
+				console.debug(`announced: broadcast=${path} ${kind} instance=${next.instance} node=${next.node}`);
+				announced.append({ prefix: path, captures, kind, route: next });
+			}
+			for (const [key, was] of prev) {
+				if (now.has(key)) continue;
+				console.debug(`announced: broadcast=${path} active=false lost=${lost} node=${was.node}`);
+				announced.append({ prefix: path, captures, kind: lost ? "offline" : "end", route: was });
+			}
+			if (now.size > 0) reported.set(path, now);
+			else reported.delete(path);
+		};
+		// Show or hide the route's claims at `touched`, each marked whether it restarted, or with
+		// `all` every claim it holds, once another stream's floor may have moved what is current.
+		const show = (wire: Route, touched: ReadonlyMap<Path.Valid, boolean>, all: boolean) => {
+			const paths = all
+				? new Set([...touched.keys(), ...wire.shown.keys(), ...wire.view.claims.keys()])
+				: touched.keys();
+			for (const path of paths) {
+				const now = this.#floors.shows(wire.node, wire.view, path);
+				const was = wire.shown.get(path);
+				const restart = touched.get(path);
+				if (same(now, was) && restart === undefined) continue;
+				if (now) wire.shown.set(path, now);
+				else wire.shown.delete(path);
+				// A claim shown anew or restarted iterates last, as the newest; a re-price keeps its
+				// place, as the consume cache does. See bestCandidate.
+				const ids = byPath.get(path);
+				if (now && ids && (!was || restart)) {
+					ids.delete(wire.id);
+					ids.add(wire.id);
+				}
+				serve(wire, path, restart ?? false);
+				refresh(path, false);
+			}
+		};
+		const refreshRoute = (wire: Route, lost: boolean) => {
+			for (const path of wire.view.claims.keys()) {
+				serve(wire, path, false);
+				refresh(path, lost);
+			}
+		};
+
+		// A draining peer ranks its routes last from the GOAWAY itself.
+		const stopDrain = this.#goaway?.changed(() => {
+			if (announced.closed.peek() !== undefined) return;
+			for (const wire of routes.values()) refreshRoute(wire, false);
+		});
+
+		try {
+			for (;;) {
+				const msg = await race([decodeAnnounceBroadcastMaybe(stream.reader, this.version), announced.closed]);
+				if (msg === undefined && !synced) throw new ProtocolViolation("announce stream ended before SYNCED");
+				// undefined: the stream ended. null: the consumer closed cleanly.
+				if (!msg) break;
+				if (msg instanceof Error) throw msg;
+
+				switch (msg.status) {
+					case "routeStart": {
+						if (nodes.has(msg.node)) throw new ProtocolViolation(`second route to node ${msg.node}`);
+						const id = nextRoute++;
+						const view: Route["view"] = { prefix, hidden, revision: undefined, claims: new Map() };
+						const wire: Route = {
+							id,
+							node: msg.node,
+							advert: msg.advert,
+							held: false,
+							claims: new Map(),
+							pending: new Map(),
+							view,
+							shown: new Map(),
+							carrier: {
+								view,
+								// Another route's floor or end runs this: a closed reader is about to let go.
+								reshow: () => {
+									if (!closing && announced.closed.peek() === undefined) show(wire, new Map(), true);
+								},
+							},
+							owner: {},
+						};
+						routes.set(id, wire);
+						nodes.add(msg.node);
+						this.#floors.join(msg.node, wire.carrier);
+						break;
+					}
+					case "routeUpdate": {
+						const wire = route(msg.id);
+						wire.advert = msg.advert;
+						wire.held = false;
+						refreshRoute(wire, !usable(wire));
+						break;
+					}
+					case "routeHold": {
+						const wire = route(msg.id);
+						wire.held = true;
+						refreshRoute(wire, false);
+						break;
+					}
+					case "routeEnd": {
+						// Every claim under the route goes with it: offline, not withdrawn.
+						const wire = route(msg.id);
+						for (const id of wire.claims.values()) {
+							history.end(id);
+							claims.delete(id);
+						}
+						routes.delete(msg.id);
+						nodes.delete(wire.node);
+						// What its last floor certified stays, so no other stream's lagging claim revives.
+						this.#floors.leave(wire.node, wire.carrier);
+						for (const path of wire.view.claims.keys()) byPath.get(path)?.delete(msg.id);
+						wire.shown.clear();
+						refreshRoute(wire, true);
+						this.#consumes.revalidate();
+						for (const path of wire.view.claims.keys())
+							if (byPath.get(path)?.size === 0) byPath.delete(path);
+						await encodeAnnounceReply(stream.writer, { kind: "echo", id: msg.id }, this.version);
+						break;
+					}
+					case "floor": {
+						// The batch applies whole, at the revision its floor certifies.
+						const wire = route(msg.id);
+						// A floor that certifies less keeps what the route's last one certified.
+						const certified = wire.view.revision;
+						if (certified !== undefined && (msg.revision === undefined || msg.revision < certified))
+							this.#floors.regress(wire.node, wire.carrier);
+						const touched = new Map<Path.Valid, boolean>();
+						for (const [path, claim] of wire.pending) {
+							// Another instance or epoch: what was consumed through the claim may be stale.
+							const was = wire.view.claims.get(path);
+							const restart =
+								!!was && !!claim && (was.instance !== claim.instance || was.epoch !== claim.epoch);
+							touched.set(path, restart);
+							if (claim) {
+								wire.view.claims.set(path, claim);
+								let ids = byPath.get(path);
+								if (!ids) {
+									ids = new Set();
+									byPath.set(path, ids);
+								}
+								ids.add(msg.id);
+							} else {
+								wire.view.claims.delete(path);
+								const ids = byPath.get(path);
+								ids?.delete(msg.id);
+								if (ids?.size === 0) byPath.delete(path);
+							}
+						}
+						wire.pending.clear();
+						wire.view.revision = msg.revision;
+						// Every other route to the node is shown anew first; with one, this route's
+						// unchanged claims may change state too.
+						const others = this.#floors.floor(wire.node, wire.carrier);
+						show(wire, touched, others);
+						// Another view of the node may now cover a consumed path differently.
+						if (others) this.#consumes.revalidate();
+						break;
+					}
+					case "active": {
+						if (msg.route === undefined) throw new ProtocolViolation("lite-07 claim without a route");
+						if (msg.instance === undefined)
+							throw new ProtocolViolation("lite-07 claim without an instance");
+						const wire = route(msg.route);
+						const path = Path.join(prefix, history.start(msg));
+						const error = Path.check(path);
+						if (error) throw new ProtocolViolation(error);
+						if (wire.claims.has(path))
+							throw new ProtocolViolation(`route ${msg.route} claims ${path} twice`);
+						const id = history.next - 1n;
+						const claim = { instance: msg.instance, epoch: msg.epoch ?? 0n, cost: msg.cost ?? Cost.zero };
+						claims.set(id, { route: msg.route, path, claim });
+						wire.claims.set(path, id);
+						change(msg.route, path, claim);
+						break;
+					}
+					case "update": {
+						const live = claimOf(msg.id);
+						live.claim = { ...live.claim, cost: msg.cost ?? Cost.zero };
+						change(live.route, live.path, live.claim);
+						break;
+					}
+					case "restart": {
+						const live = claimOf(msg.id);
+						if (msg.instance === undefined)
+							throw new ProtocolViolation("lite-07 restart without an instance");
+						live.claim = { instance: msg.instance, epoch: msg.epoch ?? 0n, cost: msg.cost ?? Cost.zero };
+						change(live.route, live.path, live.claim);
+						break;
+					}
+					case "endedId": {
+						const live = claimOf(msg.id);
+						history.end(msg.id);
+						claims.delete(msg.id);
+						route(live.route).claims.delete(live.path);
+						change(live.route, live.path, undefined);
+						break;
+					}
+					case "synced":
+						if (synced) throw new ProtocolViolation("duplicate SYNCED");
+						synced = true;
+						announced.synced();
+						break;
+					case "skipped":
+						break;
+					case "ended":
+						// Lite-07 ends a claim by its Announce ID only.
+						throw new ProtocolViolation("ANNOUNCE_END by path on lite-07");
+				}
+			}
+		} finally {
+			stopDrain?.();
+			closing = true;
+			for (const wire of routes.values()) {
+				this.#floors.leave(wire.node, wire.carrier);
+				for (const path of wire.view.claims.keys()) this.#consumes.withdraw(path, wire.owner);
+			}
+			if (routes.size > 0) this.#consumes.revalidate();
+			reported.clear();
+			claims.clear();
+			routes.clear();
+		}
+	}
+
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
@@ -869,16 +1239,28 @@ export class Subscriber {
 	 * closed its handle, so callers close normally.
 	 *
 	 * @param name - The name of the broadcast to consume
+	 * @param pin - Consume only this instance, over its best route. A minted one names an
+	 * announcement rather than a stream, so it pins nothing on a wire that carries no instance.
 	 * @returns A Broadcast instance
 	 */
-	consume(path: Path.Valid): broadcast.Consumer {
-		const instance = this.#consumes.instance(path);
+	consume(path: Path.Valid, pin?: Instance.Valid): broadcast.Consumer {
+		const instance =
+			pin !== undefined && (hasInstance(this.version) || !Instance.isMinted(pin))
+				? this.#consumes.pinned(path, pin)
+				: this.#consumes.instance(path);
 		return this.#consumes.get(path, instance) ?? this.#createConsume(path, instance);
 	}
 
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
+		const consumes = this.#consumes;
+		const pinned = instance.route.node;
 		const consumed = {
 			instance: instance.route.instance,
+			// The node of the best route now serving the instance, which moves with failover even
+			// once another instance wins the path; the one it first resolved through once none does.
+			get node() {
+				return (this.instance !== undefined ? consumes.node(path, this.instance) : undefined) ?? pinned;
+			},
 			id: this.#consumeNext++,
 			get valid() {
 				return instance.validity?.signal;
@@ -975,6 +1357,7 @@ export class Subscriber {
 							id,
 							broadcast: path,
 							instance: consumed.instance,
+							node: consumed.node,
 							track: request.name,
 							priority,
 						}).encode(opened.writer, this.version);
@@ -1133,7 +1516,7 @@ export class Subscriber {
 			// Gave up, perhaps handed a stream as it did: the catch below hands back any stream.
 			if (!stream || cut.aborted) throw cut.reason;
 			await stream.writer.u53(StreamId.Tracks);
-			await new TracksMessage(broadcast, consumed.instance).encode(stream.writer, this.version);
+			await new TracksMessage(broadcast, consumed.instance, consumed.node).encode(stream.writer, this.version);
 			let synced = false;
 			const answering = consumed.answering;
 			let unanswered = answering ? AbortSignal.any([stop, answering]) : stop;
@@ -1342,6 +1725,7 @@ export class Subscriber {
 			id,
 			broadcast,
 			instance: consumed.instance,
+			node: consumed.node,
 			track: name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
@@ -1509,14 +1893,12 @@ export class Subscriber {
 		// The TRACK opens first, then the SUBSCRIBE, which is waiting on before it is written.
 		// The answered TRACK is held at once, so a cancellation while the SUBSCRIBE still opens
 		// closes it rather than waiting on an open that may never finish.
-		const info = this.#trackInfo(msg.broadcast, msg.instance, msg.track, state.cancel.signal, deadline).then(
-			(answered) => {
-				state.track = answered.stream;
-				// Cancelled as it was answered: the caller may already have left.
-				if (state.cancel.signal.aborted) answered.stream.close();
-				return answered;
-			},
-		);
+		const info = this.#trackInfo(msg.broadcast, msg, msg.track, state.cancel.signal, deadline).then((answered) => {
+			state.track = answered.stream;
+			// Cancelled as it was answered: the caller may already have left.
+			if (state.cancel.signal.aborted) answered.stream.close();
+			return answered;
+		});
 		let settle: (entry: SubscribeEntry | undefined) => void = () => {};
 		this.#pending.set(
 			id,
@@ -1673,7 +2055,7 @@ export class Subscriber {
 	// stays open, as interest in the track, until the caller closes it.
 	async #trackInfo(
 		broadcast: Path.Valid,
-		instance: Instance.Valid | undefined,
+		{ instance, node }: Pin,
 		track: string,
 		signal: AbortSignal | undefined,
 		deadline: Deadline,
@@ -1682,7 +2064,7 @@ export class Subscriber {
 			{ version: this.version },
 			async (stream) => {
 				await stream.writer.u53(StreamId.Track);
-				await new TrackMessage(broadcast, track, instance).encode(stream.writer, this.version);
+				await new TrackMessage(broadcast, track, instance, node).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
 				return { info, stream };
 			},
@@ -1745,14 +2127,14 @@ export class Subscriber {
 	async resolveTrackInfo(
 		broadcast: Path.Valid,
 		track: string,
-		instance?: Instance.Valid,
+		pin: Pin = {},
 		hold?: AbortSignal,
 	): Promise<track.Info> {
 		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
 		const deadline = new Deadline();
-		const { info, stream } = await deadline.wait(this.#trackInfo(broadcast, instance, track, hold, deadline));
+		const { info, stream } = await deadline.wait(this.#trackInfo(broadcast, pin, track, hold, deadline));
 		if (hold && !hold.aborted) hold.addEventListener("abort", () => stream.close(), { once: true });
 		else stream.close();
 		return this.#toModelInfo(info);
@@ -1890,11 +2272,11 @@ export class Subscriber {
 		deadline: Deadline,
 		maxDelay?: Duration,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const { instance, valid } = consumed;
+		const { instance, node, valid } = consumed;
 		const cancel = new AbortController();
 		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
 		const signal = valid ? AbortSignal.any([valid, cancel.signal]) : cancel.signal;
-		const answered = this.#trackInfo(broadcast, instance, track, signal, deadline);
+		const answered = this.#trackInfo(broadcast, consumed, track, signal, deadline);
 		// Only the properties are needed, so the TRACK stream closes however the wait ends.
 		answered.then(
 			({ stream }) => stream.close(),
@@ -1909,6 +2291,7 @@ export class Subscriber {
 					await new FetchMessage({
 						broadcast,
 						instance,
+						node,
 						track,
 						priority,
 						maxDelay:
@@ -2284,6 +2667,7 @@ export class Subscriber {
 							await new FetchMessage({
 								broadcast,
 								instance: consumed.instance,
+								node: consumed.node,
 								track: name,
 								priority,
 								maxDelay,
@@ -3139,13 +3523,13 @@ class ConsumeBroadcast extends broadcast.Consumer {
 		super(state);
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: async (name, hold) => {
-				if (!consumed.valid) return subscriber.resolveTrackInfo(path, name, consumed.instance, hold);
+				if (!consumed.valid) return subscriber.resolveTrackInfo(path, name, consumed, hold);
 				// Retirement cancels setup, but a one-shot query still releases its TRACK
 				// as soon as it answers instead of holding it for the broadcast's lifetime.
 				const query = new AbortController();
 				const signal = AbortSignal.any([consumed.valid, hold ?? query.signal]);
 				try {
-					return await subscriber.resolveTrackInfo(path, name, consumed.instance, signal);
+					return await subscriber.resolveTrackInfo(path, name, consumed, signal);
 				} finally {
 					if (!hold) query.abort();
 				}

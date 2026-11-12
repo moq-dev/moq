@@ -557,7 +557,7 @@ fn lite_auth_unsupported_interop() {
 /// with a listing Rust decodes, and JS decodes Rust's listing events and re-encodes them byte for
 /// byte.
 #[test]
-#[ignore = "JS encodes TRACKS without a Node ID until quest/m2/cluster-routing/routes/js.md, which restores it to just test interop"]
+#[ignore = "requires Bun; run by just test interop"]
 fn lite_tracks_interop() {
 	use crate::coding::Decode;
 

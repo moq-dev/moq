@@ -165,6 +165,12 @@ export interface WireRoute {
 	readonly draining?: boolean;
 	/** See {@link RouteInfo.available}; unset means available. */
 	readonly available?: boolean;
+	/**
+	 * The origin node a lite-07 route reaches, which every request through it names. Unset on a
+	 * route announced here and on every other version. Local: requests name it, readers never
+	 * see it.
+	 */
+	readonly node?: bigint;
 }
 
 /** Constructors and helpers for {@link WireRoute}. @internal */
@@ -186,6 +192,7 @@ export const WireRoute = {
 			auth: route.auth,
 			draining: route.draining,
 			available: route.available,
+			node: route.node,
 		};
 	},
 };
@@ -203,8 +210,8 @@ export function isAnonymous(route: WireRoute): boolean {
 }
 
 /**
- * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state, and
- * availability.
+ * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
+ * availability, and origin node.
  *
  * @internal
  */
@@ -218,6 +225,7 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.auth === b.auth &&
 		(a.draining ?? false) === (b.draining ?? false) &&
 		(a.available ?? true) === (b.available ?? true) &&
+		a.node === b.node &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

@@ -1323,6 +1323,17 @@ export function spreadHash(path: string, instance: string): bigint {
 }
 
 /**
+ * The draft's Rendezvous Hash: FNV-1a 64 of `path` then the origin's Node ID as 8 little-endian
+ * bytes, so every node that knows the same lite-07 claims ranks them alike. Mirrors the node key
+ * of `route_order` in `rs/moq-net`.
+ */
+export function rendezvousHash(path: string, node: bigint): bigint {
+	const bytes: number[] = [];
+	for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((node >> shift) & 0xffn));
+	return fnv(path, bytes);
+}
+
+/**
  * Settles among one instance's routes: FNV-1a 64 of `path` then each hop, oldest first, as 8
  * little-endian bytes. Mirrors `chain_key` in `rs/moq-net`.
  */
@@ -1332,6 +1343,31 @@ export function chainHash(path: string, hops: readonly bigint[]): bigint {
 		for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((hop >> shift) & 0xffn));
 	}
 	return fnv(path, bytes);
+}
+
+/**
+ * The best of `candidates`, oldest first, at `prefix` for resolving `path`: `best_route` in
+ * rs/moq-net. Only an instance's highest epoch is eligible, ranked by
+ * {@link compareRouteCandidates} (`route_order`), and a full tie goes to the newest, as Rust's
+ * final `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or
+ * epoch), and keeps its place through a re-price. Every selector ranks through this, so the
+ * announcements and the consumes of one session never pick apart.
+ */
+export function bestCandidate<T>(
+	path: Path.Valid,
+	prefix: Path.Valid,
+	candidates: Iterable<T>,
+	route: (candidate: T) => WireRoute,
+): T | undefined {
+	const list = [...candidates];
+	const epochs = new Epochs(list.map(route));
+	let best: T | undefined;
+	for (const candidate of list) {
+		const next = route(candidate);
+		if (epochs.supersedes(next)) continue;
+		if (best === undefined || compareRouteCandidates(path, prefix, next, route(best)) <= 0) best = candidate;
+	}
+	return best;
 }
 
 /** Covering prefixes, most specific first, including the empty root. */
@@ -1385,26 +1421,44 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
 	return (
 		last(a) - last(b) ||
-		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
+		Number(a.node === undefined && isAnonymous(a)) - Number(b.node === undefined && isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
 	);
 }
 
 /**
  * Order eligible routes at `prefix` resolving `path` by preference, hop count, then the spread
- * hash of each instance, then, within one instance, the hash of its chain. The hashes only
- * spread a prefix's paths: at the prefix itself a tie is left for the newest to win, so a
- * publisher that restarts under a new instance takes over from its lingering session at once,
- * matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer, which
- * is every route here.
+ * hash of each instance, then, within one instance, the hash of its chain. A lite-07 route counts
+ * as the one hop to its origin node, and ranks by the rendezvous hash of that node instead. The
+ * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win
+ * (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over from
+ * its lingering session at once, matching `route_order` in rs/moq-net for routes a node did not
+ * get from a cluster peer, which is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+	const order = compareRoutes(a, b) || routeHops(a) - routeHops(b);
 	if (order !== 0 || path === prefix) return order;
-	const ha = spreadHash(path, a.instance ? Instance.text(a.instance) : "");
-	const hb = spreadHash(path, b.instance ? Instance.text(b.instance) : "");
-	if (ha !== hb) return ha < hb ? -1 : 1;
-	const ca = chainHash(path, a.hops);
-	const cb = chainHash(path, b.hops);
-	return ca < cb ? -1 : ca > cb ? 1 : 0;
+	const [a1, a2] = routeKey(path, a);
+	const [b1, b2] = routeKey(path, b);
+	if (a1 !== b1) return a1 < b1 ? -1 : 1;
+	return a2 < b2 ? -1 : a2 > b2 ? 1 : 0;
+}
+
+/**
+ * The hops a route ranks by: a lite-07 route counts as the one hop to its origin node, since the
+ * rest of its chain is the lite-06 one it carries only for loop detection. As `route_order` in
+ * rs/moq-net.
+ */
+export function routeHops(route: WireRoute): number {
+	return route.node !== undefined ? 1 : route.hops.length;
+}
+
+/**
+ * The hash pair `route_order` in rs/moq-net ranks a route by beneath its prefix, each route keyed
+ * on its own: a lite-07 claim by the rendezvous hash of its origin node, any other by the spread
+ * hash of its instance and then the hash of its chain.
+ */
+function routeKey(path: Path.Valid, route: WireRoute): [bigint, bigint] {
+	if (route.node !== undefined) return [rendezvousHash(path, route.node), 0n];
+	return [spreadHash(path, route.instance ? Instance.text(route.instance) : ""), chainHash(path, route.hops)];
 }

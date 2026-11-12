@@ -64,8 +64,22 @@ Work:
   whose last advertised route to it is feasible here has answered the
   current request" with the settled rule. The hold rule in Routing changes
   with the route rule (epic Plan item 27). Add a changelog bullet.
-- If [js/net's route layer](/quest/m2/cluster-routing/routes/js.md) has
-  landed, change it in the same PR.
+- Change js/net's route layer (`js/net/src/lite/publisher.ts`,
+  `js/net/src/lite/subscriber.ts`, `js/net/src/lite/floors.ts`,
+  `js/net/src/route.ts`) in the same PR.
+- Make js/net's origin apply the covering rule (`covering` in
+  `route/view.rs`) when it picks among a session's routes, as its consume
+  cache does through `Floors.covers`. Decided 2026-11-12 (maintainer, on
+  [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443)): ✅ leave it to
+  this rewrite (rejected: port the per-node merged view in #8443). Until then,
+  when a newer floor withdraws a node's claim above `live/x` while another
+  node claims `live` with a different instance, `forwardAnnounced` still
+  offers the withdrawn claim, and an origin request for `live/x` fails
+  `Unroutable` until the lagging stream's floor lands. Recommended: the
+  origin asks a session's route, per request, whether it covers the
+  requested path (the session's `Floors.covers`) and skips one that does not,
+  since an announcement at `live` cannot say it stops short of `live/x`.
+  Test it with the two-stream, two-instance case from #8443's review.
 - Rewrite the epic's bullet on who certifies as built, and update the
   `verify-route` skill's coverage and sync commit.
 - Measure route and claim messages per change with

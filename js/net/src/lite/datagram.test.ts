@@ -95,7 +95,8 @@ test("lite-07 datagram requests match Rust's size-prefixed fields", async () => 
 	const { Timescale } = await import("../time.ts");
 	const request = new Datagrams({ id: 7n, broadcast: Path.from("room/alice"), track: "audio", priority: -3 });
 	const body = await Writer.collect(Version.DRAFT_07, (writer) => request.encode(writer, Version.DRAFT_07));
-	expect([...body]).toEqual([21, 7, 10, ...enc.encode("room/alice"), 0, 0, 5, ...enc.encode("audio"), 125]);
+	// Id, broadcast, an empty unminted pin, Node ID 0, track, priority.
+	expect([...body]).toEqual([22, 7, 10, ...enc.encode("room/alice"), 0, 0, 0, 5, ...enc.encode("audio"), 125]);
 	const decoded = await Datagrams.decode(new Reader(undefined, body, Version.DRAFT_07), Version.DRAFT_07);
 	expect(decoded).toEqual(request);
 	for (const timescale of [undefined, Timescale.MILLI]) {

@@ -9,7 +9,7 @@ import { type Hop, HopSchema, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
-import { hasAuth, hasImplementation, hasNodeId, hasRouteKey, hasSetupStream, type Version } from "./version.ts";
+import { hasAuth, hasImplementation, hasRouteKey, hasRoutes, hasSetupStream, type Version } from "./version.ts";
 
 const clientParameters = new WeakSet<Setup>();
 
@@ -274,7 +274,7 @@ export class Setup {
 			params.setVarint(PARAM_ROLE, this.role, version);
 		}
 		if (this.hop !== undefined && this.hop !== 0n) {
-			if (hasNodeId(version) && this.hop >= QUALIFIED) throw new Error("setup Node ID cannot be qualified");
+			if (hasRoutes(version) && this.hop >= QUALIFIED) throw new Error("setup Node ID cannot be qualified");
 			params.setVarint(PARAM_HOP, wireHop(this.hop, version), version);
 		}
 		if (this.implementation) {
@@ -310,7 +310,7 @@ export class Setup {
 		// Before lite-07, 0 carries no identity (it cannot be excluded), so it decodes as
 		// absent. A lite-07 Node ID is never 0 or qualified.
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
-		if (hopRaw !== undefined && hasNodeId(version) && (hopRaw === 0n || hopRaw >= QUALIFIED)) {
+		if (hopRaw !== undefined && hasRoutes(version) && (hopRaw === 0n || hopRaw >= QUALIFIED)) {
 			throw new Error("setup Node ID must be non-zero and unqualified");
 		}
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
