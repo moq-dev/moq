@@ -3407,7 +3407,7 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 // failure, even to a reader only watching `closed`, as does a duplicate starting past the reader's
 // frame or one that shed it. A re-offer that fails too hands over to the next. A reader closed while it waits ends its
 // read and can be closed again, and one closed with frames still buffered reads them first.
-test.each(["reoffer", "readable", "released", "observed", "twice", "leaving", "closed", "past", "shed"])(
+test.each(["reoffer", "readable", "released", "observed", "unserved", "twice", "leaving", "closed", "past", "shed"])(
 	"a failed copy continues on its held re-offer (%p)",
 	async (kind) => {
 		const producer = new TrackProducer("video").accept({ maxAge: null });
@@ -3461,6 +3461,16 @@ test.each(["reoffer", "readable", "released", "observed", "twice", "leaving", "c
 			expect(await reader.readString()).toBe("b");
 			expect(await reader.readString()).toBeUndefined();
 			expect(await reader.closed).toBeNull();
+			producer.close();
+			return;
+		}
+		if (kind === "unserved") {
+			// A re-offer starting past the reader's frame cannot take over, so `closed` settles once
+			// nothing else is held.
+			hooks.receiveGroup(producer, { sequence: 3n, start: 2 });
+			arriving?.release();
+			await settle();
+			expect(reader.closed.peek()).toBe(failed);
 			producer.close();
 			return;
 		}
@@ -3530,6 +3540,70 @@ test.each(["reoffer", "readable", "released", "observed", "twice", "leaving", "c
 		producer.close();
 	},
 );
+
+// A subscriber's reader of a failed copy keeps its place when a re-offer replaces that copy in the
+// track, continuing on it, and its budget still gives up on it while it waits on a held re-offer.
+test.each(["buffered", "expires"])("a subscriber's failed copy waits on its re-offer (%p)", async (kind) => {
+	const clock = manualTime(0);
+	try {
+		await subscriberReoffer(kind);
+	} finally {
+		clock.installed.close();
+	}
+});
+
+async function subscriberReoffer(kind: string): Promise<void> {
+	const producer = new TrackProducer("video").accept({ timescale: Timescale.MILLI, maxAge: null });
+	hooks.receiveTrack(producer);
+	const track = producer.subscribe({ delay: { max: Duration.millis(500) } });
+	const first = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.fromMillis(0) });
+	first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.fromMillis(1) });
+	const reader = await track.recvGroup();
+	if (!reader) throw new Error("missing group");
+	expect(await reader.readString()).toBe("a");
+
+	const arriving = hooks.arrivingGroup(producer, 3n);
+	const failed = new Error("reset");
+	first.abort(failed);
+	if (kind === "expires") {
+		expect(await reader.readString()).toBe("b");
+		let read: unknown;
+		reader.readString().then(
+			(frame) => {
+				read = frame;
+			},
+			(err: unknown) => {
+				read = err;
+			},
+		);
+		// Group 4 bounds group 3's reach at 1s, and group 5 puts the edge a second past it.
+		for (const [sequence, millis] of [
+			[4n, 1000],
+			[5n, 2000],
+		] as const) {
+			hooks
+				.receiveGroup(producer, { sequence, start: 0 })
+				.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(millis) });
+		}
+		await settle();
+		expect(read).toMatchObject({ code: StreamCode.Old });
+		arriving?.release();
+		producer.close();
+		return;
+	}
+	// The re-offer replaces the failed copy in the track before the reader takes `b`.
+	const again = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+	arriving?.release();
+	again.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.fromMillis(0) });
+	again.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.fromMillis(1) });
+	again.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.fromMillis(2) });
+	again.finish();
+	expect(await reader.readString()).toBe("b");
+	expect(await reader.readString()).toBe("c");
+	expect(await reader.readString()).toBeUndefined();
+	producer.close();
+}
 
 test("a drop below the window is reported once the window lowers to it", () => {
 	const producer = new TrackProducer("video").accept({});

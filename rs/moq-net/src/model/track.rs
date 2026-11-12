@@ -3792,6 +3792,10 @@ pub(super) fn successor(
 	waiter: &kio::Waiter,
 ) -> Poll<Option<group::Consumer>> {
 	let sequence = reader.sequence;
+	let frames = group::Bounds {
+		start: reader.index(),
+		end: None,
+	};
 	let found = track.poll_ref(waiter, |state| {
 		// Only a hold on the copy read: one on a copy that took over from it waits on that one.
 		if state
@@ -3801,11 +3805,16 @@ pub(super) fn successor(
 		{
 			return Poll::Pending;
 		}
+		// Every copy, since one that fails or cannot serve the frame may sit before one that can.
 		Poll::Ready(
 			state
-				.covering_group(sequence, reader.index())
-				.filter(|copy| !copy.is_read_by(reader))
-				.and_then(group::Handle::try_consume),
+				.lookup
+				.get(&sequence)
+				.into_iter()
+				.flat_map(Slot::copies)
+				.filter(|copy| copy.covers(frames) && !copy.is_read_by(reader))
+				.filter_map(group::Handle::try_consume)
+				.find(|copy| copy.continues(reader)),
 		)
 	});
 	Poll::Ready(match found {
@@ -17239,6 +17248,79 @@ mod test {
 			again.finish().unwrap();
 			drop(third);
 			assert!(reader.read_frame().await.unwrap().is_none());
+		}
+	}
+
+	/// A failed copy's end follows its frame reads: it waits out a held re-offer rather than
+	/// report the failure, so a publisher watching it keeps the stream the re-offer continues.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_failed_copy_finishes_on_its_held_reoffer() {
+		let producer = received_producer(Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+			panic!("the first copy opens");
+		};
+		first.write_frame(at(300), &b"a"[..]).unwrap();
+		let mut reader = first.consume();
+		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
+
+		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+			panic!("the re-offer waits on the copy still arriving");
+		};
+		first.abort(Error::Cancel).unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(reader.poll_finished(&waiter).is_pending(), "waits on the held re-offer");
+
+		let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+			panic!("the re-offer takes the group");
+		};
+		drop(hold);
+		again.write_frame(at(300), &b"a"[..]).unwrap();
+		again.write_frame(at(301), &b"b"[..]).unwrap();
+		assert!(reader.poll_finished(&waiter).is_pending(), "the re-offer is still open");
+		again.finish().unwrap();
+		assert_eq!(reader.finished().await.unwrap(), 1);
+		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+	}
+
+	/// A reader waiting out a held re-offer is stalled, so its budget still gives up on it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn waiting_on_a_held_reoffer_expires() {
+		for finished in [false, true] {
+			let producer = received_producer(Info::timed());
+			let mut subscriber = producer
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
+			let at = |millis| Timestamp::from_millis(millis).unwrap();
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the first copy opens");
+			};
+			first.write_frame(at(0), &b"a"[..]).unwrap();
+			let mut reader = subscriber.recv_group().await.unwrap().expect("group 3");
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
+
+			let Ok(Received::Held(_hold)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the re-offer waits on the copy still arriving");
+			};
+			first.abort(Error::Cancel).unwrap();
+			let waiter = kio::Waiter::noop();
+			assert!(reader.poll_read_frame(&waiter).is_pending(), "{finished}");
+
+			// Group 4 bounds group 3's reach at 1s, and group 5 puts the edge a second past it.
+			let mut later = Vec::new();
+			for (sequence, millis) in [(4, 1000), (5, 2000)] {
+				let Ok(Received::Group(mut next)) = producer.create_group_at(group::Info { sequence }, 0) else {
+					panic!("group {sequence} opens");
+				};
+				next.write_frame(at(millis), &b"x"[..]).unwrap();
+				later.push(next);
+			}
+			let res = match finished {
+				true => reader.finished().await.map(|_| ()),
+				false => reader.read_frame().await.map(|_| ()),
+			};
+			assert!(matches!(res, Err(Error::Old)), "{finished}: {res:?}");
 		}
 	}
 

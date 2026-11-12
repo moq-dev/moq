@@ -154,12 +154,16 @@ class Succession {
 		this.changed.update((n) => n + 1);
 	}
 
-	// The latest copy, unless it failed too.
-	live(): Producer | undefined {
+	// The latest copy, if it can continue a reader from frame `index`.
+	serving(index: number): Producer | undefined {
 		const next = this.next;
-		return next && !(next.closed.peek() instanceof Error) ? next : undefined;
+		return next && serves(next, index) ? next : undefined;
 	}
 }
+
+// Whether `group` has not failed and still holds every frame from `index` on, so a mirror of it
+// continues a reader there.
+let serves: (group: Producer, index: number) => boolean;
 
 // A written frame and when it landed. It keeps the writer's frame rather than copying it, so a
 // lazy payload is read only when a reader takes it.
@@ -325,6 +329,15 @@ export class Producer {
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
+		serves = (group, index) => {
+			const state = group.#state;
+			return (
+				!(state.closed.peek() instanceof Error) &&
+				state.start === state.offset &&
+				state.start <= index &&
+				!headShed(state.frames.peek().first)
+			);
+		};
 		hooks.receivedGroup = (group, failed) => {
 			if (failed === undefined) {
 				group.#state.succession = new Succession();
@@ -1085,10 +1098,14 @@ export class Consumer {
 	}
 
 	// Whether another copy in the track may take over the failed one being read: one took it and
-	// has not failed, or one is held.
+	// can serve the frame read next, or one is held.
 	#succeeds(): boolean {
 		const succession = this.#state.succession;
-		return !this.#released && succession !== undefined && (succession.live() !== undefined || succession.holds > 0);
+		return (
+			!this.#released &&
+			succession !== undefined &&
+			(succession.serving(this.#index()) !== undefined || succession.holds > 0)
+		);
 	}
 
 	// Continue on the copy that took this group's sequence in its track once the one being read
@@ -1096,24 +1113,19 @@ export class Consumer {
 	async #succeed(): Promise<boolean> {
 		const succession = this.#state.succession;
 		if (!succession || this.#released || this.#verdict.peek() || this.#torn()) return false;
-		let next = succession.live();
+		let next = succession.serving(this.#index());
 		while (!next) {
 			if (succession.holds === 0) return false;
+			// Waiting on a held copy is a stall the budget bounds.
+			if (this.#expire()) return true;
 			this.#leaving ??= new Once();
-			await Signal.race(succession.changed, this.#verdict, this.#leaving);
+			await Signal.race(succession.changed, this.#verdict, this.#leaving, ...(this.#expiry?.changed ?? []));
 			// A closed reader ends on the failure rather than continue elsewhere.
 			if (this.#released) return false;
 			if (this.#verdict.peek()) return true;
-			next = succession.live();
+			next = succession.serving(this.#index());
 		}
-		const group = next.mirror();
-		// It no longer holds the frame read next: it starts past it, or shed it, which fails the
-		// mirror. The mirror shares this succession, so adopting a failed one would loop.
-		if (group.#state.closed.peek() instanceof Error || group.#state.start > this.#index()) {
-			group.close();
-			return false;
-		}
-		this.#switch(group, this.#expiry);
+		this.#switch(next.mirror(), this.#expiry);
 		return true;
 	}
 
@@ -1181,7 +1193,8 @@ export class Consumer {
 	// the group, so a clean end would pass the prefix off as the whole group.
 	#expire(): boolean {
 		if (this.#verdict.peek()) return false;
-		if (this.#state.closed.peek() instanceof Error) return false;
+		// A failed copy is no stall, unless the reader waits for another to take it over.
+		if (this.#state.closed.peek() instanceof Error && !this.#succeeds()) return false;
 		if (!this.#expiry?.expired()) return false;
 
 		this.#fail(
@@ -1202,23 +1215,24 @@ export class Consumer {
 	#evict(lost: Error): boolean {
 		// A group read on from another copy is that copy's to reclaim.
 		if (this.#state !== this.#mirrored) return false;
+		const closed = this.#state.closed.peek();
+		// A failed copy that another copy or route may still continue keeps the reader's place,
+		// and that copy serves the frames dropped here.
+		const continues = closed instanceof Error && this.#recovers(closed);
 		const frames = this.#bufferedFrames();
-		if (frames.length > 0) {
+		if (frames.length > 0 && !continues) {
 			// Unread content is going away either way. If the budget had already given up
 			// on this group that is the more specific reason, so ask it first; otherwise
 			// the cache reclaimed it before the reader got to it.
 			this.#expire();
 			this.#fail(lost);
-		}
-		if (frames.length > 0) {
 			this.#state.start += frames.length;
 		}
 		this.#state.cacheBytes = 0;
 		this.#state.flate = undefined;
 		this.#state.frames.set(new Queue());
-		// A failed copy holds nothing more to reclaim, and its recovery may still continue the group.
-		const closed = this.#state.closed.peek();
-		return !(closed instanceof Error && this.#recovers(closed));
+		// A failed copy holds nothing more to reclaim.
+		return !continues;
 	}
 
 	// The next change a parked read waits for.

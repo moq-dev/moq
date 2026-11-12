@@ -4321,11 +4321,8 @@ impl Consumer {
 			if !matches!(res, Poll::Ready(Err(_))) {
 				return res;
 			}
-			match self.poll_successor(waiter) {
-				Poll::Ready(true) => continue,
-				Poll::Ready(false) => {}
-				// Waiting on a re-offer is blocked like a read at the edge.
-				Poll::Pending => return self.poll_expired_if_blocked(waiter, Poll::Pending),
+			if ready!(self.poll_successor(waiter))? {
+				continue;
 			}
 			if !self.shed_next() {
 				return res;
@@ -4357,9 +4354,9 @@ impl Consumer {
 
 	/// Continue on another copy of this group in the same track once the copy read failed,
 	/// such as a re-offer held while that copy was still arriving (see [`track::successor`]).
-	/// Returns whether the reader moved to one.
-	fn poll_successor(&mut self, waiter: &kio::Waiter) -> Poll<bool> {
-		let (index, raw) = (self.cursor.index, self.cursor.raw);
+	/// Returns whether the reader moved to one, or [`Error::Old`] once its budget gives up
+	/// on the wait.
+	fn poll_successor(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		{
 			let state = self.cursor.state.read();
 			// Only a delivery failure: content that failed to inflate is the group's under its
@@ -4368,31 +4365,39 @@ impl Consumer {
 			if self.expired
 				|| self.carry.as_ref().is_some_and(|carry| carry.ride.is_some())
 				|| state.outcome.error().is_none()
-				|| (!raw && state.malformed())
-				|| state.committed() < index
+				|| (!self.cursor.raw && state.malformed())
+				|| state.committed() < self.cursor.index
 				|| state.sparse()
 			{
-				return Poll::Ready(false);
+				return Poll::Ready(Ok(false));
 			}
 		}
 		let Some(track) = self.cursor.cache.track() else {
-			return Poll::Ready(false);
+			return Poll::Ready(Ok(false));
 		};
-		let Some(copy) = ready!(track::successor(&track, self, waiter)) else {
-			return Poll::Ready(false);
-		};
-		{
-			let state = copy.cursor.state.read();
-			// A plain read inflates from frame 0, and a copy that shed the frame can't serve it.
-			if state.sparse()
-				|| (!raw && state.flate.is_some() && state.offset > 0)
-				|| state.check_read(index, raw).is_err()
-			{
-				return Poll::Ready(false);
+		let copy = match track::successor(&track, self, waiter) {
+			Poll::Ready(copy) => copy,
+			// A stall the budget bounds, though the copy read can receive nothing more.
+			Poll::Pending => {
+				return match self.poll_expiry(waiter, true) {
+					true => Poll::Ready(Err(Error::Old)),
+					false => Poll::Pending,
+				};
 			}
-		}
+		};
+		let Some(copy) = copy else {
+			return Poll::Ready(Ok(false));
+		};
 		self.adopt_copy(copy);
-		Poll::Ready(true)
+		Poll::Ready(Ok(true))
+	}
+
+	/// Whether this copy can continue `reader` from its frame.
+	pub(super) fn continues(&self, reader: &Consumer) -> bool {
+		let (index, raw) = (reader.cursor.index, reader.cursor.raw);
+		let state = self.cursor.state.read();
+		// A plain read inflates from frame 0, and a copy that shed the frame can't serve it.
+		!state.sparse() && (raw || state.flate.is_none() || state.offset == 0) && state.check_read(index, raw).is_ok()
 	}
 
 	fn recover(&self) -> Option<&super::resume::Recover> {
@@ -4557,7 +4562,18 @@ impl Consumer {
 		res
 	}
 
+	/// Like a frame read, a failed copy's end waits out a re-offer held for the group and
+	/// reports the end of the copy that took it over (see [`Self::poll_successor`]).
 	fn poll_finished_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		loop {
+			let res = self.poll_finished_copy(waiter);
+			if !matches!(res, Poll::Ready(Err(_))) || !ready!(self.poll_successor(waiter))? {
+				return res;
+			}
+		}
+	}
+
+	fn poll_finished_copy(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
