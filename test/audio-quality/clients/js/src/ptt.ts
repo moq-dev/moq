@@ -138,12 +138,15 @@ const capture = new Capture({
 	broadcast: audio.source.in.broadcast,
 	track: audio.source.out.track,
 	config: audio.source.out.config,
-	delay: watch.sync.in.delay,
 	// Decoder subscriptions include codec warmup beyond Sync's budget. The observer must
 	// request the same age so its own subscription cannot discard an otherwise visible frame.
+	delay: new Derived([watch.sync.out.delay, audio.source.out.config], (delay, config) =>
+		delay.add(Duration.millis(config?.warmup ?? 0)),
+	),
 	maxDelay: new Derived([watch.sync.out.maxDelay, audio.source.out.config], (max, config) =>
 		max.add(Duration.millis(config?.warmup ?? 0)),
 	),
+	stretch: watch.sync.in.stretch,
 });
 const arrivals: Arrival[] = [];
 let attached: AudioNode | undefined;

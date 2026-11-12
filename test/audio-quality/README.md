@@ -113,7 +113,7 @@ configuration.
 
 `--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group, duration]` on the same viewer clock as
 `<tag>.ndjson`, before the container orders or skips groups. The observer shares the player's
-connection and track, priority, and subscription max delay (the delay plus the stretch as capture starts, as the
+connection and track, priority, and subscription max delay (the delay plus the stretch, as the
 decoder asks, not the target), so it adds no upstream subscription demand and still sees a frame later than
 the target.
 Groups drain concurrently, so an earlier stalled group cannot hide a later arrival. Capture

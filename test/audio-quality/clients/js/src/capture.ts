@@ -61,7 +61,13 @@ export class Capture {
 				effect.run((inner) =>
 					track.update({
 						priority: Catalog.PRIORITY.audio,
-						delay: { max: subscribed(inner.get(input.delay), inner.get(input.maxDelay)) },
+						delay: {
+							max: maxDelay({
+								delay: inner.get(input.delay),
+								maxDelay: inner.get(input.maxDelay),
+								stretch: inner.get(input.stretch),
+							}),
+						},
 					}),
 				);
 				effect.spawn(async () => {
