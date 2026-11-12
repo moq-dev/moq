@@ -180,7 +180,7 @@ fn opening_error(error: cpal::Error, device: &str, layout: Layout) -> Error {
 ///
 /// Backends stay private behind the shared capture producer.
 #[cfg_attr(
-	test,
+	all(test, not(target_os = "macos")),
 	expect(
 		clippy::large_enum_variant,
 		reason = "a synthetic stream has no device allocation; one enum per capture"
