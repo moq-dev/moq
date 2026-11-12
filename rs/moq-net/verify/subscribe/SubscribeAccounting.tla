@@ -344,7 +344,9 @@ TailFold(g) ==
 \* copy unless its stream finished under this update or the copy holds it
 \* (`give_up` keeps an open group), and a final drop records it and ends its readers
 \* unless the copy holds it whole (`give_up` keeps a group a finished copy serves,
-\* the live one or a fetched head).
+\* the live one or a fetched head). A fetched head still filling, which this model
+\* leaves out, holds the drop in its slot until it finishes ("whole" here) or dies,
+\* when the drop is the slot's cut (`Slot::verdict`): never lost, never beside a group.
 \* A stale drop of a group inside the span a fold forgot that the ledger already
 \* accounted (`Tail::overtaken`) may be one a finished stream overtook, so the next
 \* update owes it nothing again.
