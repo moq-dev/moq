@@ -4,7 +4,7 @@ What the `verify-*` skills in `.claude/skills/` share. Each skill names its own 
 
 ## Reading a failure
 
-A counterexample is a path through the model, not yet a bug. Replay it on the code with the skill's helpers. If the code does not follow the path, the model is wrong: fix the model to match the code. If it does, report the path and the rule in the code's words. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
+A counterexample is a path through the model, not yet a bug. Replay it on the code with the skill's helpers. If the code does not follow the path, decide which side is wrong: fix a model that misdescribes the code, and keep a model that states the intended behavior, reporting the gap in the code. If it does, report the path and the rule in the code's words. Do not weaken a rule, add a constraint, or shrink the bounds until the check passes.
 
 ## Coverage
 
