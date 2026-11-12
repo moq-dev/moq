@@ -105,6 +105,12 @@ export class Delivered {
 		return first[0] === 0n ? this.#runs[1]?.[0] : first[0];
 	}
 
+	/** One past the last sequence of the run holding `sequence`, if it was handed out. */
+	runEnd(sequence: bigint): bigint | undefined {
+		const index = this.#below(sequence);
+		return index >= 0 && sequence <= this.#runs[index][1] ? this.#runs[index][1] + 1n : undefined;
+	}
+
 	/** How many runs it holds: one per gap, plus the floor. */
 	get runs(): number {
 		return this.#runs.length;

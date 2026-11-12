@@ -6,7 +6,7 @@
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import * as cache from "./cache.ts";
 import * as datagram from "./datagram.ts";
-import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
+import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
@@ -327,8 +327,8 @@ async function fetchGroup(
 					void recv.group.closed.then(() => subscriber.close());
 					return recv.group;
 				case "drop":
-					// A fill's refusal says why; anything else given up is just gone.
-					if (toStreamCode(recv.error) === StreamCode.Old) throw new NotFound(`group ${sequence}`);
+					// Its own reason, so a stale verdict stays OLD: a relay's fill asking under this
+					// budget refuses it only to readers no more tolerant (see `fill.rejectGroups`).
 					throw recv.error;
 				case "error":
 					throw recv.error;

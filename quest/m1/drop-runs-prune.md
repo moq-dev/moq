@@ -6,8 +6,4 @@ A track's record of dropped groups stays proportional to the window readers can 
 
 ## Plan
 
-Found by the 2026-11-07 invariant audit (js-4). Runs below the cache/arrivals floor are forgotten, as `Delivered.forgetBelow` does, and JS inserts in place. This waits on [Drop set](/quest/m1/drop-set.md), which redesigns these runs with their reason and budget; prune that representation rather than today's.
-
-## Required
-
-- [Drop set](/quest/m1/drop-set.md) - drop runs carry their reason and budget, the structure this quest prunes
+Found by the 2026-11-07 invariant audit (js-4). Runs below the cache/arrivals floor are forgotten, as `Delivered.forgetBelow` does, and JS inserts in place. Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)), which billed each reader's disposition record to the pool, left the track's own drop runs as they were; prune them in place.

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { NotFound, StreamCode } from "./error.ts";
+import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -666,9 +666,12 @@ test("fetch maxDelay tightens the publisher's maxAge without changing omission",
 	expect(omitted.sequence).toBe(0n);
 	omitted.close();
 
-	await expect(wireOf(broadcast).fetchGroup("video", 0n, { maxDelay: Duration.millis(0) })).rejects.toBeInstanceOf(
-		NotFound,
-	);
+	// Stale under its own budget, which says OLD as the Rust `fetch_group` does, so a relay asking
+	// for a narrow reader refuses it to that reader alone.
+	const stale = await wireOf(broadcast)
+		.fetchGroup("video", 0n, { maxDelay: Duration.millis(0) })
+		.catch((err: unknown) => err);
+	expect(toStreamCode(stale)).toBe(StreamCode.Old);
 	broadcast.close();
 });
 

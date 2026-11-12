@@ -191,5 +191,4 @@ quests that require them.
 
 ## Required
 
-- [Drop set](/quest/m1/drop-set.md) - each cursor's disposition record is billed to the cache pool, as the track's drop runs are, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind` (held in m1 by an open claim)
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)

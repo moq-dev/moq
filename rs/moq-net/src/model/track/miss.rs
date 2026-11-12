@@ -611,6 +611,9 @@ impl Misses {
 						}
 					}
 					Err((Error::Old, asked)) if looser(max_delay, asked) => retry.insert(groups),
+					// Stale under the budget it was asked with, which this reader's is no wider
+					// than: a stale verdict an update reopens, never a refusal spent for good.
+					Err((Error::Old, Some(asked))) => self.give_up_stale(groups, asked, given_up),
 					// A drop the track recorded is named by the drop cursor already.
 					Err(_) => self.settle(&state, groups, given_up),
 				}
@@ -1629,6 +1632,20 @@ fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
 		(Some(asked), Some(ours)) => ours > asked,
 		(Some(_), None) => true,
 		(None, _) => false,
+	}
+}
+
+/// The misses a reader gave up, billed with its record and forgotten below its floor once it
+/// folds: it hands out nothing there, so never asks a fill for it again.
+impl super::super::record::Beside for Misses {
+	fn runs(&self) -> u64 {
+		self.given_up.len() as u64
+	}
+
+	fn forget_below(&mut self, floor: u64) {
+		if floor > 0 {
+			self.given_up.remove(0..floor);
+		}
 	}
 }
 
