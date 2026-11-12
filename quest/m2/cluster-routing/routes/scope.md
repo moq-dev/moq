@@ -45,6 +45,21 @@ the wire, the draft, and `js/net` onto it and deletes Babel's router
 one quest for everything, which is one PR across the router, the wire, the
 draft, the Rust sessions, and `js/net`).
 
+Open, from the model
+([moq-dev/moq#8541](https://github.com/moq-dev/moq/pull/8541)): how long a
+relay keeps its doubt about a node. As the rule stands the doubt goes once no
+route names the node, and a request can then loop while the news of three
+closed sessions is still on its way: `Loop.cfg` breaks `RequestsLoopFree` at
+depth 11 and is kept as that open finding. Keeping the doubt until its timer
+fires showed no loop on that mesh in 7.6M states, to depth 13, and costs a
+wait: every route through the doubted node sits out the timer, a publisher
+reconnecting through another relay included. Measure that reconnect delay on
+the prototype's meshes under both rules and put the two to the maintainer
+with the numbers. Recommended: keep the doubt, since the wait is bounded by
+the timer and a looping request is not bounded by anything the relay
+controls. If the rule changes,
+`Loop.cfg` passes and `RequestsLoopFree` joins the rules every config checks.
+
 The two rules share a tree until the switch. Pick how, and say why in the
 PR: the prototype (`route/tests/paths.rs`, `compare.rs`, `copies.rs`)
 promoted out of `tests/` into a second router, or one router generic over
