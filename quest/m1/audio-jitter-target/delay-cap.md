@@ -41,8 +41,10 @@ the PR's recommendations):
   catalog delay, at `LATENCY_MAX` too, so one 10 s ceiling holds everywhere
   (rejected: (b) raise the browser to 20 s; (c) keep the mismatch).
 - ✅ (a) clamp catalog `warmup` at `LATENCY_MAX` where the browser reads it,
-  and in Rust's `moq_mux::container::Playout` for parity (rejected: (b) reject
-  the rendition; (c) leave unbounded).
+  and in Rust for parity: `moq_mux::container::Playout`, `moq_video`'s
+  decode `Consumer`, and `moq play`'s video refresh, all through one
+  `moq_mux::container::WARMUP_MAX` (rejected: (b) reject the rendition; (c)
+  leave unbounded).
 
 Findings:
 
@@ -55,4 +57,6 @@ Findings:
   `warmup` still discards that much of the publisher's own audio, which hurts
   only its broadcast.
 
-Public API: none. The constants stay internal. Wire: none.
+Public API: `moq_mux::container::WARMUP_MAX` (10 s) is exported so every
+Rust reader of catalog `warmup` shares one ceiling; the browser's `DELAY_MAX`
+stays internal. Wire: none.
