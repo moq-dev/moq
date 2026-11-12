@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A V4L2 camera that opens and never delivers a frame no longer blocks its capture thread forever: reads time out after a second, so dropping the `capture::Stream` stops the thread and closes the device promptly.
 - The PipeWire camera listing hides nodes that offer no format the backend converts, such as an IR camera with only GREY, as the V4L2 listing already does.
 - `capture::cameras()` lists a webcam once with the `pipewire` feature: the dedupe read `api.v4l2.path`, which a PipeWire registry global lacks, and now reads `object.path`.
+- A PipeWire camera that another client already runs opens and captures, sharing that client's mode, where it used to time out waiting for a format or a frame.
 
 ### Added
 

@@ -703,12 +703,13 @@ fn parse_format(value: &Value) -> Vec<Format> {
 			.find(|property| property.key == key.as_raw())
 			.map(|property| &property.value)
 	};
-	if property(FormatProperties::MediaType) != Some(&Value::Id(spa::utils::Id(MediaType::Video.as_raw()))) {
+	let property_id = |key: FormatProperties| property(key).and_then(id);
+	if property_id(FormatProperties::MediaType) != Some(spa::utils::Id(MediaType::Video.as_raw())) {
 		return Vec::new();
 	}
-	let encodings = match property(FormatProperties::MediaSubtype) {
-		Some(Value::Id(id)) if *id == spa::utils::Id(MediaSubtype::Mjpg.as_raw()) => vec![Encoding::Mjpeg],
-		Some(Value::Id(id)) if *id == spa::utils::Id(MediaSubtype::Raw.as_raw()) => {
+	let encodings = match property_id(FormatProperties::MediaSubtype) {
+		Some(id) if id == spa::utils::Id(MediaSubtype::Mjpg.as_raw()) => vec![Encoding::Mjpeg],
+		Some(id) if id == spa::utils::Id(MediaSubtype::Raw.as_raw()) => {
 			let formats = match property(FormatProperties::VideoFormat) {
 				Some(Value::Id(id)) => vec![*id],
 				Some(Value::Choice(ChoiceValue::Id(choice))) => listed(&choice.1),
@@ -776,6 +777,19 @@ fn parse_format(value: &Value) -> Vec<Format> {
 			rate_range,
 		})
 		.collect()
+}
+
+/// The id a property holds, plain or as a `None` choice.
+///
+/// A `None` choice holds exactly one value, like a plain property. PipeWire
+/// sends a format in that form to a stream that links to a node another
+/// stream already runs. The other properties parse through their choice arms,
+/// where [`listed`] reads a `None` choice as its value.
+fn id(value: &Value) -> Option<spa::utils::Id> {
+	match value {
+		Value::Id(id) | Value::Choice(ChoiceValue::Id(spa::utils::Choice(_, ChoiceEnum::None(id)))) => Some(*id),
+		_ => None,
+	}
 }
 
 /// The values a choice lists. A range lists none: it describes a continuum.
@@ -1047,6 +1061,43 @@ mod tests {
 		assert_eq!(formats[0].sizes, [Size::new(1280, 720)]);
 		assert_eq!(formats[0].rates, [FrameRate::new(30, 1).unwrap()]);
 		assert_eq!(formats[3].encoding, Encoding::Raw(VideoFormat::YUY2));
+	}
+
+	/// The format a stream gets when it links to a camera another stream already
+	/// runs: every value wrapped in a `None` choice.
+	#[test]
+	fn a_format_of_none_choices_parses_like_a_plain_one() {
+		fn none<T: spa::pod::CanonicalFixedSizedPod>(value: T) -> spa::utils::Choice<T> {
+			spa::utils::Choice(spa::utils::ChoiceFlags::empty(), ChoiceEnum::None(value))
+		}
+		let property = |key: FormatProperties, value| spa::pod::Property::new(key.as_raw(), value);
+		let format = Value::Object(spa::pod::Object {
+			type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+			id: spa::param::ParamType::Format.as_raw(),
+			properties: vec![
+				property(
+					FormatProperties::MediaType,
+					Value::Choice(ChoiceValue::Id(none(spa::utils::Id(MediaType::Video.as_raw())))),
+				),
+				property(
+					FormatProperties::MediaSubtype,
+					Value::Choice(ChoiceValue::Id(none(spa::utils::Id(MediaSubtype::Mjpg.as_raw())))),
+				),
+				property(
+					FormatProperties::VideoSize,
+					Value::Choice(ChoiceValue::Rectangle(none(rectangle(1280, 720)))),
+				),
+				property(
+					FormatProperties::VideoFramerate,
+					Value::Choice(ChoiceValue::Fraction(none(ratio(30, 1)))),
+				),
+			],
+		});
+		let formats = parse_format(&format);
+		assert_eq!(formats.len(), 1);
+		assert_eq!(formats[0].encoding, Encoding::Mjpeg);
+		assert_eq!(formats[0].sizes, [Size::new(1280, 720)]);
+		assert_eq!(formats[0].rates, [FrameRate::new(30, 1).unwrap()]);
 	}
 
 	#[test]
@@ -1390,4 +1441,39 @@ mod tests {
 		assert_eq!(stream.label(), PIPEWIRE);
 	}
 
+	/// Opens the default PipeWire camera twice at once, the second at another
+	/// size, and checks both capture at the mode the first one runs. Ignored
+	/// because it turns the camera on:
+	/// `cargo test -p moq-video --features pipewire pipewire_camera_shares -- --ignored`.
+	///
+	/// Run it a second time while another client holds the camera in DMA-BUF,
+	/// to cover a join to buffers this stream did not negotiate, for example:
+	/// `gst-launch-1.0 pipewiresrc target-object=<node.name>
+	/// stream-properties="props,media.type=Video,media.category=Capture,media.role=Camera"
+	/// ! image/jpeg ! fakesink` (or `! video/x-raw,format=YUY2 ! fakesink`).
+	#[tokio::test]
+	#[ignore = "turns on the default PipeWire camera"]
+	async fn pipewire_camera_shares_a_running_stream() {
+		if ashpd::is_sandboxed() {
+			eprintln!("skipping: capturing inside a sandbox would ask the camera portal");
+			return;
+		}
+		if cameras(Vec::new()).await.expect("listing PipeWire cameras").is_empty() {
+			eprintln!("skipping: no PipeWire camera");
+			return;
+		}
+		let config = |width, height| Config {
+			source: crate::capture::Source::Camera(Some(PIPEWIRE.to_string())),
+			width: Some(width),
+			height: Some(height),
+			..Default::default()
+		};
+		let first = capture(&config(1280, 720)).await.expect("first open");
+		let second = capture(&config(640, 360)).await.expect("second open");
+		assert_eq!(
+			(second.width(), second.height()),
+			(first.width(), first.height()),
+			"a joining stream gets the running mode"
+		);
+	}
 }
