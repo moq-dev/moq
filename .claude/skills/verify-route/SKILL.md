@@ -71,7 +71,14 @@ Sync commit: `caa3dd8926f16fbed15760ab22298085df73b655`. Run `git log caa3dd8926
 
 | Code | Model |
 | --- | --- |
-Sync commit: `c916855d163ff5641ad18cfb8e14b76dababd99a`, plus the change that added a route's hops ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)). Run `git log c916855d16.. -- rs/moq-net/src/route/` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`), so each Code cell starts with a repo-relative path, then the symbols in it.
+| `rs/moq-net/src/route/mod.rs` `feasible`, `Entry::crossed`, `eligible`, `metric`, `selected`, `infeasible`, `recoverable`, `live`, `certifiers` | `Feasible`, `Crossed`, `Eligible`, `Through`, `Selected`, `InfeasibleSet`, `Recoverable`, `Live`, `Certifiers` |
+| `rs/moq-net/src/route/mod.rs` `certified`, `prune`, `adopted` | `Certified`, `Prune`, `Adopted` |
+| `rs/moq-net/src/route/mod.rs` `update`, `recompute`, `record`, `advertise`, `requests` | `Update` and its `prune`, `Record`, `Plan`, `Requests` |
+| `rs/moq-net/src/route/mod.rs` `show`, `shown_now` | `Events`, `ShownNow` |
+| `rs/moq-net/src/route/mod.rs` `route`, `batch`, `request`, `echo` | `OnRoute`, `OnBatch`, `OnRequest`, `Deliver`, `DeliverAck` |
+| `rs/moq-net/src/route/mod.rs` `connect`, `peer_interest`, `disconnect`, `collect`, `change` | `Connect`, `Opened`, `Disconnect`, `Closed`, `Collect`, `ChangeClaim` |
+| `rs/moq-net/src/route/view.rs` `View::merge`, `View::restrict` | `Merge`, `Certify` |
+| `rs/moq-net/src/route/tests/mod.rs` `Sim` queues and `revivals`, `false_ends` | `q`, `acks`, `revivals`, `falseEnds` |
 | `rs/moq-net/src/route/tests/mod.rs` `Sim::leaf`, `Stats` | `Leaves`, `burst` |
 
 ## Not covered
