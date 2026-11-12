@@ -3869,7 +3869,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 }
 
 // A lite-07 announce stream the test reads as the subscriber, and answers.
-function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>) {
+function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>, prefix = Path.empty()) {
 	const version = Version.DRAFT_07;
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const auth = grant && { grant, ready: Promise.resolve() };
@@ -3882,7 +3882,7 @@ function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>)
 		readable: new ReadableStream<Uint8Array>({ start: (c) => (replies = c) }),
 		writable: new WritableStream<Uint8Array>({ write: (chunk) => output.enqueue(new Uint8Array(chunk)) }),
 	});
-	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+	const running = publisher.runAnnounce(new AnnounceRequest(prefix), stream);
 	return {
 		node: wireOf(origin.consume()).own.node,
 		running,
@@ -3890,6 +3890,8 @@ function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>)
 		answer: async (msg: AnnounceReply) =>
 			replies.enqueue(await Writer.collect(version, (w) => encodeAnnounceReply(w, msg, version))),
 		ok: () => AnnounceOk.decode(reader, version),
+		// The peer finishes its replies, which ends the stream.
+		finish: () => replies.close(),
 		close: () => {
 			publisher.close();
 			pair.client.close();
@@ -3904,11 +3906,11 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 	const { node, running, next, answer, ok, close } = routedAnswer(origin);
 	try {
 		await ok();
-		// The answered stream changed this origin's set of sessions, which advances its seqno.
+		// Answering a stream lengthens no path, so the seqno stays.
 		expect(await next()).toEqual({
 			status: "routeStart",
 			node,
-			advert: { seqno: 1n, metric: 0n, downOnly: false, rtt: 0n, hops: [node] },
+			advert: { seqno: 0n, metric: 0n, downOnly: false, rtt: 0n, hops: [node] },
 		});
 		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
 		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
@@ -3951,6 +3953,42 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 		again.close();
 	} finally {
 		close();
+		origin.close();
+	}
+});
+
+// A browser forwards nothing, so every session its route went out on is a path to it: closing one
+// advances the seqno. A session that never carried the route changes no path.
+test("a lite-07 seqno advances only when a session carrying the route closes", async () => {
+	const origin = new OriginProducer();
+	const cam = publish(origin, Path.from("cam"));
+	const first = routedAnswer(origin);
+	const second = routedAnswer(origin);
+	try {
+		for (const { ok, next } of [first, second]) {
+			await ok();
+			expect(await next()).toMatchObject({ status: "routeStart", advert: { seqno: 0n } });
+			expect(await next()).toMatchObject({ status: "active", suffix: "cam" });
+			expect(await next()).toMatchObject({ status: "floor" });
+			expect(await next()).toEqual({ status: "synced" });
+		}
+
+		first.finish();
+		await first.running;
+		expect(await second.next()).toMatchObject({ status: "routeUpdate", id: 0n, advert: { seqno: 1n } });
+
+		// The unmatched stream shows no claim, so no route goes out on it, and its close is no bump.
+		const unmatched = routedAnswer(origin, undefined, Path.from("other"));
+		await unmatched.ok();
+		expect(await unmatched.next()).toEqual({ status: "synced" });
+		unmatched.finish();
+		await unmatched.running;
+		const mic = publish(origin, Path.from("mic"));
+		expect(await second.next()).toMatchObject({ status: "active", suffix: "mic" });
+		mic.close();
+	} finally {
+		cam.close();
+		for (const answer of [first, second]) answer.close();
 		origin.close();
 	}
 });

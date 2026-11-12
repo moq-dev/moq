@@ -828,6 +828,11 @@ export class Publisher {
 		// until every end is echoed, so a peer that rotates our identity and withholds its echoes
 		// holds at most one here.
 		const ending = new Map<bigint, bigint>();
+		// Whether our route went out on this stream, making it a path to this origin: its close
+		// then advances the seqno, so a node remembering this shorter path accepts a longer one
+		// without a ROUTE_REQUEST. A new stream lengthens no path. Mirrors `links` in
+		// rs/moq-net's `route/node.rs` for a node that does not forward.
+		let link = false;
 		// The claims the peer holds, by suffix.
 		const live = new Map<Path.Valid, { id: bigint; snap: Advertised }>();
 
@@ -899,6 +904,7 @@ export class Publisher {
 				changed = true;
 				if (!route) {
 					route = { id: nextRoute++, node: identity.node, seqno: identity.seqno };
+					link = true;
 					await write({ status: "routeStart", node: identity.node, advert: advert(identity.seqno) });
 				}
 				const { instance, epoch, cost } = snap.route;
@@ -985,8 +991,6 @@ export class Publisher {
 				return;
 			}
 
-			// This origin's set of sessions changed.
-			origin?.own.bump();
 			await new AnnounceOk(UNKNOWN_HOP, 0).encode(stream.writer, this.version);
 			dirty = false;
 			await sync();
@@ -1016,6 +1020,7 @@ export class Publisher {
 			}
 		} finally {
 			for (const stop of stops) stop?.();
+			if (link) origin?.own.bump();
 		}
 	}
 

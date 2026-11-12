@@ -68,7 +68,7 @@ export class Own {
 		return this.#revision;
 	}
 
-	/** The origin's own set of sessions changed: advance the seqno. */
+	/** A session that carried this origin's route closed, changing a path to it: advance the seqno. */
 	bump(): void {
 		const { node, seqno } = this.identity.peek();
 		if (seqno + 1n >= MAX) this.rotate();
