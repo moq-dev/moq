@@ -15,7 +15,7 @@ import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast
 import { formatDuration, parseDuration } from "./duration";
 import { checkName, Echo } from "./echo";
 import { Player } from "./player";
-import type { Delay, Sync } from "./sync";
+import { type Delay, STRETCH, type Sync } from "./sync";
 import type * as Text from "./text";
 import type * as Video from "./video";
 
@@ -66,6 +66,7 @@ const OBSERVED = [
 	"buffer",
 	"delay",
 	"lookahead",
+	"stretch",
 	"catalog-format",
 	"captions",
 	"echo",
@@ -105,6 +106,14 @@ function parseLookahead(value: string | null): Duration {
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
 	throw invalidAttribute("lookahead", value, 'a duration like "30s"');
+}
+
+// Parse the `stretch` attribute: a duration, or the default when absent.
+function parseStretch(value: string | null): Duration {
+	if (value === null) return STRETCH;
+	const parsed = parseDuration(value);
+	if (parsed !== undefined) return parsed;
+	throw invalidAttribute("stretch", value, 'a duration like "2s", or "0" to turn it off');
 }
 
 // Parse the `echo` attribute: the viewer's feedback name, one visible path segment, or undefined when absent.
@@ -209,6 +218,8 @@ export default class MoqWatch extends HTMLElement {
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
 		lookahead: new Signal<Duration>(Duration.ZERO),
+		// How far audio may trail the clock before it skips ahead; zero turns the time stretch off.
+		stretch: new Signal<Duration>(STRETCH),
 		video: {
 			// The desired video rendition (resolution/bitrate cap).
 			target: new Signal<Video.Target | undefined>(undefined),
@@ -373,6 +384,9 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run((effect) =>
 			this.#reflect(effect, "lookahead", formatDuration(effect.get(this.controls.lookahead))),
 		);
+		this.signals.run((effect) =>
+			this.#reflect(effect, "stretch", formatDuration(effect.get(this.controls.stretch))),
+		);
 
 		// Track the element's rendered size and feed it into the rendition picker,
 		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
@@ -451,6 +465,7 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "buffer") this.#accept("buffer");
 			else if (name === "delay") this.delay = parseDelay(newValue);
 			else if (name === "lookahead") this.lookahead = parseLookahead(newValue);
+			else if (name === "stretch") this.stretch = parseStretch(newValue);
 			else if (name === "catalog-format") this.catalogFormat = parseCatalogFormat(newValue);
 			else if (name === "captions") this.captions = newValue || undefined;
 			else if (name === "echo") this.echo = parseEcho(newValue);
@@ -608,7 +623,7 @@ export default class MoqWatch extends HTMLElement {
 	 * future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
 	 * once they would sit further than `delay + lookahead` past the playhead. Audio that falls
 	 * behind, as after a stall, catches up by playing faster, and skips only what trails by more
-	 * than the lookahead. Call `reset()` at each utterance boundary. Not a jitter buffer: live
+	 * than the larger of the lookahead and the {@link stretch}. Call `reset()` at each utterance boundary. Not a jitter buffer: live
 	 * streams leave it at zero and tune `delay`.
 	 */
 	get lookahead(): Duration {
@@ -619,6 +634,25 @@ export default class MoqWatch extends HTMLElement {
 		if (!(value instanceof Duration)) throw invalidAttribute("lookahead", value, "a Duration");
 		this.controls.lookahead.set(parseLookahead(formatDuration(value)));
 		this.#accept("lookahead");
+	}
+
+	/**
+	 * How far audio may trail the clock before it skips ahead (default: 2 s), mirrored by the
+	 * `stretch` attribute.
+	 *
+	 * After a stall, audio slows down and falls behind the clock rather than dropping what arrives
+	 * late, then speeds up until it is back on it. A voice app might ask for 200 ms, a sports stream
+	 * for 2 s. Zero turns the time stretch off: received audio plays unaltered and late audio is
+	 * skipped.
+	 */
+	get stretch(): Duration {
+		return this.controls.stretch.peek();
+	}
+
+	set stretch(value: Duration) {
+		if (!(value instanceof Duration)) throw invalidAttribute("stretch", value, "a Duration");
+		this.controls.stretch.set(parseStretch(formatDuration(value)));
+		this.#accept("stretch");
 	}
 
 	/**
