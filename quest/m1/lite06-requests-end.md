@@ -21,8 +21,8 @@ whose task drains `request.requests()` in a `while let`. After the client's
 `requests()` closes only through `auth::Handle::close`, which every moq-lite
 version reaches from `Driver::end` or `Driver`'s `Drop` in
 `rs/moq-net/src/lite/session.rs`. So suspect the lite-06 driver not ending
-(it has no session stream to see the peer leave) or the server keeping it
-alive, rather than the stream itself.
+(check what it watches to see the peer leave; see `has_setup_stream`) or the
+server keeping it alive, rather than the stream itself.
 
 - Reproduce in moq-net or moq-tokio with a lite-06 pair: the client cancels,
   and the server's `requests()` must yield `None` within the test's timeout.
