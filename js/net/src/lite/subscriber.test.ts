@@ -3670,6 +3670,87 @@ test("a lite-07 claim another stream's newer floor withdrew is not selected", as
 	await Promise.all([first.info, second.info]);
 });
 
+// A floor that certifies nothing withdraws no knowledge: the revision its route's last floor
+// certified still decides, so the lagging stream's withdrawn copy stays held back.
+test("a lite-07 floor that certifies nothing keeps the withdrawal its route certified", async () => {
+	const { subscriber, announced, send, trackRequest, another } = await routedStream();
+	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const x = Path.from("live/x");
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+
+	// NODE_A claims live/x cheaply on both streams at revision 0; a dearer NODE_B on the first.
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	await live.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance: a });
+	await live.send({ status: "floor", id: 0n, revision: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	await send({ status: "routeStart", node: NODE_B, advert: { ...ADVERT, metric: 5n } });
+	await send({ status: "active", suffix: x, route: 1n, instance: b });
+	await send({ status: "floor", id: 1n, revision: 0n });
+
+	// NODE_A withdraws live/x at revision 1 on the first stream, whose next floor certifies nothing.
+	await send({ status: "endedId", id: 0n });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "restart", route: { node: NODE_B } });
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "end", route: { node: NODE_A } });
+	await send({ status: "floor", id: 0n });
+	// Another node's claim marks the uncertified floor as applied.
+	const w = Path.from("live/w");
+	await send({ status: "active", suffix: w, route: 1n, instance: b });
+	await send({ status: "floor", id: 1n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: w, kind: "start" });
+
+	const pick = await trackRequest(x, 2);
+	expect(pick.request).toMatchObject({ instance: b, node: NODE_B });
+
+	pick.consumed.close();
+	live.announced.close();
+	announced.close();
+	subscriber.close();
+	await pick.info;
+});
+
+// A lagging stream's copy of a claim takes the cost the newest certifying floor gives it, so a
+// re-priced origin does not keep winning on the cost it had.
+test("a lite-07 lagging copy carries the cost a newer floor certified", async () => {
+	const { subscriber, announced, send, trackRequest, another } = await routedStream();
+	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const x = Path.from("live/x");
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	await live.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance: a });
+	await live.send({ status: "floor", id: 0n, revision: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { cost: 1n } });
+	await send({ status: "routeStart", node: NODE_B, advert: { ...ADVERT, metric: 5n } });
+	await send({ status: "active", suffix: x, route: 1n, instance: b });
+	await send({ status: "floor", id: 1n, revision: 0n });
+
+	// NODE_A raises its cost to 100 at revision 1, which only the first stream has delivered.
+	await send({ status: "update", id: 0n, cost: 100n });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "restart", route: { node: NODE_B } });
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "update", route: { cost: 101n } });
+
+	const pick = await trackRequest(x, 2);
+	expect(pick.request).toMatchObject({ instance: b, node: NODE_B });
+
+	pick.consumed.close();
+	live.announced.close();
+	announced.close();
+	subscriber.close();
+	await pick.info;
+});
+
 test("a lite-07 consume names the node now serving its instance", async () => {
 	const { subscriber, announced, send, trackRequest } = await routedStream();
 	const room = Path.from("room");

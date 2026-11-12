@@ -890,8 +890,9 @@ export class Subscriber {
 			pending: Map<Path.Valid, Claim | undefined>;
 			// The claims as of the last floor, and the revision it certified them at, if any.
 			view: { prefix: Path.Valid; hidden: boolean; revision: bigint | undefined; claims: Map<Path.Valid, Claim> };
-			// The view's claims no other stream's newer floor withdrew or replaced.
-			shown: Set<Path.Valid>;
+			// The view's claims no other stream's newer floor withdrew or replaced, each as the
+			// newest floor certifying it has it, cost included.
+			shown: Map<Path.Valid, Claim>;
 			carrier: Carrier;
 			// Who the route's claims are filed under in the consume cache, which keeps every
 			// route's claim so a consume ranks them for its own path.
@@ -952,8 +953,8 @@ export class Subscriber {
 		// stays there, so each consume ranks them for its own path and its epochs. `restart` marks
 		// another instance or epoch, whose consumes subscribe fresh.
 		const serve = (wire: Route, path: Path.Valid, restart: boolean) => {
-			const claim = wire.view.claims.get(path);
-			if (claim && wire.shown.has(path) && visible(path) && usable(wire))
+			const claim = wire.shown.get(path);
+			if (claim && visible(path) && usable(wire))
 				this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
 			else this.#consumes.withdraw(path, wire.owner);
 		};
@@ -968,8 +969,8 @@ export class Subscriber {
 				const candidates: WireRoute[] = [];
 				for (const id of byPath.get(path) ?? []) {
 					const wire = route(id);
-					const claim = wire.view.claims.get(path);
-					if (claim && wire.shown.has(path) && usable(wire)) candidates.push(candidate(wire, claim));
+					const claim = wire.shown.get(path);
+					if (claim && usable(wire)) candidates.push(candidate(wire, claim));
 				}
 				if (perNode) {
 					for (const next of candidates) now.set(next.node, next);
@@ -1003,14 +1004,14 @@ export class Subscriber {
 		// `all` every claim it holds, once another stream's floor may have moved what is current.
 		const show = (wire: Route, touched: ReadonlyMap<Path.Valid, boolean>, all: boolean) => {
 			const paths = all
-				? new Set([...touched.keys(), ...wire.shown, ...wire.view.claims.keys()])
+				? new Set([...touched.keys(), ...wire.shown.keys(), ...wire.view.claims.keys()])
 				: touched.keys();
 			for (const path of paths) {
 				const now = this.#floors.shows(wire.node, wire.view, path);
-				const was = wire.shown.has(path);
+				const was = wire.shown.get(path);
 				const restart = touched.get(path);
-				if (now === was && restart === undefined) continue;
-				if (now) wire.shown.add(path);
+				if (same(now, was) && restart === undefined) continue;
+				if (now) wire.shown.set(path, now);
 				else wire.shown.delete(path);
 				// A claim shown anew or restarted iterates last, as the newest; a re-price keeps its
 				// place, as the consume cache does. See bestCandidate.
@@ -1058,7 +1059,7 @@ export class Subscriber {
 							claims: new Map(),
 							pending: new Map(),
 							view,
-							shown: new Set(),
+							shown: new Map(),
 							carrier: {
 								view,
 								// Another stream's floor runs this: a closed reader is about to let go.
@@ -1107,6 +1108,10 @@ export class Subscriber {
 					case "floor": {
 						// The batch applies whole, at the revision its floor certifies.
 						const wire = route(msg.id);
+						// A floor that certifies less keeps what the route's last one certified.
+						const certified = wire.view.revision;
+						if (certified !== undefined && (msg.revision === undefined || msg.revision < certified))
+							this.#floors.regress(wire.node, wire.carrier);
 						const touched = new Map<Path.Valid, boolean>();
 						for (const [path, claim] of wire.pending) {
 							// Another instance or epoch: what was consumed through the claim may be stale.

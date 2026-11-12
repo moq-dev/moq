@@ -120,7 +120,10 @@ class Scope {
 
 	/** Whether this scope allows everything beneath the root-relative `prefix`. */
 	covers(prefix: Path.Valid): boolean {
-		return this.allowed?.contains(Path.Pattern.subtree(Path.encode(Path.join(this.root, prefix)))) ?? true;
+		if (!this.allowed) return true;
+		// A peer's prefix may fit the wire alone and overflow once joined: nothing allowed lies there.
+		const path = Path.join(this.root, prefix);
+		return !Path.check(path) && this.allowed.contains(Path.Pattern.subtree(path));
 	}
 
 	/** Whether this scope allows anything beneath the absolute `prefix`. */

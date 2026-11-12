@@ -4054,6 +4054,29 @@ test("a lite-07 grant change alone re-floors the route", async () => {
 	}
 });
 
+// A request prefix that fits the wire alone may overflow once joined to the handle's root:
+// nothing the scope allows lies there, so the floor certifies nothing rather than failing.
+test("a lite-07 request beyond the scope's path limits floors uncertified", async () => {
+	const origin = new OriginProducer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/**")]));
+	// The claim at room covers the request, so the answer floors it.
+	const room = publish(scoped, Path.from("room"));
+	const prefix = Path.from(["room", ...Array.from({ length: Path.MAX_PARTS - 1 }, () => "a")].join("/"));
+	const { running, next, ok, close } = routedAnswer(scoped, undefined, prefix);
+	try {
+		await ok();
+		expect(await next()).toMatchObject({ status: "routeStart" });
+		expect(await next()).toMatchObject({ status: "active", suffix: "", route: 0n });
+		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
+		expect(await next()).toEqual({ status: "synced" });
+	} finally {
+		room.close();
+		close();
+		origin.close();
+		await running.catch(() => {});
+	}
+});
+
 // The publishing origin closing ends its claims and route, and finishes the stream.
 test("a lite-07 answer finishes once the publishing origin closes", async () => {
 	const origin = new OriginProducer();

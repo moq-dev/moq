@@ -71,8 +71,9 @@ function presented(view: View, path: Path.Valid, covering: boolean): Claim | und
  * Several streams may carry one origin's claims, each answering its own prefix and applying its
  * batches at its own floors, so one can lag another. Of the views whose floor certifies a claim,
  * the one with the highest revision decides whether it exists, and a claim no floor certifies
- * exists while some stream carries it. A route that ends leaves what its last floor certified, so
- * an older floor never revives a claim a newer one withdrew. Mirrors `route/view.rs`'s merge in
+ * exists while some stream carries it. A route that ends, or whose floor stops certifying or goes
+ * back, leaves what its last floor certified, so an older floor never revives a claim a newer one
+ * withdrew; that knowledge counts while a live floor still certifies the path. Mirrors `route/view.rs`'s merge in
  * rs/moq-net, held per session since a node that forwards nothing merges only for its own reads.
  * @internal
  */
@@ -100,10 +101,22 @@ export class Floors {
 			this.#nodes.delete(node);
 			return;
 		}
-		// A snapshot: the route's own state is gone with it.
+		// The route's own state is gone with it, so its claims need no copy.
 		const { prefix, hidden, revision, claims } = carrier.view;
 		if (revision !== undefined) entry.retained.push({ prefix, hidden, revision, claims });
 		this.#prune(entry);
+	}
+
+	/**
+	 * A route to `node` is about to apply a floor that certifies nothing, or an older revision.
+	 * What its current floor certified stays, as an ended route's does, since no floor withdraws
+	 * what a newer one said. Call it before the batch changes the route's view.
+	 */
+	regress(node: bigint, carrier: Carrier): void {
+		const entry = this.#nodes.get(node);
+		const { prefix, hidden, revision, claims } = carrier.view;
+		if (!entry?.carriers.has(carrier) || revision === undefined) return;
+		entry.retained.push({ prefix, hidden, revision, claims: new Map(claims) });
 	}
 
 	/**
@@ -121,12 +134,13 @@ export class Floors {
 	}
 
 	/**
-	 * Whether `view`'s claim at `path`, under a route to `node`, exists: no view certifies the path,
-	 * or the newest that does presents the same instance and epoch there.
+	 * The claim `view` shows at `path`, under a route to `node`: its own when no view certifies the
+	 * path, or else the newest certifying view's, so its cost is current, when that one presents the
+	 * same instance and epoch there. Undefined when the claim does not exist.
 	 */
-	shows(node: bigint, view: View, path: Path.Valid): boolean {
+	shows(node: bigint, view: View, path: Path.Valid): Claim | undefined {
 		const claim = view.claims.get(path);
-		if (!claim) return false;
+		if (!claim) return undefined;
 		const entry = this.#nodes.get(node);
 		// The view itself wins a tie: one revision presents the same claims on every stream.
 		let best: View | undefined = certifies(view, path) ? view : undefined;
@@ -136,21 +150,24 @@ export class Floors {
 			if (best === undefined || other.revision! > best.revision!) best = other;
 		};
 		for (const other of entry?.carriers ?? []) consider(other.view);
-		for (const other of entry?.retained ?? []) consider(other);
-		if (best === undefined || best === view) return true;
+		// What an ended or regressed floor said counts only where a live one still certifies, as
+		// Rust's router prunes a merged region no certifier certifies any more.
+		if (best !== undefined) for (const other of entry?.retained ?? []) consider(other);
+		if (best === undefined || best === view) return claim;
 		const theirs = presented(best, path, path === view.prefix);
-		return theirs !== undefined && theirs.instance === claim.instance && theirs.epoch === claim.epoch;
+		if (theirs?.instance !== claim.instance || theirs.epoch !== claim.epoch) return undefined;
+		return theirs;
 	}
 
 	// Drop each retained view that decides no claim a route holds: one another view supersedes, or
-	// one no route's prefix meets. Of two alike, the later stays, so each prefix the session
+	// one no certifying route's prefix meets. Of two alike, the later stays, so each prefix the session
 	// requested keeps at most two: one for the hidden claims, one for the rest.
 	#prune(entry: Node): void {
 		const live = [...entry.carriers].map((carrier) => carrier.view);
 		const retained = entry.retained;
 		entry.retained = retained.filter(
 			(view, i) =>
-				live.some((other) => meets(other.prefix, view.prefix)) &&
+				live.some((other) => other.revision !== undefined && meets(other.prefix, view.prefix)) &&
 				!live.some((other) => supersedes(other, view)) &&
 				!retained.some((other, j) => j !== i && supersedes(other, view) && (j > i || !supersedes(view, other))),
 		);
