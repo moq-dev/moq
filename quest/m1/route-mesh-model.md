@@ -28,8 +28,9 @@ for finalizing lite-07.
   external change, the queues empty and every relay shows what
   `QuietIsSettled` requires.
 - Keep explicit-state runs tractable with `SYMMETRY` over interchangeable
-  relays; run larger meshes with TLC's random simulation in Nightly
-  ([nightly models](/quest/m1/model-checks-nightly.md)).
+  relays; run larger meshes with TLC's random simulation in Nightly, whose
+  `just test tla` (`sh/tla.sh`) runs each config exhaustively today and needs
+  a way to mark a config for simulation.
 - Check `SimplePaths` and `NoCountToInfinity` on every mesh: a route names
   the nodes it crossed since [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487).
 

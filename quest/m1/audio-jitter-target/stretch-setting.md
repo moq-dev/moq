@@ -63,7 +63,3 @@ Recommendations:
 
 Public API: an additive attribute, property, and flag. Wire: none; a
 fixed-delay player's audio subscription asks for a longer max delay.
-
-## Required
-
-- [Stretch model](/quest/m1/audio-jitter-target/stretch.md) - the slow-down and catch-up this setting bounds and turns off

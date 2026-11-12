@@ -46,17 +46,17 @@ A counterexample is a path through the model, not yet a bug. Replay it on the re
 
 ## Coverage
 
-Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
+Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs` to see what changed since. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit.
 
-| Code (`rs/moq-net/src/model/`) | Model |
+| Code | Model |
 | --- | --- |
-| `resume.rs` `Reader::sync`, `backfill_gaps`, `Producer::subscription` | `ResumeAsk`, `Demand`, `Switch`, `Subscribe` |
-| `resume.rs` `Reader::take`, `poll_end` | `HandOut`, `Drained`, `EndOk` |
-| `resume.rs` `Reader::let_go`, `Copy::retains`, `Producer::park` | `LetGo`, `Park` |
-| `resume.rs` `Recover::wants`, `poll`, `held`, `poll_serving` | `Recover`, `Holders`, `Exhausted`, `Abort` |
-| `resume.rs` `Recover::poll_fetch`, `Fetching`; `track.rs` `fetch_group` | `Ask` |
-| `front.rs` `track_ended`; `origin.rs` `Action::Finish`, `TrackIo::end` | `FrontFinish`, `Whole` |
-| `front.rs` failover and its unroutable end | `Switch`, `FrontFail` |
+| `rs/moq-net/src/model/resume.rs` `Reader::sync`, `backfill_gaps`, `Producer::subscription` | `ResumeAsk`, `Demand`, `Switch`, `Subscribe` |
+| `rs/moq-net/src/model/resume.rs` `Reader::take`, `poll_end` | `HandOut`, `Drained`, `EndOk` |
+| `rs/moq-net/src/model/resume.rs` `Reader::let_go`, `Copy::retains`, `Producer::park` | `LetGo`, `Park` |
+| `rs/moq-net/src/model/resume.rs` `Recover::wants`, `poll`, `held`, `poll_serving` | `Recover`, `Holders`, `Exhausted`, `Abort` |
+| `rs/moq-net/src/model/resume.rs` `Recover::poll_fetch`, `Fetching`; `rs/moq-net/src/model/track.rs` `fetch_group` | `Ask` |
+| `rs/moq-net/src/model/front.rs` `track_ended`, `Action::Finish`; `rs/moq-net/src/model/origin.rs` `TrackIo::end` | `FrontFinish`, `Whole` |
+| `rs/moq-net/src/model/front.rs` failover and its unroutable end | `Switch`, `FrontFail` |
 
 ## Not covered
 

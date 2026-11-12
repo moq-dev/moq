@@ -27,6 +27,11 @@ name: Nightly
 # exception: deterministic and seconds long, so `just ci` gates every diff that
 # can move them, and audio-quality.yml reruns them here.
 #
+# `tla` model-checks every TLA+ config: TLC explores every ordering a model
+# allows, which takes minutes per config, and a model only changes when the code
+# it covers does, which review checks (see REVIEW.md). It also fails when an
+# open finding's config starts passing, so the fix promotes its rule.
+#
 # Main PRs run only the landing gate's selection as a signal, so every
 # path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
@@ -402,6 +407,32 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
           CI_STRICT: 1
+
+  tla:
+    name: TLA+ (${{ matrix.name }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two largest models get a runner each; the last leg takes every
+        # other config, so a new model is checked without editing this list.
+        include:
+          - name: resume
+            paths: rs/moq-net/verify/resume
+          - name: route
+            paths: rs/moq-net/verify/route
+          - name: rest
+            paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/route"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      # No dev shell: the recipes fetch TLC themselves.
+      - name: Model-check
+        run: nix shell --inputs-from . nixpkgs#just --command just test tla ${{ matrix.paths }}
 
   # Media QA with a Firefox player against a Chromium fixture. The Chromium
   # player already runs in interop.yml, nightly and on release PRs. WebKit has

@@ -9,7 +9,7 @@ still answers.
 ## Plan
 
 Found 2026-11-10 by the failover chart ([moq-dev/moq#8447](https://github.com/moq-dev/moq/pull/8447)):
-`js/watch/verify/Redirect.cfg` breaks `RedialsALiveRelay` in 4 steps. In
+`js/watch/verify/FailoverRedirect.cfg` breaks `RedialsALiveRelay` in 4 steps. In
 `js/net/src/connection/reload.ts` every redial after a redirect targets only
 the relay it was sent to, with no retry timeout by default, so the viewer
 redials a dead relay indefinitely. `residual: a redirected connection redials

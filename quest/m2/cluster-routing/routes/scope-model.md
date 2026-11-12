@@ -8,8 +8,10 @@ the prefix it covers, carries its own path, and is believed by a relay it did
 not cross. TLC shows on it:
 
 - A relay shows a claim exactly while it holds a route that covers the claim
-  and did not cross the relay, and the newest revision the relay knows still
-  has the claim. It shows the claim as it is at that revision.
+  and did not cross the relay, and the newest revision any covering route gave
+  it still has the claim. It shows the claim as it is at that revision. A
+  newer revision from a route that does not cover the claim says nothing
+  about it.
 - Once nothing is in flight, no relay shows a claim that no path from its
   publisher carries.
 - A change of path or seqno alone starts, ends, and changes no claim a reader
@@ -20,7 +22,7 @@ not cross. TLC shows on it:
   offers.
 
 The model uses the rule
-[the prototype](/quest/m2/cluster-routing/routes/stale-copies.md) picked for
+[the prototype](/quest/m1/route-stale-copies.md) picked for
 keeping a route free of stale copies. The rule this settles is written into
 the epic's contract for
 [the router](/quest/m2/cluster-routing/routes/scope.md) to implement. The
@@ -29,7 +31,7 @@ router's behaviour, the wire, and the draft do not change here.
 ## Plan
 
 Decided 2026-11-11 (maintainer, /quest-plan). The decisions and what was
-tried are in [the prototype](/quest/m2/cluster-routing/routes/stale-copies.md)'s
+tried are in [the prototype](/quest/m1/route-stale-copies.md)'s
 Plan and the [epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item
 26.
 
@@ -92,7 +94,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [A prototype settles what keeps a route free of stale copies](/quest/m2/cluster-routing/routes/stale-copies.md) - the rule for loops and stale copies that this model is written on
+- [A prototype settles what keeps a route free of stale copies](/quest/m1/route-stale-copies.md) - the rule for loops and stale copies that this model is written on
 
 ## Related
 
