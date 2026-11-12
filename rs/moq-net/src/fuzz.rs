@@ -800,6 +800,88 @@ impl RouteRelay {
 	}
 }
 
+/// A lite-07 route node following one origin on a stream per prefix, as a viewer
+/// session holding many announce prefixes does, for the routes bench.
+pub struct RouteFollower {
+	node: crate::route::Node,
+	/// Each prefix's stream, `None` only while [`Self::refollow`] replaces it.
+	streams: Vec<Option<crate::route::node::Stream>>,
+	instance: crate::Instance,
+	claims: usize,
+	/// The next stream [`Self::refollow`] replaces.
+	next: usize,
+}
+
+impl RouteFollower {
+	/// The origin's identity and revision as the node hears them.
+	const ORIGIN: u64 = 1;
+	const REV: u64 = 1;
+
+	/// A node following `prefixes` prefixes `live/{k}`, each holding `claims` claims.
+	pub fn new(prefixes: usize, claims: usize) -> Self {
+		let mut follower = Self {
+			node: crate::route::Node::new(2, 2),
+			streams: Vec::new(),
+			instance: crate::Instance::random(),
+			claims,
+			next: 0,
+		};
+		follower.streams = (0..prefixes).map(|k| Some(follower.follow(k))).collect();
+		follower.drain();
+		follower
+	}
+
+	/// Open the stream for prefix `k`, which hears the origin's route and snapshot.
+	fn follow(&self, k: usize) -> crate::route::node::Stream {
+		let prefix = Path::new(&format!("live/{k}")).unwrap();
+		let stream = self.node.receive(crate::route::Link::default(), prefix).unwrap();
+		let advert = crate::route::Advert {
+			seqno: 0,
+			metric: 0,
+			down_only: false,
+			rtt: None,
+			hops: [].into(),
+		};
+		stream.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert)));
+		let claim = crate::route::node::Claim {
+			instance: self.instance.clone(),
+			epoch: 0,
+			cost: 0,
+			upstream: false,
+			learned: false,
+			chain: crate::Hops::new(),
+		};
+		let snapshot = (0..self.claims)
+			.map(|j| (Path::new(&format!("live/{k}/{j}")).unwrap(), Some(claim.clone())))
+			.collect();
+		stream.batch(Self::ORIGIN, snapshot, Some(Self::REV));
+		stream
+	}
+
+	/// Close one prefix's stream and open it again, returning how many outputs the
+	/// node queued.
+	pub fn refollow(&mut self) -> usize {
+		let k = self.next % self.streams.len();
+		self.next += 1;
+		// Closed first, so the node lets go of the prefix before hearing it again.
+		drop(self.streams[k].take());
+		self.streams[k] = Some(self.follow(k));
+		self.drain()
+	}
+
+	/// Close every stream at once, as a session ending does.
+	pub fn teardown(self) {
+		let _closing = self.node.closing();
+		drop(self.streams);
+	}
+
+	fn drain(&self) -> usize {
+		(self.streams.iter().flatten())
+			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
+			.sum()
+	}
+}
+
 /// What a client session fed into an origin hears it should ask its peer about, for
 /// the interests bench.
 pub struct Interests(crate::model::Interests);

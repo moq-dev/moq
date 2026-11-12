@@ -23,6 +23,17 @@ nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
 
+Decided 2026-11-12 (maintainer, coordinator session): ✅ bump mbx to 1.30.0
+first, then file the Windows misses upstream with 1.30.0 evidence (rejected:
+file now on 1.29.2). 1.30.0 adds `mbx analyze` and `mbx stats` explanations
+of why a compilation missed, and
+[jdx/mr-boxington#903](https://github.com/jdx/mr-boxington/pull/903) fixes
+local store eviction on Windows. The Windows platform job now runs
+`mbx analyze` after its workspace build. It compares only against builds
+recorded on the same runner, so on a fresh hosted runner a cross-run miss
+likely reads as "misses with no earlier recording"; the report still names
+the remaining causes and is what an upstream issue should carry.
+
 Decided 2026-11-07 (maintainer, /quest-unblock): agents collect the R2
 numbers with this desktop's wrangler login, and the maintainer only picks the
 lifecycle. Baseline that day: 720,249 objects / 1.2 TB, with 18,006,968
@@ -81,8 +92,9 @@ compilation is "not looked up".
   under its own workspace, so the install order does not matter; it stays
   where `main` has it. mbx v1.29.1 (2026-11-01) includes
   [#870](https://github.com/jdx/mr-boxington/pull/870), and
-  `.github/actions/rust-cache/action.yml` pins 1.29.2 (2026-11-03) since
-  [#7653](https://github.com/moq-dev/moq/pull/7653). The fix also offers
+  `.github/actions/rust-cache/action.yml` pinned 1.29.2 (2026-11-03) from
+  [#7653](https://github.com/moq-dev/moq/pull/7653) until the 1.30.0 bump
+  below. The fix also offers
   legacy CRLF identities, so an in-window manifest from 1.28.0 remains usable.
   Verified 2026-11-05: the scheduled
   [Windows job](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127326015447)
@@ -159,16 +171,53 @@ runs, so every platform stayed within the 8-state lookback):
   (depth 1): 174 hits, 279 misses, 305 not looked up, 414 prefetched,
   4 remote failures.
 
+Evidence checked 2026-11-12, scheduled runs
+[42659882487](https://github.com/moq-dev/moq/actions/runs/42659882487) (11-09),
+[42842827718](https://github.com/moq-dev/moq/actions/runs/42842827718) (11-10) and
+[43041909115](https://github.com/moq-dev/moq/actions/runs/43041909115) (11-11).
+[#8342](https://github.com/moq-dev/moq/pull/8342), which gives Linux full
+history, merged 2026-11-12 07:19 UTC, after all three, so their Linux jobs
+are still depth-1 and serve only as baselines. `Cargo.lock` changed 5, 1 and
+1 times since each previous scheduled run, all within the 8-state lookback.
+Workspace builds (hits / misses / not looked up):
+
+- macOS: 753 / 58 / 401, 964 / 227 / 4, 1,008 / 182 / 0. Inheritance now
+  predicts nearly every compilation, which settles the 687 not looked up
+  from 11-08; macOS reuses earlier Nightlies.
+- Windows: 123 / 636 / 415, 108 / 1,049 / 18, 112 / 1,043 / 14. Like macOS,
+  the predictions now cover the build, but about 90% of looked-up keys miss,
+  even with one lockfile change since a Nightly that uploaded 1.2 GiB from
+  the same job. Inheritance works, but the cause of the misses is
+  unconfirmed: the keys may differ between builds, the previous job may not
+  have stored them, they may have expired, or the build may have loaded
+  another manifest. The summary still names no manifest identity, so
+  comparing the loaded manifest with the stored keys would tell these
+  apart. Down from 846 hits on 2026-11-05.
+- Linux depth-1 baselines, hits only per run (not the hits / misses / not
+  looked up triple above): doctest 124, 502 (0 misses), 150; Media (firefox
+  player) 58, 84 (11-11 cancelled before its build); Audio quality, hits of
+  each of its three builds per night, 74, 77, 0 (11-09), 57, 97, 0 (11-10),
+  54, 25, 0 (11-11). The doctest job is one entry of the `Tests` matrix.
+  The remaining Linux Rust-cache jobs (the `Nightly` matrix, the `Tests`
+  matrix's other recipes, and `Shipping sizes`) have no baseline recorded
+  here; read each one's depth-1 baseline from its own cache summary in these
+  three runs.
+
 ## Waiting
 
-- GitHub Actions: the first scheduled Nightly after Linux full history
-  lands must show each Linux Rust-cache job's hits against its own depth-1
-  hits (the 174-hit doctest baseline, and each other job's last completed
-  depth-1 scheduled run), and
-  scheduled runs must supply the remaining cross-platform reuse,
-  restore-plus-build comparison and rebuild-frequency evidence in the Goal,
-  plus why Windows fell to 163 hits on 2026-11-08. Current timings are not a matched-commit comparison, and macOS's
-  inherited-prediction misses remain unexplained.
+- GitHub Actions: the first scheduled Nightly on mbx 1.30.0 shows whether
+  Windows still misses most looked-up keys (above). If it does, file an issue
+  on jdx/mr-boxington with that run's `Explain Rust cache misses` output and
+  cache summary, following its CONTRIBUTING.md and AGENTS.md AI disclosure
+  rules (the maintainer approved filing). If the misses are gone, record that
+  run's numbers here. Either way, drop this item.
+- GitHub Actions: the first scheduled Nightly after #8342 (2026-11-12 afternoon or
+  later) must show each Linux Rust-cache job's hits against its depth-1
+  baseline (above, or for the `Nightly` matrix, the `Tests` matrix's other
+  recipes and `Shipping sizes`, their own summaries in runs 42659882487, 42842827718 and 43041909115) and the
+  174-hit doctest run of 11-08, and scheduled runs
+  must supply the same-commit restore-plus-build comparison and the
+  rebuild-frequency count in the Goal.
 - moq-dev/moq: no earlier than 2026-11-26, an agent on the maintainer's
   desktop collects `mbx-moq-dev`'s size and request counts for the first
   month and checks that the six old oversized manifests expired. Size comes
