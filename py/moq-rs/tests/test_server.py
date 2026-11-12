@@ -657,3 +657,54 @@ async def test_session_auth_reads_the_grant():
                 pass
             for session in sessions:
                 session.cancel(0)
+
+
+async def test_session_credential_lifecycle():
+    """A credential is answered by the peer, names a route and a claim, and cancels."""
+    version = ["moq-lite-07-wip"]
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], versions=version) as server:
+        sessions: list = []
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+
+        accept_task = asyncio.create_task(accept_loop())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}", tls=moq.ClientTls(insecure=True), bind="127.0.0.1:0", versions=version
+            ) as client:
+                session = client.session
+                assert session is not None
+                with pytest.raises(moq.Error.Config):
+                    session.credential("")
+
+                credential = session.credential("extra")
+                # The server verifies no tokens of its own, so it refuses this one.
+                with pytest.raises(moq.Error.Unsupported):
+                    await asyncio.wait_for(credential.answered(), timeout=5.0)
+
+                route = session.publish().route("room/x", hidden=True)
+                claim = session.publish().claim("live", hidden=True)
+                route.set_auth(credential)
+                claim.set_auth(credential)
+                route.set_auth(None)
+                claim.set_auth(None)
+
+                credential.cancel()
+                with pytest.raises(moq.Error.Cancelled):
+                    await credential.answered()
+                with pytest.raises(moq.Error.Cancelled):
+                    route.set_auth(credential)
+                with pytest.raises(moq.Error.Cancelled):
+                    claim.set_auth(credential)
+                route.cancel()
+                claim.cancel()
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+            for session in sessions:
+                session.cancel(0)

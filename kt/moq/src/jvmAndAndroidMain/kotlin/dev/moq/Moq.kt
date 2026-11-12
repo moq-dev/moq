@@ -95,6 +95,15 @@ internal constructor(
     fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }
 
     /**
+     * Present a request token, for a [Route] or [Claim] to carry with `setAuth`.
+     *
+     * On moq-transport it rides each naming route's announcing request; on moq-lite it needs AUTH,
+     * where it earns a grant. The session presents it again on every reconnect. Suspend on
+     * [Credential.answered] for the peer's verdict. An empty token throws `MoqException.Config`.
+     */
+    fun credential(token: String): Credential = session.credential(token)
+
+    /**
      * Request a draining close now; await `session.closed()` for its result, then [close] to
      * release the client. `moq-lite-05` and newer wait for the peer to receive finished tails;
      * older Lite versions and IETF wait only for transport ACKs.
