@@ -36,9 +36,10 @@ stay constants the config states. Say both bounds in the `verify-route` skill.
   replay it on `route::tests::Sim` as the skill says before calling it a bug.
 - Apalache needs type annotations. Add them to the spec TLC already checks,
   so both tools read one file and neither drifts.
-- `NoCountToInfinity` stays out until
-  [the echo fix](/quest/m2/cluster-routing/routes/echo-order.md) lands; expect
-  the search for the invariant to find that path again.
+- `NoCountToInfinity` follows from `SimplePaths`, which is inductive once
+  the invariant also says a route is held only from a node the holder shares
+  a link with: every route sent adds its sender to hops that did not name it
+  ([moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)). Start there.
 - Run it through the `tla` recipes with Apalache from the flake. If five
   relays does not fit Nightly, record the largest mesh that does and its time.
 
@@ -46,9 +47,8 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - the spec parametrised over mesh shapes that this invariant is stated on
+- [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the rule for whose claims a relay believes, which the claim rules rest on; an invariant found before it is found for a rule about to go
 
 ## Related
 
-- [The TLA+ models run nightly and reviews resync them](/quest/m1/model-checks-nightly.md) - the Nightly job this check joins
 - [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - ties the same spec to the code

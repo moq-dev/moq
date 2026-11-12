@@ -33,8 +33,7 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 /// presented.
 ///
 /// Returned by [`MoqSession::grants`](crate::session::MoqSession::grants). AUTH is only on
-/// `moq-lite-07-wip` and on moq-transport sessions that negotiate the MoQ Auth extension;
-/// elsewhere the grant stays `None`.
+/// `moq-lite-07-wip`; elsewhere the grant stays `None`.
 #[derive(uniffi::Object)]
 pub struct MoqGrantConsumer {
 	/// The watch behind [`grant`](Self::grant), which reads without the lock.
@@ -77,6 +76,52 @@ impl MoqGrantConsumer {
 	/// Cancel all current and future [`changed`](Self::changed) calls.
 	pub fn cancel(&self) {
 		self.changed.cancel();
+	}
+}
+
+/// A token this side presented on a session, which a route or claim names with `set_auth`.
+///
+/// Returned by [`MoqSession::credential`](crate::session::MoqSession::credential). It stays
+/// presented until [`cancel`](Self::cancel) or the last handle is released and no route or
+/// claim names it, answered or not.
+#[derive(uniffi::Object)]
+pub struct MoqCredential {
+	/// The credential itself, released on cancel.
+	inner: Polled<moq_net::auth::Credential>,
+}
+
+impl MoqCredential {
+	pub(crate) fn new(credential: moq_net::auth::Credential) -> Self {
+		Self {
+			inner: Polled::new(credential),
+		}
+	}
+
+	/// The credential to name on a route or claim, refused with `Cancelled` once cancelled.
+	pub(crate) fn credential(&self) -> Result<moq_net::auth::Credential, MoqError> {
+		self.inner.peek(Clone::clone).ok_or(MoqError::Cancelled)
+	}
+}
+
+#[uniffi::export]
+impl MoqCredential {
+	/// Wait for the peer's first verdict on the token: `Ok` once a peer accepts it, at once on
+	/// moq-transport, where only the requests that name it carry the token.
+	///
+	/// The peer's refusal is a [`MoqError::Protocol`] carrying its code,
+	/// [`MoqError::Unsupported`] when neither the session nor its requests can carry a token
+	/// (moq-lite without AUTH), and [`MoqError::Cancelled`] once [`cancel`](Self::cancel) ran.
+	pub async fn answered(&self) -> Result<(), MoqError> {
+		self.inner
+			.wait(|credential, waiter| credential.poll_answered(waiter).map_err(Into::into))
+			.await
+	}
+
+	/// Release the credential here, not when the handle is: withdrawn at once unless a route
+	/// or claim still names it, and every [`answered`](Self::answered) call ends with
+	/// `Cancelled`. Terminal.
+	pub fn cancel(&self) {
+		self.inner.cancel();
 	}
 }
 

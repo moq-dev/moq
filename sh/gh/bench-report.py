@@ -16,7 +16,22 @@ from pathlib import Path
 from urllib.parse import quote
 
 BIGGER = {"MB/s", "MiB/s", "B/s", "ops/s", "frames/s", "frames"}
-SMALLER = {"ns", "us", "µs", "ms", "s", "ms/MB", "x", "bytes", "B", "MiB", "packets", "streams", "instructions"}
+SMALLER = {
+    "ns",
+    "us",
+    "µs",
+    "ms",
+    "s",
+    "ms/MB",
+    "x",
+    "bytes",
+    "B",
+    "MiB",
+    "packets",
+    "streams",
+    "instructions",
+    "messages",
+}
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -150,6 +165,8 @@ def measurement_unit(column):
         return "MiB/s"
     if column.endswith("_packets"):
         return "packets"
+    if column.endswith("_messages"):
+        return "messages"
     for unit in ("ns", "us", "ms"):
         if re.search(f"(^|_){unit}($|_per_)", column):
             return unit

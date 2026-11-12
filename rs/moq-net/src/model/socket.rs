@@ -81,10 +81,12 @@ pub fn is_endpoint(path: &Path) -> bool {
 		.any(|role| parent == Some(role.segment()))
 }
 
-/// A fresh session id: 128 random bits as hex, so nobody can guess a session's tracks.
+/// A fresh session id: 128 random bits as hex, so nobody can guess a session's tracks. Drawn
+/// from the ambient generator, the thread's outside a simulated run, so a simulated run
+/// replays them.
 fn session_id() -> Arc<str> {
 	use rand::RngExt;
-	format!("{:032x}", rand::rng().random::<u128>()).into()
+	format!("{:032x}", kio::clock::rng().random::<u128>()).into()
 }
 
 /// The track name of a session: `<protocol>/<dialer>/<acceptor>/<session>`, the same in

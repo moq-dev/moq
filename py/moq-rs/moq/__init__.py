@@ -45,6 +45,7 @@ from .server import Request, Server, Transport
 from .session import (
     Allocator,
     BandwidthConsumer,
+    Credential,
     GrantConsumer,
     RateControl,
     Reservation,
@@ -128,6 +129,7 @@ __all__ = [
     "ConnectionStats",
     "ConnectionPhase",
     "ConnectionState",
+    "Credential",
     "Datagram",
     "DatagramInfo",
     "DatagramConsumer",

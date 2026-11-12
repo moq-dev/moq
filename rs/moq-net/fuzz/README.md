@@ -4,17 +4,21 @@ Coverage-guided fuzzing of the wire codecs: the moq-lite and moq-transport contr
 messages, stream and datagram headers, group streams through the incremental ingest,
 moq-transport request-stream framing, both varint codecs, and `Path`. These are the
 bytes a relay parses from an untrusted peer, so they are the surface worth fuzzing.
+Two more targets drive a whole session, one per protocol, as a relay runs it against a
+peer that does anything.
 
 ```bash
 cargo install --locked cargo-fuzz
 just rs fuzz lite
 ```
 
-The targets are `lite`, `announce`, `ietf`, `varint`, `path`, `pattern`, `ingest`, and `request`. Extra arguments pass through to
-libFuzzer, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
+The targets are `lite`, `announce`, `ietf`, `varint`, `path`, `pattern`, `ingest`, `request`,
+`session_lite`, and `session_ietf`. Extra arguments pass through to libFuzzer, so
+`just rs fuzz lite -- -max_total_time=300` bounds a run.
 
-The Nightly workflow runs every target for five minutes, resumes from the previous run's
-minimized corpus, and uploads failure inputs as workflow artifacts.
+The Nightly workflow runs every codec target for five minutes and each session target for
+fifteen, with a 10 second per-input timeout. Each resumes from the previous run's minimized
+corpus and uploads failure inputs as workflow artifacts.
 
 ## How it fits together
 
@@ -67,6 +71,26 @@ Beyond "does not panic":
   most one GOAWAY migrates it. Its body decodes as each message its type names exactly
   when the control stream's length-prefixed reading accepts it, as the same message, and
   the REQUEST\_UPDATE readers stop where the framing did.
+
+The session targets (`src/fuzz/session.rs`) take a version byte, then a script of peer
+actions: open or accept a stream, write raw bytes or a framed message, finish, reset, stop,
+read, send a datagram, advance the clock, or close. A relay origin serves the peer beside a
+bystander that publishes a group a second over one session and reads it back over another.
+It all runs over the in-memory transport on the simulated clock with a fixed seed, so a
+failing input replays exactly. Beyond "does not panic":
+
+- The bystander reads every group it published, in order and byte for byte.
+- Once the peer is gone and the clock runs past every timeout, the origin is back to what
+  it held for the bystander alone: its pool charge, tasks, routes, announce cursors, and
+  listeners. The peer's session task has finished, and the relay holds no handle to the
+  peer's transport or any stream the peer opened.
+- Unbounded work trips the per-input timeout. A script advances the clock at most ten
+  minutes in all, since idle sessions still wake for their timers.
+
+Their seeds are transcripts of a real client recorded against the same relay (announce and
+serve a group, subscribe, fetch) at every version, so the fuzzer starts past SETUP. A five
+minute run makes about 25,000 executions at 50 to 90 a second, and coverage still climbs at
+the end: the next fifteen minutes add about 4% more edges.
 
 `seeds/` also holds length prefixes at and one past each cap (a moq-lite message's size,
 a moq-transport length, a frame, a property or extension block), so every rejection path

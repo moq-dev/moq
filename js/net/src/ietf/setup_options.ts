@@ -20,8 +20,6 @@ export const SetupOption = {
 	Hidden: 0x40b5cn,
 	/** Subscriber max age, from the MoQ Timestamp extension. */
 	MaxAge: 0x915c4n,
-	/** AUTH, from the MoQ Auth extension. See `auth.ts`. */
-	Auth: 0x40b70n,
 	/** ACTIVE_COUNT, from the MoQ Active Count extension. See `active_count.ts`. */
 	ActiveCount: 0x40b64n,
 } as const;

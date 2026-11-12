@@ -1502,14 +1502,12 @@ fn missing_url_fails_state_change() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// A connect that cannot succeed does NOT post a fatal ERROR: the sink reconnects with backoff
-// (issue #2212), so an unattended publisher survives a relay that is unreachable at startup or
-// during an outage instead of tearing down the pipeline. It keeps retrying and stays disconnected.
-// (A non-retryable failure, e.g. auth rejection, is still terminal; that path needs a live relay
-// and is covered separately.) The "relay" accepts each dial and hangs up at once, so the test
-// counts the retries rather than waiting out a window.
+// A first connect that reaches no session posts a fatal ERROR instead of retrying, so a
+// misconfigured relay URL, certificate, or version surfaces at once; a supervisor restarts the
+// pipeline once the relay is reachable. Reconnecting with backoff is only for a session that
+// once worked. The "relay" accepts each dial and hangs up at once.
 #[test]
-fn connect_failure_retries_without_erroring() {
+fn a_failed_first_connect_errors_without_retrying() {
 	init();
 	let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
 	let addr = listener.local_addr().expect("local address");
@@ -1535,33 +1533,20 @@ fn connect_failure_retries_without_erroring() {
 		pipeline.set_state(gst::State::Playing).is_ok(),
 		"a valid url + broadcast must let the Ready->Playing change start (connect runs in the background)"
 	);
-	// The first dial and a retry after it failed.
-	for _ in 0..2 {
-		dials
-			.recv_timeout(std::time::Duration::from_secs(30))
-			.expect("the sink stopped dialing");
-	}
 	let bus = pipeline.bus().expect("pipeline bus");
-	let msg = bus.pop_filtered(&[gst::MessageType::Error]);
+	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(30), &[gst::MessageType::Error]);
 	let connected = sink.property::<bool>("connected");
 	let status = sink.property::<gstmoq::ConnectionStatus>("status");
-	let send_bitrate = sink.property::<u64>("estimated-send-rate");
-	let recv_bitrate = sink.property::<u64>("estimated-recv-rate");
 	let _ = pipeline.set_state(gst::State::Null);
 
+	assert!(msg.is_some(), "a failed first connect must post an ERROR");
+	assert!(!connected);
+	assert_eq!(status, gstmoq::ConnectionStatus::Failed);
+	dials.recv().expect("the sink dialed");
 	assert!(
-		msg.is_none(),
-		"a failed connect must NOT post an ERROR: the sink retries (issue #2212)"
+		dials.try_recv().is_err(),
+		"the sink redialed after its first connect failed"
 	);
-	assert!(
-		!connected,
-		"a failed connect must leave connected = false while retrying"
-	);
-	// While retrying, status stays Disconnected (a transient retry, not the terminal Failed) and the
-	// bitrate estimates read 0.
-	assert_eq!(status, gstmoq::ConnectionStatus::Disconnected);
-	assert_eq!(send_bitrate, 0);
-	assert_eq!(recv_bitrate, 0);
 }
 
 // Both element factories expose the same connection syntax, and refuse unknown versions

@@ -402,11 +402,6 @@ impl<E: Serialize> Catalog<E> {
 		Ok(serde_json::to_string(self)?)
 	}
 
-	/// Serialize the catalog to a pretty-printed JSON string.
-	pub fn to_json_pretty(&self) -> Result<String> {
-		Ok(serde_json::to_string_pretty(self)?)
-	}
-
 	/// Serialize the catalog to a vector of bytes.
 	pub fn to_vec(&self) -> Result<Vec<u8>> {
 		Ok(serde_json::to_vec(self)?)

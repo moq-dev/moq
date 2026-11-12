@@ -72,7 +72,7 @@ async fn pair(version: Version, origins: Option<Origins<'_>>) -> Pair {
 impl Pair {
 	async fn round(&mut self, count: usize) {
 		let handle = self.client.auth();
-		let present = join_all((0..count).map(|_| handle.add(Bytes::from_static(b"token"))));
+		let present = join_all((0..count).map(|_| added(&handle, Bytes::from_static(b"token"))));
 		let accept = async {
 			let mut issued = Vec::with_capacity(count);
 			for _ in 0..count {
@@ -122,8 +122,6 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	mock.protocol = Some(version.alpn().to_string());
 	let (client, server) = create_mock_session_pair(mock);
 	// Tokens ride requests alone, and the client announces with PUBLISH_NAMESPACE.
-	let mut client_extensions = moq_net::setup::Extensions::default();
-	client_extensions.auth = false;
 	let mut server_extensions = moq_net::setup::Extensions::default();
 	server_extensions.solicit = false;
 	let (subscribe, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
@@ -131,7 +129,6 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_extensions(client_extensions)
 			.with_publisher(origin.consume())
 			.connect(harness::now(), client)
 			.await
@@ -187,8 +184,8 @@ fn renewal(c: &mut Criterion) {
 							let mut auths = Vec::new();
 							for route in 0..routes {
 								auths.push([
-									handle.add(format!("a/{route}")).await.unwrap(),
-									handle.add(format!("b/{route}")).await.unwrap(),
+									added(&handle, format!("a/{route}")).await.unwrap(),
+									added(&handle, format!("b/{route}")).await.unwrap(),
 								]);
 							}
 							auths
@@ -270,7 +267,7 @@ fn waiting(c: &mut Criterion) {
 							runtime.block_on(async {
 								let handle = pair.client.auth();
 								let mut presenting =
-									std::pin::pin!(join_all((0..tokens).map(|_| handle.add("pending"))));
+									std::pin::pin!(join_all((0..tokens).map(|_| added(&handle, "pending"))));
 								assert!(futures::poll!(presenting.as_mut()).is_pending());
 								let mut pending = Vec::with_capacity(tokens);
 								for _ in 0..tokens {
@@ -357,7 +354,7 @@ fn shared_requests(c: &mut Criterion) {
 					let auths = runtime.block_on(async {
 						let mut auths = Vec::new();
 						for token in 0..tokens {
-							auths.push(client.auth().add(format!("token/{token}")).await.unwrap());
+							auths.push(added(&client.auth(), format!("token/{token}")).await.unwrap());
 						}
 						auths
 					});
@@ -407,3 +404,13 @@ fn shared_requests(c: &mut Criterion) {
 
 criterion_group!(benches, admission, renewal, waiting, shared_requests);
 criterion_main!(benches);
+
+/// Present `token` on `handle` and wait for its first verdict.
+async fn added(
+	handle: &moq_net::auth::Handle,
+	token: impl Into<bytes::Bytes>,
+) -> moq_net::Result<moq_net::auth::Credential> {
+	let credential = handle.add(token)?;
+	credential.answered().await?;
+	Ok(credential)
+}

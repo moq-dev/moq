@@ -98,7 +98,8 @@ impl Hop {
 #[non_exhaustive]
 pub struct Config {
 	/// The origin's identity on every wire: the hop id appended to broadcast hop chains
-	/// for loop detection, and the route identity it declares on moq-lite-07. Random by
+	/// for loop detection, and the route identity it declares on moq-lite-07, which also
+	/// names it in the hops of each route it forwards there. Random by
 	/// default, so each process is a fresh identity; one reused across a restart has its
 	/// lite-07 routes refused until a seqno request lifts them past the old process's.
 	pub hop: NonZeroU64,
@@ -114,7 +115,8 @@ pub struct Config {
 	/// moq-transport. A forwarded path counts this origin's own hop too, including
 	/// when the receiving peer reconstructs that hop from the announce handshake.
 	/// Protocols without a hop path cannot reveal or bound the depth they hide. No wire
-	/// carries a path longer than 32, so a larger value acts as 32.
+	/// carries a path longer than 32, so a larger value acts as 32, and a moq-lite-07
+	/// route's own hops stop there whatever this is.
 	pub max_hops: NonZeroUsize,
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
@@ -512,6 +514,10 @@ pub struct RouteInfo {
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
 	pub(crate) available: bool,
+
+	/// The round trip to the route's origin node; see [`Self::rtt`]. Never forwarded:
+	/// each node measures its own link.
+	pub(crate) rtt: Option<Duration>,
 }
 
 impl RouteInfo {
@@ -529,6 +535,7 @@ impl RouteInfo {
 			node: None,
 			draining: false,
 			available: true,
+			rtt: None,
 		}
 	}
 }
@@ -564,6 +571,17 @@ impl RouteInfo {
 	/// and finally the most recently announced route. See [`Cost`].
 	pub fn cost(&self) -> Cost {
 		self.cost
+	}
+
+	/// The round trip to the route's origin node over moq-lite-07, informational: it
+	/// never ranks or selects a route.
+	///
+	/// Each link on the path adds its min RTT, the lowest smoothed RTT it measured over
+	/// the last 30 seconds, this session's own link included. `None` on any other wire,
+	/// on a route this origin serves itself, and while any link on the path has no
+	/// measurement.
+	pub fn rtt(&self) -> Option<Duration> {
+		self.rtt
 	}
 
 	/// Whether a usable path reaches the route's origin. An unavailable route is held:
@@ -632,6 +650,13 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_available(mut self, available: bool) -> Self {
 		self.available = available;
+		self
+	}
+
+	/// Set the round trip to the route's origin node; see [`Self::rtt`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_rtt(mut self, rtt: Option<Duration>) -> Self {
+		self.rtt = rtt;
 		self
 	}
 
@@ -847,8 +872,8 @@ type RouteOrder = (
 	Reverse<u64>,
 );
 
-/// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata an announce
-/// cursor delivers alongside a prefix.
+/// The `(hops, cost, source, instance, epoch, auth, node, available, rtt)` metadata
+/// an announce cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
 	Cost,
@@ -858,6 +883,7 @@ type RouteMeta = (
 	Option<crate::auth::Credential>,
 	Option<u64>,
 	bool,
+	Option<Duration>,
 );
 
 /// The earlier of two optional deadlines.
@@ -1111,8 +1137,15 @@ impl OriginConsumerState {
 				self.put(prefix, PendingUpdate::Unannounce(last, gone));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
-			// needs the leading one, reported as the later one went.
-			Some(PendingUpdate::UnannounceAnnounce { old, .. }) => {
+			// needs the leading one. Its reason is the later one only when both carry
+			// one identity (captures and instance); otherwise the later reason is for a
+			// route never delivered.
+			Some(PendingUpdate::UnannounceAnnounce { old, gone: prior, new }) => {
+				let gone = if old.1 == new.1 && old.0.3 == new.0.3 {
+					gone
+				} else {
+					prior
+				};
 				self.put(prefix, PendingUpdate::Unannounce(old, gone));
 			}
 		}
@@ -1256,6 +1289,7 @@ impl OriginConsumerState {
 				node: meta.6,
 				draining: false,
 				available: meta.7,
+				rtt: meta.8,
 			},
 		};
 		(RouteEvent { kind, announce }, owed)
@@ -1298,6 +1332,8 @@ struct RouteEntry {
 	draining: bool,
 	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
 	available: bool,
+	/// The round trip to the route's origin node; see [`RouteInfo::rtt`].
+	rtt: Option<Duration>,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Claim`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -1366,12 +1402,13 @@ impl RouteEntry {
 			self.auth.clone(),
 			self.node,
 			self.available,
+			self.rtt,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available) = meta;
+		let (hops, cost, source, instance, epoch, auth, node, available, rtt) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1380,6 +1417,7 @@ impl RouteEntry {
 			&& *auth == self.auth
 			&& *node == self.node
 			&& *available == self.available
+			&& *rtt == self.rtt
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -1750,12 +1788,7 @@ impl TableCursor {
 			// identity explicitly so consumers keyed on it remove it.
 			Some(previous) if previous.captures != captures => {
 				if let Ok(mut state) = self.state.write() {
-					state.apply_unannounce(
-						self.under.rejoin(presented),
-						previous.meta,
-						previous.captures,
-						Gone::End,
-					);
+					state.apply_unannounce(self.under.rejoin(presented), previous.meta, previous.captures, gone);
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
 				}
 			}
@@ -2973,6 +3006,7 @@ impl Announcing {
 				node: route.node,
 				draining: route.draining,
 				available: route.available,
+				rtt: route.rtt,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -3161,14 +3195,22 @@ impl RouteState {
 		self.announcement.route().is_some()
 	}
 
-	/// Apply `update` to the options, re-advertising a visible route in place.
+	/// Apply `update` to the options, re-advertising a visible route in place. A failed
+	/// change keeps the options as they were, so a closed route holds nothing it was given.
 	fn change(&self, update: impl FnOnce(&mut RouteOptions)) -> Result<(), Error> {
 		let mut control = self.control.lock();
+		let previous = control.options.clone();
 		update(&mut control.options);
-		if !self.announcement.is_live()? {
-			return Ok(());
+		// One rollback for both failures: closed before the check, or between it and the update.
+		let result = match self.announcement.is_live() {
+			Ok(true) => self.announcement.update_if(control.info(), None, |_| true).map(drop),
+			Ok(false) => Ok(()),
+			Err(err) => Err(err),
+		};
+		if result.is_err() {
+			control.options = previous;
 		}
-		self.announcement.update_if(control.info(), None, |_| true).map(|_| ())
+		result
 	}
 }
 
@@ -3589,6 +3631,7 @@ impl AnnounceProducer {
 			entry.node = route.node;
 			entry.draining = route.draining;
 			entry.available = route.available;
+			entry.rtt = route.rtt;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
@@ -3650,6 +3693,7 @@ impl AnnounceProducer {
 			node: entry.node,
 			draining: entry.draining,
 			available: entry.available,
+			rtt: entry.rtt,
 		})
 	}
 
@@ -3759,8 +3803,6 @@ impl Drop for AnnounceProducer {
 	}
 }
 
-/// Drives origin lifecycle work and cache expiration with caller-supplied time.
-///
 /// Feeds a route layer node the routes this node serves itself, best per prefix,
 /// for as long as the origin lives.
 struct OwnClaims {
@@ -3775,16 +3817,26 @@ struct OwnClaims {
 }
 
 /// The driver's task feeding [`OwnClaims`], which [`Consumer::route_node`] also catches up.
-struct FeedOwnClaims(Arc<std::sync::Mutex<OwnClaims>>);
+/// It ends once nothing owns the origin, after feeding the withdrawals still queued: its
+/// cursors end only in the driver's teardown, which waits for this task.
+struct FeedOwnClaims {
+	claims: Arc<std::sync::Mutex<OwnClaims>>,
+	origin: TasksWeak,
+}
 
 impl kio::Task for FeedOwnClaims {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// Wakes wait for the feeder's lock, which a tail expression's guard drops before
-		// the hold; see `Consumer::route_node`.
+		// Wakes wait for the feeder's lock, which drops before the hold; see
+		// `Consumer::route_node`.
 		let _hold = kio::hold();
-		lock_own(&self.0).poll(waiter)
+		let mut claims = lock_own(&self.claims);
+		if self.origin.poll_orphaned(waiter).is_ready() {
+			claims.catch_up();
+			return Poll::Ready(());
+		}
+		claims.poll(waiter)
 	}
 }
 
@@ -3892,6 +3944,8 @@ impl OwnClaims {
 	}
 }
 
+/// Drives origin lifecycle work and cache expiration with caller-supplied time.
+///
 /// Returned by [`Producer::new`]. Poll on external activity or at the deadline
 /// it returns, supplying nondecreasing instants. RouteInfo changes, track serving, linger,
 /// failover, and teardown run here; the route table and announce cursors update
@@ -3947,6 +4001,35 @@ impl Driver {
 impl crate::time::Driver for Driver {
 	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.poll(now, waiter)
+	}
+}
+
+/// What an origin holds on behalf of its sessions and readers, for the session fuzz target's
+/// leak check.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Footprint {
+	tasks: usize,
+	routes: usize,
+	cursors: usize,
+	listeners: usize,
+	withdrawn: usize,
+	withheld: usize,
+}
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl Driver {
+	/// Count what this origin holds; see [`Footprint`].
+	pub(crate) fn footprint(&self) -> Footprint {
+		let shared = self.state.shared.lock();
+		Footprint {
+			tasks: self.state.set.len(),
+			routes: shared.routes.entries().count(),
+			cursors: shared.cursors.len(),
+			listeners: shared.listeners.len(),
+			withdrawn: shared.withdrawn.len(),
+			withheld: *shared.hidden_withheld.0.read(),
+		}
 	}
 }
 
@@ -7375,7 +7458,10 @@ impl Consumer {
 		let created = (node, Arc::downgrade(&claims));
 		shared.route_node = Some(created.clone());
 		drop(shared);
-		self.tasks.push(FeedOwnClaims(claims));
+		self.tasks.push(FeedOwnClaims {
+			claims,
+			origin: self.tasks.clone(),
+		});
 		created
 	}
 
@@ -9897,7 +9983,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_auth_swap_is_an_update() {
-		let handle = crate::auth::Link::ietf(false);
+		let handle = crate::auth::Link::ietf();
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
 		let producer = origin(1).produce();
@@ -9915,6 +10001,28 @@ mod tests {
 			} => assert_eq!(update.route.auth, Some(second)),
 			other => panic!("should be an update: got {other:?}"),
 		}
+	}
+
+	/// A change to a closed route fails and keeps nothing, so the route holds no
+	/// credential it was refused.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_closed_route_keeps_no_refused_change() {
+		let handle = crate::auth::Link::ietf();
+		let token = handle.present(bytes::Bytes::from_static(b"token"), false).unwrap();
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().routes();
+		let route = producer.route("room", RouteOptions::hidden()).unwrap();
+		route.announce().unwrap();
+		announced.expect_next_active("room").await;
+		route.broadcast().close();
+		announced.expect_next_ended("room").await;
+
+		assert!(matches!(route.set_auth(Some(token.clone())), Err(Error::Closed)));
+		assert!(matches!(route.set_cost(7), Err(Error::Closed)));
+		let control = route.state.control.lock();
+		assert!(control.options.auth.is_none());
+		assert_eq!(control.options.cost, Cost::default());
 	}
 
 	/// A replacement under another instance from a cluster peer at equal cost and chain
@@ -10398,6 +10506,63 @@ mod tests {
 		};
 		assert_eq!(replacement.prefix.as_str(), "");
 		assert_eq!(replacement.captures, None);
+	}
+
+	/// A forwarded route lost with its session retracts its identity as offline,
+	/// even when a broader route takes over the presented prefix.
+	#[kio::test]
+	async fn capture_change_reports_a_lost_route_offline() {
+		let producer = origin(1).produce();
+		let _broad = producer.announce("room", RouteInfo::new()).unwrap();
+		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
+		let mut announced = producer
+			.consume()
+			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.covering()
+			.routes();
+		announced.expect_next_active("").await;
+
+		drop(exact);
+		announced.expect_next_offline("").await;
+		announced.expect_next_active("").await;
+	}
+
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn capture_change_coalesced_keeps_the_lost_route_offline() {
+		let producer = origin(1).produce();
+		let broad = producer.announce("room", RouteInfo::new()).unwrap();
+		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
+		let mut announced = producer
+			.consume()
+			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.covering()
+			.routes();
+		announced.expect_next_active("").await;
+
+		// Both leave before the next poll: the one retraction delivered is the
+		// exact route's, which was lost rather than withdrawn.
+		drop(exact);
+		drop(broad);
+		announced.expect_next_offline("").await;
+	}
+
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn restart_coalesced_keeps_the_lost_instance_offline() {
+		let producer = origin(1).produce();
+		let lost = producer.forward("room/alice", RouteInfo::new()).unwrap();
+		let mut announced = producer.consume().routes();
+		announced.expect_next_active("room/alice").await;
+
+		// Another instance comes and is withdrawn before the next poll: the one
+		// retraction delivered is the lost instance's.
+		drop(lost);
+		let other = producer.announce("room/alice", RouteInfo::new()).unwrap();
+		drop(other);
+		announced.expect_next_offline("room/alice").await;
 	}
 
 	#[test]
@@ -15065,6 +15230,74 @@ mod tests {
 		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
 	}
 
+	/// The serving route is withdrawn while its copy of the track is still open, and the
+	/// next route for the same publisher no longer has the broadcast: its refusal must not
+	/// end the track, which takes the incumbent's remaining groups and clean end.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_refused_replacement_keeps_a_withdrawn_incumbent_open() {
+		// The incumbent arrives from relay 2, a stale standby from relay 3, both for
+		// publisher 9, so withdrawing relay 2 leaves the standby standing.
+		let producer = origin(1).produce();
+		let server = producer
+			.forward(
+				"room",
+				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[9, 2])),
+			)
+			.unwrap();
+		let standby = producer
+			.forward(
+				"room",
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[9, 5, 3])),
+			)
+			.unwrap();
+		let pending = producer.consume().request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
+		queued(&server).await.serve(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
+
+		// The peer withdraws the broadcast: the route retracts and its source closes,
+		// while the subscription already in flight stays open.
+		server.withdrawn();
+		upstream.close();
+
+		let successor = broadcast::Info::new().produce();
+		let mut handler = successor.requests();
+		queued(&standby).await.serve(&successor);
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the standby")
+			.expect("request");
+		request.reject(Error::Unroutable);
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("the incumbent keeps serving")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+
+		let _old = old.finish().unwrap();
+		let end = next_group(&mut subscription)
+			.await
+			.map(|group| group.map(|group| group.sequence));
+		assert!(matches!(end, Ok(None)), "the incumbent's clean end, not {end:?}");
+	}
+
 	/// The newcomer answers "video" with matching metadata, the front reads that answer,
 	/// and only then does the newcomer abort, before its first group: still a refusal, so
 	/// the incumbent keeps serving.
@@ -15684,6 +15917,39 @@ mod tests {
 		);
 		drop(broadcast);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
+	}
+
+	/// The task feeding a route node never keeps the driver running: it finishes once
+	/// the last owner drops, whatever read handles remain, and still feeds the node the
+	/// withdrawals that last drop queued.
+	#[kio::test]
+	async fn a_route_node_never_keeps_the_driver_running() {
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
+		let waiter = kio::Waiter::noop();
+		let link = crate::route::Link {
+			proxy: true,
+			..Default::default()
+		};
+		let consumer = producer.consume();
+		let alice = producer.announce("room/alice", RouteInfo::new()).unwrap();
+		let stream = consumer.route_node().answer(link, Path::empty()).unwrap();
+		assert!(
+			driver.poll(Instant::now(), &waiter).is_ok(),
+			"the producer owns the origin"
+		);
+		while stream.try_output().is_some() {}
+		drop(alice);
+		drop(producer);
+		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
+		let output = stream.try_output();
+		assert!(
+			matches!(
+				&output,
+				Some(crate::route::node::Output::Batch { changes, .. })
+					if changes.iter().any(|(path, claim)| path.as_str() == "room/alice" && claim.is_none())
+			),
+			"the stream is sent the withdrawal: {output:?}"
+		);
 	}
 
 	/// A handler holding only its `Route` keeps serving once every producer

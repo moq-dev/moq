@@ -54,6 +54,8 @@ pub use timed::Timed;
 /// Routing broadcasts into an origin, and consuming them through it.
 pub mod origin {
 	pub use super::follow::Following;
+	#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+	pub(crate) use super::origin_impl::Footprint;
 	pub(crate) use super::origin_impl::HiddenWithheld;
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::HiddenWithholding;

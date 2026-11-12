@@ -131,12 +131,12 @@ recorded only sequencing.
 - **No local clock in the model.** Added 2026-11-07 (maintainer,
   /quest-plan from the API shape audit): `Timestamp::now()`, the only model
   API that reads the local clock, is removed, and its callers stamp from
-  their own clock: moq-boy, moq-hls, moq-room, moq-stats, moq-bench, hang's
+  their own clock: moq-boy, moq-hls, moq-stats, moq-bench, hang's
   video example, moq-tokio's examples, and tests across moq-net, moq-json,
   moq-mux, and moq-hls. `Timed<P>` moves from moq-net's root to moq-json,
   since moq-net never uses it internally, and its `at` becomes required under
   the rule above. Every crate that names `moq_net::Timed` follows the move:
-  moq-mux, moq-ffi, moq-c, moq-cli, moq-room, moq-boy, moq-hls, moq-stats,
+  moq-mux, moq-ffi, moq-c, moq-cli, moq-boy, moq-hls, moq-stats,
   and moq-net-tests.
 - **One anchor rule.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ collapse `Anchor` to `{Oldest,
   Relative(n), Time(ts)}` with every end inclusive (rejected: keep

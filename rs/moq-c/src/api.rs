@@ -1744,8 +1744,9 @@ unsafe fn connect_session(
 /// Returns a non-zero handle to the session on success, or a negative code on (immediate) failure.
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
-/// The session reconnects automatically with exponential backoff if the connection drops.
-/// Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
+/// Once connected, the session reconnects automatically with exponential backoff if the
+/// connection drops. A first dial that reaches no session ends it instead, with that dial's
+/// error as the terminal snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
 /// since the origins outlive the underlying connection.
 ///
 /// `on_state` receives a [moq_connection_state] whenever the lifecycle changes: each
@@ -1753,7 +1754,8 @@ unsafe fn connect_session(
 /// connect count. Changes that land together arrive as one snapshot.
 ///
 /// The last call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `data.closed.failure` zero after
-/// [moq_session_close] or the negative code that made reconnecting give up. By then the
+/// [moq_session_close], or the negative code of the failed first dial or of the failure that
+/// made reconnecting give up. By then the
 /// session handle is already released, and `on_state` and `user_data` are never touched
 /// again, so that terminal snapshot is the point to release `user_data`. It fires even
 /// after [moq_session_close], so do not free `user_data` on the close call itself.
@@ -2340,6 +2342,25 @@ pub extern "C" fn moq_route_set_cost(route: u32, cost: u64) -> i32 {
 	})
 }
 
+/// Swap the credential a route's announcing request carries, renewing that request in place.
+///
+/// `credential` is a [crate::moq_session_credential] handle, or zero to announce under the
+/// session's scope. Only the session it was minted on carries it, a dialed one across every
+/// reconnect; any other session announces the route under its own scope. The route keeps
+/// its own reference, so the handle can be freed after this call. Fails, keeping the
+/// route's credential as it was, once its broadcast closed or the origin's background task
+/// stopped. Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_route_set_auth(route: u32, credential: u32) -> i32 {
+	ffi::enter(move || {
+		let route = ffi::parse_id(route)?;
+		let credential = ffi::parse_id_optional(credential)?;
+		let state = State::lock();
+		let credential = credential.map(|id| state.auth.credential(id)).transpose()?;
+		state.origin.route_with(route, |route| route.set_auth(credential))
+	})
+}
+
 /// Release a route handle, retracting the route.
 ///
 /// The broadcast handle stays the caller's until [moq_publish_close].
@@ -2406,6 +2427,25 @@ pub extern "C" fn moq_claim_set_cost(claim: u32, cost: u64) -> i32 {
 	ffi::enter(move || {
 		let claim = ffi::parse_id(claim)?;
 		State::lock().origin.claim_with(claim, |claim| claim.set_cost(cost))
+	})
+}
+
+/// Swap the credential a claim's announcing request carries, renewing that request in place.
+///
+/// `credential` is a [crate::moq_session_credential] handle, or zero to announce under the
+/// session's scope. Only the session it was minted on carries it, a dialed one across every
+/// reconnect; any other session announces the claim under its own scope. The claim keeps
+/// its own reference, so the handle can be freed after this call. Fails, keeping the
+/// claim's credential as it was, once the origin's background task stopped. Returns zero on
+/// success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_claim_set_auth(claim: u32, credential: u32) -> i32 {
+	ffi::enter(move || {
+		let claim = ffi::parse_id(claim)?;
+		let credential = ffi::parse_id_optional(credential)?;
+		let state = State::lock();
+		let credential = credential.map(|id| state.auth.credential(id)).transpose()?;
+		state.origin.claim_with(claim, |claim| claim.set_auth(credential))
 	})
 }
 

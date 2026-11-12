@@ -11,10 +11,11 @@
 (* own queue. A session opens and closes atomically, dropping what was in  *)
 (* flight.                                                                 *)
 (*                                                                         *)
-(* Scope: every node watches the root, links cost 1 with equal priority,   *)
-(* no scoped grants, no GOAWAY, and the origin keeps its identity. Claims  *)
-(* are exact paths, and a claim's attributes are the revision that last    *)
-(* set them, standing in for a fresh Instance per announce.                *)
+(* Scope: every node watches the root, links have equal priority, no       *)
+(* scoped grants, no GOAWAY, no hop limit, and the origin keeps its        *)
+(* identity. Claims are exact paths, and a claim's attributes are the      *)
+(* revision that last set them, standing in for a fresh Instance per       *)
+(* announce.                                                               *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -23,12 +24,15 @@ CONSTANTS
     Origin,       \* the node that declares the identity
     Leaves,       \* nodes that send only identities they serve (`Sim::leaf`)
     Links,        \* sessions, as 2-element sets of nodes
+    Dear,         \* the links that add 2 to a metric; the rest add 1 (`Link::cost`)
     Claims,       \* claim paths
     MaxRev,       \* the origin's claim changes
     MaxFlaps,     \* session opens and closes
     MaxCollects   \* `collect` calls
 
 Relays == Nodes \ {Origin}
+
+Cost == [l \in Links |-> IF l \in Dear THEN 2 ELSE 1]
 
 \* A claim's attributes: the revision that last set it, or None when absent.
 None == -1
@@ -39,13 +43,14 @@ NoItems == [c \in Claims |-> None]
 EmptyView == [floor |-> None, items |-> NoItems]
 NoView == [floor |-> Absent, items |-> NoItems]
 
-\* `Reach` as sent on a stream: nothing, `Finite(Advert)`, or `Held`.
-NoReach == [kind |-> "none", seq |-> 0, met |-> 0]
-HeldReach == [kind |-> "held", seq |-> 0, met |-> 0]
-Finite(seq, met) == [kind |-> "fin", seq |-> seq, met |-> met]
+\* `Reach` as sent on a stream: nothing, `Finite(Advert)`, or `Held`. `hops` is
+\* the nodes the route crossed, the origin first and the sender last.
+NoReach == [kind |-> "none", seq |-> 0, met |-> 0, hops |-> <<>>]
+HeldReach == [kind |-> "held", seq |-> 0, met |-> 0, hops |-> <<>>]
+Finite(seq, met, hops) == [kind |-> "fin", seq |-> seq, met |-> met, hops |-> hops]
 
 \* `rx` entry, `fd`, `heard`, and `pending` when absent.
-NoEntry == [on |-> FALSE, seq |-> 0, met |-> 0, held |-> FALSE]
+NoEntry == [on |-> FALSE, seq |-> 0, met |-> 0, held |-> FALSE, hops |-> <<>>]
 NoFd == [on |-> FALSE, seq |-> 0, met |-> 0]
 NoHeard == [on |-> FALSE, raw |-> EmptyView, kept |-> NoView, ended |-> FALSE]
 NoPending == [on |-> FALSE, seq |-> 0, from |-> {}, asked |-> None]
@@ -70,10 +75,12 @@ VARIABLES
     falseEnds,  \* reader ENDs while the origin still has that item (`false_ends`)
     regressions,\* reader UPDATEs to an older item
     flaps,
-    collects
+    collects,
+    burst,      \* ROUTE, batch, request, and echo messages sent since the last quiet point
+    churn       \* external changes since the last quiet point
 
 vars == <<up, q, acks, rev, own, seqno, hist, st, ended, revivals, falseEnds,
-          regressions, flaps, collects>>
+          regressions, flaps, collects, burst, churn>>
 
 \* The origin's view and seqno.
 OV == [rev |-> rev, items |-> own, seq |-> seqno]
@@ -85,31 +92,44 @@ Peers(n, ups) == {m \in Nodes : {n, m} \in ups}
 Serves(n) == n = Origin \/ n \notin Leaves
 
 -----------------------------------------------------------------------------
-(* Route selection on one node's state `s` (mod.rs: `feasible`, `selected`, *)
-(* `infeasible`, `recoverable`, `live`, `certifiers`). Every link costs 1.  *)
+(* Route selection on node `n`'s state `s` (mod.rs: `feasible`, `selected`,  *)
+(* `infeasible`, `recoverable`, `live`, `certifiers`).                      *)
+
+\* `Entry::crossed`: the route's hops name this node.
+Crossed(n, e) == \E i \in DOMAIN e.hops : e.hops[i] = n
 
 Feasible(s, e) ==
     ~s.fd.on \/ e.seq > s.fd.seq \/ (e.seq = s.fd.seq /\ e.met < s.fd.met)
 
-UsableSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ Feasible(s, s.rx[m])}
+\* `eligible`: a node selects and certifies only through a feasible route that
+\* did not cross it.
+Eligible(n, s, e) == ~Crossed(n, e) /\ Feasible(s, e)
+
+UsableSet(n, s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ Eligible(n, s, s.rx[m])}
+\* `infeasible`: a route that crossed this node counts like any other. No key
+\* is qualified here, so its sender routes through this node's own route.
 InfeasibleSet(s) == {m \in Nodes : s.rx[m].on /\ ~s.rx[m].held /\ ~Feasible(s, s.rx[m])}
-Certifiers(s) == {m \in Nodes : s.rx[m].on /\ Feasible(s, s.rx[m])}
-Recoverable(s) == \E m \in Certifiers(s) : s.rx[m].held
+Certifiers(n, s) == {m \in Nodes : s.rx[m].on /\ Eligible(n, s, s.rx[m])}
+Recoverable(n, s) == \E m \in Certifiers(n, s) : s.rx[m].held
+
+\* This node's metric through the route `m` sent.
+Through(n, s, m) == s.rx[m].met + Cost[{n, m}]
 
 \* The lowest metric, then the lowest key: `selected`'s rank with equal priority.
-Best(s, S) ==
+Best(n, s, S) ==
     CHOOSE m \in S : \A k \in S :
-        s.rx[m].met < s.rx[k].met \/ (s.rx[m].met = s.rx[k].met /\ m <= k)
+        Through(n, s, m) < Through(n, s, k) \/ (Through(n, s, m) = Through(n, s, k) /\ m <= k)
 
-NoSel == [on |-> FALSE, next |-> None, seq |-> 0, met |-> 0]
+NoSel == [on |-> FALSE, next |-> None, seq |-> 0, met |-> 0, hops |-> <<>>]
 Selected(n, s, ov) ==
-    IF n = Origin THEN [on |-> TRUE, next |-> None, seq |-> ov.seq, met |-> 0]
-    ELSE IF UsableSet(s) = {} THEN NoSel
-    ELSE LET m == Best(s, UsableSet(s))
-         IN [on |-> TRUE, next |-> m, seq |-> s.rx[m].seq, met |-> s.rx[m].met + 1]
+    IF n = Origin THEN [on |-> TRUE, next |-> None, seq |-> ov.seq, met |-> 0, hops |-> <<n>>]
+    ELSE IF UsableSet(n, s) = {} THEN NoSel
+    ELSE LET m == Best(n, s, UsableSet(n, s))
+         IN [on |-> TRUE, next |-> m, seq |-> s.rx[m].seq, met |-> Through(n, s, m),
+             hops |-> Append(s.rx[m].hops, n)]
 
 Live(n, s) ==
-    n = Origin \/ UsableSet(s) # {} \/ InfeasibleSet(s) # {} \/ Recoverable(s)
+    n = Origin \/ UsableSet(n, s) # {} \/ InfeasibleSet(s) # {} \/ Recoverable(n, s)
 
 \* `Heard::view`: what it certified before its route ended, else the raw view.
 HeardView(h) == IF h.kept.floor # Absent THEN h.kept ELSE h.raw
@@ -117,9 +137,9 @@ HeardView(h) == IF h.kept.floor # Absent THEN h.kept ELSE h.raw
 \* `certified(id, held)` at the root interest: `ok` is FALSE where the code
 \* returns None (no route, or a certifier has not answered), and `root` says
 \* whether any counted certifier's view has a floor over the root.
-Certified(s, held) ==
-    [ok |-> (\E m \in Nodes : s.rx[m].on) /\ \A m \in Certifiers(s) : s.heard[m].on,
-     root |-> \E m \in Certifiers(s) :
+Certified(n, s, held) ==
+    [ok |-> (\E m \in Nodes : s.rx[m].on) /\ \A m \in Certifiers(n, s) : s.heard[m].on,
+     root |-> \E m \in Certifiers(n, s) :
                 (held \/ ~s.rx[m].held) /\ HeardView(s.heard[m]).floor >= 0]
 
 \* The view the node shows and forwards (`adopted`). Only certified claims
@@ -142,7 +162,7 @@ HasItems(v) == \E c \in Claims : v.items[c] # None
 \* `prune` at the root interest: once no certifier's view has a floor, the
 \* merged view is let go and rebuilt empty.
 Prune(n, s, ov) ==
-    LET c == Certified(s, TRUE) IN
+    LET c == Certified(n, s, TRUE) IN
     IF n # Origin /\ Selected(n, s, ov).on /\ c.ok /\ s.view.floor >= 0 /\ ~c.root
     THEN [s EXCEPT !.view = EmptyView]
     ELSE s
@@ -150,7 +170,7 @@ Prune(n, s, ov) ==
 \* What `advertise` decides for one peer.
 Plan(n, s, m, sel, live, av, ov) ==
     LET was == s.sent[m]
-        reach0 == IF sel.on /\ Serves(n) THEN Finite(sel.seq, sel.met)
+        reach0 == IF sel.on /\ Serves(n) THEN Finite(sel.seq, sel.met, sel.hops)
                   ELSE IF ~sel.on /\ Serves(n) /\ live /\ was.kind # "none" THEN HeldReach
                   ELSE NoReach
         \* A route starts again only once its last end was echoed.
@@ -192,7 +212,7 @@ Requests(n, s, sel) ==
               ELSE p0
         answered == sel.on /\ sel.seq >= p1.seq
         hasTarget == sel.on \/ InfeasibleSet(s) # {}
-        target == IF sel.on THEN sel.next ELSE Best(s, InfeasibleSet(s))
+        target == IF sel.on THEN sel.next ELSE Best(n, s, InfeasibleSet(s))
     IN IF ~p1.on THEN [pending |-> p1, to |-> None, seq |-> 0]
        ELSE IF answered \/ (p1.from = {} /\ ~starved) \/ ~hasTarget
             THEN [pending |-> NoPending, to |-> None, seq |-> 0]
@@ -202,7 +222,7 @@ Requests(n, s, sel) ==
 
 \* `shown_now`: how the reader sees each claim.
 ShownNow(n, s, sel, live, ov) ==
-    LET serving == Certified(s, FALSE)
+    LET serving == Certified(n, s, FALSE)
         avail == sel.on /\ (n = Origin \/ ~serving.ok \/ serving.root)
         v == Adopted(n, s, ov)
     IN [c \in Claims |->
@@ -211,7 +231,7 @@ ShownNow(n, s, sel, live, ov) ==
 \* `show`: the reader's events, as changes to `ended` and the counters.
 \* A claim leaving while live and certified is an END, else it went offline.
 Events(n, s, old, now, live, ov, eb) ==
-    LET c0 == Certified(s, TRUE)
+    LET c0 == Certified(n, s, TRUE)
         uncertified == (c0.ok /\ ~c0.root) \/ (n # Origin /\ s.view.floor < 0)
         isEnd(c) == old[c].item # None /\ now[c].item = None /\ live /\ ~uncertified
         isStart(c) == old[c].item = None /\ now[c].item # None
@@ -223,8 +243,8 @@ Events(n, s, old, now, live, ov, eb) ==
 
 \* `update` on node n's state `s0`, with the origin's view `ov`, the open
 \* sessions `ups`, and `eb`, the items n's reader saw END for. A prune forgets.
-Update(n, s0, ov, ups, eb) ==
-    LET s1 == Prune(n, s0, ov)
+Update(n, s0, ov, ups, eb, prune) ==
+    LET s1 == IF prune THEN Prune(n, s0, ov) ELSE s0
         eb1 == IF s1 # s0 THEN [c \in Claims |-> None] ELSE eb
         sel == Selected(n, s1, ov)
         s2 == Record(n, s1, sel, Adopted(n, s1, ov), ups)
@@ -254,13 +274,16 @@ Update(n, s0, ov, ups, eb) ==
 Heeded(d, m) ==
     d[2] # Origin \/ m.type = "request" \/ (m.type = "route" /\ m.reach.kind = "none")
 
+\* The sum of f(x) over the finite set S.
+SumOver(S, f(_)) ==
+    LET F[T \in SUBSET S] == IF T = {} THEN 0 ELSE LET x == CHOOSE x \in T : TRUE IN f(x) + F[T \ {x}]
+    IN F[S]
+
 \* Commit the updates `rs` (a function from nodes to `Update` results), appending
 \* each node's messages to `q0`. Nodes in one step send on disjoint queues.
 Commit(rs, q0) ==
     LET ns == DOMAIN rs
-        Sum(f(_)) == LET F[S \in SUBSET ns] ==
-                            IF S = {} THEN 0 ELSE LET x == CHOOSE x \in S : TRUE IN f(x) + F[S \ {x}]
-                     IN F[ns]
+        Sum(f(_)) == SumOver(ns, f)
     IN /\ st' = [n \in Nodes |-> IF n \in ns THEN rs[n].s ELSE st[n]]
        /\ q' = [d \in Dirs |-> IF d[1] \in ns THEN q0[d] \o SelectSeq(rs[d[1]].out[d[2]], LAMBDA m : Heeded(d, m))
                                  ELSE q0[d]]
@@ -268,6 +291,22 @@ Commit(rs, q0) ==
        /\ revivals' = revivals + Sum(LAMBDA n : rs[n].ev.revivals)
        /\ falseEnds' = falseEnds + Sum(LAMBDA n : rs[n].ev.falseEnds)
        /\ regressions' = regressions + Sum(LAMBDA n : rs[n].ev.regressions)
+
+Quiet == \A d \in Dirs : q[d] = <<>> /\ acks[d] = 0
+
+\* The messages the updates `rs` send, counted before `Heeded` drops any.
+Sent(rs) == SumOver(DOMAIN rs, LAMBDA n : SumOver(Nodes, LAMBDA m : Len(rs[n].out[m])))
+
+\* A burst runs from one quiet point to the next. An external change (a claim
+\* change, a session opening or closing, a collection) made while quiet starts
+\* a fresh one; every message sent in it counts against the changes made in it.
+External(sent) ==
+    /\ burst' = (IF Quiet THEN 0 ELSE burst) + sent
+    /\ churn' = (IF Quiet THEN 0 ELSE churn) + 1
+
+Internal(sent) ==
+    /\ burst' = burst + sent
+    /\ UNCHANGED churn
 
 -----------------------------------------------------------------------------
 (* Initial state: every session open (`Sim::join`), the origin declared     *)
@@ -300,6 +339,8 @@ Init ==
     /\ regressions = 0
     /\ flaps = 0
     /\ collects = 0
+    /\ burst = 0
+    /\ churn = 0
 
 -----------------------------------------------------------------------------
 (* The origin changes a claim (`announce` / `unannounce` -> `change`).      *)
@@ -307,10 +348,12 @@ Init ==
 ChangeClaim(c, item) ==
     LET own1 == [own EXCEPT ![c] = item]
         ov1 == [rev |-> rev + 1, items |-> own1, seq |-> seqno]
+        rs == [n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, ended[Origin], TRUE)]
     IN /\ rev' = rev + 1
        /\ own' = own1
        /\ hist' = Append(hist, own1)
-       /\ Commit([n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, ended[Origin])], q)
+       /\ Commit(rs, q)
+       /\ External(Sent(rs))
        /\ UNCHANGED <<up, acks, seqno, flaps, collects>>
 
 \* A new claim, or new attributes for one, under a fresh revision.
@@ -329,8 +372,8 @@ Certify(v) == IF v.floor >= 0 THEN v ELSE [floor |-> v.floor, items |-> NoItems]
 OnRoute(s, from, reach) ==
     LET h == s.heard[from]
         rx1 == CASE reach.kind = "fin" ->
-                      [s.rx EXCEPT ![from] = [on |-> TRUE, seq |-> reach.seq,
-                                              met |-> reach.met, held |-> FALSE]]
+                      [s.rx EXCEPT ![from] = [on |-> TRUE, seq |-> reach.seq, met |-> reach.met,
+                                              held |-> FALSE, hops |-> reach.hops]]
                  [] reach.kind = "held" ->
                       IF s.rx[from].on THEN [s.rx EXCEPT ![from].held = TRUE] ELSE s.rx
                  [] OTHER -> [s.rx EXCEPT ![from] = NoEntry]
@@ -372,31 +415,43 @@ Deliver(d) ==
         sel == Selected(n, st[n], OV)
         \* Already advertised to the requester: `request` returns before `update`.
         skip == n # Origin /\ msg.type = "request" /\ sel.on /\ sel.seq >= msg.seq
+        \* Only the route's hops changed: `route` then lets go of nothing.
+        was == st[n].rx[m]
+        same == /\ msg.type = "route" /\ msg.reach.kind = "fin"
+                /\ was.on /\ ~was.held
+                /\ was.seq = msg.reach.seq /\ was.met = msg.reach.met
+                /\ Crossed(n, was) = Crossed(n, msg.reach)
         \* The origin's own identity merges nothing it hears.
         s1 == IF n = Origin THEN st[n]
               ELSE CASE msg.type = "route" -> OnRoute(st[n], m, msg.reach)
                      [] msg.type = "batch" -> OnBatch(st[n], m, msg.view)
                      [] OTHER -> OnRequest(st[n], m, msg.seq)
+        rs == [x \in {n} |-> Update(n, s1, ov1, up, ended[n], ~same)]
+        echoes == IF isEnd THEN 1 ELSE 0
     IN /\ q[d] # <<>>
        \* Every ROUTE_END is echoed once applied.
        /\ acks' = IF isEnd THEN [acks EXCEPT ![<<n, m>>] = @ + 1] ELSE acks
        /\ seqno' = ov1.seq
        /\ IF skip
           THEN /\ q' = q0
+               /\ Internal(echoes)
                /\ UNCHANGED <<st, ended, revivals, falseEnds, regressions>>
-          ELSE Commit([x \in {n} |-> Update(n, s1, ov1, up, ended[n])], q0)
+          ELSE /\ Commit(rs, q0)
+               /\ Internal(echoes + Sent(rs))
        /\ UNCHANGED <<up, rev, own, hist, flaps, collects>>
 
 \* `echo`: an echoed ROUTE_END comes back (`Sim::deliver_ack`).
 DeliverAck(d) ==
     LET m == d[1]
         n == d[2]
+        rs == [x \in {n} |-> Update(n, [st[n] EXCEPT !.unacked[m] = @ - 1], OV, up, ended[n], TRUE)]
     IN /\ acks[d] > 0
        /\ acks' = [acks EXCEPT ![d] = @ - 1]
        /\ IF st[n].unacked[m] = 0
-          THEN UNCHANGED <<st, q, ended, revivals, falseEnds, regressions>>
-          ELSE Commit([x \in {n} |->
-                  Update(n, [st[n] EXCEPT !.unacked[m] = @ - 1], OV, up, ended[n])], q)
+          THEN /\ Internal(0)
+               /\ UNCHANGED <<st, q, ended, revivals, falseEnds, regressions>>
+          ELSE /\ Commit(rs, q)
+               /\ Internal(Sent(rs))
        /\ UNCHANGED <<up, rev, own, seqno, hist, flaps, collects>>
 
 -----------------------------------------------------------------------------
@@ -417,42 +472,47 @@ Closed(s, y) ==
 
 Connect(l) ==
     LET up1 == up \cup {l}
+        rs == [x \in l |->
+                 LET y == CHOOSE y \in l : y # x
+                 IN Update(x, Opened(st[x], y), OV, up1, ended[x], TRUE)]
     IN /\ l \notin up
        /\ flaps < MaxFlaps
        /\ up' = up1
        /\ flaps' = flaps + 1
-       /\ Commit([x \in l |->
-               LET y == CHOOSE y \in l : y # x
-               IN Update(x, Opened(st[x], y), OV, up1, ended[x])], q)
+       /\ Commit(rs, q)
+       /\ External(Sent(rs))
        /\ UNCHANGED <<acks, rev, own, seqno, hist, collects>>
 
 Disconnect(l) ==
     LET up1 == up \ {l}
         q0 == [d \in Dirs |-> IF {d[1], d[2]} = l THEN <<>> ELSE q[d]]
+        rs == [x \in l |->
+                 LET y == CHOOSE y \in l : y # x
+                 IN Update(x, Closed(st[x], y), OV, up1, ended[x], TRUE)]
     IN /\ l \in up
        /\ flaps < MaxFlaps
        /\ up' = up1
        /\ flaps' = flaps + 1
        /\ acks' = [d \in Dirs |-> IF {d[1], d[2]} = l THEN 0 ELSE acks[d]]
-       /\ Commit([x \in l |->
-               LET y == CHOOSE y \in l : y # x
-               IN Update(x, Closed(st[x], y), OV, up1, ended[x])], q0)
+       /\ Commit(rs, q0)
+       /\ External(Sent(rs))
        /\ UNCHANGED <<rev, own, seqno, hist, collects>>
 
 \* `collect`, allowed once the node holds no route (`Sim::holds`). It
 \* forgets the views, so the reader's earlier ENDs no longer count.
 Collect(n) ==
+    LET rs == [x \in {n} |->
+                 Update(n, [st[n] EXCEPT !.view = NoView,
+                                         !.heard = [m \in Nodes |-> NoHeard],
+                                         !.pending = NoPending],
+                        OV, up, [c \in Claims |-> None], TRUE)]
+    IN
     /\ collects < MaxCollects
     /\ \A m \in Nodes : ~st[n].rx[m].on
     /\ collects' = collects + 1
-    /\ Commit([x \in {n} |->
-            Update(n, [st[n] EXCEPT !.view = NoView,
-                                    !.heard = [m \in Nodes |-> NoHeard],
-                                    !.pending = NoPending],
-                   OV, up, [c \in Claims |-> None])], q)
+    /\ Commit(rs, q)
+    /\ External(Sent(rs))
     /\ UNCHANGED <<up, acks, rev, own, seqno, hist, flaps>>
-
-Quiet == \A d \in Dirs : q[d] = <<>> /\ acks[d] = 0
 
 \* Nothing is in flight and no more churn is allowed: the run is over.
 Done ==
@@ -504,17 +564,41 @@ Hop(n, k) == IF k = 0 THEN n ELSE Hop(NextHop(n), k - 1)
 \* Following selected next hops from any relay never cycles.
 LoopFree == \A n \in Relays : Hop(n, Cardinality(Nodes)) \notin Relays
 
-\* Every link costs 1, so a loop-free path to the origin has at most this metric.
-Longest == Cardinality(Nodes) - 1
+\* The loop-free paths from the origin over the configured links, each as the
+\* nodes it crosses in order, and what each costs its last node. A path goes on
+\* only from a node that forwards, so a client ends one.
+RECURSIVE Extend(_, _)
+Last(p) == p[Len(p)]
+Extend(P, k) ==
+    IF k = 0 THEN P
+    ELSE Extend(P \cup UNION {{Append(p, n) : n \in {m \in Relays : {Last(p), m} \in Links}} :
+                                p \in {x \in P : Serves(Last(x))}}, k - 1)
+RECURSIVE Along(_)
+Along(p) ==
+    IF Len(p) = 1 THEN 0
+    ELSE LET before == SubSeq(p, 1, Len(p) - 1)
+         IN Along(before) + Cost[{Last(before), Last(p)}]
+Paths ==
+    {p \in Extend({<<Origin>>}, Cardinality(Relays)) :
+        /\ \A i, j \in DOMAIN p : i # j => p[i] # p[j]
+        /\ \A i \in DOMAIN p : i > 1 => {p[i - 1], p[i]} \in Links}
+
+\* A route's hops are a loop-free path from the origin to its sender, and its
+\* metric is that path's cost. Every route sent adds its sender to hops that did
+\* not name it, so this holds of every route held or in flight, whatever any
+\* node forgot.
+IsPath(from, r) == r.hops \in Paths /\ Last(r.hops) = from /\ r.met = Along(r.hops)
+SimplePaths ==
+    /\ \A n, m \in Nodes : st[n].rx[m].on => IsPath(m, st[n].rx[m])
+    /\ \A d \in Dirs : \A i \in DOMAIN q[d] :
+          q[d][i].type = "route" /\ q[d][i].reach.kind = "fin" => IsPath(d[1], q[d][i].reach)
 
 \* No relay selects a route longer than any loop-free path: a longer one is a
-\* stale route counting up as it bounces between relays (Babel's feasibility
-\* condition exists to rule this out).
+\* stale route counting up as it bounces between relays. It follows from
+\* SimplePaths, since no node selects a route that crossed it.
+Longest == LET costs == {Along(p) : p \in Paths}
+           IN CHOOSE c \in costs : \A k \in costs : k <= c
 NoCountToInfinity == \A n \in Relays : Selected(n, st[n], OV).met <= Longest
-
-\* Explore one step past NoCountToInfinity and no further, so a count to
-\* infinity is reported rather than explored forever.
-Bounded == \A n, m \in Nodes : st[n].rx[m].met <= Longest
 
 \* Nodes the origin reaches over open sessions, through nodes that forward.
 RECURSIVE Grow(_, _)
@@ -539,5 +623,30 @@ Settled ==
     /\ \A n \in Nodes : ~st[n].pending.on
 
 QuietIsSettled == Quiet => Settled
+
+\* What one external change may cost: 4 messages each way over each configured
+\* session per route identity and per claim, the budget `mesh_sweep.rs` holds
+\* the implementation to. Here there is one identity.
+PerChange == 4 * Cardinality(Dirs) * (1 + Cardinality(Claims))
+
+\* The messages sent since the last quiet point stay within the budget of the
+\* external changes made since then, so a change never sets off announce spam.
+\* `burst` is part of the state, so a cycle of deliveries that never goes quiet
+\* would grow it past any budget: Budget also rules out routing that never
+\* converges once the changes stop.
+Budget == burst <= PerChange * churn
+
+\* While anything is in flight, something is eventually delivered. This is
+\* WF_vars(Delivery) written out, since Delivery is enabled exactly when not
+\* Quiet and TLC's ENABLED on these actions does not finish. It is weaker than
+\* fairness per queue, so Converges fails on any cycle of deliveries, starving
+\* a queue or not.
+Delivery == \E d \in Dirs : Deliver(d) \/ DeliverAck(d)
+Fairness == []<>Quiet \/ []<><<Delivery>>_vars
+
+LiveSpec == Spec /\ Fairness
+
+\* After the last external change, routing goes quiet and stays settled.
+Converges == <>[](Quiet /\ Settled)
 
 =============================================================================

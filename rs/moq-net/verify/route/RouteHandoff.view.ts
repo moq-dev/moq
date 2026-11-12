@@ -1,38 +1,47 @@
 // Labels for `/statechart` on RouteHandoff.tla: each relay's route and what its
 // reader shows, and each step as the message that arrives.
 
-type Entry = { on: boolean; seq: number; met: number; held: boolean };
+// A sequence such as `hops` is keyed from 1.
+type Entry = { on: boolean; seq: number; met: number; held: boolean; hops: Record<string, number> };
 type Node = {
 	rx: Record<string, Entry>;
 	fd: { on: boolean; seq: number; met: number };
 	shown: Record<string, { item: number; avail: boolean }>;
 };
-type Msg = { type: string; reach: { kind: string; seq: number; met: number } };
+type Msg = { type: string; reach: { kind: string; seq: number; met: number; hops: Record<string, number> } };
 type Vars = {
 	st: Record<string, Node>;
 	q: Record<string, Record<string, Msg>>;
 	acks: Record<string, number>;
 	up: number[][];
 	own: Record<string, number>;
+	burst: number;
+	churn: number;
 };
 
 const ORIGIN = "0";
 const name = (n: string | number) => (String(n) === ORIGIN ? "the origin" : `relay ${n}`);
 
-const feasible = (s: Node, e: Entry) => !s.fd.on || e.seq > s.fd.seq || (e.seq === s.fd.seq && e.met < s.fd.met);
+const hops = (e: { hops: Record<string, number> }) => Object.keys(e.hops).length;
 
-// `selected`: the usable feasible route with the lowest metric, then key.
-const selected = (s: Node) => {
-	let best: [string, number] | null = null;
+// Never a route that crossed node `n`, then Babel's condition.
+const feasible = (n: string, s: Node, e: Entry) =>
+	!Object.values(e.hops).some((hop) => String(hop) === n) &&
+	(!s.fd.on || e.seq > s.fd.seq || (e.seq === s.fd.seq && e.met < s.fd.met));
+
+// `selected` where every link costs the same: the usable feasible route with the
+// lowest metric, then key, and the hops to the origin through it.
+const selected = (n: string, s: Node) => {
+	let best: [string, number, number] | null = null;
 	for (const [m, e] of Object.entries(s.rx)) {
-		if (!e.on || e.held || !feasible(s, e)) continue;
-		if (best === null || e.met + 1 < best[1]) best = [m, e.met + 1];
+		if (!e.on || e.held || !feasible(n, s, e)) continue;
+		if (best === null || e.met < best[2]) best = [m, hops(e), e.met];
 	}
 	return best;
 };
 
-const relay = (s: Node) => {
-	const route = selected(s);
+const relay = (n: string, s: Node) => {
+	const route = selected(n, s);
 	const shows = Object.values(s.shown).some((x) => x.item >= 0);
 	const held = Object.values(s.rx).some((e) => e.on);
 	const how = route
@@ -45,17 +54,22 @@ const relay = (s: Node) => {
 	return `${how}${shows ? ", shows it" : ""}`;
 };
 
-const sessions = (v: Vars) => {
-	const down = ["0,1", "0,2", "1,2"].filter((l) => !v.up.some((u) => [...u].sort().join(",") === l));
-	return down.length === 0 ? "all open" : down.map((l) => `${l.replace(",", "–")} closed`).join(", ");
-};
+const sessions = (v: Vars) =>
+	v.up
+		.map((l) => [...l].sort((a, b) => a - b).join("–"))
+		.sort()
+		.join(", ") || "none";
 
-export const title = "One origin identity across a triangle of relays";
+export const title = "One origin identity across a mesh of relays";
 
 export const state = (v: Vars) => ({
-	Sessions: sessions(v),
-	"Relay 1": relay(v.st["1"]),
-	"Relay 2": relay(v.st["2"]),
+	"Open sessions": sessions(v),
+	...Object.fromEntries(
+		Object.keys(v.st)
+			.filter((n) => n !== ORIGIN)
+			.map((n) => [`Relay ${n}`, relay(n, v.st[n])]),
+	),
+	"Messages this burst": `${v.burst} for ${v.churn} change${v.churn === 1 ? "" : "s"}`,
 });
 
 const len = (s: Record<string, unknown> | undefined) => (s ? Object.keys(s).length : 0);
@@ -100,7 +114,7 @@ export const step = (action: string, from: Vars, to: Vars) => {
 							? "hold"
 							: String(m) === ORIGIN
 								? "route"
-								: `route (${msg.reach.met} hop${msg.reach.met === 1 ? "" : "s"})`;
+								: `route (${hops(msg.reach) - 1} hop${hops(msg.reach) === 2 ? "" : "s"})`;
 			return `${name(m)}'s ${what} reaches ${name(n)}`;
 		}
 		default:

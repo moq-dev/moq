@@ -1063,6 +1063,10 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 				errors.push(event.message);
 				event.preventDefault();
 			});
+			// The page's own Duration, since `lookahead` refuses a plain number.
+			const probe = document.createElement("moq-watch");
+			const lookahead = probe.lookahead;
+			probe.signals.close();
 			const cases: readonly (readonly ["moq-watch" | "moq-publish", string, string, string, unknown])[] = [
 				["moq-watch", "url", "http://[", "url", undefined],
 				["moq-publish", "url", "http://[", "url", undefined],
@@ -1072,7 +1076,7 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 				["moq-watch", "backend", "gpu", "backend", "auto"],
 				["moq-watch", "visible", "sometimes", "visible", "never"],
 				["moq-watch", "delay", "30", "delay", "instant"],
-				["moq-watch", "lookahead", "30", "lookahead", 0],
+				["moq-watch", "lookahead", "30", "lookahead", lookahead],
 				["moq-watch", "catalog-format", "guess", "catalogFormat", "manual"],
 				["moq-publish", "source", "monitor", "source", undefined],
 				["moq-publish", "preview", "mse", "preview", "none"],

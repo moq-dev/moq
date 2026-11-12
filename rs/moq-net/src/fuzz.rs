@@ -1,8 +1,9 @@
-//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and their
-//! seeds, plus the hooks the benches and `moq-net-tests` reach private state through.
+//! Test support, enabled by the `fuzz` feature: fuzz target bodies for the wire codecs and
+//! sessions and their seeds, plus the hooks the benches and `moq-net-tests` reach private
+//! state through.
 //!
-//! Each `pub fn` here is one target: it takes raw fuzzer bytes, drives a decoder, and
-//! checks that whatever came out survives a re-encode. The bodies live in the crate
+//! Each codec target takes raw fuzzer bytes, drives a decoder, and checks that whatever
+//! came out survives a re-encode; the session targets are described in `session`. The bodies live in the crate
 //! rather than in `fuzz/fuzz_targets/` because the `lite` and `ietf` modules are
 //! private modules, so an outside harness cannot reach a single decoder. Keeping them
 //! here also lets the tests below replay them on stable, which is what turns a crash
@@ -12,9 +13,11 @@
 
 mod ingest;
 mod request;
+mod session;
 
 pub use ingest::ingest;
 pub use request::request;
+pub use session::{session_ietf, session_lite};
 
 /// A lite-07 publisher run loop waiting on SUBSCRIBE_START, for the publisher bench.
 pub use crate::lite::CoverageBench;
@@ -252,6 +255,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 	("pattern", pattern),
 	("ingest", ingest),
 	("request", request),
+	("session_lite", session_lite),
+	("session_ietf", session_ietf),
 ];
 
 /// The moq-lite versions a target decodes at, selected by the input's first byte.
@@ -449,8 +454,8 @@ fn hop_chain(ids: impl IntoIterator<Item = u64>) -> Hops {
 
 /// One announcement on an announce stream, resolved: what the application sees.
 ///
-/// The hop chain travels only on lite-06: lite-07 names the claim's route instead, so
-/// its writer drops the chain and its reader decodes an empty one.
+/// The hop chain is lite-06's, and lite-07's trailing Lite-06 Chain: a lite-07 claim
+/// names its route instead, and carries a chain only when it was learned over lite-06.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
 	/// ANNOUNCE_START: a route's suffix and wire hop ids, taking the next id.
@@ -496,13 +501,13 @@ impl AnnounceWriter {
 					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
 					epoch: 0,
 					suffix,
-					hops: self.chain(hops),
+					hops: hop_chain(hops.iter().copied()),
 					cost: Default::default(),
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
-				hops: self.chain(hops),
+				hops: hop_chain(hops.iter().copied()),
 				cost: Default::default(),
 			},
 			Announced::End(id) => {
@@ -512,14 +517,6 @@ impl AnnounceWriter {
 		};
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
-	}
-
-	/// The hop chain as this version carries it: none on lite-07.
-	fn chain(&self, hops: &[u64]) -> Hops {
-		match self.version.has_routes() {
-			true => Hops::default(),
-			false => hop_chain(hops.iter().copied()),
-		}
 	}
 }
 
@@ -646,11 +643,11 @@ impl RouteNode {
 }
 
 /// A relay's lite-07 route node hearing one origin's claims on streams it asked for,
-/// and forwarding them on a stream it answers, for the routes bench.
+/// and forwarding them on streams it answers, for the routes bench.
 pub struct RouteRelay {
 	// Dropped first: a stream disconnects from its node on drop.
 	receive: Vec<crate::route::node::Stream>,
-	answer: crate::route::node::Stream,
+	answer: Vec<crate::route::node::Stream>,
 	#[allow(dead_code, reason = "held so the streams keep a node to talk to")]
 	node: crate::route::Node,
 	instance: crate::Instance,
@@ -666,22 +663,26 @@ impl RouteRelay {
 	/// The origin's identity as the relay hears it.
 	const ORIGIN: u64 = 1;
 
-	/// A relay that already heard and forwarded the origin's `claims` claims under
-	/// `live/`, on each of `streams` streams.
-	fn new(claims: usize, streams: usize) -> Self {
+	/// A relay that already heard the origin's `claims` claims under `live/` on each of
+	/// `streams` streams, and forwarded them on each of `answers` streams.
+	fn new(claims: usize, streams: usize, answers: usize) -> Self {
 		let node = crate::route::Node::new(2, 2);
-		let answer = node.answer(crate::route::Link::default(), Path::empty()).unwrap();
+		let answer = (0..answers)
+			.map(|_| node.answer(crate::route::Link::default(), Path::empty()).unwrap())
+			.collect();
 		let instance = crate::Instance::random();
 		let rev = claims as u64;
 		let advert = crate::route::Advert {
 			seqno: 0,
 			metric: 0,
 			down_only: false,
+			rtt: None,
+			hops: [].into(),
 		};
 		let receive = (0..streams)
 			.map(|_| {
 				let receive = node.receive(crate::route::Link::default(), Path::empty()).unwrap();
-				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert)));
+				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert.clone())));
 				let snapshot = (0..claims)
 					.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
 					.collect();
@@ -704,13 +705,20 @@ impl RouteRelay {
 
 	/// A relay hearing the origin's `claims` claims on one stream.
 	pub fn heard(claims: usize) -> Self {
-		Self::new(claims, 1)
+		Self::new(claims, 1, 1)
+	}
+
+	/// A relay hearing the origin's `claims` claims on one stream and answering
+	/// `answers` streams, holding every claim back from them since none is confirmed
+	/// served.
+	pub fn held(claims: usize, answers: usize) -> Self {
+		Self::new(claims, 1, answers)
 	}
 
 	/// A relay hearing the origin's `claims` claims on two streams, the second `lag`
 	/// one-claim batches behind the first.
 	pub fn lagging(claims: usize, lag: usize) -> Self {
-		let mut relay = Self::new(claims, 2);
+		let mut relay = Self::new(claims, 2, 1);
 		for _ in 0..lag {
 			relay.advance();
 		}
@@ -743,6 +751,29 @@ impl RouteRelay {
 		self.drain()
 	}
 
+	/// The first claim restarts at another epoch, then back at the one every other
+	/// claim shares, the relay confirming each, returning how many outputs it queued.
+	pub fn restart(&mut self) -> usize {
+		self.confirm(1) + self.confirm(0)
+	}
+
+	/// The first claim changes to `epoch`, and the relay confirms serving it.
+	fn confirm(&mut self, epoch: u64) -> usize {
+		self.rev += 1;
+		let claim = crate::route::node::Claim {
+			epoch,
+			..Self::claim(&self.instance, 0)
+		};
+		self.receive[0].batch(Self::ORIGIN, vec![(Self::path(0), Some(claim))], Some(self.rev));
+		let serves: Vec<_> = std::iter::from_fn(|| self.receive[0].try_output()).collect();
+		for serve in &serves {
+			if let crate::route::node::Output::Serve { id, claim, served, .. } = serve {
+				self.receive[0].serving(*id, claim, &served.claim);
+			}
+		}
+		serves.len() + self.drain()
+	}
+
 	/// The first stream hears the origin's next revision, which changes one claim.
 	fn advance(&mut self) {
 		self.rev += 1;
@@ -763,7 +794,7 @@ impl RouteRelay {
 	}
 
 	fn drain(&self) -> usize {
-		(self.receive.iter().chain([&self.answer]))
+		(self.receive.iter().chain(&self.answer))
 			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
 			.sum()
 	}
@@ -1589,8 +1620,8 @@ const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
 	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 4, 1, 0, 1, 0]),
-	(5, &[7, 4, 0, 1, 2, 0]),
+	(5, &[6, 6, 1, 0, 1, 0, 1, 1]),
+	(5, &[7, 6, 0, 1, 2, 0, 1, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),
@@ -1905,6 +1936,7 @@ pub fn seeds() -> Vec<Seed> {
 	seeds.extend(ingest::seeds());
 	seeds.extend(ingest::limit_seeds());
 	seeds.extend(request::seeds());
+	seeds.extend(session::seeds());
 
 	seeds
 }

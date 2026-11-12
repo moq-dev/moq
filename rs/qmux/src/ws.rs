@@ -58,7 +58,7 @@ impl KeepAlive {
 
 impl Default for KeepAlive {
 	fn default() -> Self {
-		// Match the QUIC defaults used by moq-native: 5s ping, 30s deadline.
+		// Match the QUIC defaults used by moq-tokio: 5s ping, 30s deadline.
 		Self {
 			interval: Duration::from_secs(5),
 			timeout: Duration::from_secs(30),
