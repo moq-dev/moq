@@ -316,7 +316,7 @@ impl<O: Output> Media<O> {
 						// An intra-refresh rendition also runs a decoder with one more sweep
 						// of budget, joining a group earlier so its pictures stay clean, as
 						// `moq_video::decode::Consumer` does. Both share one upstream request.
-						let warmup = config.warmup.unwrap_or_default();
+						let warmup = config.warmup.unwrap_or_default().min(moq_mux::container::WARMUP_MAX);
 						let refresh = if warmup.is_zero() {
 							None
 						} else {

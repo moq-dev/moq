@@ -328,9 +328,9 @@ pub struct Playout {
 	pub warmup: std::time::Duration,
 }
 
-/// The most warmup a [`Playout`] reaches back for, so a catalog `warmup` cannot hold a reader's
-/// media without bound. Matches `moq_audio::playback::Input::LATENCY_MAX` and `@moq/watch`'s cap.
-const WARMUP_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+/// The most catalog `warmup` a reader reaches back for, so a publisher cannot hold a reader's media
+/// without bound. Matches `moq_audio::playback::Input::LATENCY_MAX` and `@moq/watch`'s cap.
+pub const WARMUP_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Playout {
 	/// Play at `delay`, starting `warmup` further back.
