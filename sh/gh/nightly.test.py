@@ -357,6 +357,17 @@ class NightlyTest(unittest.TestCase):
             if "nix develop" in job:
                 self.assertIn("uses: ./.github/actions/nix", job, job.splitlines()[0])
 
+    def test_every_tla_leg_path_exists(self):
+        # A leg naming a deleted config checks nothing and fails Nightly; an
+        # exclusion naming one silently stops excluding.
+        workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
+        job = re.search(r"^  tla:\n(.*?)^  \S", workflow, re.M | re.S)
+        self.assertIsNotNone(job)
+        paths = [p for line in re.findall(r"^ +paths: (.+)$", job[1], re.M) for p in line.strip("\"").split()]
+        self.assertTrue(paths)
+        missing = [p for p in paths if not (ROOT / p.removeprefix(":!")).exists()]
+        self.assertEqual(missing, [], "TLA+ matrix paths that no longer exist")
+
     def test_benchmark_tests_stay_out_of_cargo_bench(self):
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
         for group in RUST_TEST_GROUPS:

@@ -427,21 +427,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The largest models get a runner each, and the route model's three
-        # largest configs (about an hour each on 4 workers) one per config; the
-        # `route` and `rest` legs take every other config, so a new one is
-        # checked without editing this list.
+        # The largest models get a runner each, and the route model's two
+        # largest configs one per config; the `route` and `rest` legs take
+        # every other config, so a new one is checked without editing this
+        # list. sh/gh/nightly.test.py fails on a path that no longer exists.
         include:
           - name: resume
             paths: rs/moq-net/verify/resume
           - name: route triangle
             paths: rs/moq-net/verify/route/RouteHandoff.cfg
-          - name: route behind
-            paths: rs/moq-net/verify/route/BehindDear.cfg
           - name: route ring
             paths: rs/moq-net/verify/route/Ring.cfg
           - name: route
-            paths: "rs/moq-net/verify/route :!rs/moq-net/verify/route/RouteHandoff.cfg :!rs/moq-net/verify/route/BehindDear.cfg :!rs/moq-net/verify/route/Ring.cfg"
+            paths: "rs/moq-net/verify/route :!rs/moq-net/verify/route/RouteHandoff.cfg :!rs/moq-net/verify/route/Ring.cfg"
           - name: rest
             paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/route"
     steps:
