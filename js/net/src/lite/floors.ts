@@ -93,6 +93,8 @@ export class Floors {
 	/**
 	 * The route ended or its stream closed. What its floor certified stays while another route to
 	 * the node may still carry a claim it decides; the last route takes the node's state with it.
+	 * Every other route to the node is shown anew, since a path this one alone certified now shows
+	 * what its streams carry.
 	 */
 	leave(node: bigint, carrier: Carrier): void {
 		const entry = this.#nodes.get(node);
@@ -105,6 +107,7 @@ export class Floors {
 		const { prefix, hidden, revision, claims } = carrier.view;
 		if (revision !== undefined) entry.retained.push({ prefix, hidden, revision, claims });
 		this.#prune(entry);
+		for (const other of entry.carriers) other.reshow();
 	}
 
 	/**

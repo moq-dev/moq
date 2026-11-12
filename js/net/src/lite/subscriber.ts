@@ -913,6 +913,8 @@ export class Subscriber {
 		const history = new AnnounceHistory();
 		let nextRoute = 0n;
 		let synced = false;
+		// Set once the stream lets go of its routes, which then show nothing anew.
+		let closing = false;
 
 		const route = (id: bigint): Route => {
 			const found = routes.get(id);
@@ -1062,9 +1064,9 @@ export class Subscriber {
 							shown: new Map(),
 							carrier: {
 								view,
-								// Another stream's floor runs this: a closed reader is about to let go.
+								// Another route's floor or end runs this: a closed reader is about to let go.
 								reshow: () => {
-									if (announced.closed.peek() === undefined) show(wire, new Map(), true);
+									if (!closing && announced.closed.peek() === undefined) show(wire, new Map(), true);
 								},
 							},
 							owner: {},
@@ -1194,6 +1196,7 @@ export class Subscriber {
 			}
 		} finally {
 			stopDrain?.();
+			closing = true;
 			for (const wire of routes.values()) {
 				this.#floors.leave(wire.node, wire.carrier);
 				for (const path of wire.view.claims.keys()) this.#consumes.withdraw(path, wire.owner);

@@ -3714,6 +3714,35 @@ test("a lite-07 floor that certifies nothing keeps the withdrawal its route cert
 	await pick.info;
 });
 
+// A kept floor decides only while a live one certifies the path: once the last certifying route
+// ends, a claim another stream carries uncertified shows again.
+test("a lite-07 uncertified claim shows once its last certifier ends", async () => {
+	const { subscriber, announced, send, another } = await routedStream();
+	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const x = Path.from("live/x");
+	const y = Path.from("live/y");
+	const a = Instance.parse("a");
+
+	// The first stream certifies NODE_A's claims at revision 1, without live/x.
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: y, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: y, kind: "start" });
+	// The second carries live/x under a floor that certifies nothing: held back.
+	await live.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance: a });
+	await live.send({ status: "active", suffix: Path.from("y"), route: 0n, instance: a });
+	await live.send({ status: "floor", id: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: y, kind: "start" });
+
+	await send({ status: "routeEnd", id: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+
+	live.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
 // A lagging stream's copy of a claim takes the cost the newest certifying floor gives it, so a
 // re-priced origin does not keep winning on the cost it had.
 test("a lite-07 lagging copy carries the cost a newer floor certified", async () => {
