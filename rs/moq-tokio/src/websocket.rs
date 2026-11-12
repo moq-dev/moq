@@ -348,13 +348,6 @@ pub(crate) async fn race_handle(
 		_ => return None,
 	}
 
-	// `http://` falls back to plaintext `ws://`, which can't carry the client
-	// certificate QUIC presents, so a fallback win would bring the session up anonymous.
-	if url.scheme() == "http" && tls.client_auth_cert_resolver.has_certs() {
-		tracing::info!(peer = %crate::connect::Endpoint(url), "skipping the plaintext WebSocket fallback: it can't present the client certificate");
-		return None;
-	}
-
 	let res = connect(config, tls, tls_host_name, addr, alpns, session).await;
 	if let Err(err) = &res {
 		tracing::warn!(%err, "WebSocket connection failed");
@@ -959,40 +952,6 @@ mod tests {
 	async fn ipv6_tls_host_name_override() {
 		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", false, Some("::1")).await;
-	}
-
-	/// A client certificate rules out the plaintext `ws://` fallback of `http://`, but
-	/// not the `wss://` fallback of `https://`, which presents it.
-	#[cfg(feature = "quic")]
-	#[tokio::test]
-	async fn client_cert_skips_only_the_plaintext_fallback() {
-		let identity = crate::tls::Identity::generate(&["client".to_string()]).unwrap();
-		let mut connect = crate::tls::Connect::default();
-		connect.insecure = Some(true);
-		connect.identity = Some(identity);
-		let tls = connect.build().unwrap();
-		// No head start, so the dial that does run never waits on the clock.
-		let config = Config {
-			delay: Some(time::Duration::ZERO.into()),
-			..Default::default()
-		};
-
-		// Nothing listens here, so a dial that does run fails fast.
-		let port = tokio::net::TcpListener::bind("127.0.0.1:0")
-			.await
-			.unwrap()
-			.local_addr()
-			.unwrap()
-			.port();
-		let race = |scheme: &str| {
-			let url = Url::parse(&format!("{scheme}://127.0.0.1:{port}/anon")).unwrap();
-			let tls = tls.clone();
-			let config = config.clone();
-			async move { race_handle(&config, &tls, None, url.into(), moq_net::ALPNS, &crate::qmux_default()).await }
-		};
-
-		assert!(race("http").await.is_none());
-		assert!(race("https").await.is_some());
 	}
 
 	/// Dial `wss://{url_host}` on loopback, optionally pinned to fixed addresses, and

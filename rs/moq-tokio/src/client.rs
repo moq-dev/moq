@@ -52,6 +52,9 @@ pub struct Client {
 	pub(crate) tokens: Vec<moq_net::auth::Token>,
 	/// The connect deadline, backoff, and GOAWAY handling each [`Connection`] runs under.
 	pub(crate) policy: moq_net::reconnect::Config,
+	/// Whether dials present an mTLS client certificate, refusing schemes that can't.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+	client_cert: bool,
 	/// The resolved Happy Eyeballs timings, used by the `tcp://` and `tls://`
 	/// dials here; the QUIC backend captures its own copy from the config.
 	#[cfg(feature = "tcp")]
@@ -151,6 +154,8 @@ impl Client {
 		let tcp_tls = config.tls.clone();
 		#[cfg(feature = "websocket")]
 		let tls_host_name = config.tls.host_name.clone();
+		#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+		let client_cert = config.tls.has_client_cert();
 		let mut policy = moq_net::reconnect::Config::default();
 		policy.backoff = config.backoff.resolve();
 		policy.goaway = config.goaway.resolve();
@@ -170,6 +175,8 @@ impl Client {
 			connect: config.url,
 			tokens: config.tokens,
 			policy,
+			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+			client_cert,
 			#[cfg(feature = "tcp")]
 			failover_delay,
 			#[cfg(feature = "tcp")]
@@ -386,6 +393,13 @@ impl Client {
 		attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
 	) -> crate::Result<Dialed> {
 		let (addr, client) = self.attempt(&attempt);
+		// A configured certificate is never silently dropped. `http://` trusts a fingerprint
+		// fetched over plaintext and falls back to `ws://`, and `ws://` and `tcp://` carry
+		// no TLS, so none can present it to an authenticated server. `unix://` is local:
+		// the kernel identifies the client and the socket's permissions guard the server.
+		if self.client_cert && matches!(addr.url().scheme(), "http" | "ws" | "tcp") {
+			return Err(Error::ClientCertScheme(addr.url().scheme().to_string()));
+		}
 		#[cfg(test)]
 		if let Some(dialer) = &self.dialer {
 			return dialer(addr, client.moq.clone()).await;
@@ -731,6 +745,30 @@ mod tests {
 	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
+	/// A client certificate refuses every scheme that can't present it, before dialing.
+	#[tokio::test]
+	async fn client_cert_refuses_schemes_that_cannot_present_it() {
+		let mut config = crate::connect::Config::default();
+		config.tls.identity = Some(crate::tls::Identity::generate(["client"]).unwrap());
+		let mut client = config.init(Default::default()).unwrap().with_reconnect(false);
+		let dialed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let record = dialed.clone();
+		client.dialer = Some(std::sync::Arc::new(move |addr: crate::connect::Addr, _| {
+			record.lock().unwrap().push(addr.url().scheme().to_string());
+			Box::pin(async { Err(Error::ConnectFailed) })
+		}));
+
+		for scheme in ["http", "ws", "tcp", "https", "wss", "moqt", "moql", "tls", "unix"] {
+			let url: Url = format!("{scheme}://relay.invalid:443/").parse().unwrap();
+			let Err(err) = client.connect(url).established().await else {
+				panic!("{scheme} connected");
+			};
+			let refused = matches!(err, Error::ClientCertScheme(_));
+			assert_eq!(refused, matches!(scheme, "http" | "ws" | "tcp"), "{scheme}: {err}");
+		}
+		assert_eq!(*dialed.lock().unwrap(), ["https", "wss", "moqt", "moql", "tls", "unix"]);
 	}
 
 	#[cfg(feature = "quic")]

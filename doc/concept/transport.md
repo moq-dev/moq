@@ -52,9 +52,11 @@ minutes. Once a probe gets through, it moves back the way it follows a GOAWAY:
 the WebSocket session tells the relay it is leaving and keeps serving until the
 QUIC session replaces it.
 
-An `http://` URL falls back to plaintext `ws://`, which can't present a client
-certificate, so a `moq-tokio` client configured with one dials `http://` over
-QUIC alone. `https://` still races `wss://`, which presents it.
+A `moq-tokio` client with a client certificate refuses to dial `http://`,
+`ws://`, or `tcp://`: none can present the certificate to a server it has
+authenticated, and `http://` trusts a fingerprint fetched over plaintext. Dial
+`https://`, `wss://`, `moqt://`, `moql://`, or `tls://` instead. `unix://` stays
+allowed, since the kernel identifies both ends of a local socket.
 
 Each side lets the other hold 10,000 streams open in each direction, as over
 QUIC, since MoQ holds one per subscription and per live group. Set it with
