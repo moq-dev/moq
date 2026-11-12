@@ -183,12 +183,16 @@ Scheduled run
   a missing group in moq-audio only for the playout delay, which is small at a
   cold start, so a reordered group early on reads as a gap. No open PR names this cell;
   [moq-dev/moq#8587](https://github.com/moq-dev/moq/pull/8587) covers `python -> go`.
+  Decided 2026-11-12 (maintainer): the cell moves to
+  [test flakes](/quest/m0/test-flakes-2/interop-go-python.md), which checks
+  #8531 first.
 - Media output and lifecycle: after the pause case resumes, the audio trails the
   picture by about 1.7 s. [moq-dev/moq#8507](https://github.com/moq-dev/moq/pull/8507)
   keeps audio that trails the clock up to its 2 s stretch bound and plays it
   faster, and a resume keeps the ring it had. Fixed by the child
   [resumed audio snaps to the clock](/quest/m0/interop-green/resume-sync.md),
-  which waits on a maintainer decision.
+  decided 2026-11-12 (maintainer) to snap to the live picture rather than
+  stretch the lag back.
 
 The 11-11 run, before #8507, passed all three steps.
 

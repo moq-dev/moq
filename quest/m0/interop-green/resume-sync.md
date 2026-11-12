@@ -18,13 +18,9 @@ Evidence, `just test media --media-cases pause` in `test/interop/clients/js/medi
 - Parent of #8507 (ac73d9e0b): passes, median skew 0 ms (one run). On a host at load 30, four full `just test media` runs there passed 1, and the other 3 failed only `audio tone` (67 to 70 of 81 samples, the CI signature), never sync; the 11-11 head a4bc922c6 passed 4 of 6, failing the same way. #8507 itself (4262a0691) failed 4 of 4 on sync, median skew 400 to 600 ms after resume. So the CI step can stay red under load after this fix, from a tone flake older than #8507.
 - Experiment, not committed: a same-instance resubscribe calls the decoder's `reset()`, so the ring joins the clock again. 4 of 4 runs pass, median skew 0 ms. One full `just test media` run also passed the pause and rejoin steps, then failed the later `live incumbent fallback` case, which was not investigated.
 
-Recommendation: re-join the ring when a viewer returns from absence on the same instance, so resumed audio lands on the clock the way a tune-in does, and keep the 2 s bound for stalls. Rejected: relax the resume assertion. `js/watch/AGENTS.md` says to judge a player change by its lag first, and the lip sync this stretch was built to fix (#8031) is what a stretch-back costs.
+Decided 2026-11-12 (maintainer): ✅ snap to the live picture. Re-join the ring when a viewer returns from absence on the same instance, so resumed audio lands on the clock the way a tune-in does, and keep the 2 s bound for stalls. Rejected: stretch catch-up with #8507's time-stretch, which plays the lag back over about 5 s and costs the lip sync that #8031 fixed; relaxing the resume assertion to match it, since `js/watch/AGENTS.md` says to judge a player change by its lag first. Check it with `just test media --media-cases pause`.
 
 Open for the implementer:
 
 - Scope the re-join to a return from absence. The handover path (`#handover` in `decoder.ts`) also inherits the ring for a rendition swap and a fallback, which should keep their seamless handover. Check the fallback case.
 - Native parity: `moq play` pauses through `rs/moq-audio`. Check whether its ring inherits the same way; `just test media` does not cover it.
-
-## Waiting
-
-- Maintainer: decide whether a resumed viewer's audio snaps to the clock or plays faster to catch up over about 5 s with #8507's stretch. Recommended: snap, as in the Plan, because the stretch-back is seconds of lip-sync loss. Choosing the stretch-back means relaxing the media test's resume assertion. Check: `just test media --media-cases pause` passes four runs in a row.

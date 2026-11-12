@@ -280,4 +280,12 @@ its third failure since 2026-10-16 and its first after
 [moq-dev/moq#8526](https://github.com/moq-dev/moq/pull/8526). It is
 quarantined with `#[ignore]` until its child fixes it.
 
+Added 2026-11-12 (maintainer, from the Interop triage of scheduled run
+[43260674067](https://github.com/moq-dev/moq/actions/runs/43260674067)): the
+`go -> python` media cell, which failed `audio gap after 648 samples` once and
+passed 8 local runs after it. Decided: ✅ add it here as the child
+[interop's go -> python media cell](/quest/m0/test-flakes-2/interop-go-python.md),
+not quarantined (rejected: a new quest after a second red run; quarantining the
+cell). Check [moq-dev/moq#8531](https://github.com/moq-dev/moq/pull/8531) first.
+
 Public API: none. Wire: none.
