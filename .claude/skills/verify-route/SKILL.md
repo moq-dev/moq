@@ -34,9 +34,9 @@ What the timer costs, as the configs show it: fired late, it costs only the wait
 ## Run
 
 ```sh
-just rs tla moq-net/verify/route/RouteHandoff.tla
-just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Ring.cfg
-just test tla rs/moq-net/verify/route
+quest gate just rs tla moq-net/verify/route/RouteHandoff.tla
+quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Ring.cfg
+quest gate just test tla rs/moq-net/verify/route
 ```
 
 `just test tla rs/moq-net/verify/route` runs every config, as Nightly does, simulating each one with a `Simulate:` line and expecting `Loop.cfg` to break. Times are with `-workers 4`. `Patient` is TRUE unless the table says otherwise.

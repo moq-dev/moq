@@ -22,9 +22,9 @@ Each rule is an INVARIANT, except `Settles`, which is TLC's deadlock check: ever
 ## Run
 
 ```sh
-just rs tla moq-net/verify/failover/FailoverChain.tla
-just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Leave.cfg
-just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/EndedRelay.cfg
+quest gate just rs tla moq-net/verify/failover/FailoverChain.tla
+quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Leave.cfg
+quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/EndedRelay.cfg
 ```
 
 The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 2.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 2.2M states. Each takes seconds and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop: it fails at the sync commit on the open finding below at depth 31, after about 50M distinct states and minutes.
