@@ -4449,6 +4449,14 @@ impl Consumer {
 		self.cursor.raw = raw;
 	}
 
+	/// The frames this reader has yet to read: from its cursor to its cap.
+	pub(super) fn unread(&self) -> Bounds {
+		Bounds {
+			start: self.cursor.index as u64,
+			end: self.cursor.end.map(|end| end as u64),
+		}
+	}
+
 	/// One past the last frame the copy read committed.
 	pub(super) fn committed(&self) -> usize {
 		self.cursor.state.read().committed()

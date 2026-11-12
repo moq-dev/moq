@@ -3792,10 +3792,8 @@ pub(super) fn successor(
 	waiter: &kio::Waiter,
 ) -> Poll<Option<group::Consumer>> {
 	let sequence = reader.sequence;
-	let frames = group::Bounds {
-		start: reader.index(),
-		end: None,
-	};
+	// A copy cut short at the back still continues a reader capped no later than the cut.
+	let frames = reader.unread();
 	let found = track.poll_ref(waiter, |state| {
 		// Only a hold on the copy read: one on a copy that took over from it waits on that one.
 		if state
@@ -17282,6 +17280,39 @@ mod test {
 		again.finish().unwrap();
 		assert_eq!(reader.finished().await.unwrap(), 1);
 		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+	}
+
+	/// A capped reader continues on a copy cut short at the back no earlier than its cap, which
+	/// holds every frame it still reads.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_capped_reader_continues_on_a_copy_cut_at_its_cap() {
+		let producer = received_producer(Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		// Received from frame 1, so a fetch of the group's head can sit beside it.
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { sequence: 3 }, 1) else {
+			panic!("the first copy opens");
+		};
+		first.write_frame(at(301), &b"b"[..]).unwrap();
+		let mut reader = first.consume().with_range(..3);
+		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"b");
+
+		let mut head = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
+			.unwrap();
+		for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
+			head.write_frame(at(millis), &payload[..]).unwrap();
+		}
+		head.finish().unwrap();
+		first.abort(Error::Cancel).unwrap();
+		// An uncapped reader needs frames past the head, which no copy holds.
+		assert!(reader.clone().with_end(None).read_frame().await.is_err());
+		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"c");
+		assert!(reader.read_frame().await.unwrap().is_none());
 	}
 
 	/// A reader waiting out a held re-offer is stalled, so its budget still gives up on it.

@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Instant, Manual, Wall, yieldNow } from "@moq/clock";
-import { race } from "@moq/signals";
+import { race, Signal } from "@moq/signals";
 import { DEFAULT_EXPIRY } from "./cache.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -3406,157 +3406,190 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 // continues on it from its frame with nothing repeated or missed. A released hold leaves the
 // failure, even to a reader only watching `closed`, as does a duplicate starting past the reader's
 // frame or one that shed it. A re-offer that fails too hands over to the next. A reader closed while it waits ends its
-// read and can be closed again, and one closed with frames still buffered reads them first.
-test.each(["reoffer", "readable", "released", "observed", "shedObserved", "unserved", "twice", "leaving", "closed", "past", "shed"])(
-	"a failed copy continues on its held re-offer (%p)",
-	async (kind) => {
-		const producer = new TrackProducer("video").accept({ maxAge: null });
-		hooks.receiveTrack(producer);
-		const first = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
-		first.writeFrame({ payload: enc.encode("a") });
-		const reader = first.consume();
-		expect(await reader.readString()).toBe("a");
+// read and can be closed again, and one closed with frames still buffered reads them first. A route
+// replacement asked for while the copy stalled is moot once a re-offer takes over.
+test.each([
+	"reoffer",
+	"readable",
+	"released",
+	"observed",
+	"shedObserved",
+	"unserved",
+	"twice",
+	"leaving",
+	"closed",
+	"past",
+	"shed",
+	"stalled",
+])("a failed copy continues on its held re-offer (%p)", async (kind) => {
+	const producer = new TrackProducer("video").accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const first = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+	first.writeFrame({ payload: enc.encode("a") });
+	const reader = first.consume();
+	expect(await reader.readString()).toBe("a");
 
-		const arriving = hooks.arrivingGroup(producer, 3n);
-		expect(arriving).toBeDefined();
-		const failed = new Error("reset");
-		if (kind === "closed") {
-			// A frame still buffered when the copy fails stays readable after a close.
-			first.writeFrame({ payload: enc.encode("c") });
-			first.abort(failed);
-			reader.close();
-			expect(await reader.readString()).toBe("c");
-			await expect(reader.readString()).rejects.toBe(failed);
-			arriving?.release();
-			producer.close();
-			return;
-		}
+	const arriving = hooks.arrivingGroup(producer, 3n);
+	expect(arriving).toBeDefined();
+	const failed = new Error("reset");
+	// A front whose route moved: a stalled read asks it for a replacement, held out until rejected.
+	const asked: PromiseWithResolvers<never>[] = [];
+	if (kind === "stalled") {
+		hooks.recoverGroup(reader, {
+			changed: new Signal(0),
+			wants: () => true,
+			replace: () => {
+				const attempt = Promise.withResolvers<never>();
+				asked.push(attempt);
+				return attempt.promise;
+			},
+		});
+	}
+	if (kind === "closed") {
+		// A frame still buffered when the copy fails stays readable after a close.
+		first.writeFrame({ payload: enc.encode("c") });
 		first.abort(failed);
-		if (kind === "observed") {
-			let closed: Error | null | undefined;
-			reader.closed.then((value) => {
-				closed = value;
-			});
-			await settle();
-			expect(closed).toBeUndefined();
-			arriving?.release();
-			await settle();
-			expect(closed).toBe(failed);
-			producer.close();
-			return;
-		}
-		if (kind === "twice") {
-			// The reader reaches neither re-offer before the third copy takes over.
-			const second = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
-			arriving?.release();
-			const held = hooks.arrivingGroup(producer, 3n);
-			second.abort(failed);
-			await settle();
-			expect(reader.closed.peek()).toBeUndefined();
-			const third = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
-			held?.release();
-			third.writeFrame({ payload: enc.encode("a") });
-			third.writeFrame({ payload: enc.encode("b") });
-			third.finish();
-			expect(await reader.readString()).toBe("b");
-			expect(await reader.readString()).toBeUndefined();
-			expect(await reader.closed).toBeNull();
-			producer.close();
-			return;
-		}
-		if (kind === "shedObserved") {
-			// A re-offer that could take over until it shed the reader's frame settles `closed` then.
-			const again = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
-			arriving?.release();
-			for (const payload of ["a", "b", "c"]) again.writeFrame({ payload: enc.encode(payload) });
-			let closed: Error | null | undefined;
-			reader.closed.then((value) => {
-				closed = value;
-			});
-			await settle();
-			expect(closed).toBeUndefined();
-			hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
-			await settle();
-			expect(closed).toBe(failed);
-			producer.close();
-			return;
-		}
-		if (kind === "unserved") {
-			// A re-offer starting past the reader's frame cannot take over, so `closed` settles once
-			// nothing else is held.
-			hooks.receiveGroup(producer, { sequence: 3n, start: 2 });
-			arriving?.release();
-			await settle();
-			expect(reader.closed.peek()).toBe(failed);
-			producer.close();
-			return;
-		}
-		let read: string | Uint8Array | undefined | Error;
-		// A readiness poll waits the same way, and adopts the re-offer rather than spinning on the
-		// failed copy.
-		const pending =
-			kind === "readable" ? reader.readable().then(() => reader.tryReadFrame()?.payload) : reader.readString();
-		const reading = pending.then(
-			(frame) => {
-				read = frame;
-			},
-			(err: Error) => {
-				read = err;
-			},
-		);
-		await settle();
-		expect(read).toBeUndefined();
-		expect(reader.closed.peek()).toBeUndefined();
-
-		if (kind === "leaving") {
-			reader.close();
-			await reading;
-			expect(read).toBe(failed);
-			// Closing is idempotent, even after the wait was cancelled.
-			reader.close();
-			arriving?.release();
-			producer.close();
-			return;
-		}
-		if (kind === "released") {
-			arriving?.release();
-			await reading;
-			expect(read).toBe(failed);
-			expect(await reader.closed).toBe(failed);
-			producer.close();
-			return;
-		}
-		const again = hooks.receiveGroup(producer, { sequence: 3n, start: kind === "past" ? 2 : 0 });
+		reader.close();
+		expect(await reader.readString()).toBe("c");
+		await expect(reader.readString()).rejects.toBe(failed);
 		arriving?.release();
-		if (kind === "shed") {
-			// The re-offer drops frames 0 and 1 to cache pressure before the reader reaches it.
-			again.writeFrame({ payload: enc.encode("a") });
-			again.writeFrame({ payload: enc.encode("b") });
-			again.writeFrame({ payload: enc.encode("c") });
-			hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
-			await reading;
-			expect(read).toBe(failed);
-			producer.close();
-			return;
-		}
-		if (kind === "past") {
-			await reading;
-			expect(read).toBe(failed);
-			producer.close();
-			return;
-		}
+		producer.close();
+		return;
+	}
+	if (kind !== "stalled") first.abort(failed);
+	if (kind === "observed") {
+		let closed: Error | null | undefined;
+		reader.closed.then((value) => {
+			closed = value;
+		});
 		await settle();
-		expect(read).toBeUndefined();
-		again.writeFrame({ payload: enc.encode("a") });
-		again.writeFrame({ payload: enc.encode("b") });
-		again.finish();
-		await reading;
-		expect(read).toEqual(kind === "readable" ? enc.encode("b") : "b");
+		expect(closed).toBeUndefined();
+		arriving?.release();
+		await settle();
+		expect(closed).toBe(failed);
+		producer.close();
+		return;
+	}
+	if (kind === "twice") {
+		// The reader reaches neither re-offer before the third copy takes over.
+		const second = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+		arriving?.release();
+		const held = hooks.arrivingGroup(producer, 3n);
+		second.abort(failed);
+		await settle();
+		expect(reader.closed.peek()).toBeUndefined();
+		const third = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+		held?.release();
+		third.writeFrame({ payload: enc.encode("a") });
+		third.writeFrame({ payload: enc.encode("b") });
+		third.finish();
+		expect(await reader.readString()).toBe("b");
 		expect(await reader.readString()).toBeUndefined();
 		expect(await reader.closed).toBeNull();
 		producer.close();
-	},
-);
+		return;
+	}
+	if (kind === "shedObserved") {
+		// A re-offer that could take over until it shed the reader's frame settles `closed` then.
+		const again = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+		arriving?.release();
+		for (const payload of ["a", "b", "c"]) again.writeFrame({ payload: enc.encode(payload) });
+		let closed: Error | null | undefined;
+		reader.closed.then((value) => {
+			closed = value;
+		});
+		await settle();
+		expect(closed).toBeUndefined();
+		hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
+		await settle();
+		expect(closed).toBe(failed);
+		producer.close();
+		return;
+	}
+	if (kind === "unserved") {
+		// A re-offer starting past the reader's frame cannot take over, so `closed` settles once
+		// nothing else is held.
+		hooks.receiveGroup(producer, { sequence: 3n, start: 2 });
+		arriving?.release();
+		await settle();
+		expect(reader.closed.peek()).toBe(failed);
+		producer.close();
+		return;
+	}
+	let read: string | Uint8Array | undefined | Error;
+	// A readiness poll waits the same way, and adopts the re-offer rather than spinning on the
+	// failed copy.
+	const pending =
+		kind === "readable" ? reader.readable().then(() => reader.tryReadFrame()?.payload) : reader.readString();
+	const reading = pending.then(
+		(frame) => {
+			read = frame;
+		},
+		(err: Error) => {
+			read = err;
+		},
+	);
+	await settle();
+	expect(read).toBeUndefined();
+	expect(reader.closed.peek()).toBeUndefined();
+
+	if (kind === "stalled") {
+		// The stall's attempt is out before the copy fails.
+		expect(asked.length).toBe(1);
+		first.abort(failed);
+		await settle();
+	}
+	if (kind === "leaving") {
+		reader.close();
+		await reading;
+		expect(read).toBe(failed);
+		// Closing is idempotent, even after the wait was cancelled.
+		reader.close();
+		arriving?.release();
+		producer.close();
+		return;
+	}
+	if (kind === "released") {
+		arriving?.release();
+		await reading;
+		expect(read).toBe(failed);
+		expect(await reader.closed).toBe(failed);
+		producer.close();
+		return;
+	}
+	const again = hooks.receiveGroup(producer, { sequence: 3n, start: kind === "past" ? 2 : 0 });
+	arriving?.release();
+	if (kind === "shed") {
+		// The re-offer drops frames 0 and 1 to cache pressure before the reader reaches it.
+		again.writeFrame({ payload: enc.encode("a") });
+		again.writeFrame({ payload: enc.encode("b") });
+		again.writeFrame({ payload: enc.encode("c") });
+		hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
+		await reading;
+		expect(read).toBe(failed);
+		producer.close();
+		return;
+	}
+	if (kind === "past") {
+		await reading;
+		expect(read).toBe(failed);
+		producer.close();
+		return;
+	}
+	await settle();
+	expect(read).toBeUndefined();
+	asked[0]?.reject(new Error("route refused"));
+	await settle();
+	expect(read).toBeUndefined();
+	again.writeFrame({ payload: enc.encode("a") });
+	again.writeFrame({ payload: enc.encode("b") });
+	again.finish();
+	await reading;
+	expect(read).toEqual(kind === "readable" ? enc.encode("b") : "b");
+	expect(await reader.readString()).toBeUndefined();
+	expect(await reader.closed).toBeNull();
+	producer.close();
+});
 
 // A subscriber's reader of a failed copy keeps its place when a re-offer replaces that copy in the
 // track, continuing on it, and its budget still gives up on it while it waits on a held re-offer.

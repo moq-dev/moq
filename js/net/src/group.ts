@@ -1325,6 +1325,9 @@ export class Consumer {
 	// Read the rest of the group from `group`, which starts at or below the frame this one reached.
 	#switch(group: Consumer, expiry: Expiry | undefined): void {
 		const index = this.#index();
+		// A replacement still asked for the copy left behind is moot: its refusal would fail
+		// the reader on this one. A stall here asks again.
+		this.#abandon();
 		// The copy left behind stops teeing into the state this consumer read.
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
 		this.#arrived ??= this.#state.arrived;
