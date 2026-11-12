@@ -23895,6 +23895,40 @@ mod test {
 		assert_eq!((fill.start().group, fill.end()), (0, 3));
 	}
 
+	/// A fill's OLD answer under the budget it was asked with is a stale verdict on its reader,
+	/// which each update reopens: a new fill is asked every time, never given up. Mirrors JS.
+	#[test]
+	#[cfg(feature = "async")]
+	#[expect(clippy::single_range_in_vec_init, reason = "the reopened runs are a list, here one")]
+	fn a_fills_old_answer_is_asked_again_after_each_update() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		producer.start_at(3).unwrap();
+		write_group(&producer, 3);
+		let terms = |secs| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(secs)))
+				.with_ranges([Range::groups(0..)])
+		};
+		let mut subscriber = producer.subscribe(terms(60));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), [3]);
+		for secs in [60, 120, 240] {
+			assert!(subscriber.poll_drop(&waiter).is_pending());
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+				panic!("a fill is asked under {secs}s");
+			};
+			assert_eq!((fill.start().group, fill.end()), (0, 3));
+			fill.reject_groups(0..3, Error::Old);
+			let stale = Hole::stale(Duration::from_secs(secs));
+			assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((0..3, stale)));
+			subscriber.update(terms(secs * 2)).unwrap();
+			assert_eq!(subscriber.reoffer_stale(), [0..3]);
+		}
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert!(matches!(dynamic.poll_requested_fill(&waiter), Poll::Ready(Ok(_))));
+	}
+
 	/// Every group a set of ranges names, as a received copy's upstream terms judge them.
 	#[cfg(feature = "async")]
 	fn judged(runs: impl IntoIterator<Item = (u64, u64)>) -> Option<RangeSet<u64>> {

@@ -611,6 +611,9 @@ impl Misses {
 						}
 					}
 					Err((Error::Old, asked)) if looser(max_delay, asked) => retry.insert(groups),
+					// Stale under the budget it was asked with, which this reader's is no wider
+					// than: a stale verdict an update reopens, never a refusal spent for good.
+					Err((Error::Old, Some(asked))) => self.give_up_stale(groups, asked, given_up),
 					// A drop the track recorded is named by the drop cursor already.
 					Err(_) => self.settle(&state, groups, given_up),
 				}

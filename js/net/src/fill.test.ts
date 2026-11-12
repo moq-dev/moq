@@ -4,6 +4,7 @@ import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
+import { rejectGroups } from "./fill.ts";
 import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -748,6 +749,33 @@ test("fill: a group no reader reads any more stays withdrawn, and widening back 
 	third?.close();
 	again?.close();
 	fill.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a refusal under an old budget is asked afresh on each widening, never spending the eviction refill", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const terms = (max: number): Subscription => ({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 5n } }],
+		delay: { max: Duration.millis(max) },
+		order: "ascending",
+	});
+	const reader = track.subscribe(terms(60_000));
+	void drain(reader);
+	const old = new StreamError(StreamCode.Old, { message: "old" });
+	// Each widening past the last refusal's budget asks a new fill for the run.
+	for (const budget of [60_000, 120_000, 240_000]) {
+		const fill = await requests.requestedFill();
+		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
+		if (!fill) throw new Error("no fill");
+		rejectGroups(fill, 0n, 5n, old, budget);
+		fill.close();
+		reader.update(terms(budget * 2));
+	}
+	expect(await requests.requestedFill()).toMatchObject({ start: 0n, end: 5n });
+
 	reader.close();
 	requests.close();
 	broadcast.close();

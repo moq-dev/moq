@@ -3464,8 +3464,15 @@ export class Subscriber {
 			priority: () => this.#state.update.peek()?.priority ?? 0,
 			maxDelay: () => this.#drift().budget,
 			order: () => this.#state.update.peek()?.order ?? "descending",
-			refuse: (start, end, error, stale) =>
-				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, stale })),
+			refuse: (start, end, error, stale) => {
+				// A budget's verdict is no eviction: a widening asks it afresh, never through the
+				// one refill an evicted answer is allowed, as the Rust `Misses::resolve` retries it.
+				if (stale !== undefined) {
+					this.#asked = removeRun(this.#asked, start, end);
+					this.#refilled = removeRun(this.#refilled, start, end);
+				}
+				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, stale }));
+			},
 		};
 		return this.#state.asker;
 	}
