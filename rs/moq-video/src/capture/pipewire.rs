@@ -14,7 +14,9 @@
 //!   reopens it for the next viewer. A fresh portal session would re-prompt the
 //!   picker every time, so the portal's restore token is kept with the selection
 //!   and consumed by the next [`open`], which restores the same grant without a
-//!   dialog (on compositors that support persistence). The token is forgotten when the
+//!   dialog (on compositors that support persistence). The grant lasts until the
+//!   user revokes it, so a caller can also persist the token for a later process
+//!   (`Selection::restore_token`). The token is forgotten when the
 //!   compositor ends the stream (the user hit "stop sharing"), so a revoked
 //!   grant is asked for again rather than silently resumed.
 //! - Compositors only deliver frames on damage, so a static screen would starve
@@ -256,8 +258,10 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 				})
 				.set_sources(ashpd::enumflags2::BitFlags::from(requested))
 				.set_multiple(false)
-				.set_persist_mode(PersistMode::Application)
-				.set_restore_token(restore.as_deref()),
+				// A grant that ends with the process would make a token persisted
+				// through `Selection::restore_token` useless to the next one.
+				.set_persist_mode(PersistMode::ExplicitlyRevoked)
+				.set_restore_token(restore.as_ref().map(portal::RestoreToken::as_str)),
 		)
 		.await
 		.map_err(|e| err("portal select sources", e))?
