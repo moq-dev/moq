@@ -2,8 +2,8 @@
 
 ## Goal
 
-`just bench-profile instructions` never reports a number from a cell that ran while other work loaded the host: it reruns the cell, and fails the run if the host stays busy, so every figure in its summary is comparable with the others.
-Today each cell records the load it ran under (`host_load_1m` in `bench/instructions.py`) and the summary prints it, but telling a clean cell from a contaminated one is left to the reader.
+`just bench-profile instructions` never reports a number from a cell that other work on the host disturbed, or that did not deliver its workload: it reruns the cell, and fails the run if no clean window comes, so every figure in its summary is comparable with the others.
+Today each cell records the load it ran under (`host_load_1m` in `bench/instructions.py`), its delivered rate, and its lost groups, and the summary prints them, but telling a clean cell from a contaminated one is left to the reader.
 
 ## Plan
 
@@ -18,7 +18,7 @@ One revision read 142.7k under load and 169k to 175k quiet.
 
 Guidance, for the implementer to confirm:
 
-- The threshold is a property of the host, so derive it from the CPU count or measure it rather than hard-coding 9.
-- Bound the reruns, and say in the failure which cells never got a quiet window.
-- The one-minute average lags a short burst. Sampling the load at both ends of the window is what the bench does now; check whether that is enough or whether the window needs its own measure, such as the run queue from `/proc/pressure/cpu`.
+- The load average cannot be the test. It counts the bench's own relay and generator, so a clean 16-worker cell reads higher than a contaminated 4-worker one, and no single threshold separates them. Measure the other work instead, such as CPU time over the window spent outside the bench's own processes, or `/proc/pressure/cpu`.
+- The one-minute average also lags: recorded cells at load 5.25 and 8.7 delivered 4 to 5% under the target rate with no lost groups (`.github/relay-cpu-bisect.md`). A cell that falls short of its target rate, or loses a group, is rejected whatever the host measure says; `bench/instructions.py` already has both numbers.
+- Bound the reruns, and say in the failure which cells never got a clean window.
 - `bench/local.py` records `host_load` as well; decide whether it takes the same rule.
