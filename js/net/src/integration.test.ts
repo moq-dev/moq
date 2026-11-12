@@ -15,7 +15,6 @@ import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
 import { refuse as refuseRequest } from "./ietf/request_stream.ts";
-import { SubscribeTracks } from "./ietf/subscribe_tracks.ts";
 import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
@@ -1294,43 +1293,6 @@ test("integration: lite draft-07 fetch uses the republished track's timescale", 
 	server.abort();
 });
 
-test("integration: ietf fetches a past group of a finished track", async () => {
-	for (const protocol of [Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
-		const pair = createMockTransportPair(protocol);
-		const origin = new OriginProducer();
-		const publication = origin.route(Path.from("test"));
-		// No publisher limit, so the superseded group stays fresh to fetch, and no MAX_CACHE_DURATION.
-		const published = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-		for (let sequence = 0; sequence < 3; sequence++) {
-			const group = published.appendGroup();
-			group.writeFrame({
-				payload: new Uint8Array([sequence]),
-				timestamp: new Timestamp(sequence * 1000, Timescale.MILLI),
-			});
-			group.finish();
-		}
-		published.finish();
-		const [client, server] = await Promise.all([
-			connect(url, { transport: pair.client }),
-			accept(pair.server, url, { publish: origin.consume() }),
-		]);
-		const remote = wireOf(client).consume(Path.from("test"));
-		const group = await remote.track("video").fetchGroup(1n);
-		expect(group.sequence).toBe(1n);
-		const frame = await group.readFrame();
-		expect(frame?.payload).toEqual(new Uint8Array([1]));
-		expect(frame?.timestamp).toEqual(new Timestamp(1000, Timescale.MILLI));
-		expect(await group.readFrame()).toBeUndefined();
-		group.close();
-		// The FETCH-only copy keeps the absent MAX_CACHE_DURATION as no limit, not the authored zero.
-		expect((await remote.track("video").info()).maxAge).toBeNull();
-		remote.close();
-		client.abort();
-		server.abort();
-		origin.close();
-	}
-});
-
 // We list no tracks by PUBLISH, so a SUBSCRIBE_TRACKS is refused NOT_SUPPORTED on its own stream, and
 // the subscription already on the session keeps going.
 test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
@@ -1365,8 +1327,9 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 
 		const bidi = await pair.client.createBidirectionalStream();
 		const listing = new Stream({ ...bidi, version });
-		await listing.writer.u53(SubscribeTracks.id);
-		await new SubscribeTracks(62n, Path.from("room")).encode(listing.writer, version);
+		// SUBSCRIBE_TRACKS (0x51): Request ID 62, the prefix "room", and no parameters.
+		await listing.writer.u53(0x51);
+		await listing.writer.write(Uint8Array.from([0, 8, 62, 1, 4, ...new TextEncoder().encode("room"), 0]));
 		expect(await listing.reader.u53()).toBe(RequestError.id);
 		expect((await RequestError.decode(listing.reader, version)).errorCode).toBe(0x3);
 

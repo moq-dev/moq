@@ -131,6 +131,5 @@ Public API: none expected. Wire: lite-07-wip only.
 
 ## Related
 
-- [A node advances its route seqno only when a route link changes](/quest/m1/route-seqno-bumps.md) - changes the same registration path
 - [Announce interest streams share one route table](/quest/m4/announce-interest-memory.md) - lite-07 then holds one interest stream per side; the bound still matters for older versions
 - [A regrant re-checks only the routes it can change](/quest/m4/regrant-route-recheck.md) - its per-stream product loses a factor on lite-07

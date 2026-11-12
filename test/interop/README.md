@@ -69,7 +69,9 @@ publisher and subscriber. Each reader fetches group 1 of a finished track, requi
 its three objects, each with its own bytes, and closes under the relay idle-out check. Each native JS runtime also serves
 that FETCH to all three subscribers from history (`CLI FETCH history`): its publisher writes only group 3 live and answers
 groups 0 through 2, which it never cached, from an in-memory responder on `track.requests()`.
-This runs on moq-lite and every supported IETF draft.
+Both lanes run on moq-lite and every supported IETF draft, except that a native JS
+publisher's cells are skipped on moq-transport: the relay fills its miss with an upstream
+FETCH, which a JS publisher refuses there by design.
 
 A late-join lane runs Rust-to-Rust and Rust/Node/Bun in both directions. The publisher
 writes the first two objects of group 0 before any subscriber exists and leaves the group

@@ -20,7 +20,3 @@ printed `Benchmarking` and nothing for the job's last 34 minutes, so the hang
 starts with the first lite-07 cell, and every later bench in the job goes
 unmeasured. Reproduce it locally, bisect against the lite-07 changes
 if it is a regression, and fix it at the root.
-
-## Related
-
-- [JS subscribe-drop finishes](/quest/m0/js-subscribe-drop-hang.md) - another Nightly benchmark that hangs

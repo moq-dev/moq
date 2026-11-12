@@ -18,3 +18,7 @@ Suppress the advertisement per session rather than per neighbor, and measure
 route messages between two relays before and after.
 
 Public API: none. Wire: none; behavior only.
+
+## Related
+
+- [A relay keeps its next hop among equal routes](/quest/m3/route-keep-next-hop.md) - the other trim of route traffic

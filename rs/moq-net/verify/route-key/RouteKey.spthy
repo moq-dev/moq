@@ -1,0 +1,209 @@
+theory RouteKey
+begin
+
+/*
+ * lite-07's Route Key Parameter (`rs/moq-net/src/route/proof.rs`): an endpoint signs the
+ * domain, its side of the session, and 32 bytes exported from the session's handshake, so a
+ * peer files its routes under that key.
+ *
+ * The attacker owns the network, runs sessions of its own with every endpoint, and makes
+ * route keys of its own. Each honest endpoint holds one key that never leaks. A session's
+ * exporter derives from its connection's secret, which only that connection's two ends hold
+ * (TLS 1.3, RFC 8446 section 7.5): binding 1 exports it directly, and binding 2 under the
+ * WebTransport session's ID (draft-ietf-webtrans-http3 section 4.8).
+ *
+ * Every run records the endpoint really at its other end, `'adv'` for the attacker, so the
+ * lemmas say what a proof means without trusting what an endpoint believes.
+ *
+ * Each variant drops one assumption the draft states and must break exactly the lemmas its
+ * `Breaks:` line names; `test/route-key-model.sh` checks that, so the model stays sharp.
+ *
+ * NO_SIDE  Breaks: no_relay no_reflection injective_agreement
+ *          The signature leaves out the sender's side, so the attacker hands an endpoint's
+ *          proof back to it.
+ * EARLY    Breaks: no_replay injective_agreement
+ *          A resumed session exports from its 0-RTT secret, which a replayed ClientHello
+ *          reproduces on another connection.
+ * NO_EMS   Breaks: no_relay no_reflection injective_agreement
+ *          A man in the middle gives its two sessions one secret, as TLS 1.2 without the
+ *          extended master secret (RFC 7627) allows, and relays between them, even from an
+ *          endpoint to itself.
+ */
+
+builtins: signing, hashing
+
+restriction once:
+  "All x #i #j. Once(x) @ #i & Once(x) @ #j ==> #i = #j"
+
+restriction verified:
+  "All a b #i. Eq(a, b) @ #i ==> a = b"
+
+// `'adv'` names the attacker's end of a session, never an endpoint.
+restriction endpoint:
+  "All e #i. Endpoint(e) @ #i ==> not (e = 'adv')"
+
+// One route key per endpoint: relays sharing a key on purpose are out of scope.
+rule Key:
+    [ Fr(~sk) ]
+  --[ Endpoint($E), Once(<'key', $E>), KeyOf($E, pk(~sk)) ]->
+    [ !Ltk($E, ~sk), Out(pk(~sk)) ]
+
+/* Connections. `$b` is the binding: 'quic' (1) or 'h3' (2). */
+
+// A full TLS 1.3 handshake between two endpoints, or an endpoint and itself.
+rule Connect:
+    [ Fr(~conn), Fr(~ms) ]
+  --[ Endpoint($C), Endpoint($S) ]->
+    [ !End(~conn, $C, 'client', $S, ~ms, $b), !End(~conn, $S, 'server', $C, ~ms, $b) ]
+
+// An endpoint dials the attacker, or an intermediary that terminates TLS.
+rule Connect_to_adv:
+    [ Fr(~conn), Fr(~ms) ]
+  --[ Endpoint($C) ]->
+    [ !End(~conn, $C, 'client', 'adv', ~ms, $b), Out(~ms) ]
+
+// The attacker, or an intermediary that terminates TLS, dials an endpoint.
+rule Connect_from_adv:
+    [ Fr(~conn), Fr(~ms) ]
+  --[ Endpoint($S) ]->
+    [ !End(~conn, $S, 'server', 'adv', ~ms, $b), Out(~ms) ]
+
+// Resumption: the new secret mixes the PSK with fresh handshake randoms, even without
+// (EC)DHE, and the session exports only once the handshake completes.
+rule Resume:
+    [ !End(conn, C, 'client', S, ms, b), !End(conn, S, 'server', C, ms, b), Fr(~conn2), Fr(~n) ]
+  -->
+    [ Out(~n),
+      !End(~conn2, C, 'client', S, h(<'resumption', ms, ~n>), $b2),
+      !End(~conn2, S, 'server', C, h(<'resumption', ms, ~n>), $b2) ]
+
+#ifdef EARLY
+// The client sends its SETUP in 0-RTT, signing over the early secret...
+rule Resume_early_client:
+    [ !End(conn, C, 'client', S, ms, b), !End(conn, S, 'server', C, ms, b), Fr(~conn2), Fr(~hello) ]
+  -->
+    [ Out(~hello), !End(~conn2, C, 'client', S, h(<'early', ms, ~hello>), $b2) ]
+
+// ...and the server derives it from whichever ClientHello arrives, replays included.
+rule Resume_early_server:
+    [ !End(conn, S, 'server', C, ms, b), In(hello), Fr(~conn3) ]
+  -->
+    [ !End(~conn3, S, 'server', C, h(<'early', ms, hello>), $b2) ]
+#endif
+
+#ifdef NO_EMS
+// The triple handshake: one secret on the attacker's session with each endpoint.
+rule Synchronize:
+    [ Fr(~conn1), Fr(~conn2), Fr(~ms) ]
+  --[ Endpoint($C), Endpoint($S) ]->
+    [ !End(~conn1, $C, 'client', 'adv', ~ms, $b),
+      !End(~conn2, $S, 'server', 'adv', ~ms, $b),
+      Out(~ms) ]
+#endif
+
+/* Sessions: each end of a connection derives the session's exporter itself. */
+
+// Binding 1: one session per connection, exporting from the connection.
+rule Session_quic:
+    [ !End(conn, E, side, peer, ms, 'quic'), Fr(~r) ]
+  --[ Once(<'session', conn, E, side>) ]->
+    [ !Run(~r, E, side, peer, h(<'exporter', ms, 'EXPORTER-moq-lite-route-key'>)) ]
+
+// Binding 2: WebTransport sessions share a connection, each exporting under its own ID,
+// which the attacker picks, but never twice on one connection.
+rule Session_webtransport:
+    [ !End(conn, E, side, peer, ms, 'h3'), In(id), Fr(~r) ]
+  --[ Once(<'session', conn, E, side, id>) ]->
+    [ !Run(~r, E, side, peer,
+        h(<'exporter', ms, 'EXPORTER-WebTransport', <id, 'EXPORTER-moq-lite-route-key'>>)) ]
+
+/* The proof: SETUP's Route Key Parameter, sent and checked once per session. */
+
+#ifdef NO_SIDE
+rule Prove:
+    [ !Run(r, E, side, peer, ex), !Ltk(E, sk) ]
+  --[ Once(<'prove', r>), Signed(E, peer, pk(sk), side, ex) ]->
+    [ Out(<pk(sk), sign(<'moq-lite route key', ex>, sk)>) ]
+
+rule Accept_from_server:
+    [ !Run(r, E, 'client', peer, ex), In(<k, sig>) ]
+  --[ Once(<'accept', r>), Eq(verify(sig, <'moq-lite route key', ex>, k), true),
+      Accepted(r, E, peer, k, 'server', ex) ]->
+    [ ]
+
+rule Accept_from_client:
+    [ !Run(r, E, 'server', peer, ex), In(<k, sig>) ]
+  --[ Once(<'accept', r>), Eq(verify(sig, <'moq-lite route key', ex>, k), true),
+      Accepted(r, E, peer, k, 'client', ex) ]->
+    [ ]
+#else
+rule Prove:
+    [ !Run(r, E, side, peer, ex), !Ltk(E, sk) ]
+  --[ Once(<'prove', r>), Signed(E, peer, pk(sk), side, ex) ]->
+    [ Out(<pk(sk), sign(<'moq-lite route key', side, ex>, sk)>) ]
+
+rule Accept_from_server:
+    [ !Run(r, E, 'client', peer, ex), In(<k, sig>) ]
+  --[ Once(<'accept', r>), Eq(verify(sig, <'moq-lite route key', 'server', ex>, k), true),
+      Accepted(r, E, peer, k, 'server', ex) ]->
+    [ ]
+
+rule Accept_from_client:
+    [ !Run(r, E, 'server', peer, ex), In(<k, sig>) ]
+  --[ Once(<'accept', r>), Eq(verify(sig, <'moq-lite route key', 'client', ex>, k), true),
+      Accepted(r, E, peer, k, 'client', ex) ]->
+    [ ]
+#endif
+
+/* Lemmas */
+
+// Two endpoints accept each other's keys over raw QUIC.
+lemma executable:
+  exists-trace
+  "Ex a b ka kb ex r1 r2 #i #j #k #l.
+      KeyOf(a, ka) @ #k & KeyOf(b, kb) @ #l & not (a = b)
+    & Accepted(r1, a, b, kb, 'server', ex) @ #i
+    & Accepted(r2, b, a, ka, 'client', ex) @ #j"
+
+// The same after resumption, over a WebTransport session.
+lemma executable_resumed_webtransport:
+  exists-trace
+  "Ex a b ka kb ms n id r1 r2 #i #j #k #l.
+      KeyOf(a, ka) @ #k & KeyOf(b, kb) @ #l & not (a = b)
+    & Accepted(r1, a, b, kb, 'server',
+        h(<'exporter', h(<'resumption', ms, n>), 'EXPORTER-WebTransport',
+           <id, 'EXPORTER-moq-lite-route-key'>>)) @ #i
+    & Accepted(r2, b, a, ka, 'client',
+        h(<'exporter', h(<'resumption', ms, n>), 'EXPORTER-WebTransport',
+           <id, 'EXPORTER-moq-lite-route-key'>>)) @ #j"
+
+// An honest key is never accepted on a session the attacker or an intermediary terminates,
+// even when it relays the proof live from its session with the key's holder.
+lemma no_relay:
+  "All r e k side ex #i a #h.
+      Accepted(r, e, 'adv', k, side, ex) @ #i & KeyOf(a, k) @ #h ==> F"
+
+// An endpoint accepts its own key only from itself, as the other side: the attacker never
+// reflects the endpoint's proof back to it.
+lemma no_reflection:
+  "All r e peer k side ex #i #h.
+      Accepted(r, e, peer, k, side, ex) @ #i & KeyOf(e, k) @ #h
+    ==> peer = e & (Ex #j. Signed(e, e, k, side, ex) @ #j & #j < #i)"
+
+// One signature is accepted on one session only: never replayed onto another.
+lemma no_replay:
+  "All r1 r2 e1 e2 p1 p2 k side ex a #i #j #h.
+      Accepted(r1, e1, p1, k, side, ex) @ #i & Accepted(r2, e2, p2, k, side, ex) @ #j
+    & KeyOf(a, k) @ #h
+    ==> r1 = r2"
+
+// Injective agreement: an accepted honest key was signed by its holder, who is the
+// session's other end, for that side of that session, and no other session accepts it.
+lemma injective_agreement:
+  "All r e peer k side ex a #i #h.
+      Accepted(r, e, peer, k, side, ex) @ #i & KeyOf(a, k) @ #h
+    ==> peer = a
+      & (Ex #j. Signed(a, e, k, side, ex) @ #j & #j < #i)
+      & not (Ex r2 e2 p2 #i2. Accepted(r2, e2, p2, k, side, ex) @ #i2 & not (r2 = r))"
+
+end

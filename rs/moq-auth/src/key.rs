@@ -399,12 +399,6 @@ impl Key {
 		std::fs::read_to_string(&path)?.parse()
 	}
 
-	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
-	#[cfg(any(feature = "client", feature = "serve"))]
-	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
-		tokio::fs::read_to_string(path).await?.parse()
-	}
-
 	/// Encode the key as base64url-encoded JSON.
 	pub fn to_str(&self) -> crate::Result<String> {
 		let json = serde_json::to_string(self)?;

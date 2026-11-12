@@ -470,6 +470,22 @@ test("a received route its announcer ends ends, and one its session loses goes o
 	origin.close();
 });
 
+test("a route received through a scoped handle goes offline when the handle closes", async () => {
+	const origin = new Producer();
+	const announced = origin.consume().routes();
+
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const route = wireOf(scoped).receive(Path.from("room"), WireRoute.default);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+
+	scoped.close();
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "offline" });
+	route.close();
+
+	announced.close();
+	origin.close();
+});
+
 test("announced keeps a broader covering route at its prefix", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

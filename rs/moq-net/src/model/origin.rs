@@ -1137,8 +1137,15 @@ impl OriginConsumerState {
 				self.put(prefix, PendingUpdate::Unannounce(last, gone));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
-			// needs the leading one, reported as the later one went.
-			Some(PendingUpdate::UnannounceAnnounce { old, .. }) => {
+			// needs the leading one. Its reason is the later one only when both carry
+			// one identity (captures and instance); otherwise the later reason is for a
+			// route never delivered.
+			Some(PendingUpdate::UnannounceAnnounce { old, gone: prior, new }) => {
+				let gone = if old.1 == new.1 && old.0.3 == new.0.3 {
+					gone
+				} else {
+					prior
+				};
 				self.put(prefix, PendingUpdate::Unannounce(old, gone));
 			}
 		}
@@ -1781,12 +1788,7 @@ impl TableCursor {
 			// identity explicitly so consumers keyed on it remove it.
 			Some(previous) if previous.captures != captures => {
 				if let Ok(mut state) = self.state.write() {
-					state.apply_unannounce(
-						self.under.rejoin(presented),
-						previous.meta,
-						previous.captures,
-						Gone::End,
-					);
+					state.apply_unannounce(self.under.rejoin(presented), previous.meta, previous.captures, gone);
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
 				}
 			}
@@ -3193,14 +3195,22 @@ impl RouteState {
 		self.announcement.route().is_some()
 	}
 
-	/// Apply `update` to the options, re-advertising a visible route in place.
+	/// Apply `update` to the options, re-advertising a visible route in place. A failed
+	/// change keeps the options as they were, so a closed route holds nothing it was given.
 	fn change(&self, update: impl FnOnce(&mut RouteOptions)) -> Result<(), Error> {
 		let mut control = self.control.lock();
+		let previous = control.options.clone();
 		update(&mut control.options);
-		if !self.announcement.is_live()? {
-			return Ok(());
+		// One rollback for both failures: closed before the check, or between it and the update.
+		let result = match self.announcement.is_live() {
+			Ok(true) => self.announcement.update_if(control.info(), None, |_| true).map(drop),
+			Ok(false) => Ok(()),
+			Err(err) => Err(err),
+		};
+		if result.is_err() {
+			control.options = previous;
 		}
-		self.announcement.update_if(control.info(), None, |_| true).map(|_| ())
+		result
 	}
 }
 
@@ -3793,8 +3803,6 @@ impl Drop for AnnounceProducer {
 	}
 }
 
-/// Drives origin lifecycle work and cache expiration with caller-supplied time.
-///
 /// Feeds a route layer node the routes this node serves itself, best per prefix,
 /// for as long as the origin lives.
 struct OwnClaims {
@@ -3809,16 +3817,26 @@ struct OwnClaims {
 }
 
 /// The driver's task feeding [`OwnClaims`], which [`Consumer::route_node`] also catches up.
-struct FeedOwnClaims(Arc<std::sync::Mutex<OwnClaims>>);
+/// It ends once nothing owns the origin, after feeding the withdrawals still queued: its
+/// cursors end only in the driver's teardown, which waits for this task.
+struct FeedOwnClaims {
+	claims: Arc<std::sync::Mutex<OwnClaims>>,
+	origin: TasksWeak,
+}
 
 impl kio::Task for FeedOwnClaims {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// Wakes wait for the feeder's lock, which a tail expression's guard drops before
-		// the hold; see `Consumer::route_node`.
+		// Wakes wait for the feeder's lock, which drops before the hold; see
+		// `Consumer::route_node`.
 		let _hold = kio::hold();
-		lock_own(&self.0).poll(waiter)
+		let mut claims = lock_own(&self.claims);
+		if self.origin.poll_orphaned(waiter).is_ready() {
+			claims.catch_up();
+			return Poll::Ready(());
+		}
+		claims.poll(waiter)
 	}
 }
 
@@ -3926,6 +3944,8 @@ impl OwnClaims {
 	}
 }
 
+/// Drives origin lifecycle work and cache expiration with caller-supplied time.
+///
 /// Returned by [`Producer::new`]. Poll on external activity or at the deadline
 /// it returns, supplying nondecreasing instants. RouteInfo changes, track serving, linger,
 /// failover, and teardown run here; the route table and announce cursors update
@@ -3981,6 +4001,35 @@ impl Driver {
 impl crate::time::Driver for Driver {
 	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.poll(now, waiter)
+	}
+}
+
+/// What an origin holds on behalf of its sessions and readers, for the session fuzz target's
+/// leak check.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Footprint {
+	tasks: usize,
+	routes: usize,
+	cursors: usize,
+	listeners: usize,
+	withdrawn: usize,
+	withheld: usize,
+}
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl Driver {
+	/// Count what this origin holds; see [`Footprint`].
+	pub(crate) fn footprint(&self) -> Footprint {
+		let shared = self.state.shared.lock();
+		Footprint {
+			tasks: self.state.set.len(),
+			routes: shared.routes.entries().count(),
+			cursors: shared.cursors.len(),
+			listeners: shared.listeners.len(),
+			withdrawn: shared.withdrawn.len(),
+			withheld: *shared.hidden_withheld.0.read(),
+		}
 	}
 }
 
@@ -7409,7 +7458,10 @@ impl Consumer {
 		let created = (node, Arc::downgrade(&claims));
 		shared.route_node = Some(created.clone());
 		drop(shared);
-		self.tasks.push(FeedOwnClaims(claims));
+		self.tasks.push(FeedOwnClaims {
+			claims,
+			origin: self.tasks.clone(),
+		});
 		created
 	}
 
@@ -10005,6 +10057,28 @@ mod tests {
 		}
 	}
 
+	/// A change to a closed route fails and keeps nothing, so the route holds no
+	/// credential it was refused.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_closed_route_keeps_no_refused_change() {
+		let handle = crate::auth::Link::ietf();
+		let token = handle.present(bytes::Bytes::from_static(b"token"), false).unwrap();
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().routes();
+		let route = producer.route("room", RouteOptions::hidden()).unwrap();
+		route.announce().unwrap();
+		announced.expect_next_active("room").await;
+		route.broadcast().close();
+		announced.expect_next_ended("room").await;
+
+		assert!(matches!(route.set_auth(Some(token.clone())), Err(Error::Closed)));
+		assert!(matches!(route.set_cost(7), Err(Error::Closed)));
+		let control = route.state.control.lock();
+		assert!(control.options.auth.is_none());
+		assert_eq!(control.options.cost, Cost::default());
+	}
+
 	/// A replacement under another instance from a cluster peer at equal cost and chain
 	/// length, whose hash loses, competes with the lingering old route: nothing restarts and
 	/// requests stay on the old route until it is withdrawn, then consumers restart and a
@@ -10486,6 +10560,63 @@ mod tests {
 		};
 		assert_eq!(replacement.prefix.as_str(), "");
 		assert_eq!(replacement.captures, None);
+	}
+
+	/// A forwarded route lost with its session retracts its identity as offline,
+	/// even when a broader route takes over the presented prefix.
+	#[kio::test]
+	async fn capture_change_reports_a_lost_route_offline() {
+		let producer = origin(1).produce();
+		let _broad = producer.announce("room", RouteInfo::new()).unwrap();
+		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
+		let mut announced = producer
+			.consume()
+			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.covering()
+			.routes();
+		announced.expect_next_active("").await;
+
+		drop(exact);
+		announced.expect_next_offline("").await;
+		announced.expect_next_active("").await;
+	}
+
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn capture_change_coalesced_keeps_the_lost_route_offline() {
+		let producer = origin(1).produce();
+		let broad = producer.announce("room", RouteInfo::new()).unwrap();
+		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
+		let mut announced = producer
+			.consume()
+			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.covering()
+			.routes();
+		announced.expect_next_active("").await;
+
+		// Both leave before the next poll: the one retraction delivered is the
+		// exact route's, which was lost rather than withdrawn.
+		drop(exact);
+		drop(broad);
+		announced.expect_next_offline("").await;
+	}
+
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn restart_coalesced_keeps_the_lost_instance_offline() {
+		let producer = origin(1).produce();
+		let lost = producer.forward("room/alice", RouteInfo::new()).unwrap();
+		let mut announced = producer.consume().routes();
+		announced.expect_next_active("room/alice").await;
+
+		// Another instance comes and is withdrawn before the next poll: the one
+		// retraction delivered is the lost instance's.
+		drop(lost);
+		let other = producer.announce("room/alice", RouteInfo::new()).unwrap();
+		drop(other);
+		announced.expect_next_offline("room/alice").await;
 	}
 
 	#[test]
@@ -15840,6 +15971,39 @@ mod tests {
 		);
 		drop(broadcast);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
+	}
+
+	/// The task feeding a route node never keeps the driver running: it finishes once
+	/// the last owner drops, whatever read handles remain, and still feeds the node the
+	/// withdrawals that last drop queued.
+	#[kio::test]
+	async fn a_route_node_never_keeps_the_driver_running() {
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
+		let waiter = kio::Waiter::noop();
+		let link = crate::route::Link {
+			proxy: true,
+			..Default::default()
+		};
+		let consumer = producer.consume();
+		let alice = producer.announce("room/alice", RouteInfo::new()).unwrap();
+		let stream = consumer.route_node().answer(link, Path::empty()).unwrap();
+		assert!(
+			driver.poll(Instant::now(), &waiter).is_ok(),
+			"the producer owns the origin"
+		);
+		while stream.try_output().is_some() {}
+		drop(alice);
+		drop(producer);
+		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
+		let output = stream.try_output();
+		assert!(
+			matches!(
+				&output,
+				Some(crate::route::node::Output::Batch { changes, .. })
+					if changes.iter().any(|(path, claim)| path.as_str() == "room/alice" && claim.is_none())
+			),
+			"the stream is sent the withdrawal: {output:?}"
+		);
 	}
 
 	/// A handler holding only its `Route` keeps serving once every producer

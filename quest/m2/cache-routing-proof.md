@@ -27,6 +27,16 @@ it; a SETUP extension needs neither before the cut, and
 from its list. Either placement is now this quest's to record, with no
 second trip to the maintainer for choosing lite-07.
 
+Reopened 2026-11-11 (maintainer, /quest-plan on the route redesign, epic
+Plan item 8): a warm route propagates, and the rule that keeps it free of
+loops and stale copies is
+[the prototype](/quest/m1/route-stale-copies.md)'s to pick.
+The eligibility rule and the fixtures below are for the one-hop warm route
+first decided, which [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457)
+proves. Once the prototype's pick is recorded, rewrite both for it: the
+fixtures keep their meshes, and gain a relay that joins a copy at a neighbour
+farther from the publisher than itself.
+
 Build on the sans-IO `Router` in `rs/moq-net/src/route/`, which each
 origin's `route::Node` drives, and the harness behind its handoff sweeps,
 not the reference model in
@@ -69,6 +79,10 @@ Wire: design the warm message, which names at least the path, the origin's
 Route ID, and the instance, and say which stream carries it and how a peer
 that never sends one behaves. Size it against lite-07 and an additive SETUP
 extension and record the choice and its reason in the epic's Plan.
+
+## Required
+
+- [A prototype settles what keeps a route free of stale copies](/quest/m1/route-stale-copies.md) - the rule a propagating warm route rests on, which replaces the one this proved
 
 ## Related
 

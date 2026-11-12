@@ -160,12 +160,11 @@ class Presented {
 }
 
 /**
- * A token {@link Handle.present} returned before its answer.
+ * A token {@link Handle.present} returned, with what the connection's token rotation reads.
  *
  * @internal
  */
 export interface Pending extends Credential {
-	/** Resolves once a peer accepts the token, or rejects as {@link Handle.add} does. */
 	readonly answered: Promise<void>;
 	/** Whether any session holds a grant for it now, a draining one included. */
 	readonly held: boolean;
@@ -367,25 +366,21 @@ export class Handle {
 	}
 
 	/**
-	 * Present another token on every session of this handle, resolving once a peer answers it.
+	 * Present another token on every session of this handle, returning it at once; its
+	 * {@link Credential.answered} settles on the peer's first verdict, and closing it withdraws
+	 * it, answered or not.
 	 *
 	 * With no session live it waits for the next one. A refusal that may pass, such as an
 	 * unreachable auth server, is presented again after a backoff on moq-lite, and so is a token
-	 * whose stream the peer drops without a verdict. Rejects with
-	 * {@link Unsupported} when a session neither carries AUTH nor lets a request carry a token
-	 * (moq-lite without AUTH), with the peer's refusal as an `Error.Session`, or with the
-	 * handle's end. On moq-transport without AUTH it resolves at once with no grant: only a
-	 * request whose route names it carries it.
+	 * whose stream the peer drops without a verdict. Throws once the handle ended, or while its
+	 * own session drains with no successor.
 	 */
-	async add(token: string | Uint8Array): Promise<Credential> {
-		const added = this.present(token);
-		await added.answered;
-		return added;
+	add(token: string | Uint8Array): Credential {
+		return this.present(token);
 	}
 
 	/**
-	 * Present another token like {@link add}, returning it at once with its answer, so it can be
-	 * withdrawn before the peer answers.
+	 * Present another token like {@link add}, returning what the token rotation reads.
 	 *
 	 * @internal
 	 */

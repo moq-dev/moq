@@ -29,7 +29,8 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    advertise a warm route for it. This revises Cluster routing's non-goal of
    cache-dependent route prices. (rejected: per-broadcast forwarding with a
    cache-only subscribe and no advertisement; keeping routing cache-agnostic)
-2. ✅ **A warm route is per neighbor and travels one hop.** It goes only to
+2. ✅ **A warm route is per neighbor and travels one hop.** Reopened by
+   item 8. It goes only to
    direct neighbors and is never forwarded. B is warm toward N only while B
    has demand besides N's (a local reader or another downstream session),
    and withdraws once that demand has been gone for the copy's existing
@@ -48,7 +49,8 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    the skipped relay pulls for its own reader, its neighbor joins it. With
    uniform prices both cases tie and fall to the hash. (rejected: a warm and
    a cold price per link; a warm price the carrier seeds)
-4. **Eligibility, which the proof must hold.** A relay may pull broadcast P
+4. **Eligibility, which the proof must hold.** Reopened by item 8. A relay
+   may pull broadcast P
    through neighbor N only when N's advertised route to the request's pinned
    origin has a newer seqno, or an equal seqno with
    `(cold metric, hash(P, N))` below `(feasibility distance, hash(P, self))`.
@@ -73,6 +75,22 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    (rejected: a design-only sizing quest in m2; leaving the proof in m3 and
    accepting a SETUP extension). The implementation stays in m3. This
    replaces item 6's rule that choosing lite-07 went back to the maintainer.
+
+8. Reopened 2026-11-11 (maintainer, /quest-plan on the route redesign):
+   items 2 and 4. In the maintainer's words: "I think we need warm routes
+   propagating, that decision was made based on this flawed setup." ✅ **A
+   warm route is per broadcast and propagates**, for as long as it is
+   cheaper than the route its publisher's broadcasts share
+   ([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 26). A
+   broadcast no relay carries rides the shared route and costs no message of
+   its own. Item 4 rests safety on Babel's distance, which cannot let a relay
+   join a copy at a neighbour that is no closer to the publisher: the join
+   the Goal wants, and why item 2 stopped at one hop. What keeps a warm route
+   free of loops and stale copies is
+   [the prototype](/quest/m1/route-stale-copies.md)'s to
+   measure, and the proof then holds that rule. Items 1 and 3 stand.
+   [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) proves items
+   2 and 4 as first decided.
 
 Prior art: warm/cold route prices
 ([moq-dev/moq#2925](https://github.com/moq-dev/moq/pull/2925)) were deleted

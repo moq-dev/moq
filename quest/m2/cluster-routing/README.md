@@ -37,6 +37,18 @@ Decided with the maintainer, 2026-10-13:
 - Keep Babel. A detour longer than the lost route may wait for a sequence
   refresh from the origin; instant failover is not required. Measure failure
   detection, additional routing recovery, and total interruption separately.
+  Reopened 2026-11-11 (maintainer, /quest-plan after
+  [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)'s reviews):
+  whether Babel's distance stays is
+  [the prototype](/quest/m1/route-stale-copies.md)'s to
+  measure, against paths alone with a withdrawal that names the hop that
+  died. The distance refuses a longer way round until the publisher advances
+  its seqno, and refuses a cached copy at a neighbour no closer to the
+  publisher, which [cache-aware routing](/quest/m3/cache-routing/README.md)
+  wants to join. Decided the same day: a route is shared per publisher and
+  per scope, and a relay believes a route by that route's own path, whichever
+  rule wins. Rejected: link-state among relays, and routes to relays in
+  place of publishers.
 - An origin declares its own routing identity, fresh per process or tab
   restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
   key proof is planned; if a use case needs a provable identity, moq-lite-07's

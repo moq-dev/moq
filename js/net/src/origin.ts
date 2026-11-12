@@ -1674,16 +1674,15 @@ export class Producer implements Table {
 			this.#state.rebuildOriginated();
 			this.#state.refreshPrefix(prefix);
 		};
+		// A received route torn down by any path (its handle, or the scoped handle it came through)
+		// was lost with its session; only its announcer ending it on the wire withdraws it.
+		let lost = !originated;
 		const release = this.#hold(() => {
+			if (!ended) entry.lost = lost;
 			ended = true;
 			this.#state.servers.delete(server);
 			remove(() => server.close());
 		});
-		// A received route its handle closes was lost with its session, unless its announcer ended it.
-		const close = (lost: boolean) => {
-			if (!ended) entry.lost = lost;
-			release();
-		};
 		// A route made after its origin (or this handle) closed is born retracted.
 		if (this.#borrowed?.closed || this.#state.closed.peek() !== undefined) {
 			ended = true;
@@ -1738,8 +1737,11 @@ export class Producer implements Table {
 				},
 				announced: () => inserted && this.#state.closed.peek() === undefined,
 				change: (changed) => update(WireRoute.normalize({ ...entry.route.peek(), ...changed })),
-				close: () => close(!originated),
-				end: () => close(false),
+				close: release,
+				end: () => {
+					lost = false;
+					release();
+				},
 				info: () => (inserted && this.#state.closed.peek() === undefined ? entry.route.peek() : undefined),
 				update: (next) => {
 					// A route naming no instance keeps the one it serves.

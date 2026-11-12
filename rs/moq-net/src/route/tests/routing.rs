@@ -1184,6 +1184,11 @@ fn a_scoped_copy_that_crossed_a_relay_asks_for_no_seqno() {
 	let key = qualified(LOCAL.subject, 7);
 	assert_eq!(next(&sim, cdn, key), Some(far));
 	assert_eq!(next(&sim, near, key), Some(cdn));
+	assert_eq!(
+		sim.shows(near, key, "local/x"),
+		Some(true),
+		"the far relay's copy is a route"
+	);
 
 	sim.release(near, cdn);
 	assert!(sim.run());
@@ -1214,6 +1219,7 @@ fn a_scoped_copy_that_crossed_a_relay_is_not_waited_on() {
 	let key = qualified(LOCAL.subject, 7);
 	assert_eq!(next(&sim, cdn, key), Some(far));
 	assert_eq!(sim.route(near, key).map(|route| route.metric), Some(7));
+	assert_eq!(sim.shows(near, key, "local/x"), Some(true));
 
 	sim.disconnect(far, cdn);
 	assert!(sim.run());

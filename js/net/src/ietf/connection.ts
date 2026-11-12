@@ -17,6 +17,7 @@ import * as Cluster from "./cluster.ts";
 import type { RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
@@ -25,7 +26,6 @@ import { malformed, refuse } from "./request_stream.ts";
 import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace } from "./subscribe_namespace.ts";
-import { SubscribeTracks } from "./subscribe_tracks.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -370,9 +370,19 @@ export class Connection implements Session {
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
-				const decoded = SubscribeTracks.decode(stream.reader, this.#session.version);
-				const msg = await this.#request(stream, "subscribe_namespace", decoded);
-				if (msg) await handed(this.#publisher.runSubscribeTracks(msg, stream));
+				// We list no tracks by PUBLISH, so each listing is refused on its own. Only its
+				// Request ID is read; the rest of the body goes unread.
+				const requestId = await Message.decode(stream.reader, async (body) => {
+					const id = await body.u62();
+					await body.discard();
+					return id;
+				}).catch((err: unknown) => {
+					throw malformed(err, "subscribe_tracks");
+				});
+				this.#spend(requestId);
+				await handed(
+					this.#refuseUnsupported(stream, "subscribe_namespace", "SUBSCRIBE_TRACKS is not supported"),
+				);
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
@@ -384,7 +394,8 @@ export class Connection implements Session {
 			case BigInt(Fetch.id): {
 				const decoded = Fetch.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "fetch", decoded);
-				if (msg) await handed(this.#publisher.runFetch(msg, stream));
+				// Only a relay answers a FETCH, from its cache.
+				if (msg) await handed(this.#refuseUnsupported(stream, "fetch", "FETCH is not supported"));
 				break;
 			}
 
@@ -451,6 +462,11 @@ export class Connection implements Session {
 	/** Spend a request's ID, closing the session if it was already used. */
 	#spend(requestId: bigint) {
 		this.#session.checkRequestId(requestId);
+	}
+
+	/** Refuse a request we never serve NOT_SUPPORTED, ending its stream. */
+	async #refuseUnsupported(stream: Stream, kind: RequestKind, reasonPhrase: string) {
+		await refuse(stream, this.#session.version, kind, { condition: "not_supported", reasonPhrase });
 	}
 
 	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */
