@@ -21,9 +21,11 @@ not cross. TLC shows on it:
   behind a scoped neighbour reaches what a farther, unscoped neighbour
   offers.
 
-The model uses the rule
-[the prototype](/quest/m1/route-stale-copies.md) picked for
-keeping a route free of stale copies. The rule this settles is written into
+The model keeps a route free of loops and stale copies by the rule the
+[epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item 27 picked: the
+path, a withdrawal that names the hop that died, holds, and a timed doubt.
+TLC also shows that every hold ends, and what bounds a loop of selected next
+hops while messages are in flight. The rule this settles is written into
 the epic's contract for
 [the router](/quest/m2/cluster-routing/routes/scope.md) to implement. The
 router's behaviour, the wire, and the draft do not change here.
@@ -31,9 +33,31 @@ router's behaviour, the wire, and the draft do not change here.
 ## Plan
 
 Decided 2026-11-11 (maintainer, /quest-plan). The decisions and what was
-tried are in [the prototype](/quest/m1/route-stale-copies.md)'s
-Plan and the [epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item
-26.
+tried are in the [epic](/quest/m2/cluster-routing/routes/README.md)'s Plan
+items 26 and 27, [moq-dev/moq#8514](https://github.com/moq-dev/moq/pull/8514),
+and [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533).
+
+The rule for loops and stale copies has passed sweeps and no model. The
+prototype in `rs/moq-net/src/route/tests/paths.rs` runs it (`Rules::waits`),
+and `compare.rs` beside it holds the meshes. What the model must prove or
+replace:
+
+- **Every hold ends.** A relay holds under the next hop it used, answers
+  that hop only once the neighbours that learned the route from it have
+  answered, and holds on its own account when that next hop's own route
+  names it. Two hangs the sweeps found are fixed in the prototype, and each
+  deserves a config: two relays that took each other's stale route each
+  waited on the other, and a relay answered "nothing" while a route only
+  doubt kept it off could still come back.
+- **The doubt.** Model the timer as a step that may fire at any moment. Show
+  that firing late costs only the wait, and state what firing early costs: a
+  relay moves to a stale route, as with no doubt at all.
+- **Loops.** Selected next hops form no loop once nothing is in flight.
+  While something is, find what bounds a loop, or the smallest change that
+  does: the churn sweep still loops on 32 of 120,000 steps, when two
+  unrelated things fail at once.
+- **Forgetting.** A relay remembers a dead hop only while a neighbour's route
+  still names it. Show no stale route returns after that.
 
 Why a route per scope: a relay that asked a neighbour for prefix `a` knows a
 publisher's claims only inside `a`. Today that partial knowledge lives inside
@@ -91,10 +115,6 @@ Work:
 edits to the two prefixes this introduces.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [A prototype settles what keeps a route free of stale copies](/quest/m1/route-stale-copies.md) - the rule for loops and stale copies that this model is written on
 
 ## Related
 

@@ -39,9 +39,10 @@ selection.
   down-only route still moves to an equal one it may export, and test that.
 - Check that every router test that names the next hop it expects still
   means what it says, rather than editing expectations to match.
-- [The prototype](/quest/m1/route-stale-copies.md) may
-  replace how a route is selected. If it has, apply this to the rule that
-  stands.
+- How a route is selected is being replaced
+  ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27).
+  Apply this to the rule that stands when this starts. The prototype in
+  `route/tests/paths.rs` already stays on its next hop among equals.
 - Measure with `Sim`'s `hop_updates` count and, if it has landed,
   `mesh_sweep.rs`'s benchmark, before and after.
 
