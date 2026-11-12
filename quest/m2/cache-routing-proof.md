@@ -30,7 +30,7 @@ second trip to the maintainer for choosing lite-07.
 Reopened 2026-11-11 (maintainer, /quest-plan on the route redesign, epic
 Plan item 8): a warm route propagates, and the rule that keeps it free of
 loops and stale copies is
-[the prototype](/quest/m2/cluster-routing/routes/stale-copies.md)'s to pick.
+[the prototype](/quest/m1/route-stale-copies.md)'s to pick.
 The eligibility rule and the fixtures below are for the one-hop warm route
 first decided, which [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457)
 proves. Once the prototype's pick is recorded, rewrite both for it: the
@@ -82,7 +82,7 @@ extension and record the choice and its reason in the epic's Plan.
 
 ## Required
 
-- [A prototype settles what keeps a route free of stale copies](/quest/m2/cluster-routing/routes/stale-copies.md) - the rule a propagating warm route rests on, which replaces the one this proved
+- [A prototype settles what keeps a route free of stale copies](/quest/m1/route-stale-copies.md) - the rule a propagating warm route rests on, which replaces the one this proved
 
 ## Related
 

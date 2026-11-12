@@ -5,12 +5,12 @@
 `route::Router` keys a route by its publisher and the prefix it covers, and
 believes a route that did not cross it, as
 [the model](/quest/m2/cluster-routing/routes/scope-model.md) settled. A relay
-shows a claim exactly while such a route covers it and the newest revision
-the relay knows still has the claim, two relays never keep a
+shows a claim exactly while such a route covers it and the newest revision a
+covering route gave it still has the claim, two relays never keep a
 dead route alive through each other, a change of path or seqno alone changes
 no claim a reader sees, and a relay behind a scoped neighbour reaches what a
 farther one offers. The `residual_` tests
-[the prototype](/quest/m2/cluster-routing/routes/stale-copies.md) pinned pass
+[the prototype](/quest/m1/route-stale-copies.md) pinned pass
 as plain tests, a sweep over meshes with scoped relays holds the rules at
 every quiet point, and the draft and the epic's contract say what the router
 does.
