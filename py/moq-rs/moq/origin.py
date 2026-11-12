@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from moq_ffi import (
     MoqAnnounce,
     MoqAnnounceConfig,
@@ -21,6 +23,9 @@ from ._stream import _Stream
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
 from .types import Instance
+
+if TYPE_CHECKING:
+    from .session import Credential
 
 Announce = MoqAnnounce
 """A route over a prefix: the origin-relative ``prefix``, what each filter wildcard
@@ -211,6 +216,16 @@ class Route:
         """
         self._inner.set_cost(cost)
 
+    def set_auth(self, credential: Credential | None) -> None:
+        """Swap the credential the route's announcing request carries, renewing it in place,
+        or ``None`` to announce under the session's scope.
+
+        Only the session it was minted on carries it. Raises ``moq.Error.Closed`` once its
+        broadcast closed, keeping the credential it had, and ``moq.Error.Cancelled`` for a
+        cancelled credential.
+        """
+        self._inner.set_auth(None if credential is None else credential._inner)
+
     def cancel(self) -> None:
         """Retract the route and release it now. Its broadcast lives on until
         :meth:`BroadcastProducer.close`."""
@@ -255,6 +270,15 @@ class Claim(_Stream[BroadcastRequest]):
         A hidden claim keeps the price for when it next announces.
         """
         self._inner.set_cost(cost)
+
+    def set_auth(self, credential: Credential | None) -> None:
+        """Swap the credential the claim's announcing request carries, renewing it in place,
+        or ``None`` to announce under the session's scope.
+
+        Only the session it was minted on carries it. Raises ``moq.Error.Cancelled`` for a
+        cancelled credential.
+        """
+        self._inner.set_auth(None if credential is None else credential._inner)
 
     async def _next(self) -> BroadcastRequest | None:
         return await self.requested()

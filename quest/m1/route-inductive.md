@@ -47,7 +47,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [The route model covers a mesh with clients and an announce budget](/quest/m1/route-mesh-model.md) - the spec parametrised over mesh shapes that this invariant is stated on
 - [The route model has a route per scope](/quest/m2/cluster-routing/routes/scope-model.md) - the rule for whose claims a relay believes, which the claim rules rest on; an invariant found before it is found for a rule about to go
 
 ## Related

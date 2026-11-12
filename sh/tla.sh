@@ -2,7 +2,9 @@
 # Model-check every TLA+ config under the given paths (default: all of them)
 # through the `tla` recipes. A config with a `\* Open finding:` line must break
 # a rule (a deadlock, invariant, property, or assertion), so a fix that should
-# promote its rule is noticed; every other config must pass.
+# promote its rule is noticed; every other config must pass. A config with a
+# `\* Simulate:` line is too large to exhaust: TLC samples it at random with the
+# arguments that line gives.
 set -euo pipefail
 shopt -s nullglob
 cd "$(git rev-parse --show-toplevel)"
@@ -40,11 +42,12 @@ for cfg in "${configs[@]}"; do
     lang=${cfg%%/*}
     finding=false
     ! grep -q '^\\\* Open finding:' "$cfg" || finding=true
+    read -ra simulate < <(sed -n 's/^\\\* Simulate: //p' "$cfg") || true
 
     echo "::group::$cfg"
     start=$SECONDS
     status=0
-    just "$lang" tla "${specs[0]#"$lang"/}" -config "$cfg" || status=$?
+    just "$lang" tla "${specs[0]#"$lang"/}" -config "$cfg" "${simulate[@]}" || status=$?
     echo "::endgroup::"
     echo "$cfg: exit $status in $((SECONDS - start))s"
 
