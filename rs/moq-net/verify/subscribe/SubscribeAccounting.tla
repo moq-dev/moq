@@ -62,6 +62,7 @@ VARIABLES
     sup,        \* `SubStream::update`: the latest number sent
     acct,       \* the tail's ledger: groups accounted for
     finished,   \* `Tail::finished`: groups whose stream finished since the last update
+    forgot,     \* `Tail::folded`: the span a fold forgot since the last update
     sstale,     \* `SubStream::stale`: runs accounted by a stale drop under `sup`
     rec,        \* the copy's record: "none", "stale", "final", or "skip"
     cached,     \* the copy's group: "none", "open", "whole", "aborted", "evicted"
@@ -69,7 +70,7 @@ VARIABLES
     violation   \* the subscriber closed the session with a PROTOCOL_VIOLATION
 
 pubVars == <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered, outq, folded>>
-subVars == <<sup, acct, finished, sstale, rec, cached, got, violation>>
+subVars == <<sup, acct, finished, forgot, sstale, rec, cached, got, violation>>
 vars == <<pubVars, streams, resp, ctrl, subVars>>
 
 Init ==
@@ -80,7 +81,7 @@ Init ==
     /\ redrop = {} /\ reoffered = {} /\ outq = <<>> /\ folded = {}
     /\ streams = <<>> /\ resp = <<>> /\ ctrl = <<>>
     /\ sup = 0
-    /\ acct = {} /\ finished = {} /\ sstale = {}
+    /\ acct = {} /\ finished = {} /\ forgot = {} /\ sstale = {}
     /\ rec = [g \in Groups |-> "none"]
     /\ cached = [g \in Groups |-> "none"]
     /\ got = {}
@@ -281,7 +282,7 @@ SubHeaderAt(i) ==
                     /\ streams' = [streams EXCEPT ![i].sub = "header"]
                     /\ cached' = [cached EXCEPT ![g] = "open"]
                     /\ rec' = [rec EXCEPT ![g] = IF @ = "stale" THEN "none" ELSE @]
-    /\ UNCHANGED <<pubVars, resp, ctrl, sup, finished, sstale, got, violation>>
+    /\ UNCHANGED <<pubVars, resp, ctrl, sup, finished, forgot, sstale, got, violation>>
 
 \* The stream filling the copy is read to its FIN (`Reading::finish`); once every byte
 \* arrived, a reset sent after the FIN changes nothing. A held stream of the group then
@@ -298,7 +299,7 @@ SubFinAt(i) ==
           /\ finished' = finished \cup {g}
           /\ cached' = [cached EXCEPT ![g] = "whole"]
           /\ got' = got \cup {g}
-    /\ UNCHANGED <<pubVars, resp, ctrl, sup, acct, sstale, rec, violation>>
+    /\ UNCHANGED <<pubVars, resp, ctrl, sup, acct, forgot, sstale, rec, violation>>
 
 \* The reset of the stream filling the copy arrives: the group's readers end with its
 \* error, and the first held stream of the group opens it again (`TrackEntry::reopen`).
@@ -312,7 +313,7 @@ SubResetAt(i) ==
                             ELSE IF j \in next THEN [streams[j] EXCEPT !.sub = "header"]
                             ELSE streams[j]]
           /\ cached' = [cached EXCEPT ![g] = IF next = {} THEN "aborted" ELSE "open"]
-    /\ UNCHANGED <<pubVars, resp, ctrl, sup, acct, finished, sstale, rec, got, violation>>
+    /\ UNCHANGED <<pubVars, resp, ctrl, sup, acct, finished, forgot, sstale, rec, got, violation>>
 
 \* A held stream's own reset arrives.
 SubResetHeldAt(i) ==
@@ -325,14 +326,16 @@ SubResetHeldAt(i) ==
 Evict(g) ==
     /\ cached[g] = "whole"
     /\ cached' = [cached EXCEPT ![g] = "evicted"]
-    /\ UNCHANGED <<pubVars, streams, resp, ctrl, sup, acct, finished, sstale, rec, got, violation>>
+    /\ UNCHANGED <<pubVars, streams, resp, ctrl, sup, acct, finished, forgot, sstale, rec, got, violation>>
 
-\* The pool hands the tail debt and `Tail::rebill` forgets every finished run but the
-\* newest: one group stands for any of them, since a later group may have finished.
+\* The pool hands the tail debt and `Tail::rebill` folds every finished run but the newest
+\* into the span it forgot: one group stands for any of them, since a later group may have
+\* finished, and the span takes in the gaps between them, so g need not have finished.
 TailFold(g) ==
     /\ Pressure
-    /\ g \in finished
+    /\ g \notin forgot
     /\ finished' = finished \ {g}
+    /\ forgot' = forgot \cup {g}
     /\ UNCHANGED <<pubVars, streams, resp, ctrl, sup, acct, sstale, rec, cached, got, violation>>
 
 \* `apply_response` for SUBSCRIBE_DROP. A stale drop under a replaced update is no
@@ -375,11 +378,11 @@ SubRecv ==
     /\ resp' = Tail(resp)
     /\ LET m == Head(resp)
        IN IF m.type = "drop" THEN OnDrop(m) ELSE OnSkip(m)
-    /\ UNCHANGED <<pubVars, streams, ctrl, sup, finished, got>>
+    /\ UNCHANGED <<pubVars, streams, ctrl, sup, finished, forgot, got>>
 
 \* `buffer_update`: the copy forgets every stale record (`supersede_stale`), the tail
 \* owes again each stale run this subscription accounted that the copy still held,
-\* and `Tail::updated` forgets which streams finished.
+\* save the span a fold forgot, and `Tail::updated` forgets which streams finished.
 SubUpdate ==
     /\ sup < MaxUpdates
     /\ ~violation
@@ -387,9 +390,10 @@ SubUpdate ==
        IN /\ sup' = sup + 1
           /\ ctrl' = Append(ctrl, sup + 1)
           /\ rec' = [g \in Groups |-> IF rec[g] = "stale" THEN "none" ELSE rec[g]]
-          /\ acct' = acct \ (sstale \cap held)
+          /\ acct' = acct \ ((sstale \cap held) \ forgot)
           /\ sstale' = {}
           /\ finished' = {}
+          /\ forgot' = {}
     /\ UNCHANGED <<pubVars, streams, resp, cached, got, violation>>
 
 -----------------------------------------------------------------------------

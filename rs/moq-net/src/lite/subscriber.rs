@@ -10542,10 +10542,18 @@ fn buffer_update(
 	let held = serving.supersede_stale(judged(active.live.iter().map(|(_, range)| range)));
 	let recorded = std::mem::take(&mut active.stale);
 	if let Ok(mut tail) = active.tail.write() {
-		tail.updated();
+		// What a fold forgot finishing may have overtaken its drop, so none of it is owed again.
+		let folded = tail.updated();
 		for run in recorded.iter() {
 			for reopened in held.overlapping(run) {
-				tail.unaccount(reopened.start.max(run.start)..reopened.end.min(run.end), now);
+				let mut owed = RangeSet::new();
+				owed.insert(reopened.start.max(run.start)..reopened.end.min(run.end));
+				if let Some(folded) = &folded {
+					owed.remove(folded.clone());
+				}
+				for owed in owed.iter() {
+					tail.unaccount(owed.clone(), now);
+				}
 			}
 		}
 	}

@@ -34,6 +34,9 @@ pub(crate) struct Tail {
 	// that update names one only if it was sent before the publisher served the group, so the
 	// group won over it, even once the cache evicted it.
 	finished: RangeSet<u64>,
+	// The span of the finished runs a fold under the pool's debt forgot since the last update.
+	// A stale drop in it may be one its stream overtook, so the update owes none of it again.
+	folded: Option<Range<u64>>,
 	// What `finished` bills to the track's account, [`FINISHED_OVERHEAD`] per run, once the
 	// subscription has a copy to bill.
 	bill: Option<crate::model::track::Bill>,
@@ -59,6 +62,7 @@ impl Tail {
 			active: 0,
 			ended: false,
 			finished: RangeSet::new(),
+			folded: None,
 			bill: None,
 		}
 	}
@@ -69,22 +73,31 @@ impl Tail {
 		self.rebill();
 	}
 
-	/// Bill what `finished` keeps, and under the pool's debt forget all but its newest run: a
-	/// stale drop under this update then stands as the publisher judged it, which a wider budget
-	/// still reverses. The newest run stays, so streams finishing in sequence grow nothing to
-	/// charge again.
+	/// Bill what `finished` keeps, and under the pool's debt fold all but its newest run into
+	/// `folded`: a stale drop under this update then stands as the publisher judged it, but the
+	/// update owes none of the folded span again. The newest run stays, so streams finishing in
+	/// sequence grow nothing to charge again.
 	fn rebill(&mut self) {
 		let Some(bill) = &mut self.bill else {
 			return;
 		};
-		bill.set(self.finished.len() as u64 * FINISHED_OVERHEAD);
+		let runs = self.finished.len() + usize::from(self.folded.is_some());
+		bill.set(runs as u64 * FINISHED_OVERHEAD);
 		if bill.debt() > 0
 			&& self.finished.len() > 1
-			&& let Some(newest) = self.finished.iter().next_back().cloned()
-		{
+			&& let (Some(first), Some(older), Some(newest)) = (
+				self.finished.iter().next().cloned(),
+				self.finished.iter().nth_back(1).cloned(),
+				self.finished.iter().next_back().cloned(),
+			) {
+			let span = match self.folded.take() {
+				Some(folded) => folded.start.min(first.start)..folded.end.max(older.end),
+				None => first.start..older.end,
+			};
+			self.folded = Some(span);
 			self.finished = RangeSet::new();
 			self.finished.insert(newest);
-			bill.set(FINISHED_OVERHEAD);
+			bill.set(2 * FINISHED_OVERHEAD);
 		}
 	}
 
@@ -150,10 +163,13 @@ impl Tail {
 	}
 
 	/// Forget which streams finished, for an update being sent: a stale drop under an earlier
-	/// one is no verdict, so none needs them.
-	pub fn updated(&mut self) {
+	/// one is no verdict, so none needs them. Returns the span a fold forgot since the last
+	/// update, which the update owes none of again.
+	pub fn updated(&mut self) -> Option<Range<u64>> {
 		self.finished = RangeSet::new();
+		let folded = self.folded.take();
 		self.rebill();
+		folded
 	}
 
 	/// Whether a data stream whose header arrived is still being read.

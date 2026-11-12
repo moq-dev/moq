@@ -24383,6 +24383,12 @@ mod test {
 			"forgotten under debt"
 		);
 		assert!(pool.used() <= capacity, "within the pool: {}", pool.used());
+		// The update owes none of what the fold forgot again, since a stale drop there may be
+		// one its stream overtook.
+		if let Ok(mut state) = tail.write() {
+			assert_eq!(state.updated(), Some(0..2 * RUNS - 1));
+			assert_eq!(state.updated(), None, "each update starts over");
+		}
 	}
 
 	/// A flood a reader reported, fragmented into runs alternating with upstream skips,

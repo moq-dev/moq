@@ -37,6 +37,9 @@ export class Tail {
 	// update names one only if it was sent before the publisher served the group, so the group won
 	// over it, even once the cache evicted it.
 	#finished: Run[] = [];
+	// The span of the finished runs a fold under the pool's debt forgot since the last update. A
+	// stale drop in it may be one its stream overtook, so the update owes none of it again.
+	#folded?: Run;
 	// What `#finished` bills, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
 	// streams it finishes between updates costs what the cache would hold.
 	#bill?: Reader;
@@ -46,23 +49,30 @@ export class Tail {
 		this.#bill = options.bill;
 	}
 
-	// Bill what `#finished` keeps, and under the pool's debt forget all but its newest run: a stale
-	// drop under this update then stands as the publisher judged it, which a wider budget still
-	// reverses. The newest run stays, so streams finishing in sequence grow nothing to charge again.
-	// Mirrors the Rust `Tail::rebill`.
+	// Bill what `#finished` keeps, and under the pool's debt fold all but its newest run into
+	// `#folded`: a stale drop under this update then stands as the publisher judged it, but the
+	// update owes none of the folded span again. The newest run stays, so streams finishing in
+	// sequence grow nothing to charge again. Mirrors the Rust `Tail::rebill`.
 	#rebill(): void {
 		const bill = this.#bill;
 		if (!bill) return;
-		bill.set(this.#finished.length * READER_RUN_OVERHEAD);
+		bill.set((this.#finished.length + (this.#folded ? 1 : 0)) * READER_RUN_OVERHEAD);
 		if (bill.debt > 0 && this.#finished.length > 1) {
+			const start = this.#finished[0].start;
+			const end = this.#finished[this.#finished.length - 2].end;
+			const folded = this.#folded;
+			this.#folded = folded
+				? { start: folded.start < start ? folded.start : start, end: folded.end > end ? folded.end : end }
+				: { start, end };
 			this.#finished = this.#finished.slice(-1);
-			bill.set(READER_RUN_OVERHEAD);
+			bill.set(2 * READER_RUN_OVERHEAD);
 		}
 	}
 
 	/** Release what the tail bills, once its subscription ended. */
 	close(): void {
 		this.#finished = [];
+		this.#folded = undefined;
 		// A stream still in flight finishes after this: with no bill, it can never bill again.
 		this.#bill?.close();
 		this.#bill = undefined;
@@ -136,11 +146,15 @@ export class Tail {
 
 	/**
 	 * Forget which streams finished, for an update being sent: a stale drop under an earlier one is
-	 * no verdict, so none needs them.
+	 * no verdict, so none needs them. Returns the span a fold forgot since the last update, which
+	 * the update owes none of again.
 	 */
-	updated(): void {
+	updated(): Run | undefined {
 		this.#finished = [];
+		const folded = this.#folded;
+		this.#folded = undefined;
 		this.#rebill();
+		return folded;
 	}
 
 	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */

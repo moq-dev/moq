@@ -36,6 +36,7 @@ import {
 	minDelayOf,
 	type Run,
 	removeRun,
+	runGaps,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
@@ -2625,7 +2626,8 @@ export class Subscriber {
 			// unknown again: a reader fills them rather than trust an old verdict.
 			entry.update = update.update;
 			entry.maxDelay = update.maxDelay;
-			entry.tail.updated();
+			// What a fold forgot finishing may have overtaken its drop, so none of it is owed again.
+			const folded = entry.tail.updated();
 			const held = hooks.supersedeStale(entry.track, judged(ranges));
 			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 			// again under the new number what is still stale, so the tail owes every stale run again.
@@ -2635,7 +2637,7 @@ export class Subscriber {
 				for (const reopened of held) {
 					const start = max(run.start, reopened.start);
 					const end = min(run.end, reopened.end);
-					if (start < end) entry.tail.unaccount(start, end);
+					for (const part of runGaps(folded ? [folded] : [], start, end)) entry.tail.unaccount(part.start, part.end);
 				}
 			}
 			// Re-offered whether or not the copy still holds the stale verdict.
