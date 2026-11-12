@@ -8975,6 +8975,15 @@ async fn a_credential_is_answered_over_auth_and_cancelled_while_held() {
 async fn a_credential_without_auth_is_unsupported() {
 	let (addr, _tokens, serving) = token_server("moq-lite-06").await;
 	let session = token_client(addr, "moq-lite-06").await;
+	// The verdict is local, so connect first: cancelling the dial would leave the server
+	// waiting to accept rather than ending its requests.
+	kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&session, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
+	)
+	.await
+	.unwrap()
+	.unwrap();
 	let credential = session.credential("token".into()).unwrap();
 	let err = kio::clock::timeout(TIMEOUT, credential.answered())
 		.await
@@ -8982,7 +8991,7 @@ async fn a_credential_without_auth_is_unsupported() {
 		.expect_err("unsupported");
 	assert!(matches!(err, MoqError::Unsupported), "{err:?}");
 	session.cancel(0);
-	serving.abort();
+	kio::clock::timeout(TIMEOUT, serving).await.unwrap().unwrap();
 }
 
 /// On moq-transport a route's and a claim's credentials ride their announcements, and
