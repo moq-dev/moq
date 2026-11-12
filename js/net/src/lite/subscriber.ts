@@ -960,14 +960,10 @@ export class Subscriber {
 					const now = window.read(rtt?.isZero() ? undefined : rtt);
 					if (now !== linkRtt) {
 						linkRtt = now;
-						// Every route's claims move at once: re-serve each, then report each path once.
+						// RTT never selects a route, so the consume cache keeps its picks: only the
+						// reported routes change, each path once.
 						const paths = new Set<Path.Valid>();
-						for (const wire of routes.values()) {
-							for (const path of wire.view.claims.keys()) {
-								serve(wire, path, false);
-								paths.add(path);
-							}
-						}
+						for (const wire of routes.values()) for (const path of wire.view.claims.keys()) paths.add(path);
 						for (const path of paths) refresh(path, false);
 					}
 					await sleep(LinkRtt.INTERVAL, { signal });
