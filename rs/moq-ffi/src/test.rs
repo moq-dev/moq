@@ -892,10 +892,9 @@ async fn raw_audio_decode_delay() {
 			"microphone".into(),
 			rendition.clone(),
 			MoqAudioDecoderOutput {
-				delay: delay.map(|min| MoqDelay {
-					min: Some(min),
-					max: Some(Duration::ZERO),
-				}),
+				// No max delay: at zero, a read that runs late under load finds group 0
+				// stale and the mid-join warmup trims the rest, so the read never returns.
+				delay: Some(MoqDelay { min: delay, max: None }),
 				estimate: delay.is_none(),
 				..audio_output()
 			},

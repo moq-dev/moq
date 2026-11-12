@@ -47,6 +47,10 @@ no cores, do a ring of edges? I just want this to work by default, which I
 guess means everything is a core unless stated otherwise." Rejected: pricing
 alone; shaping alone; ranking links to cheaper nodes by priority, whose
 outcome under the feasibility rule depends on which route arrived first.
+That reason was written under Babel. Under the path rule
+([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27) a
+relay takes the cheapest route whose path does not name it, whatever arrived
+first.
 
 - Every node is a core unless the embedding application says it is an edge.
   Every node forwards; the role only changes which links it keeps and what

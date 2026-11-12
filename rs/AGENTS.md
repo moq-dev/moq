@@ -6,6 +6,7 @@ The `/rs` Cargo workspace.
 - `kio` provides the async primitives everything polls through.
 - `moq-quic` (our quinn fork) is the only QUIC stack we develop; it also powers qmux and WebTransport. Don't add or deepen dependencies on web-transport, noq, or quinn.
 - `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates.
+- `moq-tokio` and `moq-uring` hold only runtime plumbing, such as dialing and reconnect loops. Logic both would need lives in `moq-net`.
 
 # Producer / Consumer
 
@@ -31,7 +32,6 @@ A `Producer` writes and any number of `Consumer`s read, sharing state via `kio`.
 - Derive `Serialize`/`Deserialize` (with `serde_with` as needed) instead of hand-writing a second copy of the wire shape.
 - Keep `mod encoder` private and re-export flat as `encode::Encoder`.
 - Dependencies use `{ workspace = true }`, except internal dev-dependencies, which are path-only so releases publish.
-- Newtypes and enums over untyped strings.
 
 # Semver
 

@@ -175,8 +175,8 @@ export interface Run {
 /** Add `[start, end)` to sorted, disjoint, non-adjacent `runs`, merging every run it touches. */
 export function insertRun(runs: Run[], start: bigint, end: bigint): void {
 	if (start >= end) return;
-	let first = 0;
-	while (first < runs.length && runs[first].end < start) first++;
+	// Merging a run it touches, so the first that ends at or past `start`.
+	const first = runsFrom(runs, start - 1n);
 	let last = first;
 	while (last < runs.length && runs[last].start <= end) last++;
 	const merged =
@@ -192,6 +192,19 @@ export function removeRun<R extends Run>(runs: readonly R[], start: bigint, end:
 			{ ...run, start: max(run.start, end), end: run.end },
 		].filter((part) => part.start < part.end),
 	);
+}
+
+/** Take `[start, end)` out of sorted, disjoint `runs` in place, each part keeping its run's fields. */
+export function cutRun<R extends Run>(runs: R[], start: bigint, end: bigint): void {
+	if (start >= end) return;
+	const from = runsFrom(runs, start);
+	let to = from;
+	while (to < runs.length && runs[to].start < end) to++;
+	if (from === to) return;
+	const parts: R[] = [];
+	if (runs[from].start < start) parts.push({ ...runs[from], end: start });
+	if (runs[to - 1].end > end) parts.push({ ...runs[to - 1], start: end });
+	runs.splice(from, to - from, ...parts);
 }
 
 /**
@@ -306,11 +319,24 @@ export function dropAt(drops: readonly DropRun[], sequence: bigint): Error | und
 	return drops.find((run) => run.start <= sequence && sequence < run.end)?.error;
 }
 
+/** The index of the first of sorted, disjoint `runs` ending past `sequence`. */
+export function runsFrom(runs: readonly Run[], sequence: bigint): number {
+	let lo = 0;
+	let hi = runs.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (runs[mid].end <= sequence) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
+}
+
 /** The parts of `[start, end)` that sorted, disjoint `runs` do not cover, in order. */
 export function runGaps(runs: readonly Run[], start: bigint, end: bigint): Run[] {
 	const gaps: Run[] = [];
 	let next = start;
-	for (const run of runs) {
+	for (let i = runsFrom(runs, start); i < runs.length; i++) {
+		const run = runs[i];
 		if (next >= end) break;
 		if (run.start > next) gaps.push({ start: next, end: min(run.start, end) });
 		next = max(next, run.end);
@@ -872,6 +898,8 @@ export const hooks: {
 	 * Assigned by `group.ts`.
 	 */
 	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
+	/** Settles once a group reader read or released everything it holds, its {@link GroupConsumer.done}. Assigned by `group.ts`. */
+	groupDone: (group: GroupConsumer) => GetPromise<Error | null>;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
 	readsMirrored: (group: GroupConsumer) => boolean;
 	/**
@@ -1214,6 +1242,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	releaseGroupReader: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupDone: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readsMirrored: () => {

@@ -104,27 +104,36 @@ impl<A: Clone + Eq> View<A> {
 	pub fn restrict(&self, prefix: &Path) -> Self {
 		let mut out = self.present(prefix);
 		let floors = &out.floors;
-		out.items
-			.retain(|claim, _| floors.keys().any(|region| within(claim, region)));
+		out.items.retain(|claim, _| above(floors, claim).next().is_some());
 		out
 	}
 
-	/// The view restricted to the union of `regions`.
-	pub fn restrict_all(&self, regions: &[Path]) -> Self {
+	/// The view restricted to the union of `regions`, as merging each region's
+	/// restriction would leave it, in one pass.
+	///
+	/// A region within another adds nothing the wider one's restriction lacks: the
+	/// floors over it narrow to the wider region, where they certify the claim at the
+	/// region itself at its own path. So only the widest regions count, and those are
+	/// disjoint, so their restrictions merge as a union. A floor a wider one at least
+	/// as new covers then goes, as [`Self::merge`] drops it.
+	pub fn restrict_all(&self, regions: &BTreeSet<Path>) -> Self {
 		let mut out = Self::default();
 		for region in regions {
-			out.merge(&self.restrict(region));
+			let wider = heads(region).filter(|&head| head != region.as_str());
+			if wider.into_iter().any(|head| regions.contains(head)) {
+				continue;
+			}
+			let Self { floors, items } = self.restrict(region);
+			out.floors.extend(floors);
+			out.items.extend(items);
 		}
+		settle(&mut out.floors);
 		out
 	}
 
 	/// The newest revision this view knows `claim` at, if a region certifies it.
 	pub fn as_of(&self, claim: &Path) -> Option<Rev> {
-		self.floors
-			.iter()
-			.filter(|(region, _)| within(claim, region))
-			.map(|(_, floor)| *floor)
-			.max()
+		above(&self.floors, claim).map(|(_, &floor)| floor).max()
 	}
 
 	/// The claims no floor certifies.
@@ -157,10 +166,8 @@ impl<A: Clone + Eq> View<A> {
 		// Every floor of `other` lies within a newer one here, so it knows no claim at a
 		// newer revision and changes nothing: a lagging view costs nothing to merge,
 		// however far it lags.
-		let stale = other
-			.floors
-			.iter()
-			.all(|(region, &floor)| (self.floors.iter()).any(|(wider, &newer)| newer > floor && within(region, wider)));
+		let stale =
+			(other.floors.iter()).all(|(region, &floor)| above(&self.floors, region).any(|(_, &newer)| newer > floor));
 		if stale {
 			return Vec::new();
 		}
@@ -184,12 +191,7 @@ impl<A: Clone + Eq> View<A> {
 			let entry = self.floors.entry(region.clone()).or_insert(floor);
 			*entry = (*entry).max(floor);
 		}
-		let floors = self.floors.clone();
-		self.floors.retain(|region, floor| {
-			!floors
-				.iter()
-				.any(|(wider, newer)| wider != region && within(region, wider) && newer >= floor)
-		});
+		settle(&mut self.floors);
 		changed
 	}
 
@@ -206,10 +208,9 @@ impl<A: Clone + Eq> View<A> {
 		for (region, &floor) in &self.floors {
 			if Some(floor) > newest && !kept.floors.contains_key(region) {
 				kept.floors.insert(region.clone(), floor);
-				for (claim, item) in &self.items {
-					if within(claim, region) {
-						kept.items.insert(claim.clone(), item.clone());
-					}
+				let exact = self.items.get_key_value(region);
+				for (claim, item) in exact.into_iter().chain(below(&self.items, region)) {
+					kept.items.insert(claim.clone(), item.clone());
 				}
 			}
 		}
@@ -283,14 +284,14 @@ pub(crate) fn covering<'a, A>(
 	if claim == *prefix {
 		return Some(found);
 	}
-	let over = || floors.iter().filter(|(region, _)| within(prefix, region));
-	let Some(floor) = over().map(|(_, &rev)| rev).max() else {
+	let Some(floor) = above(floors, prefix).map(|(_, &rev)| rev).max() else {
 		return Some(found);
 	};
-	let certifier = over()
+	// The most specific of the newest, since the root comes first.
+	let certifier = above(floors, prefix)
 		.filter(|&(_, &rev)| rev == floor)
 		.map(|(region, _)| region)
-		.max_by_key(|region| region.len());
+		.last();
 	match certifier.is_some_and(|certifier| !within(&claim, certifier)) {
 		true => None,
 		false => Some(found),
@@ -300,19 +301,44 @@ pub(crate) fn covering<'a, A>(
 /// `floors` narrowed to `prefix`: a region meeting it becomes whichever of the two
 /// lies within the other, keeping the newest floor where two narrow alike.
 pub(crate) fn narrow(floors: &BTreeMap<Path, Rev>, prefix: &Path) -> BTreeMap<Path, Rev> {
-	let mut out: BTreeMap<Path, Rev> = BTreeMap::new();
-	for (region, &floor) in floors {
-		let narrowed = if within(region, prefix) {
-			region
-		} else if within(prefix, region) {
-			prefix
-		} else {
-			continue;
-		};
-		let entry = out.entry(narrowed.clone()).or_insert(floor);
-		*entry = (*entry).max(floor);
+	let mut out: BTreeMap<Path, Rev> = (below(floors, prefix))
+		.map(|(region, &floor)| (region.clone(), floor))
+		.collect();
+	if let Some(floor) = above(floors, prefix).map(|(_, &rev)| rev).max() {
+		out.insert(prefix.clone(), floor);
 	}
 	out
+}
+
+/// The entries of `map` at `path` or above it, the root first: one lookup per
+/// segment, however many entries the map holds.
+pub(crate) fn above<'a, V>(map: &'a BTreeMap<Path, V>, path: &'a Path) -> impl Iterator<Item = (&'a Path, &'a V)> {
+	heads(path).filter_map(|head| map.get_key_value(head))
+}
+
+/// Whether `path` lies within any of `regions`: one lookup per segment.
+pub(crate) fn within_any(path: &Path, regions: &BTreeSet<Path>) -> bool {
+	heads(path).any(|head| regions.contains(head))
+}
+
+/// `path` and every prefix above it, the root first, as the strings a `Path`-keyed
+/// map is looked up by.
+fn heads(path: &Path) -> impl Iterator<Item = &str> {
+	let s = path.as_str();
+	let ends = s.match_indices('/').map(|(end, _)| end);
+	(std::iter::once(0).chain(ends).chain((!s.is_empty()).then_some(s.len()))).map(move |end| &s[..end])
+}
+
+/// Drop each region a wider one at least as new covers: what it certifies, the
+/// wider one already does.
+fn settle(floors: &mut BTreeMap<Path, Rev>) {
+	let covered: Vec<Path> = (floors.iter())
+		.filter(|&(region, &floor)| above(floors, region).any(|(wider, &newer)| wider != region && newer >= floor))
+		.map(|(region, _)| region.clone())
+		.collect();
+	for region in covered {
+		floors.remove(&region);
+	}
 }
 
 #[cfg(test)]
@@ -412,5 +438,63 @@ mod tests {
 		let gone = view(&[("", 3)], &[("c", 4)]);
 		got.apply(gone.diff(&new), gone.floors.clone());
 		assert_eq!(got, gone);
+	}
+
+	#[test]
+	fn restrict_all_ignores_a_region_within_another() {
+		// A newer floor over `live` but not `live/a`, and an older one exactly there:
+		// restricting to `live/a` alone presents `live`'s claim at `live/a`, which the
+		// wider region knows is no claim of its own.
+		let v = view(&[("live", 5), ("live/a", 3)], &[("live", 1)]);
+		let wide = view(&[("live", 5)], &[("live", 1)]);
+		assert_eq!(v.restrict_all(&BTreeSet::from([p("live/a"), p("live")])), wide);
+	}
+
+	/// Random views over paths that share segments and string prefixes (`a` and `ab`).
+	#[test]
+	fn lookups_match_a_scan_of_every_floor() {
+		const PATHS: [&str; 9] = ["", "a", "a/b", "a/b/c", "a/c", "ab", "ab/c", "b", "b/a"];
+		let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+		let mut next = |below: u64| {
+			seed ^= seed << 13;
+			seed ^= seed >> 7;
+			seed ^= seed << 17;
+			seed % below
+		};
+		for _ in 0..2_000 {
+			let mut v = View::<u32>::default();
+			for path in PATHS {
+				if next(3) == 0 {
+					v.floors.insert(p(path), next(4));
+				}
+				if next(2) == 0 {
+					v.items.insert(p(path), next(3) as u32);
+				}
+			}
+			for path in PATHS.map(p) {
+				let scan = v.floors.iter().filter(|(region, _)| within(&path, region));
+				assert_eq!(v.as_of(&path), scan.map(|(_, &floor)| floor).max());
+				let mut narrowed = BTreeMap::new();
+				for (region, &floor) in &v.floors {
+					let key = match (within(region, &path), within(&path, region)) {
+						(true, _) => region.clone(),
+						(_, true) => path.clone(),
+						_ => continue,
+					};
+					let entry = narrowed.entry(key).or_insert(floor);
+					*entry = (*entry).max(floor);
+				}
+				assert_eq!(narrow(&v.floors, &path), narrowed);
+			}
+			let regions: BTreeSet<Path> = PATHS.iter().filter(|_| next(3) == 0).map(|path| p(path)).collect();
+			let widest: Vec<&Path> = (regions.iter())
+				.filter(|&region| !regions.iter().any(|wider| wider != region && within(region, wider)))
+				.collect();
+			let mut folded = View::default();
+			for region in widest.iter().rev() {
+				folded.merge(&v.restrict(region));
+			}
+			assert_eq!(v.restrict_all(&regions), folded);
+		}
 	}
 }

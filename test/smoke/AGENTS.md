@@ -13,4 +13,4 @@ Cross-language interop smoke for the *published* MoQ packages; `test/interop` co
 
 This directory has its own flake: direnv loads it, or use `nix develop ./test/smoke --command ...` or `just test smoke <recipe>` from the root.
 
-`just check` lints (shfmt, shellcheck, actionlint, freshness) but doesn't run the matrix. Run the lane you changed: `just smoke`, `just full`, `just token`, `just cloudflare`, `just moxygen`, or `just relays`.
+`just check` lints (shfmt, shellcheck, actionlint, freshness) but doesn't run the matrix. Run the lane you changed.

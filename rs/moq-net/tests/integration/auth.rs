@@ -69,6 +69,7 @@ cases!(
 	a_handle_backs_one_active_session,
 	a_token_queued_before_our_goaway_rides_only_the_successor,
 	a_broadcast_received_from_the_peer_is_not_ours_to_check,
+	a_broadcast_relayed_from_another_client_is_not_ours_to_check,
 	exact_and_subtree_grants_admit_their_broadcast,
 	pattern_grants_arrive_exactly,
 	a_wildcard_grant_is_enforced,
@@ -2334,6 +2335,69 @@ async fn a_transient_refusal_is_presented_again(version: &'static str) {
 		assert_eq!(token.grant().peek(), Some(Grant::default()));
 		let _setup = issued.next().await;
 		let _token = issued.next().await;
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A broadcast another client publishes through the relay, consumed into one origin that
+/// both publishes and consumes, is not ours to check either: the relay is not its origin.
+async fn a_broadcast_relayed_from_another_client_is_not_ours_to_check(version: &'static str) {
+	within(async {
+		let relay = produce_origin(1);
+		let publisher = produce_origin(3);
+		let broadcast = publisher
+			.route("remote/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
+		let _upstream = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		wait_announced(&relay.consume(), "remote/x", true).await;
+
+		let local = produce_origin(2);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(local.clone()),
+			client_subscribe: Some(local.clone()),
+			server_publish: Some(relay.clone()),
+			server_subscribe: Some(relay.scope("", &patterns(&["local"])).unwrap()),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(granted(&pair.client).await, grant(&["local"], &[""]));
+
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
+			.unwrap();
+		let remote = local
+			.consume()
+			.follow("remote/x", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let prefs = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
+		sub.recv_group().await.unwrap().expect("a group");
+
+		// The first broadcast refused is the one we published, not the one relayed to us.
+		let bad = local.route("bad/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		bad.announce().unwrap();
+		assert!(matches!(
+			pair.server.closed().await,
+			Error::Session(SessionError::Unauthorized)
+		));
+		let (_, reason) = pair.client_transport.close_reason().expect("closed");
+		assert_eq!(reason, "unauthorized: bad/x");
 	})
 	.await
 	.expect("timed out");

@@ -527,6 +527,7 @@ export namespace Origin {
 		readonly available: boolean;
 		readonly cost: Origin.Cost;
 		readonly instance?: Instance.Valid;
+		readonly rtt?: Clock.Duration;
 	}
 	export interface RouteOptions {
 		auth?: Auth.Credential;

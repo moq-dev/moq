@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import * as cache from "./cache.ts";
 import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -710,4 +711,33 @@ test("a pending track info query is answered by its request, and closing rejects
 	const rejected = wireOf(broadcast).resolveTrackInfo("audio");
 	broadcast.close();
 	await expect(rejected).rejects.toThrow();
+});
+
+// A failed group's consumer settles `closed` with frames still unread; the fetch keeps its mirror
+// registered until the caller lets go, so the pool can still reclaim those frames.
+test("a fetch of a failed group leaves its unread frames to the pool's eviction", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const broadcast = new BroadcastProducer();
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const pool = new cache.Pool();
+		hooks.poolTrack(track, pool);
+
+		const failed = track.appendGroup();
+		failed.writeFrame(textFrame("unread"));
+		const group = await wireOf(broadcast).fetchGroup("video", 0n);
+		// The publisher cuts the live group before the caller reads it.
+		failed.abort(new Error("cut"));
+		await yieldNow();
+		expect(group.closed.peek()).toBeInstanceOf(Error);
+
+		// Debt reclaims the oldest group, which the caller has not read.
+		pool.resize(1);
+		track.writeFrame(textFrame("fresh"));
+		await expect(group.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
 });

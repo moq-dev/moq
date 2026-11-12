@@ -566,6 +566,54 @@ fn a_claim_above_an_interest_is_presented_at_it() {
 	sim.check().unwrap();
 }
 
+/// A client presented a claim at a narrow interest widens it after the claim
+/// changed, while cut off from the change. Its stale presentation may come
+/// back first, and moves up to the changed claim without ending.
+#[test]
+fn widening_past_a_changed_claim_moves_it_up() {
+	let (origin, relay, client) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.leaf(client);
+	sim.join(origin, relay, 1);
+	sim.join(client, relay, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/", 0, None);
+	sim.watch(client, "live/b/z");
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/b/z"), Some(true));
+
+	sim.disconnect(client, relay);
+	sim.announce(origin, "live/", 1, None);
+	sim.watch(client, "");
+	assert!(sim.run());
+	sim.connect(client, relay);
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/"), Some(true));
+	assert_eq!(sim.shown(client).len(), 1);
+	assert_eq!(false_ends(&sim.events), 0);
+}
+
+/// A claim withdrawn below one its origin still has ends: the claim above
+/// covers its path but is not the claim it was.
+#[test]
+fn a_claim_withdrawn_under_a_live_one_ends() {
+	let (origin, relay, client) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.leaf(client);
+	sim.join(origin, relay, 1);
+	sim.join(client, relay, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/", 0, None);
+	sim.announce(origin, "live/a/x", 0, None);
+	assert!(sim.run());
+
+	sim.unannounce(origin, "live/a/x");
+	assert!(sim.run());
+	assert_eq!(life(&sim, client, "live/a/x"), [Kind::Start, Kind::End]);
+}
+
 /// Two origins hold the same wildcard capability for one epoch, and a client
 /// watches a region below it. Withdrawing one origin's wildcard ends only that
 /// origin's claim, and a lagging relay's older copy of it is refused after the
@@ -1015,7 +1063,7 @@ fn sweep_scoped_handoff() {
 	let (origin, r1, r2, client) = (0, 1, 2, 3);
 	let mut rng = XorShift(0x5c0b_ed00);
 	let mut live_starts = 0;
-	for scenario in 0..150 {
+	for scenario in 0..scenarios() {
 		let mut sim = Sim::new(4);
 		sim.leaf(origin);
 		sim.leaf(client);
@@ -1132,7 +1180,7 @@ const CLAIMS: [&str; 4] = ["live/", "live/a/", "live/a/x", "live/b"];
 #[test]
 fn sweep_handoff() {
 	let mut rng = XorShift(0x4a4d_0ff5);
-	for scenario in 0..150 {
+	for scenario in 0..scenarios() {
 		let mut sim = churn(&mut rng);
 		let label = format!("scenario {scenario}");
 		assert_eq!(revivals(&sim.events), 0, "{label}");

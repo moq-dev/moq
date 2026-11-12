@@ -1,11 +1,11 @@
-import { Duration, yieldNow } from "@moq/clock";
+import { Duration, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
-import type { Probe as ProbeStats } from "../connection/stats.ts";
+import { type Probe as ProbeStats, transportStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -22,7 +22,7 @@ import {
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
-import { fillChanged, rejectGroups, wantedRuns } from "../fill.ts";
+import { fillChanged, type Judged, rejectGroups, wantedRuns } from "../fill.ts";
 import type { Producer as FrameProducer } from "../frame.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
@@ -75,6 +75,7 @@ import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
+import { LinkRtt } from "./link_rtt.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -976,6 +977,54 @@ export class Subscriber {
 		let synced = false;
 		// Set once the stream lets go of its routes, which then show nothing anew.
 		let closing = false;
+		// This link's min RTT, read once a second while the peer has a route, as Rust's
+		// `Routed::sample`: no route, no timer, and a pause restarts the window.
+		let link = new LinkRtt();
+		let linkRtt: Duration | undefined;
+		let sampler: AbortController | undefined;
+		// The running sampler's first read, settled once it landed or the sampler stopped.
+		let firstRead = Promise.resolve();
+		// Returns whether it started a sampler.
+		const sample = (): boolean => {
+			if (routes.size === 0 && sampler) {
+				sampler.abort();
+				sampler = undefined;
+				link = new LinkRtt();
+				linkRtt = undefined;
+			} else if (routes.size > 0 && !sampler) {
+				const ctrl = new AbortController();
+				sampler = ctrl;
+				const first = Promise.withResolvers<void>();
+				firstRead = first.promise;
+				void readLink(ctrl.signal, link, first.resolve);
+				return true;
+			}
+			return false;
+		};
+		const readLink = async (signal: AbortSignal, window: LinkRtt, read: () => void) => {
+			try {
+				while (!signal.aborted && window.reading) {
+					const rtt = (await transportStats(this.#quic)).rtt;
+					if (signal.aborted || closing || announced.closed.peek() !== undefined) return;
+					// A transport reporting 0 has not measured one.
+					const now = window.read(rtt?.isZero() ? undefined : rtt);
+					if (now !== linkRtt) {
+						linkRtt = now;
+						// RTT never selects a route, so the consume cache keeps its picks: only the
+						// reported routes change, each path once.
+						const paths = new Set<Path.Valid>();
+						for (const wire of routes.values()) for (const path of wire.view.claims.keys()) paths.add(path);
+						for (const path of paths) refresh(path, false);
+					}
+					read();
+					await sleep(LinkRtt.INTERVAL, { signal });
+				}
+			} catch {
+				// Aborted: the routes went or the stream ended.
+			} finally {
+				read();
+			}
+		};
 
 		const route = (id: bigint): Route => {
 			const found = routes.get(id);
@@ -1009,6 +1058,11 @@ export class Subscriber {
 					cost: claim.cost + wire.advert.metric + 1n,
 					node: wire.node,
 					available: !wire.held,
+					// The relay's sum plus this link's own, unknown while either is.
+					rtt:
+						wire.advert.rtt !== undefined && linkRtt !== undefined
+							? linkRtt.checkedAdd(Duration.millis(Number(wire.advert.rtt)))
+							: undefined,
 				}),
 			);
 
@@ -1133,8 +1187,14 @@ export class Subscriber {
 							owner: {},
 						};
 						routes.set(id, wire);
+						const started = sample();
 						nodes.add(msg.node);
 						this.#floors.join(msg.node, wire.carrier);
+						// The link's first read lands before the route's first claims show, as Rust
+						// reads the link before it serves them: a listing reports a path's route when
+						// it turns present and not again for an RTT, so a read landing after would
+						// never reach it.
+						if (started) await race([firstRead, announced.closed]);
 						break;
 					}
 					case "routeUpdate": {
@@ -1158,6 +1218,7 @@ export class Subscriber {
 							claims.delete(id);
 						}
 						routes.delete(msg.id);
+						sample();
 						nodes.delete(wire.node);
 						// What its last floor certified stays, so no other stream's lagging claim revives.
 						this.#floors.leave(wire.node, wire.carrier);
@@ -1263,6 +1324,7 @@ export class Subscriber {
 		} finally {
 			stopDrain?.();
 			closing = true;
+			sampler?.abort();
 			for (const wire of routes.values()) {
 				this.#floors.leave(wire.node, wire.carrier);
 				for (const path of wire.view.claims.keys()) this.#consumes.withdraw(path, wire.owner);
@@ -2591,10 +2653,10 @@ export class Subscriber {
 				const { start, end } = resp.drop;
 				entry.tail.account(start, end);
 				const cause = resp.drop.cause(this.version);
-				// Only a group its publisher never had is lost for every reader, and asked with no
-				// budget, an OLD one is past the publisher's max age, which binds every reader too.
+				// Only a group its publisher never had is lost for every reader; anything else,
+				// OLD included, is refused for now, as the Rust `Refusal::answer` does.
 				if (toStreamCode(cause) === StreamCode.NotFound) fill.dropGroups(start, end);
-				else rejectGroups(fill, start, end, cause, undefined);
+				else fill.refuseGroups(start, end, cause);
 			} else if ("skip" in resp) {
 				// Never produced: final, as the subscription feeding the copy records it.
 				const { start, end } = resp.skip;
@@ -2608,12 +2670,13 @@ export class Subscriber {
 		}
 	}
 
-	// The budget an OLD answer to a request carrying `asked` judged, or undefined when it
-	// reached the publisher's max age, which binds every reader, as the Rust
-	// `Inner::old_binds_everyone` judges. No budget leaves only the max age.
-	#stale(framing: Framing, asked: number | undefined): number | undefined {
+	// The budget an OLD answer to a request carrying `asked` judged: the publisher's max age once
+	// it reached it, which binds every reader, as the Rust `Inner::binding_max_age` judges. No
+	// budget leaves only the max age; undefined when neither is known.
+	#stale(framing: Framing, asked: number | undefined): Judged | undefined {
 		const bound = framing.maxAge?.asMillis();
-		return asked === undefined || (bound !== undefined && asked >= bound) ? undefined : asked;
+		if (asked !== undefined && (bound === undefined || asked < bound)) return { budget: asked, everyone: false };
+		return bound === undefined ? undefined : { budget: bound, everyone: true };
 	}
 
 	// Settle `[start, end)` of what `producer`'s subscription re-offers: a stream or a verdict

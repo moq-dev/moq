@@ -8,7 +8,7 @@ to `release` on demand at any point in the first two phases. The wire phase
 is short, because `main` cannot be cut while a wire version is half changed.
 A cut made while the cycle is still additive publishes patch versions;
 every cut that carries an API break or a wire change advances the shared
-minor, so a wire cut after an API cut advances it again. The questline, `CONTRIBUTING.md`'s Releases and Versions, the version
+minor, so a wire cut after an API cut advances it again. The questline, `RELEASE.md`'s Releases and Versions, the version
 check, and the cut's recurrence all say so.
 
 ## Plan

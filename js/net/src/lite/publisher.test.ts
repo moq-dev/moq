@@ -1517,7 +1517,10 @@ test("lite draft-07: a final drop replaces an expired stream", async () => {
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
 
 		const reset = sub.stall();
-		sub.serve(1n);
+		// Still arriving, as a relay's copy from upstream: the upstream's final drop ends it. One
+		// held whole would stay, since a group stream wins over its drop.
+		const arriving = sub.track.createGroup(1n);
+		arriving.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		expect(await sub.servedHeader()).toBe(1n);
 		await flush();
 		await clock.advance(Duration.millis(budget * 10));

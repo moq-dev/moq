@@ -46,7 +46,7 @@ wrap the Rust core. [Layers](/lib/layers) maps the binding namespaces.
 | Build and check selection | [`justfile`](https://github.com/moq-dev/moq/blob/main/justfile), language justfiles, [`sh/dispatch.sh`](https://github.com/moq-dev/moq/blob/main/sh/dispatch.sh) |
 | CI and packaging | [`.github/workflows/`](https://github.com/moq-dev/moq/tree/main/.github/workflows), [`infra/`](https://github.com/moq-dev/moq/tree/main/infra), [`sh/`](https://github.com/moq-dev/moq/tree/main/sh) |
 | Generated binding ownership | [`rs/moq-ffi/AGENTS.md`](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/AGENTS.md), [FFI release layout](https://github.com/moq-dev/moq/blob/main/.github/ffi.md) |
-| Contribution and release workflow | [`CONTRIBUTING.md`](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md) |
+| Contribution and release workflow | [`CONTRIBUTING.md`](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md), [`RELEASE.md`](https://github.com/moq-dev/moq/blob/main/RELEASE.md) |
 
 ## Read the right version
 
