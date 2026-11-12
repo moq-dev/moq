@@ -272,10 +272,4 @@ session as publishing outside its grant once in
 [moq-dev/moq#8444](https://github.com/moq-dev/moq/pull/8444)'s local run and
 passed on rerun. It is quarantined until its child fixes it.
 
-Added 2026-11-12 (maintainer's standing rule that flakes join this epic):
-moq-ffi's `raw_audio_decode_delay`, whose decoded read hung until the host-clock
-timeout aborted it in the merge queue for
-[moq-dev/moq#8525](https://github.com/moq-dev/moq/pull/8525). It is quarantined
-with `#[ignore]` until its child fixes it.
-
 Public API: none. Wire: none.
