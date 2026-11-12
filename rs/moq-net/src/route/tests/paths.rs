@@ -679,11 +679,15 @@ impl Relay {
 				carrier: 0,
 			})
 		}));
+		let pull = self.readers.get(cast).copied().flatten();
 		for (&peer, session) in &self.sessions {
 			let Some(copy) = session.copies.get(cast) else {
 				continue;
 			};
-			if copy.dead || names(&copy.path, self.hop) || self.doubted(&copy.path) {
+			// As in `select`, doubt keeps a reader from moving to a copy, not on the one
+			// it pulls: that copy's own neighbour says when it goes.
+			let doubted = pull != Some((peer, true)) && self.doubted(&copy.path);
+			if copy.dead || names(&copy.path, self.hop) || doubted {
 				continue;
 			}
 			let Some(cost) = copy.cost.checked_add(session.cost) else {
@@ -702,7 +706,6 @@ impl Relay {
 				carrier: copy.carrier,
 			});
 		}
-		let pull = self.readers.get(cast).copied().flatten();
 		let pull = pull.filter(|pull| options.iter().any(|source| (source.next, source.warm) == *pull));
 		let rank = |node: Id| fnv(cast.1.as_str(), &[cast.0, node]);
 		let free = |source: &Source| match pull {
@@ -1136,6 +1139,8 @@ pub(super) struct PathSim {
 	up: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
 	held: BTreeSet<(Node, Node)>,
+	/// Nodes whose process is gone and has yet to restart.
+	stopped: BTreeSet<Node>,
 	pub stats: PathStats,
 	pub events: Vec<(Node, Id, String, Kind)>,
 }
@@ -1150,6 +1155,7 @@ impl PathSim {
 			up: BTreeSet::new(),
 			queues: BTreeMap::new(),
 			held: BTreeSet::new(),
+			stopped: BTreeSet::new(),
 			stats: PathStats::default(),
 			events: Vec::new(),
 		}
@@ -1218,11 +1224,21 @@ impl PathSim {
 			.collect()
 	}
 
-	/// The process at `node` exits: its sessions close and its state is lost.
+	/// The process at `node` stops: nothing passes between it and `peer` from now on,
+	/// though `peer` has yet to notice, and no timer of its runs until `kill`.
+	pub fn mute(&mut self, node: Node, peer: Node) {
+		self.held.insert((node, peer));
+		self.held.insert((peer, node));
+		self.stopped.insert(node);
+	}
+
+	/// The process at `node` exits: its sessions close and its state is lost. It says
+	/// nothing on the way out, so each neighbour notices and it does not.
 	pub fn kill(&mut self, node: Node) {
 		for peer in self.peers(node) {
-			self.disconnect(node, peer);
+			self.sever(node, peer);
 		}
+		self.stopped.remove(&node);
 		self.restarts[node] += 1;
 		let leaf = self.nodes[node].leaf;
 		self.nodes[node] = Relay::new(hop(node, self.restarts[node]), self.rules);
@@ -1260,18 +1276,16 @@ impl PathSim {
 		self.nodes[node].source(&(id, p(claim)))
 	}
 
-	/// One hop of delay passes at every node. Whether any still waits on a timer.
+	/// One hop of delay passes at every running node. Whether any still waits on a timer.
 	pub fn tick(&mut self) -> bool {
 		let mut waiting = false;
-		for node in &mut self.nodes {
-			waiting |= node.tick();
+		for (node, relay) in self.nodes.iter_mut().enumerate() {
+			if !self.stopped.contains(&node) {
+				waiting |= relay.tick();
+			}
 		}
 		self.flush();
 		waiting
-	}
-
-	pub fn hold(&mut self, from: Node, to: Node) {
-		self.held.insert((from, to));
 	}
 
 	pub fn queued(&self, from: Node, to: Node) -> usize {

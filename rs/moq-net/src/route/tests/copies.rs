@@ -160,6 +160,33 @@ fn two_copies_never_feed_each_other() {
 	}
 }
 
+/// `NEAR` pulls `FAR`'s copy, whose path crosses `HOME`, and then loses its own
+/// session to `HOME`, which casts doubt on `HOME`. Doubt keeps a reader from moving
+/// to a copy, not on the one it pulls, so `NEAR` stays on `FAR`'s throughout.
+#[test]
+fn a_doubt_leaves_the_copy_in_use_alone() {
+	for rules in [Rules::waits(4), Rules::EPOCHS] {
+		let mut sim = uplinks(rules);
+		sim.carry(FAR, 7, "live");
+		assert_eq!(settle(&mut sim), (0, 0), "{rules:?}");
+		sim.carry(NEAR, 7, "live");
+		assert_eq!(settle(&mut sim), (0, 0), "{rules:?}");
+		assert_eq!(pulls(&sim, NEAR), Some((FAR, 3, true)), "{rules:?}");
+
+		sim.disconnect(HOME, NEAR);
+		assert_eq!(pulls(&sim, NEAR), Some((FAR, 3, true)), "{rules:?}");
+		for _ in 0..64 {
+			match sim.busy().first() {
+				Some(&(from, to)) => sim.deliver(from, to),
+				None => sim.tick(),
+			};
+			assert_eq!(pulls(&sim, NEAR), Some((FAR, 3, true)), "{rules:?}");
+		}
+		assert!(sim.busy().is_empty() && !sim.tick(), "{rules:?}");
+		assert_eq!(astray(&sim), (0, 0), "{rules:?}");
+	}
+}
+
 /// Readers arrive at both relays in the same instant, so each pulls over its own
 /// uplink and then hears of the other's copy. By their paths alone each would move
 /// onto the other's, see its own copy's path come back, move off again, and so on

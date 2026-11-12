@@ -214,8 +214,7 @@ impl Net for PathSim {
 	}
 
 	fn mute(&mut self, node: Node, peer: Node) {
-		self.hold(node, peer);
-		self.hold(peer, node);
+		PathSim::mute(self, node, peer);
 	}
 
 	fn sever(&mut self, node: Node, peer: Node) {
@@ -943,21 +942,18 @@ fn every_rule_settles_after_churn() {
 #[test]
 #[ignore = "a benchmark; Nightly reports it"]
 fn benchmark_route_churn() {
-	println!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
+	// Nightly's report reads stdout and keeps the columns it has a unit for, so the
+	// message counts go there and the whole table to stderr. A claim sent is one
+	// message on the wire.
+	println!("rule,route_messages,claim_messages");
+	eprintln!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
 	for rule in Rule::ALL {
 		let churn = churn(rule, 0..400);
-		println!(
-			"{},{},{},{},{},{},{},{},{},{}",
-			rule.as_str(),
-			churn.steps,
-			churn.loops,
-			churn.stale,
-			churn.dark,
-			churn.sent.msgs,
-			churn.sent.items,
-			churn.sent.claims,
-			churn.sent.offline,
-			churn.sent.unavailable,
+		let (rule, steps, sent) = (rule.as_str(), churn.steps, churn.sent);
+		println!("{rule},{},{}", sent.msgs, sent.claims);
+		eprintln!(
+			"{rule},{steps},{},{},{},{},{},{},{},{}",
+			churn.loops, churn.stale, churn.dark, sent.msgs, sent.items, sent.claims, sent.offline, sent.unavailable,
 		);
 	}
 }
@@ -1027,7 +1023,10 @@ fn the_rules_differ_as_reported() {
 #[test]
 #[ignore = "a benchmark; Nightly reports it"]
 fn benchmark_route_rules() {
-	println!("shape,relays,change,rule,msgs,items,claims,rounds,stale,dark,loops,offline,unavailable");
+	// As above: message counts to stdout for the report, which keeps the largest mesh
+	// alone, and the whole table to stderr.
+	println!("shape,relays,change,rule,route_messages,claim_messages,loop_messages");
+	eprintln!("shape,relays,change,rule,msgs,items,claims,rounds,stale,dark,loops,offline,unavailable");
 	for relays in [3, 6, 12, 24] {
 		let mut rng = XorShift(0x6d6f_7100 + relays as u64);
 		let mut shapes = vec![
@@ -1052,10 +1051,17 @@ fn benchmark_route_rules() {
 				for (change, costs) in all {
 					let mean =
 						|field: fn(&Cost) -> usize| costs.iter().map(field).sum::<usize>() as f64 / costs.len() as f64;
-					println!(
-						"{shape},{relays},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
-						change.as_str(),
-						rule.as_str(),
+					let (change, rule) = (change.as_str(), rule.as_str());
+					if relays == 24 {
+						println!(
+							"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1}",
+							mean(|cost| cost.sent.msgs),
+							mean(|cost| cost.sent.claims),
+							mean(|cost| cost.loops),
+						);
+					}
+					eprintln!(
+						"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
 						mean(|cost| cost.sent.msgs),
 						mean(|cost| cost.sent.items),
 						mean(|cost| cost.sent.claims),
