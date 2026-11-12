@@ -22,7 +22,7 @@ export interface Terms {
 	// The playout delay the shared clock plays at: the depth the stretch keeps, decoded or not.
 	target: number;
 	// How far audio may trail the shared clock before the ring skips ahead: the subscription's max
-	// delay less the playout delay.
+	// delay less the playout delay. Zero turns the time stretch off.
 	bound: number;
 }
 

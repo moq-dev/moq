@@ -436,6 +436,7 @@ impl<O: Output> Media<O> {
 								latency: self.args.fixed_delay().unwrap_or_default().max(AUDIO_BUFFER_MIN),
 								changed: self.drained.clone(),
 								output: self.output.clone(),
+								stretch: self.args.stretch(),
 							};
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							let (retire, retired) = tokio::sync::oneshot::channel();
@@ -569,6 +570,8 @@ struct AudioPlayback<O: Output> {
 	output: O,
 	/// The rendition's catalog `delay`, added to the jitter target this track holds.
 	delay: tokio::sync::watch::Receiver<Option<Duration>>,
+	/// How far audio may trail the clock before it skips ahead; zero turns the time stretch off.
+	stretch: Duration,
 }
 
 /// Play a track until it ends, or until `retired` resolves, which ends it where
@@ -586,6 +589,7 @@ async fn play_audio<O: Output>(
 		latency,
 		output,
 		delay: stated,
+		stretch,
 	} = playback;
 
 	// The playout delay is the consumer's to size, from how unevenly packets arrive,
@@ -660,8 +664,8 @@ async fn play_audio<O: Output>(
 	let target = || schedule.delay().clamp(AUDIO_BUFFER_MIN, cap);
 	// Anchor the sink to the shared clock: the media written so far ends at
 	// `end`, and sounds when the clock says it is due. The callback stretches
-	// onto that clock, and skips only what trails it past the age budget the
-	// subscription still delivers, which a fixed delay leaves none of.
+	// onto that clock, and skips only what trails it past the stretch, which
+	// the subscription still delivers.
 	// The last anchor, as when its end was due, the end, and the delay. The
 	// clock's reference is when media zero arrived, `at - end - delay`: one that
 	// moved earlier jumped the clock ahead, which the sink skips rather than
@@ -686,7 +690,7 @@ async fn play_audio<O: Output>(
 				earlier + nanos(end) - nanos(from) + nanos(delay) - nanos(before)
 			});
 			let jumped = Duration::from_nanos(jumped.clamp(0, u64::MAX as i128) as u64);
-			sink.due(at, max_delay.saturating_sub(delay), jumped);
+			sink.due(at, stretch, jumped);
 		}
 	};
 
@@ -714,7 +718,17 @@ async fn play_audio<O: Output>(
 		// Media went missing since the last frame, so the next one does not continue it.
 		let mut lost = false;
 		let mut ends = VecDeque::new();
+		// The subscription reaches the stretch past the shared delay wherever that moves, never
+		// below what it opened with, so audio the sink may still catch up on arrives.
+		let floor = consumer.options().delay.max.unwrap_or_default();
+		let mut asked = floor;
 		loop {
+			let seen = schedule.delay();
+			let max = seen.saturating_add(stretch).max(floor);
+			if max != asked {
+				consumer.set_max_delay(max);
+				asked = max;
+			}
 			// Stop reading while play is held behind a resume with more than the age
 			// budget queued, so the subscription evicts the excess instead of this
 			// queue growing without bound.
@@ -736,6 +750,7 @@ async fn play_audio<O: Output>(
 					retarget(*stated.borrow_and_update());
 					continue;
 				}
+				_ = role.delay_changed(seen) => continue,
 			};
 			let event = match event {
 				Err(err) if !matches!(err, moq_audio::Error::Decode(_)) => return Err(err.into()),
@@ -1104,6 +1119,7 @@ mod tests {
 			playhead: Default::default(),
 			latency: AUDIO_BUFFER_MIN,
 			output: recorder,
+			stretch: Duration::ZERO,
 		};
 		let _sink = play_audio(consumer, playback, std::future::ready(())).await.unwrap();
 	}
@@ -1141,6 +1157,7 @@ mod tests {
 			playhead: Default::default(),
 			latency: AUDIO_BUFFER_MIN,
 			output: recorder.clone(),
+			stretch: Duration::ZERO,
 		};
 		let task = tokio::spawn(async move {
 			play_audio(consumer, playback, std::future::pending())
@@ -1240,6 +1257,7 @@ mod tests {
 			// What `--delay auto` opens on, well short of the lead the held media needs.
 			latency: AUDIO_BUFFER_MIN,
 			output: recorder.clone(),
+			stretch: Duration::ZERO,
 		};
 		let task = tokio::spawn(async move {
 			play_audio(consumer, playback, std::future::pending())
@@ -1314,6 +1332,7 @@ mod tests {
 			playhead: Default::default(),
 			latency: delay,
 			output: recorder.clone(),
+			stretch: Duration::ZERO,
 		};
 		let task = tokio::spawn(async move {
 			play_audio(consumer, playback, std::future::pending())
@@ -1458,6 +1477,7 @@ mod tests {
 			playhead: Default::default(),
 			latency: delay,
 			output: recorder.clone(),
+			stretch: Duration::ZERO,
 		};
 		let video_play = Video {
 			presentation: media.presentation.clone(),
@@ -1592,6 +1612,7 @@ mod tests {
 			playhead: Default::default(),
 			latency: audio_latency,
 			output: recorder.clone(),
+			stretch: Duration::ZERO,
 		};
 		let video_play = Video {
 			presentation: media.presentation.clone(),
@@ -1750,6 +1771,7 @@ mod tests {
 			playhead: Default::default(),
 			latency: delay,
 			output: recorder.clone(),
+			stretch: Duration::ZERO,
 		};
 		let task = tokio::spawn(async move {
 			play_audio(consumer, playback, std::future::pending())
@@ -1832,6 +1854,7 @@ mod tests {
 			playhead: Default::default(),
 			latency: delay,
 			output: recorder.clone(),
+			stretch: Duration::ZERO,
 		};
 		let task = tokio::spawn(async move {
 			play_audio(consumer, playback, std::future::pending())
@@ -1890,6 +1913,7 @@ mod tests {
 			playhead: Default::default(),
 			latency: delay,
 			output: recorder.clone(),
+			stretch: Duration::ZERO,
 		};
 		let task = tokio::spawn(async move {
 			play_audio(consumer, playback, std::future::pending())
@@ -2051,6 +2075,7 @@ mod tests {
 				#[cfg(all(target_os = "linux", feature = "v4l2"))]
 				v4l2_decoder: None,
 				delay: Delay::Fixed(delay),
+				stretch: Duration::ZERO.into(),
 				select: Default::default(),
 			},
 			video: Default::default(),

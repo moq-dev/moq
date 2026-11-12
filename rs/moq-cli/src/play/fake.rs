@@ -163,7 +163,7 @@ impl Sink for FakeSink {
 	}
 
 	/// Playing onto the clock is the real ring's stretch, which this fake leaves out.
-	fn due(&mut self, _at: Instant, _late: Duration, _jumped: Duration) {}
+	fn due(&mut self, _at: Instant, _stretch: Duration, _jumped: Duration) {}
 
 	async fn finish(mut self) {
 		// A finite short tail drains even when it cannot refill the target.

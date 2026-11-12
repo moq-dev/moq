@@ -1,36 +1,29 @@
 /** Capture arrivals before the player's container orders or skips them. @module */
 
-import { Duration, Instant, now } from "@moq/clock";
+import { type Duration, Instant, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Cmaf from "@moq/hang/cmaf";
 import * as Container from "@moq/hang/container";
 import { type Group, Error as NetError } from "@moq/net";
 import { Effect, type Getter } from "@moq/signals";
-import type { Broadcast, Delay } from "@moq/watch";
+import type { Broadcast } from "@moq/watch";
 import { frameDuration, packetDuration } from "../../../../../js/watch/src/audio/config.ts";
+import { maxDelay } from "../../../../../js/watch/src/audio/latency.ts";
 import type { Arrival } from "./schema.ts";
-
-/**
- * The least max delay the decoder subscribes with at "auto": the estimator's 2 s ceiling, so a frame
- * later than the target is still observed (doc/concept/audio-jitter.md). The observer asks for the
- * same, or it would drop exactly the late frames the estimator measures.
- */
-const AUTO_MAX_DELAY = Duration.millis(2000);
 
 /** The public player inputs needed to observe its existing subscription. */
 export type Input = {
 	broadcast: Getter<Broadcast | undefined>;
 	track: Getter<string | undefined>;
 	config: Getter<Catalog.AudioConfig | undefined>;
-	/** The configured delay, which decides whether the decoder subscribes past `maxDelay`. */
-	delay: Getter<Delay>;
+	/**
+	 * The terms of the max delay the decoder subscribes with, which the observer matches, or it would
+	 * drop exactly the late frames the estimator measures (doc/concept/audio-jitter.md).
+	 */
+	delay: Getter<Duration>;
 	maxDelay: Getter<Duration>;
+	stretch: Getter<Duration>;
 };
-
-/** The max delay the decoder subscribes with, which the observer matches. */
-function subscribed(delay: Delay, maxDelay: Duration): Duration {
-	return delay === "auto" ? maxDelay.max(AUTO_MAX_DELAY) : maxDelay;
-}
 
 /** Record frames on the player's connection with its subscription settings. */
 export class Capture {
@@ -52,7 +45,13 @@ export class Capture {
 				if (!active) return;
 				const track = active.track(name).subscribe({
 					priority: Catalog.PRIORITY.audio,
-					delay: { max: subscribed(input.delay.peek(), input.maxDelay.peek()) },
+					delay: {
+						max: maxDelay({
+							delay: input.delay.peek(),
+							maxDelay: input.maxDelay.peek(),
+							stretch: input.stretch.peek(),
+						}),
+					},
 				});
 				const groups = new Set<Group.Consumer>();
 				effect.cleanup(() => {

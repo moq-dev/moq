@@ -22,7 +22,7 @@ import type { Sync, Track } from "../sync";
 import { AudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
-import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
+import { bound, maxDelay, ringHold, target } from "./latency";
 import { Order } from "./order";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -188,7 +188,7 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Duration | undefined>(undefined);
 
-	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
+	// The subscription's max delay: the shared budget, raised to the delay plus the stretch.
 	#subscribeMaxDelay = new Signal<Duration>(Duration.ZERO);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
@@ -321,25 +321,28 @@ export class Decoder {
 		});
 	}
 
-	// A group the relay expires is never observed, so a subscription cut to the target would cap the
-	// estimate at the target it already holds. The container consumer skips at the same max delay,
-	// since it observes each frame before applying it, so audio the ring could still catch up on is
-	// delivered, and carves out the warmup the subscription adds once it has warmed, as Rust's does.
-	// See doc/concept/audio-jitter.md.
+	// The subscription reaches the stretch past the delay, so audio the ring could still catch up on
+	// arrives. A group the relay expires is never observed, so a zero stretch, which cuts the
+	// subscription to the target, leaves the estimate rising one bucket at a time. The container
+	// consumer skips at the same max delay, since it observes each frame before applying it, and
+	// carves out the warmup the subscription adds once it has warmed, as Rust's does. See
+	// doc/concept/audio-jitter.md.
 	#runSubscribeMaxDelay(effect: Effect): void {
-		const delay = effect.get(this.sync.out.delay);
-		const max = this.#maxDelay(effect);
+		const budget = this.#budget(effect);
+		const delay = budget.delay;
+		const max = maxDelay(budget);
 		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0);
 		this.#delay.set({ min: delay, max });
 		this.#subscribeMaxDelay.set(max.add(warmup));
 	}
 
-	// The subscription's max delay, less warmup: the shared max delay, at least the estimator's ceiling
-	// for "auto".
-	#maxDelay(effect: Effect): Duration {
-		const maxDelay = effect.get(this.sync.out.maxDelay);
-		const auto = effect.get(this.sync.in.delay) === "auto";
-		return auto ? maxDelay.max(AUTO_MAX_DELAY) : maxDelay;
+	// The terms of the subscription's max delay: the shared delay and max delay, and the stretch.
+	#budget(effect: Effect): { delay: Duration; maxDelay: Duration; stretch: Duration } {
+		return {
+			delay: effect.get(this.sync.out.delay),
+			maxDelay: effect.get(this.sync.out.maxDelay),
+			stretch: effect.get(this.sync.in.stretch),
+		};
 	}
 
 	#runShape(effect: Effect): void {
@@ -507,8 +510,8 @@ export class Decoder {
 
 		// The ring plays onto the shared clock, slowing down onto a rise and speeding up onto a fall,
 		// and skips only audio trailing it past what the subscription still delivers.
-		const delay = effect.get(this.sync.out.delay);
-		ring.setLatency(delay, this.#maxDelay(effect).saturatingSub(delay));
+		const budget = this.#budget(effect);
+		ring.setLatency(budget.delay, bound(budget));
 	}
 
 	#runDecoder(effect: Effect): void {
