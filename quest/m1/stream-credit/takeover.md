@@ -44,3 +44,31 @@ The draft specifies the wire ([Takeover](/drafts/draft-lcurley-moq-lite.md),
 GROUP_END, YIELDED): what remains is the Rust and JS publishers taking over
 and continuing paused Groups, the subscribers holding and continuing them,
 and the tests above.
+
+Decided 2026-11-12 (coordinator on the maintainer's behalf while away, taking
+the PR's recommendations; open to revision on review):
+
+- GROUP_END encoding: ✅ lite-07 FRAME leads with `Payload Length + 1`, 0 =
+  GROUP_END (rejected: a new Group Stream type with a 1-byte type per frame;
+  no in-band marker, reset only).
+- Reset fallback: ✅ a new YIELDED (0x3C) reset pauses the group, with no
+  SUBSCRIBE_DROP (rejected: TOO_FAR_BEHIND plus the drop, resuming only via a
+  fresh group).
+
+Implementation guidance (recommended, not yet settled by review):
+
+- Take over only a stream whose writer is parked between frames (waiting for
+  its group's next frame) and fully acknowledged; a stream mid-frame falls
+  back to the YIELDED reset, so no frame waits on a handoff.
+- A paused group re-enters its subscription's cursor at its own sequence,
+  ranked like any other group, so the delivery budget can still expire it
+  (then named in SUBSCRIBE_DROP as OLD).
+- The subscriber keeps a paused group's `group::Producer` open in its
+  subscription entry; a continuation takes it and skips the frames it holds.
+- `verify-subscribe`'s `SubscribeAccounting.tla` gains the YIELDED pause and
+  the continuation, since both change how a Group Stream accounts for a
+  sequence.
+
+## Waiting
+
+- Maintainer: scope. The implementation is about XL, not M: a FRAME codec reorder in Rust and JS (publisher, subscriber, Fetch, corpus), a paused-group state on both sides of both languages, a cross-task stream handoff at a frame boundary, multi-group Group Stream parsing, the `SubscribeAccounting.tla` model, and a new browser-over-WebTransport test harness. Options: (1) split: this quest (resized [L]) lands the FRAME reorder, YIELDED, paused groups and continuations, the model, and the resumes-without-loss test, with the Takeover text moved out of the draft; a new [L] follow-up adds takeover (the `Lines` handle before `Listed::preempt`, JS `OpenStream`, GROUP_END, multi-group streams) and the browser test; (2) keep one PR, resized [XL]. Recommend (1): YIELDED pausing is the machinery takeover builds on, each half keeps the draft matching the code at merge, and each stays reviewable.
