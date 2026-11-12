@@ -85,10 +85,20 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    broadcast no relay carries rides the shared route and costs no message of
    its own. Item 4 rests safety on Babel's distance, which cannot let a relay
    join a copy at a neighbour that is no closer to the publisher: the join
-   the Goal wants, and why item 2 stopped at one hop. What keeps a warm route
-   free of loops and stale copies is
-   [the prototype](/quest/m1/route-stale-copies.md)'s to
-   measure, and the proof then holds that rule. Items 1 and 3 stand.
+   the Goal wants, and why item 2 stopped at one hop. Items 1 and 3 stand.
+   Decided 2026-11-11 (maintainer, on
+   [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)): what keeps a warm
+   route free of loops and stale copies is its path, as for every route
+   (routes epic Plan item 27), and the proof then holds that rule. The
+   prototype in `rs/moq-net/src/route/tests/copies.rs` showed three things
+   the proof starts from. A warm route carries the path its copy took and
+   names the relay that carries it, and a relay refuses one whose path names
+   it, so it joins a copy at a neighbour farther from the publisher than
+   itself. Two relays that start carrying in the same instant trade copies
+   for good unless they are ranked, so a relay already pulling moves onto
+   another's copy only if that carrier ranks below it. And when a carrier's
+   uplink closes, it and a relay pulling from it point at each other until
+   the news crosses their link.
    [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) proves items
    2 and 4 as first decided.
 

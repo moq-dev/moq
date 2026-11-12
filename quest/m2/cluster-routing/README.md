@@ -39,16 +39,19 @@ Decided with the maintainer, 2026-10-13:
   detection, additional routing recovery, and total interruption separately.
   Reopened 2026-11-11 (maintainer, /quest-plan after
   [moq-dev/moq#8487](https://github.com/moq-dev/moq/pull/8487)'s reviews):
-  whether Babel's distance stays is
-  [the prototype](/quest/m1/route-stale-copies.md)'s to
-  measure, against paths alone with a withdrawal that names the hop that
-  died. The distance refuses a longer way round until the publisher advances
-  its seqno, and refuses a cached copy at a neighbour no closer to the
+  the distance refuses a longer way round until the publisher advances its
+  seqno, and refuses a cached copy at a neighbour no closer to the
   publisher, which [cache-aware routing](/quest/m3/cache-routing/README.md)
   wants to join. Decided the same day: a route is shared per publisher and
-  per scope, and a relay believes a route by that route's own path, whichever
-  rule wins. Rejected: link-state among relays, and routes to relays in
-  place of publishers.
+  per scope, and a relay believes a route by that route's own path. Rejected:
+  link-state among relays, and routes to relays in place of publishers.
+  Decided 2026-11-11 (maintainer, on the measurements of
+  [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)): Babel goes. A route is
+  kept free of loops by its path, a withdrawal that names the hop that died,
+  holds, and a timed doubt
+  ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27). A
+  detour no longer waits on the publisher, and today's router keeps Babel
+  until [the router quest](/quest/m2/cluster-routing/routes/scope.md) lands.
 - An origin declares its own routing identity, fresh per process or tab
   restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
   key proof is planned; if a use case needs a provable identity, moq-lite-07's

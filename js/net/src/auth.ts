@@ -3,10 +3,11 @@
  *
  * Each side of a moq-lite-07 session presents the credential its connection already carried
  * (the URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
- * versions and moq-transport carry no AUTH exchange: the grant stays undefined. There {@link Handle.add} rejects with {@link Unsupported} on moq-lite, and on
- * moq-transport keeps the token, with no grant, for the announcements whose route names it.
+ * versions and moq-transport carry no AUTH exchange: the grant stays undefined. There a
+ * {@link Credential.answered} rejects with {@link Unsupported} on moq-lite, and on
+ * moq-transport the token is kept, with no grant, for the announcements whose route names it.
  * {@link Handle.grant} is the union of every token this side presented, and {@link Handle.add}
- * presents another without reconnecting, returning its {@link Credential}.
+ * presents another without reconnecting, returning its {@link Credential} at once.
  *
  * A {@link Handle} passed to `connect` as `auth`, or the one a reconnecting `Connection` owns,
  * outlives its sessions: each presents every token it holds, so a route naming one of its
@@ -53,6 +54,14 @@ export interface Credential {
 	 * not one: the next session presents it again.
 	 */
 	readonly closed: PromiseLike<Error | null>;
+	/**
+	 * Resolves once a peer first accepts the token. Rejects with {@link Unsupported} when a
+	 * session neither carries AUTH nor lets a request carry a token (moq-lite without AUTH),
+	 * with the peer's refusal as an `Error.Session`, with the handle's end, or once the token is
+	 * withdrawn before an answer. On moq-transport without AUTH it resolves at once with no grant:
+	 * only a request whose route names it carries it.
+	 */
+	readonly answered: PromiseLike<void>;
 	/** Withdraw the token, removing its grant from the union and remaking any request that carries it without it. */
 	close(): void;
 }

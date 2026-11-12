@@ -417,17 +417,25 @@ jobs:
   tla:
     name: TLA+ (${{ matrix.name }})
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        # The two largest models get a runner each; the last leg takes every
-        # other config, so a new model is checked without editing this list.
+        # The largest models get a runner each, and the route model's three
+        # largest configs (about an hour each on 4 workers) one per config; the
+        # `route` and `rest` legs take every other config, so a new one is
+        # checked without editing this list.
         include:
           - name: resume
             paths: rs/moq-net/verify/resume
+          - name: route triangle
+            paths: rs/moq-net/verify/route/RouteHandoff.cfg
+          - name: route behind
+            paths: rs/moq-net/verify/route/BehindDear.cfg
+          - name: route ring
+            paths: rs/moq-net/verify/route/Ring.cfg
           - name: route
-            paths: rs/moq-net/verify/route
+            paths: "rs/moq-net/verify/route :!rs/moq-net/verify/route/RouteHandoff.cfg :!rs/moq-net/verify/route/BehindDear.cfg :!rs/moq-net/verify/route/Ring.cfg"
           - name: rest
             paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/route"
     steps:

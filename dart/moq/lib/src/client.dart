@@ -279,6 +279,14 @@ final class Moq {
   /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
   Tokens tokens() => session.tokens()!;
 
+  /// Present a request token, for a route or [Claim] to carry with `setAuth`.
+  ///
+  /// On moq-transport it rides each naming route's announcing request; on
+  /// moq-lite it needs AUTH, where it earns a grant. The session presents it
+  /// again on every reconnect. Await [Credential.answered] for the peer's
+  /// verdict. An empty token throws `ConfigMoqException`.
+  Credential credential(String token) => session.credential(token: token);
+
   /// Drain within one second, then stop the client.
   ///
   /// `moq-lite-05` and newer wait for the peer to receive finished tails; older
