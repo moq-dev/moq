@@ -294,6 +294,14 @@ json-properties:
 resume-model:
     bash ../sh/local.sh bash resume-model.sh
 
+# Model-check every TLA+ config under the given paths (default: all): open findings must still break.
+tla *paths:
+    bash ../sh/tla.sh {{ paths }}
+
+# Prove the route key model, and that each variant breaks the lemmas it names.
+route-key-model:
+    bash route-key-model.sh
+
 # Check random lite-07 meshes against the route rules from a fresh replayable seed.
 route-sweep:
     bash ../sh/local.sh bash route-sweep.sh

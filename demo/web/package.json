@@ -15,6 +15,7 @@
 		"@moq/clock": "workspace:*",
 		"@moq/hang": "workspace:^",
 		"@moq/json": "workspace:^",
+		"@moq/stats": "workspace:^",
 		"@moq/publish": "workspace:^",
 		"@moq/room": "workspace:^",
 		"@moq/watch": "workspace:^",

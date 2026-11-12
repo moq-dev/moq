@@ -312,34 +312,6 @@ function decodeTag(data: Uint8Array): Filter {
 	}
 }
 
-/**
- * Read the tagged filter draft-14 carries inline in a SUBSCRIBE body, where the fields
- * following the tag have no length to delimit them.
- *
- * Every tag is read, including the absolute forms we do not serve. Rejecting one would tear
- * the session down over a filter the draft lets a subscriber send; what we do with it is
- * decided when the range is resolved.
- */
-export async function decodeInline(r: Reader): Promise<Filter> {
-	const tag = await r.u62();
-	switch (tag) {
-		case TAG_NEXT_GROUP:
-			return { kind: "relative", groups: 0n };
-		case TAG_LARGEST_OBJECT:
-			return { kind: "nextObject" };
-		case TAG_ABSOLUTE_START:
-			return { kind: "absolute", startGroup: await r.u62(), startObject: await r.u62() };
-		case TAG_ABSOLUTE_RANGE: {
-			const startGroup = await r.u62();
-			const startObject = await r.u62();
-			const delta = await r.u62();
-			return { kind: "absolute", startGroup, startObject, endGroup: startGroup + delta };
-		}
-		default:
-			throw new Error(`unsupported filter type: ${tag}`);
-	}
-}
-
 function expectEmpty(rest: Uint8Array): void {
 	if (rest.length !== 0) {
 		throw new Error("trailing bytes in LOCATION_FILTER");

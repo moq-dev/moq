@@ -7,15 +7,6 @@ clock, keeping its own corpus. A crash it finds reaches the maintainer
 privately, and its reproducer lands in the target's `regressions/` so
 `just check` replays it.
 
-## Waiting
-
-- Maintainer: approve the application PR to
-  [google/oss-fuzz](https://github.com/google/oss-fuzz) and name the contact
-  address it lists. An agent cannot take this: it posts outside the
-  `kixelated` and `moq-dev` orgs, the address receives private security
-  reports, and accepting commits the project to OSS-Fuzz's 90-day disclosure
-  deadline. Done when the application PR is open.
-
 ## Plan
 
 Decided 2026-11-10 (maintainer, /quest-plan of the follow-ups from
@@ -26,8 +17,17 @@ Decided 2026-11-10 (maintainer, /quest-plan of the follow-ups from
 - ✅ m4, after the whole-session targets exist, since stateful targets gain
   the most from long runs.
 
-Nightly gives each of its 22 targets five minutes. That finds shallow bugs
-and replays the corpus; it rarely reaches deep states.
+Decided 2026-11-11 (maintainer, /quest-unblock): ✅ the project files list
+`security@moq.dev`, the address in `SECURITY.md` (rejected: a personal
+address), and ✅ the agent opens the google/oss-fuzz PR from the
+maintainer's account once the maintainer has reviewed its draft files and PR
+text (rejected: waiting to decide). The maintainer accepts OSS-Fuzz's 90-day
+disclosure deadline.
+
+Nightly gives each of its 22 codec targets five minutes and the two
+whole-session targets (`session_lite`, `session_ietf`) fifteen. That finds
+shallow bugs and replays the corpus; it rarely reaches deep states, and the
+session targets' coverage still climbs when their run ends.
 
 - The OSS-Fuzz project files (`project.yaml`, `Dockerfile`, `build.sh`) live
   in google/oss-fuzz. The build script calls `cargo fuzz build` per crate
@@ -42,10 +42,6 @@ and replays the corpus; it rarely reaches deep states.
   handled: reproduce, fix on `main`, commit the input, backport when serious.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [A hostile peer's session cannot panic, leak, or disturb another broadcast](/quest/m1/session-fuzz.md) - the stateful targets that gain most from continuous fuzzing
 
 ## Related
 

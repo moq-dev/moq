@@ -67,8 +67,10 @@ pub async fn run(
 /// starts. [`run`](Self::run) consumes the transcoder, so take the cursors you
 /// want first.
 ///
-/// Dropping this handle or its run future cancels its catalog and closes the output, including
-/// when the future was never polled.
+/// Dropping this handle or its run future cancels its catalog, including when the future was
+/// never polled, but leaves `output` open: whoever holds it decides when it ends, so a caller
+/// replacing this transcoder can keep the path announced until the successor is. [`run`](Self::run)
+/// closes `output` itself only once the source ends.
 pub struct Transcoder {
 	source: moq_net::broadcast::Consumer,
 	output: moq_net::broadcast::Producer,
@@ -210,10 +212,9 @@ impl Transcoder {
 
 impl Drop for Transcoder {
 	fn drop(&mut self) {
-		// The owner exists before `run` is polled. A cancelled prologue must close the
+		// The owner exists before `run` is polled. A cancelled prologue must end the
 		// already registered catalog too. Abort preserves an earlier clean finish or error.
 		self.derived.clone().abort(moq_net::Error::Cancel);
-		self.output.close();
 	}
 }
 
@@ -223,7 +224,8 @@ mod tests {
 	use super::*;
 
 	/// Constructing a transcoder registers its catalog synchronously, so even an unpolled
-	/// run future owns published state that must end deliberately when abandoned.
+	/// run future owns published state that must end deliberately when abandoned. The
+	/// output itself stays open while the caller holds it.
 	#[tokio::test(start_paused = true)]
 	async fn an_unpolled_run_cancels_its_registered_catalog() {
 		let source = moq_net::broadcast::Info::new().produce();
@@ -237,8 +239,13 @@ mod tests {
 			.await
 			.unwrap();
 		drop(transcoder.run());
-		assert!(consumer.is_closed());
 		assert!(matches!(catalog.recv_group().await, Err(moq_net::Error::Cancel)));
+		assert!(
+			!consumer.is_closed(),
+			"the caller's handle decides the output's lifetime"
+		);
+		drop(output);
+		assert!(consumer.is_closed());
 	}
 
 	/// A live source broadcast, whose producers keep its tracks open.

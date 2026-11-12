@@ -27,6 +27,11 @@ name: Nightly
 # exception: deterministic and seconds long, so `just ci` gates every diff that
 # can move them, and audio-quality.yml reruns them here.
 #
+# `tla` model-checks every TLA+ config: TLC explores every ordering a model
+# allows, which takes minutes per config, and a model only changes when the code
+# it covers does, which review checks (see REVIEW.md). It also fails when an
+# open finding's config starts passing, so the fix promotes its rule.
+#
 # Main PRs run only the landing gate's selection as a signal, so every
 # path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
@@ -340,6 +345,7 @@ jobs:
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
         # `rs rung-disable` proves FFI simulcast disable and recovery on a shaped BBR3 uplink.
         # `test resume-model` sweeps resume against its model from a fresh seed; PRs run a fixed 64.
+        # `test route-key-model` proves the route key proof with Tamarin, and that each variant breaks what it names.
         # `test route-sweep` checks random lite-07 meshes against the route rules from a fresh seed; PRs run a fixed 8.
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
@@ -356,7 +362,7 @@ jobs:
         # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
-        recipe: ["gate", "gh test-integration", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test json-properties", "test resume-model", "test route-sweep", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        recipe: ["gate", "gh test-integration", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test json-properties", "test resume-model", "test route-key-model", "test route-sweep", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe; too slow for the merge gate.
           - recipe: rs miri
@@ -401,6 +407,40 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
           CI_STRICT: 1
+
+  tla:
+    name: TLA+ (${{ matrix.name }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # The largest models get a runner each, and the route model's three
+        # largest configs (about an hour each on 4 workers) one per config; the
+        # `route` and `rest` legs take every other config, so a new one is
+        # checked without editing this list.
+        include:
+          - name: resume
+            paths: rs/moq-net/verify/resume
+          - name: route triangle
+            paths: rs/moq-net/verify/route/RouteHandoff.cfg
+          - name: route behind
+            paths: rs/moq-net/verify/route/BehindDear.cfg
+          - name: route ring
+            paths: rs/moq-net/verify/route/Ring.cfg
+          - name: route
+            paths: "rs/moq-net/verify/route :!rs/moq-net/verify/route/RouteHandoff.cfg :!rs/moq-net/verify/route/BehindDear.cfg :!rs/moq-net/verify/route/Ring.cfg"
+          - name: rest
+            paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/route"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      # No dev shell: the recipes fetch TLC themselves.
+      - name: Model-check
+        run: nix shell --inputs-from . nixpkgs#just --command just test tla ${{ matrix.paths }}
 
   # Media QA with a Firefox player against a Chromium fixture. The Chromium
   # player already runs in interop.yml, nightly and on release PRs. WebKit has
@@ -748,7 +788,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, ingest, request, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
+        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
+        # A whole session runs at 50 to 90 inputs a second, and its coverage still climbs
+        # after five minutes, so it gets fifteen.
+        include:
+          - target: session_lite
+            seconds: 900
+          - target: session_ietf
+            seconds: 900
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -769,7 +816,8 @@ jobs:
           restore-keys: |
             fuzz-corpus-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
       - name: Fuzz
-        run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=300
+        # A low per-input timeout, so unbounded work an input causes is a finding.
+        run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=${{ matrix.seconds || 300 }} -timeout=10
       - name: Minimize corpus
         run: nix develop --command just rs fuzz --minimize ${{ matrix.target }}
       - name: Save corpus

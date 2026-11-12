@@ -16,7 +16,7 @@ coming back once it reconnects.
 ## Run
 
 ```sh
-just js tla room/verify/Room.tla
+just test tla js/room
 ```
 
 To draw the chart, run `/statechart` with
