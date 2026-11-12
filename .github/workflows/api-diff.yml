@@ -20,6 +20,8 @@ jobs:
   diff:
     name: Public API
     runs-on: ubuntu-24.04-arm
+    # Nightly's run on `main` writes the Rust cache, which needs this environment's keys.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     # cargo-semver-checks documents every published crate twice, baseline and current.
     timeout-minutes: 120
     steps:
