@@ -10,7 +10,7 @@ its creator composed it, while each source stays its own broadcast that a
 viewer can toggle and fetch at its own priority.
 
 This README's own work is the end-to-end proof: one fixture composition with
-a main broadcast, a picture child, and a sound child plays in `moq play` and
+a main broadcast, a child shown in a picture, and a child heard as sound plays in `moq play` and
 `@moq/watch` with the same placement and timing, within a stated tolerance,
 and with the child's sound mixed in.
 
