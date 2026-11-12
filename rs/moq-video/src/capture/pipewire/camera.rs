@@ -260,13 +260,26 @@ impl Node {
 			name: name.to_string(),
 			description: description.to_string(),
 			priority,
-			v4l2_path: (prop("device.api") == Some("v4l2"))
-				.then(|| prop("api.v4l2.path"))
-				.flatten()
-				.filter(|path| !path.is_empty())
-				.map(str::to_string),
+			v4l2_path: v4l2_path(&prop).map(str::to_string),
 		})
 	}
+}
+
+/// The V4L2 device path behind a node, only when the node uses the V4L2 backend.
+///
+/// A registry global carries only the node's global properties: spa-v4l2
+/// names the device there as `object.path = "v4l2:/dev/videoN"`, while
+/// `device.api` and `api.v4l2.path` appear only in the full node info. The
+/// latter pair is still read for a session manager that does publish them.
+fn v4l2_path<'a>(prop: &impl Fn(&str) -> Option<&'a str>) -> Option<&'a str> {
+	let path = prop(*pw::keys::OBJECT_PATH)
+		.and_then(|path| path.strip_prefix("v4l2:"))
+		.or_else(|| {
+			(prop("device.api") == Some("v4l2"))
+				.then(|| prop("api.v4l2.path"))
+				.flatten()
+		});
+	path.filter(|path| !path.is_empty())
 }
 
 /// Run `mainloop` until the daemon has answered every request sent before
@@ -862,6 +875,13 @@ mod tests {
 		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		props.remove(props.len() - 2);
 		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		// A registry global names the device only in `object.path`.
+		let mut global = WEBCAM.to_vec();
+		global.push(("object.path", "v4l2:/dev/video0"));
+		assert!(unlisted(vec![node(&global).unwrap()], &v4l2).is_empty());
+		global.pop();
+		global.push(("object.path", "libcamera:/base/soc/i2c0mux"));
+		assert_eq!(unlisted(vec![node(&global).unwrap()], &v4l2).len(), 1);
 		// Listing never removes nodes from explicit or priority-based resolution.
 		assert_eq!(
 			resolve(std::slice::from_ref(&webcam), Some(&webcam.name)).unwrap(),
