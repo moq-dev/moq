@@ -2821,9 +2821,12 @@ impl Handle {
 		// Pairs with the fence after the track's `give_up` ended the live copy: either it sees
 		// this abort, or this sees its flag and that copy ended, so the drop riding on this
 		// copy is announced once it is the cut. Cache policy announces nothing, as it cuts
-		// nothing: it runs under the track guard, which a woken cursor would take.
-		std::sync::atomic::fence(Ordering::SeqCst);
-		let carried = !finished && !policy && self.alive.carries_drop.load(Ordering::Relaxed);
+		// nothing: it runs under the track guard, which a woken cursor would take. The fence
+		// runs only on an abort that could carry a drop, so a released group pays nothing.
+		let carried = !finished && !policy && {
+			std::sync::atomic::fence(Ordering::SeqCst);
+			self.alive.carries_drop.load(Ordering::Relaxed)
+		};
 		self.cache.aborted(self.sequence, cut || carried);
 	}
 
