@@ -8,7 +8,7 @@
 import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Charge, Pool } from "./cache.ts";
+import type { Reader as CacheReader, Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -30,6 +30,7 @@ import type {
 	Request,
 	Subscriber,
 	Subscription,
+	WireRecord,
 } from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
@@ -262,6 +263,44 @@ export function insertDrop(
 	return merged;
 }
 
+/**
+ * The parts of sorted, disjoint `runs` that sorted, disjoint `cut` leaves, each keeping its run's
+ * fields, as {@link removeRun} of each cut would, in one pass.
+ */
+export function subtractRuns<R extends Run>(runs: readonly R[], cut: readonly Run[]): R[] {
+	const kept: R[] = [];
+	let first = 0;
+	for (const run of runs) {
+		while (first < cut.length && cut[first].end <= run.start) first++;
+		let from = run.start;
+		for (let i = first; i < cut.length && cut[i].start < run.end; i++) {
+			if (cut[i].start > from) kept.push({ ...run, start: from, end: cut[i].start });
+			from = max(from, cut[i].end);
+		}
+		if (from < run.end) kept.push({ ...run, start: from, end: run.end });
+	}
+	return kept;
+}
+
+/**
+ * `drops` with each of the sorted, disjoint `runs` inserted as {@link insertDrop} inserts it, in
+ * one pass: folding in a span of many runs costs the runs, not their square.
+ */
+export function insertDrops(drops: readonly DropRun[], runs: readonly DropRun[]): DropRun[] {
+	if (runs.length === 0) return [...drops];
+	const next = subtractRuns(drops, runs);
+	// Appended one by one: a peer controls how many runs there are, past any argument limit.
+	for (const run of runs) next.push(run);
+	next.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+	const merged: DropRun[] = [];
+	for (const run of next) {
+		const last = merged[merged.length - 1];
+		if (last && last.end === run.start && sameHole(last, run)) last.end = run.end;
+		else merged.push({ ...run });
+	}
+	return merged;
+}
+
 /** The error `drops` gave `sequence` up with, if any. */
 export function dropAt(drops: readonly DropRun[], sequence: bigint): Error | undefined {
 	return drops.find((run) => run.start <= sequence && sequence < run.end)?.error;
@@ -452,6 +491,11 @@ export interface ResumeSource {
 	 * route change keeps, and those the serving copy reported.
 	 */
 	reofferStale(): Run[];
+	/**
+	 * The bill for the reader's record on the serving copy's account: `current` while it bills that
+	 * account, or else a new one. `current` without a serving copy.
+	 */
+	bill(current: CacheReader | undefined): CacheReader | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -572,8 +616,11 @@ export const hooks: {
 	 * ask below it. Assigned by `track.ts`.
 	 */
 	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
-	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
-	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number }) => GroupProducer;
+	/**
+	 * Create a received group at its wire offset before publishing it to readers; `fill` marks one a
+	 * fill's subscription answered, which the feed never promised. Assigned by `track.ts`.
+	 */
+	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number; fill?: boolean }) => GroupProducer;
 	/** How the copy of `sequence` still arriving ends, if one is, for a duplicate to wait on. Assigned by `track.ts`. */
 	arrivingGroup: (producer: Producer, sequence: bigint) => GetPromise<Error | null> | undefined;
 	/** The producer's largest reported location and its subsequent changes. */
@@ -706,10 +753,21 @@ export const hooks: {
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
 	/**
-	 * Take `[start, end)` back out of what a subscriber's wire cursor reported dropped: a drop
-	 * below where SUBSCRIBE_START resolved never goes out, so a wider budget may still serve it.
+	 * What a lite publisher told its wire about a subscriber's sequences, kept in the
+	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
-	unreport: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	wire: (subscriber: Subscriber) => WireRecord;
+	/**
+	 * Open a bill against a track's cache account for what a session keeps for it beside the
+	 * cache, such as its tail's record of finished streams, billed as a reader's record is, so
+	 * the pool can hand it debt. Mirrors the Rust crate-private `track::Producer::bill`.
+	 */
+	billTrack: (producer: Producer) => CacheReader;
+	/**
+	 * The bill on the account of the track `subscriber` reads: `current` while it bills that account,
+	 * or else a new one; undefined while it has none.
+	 */
+	billSubscriber: (subscriber: Subscriber, current: CacheReader | undefined) => CacheReader | undefined;
 	/**
 	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
 	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
@@ -802,6 +860,8 @@ export const hooks: {
 	 * the group joined accepted it.
 	 */
 	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
+	/** Call `fn` as a group aborts, before its readers can look; assigned by `group.ts`. */
+	onGroupAbort: (group: GroupProducer, fn: (error: Error) => void) => void;
 	/** Whether a group's bytes after its first frame exceed `ratio` times the first frame. */
 	overRefresh: (group: GroupProducer, ratio: number) => boolean;
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
@@ -1012,7 +1072,13 @@ export const hooks: {
 	forgetPastBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
-	unreport: () => {
+	wire: () => {
+		throw new Error("track.ts not loaded");
+	},
+	billTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	billSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	supersedeStale: () => {
@@ -1133,6 +1199,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	admitGroupStart: () => {
+		throw new Error("group.ts not loaded");
+	},
+	onGroupAbort: () => {
 		throw new Error("group.ts not loaded");
 	},
 	overRefresh: () => {

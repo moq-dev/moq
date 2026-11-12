@@ -34,6 +34,7 @@ in sync at the latency you ask for.
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
 | `lookahead` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
+| `stretch` | How far audio may trail the clock before it skips ahead: a duration like `"2s"` (the default), or `"0"` to turn the time stretch off; see [catching up](#catching-up). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
@@ -218,16 +219,31 @@ leave the connection's estimate unclaimed. Without a claim, video selects the be
 `video.target` allows. To stop the relay probing while still adapting, keep the claim and call
 `connection.viewers.setTarget(0)`.
 
+## Catching up
+
+After a stall, video shows each late frame as it arrives and is live again at
+once. Audio cannot skip without losing what arrives late, so it slows down
+slightly when the audio received ahead of it runs low, falls behind the clock,
+and speeds back up once it recovers until it is back on it. `stretch` bounds
+how far it may trail: only audio later than that is skipped, and the audio
+subscription waits on a stalled group for `delay + stretch`, so the late audio
+still arrives. A voice app might ask for `stretch="200ms"`, a sports stream for
+the default 2 s, whether `delay` is `auto` or fixed.
+
+`stretch="0"` turns the time stretch off, for content where a pitch-period
+splice is audible, such as music: received audio plays unaltered, late audio
+is skipped, an underrun is silence, and drift between the publisher's clock
+and the device's is corrected by a small skip or pad.
+
 ## Buffered playback
 
-By default the player minimizes latency: audio plays at the delay, slows down
-slightly when the audio received ahead of it runs low, speeds back up once it
-recovers, and skips ahead only audio trailing by more than the subscription
-still delivers. Content produced faster than real time, such as a TTS
+By default the player minimizes latency: playback trails the live edge by the
+delay, and audio catches up after a stall as [above](#catching-up). Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
 `lookahead` to how far ahead it may run and it plays through at the encoded pace.
 If a stall leaves audio behind, it catches up by playing faster, as live
-playback does, and skips only what trails by more than the lookahead:
+playback does, and skips only what trails by more than the larger of the
+lookahead and `stretch`; a zero `stretch` still turns the stretch off:
 
 ```html
 <moq-watch url="..." name="bot/tts.hang" delay="100ms" lookahead="30s"></moq-watch>
@@ -237,8 +253,9 @@ playback does, and skips only what trails by more than the lookahead:
 `delay`, since playback only skips ahead once media sits more than
 `delay + lookahead` past the playhead.
 
-Durations need a unit; a bare number is rejected. From script, the `delay` and
-`lookahead` properties take a `Duration` from `@moq/clock`, such as
+Durations need a unit; a bare number other than zero is rejected. From script,
+the `delay`, `lookahead`, and `stretch` properties take a `Duration` from
+`@moq/clock`, such as
 `el.delay = Duration.millis(300)`. Audio holds the lookahead
 as encoded frames, so a large one is cheap; video waits as decoded pictures,
 which hold decoder memory, so a long video lookahead is not. The first video

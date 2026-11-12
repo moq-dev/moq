@@ -12,7 +12,7 @@
  */
 import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
-import { NotFound } from "./error.ts";
+import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { insertRun, NO_MAX_DELAY, runGaps } from "./internal.ts";
 import type { Info, Order } from "./track.ts";
@@ -56,15 +56,19 @@ export interface Asker {
 	maxDelay(): number;
 	/** Which end it reads first. */
 	order(): Order;
-	/** Stop waiting for `[start, end)`, which a fill refused with `error`, without asking again. */
-	refuse(start: bigint, end: bigint, error: Error): void;
+	/**
+	 * Stop waiting for `[start, end)`, which a fill refused with `error`, without asking again.
+	 * With `stale`, the source judged them too old under that budget in milliseconds: a verdict
+	 * on this reader only while its own budget is no wider, so a widening asks again.
+	 */
+	refuse(start: bigint, end: bigint, error: Error, stale?: number): void;
 }
 
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
 	accept(state: FillState, pending: Pending, sequence: bigint, info: Info | undefined): GroupProducer;
-	drop(state: FillState, pending: Pending, start: bigint, end: bigint): void;
-	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error): void;
+	drop(state: FillState, pending: Pending, start: bigint, end: bigint, error?: Error): void;
+	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error, stale?: number): void;
 	settle(state: FillState, pending: Pending): void;
 	name(state: FillState): string;
 };
@@ -311,16 +315,17 @@ export class FillState {
 				// Landing in the cache answers it, as `arrived` records.
 				return state.#track.accept(sequence, info);
 			},
-			drop: (state, pending, start, end) => {
+			drop: (state, pending, start, end, error) => {
 				for (const run of pending.owed(start, end)) {
-					state.#track.drop(run.start, run.end, new NotFound(`group ${run.start}`));
+					state.#track.drop(run.start, run.end, error ?? new NotFound(`group ${run.start}`));
 				}
 				state.#resolve(pending, start, end);
 			},
-			refuse: (state, pending, start, end, error) => {
+			refuse: (state, pending, start, end, error, stale) => {
 				for (const gap of pending.unresolved(start, end)) {
 					for (const asker of pending.askers) {
-						for (const run of asker.wants(gap.start, gap.end)) asker.refuse(run.start, run.end, error);
+						for (const run of asker.wants(gap.start, gap.end))
+							asker.refuse(run.start, run.end, error, stale);
 					}
 				}
 				state.#resolve(pending, start, end);
@@ -343,6 +348,16 @@ function subtract(gap: Run, run: Run): Run[] {
 export let wantedRuns: (fill: Fill) => Run[];
 /** Wait for a change to the groups or readers of a fill. @internal */
 export let fillChanged: (fill: Fill) => Promise<unknown>;
+/**
+ * Answer `[start, end)` of `fill` with its source's refusal of a request for them. An OLD one
+ * says every older group of the fill is stale too, since a timed track's starts never rewind:
+ * with `stale`, the budget in milliseconds the request carried, it is refused to the readers
+ * waiting now, a verdict only on those no more tolerant, so a wider reader asks again; without,
+ * the publisher's max age judged it, which binds every reader, so the track records it dropped.
+ * Any other refusal answers only `[start, end)`, for now. Mirrors the Rust `Fill::reject_groups`.
+ * @internal
+ */
+export let rejectGroups: (fill: Fill, start: bigint, end: bigint, error: Error, stale: number | undefined) => void;
 
 // Constructs the public handles from within this module; assigned in their static blocks.
 let makeFill: (state: FillState, pending: Pending) => Fill;
@@ -450,6 +465,15 @@ export class Fill {
 		makeFill = (state, pending) => new Fill(state, pending);
 		wantedRuns = (fill) => fill.#pending.owed();
 		fillChanged = (fill) => Promise.resolve(fill.#pending.revision.changed());
+		rejectGroups = (fill, start, end, error, stale) => {
+			if (toStreamCode(error) !== StreamCode.Old) {
+				fill.refuseGroups(start, end, error);
+			} else if (stale === undefined) {
+				fillOps.drop(fill.#state, fill.#pending, fill.start, end, error);
+			} else {
+				fillOps.refuse(fill.#state, fill.#pending, fill.start, end, error, stale);
+			}
+		};
 	}
 
 	/** The most urgent delivery priority among the readers waiting on it now. */

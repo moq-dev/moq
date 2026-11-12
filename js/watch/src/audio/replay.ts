@@ -21,10 +21,10 @@ import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
-import { type Delay, Sync } from "../sync";
+import { type Delay, STRETCH, Sync } from "../sync";
 import { Backpressure } from "./buffer";
 import { frameDuration } from "./config";
-import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
+import { maxDelay as audioMaxDelay, bound, ringHold, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 
 /** An AudioWorklet render quantum, in frames. */
@@ -62,6 +62,8 @@ export interface Options {
 	delay: Exclude<Delay, "instant">;
 	/** The configured lookahead, in ms: nonzero plays in buffered mode, as the decoder does. */
 	lookahead?: number;
+	/** The configured stretch, in ms, as the element takes it (default: the element's). */
+	stretch?: number;
 	/** The rendition as the catalog described it: its advertised jitter, delay, and codec. */
 	config: Catalog.AudioConfig;
 	/**
@@ -208,11 +210,12 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	const lookahead = Duration.millis(options.lookahead ?? 0);
 	const buffered = !lookahead.isZero();
-	const sync = new Sync({ delay: options.delay, lookahead });
+	const stretch = options.stretch !== undefined ? Duration.millis(options.stretch) : STRETCH;
+	const sync = new Sync({ delay: options.delay, lookahead, stretch });
 	const track = new Track.Producer("audio");
 	// The subscription's max delay, as the decoder sets it, which the consumer drops aged media at too.
-	const maxDelay = new Derived([sync.out.maxDelay], (max) =>
-		options.delay === "auto" ? max.max(AUTO_MAX_DELAY) : max,
+	const maxDelay = new Derived([sync.out.delay, sync.out.maxDelay], (delay, max) =>
+		audioMaxDelay({ delay, maxDelay: max, stretch }),
 	);
 	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
 		format: new Container.Legacy.Format("audio"),
@@ -248,7 +251,10 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	await settle();
 
 	let delay = sync.out.delay.peek();
-	const terms = () => ({ target: delay.asMillis(), bound: maxDelay.peek().saturatingSub(delay).asMillis() });
+	const terms = () => ({
+		target: delay.asMillis(),
+		bound: bound({ delay, maxDelay: sync.out.maxDelay.peek(), stretch }).asMillis(),
+	});
 	// The decode gate, and the worklet's ring on the floor it sets, the way `AudioBuffer` drives both.
 	const gate = new Backpressure(rate, buffered, delay);
 	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor), ...terms() });

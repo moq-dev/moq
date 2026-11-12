@@ -31,7 +31,6 @@ import {
 	insertRun,
 	presented,
 	type Run,
-	removeRun,
 	runGaps,
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
@@ -42,6 +41,7 @@ import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { floorAt, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
+import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
@@ -1041,10 +1041,9 @@ export class Publisher {
 		let controls: SubscriptionControls | undefined;
 		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
-		// for a group that will not come. The group sequences served or
-		// dropped. A gap that never arrived stays until the end sweep names it: this side
-		// cannot tell when the subscriber stopped waiting for it. Undefined on other versions.
-		const served: Run[] | undefined = hasTrackStream(this.version) ? [] : undefined;
+		// for a group that will not come. A gap that never arrived stays until the end sweep
+		// names it: this side cannot tell when the subscriber stopped waiting for it.
+		const named = hasTrackStream(this.version);
 
 		try {
 			// Every draft waits for the track's info, as Rust does: it surfaces a rejected track
@@ -1167,7 +1166,7 @@ export class Publisher {
 				stamp,
 				publisher,
 				compress,
-				served,
+				named,
 				floor,
 				bounds,
 				update: msg.update,
@@ -1337,7 +1336,9 @@ export class Publisher {
 			/** The track's publisher priority, breaking ties between subscriptions. */
 			publisher: number;
 			compress: boolean;
-			served: Run[] | undefined;
+			// Whether the wire names what it never served (lite-05 and later), recording what it
+			// told in the reader's own record.
+			named: boolean;
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: bigint;
 			bounds: FrameBounds;
@@ -1347,7 +1348,10 @@ export class Publisher {
 			initial: bigint;
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, stamp, publisher, compress, served, bounds, initial } = serving;
+		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
+		// What the wire was told of each sequence: served, or given up, and how. Kept in the
+		// reader's own record, which its drops consult too. Undefined before lite-05.
+		const record = named ? hooks.wire(track) : undefined;
 		let updateNumber = serving.update;
 		// The read cursor's floor; the subscription's ranges cap it.
 		let floor = serving.floor;
@@ -1430,73 +1434,45 @@ export class Publisher {
 		// Whether lite-07 names `hole` stale: an OLD drop, which the next update reopens.
 		const sentStale = (hole: Hole) => !hole.skip && toStreamCode(hole.error) === StreamCode.Old;
 
-		// Lite-07: the part of `served` named in SUBSCRIBE_DROP, never served. A skip replaces a
-		// drop, so it is sent over one of these, but never over a group served.
-		let dropped: Run[] = [];
-		// Lite-07: the part of `dropped` named stale (OLD), which a final drop or a group replaces,
-		// as one a route the front switched to delivers after the update that reopens it.
-		let droppedStale: Run[] = [];
-		// Lite-07 groups whose stream expired as stale, which every update drops again under its
-		// number: the subscriber reopens each stale drop then, and the stream already reset.
-		const expired: Run[] = [];
+		// What the wire is told when `hole` goes out. Mirrors the Rust `TrackRun::report`.
+		const reportOf = (hole: Hole): Omit<Reported, "start" | "end"> => {
+			// Every drop is final before lite-07.
+			if (!hasSkip(this.version)) return { kind: "settled" };
+			if (hole.skip) return { kind: "skip" };
+			// The wire names every OLD drop stale, which the next update reopens. One given up as
+			// final, such as one relayed from a version whose drops are all final, is dropped again
+			// by each update, as an expired stream is.
+			if (sentStale(hole)) return { kind: "stale", ...(hole.stale === undefined ? { expired: true } : {}) };
+			return { kind: "dropped" };
+		};
 
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
 		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
-			if (!served) return true;
-			const gaps = runGaps(served, start, end);
-			if (hasSkip(this.version)) {
-				for (const gap of gaps) {
-					if (hole.skip) {
-						dropped = removeRun(dropped, gap.start, gap.end);
-						droppedStale = removeRun(droppedStale, gap.start, gap.end);
-						continue;
-					}
-					insertRun(dropped, gap.start, gap.end);
-					// The wire names every OLD drop stale, which the next update reopens. One the
-					// reader gave up as final, such as one relayed from a version whose drops are all
-					// final, is dropped again by each update, as an expired stream is.
-					if (!sentStale(hole)) {
-						droppedStale = removeRun(droppedStale, gap.start, gap.end);
-						continue;
-					}
-					insertRun(droppedStale, gap.start, gap.end);
-					if (hole.stale === undefined) insertRun(expired, gap.start, gap.end);
-				}
-			}
-			for (const gap of gaps) {
-				insertRun(served, gap.start, gap.end);
+			if (!record) return true;
+			const report = reportOf(hole);
+			for (const gap of record.untold(start, end)) {
+				record.tell(gap.start, gap.end, report);
 				const msg = holeMessage(gap.start, gap.end, hole);
 				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
 			}
 			return true;
 		};
 
-		// Forward a verdict the reader reached on `[start, end)`, as `drop` does. On lite-07 it also
-		// replaces what it overrides: a skip any drop already sent, and a final (non-OLD) drop a stale one,
-		// which the next update would otherwise reopen. A reader the earlier drop ended stays ended.
+		// Forward a verdict the reader reached on `[start, end)`, which its record already took in,
+		// replacing what it goes out over: on lite-07, a skip any drop already sent, and a final
+		// drop a stale one, which the next update would otherwise reopen. A reader the earlier drop
+		// ended stays ended.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
-			if (served && hasSkip(this.version)) {
-				const replaces = hole.skip ? dropped : sentStale(hole) ? [] : droppedStale;
-				for (const run of [...replaces]) {
-					const from = max(run.start, start);
-					const to = min(run.end, end);
-					if (from >= to) continue;
-					replaceStale(from, to);
-					served.splice(0, served.length, ...removeRun(served, from, to));
-				}
-			}
-			return drop(start, end, hole);
+			if (!record || start >= end) return true;
+			record.tell(start, end, reportOf(hole));
+			const msg = holeMessage(start, end, hole);
+			return controls.response(encodeSubscribeResponse(stream, msg, this.version));
 		};
 
-		// Forget that `[start, end)` went out as a drop: a verdict or group replaces it. A stream of
-		// this subscription that expired there is no longer owed again on an update, since what
-		// replaced it settles it.
-		const replaceStale = (start: bigint, end: bigint) => {
-			dropped = removeRun(dropped, start, end);
-			droppedStale = removeRun(droppedStale, start, end);
-			expired.splice(0, expired.length, ...removeRun(expired, start, end));
-		};
+		// Record `[start, end)` as named stale (OLD) in a lite-07 drop that each update drops
+		// again, which a later verdict or group replaces.
+		const toldStale = (start: bigint, end: bigint) => record?.tell(start, end, { kind: "stale", expired: true });
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_FINISH
 		// straight into finish_at, so it must name the track's boundary (which counts
@@ -1562,24 +1538,31 @@ export class Publisher {
 			for (;;) {
 				if (startSequence !== undefined && skipped.length > 0) {
 					for (const range of skipped) {
-						// What was given up below the start is never named, so a wider budget may serve it.
-						if (range.start < startSequence)
-							hooks.unreport(track, range.start, min(range.end, startSequence));
+						// A stale run below the start is never named, so a wider budget may serve it. A
+						// final one is named all the same: no budget brings it back, and a subscriber
+						// filling below the start (a relay whose reader reaches lower) must still learn
+						// its fate. Mirrors the Rust `TrackRun::resolve`.
+						const below = min(range.end, startSequence);
+						if (range.stale !== undefined) {
+							if (range.start < below) record?.untell(range.start, below);
+						} else if (!(await forward(range.start, below, range))) return false;
 						if (!(await forward(max(range.start, startSequence), range.end, range))) return false;
 					}
 					skipped.length = 0;
 				}
 				if (pendingDrops.length > 0) {
-					for (const { start, end, error } of pendingDrops.splice(0)) {
+					for (const { start, end, error: failed } of pendingDrops.splice(0)) {
+						let error = failed;
+						const old = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
+						// The pool folded the run while its stream was open, which is final for this
+						// reader: no update would re-offer a stale drop on it. Mirrors the Rust `TrackRun`.
+						if (old && record?.folded(end - 1n)) error = new StreamError(StreamCode.Evicted);
 						// A stream expired under this subscription's budget is a stale verdict, which
-						// a later verdict or group replaces as any stale drop sent.
-						if (hasSkip(this.version) && toStreamCode(error) === StreamCode.Old) {
-							insertRun(expired, start, end);
-							insertRun(dropped, start, end);
-							insertRun(droppedStale, start, end);
-						}
-						// A re-offer an update owed again is given up now, so the end sweep never names it.
-						if (served) insertRun(served, start, end);
+						// a later verdict or group replaces as any stale drop sent, and each update drops
+						// again. A re-offer an update owed again is given up now, so the end sweep never
+						// names it.
+						else if (old) toldStale(start, end);
+						else record?.tell(start, end, reportOf({ error }));
 						const msg = SubscribeDrop.given(start, end, error, this.version, updateNumber);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 							return false;
@@ -1646,12 +1629,11 @@ export class Publisher {
 							// (applied as the update was decoded): what was reported stale is offered
 							// again, and dropped again under this update's number if still stale.
 							if (hasSkip(this.version)) {
-								const owe = (start: bigint, end: bigint) => {
-									if (served) served.splice(0, served.length, ...removeRun(served, start, end));
-									dropped = removeRun(dropped, start, end);
-									droppedStale = removeRun(droppedStale, start, end);
-								};
+								const owe = (start: bigint, end: bigint) => record?.untell(start, end);
 								for (const run of hooks.reofferStale(track)) owe(run.start, run.end);
+								// What each update drops again: the stale runs whose stream expired, or
+								// that went out OLD for good.
+								const expired: Run[] = record?.expired() ?? [];
 								// A stale drop not sent yet, such as one an earlier update left to drop
 								// again, is judged again under these terms too.
 								for (const pending of pendingDrops.filter(
@@ -1853,9 +1835,25 @@ export class Publisher {
 				// A lite-07 stale drop is no final verdict, and a Group Stream wins over it, so a group
 				// handed out after one is served, as one a route the front switched to delivers: the
 				// update that reopens the drop would never re-offer it.
-				if (runGaps(droppedStale, group.sequence, group.sequence + 1n).length === 0) {
-					replaceStale(group.sequence, group.sequence + 1n);
-				} else if (served && runGaps(served, group.sequence, group.sequence + 1n).length === 0) {
+				// The pool folded a re-offered group while it waited, which is final for this reader:
+				// tell the wire it is gone, since an update re-offered it. Mirrors the Rust `TrackRun`.
+				if (again && record?.folded(group.sequence)) {
+					group.close();
+					const evicted = new StreamError(StreamCode.Evicted);
+					const msg = SubscribeDrop.given(
+						group.sequence,
+						group.sequence + 1n,
+						evicted,
+						this.version,
+						updateNumber,
+					);
+					if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
+						return false;
+					continue;
+				}
+				if (record?.toldStale(group.sequence)) {
+					record.replaceDrops(group.sequence, group.sequence + 1n);
+				} else if (record?.told(group.sequence)) {
 					group.close();
 					continue;
 				}
@@ -1897,7 +1895,7 @@ export class Publisher {
 					)
 						return false;
 				}
-				if (served) insertRun(served, group.sequence, group.sequence + 1n);
+				record?.tell(group.sequence, group.sequence + 1n, { kind: "settled" });
 
 				const options: RunGroup = {
 					sub,

@@ -258,6 +258,9 @@ export class Producer {
 	// timestamp against its neighbors' starts.
 	#admits?: ((start: Timestamp) => () => void)[];
 
+	// Called as the group aborts, before any signal subscriber runs (see `hooks.onGroupAbort`).
+	#aborted?: ((error: Error) => void)[];
+
 	constructor(sequence: bigint) {
 		if (checkSequence(sequence) >= RESERVED) throw new RangeError(`group sequence out of range: ${sequence}`);
 		this.#state = new GroupState(sequence);
@@ -327,6 +330,10 @@ export class Producer {
 		hooks.admitGroupStart = (group, admit) => {
 			group.#admits ??= [];
 			group.#admits.push(admit);
+		};
+		hooks.onGroupAbort = (group, fn) => {
+			group.#aborted ??= [];
+			group.#aborted.push(fn);
 		};
 		hooks.overRefresh = (group, ratio) => {
 			const state = group.#state;
@@ -693,6 +700,8 @@ export class Producer {
 			if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
 			this.#unmirror(mirror);
 		}
+		if (outcome) for (const fn of this.#aborted ?? []) fn(outcome);
+		this.#aborted = undefined;
 	}
 }
 

@@ -57,7 +57,7 @@ The work:
   already has over a new constant: for `Old`, the budget it was judged
   under (a widening already re-asks), or the publisher's max age. The
   bound must also hold up against a hostile peer: what the cache holds is
-  sized by the pool, as the [drop set](/quest/m1/drop-set.md) bills its
+  sized by the pool, as the drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)) bills its
   runs.
 - **Fix both main paths** under the rule: a live SUBSCRIBE_DROP records
   only a permanent error, and `Fill::reject` stops recording `Old` as lost
@@ -77,9 +77,6 @@ The work:
 Public API: possibly a classification query on `Error` (Rust) and its JS
 mirror, if a caller outside moq-net needs it; otherwise none. Wire: none.
 
-## Required
-
-- [Drop set](/quest/m1/drop-set.md) - its per-cursor runs and their reasons are what this bounds; its PR, [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), rewrites the same recording paths
 
 ## Related
 

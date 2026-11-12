@@ -145,14 +145,18 @@ describe("replay", () => {
 async function lag(trace: Arrival[], options: Options, settle: number) {
 	const lags: number[] = [];
 	let underruns = 0;
+	let trimmed = 0;
+	let accelerated = 0;
 	for await (const quantum of replay(trace, options)) {
 		if (quantum.at >= settle && !quantum.stalled && quantum.clock !== undefined) {
 			lags.push(quantum.clock - quantum.timestamp);
 		}
 		underruns = quantum.underruns;
+		trimmed = quantum.trimmed;
+		accelerated = quantum.accelerated;
 	}
 	lags.sort((a, b) => a - b);
-	return { lags, median: lags[lags.length >> 1], underruns };
+	return { lags, median: lags[lags.length >> 1], underruns, trimmed, accelerated };
 }
 
 /**
@@ -163,8 +167,8 @@ const PERIOD = 1000 / 90;
 
 // Audio and video keep separate clocks that align once the delay covers the arrivals. The ring plays
 // onto the shared clock: in steady state the playhead rests within a pitch period of it, either way.
-// A buffer that runs low slows playback and leaves it behind the clock, only as far as the
-// subscription's max delay still delivers, which a fixed delay leaves none of.
+// A buffer that runs low slows playback and leaves it behind the clock, only as far as the stretch
+// allows, which a zero stretch leaves none of.
 describe("replay against the shared clock", () => {
 	let warn: Mock<typeof console.warn>;
 	beforeEach(() => {
@@ -186,16 +190,28 @@ describe("replay against the shared clock", () => {
 		});
 	}
 
-	it("underruns a fixed target short of the spread rather than trailing the clock", async () => {
-		// 80 ms of spread against a fixed 40 ms target: every flush runs the ring dry, and a fixed delay
-		// has no max delay past it to fall behind into.
-		const trace = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
-		const options: Options = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
-		const { lags, median, underruns } = await lag(trace, options, 30_000);
-		expect(underruns).toBeGreaterThanOrEqual(trace.length / 5);
-		// Each refill catches back up within the frame after it, never by a whole flush.
+	// 80 ms of spread against a fixed 40 ms target: every flush runs a ring dry that cannot fall behind.
+	const flushed = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
+	const fixed = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
+
+	it("underruns a fixed target short of the spread with the stretch off, rather than trailing the clock", async () => {
+		const { lags, median, underruns, accelerated } = await lag(flushed, { ...fixed, stretch: 0 }, 30_000);
+		expect(underruns).toBeGreaterThanOrEqual(flushed.length / 5);
+		// Each refill skips back onto the clock within the frame after it, never by a whole flush.
 		expect(median).toBeLessThanOrEqual(20);
 		expect(lags.at(-1)).toBeLessThan(40);
+		expect(accelerated).toBe(0);
+	});
+
+	// The stretch raises no target, so the flushes still underrun, but what arrives late plays and is
+	// caught up by speeding up, where a zero stretch skips it.
+	it("keeps the audio a fixed target short of the spread receives late, where a zero stretch skips it", async () => {
+		const off = await lag(flushed, { ...fixed, stretch: 0 }, 30_000);
+		const on = await lag(flushed, fixed, 30_000);
+		// A zero stretch skips most of every flush; the stretch skips only the backlog it joins on.
+		expect(off.trimmed).toBeGreaterThan(20_000);
+		expect(on.trimmed).toBeLessThanOrEqual(40);
+		expect(on.accelerated).toBeGreaterThan(0);
 	});
 });
 

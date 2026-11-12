@@ -137,8 +137,16 @@ impl Delivered {
 		self.runs.range(..sequence).next_back().map(|(start, _)| *start)
 	}
 
+	/// One past the last sequence of the run holding `sequence`, if it was handed out.
+	pub fn run_end(&self, sequence: u64) -> Option<u64> {
+		self.runs
+			.range(..=sequence)
+			.next_back()
+			.filter(|(_, last)| sequence <= **last)
+			.map(|(_, last)| last + 1)
+	}
+
 	/// How many runs it holds: one per gap, plus the floor.
-	#[cfg(test)]
 	pub fn runs(&self) -> usize {
 		self.runs.len()
 	}
