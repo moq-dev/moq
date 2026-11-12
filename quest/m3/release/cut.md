@@ -54,7 +54,8 @@ both fixes reach release.
 Recurs once per cut (decided 2026-10-19 as once per major release; per cut,
 in three kinds, 2026-11-09). The kinds, what each publishes, and which checks
 each runs are in [Releases](/RELEASE.md#releases). This run is the
-`0.22.0` cut: it still waits on all of m2. Once it merges into `release`, a
+`0.22.0` cut: it still waits on all of m2. Once it merges into `release` and
+release-plz has published every package it bumps (the API diff's baselines), a
 PR on `main` sets `phase` in `version.json` to `additive` (the cut PR keeps
 the old phase, so its API diff only reports its breaks) and performs the re-split the root
 [questline](/quest/README.md) describes. This epic's remaining publication and
@@ -85,7 +86,7 @@ follows that kind:
 - **Wire**, which ends the cycle: also require `/quest/m2/README.md` and
   `/quest/m3/README.md`, which the cut can wait on because it lives in m0,
   not m3; finalize the cycle's wire version, then, once it merges
-  into `release`, set `phase` back to `additive` on `main`, and shift the milestones: remaining publication and adoption
+  into `release` and its packages are published, set `phase` back to `additive` on `main`, and shift the milestones: remaining publication and adoption
   quests to m0, m4's quests by kind into m1, m2 and m3, m5's to m4, and m6
   stays the deferred bucket.
 

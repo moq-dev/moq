@@ -5,7 +5,7 @@
 After the `0.22.0` cut, which still waits on every break planned for it, each release cycle runs in three phases by kind of change, recorded as `phase` in `version.json`: `additive` work first, then `api` breaks, then `wire` changes.
 An API break is what a published consumer adapts to when it rebuilds: the public Rust, JS, or bindings API, CLI flags, config keys, and environment variables.
 A wire change is what a deployed peer adapts to without rebuilding: a frozen wire version, the hang catalog JSON, or a stored or exported container format.
-The maintainer opens the next phase with a PR that changes `phase`. After the `0.22.0` cut, and after the wire cut that ends each cycle, a PR on `main` sets it to `additive` once the cut has merged into `release`: the cut PR itself carries breaks, so its API diff must only report.
+The maintainer opens the next phase with a PR that changes `phase`. After the `0.22.0` cut, and after the wire cut that ends each cycle, a PR on `main` sets it to `additive` once the cut has merged into `release` and every package it bumps is published (crates.io, npm, and the `moq-c-v*`/`moq-ffi-v*` GitHub releases): the cut PR itself carries breaks, so its API diff must only report, and the API diff's baselines are those published versions, so an earlier reset fails Nightly's `--deny` on every break the cut shipped.
 `main` can be cut on demand in the additive and API phases; in the wire phase it is cut only once its wire version is final, so wire work comes last and stays short.
 While `phase` is `additive`, Nightly runs `just api-diff --deny` on `main` and the cut PR's API diff denies too, so a break that lands early is reverted, or the maintainer opens the API phase.
 
