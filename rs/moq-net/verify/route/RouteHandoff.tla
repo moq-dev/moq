@@ -774,32 +774,24 @@ Hearing(n, m, k) ==
     IF ~st[n].rx[m][k].on THEN "off" ELSE IF Believed(n, st[n], m, k) THEN "live" ELSE "doubt"
 Routing(r) == IF ~r.on THEN "none" ELSE IF r.held THEN "held" ELSE "live"
 
+\* The publisher's claims at revision r, for a floor's `full` there.
+Full(r) == IF r >= 0 THEN hist[r + 1] ELSE NoItems
+
 \* The claims messages queued on d, without their order.
 ClaimsOn(d) ==
-    {[k |-> q[d][i].k, rev |-> q[d][i].rev, items |-> q[d][i].items] :
+    {[k |-> q[d][i].k, rev |-> q[d][i].rev, items |-> q[d][i].items, full |-> Full(q[d][i].rev)] :
         i \in {j \in DOMAIN q[d] : q[d][j].t = "claims"}}
 
-COffered == [x \in Relays \X Nodes \X Keys |->
-                [rev |-> st[x[1]].rx[x[2]][x[3]].rev, items |-> st[x[1]].rx[x[2]][x[3]].items]]
-CView == [x \in Relays \X Keys |-> st[x[1]].view[x[2]]]
-CFlight == UNION {ClaimsOn(d) : d \in Dirs}
-\* The publisher's claims at each revision the state names, as `Refs` there.
-CHist ==
-    LET refs == {r \in {rev}
-                       \cup {CView[x].floor : x \in DOMAIN CView}
-                       \cup {COffered[x].rev : x \in DOMAIN COffered}
-                       \cup {y.rev : y \in CFlight} : r >= 0}
-    IN [r \in refs |-> hist[r + 1]]
-
 Claimed == INSTANCE RouteClaims WITH
-    hist <- CHist,
     heard <- [x \in Relays \X Nodes \X Keys |-> Hearing(x[1], x[2], x[3])],
-    offered <- COffered,
+    offered <- [x \in Relays \X Nodes \X Keys |->
+                  LET h == st[x[1]].rx[x[2]][x[3]] IN [rev |-> h.rev, items |-> h.items, full |-> Full(h.rev)]],
     route <- [x \in Relays \X Keys |-> Routing(st[x[1]].rt[x[2]])],
-    view <- CView,
+    view <- [x \in Relays \X Keys |->
+               LET v == st[x[1]].view[x[2]] IN [floor |-> v.floor, items |-> v.items, full |-> Full(v.floor)]],
     shown <- [x \in Relays \X Claims |-> st[x[1]].shown[x[2]]],
     ended <- [x \in Relays \X Claims |-> ended[x[1]][x[2]]],
-    flight <- CFlight,
+    flight <- UNION {ClaimsOn(d) : d \in Dirs},
     MaxFlight <- 0
 
 RefinesClaims == Claimed!Spec
