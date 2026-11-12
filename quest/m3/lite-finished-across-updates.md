@@ -25,8 +25,7 @@ Decided 2026-11-10 (maintainer, /quest-plan): ✅ the subscriber keeps
 tail's floor, and `js/net/src/lite/subscriber.ts` does the same (rejected: the
 publisher skipping the drop for a stream that expires after its FIN, which
 leaves a subscriber whose stream was lost waiting out its grace period). The
-model passes all four rules with this change (about 1.9M states). The bound
-ties to [drop runs pruned below the floor](/quest/m1/drop-runs-prune.md).
+model passes all four rules with this change (about 1.9M states).
 
 Flip both tests, move `StreamWins` into `SubscribeAccounting.cfg`, delete
 `StreamWins.cfg`, and update the `verify-subscribe` skill.
