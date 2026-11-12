@@ -1200,6 +1200,18 @@ impl PathSim {
 		self.flush();
 	}
 
+	/// `peer` notices its session to `node` closed. `node`, whose process is gone,
+	/// does nothing.
+	pub fn sever(&mut self, node: Node, peer: Node) {
+		self.up.remove(&Self::pair(node, peer));
+		for key in [(node, peer), (peer, node)] {
+			self.queues.remove(&key);
+			self.held.remove(&key);
+		}
+		self.nodes[peer].disconnect(node);
+		self.flush();
+	}
+
 	fn peers(&self, node: Node) -> Vec<Node> {
 		(0..self.nodes.len())
 			.filter(|&peer| self.links[node][peer].is_some() && self.connected(node, peer))

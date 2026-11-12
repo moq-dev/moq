@@ -59,8 +59,11 @@ pub(super) trait Net {
 	fn join(&mut self, a: Node, b: Node, cost: Metric);
 	fn open(&mut self, a: Node, b: Node);
 	fn close(&mut self, a: Node, b: Node);
-	/// Keep back whatever `node` has yet to send `peer`: its process is gone.
+	/// The process at `node` is gone: nothing more passes between it and `peer`,
+	/// either way, though `peer` has yet to notice.
 	fn mute(&mut self, node: Node, peer: Node);
+	/// `peer` notices its session to `node` closed. `node`, which is gone, does nothing.
+	fn sever(&mut self, node: Node, peer: Node);
 	/// `node` restarts with no sessions and no state.
 	fn reset(&mut self, node: Node);
 	fn publish(&mut self, node: Node, id: Id);
@@ -106,16 +109,29 @@ impl Net for Sim {
 
 	fn open(&mut self, a: Node, b: Node) {
 		self.connect(a, b);
-		self.moved(a, b);
 	}
 
 	fn close(&mut self, a: Node, b: Node) {
 		self.disconnect(a, b);
-		self.moved(a, b);
+		self.closed(a);
+		self.closed(b);
 	}
 
 	fn mute(&mut self, node: Node, peer: Node) {
 		self.hold(node, peer);
+		self.hold(peer, node);
+	}
+
+	fn sever(&mut self, node: Node, peer: Node) {
+		self.up.remove(&Self::pair(node, peer));
+		for key in [(node, peer), (peer, node)] {
+			self.queues.remove(&key);
+			self.acks.remove(&key);
+			self.held.remove(&key);
+		}
+		self.nodes[peer].disconnect(node);
+		self.flush();
+		self.closed(peer);
 	}
 
 	fn reset(&mut self, node: Node) {
@@ -171,13 +187,11 @@ impl Net for Sim {
 }
 
 impl Sim {
-	/// A publisher advances its seqno whenever its own sessions change, as the
-	/// session layer has it do.
-	fn moved(&mut self, a: Node, b: Node) {
-		for node in [a, b] {
-			if self.declared[node].is_some() {
-				self.bump(node);
-			}
+	/// A publisher advances its seqno when a session its route went out on closes,
+	/// as `route::Node` has it do. A new session lengthens no path, so it does not.
+	fn closed(&mut self, node: Node) {
+		if self.declared[node].is_some() {
+			self.bump(node);
 		}
 	}
 }
@@ -201,6 +215,11 @@ impl Net for PathSim {
 
 	fn mute(&mut self, node: Node, peer: Node) {
 		self.hold(node, peer);
+		self.hold(peer, node);
+	}
+
+	fn sever(&mut self, node: Node, peer: Node) {
+		PathSim::sever(self, node, peer);
 	}
 
 	fn reset(&mut self, node: Node) {
@@ -490,8 +509,9 @@ impl Lab {
 					_ if at == b => a,
 					_ => continue,
 				};
-				// A publisher forwards nothing.
-				if peer < self.mesh.relays && seen.insert(peer) {
+				// A publisher forwards nothing, and neither does a relay that died,
+				// whether or not its neighbours have noticed.
+				if peer < self.mesh.relays && !self.down.contains(&peer) && seen.insert(peer) {
 					queue.push(peer);
 				}
 			}
@@ -510,7 +530,7 @@ impl Lab {
 				None => return Some(Walk::Broken),
 				Some(None) if at == origin => return Some(Walk::Reached),
 				Some(None) => return Some(Walk::Broken),
-				Some(Some(next)) if !self.is_up(at, next) => return Some(Walk::Broken),
+				Some(Some(next)) if !self.is_up(at, next) || self.down.contains(&next) => return Some(Walk::Broken),
 				Some(Some(next)) => at = next,
 			}
 		}
@@ -617,7 +637,7 @@ impl Lab {
 		}
 		self.down.insert(relay);
 		for peer in peers {
-			self.net.close(relay, peer);
+			self.net.sever(relay, peer);
 			self.up.remove(&pair(relay, peer));
 			self.round();
 		}
@@ -640,8 +660,12 @@ impl Lab {
 
 	/// `relay` restarts at once: every session of its closes together and reopens.
 	pub fn restart(&mut self, relay: Node) {
-		for peer in self.peers(relay) {
-			self.net.close(relay, peer);
+		let peers = self.peers(relay);
+		for &peer in &peers {
+			self.net.mute(relay, peer);
+		}
+		for peer in peers {
+			self.net.sever(relay, peer);
 			self.up.remove(&pair(relay, peer));
 		}
 		self.net.reset(relay);
