@@ -1,4 +1,4 @@
-# [XS] Interop and Video pass on main
+# Interop and Video pass on main
 
 ## Goal
 
@@ -14,16 +14,25 @@ so it only needs to stay green.
   [moq-dev/moq#8455](https://github.com/moq-dev/moq/pull/8455) and
   [moq-dev/moq#8512](https://github.com/moq-dev/moq/pull/8512)) passes. Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`.
-  Then delete this quest. Its pass skips the datagram and replacement cases
-  until [routes/js.md](/quest/m2/cluster-routing/routes/js.md) lands, as
+  Its pass skips the datagram and replacement cases until
+  [routes/js.md](/quest/m2/cluster-routing/routes/js.md) lands, as
   [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) set. Decided
   2026-11-09 (maintainer, AFK, accepting the recommendation): close this quest
-  on that pass, because routes/js.md tracks restoring those cases. A red run
-  whose only failure is a stale planned break is not triage: the
-  [planned-break remeasure](/quest/m3/release/planned-break-remeasure.md)
-  owns it, and the release pipeline runs that remeasure with each release.
+  on that pass, because routes/js.md tracks restoring those cases. Decided
+  2026-11-12 (maintainer): this epic also waits for its
+  [planned-break remeasure](/quest/m0/interop-green/planned-break-remeasure.md)
+  child, so the pass closes the epic only once that child lands too. Until then,
+  a red run whose only failure is a stale planned break is fixed by hand: run
+  `just test wire-compat --remeasure` and land the rewritten
+  `test/interop/compat/planned-breaks.json`, as CONTRIBUTING.md's release
+  procedure describes.
 
 ## Plan
+
+Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
+
+- ✅ the release-remeasure pipeline is a child quest of quest/m0/interop-green/ (rejected: quest/m3/release/; drop the follow-up). See [planned-break remeasure](/quest/m0/interop-green/planned-break-remeasure.md).
+- ✅ the release cut keeps its manual post-publish `just test wire-compat --remeasure` step until that child lands, and does not require it (rejected: block the cut on the new quest; accept a red Interop run per release).
 
 Decided 2026-10-27 (maintainer), from an external release-to-main audit
 and a triage of Interop runs

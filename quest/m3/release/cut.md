@@ -30,10 +30,11 @@ its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
-After publication, the release pipeline re-measures the planned wire-compat
-breaks against the published versions and lands the rewritten
-`planned-breaks.json`, per [planned-break remeasure](/quest/m3/release/planned-break-remeasure.md)
-(decided 2026-11-11). Nobody runs that step by hand.
+After publication, re-measure the planned wire-compat breaks against the
+published versions, as CONTRIBUTING.md's release procedure describes. Until the
+[planned-break remeasure](/quest/m0/interop-green/planned-break-remeasure.md)
+moves that step into the release pipeline (decided 2026-11-11), run it by hand;
+the cut does not wait on that quest (decided 2026-11-12).
 
 This cut carries stats epochs, so it drops
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s release-only wall-clock
@@ -143,4 +144,3 @@ with the suites above.
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
 - [Cycle phases](/quest/m3/release/cycle-phases.md) - the shift this cut performs sorts by additive, API and wire, and its recurrence is rewritten to match
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
-- [Planned-break remeasure](/quest/m3/release/planned-break-remeasure.md) - the release pipeline re-measures the planned wire-compat breaks and lands their file with each release, which the post-publish step relies on

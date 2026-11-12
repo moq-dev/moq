@@ -16,6 +16,11 @@ went red on it:
 
 - ✅ the release pipeline runs `just test wire-compat --remeasure` and lands the rewritten `test/interop/compat/planned-breaks.json` with the release (rejected: keep the manual post-publish step; warn on stale pins in scheduled runs).
 
+Decided 2026-11-12 (maintainer), since stale pins caused four of the last six red scheduled Interop runs. This quest is a child of the [Interop epic](/quest/m0/interop-green/README.md):
+
+- ✅ the release-remeasure pipeline is a child quest of quest/m0/interop-green/ (rejected: quest/m3/release/; drop the follow-up).
+- ✅ the release cut keeps its manual post-publish `just test wire-compat --remeasure` step until this quest lands, and does not require it (rejected: block the cut on this quest; accept a red Interop run per release).
+
 The job runs after the publish jobs for the three packages the planned-breaks
 file pins, in the workflows that publish from `release` (`.github/workflows/release-*.yml`).
 It re-measures the pins against the versions just published and lands the
