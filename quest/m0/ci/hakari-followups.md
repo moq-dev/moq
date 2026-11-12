@@ -83,7 +83,8 @@ Public API: none. Wire: none.
   cost is material, present the measured tradeoff to the maintainer; recommend
   keeping the narrow final exclusions unless the measurements justify another
   design. That job timed out on five of the six scheduled runs from
-  2026-11-05 to 11-10 and on every one since 11-07, so a complete run waits on
-  [it fitting its hour](/quest/m0/ci/nightly-rust-test-hour.md). That change
-  regroups the job's builds, so compare only the mbx summaries of builds whose
-  crates, features, and profile match the baseline's.
+  2026-11-05 to 11-10 and on every one since 11-07. It is now two jobs,
+  `Nightly (Rust benchmark tests)` and `Nightly (Rust application benchmark
+  tests)`, each one release build grouping several crates, so none of their
+  builds match a baseline build's crates and features; compare only builds
+  that do.

@@ -907,22 +907,31 @@ impl Handles {
 }
 
 impl Handles {
+	/// The QUIC code to reset or stop a stream with: WT_SESSION_GONE once the session closed,
+	/// which tells the peer to read the session's close reason instead (draft-ietf-webtrans-http3 §4.4).
 	fn encode_stream_code(&self, code: u32) -> VarInt {
-		if self.web.is_some() {
-			http3_code(proto::error_to_http3(code))
-		} else {
-			code.into()
+		match &self.web {
+			Some(web) if web.closed.borrow().is_some() => http3_code(WT_SESSION_GONE),
+			Some(_) => http3_code(proto::error_to_http3(code)),
+			None => code.into(),
 		}
 	}
 	fn decode_stream_code(&self, code: VarInt) -> Option<u32> {
 		decode_stream_code(self.web.is_none(), code)
 	}
 
-	fn session_gone(&self, code: VarInt) -> Option<Error> {
-		self.web
-			.as_ref()
-			.filter(|_| code.into_inner() == 0x170d7b68)
-			.map(|web| web.closed.borrow().clone().unwrap_or(Error::SessionGone))
+	/// Poll the session's close reason when the peer reset or stopped a stream with
+	/// WT_SESSION_GONE, which tears down the streams of a closed session
+	/// (draft-ietf-webtrans-http3 §4.4), or None for any other code.
+	///
+	/// The reset can beat the close capsule, so this waits for it, or for the connection's
+	/// close, which reading the capsule always ends with.
+	fn poll_session_gone(&self, waiter: &kio::Waiter, code: VarInt) -> Option<Poll<Error>> {
+		let web = self.web.as_ref().filter(|_| code.into_inner() == WT_SESSION_GONE)?;
+		if let Some(reason) = web.closed.borrow().clone() {
+			return Some(Poll::Ready(reason));
+		}
+		Some(self.conn.poll_closed(waiter).map(|err| self.map(err.into())))
 	}
 	/// Replace an error caused by the connection closing with the recorded close reason, or
 	/// decode the peer's close code when none was recorded.
@@ -942,6 +951,9 @@ impl Drop for Handles {
 		close(&self.conn, self.web.as_ref(), 0, "dropped");
 	}
 }
+
+/// The HTTP/3 code a closed session's streams are reset and stopped with.
+const WT_SESSION_GONE: u64 = 0x170d7b68;
 
 /// An HTTP/3 code as a QUIC varint.
 fn http3_code(code: u64) -> VarInt {

@@ -842,7 +842,7 @@ The table includes these measurements:
   `size_bytes` and `peak_bytes`, `mib_per_s`, and `*_packets` and `*_messages`
   columns are measurements, and every other column is a workload dimension in each series
   name, so print outcomes only in measured columns. The Rust benchmark tests
-  (`just gh nightly rust-test`) run in release builds, one at a time, under
+  (`just gh nightly rust-test` and `rust-test-apps`) run in release builds, one at a time, under
   nextest's `bench` profile, which keeps each test's output in a JUnit report;
   their series are named by package and test path, such as
   `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`. A test with no runnable

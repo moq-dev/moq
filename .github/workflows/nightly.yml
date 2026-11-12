@@ -93,6 +93,7 @@ jobs:
   # build environment, so a benchmark reuses the dependencies its group already
   # compiled. The Rust benchmarks outgrew one hour, so they split by harness:
   # nextest's ignored benchmark tests and cargo's bench targets share few builds.
+  # The benchmark tests split again by layer, since fat LTO links each test binary.
   # A paired group also builds and runs the previous nightly's commit beside this
   # one on the same runner, which is what fails the job on a regression; the
   # cross-night history on the benchmark site stays informational.
@@ -116,6 +117,11 @@ jobs:
             recipe: gh nightly rust-test
             artifact: bench-rust-test
             artifact-path: target/bench/nightly/rust-test
+            benchmark: true
+          - name: Rust application benchmark tests
+            recipe: gh nightly rust-test-apps
+            artifact: bench-rust-test-apps
+            artifact-path: target/bench/nightly/rust-test-apps
             benchmark: true
           - name: Binding benchmark runners
             recipe: gh nightly bindings

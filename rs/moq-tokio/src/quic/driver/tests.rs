@@ -2313,6 +2313,20 @@ async fn reads_after_a_received_reset_fail_with_it() {
 	let mut recv = server.accept_uni().await.unwrap();
 	send.reset(VarInt::from_u32(7));
 
+	// A read that hit the reset reads it again, never a clean end.
+	let mut buf = Vec::with_capacity(8);
+	loop {
+		match timeout(Duration::from_secs(10), recv.read(&mut buf)).await.unwrap() {
+			Ok(Some(_)) => {}
+			res => {
+				assert!(matches!(res, Err(recv::Error::Reset(_))), "{res:?}");
+				break;
+			}
+		}
+	}
+	let read = recv.read(&mut Vec::with_capacity(8)).await;
+	assert!(matches!(read, Err(recv::Error::Reset(_))), "{read:?}");
+
 	let reset = timeout(Duration::from_secs(10), recv.received_reset()).await.unwrap();
 	assert_eq!(reset.unwrap(), Some(VarInt::from_u32(7)));
 	let lease = recv.lease(1).await.err();
