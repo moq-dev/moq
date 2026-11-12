@@ -265,7 +265,7 @@ impl Client {
 	/// For a credential [`connect.tokens`](crate::connect::Config::tokens) cannot hold:
 	/// one that is not text, or that needs its own Token Type, such as a CBOR token. A
 	/// connect token a dial presents in SETUP replaces it for that dial.
-	pub fn with_setup_token(mut self, token: moq_net::setup::Token) -> Self {
+	pub fn with_token(mut self, token: moq_net::setup::Token) -> Self {
 		self.moq = self.moq.with_token(token);
 		self
 	}
@@ -864,7 +864,8 @@ mod tests {
 	/// on every connection, unless a connect token takes its place.
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
-	async fn a_setup_token_keeps_its_type_and_bytes() {
+	async fn a_token_keeps_its_type_and_bytes() {
+		kio::clock::host_time(); // real TCP sockets
 		let version: moq_net::Version = "moq-transport-18".parse().unwrap();
 		let token = moq_net::setup::Token {
 			kind: 16,
@@ -885,7 +886,7 @@ mod tests {
 			.init(Default::default())
 			.unwrap()
 			.with_reconnect(false)
-			.with_setup_token(token.clone());
+			.with_token(token.clone());
 		let url: Url = format!("tcp://{addr}/").parse().unwrap();
 
 		for round in 0..2 {
@@ -903,7 +904,7 @@ mod tests {
 			.init(Default::default())
 			.unwrap()
 			.with_reconnect(false)
-			.with_setup_token(token);
+			.with_token(token);
 		let connection = client.connect(url);
 		let request = listener.accept().await.unwrap();
 		let text = moq_net::setup::Token {
