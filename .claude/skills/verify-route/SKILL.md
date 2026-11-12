@@ -44,13 +44,13 @@ just test tla rs/moq-net/verify/route
 | Config | Mesh | Bounds | Distinct states | Run |
 | --- | --- | --- | --- | --- |
 | `RouteHandoff.cfg` | The publisher behind relay 1, in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 407,240 | 1.5 min |
-| `Early.cfg` | The same, with a timer that fires at any moment. | 1 claim change, 1 session change | TBD | TBD |
-| `Twice.cfg` | The same, where two sessions close, as when relay 1 dies. Simulated. | 1 claim change, 2 session changes | TBD | TBD |
-| `Ring.cfg` | The publisher and three relays in a ring; timer fires at any moment. | 1 claim change, 1 session change | TBD | TBD |
-| `Lag.cfg` | Relay 3 hears the publisher through relays 1 and 2: the lagging neighbour. | 2 claim changes, 1 session change | TBD | TBD |
-| `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | TBD | TBD |
-| `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | TBD | TBD |
-| `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | TBD | TBD |
+| `Early.cfg` | The same, with a timer that fires at any moment. | 1 claim change, 1 session change | 4,178,590 | 12 min |
+| `Twice.cfg` | The same, where two sessions close, as when relay 1 dies. Simulated: `num` counts behaviours per worker. | 1 claim change, 2 session changes | 40,000 behaviours, 4.0M states | 2 min |
+| `Ring.cfg` | The publisher and three relays in a ring, with a timer that fires at any moment. | 1 claim change, 1 session change | 426,409 | 1.5 min |
+| `Lag.cfg` | Relay 3 hears the publisher through relays 1 and 2: the lagging neighbour. | 2 claim changes, 1 session change | 1,299,405 | 5 min |
+| `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | 20 min |
+| `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | 11 min |
+| `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | 9 min |
 | `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Open finding: `RequestsLoopFree` breaks. | 3 session changes | 979,474 when it breaks | 2.6 min |
 
 Run them last, one at a time. First run what answers in seconds: the prototype's tests (`just rs test -p moq-net --lib -E 'test(/route::tests::(paths|compare|copies)/)'`), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
@@ -63,7 +63,7 @@ A counterexample is a path through the model, not yet a bug. Replay it on the pr
 
 ## Coverage
 
-Sync commit: TBD. The model describes the prototype, extended with a route per prefix and with dead hops kept until their timer fires; `route::Router` does not run this rule yet. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`).
+Sync commit: `d3b6c2573a30541402d396f8080488646f673594`. Run `git log d3b6c2573a.. -- rs/moq-net/src/route/tests/paths.rs` to see what changed since. The model describes the prototype, extended with a route per prefix and with dead hops kept until their timer fires; `route::Router` does not run this rule yet. After a change to a covered function, mirror it in the model, rerun every config, and move the sync commit forward only once the model describes the code at the new commit. `just check` fails when a function or type the table names no longer exists in its file (`sh/coverage-tables.py`).
 
 | Code | Model |
 | --- | --- |
