@@ -1,6 +1,6 @@
 # Watch flows
 
-TLA+ models of two viewer flows, written to be drawn as statecharts. Each
+TLA+ models of two viewer flows. Each
 models what the code does today, in the viewer's words, so a rule that breaks is a bug a viewer
 can hit.
 
@@ -46,8 +46,7 @@ just test tla js/watch
 This runs every config, as Nightly does. `Watch.cfg` and `Failover.cfg` check the rules that hold
 and must pass; each rule that breaks has its own config, marked `\* Open finding:`, which must
 fail until the fix moves its rule into the passing one. A config checks the spec its name starts
-with. A chart draws from the spec, a config, and its `.view.ts`; a
-finding's config charts its break.
+with.
 
 ## Left out
 
