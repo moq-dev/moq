@@ -872,6 +872,8 @@ export const hooks: {
 	 * Assigned by `group.ts`.
 	 */
 	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
+	/** Settles once a group reader read or released everything it holds, its {@link GroupConsumer.done}. Assigned by `group.ts`. */
+	groupDone: (group: GroupConsumer) => GetPromise<Error | null>;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
 	readsMirrored: (group: GroupConsumer) => boolean;
 	/**
@@ -1214,6 +1216,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	releaseGroupReader: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupDone: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readsMirrored: () => {
