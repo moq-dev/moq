@@ -51,8 +51,8 @@ Work:
   current request" with the settled rule. The hold rule in Routing is not
   about belief and stays unless the prototype's pick removes holds. Add a
   changelog bullet.
-- If [js/net's route layer](/quest/m2/cluster-routing/routes/js.md) has
-  landed, change it in the same PR.
+- Change js/net's route layer (`js/net/src/lite/publisher.ts`,
+  `js/net/src/lite/subscriber.ts`, `js/net/src/route.ts`) in the same PR.
 - Rewrite the epic's bullet on who certifies as built, and update the
   `verify-route` skill's coverage and sync commit.
 - Measure route and claim messages per change with
