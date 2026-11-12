@@ -6628,14 +6628,18 @@ impl GroupServe {
 							match writer.finish() {
 								Ok(()) => self.state = GroupState::Closed { writer },
 								// The writer drops here: the Drop reset stands in for the
-								// abort, exactly like the old `finish()?`.
-								Err(err) => return Poll::Ready(Err(err)),
+								// abort, exactly like the old `finish()?`. A preempt from
+								// another task can land between the last flush and the FIN,
+								// which then fails, and only pauses the group too.
+								Err(err) => {
+									self.paused = self.preempted(&writer);
+									return Poll::Ready(Err(err));
+								}
 							}
 						}
 						Err(err) => {
 							// Read before the abort releases the stream.
-							self.paused =
-								self.rewind.is_some() && writer.stream().is_some_and(|stream| stream.preempted());
+							self.paused = self.preempted(&writer);
 							writer.abort(&err);
 							return Poll::Ready(Err(err));
 						}
@@ -6686,6 +6690,11 @@ impl GroupServe {
 	/// carries the `ietf` extension's object records, which a continuation cannot resume.
 	fn yields(ctx: &GroupContext) -> bool {
 		ctx.version.has_yield() && !ctx.ietf
+	}
+
+	/// Whether the session reset `writer`'s stream to make room, pausing a group that yields.
+	fn preempted(&self, writer: &Writer<crate::transport::boxed::SendStream, Version>) -> bool {
+		self.rewind.is_some() && writer.stream().is_some_and(|stream| stream.preempted())
 	}
 
 	/// Account for a group that failed with `err`: a reset can lose its header, and a group

@@ -219,6 +219,73 @@ async fn a_reset_group_resumes_without_loss() {
 	assert_eq!(rest, [b"b".as_slice(), b"c".as_slice()]);
 }
 
+/// On lite-07 a group paused while it waited for its next frame, which then finishes with no
+/// more frames, still only pauses: the continuation ends it cleanly rather than a drop giving
+/// it up.
+#[kio::test]
+async fn a_reset_group_finishing_without_more_frames_ends_cleanly() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = origin(1);
+	let viewer = origin(2);
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	let track = broadcast.broadcast().create_track("0", info).unwrap();
+	broadcast.announce().unwrap();
+
+	let mut options = MockConnectOptions::new(version);
+	options.transport.max_concurrent_uni_streams = Some(1);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(viewer.clone());
+	let _pair = connect_mock(options).await;
+
+	let remote = viewer
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	let prefs = track::Subscription::default()
+		.with_order(track::Order::Descending)
+		.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+	let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+
+	let mut older = track.append_group().unwrap();
+	older.write_frame(Timestamp::ZERO, b"a".as_slice()).unwrap();
+	let mut paused = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+		.await
+		.expect("the older group arrives")
+		.unwrap()
+		.unwrap();
+	let first = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
+		.await
+		.expect("its first frame arrives")
+		.unwrap();
+	assert_eq!(first.map(|frame| frame.payload), Some(bytes::Bytes::from_static(b"a")));
+
+	let mut newer = track.append_group().unwrap();
+	newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
+	newer.finish().unwrap();
+	let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+		.await
+		.expect("the newer group takes the older one's credit")
+		.unwrap()
+		.unwrap();
+	assert_eq!(group.sequence, 1);
+
+	// No frame follows the reset: the group just ends.
+	older.finish().unwrap();
+	let end = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
+		.await
+		.expect("the paused group continues");
+	assert!(matches!(end, Ok(None)), "the paused group ends cleanly: {end:?}");
+}
+
 /// On lite-07 a paused group's continuation waiting for credit ranks below the stream it
 /// lost to, so it never holds back a newer group that outranks that stream: the newer group
 /// still resets it, and both paused groups then continue without loss.

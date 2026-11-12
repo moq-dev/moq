@@ -488,15 +488,26 @@ impl TrackEntry {
 		self.place(hdr, version, received, reading, owed)
 	}
 
-	/// Whether a YIELDED reset paused the group `sequence`, which the cache still holds.
-	fn is_paused(&self, sequence: u64) -> bool {
-		self.paused.as_ref().is_some_and(|paused| {
-			paused
-				.read()
-				.groups
-				.get(&sequence)
-				.is_some_and(|paused| !paused.group.handle().is_aborted())
-		})
+	/// Whether a YIELDED reset paused the group `sequence`, which the cache still holds. One the
+	/// cache gave up on is let go here, releasing the subscription's end its stream held, since
+	/// the stream asking opens the group afresh.
+	fn is_paused(&mut self, sequence: u64) -> bool {
+		let Some(registry) = &self.paused else {
+			return false;
+		};
+		let Ok(mut state) = registry.write() else {
+			return false;
+		};
+		match state.groups.get(&sequence) {
+			None => false,
+			Some(paused) if !paused.group.handle().is_aborted() => true,
+			Some(_) => {
+				let given_up = state.groups.remove(&sequence);
+				drop(state);
+				drop(given_up);
+				false
+			}
+		}
 	}
 
 	/// Continue the group a YIELDED reset paused with the stream whose header is `hdr`,
@@ -5629,6 +5640,95 @@ mod tests {
 			assert!(group.read_frame().await.unwrap().is_none(), "overtakes: {overtakes}");
 			assert_eq!(tail.read().streams(), 2, "each stream counts toward the end");
 		}
+	}
+
+	/// Lite-07: a paused group the cache gave up on lets go of the subscription's end once a
+	/// continuation arrives, which opens the group afresh.
+	#[kio::test]
+	async fn a_paused_group_the_cache_gave_up_lets_go_of_the_end() {
+		use crate::lite::test_transport::{Close, ScriptedSession};
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let header = || {
+			let mut script = Vec::new();
+			lite::Group {
+				subscribe: 7,
+				sequence: 3,
+				frame_start: 0,
+			}
+			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+			.unwrap();
+			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+			encoder.varint(2).unwrap();
+			encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
+			script.push(b'x');
+			script
+		};
+		let yielded = ScriptedSession::new(header());
+		let continued = ScriptedSession::eof(header());
+		let clock = crate::time::Deadlines::new(crate::time::Instant::now());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: clock.clone(),
+			session: crate::driver::Transport::new(yielded.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		let subscription = crate::track::Subscription::default()
+			.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+			.with_range(0..);
+		let _reader = track.subscribe(subscription);
+		let framing = lite::Framing {
+			timescale: Some(Timescale::MILLI),
+			ietf: None,
+			compressed: false,
+			length_first: true,
+		};
+		let tail = kio::Producer::new(Tail::default());
+		subscriber
+			.subscribes
+			.lock()
+			.insert(7, TrackEntry::accepted(track.clone(), framing, tail.clone()));
+
+		let (_, recv) = yielded.open_bi(Default::default()).await.unwrap();
+		let mut first = GroupRecv::new(
+			subscriber.clone(),
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		);
+		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
+		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
+		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
+		assert!(res.is_ok(), "{res:?}");
+		assert!(tail.read().is_reading(), "the paused stream holds the end");
+
+		// The cache gives the paused group up, as eviction would.
+		{
+			let subs = subscriber.subscribes.lock();
+			let paused = subs.get(&7).unwrap().paused.as_ref().unwrap().read();
+			let _ = paused.groups.get(&3).unwrap().group.handle().abort(Error::Old);
+		}
+		let (_, recv) = continued.open_bi(Default::default()).await.unwrap();
+		let mut second = GroupRecv::new(
+			subscriber.clone(),
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		);
+		let res = kio::wait(|waiter| second.poll_serve(waiter)).await;
+		assert!(res.is_ok(), "{res:?}");
+		assert!(!tail.read().is_reading(), "no stream holds the end");
+		let subs = subscriber.subscribes.lock();
+		let paused = subs.get(&7).unwrap().paused.as_ref().unwrap().read();
+		assert!(paused.groups.is_empty(), "the given-up group is let go");
 	}
 
 	/// Lite-07: a drop can overtake the YIELDED reset of the stream it names. The group ends
