@@ -14,7 +14,7 @@ import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
-import { insertRun, NO_MAX_DELAY, runGaps } from "./internal.ts";
+import { cutRun, insertRun, NO_MAX_DELAY, runGaps, runsFrom } from "./internal.ts";
 import type { Info, Order } from "./track.ts";
 import { checkEnd, checkSequence, max, min } from "./util/sequence.ts";
 
@@ -72,6 +72,9 @@ let fillOps: {
 	settle(state: FillState, pending: Pending): void;
 	name(state: FillState): string;
 };
+
+// A part of a fill's run it still owes.
+type Live = Run & { pending: Pending };
 
 // One fill: a run of groups some readers miss, until each is answered or nobody wants it.
 class Pending {
@@ -131,6 +134,9 @@ export class FillState {
 	#queue: Pending[] = [];
 	readonly #queued = new Signal(0);
 	readonly #pending = new Set<Pending>();
+	// What each fill still owes, by sequence: its unanswered, unwithdrawn parts, which no two fills
+	// share, so a reader's ask or an arrival costs the fills it touches, never every fill out.
+	#live: Live[] = [];
 	// Bumped as each handler opens, so readers parked on a miss nobody could take ask again.
 	readonly #opened = new Signal(0);
 
@@ -157,25 +163,21 @@ export class FillState {
 	ask(start: bigint, end: bigint, asker: Asker): Run[] {
 		if (start >= end || this.#track.closed()) return [];
 		const asked: Run[] = [];
-		let missing: Run[] = [{ start, end }];
-		for (const pending of this.#pending) {
-			const unresolved = pending.unresolved(start, end);
-			if (unresolved.length === 0) continue;
-			if (!pending.askers.has(asker)) {
-				pending.askers.add(asker);
-				pending.bump();
+		for (const live of this.#overlapping(start, end)) {
+			if (!live.pending.askers.has(asker)) {
+				live.pending.askers.add(asker);
+				live.pending.bump();
 			}
-			for (const run of unresolved) {
-				insertRun(asked, run.start, run.end);
-				missing = missing.flatMap((gap) => subtract(gap, run));
-			}
+			insertRun(asked, max(live.start, start), min(live.end, end));
 		}
 		if (this.#handlers === 0) return asked;
+		const missing = runGaps(asked, start, end);
 		for (const gap of missing) {
 			const pending = new Pending(gap.start, gap.end);
 			pending.askers.add(asker);
 			this.#pending.add(pending);
 			this.#queue.push(pending);
+			this.#live.splice(runsFrom(this.#live, gap.start), 0, { start: gap.start, end: gap.end, pending });
 			insertRun(asked, gap.start, gap.end);
 		}
 		if (missing.length > 0) this.#queued.update((revision) => revision + 1);
@@ -183,19 +185,25 @@ export class FillState {
 	}
 
 	/**
-	 * The parts of `[start, end)` a fill `asker` joined still owes it, in order: only what it still
+	 * The parts of `[start, end)` a fill `asker` joined still owes it, merged and in order: only what it still
 	 * reads, as the Rust `Join::held` holds, so a wider fill shared with other readers owes it
 	 * nothing outside its own ranges.
 	 */
-	covered(start: bigint, end: bigint, asker: Asker): Run[] {
-		const covered: Run[] = [];
-		for (const pending of this.#pending) {
-			if (!pending.askers.has(asker)) continue;
-			for (const gap of pending.unresolved(start, end)) {
-				for (const run of asker.wants(gap.start, gap.end)) insertRun(covered, run.start, run.end);
+	*covered(start: bigint, end: bigint, asker: Asker): Generator<Run> {
+		// Walked lazily, so a caller wanting only the first run costs only the fills up to it.
+		let run: Run | undefined;
+		for (let i = runsFrom(this.#live, start); i < this.#live.length && this.#live[i].start < end; i++) {
+			const live = this.#live[i];
+			if (!live.pending.askers.has(asker)) continue;
+			for (const part of asker.wants(max(live.start, start), min(live.end, end))) {
+				if (run && run.end === part.start) run.end = part.end;
+				else {
+					if (run) yield run;
+					run = { ...part };
+				}
 			}
 		}
-		return covered;
+		if (run) yield run;
 	}
 
 	/** `asker` left: the fills it alone waited on are withdrawn. */
@@ -206,21 +214,43 @@ export class FillState {
 		}
 	}
 
-	/** What `asker` reads changed: a fill nobody reads any more is withdrawn. */
-	moved(asker: Asker): void {
-		for (const pending of this.#pending) {
-			if (pending.askers.has(asker)) this.#judge(pending);
+	/**
+	 * What `asker` reads in `[start, end)` changed: a fill nobody reads any more is withdrawn. Only
+	 * the fills still owing a group there are judged again, so a change costs what it touches.
+	 */
+	moved(asker: Asker, start = 0n, end?: bigint): void {
+		const judged = new Set<Pending>();
+		for (const live of end === undefined
+			? this.#live.slice(runsFrom(this.#live, start))
+			: this.#overlapping(start, end)) {
+			if (live.pending.askers.has(asker)) judged.add(live.pending);
 		}
+		for (const pending of judged) this.#judge(pending);
 	}
 
 	/** Group `sequence` landed in the cache, through a fill or live: it is answered. */
 	arrived(sequence: bigint): void {
-		for (const pending of this.#pending) this.#resolve(pending, sequence, sequence + 1n);
+		const [live] = this.#overlapping(sequence, sequence + 1n);
+		if (live) this.#resolve(live.pending, sequence, sequence + 1n);
 	}
 
 	/** `[start, end)` was given up, by a fill or otherwise: nobody waits for it from a fill. */
 	dropped(start: bigint, end: bigint): void {
-		for (const pending of this.#pending) this.#resolve(pending, start, end);
+		const owing = new Set(this.#overlapping(start, end).map((live) => live.pending));
+		for (const pending of owing) this.#resolve(pending, start, end);
+	}
+
+	// The live parts overlapping `[start, end)`, lowest first.
+	#overlapping(start: bigint, end: bigint): Live[] {
+		const found: Live[] = [];
+		for (let i = runsFrom(this.#live, start); i < this.#live.length && this.#live[i].start < end; i++)
+			found.push(this.#live[i]);
+		return found;
+	}
+
+	// Take `runs` of one fill out of the live parts, once it no longer owes them.
+	#settled(runs: readonly Run[]): void {
+		for (const run of runs) cutRun(this.#live, run.start, run.end);
 	}
 
 	/** Bumped as each handler opens: a reader parked on a miss watches it to ask again. */
@@ -262,9 +292,14 @@ export class FillState {
 	#judge(pending: Pending): void {
 		if (pending.done) return;
 		const owed = pending.owed();
+		const withdrawn: Run[] = [];
 		for (const gap of pending.unresolved()) {
-			for (const run of runGaps(owed, gap.start, gap.end)) insertRun(pending.withdrawn, run.start, run.end);
+			for (const run of runGaps(owed, gap.start, gap.end)) {
+				insertRun(pending.withdrawn, run.start, run.end);
+				withdrawn.push(run);
+			}
 		}
+		this.#settled(withdrawn);
 		if (owed.length > 0) {
 			pending.bump();
 			return;
@@ -277,6 +312,7 @@ export class FillState {
 		const unresolved = pending.unresolved(start, end);
 		if (unresolved.length === 0) return;
 		for (const run of unresolved) insertRun(pending.resolved, run.start, run.end);
+		this.#settled(unresolved);
 		if (pending.unresolved().length === 0) this.#finish(pending);
 		else pending.bump();
 	}
@@ -290,6 +326,7 @@ export class FillState {
 	// Forget `pending`: it owes nothing more.
 	#finish(pending: Pending): void {
 		if (pending.done) return;
+		this.#settled(pending.unresolved());
 		pending.done = true;
 		this.#pending.delete(pending);
 		if (pending.queued) this.#queue.splice(this.#queue.indexOf(pending), 1);
@@ -299,6 +336,7 @@ export class FillState {
 	#release(): void {
 		this.#queue = [];
 		for (const pending of this.#pending) this.#finish(pending);
+		this.#live = [];
 		this.#queued.update((revision) => revision + 1);
 	}
 
@@ -334,14 +372,6 @@ export class FillState {
 			name: (state) => state.#track.name,
 		};
 	}
-}
-
-// The parts of `gap` outside `run`.
-function subtract(gap: Run, run: Run): Run[] {
-	return [
-		{ start: gap.start, end: min(gap.end, run.start) },
-		{ start: max(gap.start, run.end), end: gap.end },
-	].filter((part) => part.start < part.end);
 }
 
 /** The still-wanted runs of a fill, in ascending order. @internal */
