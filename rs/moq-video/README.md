@@ -39,7 +39,10 @@ Per-platform, picked at compile time:
   access is available (build 20348+) and granted.
 
 `capture::cameras()` lists AVFoundation, V4L2, or Media Foundation cameras with
-identifiers accepted by `capture::Source::Camera`. `capture::displays()` does
+identifiers accepted by `capture::Source::Camera`. With the `pipewire` feature,
+a Linux webcam that PipeWire fronts lists as `pipewire:<node name>` rather than
+`/dev/videoN`, because PipeWire lets several clients share it, and the default
+camera is PipeWire's when it lists one, else `/dev/video0`. `capture::displays()` does
 the same for macOS, Windows, and X11 displays. `capture::windows()` lists macOS,
 Windows, and X11 windows. Wayland display selection stays in the desktop portal
 picker, which does not expose a stable display identifier; ask it with

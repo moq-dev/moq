@@ -581,6 +581,20 @@ test("a kept local skip expires once the edge passes it or the track closes", as
 	});
 });
 
+// A final drop ends a group still arriving, but leaves one that finished here to every reader, as a
+// group arriving after its drop replaces it. Mirrors Rust `a_final_drop_leaves_a_finished_group`.
+test("a final drop leaves a finished group", async () => {
+	const producer = pooled(new cache.Pool({ capacity: 1 << 30 }));
+	hooks.receiveTrack(producer);
+	producer.createGroup(0n).finish();
+	const open = producer.createGroup(1n);
+	hooks.dropTrackGroups(producer, 0n, 2n, { error: new StreamError(StreamCode.Cancel) });
+
+	expect(dropsHeld(producer)).toEqual([1n]);
+	expect(open.closed.peek()).toBeInstanceOf(Error);
+	expect(await cached(producer)).toContain(0n);
+});
+
 // A received stale run the pool forgets is accounted for, as an evicted group is: no reader waits
 // on it from the live feed, so a reader that wants it asks a fill. Mirrors Rust
 // `a_reader_asks_a_fill_for_a_forgotten_run_it_judged`.

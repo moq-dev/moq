@@ -351,10 +351,11 @@ class NightlyTest(unittest.TestCase):
     def test_dev_shell_jobs_trust_the_nix_cache(self):
         # Without the flake's substituter, the dev shell builds uncached tools from
         # source and outlasts short jobs: the benchmark site timed out before publishing.
+        # A self-hosted runner VM's own Nix already names the cache, as Queue relies on.
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
         jobs = re.split(r"^  (?=[\w-]+:\n)", workflow.split("\njobs:\n", 1)[1], flags=re.M)
         for job in jobs:
-            if "nix develop" in job:
+            if "nix develop" in job and "runs-on: [self-hosted" not in job:
                 self.assertIn("uses: ./.github/actions/nix", job, job.splitlines()[0])
 
     def test_every_tla_leg_path_exists(self):

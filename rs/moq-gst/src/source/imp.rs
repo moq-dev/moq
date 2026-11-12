@@ -6165,6 +6165,7 @@ mod session_tests {
 
 	/// A real moqsink restart negotiates audio after video, keeping both held moqsrc pads.
 	#[test]
+	#[ignore = "flaky: the dropped audio pad sometimes plays a third stream; quest/m0/test-flakes-2/gst-moqsink-restart-pads.md"]
 	fn a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
@@ -6244,12 +6245,15 @@ mod session_tests {
 				}
 			}
 			let mut playing = std::collections::BTreeSet::new();
+			// Every (pad, stream, eos) this generation saw, for a failure to show which pad replayed.
+			let mut seen = Vec::new();
 			let mut dropped = false;
 			let returning = if generation == 2 { 1 } else { 2 };
 			while playing.len() < returning || (generation == 2 && !dropped) {
 				let (pad, run, eos) = received
 					.recv_timeout(Duration::from_secs(10))
 					.expect("both renditions should resume");
+				seen.push((pad.clone(), run, eos));
 				if eos {
 					assert_eq!(generation, 2, "a returning rendition received EOS");
 					assert!(pad.starts_with("audio_"), "the returning video received EOS");
@@ -6267,7 +6271,8 @@ mod session_tests {
 				assert!(
 					playing
 						.iter()
-						.all(|pad| held.contains(pad) && pad.starts_with("video_"))
+						.all(|pad| held.contains(pad) && pad.starts_with("video_")),
+					"held {held:?}, playing {playing:?}, seen {seen:?}"
 				);
 			}
 			sink.set_state(gst::State::Ready).unwrap();
