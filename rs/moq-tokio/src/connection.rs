@@ -1437,15 +1437,15 @@ type Probe = dyn Future<Output = crate::Result<std::pin::Pin<Box<Dial>>>> + Send
 #[cfg(all(feature = "websocket", feature = "quic"))]
 type Probing = (url::Url, std::pin::Pin<Box<Probe>>);
 
-/// The live session left the WebSocket fallback: stop probing, and give QUIC its head start
-/// on the next race, since the outage that lost the last one may be over.
-#[cfg(all(feature = "websocket", feature = "quic"))]
 /// A random non-zero hop id within 2^53, which older `@moq/lite` clients still decode.
 fn random_hop() -> std::num::NonZeroU64 {
 	use rand::RngExt as _;
 	std::num::NonZeroU64::MIN.saturating_add(kio::clock::rng().random_range(0..(1u64 << 53) - 1))
 }
 
+/// The live session left the WebSocket fallback: stop probing, and give QUIC its head start
+/// on the next race, since the outage that lost the last one may be over.
+#[cfg(all(feature = "websocket", feature = "quic"))]
 fn left_fallback(probe: &mut Option<Probing>, fallback: &mut Option<url::Url>) {
 	*probe = None;
 	if let Some(url) = fallback.take() {
