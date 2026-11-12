@@ -185,9 +185,11 @@ Workspace builds (hits / misses / not looked up):
   looked up triple above): doctest 124, 502 (0 misses), 150; Media (firefox
   player) 58, 84 (11-11 cancelled before its build); Audio quality, hits of
   each of its three builds per night, 74, 77, 0 (11-09), 57, 97, 0 (11-10),
-  54, 25, 0 (11-11). The other two Linux Rust-cache jobs (the Nightly and
-  Tests matrix jobs) have no baseline recorded here; read each one's depth-1
-  baseline from its own cache summary in these three runs.
+  54, 25, 0 (11-11). The doctest job is one entry of the `Tests` matrix.
+  The remaining Linux Rust-cache jobs (the `Nightly` matrix, the `Tests`
+  matrix's other recipes, and `Shipping sizes`) have no baseline recorded
+  here; read each one's depth-1 baseline from its own cache summary in these
+  three runs.
 
 ## Waiting
 
@@ -200,8 +202,8 @@ Workspace builds (hits / misses / not looked up):
   the decision is recorded here.
 - GitHub Actions: the first scheduled Nightly after #8342 (2026-11-12 afternoon or
   later) must show each Linux Rust-cache job's hits against its depth-1
-  baseline (above, or for the Nightly and Tests matrix jobs, their own
-  summaries in runs 42659882487, 42842827718 and 43041909115) and the
+  baseline (above, or for the `Nightly` matrix, the `Tests` matrix's other
+  recipes and `Shipping sizes`, their own summaries in runs 42659882487, 42842827718 and 43041909115) and the
   174-hit doctest run of 11-08, and scheduled runs
   must supply the same-commit restore-plus-build comparison and the
   rebuild-frequency count in the Goal.
