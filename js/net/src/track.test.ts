@@ -3405,7 +3405,7 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 // A reader on a received copy that fails waits out a duplicate still held for its group, then
 // continues on it from its frame with nothing repeated or missed. A released hold leaves the
 // failure, as does a duplicate starting past the reader's frame. A reader closed while it waits ends
-// its read, and one closed with frames still buffered reads them first.
+// its read and can be closed again, and one closed with frames still buffered reads them first.
 test.each(["reoffer", "readable", "released", "leaving", "closed", "past"])(
 	"a failed copy continues on its held re-offer (%p)",
 	async (kind) => {
@@ -3452,6 +3452,8 @@ test.each(["reoffer", "readable", "released", "leaving", "closed", "past"])(
 			reader.close();
 			await reading;
 			expect(read).toBe(failed);
+			// Closing is idempotent, even after the wait was cancelled.
+			reader.close();
 			arriving?.release();
 			producer.close();
 			return;
