@@ -1115,6 +1115,8 @@ export class Consumer {
 	async #succeed(): Promise<boolean> {
 		const succession = this.#state.succession;
 		if (!succession || this.#released || this.#verdict.peek() || this.#torn()) return false;
+		// A failure `closed` or `done` already reported, with nothing then able to take over, stands.
+		if (this.#closed?.peek() instanceof Error || this.#finished?.peek() instanceof Error) return false;
 		let next = succession.serving(this.#index());
 		while (!next) {
 			if (succession.holds === 0) return false;

@@ -3467,6 +3467,11 @@ test.each([
 		arriving?.release();
 		await settle();
 		expect(closed).toBe(failed);
+		// The failure it reported stands: a re-offer arriving later does not take over.
+		const late = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+		late.writeFrame({ payload: enc.encode("a") });
+		late.writeFrame({ payload: enc.encode("b") });
+		await expect(reader.readString()).rejects.toBe(failed);
 		producer.close();
 		return;
 	}
