@@ -86,6 +86,12 @@ pub struct Dpb<T> {
 	/// sequence in decoding order and follow it in output order shall be less
 	/// than or equal to max_num_reorder_frames.
 	max_num_reorder_frames: usize,
+	/// Frames added to `max_num_reorder_frames` because the stream reordered
+	/// more than its SPS declares. Kept across sequences, since an encoder
+	/// that understates the limit once does so in every SPS it writes.
+	reorder_shortfall: usize,
+	/// The highest order count output since the DPB was last cleared.
+	last_output_poc: Option<i32>,
 	/// Whether we're decoding in interlaced mode. Interlaced support is
 	/// inspired by the GStreamer implementation, in which frames are split if
 	/// interlaced=1. This makes reference marking easier. We also decode both
@@ -390,17 +396,19 @@ impl<T: Clone> Dpb<T> {
 		debug!("Bumping picture {:#?} from the dpb", pic);
 
 		dpb_entry.needed_for_output = false;
+		let poc = pic.pic_order_cnt;
 		// Lookup the second field entry and flip as well.
 		// `find_lowest_poc_for_bumping_mut` always returns the first field, never the second.
-		if let FieldRank::First(second_field) = pic.field_rank() {
-			let second_field = second_field.upgrade();
-			drop(pic);
-			if let Some(second_field) =
-				second_field.and_then(|f| self.entries.iter_mut().find(|e| Rc::ptr_eq(&f, &e.pic)))
-			{
-				second_field.needed_for_output = false;
-			}
+		let second_field = match pic.field_rank() {
+			FieldRank::First(second_field) => second_field.upgrade(),
+			_ => None,
+		};
+		drop(pic);
+		if let Some(second_field) = second_field.and_then(|f| self.entries.iter_mut().find(|e| Rc::ptr_eq(&f, &e.pic)))
+		{
+			second_field.needed_for_output = false;
 		}
+		self.last_output_poc = Some(self.last_output_poc.map_or(poc, |last| last.max(poc)));
 
 		Some(handle)
 	}
@@ -425,11 +433,15 @@ impl<T: Clone> Dpb<T> {
 		debug!("Clearing the DPB");
 
 		let max_num_pics = self.max_num_pics;
+		let max_num_reorder_frames = self.max_num_reorder_frames;
+		let reorder_shortfall = self.reorder_shortfall;
 		let interlaced = self.interlaced;
 
 		*self = Default::default();
 
 		self.max_num_pics = max_num_pics;
+		self.max_num_reorder_frames = max_num_reorder_frames;
+		self.reorder_shortfall = reorder_shortfall;
 		self.interlaced = interlaced;
 	}
 
@@ -491,6 +503,70 @@ impl<T: Clone> Dpb<T> {
 		}
 
 		pics
+	}
+
+	/// Bumps the pictures the stream's reorder limit already lets out.
+	///
+	/// C.4.5.3 bumps only when a new picture needs a frame buffer, which fixes
+	/// the output order but not how early a picture may leave. A stream that
+	/// declares one frame buffer and no reordering would trail by a picture,
+	/// released only when the next one needs its buffer. No more than
+	/// `max_num_reorder_frames` frames may precede a frame in decoding order
+	/// and follow it in output order, so once more than that wait for output,
+	/// no later picture can come before the one with the lowest order count,
+	/// and it is due now.
+	pub fn bump_over_reorder_limit(&mut self) -> Vec<Option<T>> {
+		let limit = self.reorder_limit();
+		let mut pics = vec![];
+		while self.entries.iter().filter(|entry| entry.is_bumpable()).count() > limit {
+			match self.bump() {
+				Some(pic) => pics.push(pic),
+				None => break,
+			}
+		}
+		self.remove_unused();
+
+		pics
+	}
+
+	/// Records that `pic` was output without passing through the DPB, as
+	/// C.4.5.2 does with a non-reference picture when no frame buffer is free.
+	pub fn output_unstored(&mut self, pic: &PictureData) {
+		let poc = pic.pic_order_cnt;
+		self.last_output_poc = Some(self.last_output_poc.map_or(poc, |last| last.max(poc)));
+	}
+
+	/// Raises the reorder limit when `pic` belongs before a picture already
+	/// output.
+	///
+	/// A conforming stream never does this, but the VUI's limit is only as
+	/// good as the encoder that wrote it, and bumping by it trusts the stream
+	/// further than C.4.5.3 does. A stream that understates its reordering
+	/// shows one picture out of order and then gets one more frame of slack,
+	/// up to the DPB size, which is where C.4.5.3 alone would have left it.
+	pub fn check_output_order(&mut self, pic: &PictureData) {
+		let Some(last_output_poc) = self.last_output_poc else {
+			return;
+		};
+		if pic.nonexisting || pic.pic_order_cnt >= last_output_poc || self.reorder_limit() >= self.max_num_pics {
+			return;
+		}
+
+		self.reorder_shortfall += 1;
+		tracing::warn!(
+			poc = pic.pic_order_cnt,
+			last_output_poc,
+			declared = self.max_num_reorder_frames,
+			limit = self.reorder_limit(),
+			"H.264 stream reorders more than its SPS declares, raising the reorder limit"
+		);
+	}
+
+	/// Returns how many frames may wait for output before the one with the
+	/// lowest order count is due: the SPS's limit plus whatever the stream has
+	/// shown it understates, bounded by the DPB size.
+	fn reorder_limit(&self) -> usize {
+		(self.max_num_reorder_frames + self.reorder_shortfall).min(self.max_num_pics)
 	}
 
 	// 8.2.5.3
@@ -1222,6 +1298,8 @@ impl<T> Default for Dpb<T> {
 			entries: Default::default(),
 			max_num_pics: Default::default(),
 			max_num_reorder_frames: Default::default(),
+			reorder_shortfall: Default::default(),
+			last_output_poc: Default::default(),
 			interlaced: Default::default(),
 		}
 	}
@@ -1235,5 +1313,71 @@ impl<T> std::fmt::Debug for Dpb<T> {
 			.field("max_num_pics", &self.max_num_pics)
 			.field("interlaced", &self.interlaced)
 			.finish()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A progressive non-reference frame with order count `poc`.
+	fn frame(poc: i32) -> PictureData {
+		let mut pic = PictureData::default();
+		pic.pic_order_cnt = poc;
+		pic
+	}
+
+	/// Decodes `pocs` in order through the steps `finish_picture` takes for a
+	/// non-reference frame with a free buffer, returning what comes out.
+	fn decode(dpb: &mut Dpb<i32>, pocs: &[i32]) -> Vec<i32> {
+		let mut output = Vec::new();
+		for &poc in pocs {
+			let pic = frame(poc);
+			dpb.check_output_order(&pic);
+			dpb.store_picture(pic.into_rc(), Some(poc))
+				.expect("a free frame buffer");
+			output.extend(dpb.bump_over_reorder_limit().into_iter().flatten());
+		}
+		output
+	}
+
+	/// A stream that reorders by the amount it declares comes out in order, each
+	/// picture as soon as the limit lets it out.
+	#[test]
+	fn bumping_by_the_reorder_limit_keeps_output_order() {
+		let mut dpb = Dpb::default();
+		dpb.set_limits(4, 1);
+		assert_eq!(decode(&mut dpb, &[0, 4, 2, 8, 6]), [0, 2, 4, 6]);
+		assert_eq!(dpb.drain().into_iter().flatten().collect::<Vec<_>>(), [8]);
+	}
+
+	/// A stream that reorders while declaring it does not shows one picture out
+	/// of order, then gets the slack it needs and keeps it across a clear.
+	#[test]
+	fn understated_reordering_raises_the_limit() {
+		let mut dpb = Dpb::default();
+		dpb.set_limits(4, 0);
+		assert_eq!(decode(&mut dpb, &[0, 4, 2]), [0, 4]);
+		assert_eq!(dpb.reorder_limit(), 1);
+		assert_eq!(decode(&mut dpb, &[8, 6, 12, 10]), [2, 6, 8, 10]);
+
+		// A new sequence starts its order counts over, which is not a violation,
+		// and an SPS that repeats the understated limit does not lose the slack.
+		dpb.drain();
+		dpb.set_limits(4, 0);
+		assert_eq!(decode(&mut dpb, &[0, 4, 2, 8]), [0, 2, 4]);
+		assert_eq!(dpb.reorder_limit(), 1);
+	}
+
+	/// The slack stops at the DPB size, which is all C.4.5.3 ever holds back.
+	#[test]
+	fn the_raised_limit_stops_at_the_dpb_size() {
+		let mut dpb = Dpb::default();
+		dpb.set_limits(2, 0);
+		decode(&mut dpb, &[0, 10, 8, 6]);
+		assert_eq!(dpb.reorder_limit(), 2);
+
+		dpb.check_output_order(&frame(4));
+		assert_eq!(dpb.reorder_limit(), 2);
 	}
 }
