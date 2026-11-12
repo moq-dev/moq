@@ -159,9 +159,11 @@ runs, so every platform stayed within the 8-state lookback):
 
 ## Waiting
 
-- GitHub Actions: scheduled runs must supply the remaining cross-platform
-  reuse, restore-plus-build comparison and rebuild-frequency evidence in the
-  Goal. Current timings are not a matched-commit comparison, and macOS's
+- GitHub Actions: the first scheduled Nightly after Linux full history
+  lands must show Linux hits against the 174-hit doctest baseline, and
+  scheduled runs must supply the remaining cross-platform reuse,
+  restore-plus-build comparison and rebuild-frequency evidence in the Goal,
+  plus why Windows fell to 163 hits on 2026-11-08. Current timings are not a matched-commit comparison, and macOS's
   inherited-prediction misses remain unexplained.
 - moq-dev/moq: no earlier than 2026-11-26, an agent on the maintainer's
   desktop collects `mbx-moq-dev`'s size and request counts for the first
