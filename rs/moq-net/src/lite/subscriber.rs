@@ -1210,6 +1210,9 @@ impl Drop for SubscriberDriver {
 		// `abort` already recorded a session error when the driver failed. A driver
 		// dropped without that still has to name an end before its setup machines drop.
 		self.subscriber.note_end(&Error::Cancel);
+		// Every announce stream closes with the session: disconnect them together.
+		let _closing = self.subscriber.origin.route_closing();
+		self.announces = kio::Tasks::new();
 	}
 }
 

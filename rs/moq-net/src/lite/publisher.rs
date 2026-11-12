@@ -290,6 +290,14 @@ impl Publisher {
 	}
 }
 
+impl Drop for Publisher {
+	fn drop(&mut self) {
+		// Every announce stream closes with the session: disconnect them together.
+		let _closing = self.shared.origin.route_closing();
+		self.children = kio::Tasks::new();
+	}
+}
+
 impl Publisher {
 	/// The peer's latest PROBE target, or zero while it asks for none.
 	pub fn peer_target(&self) -> kio::Consumer<crate::bandwidth::Rate> {

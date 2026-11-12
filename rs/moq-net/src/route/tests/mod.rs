@@ -261,7 +261,7 @@ impl Sim {
 			self.queues.remove(&(x, y));
 			self.acks.remove(&(x, y));
 			self.held.remove(&(x, y));
-			self.nodes[y].disconnect(x);
+			self.nodes[y].disconnect([x]);
 		}
 		self.flush();
 	}

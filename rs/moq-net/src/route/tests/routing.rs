@@ -992,7 +992,7 @@ fn a_fresh_uncertified_claim_waits_on_an_older_floor() {
 
 		match refresh {
 			true => router.batch(certifier, 7, vec![(p("live/x"), Some(item))], Some(2), 0),
-			false => router.disconnect(certifier),
+			false => router.disconnect([certifier]),
 		}
 		assert_eq!(router.shows(7, &p("live/x")), Some(true), "refresh {refresh}");
 	}
