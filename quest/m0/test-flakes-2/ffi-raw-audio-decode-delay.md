@@ -24,8 +24,9 @@ found that a zero max delay makes a read that runs late under load find the
 first group stale and the warmup trim all remaining audio. This test writes
 only two frames and never finishes before reading, so a trimmed read would
 wait forever instead of returning a frame or an end. If that is the cause,
-decide whether the consumer should hold the newest frame instead of trimming
-everything, rather than only loosening the test's delay.
+decide whether the test should ask for no max delay, as #8050's fixed
+consumer does, or whether the consumer should hold the newest frame instead of
+trimming everything, rather than only loosening the delay it asks for.
 
 Steps:
 
