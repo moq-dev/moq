@@ -260,6 +260,13 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	await yieldNow();
 	expect(track.closed.peek()).toBeUndefined();
 
+	// A subscriber arriving after the failure is not handed the failed answer either.
+	const late = track.subscribe({ delay: { max: null } });
+	const lateOrdered = late.ordered();
+	expect((await lateOrdered.nextGroup())?.sequence).toBe(0n);
+	const lateNext = lateOrdered.nextGroup();
+	expect(await Promise.race([lateNext.then(() => "moved"), yieldNow().then(() => "waiting")])).toBe("waiting");
+
 	// The failed answer is no verdict on group 1, so an ordered reader still waits for it rather
 	// than moving on to group 2, and gets it once the feed delivers it.
 	const next = ordered.nextGroup();
@@ -267,8 +274,10 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	hooks.receiveGroup(track, { sequence: 1n, start: 0 }).finish();
 	expect((await next)?.sequence).toBe(1n);
 	expect((await ordered.nextGroup())?.sequence).toBe(2n);
+	expect((await lateNext)?.sequence).toBe(1n);
 
 	reader.close();
+	late.close();
 	requests.close();
 	broadcast.close();
 }

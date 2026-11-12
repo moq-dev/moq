@@ -14971,7 +14971,11 @@ mod test {
 				.unwrap();
 			req.accept(None).unwrap().abort(error.clone()).unwrap();
 			drop(pending);
-			assert!(drain_ordered(&mut ordered).is_empty(), "{error}: group 1 is still owed");
+			let waiter = kio::Waiter::noop();
+			assert!(
+				ordered.poll_next_group(&waiter).is_pending(),
+				"{error}: group 1 is still owed"
+			);
 
 			put(&producer, 1, None);
 			assert_eq!(
