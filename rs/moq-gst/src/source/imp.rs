@@ -4707,6 +4707,25 @@ mod session_tests {
 	fn a_reannounced_sibling_instance_does_not_replay_its_finish() {
 		let _pad_ids = pad_ids();
 		let element = element();
+		// Hold the play in its push of the first group until the instance has closed, so it may
+		// read the track's end only after the withdraw, the ordering a loaded host produces. The
+		// follower's cancel races that read, so a regression fails often rather than always.
+		let (entered, pushing) = std::sync::mpsc::channel();
+		let (release, released) = std::sync::mpsc::channel::<()>();
+		let gate = Mutex::new(Some((entered, released)));
+		element.connect_pad_added(move |_, pad| {
+			let Some((entered, released)) = gate.lock().unwrap().take() else {
+				return;
+			};
+			let gate = Mutex::new(Some((entered, released)));
+			pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+				if let Some((entered, released)) = gate.lock().unwrap().take() {
+					entered.send(()).unwrap();
+					let _ = released.recv();
+				}
+				gst::PadProbeReturn::Ok
+			});
+		});
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 		let _room = referencing(&origin, None);
@@ -4714,7 +4733,10 @@ mod session_tests {
 		let mut follow = watch(&origin, "cam");
 
 		let mut first = Publisher::sibling(&origin, None);
-		let pad = recorder.written(&mut first, 1);
+		first.write(1);
+		pushing
+			.recv_timeout(Duration::from_secs(10))
+			.expect("1 never reached a pad");
 		first.finish_video();
 		await_finished(&first);
 		await_event(&mut follow, |event| {
@@ -4736,6 +4758,8 @@ mod session_tests {
 				}
 			)
 		});
+		release.send(()).unwrap();
+		let pad = recorder.wait("1 never reached a pad", |seen| reached(seen, 1).into_iter().next());
 		first.route.as_ref().unwrap().announce().unwrap();
 		await_event(&mut follow, |event| {
 			matches!(
