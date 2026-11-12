@@ -249,6 +249,7 @@ fn has(routes: &BTreeMap<String, Vec<u64>>, paths: &[&str]) -> bool {
 /// route layer's choice, not something this asserts.
 #[test]
 fn tiered_regions() {
+	kio::clock::host_time(); // relays over real TCP, publishing a group every 50ms
 	run_cluster_test(tiered_regions_inner());
 }
 
@@ -295,6 +296,7 @@ async fn tiered_regions_inner() {
 /// edge dialed the core or the core dialed the edge.
 #[test]
 fn edges_never_transit_between_cores() {
+	kio::clock::host_time(); // relays over real TCP, publishing a group every 50ms
 	run_cluster_test(edges_never_transit_between_cores_inner());
 }
 
@@ -329,6 +331,7 @@ async fn edges_never_transit_between_cores_inner() {
 /// in a line: the mesh reaches the CDN and the CDN reaches the mesh.
 #[test]
 fn uplink_transits_both_ways() {
+	kio::clock::host_time(); // relays over real TCP, publishing a group every 50ms
 	run_cluster_test(uplink_transits_both_ways_inner());
 }
 
