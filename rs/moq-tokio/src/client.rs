@@ -259,6 +259,17 @@ impl Client {
 		self
 	}
 
+	/// Present `token` in SETUP on every session this client dials; see
+	/// [`moq_net::Client::with_token`].
+	///
+	/// For a credential [`connect.tokens`](crate::connect::Config::tokens) cannot hold:
+	/// one that is not text, or that needs its own Token Type, such as a CBOR token. A
+	/// connect token a dial presents in SETUP replaces it for that dial.
+	pub fn with_setup_token(mut self, token: moq_net::setup::Token) -> Self {
+		self.moq = self.moq.with_token(token);
+		self
+	}
+
 	/// Override whether this client redials after a session drop.
 	///
 	/// Defaults to true. Each clone can choose its own reconnect policy.
@@ -847,6 +858,61 @@ mod tests {
 		} else {
 			assert!(result.is_ok());
 		}
+	}
+
+	/// A token set on the client reaches the peer's SETUP with its type and bytes intact,
+	/// on every connection, unless a connect token takes its place.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_setup_token_keeps_its_type_and_bytes() {
+		let version: moq_net::Version = "moq-transport-18".parse().unwrap();
+		let token = moq_net::setup::Token {
+			kind: 16,
+			value: vec![0xd8, 0x3d, 0xd2, 0x00, 0xff],
+		};
+
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.version = vec![version];
+		let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
+		let addr = listener.tcp_local_addr().unwrap();
+
+		let config = crate::connect::Config {
+			version: vec![version],
+			..Default::default()
+		};
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false)
+			.with_setup_token(token.clone());
+		let url: Url = format!("tcp://{addr}/").parse().unwrap();
+
+		for round in 0..2 {
+			let connection = client.connect(url.clone());
+			let request = listener.accept().await.unwrap();
+			assert_eq!(request.token(), Some(&token), "round {round}");
+			let _session = request.ok().await.unwrap();
+			let _connection = connection.established().await.unwrap();
+		}
+
+		// A connect token takes its place in SETUP.
+		let mut config: crate::connect::Config = toml::from_str(r#"tokens = ["text"]"#).unwrap();
+		config.version = vec![version];
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false)
+			.with_setup_token(token);
+		let connection = client.connect(url);
+		let request = listener.accept().await.unwrap();
+		let text = moq_net::setup::Token {
+			kind: moq_net::setup::Token::OUT_OF_BAND,
+			value: b"text".to_vec(),
+		};
+		assert_eq!(request.token(), Some(&text));
+		let _session = request.ok().await.unwrap();
+		let _connection = connection.established().await.unwrap();
 	}
 
 	/// A parser wrapping the config, since it derives `Args` (a flattened `Parser`
