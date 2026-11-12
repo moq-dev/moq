@@ -960,7 +960,15 @@ export class Subscriber {
 					const now = window.read(rtt?.isZero() ? undefined : rtt);
 					if (now !== linkRtt) {
 						linkRtt = now;
-						for (const wire of routes.values()) refreshRoute(wire, false);
+						// Every route's claims move at once: re-serve each, then report each path once.
+						const paths = new Set<Path.Valid>();
+						for (const wire of routes.values()) {
+							for (const path of wire.view.claims.keys()) {
+								serve(wire, path, false);
+								paths.add(path);
+							}
+						}
+						for (const path of paths) refresh(path, false);
 					}
 					await sleep(LinkRtt.INTERVAL, { signal });
 				}
