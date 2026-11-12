@@ -571,6 +571,17 @@ describe("declared end", () => {
 		expect(buffer.silent).toBe(false);
 	});
 
+	it("ends where contiguous frames end, not at their jittered stamp", () => {
+		const buffer = new AudioRingBuffer({ rate: 48000, channels: 1, latency: 10 });
+		// The second frame is stamped 1 ms late, so it plays from sample 480 and ends at 960, not 1008.
+		buffer.end(21_000);
+		write(buffer, 0, 480, { channels: 1 });
+		write(buffer, 11, 480, { channels: 1 });
+		expect(read(buffer, 1024, 1)[0].length).toBe(960);
+		expect(buffer.silent).toBe(true);
+		expect(buffer.underruns).toBe(0);
+	});
+
 	it("counts running dry short of the end as an underrun", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 });
 		write(buffer, 0, 20, { channels: 1 });

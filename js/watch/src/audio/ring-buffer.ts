@@ -251,7 +251,7 @@ export class AudioRingBuffer {
 			this.#writeIndex = start;
 			this.#anchored = true;
 			this.#level = Math.max(this.#received ?? start, start) - start;
-		} else if (Math.abs(start - this.#writeIndex) <= this.rate / 1000 + 2) {
+		} else if (this.#contiguous(start)) {
 			// A frame starting within a millisecond and two samples of where the last one ended
 			// continues it: timestamps stamped in milliseconds, or rounded from another clock, land on
 			// either side of the exact boundary, and a hole there would play a few samples of silence.
@@ -321,6 +321,7 @@ export class AudioRingBuffer {
 		if (end > this.#writeIndex) {
 			this.#writeIndex = end;
 		}
+		this.#snapEnd();
 		// Decoded audio arrived too, if no message said so first.
 		this.received((end / this.rate) * 1_000_000);
 		this.#resume();
@@ -367,9 +368,22 @@ export class AudioRingBuffer {
 	 */
 	end(timestamp: number): void {
 		this.#end = Math.round((timestamp / 1_000_000) * this.rate);
+		this.#snapEnd();
 		// The end can arrive after the playhead already ran out at it, or before any audio, as for a
 		// listener that joins during a mute.
 		if (!this.#anchored || (this.#stalled && this.length <= 0 && this.#ended())) this.#silent = true;
+	}
+
+	// Whether `index` is within a millisecond and two samples of the write index: the jitter of
+	// timestamps stamped in milliseconds or rounded from another clock.
+	#contiguous(index: number): boolean {
+		return Math.abs(index - this.#writeIndex) <= this.rate / 1000 + 2;
+	}
+
+	// Move a declared end within that jitter of the written audio onto its end, since frames are placed
+	// contiguously rather than at their stamps.
+	#snapEnd(): void {
+		if (this.#anchored && this.#end !== undefined && this.#contiguous(this.#end)) this.#end = this.#writeIndex;
 	}
 
 	// Move the read index forward to `index`, dropping any queued audio it passes, staged included,
