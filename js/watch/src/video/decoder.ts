@@ -19,7 +19,7 @@ import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-import type { Sync, Track } from "../sync";
+import { DELAY_MAX, type Sync, type Track } from "../sync";
 import { type DecoderConfig, hardwareAcceleration, type PlaybackIdentity, playbackIdentity } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { Recovery } from "./recovery";
@@ -1194,7 +1194,8 @@ class Rendition {
 
 		this.#signals.run((effect) => {
 			const config = effect.get(props.catalog)?.video?.renditions?.[props.track];
-			warmup.set(Duration.millis(config?.warmup ?? 0));
+			// Capped like the delay, so a catalog `warmup` cannot hold the viewer without bound.
+			warmup.set(Duration.millis(config?.warmup ?? 0).min(DELAY_MAX));
 			dual.set(!warmup.peek().isZero());
 		});
 		this.#signals.run((effect) => {
