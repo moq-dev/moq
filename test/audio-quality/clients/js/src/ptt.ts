@@ -1,11 +1,9 @@
 /** Measure the shipped push-to-talk path on one monotonic page clock. @module */
 import "@moq/publish/element";
 import "@moq/watch/element";
-import { Duration } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Track } from "@moq/net";
 import type MoqPublish from "@moq/publish/element";
-import { Derived } from "@moq/signals";
 import type MoqWatch from "@moq/watch/element";
 import { Capture } from "./capture";
 import type { Arrival } from "./schema";
@@ -138,14 +136,8 @@ const capture = new Capture({
 	broadcast: audio.source.in.broadcast,
 	track: audio.source.out.track,
 	config: audio.source.out.config,
-	// Decoder subscriptions include codec warmup beyond Sync's budget. The observer must
-	// request the same age so its own subscription cannot discard an otherwise visible frame.
-	delay: new Derived([watch.sync.out.delay, audio.source.out.config], (delay, config) =>
-		delay.add(Duration.millis(config?.warmup ?? 0)),
-	),
-	maxDelay: new Derived([watch.sync.out.maxDelay, audio.source.out.config], (max, config) =>
-		max.add(Duration.millis(config?.warmup ?? 0)),
-	),
+	delay: watch.sync.out.delay,
+	maxDelay: watch.sync.out.maxDelay,
 	stretch: watch.sync.in.stretch,
 });
 const arrivals: Arrival[] = [];

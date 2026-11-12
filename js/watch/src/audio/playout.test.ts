@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Duration, Instant, Manual } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Time, Track, Varint } from "@moq/net";
+import { Signal } from "@moq/signals";
 import { STRETCH } from "../sync";
 import { maxDelay, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
@@ -78,10 +79,12 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
-	const subscriber = track.subscribe({ delay: { max: budget(Duration.ZERO) } });
+	// One budget for both, as the decoder keeps: the container skips at the max delay it subscribes with.
+	const delay = new Signal<Track.Delay>({ max: budget(Duration.ZERO) });
+	const subscriber = track.subscribe({ delay: delay.peek() });
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
-		delay: { max: budget(Duration.ZERO) },
+		delay,
 	});
 
 	const result: Measured = { targets: [], delivered: 0 };
@@ -110,7 +113,8 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 
 			const current = target({ measured: consumer.spread.peek(), frame: Duration.millis(CHUNK_MS) });
 			result.targets.push(current.asMillis());
-			subscriber.update({ delay: { max: budget(current) } });
+			delay.set({ max: budget(current) });
+			subscriber.update({ delay: delay.peek() });
 		}
 	} finally {
 		track.finish();

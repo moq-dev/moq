@@ -55,11 +55,15 @@ before any container sees them, at the relay and in the receiver's own transport
 subscriber, so a subscription cut to the target hides every frame later than
 the target: the estimate creeps up one bucket at a time while the frames it
 should have measured go unplayed. Both implementations subscribe with the delay
-plus the player's `stretch` setting, 2 s by default, past the estimate's own
-ceiling: `moq play` through its age budget, and the browser through the audio
-subscription alone, since its container consumer observes each frame before
-applying the local budget. A zero stretch cuts the subscription to the target
-and accepts that creep.
+plus the player's `stretch` setting: `moq play` through its age budget, and the
+browser through the audio subscription alone, since its container consumer
+observes each frame before applying the local budget. The 2 s default reaches
+the estimate's own ceiling, so any lateness the estimator can measure is
+observed at once. A smaller stretch hides frames later than the target plus the
+stretch, so a jump in lateness larger than the stretch is learned in steps of
+about the stretch; a zero stretch cuts a live subscription to the target and
+accepts the one-bucket creep. A buffered browser player keeps its subscription
+at least the delay plus its lookahead, whatever the stretch.
 Browser video keeps the shared budget, because a longer one fetches whole stale
 groups, so a broadcast with no audio measures only the lateness that budget
 lets through.

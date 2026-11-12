@@ -637,10 +637,12 @@ async fn play_audio<O: Output>(
 	// subtracting the incoming frame before it reaches the sink.
 	let lead = |delay: Duration| latency.max(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
 
-	// The most the sink holds. A shared delay past it, such as a slow video
-	// encoder's, stays encoded in the consumer until it is due instead, so the
-	// ring never grows with the delay.
-	let cap = max_delay.max(AUDIO_BUFFER_MIN);
+	// The most the sink holds, within what it accepts. A shared delay past it,
+	// such as a slow video encoder's, stays encoded in the consumer until it is
+	// due instead, so the ring never grows with the delay.
+	let cap = max_delay
+		.max(AUDIO_BUFFER_MIN)
+		.min(moq_audio::playback::Input::LATENCY_MAX);
 	let schedule = presentation.consume();
 	// The consumer decodes a packet once the sink has room for it. Its playhead is
 	// where the shared clock says the last write sounds, rather than what the sink

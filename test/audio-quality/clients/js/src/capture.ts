@@ -1,6 +1,6 @@
 /** Capture arrivals before the player's container orders or skips them. @module */
 
-import { type Duration, Instant, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Cmaf from "@moq/hang/cmaf";
 import * as Container from "@moq/hang/container";
@@ -17,8 +17,9 @@ export type Input = {
 	track: Getter<string | undefined>;
 	config: Getter<Catalog.AudioConfig | undefined>;
 	/**
-	 * The terms of the max delay the decoder subscribes with, which the observer matches, or it would
-	 * drop exactly the late frames the estimator measures (doc/concept/audio-jitter.md).
+	 * The terms of the max delay the decoder subscribes with, which the observer matches, codec warmup
+	 * included, or it would drop exactly the late frames the estimator measures
+	 * (doc/concept/audio-jitter.md).
 	 */
 	delay: Getter<Duration>;
 	maxDelay: Getter<Duration>;
@@ -43,6 +44,7 @@ export class Capture {
 				const decoder = format(config);
 				const active = broadcast.relativeBroadcast(effect, config.broadcast);
 				if (!active) return;
+				const warmup = Duration.millis(config.warmup ?? 0);
 				const track = active.track(name).subscribe({
 					priority: Catalog.PRIORITY.audio,
 					delay: {
@@ -50,7 +52,7 @@ export class Capture {
 							delay: input.delay.peek(),
 							maxDelay: input.maxDelay.peek(),
 							stretch: input.stretch.peek(),
-						}),
+						}).add(warmup),
 					},
 				});
 				const groups = new Set<Group.Consumer>();
@@ -66,7 +68,7 @@ export class Capture {
 								delay: inner.get(input.delay),
 								maxDelay: inner.get(input.maxDelay),
 								stretch: inner.get(input.stretch),
-							}),
+							}).add(warmup),
 						},
 					}),
 				);

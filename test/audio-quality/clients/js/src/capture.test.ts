@@ -117,7 +117,7 @@ test("the observer shares playback demand and closes without ending playback", a
 	}
 });
 
-test("the observer asks for the decoder's delay plus its stretch, not the target", async () => {
+test("the observer asks for the decoder's delay plus its stretch and warmup, not the target", async () => {
 	// A capture cut to the target would drop the frames later than it, which are what the target
 	// is measured from, so a trace recorded that way can never show the player falling short.
 	const origin = new Origin.Producer();
@@ -134,6 +134,7 @@ test("the observer asks for the decoder's delay plus its stretch, not the target
 			sampleRate: 48000,
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
+			warmup: 80,
 		} as Catalog.AudioConfig),
 		delay: new Signal(Duration.millis(100)),
 		maxDelay: new Signal(Duration.millis(100)),
@@ -141,7 +142,7 @@ test("the observer asks for the decoder's delay plus its stretch, not the target
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		expect(track.subscription.peek()).toMatchObject({ delay: { max: Duration.millis(2100) } });
+		expect(track.subscription.peek()).toMatchObject({ delay: { max: Duration.millis(2180) } });
 	} finally {
 		await capture.close();
 		source.close();
