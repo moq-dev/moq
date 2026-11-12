@@ -887,6 +887,46 @@ test.each(["request", "follow"] as const)("a %s pinned to a losing instance reso
 	origin.close();
 });
 
+// A detached request follows its instance's cheapest route, as Rust's does, rather than stay on
+// the route it first resolved while that one still serves.
+test("a pinned request moves to a cheaper route of its instance", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const pinned = Instance.random();
+	const far = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
+	const requested = origin.request(path, { instance: pinned });
+	const first = (await far.requested().next()).value;
+	if (!first) throw new Error("the pinned instance's route was not asked");
+	const farSource = new BroadcastProducer();
+	first.serve(farSource.consume());
+	await settle();
+	expect(requested.active.peek()?.instance).toBe(pinned);
+
+	// A cheaper route of the same instance, still above the winner: the request moves to it.
+	const near = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 5n });
+	const asked = near.requested().next();
+	const moved = await Promise.race([asked, settle().then(() => undefined)]);
+	if (!moved?.value) throw new Error("the cheaper route of the instance was not asked");
+	const nearSource = new BroadcastProducer();
+	moved.value.serve(nearSource.consume());
+	await settle();
+	expect(requested.closed.peek()).toBeUndefined();
+	expect(requested.active.peek()?.instance).toBe(pinned);
+
+	// The far route leaving no longer touches it.
+	far.close();
+	farSource.close();
+	await settle();
+	expect(requested.closed.peek()).toBeUndefined();
+
+	requested.close();
+	nearSource.close();
+	near.close();
+	winning.close();
+	origin.close();
+});
+
 test("a peer's pin is served by a local broadcast that loses the path", async () => {
 	const origin = new Producer();
 	const wire = wireOf(origin.consume());

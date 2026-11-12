@@ -159,8 +159,11 @@ async function lag(trace: Arrival[], options: Options, settle: number) {
 	return { lags, median: lags[lags.length >> 1], underruns, trimmed, accelerated };
 }
 
-/** The shortest pitch period a seam moves by: 2.5 ms. A lag shorter than that cannot be corrected. */
-const PERIOD = 2.5;
+/**
+ * The longest pitch period of the replay's speech, at its 90 Hz floor: a seam moves by one period, so
+ * a lag shorter than that may rest uncorrected.
+ */
+const PERIOD = 1000 / 90;
 
 // Audio and video keep separate clocks that align once the delay covers the arrivals. The ring plays
 // onto the shared clock: in steady state the playhead rests within a pitch period of it, either way.
@@ -373,8 +376,8 @@ describe("buffered replay against the shared clock", () => {
 			lookahead: 500,
 			duration: observed(30),
 		};
-		// NetEq's accelerate takes one pitch period per stretch, so this 2.5 ms tone gains about 30 ms a
-		// second: the stall's lag is gone well before 20 s.
+		// NetEq's accelerate takes one pitch period per stretch, at least 4.5 ms of this speech, so it
+		// gains well over 100 ms a second: the stall's lag is gone well before 20 s.
 		const result = await play(trace, options, (at) => (at >= 2000 && at < 5000) || at >= 20_000);
 		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
 		expect(result.max).toBeLessThanOrEqual(PERIOD);

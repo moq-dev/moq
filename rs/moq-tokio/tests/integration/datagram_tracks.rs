@@ -52,7 +52,8 @@ async fn run(relay: bool, js_publishes: bool) {
 	let serve = {
 		let local = local.clone();
 		tokio::spawn(async move {
-			let relayed = moq_tokio::origin::spawn();
+			// A relay carries what it learned on to its other peers (moq-lite-07).
+			let relayed = moq_tokio::origin::spawn().with_proxy(true);
 			let mut sessions = Vec::new();
 			for _ in 0..if relay { 2 } else { 1 } {
 				let request = server.accept().await.unwrap();
@@ -238,7 +239,7 @@ async fn run(relay: bool, js_publishes: bool) {
 }
 
 #[tokio::test]
-#[ignore = "JS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md"]
+#[ignore = "requires Bun; run by just test datagram-tracks in the interop workflow"]
 async fn datagram_tracks_javascript() {
 	for relay in [false, true] {
 		for js_publishes in [false, true] {
