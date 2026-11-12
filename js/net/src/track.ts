@@ -2961,6 +2961,7 @@ export class Subscriber {
 	// Record `sequence` as handed out. An ordered read never goes back, and any reader stops
 	// expecting what is past its budget, so only the gaps within it cost memory.
 	#handOut(sequence: bigint, ordered: boolean): void {
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
 		if (ordered) this.#delivered.forgetBelow(sequence);
 		this.#delivered.add(sequence);
 		this.#skipped.delete(sequence);
@@ -2974,8 +2975,31 @@ export class Subscriber {
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
 		else this.#forgetPastBudget(this.#delivered);
 		// What it hands out, and forgets below it, it no longer wants from a fill: tell the fills
-		// it joined, as a move of its bounds does, so their handlers stop serving it.
-		this.#fillsMoved();
+		// owing it there, so their handlers stop serving it.
+		const forgot = this.#delivered.runEnd(0n) ?? 0n;
+		if (forgot > floor) this.#stoppedReading(floor, forgot);
+		if (sequence >= forgot) this.#stoppedReading(sequence, sequence + 1n);
+	}
+
+	// This reader stopped reading `[start, end)` for good: clip what it asked there, and judge
+	// again only the fills owing it there, so a hand-out costs what it touches, not every fill.
+	#stoppedReading(start: bigint, end: bigint): void {
+		const asker = this.#state.asker;
+		const producer = this.#state.producer;
+		if (!asker || !producer) return;
+		this.#reclip(this.#givenUp, start, end, (run) => this.#reads(run.start, run.end));
+		this.#reclip(this.#asked, start, end, (run) => this.#wants(run.start, run.end));
+		this.#reclip(this.#refilled, start, end, (run) => this.#wants(run.start, run.end));
+		fillsOf(producer).moved(asker, start, end);
+		this.#fillMoves.update((moves) => moves + 1);
+	}
+
+	// Replace the `runs` overlapping `[start, end)` with what `keep` leaves of them.
+	#reclip(runs: Run[], start: bigint, end: bigint, keep: (run: Run) => Run[]): void {
+		const from = runsFrom(runs, start);
+		let to = from;
+		while (to < runs.length && runs[to].start < end) to++;
+		if (from < to) runs.splice(from, to - from, ...runs.slice(from, to).flatMap(keep));
 	}
 
 	// What this reader wants from the fills it joined may have narrowed: rejudge them, so their
@@ -2998,8 +3022,7 @@ export class Subscriber {
 	}
 
 	// Keep what this reader asked within what it still reads, as the Rust `Misses` clips what it
-	// judged to the window: a group handed out, forgotten past the budget, passed, or outside the
-	// window is never asked again, so these stay within the live span. A window moving back over a
+	// judged to the window: a group outside the window is never asked again, so these stay within the live span. A window moving back over a
 	// clipped group asks it once more, as in Rust.
 	#clipAsked(): void {
 		if (this.#givenUp.length > 0) this.#givenUp = this.#givenUp.flatMap((run) => this.#reads(run.start, run.end));
@@ -3015,7 +3038,7 @@ export class Subscriber {
 		const passed = this.#nextSequence;
 		this.#nextSequence = floor;
 		this.#judge(passed, floor);
-		this.#fillsMoved();
+		this.#stoppedReading(passed, floor);
 	}
 
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
@@ -4830,9 +4853,10 @@ export class Subscriber {
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.sequence, drift)) {
+				const passed = this.#nextSequence;
 				this.#pass(groups, index);
 				// The cursor passed what lies below it, which a fill no longer owes this reader.
-				this.#fillsMoved();
+				this.#stoppedReading(passed, this.#nextSequence);
 				// Holes below a skipped group are undeliverable, even ones the wall clock
 				// still spares because their successor arrived late.
 				start = this.#nextSequence;
