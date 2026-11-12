@@ -373,7 +373,8 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 		delay: { initial: Duration.millis(1) },
 	});
 	try {
-		const token = await reload.auth.add("token");
+		const token = reload.auth.add("token");
+		await token.answered;
 		const first = relays[0];
 		if (!first) throw new Error("no first dial");
 		expect(first.tokens).toContain("token");

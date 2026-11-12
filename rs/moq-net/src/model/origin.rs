@@ -3197,15 +3197,16 @@ impl RouteState {
 	/// change keeps the options as they were, so a closed route holds nothing it was given.
 	fn change(&self, update: impl FnOnce(&mut RouteOptions)) -> Result<(), Error> {
 		let mut control = self.control.lock();
-		if !self.announcement.is_live()? {
-			update(&mut control.options);
-			return Ok(());
-		}
-		let old = control.options.clone();
+		let previous = control.options.clone();
 		update(&mut control.options);
-		let result = self.announcement.update_if(control.info(), None, |_| true).map(|_| ());
+		// One rollback for both failures: closed before the check, or between it and the update.
+		let result = match self.announcement.is_live() {
+			Ok(true) => self.announcement.update_if(control.info(), None, |_| true).map(drop),
+			Ok(false) => Ok(()),
+			Err(err) => Err(err),
+		};
 		if result.is_err() {
-			control.options = old;
+			control.options = previous;
 		}
 		result
 	}

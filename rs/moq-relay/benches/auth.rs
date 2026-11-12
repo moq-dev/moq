@@ -82,10 +82,10 @@ impl Fixture {
 			let connection = client.clone().connect(url.clone()).established().await.unwrap();
 			producers.push(receive.recv().await.unwrap().1);
 			let auth = connection.auth();
-			let added = futures::future::join_all((0..tokens).map(|index| auth.add(format!("token{index}")))).await;
+			let added = futures::future::join_all((0..tokens).map(|index| added(&auth, format!("token{index}")))).await;
 			let added: Vec<_> = added.into_iter().map(|added| added.unwrap()).collect();
 			if session == 0 {
-				// `add` resolves once the peer grants the token, so its grant is already current.
+				// `added` resolves once the peer grants the token, so its grant is already current.
 				let observed = added.last().unwrap().grant();
 				assert!(observed.peek().is_some());
 				watch = Some(observed);
@@ -205,7 +205,7 @@ impl Queue {
 			let auth = self.auth.clone();
 			let token = format!("{:0>width$}", self.presented, width = bytes);
 			self.presented += 1;
-			tasks.push(tokio::spawn(async move { auth.add(token).await }));
+			tasks.push(tokio::spawn(async move { added(&auth, token).await }));
 		}
 		for _ in 0..offered {
 			self.admissions
@@ -247,3 +247,10 @@ fn queue(c: &mut Criterion) {
 
 criterion_group!(benches, refresh, queue);
 criterion_main!(benches);
+
+/// Present `token` on `handle` and wait for its first verdict.
+async fn added(handle: &moq_net::auth::Handle, token: impl Into<bytes::Bytes>) -> moq_net::Result<moq_net::auth::Credential> {
+	let credential = handle.add(token)?;
+	credential.answered().await?;
+	Ok(credential)
+}
