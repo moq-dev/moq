@@ -8856,6 +8856,7 @@ async fn token_server(
 	std::net::SocketAddr,
 	tokio::sync::mpsc::UnboundedReceiver<moq_net::auth::Request>,
 	tokio::task::JoinHandle<()>,
+	tokio::sync::oneshot::Receiver<()>,
 ) {
 	let version: moq_net::Version = version.parse().unwrap();
 	let mut config = moq_tokio::listen::Config::default();
@@ -8865,11 +8866,13 @@ async fn token_server(
 	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 	let addr = listener.tcp_local_addr().unwrap();
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+	let (accepted_tx, accepted) = tokio::sync::oneshot::channel();
 	let serving = tokio::spawn(async move {
 		let mut request = listener.accept().await.expect("accept");
 		let mut requests = request.requests();
 		let (sink, _driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		let session = request.with_subscriber(sink).ok().await.unwrap();
+		let _ = accepted_tx.send(());
 		let mut setup = Vec::new();
 		while let Some(request) = requests.next().await {
 			if request.token().is_empty() {
@@ -8880,7 +8883,7 @@ async fn token_server(
 		}
 		drop((session, setup));
 	});
-	(addr, rx, serving)
+	(addr, rx, serving, accepted)
 }
 
 /// Dial `addr` once over TCP on `version`.
@@ -8912,7 +8915,7 @@ async fn next_token(
 /// peer holds withdraws it and ends the wait.
 #[tokio::test]
 async fn a_credential_is_answered_over_auth_and_cancelled_while_held() {
-	let (addr, mut tokens, serving) = token_server("moq-lite-07-wip").await;
+	let (addr, mut tokens, serving, _) = token_server("moq-lite-07-wip").await;
 	let session = token_client(addr, "moq-lite-07-wip").await;
 	assert!(matches!(
 		session.credential(String::new()),
@@ -8973,8 +8976,14 @@ async fn a_credential_is_answered_over_auth_and_cancelled_while_held() {
 /// On moq-lite before 07 nothing can carry a credential.
 #[tokio::test]
 async fn a_credential_without_auth_is_unsupported() {
-	let (addr, _tokens, serving) = token_server("moq-lite-06").await;
+	let (addr, _tokens, serving, accepted) = token_server("moq-lite-06").await;
 	let session = token_client(addr, "moq-lite-06").await;
+	// The verdict is local and the client's Connected precedes its SETUP reaching the server,
+	// so wait for the server's accept: cancelling earlier leaves it waiting to accept.
+	kio::clock::timeout(TIMEOUT, accepted)
+		.await
+		.expect("server accepted")
+		.unwrap();
 	let credential = session.credential("token".into()).unwrap();
 	let err = kio::clock::timeout(TIMEOUT, credential.answered())
 		.await
@@ -8982,14 +8991,17 @@ async fn a_credential_without_auth_is_unsupported() {
 		.expect_err("unsupported");
 	assert!(matches!(err, MoqError::Unsupported), "{err:?}");
 	session.cancel(0);
-	serving.abort();
+	kio::clock::timeout(TIMEOUT, serving)
+		.await
+		.expect("server ended")
+		.unwrap();
 }
 
 /// On moq-transport a route's and a claim's credentials ride their announcements, and
 /// swapping one renews the request, withdrawing the old token.
 #[tokio::test]
 async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
-	let (addr, mut tokens, serving) = token_server("moq-transport-18").await;
+	let (addr, mut tokens, serving, _) = token_server("moq-transport-18").await;
 	let session = token_client(addr, "moq-transport-18").await;
 	let hidden = || MoqRouteOptions {
 		hidden: true,
