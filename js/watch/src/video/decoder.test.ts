@@ -8,7 +8,7 @@ import { Effect, Signal } from "@moq/signals";
 import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
-import { type Delay, Sync, Track } from "../sync";
+import { DELAY_MAX, type Delay, Sync, Track } from "../sync";
 import { Decoder, insertRecoveryPoint } from "./decoder";
 import { Source } from "./source";
 
@@ -1643,6 +1643,8 @@ describe("Decoder with a warmup rendition", () => {
 			[{}, 1],
 			[{ warmup: Catalog.u53(0) }, 1],
 			[{ warmup: WARMUP }, 2],
+			// An hour of warmup reaches back only as far as the delay cap.
+			[{ warmup: Catalog.u53(3_600_000) }, 2],
 		] as const) {
 			const subscribe = spyOn(Moq.Track.Consumer.prototype, "subscribe");
 			const run = await refresh(fields);
@@ -1650,9 +1652,8 @@ describe("Decoder with a warmup rendition", () => {
 				expect(run.playback.codecs).toBe(decoders);
 				const budgets = subscribe.mock.calls.map(([options]) => options?.delay?.max);
 				// The max-delay decoder tolerates one sweep more; js/net merges the two upstream.
-				expect(budgets).toEqual(
-					decoders === 1 ? [Duration.millis(0)] : [Duration.millis(0), Duration.millis(WARMUP)],
-				);
+				const warmup = Duration.millis(fields.warmup ?? 0).min(DELAY_MAX);
+				expect(budgets).toEqual(decoders === 1 ? [Duration.millis(0)] : [Duration.millis(0), warmup]);
 			} finally {
 				subscribe.mockRestore();
 				await run.close();

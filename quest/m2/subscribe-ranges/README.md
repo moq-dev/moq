@@ -50,7 +50,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   (maintainer, 2026-10-28,
   [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), and the
   [IETF scope freeze](/quest/m2/ietf-scope/README.md) adds no hole-marker
-  extension that would let a cache answer a range. A FETCH of the track's newest live group is refused
+  extension that would let a cache answer a range.
+  [Range FETCH over known holes](/quest/m4/ietf-range-fetch.md) later answers
+  a range whose every group is cached or proven never produced. A FETCH of the track's newest live group is refused
   unless its range ends below that group's live edge
   ([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944),
   `poll_settle` in `rs/moq-net/src/ietf/publisher.rs`), replacing the

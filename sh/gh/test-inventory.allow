@@ -23,6 +23,7 @@ ignore moq-video::capture::wgc::native::tests::wgc_displays_reopen_with_cursor_o
 ignore moq-video::capture::wgc::native::tests::wgc_minimized_window_is_rejected_before_the_first_frame /quest/m4/capture-wgc.md
 ignore moq-video::capture::wgc::native::tests::wgc_window_reopens_with_cursor_on_and_off /quest/m4/capture-wgc.md
 ignore moq-video::capture::pipewire::camera::tests::pipewire_camera_captures_frames /quest/m5/video-hardware.md
+ignore moq-video::capture::pipewire::camera::tests::pipewire_camera_shares_a_running_stream /quest/m5/video-hardware.md
 ignore moq-video::capture::pipewire::tests::portal_captures_frames /quest/m5/video-hardware.md
 ignore moq-video::decode::decoder::tests::mediafoundation_resized_texture_reencodes_in_place /quest/m5/video-hardware.md
 ignore moq-video::encode::encoder::tests::mediafoundation_camera_texture /quest/m5/video-hardware.md
@@ -34,3 +35,8 @@ ignore moq-video::frame::tests::d3d11_resize_defaults_to_the_gpu /quest/m5/video
 ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
+
+# Flaked under load; disabled until fixed at its cause.
+
+# Too slow for the merge gate; the quest runs it nightly once every scenario settles.
+ignore moq-net::route::tests::cache::sweep_cache_routing_long /quest/m2/cache-routing-proof.md

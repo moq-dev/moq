@@ -1,6 +1,6 @@
 # Room flow
 
-`Room.tla` is a TLA+ model of you and Bob in a room, written to be drawn as a statechart.
+`Room.tla` is a TLA+ model of you and Bob in a room.
 Your side is `src/local.ts`: joining announces your camera broadcast, and a live
 screen share announces your screen broadcast while joined. Your view of Bob is `src/room.ts`: each of his
 announcements adds or removes one of his broadcasts, and your connection dropping removes him
@@ -10,8 +10,8 @@ until the reconnect announces him again.
 | --- | --- |
 | `LeavingStopsPublishing` | Someone who has not joined the room, or has left it, publishes nothing to it. |
 
-The chart also shows every participant leaving your screen while your connection is down and
-coming back once it reconnects.
+Every participant also leaves your screen while your connection is down and
+comes back once it reconnects.
 
 ## Run
 
@@ -19,8 +19,7 @@ coming back once it reconnects.
 just test tla js/room
 ```
 
-The chart draws from
-`Room.tla`, `Room.cfg`, and `Room.view.ts`. `Room.cfg` plays only Bob's camera; add `"screen"` to
+`Room.cfg` plays only Bob's camera; add `"screen"` to
 `Kinds` to play his share too.
 
 ## Left out

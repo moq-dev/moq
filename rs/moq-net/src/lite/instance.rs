@@ -80,6 +80,16 @@ pub(super) fn decode_route(r: &mut Decoder<'_>, version: Version) -> Result<(Opt
 	Ok((Some(instance), r.varint()?))
 }
 
+/// Encode the instance of a copy a warm route names, which is never none.
+pub(super) fn encode_copy(w: &mut Encoder<'_>, instance: &Instance) -> Result<(), EncodeError> {
+	encode(w, instance)
+}
+
+/// Decode the instance of a copy a warm route names; see [`encode_copy`].
+pub(super) fn decode_copy(r: &mut Decoder<'_>) -> Result<Instance, DecodeError> {
+	decode(r.bytes()?, r.bool()?)
+}
+
 fn encode(w: &mut Encoder<'_>, instance: &Instance) -> Result<(), EncodeError> {
 	w.bytes(instance.as_str().as_bytes())?;
 	w.bool(instance.is_minted());

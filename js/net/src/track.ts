@@ -23,6 +23,7 @@ import { type Asker, FillState, type Requests, requestsOf } from "./fill.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import {
+	cutRun,
 	type DropRun,
 	dropAt,
 	type FillStarts,
@@ -41,6 +42,7 @@ import {
 	type Run,
 	removeRun,
 	runGaps,
+	runsFrom,
 	type StagedTrack,
 	sameHole,
 	skipHole,
@@ -636,9 +638,21 @@ export class Consumer {
 
 // The parts of sorted, disjoint `runs` inside `[start, end)`.
 function intersect(runs: readonly Run[], start: bigint, end: bigint): Run[] {
-	return runs
-		.map((run) => ({ start: max(run.start, start), end: min(run.end, end) }))
-		.filter((run) => run.start < run.end);
+	const found: Run[] = [];
+	for (let i = runsFrom(runs, start); i < runs.length && runs[i].start < end; i++)
+		found.push({ start: max(runs[i].start, start), end: min(runs[i].end, end) });
+	return found;
+}
+
+// How many runs a sink's `lost` keeps apart before folding them into one span.
+const LOST_KEPT = 16;
+
+// Record that `sink`'s timeline lost group `sequence`, for its reader's fill probe.
+function lose(sink: TrackState, sequence: bigint): void {
+	const lost = sink.lost;
+	if (!lost) return;
+	insertRun(lost, sequence, sequence + 1n);
+	if (lost.length > LOST_KEPT) lost.splice(0, lost.length, { start: lost[0].start, end: (lost.at(-1) as Run).end });
 }
 
 // Take a group's mirror out of `sink`, so its subscriber can no longer receive it.
@@ -649,6 +663,7 @@ function unlinkMirror(sink: TrackState, mirror: GroupConsumer): void {
 	});
 	const index = timelineIndex(sink.timeline, mirror.sequence);
 	if (sink.timeline[index] === mirror) sink.timeline.splice(index, 1);
+	lose(sink, mirror.sequence);
 }
 
 // The index of the first timeline group at or after `sequence`.
@@ -713,6 +728,10 @@ class TrackState {
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
 	// arrival, searches it instead of scanning the whole retained window.
 	timeline: GroupConsumer[] = [];
+	// The groups `timeline` lost since this sink's reader last probed its fills (evicted, withheld,
+	// or failed), which its probe judges again; undefined until it first probes. Past LOST_KEPT
+	// runs they fold into the span covering them all, judged again whole.
+	lost?: Run[];
 	// First timestamps mutate group state rather than track state, so held groups
 	// watch this revision as well as arrivals when enforcing latency after handoff.
 	timelineChanged = new Signal(0);
@@ -901,18 +920,6 @@ interface Born extends Run {
 // Whether `a` and `b` give a sequence up alike, however each was folded in.
 function sameVerdict(a: DropRun, b: DropRun): boolean {
 	return sameHole({ ...a, received: undefined }, { ...b, received: undefined });
-}
-
-// The index of the first of `runs`, sorted and disjoint, ending past `sequence`.
-function endingPast(runs: readonly Run[], sequence: bigint): number {
-	let lo = 0;
-	let hi = runs.length;
-	while (lo < hi) {
-		const mid = (lo + hi) >>> 1;
-		if (runs[mid].end <= sequence) lo = mid + 1;
-		else hi = mid;
-	}
-	return lo;
 }
 
 // The runs of `drops` and a reader's `refused` overlapping `[start, end)`, lowest first. A drop
@@ -1145,8 +1152,8 @@ export class Producer {
 				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
 				return this.#createGroup(sequence, 0, true);
 			},
-			drop: (start, end, error) => {
-				this.#drop(start, end, { error });
+			drop: (start, end, hole) => {
+				this.#drop(start, end, hole);
 				this.#chargeDebt();
 			},
 			holds: (sequence) => cachedHolds(this, sequence),
@@ -1493,33 +1500,29 @@ export class Producer {
 	// Record `[start, end)` given up as `hole` says, returning the runs recorded. A skip is final
 	// and the most authoritative verdict, so a drop never replaces one. An upstream drop (`open`)
 	// also ends the groups still arriving in it with its error, so their readers settle now
-	// rather than once the stream's reset lands; one that finished here stays whole. A skip names
-	// nothing produced.
+	// rather than once the stream's reset lands. A skip names nothing produced.
 	#drop(start: bigint, end: bigint, hole: Hole, open = false): Run[] {
 		if (start >= end) return [];
 		const skipped = hole.skip ? [] : this.#state.drops.overlapping(start, end).filter((run) => run.skip);
 		let runs = runGaps(skipped, start, end);
-		// A received stale verdict leaves a group that arrived and was not aborted: a lite-07
-		// publisher may serve a group after its stale drop, and the group's stream may land first.
-		// The group wins, still arriving or not.
-		if (open && hole.stale !== undefined) {
+		const arriving: GroupProducer[] = [];
+		if (open && !hole.skip) {
 			for (const [sequence, entry] of this.#cached) {
-				if (sequence >= start && sequence < end && !(entry.group.closed.peek() instanceof Error)) {
-					runs = removeRun(runs, sequence, sequence + 1n);
-				}
+				const closed = entry.group.closed.peek();
+				if (sequence < start || sequence >= end || closed instanceof Error) continue;
+				// A lite-07 publisher may serve a group after its stale drop, and the group's stream
+				// may land first. A final drop ends a group still arriving, but one that finished here
+				// stays whole, as a re-sent copy the subscriber refused leaves it: naming it given up
+				// would hide it from every reader.
+				if (hole.stale === undefined && closed === undefined) arriving.push(entry.group);
+				else runs = removeRun(runs, sequence, sequence + 1n);
 			}
 		}
 		// A fill no longer owes what the track gave up for good. A stale verdict settles only
 		// the readers it covers, so a fill asked by any other is still owed.
 		if (hole.stale === undefined) this.#fills.dropped(start, end);
 		for (const run of runs) this.#setDrops(run.start, run.end, hole);
-		if (open && !hole.skip && hole.stale === undefined) {
-			for (const [sequence, entry] of this.#cached) {
-				if (sequence >= start && sequence < end && entry.group.closed.peek() === undefined) {
-					entry.group.abort(hole.error);
-				}
-			}
-		}
+		for (const group of arriving) group.abort(hole.error);
 		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: new
 		// terms may supersede it, leaving those groups unknown again, as in Rust.
 		if (hole.stale === undefined) this.#arrive(start, end);
@@ -1792,6 +1795,7 @@ export class Producer {
 			});
 			const at = timelineIndex(sink.timeline, mirror.sequence);
 			if (sink.timeline[at] === mirror) sink.timeline.splice(at, 1);
+			lose(sink, mirror.sequence);
 			entry.mirrors.delete(sink);
 			entry.charge.sub(cache.MIRROR_OVERHEAD);
 			hooks.releaseGroupReader(mirror, undefined);
@@ -1969,6 +1973,8 @@ export class Producer {
 			// A re-created group already replaced this one.
 			const current = this.#cached.get(group.sequence);
 			if (current && current.group !== group) return;
+			// A failed copy holds nothing to read, so each reader's probe misses it again.
+			for (const sink of entry.mirrors.keys()) lose(sink, group.sequence);
 			// A failed fill answer says nothing of the feed, so it gives nothing up: the track's drops
 			// and arrivals hold only the feed's verdicts, as Rust records nothing for a failed fill.
 			if (fetched) return;
@@ -2734,6 +2740,19 @@ export class Subscriber {
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
+	// The sequences the fill probe has yet to judge, and the terms it last judged under: each is
+	// judged once, then again only once a change reopens it (see #reopen), as the Rust `Misses`
+	// keeps `judged`. A run the live feed still owes stays unjudged until the feed gives it up.
+	#unjudged: Run[] = [{ start: 0n, end: UNBOUNDED }];
+	#judgedAt?: {
+		producer: Producer;
+		budget: number;
+		coverage: Coverage;
+		judged: readonly Run[] | undefined;
+		opened: number;
+		drops: number;
+		edge: bigint;
+	};
 	// The received stale runs that do not settle this reader, and the terms they were judged
 	// under; see #unknownRuns.
 	#unknown?: {
@@ -2970,6 +2989,7 @@ export class Subscriber {
 	// Record `sequence` as handed out. An ordered read never goes back, and any reader stops
 	// expecting what is past its budget, so only the gaps within it cost memory.
 	#handOut(sequence: bigint, ordered: boolean): void {
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
 		if (ordered) this.#delivered.forgetBelow(sequence);
 		this.#delivered.add(sequence);
 		this.#skipped.delete(sequence);
@@ -2983,25 +3003,54 @@ export class Subscriber {
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
 		else this.#forgetPastBudget(this.#delivered);
 		// What it hands out, and forgets below it, it no longer wants from a fill: tell the fills
-		// it joined, as a move of its bounds does, so their handlers stop serving it.
-		this.#fillsMoved();
+		// owing it there, so their handlers stop serving it.
+		const forgot = this.#delivered.runEnd(0n) ?? 0n;
+		if (forgot > floor) this.#stoppedReading(floor, forgot);
+		if (sequence >= forgot) this.#stoppedReading(sequence, sequence + 1n);
+	}
+
+	// This reader stopped reading `[start, end)` for good: clip what it asked there, and judge
+	// again only the fills owing it there, so a hand-out costs what it touches, not every fill.
+	#stoppedReading(start: bigint, end: bigint): void {
+		const asker = this.#state.asker;
+		const producer = this.#state.producer;
+		if (!asker || !producer) return;
+		this.#reclip(this.#givenUp, start, end, (run) => this.#reads(run.start, run.end));
+		this.#reclip(this.#asked, start, end, (run) => this.#wants(run.start, run.end));
+		this.#reclip(this.#refilled, start, end, (run) => this.#wants(run.start, run.end));
+		fillsOf(producer).moved(asker, start, end);
+		this.#fillMoves.update((moves) => moves + 1);
+	}
+
+	// Replace the `runs` overlapping `[start, end)` with what `keep` leaves of them.
+	#reclip(runs: Run[], start: bigint, end: bigint, keep: (run: Run) => Run[]): void {
+		const from = runsFrom(runs, start);
+		let to = from;
+		while (to < runs.length && runs[to].start < end) to++;
+		if (from < to) runs.splice(from, to - from, ...runs.slice(from, to).flatMap(keep));
 	}
 
 	// What this reader wants from the fills it joined may have narrowed: rejudge them, so their
 	// handlers hear it.
-	#fillsMoved(): void {
+	#fillsMoved(given?: readonly Run[]): void {
 		const producer = this.#state.producer;
 		if (!this.#state.asker || !producer) return;
-		// At once, before the fills withdraw what it no longer reads: a widening back asks those
-		// groups afresh, never through the one refill an evicted answer is allowed.
-		this.#clipAsked();
-		fillsOf(producer).moved(this.#state.asker);
+		const fills = fillsOf(producer);
+		// Runs given up are never wanted again, unless an update retries them, which asks afresh:
+		// only the fills owing them are judged again.
+		if (given) {
+			for (const run of given) fills.moved(this.#state.asker, run.start, run.end);
+		} else {
+			// At once, before the fills withdraw what it no longer reads: a widening back asks those
+			// groups afresh, never through the one refill an evicted answer is allowed.
+			this.#clipAsked();
+			fills.moved(this.#state.asker);
+		}
 		this.#fillMoves.update((moves) => moves + 1);
 	}
 
 	// Keep what this reader asked within what it still reads, as the Rust `Misses` clips what it
-	// judged to the window: a group handed out, forgotten past the budget, passed, or outside the
-	// window is never asked again, so these stay within the live span. A window moving back over a
+	// judged to the window: a group outside the window is never asked again, so these stay within the live span. A window moving back over a
 	// clipped group asks it once more, as in Rust.
 	#clipAsked(): void {
 		if (this.#givenUp.length > 0) this.#givenUp = this.#givenUp.flatMap((run) => this.#reads(run.start, run.end));
@@ -3017,7 +3066,7 @@ export class Subscriber {
 		const passed = this.#nextSequence;
 		this.#nextSequence = floor;
 		this.#judge(passed, floor);
-		this.#fillsMoved();
+		this.#stoppedReading(passed, floor);
 	}
 
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
@@ -3343,6 +3392,7 @@ export class Subscriber {
 		this.#givenUp = removeRun(this.#givenUp, run.start, run.end);
 		this.#asked = removeRun(this.#asked, run.start, run.end);
 		this.#refilled = removeRun(this.#refilled, run.start, run.end);
+		insertRun(this.#unjudged, run.start, run.end);
 		return true;
 	}
 
@@ -3465,6 +3515,8 @@ export class Subscriber {
 			end: end === undefined ? local.end : min(local.end ?? end, end),
 		});
 		this.#judge(0n, UNBOUNDED);
+		// What it reads changed, so its fill probe judges everything again.
+		this.#judgedAt = undefined;
 		// A fill this reader alone waited on for a group it no longer reads is withdrawn.
 		this.#fillsMoved();
 	}
@@ -3523,6 +3575,7 @@ export class Subscriber {
 				if (stale !== undefined) {
 					this.#asked = removeRun(this.#asked, start, end);
 					this.#refilled = removeRun(this.#refilled, start, end);
+					insertRun(this.#unjudged, start, end);
 				}
 				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, stale }));
 			},
@@ -3533,8 +3586,9 @@ export class Subscriber {
 	// Ask the producer's fills for the misses in `[start, end)`: groups this reader reads below
 	// the newest one received that the cache does not hold and nobody gave up. A run whose newest
 	// group the budget already convicts is not asked, so a reader at the live edge never asks.
-	// Returns the first sequence a fill still owes this reader whose budget still wants it, arming
-	// the wakeup for when that changes. Mirrors the Rust `Misses::judge`.
+	// Only what is still unjudged is looked at (see #unjudged), so a probe costs what changed
+	// since the last. Returns the first sequence a fill still owes this reader whose budget still
+	// wants it, arming the wakeup for when that changes. Mirrors the Rust `Misses::judge`.
 	#askFills(start: bigint, end: bigint, drift?: Drift): bigint | undefined {
 		const producer = this.#state.producer;
 		if (this.#resume || !producer || this.#left) return undefined;
@@ -3543,58 +3597,69 @@ export class Subscriber {
 		if (fills.serving || fills.active) {
 			drift ??= this.#drift();
 			const asker = this.#askerOf();
-			this.#clipAsked();
-			const timeline = this.#state.timeline;
-			const accounted: Run[] = [];
-			// Reordered streams still owed by the live feed are not cache misses.
-			for (const run of owedRuns(producer, start, end)) {
-				insertRun(accounted, run.start, run.end);
-				if (run.folds !== undefined) this.#wakeAt(run.folds.since(Instant.ZERO).asNanos());
-			}
-			// Below where the feed starts, only the history the copy's start rule leaves fillable.
-			const floor = fillFloor(producer, this.#window.start());
-			// A received stale run that does not settle this reader is unknown to it, so it is
-			// still asked for, as the Rust `Misses::unclaimed` judges it.
+			// A moving read floor retires only its prefix: what lies above it stays asked.
+			const read = max(this.#cursor.peek().start, this.#nextSequence);
+			for (const runs of [this.#asked, this.#refilled, this.#givenUp]) cutRun(runs, 0n, read);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
+			this.#reopen(producer, fills, budget, coverage);
+			const timeline = this.#state.timeline;
+			// Below where the feed starts, only the history the copy's start rule leaves fillable.
+			const floor = fillFloor(producer, this.#window.start());
 			const { drops, refused } = this.#state;
 			const low = floor === undefined ? start : max(start, floor);
 			const edge = min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n));
-			const spans: Run[] = [{ start: low, end: edge }];
-			// The upstream accounted for a stale run, so the live feed brings none of it unless an
-			// update supersedes it: asked even above the newest group received. Only the runs that
-			// do not settle this reader are walked, never every run above the edge.
 			const above = max(low, edge);
 			const unknown = this.#unknownRuns(budget, coverage);
-			for (let i = endingPast(unknown, above); i < unknown.length; i++) {
-				const dropped = unknown[i];
-				if (dropped.start >= end) break;
-				const span = { ...dropped, start: max(dropped.start, above), end: min(dropped.end, end) };
-				if (span.start < span.end && !settles(span, budget, coverage, this.#state.judged)) spans.push(span);
-			}
-			for (const run of spans.flatMap((span) => this.#wants(span.start, span.end))) {
-				const gone = [...accounted];
-				for (const dropped of givenUp(drops, refused.peek(), run.start, run.end, (run) =>
-					settles(run, budget, coverage, this.#state.judged),
-				)) {
-					// Judged from where it meets the asked run, as the reader would read it.
-					const clipped = { ...dropped, start: max(dropped.start, run.start) };
-					if (settles(clipped, budget, coverage, this.#state.judged))
-						insertRun(gone, clipped.start, dropped.end);
+			const seen: Run[] = [];
+			const unjudged = this.#unjudged;
+			for (let at = runsFrom(unjudged, low); at < unjudged.length && unjudged[at].start < end; at++) {
+				const from = max(unjudged[at].start, low);
+				const to = min(unjudged[at].end, end);
+				// Reordered streams still owed by the live feed are not cache misses, and stay unjudged
+				// until the feed gives them up.
+				const accounted: Run[] = [];
+				for (const run of owedRuns(producer, from, to)) {
+					insertRun(accounted, run.start, run.end);
+					if (run.folds !== undefined) this.#wakeAt(run.folds.since(Instant.ZERO).asNanos());
 				}
-				for (const open of runGaps(gone, run.start, run.end)) {
-					let next = open.start;
-					for (let i = timelineIndex(timeline, open.start); i < timeline.length; i++) {
-						const group = timeline[i];
-						if (group.sequence >= open.end) break;
-						// A failed copy holds nothing to read, so it is missed like an evicted one.
-						if (hooks.groupFailed(group)) continue;
-						this.#askMiss(next, group.sequence, drift, asker);
-						next = group.sequence + 1n;
+				for (const run of runGaps(accounted, from, to)) seen.push(run);
+				const spans: Run[] = from < min(to, edge) ? [{ start: from, end: min(to, edge) }] : [];
+				// A received stale run that does not settle this reader is unknown to it, so it is
+				// still asked for, as the Rust `Misses::unclaimed` judges it: the upstream accounted
+				// for it, so the live feed brings none of it unless an update supersedes it. Only the
+				// unknown runs overlapping what is unjudged are walked.
+				const over = max(from, above);
+				for (let i = runsFrom(unknown, over); i < unknown.length && unknown[i].start < to; i++) {
+					const dropped = unknown[i];
+					const span = { ...dropped, start: max(dropped.start, over), end: min(dropped.end, to) };
+					if (span.start < span.end && !settles(span, budget, coverage, this.#state.judged)) spans.push(span);
+				}
+				for (const run of spans.flatMap((span) => this.#wants(span.start, span.end))) {
+					const gone = [...accounted];
+					for (const dropped of givenUp(drops, refused.peek(), run.start, run.end, (run) =>
+						settles(run, budget, coverage, this.#state.judged),
+					)) {
+						// Judged from where it meets the asked run, as the reader would read it.
+						const clipped = { ...dropped, start: max(dropped.start, run.start) };
+						if (settles(clipped, budget, coverage, this.#state.judged))
+							insertRun(gone, clipped.start, dropped.end);
 					}
-					this.#askMiss(next, open.end, drift, asker);
+					for (const open of runGaps(gone, run.start, run.end)) {
+						let next = open.start;
+						for (let i = timelineIndex(timeline, open.start); i < timeline.length; i++) {
+							const group = timeline[i];
+							if (group.sequence >= open.end) break;
+							// A failed copy holds nothing to read, so it is missed like an evicted one.
+							if (hooks.groupFailed(group)) continue;
+							this.#askMiss(next, group.sequence, drift, asker);
+							next = group.sequence + 1n;
+						}
+						this.#askMiss(next, open.end, drift, asker);
+					}
 				}
 			}
+			for (const run of seen) cutRun(this.#unjudged, run.start, run.end);
 		}
 		const asker = this.#state.asker;
 		if (!asker) return undefined;
@@ -3617,9 +3682,61 @@ export class Subscriber {
 				insertRun(this.#givenUp, run.start, run.end);
 				this.#judge(run.start, run.end);
 			}
-			this.#fillsMoved();
+			this.#fillsMoved(stale);
 		}
 		return owed;
+	}
+
+	// Take what changed since the last probe as unjudged again: every sequence once the terms it
+	// was judged under change, else the drop runs changed or forgotten, the groups the timeline
+	// lost with the gaps they were successor to, and what the received edge rose over, which
+	// arrives live no more.
+	#reopen(producer: Producer, fills: FillState, budget: number, coverage: Coverage): void {
+		const state = this.#state;
+		const at = this.#judgedAt;
+		const edge = max(state.received.peek(), (fillEdge(producer) ?? -1n) + 1n);
+		const opened = fills.opened.peek();
+		const removed = at && state.drops.removedSince(at.drops);
+		if (
+			!at ||
+			!removed ||
+			!state.lost ||
+			at.producer !== producer ||
+			at.budget !== budget ||
+			!sameCoverage(at.coverage, coverage) ||
+			at.judged !== state.judged ||
+			at.opened !== opened
+		) {
+			this.#unjudged = [{ start: 0n, end: UNBOUNDED }];
+		} else {
+			for (const run of [...removed, ...state.drops.since(at.drops)])
+				insertRun(this.#unjudged, run.start, run.end);
+			// A lost group was the successor the gap below it was judged stale by, back to the
+			// group below that #after would count instead.
+			const timeline = state.timeline;
+			for (const run of state.lost) {
+				let i = timelineIndex(timeline, run.start) - 1;
+				while (
+					i >= 0 &&
+					(hooks.groupFailed(timeline[i]) ||
+						!this.#judges(timeline[i].sequence) ||
+						!hooks.groupStarted(timeline[i]))
+				)
+					i--;
+				insertRun(this.#unjudged, i < 0 ? 0n : timeline[i].sequence + 1n, run.end);
+			}
+			if (edge > at.edge) insertRun(this.#unjudged, at.edge, edge);
+		}
+		state.lost = [];
+		this.#judgedAt = {
+			producer,
+			budget,
+			coverage,
+			judged: state.judged,
+			opened,
+			drops: state.drops.revision,
+			edge,
+		};
 	}
 
 	// The received stale runs that do not settle this reader under `budget` and `coverage`,
@@ -3644,14 +3761,14 @@ export class Subscriber {
 			// Updated in place: its one caller is done with the last answer.
 			const runs = memo.runs;
 			for (const gone of removed) {
-				const from = endingPast(runs, gone.start);
+				const from = runsFrom(runs, gone.start);
 				let to = from;
 				while (to < runs.length && runs[to].start < gone.end) to++;
 				runs.splice(from, to - from);
 			}
 			for (const changed of drops.since(memo.drops)) {
 				for (const run of drops.overlapping(changed.start, changed.end)) {
-					const at = endingPast(runs, run.start);
+					const at = runsFrom(runs, run.start);
 					if (unsettled(run) && runs[at] !== run) runs.splice(at, 0, run);
 				}
 			}
@@ -3696,7 +3813,7 @@ export class Subscriber {
 		// before this reader took it.
 		const again = intersect(this.#asked, start, end).flatMap((run) =>
 			runGaps(this.#refilled, run.start, run.end).flatMap((refill) =>
-				runGaps(fills.covered(refill.start, refill.end, asker), refill.start, refill.end),
+				runGaps([...fills.covered(refill.start, refill.end, asker)], refill.start, refill.end),
 			),
 		);
 		// Only what a fill took counts as asked: with no handler open, a miss no fill covers is
@@ -3707,7 +3824,7 @@ export class Subscriber {
 		// Refilled and missed again, unless a fill still brings it: given up and named, never
 		// asked a third time, as the Rust `Misses` gives up a refill evicted again.
 		const lost = intersect(this.#refilled, start, end).flatMap((run) =>
-			runGaps(fills.covered(run.start, run.end, asker), run.start, run.end),
+			runGaps([...fills.covered(run.start, run.end, asker)], run.start, run.end),
 		);
 		for (const refill of again) {
 			for (const run of fills.ask(refill.start, refill.end, asker)) insertRun(this.#refilled, run.start, run.end);
@@ -3716,7 +3833,7 @@ export class Subscriber {
 			insertRun(this.#givenUp, run.start, run.end);
 			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "group evicted again" }));
 		}
-		if (lost.length > 0) this.#fillsMoved();
+		if (lost.length > 0) this.#fillsMoved(lost);
 	}
 
 	// Whether a held group waits on the local cap rising: one past it may still be read. A
@@ -4764,9 +4881,10 @@ export class Subscriber {
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.sequence, drift)) {
+				const passed = this.#nextSequence;
 				this.#pass(groups, index);
 				// The cursor passed what lies below it, which a fill no longer owes this reader.
-				this.#fillsMoved();
+				this.#stoppedReading(passed, this.#nextSequence);
 				// Holes below a skipped group are undeliverable, even ones the wall clock
 				// still spares because their successor arrived late.
 				start = this.#nextSequence;

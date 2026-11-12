@@ -1587,6 +1587,9 @@ struct Alive {
 	// the group lock is released and before the track is told: a track scan reading a stale
 	// false judges the group frameless until that wake re-judges it.
 	started: AtomicBool,
+	// Set once a final drop of this group waits on this copy, a fetched head still filling:
+	// an abort before it finishes makes the drop the group's cut, so cut watchers hear it.
+	carries_drop: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -1724,6 +1727,7 @@ impl Producer {
 			cut: OnceLock::new(),
 			checked: AtomicBool::new(false),
 			started: AtomicBool::new(false),
+			carries_drop: AtomicBool::new(false),
 			access,
 			log,
 			pace,
@@ -2821,6 +2825,7 @@ impl Handle {
 		if cut {
 			let _ = self.alive.cut.set(err.clone());
 		}
+		let finished = guard.outcome.frames().is_some();
 		guard.outcome = match guard.outcome {
 			Outcome::Finished(frames) => Outcome::Released(frames, err),
 			_ => Outcome::Aborted(err),
@@ -2830,7 +2835,23 @@ impl Handle {
 		self.alive.fall.store(fall as u8, Ordering::Release);
 		guard.release(salvage);
 		guard.close();
-		self.cache.aborted(self.sequence, cut);
+		// Pairs with the fence after the track's `give_up` ended the live copy: either it sees
+		// this abort, or this sees its flag and that copy ended, so the drop riding on this
+		// copy is announced once it is the cut. Cache policy announces nothing, as it cuts
+		// nothing: it runs under the track guard, which a woken cursor would take. The fence
+		// runs only on an abort that could carry a drop, so a released group pays nothing.
+		let carried = !finished && !policy && {
+			std::sync::atomic::fence(Ordering::SeqCst);
+			self.alive.carries_drop.load(Ordering::Relaxed)
+		};
+		self.cache.aborted(self.sequence, cut || carried);
+	}
+
+	/// Mark that a final drop of this group waits on this copy, so a failure before it
+	/// finishes is announced to cut watchers as a cut would be. An abort racing this is the
+	/// caller's to announce; see the fence in [`Self::commit_abort`].
+	pub(super) fn carry_drop(&self) {
+		self.alive.carries_drop.store(true, Ordering::Relaxed);
 	}
 
 	/// Whether the group has been aborted (including pool eviction). The track's

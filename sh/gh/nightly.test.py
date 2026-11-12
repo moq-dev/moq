@@ -351,11 +351,23 @@ class NightlyTest(unittest.TestCase):
     def test_dev_shell_jobs_trust_the_nix_cache(self):
         # Without the flake's substituter, the dev shell builds uncached tools from
         # source and outlasts short jobs: the benchmark site timed out before publishing.
+        # A self-hosted runner VM's own Nix already names the cache, as Queue relies on.
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
         jobs = re.split(r"^  (?=[\w-]+:\n)", workflow.split("\njobs:\n", 1)[1], flags=re.M)
         for job in jobs:
-            if "nix develop" in job:
+            if "nix develop" in job and "runs-on: [self-hosted" not in job:
                 self.assertIn("uses: ./.github/actions/nix", job, job.splitlines()[0])
+
+    def test_every_tla_leg_path_exists(self):
+        # A leg naming a deleted config checks nothing and fails Nightly; an
+        # exclusion naming one silently stops excluding.
+        workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
+        job = re.search(r"^  tla:\n(.*?)^  \S", workflow, re.M | re.S)
+        self.assertIsNotNone(job)
+        paths = [p for line in re.findall(r"^ +paths: (.+)$", job[1], re.M) for p in line.strip('"').split()]
+        self.assertTrue(paths)
+        missing = [p for p in paths if not (ROOT / p.removeprefix(":!")).exists()]
+        self.assertEqual(missing, [], "TLA+ matrix paths that no longer exist")
 
     def test_benchmark_tests_stay_out_of_cargo_bench(self):
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()

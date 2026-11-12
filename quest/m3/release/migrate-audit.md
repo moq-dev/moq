@@ -9,6 +9,11 @@ published version.
 
 ## Plan
 
+Recurs once per API or wire cut (decided 2026-11-09). The [release
+cut](/quest/m3/release/cut.md) re-creates this quest when the maintainer
+names the next API or wire cut, so the PR finishing this run adds no
+successor. Only `/quest-delete` ends the recurrence.
+
 Decided 2026-10-16 (maintainer interview); the diff tooling moved to its own
 m1 quest on 2026-10-22.
 

@@ -5,6 +5,12 @@ import type { Format } from "./format";
 import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame, ReceivedFrame } from "./types";
 
+/**
+ * The longest playout delay: it caps a reader's latency and how far catalog `warmup` reaches back,
+ * so a publisher cannot hold a reader's media without bound. Mirrors `moq_mux::container::DELAY_MAX`.
+ */
+export const DELAY_MAX = Duration.secs(10);
+
 /** Options for constructing a {@link Consumer}. */
 export interface ConsumerProps {
 	/** The container format used to decode each MoQ frame. */
@@ -259,7 +265,7 @@ export class Consumer {
 		this.#delay = getter(props.delay ?? {});
 		this.#wait = getter(props.wait);
 		this.#maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
-		this.#warmup = props.warmup ?? Duration.ZERO;
+		this.#warmup = (props.warmup ?? Duration.ZERO).min(DELAY_MAX);
 		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
 		this.#spread = new Signal(Duration.millis(this.#jitter.measured));
 		this.spread = this.#spread;

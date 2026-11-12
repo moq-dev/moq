@@ -32,8 +32,8 @@ Each variant drops one assumption the draft states and must break exactly the le
 ## Run
 
 ```sh
-just test route-key-model
-just rs tamarin moq-net/verify/route-key/RouteKey.spthy -D=NO_SIDE
+quest gate just test route-key-model
+quest gate just rs tamarin moq-net/verify/route-key/RouteKey.spthy -D=NO_SIDE
 ```
 
 The first proves the model and checks every variant's `Breaks:` line, in seconds; Nightly runs it. The second proves one variant. To read a counterexample, run `nix shell --inputs-from . nixpkgs#tamarin-prover --command tamarin-prover interactive rs/moq-net/verify/route-key/` and open the falsified lemma.

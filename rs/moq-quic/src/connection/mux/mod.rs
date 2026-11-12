@@ -659,7 +659,7 @@ impl Connection {
 	/// The error for a record or draft-00 frame over its size limit
 	fn oversized(&self) -> TransportError {
 		match self.config.version.uses_records() {
-			true => TransportError::PROTOCOL_VIOLATION("record exceeds max_record_size"),
+			true => TransportError::FRAME_ENCODING_ERROR("record exceeds max_record_size"),
 			false => TransportError::FRAME_ENCODING_ERROR("frame exceeds max_frame_size"),
 		}
 	}

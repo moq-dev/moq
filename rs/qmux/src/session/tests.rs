@@ -714,7 +714,7 @@ async fn a_peer_that_never_sends_parameters_times_out_the_handshake() {
 /// A record over `max_record_size` closes the connection with a CONNECTION_CLOSE the
 /// peer can read, rather than dropping the transport.
 #[tokio::test(start_paused = true)]
-async fn an_oversized_record_is_a_protocol_violation() {
+async fn an_oversized_record_is_a_frame_encoding_error() {
 	for version in [Version::QMux01, Version::QMux02] {
 		for max_record_size in [16382, 32768] {
 			let (client, mut raw) = tokio::io::duplex(PIPE);
@@ -729,12 +729,12 @@ async fn an_oversized_record_is_a_protocol_violation() {
 			VarInt::from_u64(max_record_size + 1).unwrap().encode(&mut record);
 			raw.write_all(&record).await.unwrap();
 			let err = session.closed().await;
-			assert!(matches!(err, Error::ProtocolViolation), "got {err:?}");
+			assert!(matches!(err, Error::FrameEncoding), "got {err:?}");
 			assert_eq!(session.wire().unwrap().received_bytes(), max_record_size);
 			let mut sent = Vec::new();
 			raw.read_to_end(&mut sent).await.unwrap();
 			assert!(
-				sent.windows(2).any(|w| w == [0x1c, 0x0a]),
+				sent.windows(2).any(|w| w == [0x1c, 0x07]),
 				"no CONNECTION_CLOSE in {sent:02x?}"
 			);
 		}

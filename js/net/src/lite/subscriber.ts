@@ -22,7 +22,7 @@ import {
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
-import { fillChanged, rejectGroups, wantedRuns } from "../fill.ts";
+import { fillChanged, type Judged, rejectGroups, wantedRuns } from "../fill.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
@@ -2605,10 +2605,10 @@ export class Subscriber {
 				const { start, end } = resp.drop;
 				entry.tail.account(start, end);
 				const cause = resp.drop.cause(this.version);
-				// Only a group its publisher never had is lost for every reader, and asked with no
-				// budget, an OLD one is past the publisher's max age, which binds every reader too.
+				// Only a group its publisher never had is lost for every reader; anything else,
+				// OLD included, is refused for now, as the Rust `Refusal::answer` does.
 				if (toStreamCode(cause) === StreamCode.NotFound) fill.dropGroups(start, end);
-				else rejectGroups(fill, start, end, cause, undefined);
+				else fill.refuseGroups(start, end, cause);
 			} else if ("skip" in resp) {
 				// Never produced: final, as the subscription feeding the copy records it.
 				const { start, end } = resp.skip;
@@ -2622,12 +2622,13 @@ export class Subscriber {
 		}
 	}
 
-	// The budget an OLD answer to a request carrying `asked` judged, or undefined when it
-	// reached the publisher's max age, which binds every reader, as the Rust
-	// `Inner::old_binds_everyone` judges. No budget leaves only the max age.
-	#stale(framing: Framing, asked: number | undefined): number | undefined {
+	// The budget an OLD answer to a request carrying `asked` judged: the publisher's max age once
+	// it reached it, which binds every reader, as the Rust `Inner::binding_max_age` judges. No
+	// budget leaves only the max age; undefined when neither is known.
+	#stale(framing: Framing, asked: number | undefined): Judged | undefined {
 		const bound = framing.maxAge?.asMillis();
-		return asked === undefined || (bound !== undefined && asked >= bound) ? undefined : asked;
+		if (asked !== undefined && (bound === undefined || asked < bound)) return { budget: asked, everyone: false };
+		return bound === undefined ? undefined : { budget: bound, everyone: true };
 	}
 
 	// Settle `[start, end)` of what `producer`'s subscription re-offers: a stream or a verdict

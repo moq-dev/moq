@@ -173,7 +173,7 @@ impl Consumer {
 		let name = name.into();
 		let min = Reader::open(broadcast, catalog, &name, &options, options.delay, 0).await?;
 
-		let warmup = catalog.warmup.unwrap_or_default();
+		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
 		let max = if warmup.is_zero() {
 			None
 		} else {
@@ -1268,6 +1268,36 @@ mod tests {
 			write(&mut live, &[second]);
 			assert_eq!(read(&mut consumer).await, (second, Lane::Max));
 		}
+	}
+
+	/// A catalog warmup past the cap widens the max-delay decoder's subscription by the cap alone.
+	#[tokio::test]
+	async fn a_huge_warmup_reaches_back_by_the_cap() {
+		let (broadcast, mut track) = live_track();
+		let published = track.clone();
+		group(&mut track, 0, &[0]).finish().unwrap();
+		let _consumer = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(Some(std::time::Duration::from_secs(3600))),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
+					..Config::new()
+				},
+				start: Start::Latest,
+				delay: Delay {
+					max: Some(std::time::Duration::ZERO),
+					..Delay::default()
+				},
+			},
+		)
+		.await
+		.unwrap();
+		assert_eq!(
+			published.subscription().and_then(|sub| sub.delay.max),
+			Some(moq_mux::container::DELAY_MAX)
+		);
 	}
 
 	/// On a cold network join the live edge's stream often lands first. The

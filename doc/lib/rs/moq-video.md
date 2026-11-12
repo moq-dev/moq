@@ -51,8 +51,10 @@ Opt-in features: `capture`, `v4l2` (ARM SoC codecs such as a Raspberry Pi's),
 On Wayland, the `pipewire` feature lets Rust callers request a screen or
 window through the system picker with `capture::Source::Portal`. Keep the
 selection for automatic reopens; create a new one to choose another source.
-Restoring a grant without another dialog depends on compositor support. X11
-continues to select displays and windows by ID, and `capture::Source::Display`
+Restoring a grant without another dialog depends on compositor support. To
+restore it in a later process too, watch `Selection::restore_token` and persist
+each change, then seed the next run with `with_restore_token`. X11 continues
+to select displays and windows by ID, and `capture::Source::Display`
 refuses anything else rather than opening the picker.
 
 Windows display and window capture use Windows.Graphics.Capture on Windows 10

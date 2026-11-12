@@ -14,7 +14,9 @@
 //!   reopens it for the next viewer. A fresh portal session would re-prompt the
 //!   picker every time, so the portal's restore token is kept with the selection
 //!   and consumed by the next [`open`], which restores the same grant without a
-//!   dialog (on compositors that support persistence). The token is forgotten when the
+//!   dialog (on compositors that support persistence). The grant lasts until the
+//!   user revokes it, so a caller can also persist the token for a later process
+//!   (`Selection::restore_token`). The token is forgotten when the
 //!   compositor ends the stream (the user hit "stop sharing"), so a revoked
 //!   grant is asked for again rather than silently resumed.
 //! - Compositors only deliver frames on damage, so a static screen would starve
@@ -256,8 +258,10 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 				})
 				.set_sources(ashpd::enumflags2::BitFlags::from(requested))
 				.set_multiple(false)
-				.set_persist_mode(PersistMode::Application)
-				.set_restore_token(restore.as_deref()),
+				// A grant that ends with the process would make a token persisted
+				// through `Selection::restore_token` useless to the next one.
+				.set_persist_mode(PersistMode::ExplicitlyRevoked)
+				.set_restore_token(restore.as_ref().map(portal::RestoreToken::as_str)),
 		)
 		.await
 		.map_err(|e| err("portal select sources", e))?
@@ -437,7 +441,7 @@ impl DmaBufFrame for PipeWireDmaBuf {
 
 		wait_dma_buf_readable(self.fd.as_fd())
 			.map_err(|e| Error::codec(anyhow::anyhow!("waiting for DMA-BUF producer: {e}")))?;
-		with_dma_buf_read(&self.fd, || {
+		with_dma_buf_read(self.fd.as_fd(), || {
 			let allocation_size = self
 				.allocation_size
 				.ok_or_else(|| Error::codec(anyhow::anyhow!("DMA-BUF descriptor does not report a mappable size")))?;
@@ -483,7 +487,7 @@ struct DmaBufSync {
 }
 
 /// Brackets CPU reads with the cache-coherency protocol required by DMA-BUF.
-fn with_dma_buf_read<T>(fd: &OwnedFd, read: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+fn with_dma_buf_read<T>(fd: BorrowedFd<'_>, read: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
 	let sync = DmaBufRead::new(fd)?;
 	let result = read();
 	let end = sync.finish();
@@ -495,12 +499,12 @@ fn with_dma_buf_read<T>(fd: &OwnedFd, read: impl FnOnce() -> Result<T, Error>) -
 }
 
 struct DmaBufRead<'a> {
-	fd: &'a OwnedFd,
+	fd: BorrowedFd<'a>,
 	finished: bool,
 }
 
 impl<'a> DmaBufRead<'a> {
-	fn new(fd: &'a OwnedFd) -> Result<Self, Error> {
+	fn new(fd: BorrowedFd<'a>) -> Result<Self, Error> {
 		dma_buf_sync(fd, DMA_BUF_SYNC_READ)?;
 		Ok(Self { fd, finished: false })
 	}
@@ -521,14 +525,14 @@ impl Drop for DmaBufRead<'_> {
 	}
 }
 
-fn dma_buf_sync(fd: &OwnedFd, flags: u64) -> Result<(), Error> {
+fn dma_buf_sync(fd: BorrowedFd<'_>, flags: u64) -> Result<(), Error> {
 	let mut sync = DmaBufSync { flags };
 	loop {
 		// SAFETY: this is the DMA-BUF sync ioctl with its matching UAPI payload,
 		// and `fd` stays open for the duration of the call.
 		let result = unsafe {
 			libc::ioctl(
-				std::os::fd::AsRawFd::as_raw_fd(fd),
+				std::os::fd::AsRawFd::as_raw_fd(&fd),
 				linux_raw_sys::ioctl::DMA_BUF_IOCTL_SYNC as libc::Ioctl,
 				&mut sync,
 			)
@@ -1066,8 +1070,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					ChunkKind::Empty => return,
 					ChunkKind::Invalid => return,
 				}
-				// A JPEG spans its chunk, whatever its layout would suggest.
+				// A JPEG spans its chunk, whatever its layout would suggest. An
+				// empty one carries no frame.
 				let required = match state.format.format() {
+					VideoFormat::Encoded if size == 0 => return,
 					VideoFormat::Encoded => size,
 					format => {
 						let Some(required) = frame_data_size(format, layout) else {
@@ -1077,11 +1083,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						required
 					}
 				};
-				if dmabuf {
-					let Some(format) = drm_format(state.format.format()) else {
-						tracing::warn!(format = ?state.format.format(), "unsupported DMA-BUF pixel format");
-						return;
-					};
+				// Import a DMA-BUF only in a format and modifier this stream
+				// negotiated. Anything else goes to the CPU path below.
+				if dmabuf && let Some((format, modifier)) = drm_format(state.format.format()).zip(state.dmabuf_modifier)
+				{
 					if data.fd() < 0 || stride == 0 {
 						tracing::warn!("DMA-BUF has no valid fd or row stride");
 						return;
@@ -1093,11 +1098,13 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						return;
 					};
 					let offset = normalize_dma_buf_offset(chunk_offset, maxsize);
-					if !dma_buf_chunk_contains(required, chunk_size, maxsize) {
+					// The chunk size is advisory for a DMA-BUF; only a stated maxsize
+					// bounds the frame here. The allocation check below is the real one.
+					if !dma_buf_maxsize_contains(required, maxsize) {
 						tracing::warn!(
 							required,
-							available = size,
-							"DMA-BUF chunk does not contain a complete frame"
+							maxsize,
+							"DMA-BUF frame is larger than the buffer's stated maxsize"
 						);
 						return;
 					}
@@ -1136,10 +1143,6 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						]
 					} else {
 						vec![DmaBufPlane::new(base, layout.stride)]
-					};
-					let Some(modifier) = state.dmabuf_modifier else {
-						tracing::warn!("received a DMA-BUF without a negotiated modifier");
-						return;
 					};
 					let lease = buffer.lease(state.generation);
 					let inner = Arc::new(PipeWireDmaBuf {
@@ -1182,7 +1185,14 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					tracing::warn!("pipewire buffer has zero maximum size");
 					return;
 				};
-				if required > size || required > allocation_size {
+				// A DMA-BUF chunk may report size 0 for "the whole buffer", as on
+				// the import path above.
+				let complete = if dmabuf {
+					dma_buf_chunk_contains(required, chunk_size, maxsize)
+				} else {
+					required <= size
+				};
+				if !complete || required > allocation_size {
 					tracing::warn!(
 						required,
 						available = size,
@@ -1190,8 +1200,18 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					);
 					return;
 				}
-				// MAP_BUFFERS maps MemPtr/MemFd for the CPU fallback. `None` here
-				// means the producer forced an unsupported buffer representation.
+				// A DMA-BUF that gets here is one this stream cannot import: a
+				// camera another client already runs keeps the buffers it
+				// allocated for that client, so a stream that negotiated shared
+				// memory can still receive DMA-BUFs. A camera's V4L2 buffer is
+				// linear, so it reads like shared memory once PipeWire has mapped
+				// it, inside the DMA-BUF sync bracket.
+				// SAFETY: PipeWire owns this fd while the buffer is dequeued, and
+				// `buffer` stays dequeued until the read below has finished.
+				let dma_buf = (dmabuf && data.fd() >= 0).then(|| unsafe { BorrowedFd::borrow_raw(data.fd()) });
+				// MAP_BUFFERS maps MemPtr/MemFd, and a DMA-BUF flagged MAPPABLE, for
+				// the CPU fallback. `None` here means the producer forced a buffer
+				// representation this stream cannot read.
 				let Some(bytes) = data.data() else {
 					tracing::warn!("pipewire buffer is not CPU-mapped; stopping capture");
 					state.terminal = Some(Error::SourceUnavailable(
@@ -1205,11 +1225,29 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				let Some(allocation) = bytes.get(..allocation_size) else {
 					return;
 				};
-				let Some(bytes) = chunk_bytes(allocation, offset, required) else {
-					return;
+				let format = state.format.format();
+				let read = || {
+					chunk_bytes(allocation, offset, required)
+						.map(|bytes| convert(format, bytes.as_ref(), layout, color))
+						.transpose()
 				};
-				match convert(state.format.format(), bytes.as_ref(), layout, color) {
-					Ok(i420) => {
+				let converted = match dma_buf {
+					Some(fd) => {
+						// The sync ioctl only keeps caches coherent. Waiting for the
+						// producer's write fence is the reader's job, as in
+						// `download_i420`. A late fence costs this frame, not the
+						// capture.
+						if let Err(error) = wait_dma_buf_readable(fd) {
+							tracing::warn!(%error, "DMA-BUF producer did not finish the frame; dropping it");
+							return;
+						}
+						with_dma_buf_read(fd, read)
+					}
+					None => read(),
+				};
+				match converted {
+					Ok(None) => {}
+					Ok(Some(i420)) => {
 						chan.push(Surface::I420(i420.clone()));
 						if kind == Kind::Screen {
 							state.last = Some(Last::I420(i420));
@@ -1339,8 +1377,13 @@ fn dma_buf_chunk_size(size: u32, maxsize: u32) -> usize {
 	}
 }
 
-fn dma_buf_chunk_contains(required: usize, size: u32, maxsize: u32) -> bool {
-	size == 0 || required <= dma_buf_chunk_size(size, maxsize)
+// A producer cannot always know a DMA-BUF's byte size: xdg-desktop-portal-hyprland
+// leaves maxsize 0 and writes a placeholder chunk size of 9, flagging bad frames
+// CORRUPTED instead (see `chunk_kind`). The chunk size is not used to read the
+// frame (the layout and the fd's own allocation size are), so only a nonzero
+// maxsize, the producer's stated allocation, bounds it here.
+fn dma_buf_maxsize_contains(required: usize, maxsize: u32) -> bool {
+	maxsize == 0 || required <= maxsize as usize
 }
 
 fn chunk_bytes(data: &[u8], offset: usize, size: usize) -> Option<Cow<'_, [u8]>> {
@@ -1862,9 +1905,33 @@ mod tests {
 		assert_eq!(clamp_chunk_size(8, 16), 8);
 		assert_eq!(dma_buf_chunk_size(8, 16), 8);
 		assert_eq!(dma_buf_chunk_size(8, 0), 8);
-		assert!(dma_buf_chunk_contains(16, 0, 0));
-		assert!(!dma_buf_chunk_contains(16, 8, 0));
-		assert!(dma_buf_chunk_contains(16, 16, 16));
+		assert!(dma_buf_maxsize_contains(16, 0));
+		assert!(dma_buf_maxsize_contains(16, 16));
+	}
+
+	// xdg-desktop-portal-hyprland's shape for a 4K BGRx frame.
+	#[test]
+	fn dma_buf_placeholder_chunk_size_is_accepted() {
+		let required = 3840 * 2160 * 4;
+		assert_eq!(required, 33_177_600);
+		assert_eq!(dma_buf_chunk_size(9, 0), 9);
+		assert!(dma_buf_maxsize_contains(required, 0));
+		assert_eq!(
+			chunk_kind(dma_buf_chunk_size(9, 0), spa::buffer::ChunkFlags::empty(), true),
+			ChunkKind::Data
+		);
+		// A bad frame is flagged, which still rejects it.
+		assert_eq!(
+			chunk_kind(9, spa::buffer::ChunkFlags::CORRUPTED, true),
+			ChunkKind::Invalid
+		);
+	}
+
+	#[test]
+	fn dma_buf_frame_larger_than_maxsize_is_rejected() {
+		assert!(!dma_buf_maxsize_contains(17, 16));
+		assert!(!dma_buf_maxsize_contains(33_177_600, 33_177_599));
+		assert!(dma_buf_maxsize_contains(33_177_600, 33_177_600));
 	}
 
 	#[test]
