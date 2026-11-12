@@ -29,7 +29,10 @@ use crate::{Instance, Path};
 
 use rand::RngExt;
 
-use super::{Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno, view::ancestors};
+use super::{
+	Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno,
+	view::{ancestors, below},
+};
 
 /// One announce stream in one direction.
 pub(crate) type Key = u64;
@@ -172,9 +175,9 @@ type Changes = BTreeMap<Path, Option<Claim>>;
 /// Claims held back, by path.
 type Held = BTreeMap<Path, Claim>;
 
-/// The streams holding back a claim of each identity until its instance and epoch are
-/// confirmed, and the path each holds it at: one entry per held claim.
-type Waiting = HashMap<(Id, Instance, u64), BTreeSet<(Key, Path)>>;
+/// The streams holding back a claim of each identity, by the path each holds it at:
+/// one entry per held claim. A change to a home is looked up as a range of paths.
+type Waiting = HashMap<Id, BTreeMap<Path, BTreeSet<Key>>>;
 
 impl Outbox {
 	fn is_empty(&self) -> bool {
@@ -244,8 +247,8 @@ impl Outbox {
 	fn end(&mut self, key: Key, id: Id, waiting: &mut Waiting) -> Option<Id> {
 		// The peer drops the route's claims, so nothing held back is owed.
 		let held = self.withheld.remove(&id);
-		for (path, claim) in held.iter().flat_map(|(held, _)| held) {
-			unwait(waiting, id, claim, key, path);
+		for path in held.iter().flat_map(|(held, _)| held.keys()) {
+			unwait(waiting, id, path, key);
 		}
 		let holds = self.delivered.contains_key(&id);
 		let entry = self.entry(id);
@@ -278,7 +281,7 @@ impl Outbox {
 		key: Key,
 		id: Id,
 		(changes, floor): (Vec<(Path, Option<Claim>)>, Option<Rev>),
-		awaits: impl Fn(&Path, &Claim) -> bool,
+		awaits: impl Fn(&Path, &Claim) -> Option<bool>,
 		waiting: &mut Waiting,
 	) {
 		let ended = self.entry(id).ended;
@@ -294,19 +297,21 @@ impl Outbox {
 		for (path, claim) in changes {
 			// A newer change replaces one held back.
 			if let Some((held, _)) = withheld.get_mut(&id)
-				&& let Some(old) = held.remove(&path)
+				&& held.remove(&path).is_some()
 			{
-				unwait(waiting, id, &old, key, &path);
+				unwait(waiting, id, &path, key);
 			}
 			if let Some(item) = &claim
-				&& awaits(&path, item)
+				&& awaits(&path, item) == Some(true)
 			{
 				// The reader keeps what it was sent until then.
 				merged.remove(&path);
 				waiting
-					.entry((id, item.instance.clone(), item.epoch))
+					.entry(id)
 					.or_default()
-					.insert((key, path.clone()));
+					.entry(path.clone())
+					.or_default()
+					.insert(key);
 				withheld.entry(id).or_default().0.insert(path, item.clone());
 				continue;
 			}
@@ -408,29 +413,61 @@ impl Outbox {
 /// Whether a claim of `id` at `instance` and `epoch`, presented at `path`, waits before
 /// it goes to other streams: on the shown claim there or, for a claim presented at a
 /// narrower interest, the one covering it that serves the same instance, until a stream
-/// serving it confirms that instance. Not when none serves it here to wait for.
-fn awaits(homes: &Homes, id: Id, path: &Path, instance: &Instance, epoch: u64) -> bool {
+/// serving it confirms that instance. `None` when none serves it here to wait on.
+fn awaits(homes: &Homes, id: Id, path: &Path, instance: &Instance, epoch: u64) -> Option<bool> {
 	let same = |claim: &Claim| claim.instance == *instance && claim.epoch == epoch;
-	let Some(home) = ancestors(path).rev().find_map(|shown| {
+	let home = ancestors(path).rev().find_map(|shown| {
 		let home = homes.get(&(id, shown))?;
 		home.keys.values().any(|slot| same(&slot.served.claim)).then_some(home)
-	}) else {
-		return false;
-	};
-	!(home.keys.values()).any(|slot| {
-		slot.confirmed
-			.as_ref()
-			.is_some_and(|(i, e)| i == instance && *e == epoch)
-	})
+	})?;
+	let confirmed =
+		(home.keys.values()).any(|slot| (slot.confirmed.as_ref()).is_some_and(|(i, e)| i == instance && *e == epoch));
+	Some(!confirmed)
 }
 
-/// The stream `key` no longer holds back `claim` of `id` at `path`.
-fn unwait(waiting: &mut Waiting, id: Id, claim: &Claim, key: Key, path: &Path) {
-	let wait = (id, claim.instance.clone(), claim.epoch);
-	if let Some(keys) = waiting.get_mut(&wait) {
-		keys.remove(&(key, path.clone()));
+/// The stream `key` no longer holds back a claim of `id` at `path`.
+fn unwait(waiting: &mut Waiting, id: Id, path: &Path, key: Key) {
+	let Some(paths) = waiting.get_mut(&id) else {
+		return;
+	};
+	if let Some(keys) = paths.get_mut(path) {
+		keys.remove(&key);
 		if keys.is_empty() {
-			waiting.remove(&wait);
+			paths.remove(path);
+		}
+	}
+	if paths.is_empty() {
+		waiting.remove(&id);
+	}
+}
+
+/// Send on what the streams hold back of `id` at or below each of `changed`, the shown
+/// claims whose homes changed, once a home serving it confirmed it: only a home at or
+/// above a path decides whether a claim there waits. One no home serves any more stays
+/// until the router changes or ends it.
+fn recheck(homes: &Homes, queues: &Queues, waiting: &mut Waiting, id: Id, changed: &[Path]) {
+	let Some(paths) = waiting.get(&id) else {
+		return;
+	};
+	let mut held = BTreeSet::new();
+	for claim in changed {
+		let at = paths.get_key_value(claim).into_iter();
+		for (path, keys) in at.chain(below(paths, claim)) {
+			held.extend(keys.iter().map(|key| (path.clone(), *key)));
+		}
+	}
+	for (path, key) in held {
+		let Some(queue) = queues.get(&key) else {
+			continue;
+		};
+		let mut outbox = queue.lock();
+		let confirmed = (outbox.withheld.get(&id))
+			.and_then(|(held, _)| held.get(&path))
+			.and_then(|item| awaits(homes, id, &path, &item.instance, item.epoch))
+			== Some(false);
+		if confirmed {
+			outbox.release(id, &path);
+			unwait(waiting, id, &path, key);
 		}
 	}
 }
@@ -776,24 +813,7 @@ impl Stream {
 		}
 		slot.confirmed = Some(confirmed.clone());
 		home.release(queues, id, claim);
-		// Only what waits on this instance and epoch is looked at: each waits on the shown
-		// claim serving it now, wherever that moved since it was held.
-		let wait = (id, confirmed.0, confirmed.1);
-		let Some(keys) = waiting.get_mut(&wait) else {
-			return;
-		};
-		keys.retain(|(key, path)| {
-			if awaits(homes, id, path, &wait.1, wait.2) {
-				return true;
-			}
-			if let Some(queue) = queues.get(key) {
-				queue.lock().release(id, path);
-			}
-			false
-		});
-		if keys.is_empty() {
-			waiting.remove(&wait);
-		}
+		recheck(homes, queues, waiting, id, std::slice::from_ref(claim));
 	}
 }
 
@@ -803,8 +823,8 @@ impl Drop for Stream {
 		let state = &mut *state;
 		if let Some(queue) = state.queues.remove(&self.key) {
 			for (id, (held, _)) in &queue.read().withheld {
-				for (path, claim) in held {
-					unwait(&mut state.waiting, *id, claim, self.key, path);
+				for path in held.keys() {
+					unwait(&mut state.waiting, *id, path, self.key);
 				}
 			}
 		}
@@ -924,6 +944,7 @@ impl State {
 				claims
 			}
 		};
+		let changed: Vec<Path> = claims.iter().cloned().collect();
 		let (shown, gone): (Vec<Path>, Vec<Path>) =
 			(claims.into_iter()).partition(|claim| self.router.shown().contains_key(&(id, claim.clone())));
 		// Most specific first: a job continuing its claim's instance is served before
@@ -1003,6 +1024,8 @@ impl State {
 				);
 			}
 		}
+		// A claim held back may now wait on another home, or on none.
+		recheck(&self.homes, &self.queues, &mut self.waiting, id, &changed);
 		#[cfg(test)]
 		self.check(id, &routes);
 		// Nothing left to recover: let the identity go.
@@ -1541,21 +1564,7 @@ mod tests {
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let edge = relay.answer(Link::default(), Path::empty()).unwrap();
 		let narrow = relay.answer(Link::default(), p("live/x")).unwrap();
-		type Batch = (Vec<(Path, Option<Instance>)>, Option<Rev>);
-		let claims = |stream: &Stream| -> Vec<Batch> {
-			(outputs(stream).into_iter())
-				.filter_map(|output| match output {
-					Output::Batch { id: 1, changes, floor } => {
-						let changes = (changes.into_iter())
-							.map(|(path, claim)| (path, claim.map(|claim| claim.instance)))
-							.collect();
-						Some((changes, floor))
-					}
-					_ => None,
-				})
-				.collect()
-		};
-		let both = || [claims(&edge), claims(&narrow)];
+		let both = || [instances(&edge), instances(&narrow)];
 
 		origin.own(p("live"), Some(claim(&old, 0)));
 		pump(&answer, &receive);
@@ -1587,33 +1596,76 @@ mod tests {
 			]
 		);
 
-		// The narrower interest waits on the covering claim, which moves to `live/x`
-		// before it is confirmed: the confirmation there releases it.
-		let moved = Instance::random();
-		origin.own(p("live"), Some(claim(&moved, 0)));
-		pump(&answer, &receive);
-		assert_eq!(both(), [[(vec![], None)], [(vec![], None)]]);
-		origin.own(p("live/x"), Some(claim(&moved, 0)));
-		origin.own(p("live"), None);
-		pump(&answer, &receive);
-		assert_eq!(both(), [[(vec![(p("live"), None)], None)], [(vec![], None)]]);
-		receive.serving(1, &p("live/x"), &claim(&moved, 0));
-		assert_eq!(
-			both(),
-			[
-				[(vec![(p("live/x"), Some(moved.clone()))], Some(5))],
-				[(vec![(p("live/x"), Some(moved.clone()))], Some(5))]
-			]
-		);
-
 		// A route that ends with a claim held back certifies nothing on its way out.
-		origin.own(p("live/x"), Some(claim(&old, 1)));
+		origin.own(p("live"), Some(claim(&old, 1)));
 		pump(&answer, &receive);
 		receive.route(1, None);
 		assert!(matches!(
 			&outputs(&edge)[..],
 			[Output::Batch { floor: None, .. }, Output::Route { reach: None, .. }]
 		));
+	}
+
+	/// A claim presented at a narrower interest waits on the shown claim covering it,
+	/// whichever that is by the time it is confirmed: a confirmed one that covers it
+	/// again once the claim between goes, and one that moves to a narrower path before
+	/// it is confirmed.
+	#[test]
+	fn a_held_claim_follows_the_claim_covering_it() {
+		let (first, second) = (Instance::random(), Instance::random());
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live"), Some(claim(&first, 0)));
+		pump(&answer, &receive);
+		receive.serving(1, &p("live"), &claim(&first, 0));
+		origin.own(p("live/x"), Some(claim(&first, 0)));
+		pump(&answer, &receive);
+		let narrow = relay.answer(Link::default(), p("live/x/y")).unwrap();
+		assert_eq!(instances(&narrow), [(vec![], None)], "held on the unconfirmed live/x");
+		origin.own(p("live/x"), None);
+		pump(&answer, &receive);
+		assert_eq!(
+			instances(&narrow),
+			[(vec![(p("live/x/y"), Some(first.clone()))], Some(3))],
+			"covered by the confirmed live again"
+		);
+
+		origin.own(p("live"), Some(claim(&second, 0)));
+		pump(&answer, &receive);
+		assert_eq!(instances(&narrow), [(vec![], None)]);
+		origin.own(p("live/x"), Some(claim(&second, 0)));
+		origin.own(p("live"), None);
+		pump(&answer, &receive);
+		assert_eq!(
+			instances(&narrow),
+			[(vec![], None)],
+			"now held on the unconfirmed live/x"
+		);
+		receive.serving(1, &p("live/x"), &claim(&second, 0));
+		assert_eq!(
+			instances(&narrow),
+			[(vec![(p("live/x/y"), Some(second.clone()))], Some(6))]
+		);
+	}
+
+	/// A batch's changes, each claim by its instance, and its floor.
+	type Instances = (Vec<(Path, Option<Instance>)>, Option<Rev>);
+
+	/// The batches for identity 1 a stream would send.
+	fn instances(stream: &Stream) -> Vec<Instances> {
+		(outputs(stream).into_iter())
+			.filter_map(|output| match output {
+				Output::Batch { id: 1, changes, floor } => {
+					let changes = (changes.into_iter())
+						.map(|(path, claim)| (path, claim.map(|claim| claim.instance)))
+						.collect();
+					Some((changes, floor))
+				}
+				_ => None,
+			})
+			.collect()
 	}
 
 	/// The seqnos of the finite ROUTE messages for `id` a stream would send.

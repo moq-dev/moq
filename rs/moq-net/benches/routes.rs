@@ -12,9 +12,10 @@
 //!   batches behind the first, and each hears its next batch. Swept over the claims
 //!   the origin holds and how far the second lags: neither axis is expected to grow.
 //! - confirmed: a relay holds back every claim from the streams it answers until it
-//!   confirms serving one, and one claim restarts and is confirmed. Swept over the
-//!   claims held and the streams answered: the streams axis is expected to grow, since
-//!   each is sent the claim; the claims axis is not.
+//!   confirms serving one, all of them at one instance and epoch. One claim restarts at
+//!   another epoch, then back at the shared one, each confirmed. Swept over the claims
+//!   held and the streams answered: the streams axis is expected to grow, since each is
+//!   sent the claim; the claims axis is not.
 //!
 //! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
@@ -103,8 +104,8 @@ fn bench_confirmed(c: &mut Criterion) {
 		let mut fixture = None;
 		group.bench_function(id, |b| {
 			let relay = fixture.get_or_insert_with(|| fuzz::RouteRelay::held(claims, streams));
-			// The restart's serving change, then one batch per stream answered.
-			b.iter(|| assert_eq!(relay.restart(), 1 + streams));
+			// Each change's serving change, then one batch per stream answered.
+			b.iter(|| assert_eq!(relay.restart(), 2 * (1 + streams)));
 		});
 	}
 	group.finish();

@@ -751,12 +751,17 @@ impl RouteRelay {
 		self.drain()
 	}
 
-	/// The first claim restarts at a new epoch, and the relay confirms serving it,
-	/// returning how many outputs the relay queued.
+	/// The first claim restarts at another epoch, then back at the one every other
+	/// claim shares, the relay confirming each, returning how many outputs it queued.
 	pub fn restart(&mut self) -> usize {
+		self.confirm(1) + self.confirm(0)
+	}
+
+	/// The first claim changes to `epoch`, and the relay confirms serving it.
+	fn confirm(&mut self, epoch: u64) -> usize {
 		self.rev += 1;
 		let claim = crate::route::node::Claim {
-			epoch: self.rev,
+			epoch,
 			..Self::claim(&self.instance, 0)
 		};
 		self.receive[0].batch(Self::ORIGIN, vec![(Self::path(0), Some(claim))], Some(self.rev));
