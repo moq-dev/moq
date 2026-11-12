@@ -11157,7 +11157,10 @@ mod test {
 		assert_eq!(sub.assert_group().sequence, 0);
 
 		head.abort(Error::Evicted).unwrap();
-		assert!(producer.state.read().given_up(0).is_none(), "a freed head was still whole");
+		assert!(
+			producer.state.read().given_up(0).is_none(),
+			"a freed head was still whole"
+		);
 	}
 
 	/// Let `duration` pass on the cache pool `producer`'s groups charge into.
