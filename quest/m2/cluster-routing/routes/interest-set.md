@@ -108,4 +108,3 @@ Public API: none (the router is crate-private). Wire: none.
 ## Related
 
 - [The router keeps a route per scope](/quest/m2/cluster-routing/routes/scope.md) - rewrites how the router keeps a floor per prefix; whichever lands second adapts
-- [Widening an interest ends no live claim](/quest/m2/cluster-routing/routes/widen-false-end.md) - a false END on an interest change today, which the edit in place may remove

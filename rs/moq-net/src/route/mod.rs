@@ -228,6 +228,9 @@ pub(crate) struct Shown<A> {
 	/// Whether the node has a usable route to the claim's origin through a
 	/// neighbor certifying it.
 	pub available: bool,
+	/// Whether the claim sits at the root of a region its view was presented at,
+	/// where it stands for whichever claim covers that region.
+	pub presented: bool,
 }
 
 /// A change a node's announcement reader sees.
@@ -1971,11 +1974,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 						.as_ref()
 						.is_some_and(|regions| !regions.iter().any(|region| within(claim, region)))
 						|| !ctx.own && self.views.get(&id).is_none_or(|view| view.as_of(claim).is_none());
-					// A claim presented at a narrower interest moved up to the claim it
-					// stood for, which is still shown.
+					// A claim presented at a narrower region moved up to the claim it
+					// stood for, which is still shown. That claim may have changed
+					// meanwhile, so a presented claim needs only something shown above it.
 					let moved = ancestors(claim)
 						.filter(|above| above != claim)
-						.any(|above| shown(&above).is_some_and(|now| now.item == was.item));
+						.any(|above| shown(&above).is_some_and(|now| was.presented || now.item == was.item));
 					let kind = if !within(claim, &self.watch) {
 						Kind::Unwatched
 					} else if ctx.live && !uncertified && !moved {
@@ -2056,6 +2060,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			Some(Shown {
 				item: item.clone(),
 				available,
+				presented: merged.is_some_and(|merged| merged.floors.contains_key(claim)),
 			})
 		};
 		claims.map(|claim| (claim.clone(), at(claim))).collect()
