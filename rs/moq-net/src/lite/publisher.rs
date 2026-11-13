@@ -12415,4 +12415,40 @@ mod tests {
 		assert!(groups[1].1 > groups[0].1, "the publisher's priority breaks the tie");
 		assert!(groups[2].1 > groups[1].1, "the subscriber's priority dominates");
 	}
+
+	/// A group paused again waits once, at its new start, and is dropped once when given up.
+	#[test]
+	fn a_group_paused_again_replaces_its_wait() {
+		let mut bench = PausedBench::new(1);
+		let run = &mut bench.coverage.run;
+		run.pause(Paused {
+			group: bench.groups[0].consume(),
+			frame_start: 1,
+		});
+		assert_eq!(run.paused_tasks.len(), 1, "the earlier wait is cancelled");
+		assert_eq!(run.paused[&100].frame_start, 1);
+
+		bench.groups.remove(0).abort(Error::Cancel).unwrap();
+		let run = &mut bench.coverage.run;
+		run.drop_given_up_paused(&kio::Waiter::noop());
+		assert!(run.paused.is_empty() && run.paused_tasks.is_empty());
+		let dropped = run.ctx.outcomes.dropped.lock().unwrap();
+		assert_eq!(dropped.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [100]);
+	}
+
+	/// The next paused group to continue is the newest when descending, the oldest when
+	/// ascending, and only the woken group leaves when it is given up.
+	#[test]
+	fn the_best_paused_group_follows_the_order() {
+		let mut bench = PausedBench::new(3);
+		let best = |run: &TrackRun, order| run.best_paused(order).map(|(sequence, _)| sequence);
+		assert_eq!(best(&bench.coverage.run, track::Order::Descending), Some(102));
+		assert_eq!(best(&bench.coverage.run, track::Order::Ascending), Some(100));
+
+		bench.groups.remove(2).abort(Error::Cancel).unwrap();
+		bench.wake(0);
+		let run = &bench.coverage.run;
+		assert_eq!(best(run, track::Order::Descending), Some(101));
+		assert_eq!(run.paused_tasks.len(), 2);
+	}
 }
