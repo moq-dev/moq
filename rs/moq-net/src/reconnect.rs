@@ -348,7 +348,7 @@ pub enum Action<A, E> {
 	/// live session got a GOAWAY and now drains as it, or the replacement closed while it
 	/// still drains.
 	Migrating,
-	/// The predecessor closed, overstayed its handover, or gave way to a newer one.
+	/// The predecessor closed or overstayed its handover.
 	Retired,
 	/// Nothing serves anymore: the live session ended with this error, or the predecessor
 	/// retired between sessions. A redial follows.
@@ -741,7 +741,9 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			now.saturating_duration_since(old.since),
 			&Pacing::new(&self.config.backoff),
 		);
-		self.retire();
+		if let Some(older) = self.predecessor.take() {
+			older.retire();
+		}
 		self.predecessor = Some(Predecessor {
 			deadline: now.saturating_add(self.config.goaway.handover),
 			session: old.session,
@@ -974,7 +976,9 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		// serving until it closes or overstays, so its routes stay attached and live tracks
 		// splice onto the replacement at a group boundary.
 		tracing::info!(peer = %Shown(&url), "upstream GOAWAY; migrating");
-		self.retire();
+		if let Some(old) = self.predecessor.take() {
+			old.retire();
+		}
 		self.predecessor = Some(Predecessor {
 			deadline: now.saturating_add(self.config.goaway.handover(msg.timeout())),
 			session: live.session,
@@ -1079,14 +1083,6 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			last: self.retry.last.as_ref().map(ToString::to_string),
 		}
 		.into()
-	}
-
-	/// Close the predecessor ahead of its handover, for a newer one to replace it.
-	fn retire(&mut self) {
-		if let Some(older) = self.predecessor.take() {
-			older.retire();
-			self.queue.push_back(Action::Retired);
-		}
 	}
 
 	fn done(&mut self, result: Result<(), E>) {

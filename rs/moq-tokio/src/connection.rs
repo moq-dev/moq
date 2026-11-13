@@ -554,10 +554,9 @@ impl Shared {
 	/// The policy's predecessor, `session` draining until `deadline`, serves while a
 	/// replacement comes up.
 	///
-	/// With no predecessor mirrored yet, the live session got the GOAWAY: it is that
-	/// predecessor and keeps serving, so only the status moves. With one, which the policy
-	/// would have retired first if it were older, the replacement serving on top of it closed:
-	/// the handle serves on the predecessor again rather than on a closed session.
+	/// Either the live session got the GOAWAY and is that predecessor, so only the status
+	/// moves, or the replacement serving on top of the mirrored predecessor closed, and the
+	/// handle serves on the predecessor again rather than on a closed session.
 	fn migrating(&self, session: &moq_net::Session, deadline: kio::clock::Instant) {
 		let Ok(mut state) = self.state.write() else {
 			return;
@@ -569,7 +568,7 @@ impl Shared {
 			return;
 		};
 		live.migrating = Some(Migrating::default());
-		match &live.predecessor {
+		match live.predecessor.as_ref().filter(|predecessor| predecessor.session == *session) {
 			Some(predecessor) => {
 				live.session = predecessor.session.clone();
 				live.transport = predecessor.transport;
