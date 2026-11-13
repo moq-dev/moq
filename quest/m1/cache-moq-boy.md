@@ -9,8 +9,8 @@ compiling it.
 
 ## Plan
 
-Decided 2026-11-13 (maintainer, /quest-run follow-up): ✅ plan it (rejected:
-leave it). The consumers are the demo deploys on the maintainer's host, which
+Decided 2026-11-13 (maintainer, /quest-run follow-up): ✅ plan it in m1,
+since the demo deploys count as urgent (rejected: leave it; m3). The consumers are the demo deploys on the maintainer's host, which
 pin a moq commit and compile moq-boy on each deploy today. Their pins are that
 host's own work, not this repository's.
 
