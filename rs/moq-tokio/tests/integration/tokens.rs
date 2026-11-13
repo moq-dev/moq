@@ -167,7 +167,7 @@ async fn refused_credential_closes(config: moq_tokio::connect::Config) {
 	let mut server = serve(&version, "old").await;
 	let client = config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("moqt://localhost:{}/", server.port).parse().unwrap();
-	let connection = client.connect(url);
+	let connection = client.with_reconnect(false).connect(url);
 	let tokens = connection.tokens();
 	let seen = next(&mut server).await;
 	assert!(
