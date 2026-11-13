@@ -1474,9 +1474,10 @@ mod tests {
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		producer.discontinuity().unwrap();
-		// One group per packet and one for the marker, so the next press would be group 11.
+		// A seek creates the press's first group without appending it, so nothing declares the
+		// starts between it and the marker skipped: a group there may have been lost.
 		if lost {
-			producer.seek(12).unwrap();
+			producer.seek(packet(110, 0.5).timestamp.as_micros() as u64).unwrap();
 		}
 		// Two seconds muted, with the timeline running on through it.
 		kio::clock::sleep(Duration::from_secs(2)).await;
