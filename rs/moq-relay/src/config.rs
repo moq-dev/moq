@@ -400,6 +400,12 @@ impl Config {
 		}
 		#[cfg(not(target_os = "linux"))]
 		anyhow::bail!("handoff.socket is Linux-only");
+		// Static and API peers share one dial socket on a fixed port, bound at startup and
+		// not handed on: a successor could not bind it beside the relay it replaces.
+		anyhow::ensure!(
+			!self.cluster.dials_statics() || self.connect.resolve().bind.port() == 0,
+			"handoff.socket cannot hand on the cluster's dial socket: give --connect-bind port 0"
+		);
 		// The QUIC port is handed on as a reuseport group with room for a successor,
 		// which only a worker group binds.
 		anyhow::ensure!(
@@ -960,6 +966,23 @@ root = ["ca.pem"]
 			resolve(&format!("{quic}[runtime]\nworkers = 1\n{handoff}"));
 			// With no QUIC listener there is no group to hand on.
 			resolve(&format!("[listen.tcp]\nbind = \"127.0.0.1:0\"\n{handoff}"));
+			// Static and API peers dial from one socket on a fixed port, which a successor
+			// could not bind beside its predecessor; an ephemeral port is bound per session.
+			let quic = format!("{quic}[runtime]\nworkers = 1\n{handoff}");
+			for peers in [
+				"[cluster]\nconnect = [\"https://b.example\"]\n",
+				"[cluster.api]\nurl = \"https://api.example/peers\"\n",
+			] {
+				refuse(
+					&format!("{quic}{peers}[connect]\nbind = \"0.0.0.0:4444\"\n"),
+					"cannot hand on the cluster's dial socket",
+				);
+				resolve(&format!("{quic}{peers}[connect]\nbind = \"0.0.0.0:0\"\n"));
+			}
+			// A list naming only this relay dials nothing.
+			resolve(&format!(
+				"{quic}[cluster]\nnode = \"https://a.example\"\nconnect = [\"https://a.example\"]\n[connect]\nbind = \"0.0.0.0:4444\"\n"
+			));
 		}
 		#[cfg(not(target_os = "linux"))]
 		refuse(

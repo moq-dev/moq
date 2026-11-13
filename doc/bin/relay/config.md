@@ -462,8 +462,10 @@ steering its own connections by connection ID, so handoff needs
 `[runtime] workers` (tokio or io\_uring) and halves the most workers a relay
 runs to 128. The new relay serves the old one's worker count, logging a warning
 when the config asks for another. A relay still serving beside the one it
-replaced refuses a third until that one exits. Packets on the QUIC port that are
-not QUIC, such as WebRTC, go to the newest relay, so a WebRTC session on the old
+replaced refuses a third until that one exits. A relay dialing static or API
+cluster peers needs `[connect] bind` on port 0: their shared dial socket on a
+fixed port is bound at startup and not handed on. Packets on the QUIC port that
+are not QUIC, such as WebRTC, go to the newest relay, so a WebRTC session on the old
 relay ends at the handoff.
 
 Both relays name the same node while the old one drains. Each counts the

@@ -863,6 +863,17 @@ pub struct Config {
 }
 
 impl Config {
+	/// Whether this relay dials a static or API peer. A static list naming only this
+	/// relay dials nothing, so it runs standalone rather than as a mesh that finishes
+	/// at once.
+	pub(crate) fn dials_statics(&self) -> bool {
+		let own = self.node.as_deref().map(PeerKey::canonicalize);
+		self.connect
+			.iter()
+			.any(|peer| own.as_ref() != Some(&PeerKey::canonicalize(&peer.url)))
+			|| self.api.url.is_some()
+	}
+
 	/// Released spellings this config was parsed from, each paired with what replaced it.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
@@ -1839,15 +1850,7 @@ impl Cluster {
 			}
 		}
 
-		// A static list naming only this relay dials nothing, so it runs standalone
-		// rather than as a mesh that finishes at once.
-		let own = node.as_deref().map(PeerKey::canonicalize);
-		let statics = self
-			.config
-			.connect
-			.iter()
-			.any(|peer| own.as_ref() != Some(&PeerKey::canonicalize(&peer.url)))
-			|| self.config.api.url.is_some();
+		let statics = self.config.dials_statics();
 		let can_dial = statics || lan;
 		if !can_dial {
 			tracing::info!("no cluster peers configured; running standalone");
