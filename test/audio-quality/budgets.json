@@ -432,10 +432,10 @@
 			"underrun_ms_per_min": 0,
 			"trimmed_ms_per_min": 0,
 			"stalled_share": 0.005,
-			"silence_share": 0.009,
+			"silence_share": 0.007,
 			"target_ms_p95": 343.2,
 			"av_lag_ms_p50": 11,
-			"av_lag_ms_p95": 104.8
+			"av_lag_ms_p95": 102.7
 		},
 		{
 			"runtime": "replay",
@@ -466,8 +466,8 @@
 			"stalled_share": 0,
 			"silence_share": 0,
 			"target_ms_p95": 223.2,
-			"av_lag_ms_p50": -4.2,
-			"av_lag_ms_p95": 1.4
+			"av_lag_ms_p50": -2,
+			"av_lag_ms_p95": 3.6
 		},
 		{
 			"runtime": "replay",
