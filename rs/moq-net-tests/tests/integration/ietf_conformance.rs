@@ -71,12 +71,12 @@ async fn routing(version: &str, cluster: bool) {
 		.unwrap();
 	let mut subscription = remote.track("test").unwrap().subscribe(None).await.unwrap();
 	crate::support::harness::subscribed(&track).await;
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_group(0).unwrap();
 	group.write_frame(None, &b"conformance"[..]).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	let track = track.finish().unwrap();
 	let mut received = subscription.recv_group().await.unwrap().unwrap();
-	assert_eq!(received.sequence, 0);
+	assert_eq!(received.start, 0);
 	assert_eq!(
 		received.read_frame().await.unwrap().unwrap().payload.as_ref(),
 		b"conformance"

@@ -8,6 +8,7 @@
 //! instance's cached groups.
 
 use crate::support;
+use support::AppendNext;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -95,11 +96,12 @@ async fn quiet(version: Version, announced: &mut origin::Routes) {
 	}
 }
 
-/// Write one group of one frame tagged `tag`.
+/// Write the next group of one frame tagged `tag`, starting at its key in milliseconds.
 fn write(track: &track::Producer, tag: &str) {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, tag.as_bytes().to_vec()).unwrap();
-	group.finish().unwrap();
+	let mut group = track.append_next().unwrap();
+	let start = Timestamp::from_millis(group.start).unwrap();
+	group.write_frame(start, tag.as_bytes().to_vec()).unwrap();
+	group.close().unwrap();
 }
 
 /// The next frame a subscription delivers, as text.
@@ -598,7 +600,7 @@ async fn unanswered_takeover(version: &str) {
 		Err(err) => assert!(matches!(err, moq_net::Error::Unroutable), "{version}: {err}"),
 		Ok(group) => panic!(
 			"{version}: the replaced instance's SUBSCRIBE went on: {:?}",
-			group.map(|group| group.sequence)
+			group.map(|group| group.start)
 		),
 	}
 }

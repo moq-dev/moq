@@ -57,10 +57,12 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		subscribed(&track).await;
 
 		let at = |n| Timestamp::from_millis(100 + n).unwrap();
+		// A group starts at its first frame's time, in the track's milliseconds.
+		let key = |n| 100 + n;
 		let value = |n| json!({ "n": n, "p": "" });
 		let snapshot_bytes = producer.update(Timed::from(&value(0)).at(at(0))).unwrap().unwrap();
 		let mut original = baseline.recv_group().await.unwrap().unwrap();
-		assert_eq!(original.sequence, 0);
+		assert_eq!(original.start, key(0));
 		let first = original.read_frame().await.unwrap().unwrap();
 		assert_eq!(first.timestamp, Some(at(0)));
 		assert_eq!(first.payload.len(), snapshot_bytes);
@@ -114,7 +116,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		})
 		.await
 		.unwrap();
-		assert_eq!(cached.sequence, 0, "the cached group is not withheld");
+		assert_eq!(cached.start, key(0), "the cached group is not withheld");
 		let mut cached_bytes = 0;
 		for _ in 0..=n {
 			cached_bytes += cached.read_frame().await.unwrap().unwrap().payload.len();
@@ -124,13 +126,13 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			producer.poll_refresh(&kio::Waiter::noop()).is_pending(),
 			"answered once"
 		);
-		assert_eq!(fresh.sequence, 1, "new content gets a new group identity");
+		assert_eq!(fresh.start, key(n), "new content gets a new group identity");
 		let frame = fresh.read_frame().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp, Some(at(n)), "refresh preserves the newest source time");
 		assert_eq!(serde_json::from_slice::<Value>(&frame.payload).unwrap(), value(n));
 		assert_eq!(frame.payload.len(), snapshot_bytes);
 		assert!(fresh.poll_read_frame(&kio::Waiter::noop()).is_pending());
-		assert_eq!(baseline.recv_group().await.unwrap().unwrap().sequence, 1);
+		assert_eq!(baseline.recv_group().await.unwrap().unwrap().start, key(n));
 
 		producer.update(Timed::from(&value(n + 1)).at(at(n + 1))).unwrap();
 		let delta = fresh.read_frame().await.unwrap().unwrap();
@@ -180,7 +182,7 @@ async fn ratio_joins_cross_two_relays() {
 		let mut baseline = remote.subscribe(None).await.unwrap();
 		assert_eq!(baseline.info().refresh, (name == "moq-lite-07-wip").then_some(1));
 		crate::support::harness::subscribed(&producer).await;
-		let mut group = producer.append_group().unwrap();
+		let mut group = producer.append_group(0).unwrap();
 		group.write_frame(None, &b"key"[..]).unwrap();
 		group.write_frame(None, &b"abc"[..]).unwrap();
 		let mut received = baseline.recv_group().await.unwrap().unwrap();
