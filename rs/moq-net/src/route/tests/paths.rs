@@ -801,19 +801,27 @@ impl Relay {
 			.routes
 			.get(&cast.0)
 			.and_then(|route| route.next.zip(route.path.clone()));
-		// Pulling along the route for others, it is on the copies it feeds: each
-		// neighbour it serves offers its copy back, along this relay's route. Joining
-		// another would hand each of them another carrier, so it joins only one that
-		// ranks below them all, and none until each has offered one: an offer along any
-		// other path is from before it took the route, and a neighbour that offers none
-		// may feed copies further on. `None` joins nothing it chooses.
+		// Off a copy, the copies it would hand on are those of each neighbour that pulls
+		// through it, or would on its route, since that neighbour's next hop's copy is no
+		// choice: each offers its copy back along this relay's route. Joining another
+		// would hand each of them another carrier, so it joins only one that ranks below
+		// them all, and none until each that pulls through it has offered one: an offer
+		// along any other path is from before it took the route, and a neighbour that
+		// offers none may feed copies further on. `None` joins nothing it chooses.
 		let chosen: Option<Option<Id>> = match own {
 			Some(own) => Some(Some(own)),
-			None => (downstream.into_iter().flatten())
-				.map(|peer| {
-					let (_, path) = next.as_ref().filter(|_| pull.is_some_and(|(_, warm)| !warm))?;
-					let copy = self.sessions.get(peer)?.copies.get(cast)?;
-					copy.path.starts_with(path).then_some(copy.carrier)
+			None => (self.sessions.iter())
+				.filter_map(|(peer, session)| {
+					let pulls = downstream.is_some_and(|downstream| downstream.contains(peer));
+					let behind = (session.rx.get(&cast.0)).is_some_and(|heard| child(&heard.path, self.hop));
+					let fresh = (session.copies.get(cast))
+						.filter(|copy| next.as_ref().is_some_and(|(_, path)| copy.path.starts_with(path)))
+						.map(|copy| copy.carrier);
+					match fresh {
+						Some(carrier) if pulls || behind => Some(Some(carrier)),
+						None if pulls => Some(None),
+						_ => None,
+					}
 				})
 				.try_fold(None, |low: Option<Id>, carrier| {
 					let carrier = carrier?;
