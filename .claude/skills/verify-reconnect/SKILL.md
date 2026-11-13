@@ -30,7 +30,7 @@ quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/OfflineWhileServing.cfg
 ```
 
-The first checks every rule but the two with open findings, over four sessions: about 1.2M distinct states, under a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 240k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. `just test tla rs/moq-net/verify/reconnect` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
+The first checks every rule but the two with open findings, over four sessions: about 1.2M distinct states, under a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 240k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 
@@ -48,7 +48,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `c681b7a095bf2e1ce41bc405acdaa7993c5fe217`. Run `git log c681b7a095.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

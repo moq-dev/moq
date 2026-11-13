@@ -15,6 +15,10 @@ rust-version.workspace = true
 keywords = ["async", "poll", "state-machine", "test", "simulation"]
 categories = ["asynchronous", "development-tools::testing"]
 
+# Compile-fail fixtures are loaded by trybuild.
+[package.metadata.cargo-shear]
+ignored-paths = ["tests/ui/*.rs"]
+
 [lib]
 proc-macro = true
 

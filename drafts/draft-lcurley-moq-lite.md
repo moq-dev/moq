@@ -2226,7 +2226,7 @@ The new session URI SHOULD use the same scheme as the current session's URI.
 
 An endpoint MUST close the session with a protocol violation if it receives more than one GOAWAY.
 
-A peer that reconnects to a provided URI SHOULD keep using that URI for subsequent reconnects rather than reverting to the original.
+A peer that reconnects to a provided URI SHOULD keep using that URI for subsequent reconnects rather than reverting to the original, until a connection attempt to it fails; it then SHOULD revert to the original, which may still answer.
 
 Routes that arrived on a session that received a GOAWAY stay usable until the session ends, ranked below every other (see [Routing](#routing)).
 

@@ -280,4 +280,14 @@ its third failure since 2026-10-16 and its first after
 [moq-dev/moq#8526](https://github.com/moq-dev/moq/pull/8526). It is
 quarantined with `#[ignore]` until its child fixes it.
 
+The `go -> python` media cell failed with `audio gap after 648 samples` in
+scheduled run [43260674067](https://github.com/moq-dev/moq/actions/runs/43260674067).
+[moq-dev/moq#8633](https://github.com/moq-dev/moq/pull/8633) investigated
+[moq-dev/moq#8531](https://github.com/moq-dev/moq/pull/8531) and ran ten complete
+full matrices in the dev shell with retained debug logs. The cell passed every
+one; nine matrices passed entirely. The repeated-run outcome, authorized by the
+maintainer on 2026-11-13, retires its separate quest without claiming a runtime
+fix or ruling out a rarer failure. The shared container's CPU-starvation skip
+is being fixed in [moq-dev/moq#8611](https://github.com/moq-dev/moq/pull/8611).
+
 Public API: none. Wire: none.

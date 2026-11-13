@@ -28,6 +28,11 @@ export class Queue<T> implements Iterable<T> {
 		this.#items.push(item);
 	}
 
+	/** Remove the newest entry. */
+	pop(): T | undefined {
+		return this.length === 0 ? undefined : this.#items.pop();
+	}
+
 	shift(): T | undefined {
 		if (this.length === 0) return undefined;
 		const item = this.#items[this.#head];

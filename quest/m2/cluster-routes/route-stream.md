@@ -25,11 +25,11 @@ session. This removes the ordering hazard as a class and makes a
 token-scope change an edit.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
-Babel): ✅ [the switch](/quest/m2/cluster-routing/routes/switch.md) to the
+Babel): ✅ [the switch](/quest/m2/cluster-routes/switch.md) to the
 path rule lands first, on today's streams, and this follows (rejected: this
 first, which builds the echo and ROUTE_REQUEST on the new stream and then
 deletes them; one wire change for both, which joins two XL quests). The path
-rule ([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27) has
+rule ([epic](/quest/m2/cluster-routes/README.md) Plan item 27) has
 no echo and no route request, and the switch puts the hold answer on the
 publisher half, so a side's routing messages for one prefix already share a
 stream. What is left for this quest is the order between a side's prefixes,
@@ -46,12 +46,12 @@ Settled:
    client must open even when it wants nothing).
 2. ✅ **Its interest is a set of prefixes edited in place**, with a floor per
    prefix, SYNCED per prefix, and swaps that keep what both sets cover:
-   [the interest set](/quest/m2/cluster-routing/routes/interest-set.md)
+   [the interest set](/quest/m2/cluster-routes/interest-set.md)
    settles and proves those rules, and this puts them on the wire.
 3. ✅ **A token-scope change is an edit.** The subscriber's set is its local
    interests met with its scope's regions, one prefix per region, so a
    multi-region scope is certifiable. Plan items 16 and 17 of the
-   [epic](/quest/m2/cluster-routing/routes/README.md) (reopen and replace,
+   [epic](/quest/m2/cluster-routes/README.md) (reopen and replace,
    and the old request's own budget) are superseded, and the overlapping
    reopened requests that could hold three times the announce cap
    ([moq-dev/moq#8375](https://github.com/moq-dev/moq/pull/8375)'s open
@@ -70,7 +70,7 @@ departure is a choice to list there:
   sends as a publisher: one ANNOUNCE_OK per edit it applied, the marker where
   the edit takes effect, then ROUTE_START, UPDATE, HOLD, and END, the
   withdrawal that names a dead hop and the hold answer as
-  [the switch](/quest/m2/cluster-routing/routes/switch.md) shaped them, the
+  [the switch](/quest/m2/cluster-routes/switch.md) shaped them, the
   ANNOUNCE messages, ANNOUNCE_FLOOR with a Prefix ID, and SYNCED with a
   Prefix ID. ANNOUNCE_START names the Prefix ID its suffix is relative to,
   and a compression base shares it.
@@ -136,8 +136,8 @@ Public API: none expected. Wire: lite-07-wip only.
 
 ## Required
 
-- [The route model and router take an interest as an edited set of prefixes](/quest/m2/cluster-routing/routes/interest-set.md) - the edit rule proven in the model and the router that implements it
-- [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - the messages this moves onto one stream, with no echo or route request among them
+- [The route model and router take an interest as an edited set of prefixes](/quest/m2/cluster-routes/interest-set.md) - the edit rule proven in the model and the router that implements it
+- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the messages this moves onto one stream, with no echo or route request among them
 
 ## Related
 

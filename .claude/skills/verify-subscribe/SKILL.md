@@ -29,7 +29,7 @@ quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config 
 quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/StreamWins.cfg
 ```
 
-The first checks every rule but `StreamWins` and `ContinuesWithinHeld` under `Pressure`, with one YIELDED reset and frames left out: about 76.5M distinct states, five minutes on 24 workers. The second gives the group one frame and two YIELDED resets, without `Pressure` and over two updates, so it also checks where each continuation starts: about 29.4M distinct states, two to three minutes. Both pass. The third checks `StreamWins` without `Pressure` or YIELDED and fails on the open finding below. `just test tla rs/moq-net/verify/subscribe` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.
+The first checks every rule but `StreamWins` and `ContinuesWithinHeld` under `Pressure`, with one YIELDED reset and frames left out: about 77.7M distinct states, fifteen minutes. The second gives the group one frame and two YIELDED resets, without `Pressure` and over two updates, so it also checks where each continuation starts: about 29.6M distinct states, five minutes. Both pass. The third checks `StreamWins` without `Pressure` or YIELDED and fails on the open finding below. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. One group is enough: groups share only the order of the Subscribe Stream, and a second group multiplies the states (60M and more) without adding a race.
 
 ## Open finding: a group read whole is named in a stale drop
 
@@ -41,11 +41,12 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `81a4d971fc766431ef49361c640a36d69b7f3ac2`. Run `git log 81a4d971fc.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `6aa4f9c1cad482aa86adcf3cf26bd7779697a01a`. Run `git log 6aa4f9c1ca.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`, the re-offer pop), `serve`, `mark_served` | `CursorHand`, `PubReoffer`, `Serve` |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::give_way`, `shed` | a new group, or one shed, as `Serve`, then `StreamFail` with `old` whose header never arrives; a continuation as `StreamYield` of a stream whose header never arrives |
 | `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `replace_stale`, `sent_stale`, `hole` | `CursorGiveUp`, `ReplaceStale` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_step` (outcomes, `redrop`) | `PubOutcomes`, `PubRedrop` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::update`, `owe`; `rs/moq-net/src/model/track.rs` `reoffer_stale`, `reoffer_groups` | `PubUpdate` |
@@ -57,7 +58,7 @@ Sync commit: `81a4d971fc766431ef49361c640a36d69b7f3ac2`. Run `git log 81a4d971fc
 | `rs/moq-net/src/tail.rs` `Tail::rebill`, `overtaken`, `updated`; `rs/moq-net/src/lite/subscriber.rs` `ServeLoop::apply_response`; `rs/moq-net/src/model/record.rs` `Record::folded` | `TailFold`, `forgot`, `PubFold`, `folded` |
 | `rs/moq-net/src/model/track.rs` `Producer::give_up`, `skip_received` | `rec`, `cached` |
 | `rs/moq-net/src/lite/publisher.rs` `GroupServe::settle_failed`, `TrackRun::open`; `rs/moq-net/src/transport/boxed.rs` `SendStream::preempted` | `StreamYield`, `PubContinue`, `PausedGiveUp` |
-| `rs/moq-net/src/lite/subscriber.rs` `TrackEntry::pause`, `resume`, `dropped`, `read_yielding`, `end_yielding`, `GroupRecv::poll_serve`, `FrameIngest::dispatch` | the YIELDED branch of `SubReset`, `SubFrame`, `reading`, `sdrop`, `paused` |
+| `rs/moq-net/src/lite/subscriber.rs` `TrackEntry::pause`, `resume`, `dropped`, `read_yielding`, `end_yielding`, `YieldVerdict`, `GroupRecv::poll_serve`, `FrameIngest::dispatch` | the YIELDED branch of `SubReset`, `SubFrame`, `reading`, `sdrop`, `paused` |
 
 What the model asks of that code, each found by TLC as a broken rule without it:
 

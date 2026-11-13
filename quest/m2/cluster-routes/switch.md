@@ -3,8 +3,8 @@
 ## Goal
 
 Every lite-07 session, in Rust and in `js/net`, routes by the rule of the
-[epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item 27, on the
-router [the route per scope](/quest/m2/cluster-routing/routes/scope.md)
+[epic](/quest/m2/cluster-routes/README.md)'s Plan item 27, on the
+router [the route per scope](/quest/m2/cluster-routes/scope.md)
 built. A route on the wire carries its path with a session in each hop and
 the prefix it covers. A relay that loses a session names that hop in one
 message, and a relay answers a neighbour that holds for it. Babel's
@@ -26,7 +26,7 @@ Babel):
   change, then this switch (rejected: the router quest in m1; one quest for
   everything).
 - ✅ The switch lands on today's streams, before
-  [the route stream](/quest/m2/cluster-routing/routes/route-stream.md)
+  [the route stream](/quest/m2/cluster-routes/route-stream.md)
   (rejected: the route stream first, which builds the echo and ROUTE_REQUEST
   on the new stream and then deletes them; one wire change for both, which
   joins two XL quests and waits on the interest set). The path rule sends no
@@ -64,7 +64,7 @@ Work:
 - Delete today's router with what only it used: the feasibility distance and
   its drain, seqno requests and their pending state, the echo, and their
   fixtures. A fixture that states a claim rule moves to the new router if
-  [the route per scope](/quest/m2/cluster-routing/routes/scope.md) did not
+  [the route per scope](/quest/m2/cluster-routes/scope.md) did not
   move it already.
 - The Rust codec and sessions (`rs/moq-net/src/lite/`), and `js/net`'s route
   layer (`js/net/src/lite/publisher.ts`, `js/net/src/lite/subscriber.ts`,
@@ -115,13 +115,18 @@ Rollout: lite-07 is `-wip`, so a relay on this wire refuses one on the old
 by misparse, not by version. Relays pinned to `main` roll together, as each
 earlier lite-07 wire change did.
 
+A relay refuses a route its neighbour only forwarded by withdrawing that
+route, not by closing the session
+([refuse-route](/quest/m1/refuse-route.md)). If that rule has landed, the
+rewritten codec and the path router keep it; if not, it follows this switch.
+
 Public API: none expected. Wire: lite-07-wip only.
 
 ## Required
 
-- [The router runs the path rule with a route per scope](/quest/m2/cluster-routing/routes/scope.md) - the router these sessions drive
+- [The router runs the path rule with a route per scope](/quest/m2/cluster-routes/scope.md) - the router these sessions drive
 
 ## Related
 
-- [Each side says everything about routing on one stream](/quest/m2/cluster-routing/routes/route-stream.md) - moves these messages onto one stream per side afterwards
-- [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - proves the switched sessions end to end
+- [Each side says everything about routing on one stream](/quest/m2/cluster-routes/route-stream.md) - moves these messages onto one stream per side afterwards
+- [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) - proves the switched sessions end to end

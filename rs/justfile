@@ -21,10 +21,9 @@ default:
 # Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
 # Pass `-config rs/<path>.cfg` for a config not named after the spec, and
 # `../<path>.tla` for a spec outside `rs/`, such as a generated one in `.tmp/`.
-# TLC runs at the lowest priority with a 4 GB heap, which no model here outgrows:
-# the JVM otherwise takes a quarter of RAM per run.
+# sh/tlc.py says how a run shares the host.
 tla spec *args:
-    JAVA_TOOL_OPTIONS=-Xmx4g nice -n 19 nix shell --inputs-from . nixpkgs#tlaplus18 --command tlc -workers auto -cleanup -noGenerateSpecTE -metadir "$(mktemp -d)" {{ args }} rs/{{ spec }}
+    python3 sh/tlc.py rs/{{ spec }} {{ args }}
 
 # Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
 # Pass `-D=<VARIANT>` for a variant the model defines.
@@ -63,7 +62,7 @@ lint *args:
     git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
-    cargo shear
+    cargo shear --deny-warnings
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
     cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
     cargo hakari generate --diff
@@ -571,21 +570,40 @@ gst-smoke *args:
 # `iter_custom`, so targets made only of it are left out too. Nightly still measures them all.
 # Valgrind runs ADX but hides it from CPUID (https://bugs.kde.org/show_bug.cgi?id=494162), so
 # rind is built to skip that one startup check, or it refuses the simulated CPU.
-codspeed:
-    VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation \
-        -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
-        --features moq-audio/bus,moq-json/bench,moq-net/fuzz,moq-quic/fuzz \
-        --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
-        --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
-        --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video \
-        --bench announce --bench auth --bench bandwidth --bench canonical --bench frame --bench interests \
-        --bench priority --bench retirement --bench schedule --bench stats --bench synced --bench tail \
-        --bench tracks --bench varint --bench viewers --bench matching \
-        --bench endpoint --bench receive --bench sent_packets --bench streams --bench chunk_interleaving
-    # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous and
-    # cargo-codspeed takes no `--manifest-path`: build it from its own directory. Each build
-    # replaces only its own packages' benches, so `cargo codspeed run` runs both.
-    cd rs/moq-auth && VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation --bench jwt
+# CodSpeed rejects an upload of more than about 1,000 benchmarks, so CI builds and uploads each
+# shard (net, mux, rest) as its own matrix job, and CodSpeed merges them into one report.
+codspeed shard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    build() { VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation "$@"; }
+    case "{{ shard }}" in
+    net)
+        build -p moq-net --features moq-net/fuzz \
+            --bench announce --bench auth --bench bandwidth --bench canonical --bench codec --bench frame \
+            --bench interests --bench priority --bench retirement --bench schedule --bench stats \
+            --bench synced --bench tail --bench tracks --bench varint --bench viewers
+        ;;
+    mux)
+        build -p moq-mux \
+            --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
+            --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video
+        ;;
+    rest)
+        build -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-pattern -p moq-quic -p moq-rtmp \
+            --features moq-audio/bus,moq-json/bench,moq-quic/fuzz \
+            --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
+            --bench matching --bench endpoint --bench receive --bench sent_packets --bench streams \
+            --bench chunk_interleaving
+        # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous and
+        # cargo-codspeed takes no `--manifest-path`: build it from its own directory. Each build
+        # replaces only its own packages' benches, so `cargo codspeed run` runs both.
+        cd rs/moq-auth && build --bench jwt
+        ;;
+    *)
+        echo "unknown shard '{{ shard }}': expected net, mux, or rest" >&2
+        exit 1
+        ;;
+    esac
 
 # Run the tests the arguments select in a release build, printing their output; benchmarks add `--run-ignored only`.
 [positional-arguments]

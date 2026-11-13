@@ -12,7 +12,7 @@ the relay's log for the tab's verified proof. Each build either must prove or
 must send no proof. One that must send none either holds the lite-07 cut,
 skipping or failing under `CI_STRICT` (which release PRs set), or connects
 unproven by design and passes. Chromium 158 and later must prove, which the
-[Playwright bump](/quest/m2/cluster-routing/routes/playwright-pin.md)
+[Playwright bump](/quest/m2/cluster-routes/playwright-pin.md)
 reaches. Every Firefox build connects unproven, so the lite-07 cut does not
 wait on Firefox.
 
@@ -53,7 +53,7 @@ Once a Firefox release carries neqo's fix, gate `route_key.ts` on Firefox
 majors before it, set the lane's table (`uncovered` in `route-key.ts`) to
 require a proof from it on and to pass older majors unproven, and bump
 Playwright to a release bundling it, the way the
-[Playwright bump](/quest/m2/cluster-routing/routes/playwright-pin.md) does for
+[Playwright bump](/quest/m2/cluster-routes/playwright-pin.md) does for
 Chromium. Verify the fixed build against the relay the way the
 2026-11-06 check did: its export must match the relay's for the same session.
 

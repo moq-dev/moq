@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
-import { StreamCode, StreamError } from "../error.ts";
+import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import { Producer } from "../group.ts";
+import { hooks } from "../internal.ts";
 import { concat, encodeVarint, Reader } from "../stream.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import * as Varint from "../varint.ts";
@@ -229,4 +230,28 @@ test("a lite-07 stream ending at the Payload Length ends the group", async () =>
 	await expect(
 		readFrames(streamOf([cut], version), new Producer(0n), { scale: SCALE, lengthFirst: true }),
 	).rejects.toThrow("unexpected end of stream");
+});
+
+// A peer's huge Frame Start numbers a frame past what a number counts exactly, which is refused
+// as a protocol violation rather than counted wrong. Mirrors the Rust
+// `group_frame_start_past_any_count_is_refused`.
+test("a lite-07 frame numbered past the safe integer range is refused", async () => {
+	const version = Version.DRAFT_07;
+	const frame = concat([frameHeader(version, 0n, undefined, 1, true), new Uint8Array([7])]);
+	const start = Number.MAX_SAFE_INTEGER - 1;
+	const producer = new Producer(0n);
+	hooks.startGroup(producer, start);
+	const err = await readFrames(
+		streamOf([frame, frame], version),
+		producer,
+		{ scale: SCALE, lengthFirst: true },
+		{
+			index: start,
+		},
+	).then(
+		() => undefined,
+		(err: unknown) => err,
+	);
+	expect(err).toBeInstanceOf(ProtocolViolation);
+	expect(producer.consume().frameCount).toBe(Number.MAX_SAFE_INTEGER);
 });

@@ -4,7 +4,7 @@ set working-directory := '..'
 cache:
     bash sh/gh/cache.sh
 
-# Publish Smoke's runtime packages and their build artifacts to nix.moq.dev.
+# Publish the packages Smoke and deploys pin, and their build artifacts, to nix.moq.dev.
 cache-runtime:
     bash sh/gh/cache-runtime.sh
 
@@ -80,6 +80,7 @@ test:
     python3 sh/migrate.test.py
     python3 sh/text.test.py
     python3 sh/coverage-tables.test.py
+    python3 sh/tlc.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/gh/test-inventory.test.py
     bun test ./sh/gh/setup.test.ts

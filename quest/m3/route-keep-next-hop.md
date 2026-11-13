@@ -40,7 +40,7 @@ selection.
 - Check that every router test that names the next hop it expects still
   means what it says, rather than editing expectations to match.
 - How a route is selected is being replaced
-  ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27).
+  ([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27).
   Apply this to the rule that stands when this starts. The prototype in
   `route/tests/paths.rs` already stays on its next hop among equals.
 - Measure with `Sim`'s `hop_updates` count and, if it has landed,
