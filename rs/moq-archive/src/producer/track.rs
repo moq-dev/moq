@@ -193,9 +193,7 @@ impl<S: ObjectStore> Track<S> {
 		// Groups in key order: one the track still owes is waited for until the budget gives up on
 		// it, and one it skipped or dropped costs nothing.
 		let mut ordered = subscriber.ordered();
-		let narrowed = ordered
-			.subscription()
-			.with_delay(Delay::default().with_max(max_delay));
+		let narrowed = ordered.subscription().with_delay(Delay::default().with_max(max_delay));
 		ordered.update(narrowed)?;
 		// The group being stored, frame by frame.
 		let mut current: Option<Box<group::Consumer>> = None;

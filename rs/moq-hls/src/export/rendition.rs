@@ -2250,11 +2250,7 @@ impl Follow {
 				return Some(Ok(()));
 			}
 		}
-		if claim.retired
-			&& grid
-				.open_groups()
-				.is_some_and(|groups| theirs(groups.first()))
-		{
+		if claim.retired && grid.open_groups().is_some_and(|groups| theirs(groups.first())) {
 			return Some(Ok(()));
 		}
 		if let Some((sequence, _)) = read {

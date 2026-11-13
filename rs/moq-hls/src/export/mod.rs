@@ -3585,7 +3585,10 @@ mod tests {
 		/// Write group `sequence` with a keyframe at `pts_ms` and, when `frames` is more than one,
 		/// that many frames a tenth of the interval apart.
 		fn group(&mut self, sequence: u64, pts_ms: u64, frames: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			for index in 0..frames.max(1) {
 				let micros = (pts_ms + index * INTERVAL.as_millis() as u64 / 10) * 1_000;
 				let frame = vp8_frame(micros, index == 0);
@@ -3607,7 +3610,10 @@ mod tests {
 		/// Write group `sequence` at `pts_ms` with a single keyframe declaring a `width`x`height`
 		/// picture in band.
 		fn sized(&mut self, sequence: u64, pts_ms: u64, (width, height): (u16, u16)) {
-			let mut group = self.track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			let mut payload = KEYFRAME.to_vec();
 			payload[6..8].copy_from_slice(&width.to_le_bytes());
 			payload[8..10].copy_from_slice(&height.to_le_bytes());
@@ -3627,7 +3633,10 @@ mod tests {
 
 		/// Start group `sequence` at `pts_ms` with a keyframe, leaving it open for more frames.
 		fn open(&mut self, sequence: u64, pts_ms: u64) -> moq_net::group::Producer {
-			let mut group = self.track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			let frame = vp8_frame(pts_ms * 1_000, true);
 			hang::container::Frame {
 				timestamp: frame.timestamp,
