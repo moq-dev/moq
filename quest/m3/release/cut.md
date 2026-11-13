@@ -30,11 +30,9 @@ its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
-After publication, re-measure the planned wire-compat breaks against the
-published versions, as RELEASE.md's release procedure describes. Until the
-[planned-break remeasure](/quest/m0/interop-green/planned-break-remeasure.md)
-moves that step into the release pipeline (decided 2026-11-11), run it by hand;
-the cut does not wait on that quest (decided 2026-11-12).
+After publication, check Release remeasure and its pin-update PR, as
+RELEASE.md describes. The pipeline re-measures changed planned-break pins
+and requests landing through the main merge queue.
 
 This cut carries stats epochs, so it drops
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s release-only wall-clock
