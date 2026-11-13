@@ -877,7 +877,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			}
 			Some((prev, prefix)) => {
 				let watch = self.sessions.get(&prev)?.watch.clone()?;
-				(self.src(id, &prefix, &watch), Some(prev))
+				(self.src(id, &prefix, prev, &watch), Some(prev))
 			}
 		};
 		let route = self.routes.get(&(id, prefix.clone()))?;
@@ -1269,15 +1269,25 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// The prefix of this node's own route that what it offers a stream answering
 	/// `watch` under `prefix` reflects: the route itself inside the interest, and at the
-	/// interest the narrowest live route covering it, else the narrowest held one.
-	fn src(&self, id: Id, prefix: &Path, watch: &Path) -> Path {
+	/// interest the narrowest live route covering it that does not name the
+	/// neighbour. Without one, reflect the narrowest live or held route so a child
+	/// can answer its loss. Preferring an unusable narrow route over a usable wider
+	/// one can keep the narrow prefix circulating after its original stream ends.
+	fn src(&self, id: Id, prefix: &Path, peer: N, watch: &Path) -> Path {
 		if prefix != watch {
 			return prefix.clone();
 		}
 		let covering = || ancestors(prefix).rev().map(|above| (id, above));
-		(covering().find(|key| self.routes.get(key).is_some_and(Route::live)))
-			.or_else(|| covering().find(|key| self.routes.contains_key(key)))
-			.map_or_else(|| prefix.clone(), |(_, prefix)| prefix)
+		let hop = self.sessions[&peer].hop;
+		(covering().find(|key| {
+			self.routes
+				.get(key)
+				.and_then(|route| route.offer.as_ref())
+				.is_some_and(|offer| !names(&offer.path, hop))
+		}))
+		.or_else(|| covering().find(|key| self.routes.get(key).is_some_and(Route::live)))
+		.or_else(|| covering().find(|key| self.routes.contains_key(key)))
+		.map_or_else(|| prefix.clone(), |(_, prefix)| prefix)
 	}
 
 	// --- Internals: views ---
@@ -1439,7 +1449,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if !session.link.proxy && !self.origins.contains_key(&id) {
 			return Want::End;
 		}
-		let src = self.src(id, prefix, watch);
+		let src = self.src(id, prefix, peer, watch);
 		let Some(route) = self.routes.get(&(id, src.clone())) else {
 			return Want::End;
 		};

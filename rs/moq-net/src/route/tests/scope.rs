@@ -72,6 +72,30 @@ const WATCHES: [&str; 5] = ["", "", "a/", "b/", "a/x"];
 const SCOPES: [&str; 2] = ["a/", "b/"];
 const SUBJECTS: [&str; 2] = ["ga", "gb"];
 
+/// Retiring a narrow stream must not leave its former route circulating while
+/// another neighbour still asks for that prefix.
+#[test]
+fn widening_a_relay_does_not_oscillate_its_former_prefix() {
+	let mut sim = Sim::with(Rule::PATH, 5);
+	sim.join(0, 1, 2);
+	sim.join(0, 3, 2);
+	sim.join(1, 3, 3);
+	sim.join(1, 2, 3);
+	sim.join(2, 3, 3);
+	sim.leaf(4);
+	sim.join(4, 0, 1);
+	sim.join(4, 1, 1);
+	sim.watch(0, "a");
+	sim.watch(2, "a");
+	sim.originate(4, 7, 0);
+	sim.announce(4, "a/x", 0, None);
+	assert!(sim.run());
+
+	sim.watch(0, "");
+	assert!(sim.run(), "{}", mesh(&sim));
+	quiet(&sim, 4, "widened");
+}
+
 /// A DEAD that repaths a scoped route keeps the publisher's original key for
 /// forwarding: the neighbour admitted under the grant never hears the qualified key.
 #[test]
@@ -206,6 +230,11 @@ fn reachable(sim: &Sim, origin: Node, id: Id) -> Vec<BTreeSet<(Id, Path)>> {
 /// The sessions up, each side's grant, and each node's interest, for a failure report.
 fn mesh(sim: &Sim) -> String {
 	let mut out = String::new();
+	for ((from, to), queue) in &sim.queues {
+		if !queue.is_empty() {
+			out += &format!("  {from} -> {to}: {} queued, next {:?}\n", queue.len(), queue.front());
+		}
+	}
 	for a in 0..sim.nodes.len() {
 		out += &format!("  node {a} watches {:?}\n", sim.watching(a));
 		out += &sim.path(a).dump();
@@ -367,7 +396,11 @@ fn sweep_scoped_meshes_show_what_the_rule_says() {
 		}
 
 		let mut quiet_at = |sim: &mut Sim, step: usize| {
-			assert!(sim.run(), "scenario {scenario} step {step} never settles");
+			assert!(
+				sim.run(),
+				"scenario {scenario} step {step} never settles\n{}",
+				mesh(sim)
+			);
 			quiet(sim, origin, &format!("scenario {scenario} step {step}"));
 			quiets += 1;
 			for node in 0..relays {

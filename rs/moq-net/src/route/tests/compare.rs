@@ -206,6 +206,36 @@ pub(super) struct Mesh {
 }
 
 impl Mesh {
+	/// A deterministic cheapest-path tree, shared by every rule when choosing
+	/// which link or transit relay to fail. Ties use the next relay's number.
+	fn tree(&self) -> Vec<Option<Node>> {
+		let home = self.homes[0];
+		let mut best = vec![None; self.relays];
+		best[home] = Some((0, home));
+		let mut pending = BTreeSet::from([(0, home)]);
+		while let Some((cost, at)) = pending.pop_first() {
+			if best[at].is_none_or(|(best, _)| cost != best) {
+				continue;
+			}
+			for &(a, b, link) in &self.links {
+				let peer = match at {
+					_ if at == a => b,
+					_ if at == b => a,
+					_ => continue,
+				};
+				let candidate = (cost + link, at);
+				if best[peer].is_none_or(|best| candidate < best) {
+					best[peer] = Some(candidate);
+					pending.insert((candidate.0, peer));
+				}
+			}
+		}
+		best.into_iter()
+			.enumerate()
+			.map(|(node, best)| best.and_then(|(_, next)| (node != home).then_some(next)))
+			.collect()
+	}
+
 	/// A ring, the publisher on relay 0.
 	pub fn ring(relays: usize) -> Self {
 		let links = (0..relays).map(|a| (a, (a + 1) % relays, 1)).collect();
@@ -589,15 +619,12 @@ impl Lab {
 	/// The link of a publisher's cheapest-path tree that the most relays route
 	/// over, among those whose loss leaves every relay a path (`detour`) or cuts
 	/// some off.
-	pub fn tree_link(&self, index: usize, detour: bool) -> Option<(Node, Node)> {
-		let (_, id) = self.mesh.publisher(index);
+	fn tree_link(&self, index: usize, detour: bool, tree: &[Option<Node>]) -> Option<(Node, Node)> {
 		let mut uses: BTreeMap<(Node, Node), usize> = BTreeMap::new();
 		for relay in 0..self.mesh.relays {
 			let mut at = relay;
-			while let Some(Some(next)) = self.net.next(at, id) {
-				if next < self.mesh.relays {
-					*uses.entry(pair(at, next)).or_default() += 1;
-				}
+			while let Some(next) = tree[at] {
+				*uses.entry(pair(at, next)).or_default() += 1;
 				at = next;
 			}
 		}
@@ -665,6 +692,7 @@ impl Change {
 pub(super) fn run(rule: Rule, mesh: &Mesh) -> Vec<(Change, Cost)> {
 	let mut out = Vec::new();
 	let mut lab = Lab::new(rule, mesh);
+	let tree = mesh.tree();
 	let mut apply = |lab: &mut Lab, change: Change, apply: &dyn Fn(&mut Lab)| {
 		let cost = lab.measure(apply);
 		assert!(cost.settled, "{}: {change:?} never settles on {mesh:?}", rule.as_str());
@@ -704,21 +732,19 @@ pub(super) fn run(rule: Rule, mesh: &Mesh) -> Vec<(Change, Cost)> {
 		(true, Change::Detour, Change::Shortcut),
 		(false, Change::Cut, Change::Mend),
 	] {
-		if let Some((a, b)) = lab.tree_link(0, detour) {
+		if let Some((a, b)) = lab.tree_link(0, detour, &tree) {
 			apply(&mut lab, down, &|lab| lab.cut(a, b));
 			apply(&mut lab, up, &|lab| lab.mend(a, b));
 		}
 	}
 
 	// The relay the most others route through, the publisher's own aside.
-	let (node, id) = mesh.publisher(0);
+	let (node, _) = mesh.publisher(0);
 	let mut through = vec![0; mesh.relays];
 	for relay in 0..mesh.relays {
 		let mut at = relay;
-		while let Some(Some(next)) = lab.net.next(at, id) {
-			if next < mesh.relays {
-				through[next] += 1;
-			}
+		while let Some(next) = tree[at] {
+			through[next] += 1;
 			at = next;
 		}
 	}
@@ -833,12 +859,11 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 /// never loops, even for a step.
 #[test]
 fn every_rule_settles_after_churn() {
-	for rule in COMPARED {
-		let churn = churn(rule, 0..60);
-		if rule == Rule::Distance {
-			assert_eq!(churn.loops, 0);
-		}
-	}
+	let [distance, path, timer] = COMPARED.map(|rule| churn(rule, 0..60));
+	assert_eq!(distance.loops, 0);
+	assert!(timer.sent.msgs < path.sent.msgs && path.sent.msgs < distance.sent.msgs);
+	assert!(timer.stale < path.stale && path.stale < distance.stale);
+	assert!(timer.dark > path.dark && path.dark > distance.dark);
 }
 
 /// Loops, stale routes, and messages under the same churn, per rule.

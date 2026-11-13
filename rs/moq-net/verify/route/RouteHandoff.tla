@@ -146,9 +146,13 @@ Usable(n, s, m, k) ==
 
 \* The key of this node's own route an offer of key k to p reflects. A stream
 \* to a scoped relay carries one route, "a": the node's route for "a" where it
-\* has a live one, else its root route, which covers "a".
+\* has a live one not naming the receiver, else its root route, which covers "a".
+\* Only echo an unusable path when no covering live route can reach the receiver:
+\* a narrow path returned to its own child must not hide a usable wider route.
 SrcKey(s, p, k) ==
     IF p \notin Scoped THEN k
+    ELSE IF Live(s.rt["a"]) /\ ~Names(s.rt["a"].path, p) THEN "a"
+    ELSE IF Live(s.rt["root"]) /\ ~Names(s.rt["root"].path, p) THEN "root"
     ELSE IF Live(s.rt["a"]) THEN "a"
     ELSE IF Live(s.rt["root"]) THEN "root"
     ELSE IF s.rt["a"].on THEN "a" ELSE "root"
