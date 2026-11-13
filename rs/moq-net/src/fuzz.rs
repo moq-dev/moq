@@ -2101,9 +2101,10 @@ impl FrameRecv {
 		let streams = (0..streams)
 			.map(|_| {
 				let group = track.append_next().unwrap();
+				// Each group starts at its own key, so the starts increase.
 				let info = frame::Info {
 					size: size as u64,
-					timestamp: Some(crate::Timestamp::ZERO),
+					timestamp: Some(crate::Timestamp::from_millis(group.start).unwrap()),
 				};
 				let frame = group.create_frame(info).unwrap();
 				let stream = Chunks {

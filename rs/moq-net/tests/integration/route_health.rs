@@ -31,14 +31,15 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const KILLED: u64 = 4;
 const KILLED_AT: u64 = 3;
 
-/// Collect the frames the reader has delivered so far. A group that fails, such as
-/// one cut as too old, just stops contributing frames.
+/// Collect the frames the reader has delivered so far, by the group's index and the
+/// frame's, as each payload names them. A group that fails, such as one cut as too old,
+/// just stops contributing frames.
 fn drain(rx: &mut mpsc::UnboundedReceiver<Delivery>, into: &mut BTreeSet<(u64, u64)>) {
-	while let Ok((group, frame)) = rx.try_recv() {
+	while let Ok((_, frame)) = rx.try_recv() {
 		let Ok((_, payload)) = frame else { continue };
 		let payload = String::from_utf8(payload).unwrap();
-		let (_, frame) = payload.split_once('.').unwrap();
-		into.insert((group, frame.parse().unwrap()));
+		let (group, frame) = payload.split_once('.').unwrap();
+		into.insert((group.parse().unwrap(), frame.parse().unwrap()));
 	}
 }
 
@@ -85,7 +86,8 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	let mut seen = BTreeSet::new();
 	let mut tick = 0;
 	for key in 0..groups {
-		let mut group = track.append_next().unwrap();
+		// Each group starts at its first frame's time.
+		let mut group = track.append_group(tick * STEP.as_millis() as u64).unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();

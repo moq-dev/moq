@@ -2516,7 +2516,10 @@ impl Request for SubscribeServe {
 							.max(track.latest_key())
 							.max(track.peek_largest().map(|largest| largest.group)),
 					};
-					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
+					// A legacy start serves from the first group at or after it, so the cursor
+					// never hands out the one before it: dropped here, it would stay consumed
+					// when an update lowers the floor to reach it.
+					let floor = cursor_floor(shared.version, bounds.groups().start(), latest).max(bounds.frames.floor);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
 					run.update = msg.update;
 					run.datagrams = LegacyDatagrams::join(legacy, msg.id, msg.priority, timescale);

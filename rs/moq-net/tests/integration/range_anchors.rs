@@ -2,10 +2,12 @@
 
 //! A range anchored relative to the latest group or at a presentation time resolves where
 //! the track is held, and on a copy received over a wire that tells it enough to resolve
-//! the anchor the same way. Every wire carries a time anchor, as the group ID with that key.
-//! A moq-transport copy resolves a relative anchor from the Largest Object its live join
-//! reports. A copy received over any other wire refuses a relative anchor other than the
-//! live start instead of resolving it against the part of the track it happens to hold.
+//! the anchor the same way. Every wire carries a time anchor, as the group ID with that key,
+//! but only lite-07 resolves a time start to the group containing it: an older wire's
+//! publisher starts at the first group at or after it. A moq-transport copy resolves a
+//! relative anchor from the Largest Object its live join reports. A copy received over any
+//! other wire refuses a relative anchor other than the live start instead of resolving it
+//! against the part of the track it happens to hold.
 
 use crate::support;
 use moq_net::track::Delay;
@@ -123,7 +125,8 @@ fn anchored() -> [(Range, Vec<u64>); 6] {
 }
 
 /// Each wire resolves the anchors it carries as the held track does and refuses the rest,
-/// rather than resolve them against the part of the track its copy happens to hold.
+/// rather than resolve them against the part of the track its copy happens to hold. An older
+/// wire starts a time anchor at the first group at or after it instead.
 #[kio::test]
 async fn each_wire_refuses_only_the_anchors_it_drops() {
 	let mut failures = Vec::new();
@@ -134,7 +137,12 @@ async fn each_wire_refuses_only_the_anchors_it_drops() {
 		// A moq-transport copy joins live and resolves a relative anchor from the Largest
 		// Object, so the groups below it arrive as fills, after the live one.
 		let transport = matches!(version, Some(version) if version.starts_with("moq-transport"));
-		for (range, held) in anchored() {
+		for (range, mut held) in anchored() {
+			// An older wire's publisher starts a time anchor at the first group at or after it,
+			// not the group containing it.
+			if let (false, Anchor::Time(start)) = (resolves, range.start) {
+				held.retain(|&key| key >= start);
+			}
 			let mut result = read(version, range).await;
 			// Any other wire carries time anchors and the live start, and drops the rest.
 			let wire = matches!(range.start, Anchor::Time(_) | Anchor::Oldest | Anchor::Relative(0))

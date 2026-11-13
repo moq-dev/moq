@@ -883,7 +883,9 @@ impl Fill {
 	/// A lookup owes no group, so [`wanted`](Self::wanted) is `None` and
 	/// [`is_wanted`](Self::is_wanted) false throughout; it waits only on its first accept.
 	/// Dropped unanswered, as a handler that can't resolve times does, the reader's range
-	/// reaches back to the oldest group the cache holds. `None` for a fill of groups.
+	/// reaches back to the newest group the cache holds at or before the time, or, with none,
+	/// reads every group the cache holds and asks none starting before the time. `None` for
+	/// a fill of groups.
 	pub fn time(&self) -> Option<u64> {
 		self.inner.time
 	}

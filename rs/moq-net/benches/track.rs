@@ -1909,7 +1909,7 @@ impl Fills {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		let dynamic = track.requests();
-		// The feed starts past every run, so each is a miss asked at once.
+		// The feed starts past every run, so each is a miss.
 		let start = runs * 2;
 		track.start_at(start).unwrap();
 		let mut group = track.create_group(group::Info { start }).unwrap();
@@ -1933,8 +1933,10 @@ impl Fills {
 	}
 
 	/// Every reader reads what is cached and asks for its misses, then raises its priority,
-	/// which reaches every fill it waits on. The handler drops each fill they share, and
-	/// every reader settles the drops.
+	/// which reaches every fill it waits on. A run past the first starts at a time below the
+	/// feed's start, which each reader looks up first: the handler can't resolve times, so it
+	/// drops each lookup, and the readers then ask that run as a miss. The handler drops each
+	/// fill they share, and every reader settles the drops.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for reader in &mut self.readers {
@@ -1946,16 +1948,30 @@ impl Fills {
 			reader.update(reader.subscription().with_priority(1)).unwrap();
 			assert!(reader.poll_recv_group(&waiter).is_pending());
 		}
-		let mut fills = 0;
-		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-			assert_eq!(fill.priority(), 1, "the update reached the fill");
-			fill.drop_groups(fill.start().group..fill.end());
-			fills += 1;
+		let (mut lookups, mut fills) = (0, 0);
+		// The lookups go out first, and the misses they leave behind them.
+		for _ in 0..2 {
+			while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
+				assert_eq!(fill.priority(), 1, "the update reached the fill");
+				match fill.time() {
+					Some(_) => lookups += 1,
+					None => {
+						fill.drop_groups(fill.start().group..fill.end());
+						fills += 1;
+					}
+				}
+			}
+			for reader in &mut self.readers {
+				assert!(reader.poll_recv_group(&waiter).is_pending());
+			}
 		}
+		let readers = self.readers.len() as u64;
+		assert_eq!(
+			lookups,
+			(self.runs - 1) * readers,
+			"each reader looks up each later run"
+		);
 		assert_eq!(fills, self.runs, "readers share each run's fill");
-		for reader in &mut self.readers {
-			assert!(reader.poll_recv_group(&waiter).is_pending());
-		}
 	}
 }
 
@@ -1997,9 +2013,9 @@ impl RangeFills {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		let dynamic = track.requests();
-		// The feed starts past every range, so each is a miss asked at once. A gap between
-		// neighbors keeps every range its own fill.
-		let start = ranges * (width + 1);
+		// The feed starts past every range, so each is a miss. A gap before each range keeps
+		// it its own fill, and has every range start at a time no group held places.
+		let start = ranges * (width + 1) + 1;
 		track.start_at(start).unwrap();
 		let mut group = track.create_group(group::Info { start }).unwrap();
 		group
@@ -2009,7 +2025,7 @@ impl RangeFills {
 		let subscription = track::Subscription::default()
 			.with_delay(track::Delay::default().with_max(AGED_BUDGET))
 			.with_ranges((0..ranges).map(|i| {
-				let first = i * (width + 1);
+				let first = i * (width + 1) + 1;
 				span(first, first + width - 1)
 			}));
 		let readers = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
@@ -2023,29 +2039,35 @@ impl RangeFills {
 	}
 
 	/// The readers ask for their misses, the handler accepts every group of every fill once,
-	/// and each reader drains what they filled.
+	/// and each reader drains what they filled. Each range starts at a time below the feed's
+	/// start, which each reader looks up first: the handler can't resolve times, so it drops
+	/// each lookup, and the readers then ask that range as a miss.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for reader in &mut self.readers {
 			assert!(reader.poll_recv_group(&waiter).is_pending(), "everything is a miss");
 		}
-		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-			while let Some(key) = fill.wanted() {
-				let mut group = fill.accept(key, None).unwrap();
-				group
-					.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
-					.unwrap();
-				group.close().unwrap();
+		let mut filled = vec![0; self.readers.len()];
+		// The lookups go out first, and the misses they leave behind them.
+		for _ in 0..2 {
+			while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
+				// A lookup wants no group, so it is dropped unanswered.
+				while let Some(key) = fill.wanted() {
+					let mut group = fill.accept(key, None).unwrap();
+					group
+						.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
+						.unwrap();
+					group.close().unwrap();
+				}
+			}
+			for (reader, filled) in self.readers.iter_mut().zip(&mut filled) {
+				while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+					black_box(group);
+					*filled += 1;
+				}
 			}
 		}
-		for reader in &mut self.readers {
-			let mut filled = 0;
-			while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
-				black_box(group);
-				filled += 1;
-			}
-			assert_eq!(filled, self.groups);
-		}
+		assert!(filled.iter().all(|filled| *filled == self.groups));
 	}
 }
 

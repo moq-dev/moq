@@ -662,6 +662,10 @@ pub(crate) struct TrackState {
 	// budget, but neither this copy's timestamps nor a fill can judge an older group against
 	// a reader's budget. A widened budget reaches lower groups through the feed's re-offer.
 	fills_from_start: bool,
+	// Whether readers start a time anchor at the group starting there, held or not: the
+	// wire's publisher starts one at the first group at or after it, and a copy holding part
+	// of the track cannot tell which earlier group contains the time.
+	starts_at_keys: bool,
 	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaiming a slot
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
@@ -1000,6 +1004,9 @@ impl Holdings for TrackState {
 	}
 
 	fn containing(&self, time: u64) -> Containing {
+		if self.starts_at_keys {
+			return Containing::Group(time);
+		}
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _)) => Containing::Group(key),
 			// Every key at or before it is gone, so whichever group held it will never arrive.
@@ -4194,10 +4201,23 @@ impl Producer {
 
 	/// [`Self::finish`] through a shared handle, which a session keeps to take the lower
 	/// groups still in flight.
+	///
+	/// On a received copy whose clean end was declared at its live edge, this ends the wait
+	/// for its tail instead: the session has every group stream it will get, so a key below
+	/// the end that never arrived is not coming, as with sparse starts it never existed.
 	pub(crate) fn finish_shared(&self) -> Result<()> {
 		let mut state = self.modify()?;
-		let final_key = state.max_key.map_or(0, |max| max + 1);
-		state.set_end(Position::group(final_key), None)
+		let end = Position::group(state.max_key.map_or(0, |max| max + 1));
+		if let Outcome::Ending(declared) = &state.outcome
+			&& declared.at == end
+			&& declared.error.is_none()
+			&& declared.tail.is_some()
+		{
+			let settled = declared.settled();
+			state.outcome = Outcome::Open;
+			return state.declare(end, None, None, settled);
+		}
+		state.set_end(end, None)
 	}
 
 	/// Declare the track's exclusive end, possibly ahead of the live edge.
@@ -4315,6 +4335,15 @@ impl Producer {
 	pub(crate) fn fills_from_start(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.fills_from_start = true;
+		}
+	}
+
+	/// Have this received copy's readers start a time anchor at the group starting there,
+	/// held or not, for a wire whose publisher starts one at the first group at or after it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn starts_at_keys(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.starts_at_keys = true;
 		}
 	}
 
@@ -8635,6 +8664,10 @@ impl Cursor {
 			if !self.filter.window.lookups().any(|(time, _)| time == lookup.time) {
 				lookup.join = None;
 				continue;
+			}
+			// What the reader asks with still reaches the lookups it waits on.
+			if let Some(join) = &mut lookup.join {
+				join.update(asking);
 			}
 			let answer = match &lookup.join {
 				None => None,
@@ -21740,8 +21773,8 @@ mod test {
 
 	/// A time start before every group held looks up its group through a fill that owes
 	/// none: a handler that can't resolve times drops it, and the start reaches back to the
-	/// oldest group held, asking no fill below it, since which of those groups it reaches is
-	/// unknown until they start. Another range still asks for its own misses.
+	/// group containing its time, which is unknown, so it asks no fill below the time itself:
+	/// every key from there is in range. Another range still asks for its own misses.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_time_start_before_the_cache_asks_nothing_below_it() {
@@ -21771,21 +21804,21 @@ mod test {
 		assert_eq!(lookup.wanted(), None, "a lookup owes no group");
 		drop(lookup);
 		let mut read = drain_groups(&mut subscriber);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the group range misses its groups");
-		};
-		assert_eq!(
-			(fill.time(), fill.start().group, fill.end()),
-			(None, 0, 2),
-			"nothing below 10 for the time start"
-		);
-		while let Some(key) = fill.wanted() {
-			write_filled(fill.accept(key, None), key);
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			asked.push((fill.time(), fill.start().group, fill.end()));
+			while let Some(key) = fill.wanted() {
+				write_filled(fill.accept(key, None), key);
+			}
+			drop(fill);
+			read.extend(drain_groups(&mut subscriber));
 		}
-		drop(fill);
-		read.extend(drain_groups(&mut subscriber));
-		assert_eq!(read, [10, 0, 1]);
-		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+		assert_eq!(
+			asked,
+			[(None, 0, 2), (None, 5, 10)],
+			"nothing below 5 for the time start"
+		);
+		assert_eq!(read, [10, 0, 1, 5, 6, 7, 8, 9]);
 	}
 
 	/// A time start before every group held starts at the group its lookup answers, whose key

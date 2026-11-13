@@ -386,7 +386,8 @@ impl Window {
 	}
 
 	/// The groups in range from `from` on that a miss may ask for, lowest first: all of
-	/// them but those below the oldest group held when a time start fell before it.
+	/// them but those starting before a time start that fell before every group held, or
+	/// below the oldest group held when a relative start counted back past them all.
 	pub fn missable(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
 		self.from(&self.missable, from)
 	}
@@ -545,10 +546,14 @@ impl Window {
 				continue;
 			}
 			groups.push(span.start..=last);
-			// A time start before every group held, or a relative one counting back past them
-			// all, asks no miss below the oldest, since which of them it reaches is unknown.
+			// A time start before every group held reaches back to the group containing it,
+			// which is unknown here, so it asks no miss below its time: every key from there
+			// on is in range, the key at the time itself being the containing group if it
+			// exists. A relative one counting back past every group held asks none below the
+			// oldest, since which of them it reaches is unknown.
 			let reach = match (self.ranges[span.index].start, span.floored) {
-				(Anchor::Time(_) | Anchor::Relative(_), false) => holdings.next_start(0).unwrap_or(span.start),
+				(Anchor::Time(time), false) => time,
+				(Anchor::Relative(_), false) => holdings.next_start(0).unwrap_or(span.start),
 				_ => span.start,
 			};
 			if reach <= last {
@@ -773,16 +778,12 @@ mod tests {
 		let window = Window::new(&[range(time(66), time(33))], Some(99), &keys).unwrap();
 		assert_eq!(covered(&window, [0, 33, 66, 99]), Vec::<u64>::new());
 
-		// Before every start held: reach back to the oldest, naming no floor.
+		// Before every start held: reach back to the group containing it, naming no floor.
 		let keys = Keys::new([10, 20]);
 		let window = Window::new(&[range(time(5), None)], Some(20), &keys).unwrap();
 		assert_eq!(covered(&window, [10, 20]), vec![10, 20]);
 		assert_eq!((window.floor(), window.start(), window.named()), (Some(0), None, None));
-		assert_eq!(
-			window.missable(0).next(),
-			Some(10..=u64::MAX),
-			"nothing below the oldest held"
-		);
+		assert_eq!(window.missable(0).next(), Some(5..=u64::MAX), "nothing below its time");
 	}
 
 	/// Relative anchors count back through the groups held, however sparse their starts,
@@ -1022,7 +1023,7 @@ mod tests {
 				floored: false
 			})]
 		);
-		assert!(window.contains(4000) && !window.missable(0).any(|run| *run.start() < 4000));
+		assert!(window.contains(4000) && !window.missable(0).any(|run| *run.start() < 500));
 	}
 
 	/// Keys the producer skipped hold no group, even in the history, so a start in a skipped

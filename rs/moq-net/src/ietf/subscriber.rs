@@ -848,13 +848,23 @@ fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Opt
 /// Whether `subscription` needs a live feed for a copy whose publisher reported its Largest
 /// Object in group `edge`: a reader asked for it ([`track::Subscription::feed`]), or one of
 /// its ranges is open, counts back from the live edge, or reaches the group the publisher
-/// may still be writing. Ranges wholly below it read only history, which fills serve.
+/// may still be writing. Ranges wholly below it read only history, which fills serve when
+/// each names one key. A wider one subscribes instead: its fill would FETCH every key in it,
+/// spanning groups the copy cannot tell apart, and our publishers answer only a one-group
+/// FETCH.
 fn wants_feed(subscription: &track::Subscription, edge: Option<u64>) -> bool {
 	if subscription.ranges.is_empty() {
 		return false;
 	}
 	let history = subscription.start().is_some() && subscription.end().zip(edge).is_some_and(|(end, edge)| end <= edge);
-	subscription.feed || !history
+	// An empty range, ending before it starts, fetches nothing either.
+	let one_key = subscription.ranges.iter().all(|range| {
+		matches!(
+			(range.start, range.end),
+			(track::Anchor::Time(start), Some(track::Anchor::Time(end))) if end <= start
+		)
+	});
+	subscription.feed || !history || !one_key
 }
 
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
@@ -4616,6 +4626,7 @@ impl SubscribeOnce {
 		};
 		track.received();
 		track.anchored();
+		track.starts_at_keys();
 		// Object IDs can start past zero or skip, while readers see frame ordinals, so only
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
@@ -6037,6 +6048,7 @@ impl LearnTrackStatus {
 					// wire dropped.
 					track.received();
 					track.anchored();
+					track.starts_at_keys();
 					if let Some(largest) = ok.largest {
 						track.report_object(largest.group, largest.object);
 					}

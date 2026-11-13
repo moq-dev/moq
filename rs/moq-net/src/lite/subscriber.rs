@@ -12387,6 +12387,11 @@ impl ServeLoop {
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
 		}
+		// A wire without ranges starts a time anchor at the first group at or after it, so
+		// its readers do too, rather than at an earlier group the copy happens to hold.
+		if !serve.subscriber.version.has_ranges() {
+			serving.starts_at_keys();
+		}
 		if serve.subscriber.version.fills_from_start() {
 			serving.fills_from_start();
 		}
