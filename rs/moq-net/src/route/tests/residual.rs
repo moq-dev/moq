@@ -75,7 +75,7 @@ fn residual_a_relay_behind_a_scoped_neighbour_is_blind() {
 			"node {node} sees it: drop the residual"
 		);
 	}
-	let routes: Vec<Node> = (sim.nodes[relay].eligible(7).into_iter())
+	let routes: Vec<Node> = (sim.babel(relay).eligible(7).into_iter())
 		.filter(|route| !route.tied)
 		.map(|route| route.next)
 		.collect();

@@ -431,7 +431,7 @@ impl Mesh {
 	/// The neighbors `node` may pull `broadcast` through.
 	fn candidates(&self, node: Node, broadcast: usize) -> Vec<Candidate> {
 		let path = self.broadcasts[broadcast].path;
-		(self.sim.nodes[node].eligible(self.id(broadcast)).into_iter())
+		(self.sim.babel(node).eligible(self.id(broadcast)).into_iter())
 			.filter(|route| !route.tied || hash(path, route.next) < hash(path, node))
 			.map(|route| Candidate {
 				next: route.next,
@@ -447,7 +447,7 @@ impl Mesh {
 	/// then to the lower hash.
 	fn best(&self, node: Node, broadcast: usize) -> Option<Node> {
 		if self.legacy.contains(&node) {
-			return self.sim.nodes[node]
+			return self.sim.babel(node)
 				.selected(self.id(broadcast))
 				.and_then(|route| route.next);
 		}
@@ -583,7 +583,7 @@ impl Mesh {
 			.filter(|&peer| !self.sim.leaf[peer] && !self.legacy.contains(&peer))
 			.collect();
 		for to in peers {
-			let router = &self.sim.nodes[node];
+			let router = &self.sim.babel(node);
 			// A warm route names the route it travels under, which a ROUTE_END retires.
 			let routed = router.sent.contains_key(&(id, to));
 			let own = router.selected(id).map(|route| route.metric);
