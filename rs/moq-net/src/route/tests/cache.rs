@@ -1,22 +1,25 @@
 //! Cache-aware routing on the path prototype in `paths.rs`, as
 //! `quest/m3/cache-routing/README.md` decides it: a warm route is per broadcast,
-//! propagates, and is kept free of loops by its path.
+//! propagates, and is kept free of loops by its path, with what
+//! `quest/m2/cache-routing-proof.md` found a path needs besides.
 //!
-//! A relay with a reader of its own carries a copy, and offers it to its neighbours
-//! at no cost, with the path the copy took from the publisher and itself as its
-//! carrier. Each relay pulls a broadcast it has demand for (a reader, or a
-//! neighbour's subscription) through the cheapest of its publisher's route and each
-//! copy offered whose path does not name it, and passes a copy it would join on for
-//! as long as it beats the publisher's route, at what joining it costs. A relay on
-//! one copy, its own included, moves onto another only if that copy's carrier ranks
-//! below by the Rendezvous Hash, so copies crossing on their way never trade places.
-//! A copy with no demand left lingers; a relay pulling only for a neighbour offers
-//! nothing of its own.
+//! A relay with a reader whose pull follows the publisher's route offers its copy
+//! at no cost, as its carrier, with the path the copy took. Each relay pulls a
+//! broadcast it has demand for (a reader, or a neighbour's subscription) through
+//! the cheapest of its next hop toward the publisher and each copy offered, and
+//! offers a copy it joined on at what its pull costs, so a copy's cost rises with
+//! every link from where it left the publisher's route. Pulling through a
+//! neighbour goes wherever that neighbour pulls, so each relay offers every
+//! neighbour its copy, even one whose path names that neighbour, which can then
+//! use neither. A relay on one copy moves onto another only if that copy's carrier
+//! ranks below by the Rendezvous Hash, so copies crossing on their way never trade
+//! places. A copy with no demand left lingers.
 //!
-//! [`Mesh`] adds what a sweep checks to [`PathSim`]: after every step, no
-//! broadcast's pulls form a cycle; once quiet, every reader is fed and nothing
-//! would change. Subscriptions ride streams of their own, unordered against the
-//! routes and copies.
+//! [`Mesh`] adds what a sweep checks to [`PathSim`]: after every step, whether a
+//! broadcast's pulls form a cycle, which the path allows only while a withdrawal
+//! crosses a link; once quiet, every reader is fed and nothing would change.
+//! Subscriptions ride streams of their own, unordered against the routes and
+//! copies.
 
 use super::paths::{Cast, PathSim, Rules, rendezvous};
 use super::*;
