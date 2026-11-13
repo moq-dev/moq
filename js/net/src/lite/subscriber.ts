@@ -2627,12 +2627,15 @@ export class Subscriber {
 			left.signal.addEventListener("abort", () => resolve(), { once: true }),
 		);
 		let refused: Refused[] = [];
+		// Those the fills have yet to take: each refusal is handed over once.
+		let fresh: Refused[] = [];
 		const changed = new Signal(0);
 		// What the publisher gives up of the groups, accounted for in the tail. The latest verdict on a
 		// group replaces any earlier one, so a peer repeating its drops grows nothing.
 		const giveUp = (start: bigint, end: bigint, refusal: Refusal) => {
 			entry.tail.account(start, end);
 			refused = refuseRun(refused, max(start, groups.start), min(end, groups.end), refusal);
+			fresh = refuseRun(fresh, max(start, groups.start), min(end, groups.end), refusal);
 			changed.update((revision) => revision + 1);
 		};
 		this.#subscribes.set(id, entry);
@@ -2641,7 +2644,7 @@ export class Subscriber {
 			let stream: Stream | undefined;
 			try {
 				while ((await this.#auth?.ready(broadcast, "subscribe", { signal, until: () => leaving })) === false) {
-					if (left.signal.aborted) return refused;
+					if (left.signal.aborted) return fresh;
 				}
 				if (this.#denied(broadcast)) throw unauthorized(broadcast);
 				const opened = await this.#exchange(
@@ -2701,10 +2704,16 @@ export class Subscriber {
 			let unanswered: Run[] = [{ ...groups }];
 			for (const run of [...entry.tail.accounted(groups.start, groups.end), ...refused])
 				unanswered = removeRun(unanswered, run.start, run.end);
-			for (const gap of unanswered) refused.push({ ...gap, refusal: passing(failed) });
-			return refused;
+			for (const gap of unanswered) fresh.push({ ...gap, refusal: passing(failed) });
+			// Only what was not handed over while it was out.
+			return fresh;
 		})();
-		return { done, refused: () => refused, changed, reading: () => entry.tail.reading, cancel: () => left.abort() };
+		const takeRefused = () => {
+			const taken = fresh;
+			fresh = [];
+			return taken;
+		};
+		return { done, takeRefused, changed, reading: () => entry.tail.reading, cancel: () => left.abort() };
 	}
 
 	// Read a recovery's responses to the publisher's FIN, giving up what it names it will not

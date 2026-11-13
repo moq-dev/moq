@@ -173,6 +173,15 @@ impl RangeFills {
 		self.skipped = Default::default();
 	}
 
+	/// Take the refusals a recovery made since the last poll, once: each answers the fills
+	/// owing its groups now, and [`Self::forget_answered`] ends it with them, so a later request
+	/// for the same groups asks again rather than reading it back.
+	fn take_refused(&mut self, fresh: &mut RangeMap<u64, Refusal>) {
+		for (groups, refusal) in std::mem::take(fresh) {
+			self.refused.insert(groups, refusal);
+		}
+	}
+
 	/// A refusal answers only the fills owing it now: once no held fill covers its groups, a
 	/// later request asks again, and a loss it named stays recorded on the track alone.
 	fn forget_answered(&mut self) {
@@ -287,13 +296,13 @@ impl RangeFills {
 				self.refused.insert(groups.clone(), refusal.clone());
 			}
 		}
-		// What a recovery still out already refused answers the fills owing it now, rather than
-		// waiting on its other streams.
-		for recovery in &self.recoveries {
-			for (groups, refusal) in recovery.refused.iter() {
-				self.refused.insert(groups.clone(), refusal.clone());
-			}
+		// What a recovery still out refused since the last poll answers the fills owing it now,
+		// rather than waiting on its other streams.
+		let mut recoveries = std::mem::take(&mut self.recoveries);
+		for recovery in &mut recoveries {
+			self.take_refused(&mut recovery.fresh);
 		}
+		self.recoveries = recoveries;
 
 		let mut ask = FillAsk::default();
 		// Every run a held fill still owes, recovered or not.
@@ -457,6 +466,8 @@ struct Recovery {
 	state: RecoveryState,
 	/// The groups this subscription said it will not deliver, and why.
 	refused: RangeMap<u64, Refusal>,
+	/// Those [`RangeFills`] has yet to take: each refusal is handed over once.
+	fresh: RangeMap<u64, Refusal>,
 }
 
 enum RecoveryState {
@@ -495,6 +506,7 @@ impl Recovery {
 			groups,
 			state: RecoveryState::Establish(Box::new(establish)),
 			refused: Default::default(),
+			fresh: Default::default(),
 		}
 	}
 
@@ -522,6 +534,7 @@ impl Recovery {
 		}
 		for gap in owed.iter() {
 			self.refused.insert(gap.clone(), Refusal::passing(err.clone()));
+			self.fresh.insert(gap.clone(), Refusal::passing(err.clone()));
 		}
 		self.serve.subscriber.remove_subscribe(self.id);
 		match state {
@@ -585,7 +598,8 @@ impl Recovery {
 						}
 						let given = given.start.max(groups.start)..given.end.min(groups.end);
 						if !given.is_empty() {
-							self.refused.insert(given, refusal);
+							self.refused.insert(given.clone(), refusal.clone());
+							self.fresh.insert(given, refusal);
 						}
 					};
 					match res {
@@ -648,7 +662,8 @@ impl Recovery {
 						}
 					}
 				}
-				RecoveryState::Done => return Poll::Ready(Ok(std::mem::take(&mut self.refused))),
+				// Only what was not handed over while it was out.
+				RecoveryState::Done => return Poll::Ready(Ok(std::mem::take(&mut self.fresh))),
 			}
 		}
 	}
@@ -707,6 +722,22 @@ mod tests {
 		fills.held.clear();
 		fills.forget_answered();
 		assert!(fills.refused.is_empty(), "no fill owes them any more");
+	}
+
+	/// A recovery still out hands each refusal over once: after the fills owing it end, a
+	/// later poll does not read it back for a later request.
+	#[test]
+	fn a_recovery_refusal_is_taken_once() {
+		let mut fills = RangeFills::default();
+		let mut fresh = RangeMap::new();
+		fresh.insert(1..3, Refusal::passing(StreamError::Cancel));
+		fills.take_refused(&mut fresh);
+		assert!(fills.refused.get(&1).is_some(), "handed over");
+
+		// No fill owes it any more, and the recovery is still out.
+		fills.forget_answered();
+		fills.take_refused(&mut fresh);
+		assert!(fills.refused.is_empty(), "not read back");
 	}
 
 	/// A track whose cache evicted groups 1..4, with a reader of them whose fill is the next

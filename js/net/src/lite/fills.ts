@@ -53,9 +53,12 @@ export function refuseRun(runs: readonly Refused[], start: bigint, end: bigint, 
 export interface RecoveryHandle {
 	/** Resolves once it is over, with the groups it refused. */
 	done: Promise<Refused[]>;
-	/** The groups it refused so far, which answer the fills owing them before it is over. */
-	refused(): readonly Refused[];
-	/** Bumped each time {@link refused} grows. */
+	/**
+	 * The groups it refused since the last call, each handed over once, which answer the fills
+	 * owing them before it is over. Its {@link done} resolves with only those never taken.
+	 */
+	takeRefused(): Refused[];
+	/** Bumped each time it refuses more. */
 	readonly changed: Getter<number>;
 	/** Whether a stream of it is still being read, which cancelling would cut. */
 	reading(): boolean;
@@ -226,10 +229,11 @@ export class RangeFills {
 			this.#recovering = removeRun(this.#recovering, done.groups.start, done.groups.end);
 			for (const refused of done.refused) this.#setRefused(refused.start, refused.end, refused.refusal);
 		}
-		// What a recovery still out already refused answers the fills owing it now, rather than
-		// waiting on its other streams.
+		// What a recovery still out refused since the last poll answers the fills owing it now,
+		// rather than waiting on its other streams. Taken once, so once those fills end, a later
+		// request for the same groups asks again rather than reading it back.
 		for (const recovery of this.#recoveries)
-			for (const refused of recovery.handle.refused())
+			for (const refused of recovery.handle.takeRefused())
 				this.#setRefused(refused.start, refused.end, refused.refusal);
 
 		const ask: FillAsk = { groups: [], priority: NO_PRIORITY };

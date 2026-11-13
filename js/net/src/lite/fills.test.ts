@@ -68,7 +68,7 @@ function recoveries() {
 		opened.push(entry);
 		return {
 			done,
-			refused: () => soFar,
+			takeRefused: () => soFar.splice(0),
 			changed,
 			reading: () => entry.reading,
 			cancel: () => {
@@ -365,6 +365,52 @@ test("range fills: a recovery's refusal answers before it is over", async () => 
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(2n);
 
+	fills.close();
+	peer.close();
+});
+
+// A recovery still out hands each refusal over once: after the fills owing it end, a later fill for
+// the same groups asks again rather than reading it back while the recovery reads another stream.
+test("range fills: a recovery's refusal is taken once", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+	const recovery = opened[0];
+	if (!recovery) throw new Error("no recovery");
+	// Still reading another of its streams, so it stays out with no fill owing it.
+	recovery.reading = true;
+	peer.fill.accept(0n).finish();
+	recovery.refuse({ start: 1n, end: 2n, refusal: passing(new StreamError(StreamCode.Cancel)) });
+	fills.poll(tail, true);
+	expect(peer.fill.wanted()).toBe(2n);
+	peer.fill.close();
+	fills.poll(tail, true);
+	expect(fills.recovering).toBe(true);
+
+	const requests = peer.track.requests();
+	const later = peer.track.subscribe({
+		ranges: [{ start: { absolute: 1n } }],
+		delay: { max: null },
+		order: "ascending",
+	});
+	void later
+		.ordered()
+		.nextGroup()
+		.catch(() => undefined);
+	const again = await requests.requestedFill();
+	if (!again) throw new Error("no fill");
+	fills.push(again);
+	fills.poll(tail, true);
+	expect(again.wanted()).toBe(1n);
+
+	again.close();
+	later.close();
+	requests.close();
 	fills.close();
 	peer.close();
 });
