@@ -179,6 +179,9 @@ Datagram Tracks have a namespace apart from other Tracks, so a datagram Track an
 A Group is an ordered stream of Frames within a Track.
 
 Each group consists of an append-only list of Frames.
+A Group's sequence is its start: its frame 0's timestamp on a timed Track, and on an untimed Track a number that grows with each Group, in no unit.
+Sequences therefore order Groups by start without a counter, and a gap between two says nothing on its own.
+A receiver addresses a Group by the sequence it carries whatever its frames hold, so a publisher that numbers its Groups 0, 1, 2 is still served, with time Anchors compared against those numbers.
 A publisher never creates a Group with sequence 2^64-1, so every range of Groups ends within 64 bits; a receiver treats a Group Stream naming it as a malformed Track.
 A Group is normally served by a dedicated QUIC stream which is closed on completion, reset by the publisher, or cancelled by the subscriber.
 This ensures that all Frames within a Group arrive reliably and in order.
@@ -199,7 +202,7 @@ A Group Stream normally starts at frame 0, but MAY start later when the publishe
 Each frame of a timed Track carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
 A Track without a `Timescale` is untimed: its frames carry no timestamp.
 A timestamp MUST be less than 2^61, so every version can carry it; a receiver treats a larger one as a malformed Track.
-Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
+Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a timed Group's frame 0 at or before that of any lower-sequence Group it publishes.
 A receiver MAY check a received Group against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH.
 A relay serves a Track's timestamps on as it received them, including ones it did not check, unless a negotiated extension specifies otherwise.
 
@@ -1686,7 +1689,7 @@ Which fields follow, and what the Anchor names:
 - None (0x0): no fields. As a `Start`, the oldest Group (no floor); as an `End`, the live edge (unbounded).
 - Absolute (0x1): `Group Sequence` and `Frame Index`, a Position. A `Start` delivers from it and an `End` stops just before it.
 - Relative (0x2): `Groups Back`, the Group that many before the latest, 0 being the latest. Included as an `End`.
-- Time (0x3): `Timestamp`, the Group containing that presentation time in the Track's `Timescale` (see [TRACK_INFO](#track-info)). Included as an `End`. On an untimed Track it is refused with TIMESTAMP_MISMATCH.
+- Time (0x3): `Timestamp`, the Group containing that time: the one whose sequence, its start (see [Group](#group)), is the highest at or below it. Included as an `End`.
 
 Any other value is a PROTOCOL_VIOLATION.
 The publisher resolves a Relative or Time Anchor against the Track as it holds it.
@@ -2455,7 +2458,8 @@ An application-specific payload.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME carries an `Inflated Size` when it is not none.
 - An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages omit the timestamp.
-- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
+- A publisher must not start a timed Group's frame 0 at or before a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
+- A Group's sequence is its start: frame 0's timestamp on a timed Track, and a growing number on an untimed one. A Time Anchor names the Group with the highest sequence at or below it, on an untimed Track too.
 - Bounded every timestamp below 2^61. A larger one is a malformed Track.
 - Reserved Group sequence 2^64-1: a publisher never creates it, and a Group Stream naming it is a malformed Track.
 
