@@ -18,8 +18,7 @@ Decided 2026-11-09 (maintainer, rind's quest audit): one rind 0.4 that carries
 all three breaking changes, and a MoQ-side PR ready before the m0 adapter patch
 releases publish ✅ (rejected: the 0.4 quest alone, accepting that MoQ's build
 breaks until fixed; leaving both to release-plz). rind holds those releases
-until this PR is ready
-([its epic](https://github.com/kixel-ai/rind/blob/main/quest/m0/adapters/README.md)).
+until this PR is ready.
 
 The same day the plan changed: two of rind 0.4's breaking changes merged while
 rind's 0.3.3 was unpublished, so the maintainer chose ✅ to set rind to 0.4.0
