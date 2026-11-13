@@ -790,9 +790,13 @@ impl<F: Container> Consumer<F> {
 				// cursor steps to it without waiting.
 				let skipped = self.is_skipped(self.current..sequence);
 				let front = self.pending.front_mut().unwrap();
-				let _ = front.poll_min_timestamp(waiter, &self.format, false);
+				let first = front.poll_min_timestamp(waiter, &self.format, false);
 				let start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
 				let continues = skipped || start.is_some_and(|start| pts_contiguous(self.presented_end, start));
+				// A run nothing will fill, such as one dropped over a wire that can't say it was
+				// skipped, still waits for the group past it to show where it starts: stepping
+				// before that frame lands would call a contiguous timeline a loss.
+				let excluded = excluded && first.is_ready();
 				if finished || elapsed || aged || excluded || full || continues {
 					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
 					let front = self.pending.front_mut().unwrap();
