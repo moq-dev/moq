@@ -2726,8 +2726,10 @@ mod tests {
 		);
 	}
 
-	/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps
-	/// the session: no migration and no redial. Its close then reconnects like any drop.
+	/// Under [`Restart::Wait`] an empty-URI GOAWAY on a session that is not yet healthy,
+	/// as a draining peer sends a redial that reached it again, changes nothing while the
+	/// peer keeps the session: no migration and no redial. Its close then reconnects like
+	/// any drop.
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_waited_restart_redials_only_once_the_session_closes() {
@@ -2740,7 +2742,9 @@ mod tests {
 		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
-		config.backoff.healthy = Some((FAST).into());
+		// Never healthy, so the GOAWAY always reads as a drain of a fresh redial, however
+		// late the test's own steps run.
+		config.backoff.healthy = Some((WAIT * 10).into());
 		let client = config
 			.init(Default::default())
 			.unwrap()

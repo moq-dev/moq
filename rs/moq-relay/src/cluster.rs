@@ -2291,10 +2291,13 @@ impl Cluster {
 		// replacement.
 		//
 		// A GOAWAY naming no URI is a relay draining to restart. A peer URL names
-		// that one node, so a redial would only reach the draining process again
-		// and replay both announce tables there for the rest of its window. Its
-		// routes already rank below every other, so the session serves on until
-		// the node closes it, and the redial after that finds the replacement.
+		// that one node, so the loop redials it once: a node that hands its port to
+		// a replacement serving beside it (see `handoff`) is reached that way, and
+		// the drained session leaves within its handover. A redial that reaches the
+		// draining process again is drained at once, and serves on until the node
+		// closes it rather than redialing for the rest of its window; its routes
+		// already rank below every other, and the redial after that close finds the
+		// replacement.
 		let reconnect = client
 			.with_reconnect(true)
 			.with_restart(moq_tokio::Restart::Wait)

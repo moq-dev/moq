@@ -766,8 +766,52 @@ async fn a_connect_cancels_the_offline_a_retirement_queued() {
 	assert!(machine.session().is_some());
 }
 
-/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps the
-/// session: no migration and no redial. Its close then reconnects like any drop.
+/// The actions a policy asks for until it only waits, by name.
+async fn settle(machine: &mut Reconnect<Url, TestError>) -> Vec<&'static str> {
+	let mut events = Vec::new();
+	while let Ok(action) = kio::clock::timeout(Duration::from_secs(60), next(machine)).await {
+		events.push(match action {
+			Action::Migrating => "migrating",
+			Action::Retired => "retired",
+			Action::Offline(_) => "offline",
+			other => panic!("expected the policy to wait, got {other:?}"),
+		});
+	}
+	events
+}
+
+/// Under [`Restart::Wait`] a healthy session's empty-URI GOAWAY redials the same address once
+/// while the drained session serves, so a replacement already serving beside the draining
+/// process takes over and the drained session retires once it carries nothing.
+#[kio::test]
+async fn a_waited_restart_moves_to_a_replacement() {
+	let peer = url("tcp://peer:1/");
+	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+	config.restart = Restart::Wait;
+	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	let goaway = kio::clock::now();
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 2
+	})
+	.await;
+	assert_eq!(run.accepts[1].1, goaway, "the redial waited");
+	assert_eq!(run.events, ["migrating"]);
+	assert_eq!(settle(&mut machine).await, ["retired"]);
+	assert!(machine.session().is_some(), "the replacement serves");
+	assert_eq!(run.dials.len(), 2);
+}
+
+/// Under [`Restart::Wait`] a redial that reaches the draining process again, drained before
+/// it is healthy, changes nothing while the peer keeps it: no further redial. Its close then
+/// reconnects like any drop.
 #[kio::test]
 async fn a_waited_restart_redials_only_once_the_session_closes() {
 	let peer = url("tcp://peer:1/");
@@ -782,18 +826,18 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
 	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
-	kio::clock::sim::idle().await;
-	assert!(
-		matches!(
-			machine.poll(kio::clock::now(), &kio::Waiter::noop()),
-			Action::Wait(None)
-		),
-		"the policy left the session"
-	);
-
-	run.servers.remove(0).abort(Error::GoawayTimeout);
-	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+	drive(&mut machine, &[(peer.clone(), Peer::Goaway(String::new()))], &mut run, |run| {
 		run.accepts.len() == 2
+	})
+	.await;
+	assert_eq!(run.events, ["migrating"]);
+	assert_eq!(settle(&mut machine).await, ["retired"], "the policy left the session");
+	assert_eq!(run.dials.len(), 2, "redialed the draining process again");
+
+	run.servers.remove(1).abort(Error::GoawayTimeout);
+	run.events.clear();
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 3
 	})
 	.await;
 	assert_eq!(run.events, ["offline"]);
