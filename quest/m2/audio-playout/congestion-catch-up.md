@@ -40,7 +40,9 @@ Scope:
 - The setting sizes nothing else. The audio subscription keeps the delay
   plus the larger of the lookahead and the estimator's 2 s ceiling, so late
   frames are still observed and a buffered player keeps its lookahead.
-  Natively, the decode cap, the hole policy (`fill_max`), and video's wait on
+  Since [moq-dev/moq#8611](https://github.com/moq-dev/moq/pull/8611) that max
+  delay is also where buffered media past a missing group skips it, so the
+  threshold must not shrink it. Natively, the decode cap, the hole policy (`fill_max`), and video's wait on
   a missing group (`args.rs` `video_max_delay`) stop following it, so video
   waits its own delay. That also fixes `--delay auto --stretch 0`, where any
   hole over 50 ms drops the sink and its queued audio (`play/media.rs`
@@ -58,4 +60,3 @@ native in the PR.
 ## Related
 
 - [Resume sync](/quest/m0/interop-green/resume-sync.md) - snaps resumed audio to the clock, the same rule for a return from absence
-- [Python to C++ audio gap](/quest/m0/test-flakes-2/interop-python-cpp-audio-gap.md) - also changes how long a missing group is waited on
