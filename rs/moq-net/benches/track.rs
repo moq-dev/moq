@@ -1912,7 +1912,7 @@ impl Fills {
 		// The feed starts past every run, so each is a miss asked at once.
 		let start = runs * 2;
 		track.start_at(start).unwrap();
-		let mut group = track.create_group(group::Info { start: start }).unwrap();
+		let mut group = track.create_group(group::Info { start }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
@@ -2001,7 +2001,7 @@ impl RangeFills {
 		// neighbors keeps every range its own fill.
 		let start = ranges * (width + 1);
 		track.start_at(start).unwrap();
-		let mut group = track.create_group(group::Info { start: start }).unwrap();
+		let mut group = track.create_group(group::Info { start }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
