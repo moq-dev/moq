@@ -2446,6 +2446,12 @@ impl TrackState {
 		!self.outcome.is_released() && Some(sequence) == self.latest_group
 	}
 
+	/// Publishing ended: drop the ingress scope, whose session a reader still draining the
+	/// track must not keep open. The groups already written keep their own meters.
+	fn release_ingress(&mut self) {
+		self.ingress = stats::Scope::default();
+	}
+
 	/// No producer remains: stop protecting the live edge, so the pool's idle expiry
 	/// reclaims every group once readers stop touching it, and a stale consumer can't
 	/// pin the cache (and its frame buffers) forever.
@@ -2467,6 +2473,7 @@ impl TrackState {
 	/// every unfinished copy, cached or not, to abort once the track lock is released, so a
 	/// reader that already pulled one ends with `err` too and its writer fails.
 	fn tear_down(&mut self, err: Error) -> (Option<Position>, OpenGroups) {
+		self.release_ingress();
 		let resume = self.resume_position();
 		let groups = self
 			.lookup
@@ -2586,6 +2593,7 @@ impl TrackState {
 	/// No producer ever wrote to it, so there is nothing to tear down, but a fill answered
 	/// before the refusal may have cached the live edge, which nothing protects anymore.
 	fn reject(&mut self, err: Error, retry: Option<Duration>) {
+		self.release_ingress();
 		let released = self.outcome.is_released();
 		self.outcome = Outcome::Aborted {
 			err,
@@ -5343,6 +5351,9 @@ impl Drop for Alive {
 		// later one can take its name. It finished if its producer declared its end.
 		let finished = self.state.read().outcome.end().is_some();
 		self.unlist(finished);
+		if let Ok(mut state) = self.state.write() {
+			state.release_ingress();
+		}
 		// A request nobody accepted was never publishing; there's nothing to tear down.
 		if !self.published.load(Ordering::Relaxed) {
 			return;

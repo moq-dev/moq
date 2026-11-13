@@ -9741,6 +9741,18 @@ mod tests {
 		fetched.finish().unwrap();
 		fetch.await.unwrap();
 		assert_eq!(ingress(), 4 + 7, "the fetched group counts as well");
+
+		// A reader outliving the publisher keeps the track's groups, not its session.
+		let reader = track.consume();
+		drop((track, requests, route, producer));
+		let active: u64 = registry
+			.snapshot()
+			.sessions()
+			.into_iter()
+			.map(|(_, presence)| presence.active())
+			.sum();
+		assert_eq!(active, 0, "the publisher's session ended");
+		drop(reader);
 	}
 
 	/// A route that turns up later is filtered the same way as the replay.
