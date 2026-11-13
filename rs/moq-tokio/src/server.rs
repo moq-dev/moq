@@ -1633,23 +1633,15 @@ impl Request {
 		Ok(self)
 	}
 
-	/// Finish `work` before the accept deadline, or refuse the session with the timeout code
-	/// and return [`moq_net::Error::Timeout`]; see [`moq_net::server::Handshake::expired`].
+	/// Resolve once the accept deadline passes, having refused the session with the timeout
+	/// code; never, without a deadline. See [`moq_net::server::Handshake::poll_expired`].
 	///
-	/// Admitting the session is the caller's part of the handshake, so the same
-	/// `listen.timeout` that bounds the transport and SETUP bounds it too; a peer
-	/// cannot hold a connection open behind a decision that never comes. Without a
-	/// deadline, waits forever.
-	pub async fn within<T>(&mut self, work: impl Future<Output = T>) -> crate::Result<T> {
-		let handshake = &mut self.handshake;
-		crate::runtime::scope(async move {
-			tokio::select! {
-				biased;
-				done = work => Ok(done),
-				() = handshake.expired() => Err(moq_net::Error::Timeout.into()),
-			}
-		})
-		.await
+	/// Race admission against it, so the same `listen.timeout` that bounds the transport and
+	/// SETUP bounds the caller's decision too: a peer cannot hold a connection open behind a
+	/// decision that never comes. Once it resolves, [`ok`](Self::ok) fails with the timeout.
+	#[kio::wrapper]
+	pub fn poll_expired(&mut self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.handshake.poll_expired(waiter)
 	}
 
 	/// The receive window of the qmux session under this request.
