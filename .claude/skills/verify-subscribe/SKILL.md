@@ -46,6 +46,7 @@ Sync commit: `81a4d971fc766431ef49361c640a36d69b7f3ac2`. Run `git log 81a4d971fc
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`, the re-offer pop), `serve`, `mark_served` | `CursorHand`, `PubReoffer`, `Serve` |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::give_way` | a new group as `Serve`, then `StreamFail` with `old` whose header never arrives; a continuation as `StreamYield` of a stream whose header never arrives |
 | `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `replace_stale`, `sent_stale`, `hole` | `CursorGiveUp`, `ReplaceStale` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_step` (outcomes, `redrop`) | `PubOutcomes`, `PubRedrop` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::update`, `owe`; `rs/moq-net/src/model/track.rs` `reoffer_stale`, `reoffer_groups` | `PubUpdate` |
