@@ -5645,13 +5645,16 @@ impl TrackRun {
 
 		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
 		let emit_boundary = self.emit_range && !self.end_sent;
-		// A group waiting for credit it cannot make room for must not hold back a newer one
-		// that could: the cursor hands out a group that outranks it, which takes its place.
-		// Behind one that can, the backlog waits in the cache.
+		// A group waiting for credit it cannot make room for must not hold back one that could:
+		// a group that outranks it takes its place. Newest first sheds the backlog, so the cursor
+		// hands out every group and one ranked below the waiting one is given up. Oldest first
+		// drains it in order, so the cursor hands out only a group that outranks the waiting
+		// one, and the rest waits in the cache. Behind a group that can make room, the backlog
+		// waits in the cache either way.
 		let admit = match &self.opening {
 			None => Some(ALL),
 			Some(waiting) => stuck.map(|_| match order {
-				Order::Descending => (Bound::Excluded(waiting.sequence), Bound::Unbounded),
+				Order::Descending => ALL,
 				Order::Ascending => (Bound::Unbounded, Bound::Excluded(waiting.sequence)),
 			}),
 		};
@@ -5687,6 +5690,15 @@ impl TrackRun {
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
+					if let Some(waiting) = &self.opening
+						&& crate::priority::in_group(sequence, 0, order)
+							< crate::priority::in_group(waiting.sequence, 0, order)
+					{
+						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "shedding a group ranked below one waiting for credit");
+						self.mark_served(sequence);
+						self.shed(sequence);
+						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					}
 					match self.emit_range && self.start.is_none() {
 						true => self.first = Some(group),
 						false => self.serve(group),
@@ -6086,6 +6098,19 @@ impl TrackRun {
 				frame_start: waiting.frame_start,
 			}),
 			false => waiting.settle_failed(&Error::Old),
+		}
+	}
+
+	/// Give up a group the cursor handed out without a stream, as one expired under the
+	/// subscription's budget is.
+	fn shed(&self, sequence: u64) {
+		if self.ctx.version.has_track_stream() {
+			self.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.push((sequence, StreamError::Old));
 		}
 	}
 

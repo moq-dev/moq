@@ -574,6 +574,76 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 	}
 }
 
+/// Newest first sheds the backlog: under a late group waiting for credit, a later late group
+/// ranked below it is given up rather than holding back a newer group behind it, on each
+/// protocol.
+#[kio::test]
+async fn a_shed_late_group_lets_a_newer_group_through() {
+	for version in ["moq-lite-06", "moq-lite-07-wip"] {
+		let version: Version = version.parse().unwrap();
+		let publisher = origin(1);
+		let viewer = origin(2);
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
+		let track = broadcast.broadcast().create_track("0", info).unwrap();
+		broadcast.announce().unwrap();
+
+		let mut options = MockConnectOptions::new(version);
+		options.transport.max_concurrent_uni_streams = Some(1);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(viewer.clone());
+		let _pair = connect_mock(options).await;
+
+		let remote = viewer
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let prefs = track::Subscription::default()
+			.with_order(track::Order::Descending)
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+		macro_rules! next {
+			($what:literal) => {
+				kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+					.await
+					.unwrap_or_else(|_| panic!("{version}: {}", $what))
+					.unwrap()
+					.unwrap()
+			};
+		}
+
+		// Unfinished, so its stream holds the only credit.
+		let mut held = track.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
+		held.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
+		assert_eq!(next!("the held group arrives").sequence, 3, "{version}");
+
+		// Group 1 waits for credit it cannot make room for, and group 0 ranks below it.
+		for sequence in [1, 0] {
+			let mut late = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			late.write_frame(Timestamp::ZERO, b"late".as_slice()).unwrap();
+			late.finish().unwrap();
+		}
+
+		let mut newer = track.create_group(moq_net::group::Info { sequence: 4 }).unwrap();
+		newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
+		newer.finish().unwrap();
+		assert_eq!(
+			next!("the newer group waits behind the late ones").sequence,
+			4,
+			"{version}"
+		);
+		drop(held);
+	}
+}
+
 /// Oldest first, a backlog behind a group waiting for credit stays in the cache rather than
 /// giving it up: a newer group ranks below the waiting one, so every group still arrives once
 /// the stream holding the credit finishes, on each protocol.
