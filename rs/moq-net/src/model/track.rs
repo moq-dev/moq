@@ -2014,10 +2014,12 @@ impl TrackState {
 		}
 	}
 
-	/// Whether a full `budget` passed since a successor `arrived`.
+	/// Whether a full `budget` passed since a successor `arrived`, or since a group finished
+	/// whole stops presenting, which may still be ahead: a zero budget ages it only once
+	/// that comes.
 	fn aged(&self, arrived: crate::time::Instant, budget: Duration) -> bool {
 		let now = self.cache.pool().now_wall();
-		now.saturating_duration_since(arrived) >= budget
+		now >= arrived && now.saturating_duration_since(arrived) >= budget
 	}
 
 	/// When a group was superseded, given `arrival`, its cached successor in `servable`: when
@@ -12635,6 +12637,26 @@ mod test {
 			let result = reading.poll_read_frame(&waiter);
 			assert!(matches!(result, Poll::Ready(Err(Error::Old))), "{info:?}: {result:?}");
 		}
+	}
+
+	/// A group finished whole ages from its own end, which a zero budget waits for too: a
+	/// fetch before the end still gets it, and one after is told it is old.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_whole_group_ages_only_once_it_ends() {
+		let producer = track_producer("test", Info::timed().with_max_age(Duration::ZERO));
+		elapse(&producer, Duration::ZERO);
+		let mut group = producer.append_group(0).unwrap();
+		group.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x")).unwrap();
+		group.finish(40).unwrap();
+
+		let consumer = producer.consume();
+		elapse(&producer, Duration::from_millis(39));
+		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+		assert!(fetched.is_ok(), "before its end: {:?}", fetched.err());
+		elapse(&producer, Duration::from_millis(1));
+		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+		assert!(matches!(fetched, Err(Error::Old)), "{:?}", fetched.err());
 	}
 
 	/// A successor whose header landed but whose first frame never does still starts the
