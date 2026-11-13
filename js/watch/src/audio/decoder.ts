@@ -248,15 +248,15 @@ export class Decoder {
 				queued = queued.add(range.end.saturatingSub(range.start.max(span.end)));
 			}
 			// The ring holds the delay less the output latency, which the speaker covers: the opening
-			// sounds that much after it renders, so the span reaches back by it. The clock anchors on the
-			// earliest start, which puts the opening due as it first sounds rather than skipping it.
+			// sounds that much after it renders, so it comes due then rather than being skipped.
 			const delay = effect.get(this.sync.out.delay);
 			const ring = effect.get(this.#ring);
 			if (ring) effect.get(ring.output);
 			const held = ring ? ring.held(delay) : delay;
 			return {
-				start: span.start.saturatingSub(delay.saturatingSub(held)),
+				start: span.start,
 				end: span.end.add(queued.min(ringHold(held))),
+				lead: delay.saturatingSub(held),
 			};
 		});
 		this.#track = this.sync.track({ target: playout, startup });

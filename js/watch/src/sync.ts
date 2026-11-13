@@ -87,11 +87,11 @@ export type SyncOutput = {
 };
 
 /**
- * What a track holds from the opening of its timeline. `start` is the media time the clock should
- * read as playback starts: the opening itself, or earlier by however long the track's output takes to
- * sound it. @internal
+ * What a track holds from the opening of its timeline, and how long its output takes to sound the
+ * opening once released, which counts toward the delay and holds the opening's turn back as long.
+ * @internal
  */
-export type Span = { start: Duration; end: Duration };
+export type Span = { start: Duration; end: Duration; lead?: Duration };
 
 /** What a track holds in the shared clock. @internal */
 export type TrackProps = {
@@ -446,22 +446,25 @@ export class Sync {
 		}
 		if (clock.phase.peek() === "playing") return;
 		const ready = spans.flatMap(({ part, span }) => (span ? [{ part, span }] : []));
+		const lead = (span: Span) => span.lead ?? Duration.ZERO;
 		if (
 			reference === undefined ||
 			ready.length !== spans.length ||
-			ready.some(({ span }) => span.end.saturatingSub(span.start).lt(delay))
+			ready.some(({ span }) => span.end.add(lead(span)).saturatingSub(span.start).lt(delay))
 		) {
 			clock.phase.set("starting");
 			return;
 		}
-		// The track with the earliest opening holds the reference it anchors.
-		const earliest = ready.reduce((a, b) => (b.span.start.lt(a.span.start) ? b : a));
-		const first = earliest.span.start;
+		// The track whose opening sounds earliest holds the reference it anchors.
+		const opens = (span: Span) => span.start.asMillis() - lead(span).asMillis();
+		const earliest = ready.reduce((a, b) => (opens(b.span) < opens(a.span) ? b : a));
+		const first = opens(earliest.span);
 		clock.owner = earliest.part;
 		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
 		// Every track's own anchor moves by the same offset, keeping the gaps between tracks that
-		// playing would have held, so a later handoff moves the playhead only by that gap.
-		const anchored = wall() - first.asMillis() - delay.asMillis();
+		// playing would have held, so a later handoff moves the playhead only by that gap. An opening
+		// whose output takes a while to sound comes due that much later.
+		const anchored = wall() - first - delay.asMillis();
 		for (const part of clock.parts.peek()) {
 			if (part.anchor !== undefined) part.anchor += anchored - reference;
 		}

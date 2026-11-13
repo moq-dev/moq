@@ -590,6 +590,22 @@ describe("AudioBuffer steering", () => {
 		}
 	});
 
+	// A clock short of media zero reads as zero, which would pair it late, so it waits until it moves.
+	it("sends no clock while it reads media zero", () => {
+		const clock = started();
+		const { buffer, sent, state, context } = fake(100, {
+			clock: { now: () => Duration.ZERO, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		try {
+			context.sounding = 1;
+			state(ms(0), false, 0);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([{ type: "clock", time: 0 }]);
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
 	// Before the output has played anything there is no position to pair the clock with.
 	it("sends no clock until the output reports a position", () => {
 		const { buffer, sent, state } = fake(100, {

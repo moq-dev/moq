@@ -426,7 +426,8 @@ export class AudioBuffer {
 		const time = this.#context.currentTime;
 		const last = this.#reference;
 		this.#reference = reference;
-		if (now === undefined || heard === undefined) {
+		// A clock still short of media zero reads as zero, which would pair it late; wait it out.
+		if (now === undefined || now.isZero() || heard === undefined) {
 			this.#offset = undefined;
 			const msg: Clock = { type: "clock", time };
 			this.#worklet.port.postMessage(msg);
