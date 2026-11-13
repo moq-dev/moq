@@ -125,6 +125,8 @@ class Trends(unittest.TestCase):
             previous = row("2026-10-10", 106) | {"revision": "a" * 40}
             failed, retained = run(previous)
             self.assertEqual(failed.returncode, 1, failed.stderr)
+            # The log ends with the regression, after the build-time table.
+            self.assertTrue(failed.stderr.endswith("artifact: 106 > 100 bytes + 5% (previous: 2026-10-09)\n"), failed.stderr)
             self.assertEqual(retained[-1], previous)
 
             # A stable next report compares against the failed point, not the last success.

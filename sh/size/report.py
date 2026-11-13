@@ -97,7 +97,8 @@ def main():
     (args.directory / "summary.md").write_text(summary)
     print(summary)
     if failures:
-        raise SystemExit(1)
+        # Repeated last, so the failing step's log ends with why rather than the build-time table.
+        raise SystemExit("size regression:\n" + "\n".join(failures))
 
 
 if __name__ == "__main__":
