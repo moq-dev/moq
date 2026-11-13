@@ -41,7 +41,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `1be43c735b4ddaf5811433d82390e377cd1fe15a`. Run `git log 1be43c735b.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `6aa4f9c1cad482aa86adcf3cf26bd7779697a01a`. Run `git log 6aa4f9c1ca.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
@@ -58,7 +58,7 @@ Sync commit: `1be43c735b4ddaf5811433d82390e377cd1fe15a`. Run `git log 1be43c735b
 | `rs/moq-net/src/tail.rs` `Tail::rebill`, `overtaken`, `updated`; `rs/moq-net/src/lite/subscriber.rs` `ServeLoop::apply_response`; `rs/moq-net/src/model/record.rs` `Record::folded` | `TailFold`, `forgot`, `PubFold`, `folded` |
 | `rs/moq-net/src/model/track.rs` `Producer::give_up`, `skip_received` | `rec`, `cached` |
 | `rs/moq-net/src/lite/publisher.rs` `GroupServe::settle_failed`, `TrackRun::open`; `rs/moq-net/src/transport/boxed.rs` `SendStream::preempted` | `StreamYield`, `PubContinue`, `PausedGiveUp` |
-| `rs/moq-net/src/lite/subscriber.rs` `TrackEntry::pause`, `resume`, `dropped`, `read_yielding`, `end_yielding`, `GroupRecv::poll_serve`, `FrameIngest::dispatch` | the YIELDED branch of `SubReset`, `SubFrame`, `reading`, `sdrop`, `paused` |
+| `rs/moq-net/src/lite/subscriber.rs` `TrackEntry::pause`, `resume`, `dropped`, `read_yielding`, `end_yielding`, `YieldVerdict`, `GroupRecv::poll_serve`, `FrameIngest::dispatch` | the YIELDED branch of `SubReset`, `SubFrame`, `reading`, `sdrop`, `paused` |
 
 What the model asks of that code, each found by TLC as a broken rule without it:
 

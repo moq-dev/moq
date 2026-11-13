@@ -130,6 +130,11 @@ class GroupState {
 	// Tells the group this copy was mirrored from whether its reader will still read it, so a
 	// copy buffered for a reader that passed it stops keeping the group wanted.
 	reads?: (reads: boolean) => void;
+	// Stops the group teeing into this mirror from watching it close.
+	unwatch?: () => void;
+	// The first frame the group teeing into this mirror wrote here. A copy that took over a failed
+	// one tees from where that one stopped, so the frames below came from the failed copy.
+	from = 0;
 
 	constructor(sequence: bigint) {
 		this.sequence = sequence;
@@ -261,6 +266,10 @@ export class Producer {
 	// Called as the group aborts, before any signal subscriber runs (see `hooks.onGroupAbort`).
 	#aborted?: ((error: Error) => void)[];
 
+	// Duplicates waiting on this received copy (see `hooks.holdGroup`). Failing while held, it
+	// keeps its mirrors open for the duplicate that takes over to tee into.
+	#holds = 0;
+
 	constructor(sequence: bigint) {
 		if (checkSequence(sequence) >= RESERVED) throw new RangeError(`group sequence out of range: ${sequence}`);
 		this.#state = new GroupState(sequence);
@@ -300,6 +309,55 @@ export class Producer {
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
+		hooks.holdGroup = (group) => {
+			group.#holds++;
+			let held = true;
+			return () => {
+				if (!held) return;
+				held = false;
+				if (--group.#holds === 0) group.#failHeld();
+			};
+		};
+		hooks.succeedGroup = (next, failed) => {
+			const error = failed.#state.closed.peek();
+			if (!(error instanceof Error)) throw new Error("group has not failed");
+			const state = next.#state;
+			// The failed copy's frames the continued mirrors hold, once each though mirrors share them.
+			const kept = new Set<Frame>();
+			for (const [mirror, reads] of failed.#mirrors ?? []) {
+				failed.#unmirror(mirror);
+				// The successor continues a mirror from the frame it reached, so it must hold that
+				// frame from its start. Compression binds a group to its prefix, so a compressed
+				// successor starts at 0.
+				if (mirror.closed.peek() !== undefined) continue;
+				const lost = state.start === mirror.total.peek() && headShed(state.frames.peek().first);
+				if (state.closed.peek() !== undefined || state.start > mirror.total.peek() || lost) {
+					mirror.closed.set(error);
+					continue;
+				}
+				// Its unread frames count against the tail it continues in, as they would on one copy, so a
+				// chain of takeovers cannot grow a stalled reader's buffer: past the tail, it is behind it.
+				let unread = 0;
+				for (const frame of mirror.frames.peek()) unread += frameBytes(frame);
+				if (unread > TAIL_BYTES) {
+					mirror.frames.set(new Queue());
+					mirror.cacheBytes = 0;
+					mirror.flate = undefined;
+					mirror.closed.set(evicted());
+					continue;
+				}
+				for (const frame of mirror.frames.peek()) kept.add(frame);
+				mirror.from = mirror.total.peek();
+				mirror.charge = state.charge;
+				if (state.compressed) mirror.flate = state.flate;
+				let index = state.start;
+				for (const frame of state.frames.peek()) if (index++ >= mirror.from) appendFrame(mirror, frame);
+				next.#attach(mirror, reads);
+			}
+			let bytes = 0;
+			for (const frame of kept) bytes += frameBytes(frame);
+			return bytes;
+		};
 		hooks.startGroup = (group, start) => {
 			if (!Number.isSafeInteger(start) || start < 0) throw new RangeError("invalid group frame start");
 			const state = group.#state;
@@ -413,11 +471,17 @@ export class Producer {
 			return makeConsumer(dst);
 		}
 
+		this.#attach(dst, true);
+		return makeConsumer(dst);
+	}
+
+	// Tee later writes into `dst`, counting its reader if it `reads`.
+	#attach(dst: GroupState, reads: boolean): void {
 		this.#mirrors ??= new Map();
 		const mirrors = this.#mirrors;
-		mirrors.set(dst, true);
-		this.#readers++;
-		this.#wanted.set(true);
+		mirrors.set(dst, reads);
+		if (reads) this.#readers++;
+		this.#wanted.set(this.#readers > 0);
 		dst.reads = (reads) => {
 			const was = mirrors.get(dst);
 			if (was === undefined || was === reads) return;
@@ -428,13 +492,9 @@ export class Producer {
 
 		// Track this mirror's close eagerly (not just lazily on the next write) so demand drops the
 		// moment the last reader leaves, letting an abandoned fetch cancel even with no more frames.
-		const dispose = dst.closed.subscribe((c) => {
-			if (c === undefined) return;
-			this.#unmirror(dst);
-			dispose();
+		dst.unwatch = dst.closed.subscribe((c) => {
+			if (c !== undefined) this.#unmirror(dst);
 		});
-
-		return makeConsumer(dst);
 	}
 
 	/**
@@ -453,6 +513,8 @@ export class Producer {
 		this.#mirrors?.delete(mirror);
 		// A consumer that outlives the group must not pin it, and its buffers, through this.
 		mirror.reads = undefined;
+		mirror.unwatch?.();
+		mirror.unwatch = undefined;
 		if (reads) this.#readers--;
 		this.#wanted.set(this.#readers > 0);
 	}
@@ -575,9 +637,11 @@ export class Producer {
 			for (const commit of commits) commit();
 		}
 
+		const index = this.#state.total.peek() - 1;
 		for (const mirror of this.#mirrors?.keys() ?? []) {
 			if (mirror.closed.peek() !== undefined) this.#unmirror(mirror);
-			else appendFrame(mirror, frame);
+			// A mirror taken over from a failed copy already holds the frames that copy wrote.
+			else if (index >= mirror.total.peek()) appendFrame(mirror, frame);
 		}
 		this.#trim();
 		// Past the frame's own bookkeeping: paying the track's debt may evict other groups.
@@ -653,7 +717,8 @@ export class Producer {
 		for (const mirror of this.#mirrors?.keys() ?? []) {
 			// A mirror that has not taken the front frame can no longer read it from its start.
 			if (mirror.closed.peek() !== undefined) continue;
-			if (mirror.start > state.start || (mirror.start === state.start && !lost)) continue;
+			const front = Math.max(mirror.start, mirror.from);
+			if (front > state.start || (front === state.start && !lost)) continue;
 			mirror.frames.set(new Queue());
 			mirror.cacheBytes = 0;
 			mirror.flate = undefined;
@@ -687,21 +752,44 @@ export class Producer {
 	#end(outcome: Error | null) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A frame cut short leaves the group incomplete, so even a clean end fails it.
+		let cut: Chunked | undefined;
 		if (this.#open) {
 			this.#open = undefined;
 			outcome ??= new Error("group finished while a frame was being written");
 			const last = this.#state.frames.peek().last;
-			if (last instanceof Chunked && last.done.peek() === undefined) last.done.set(outcome);
+			if (last instanceof Chunked && last.done.peek() === undefined) cut = last;
 		}
+		const held = outcome !== null && this.#holds > 0;
+		// A held copy's duplicate continues each mirror from the frame it reached, so a mirror
+		// drops the frame cut short before its reader takes it. One whose reader took it lost it.
+		if (held && cut) {
+			const index = this.#state.total.peek() - 1;
+			for (const mirror of this.#mirrors?.keys() ?? []) {
+				// A mirror taken over past the cut frame never got it from this copy.
+				if (index < mirror.from) continue;
+				if (mirror.frames.peek().last === cut) {
+					mirror.frames.mutate((frames) => frames.pop());
+					mirror.total.update((total) => total - 1);
+				} else if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
+			}
+		}
+		cut?.done.set(outcome);
 		this.#state.flate?.finish();
 		this.#state.closed.set(outcome);
 
+		if (!held) this.#failHeld();
+		if (outcome) for (const fn of this.#aborted ?? []) fn(outcome);
+		this.#aborted = undefined;
+	}
+
+	// End the open mirrors, once this copy closed and no duplicate held for it can take over.
+	#failHeld(): void {
+		const outcome = this.#state.closed.peek();
+		if (outcome === undefined) return;
 		for (const mirror of this.#mirrors?.keys() ?? []) {
 			if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
 			this.#unmirror(mirror);
 		}
-		if (outcome) for (const fn of this.#aborted ?? []) fn(outcome);
-		this.#aborted = undefined;
 	}
 }
 
@@ -1055,7 +1143,8 @@ export class Consumer {
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
 		shedReader = (group, start) => {
 			// A copy that took every shed frame keeps reading; one that had not lost them.
-			if (group.#state === group.#mirrored && group.#state.start < start) group.#evict(evicted());
+			const state = group.#state;
+			if (state === group.#mirrored && Math.max(state.start, state.from) < start) group.#evict(evicted());
 		};
 		hooks.refreshGroup = (group) => group.#state.charge?.refresh();
 		hooks.onShedRead = (group, notify) => {
