@@ -5042,10 +5042,12 @@ impl kio::Task for Paused {
 	type Output = Error;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		match poll_given_up(&mut self.group, waiter) {
-			Some(err) => Poll::Ready(err),
-			None => Poll::Pending,
+		if let Some(err) = poll_given_up(&mut self.group, waiter) {
+			return Poll::Ready(err);
 		}
+		// A finished group this cursor has nothing left of is no loss once the cache releases
+		// it, but holding it past that would outlive the cache's bound on the paused groups.
+		self.group.poll_aborted(waiter)
 	}
 }
 
@@ -12450,5 +12452,27 @@ mod tests {
 		let run = &bench.coverage.run;
 		assert_eq!(best(run, track::Order::Descending), Some(101));
 		assert_eq!(run.paused_tasks.len(), 2);
+	}
+
+	/// A paused group with nothing left to send is dropped once the cache releases it.
+	#[test]
+	fn a_released_paused_group_with_nothing_unread_is_dropped() {
+		let mut bench = PausedBench::new(1);
+		let run = &mut bench.coverage.run;
+		let empty = bench.coverage.track.create_group(group::Info { sequence: 200 }).unwrap();
+		let empty = empty.finish().unwrap();
+		run.pause(Paused {
+			group: empty.consume(),
+			frame_start: 0,
+		});
+		run.drop_given_up_paused(&kio::Waiter::noop());
+		assert!(run.paused.contains_key(&200), "a finished group waits to continue");
+
+		empty.abort(Error::Evicted).unwrap();
+		run.drop_given_up_paused(&kio::Waiter::noop());
+		assert!(!run.paused.contains_key(&200));
+		assert_eq!(run.paused_tasks.len(), 1, "only the released group leaves");
+		let dropped = run.ctx.outcomes.dropped.lock().unwrap();
+		assert_eq!(dropped.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [200]);
 	}
 }

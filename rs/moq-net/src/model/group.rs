@@ -3802,6 +3802,18 @@ impl Consumer {
 		self.cursor.poll(waiter, |state| state.poll_outcome())
 	}
 
+	/// Resolves once the group is aborted, including when the cache releases it after it
+	/// finished, with the cause. Finishing alone does not end it.
+	#[cfg(feature = "async")]
+	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.cursor
+			.poll(waiter, |state| match state.outcome.error() {
+				Some(err) => Poll::Ready(Ok(err.clone())),
+				None => Poll::Pending,
+			})
+			.map(|res| res.unwrap_or_else(|err| err))
+	}
+
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
 	pub(crate) fn first_frame(&self) -> u64 {
 		self.cursor.state.read().offset as u64
