@@ -53,8 +53,11 @@ acknowledged; a stream mid-frame falls back to the YIELDED reset, so no frame
 waits on a handoff. `SubscribeAccounting.tla` gains GROUP_END the way it gained
 YIELDED.
 
+Decided 2026-11-13 (maintainer, the pick round of
+[moq-dev/moq#8545](https://github.com/moq-dev/moq/pull/8545)): ✅ the new
+Group may belong to any subscription on the session (rejected: only the
+subscription whose stream it takes over), since stream credit is
+session-wide and the waiting higher-priority group is usually another
+track's. `GroupRecv` rebinds the stream at each GROUP message.
+
 Public API: none. Wire: lite-07 GROUP_END and group stream takeover.
-
-## Waiting
-
-- Maintainer: whether the new Group may belong to any subscription on the session, or only to the subscription whose stream it takes over. Options: (1) any subscription; (2) the same subscription only. Recommend (1): stream credit is session-wide, and the higher-priority group waiting for it is usually another track's (a browser holding hundreds of tracks), so (2) would rarely find a stream to take; the cost is that `GroupRecv` rebinds a stream to another subscription at each GROUP message, which multi-group parsing needs anyway.
