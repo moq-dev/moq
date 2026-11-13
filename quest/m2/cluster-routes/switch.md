@@ -61,6 +61,10 @@ Work:
 - `route/node.rs` drives the new router. `home` serves a request through
   the route the rule picks, in place of every feasible route whose neighbour
   `carries` the claim.
+  Honor `path::Router::new`'s fresh-hop-per-process contract, including when
+  `Config::hop` is configured: the old seqno cannot recover reused path-hop names.
+  The driver also implements `watch`/`synced`'s scope contract for every permit
+  region, completing cancelled streams locally when no replacement can answer.
 - Delete today's router with what only it used: the feasibility distance and
   its drain, seqno requests and their pending state, the echo, and their
   fixtures. A fixture that states a claim rule moves to the new router if

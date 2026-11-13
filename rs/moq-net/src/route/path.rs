@@ -131,10 +131,10 @@ pub(crate) enum Out<N, A> {
 }
 
 /// When a doubt about a node lifts.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lift {
-	/// When its timer fires, or sooner once no route names the node: the rule the
-	/// model checks.
+	/// The rejected comparison rule: lift sooner once no route names the node.
 	Unnamed,
 	/// Only when its timer fires.
 	Timer,
@@ -145,6 +145,7 @@ pub(crate) enum Lift {
 pub(crate) struct Doubt {
 	/// How long the doubt lasts.
 	pub timer: Duration,
+	#[cfg(test)]
 	pub lift: Lift,
 }
 
@@ -152,6 +153,7 @@ impl Doubt {
 	/// A second, kept until the timer fires.
 	pub const DEFAULT: Self = Self {
 		timer: Duration::from_secs(1),
+		#[cfg(test)]
 		lift: Lift::Timer,
 	};
 }
@@ -218,13 +220,16 @@ impl Death {
 #[derive(Clone, Copy, Debug)]
 enum Suspicion {
 	Doubted(Instant),
+	#[cfg(test)]
 	Lifted(Instant),
 }
 
 impl Suspicion {
 	fn deadline(self) -> Instant {
 		match self {
-			Self::Doubted(at) | Self::Lifted(at) => at,
+			Self::Doubted(at) => at,
+			#[cfg(test)]
+			Self::Lifted(at) => at,
 		}
 	}
 }
@@ -493,7 +498,8 @@ fn of<V>(map: &BTreeMap<RouteId, V>, id: Id) -> impl Iterator<Item = (&RouteId, 
 
 impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// A node with no sessions, naming itself `hop` in the routes it forwards and
-	/// minting rotated identities from `seed`.
+	/// minting rotated identities from `seed`. `hop` must be fresh per process:
+	/// a restart starts a new session namespace and must not reuse old hop names.
 	pub fn new(hop: Id, seed: u64, doubt: Doubt) -> Self {
 		Self {
 			hop,
@@ -665,10 +671,14 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.collect()
 	}
 
-	/// Ask every neighbour for announcements under `prefix` instead, returning the new
-	/// interest generation. Each answers on a new stream; until that one is SYNCED the
-	/// old one's routes stay, but only the new one's claims are believed. What this
-	/// node knows outside `prefix` is forgotten.
+	/// Change the local interest to `prefix`, returning its new generation.
+	/// The driver replaces each neighbour's streams with the intersections of
+	/// `prefix` and that session's scope regions (the whole prefix if unscoped).
+	/// It calls `synced` after all replacements' initial sets arrive.
+	/// Until then, old routes stay but only new claims are
+	/// believed. With no intersection, the driver cancels the old streams and
+	/// calls `synced` locally for this generation: no replacement can answer.
+	/// What this node knows outside `prefix` is forgotten.
 	pub fn watch(&mut self, prefix: Path) -> u32 {
 		self.interest += 1;
 		self.watch = prefix.clone();
@@ -923,7 +933,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// `from`'s stream answering interest generation `interest` sent its initial set:
-	/// what an older stream left is gone.
+	/// what an older stream left is gone. The driver also calls this after cancelling
+	/// every stream to a scoped peer whose scope no longer intersects the interest.
 	pub fn synced(&mut self, from: N, interest: u32) {
 		let Some(session) = self.sessions.get_mut(&from) else {
 			return;
@@ -1230,7 +1241,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 		if let Some(session) = self.sessions.get_mut(&from) {
 			session.heard.remove(key);
-			if !session.heard.iter().any(|(id, _)| *id == key.0) {
+			if !session
+				.heard
+				.range((key.0, Path::empty())..)
+				.next()
+				.is_some_and(|(id, _)| *id == key.0)
+			{
 				self.filed.remove(&(key.0, from));
 			}
 		}
@@ -1345,7 +1361,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let mut ids: BTreeSet<Id> = self.rx.keys().map(|(id, _)| *id).collect();
 		ids.extend(self.routes.keys().map(|(id, _)| *id));
 		ids.extend(self.views.keys().map(|(id, _)| *id));
-		ids.extend(self.reader.shown().keys().map(|(id, _)| *id));
+		ids.extend(self.shown_claims.keys().copied());
 		for answer in self.answering.values() {
 			ids.extend(answer.tx.keys().map(|(id, _)| *id));
 		}
@@ -1858,36 +1874,19 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					}
 					Want::Keep => rest += 1,
 					end @ (Want::End | Want::Empty) => {
-						let old = sent.offer().cloned().expect("sent");
-						if matches!(end, Want::Empty) && self.covering_view(key.0, &key.1).is_some() {
-							let (_, changes, floor) = self.present(
-								key.0,
-								peer,
-								&key.1,
-								&Dirty {
-									all: true,
-									..Default::default()
-								},
-							);
-							if !changes.is_empty() || floor.is_some() {
-								self.out.push(Out::Batch {
-									to: peer,
-									id: key.0,
-									prefix: key.1.clone(),
-									changes,
-									floor,
-								});
-							}
-						}
-						self.unindex_sent(peer, key, &old.path);
-						let sent = self
-							.answering
-							.get_mut(&peer)
-							.expect("answering")
-							.tx
-							.get_mut(key)
-							.expect("sent");
-						sent.end();
+						let batch =
+							(matches!(end, Want::Empty) && self.covering_view(key.0, &key.1).is_some()).then(|| {
+								self.present(
+									key.0,
+									peer,
+									&key.1,
+									&Dirty {
+										all: true,
+										..Default::default()
+									},
+								)
+							});
+						self.end_sent(peer, key, batch);
 						ends.push(key.clone());
 					}
 				}
@@ -2020,27 +2019,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 				Want::End | Want::Empty => {
 					if on {
-						if let Some((_, changes, floor)) = batch
-							&& (!changes.is_empty() || floor.is_some())
-						{
-							self.out.push(Out::Batch {
-								to: peer,
-								id,
-								prefix: prefix.clone(),
-								changes,
-								floor,
-							});
-						}
-						let old = sent.and_then(|sent| sent.offer().cloned()).expect("sent");
-						self.unindex_sent(peer, &key, &old.path);
-						let sent = self
-							.answering
-							.get_mut(&peer)
-							.expect("answering")
-							.tx
-							.get_mut(&key)
-							.expect("sent");
-						sent.end();
+						self.end_sent(peer, &key, batch);
 						self.out.push(Out::Route {
 							to: peer,
 							id,
@@ -2118,6 +2097,30 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				self.answering.get_mut(&peer).expect("answering").tx.remove(&key);
 			}
 		}
+	}
+
+	/// Send a final withdrawing batch before retiring a sent offer.
+	fn end_sent(&mut self, peer: N, key: &RouteId, batch: Option<Presented<A>>) {
+		if let Some((_, changes, floor)) = batch
+			&& (!changes.is_empty() || floor.is_some())
+		{
+			self.out.push(Out::Batch {
+				to: peer,
+				id: key.0,
+				prefix: key.1.clone(),
+				changes,
+				floor,
+			});
+		}
+		let old = self.answering[&peer].tx[key].offer().cloned().expect("sent");
+		self.unindex_sent(peer, key, &old.path);
+		self.answering
+			.get_mut(&peer)
+			.expect("answering")
+			.tx
+			.get_mut(key)
+			.expect("sent")
+			.end();
 	}
 
 	/// The changes that bring what `peer` was sent for `id` under `prefix` to what this
@@ -2401,8 +2404,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 	}
 
-	/// Forget each dead hop no heard route names once its timer fired, each doubt no
-	/// heard route names under [`Lift::Unnamed`], and each told hop no sent route names.
+	/// Forget each dead hop no heard route names once its timer fired, and each
+	/// told hop no sent route names. Tests also compare early doubt collection.
 	fn collect_doubt(&mut self) {
 		let named: BTreeSet<Hop> = self
 			.dead
@@ -2412,6 +2415,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.collect();
 		self.dead
 			.retain(|hop, state| named.contains(hop) || matches!(state, Death::Waiting { .. }));
+		#[cfg(test)]
 		if self.doubt.lift == Lift::Unnamed {
 			let lifted: Vec<Id> = self
 				.doubted

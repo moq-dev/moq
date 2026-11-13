@@ -66,7 +66,7 @@ unless the table says otherwise.
 | `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | twenty minutes |
 | `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
-| `Overlap.cfg` | Five relays, three asking for `"a"`, with overlapping cheap broad and dear narrow paths. Simulated past the message budget. | 1 claim change, no session change | 4,000 behaviours requested, depth 500 | simulation |
+| `Overlap.cfg` | Five relays, three asking for `"a"`, with overlapping cheap broad and dear narrow paths. Simulated past the message budget. | 1 claim change, no session change | 1,000 behaviours per worker (4,000 on four workers), depth 500 | simulation |
 | `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Checks `RequestsLoopFree` with timer-only doubt. | 3 session changes | 979,474 at the historical early-collection failure | a few minutes |
 
 Run the affected config last, with at most one TLC process at a time. First run what answers in seconds: the router's tests (`quest gate just rs test -p moq-net --lib -E 'test(/route::tests::(handoff|residual|scope|compare)/)'`, with `MOQ_ROUTE_SCENARIOS` raising the sweeps' count), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
@@ -86,7 +86,7 @@ Sync commit: `ae0880eece449f12c1e9f9465ca63d9662e80397`, the base of the scoped 
 | `rs/moq-net/src/route/path.rs` `Router::src` | `SrcKey` |
 | `rs/moq-net/src/route/path.rs` `Router::want`, `Router::advertise`, `Router::report` | `Want`, `Advertise`, `Report` |
 | `rs/moq-net/src/route/path.rs` `Router::route`, `Router::batch`, `Router::dead`, `Router::fail`, `Router::disconnect`, `Router::connect`, `Router::change` | `Recv`, `Fail`, `Disconnect`, `Connect`, `ChangeClaim` |
-| `rs/moq-net/src/route/path.rs` `Router::collect_doubt`, `Router::timeout` | `Collect`, `Lift`, `Expire`: each dead hop's own timer retires it independently of later failures of the same node. |
+| `rs/moq-net/src/route/path.rs` `Router::collect_doubt`, `Router::timeout` | `Collect`, `Lift`, `Expire`: each dead hop's own timer retires it independently of later failures of the same node; reporting an already retained hop again does not restart its expiry. |
 | `rs/moq-net/src/route/path.rs` `Router::know`, `Router::shown_now`, `Router::show` | `Know`, `ShownNow` |
 | `rs/moq-net/src/route/reader.rs` `Reader::apply` | `Events` |
 | `rs/moq-net/src/route/tests/mod.rs` `Sim::deliver` | `Deliver` |

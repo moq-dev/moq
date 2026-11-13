@@ -33,6 +33,43 @@ fn narrowing_keeps_the_newest_covering_withdrawal() {
 	assert!(router.events().iter().all(|event| event.kind != Kind::Start));
 }
 
+/// Another report for an expired hop retires its last heard copy without
+/// restarting the hop's timer.
+#[test]
+fn repeating_an_expired_dead_hop_does_not_restart_its_timer() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	let hop = path::Hop { node: 4, session: 1 };
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		let path::Reach::Finite(mut offer) = offered(peer as Id, 0) else {
+			unreachable!()
+		};
+		offer.path = [
+			path::Hop { node: 7, session: 0 },
+			path::Hop { node: 6, session: 1 },
+			hop,
+			path::Hop {
+				node: peer as Id,
+				session: 1,
+			},
+		]
+		.into();
+		router.route(peer, 7, p(""), Some(path::Reach::Finite(offer)), 0);
+	}
+	let dead = path::Dead {
+		hop,
+		far: 6,
+		moved: Vec::new(),
+		gone: true,
+	};
+	router.dead(1, dead.clone(), Instant::ZERO);
+	let expired = Instant::ZERO.saturating_add(Doubt::DEFAULT.timer);
+	router.timeout(expired);
+	assert_eq!(router.retained().dead, 1, "the second peer still names the hop");
+	router.dead(2, dead, expired);
+	assert_eq!(router.retained().dead, 0, "the expired hop is no longer named");
+}
+
 #[test]
 fn losing_a_wide_route_does_not_forget_a_kept_narrow_view() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
@@ -62,7 +99,7 @@ fn losing_a_wide_route_does_not_forget_a_kept_narrow_view() {
 fn flapping_a_far_node_does_not_extend_older_dead_hops() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 	router.connect(1, 1, Link::default()).unwrap();
-	let mut now = Instant::now();
+	let mut now = Instant::ZERO;
 	let retained = (Doubt::DEFAULT.timer.as_nanos() / HOP.as_nanos()) as usize + 1;
 	for session in 0..3 * retained {
 		let path::Reach::Finite(mut offer) = offered(1, 0) else {
@@ -149,7 +186,7 @@ fn a_dead_repath_withdraws_its_claims_before_ending_the_sent_route() {
 			}],
 			gone: false,
 		},
-		Instant::now(),
+		Instant::ZERO,
 	);
 	let messages = router.drain();
 	let withdrawal = messages.iter().position(|message| {
@@ -759,7 +796,7 @@ fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 	for peer in [1, 2] {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
 	}
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	for node in 100..1100 {
 		router.dead(
 			1,
@@ -846,7 +883,7 @@ fn dead_replacement_paths_obey_the_same_limit_as_route_paths() {
 				}],
 				gone: true,
 			},
-			Instant::now(),
+			Instant::ZERO,
 		);
 		assert_eq!(
 			router.routes(7).any(|(_, route)| route.offer().is_some()),
@@ -906,7 +943,7 @@ fn replacing_a_childs_interest_keeps_the_hold_until_its_answer() {
 		]
 		.into();
 		router.route(2, 7, p(""), Some(path::Reach::Finite(child)), 0);
-		router.disconnect([1], Instant::now());
+		router.disconnect([1], Instant::ZERO);
 		assert!(!router.shown()[&(7, p("a/x"))].available);
 		router.events();
 		router.peer_interest(2, interest).unwrap();
@@ -960,7 +997,7 @@ fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
 		.into();
 		router.route(3, 7, p("a"), Some(path::Reach::Finite(child)), 0);
 		router.drain();
-		router.disconnect([2], Instant::now());
+		router.disconnect([2], Instant::ZERO);
 		let messages = router.drain();
 		assert!(
 			router

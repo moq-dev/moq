@@ -511,7 +511,8 @@ Fail(n, s, hop, from, moved, gone) ==
                             \* A neighbour that holds under this node answers once those behind it have.
                             ELSE IF ~Child(h.path, n) THEN [h EXCEPT !.state = "held"] ELSE h
                   ELSE IF h.state = "live" THEN [h EXCEPT !.state = "dead"] ELSE h]]
-    IN [s EXCEPT !.rx = rx1, !.dead = @ \cup {hop}, !.expiry = @ \cup {hop},
+    IN [s EXCEPT !.rx = rx1, !.dead = @ \cup {hop},
+                 !.expiry = IF hop \in s.dead THEN @ ELSE @ \cup {hop},
                  !.doubt = @ \cup ({hop[2]} \ {n}), !.wait = @ \cup ({hop[2]} \ {n})]
 
 Recv(n, s, from, msg) ==
