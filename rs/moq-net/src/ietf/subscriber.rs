@@ -5230,8 +5230,10 @@ impl Established {
 		// track may run past: a later reader subscribes afresh to the same
 		// name, and its groups continue.
 		match end {
-			// A no-op once an END_OF_TRACK declared the end, whose readers
-			// wait for a missing group only as long as the grace.
+			// Once an END_OF_TRACK declared the end at the newest group, this
+			// ends the copy's wait for the keys below it that never arrived:
+			// every data stream is accounted for, so with sparse starts they
+			// never existed.
 			Ok(()) => {
 				let _ = self.track.finish_shared();
 			}
