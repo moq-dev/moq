@@ -40,10 +40,12 @@ export interface Counted {
 export class Tail {
 	// The sequences accounted for, whose gaps fold once the grace stops waiting for them.
 	#ledger = new Ledger();
-	// Group streams whose header arrived, those still being read, and those of them excused.
+	// Group streams whose header arrived, and those still being read and holding the end.
 	#streams = 0;
 	#active = 0;
-	#excused = 0;
+	// Streams still being read that the end waits for at most the grace, until a settle gives up
+	// on them, as the ledger does on a gap.
+	#excused = new Set<object>();
 	#changed = new Signal(0);
 	#grace: () => Duration;
 	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under that
@@ -108,11 +110,12 @@ export class Tail {
 		this.#account(sequence, sequence + 1n);
 
 		let state: "held" | "excused" | "done" = "held";
+		const token = {};
 		return {
 			done: () => {
 				if (state === "done") return;
 				if (state === "held") this.#active -= 1;
-				else this.#excused -= 1;
+				else this.#excused.delete(token);
 				state = "done";
 				this.#bump();
 			},
@@ -120,7 +123,7 @@ export class Tail {
 				if (state !== "held") return;
 				state = "excused";
 				this.#active -= 1;
-				this.#excused += 1;
+				this.#excused.add(token);
 				this.#bump();
 			},
 		};
@@ -242,7 +245,13 @@ export class Tail {
 		);
 		try {
 			while (closed.peek() === undefined) {
-				if (this.#active === 0 && (expired || (this.#excused === 0 && complete()))) return;
+				if (this.#active === 0 && expired) {
+					// Given up on, so a later settle, such as the one the publisher's FIN starts, does
+					// not wait another grace for them.
+					this.#excused.clear();
+					return;
+				}
+				if (this.#active === 0 && this.#excused.size === 0 && complete()) return;
 				await Signal.race(this.#changed, closed);
 			}
 		} finally {

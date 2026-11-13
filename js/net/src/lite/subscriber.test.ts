@@ -1732,12 +1732,19 @@ test.each(["before", "after"] as const)(
 			const group = await track.recvGroup();
 			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 			if (order === "after") await respond(request, version, [drop]);
-			await respond(request, version, [{ finish: new SubscribeFinish(1n) }], true);
+			await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 			await drainReactions();
 
+			let fin = false;
+			void request.finished.then(() => {
+				fin = true;
+			});
 			await clock.advance(GRACE.div(2));
-			expect(track.closed.peek()).toBeUndefined();
+			expect(fin).toBe(false);
 			await clock.advance(GRACE);
+			expect(fin).toBe(true);
+			// The publisher's FIN in reply ends the track at once, without another grace.
+			request.inbound.close();
 			expect(await track.recvGroup()).toBeUndefined();
 			expect(await track.closed).toBeNull();
 		} finally {
