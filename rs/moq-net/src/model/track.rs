@@ -9612,6 +9612,7 @@ impl Subscriber {
 
 	/// [`Self::poll_recv_group`], handing out the next group only if its sequence lies in
 	/// `admit`: one outside stays next, and the read is `Pending` without parking on it.
+	#[cfg(feature = "async")]
 	pub(crate) fn poll_recv_group_in(
 		&mut self,
 		admit: (ops::Bound<u64>, ops::Bound<u64>),
