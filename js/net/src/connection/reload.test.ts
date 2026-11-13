@@ -385,13 +385,14 @@ test("a page hide after give-up does not retry the failed URL", async () => {
 
 for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, SessionCode.Expired]) {
 	test(`a session rejected with ${code} surfaces the code and redials`, async () => {
+		using clock = manual();
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");
 		const closes: (Error | null)[] = [];
 		let server: MockTransport | undefined;
-		let dials = 0;
+		const dials = new Signal(0);
 		const stub = function StubWebTransport() {
-			dials++;
+			dials.update((n) => n + 1);
 			const pair = createMockTransportPair(Lite.ALPN_06);
 			server = pair.server;
 			void accept(pair.server, url);
@@ -421,7 +422,7 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 		try {
 			// The code reaches the app rather than being flattened away, and the loop redials
 			// like after any other close instead of judging the error's kind.
-			await waitUntil(() => dials >= 2);
+			await clock.drive(waitFor(dials, (n) => n >= 2));
 			expect(closes.find((e) => e instanceof SessionError)).toBeInstanceOf(SessionError);
 			expect((closes.find((e) => e instanceof SessionError) as SessionError).code).toBe(code);
 			expect(reload.error.peek()).toBeUndefined();
