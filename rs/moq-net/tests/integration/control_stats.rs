@@ -2,6 +2,8 @@
 
 //! Control counters cross real protocol drivers, including legacy multiplexing.
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use crate::support::{
 	harness::{MockConnectOptions, connect_mock, now, spawn, subscribed},
 	mock::create_mock_session_pair,
@@ -10,8 +12,6 @@ use moq_net::{
 	Timescale, origin,
 	stats::{Message, Registry, Tier},
 };
-use crate::support::AppendNext;
-use crate::support::AtStart;
 
 fn origin() -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(Default::default());

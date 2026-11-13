@@ -14,8 +14,8 @@
 //! them.
 
 use crate::support;
-use support::AppendNext;
 use moq_net::track::Delay;
+use support::AppendNext;
 
 use std::time::Duration;
 

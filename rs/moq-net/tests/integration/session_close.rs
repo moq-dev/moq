@@ -6,8 +6,8 @@
 //! Deterministic: simulated time over the mock transport.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 

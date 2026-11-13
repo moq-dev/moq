@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use moq_net::{Version, origin, track};
 
-use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 use crate::support::AppendNext;
 use crate::support::AtStart;
+use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
@@ -567,11 +567,7 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 		let mut newer = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
 		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
 		newer.close().unwrap();
-		assert_eq!(
-			next!("the newer group waits behind the late one").start,
-			3,
-			"{version}"
-		);
+		assert_eq!(next!("the newer group waits behind the late one").start, 3, "{version}");
 		drop(held);
 	}
 }
@@ -780,10 +776,7 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 				.unwrap_or_else(|_| panic!("{version}: the newer group never arrives"))
 				.unwrap()
 				.unwrap();
-			assert_ne!(
-				group.start, 8,
-				"{version}: the newer group waits behind the late one"
-			);
+			assert_ne!(group.start, 8, "{version}: the newer group waits behind the late one");
 			if group.start == 11 {
 				break;
 			}

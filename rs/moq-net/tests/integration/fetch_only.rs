@@ -7,8 +7,8 @@
 //! the fetches that report where the track ends.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

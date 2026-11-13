@@ -1429,9 +1429,10 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 									assert!(viewer.subscribers[0].poll_recv_group(waiter).is_pending());
 								}
 								loop {
-									if cluster.tracks[0].subscription().is_some_and(|subscription| {
-										subscription.ranges == [from(future)]
-									}) {
+									if cluster.tracks[0]
+										.subscription()
+										.is_some_and(|subscription| subscription.ranges == [from(future)])
+									{
 										return std::task::Poll::Ready(());
 									}
 									if cluster.tracks[0].poll_subscription_changed(waiter).is_pending() {

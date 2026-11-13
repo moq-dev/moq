@@ -6,8 +6,8 @@
 //! frame never keeps a larger receive allocation alive.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 

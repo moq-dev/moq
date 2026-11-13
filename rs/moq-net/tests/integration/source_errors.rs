@@ -7,8 +7,8 @@
 //! moq-transport's PUBLISH_DONE registry has no code for either error.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 

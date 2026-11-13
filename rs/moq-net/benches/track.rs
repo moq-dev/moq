@@ -1707,9 +1707,7 @@ fn bench_range_widening(c: &mut Criterion) {
 						.with_delay(track::Delay::default().with_max(AGED_BUDGET))
 						.with_ranges([span(0, 0)]);
 					let mid = cached / 2;
-					let wide = narrow
-						.clone()
-						.with_ranges([span(0, 0), span(mid, mid + WIDENED - 1)]);
+					let wide = narrow.clone().with_ranges([span(0, 0), span(mid, mid + WIDENED - 1)]);
 					let waiter = kio::Waiter::noop();
 					let readers: Vec<_> = (0..readers)
 						.map(|_| {

@@ -5,15 +5,15 @@
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use futures::StreamExt;
 
+use moq_net::Version;
 use moq_net::transport::poll::{RecvStream as _, SendStream as _, Session as _};
-use moq_net::{Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.

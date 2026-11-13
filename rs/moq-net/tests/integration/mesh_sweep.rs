@@ -25,9 +25,9 @@ use futures::channel::mpsc;
 use moq_net::{Instance, Timescale, Version, cache, origin, stats, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
-use crate::support::{self, Rng};
 use crate::support::AppendNext;
 use crate::support::AtStart;
+use crate::support::{self, Rng};
 
 const VERSION: &str = "moq-lite-07-wip";
 

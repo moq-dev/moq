@@ -9,17 +9,17 @@
 //! subscribes, and the publisher then resets every group still on the wire.
 
 use crate::support;
-use support::AtStart;
-use support::AppendNext;
 use moq_net::track::Delay;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use futures::channel::mpsc::TryRecvError;
 use futures::{SinkExt, StreamExt};
 
+use moq_net::Version;
 use moq_net::track::Subscription;
-use moq_net::{Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,

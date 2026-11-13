@@ -4,9 +4,9 @@
 //! viewers ask for it, and keeps serving the cached copy after a reader leaves.
 
 use crate::support;
-use support::AppendNext;
 use moq_net::{Version, origin, track};
 use std::time::Duration;
+use support::AppendNext;
 use support::harness::{MockConnectOptions, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {

@@ -13,8 +13,8 @@ use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TcpStream, TrackStream};
 use moq_net::{Error, StreamError, Version, frame, group, origin, track};
 
-use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 use crate::support::AppendNext;
+use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 

@@ -11,8 +11,8 @@
 //! from then on, so its holder follows the `Restart` instead.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 

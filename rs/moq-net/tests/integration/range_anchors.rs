@@ -115,7 +115,10 @@ fn anchored() -> [(Range, Vec<u64>); 6] {
 		(range(zero, Some(Anchor::Relative(1))), vec![0, 1000, 2000, 3000]),
 		(range(zero, Some(Anchor::Time(2500))), vec![0, 1000, 2000]),
 		(range(Anchor::Relative(2), Some(Anchor::Relative(1))), vec![2000, 3000]),
-		(range(Anchor::Time(1500), Some(Anchor::Time(3500))), vec![1000, 2000, 3000]),
+		(
+			range(Anchor::Time(1500), Some(Anchor::Time(3500))),
+			vec![1000, 2000, 3000],
+		),
 	]
 }
 
@@ -156,7 +159,11 @@ async fn each_wire_refuses_only_the_anchors_it_drops() {
 async fn every_wire_carries_the_live_and_oldest_starts() {
 	for version in VERSIONS {
 		let live = read(Some(version), Range::live()).await;
-		assert_eq!(live.unwrap().last(), Some(&4000), "{version}: live reads the latest group");
+		assert_eq!(
+			live.unwrap().last(),
+			Some(&4000),
+			"{version}: live reads the latest group"
+		);
 		let mut oldest = read(Some(version), Range::oldest()).await.unwrap();
 		oldest.sort_unstable();
 		let want: &[u64] = match *version {

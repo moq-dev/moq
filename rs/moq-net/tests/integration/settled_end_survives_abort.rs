@@ -6,10 +6,10 @@
 //! consumer that has not read them yet still gets them, then the clean end.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
-use moq_net::{Error};
+use moq_net::Error;
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
 /// and superseded groups stay readable.

@@ -255,7 +255,9 @@ async fn datagrams_arrive_as_published() {
 			.unwrap()
 			.expect("a datagram");
 		let keyed = expected(version) == Arrives::Keys;
-		let timestamp = datagram.timestamp.map(|timestamp| timestamp.convert(Timescale::MILLI).unwrap());
+		let timestamp = datagram
+			.timestamp
+			.map(|timestamp| timestamp.convert(Timescale::MILLI).unwrap());
 		assert_eq!(timestamp, keyed.then(|| millis(datagram.sequence)), "{version}");
 		assert_eq!(timescale, keyed.then_some(Timescale::MILLI), "{version}");
 	}
@@ -293,7 +295,9 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 		let mut fetched = waiting.await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().unwrap();
 		let keyed = expected(version) == Arrives::Keys;
-		let timestamp = frame.timestamp.map(|timestamp| timestamp.convert(Timescale::MILLI).unwrap());
+		let timestamp = frame
+			.timestamp
+			.map(|timestamp| timestamp.convert(Timescale::MILLI).unwrap());
 		assert_eq!(timestamp, keyed.then(|| millis(3)), "{version}");
 	}
 }

@@ -12,12 +12,12 @@
 //! Time is paused, so the one-second grace for a group that never arrives is free.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,

@@ -80,7 +80,9 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 		}
 		Stage::MidResponse => {
 			let mut group = request.accept(0, timed()).unwrap();
-			group.write_frame(group.at_start(), Bytes::from_static(b"head")).unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"head"))
+				.unwrap();
 
 			let mut fetched = waiting.await.unwrap();
 			let frame = fetched.read_frame().await.unwrap().unwrap();
@@ -99,7 +101,9 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 				.unwrap();
 
 			// No hop cached the head as the whole group: a fresh fetch reads it all.
-			group.write_frame(group.at_start(), Bytes::from_static(b"tail")).unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"tail"))
+				.unwrap();
 			group.close().unwrap();
 			let mut fetched = kio::clock::timeout(Duration::from_secs(5), track.fetch_group(0, None))
 				.await
@@ -113,8 +117,12 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 		}
 		Stage::Drained => {
 			let mut group = request.accept(0, timed()).unwrap();
-			group.write_frame(group.at_start(), Bytes::from_static(b"head")).unwrap();
-			group.write_frame(group.at_start(), Bytes::from_static(b"tail")).unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"head"))
+				.unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"tail"))
+				.unwrap();
 
 			let mut fetched = waiting.await.unwrap();
 			for expected in [&b"head"[..], b"tail"] {

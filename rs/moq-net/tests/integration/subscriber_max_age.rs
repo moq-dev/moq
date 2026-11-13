@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use moq_net::{Version, origin, track};
 
-use crate::support::harness::{peer, spawn};
 use crate::support::AppendNext;
 use crate::support::AtStart;
+use crate::support::harness::{peer, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));

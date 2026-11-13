@@ -3,8 +3,8 @@
 //! A group finished with no frames reaches the subscriber as an empty group.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 

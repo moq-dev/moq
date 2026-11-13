@@ -6,8 +6,8 @@
 //! `model::resume`'s staged copies.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 

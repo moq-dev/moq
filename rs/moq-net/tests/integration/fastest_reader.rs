@@ -10,9 +10,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::{Timestamp, Version, origin, track, transport::ReceiveWindow};
 
-use crate::support::harness::{MockPair, peer, spawn};
 use crate::support::AppendNext;
 use crate::support::AtStart;
+use crate::support::harness::{MockPair, peer, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 

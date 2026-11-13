@@ -1,8 +1,8 @@
 //! The explicit-time model works without async helpers or a runtime.
 
+use crate::support::AtStart;
 use moq_net::{Error, broadcast, frame, group, origin, track};
 use std::task::Poll;
-use crate::support::AtStart;
 
 fn ready<T>(value: Poll<T>) -> T {
 	match value {

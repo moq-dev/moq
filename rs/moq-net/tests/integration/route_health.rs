@@ -12,9 +12,9 @@ use super::route_change::{Delivery, link, payload, priced_link, produce_origin, 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use crate::support::AppendNext;
 use futures::channel::mpsc;
 use moq_net::{Error, StreamError, Timestamp, Version, origin, track};
-use crate::support::AppendNext;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 

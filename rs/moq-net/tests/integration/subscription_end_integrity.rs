@@ -20,12 +20,12 @@
 //! send" step is an idle-advance rather than a race.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.

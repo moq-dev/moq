@@ -219,7 +219,11 @@ impl Sparse {
 			.with_ranges(std::iter::once(span(0, 0)).chain((1..=ranges).map(|i| span(i * STRIDE + 1, i * STRIDE + 1))));
 		let mut reader = track.subscribe(subscription);
 		let groups = usize::try_from(ranges).unwrap() + 1;
-		assert_eq!(drain(&mut reader), groups, "each range holds the group it starts inside");
+		assert_eq!(
+			drain(&mut reader),
+			groups,
+			"each range holds the group it starts inside"
+		);
 		Self {
 			_broadcast: broadcast,
 			track,

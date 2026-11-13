@@ -17,8 +17,8 @@
 //! same way.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::collections::BTreeMap;
 use std::time::Duration;

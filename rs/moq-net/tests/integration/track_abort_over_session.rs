@@ -4,8 +4,8 @@
 //! subscriber on the far side of one session.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 

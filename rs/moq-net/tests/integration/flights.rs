@@ -15,8 +15,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::{Version, cache, frame, group, origin, track};
 
-use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 use crate::support::AppendNext;
+use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 

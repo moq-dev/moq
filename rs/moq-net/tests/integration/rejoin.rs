@@ -3,8 +3,8 @@
 //! A reader leaving and rejoining a track relayed over the in-memory mock transport.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
@@ -262,7 +262,10 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 			}
 
 			pair.server_transport.hold_unis();
-			let rejoin = remote.track("video").unwrap().subscribe(prefs().with_ranges([support::keys(0..)]));
+			let rejoin = remote
+				.track("video")
+				.unwrap()
+				.subscribe(prefs().with_ranges([support::keys(0..)]));
 			let release = async {
 				kio::clock::sleep(Duration::from_millis(100)).await;
 				pair.server_transport.release_unis_reversed();

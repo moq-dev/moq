@@ -34,7 +34,9 @@ fn timed() -> Info {
 
 fn write_group(track: &moq_net::track::Producer, key: u64) {
 	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-	group.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
+	group
+		.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+		.unwrap();
 	group.close().unwrap();
 }
 
@@ -293,7 +295,9 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 				let mut got = Vec::new();
 				for _ in 0..2 {
 					got.push(next(&mut reader).await.unwrap_or_else(|| {
-						panic!("{version} relay={relay} finished={finished}: a mixed range group is missing; got {got:?}")
+						panic!(
+							"{version} relay={relay} finished={finished}: a mixed range group is missing; got {got:?}"
+						)
 					}));
 				}
 				got.sort_unstable();
@@ -321,7 +325,9 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		}
 		seen.sort_unstable();
 		assert_eq!(seen, [2, 3, 5]);
-		reader.update(initial.clone().with_ranges([support::keys(0..6)])).unwrap();
+		reader
+			.update(initial.clone().with_ranges([support::keys(0..6)]))
+			.unwrap();
 		let mut got = Vec::new();
 		for _ in 0..3 {
 			let seen = next(&mut reader).await;
@@ -329,7 +335,9 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		}
 		got.sort_unstable();
 		assert_eq!(got, [0, 1, 4], "relay={relay}");
-		reader.update(initial.clone().with_ranges([support::keys(4..5)])).unwrap();
+		reader
+			.update(initial.clone().with_ranges([support::keys(4..5)]))
+			.unwrap();
 		kio::clock::timeout(
 			TIMEOUT,
 			kio::wait(|waiter| {
@@ -354,10 +362,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		.await
 		.expect("the narrowed range never reached the publisher");
 		reader.update(initial.with_ranges([support::keys(0..)])).unwrap();
-		let mut group = fixture
-			.track
-			.create_group(moq_net::group::Info { start: 6 })
-			.unwrap();
+		let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6).unwrap(), b"later".as_slice())
 			.unwrap();
@@ -428,10 +433,7 @@ async fn draft22_carries_time_ends_as_group_ids() {
 async fn draft22_can_widen_while_the_current_group_is_quiet() {
 	for relay in [false, true] {
 		let fixture = range_fixture(relay).await;
-		let mut quiet = fixture
-			.track
-			.create_group(moq_net::group::Info { start: 6 })
-			.unwrap();
+		let mut quiet = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 		quiet
 			.write_frame(Timestamp::from_millis(6).unwrap(), b"head".as_slice())
 			.unwrap();
@@ -489,7 +491,9 @@ async fn draft18_updates_narrow_then_widen() {
 		}
 		seen.sort_unstable();
 		assert_eq!(seen, [5], "{version} relay={relay}");
-		reader.update(initial.clone().with_ranges([support::keys(6..7)])).unwrap();
+		reader
+			.update(initial.clone().with_ranges([support::keys(6..7)]))
+			.unwrap();
 		// Group 5 is the newest, so until a later one starts it holds time 6: the narrowed
 		// range still asks from it.
 		let narrowed = Range {
@@ -519,10 +523,7 @@ async fn draft18_updates_narrow_then_widen() {
 		for key in 6..8 {
 			let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
-				.write_frame(
-					Timestamp::from_millis(key).unwrap(),
-					key.to_be_bytes().as_slice(),
-				)
+				.write_frame(Timestamp::from_millis(key).unwrap(), key.to_be_bytes().as_slice())
 				.unwrap();
 			group.close().unwrap();
 		}
@@ -572,10 +573,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 				reader.poll_recv_group(&kio::Waiter::noop()),
 				std::task::Poll::Ready(Ok(None))
 			));
-			let mut group = fixture
-				.track
-				.create_group(moq_net::group::Info { start: 6 })
-				.unwrap();
+			let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(6).unwrap(), b"sibling".as_slice())
 				.unwrap();
@@ -604,10 +602,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			)
 			.await
 			.unwrap_or_else(|_| panic!("{version} relay={relay}: empty demand retained a wire subscription"));
-			let mut group = fixture
-				.track
-				.create_group(moq_net::group::Info { start: 7 })
-				.unwrap();
+			let mut group = fixture.track.create_group(moq_net::group::Info { start: 7 }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(7).unwrap(), b"resumed".as_slice())
 				.unwrap();
@@ -629,7 +624,9 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		for start in [0, 1, 2] {
 			let future = start + 1;
-			reader.update(initial.clone().with_ranges([support::keys(future..)])).unwrap();
+			reader
+				.update(initial.clone().with_ranges([support::keys(future..)]))
+				.unwrap();
 			// A time start names the newest group starting at or before it, so once the copy
 			// holds a group, the narrowing still asks from the newest one.
 			let narrowed = support::keys(start.checked_sub(1).unwrap_or(future)..);
@@ -660,7 +657,9 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 					.unwrap();
 				group.close().unwrap();
 			}
-			reader.update(initial.clone().with_ranges([support::keys(start..)])).unwrap();
+			reader
+				.update(initial.clone().with_ranges([support::keys(start..)]))
+				.unwrap();
 			let mut keys = Vec::new();
 			for _ in start..future {
 				let mut group = kio::clock::timeout(TIMEOUT, reader.recv_group())

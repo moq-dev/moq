@@ -133,12 +133,14 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 
 	let mut old = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 	for _ in 0..3 {
-		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..]).unwrap();
+		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..])
+			.unwrap();
 	}
 	old.close().unwrap();
 	let mut live = track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 	for _ in 0..2 {
-		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..]).unwrap();
+		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..])
+			.unwrap();
 	}
 
 	if newest_first {
@@ -252,12 +254,14 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	upstream.server_transport.hold_unis();
 	let mut old = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 	for _ in 0..3 {
-		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..]).unwrap();
+		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..])
+			.unwrap();
 	}
 	old.close().unwrap();
 	let mut live = track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 	for _ in 0..2 {
-		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..]).unwrap();
+		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..])
+			.unwrap();
 	}
 	// Both streams open before paused time advances; 10ms stays below linger.
 	kio::clock::sleep(Duration::from_millis(10)).await;

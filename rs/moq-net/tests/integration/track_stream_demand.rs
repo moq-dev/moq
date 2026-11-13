@@ -9,8 +9,8 @@
 //! `used` with a round trip per hop in between.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 

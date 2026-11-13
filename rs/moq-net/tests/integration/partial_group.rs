@@ -5,9 +5,9 @@
 //! not cache the frames it already has as the whole group.
 
 use crate::support;
-use support::AtStart;
-use support::AppendNext;
 use moq_net::track::Delay;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 

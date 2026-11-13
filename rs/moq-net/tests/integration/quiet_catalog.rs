@@ -6,8 +6,8 @@
 //! must still get it.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::{future::Future, time::Duration};
 

@@ -10,8 +10,8 @@
 //! the path now, rather than the drained worker.
 
 use crate::support;
-use support::AtStart;
 use support::AppendNext;
+use support::AtStart;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 

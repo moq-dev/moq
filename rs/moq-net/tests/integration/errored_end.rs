@@ -5,9 +5,9 @@
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
 use crate::support;
-use support::AtStart;
-use support::AppendNext;
 use moq_net::track::Delay;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
