@@ -22,7 +22,7 @@ pub enum AudioLayout {
 
 impl AudioLayout {
 	/// Refuse a channel count this layout cannot carry.
-	pub(crate) fn check(&self, channel_count: u32) -> crate::Result<()> {
+	pub fn check(&self, channel_count: u32) -> crate::Result<()> {
 		if *self == Self::Ambisonic {
 			let order = channel_count.isqrt();
 			if order < 2 || order * order != channel_count {

@@ -59,6 +59,7 @@
 		"demo/boy",
 		"demo/web",
 		"demo/carla/web",
+		"demo/vr",
 		"test/audio-quality/clients/js",
 		"test/interop/clients/js",
 		"test/interop/clients/js-native",

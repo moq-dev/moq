@@ -20,6 +20,7 @@ questions to a harness. For builds and CI selection, see the
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 | [stream-credit](stream-credit/README.md) | `just test stream-credit` | a browser tab reads 300 live tracks past its ~100-stream WebTransport cap, the highest priority first, and nothing hangs |
 | qmux | `just test qmux` | `@moq/qmux`, as client and as server, interoperates with the Rust qmux 0.6.3 release on every QMux draft |
+| vr | `just test vr` | `demo/vr` paints a stereo 360 broadcast per eye facing forward, and its ambisonic decode follows the head |
 | video | `just test video` | the `@moq/video` renderer paints through WebGPU and falls back to Canvas2D after losing the GPU |
 | [json-properties](json-properties.md) | `just test json-properties` | both Snapshot codecs reconstruct, and both Window codecs emit the exact events for, random JSON sequences with replayable seeds |
 

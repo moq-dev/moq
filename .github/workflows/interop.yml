@@ -160,6 +160,14 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
+      - name: VR projection
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test vr
+        shell: bash -leo pipefail {0}
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+
       - name: Interop negative control
         id: negative
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}

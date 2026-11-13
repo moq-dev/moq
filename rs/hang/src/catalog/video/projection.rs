@@ -47,7 +47,7 @@ impl UnknownProjection {
 
 impl Projection {
 	/// Refuse a field of view outside (0, 360] degrees.
-	pub(crate) fn check(&self) -> crate::Result<()> {
+	pub fn check(&self) -> crate::Result<()> {
 		if let Self::Equirectangular { fov: Some(fov) } = self
 			&& !(*fov > 0.0 && *fov <= 360.0)
 		{

@@ -373,6 +373,8 @@ pub struct Producer<E: CatalogExt = ()> {
 	order: super::estimate::Order,
 	/// What each media track minted under this catalog has written. See [`stats`](Self::stats).
 	sent: Arc<crate::stats::Registry<crate::stats::Sent>>,
+	/// Stamped onto each rendition's config. See [`Config::with_spatial`].
+	spatial: Arc<super::Spatial>,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -386,6 +388,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			bandwidth: self.bandwidth.clone(),
 			order: self.order.clone(),
 			sent: self.sent.clone(),
+			spatial: self.spatial.clone(),
 		}
 	}
 }
@@ -403,6 +406,7 @@ pub struct Config<E: CatalogExt = ()> {
 	max_age: Option<std::time::Duration>,
 	bandwidth: moq_net::bandwidth::Allocator,
 	clock: Option<crate::Clock>,
+	spatial: super::Spatial,
 }
 
 impl Default for Config<()> {
@@ -412,6 +416,7 @@ impl Default for Config<()> {
 			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			clock: None,
+			spatial: super::Spatial::default(),
 		}
 	}
 }
@@ -427,6 +432,7 @@ impl<E: CatalogExt> Config<E> {
 			max_age: self.max_age,
 			bandwidth: self.bandwidth,
 			clock: self.clock,
+			spatial: self.spatial,
 		}
 	}
 
@@ -471,6 +477,15 @@ impl<E: CatalogExt> Config<E> {
 	/// nothing a sender can follow.
 	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
 		self.bandwidth = bandwidth;
+		self
+	}
+
+	/// Stamp `spatial` onto every video and audio rendition whose config leaves those fields unset.
+	///
+	/// A rendition it contradicts, such as an ambisonic layout on a stereo track, is refused when
+	/// its config is set.
+	pub fn with_spatial(mut self, spatial: super::Spatial) -> Self {
+		self.spatial = spatial;
 		self
 	}
 }
@@ -532,6 +547,7 @@ impl<E: CatalogExt> Producer<E> {
 			bandwidth: config.bandwidth,
 			order: Default::default(),
 			sent: Default::default(),
+			spatial: Arc::new(config.spatial),
 		})
 	}
 
@@ -958,6 +974,11 @@ impl<E: CatalogExt> Producer<E> {
 	/// A fresh estimator whose `delay` is measured against this catalog's other renditions.
 	pub(crate) fn estimator(&self) -> super::Estimator {
 		super::Estimator::with_order(self.order.clone())
+	}
+
+	/// What each rendition's config is stamped with. See [`Config::with_spatial`].
+	pub(crate) fn spatial(&self) -> &super::Spatial {
+		&self.spatial
 	}
 
 	/// The allocator passthrough tracks claim on. fMP4 writes groups by hand, so it reads this itself.
@@ -3680,5 +3701,59 @@ mod test {
 		assert_eq!(msf_sent(&catalog), Some(0));
 		let track = &msf_wire(&catalog).tracks[0];
 		assert_eq!((track.bitrate, track.delay), (Some(1_000_000), None));
+	}
+
+	#[test]
+	fn spatial_fills_only_what_a_rendition_leaves_unset() {
+		use hang::catalog::{AudioLayout, Projection, Stereo};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let spatial = super::super::Spatial {
+			projection: Some(Projection::Equirectangular { fov: Some(180.0) }),
+			stereo: Some(Stereo::LeftRight),
+			layout: Some(AudioLayout::Ambisonic),
+		};
+		let catalog = Producer::new(&mut broadcast, Config::default().with_spatial(spatial)).unwrap();
+
+		let stamped = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		let mut declared = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		declared.stereo = Some(Stereo::TopBottom);
+		let audio = AudioConfig::new(AudioCodec::Opus, 48_000, 4);
+
+		let mut keep = Vec::new();
+		for (name, config) in [("stamped", stamped), ("declared", declared)] {
+			let track = broadcast.create_track(name, None).unwrap();
+			let wire = super::super::hang::Container::try_from(&config).unwrap();
+			keep.push(catalog.video(track, wire, config).unwrap());
+		}
+		let track = broadcast.create_track("ambisonic", None).unwrap();
+		let wire = super::super::hang::Container::try_from(&audio).unwrap();
+		let _audio = catalog.audio(track, wire, audio).unwrap();
+
+		let snapshot = catalog.snapshot();
+		let stamped = &snapshot.video.renditions["stamped"];
+		assert_eq!(stamped.projection, Some(Projection::Equirectangular { fov: Some(180.0) }));
+		assert_eq!(stamped.stereo, Some(Stereo::LeftRight));
+		assert_eq!(snapshot.video.renditions["declared"].stereo, Some(Stereo::TopBottom));
+		assert_eq!(snapshot.audio.renditions["ambisonic"].layout, Some(AudioLayout::Ambisonic));
+	}
+
+	#[test]
+	fn spatial_refuses_a_rendition_it_contradicts() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let spatial = super::super::Spatial {
+			layout: Some(hang::catalog::AudioLayout::Ambisonic),
+			..Default::default()
+		};
+		let catalog = Producer::new(&mut broadcast, Config::default().with_spatial(spatial)).unwrap();
+
+		let stereo = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		let track = broadcast.create_track("stereo", None).unwrap();
+		let wire = super::super::hang::Container::try_from(&stereo).unwrap();
+		let Err(err) = catalog.audio(track, wire, stereo) else {
+			panic!("an ambisonic stereo rendition was accepted");
+		};
+		assert!(matches!(err, crate::Error::Hang(hang::Error::InvalidAmbisonicChannels(2))));
+		assert!(catalog.snapshot().audio.renditions.is_empty());
 	}
 }

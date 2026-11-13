@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use super::Estimate;
 use super::Producer;
+use super::Spatial;
 use super::hang::{Catalog, CatalogExt};
 
 /// A catalog config that can be published as a named rendition.
@@ -111,6 +112,12 @@ pub trait RenditionConfig<E: CatalogExt>: Clone + Send + 'static {
 
 	/// Replace the config's [`Estimate`] fields. Defaults to discarding them.
 	fn set_estimate(&mut self, _estimate: Estimate) {}
+
+	/// Fill the fields of [`Spatial`] this config leaves unset, refusing a result it can't carry.
+	/// Defaults to ignoring it.
+	fn spatial(&mut self, _spatial: &Spatial) -> crate::Result<()> {
+		Ok(())
+	}
 }
 
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::JsonConfig {
@@ -322,6 +329,9 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::VideoConfig {
 		self.delay = estimate.delay;
 		self.framerate = estimate.framerate;
 	}
+	fn spatial(&mut self, spatial: &Spatial) -> crate::Result<()> {
+		spatial.video(self)
+	}
 }
 
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
@@ -349,6 +359,9 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
 		self.jitter = estimate.jitter;
 		self.bitrate = estimate.bitrate;
 		self.delay = estimate.delay;
+	}
+	fn spatial(&mut self, spatial: &Spatial) -> crate::Result<()> {
+		spatial.audio(self)
 	}
 }
 
@@ -682,6 +695,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			Self::check_decrease(&published, &resolved)?;
 		}
 		config.set_estimate(resolved.clone());
+		config.spatial(self.catalog.spatial())?;
 		{
 			let mut guard = self.catalog.modify()?;
 			write(&mut guard, &self.name, config)?;
@@ -826,10 +840,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	}
 
 	/// Write `config` into the catalog, leaving the caller to choose how the guard publishes it.
-	fn stage(&mut self, config: C) -> crate::Result<super::Guard<'_, E>> {
+	fn stage(&mut self, mut config: C) -> crate::Result<super::Guard<'_, E>> {
 		if !self.present {
 			return Err(self.unpublished());
 		}
+		config.spatial(self.catalog.spatial())?;
 		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
 		let mut guard = self.catalog.modify()?;
 		write(&mut guard, &self.name, config)?;
