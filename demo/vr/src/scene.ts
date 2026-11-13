@@ -212,7 +212,11 @@ export class Scene {
 	// Turn the content to face wherever the viewer is looking.
 	#recentre = () => {
 		const head = this.#head();
-		// TODO(human)
+		head.getWorldPosition(this.#headPosition);
+		head.getWorldDirection(this.#headDirection);
+		const yaw = Math.atan2(-this.#headDirection.x, -this.#headDirection.z);
+		this.#content.rotation.set(0, yaw, 0);
+this.#content.position.set(this.#headPosition.x, 0, this.#headPosition.z);
 		this.#content.updateMatrixWorld();
 	};
 
