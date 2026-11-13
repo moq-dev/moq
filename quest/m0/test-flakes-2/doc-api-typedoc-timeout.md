@@ -20,4 +20,3 @@ TypeDoc's run out of the timed body, rather than raising the timeout.
 
 ## Related
 
-- [Interop's go -> cpp cell holds up under load](/quest/m0/test-flakes-2/interop-go-cpp.md) - quarantined from the same PR

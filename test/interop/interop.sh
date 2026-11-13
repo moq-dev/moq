@@ -50,7 +50,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_PUB_LIVE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE INTEROP_QUARANTINED RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_PUB_LIVE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -87,6 +87,8 @@ IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
+# 1 runs the quarantined cells too, to reproduce a flake its quest investigates.
+QUARANTINED="${INTEROP_QUARANTINED:-0}"
 
 # Binaries under test. Built from source below unless overridden to point at a
 # prebuilt (mirrors test/smoke's RELAY_BIN/CLI_BIN escape hatch).
@@ -1789,6 +1791,14 @@ run_finishes() {
         return
     fi
     for pub in "${PUB_LIST[@]}"; do
+        # Quarantined: quest/m0/test-flakes-2/interop-finish-fallback.md.
+        if [[ "$QUARANTINED" -eq 0 && "$pub" == rust ]]; then
+            for sub in "${SUB_LIST[@]}"; do
+                echo "  SKIP  finish $pub -> $sub (quarantined)"
+                record skip case=finish publisher="$pub" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-finish-fallback.md"
+            done
+            continue
+        fi
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
         # moq-transport requests name prefixes alone.
