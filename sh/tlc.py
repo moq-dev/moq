@@ -76,12 +76,20 @@ def claim(base):
     return meta, fd
 
 
+def release(base, meta):
+    """Remove this run's metadir under the lock a sweep holds, so neither sees the other's half-removed one."""
+    with open(base / ".lock", "w") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        shutil.rmtree(meta, ignore_errors=True)
+
+
 def main(argv):
     if not argv:
         sys.exit("usage: sh/tlc.py <spec.tla> [tlc args...]")
     spec, args = argv[0], argv[1:]
     java, cp = classpath()
-    meta, fd = claim(ROOT / ".tmp/tlc")
+    base = ROOT / ".tmp/tlc"
+    meta, fd = claim(base)
     # Turn a SIGTERM into an ordinary exit so the metadir is removed; SIGINT
     # already reaches TLC through the terminal's process group.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
@@ -93,7 +101,7 @@ def main(argv):
     except KeyboardInterrupt:
         status = 130
     finally:
-        shutil.rmtree(meta, ignore_errors=True)
+        release(base, meta)
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu = after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime
     print(f"tlc: {cpu:.0f} core-seconds in {time.monotonic() - start:.0f}s", file=sys.stderr)
