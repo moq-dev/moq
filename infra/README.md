@@ -157,7 +157,7 @@ self-hosted runner `nixos-moq-ci` (label `moq-queue`, with its local caches and
 main ruleset requires its `Queue` context and the merge queue, so only the
 queue (or the administrator bypass) lands on `main`. moq-dev/quest's queue
 watcher, `quest land watch`, runs on the maintainer's NixOS host
-(kixel-ai/nixos, `modules/quest-land.nix`)
+(kixel-ai/dotfiles, `nixos/modules/quest-land.nix`)
 with moq-bot's key: it comments on each PR the queue drops, runs the Codex
 fixer, and re-enqueues the result.
 See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landing.
