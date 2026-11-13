@@ -1348,6 +1348,10 @@ export class Producer {
 			const closed = producer.#cached.get(sequence)?.group.closed;
 			return closed?.peek() === undefined ? closed : undefined;
 		};
+		hooks.arrivingIn = (producer, start, end) =>
+			cachedIn(producer, start, end).filter(
+				(sequence) => producer.#cached.get(sequence)?.group.closed.peek() === undefined,
+			);
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		startsOf = (producer) => producer.#bounds;

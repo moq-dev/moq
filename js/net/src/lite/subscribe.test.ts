@@ -559,7 +559,7 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	const live = new LiveRanges(version, [a, b]);
 	const step = async (ranges: WireRange[], remove: bigint[], add: WireRange[]) => {
 		const edit = sent.edit(ranges);
-		expect(edit).toEqual({ remove, add });
+		expect(edit).toEqual({ remove, add, fillIds: [] });
 		const update = new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add });
 		const got = await SubscribeUpdate.decode(
 			new Reader(undefined, await encodeMessage(version, update), version),

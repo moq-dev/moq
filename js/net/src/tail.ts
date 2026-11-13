@@ -1,5 +1,5 @@
 import { type Duration, now, sleep } from "@moq/clock";
-import { type GetPromise, Signal } from "@moq/signals";
+import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { READER_RUN_OVERHEAD, type Reader } from "./cache.ts";
 import { insertRun, type Run, runGaps } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
@@ -192,6 +192,21 @@ export class Tail {
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
 	demand(start: bigint, end: bigint): void {
 		this.#ledger.demand(start, end, now());
+	}
+
+	/** The parts of `[start, end)` accounted for: a stream arrived, a drop named them, or the grace gave up. */
+	accounted(start: bigint, end: bigint): Run[] {
+		return runGaps(this.#ledger.gaps(start, end), start, end);
+	}
+
+	/** Whether a group stream is still being read. */
+	get reading(): boolean {
+		return this.#active > 0;
+	}
+
+	/** Bumped on every change {@link settle} watches. */
+	get changed(): Getter<number> {
+		return this.#changed;
 	}
 
 	/** Whether every sequence in `[start, end)` is accounted for. */

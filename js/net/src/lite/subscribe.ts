@@ -499,8 +499,16 @@ export class LiveRanges {
 	 * to retire and the ranges to add. A range already live keeps its Range ID, so an update that
 	 * changes one range sends only that one, and the publisher keeps where the rest resolved.
 	 * Before lite-07 replaced ranges take fresh Range IDs.
+	 *
+	 * The last `fills` of `ranges` ask for fills, and `isFill` names the live ones that do: a fill
+	 * asking for what a demand range does still takes a range of its own, so each Range ID stays
+	 * the demand's or a fill's. `fillIds` are the Range IDs the added fill ranges took.
 	 */
-	edit(ranges: readonly WireRange[]): { remove: bigint[]; add: WireRange[] } {
+	edit(
+		ranges: readonly WireRange[],
+		fills = 0,
+		isFill: (id: bigint) => boolean = () => false,
+	): { remove: bigint[]; add: WireRange[]; fillIds: bigint[] } {
 		if (ranges.length === 0) throw new Error(EMPTY_RANGE);
 		if (!hasRanges(this.#version)) {
 			const same =
@@ -510,30 +518,39 @@ export class LiveRanges {
 				this.#live.clear();
 				this.#add(ranges);
 			}
-			return { remove: [], add: [...ranges] };
+			return { remove: [], add: [...ranges], fillIds: [] };
 		}
+		const demand = ranges.length - fills;
+		const key = (range: WireRange, fill: boolean) => `${fill ? "f" : "d"}${rangeKey(range)}`;
 		// Each live range keeps at most one wanted copy, so duplicates edit like any other.
 		const wanted = new Map<string, number>();
-		for (const range of ranges) wanted.set(rangeKey(range), (wanted.get(rangeKey(range)) ?? 0) + 1);
+		ranges.forEach((range, index) => {
+			const k = key(range, index >= demand);
+			wanted.set(k, (wanted.get(k) ?? 0) + 1);
+		});
 		const remove: bigint[] = [];
 		for (const [id, range] of this.#live) {
-			const key = rangeKey(range);
-			const count = wanted.get(key) ?? 0;
-			if (count > 0) wanted.set(key, count - 1);
+			const k = key(range, isFill(id));
+			const count = wanted.get(k) ?? 0;
+			if (count > 0) wanted.set(k, count - 1);
 			else remove.push(id);
 		}
 		// In the order asked for, so the publisher numbers them the way this side does.
-		const add = ranges.filter((range) => {
-			const key = rangeKey(range);
-			const count = wanted.get(key) ?? 0;
-			if (count === 0) return false;
-			wanted.set(key, count - 1);
-			return true;
+		const add: WireRange[] = [];
+		const fillIds: bigint[] = [];
+		const first = this.#next;
+		ranges.forEach((range, index) => {
+			const k = key(range, index >= demand);
+			const count = wanted.get(k) ?? 0;
+			if (count === 0) return;
+			wanted.set(k, count - 1);
+			add.push(range);
+			if (index >= demand) fillIds.push(first + BigInt(add.length - 1));
 		});
 		for (const id of remove) this.#remove(id);
 		this.#add(add);
 		if (this.#size > Message.MAX_MESSAGE_SIZE) throw new Error("too many ranges for one SUBSCRIBE");
-		return { remove, add };
+		return { remove, add, fillIds };
 	}
 }
 
