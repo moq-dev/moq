@@ -571,8 +571,18 @@ impl Copy {
 	}
 
 	fn update(&mut self, reader: &Subscription) {
+		self.reopen();
 		let wire = self.wire(reader);
 		self.send(wire);
+	}
+
+	/// Read this copy again: one that ran out under the reader's old ranges, budget, or
+	/// bounds may hold a group the new ones admit, and runs out again at once otherwise. A
+	/// copy that failed stays failed.
+	fn reopen(&mut self) {
+		if matches!(self.done, Some(Ok(()))) {
+			self.done = None;
+		}
 	}
 
 	/// Ask for `wire` instead, answered or not.
@@ -1966,6 +1976,7 @@ impl Reader {
 	fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
 		let passed = std::mem::replace(&mut self.groups, (start, end)).0;
 		for copy in &mut self.copies {
+			copy.reopen();
 			let start = copy.start(start);
 			if let Sub::Ready(sub) = &mut copy.sub {
 				sub.set_range((Bound::Included(start), end.map_or(Bound::Unbounded, Bound::Excluded)));
@@ -4547,6 +4558,52 @@ mod test {
 		let mut sub = sub.with_range(..);
 		assert_eq!(drain(&mut sub, false), vec![0]);
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "nothing goes out twice");
+	}
+
+	/// A reader that ran out of a finished track under a cap and ranges short of its last
+	/// group reads that group once both widen past it, whichever widens last, as a
+	/// publisher's reader does when an update reaches for the rest of an ended track.
+	#[test]
+	fn a_widened_reader_reads_a_finished_tracks_group_it_ran_out_before() {
+		for ranges_first in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let mut a = copy();
+			routes.serve(a.consume());
+			write(&a, 407);
+			a.finish_at(Position::group(408), None).unwrap();
+			let history = Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges([track::Range {
+					start: track::Anchor::Time(0),
+					end: Some(track::Anchor::Time(406)),
+				}]);
+			let sub = logical.consume().subscribe(history).now_or_never().unwrap().unwrap();
+			let mut sub = sub.with_range(0..407);
+			let Poll::Ready(ended) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+				panic!("the history read ends")
+			};
+			assert!(ended.unwrap().is_none(), "ranges_first={ranges_first}");
+
+			let everything = sub.subscription().with_ranges([track::Range {
+				start: track::Anchor::Oldest,
+				end: None,
+			}]);
+			let mut sub = match ranges_first {
+				true => {
+					sub.update(everything).unwrap();
+					assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "the cap still ends at 407");
+					sub.with_range(0..)
+				}
+				false => {
+					let mut sub = sub.with_range(0..);
+					assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "the ranges still end at 407");
+					sub.update(everything).unwrap();
+					sub
+				}
+			};
+			assert_eq!(drain(&mut sub, false), [407], "ranges_first={ranges_first}");
+		}
 	}
 
 	/// Lowering a resumed reader's floor offers the groups below the old floor that only a

@@ -44,6 +44,7 @@ mod idle_session;
 mod implementation;
 mod instance;
 mod late_lower_group;
+mod late_tail_reader;
 mod lazy_discovery;
 mod mesh_sweep;
 mod mesh_withdraw;
