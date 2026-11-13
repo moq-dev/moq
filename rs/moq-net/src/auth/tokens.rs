@@ -254,11 +254,21 @@ impl Configured {
 		let (link, id) = match self.session.as_ref()? {
 			Connected::Slot { link, id } => (link, id),
 			Connected::Accepted { link } => {
-				let link = state.links.get(link).filter(|link| link.closed.is_none())?;
-				return link.accepted.then_some(Ok(()));
+				let link = state.links.get(link)?;
+				return match (link.accepted, &link.closed) {
+					(true, _) => Some(Ok(())),
+					// Closed before accepting it: the close is the answer, since the connection
+					// keeps redialing with the same credential and nothing else would answer.
+					(false, Some(err)) => Some(Err(err.clone())),
+					(false, None) => None,
+				};
 			}
 		};
-		let link = state.links.get(link).filter(|link| link.closed.is_none())?;
+		let link = state.links.get(link)?;
+		if let Some(err) = &link.closed {
+			// Cut off unanswered, like a session that closed before accepting it.
+			return link.cut.contains(id).then(|| Err(err.clone()));
+		}
 		let slot = link.slots.get(id)?;
 		match slot.phase.ended() {
 			// The moq-transport SETUP that carried it accepted it before the peer declined AUTH.
@@ -802,8 +812,6 @@ mod tests {
 		let set = Tokens::new(tokens(&["connection"]));
 		let link = dial_awaiting_setup(&set);
 		link.close(Error::Session(SessionError::Unauthorized));
-		assert!(answered(&set).is_pending(), "a refused session accepted the credential");
-		set.handle().abort(Error::Session(SessionError::Unauthorized));
 		refused(&set, SessionError::Unauthorized);
 	}
 
