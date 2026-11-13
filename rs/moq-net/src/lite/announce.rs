@@ -1337,7 +1337,10 @@ mod tests {
 			crate::coding::decode_buf(&mut &wire[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v))
 		};
 		assert!(decode(&[13, 4, 7, 4, 0, 0]).is_err(), "no hops, so no carrier");
-		assert!(decode(&[13, 7, 7, 4, 3, 3, 5, 9, 6]).is_err(), "a carrier past the hops");
+		assert!(
+			decode(&[13, 7, 7, 4, 3, 3, 5, 9, 6]).is_err(),
+			"a carrier past the hops"
+		);
 		let mut long = vec![13, 37, 7, 4, 0, 33];
 		long.extend([1; 33]);
 		assert!(decode(&long).is_err(), "33 hops");
