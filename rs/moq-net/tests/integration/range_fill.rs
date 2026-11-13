@@ -41,6 +41,12 @@ struct Fixture {
 impl Fixture {
 	/// A lite-07 publisher holding `groups` for good, and a copy whose cache expires them.
 	async fn new(groups: u64) -> Self {
+		Self::spaced(groups, 1).await
+	}
+
+	/// [`Self::new`] with the groups `spacing` keys apart, each appended, so the publisher
+	/// skips the keys between them.
+	async fn spaced(groups: u64, spacing: u64) -> Self {
 		let publisher = origin(1, Some(cache::Pool::unbounded()));
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
@@ -53,10 +59,13 @@ impl Fixture {
 			)
 			.unwrap();
 		broadcast.announce().unwrap();
-		for key in 0..groups {
-			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		for index in 0..groups {
+			let mut group = match spacing {
+				1 => track.create_group(moq_net::group::Info { start: index }).unwrap(),
+				spacing => track.append_group(index * spacing).unwrap(),
+			};
 			group
-				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.write_frame(Timestamp::from_millis(index * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
 			group.close().unwrap();
 		}
@@ -159,6 +168,37 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 			subscribes + 2,
 			"recovered for the later reader"
 		);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Recovering history over sparse keys gets the publisher's skips of the keys between the
+/// groups on the recovery's own subscription, which the copy records rather than refusing.
+#[kio::test]
+async fn sparse_history_is_recovered_across_its_skips() {
+	kio::clock::timeout(TIMEOUT + cache::DEFAULT_EXPIRY * 3, async {
+		let fixture = Fixture::spaced(6, 1000).await;
+		let mut first = fixture.subscribe([Range::oldest()]).await;
+		let keys: BTreeSet<u64> = (0..6).map(|index| index * 1000).collect();
+		assert_eq!(receive(&mut first, 6).await, keys);
+
+		// Superseded, the copy expires them, while the reader keeps the subscription live.
+		kio::clock::sleep(cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+		let subscribes = fixture.opened(SUBSCRIBE);
+		let mut second = fixture.subscribe([support::keys(1000..4000)]).await;
+		assert_eq!(receive(&mut second, 3).await, [1000, 2000, 3000].into());
+		assert_eq!(fixture.opened(SUBSCRIBE), subscribes + 1, "recovered on one SUBSCRIBE");
+		assert_eq!(fixture.opened(FETCH), 0, "nothing fetched");
+
+		// The session survives the skips, so the live subscription goes on.
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let mut group = fixture.track.append_group(6000).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.close().unwrap();
+		assert_eq!(receive(&mut first, 1).await, [6000].into());
 	})
 	.await
 	.expect("timed out");

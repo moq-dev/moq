@@ -414,6 +414,8 @@ impl Refusal {
 /// publisher gives it up, then FINs and waits for the publisher's FIN in reply.
 struct Recovery {
 	serve: TrackServe,
+	/// The copy the recovered groups land in, which records what the publisher skipped.
+	serving: track::Producer,
 	id: u64,
 	groups: Range<u64>,
 	state: RecoveryState,
@@ -452,6 +454,7 @@ impl Recovery {
 		let establish = serve.register(subscription, ranges, Some(copy));
 		Self {
 			serve: serve.clone(),
+			serving: serving.clone(),
 			id: establish.id,
 			groups,
 			state: RecoveryState::Establish(Box::new(establish)),
@@ -564,6 +567,15 @@ impl Recovery {
 						}
 						Ok(Some(lite::SubscribeResponse::Drop(dropped))) => {
 							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
+						}
+						// Never produced, such as the keys between two sparse group starts: the copy
+						// records the skip, as the subscription itself does, and a fill owing one
+						// is answered.
+						Ok(Some(lite::SubscribeResponse::Skip(skipped))) => {
+							if !skipped.groups.is_empty() {
+								self.serving.skip_received(skipped.groups.clone());
+								given_up(skipped.groups, Refusal::dropped(StreamError::NotFound));
+							}
 						}
 						// Nothing at or past the track's end will be produced.
 						Ok(Some(lite::SubscribeResponse::Finish(finish))) if active.end.is_none() => {
