@@ -424,7 +424,7 @@ test("the route layer round-trips on draft-07", async () => {
 	).rejects.toThrow();
 });
 
-test("the route layer refuses the last seqno and Node ID 0", async () => {
+test("the route layer refuses the last seqno, Node ID 0, unknown flags, and too many hops", async () => {
 	const v = Version.DRAFT_07;
 	const last = { seqno: ROUTE_MAX, metric: 0n, downOnly: false, rtt: undefined, hops: [] };
 	await expect(
@@ -453,24 +453,35 @@ test("the route layer refuses the last seqno and Node ID 0", async () => {
 		await w.u62(0n);
 		await w.u8(0);
 	});
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, zero, v), v)).rejects.toThrow(ProtocolViolation);
+	// What the sender only forwarded is refused, the message decoded all the same, so the receiver
+	// withdraws the route and keeps the stream.
+	const decode = (wire: Uint8Array) => decodeAnnounceBroadcast(new Reader(undefined, wire, v), v);
+	expect(await decode(zero)).toEqual({
+		status: "refused",
+		message: { kind: "routeStart", node: 0n },
+		reason: "node",
+	});
 	const maxed = await forged(async (w) => {
 		await w.u62(1n);
 		await w.u62(ROUTE_MAX);
 		await w.u62(0n);
 		await w.u8(0);
 	});
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, maxed, v), v)).rejects.toThrow(ProtocolViolation);
-	// A flag no version defines, and the RTT flag without its field.
-	for (const flags of [4, 2]) {
-		const flagged = await forged(async (w) => {
+	expect(await decode(maxed)).toEqual({
+		status: "refused",
+		message: { kind: "routeStart", node: 1n },
+		reason: "seqno",
+	});
+	// A flag no version defines is refused, and the RTT flag without its field is malformed.
+	const flagged = (flags: number) =>
+		forged(async (w) => {
 			await w.u62(1n);
 			await w.u62(0n);
 			await w.u62(0n);
 			await w.u8(flags);
 		});
-		await expect(decodeAnnounceBroadcast(new Reader(undefined, flagged, v), v)).rejects.toThrow();
-	}
+	expect(await decode(await flagged(4))).toMatchObject({ status: "refused", reason: "flags" });
+	await expect(decode(await flagged(2))).rejects.toThrow();
 	// More hops than a route may carry, refused before reading them.
 	const overHops = await forged(async (w) => {
 		await w.u62(1n);
@@ -479,7 +490,7 @@ test("the route layer refuses the last seqno and Node ID 0", async () => {
 		await w.u8(0);
 		await w.u53(ROUTE_MAX_HOPS + 1);
 	});
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, overHops, v), v)).rejects.toThrow(ProtocolViolation);
+	expect(await decode(overHops)).toMatchObject({ status: "refused", reason: "hops" });
 });
 
 test("the subscriber's replies round-trip on draft-07", async () => {

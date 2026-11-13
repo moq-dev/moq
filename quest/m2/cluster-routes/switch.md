@@ -116,9 +116,8 @@ by misparse, not by version. Relays pinned to `main` roll together, as each
 earlier lite-07 wire change did.
 
 A relay refuses a route its neighbour only forwarded by withdrawing that
-route, not by closing the session
-([refuse-route](/quest/m1/refuse-route.md)). If that rule has landed, the
-rewritten codec and the path router keep it; if not, it follows this switch.
+route, not by closing the session (the draft's Refused Content section). The
+rewritten codec and the path router keep that rule.
 
 Public API: none expected. Wire: lite-07-wip only.
 
