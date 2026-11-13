@@ -20,7 +20,7 @@ farther one offers. The `residual_` tests in
 sweep over meshes with scoped relays holds the rules at every quiet point.
 
 Sessions, the wire, the draft, and `js/net` keep today's router until
-[the switch](/quest/m2/cluster-routing/routes/switch.md), so nothing a peer
+[the switch](/quest/m2/cluster-routes/switch.md), so nothing a peer
 or an application sees changes here.
 
 ## Plan
@@ -34,12 +34,12 @@ Decided 2026-11-11 (maintainer, on
 [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)): the route rule
 changes too. Babel's distance, the seqno, ROUTE_REQUEST, and the ROUTE_END
 echo go, for the rule in the
-[epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item 27.
+[epic](/quest/m2/cluster-routes/README.md)'s Plan item 27.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel), asked how that removal is split: ✅ two quests in this epic. This one
 builds the router with no wire change, and
-[the switch](/quest/m2/cluster-routing/routes/switch.md) moves the sessions,
+[the switch](/quest/m2/cluster-routes/switch.md) moves the sessions,
 the wire, the draft, and `js/net` onto it and deletes Babel's router
 (rejected: the same split with this quest in m1, since it breaks nothing;
 one quest for everything, which is one PR across the router, the wire, the
@@ -104,7 +104,7 @@ Work:
 - Update the `verify-route` skill's coverage and sync commit for the rule
   `Sim` now runs.
 
-Left to [the switch](/quest/m2/cluster-routing/routes/switch.md): the wire,
+Left to [the switch](/quest/m2/cluster-routes/switch.md): the wire,
 the draft, `route/node.rs` and the sessions, `js/net`, the epic's contract
 as built, and the deletion of today's router.
 
@@ -112,4 +112,4 @@ Public API: none (the router is crate-private). Wire: none.
 
 ## Related
 
-- [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - puts this router on the wire and deletes the one it replaces
+- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - puts this router on the wire and deletes the one it replaces

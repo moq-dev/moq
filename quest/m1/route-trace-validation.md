@@ -35,7 +35,7 @@ model grows to cover them; pick whichever costs less and say which.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): the traces come from the path router
-([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27).
+([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27).
 Once the model has the path rule, a trace of Babel's router is no behaviour
 of it, so this waits for the router too.
 
@@ -46,4 +46,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [The router runs the path rule with a route per scope](/quest/m2/cluster-routing/routes/scope.md) - the router `Sim` records, running the rule the model has
+- [The router runs the path rule with a route per scope](/quest/m2/cluster-routes/scope.md) - the router `Sim` records, running the rule the model has

@@ -2,7 +2,7 @@
 //! parts of a publisher's claims, pinned as [`Router`] behaves today.
 //!
 //! A `residual_` test asserts a bug. Each goes when the router keeps a route per
-//! scope (`quest/m2/cluster-routing/routes/scope.md`): flip its assertion there and
+//! scope (`quest/m2/cluster-routes/scope.md`): flip its assertion there and
 //! drop the prefix. The others here are rules any replacement must keep.
 
 use super::*;

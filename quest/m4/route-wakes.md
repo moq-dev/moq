@@ -82,4 +82,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the identity and selection views the index serves
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - the identity and selection views the index serves

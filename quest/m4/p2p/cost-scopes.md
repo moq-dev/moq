@@ -48,6 +48,6 @@ in Peers and native configuration. Wire: none beyond shared routing and existing
 
 ## Required
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - route identities and route ordering
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - route identities and route ordering
 - [Signaling and policy](/quest/m4/p2p/signal.md) - explicit application peer selection
 - [moq-cli joins](/quest/m4/p2p/cli.md) - matching native controls

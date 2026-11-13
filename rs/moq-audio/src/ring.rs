@@ -149,11 +149,17 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 
 	let convert = (input_rate != output_rate).then(|| Box::new(Convert::new(channels, input_rate, output_rate)));
 
-	let latency = ((config.latency.as_secs_f64() * output_rate as f64).round() as usize).max(1);
-	// What the resampler holds back already delays the output, so the queue
-	// primes only the remainder.
-	let delay = convert.as_ref().map_or(0, |convert| convert.resampler.output_delay());
-	let latency = latency.checked_sub(delay).filter(|&latency| latency > 0).unwrap_or(1);
+	// A zero latency primes nothing and keeps no depth, for a writer whose clock
+	// already carries its own.
+	let latency = if config.latency.is_zero() {
+		0
+	} else {
+		let latency = ((config.latency.as_secs_f64() * output_rate as f64).round() as usize).max(1);
+		// What the resampler holds back already delays the output, so the queue
+		// primes only the remainder.
+		let delay = convert.as_ref().map_or(0, |convert| convert.resampler.output_delay());
+		latency.checked_sub(delay).filter(|&latency| latency > 0).unwrap_or(1)
+	};
 	// Below 50 Hz a chunk is one input frame, up to a second of output, so the
 	// room above the latency must hold one chunk to admit it at all, and two so
 	// that admitting one does not trigger a trim.
@@ -380,17 +386,23 @@ impl Producer {
 			Some(since) => frames(since),
 			None => frames(self.base - at).wrapping_neg(),
 		};
+		self.due_frame(at, frames(stretch), frames(jumped));
+	}
+
+	/// [`due`](Self::due) on a clock counted in frames, wrapping, for a writer
+	/// whose reader passes the same clock to [`Consumer::read_at_frame`].
+	pub(crate) fn due_frame(&mut self, at: usize, stretch: usize, jumped: usize) {
 		// Within a few seconds of the writer's end, unless the caller's clock is
 		// off by hours, which saturates rather than wraps.
 		let clock = (self.head().wrapping_sub(at) as isize).clamp(i32::MIN as isize, i32::MAX as isize) as i32;
-		let stretch = u32::try_from(frames(stretch)).unwrap_or(u32::MAX);
+		let stretch = u32::try_from(stretch).unwrap_or(u32::MAX);
 		// Released, so a reader that sees it also sees the target set before it.
 		self.shared
 			.anchor
 			.store(u64::from(stretch) << 32 | u64::from(clock as u32), Ordering::Release);
 		self.shared.clocked.store(true, Ordering::Release);
 		// After the anchor, so a reader that sees the jump also sees the clock it moved.
-		self.shared.jumped.fetch_add(frames(jumped), Ordering::Release);
+		self.shared.jumped.fetch_add(jumped, Ordering::Release);
 	}
 
 	/// Convert silence until the resampler has emitted the full duration of
@@ -435,6 +447,11 @@ impl Producer {
 
 	pub(crate) fn latency(&self) -> Duration {
 		self.latency
+	}
+
+	/// Frames at the reader's rate the queue still has room for.
+	pub(crate) fn vacant(&self) -> usize {
+		self.ring.vacant_len() / self.channels
 	}
 
 	/// How much audio is queued ahead of the reader.
@@ -648,9 +665,15 @@ impl Consumer {
 	/// the device's callback from there, which may outlast `output`: a refill
 	/// after an underrun waits until they are queued.
 	pub(crate) fn read_at(&mut self, output: &mut [f32], now: Instant, demand: usize) -> Read {
+		let now = (now.saturating_duration_since(self.base).as_secs_f64() * self.rate as f64).round() as usize;
+		self.read_at_frame(output, now, demand)
+	}
+
+	/// [`read_at`](Self::read_at) on the frame clock [`Producer::due_frame`] counts.
+	pub(crate) fn read_at_frame(&mut self, output: &mut [f32], now: usize, demand: usize) -> Read {
 		self.start();
 		self.demand = demand;
-		self.now = (now.saturating_duration_since(self.base).as_secs_f64() * self.rate as f64).round() as usize;
+		self.now = now;
 		let whole = output.len() - output.len() % self.channels;
 		output[whole..].fill(0.0);
 		if !self.shared.pushed.load(Ordering::Relaxed) {
@@ -969,6 +992,13 @@ impl Consumer {
 	/// Accept pushes without reading first, as a read would.
 	pub(crate) fn start(&self) {
 		self.shared.read.store(true, Ordering::Relaxed);
+	}
+
+	/// Frames played or skipped so far, on the frame clock
+	/// [`read_at_frame`](Self::read_at_frame) counts: a writer that maps its
+	/// own clock onto this one lines `now` up with it while nothing is queued.
+	pub(crate) fn consumed(&self) -> usize {
+		self.consumed
 	}
 
 	/// Frames ready to read, or zero before the writer's first push.
