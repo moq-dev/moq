@@ -15,7 +15,7 @@
 //! A route covers a prefix: the one its receiver asked for, or a narrower one a
 //! node on its path asked for. A stream answering a prefix carries the sender's
 //! routes inside it under their own prefixes, and one for the prefix itself from
-//! the narrowest of the sender's routes covering it. A node keeps one view of a
+//! the cheapest usable route covering it. A node keeps one view of a
 //! publisher's claims per prefix: the newest floor any believed route covering
 //! that prefix gave it, kept whole while it holds a route covering the prefix. It
 //! shows each claim from the narrowest view above it, available while a live
@@ -1110,18 +1110,18 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				self.repath(&key, peer, offer.clone());
 				continue;
 			}
-			let me = self.hop;
 			if reported {
 				if gone {
 					self.forget_heard(&key, peer);
 				} else {
+					let is_child = self.is_child(key.0, peer, &self.rx[&key][&peer].offer.path);
 					let heard = self
 						.rx
 						.get_mut(&key)
 						.and_then(|routes| routes.get_mut(&peer))
 						.expect("heard");
 					// A neighbour that holds under this node answers once those behind it have.
-					if !child(&heard.offer.path, me) {
+					if !is_child {
 						heard.state = State::Held;
 					}
 				}
@@ -1168,16 +1168,14 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		out
 	}
 
-	/// Pick the cheapest usable route for `key`, staying on the next hop among equals.
-	/// Doubt keeps this node from moving to a route, not on the one it uses. With none
-	/// left, hold or let go.
+	/// Pick the cheapest usable live route, staying on the next hop among equals.
+	/// Doubt keeps this node from moving to a route, not on the one it uses.
 	fn select(&self, key: &RouteId) -> Option<Route<N>> {
 		let was = self.routes.get(key);
 		let current = was.and_then(|route| route.next);
 		let using = current.filter(|_| was.is_some_and(Route::live));
 		type Rank<N> = (bool, Reverse<i8>, Metric, bool, N);
 		let mut best: Option<(Rank<N>, Offer)> = None;
-		let mut hope = false;
 		for (&peer, heard) in self.rx.get(key).into_iter().flatten() {
 			self.step();
 			if heard.state != State::Live || names(&heard.offer.path, self.hop) {
@@ -1189,7 +1187,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			};
 			if Some(peer) != using && self.doubts_path(&heard.offer.path) {
 				// It may come back once the doubt lifts.
-				hope = true;
 				continue;
 			}
 			let rank = (
@@ -1216,12 +1213,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			};
 			best = Some((rank, offer));
 		}
-		if let Some(((.., peer), offer)) = best {
-			return Some(Route {
-				next: Some(peer),
-				offer: Some(offer),
-			});
-		}
+		best.map(|((.., peer), offer)| Route {
+			next: Some(peer),
+			offer: Some(offer),
+		})
+	}
+
+	/// With no live route, keep what an upstream or a child has yet to answer.
+	fn retain(&self, key: &RouteId) -> Option<Route<N>> {
+		let was = self.routes.get(key);
+		let current = was.and_then(|route| route.next);
 		// Only a node that had the route holds it.
 		was?;
 		// Its next hop holds, or has yet to say what became of a dead route. A next hop
@@ -1230,7 +1231,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			(self.rx.get(key).and_then(|routes| routes.get(next)))
 				.is_some_and(|heard| heard.state != State::Live && !names(&heard.offer.path, self.hop))
 		});
-		if under.is_none() && !hope && !self.pending(key) {
+		if under.is_none() && !self.hopes(key) && !self.pending(key) {
 			return None;
 		}
 		Some(Route {
@@ -1246,38 +1247,61 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			self.step();
 			let sent = (key.0, prefix.clone());
 			(self.rx.get(&sent).and_then(|routes| routes.get(peer)))
-				.is_some_and(|heard| heard.state != State::Held && child(&heard.offer.path, self.hop))
+				.is_some_and(|heard| heard.state != State::Held && self.is_child(key.0, *peer, &heard.offer.path))
 		})
+	}
+
+	/// A returned raw key that we qualify is not an answer about the qualified key
+	/// we sent: the peer may have learned that raw route from us under another key.
+	fn is_child(&self, id: Id, peer: N, path: &[Hop]) -> bool {
+		self.name(peer, id) == id && child(path, self.hop)
 	}
 
 	/// Whether a neighbour offers a route for `key` that only doubt keeps this node off.
 	fn hopes(&self, key: &RouteId) -> bool {
-		(self.rx.get(key).into_iter().flatten()).any(|(_, heard)| {
-			heard.state == State::Live && !names(&heard.offer.path, self.hop) && self.doubts_path(&heard.offer.path)
+		(self.rx.get(key).into_iter().flatten()).any(|(peer, heard)| {
+			heard.state == State::Live
+				&& !names(&heard.offer.path, self.hop)
+				&& heard.offer.metric.checked_add(self.sessions[peer].link.cost).is_some()
+				&& self.doubts_path(&heard.offer.path)
 		})
 	}
 
 	/// The prefix of this node's own route that what it offers a stream answering
 	/// `watch` under `prefix` reflects: the route itself inside the interest, and at the
-	/// interest the narrowest live route covering it that does not name the
-	/// neighbour. Without one, reflect the narrowest live or held route so a child
-	/// can answer its loss. Preferring an unusable narrow route over a usable wider
-	/// one can keep the narrow prefix circulating after its original stream ends.
+	/// interest the cheapest live route covering it that does not name the
+	/// neighbour. Prefer the narrower scope among equal ranks. Without a usable
+	/// path, reflect a live or held route so a child can answer its loss. Preferring
+	/// a narrower route regardless of cost can make covering paths oscillate.
 	fn src(&self, id: Id, prefix: &Path, peer: N, watch: &Path) -> Path {
 		if prefix != watch {
 			return prefix.clone();
 		}
 		let covering = || ancestors(prefix).rev().map(|above| (id, above));
 		let hop = self.sessions[&peer].hop;
-		(covering().find(|key| {
-			self.routes
-				.get(key)
-				.and_then(|route| route.offer.as_ref())
-				.is_some_and(|offer| !names(&offer.path, hop))
-		}))
-		.or_else(|| covering().find(|key| self.routes.get(key).is_some_and(Route::live)))
-		.or_else(|| covering().find(|key| self.routes.contains_key(key)))
-		.map_or_else(|| prefix.clone(), |(_, prefix)| prefix)
+		let best = |usable| {
+			covering()
+				.filter_map(|key| {
+					let route = self.routes.get(&key)?;
+					let offer = route.offer.as_ref()?;
+					if usable && names(&offer.path, hop) {
+						return None;
+					}
+					let session = route.next.and_then(|next| self.sessions.get(&next));
+					let rank = (
+						session.is_some_and(|session| session.draining),
+						Reverse(session.map_or(0, |session| session.link.priority)),
+						offer.metric,
+					);
+					Some((rank, key))
+				})
+				.min_by_key(|(rank, _)| *rank)
+				.map(|(_, key)| key)
+		};
+		best(true)
+			.or_else(|| best(false))
+			.or_else(|| covering().find(|key| self.routes.contains_key(key)))
+			.map_or_else(|| prefix.clone(), |(_, prefix)| prefix)
 	}
 
 	// --- Internals: views ---
@@ -1443,10 +1467,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let Some(route) = self.routes.get(&(id, src.clone())) else {
 			return Want::End;
 		};
-		// A route qualified here is a different key from the one this next hop
-		// offered. Echoing it back would make that neighbour mistake the echo for
-		// a child of its own route under this key, and hold forever for its answer.
-		if route.next == Some(peer) && self.name(peer, id) != id {
+		// A route qualified here is a different key from the one this peer
+		// offered. Returning its own path under the qualified key would look like
+		// a child of another route. The peer cannot use that path anyway.
+		if self.name(peer, id) != id
+			&& (route.next == Some(peer)
+				|| route
+					.offer
+					.as_ref()
+					.is_some_and(|offer| names(&offer.path, self.sessions[&peer].hop)))
+		{
 			return Want::End;
 		}
 		let want = match &route.offer {
@@ -1795,8 +1825,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			let done: Vec<(RouteId, Path)> = (of(&self.sessions[peer].tx, id))
 				.filter(|(key, sent)| {
 					sent.offer.is_none()
-						&& !(self.rx.get(*key).and_then(|routes| routes.get(peer)))
-							.is_some_and(|heard| heard.state != State::Held && child(&heard.offer.path, self.hop))
+						&& !(self.rx.get(*key).and_then(|routes| routes.get(peer))).is_some_and(|heard| {
+							heard.state != State::Held && self.is_child(id, *peer, &heard.offer.path)
+						})
 				})
 				.map(|(key, sent)| (key.clone(), sent.src.clone()))
 				.collect();
@@ -1898,17 +1929,69 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		{
 			self.touched += ids.len();
 		}
+		let mut choices = Vec::new();
 		for &id in &ids {
 			if self.origins.contains_key(&id) {
 				continue;
 			}
 			for prefix in self.prefixes(id) {
 				let key = (id, prefix);
-				match self.select(&key) {
-					Some(route) => self.routes.insert(key, route),
-					None => self.routes.remove(&key),
-				};
+				let live = self.select(&key);
+				choices.push((key, live));
 			}
+		}
+		let mut held = Vec::new();
+		for (key, live) in choices {
+			match live {
+				Some(route) => {
+					self.routes.insert(key, route);
+				}
+				None => {
+					if let Some(was) = self.routes.get_mut(&key) {
+						was.offer = None;
+						held.push(key);
+					}
+				}
+			}
+		}
+		// A child can move from a held narrow route to a live broader one without
+		// changing its offered path. Plan that source before deciding which holds
+		// still await it, even when no message will come back to trigger an update.
+		let mut sources = Vec::new();
+		for (&peer, session) in &self.sessions {
+			let Some(watch) = &session.watch else { continue };
+			for &id in &ids {
+				for (key, sent) in of(&session.tx, id) {
+					if sent.offer.is_some() {
+						sources.push((
+							peer,
+							key.clone(),
+							sent.src.clone(),
+							self.src(key.0, &key.1, peer, watch),
+						));
+					}
+				}
+			}
+		}
+		for (peer, key, was, src) in sources {
+			self.step();
+			if was != src {
+				self.unreflect(peer, &key, &was);
+				self.reflect(peer, &key, &src);
+				self.sessions
+					.get_mut(&peer)
+					.expect("a session")
+					.tx
+					.get_mut(&key)
+					.expect("sent")
+					.src = src;
+			}
+		}
+		for key in held {
+			match self.retain(&key) {
+				Some(route) => self.routes.insert(key, route),
+				None => self.routes.remove(&key),
+			};
 		}
 		for &id in &ids {
 			let dirty = dirty.entry(id).or_default();

@@ -147,15 +147,19 @@ Usable(n, s, m, k) ==
 \* The key of this node's own route an offer of key k to p reflects. A stream
 \* to a scoped relay carries one route, "a": the node's route for "a" where it
 \* has a live one not naming the receiver, else its root route, which covers "a".
-\* Only echo an unusable path when no covering live route can reach the receiver:
-\* a narrow path returned to its own child must not hide a usable wider route.
+\* A narrower path cannot outrank a cheaper covering path: that preference can
+\* make neighbours oscillate between scopes. Equal costs prefer the narrow key.
+Cheapest(s, ks) == CHOOSE k \in ks : \A j \in ks :
+    \/ PathCost(s.rt[k].path) < PathCost(s.rt[j].path)
+    \/ PathCost(s.rt[k].path) = PathCost(s.rt[j].path) /\ (k = "a" \/ j = "root")
+
 SrcKey(s, p, k) ==
     IF p \notin Scoped THEN k
-    ELSE IF Live(s.rt["a"]) /\ ~Names(s.rt["a"].path, p) THEN "a"
-    ELSE IF Live(s.rt["root"]) /\ ~Names(s.rt["root"].path, p) THEN "root"
-    ELSE IF Live(s.rt["a"]) THEN "a"
-    ELSE IF Live(s.rt["root"]) THEN "root"
-    ELSE IF s.rt["a"].on THEN "a" ELSE "root"
+    ELSE LET live == {j \in Keys : Live(s.rt[j])}
+             usable == {j \in live : ~Names(s.rt[j].path, p)}
+         IN IF usable # {} THEN Cheapest(s, usable)
+            ELSE IF live # {} THEN Cheapest(s, live)
+            ELSE IF s.rt["a"].on THEN "a" ELSE "root"
 
 \* A neighbour that learned this node's route for k has yet to answer its loss.
 Pending(n, s, k) ==
@@ -196,9 +200,22 @@ OwnRoutes == [k \in Keys |-> IF k = "root"
                              THEN [on |-> TRUE, held |-> FALSE, next |-> None, path |-> <<OHop>>]
                              ELSE NoRoute]
 
+\* Plan every live route before assigning children to the routes they reflect.
+\* Keep the old keys as held placeholders until those assignments decide holds.
+PlanKey(n, s, k, gens) ==
+    LET live == SelectKey(n, s, k, gens)
+    IN IF Live(live) THEN live
+       ELSE IF s.rt[k].on THEN [s.rt[k] EXCEPT !.held = TRUE, !.path = <<>>]
+       ELSE NoRoute
+
 Select(n, s, gens) ==
     IF n = Origin THEN s
-    ELSE [s EXCEPT !.rt = [k \in Keys |-> SelectKey(n, s, k, gens)]]
+    ELSE LET planned == [s EXCEPT !.rt = [k \in Keys |-> PlanKey(n, s, k, gens)]]
+             sourced == [planned EXCEPT !.tx = [p \in Nodes |-> [k \in Keys |->
+                 IF planned.tx[p][k].on
+                 THEN [planned.tx[p][k] EXCEPT !.src = SrcKey(planned, p, k)]
+                 ELSE planned.tx[p][k]]]]
+         IN [sourced EXCEPT !.rt = [k \in Keys |-> SelectKey(n, sourced, k, gens)]]
 
 -----------------------------------------------------------------------------
 (* What a node knows of the claims: one view per key, the newest floor any   *)

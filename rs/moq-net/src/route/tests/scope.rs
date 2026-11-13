@@ -72,6 +72,87 @@ const WATCHES: [&str; 5] = ["", "", "a/", "b/", "a/x"];
 const SCOPES: [&str; 2] = ["a/", "b/"];
 const SUBJECTS: [&str; 2] = ["ga", "gb"];
 
+/// Two grants qualify the same raw key. A raw route learned from us through
+/// either grant is not a child of the qualified route we advertised separately.
+#[test]
+fn another_grant_does_not_turn_a_raw_route_into_a_qualified_child() {
+	let (relay, first, second, origin) = (0, 1, 2, 3);
+	let mut sim = Sim::with(Rule::PATH, 4);
+	for peer in [first, second] {
+		sim.link(
+			relay,
+			peer,
+			SimLink::cost(2).grant(Grant {
+				subject: "ga",
+				scope: "b",
+			}),
+			SimLink::cost(2),
+		);
+	}
+	sim.join(origin, relay, 2);
+	sim.join(origin, second, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "b/x", 0, None);
+	assert!(sim.run());
+	let key = qualified("ga", 7);
+	assert_eq!(sim.reaches(relay, key, &p("b/x")), Some(origin));
+	sim.disconnect(origin, second);
+	assert!(sim.run());
+	assert_eq!(sim.pending(), 0, "{}", mesh(&sim));
+	assert_eq!(sim.shows(relay, key, "b/x"), None);
+	assert_eq!(sim.shows(first, key, "b/x"), None);
+	assert_eq!(sim.reaches(relay, 7, &p("b/x")), Some(origin));
+}
+
+#[test]
+fn widening_past_a_childs_narrower_interest_releases_the_old_scope() {
+	let (origin, primary, relay, child) = (0, 1, 2, 3);
+	let mut sim = Sim::with(Rule::PATH, 4);
+	sim.join(origin, primary, 1);
+	sim.join(primary, relay, 1);
+	sim.join(relay, child, 1);
+	sim.watch(relay, "a");
+	sim.watch(child, "a/x");
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "a/x", 0, None);
+	sim.announce(origin, "a/y", 0, None);
+	assert!(sim.run());
+	sim.watch(relay, "");
+	assert!(sim.run());
+	assert!(
+		sim.path(relay).routes(7).all(|(_, route)| route.offer.is_some()),
+		"{}",
+		mesh(&sim)
+	);
+	assert_eq!(sim.reaches(child, 7, &p("a/x")), Some(origin));
+}
+
+#[test]
+fn overlapping_scopes_do_not_oscillate_between_covering_paths() {
+	let mut sim = Sim::with(Rule::PATH, 6);
+	for (a, b, cost) in [
+		(5, 0, 1),
+		(0, 1, 3),
+		(0, 2, 2),
+		(1, 3, 3),
+		(1, 4, 1),
+		(2, 3, 2),
+		(2, 4, 3),
+		(3, 4, 2),
+	] {
+		sim.join(a, b, cost);
+	}
+	for node in [2, 3, 4] {
+		sim.watch(node, "b");
+	}
+	sim.originate(5, 7, 0);
+	sim.announce(5, "b/x", 0, None);
+	assert!(sim.run(), "{}", mesh(&sim));
+	for node in 0..5 {
+		assert_eq!(sim.reaches(node, 7, &p("b/x")), Some(5));
+	}
+}
+
 /// Retiring a narrow stream must not leave its former route circulating while
 /// another neighbour still asks for that prefix.
 #[test]
@@ -290,7 +371,7 @@ fn presenting(sim: &Sim, id: Id, regions: impl IntoIterator<Item = Path>) -> BTr
 /// nothing of a key no path brings it.
 fn quiet(sim: &Sim, origin: Node, label: &str) {
 	sim.check().unwrap_or_else(|err| panic!("{label}: {err}"));
-	assert_eq!(sim.pending(), 0, "{label}: something waits");
+	assert_eq!(sim.pending(), 0, "{label}: something waits\n{}", mesh(sim));
 	let reach = reachable(sim, origin, 7);
 	let keys: Vec<Id> = std::iter::once(7)
 		.chain(SUBJECTS.iter().map(|subject| qualified(subject, 7)))
