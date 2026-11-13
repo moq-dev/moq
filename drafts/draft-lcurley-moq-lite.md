@@ -598,13 +598,13 @@ It sends a WARM_UPDATE when the copy it offers changes, and a WARM_END once it o
 A relay MUST NOT join a copy whose Hops name it or a neighbor whose subscription to the broadcast it serves, or whose Hops it would refuse for a route (see [Routing](#routing)), and MUST NOT join a copy of another Instance.
 Among its next hop and the copies it may join, it SHOULD pull through the cheapest: a copy costs its `Warm Cost` plus the link's cost, and the next hop without a copy the relay's metric to the origin node.
 A tie stays on the current source, then prefers a copy.
-It SHOULD NOT newly join a copy offered on a session that received a GOAWAY, unless it is its next hop's.
+It SHOULD NOT pull through a copy offered on a session that received a GOAWAY, unless it is its next hop's, and moves a pull already on one.
 
 Two relays that start carrying in the same instant would each join the other's copy for good, so copies are ranked by the Rendezvous Hash of the broadcast's path and their carrier's Hop ID, as defined in [Resolution](#resolution).
 A relay on a copy, as its carrier or by joining one still offered, MUST NOT move to another copy, its next hop's included, unless that copy's carrier is the same or ranks lower.
 A relay that pulls along its route with no reader of its own hands whatever it joins to the neighbors that pull through it, or would on their selected routes, so it is bound by their carriers instead: each such neighbor offers back its copy with Hops that begin with the relay's own route's.
 It MUST NOT join a copy other than its next hop's unless its carrier ranks at or below those of all of these offers, nor while a neighbor whose subscription it serves has offered none.
-An offer whose Hops do not begin with the relay's route was sent before the relay took that route, and binds nothing.
+An offer whose Hops do not begin with the relay's route was sent before the relay took that route, and counts as none: it bounds no carrier, and from a neighbor whose subscription the relay serves it forbids the join.
 
 The Hops keep the pulls of a broadcast free of loops once the copies offered are delivered: no relay joins a copy that passes through itself or a neighbor it serves.
 Two relays acting on each other's stale offers can still join each other until the WARM_END or WARM_UPDATE crossing their link arrives, and the pull then moves on.
@@ -1554,8 +1554,8 @@ More than 32 is a PROTOCOL_VIOLATION.
 **Hop ID**:
 The copy's Hops (see [Warm Routes](#warm-routes)), in order, the publisher's own last.
 
-A stream has at most one live warm route per route and path.
-A subscriber that uses warm routes MUST close the session with a PROTOCOL_VIOLATION on a WARM_START naming a Route ID that was never assigned or already retired, or a path its route already has a live warm route for.
+A stream has at most one live warm route per route and Broadcast: a relay still pulling an Instance for readers pinned to it offers that copy beside the one of the Instance that replaced it.
+A subscriber that uses warm routes MUST close the session with a PROTOCOL_VIOLATION on a WARM_START naming a Route ID that was never assigned or already retired, or a path and Instance its route already has a live warm route for.
 
 
 ## WARM_UPDATE {#warm-update}

@@ -73,10 +73,10 @@ for good:
   serving a legacy neighbour may still join a copy: the path check keeps out
   one through that neighbour, and refusing every copy while its subscription
   came and went kept a ring flipping.
-- **GOAWAY** keeps new pulls off the draining neighbour's copy, rather than
-  ranking it last ahead of cost, which let two relays each prefer the
-  other's propagation of the draining carrier's copy (scenario 149 without
-  holds).
+- **GOAWAY** moves every pull off a draining neighbour's copy other than
+  the next hop's, rather than ranking it last ahead of cost, which let two
+  relays each prefer the other's propagation of the draining carrier's copy
+  (scenario 149 without holds).
 - **A pull on another relay's behalf offers nothing new**, so `Serves` and
   its roots are not needed: a relay with no reader offers only a copy it
   joined, at its cost.

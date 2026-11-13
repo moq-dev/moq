@@ -34,7 +34,8 @@ const PICK: Rules = Rules::waits(4);
 #[derive(Clone, Debug)]
 enum Queue {
 	Route(Node, Node),
-	Sub(Node, Node, Cast),
+	/// One subscription stream: from, to, broadcast, stream.
+	Sub(Node, Node, Cast, u64),
 }
 
 pub(super) struct Mesh {
@@ -153,10 +154,24 @@ impl Mesh {
 		delivered
 	}
 
+	pub fn deliver_stream(&mut self, from: Node, to: Node, cast: &Cast, stream: u64) -> bool {
+		let delivered = self.sim.deliver_stream(from, to, cast, stream);
+		self.step();
+		delivered
+	}
+
+	/// The subscription streams from `from` to `to` with a change to deliver, oldest first.
+	pub fn streams(&self, from: Node, to: Node) -> Vec<u64> {
+		(self.sim.pending_subs().into_iter())
+			.filter(|(f, t, ..)| (*f, *t) == (from, to))
+			.map(|(.., stream)| stream)
+			.collect()
+	}
+
 	/// Every unheld queue with something to deliver.
 	fn busy(&self) -> Vec<Queue> {
 		(self.sim.busy().into_iter().map(|(from, to)| Queue::Route(from, to)))
-			.chain((self.sim.busy_subs().into_iter()).map(|(from, to, cast)| Queue::Sub(from, to, cast)))
+			.chain((self.sim.busy_subs().into_iter()).map(|(from, to, cast, stream)| Queue::Sub(from, to, cast, stream)))
 			.collect()
 	}
 
@@ -164,7 +179,7 @@ impl Mesh {
 		self.delivered = true;
 		match queue {
 			Queue::Route(from, to) => self.sim.deliver(*from, *to),
-			Queue::Sub(from, to, cast) => self.sim.deliver_sub(*from, *to, cast),
+			Queue::Sub(from, to, cast, stream) => self.sim.deliver_stream(*from, *to, cast, *stream),
 		};
 		self.step();
 	}
@@ -315,6 +330,7 @@ impl Mesh {
 					.filter(|&n| self.parent(n, cast) == Some(node))
 					.collect();
 				assert_eq!(relay.downstream(cast), feeds, "{label}: {cast:?} at node {node}");
+				assert_eq!(relay.streams(cast), feeds.len(), "{label}: {cast:?} at node {node}: one stream each");
 				assert!(!relay.lingering(cast), "{label}: {cast:?} at node {node}");
 				if node != origin {
 					let demand = relay.reading(cast) || !feeds.is_empty();
@@ -579,6 +595,37 @@ fn a_request_crossing_a_withdrawal_is_forwarded_without_a_loop() {
 	assert_eq!(mesh.loops, 0);
 }
 
+/// `c` moves off `b` and back while its subscriptions to `b` wait. The new stream's
+/// pull reaches `b` before the old stream's cancel, and `b` keeps feeding `c`.
+#[test]
+fn a_replacement_pull_overtaking_the_old_cancel_keeps_its_feed() {
+	let (a, b, c) = (1, 2, 3);
+	let (mut mesh, x) = chain(5);
+	mesh.read(b, &x, true);
+	mesh.read(c, &x, true);
+	assert!(mesh.settle());
+	assert_eq!(mesh.parent(c, &x), Some(b));
+	mesh.hold(c, b);
+
+	mesh.read(b, &x, false);
+	assert!(mesh.run());
+	assert_eq!(mesh.parent(c, &x), Some(a), "c leaves for the skip");
+	mesh.read(b, &x, true);
+	assert!(mesh.run());
+	assert_eq!(mesh.parent(c, &x), Some(b), "c comes back");
+
+	let streams = mesh.streams(c, b);
+	assert_eq!(streams.len(), 2, "the old cancel and the new pull wait");
+	assert!(mesh.deliver_stream(c, b, &x, streams[1]));
+	assert!(mesh.deliver_stream(c, b, &x, streams[0]));
+	assert_eq!(mesh.sim.nodes[b].downstream(&x), BTreeSet::from([c]));
+	mesh.release(c, b);
+	assert!(mesh.settle());
+	assert_eq!(mesh.parent(c, &x), Some(b));
+	mesh.steady("overtaken");
+	assert_eq!(mesh.loops, 0);
+}
+
 /// A copy of another instance of the same path is never joined: `c`'s reader of the
 /// new instance takes the skip although `b` offers the old one.
 #[test]
@@ -640,7 +687,7 @@ fn lan_relays_share_uplink_copies() {
 }
 
 /// While a broadcast is pulled, a relay loses its link toward the publisher, and
-/// later a relay drains (GOAWAY keeps new pulls off its copy).
+/// later a relay drains (GOAWAY moves pulls off its copy).
 #[test]
 fn a_lost_route_and_a_drain_move_pulls_without_a_loop() {
 	let (a, b, c) = (1, 2, 3);

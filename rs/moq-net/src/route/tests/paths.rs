@@ -23,7 +23,7 @@
 //!   route and the copies offered, which `cache.rs` proves.
 //!
 //! Left out, since the comparison does not need them: scoped grants, qualified
-//! keys, interests, priorities, upstream marks, and RTT. GOAWAY only keeps new
+//! keys, interests, priorities, upstream marks, and RTT. GOAWAY only moves
 //! pulls off a neighbour's copy.
 
 use std::{
@@ -227,10 +227,14 @@ struct Carry {
 	/// A reader of its own, such as a session that forwards nothing: the relay
 	/// carries a copy, and offers it.
 	reader: bool,
-	/// Neighbours whose subscription arrived and was not cancelled.
-	downstream: BTreeSet<Node>,
+	/// Each neighbour's subscription streams that arrived and were not cancelled. A
+	/// neighbour that moves back here opens a new stream, which can arrive before the
+	/// old one's cancel.
+	downstream: BTreeMap<Node, BTreeSet<u64>>,
 	/// The neighbour it pulls through, and whether that joins a copy.
 	parent: Option<(Node, bool)>,
+	/// The stream of the pull through `parent`.
+	stream: u64,
 	/// Demand is gone, and the copy stays until the linger runs out.
 	lingering: bool,
 }
@@ -306,13 +310,16 @@ pub(super) struct Relay {
 	/// Never sends or reads a copy: it pulls along its publisher's route alone, as
 	/// an endpoint that does not choose per broadcast.
 	pub legacy: bool,
-	/// Neighbours that sent GOAWAY: no new pull joins their copies.
+	/// Neighbours that sent GOAWAY: no pull joins, or stays on, their copies.
 	draining: BTreeSet<Node>,
 	/// The source last chosen for each broadcast, pulled or only offered on: its
 	/// neighbour, whether it is a copy, and that copy's carrier.
 	via: BTreeMap<Cast, (Node, bool, Id)>,
-	/// Subscription changes for the request streams: a pull, or a cancel.
-	subs: Vec<(Node, Cast, bool)>,
+	/// Subscription changes for the request streams: a pull, or a cancel, each on
+	/// its stream.
+	subs: Vec<(Node, Cast, u64, bool)>,
+	/// The last subscription stream opened.
+	streams: u64,
 	/// A pull moved from one neighbour to another.
 	pub moves: usize,
 	shown: BTreeMap<(Id, Path), (Rev, bool)>,
@@ -356,6 +363,7 @@ impl Relay {
 			draining: BTreeSet::new(),
 			via: BTreeMap::new(),
 			subs: Vec::new(),
+			streams: 0,
 			moves: 0,
 			shown: BTreeMap::new(),
 			out: Vec::new(),
@@ -727,21 +735,25 @@ impl Relay {
 		self.warm(Some(cast.0));
 	}
 
-	/// A subscription for `cast` from `from` arrives, or its cancel.
-	pub fn subscribed(&mut self, from: Node, cast: Cast, pull: bool) {
+	/// A subscription for `cast` from `from` arrives on `stream`, or its cancel.
+	pub fn subscribed(&mut self, from: Node, cast: Cast, stream: u64, pull: bool) {
 		if !self.sessions.contains_key(&from) {
 			return;
 		}
 		let id = cast.0;
 		let carry = self.carry.entry(cast).or_default();
+		let streams = carry.downstream.entry(from).or_default();
 		match pull {
-			true => carry.downstream.insert(from),
-			false => carry.downstream.remove(&from),
+			true => streams.insert(stream),
+			false => streams.remove(&stream),
 		};
+		if streams.is_empty() {
+			carry.downstream.remove(&from);
+		}
 		self.warm(Some(id));
 	}
 
-	/// `peer` sent GOAWAY: no new pull joins its copy.
+	/// `peer` sent GOAWAY: every pull on its copy moves off.
 	pub fn goaway(&mut self, peer: Node) {
 		if self.sessions.contains_key(&peer) && self.draining.insert(peer) {
 			self.warm(None);
@@ -757,7 +769,7 @@ impl Relay {
 			if let Some((parent, _)) = carry.parent.take()
 				&& self.sessions.contains_key(&parent)
 			{
-				self.subs.push((parent, cast.clone(), false));
+				self.subs.push((parent, cast.clone(), carry.stream, false));
 			}
 		}
 		self.warm(Some(cast.0));
@@ -773,13 +785,14 @@ impl Relay {
 	/// way never trade places round any cycle. Off a copy, it is bound the same way by
 	/// the carriers of the neighbours that pull, or would pull, along its route, since
 	/// what it joins they take with it. Left with no source and no such neighbour, it
-	/// chooses afresh. It joins no copy of a neighbour that sent GOAWAY. A tie stays on
-	/// the current source, then goes to the copy.
+	/// chooses afresh. It neither joins nor stays on a copy of a neighbour that sent
+	/// GOAWAY, unless that is its next hop's. A tie stays on the current source, then
+	/// goes to the copy.
 	pub fn source(&self, cast: &Cast) -> Option<Source> {
 		let carry = self.carry.get(cast);
 		let reader = carry.is_some_and(|carry| carry.reader);
 		let downstream = carry.map(|carry| &carry.downstream);
-		let serves: BTreeSet<Id> = (downstream.into_iter().flatten())
+		let serves: BTreeSet<Id> = (downstream.into_iter().flat_map(BTreeMap::keys))
 			.filter_map(|peer| self.sessions.get(peer))
 			.map(|session| session.hop)
 			.collect();
@@ -811,7 +824,7 @@ impl Relay {
 			Some(own) => Some(Some(own)),
 			None => (self.sessions.iter())
 				.filter_map(|(peer, session)| {
-					let pulls = downstream.is_some_and(|downstream| downstream.contains(peer));
+					let pulls = downstream.is_some_and(|downstream| downstream.contains_key(peer));
 					let behind = (session.rx.get(&cast.0)).is_some_and(|heard| child(&heard.path, self.hop));
 					let fresh = (session.copies.get(cast))
 						.filter(|copy| next.as_ref().is_some_and(|(_, path)| copy.path.starts_with(path)))
@@ -924,20 +937,25 @@ impl Relay {
 		}
 		let parent = source.filter(|_| demand || carry.lingering);
 		let old = std::mem::replace(&mut carry.parent, parent);
+		let (old, new) = (old.map(|(next, _)| next), parent.map(|(next, _)| next));
+		let stream = carry.stream;
+		if new.is_some() && old != new {
+			self.streams += 1;
+			carry.stream = self.streams;
+		}
 		if !demand && parent.is_none() {
 			self.carry.remove(cast);
 		}
-		let (old, new) = (old.map(|(next, _)| next), parent.map(|(next, _)| next));
 		if old == new {
 			return;
 		}
 		if let Some(old) = old
 			&& self.sessions.contains_key(&old)
 		{
-			self.subs.push((old, cast.clone(), false));
+			self.subs.push((old, cast.clone(), stream, false));
 		}
 		if let Some(new) = new {
-			self.subs.push((new, cast.clone(), true));
+			self.subs.push((new, cast.clone(), self.streams, true));
 		}
 		if old.is_some() && new.is_some() {
 			self.moves += 1;
@@ -1008,7 +1026,7 @@ impl Relay {
 		changed
 	}
 
-	pub fn drain_subs(&mut self) -> Vec<(Node, Cast, bool)> {
+	pub fn drain_subs(&mut self) -> Vec<(Node, Cast, u64, bool)> {
 		std::mem::take(&mut self.subs)
 	}
 
@@ -1024,8 +1042,13 @@ impl Relay {
 	pub fn downstream(&self, cast: &Cast) -> BTreeSet<Node> {
 		self.carry
 			.get(cast)
-			.map(|carry| carry.downstream.clone())
+			.map(|carry| carry.downstream.keys().copied().collect())
 			.unwrap_or_default()
+	}
+
+	/// The subscription streams for `cast` that arrived and were not cancelled.
+	pub fn streams(&self, cast: &Cast) -> usize {
+		(self.carry.get(cast)).map_or(0, |carry| carry.downstream.values().map(BTreeSet::len).sum())
 	}
 
 	/// Whether the copy of `cast` stays only while its linger runs.
@@ -1411,9 +1434,9 @@ pub(super) struct PathSim {
 	links: Vec<Vec<Option<Metric>>>,
 	up: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
-	/// Subscriptions, each broadcast's on a stream of its own, unordered against the
-	/// routes: true pulls, false cancels.
-	subs: BTreeMap<(Node, Node, Cast), VecDeque<bool>>,
+	/// Subscriptions, each on a stream of its own, unordered against the routes and
+	/// each other: true pulls, false cancels.
+	subs: BTreeMap<(Node, Node, Cast, u64), VecDeque<bool>>,
 	held: BTreeSet<(Node, Node)>,
 	/// Nodes whose process is gone and has yet to restart.
 	stopped: BTreeSet<Node>,
@@ -1481,7 +1504,7 @@ impl PathSim {
 		self.up.remove(&Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
-			self.subs.retain(|(from, to, _), _| (*from, *to) != (x, y));
+			self.subs.retain(|(from, to, ..), _| (*from, *to) != (x, y));
 			self.held.remove(&(x, y));
 			self.nodes[y].disconnect(x);
 		}
@@ -1494,7 +1517,7 @@ impl PathSim {
 		self.up.remove(&Self::pair(node, peer));
 		for key in [(node, peer), (peer, node)] {
 			self.queues.remove(&key);
-			self.subs.retain(|(from, to, _), _| (*from, *to) != key);
+			self.subs.retain(|(from, to, ..), _| (*from, *to) != key);
 			self.held.remove(&key);
 		}
 		self.nodes[peer].disconnect(node);
@@ -1576,24 +1599,39 @@ impl PathSim {
 		self.held.remove(&(from, to));
 	}
 
-	/// The subscription queues with a change to deliver that are not held.
-	pub fn busy_subs(&self) -> Vec<(Node, Node, Cast)> {
+	/// The subscription streams with a change to deliver, held or not.
+	pub fn pending_subs(&self) -> Vec<(Node, Node, Cast, u64)> {
+		self.subs.keys().cloned().collect()
+	}
+
+	/// The subscription streams with a change to deliver that are not held.
+	pub fn busy_subs(&self) -> Vec<(Node, Node, Cast, u64)> {
 		(self.subs.keys())
-			.filter(|(from, to, _)| !self.held.contains(&(*from, *to)))
+			.filter(|(from, to, ..)| !self.held.contains(&(*from, *to)))
 			.cloned()
 			.collect()
 	}
 
-	/// Deliver the next change to `cast`'s subscription from `from` to `to`.
+	/// Deliver the next change on the oldest stream of `cast`'s subscriptions from
+	/// `from` to `to`.
 	pub fn deliver_sub(&mut self, from: Node, to: Node, cast: &Cast) -> bool {
-		let key = (from, to, cast.clone());
+		let stream = (self.subs.keys()).find(|key| (key.0, key.1, &key.2) == (from, to, cast));
+		match stream.map(|key| key.3) {
+			Some(stream) => self.deliver_stream(from, to, cast, stream),
+			None => false,
+		}
+	}
+
+	/// Deliver the next change on one subscription stream from `from` to `to`.
+	pub fn deliver_stream(&mut self, from: Node, to: Node, cast: &Cast, stream: u64) -> bool {
+		let key = (from, to, cast.clone(), stream);
 		let Some(pull) = self.subs.get_mut(&key).and_then(VecDeque::pop_front) else {
 			return false;
 		};
 		if self.subs[&key].is_empty() {
 			self.subs.remove(&key);
 		}
-		self.nodes[to].subscribed(from, cast.clone(), pull);
+		self.nodes[to].subscribed(from, cast.clone(), stream, pull);
 		self.stats.delivered += 1;
 		self.flush();
 		true
@@ -1644,8 +1682,8 @@ impl PathSim {
 			for (from, to) in ready {
 				self.deliver(from, to);
 			}
-			for (from, to, cast) in subs {
-				self.deliver_sub(from, to, &cast);
+			for (from, to, cast, stream) in subs {
+				self.deliver_stream(from, to, &cast, stream);
 			}
 		}
 		false
@@ -1676,9 +1714,9 @@ impl PathSim {
 				}
 				self.queues.entry((node, to)).or_default().push_back(msg);
 			}
-			for (to, cast, pull) in self.nodes[node].drain_subs() {
+			for (to, cast, stream, pull) in self.nodes[node].drain_subs() {
 				self.stats.subscribes += 1;
-				self.subs.entry((node, to, cast)).or_default().push_back(pull);
+				self.subs.entry((node, to, cast, stream)).or_default().push_back(pull);
 			}
 			for (id, claim, kind) in self.nodes[node].events() {
 				self.events.push((node, id, claim.as_str().to_string(), kind));
