@@ -1210,10 +1210,11 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Draw a group boundary and number the next group `sequence`.
+	/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
 	///
-	/// [`cut`](Self::cut) with an explicit sequence, for a publisher whose group numbers have to
-	/// be deterministic: two encoders aligning per GOP so a consumer can fail over between them.
+	/// [`cut`](Self::cut) keyed explicitly rather than at the next keyframe's time, which has to
+	/// come after every group the track holds. Groups are keyed by their first frame's time, so
+	/// two encoders of the same content align without it.
 	pub fn seek(&self, sequence: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
@@ -1286,7 +1287,8 @@ impl MoqMediaContainerProducer {
 		result
 	}
 
-	/// Start a new segment and number its groups `sequence`.
+	/// Start a new segment whose first group starts at `sequence`, in its track's timescale, after
+	/// every group the track holds.
 	pub fn seek(&self, sequence: u64) -> Result<(), MoqError> {
 		self.driver.check()?;
 		let result = (|| {

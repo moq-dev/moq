@@ -885,7 +885,17 @@ where
 		// that doesn't pass the group's start. The open group ends whole there, so a reader can
 		// tell the marker follows it.
 		let marker = match (self.pending_start, edge) {
-			(Some(start), edge) => Some((start, edge.unwrap_or(moq_net::Timestamp::ZERO), false)),
+			// A seek keyed the next group. Its marker is stamped at the live edge, or one unit past
+			// the newest group when the edge is unknown or doesn't pass it, since starts strictly
+			// increase.
+			(Some(start), edge) => {
+				let edge = edge.unwrap_or(moq_net::Timestamp::ZERO);
+				let timestamp = match self.inner.info().timescale {
+					Some(_) => crate::start::next(&self.inner, edge)?.1,
+					None => edge,
+				};
+				Some((start, timestamp, false))
+			}
 			// Nothing was written, so there is no timeline to break.
 			(None, None) => None,
 			(None, Some(edge)) => {
@@ -1857,6 +1867,22 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_starts(consumer).await, vec![5, 10_000]);
+	}
+
+	/// A marker after a seek takes the seek's start, stamped past the groups before it even when
+	/// nothing says where their content ended.
+	#[tokio::test]
+	async fn discontinuity_after_a_seek_takes_its_start() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+
+		producer.write(frame(0, true)).unwrap();
+		producer.seek(100_000).unwrap();
+		producer.discontinuity().unwrap();
+		let _finished = producer.finish().unwrap();
+
+		assert_eq!(collect_starts(consumer).await, vec![0, 100_000]);
 	}
 
 	/// Records the frames handed to each `write`, so tests can inspect the

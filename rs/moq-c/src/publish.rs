@@ -670,11 +670,10 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Draw a group boundary and number the next group `sequence`.
+	/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
 	///
-	/// [`media_cut`](Self::media_cut) with an explicit sequence, for a caller whose group numbers
-	/// have to be deterministic: two encoders publishing the same content align per GOP so a
-	/// consumer can fail over between them.
+	/// [`media_cut`](Self::media_cut) keyed explicitly rather than at the next frame's time, which
+	/// has to come after every group the track holds.
 	pub fn media_seek(&mut self, media: Id, sequence: u64) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 		track.seek(sequence)?;
@@ -713,7 +712,7 @@ impl Publish {
 		Ok(result?)
 	}
 
-	/// Start a new segment and number its groups `sequence`.
+	/// Start a new segment whose first group starts at `sequence`, in its track's timescale.
 	pub fn container_seek(&mut self, container: Id, sequence: u64) -> Result<(), Error> {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
 		container.driver.check()?;
@@ -1045,6 +1044,11 @@ impl Publish {
 	/// Hand `fill` to C a group at a time, each once the one before it reached a reader or
 	/// nobody reads it any more, until every group is answered or nobody waits on the fill.
 	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
+		// A lookup of a time owes no group, and a request names one: drop it unanswered, as a
+		// handler that can't resolve times does, so the reader falls back to the groups held.
+		if fill.time().is_some() {
+			return;
+		}
 		let mut changes = (*fill).clone();
 		while let Some(sequence) = changes.wanted_changed().await {
 			let (pending, answered) = oneshot::channel();

@@ -3123,11 +3123,11 @@ pub extern "C" fn moq_publish_media_cut(media: u32) -> i32 {
 	})
 }
 
-/// Draw a group boundary and number the next group `sequence`.
+/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
 ///
-/// [moq_publish_media_cut] with an explicit sequence, for a caller whose group numbers have to be
-/// deterministic: two encoders publishing the same content align per GOP so a consumer can fail
-/// over between them.
+/// [moq_publish_media_cut] keyed explicitly rather than at the next frame's time, which has to come
+/// after every group the track holds. Groups are keyed by their first frame's time, so two encoders
+/// of the same content align without it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -3258,7 +3258,8 @@ pub extern "C" fn moq_publish_container_cut(container: u32) -> i32 {
 	})
 }
 
-/// Start a new segment and number its groups `sequence`.
+/// Start a new segment whose first group starts at `sequence`, in its track's timescale, after
+/// every group the track holds.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]

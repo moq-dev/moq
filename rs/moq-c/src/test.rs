@@ -2697,18 +2697,19 @@ fn raw_track_subscription_options_and_update() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
-	// A read whose ranges all end ends once it read them, so an open range far ahead keeps
-	// this one open for the update.
+	// An absolute anchor is a group's start, in the track's microseconds. A read whose ranges
+	// all end ends once it read them, so an open range far ahead keeps this one open for the
+	// update.
 	let ranges = [
 		moq_range {
 			start: moq_anchor {
 				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 1,
+				group: 20_000,
 				timestamp: moq_timestamp::default(),
 			},
 			end: moq_anchor {
 				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 2,
+				group: 20_001,
 				timestamp: moq_timestamp::default(),
 			},
 			end_present: true,
@@ -2716,7 +2717,7 @@ fn raw_track_subscription_options_and_update() {
 		moq_range {
 			start: moq_anchor {
 				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 100,
+				group: 100_000_000,
 				timestamp: moq_timestamp::default(),
 			},
 			end: moq_anchor {
@@ -2765,7 +2766,7 @@ fn raw_track_subscription_options_and_update() {
 	let widened = [
 		moq_range {
 			end: moq_anchor {
-				group: 3,
+				group: 40_001,
 				..ranges[0].end
 			},
 			..ranges[0]
@@ -2986,9 +2987,11 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 			std::ptr::null(),
 		)
 	});
-	let publish = |payload: &[u8]| {
+	// Each group starts at its frame's time, in the track's microseconds, all below the open
+	// range far ahead at 100.
+	let publish = |payload: &[u8], at: u64| {
 		assert_eq!(
-			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(0)) },
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(at)) },
 			0
 		);
 	};
@@ -3021,7 +3024,7 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 		received
 	};
 
-	publish(b"zero");
+	publish(b"zero", 0);
 	let consume = request_broadcast(origin, path);
 
 	// Group 0 only: the reader's cap sits below where the track will be. A read whose
@@ -3051,10 +3054,10 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	});
 	assert_eq!(recv(&frame_cb), b"zero");
 
-	publish(b"one");
-	publish(b"two");
+	publish(b"one", 10);
+	publish(b"two", 20);
 
-	// The latest group is the track's, group 2, not the newest one under the old cap.
+	// The latest group is the track's, at 20, not the newest one under the old cap.
 	let latest = [moq_range {
 		start: anchor(moq_anchor_kind::MOQ_ANCHOR_RELATIVE, 0),
 		end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
@@ -3975,12 +3978,12 @@ fn media_cut_bounds_audio_groups() {
 		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
 	}
 
-	// The same boundary, with the next group explicitly numbered.
+	// The same boundary, with the next group explicitly started past the last.
 	assert_eq!(
 		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(60_000)) },
 		0
 	);
-	assert_eq!(moq_publish_media_seek(media, 42), 0);
+	assert_eq!(moq_publish_media_seek(media, 100_000), 0);
 	assert_eq!(moq_publish_media_discontinuity(media), 0);
 
 	// Both report a missing importer rather than panicking on an unknown id.
@@ -6224,9 +6227,10 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 #[test]
 fn audio_raw_decode_reads_the_encoder_end() {
 	const START_US: u64 = 123_000;
-	// One partial frame, shorter than the 80 ms warmup a mid-stream join trims: decoded
-	// from the track's first packet, only the codec's pre-skip is dropped.
-	const SAMPLES: usize = 860;
+	// Past the 80 ms warmup, ending on a partial frame. The decoder primes the warmup on the
+	// first packet it reads, since a group starting past 0 doesn't say whether one came before
+	// it, so what is left past the warmup decodes.
+	const SAMPLES: usize = 4 * 960 + 860;
 
 	let origin = id(moq_origin_create());
 	let path = b"audio-raw-end-test";

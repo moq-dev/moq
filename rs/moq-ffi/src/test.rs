@@ -751,11 +751,13 @@ async fn audio_raw_publish_from_many_threads() {
 	)
 	.await
 	.unwrap();
+	// From time 0, so the decoder can tell the first packet is the track's and primes no warmup:
+	// a group starting later doesn't say whether one came before it.
 	for index in 0..8 {
 		let producer = audio.clone();
 		std::thread::spawn(move || {
 			producer.write(MoqAudioFrame {
-				timestamp: us(250_000 + index * 20_000),
+				timestamp: us(index * 20_000),
 				data: audio_tone(index as usize * 960, 960, 2),
 			})
 		})
@@ -772,7 +774,7 @@ async fn audio_raw_publish_from_many_threads() {
 			MoqAudioRead::End { end } => {
 				assert_eq!(
 					micros(end),
-					250_000 + 8 * 20_000,
+					8 * 20_000,
 					"the finish ends after the last frame"
 				);
 				continue;
@@ -781,7 +783,7 @@ async fn audio_raw_publish_from_many_threads() {
 		};
 		assert_eq!(
 			micros(frame.timestamp),
-			250_000 + pcm.len() as u64 / 2 * 1_000_000 / 48_000
+			pcm.len() as u64 / 2 * 1_000_000 / 48_000
 		);
 		pcm.extend(frame.data.as_chunks::<4>().0.iter().map(|s| f32::from_le_bytes(*s)));
 	}
@@ -2419,8 +2421,11 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 		moq_mux::catalog::hang::Container::new(&catalog_container, moq_mux::container::Kind::Video).unwrap();
 
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	// A CMAF track counts in its init's ticks.
-	let info = moq_net::track::Info::default().with_timescale(muxer.timescale());
+	// A CMAF track counts in its init's ticks. The group outlives its end, which a finished
+	// track's last group otherwise ages from.
+	let info = moq_net::track::Info::default()
+		.with_timescale(muxer.timescale())
+		.with_max_age(None);
 	let track = broadcast.create_track("video", info).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 	// Buffer both samples into one moof+mdat, which is what this decodes.
@@ -2439,7 +2444,6 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 			.unwrap();
 	}
 	let _finished = media.finish().unwrap();
-
 	let fetched = kio::clock::timeout(
 		TIMEOUT,
 		MoqMediaGroupConsumer::fetch(
