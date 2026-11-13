@@ -1320,13 +1320,17 @@ mod tests {
 	}
 
 	/// A stream reports the payload the peer acknowledged, past any WebTransport header, and
-	/// keeps reporting it after a reset drops its handle to the stream. The acknowledgement
-	/// alone wakes a delivery waiter on a stream still open, with no FIN or further write.
+	/// keeps reporting it after a reset drops its handle to the stream, whether the reset cut
+	/// an open stream or followed its acknowledged FIN. The acknowledgement alone wakes a
+	/// delivery waiter on a stream still open, with no FIN or further write.
 	#[tokio::test]
 	async fn delivered_counts_acknowledged_payload_through_a_reset() {
 		use moq_net::transport::poll::SendStream;
 
-		for framed in [false, true] {
+		for (framed, finish) in [false, true]
+			.into_iter()
+			.flat_map(|framed| [(framed, false), (framed, true)])
+		{
 			let (client, server, _endpoints) = pair().await;
 			let (client, server) = sessions(framed, client, server).await;
 			let mut send = client.open_uni(Default::default()).await.unwrap();
@@ -1344,16 +1348,22 @@ mod tests {
 			assert_eq!(read, b"payload", "framed: {framed}");
 			assert_eq!(send.delivered(), Some(7), "framed: {framed}: delivered while open");
 
-			SendStream::finish(&mut send).unwrap();
-			let (closed, ()) = tokio::join!(kio::wait(|waiter| SendStream::poll_closed(&send, waiter)), async {
-				let mut recv = recv;
-				assert!(recv.read_chunk(usize::MAX).await.unwrap().is_none(), "framed: {framed}");
-			});
-			closed.unwrap();
-			assert_eq!(send.delivered(), Some(7), "framed: {framed}");
+			if finish {
+				SendStream::finish(&mut send).unwrap();
+				let (closed, ()) = tokio::join!(kio::wait(|waiter| SendStream::poll_closed(&send, waiter)), async {
+					let mut recv = recv;
+					assert!(recv.read_chunk(usize::MAX).await.unwrap().is_none(), "framed: {framed}");
+				});
+				closed.unwrap();
+				assert_eq!(send.delivered(), Some(7), "framed: {framed}");
+			}
 
 			SendStream::reset(&mut send, 1);
-			assert_eq!(send.delivered(), Some(7), "framed: {framed}: the reset forgot it");
+			assert_eq!(
+				send.delivered(),
+				Some(7),
+				"framed: {framed}, finished: {finish}: the reset forgot it"
+			);
 		}
 	}
 
