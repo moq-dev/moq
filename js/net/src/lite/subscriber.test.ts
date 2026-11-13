@@ -1394,6 +1394,7 @@ function handStream(version: Version) {
 		write: (chunk: Uint8Array) => controller.enqueue(chunk),
 		finish: () => controller.close(),
 		reset: (code: StreamCode) => controller.error(toTransport(code, "reset")),
+		error: (err: Error) => controller.error(err),
 	};
 }
 
@@ -1645,6 +1646,59 @@ test("a yielded group pauses once an update supersedes a stale drop before its h
 		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n, frameStart: 1 }), second.reader);
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
 		expect(await group?.readFrame()).toBeUndefined();
+	} finally {
+		track.close();
+		subscriber.close();
+	}
+});
+
+// Lite-07: Firefox reports a reset that lands before the page read the stream's data as a bare
+// TypeError, dropping its code. The publisher owes that group a continuation or a drop, so the
+// group pauses as on YIELDED, and whichever comes settles it.
+test.each(["continued", "dropped"] as const)("a reset without its code pauses the group (%s)", async (then) => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: Duration.millis(60_000) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+
+		const first = handStream(version);
+		first.write(await liteFrame(300, new Uint8Array([1])));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		first.error(new TypeError("Error in input stream"));
+		await running;
+		await drainReactions();
+		expect(group?.closed.peek()).toBeUndefined();
+
+		if (then === "continued") {
+			const second = handStream(version);
+			second.write(await liteFrame(300, new Uint8Array([1])));
+			second.write(await liteFrame(10, new Uint8Array([2])));
+			second.finish();
+			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), second.reader);
+			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
+			expect(await group?.readFrame()).toBeUndefined();
+			expect(await group?.closed).toBeNull();
+		} else {
+			await respond(request, version, [
+				{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.NotFound }) },
+			]);
+			const err = await group?.readFrame().then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+			expect((err as StreamError).code).toBe(StreamCode.NotFound);
+		}
 	} finally {
 		track.close();
 		subscriber.close();

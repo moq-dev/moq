@@ -3392,8 +3392,14 @@ export class Subscriber {
 			// The publisher made room for a higher-priority stream: the group pauses, keeping what
 			// arrived and the subscription's end waiting, until a later stream continues it or a drop
 			// names it. Mirrors the Rust `GroupRecv::poll_serve`.
-			if (producer && ingest && yielding && toStreamCode(e) === StreamCode.Yielded) {
+			// A reset the browser lost the code of pauses the group too: a lite-07 publisher follows
+			// every reset with a continuation or a drop, unless a reliable reset kept the group's
+			// header, after which nothing follows, so the end waits for it at most the grace. Not a
+			// failure the session's close caused, which sessionCause swapped in.
+			const uncoded = stream.uncoded && e === err;
+			if (producer && ingest && yielding && (toStreamCode(e) === StreamCode.Yielded || uncoded)) {
 				this.#endYielding(entry, group.sequence, yielding);
+				if (uncoded) counted.excuse();
 				// A drop named the group first: the publisher gave it up, so nothing continues it. One
 				// that overtook the stream's header carried a stale verdict.
 				// A stale drop an update sent since superseded no longer ends the group.
