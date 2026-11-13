@@ -71,6 +71,7 @@ export namespace Legacy {
 		copyTo(buffer: Uint8Array): void;
 	}
 	export function encodeFrame(source: Uint8Array | Legacy.Source, timestamp: Net.Clock.Duration): Uint8Array;
+	export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => Net.Clock.Duration | undefined) | undefined;
 }
 
 export * as Loc from "@moq/loc";

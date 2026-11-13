@@ -460,13 +460,14 @@ class SmokeTest {
             )
 
             // Fetch while the track is still published: finishing the media producer
-            // unpublishes it, and the fetch would then miss with NotFound.
+            // unpublishes it, and the fetch would then miss with NotFound. A group is named by
+            // its start, its first packet's timestamp in microseconds.
             val fetched =
                 dev.moq.media.GroupConsumer.fetch(
                     consumer,
                     dev.moq.media.GroupConfig(
                         rendition = dev.moq.media.AudioRendition(name, audio),
-                        sequence = 0uL,
+                        sequence = 5_000_000uL,
                         options = FetchGroupOptions(priority = 3),
                     ),
                 )
@@ -475,7 +476,7 @@ class SmokeTest {
             media.finish()
 
             fetched.use {
-                assertEquals(0uL, it.sequence())
+                assertEquals(5_000_000uL, it.sequence())
                 val frames = it.frames().toList()
                 assertEquals(1, frames.size)
                 val frame = frames.single()

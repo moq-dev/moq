@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -25423,7 +25421,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqgroupconsumer_read_frame() != 26363) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqgroupconsumer_sequence() != 46527) {
+  if (uniffi_moq_ffi_checksum_method_moqgroupconsumer_sequence() != 38121) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_cancel() != 65022) {
@@ -25615,7 +25613,8 @@ void _checkApiChecksums() {
       40580) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqmediacontainerproducer_seek() != 6771) {
+  if (uniffi_moq_ffi_checksum_method_moqmediacontainerproducer_seek() !=
+      19965) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacontainerproducer_write() !=
@@ -25628,8 +25627,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqmediagroupconsumer_next() != 3173) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqmediagroupconsumer_sequence() !=
-      57049) {
+  if (uniffi_moq_ffi_checksum_method_moqmediagroupconsumer_sequence() != 9984) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediatrackconsumer_cancel() != 17311) {
@@ -25651,7 +25649,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqmediatrackproducer_finish() != 22633) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqmediatrackproducer_seek() != 37244) {
+  if (uniffi_moq_ffi_checksum_method_moqmediatrackproducer_seek() != 29733) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediatrackproducer_set_enabled() !=
@@ -25835,7 +25833,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqgroupproducer_ready() != 10687) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqgroupproducer_sequence() != 21067) {
+  if (uniffi_moq_ffi_checksum_method_moqgroupproducer_sequence() != 61101) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgroupproducer_write_frame() != 38774) {
@@ -25844,13 +25842,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_abort() != 37537) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_append_group() != 45225) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_append_group() != 30667) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_consume() != 30970) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_create_group() != 38978) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_create_group() != 2465) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_demand() != 7311) {
@@ -25893,7 +25891,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackrequests_requested_fill() !=
-      55377) {
+      19170) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqrequest_accept() != 30910) {
