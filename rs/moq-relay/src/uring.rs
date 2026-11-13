@@ -824,8 +824,8 @@ impl crate::incoming::Sealed for Request {
 		request
 	}
 
-	async fn within<T>(&mut self, work: impl Future<Output = T>) -> anyhow::Result<T> {
-		crate::incoming::within(&mut self.handshake, work).await
+	async fn expired(&mut self) {
+		self.handshake.expired().await
 	}
 
 	async fn reject(self, code: moq_net::SessionError) {
