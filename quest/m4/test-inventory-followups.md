@@ -23,6 +23,14 @@ for the `#[ignore]` check. Left over:
 - A Python orchestrator that dispatches on its first argument (argparse
   subcommands or an `if`/`match` on `sys.argv`) has all branches
   counted; follow only the selected one, or report it as unresolved.
+- Modules nested in a `#[path]`-loaded file resolve against that file's
+  directory, but the walker places them under `<dir>/<stem>/` unless the file
+  is `mod.rs` (`sh/gh/test-inventory.py:663` and `:694-696`). So the vendored
+  crates `rs/moq-webrtc/src/vendor/mod.rs:44-57` loads go unseen, with their 3
+  `#[ignore]` tests, such as `sctp_proto/queue/queue_test.rs:1207`. Walk a
+  `#[path]` child as owning its directory, and give the 3 tests callers or
+  allowlist entries (added 2026-11-12 by /quest-plan, from moq's trimmed
+  Pullfrog learnings).
 - The failure output lists `benchmark_stream_import` twice. Deduplicate
   orphans by name and location.
 - JS bench scripts are left to
