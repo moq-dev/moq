@@ -419,7 +419,7 @@ The publisher replies with a single ANNOUNCE_OK message followed by the matching
 - ANNOUNCE_RESTART: a claim now serves another Instance, or a higher Epoch of the same one.
 - ANNOUNCE_FLOOR: a batch of a route's claims is complete.
 - WARM_START: the publisher keeps a copy of a broadcast whether or not the subscriber pulls through it (see [Warm Routes](#warm-routes)).
-- WARM_UPDATE: a warm route's Serves or Warm Cost changed.
+- WARM_UPDATE: a warm route's Warm Cost, carrier, or Hops changed.
 - WARM_END: the publisher withdrew a warm route.
 - SYNCED: the initial set is complete.
 
@@ -581,38 +581,33 @@ An advertiser signals capacity through its claim alone, withdrawing or re-pricin
 
 #### Warm Routes {#warm-routes}
 A relay MAY pull each broadcast through a neighbor of its choosing rather than along its selected route to the origin node, so a broadcast crosses fewer relays and neighboring relays share one copy.
-A warm route tells a neighbor that the sender carries a broadcast and keeps it whether or not that neighbor pulls through it.
-An endpoint that does not choose per broadcast ignores every WARM_START, WARM_UPDATE, and WARM_END, and sends a `Serves` of Unknown unless it serves only its own readers.
+A warm route offers a neighbor a copy of one broadcast: the Hops it crossed, its `Warm Cost`, and its carrier.
+An endpoint that does not choose per broadcast ignores every WARM_START, WARM_UPDATE, and WARM_END, sends none, and pulls each broadcast along its selected route.
 
-Every SUBSCRIBE names whom it serves in `Serves`:
+A relay's **source** for a broadcast is where it pulls it from: its next hop on its selected route to the origin node, or a neighbor whose warm route it joins.
+Pulling through a neighbor gets whatever that neighbor pulls, so pulling through the next hop joins its copy when it offers one.
+A copy's **carrier** is the relay with a local reader where the copy left the origin node's route: a relay with a reader whose next hop offers it no copy.
+A copy's Hops are those of the route as far as its carrier, then the Hop ID of each relay that joined it, the sender last, as for a route's Hops (see [Routing](#routing)).
+Its `Warm Cost` is 0 at its carrier, and what joining it cost every relay after: the `Warm Cost` it joined plus the cost of the link it joined over, so a copy's cost rises with every link from where it left the route.
 
-- Alone: demand of the subscriber's own, either a local reader or pulls that trace back to two or more relays.
-- Relay: demand that traces back to one relay alone, its root, named by its Node ID. A downstream pull that serves Alone traces back to the relay that sent it, and one that serves Relay to its root.
-- Unknown: the subscriber does not say, or some of its demand came from a pull that serves Unknown and the rest traces back to fewer than two relays.
+A relay with a source offers its copy, if it has one, on every Announce Stream it answers whose request covers the broadcast's path, under its route to the origin node: the copy it joined, or, as a carrier, the one it pulls.
+It offers the copy even to a neighbor its Hops name, which tells that neighbor that pulling through the relay leads back to it.
+A relay with no demand left offers the copy it would join, so a neighbor can price it before it pulls, and keeps its pull only for as long as it keeps any copy whose demand is gone.
+It sends a WARM_UPDATE when the copy it offers changes, and a WARM_END once it offers none, so a broadcast no relay carries costs no message of its own.
 
-A copy kept after its demand is gone serves whom it last served.
+A relay MUST NOT join a copy whose Hops name it or a neighbor whose subscription to the broadcast it serves, or whose Hops it would refuse for a route (see [Routing](#routing)), and MUST NOT join a copy of another Instance.
+Among its next hop and the copies it may join, it SHOULD pull through the cheapest: a copy costs its `Warm Cost` plus the link's cost, and the next hop without a copy the relay's metric to the origin node.
+A tie stays on the current source, then prefers a copy.
+It SHOULD NOT newly join a copy offered on a session that received a GOAWAY, unless it is its next hop's.
 
-A relay that pulls a broadcast for demand MAY send a warm route for it, under its route to the broadcast's origin node, on an Announce Stream it answers whose request covers the path.
-It sends one only while its `Serves` is not Unknown and its selected route to the origin node is usable, and only to a neighbor that has no usable route to that origin node or whose last route to it has a Metric at least the relay's own.
-A warm route travels one hop: a receiver never forwards it.
-It carries the sender's `Serves` and its `Warm Cost`, the price it pays for its own pull, as defined below.
-The sender sends a WARM_UPDATE when either changes, and a WARM_END once it no longer pulls the broadcast.
-A change that narrows whom the copy serves, from Alone to a Relay, from one Relay to another, or to no warm route at all, waits until the sender has kept the copy without the old demand for as long as it keeps any copy whose demand is gone, so a neighbor that just joined it does not move straight back; until then the warm route stands as last sent, `Warm Cost` included.
+Two relays that start carrying in the same instant would each join the other's copy for good, so copies are ranked by the Rendezvous Hash of the broadcast's path and their carrier's Hop ID, as defined in [Resolution](#resolution).
+A relay on a copy, as its carrier or by joining one still offered, MUST NOT move to another copy, its next hop's included, unless that copy's carrier is the same or ranks lower.
+A relay that pulls along its route with no reader of its own hands whatever it joins to the neighbors that pull through it, or would on their selected routes, so it is bound by their carriers instead: each such neighbor offers back its copy with Hops that begin with the relay's own route's.
+It MUST NOT join a copy other than its next hop's unless its carrier ranks at or below those of all of these offers, nor while a neighbor whose subscription it serves has offered none.
+An offer whose Hops do not begin with the relay's route was sent before the relay took that route, and binds nothing.
 
-A receiver counts a neighbor warm for a broadcast when the neighbor's warm route serves Alone, or serves a Relay that is neither the receiver nor the root of the receiver's own pull while that pull does not serve Unknown.
-Demand a receiver causes, through any number of relays, then never warms a neighbor toward it.
-The receiver prices a pull through each neighbor as:
-
-- the link cost alone, through a neighbor it counts warm, whose copy is paid for already;
-- the link cost plus the neighbor's `Warm Cost`, through a neighbor with a warm route it does not count warm, whose copy depends on the receiver's demand;
-- otherwise its metric through that neighbor.
-
-A relay MUST pull a broadcast only through a neighbor eligible for it: one whose last route to the request's origin node is feasible (see [Routing](#routing)), or was advertised with exactly the Seqno and Metric of the relay's feasibility distance while the neighbor's Rendezvous Hash for the broadcast's path is lower than the relay's own.
-The Rendezvous Hash is as defined in [Resolution](#resolution), with the neighbor's or the relay's own Node ID (see [Node ID Parameter](#node-id-parameter)).
-A feasibility distance only falls within a Seqno, so the Seqno rises, or the Metric and then the hash fall, along every pull, and the pulls of a broadcast never form a loop, even over stale routes.
-
-Among the eligible neighbors, a relay SHOULD prefer a session that has not received a GOAWAY, then the lowest price, then a neighbor it counts warm, then the lowest Rendezvous Hash.
-It SHOULD move an existing pull only to a neighbor strictly better by GOAWAY and then price, so two relays pricing each other's copies settle instead of swapping.
+The Hops keep the pulls of a broadcast free of loops once the copies offered are delivered: no relay joins a copy that passes through itself or a neighbor it serves.
+Two relays acting on each other's stale offers can still join each other until the WARM_END or WARM_UPDATE crossing their link arrives, and the pull then moves on.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -1514,7 +1509,7 @@ The origin's Revision at which the floor certifies the stream's claims for the r
 
 
 ## WARM_START {#warm-start}
-A publisher sends a WARM_START message to tell the subscriber that it carries a broadcast and keeps it whether or not the subscriber pulls through it (see [Warm Routes](#warm-routes)).
+A publisher sends a WARM_START message to offer the subscriber its copy of a broadcast (see [Warm Routes](#warm-routes)).
 Each WARM_START implicitly assigns the next Warm ID on the stream, later referenced by WARM_UPDATE and WARM_END (see [Announce](#announce)).
 
 ~~~
@@ -1525,8 +1520,10 @@ WARM_START Message {
   Broadcast Path Suffix (s),
   Instance (b),
   Minted (8),
-  Serves (..),
   Warm Cost (i),
+  Carrier Index (i),
+  Hop Count (i),
+  Hop ID (i) ...,
 }
 ~~~
 
@@ -1543,19 +1540,26 @@ Combined with the requested prefix to form the broadcast's path.
 **Instance** and **Minted**:
 The Instance of the copy the publisher carries, as defined for [ANNOUNCE_START](#announce-start).
 
-**Serves**:
-Whom the publisher's own pull of the broadcast serves, as defined for [SUBSCRIBE](#subscribe).
-Unknown is a PROTOCOL_VIOLATION here.
-
 **Warm Cost**:
-The publisher's price for its own pull of the broadcast (see [Warm Routes](#warm-routes)), in the units of the route's Metric.
+What pulling the copy cost the publisher, 0 when it is the copy's carrier (see [Warm Routes](#warm-routes)), in the units of the route's Metric.
+
+**Carrier Index**:
+The position of the copy's carrier among the Hop IDs that follow, 0 for the first.
+A value not below `Hop Count` is a PROTOCOL_VIOLATION.
+
+**Hop Count**:
+The number of Hop IDs that follow.
+More than 32 is a PROTOCOL_VIOLATION.
+
+**Hop ID**:
+The copy's Hops (see [Warm Routes](#warm-routes)), in order, the publisher's own last.
 
 A stream has at most one live warm route per route and path.
 A subscriber that uses warm routes MUST close the session with a PROTOCOL_VIOLATION on a WARM_START naming a Route ID that was never assigned or already retired, or a path its route already has a live warm route for.
 
 
 ## WARM_UPDATE {#warm-update}
-A publisher sends a WARM_UPDATE message when a warm route's `Serves` or `Warm Cost` changes, referencing its Warm ID.
+A publisher sends a WARM_UPDATE message when the copy a warm route offers changes, referencing its Warm ID.
 The id stays live.
 
 ~~~
@@ -1563,8 +1567,10 @@ WARM_UPDATE Message {
   Type (i) = 0xD
   Message Length (i)
   Warm ID (i),
-  Serves (..),
   Warm Cost (i),
+  Carrier Index (i),
+  Hop Count (i),
+  Hop ID (i) ...,
 }
 ~~~
 
@@ -1574,7 +1580,7 @@ Set to 0xD to indicate a WARM_UPDATE message.
 **Warm ID**:
 The ordinal implicitly assigned by a prior WARM_START on this stream.
 
-**Serves** and **Warm Cost**:
+**Warm Cost**, **Carrier Index**, **Hop Count**, and **Hop ID**:
 As defined for [WARM_START](#warm-start), replacing the warm route's.
 
 
@@ -1618,7 +1624,6 @@ SUBSCRIBE Message {
   Range Count (i)
   Range (..) ...
   Update (i)
-  Serves (..)
 }
 
 Range {
@@ -1634,10 +1639,6 @@ Anchor {
   [Timestamp (i)]
 }
 
-Serves {
-  Serves Type (i)
-  [Node ID (i)]
-}
 ~~~
 
 **Subscribe ID**:
@@ -1696,15 +1697,6 @@ A Range resolves once: an update that leaves it live does not resolve it again.
 The number of the subscription's terms this message sets: 0 on SUBSCRIBE, and on each SUBSCRIBE_UPDATE a larger value than the one before it.
 A [SUBSCRIBE_DROP](#subscribe-drop) echoes the number in effect when its groups were given up, so the subscriber can tell a stale verdict on its current terms from one an update has since replaced.
 
-**Serves Type**:
-Whom the subscription serves (see [Warm Routes](#warm-routes)), and which field follows:
-
-- Unknown (0x0): no fields.
-- Alone (0x1): no fields.
-- Relay (0x2): the `Node ID` of the one relay its demand traces back to. 0 is a PROTOCOL_VIOLATION.
-
-Any other value is a PROTOCOL_VIOLATION.
-
 A `Start` is a floor, not a request; `Subscriber Max Age` is the only thing that asks for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
 A `Subscriber Max Age` of 0 therefore starts at the latest group, since every older group is already stale.
@@ -1740,7 +1732,6 @@ SUBSCRIBE_UPDATE Message {
   Range (..) ...
   Update (i)
   Wanted Group (i)
-  Serves (..)
 }
 ~~~
 
@@ -2443,7 +2434,7 @@ An application-specific payload.
 - The Cost parameter must be at least 1.
 - Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the local priority of the route's session, the Announce Cost plus the route's metric, and a Rendezvous Hash of the requested path and the origin's Node ID.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
-- Added warm routes: WARM_START (0xC), WARM_UPDATE (0xD), and WARM_END (0xE) on the Announce Stream, and `Serves` on SUBSCRIBE and SUBSCRIBE_UPDATE. A relay MAY pull each broadcast through a neighbor that already carries it, priced by whom that neighbor's copy serves, and only through a neighbor whose route is feasible or tied at its feasibility distance with a lower Rendezvous Hash, so the pulls never loop.
+- Added warm routes: WARM_START (0xC), WARM_UPDATE (0xD), and WARM_END (0xE) on the Announce Stream. A relay MAY pull each broadcast through a neighbor that offers a copy of it, carrying the copy's Hops, its Warm Cost, and its carrier. A relay never joins a copy whose Hops name it or a neighbor it serves, and moves between copies only toward a carrier with a lower Rendezvous Hash, so the pulls of a broadcast are free of loops once the copies offered are delivered.
 - Added the temporary Lite-06 Chain Setup Parameter (0x9) and a trailing Lite-06 Chain on ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART: the moq-lite-06 Hop ID list of a claim learned over moq-lite-06, which a node drops when it names that node.
 
 ### Tracks {#changelog-07-tracks}

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
@@ -8,7 +10,7 @@ use crate::{
 };
 
 use super::{
-	Message, Serves, Version,
+	Message, Version,
 	message::{MAX_MESSAGE_SIZE, decode_size},
 };
 
@@ -118,33 +120,59 @@ pub enum AnnounceBroadcast {
 	Floor { id: u64, revision: Option<route::Rev> },
 	/// WARM_START (lite-07+): under the route with Route ID `route`, the sender keeps its
 	/// copy of the broadcast at `suffix` whether or not the receiver pulls through it, and
-	/// assigns it the next Warm ID. `serves` is never [`Serves::Unknown`].
+	/// assigns it the next Warm ID. See [`Warm`] for what the copy carries.
 	WarmStart {
 		route: u64,
 		suffix: Path,
 		instance: Instance,
-		serves: Serves,
-		cost: u64,
+		warm: Warm,
 	},
-	/// WARM_UPDATE (lite-07+): the warm route with this id serves `serves` at `cost` now.
-	WarmUpdate { id: u64, serves: Serves, cost: u64 },
+	/// WARM_UPDATE (lite-07+): the warm route with this id carries `warm` now.
+	WarmUpdate { id: u64, warm: Warm },
 	/// WARM_END (lite-07+): the sender withdrew the warm route with this id.
 	WarmEnd { id: u64 },
 }
 
-/// Encode whom a warm route's copy serves, which it always names.
-fn encode_warm_serves(w: &mut Encoder<'_>, serves: Serves) -> Result<(), EncodeError> {
-	match serves {
-		Serves::Unknown => Err(EncodeError::InvalidState),
-		serves => serves.encode(w),
-	}
+/// A copy of a broadcast a warm route offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Warm {
+	/// What pulling the copy through the sender costs it: 0 at the copy's carrier, else
+	/// its own pull's cost, in the units of the route's metric.
+	pub cost: u64,
+	/// The position in `hops` of the carrier, the relay with a reader where the copy left
+	/// its origin's route.
+	pub carrier: u64,
+	/// Every node the copy crossed, the origin node first and the sender last.
+	pub hops: Arc<[route::Id]>,
 }
 
-fn decode_warm_serves(r: &mut Decoder<'_>) -> Result<Serves, DecodeError> {
-	match Serves::decode(r)? {
-		Serves::Unknown => Err(DecodeError::InvalidValue),
-		serves => Ok(serves),
+/// Encode a warm route's cost, carrier, and hops. No relay offers a copy that crossed too
+/// many hops, or whose carrier is not among them.
+fn encode_warm(w: &mut Encoder<'_>, warm: &Warm) -> Result<(), EncodeError> {
+	if warm.hops.len() > route::MAX_HOPS || warm.carrier >= warm.hops.len() as u64 {
+		return Err(EncodeError::InvalidState);
 	}
+	w.varint(warm.cost)?;
+	w.varint(warm.carrier)?;
+	w.varint(warm.hops.len() as u64)?;
+	for hop in warm.hops.iter() {
+		w.varint(*hop)?;
+	}
+	Ok(())
+}
+
+fn decode_warm(r: &mut Decoder<'_>) -> Result<Warm, DecodeError> {
+	let cost = r.varint()?;
+	let carrier = r.varint()?;
+	let count = r.varint()?;
+	if count > route::MAX_HOPS as u64 {
+		return Err(DecodeError::TooMany);
+	}
+	if carrier >= count {
+		return Err(DecodeError::InvalidValue);
+	}
+	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
+	Ok(Warm { cost, carrier, hops })
 }
 
 /// ROUTE_START and ROUTE_UPDATE flag: the route is down-only.
@@ -450,19 +478,16 @@ impl Encode<Version> for AnnounceBroadcast {
 					route,
 					suffix,
 					instance,
-					serves,
-					cost,
+					warm,
 				} => {
 					w.varint(*route)?;
 					suffix.encode(w, version)?;
 					super::instance::encode_copy(w, instance)?;
-					encode_warm_serves(w, *serves)?;
-					w.varint(*cost)?;
+					encode_warm(w, warm)?;
 				}
-				Self::WarmUpdate { id, serves, cost } => {
+				Self::WarmUpdate { id, warm } => {
 					w.varint(*id)?;
-					encode_warm_serves(w, *serves)?;
-					w.varint(*cost)?;
+					encode_warm(w, warm)?;
 				}
 				Self::WarmEnd { id } => w.varint(*id)?,
 				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
@@ -596,13 +621,11 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						route: body.varint()?,
 						suffix: Path::decode(&mut body, version)?,
 						instance: super::instance::decode_copy(&mut body)?,
-						serves: decode_warm_serves(&mut body)?,
-						cost: body.varint()?,
+						warm: decode_warm(&mut body)?,
 					},
 					WARM_UPDATE if version.has_warm() => Self::WarmUpdate {
 						id: body.varint()?,
-						serves: decode_warm_serves(&mut body)?,
-						cost: body.varint()?,
+						warm: decode_warm(&mut body)?,
 					},
 					WARM_END if version.has_warm() => Self::WarmEnd { id: body.varint()? },
 					// Unknown types are skipped by length so an earlier Lite06 build
@@ -1256,9 +1279,9 @@ mod tests {
 	}
 
 	/// The draft's warm route layouts, byte for byte: WARM_START is the Route ID, the path
-	/// suffix, the instance and its minted flag, whom the copy serves, and the cost;
-	/// WARM_UPDATE the Warm ID, serves, and cost; WARM_END the Warm ID. A warm route always
-	/// names whom it serves, and lite-06 skips the types as unknown.
+	/// suffix, the instance and its minted flag, then the copy's cost, its carrier's
+	/// position in its hops, and the hops; WARM_UPDATE the Warm ID and the same three;
+	/// WARM_END the Warm ID. Lite-06 skips the types as unknown.
 	#[test]
 	fn lite07_warm_route_layout() {
 		let encode = |msg: &AnnounceBroadcast, version: Version| {
@@ -1266,22 +1289,22 @@ mod tests {
 			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
 				.map(|()| buf)
 		};
+		let warm = Warm {
+			cost: 4,
+			carrier: 1,
+			hops: Arc::from([5, 9, 6]),
+		};
 		let start = AnnounceBroadcast::WarmStart {
 			route: 3,
 			suffix: Path::from_static("c"),
 			instance: "a".parse().unwrap(),
-			serves: Serves::Relay(9),
-			cost: 4,
+			warm: warm.clone(),
 		};
-		let update = AnnounceBroadcast::WarmUpdate {
-			id: 7,
-			serves: Serves::Alone,
-			cost: 4,
-		};
+		let update = AnnounceBroadcast::WarmUpdate { id: 7, warm };
 		let end = AnnounceBroadcast::WarmEnd { id: 7 };
 		let layouts: [(&AnnounceBroadcast, &[u8]); 3] = [
-			(&start, &[12, 9, 3, 1, b'c', 1, b'a', 0, 2, 9, 4]),
-			(&update, &[13, 3, 7, 1, 4]),
+			(&start, &[12, 12, 3, 1, b'c', 1, b'a', 0, 4, 1, 3, 5, 9, 6]),
+			(&update, &[13, 7, 7, 4, 1, 3, 5, 9, 6]),
 			(&end, &[14, 1, 7]),
 		];
 		for (msg, wire) in layouts {
@@ -1292,20 +1315,36 @@ mod tests {
 				crate::coding::decode_buf(&mut &wire[..], Version::Lite06, |r, v| AnnounceBroadcast::decode(r, v));
 			assert_eq!(got.unwrap(), AnnounceBroadcast::Skipped);
 		}
+	}
 
-		let unknown = AnnounceBroadcast::WarmUpdate {
+	/// A warm route's carrier is one of its hops, of which there are at most 32.
+	#[test]
+	fn lite07_warm_route_names_its_carrier_among_its_hops() {
+		let outside = AnnounceBroadcast::WarmUpdate {
 			id: 7,
-			serves: Serves::Unknown,
-			cost: 4,
+			warm: Warm {
+				cost: 4,
+				carrier: 3,
+				hops: Arc::from([5, 9, 6]),
+			},
 		};
+		let mut buf = Vec::new();
 		assert!(matches!(
-			encode(&unknown, Version::Lite07),
+			outside.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07),
 			Err(EncodeError::InvalidState)
 		));
 		let decode = |wire: &[u8]| {
 			crate::coding::decode_buf(&mut &wire[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v))
 		};
-		assert!(decode(&[13, 3, 7, 0, 4]).is_err());
+		assert!(decode(&[13, 4, 7, 4, 0, 0]).is_err(), "no hops, so no carrier");
+		assert!(decode(&[13, 7, 7, 4, 3, 3, 5, 9, 6]).is_err(), "a carrier past the hops");
+		let mut long = vec![13, 37, 7, 4, 0, 33];
+		long.extend([1; 33]);
+		assert!(decode(&long).is_err(), "33 hops");
+		long[1] = 36;
+		long[5] = 32;
+		long.pop();
+		decode(&long).unwrap();
 	}
 
 	/// Lite-07 carries a lite-06 chain after the cost, only when it is not empty, so an
