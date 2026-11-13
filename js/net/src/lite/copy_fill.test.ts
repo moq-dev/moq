@@ -3,7 +3,8 @@
 // SUBSCRIBE of its own, as its `Recovery` does: below where the copy's feed started, by the copy's
 // start rule, and inside the copy, once it evicted what it received.
 import { expect, test } from "bun:test";
-import { Duration, Elapsed, Manual, sleep, timeout } from "@moq/clock";
+import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { StreamCode, StreamError } from "../error.ts";

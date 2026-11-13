@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Instant, Manual, sleep, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Duration, Instant, sleep, yieldNow } from "@moq/clock";
+import { hostTime, Manual } from "@moq/clock/test";
 import { Session as Qmux, selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";

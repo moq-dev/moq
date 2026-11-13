@@ -1,5 +1,6 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
-import { Duration, Instant, Manual, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";

@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { Duration, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { RefusedRedirect } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";

@@ -1,4 +1,5 @@
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
 import type { AudioFrame, Capture, Format } from "../src/audio/capture";

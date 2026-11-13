@@ -3,7 +3,7 @@
  * a watch coming and going over held watches and attached sessions.
  */
 
-import { Manual } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { announcedView } from "../src/announced.test-util";
 import * as Announce from "../src/announced.ts";
 import { AuthSession } from "../src/auth_session.ts";

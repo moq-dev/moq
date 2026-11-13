@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { Duration, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { Producer as TrackProducer } from "../track.ts";

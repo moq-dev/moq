@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Manual, Wall, wall } from "@moq/clock";
+import { Wall, wall } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { base64url, exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims } from "./claims.ts";

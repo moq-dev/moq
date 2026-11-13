@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Duration, type Installed, Instant, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, type Installed, Instant, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
