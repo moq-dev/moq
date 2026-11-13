@@ -1040,7 +1040,10 @@ async fn a_dropped_replacement_goes_offline_over_a_closing_predecessor() {
 	let mut machine: Reconnect<Url, TestError> =
 		Reconnect::new(Config::default(), vec![a.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
-	drive(&mut machine, &[(a, Peer::Serve)], &mut run, |run| !run.accepts.is_empty()).await;
+	drive(&mut machine, &[(a, Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
 	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();

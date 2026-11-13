@@ -1032,7 +1032,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 		// A predecessor still draining serves again, so this is no outage: the caller moves
 		// back onto it. One closing gracefully already carries nothing and takes no new work.
-		if self.predecessor.as_ref().is_some_and(|predecessor| !predecessor.closing) {
+		if self
+			.predecessor
+			.as_ref()
+			.is_some_and(|predecessor| !predecessor.closing)
+		{
 			self.queue.push_back(Action::Migrating);
 			self.queue.push_back(Action::Retrying(err.clone()));
 		} else {

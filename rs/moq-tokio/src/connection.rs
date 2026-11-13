@@ -568,7 +568,11 @@ impl Shared {
 			return;
 		};
 		live.migrating = Some(Migrating::default());
-		match live.predecessor.as_ref().filter(|predecessor| predecessor.session == *session) {
+		match live
+			.predecessor
+			.as_ref()
+			.filter(|predecessor| predecessor.session == *session)
+		{
 			Some(predecessor) => {
 				live.session = predecessor.session.clone();
 				live.transport = predecessor.transport;
@@ -1060,7 +1064,10 @@ impl Connection {
 			let state = self.state.read();
 			let session = state.lifecycle.live().map(|live| live.session.clone());
 			let predecessor = state.lifecycle.predecessor();
-			(session, predecessor.map(|predecessor| (predecessor.session.clone(), predecessor.deadline)))
+			(
+				session,
+				predecessor.map(|predecessor| (predecessor.session.clone(), predecessor.deadline)),
+			)
 		};
 		self.task.handle.abort();
 		let session = async move {
@@ -2799,7 +2806,11 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
 		group.finish().unwrap();
-		let g0 = kio::clock::timeout(WAIT, sub.recv_group()).await.unwrap().unwrap().unwrap();
+		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
 		assert_eq!(g0.sequence, 0);
 
 		crate::resolve::hosts::point(HOST, [addr_b]);
@@ -2819,7 +2830,13 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert!(
-			matches!(state.phase, Phase::Migrating { transport: crate::Transport::Tcp, .. }),
+			matches!(
+				state.phase,
+				Phase::Migrating {
+					transport: crate::Transport::Tcp,
+					..
+				}
+			),
 			"{:?}",
 			state.phase
 		);
@@ -2838,7 +2855,11 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
 		group.finish().unwrap();
-		let g1 = kio::clock::timeout(WAIT, sub.recv_group()).await.unwrap().unwrap().unwrap();
+		let g1 = kio::clock::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
 		assert_eq!(g1.sequence, 1, "the drained session stopped delivering");
 	}
 
