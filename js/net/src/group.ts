@@ -335,6 +335,17 @@ export class Producer {
 					mirror.closed.set(error);
 					continue;
 				}
+				// Its unread frames count against the tail it continues in, as they would on one copy, so a
+				// chain of takeovers cannot grow a stalled reader's buffer: past the tail, it is behind it.
+				let unread = 0;
+				for (const frame of mirror.frames.peek()) unread += frameBytes(frame);
+				if (unread > TAIL_BYTES) {
+					mirror.frames.set(new Queue());
+					mirror.cacheBytes = 0;
+					mirror.flate = undefined;
+					mirror.closed.set(evicted());
+					continue;
+				}
 				for (const frame of mirror.frames.peek()) kept.add(frame);
 				mirror.from = mirror.total.peek();
 				mirror.charge = state.charge;

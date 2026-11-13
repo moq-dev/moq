@@ -3573,6 +3573,27 @@ test.each([
 	producer.close();
 });
 
+// A stalled reader continued across a chain of takeovers, each copy writing one frame, keeps no more
+// than the tail: its unread frames count against each successor's, so it ends evicted past it.
+test("a chain of takeovers keeps a stalled reader within the tail", async () => {
+	const producer = new TrackProducer("video").accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const failed = new Error("reset");
+	const payload = new Uint8Array(9 * 1024 * 1024);
+	let copy = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
+	const reader = copy.consume();
+	for (let index = 0; index < 8; index++) {
+		copy.writeFrame({ payload });
+		const held = hooks.arrivingGroup(producer, 3n);
+		copy.abort(failed);
+		copy = hooks.receiveGroup(producer, { sequence: 3n, start: index + 1 });
+		held?.release();
+	}
+	copy.finish();
+	expect(await reader.closed).toMatchObject({ code: StreamCode.Evicted });
+	producer.close();
+});
+
 // While a duplicate is held, a failed copy keeps each mirror open and the copy that takes over tees
 // into it from the frame it reached: a sink still buffering the group hands it out once, a frame cut
 // short is read whole from the successor unless a reader already took part of it, readers at
