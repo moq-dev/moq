@@ -4469,6 +4469,17 @@ impl Producer {
 		state.supersede_stale()
 	}
 
+	/// Whether a stale drop under the current terms gave up `sequence`, which a group arriving
+	/// for it replaces and an update supersedes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn holds_stale(&self, sequence: u64) -> bool {
+		self.state
+			.read()
+			.drops
+			.get(&sequence)
+			.is_some_and(|hole| hole.stale_budget().is_some())
+	}
+
 	/// Record `groups` given up as `hole` describes, returning the runs recorded: a drop
 	/// leaves a skipped sequence skipped, and a group a copy still serves whole, since a group
 	/// stream wins over its drop: a stale drop leaves it still arriving or not, and a final one

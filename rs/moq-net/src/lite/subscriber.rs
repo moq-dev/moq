@@ -270,6 +270,9 @@ struct Yielding {
 	dropped: Option<Error>,
 	/// For a stale drop, the updates sent when it arrived: the next update supersedes it.
 	stale_under: Option<u64>,
+	/// When a stale drop that overtook the stream is all that left the group unowed, the
+	/// updates sent when the stream arrived: once another is sent, the group is owed again.
+	unowed_under: Option<u64>,
 }
 
 /// What a group stream's header opened in its subscription's copy.
@@ -286,6 +289,8 @@ struct Opened {
 	partial: Option<Box<frame::Producer>>,
 	/// The publisher owed the group when the stream arrived; see [`Yielding::owed`].
 	owed: bool,
+	/// See [`Yielding::unowed_under`].
+	unowed_under: Option<u64>,
 	track: track::Producer,
 	framing: lite::Framing,
 	reading: Reading,
@@ -462,6 +467,9 @@ impl TrackEntry {
 			return Err(Error::Cancel);
 		};
 		let group_info = group::Info { sequence: hdr.sequence };
+		// A stale drop that overtook this stream, which the group replaces: the next update
+		// supersedes that verdict, so a YIELDED reset after it pauses the group.
+		let stale = producer.holds_stale(hdr.sequence);
 		// Stats (groups/frames/bytes) are counted in the model as the group
 		// is written, through the tagged `track::Producer`. The track counts
 		// it as content once its first frame lands.
@@ -493,7 +501,8 @@ impl TrackEntry {
 				}
 			}
 		}
-		self.place(hdr, version, received, reading, owed)
+		let unowed_under = (!owed && stale).then(|| self.tail.read().updates());
+		self.place(hdr, version, received, reading, owed, unowed_under)
 	}
 
 	/// Whether a YIELDED reset paused the group `sequence`, which the cache still holds. One the
@@ -546,6 +555,7 @@ impl TrackEntry {
 			group,
 			partial: partial.map(Box::new),
 			owed: true,
+			unowed_under: None,
 			track: producer.clone(),
 			framing: *framing,
 			reading,
@@ -567,10 +577,10 @@ impl TrackEntry {
 	}
 
 	/// Track a stream reading `sequence` that a YIELDED reset would pause, which `owed` says
-	/// the publisher owed when it arrived.
+	/// the publisher owed when it arrived; see [`Yielding::unowed_under`].
 	///
 	/// Returns the stream's token for [`Self::end_yielding`].
-	fn read_yielding(&mut self, sequence: u64, owed: bool) -> u64 {
+	fn read_yielding(&mut self, sequence: u64, owed: bool, unowed_under: Option<u64>) -> u64 {
 		self.yield_streams += 1;
 		let stream = self.yield_streams;
 		self.yielding.insert(
@@ -580,6 +590,7 @@ impl TrackEntry {
 				owed,
 				dropped: None,
 				stale_under: None,
+				unowed_under,
 			},
 		);
 		stream
@@ -594,12 +605,14 @@ impl TrackEntry {
 			Some(yielding) if yielding.stream == stream => self.yielding.remove(&sequence)?,
 			_ => return None,
 		};
-		if yielding
-			.stale_under
-			.is_some_and(|updates| updates < self.tail.read().updates())
-		{
+		let updates = self.tail.read().updates();
+		if yielding.stale_under.is_some_and(|under| under < updates) {
 			yielding.dropped = None;
 			yielding.stale_under = None;
+		}
+		if yielding.unowed_under.is_some_and(|under| under < updates) {
+			yielding.owed = true;
+			yielding.unowed_under = None;
 		}
 		Some(yielding)
 	}
@@ -645,7 +658,7 @@ impl TrackEntry {
 		};
 		let received = producer.create_group_at(group::Info { sequence: hdr.sequence }, hdr.frame_start);
 		// Served again, so owed again.
-		self.place(hdr, version, received, reading, true)
+		self.place(hdr, version, received, reading, true, None)
 	}
 
 	/// Give a stream what the cache answered for its header.
@@ -656,6 +669,7 @@ impl TrackEntry {
 		received: Result<track::Received, Error>,
 		reading: Reading,
 		owed: bool,
+		unowed_under: Option<u64>,
 	) -> Result<Open, Error> {
 		let Some(Accepted { producer, framing }) = &self.copy else {
 			return Err(Error::Cancel);
@@ -690,6 +704,7 @@ impl TrackEntry {
 			group: crate::recv::Group::new(group),
 			partial: None,
 			owed,
+			unowed_under,
 			track: producer.clone(),
 			framing: *framing,
 			reading,
@@ -1772,6 +1787,7 @@ impl GroupRecv {
 			group,
 			partial: cut,
 			owed: arrived_owed,
+			unowed_under,
 			track,
 			framing,
 			reading,
@@ -1782,7 +1798,7 @@ impl GroupRecv {
 				.subscribes
 				.lock()
 				.get_mut(&hdr.subscribe)
-				.map(|entry| entry.read_yielding(hdr.sequence, arrived_owed)),
+				.map(|entry| entry.read_yielding(hdr.sequence, arrived_owed, unowed_under)),
 			false => None,
 		};
 		let (priority, order) = track
@@ -5709,8 +5725,8 @@ mod tests {
 			length_first: true,
 		};
 		let mut entry = TrackEntry::accepted(track, framing, kio::Producer::new(Tail::default()));
-		let replaced = entry.read_yielding(3, true);
-		let replacement = entry.read_yielding(3, true);
+		let replaced = entry.read_yielding(3, true, None);
+		let replacement = entry.read_yielding(3, true, None);
 		assert!(
 			entry.end_yielding(3, replaced).is_none(),
 			"the replaced stream's record is gone"
@@ -5960,6 +5976,86 @@ mod tests {
 			.get_mut(&7)
 			.unwrap()
 			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
+		// An update supersedes it, as `buffer_update` does.
+		tail.write().ok().expect("the tail is open").updated();
+		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
+		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
+		assert!(res.is_ok(), "{res:?}");
+
+		let read = group.read_frame().await;
+		assert!(matches!(read, Ok(Some(_))), "the frame that arrived stays: {read:?}");
+		let subs = subscriber.subscribes.lock();
+		let paused = subs.get(&7).unwrap().paused.as_ref().unwrap().read();
+		assert!(paused.groups.contains_key(&3), "the group pauses");
+	}
+
+	/// Lite-07: a stale drop that overtook the header of the stream it names holds only under
+	/// the update it names: once the subscriber sends another, a YIELDED reset of that stream
+	/// pauses the group rather than ending it as stale.
+	#[kio::test]
+	async fn a_yielded_group_pauses_once_an_update_supersedes_a_stale_drop_before_its_header() {
+		use crate::lite::test_transport::{Close, ScriptedSession};
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		lite::Group {
+			subscribe: 7,
+			sequence: 3,
+			frame_start: 0,
+		}
+		.encode(&mut encoder, version)
+		.unwrap();
+		encoder.varint(2).unwrap();
+		encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
+		script.push(b'x');
+		let yielded = ScriptedSession::new(script);
+		let clock = crate::time::Deadlines::new(crate::time::Instant::now());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: clock.clone(),
+			session: crate::driver::Transport::new(yielded.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		let subscription = crate::track::Subscription::default()
+			.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+			.with_range(0..);
+		let mut reader = track.subscribe(subscription);
+		let framing = lite::Framing {
+			timescale: Some(Timescale::MILLI),
+			ietf: None,
+			compressed: false,
+			length_first: true,
+		};
+		let tail = kio::Producer::new(Tail::default());
+		subscriber
+			.subscribes
+			.lock()
+			.insert(7, TrackEntry::accepted(track.clone(), framing, tail.clone()));
+
+		// The drop lands before the stream's header, as `apply_response` records it.
+		track.give_up(3..4, track::Hole::stale(std::time::Duration::from_secs(10)));
+		tail.write().ok().expect("the tail is open").account(3..4, clock.now());
+
+		let (_, recv) = yielded.open_bi(Default::default()).await.unwrap();
+		let mut first = GroupRecv::new(
+			subscriber.clone(),
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		);
+		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
+		let mut group = reader.assert_group();
 		// An update supersedes it, as `buffer_update` does.
 		tail.write().ok().expect("the tail is open").updated();
 		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));

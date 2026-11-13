@@ -776,3 +776,76 @@ async fn a_paused_group_given_up_while_it_waits_is_dropped() {
 		.expect("the paused group is dropped while the others hold the credit");
 	assert!(end.is_err(), "the aborted paused group fails: {end:?}");
 }
+
+/// On lite-07 a finished group whose FIN awaits its acknowledgement still holds stream credit
+/// but can no longer be reset, so a continuation waiting for credit is weighed only against
+/// the streams that can: a newer group still resets the one that outranks the continuation,
+/// without waiting a round trip for the acknowledgement.
+#[kio::test]
+async fn a_closing_stream_does_not_hold_back_a_newer_group() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = origin(1);
+	let viewer = origin(2);
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	let track = broadcast.broadcast().create_track("0", info).unwrap();
+	broadcast.announce().unwrap();
+
+	let latency = Duration::from_secs(1);
+	let mut options = MockConnectOptions::new(version);
+	options.transport.max_concurrent_uni_streams = Some(2);
+	options.latency = latency;
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(viewer.clone());
+	let _pair = connect_mock(options).await;
+
+	let remote = viewer
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	let prefs = track::Subscription::default()
+		.with_order(track::Order::Descending)
+		.with_delay(track::Delay::default().with_max(Duration::from_secs(300)));
+	let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+
+	// Group 0 finishes, so its stream only waits for the acknowledgement. Group 1 stays
+	// unfinished, then group 2 resets it, and group 1's continuation waits for credit.
+	let mut zero = track.append_group().unwrap();
+	zero.write_frame(Timestamp::ZERO, b"a".as_slice()).unwrap();
+	zero.finish().unwrap();
+	let mut open = Vec::new();
+	for _ in 1..3 {
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, b"a".as_slice()).unwrap();
+		open.push(group);
+	}
+	// Group 3 outranks group 2's stream, the only one that can still be reset.
+	let mut three = track.append_group().unwrap();
+	three.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
+	three.finish().unwrap();
+
+	let start = kio::clock::now();
+	loop {
+		let group = kio::clock::timeout(4 * latency, subscriber.recv_group())
+			.await
+			.expect("a group arrives")
+			.unwrap()
+			.unwrap();
+		if group.sequence == 3 {
+			break;
+		}
+	}
+	let waited = kio::clock::now() - start;
+	assert!(
+		waited < 2 * latency,
+		"group 3 waited for an acknowledgement: {waited:?}"
+	);
+}

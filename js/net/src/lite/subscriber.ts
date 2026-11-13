@@ -274,6 +274,9 @@ interface Yielding {
 	dropped?: Error;
 	// For a stale drop, the update it named: the next update supersedes it.
 	staleUnder?: bigint;
+	// When a stale drop that overtook the stream is all that left the group unowed, the update it
+	// named: once another is sent, the group is owed again. Mirrors the Rust `Yielding::unowed_under`.
+	unowedUnder?: bigint;
 }
 
 // The paused groups of `entry`, created on first use.
@@ -3251,6 +3254,12 @@ export class Subscriber {
 		const yields = hasYield(this.version);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.sequence, group.sequence + 1n);
+		// A stale drop that overtook this stream: the next update supersedes that verdict, so a
+		// YIELDED reset after it pauses the group.
+		const unowedUnder =
+			!owed && entry.stale?.some((run) => run.start <= group.sequence && group.sequence < run.end)
+				? entry.update
+				: undefined;
 		let producer: netGroup.Producer | undefined;
 		let ingest: Ingest | undefined;
 		let yielding: Yielding | undefined;
@@ -3298,7 +3307,7 @@ export class Subscriber {
 			});
 			if (yields) {
 				ingest ??= { index: group.frameStart };
-				yielding = { owed };
+				yielding = { owed, unowedUnder: owed ? undefined : unowedUnder };
 				entry.yielding ??= new Map();
 				entry.yielding.set(group.sequence, yielding);
 			}
@@ -3330,7 +3339,9 @@ export class Subscriber {
 				// A stale drop an update sent since superseded no longer ends the group.
 				const superseded = yielding.staleUnder !== undefined && yielding.staleUnder < entry.update;
 				const dropped = superseded ? undefined : yielding.dropped;
-				const given = dropped ?? (yielding.owed ? undefined : new StreamError(StreamCode.Old));
+				const owedNow =
+					yielding.owed || (yielding.unowedUnder !== undefined && yielding.unowedUnder < entry.update);
+				const given = dropped ?? (owedNow ? undefined : new StreamError(StreamCode.Old));
 				if (given) {
 					producer.abort(given);
 					return;
