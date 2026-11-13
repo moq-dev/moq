@@ -268,15 +268,30 @@ interface PausedGroup {
 
 // Whether a YIELDED reset of a stream being read pauses its group.
 interface Yielding {
-	// The publisher still owed the group when the stream arrived: no drop named it first.
-	owed: boolean;
-	// The error a drop named the group with while the stream was read.
-	dropped?: Error;
-	// For a stale drop, the update it named: the next update supersedes it.
-	staleUnder?: bigint;
-	// When a stale drop that overtook the stream is all that left the group unowed, the update it
-	// named: once another is sent, the group is owed again. Mirrors the Rust `Yielding::unowed_under`.
-	unowedUnder?: bigint;
+	verdict: YieldVerdict;
+}
+
+// Stale drops expire on the next update. An already accounted header stays accounted.
+type YieldVerdict =
+	| { kind: "owed" }
+	| { kind: "accounted" }
+	| { kind: "stale"; under: bigint; error: Error }
+	| { kind: "accounted-stale"; under: bigint; error: Error }
+	| { kind: "dropped"; error: Error };
+
+function yieldError(verdict: YieldVerdict, update: bigint): Error | undefined {
+	switch (verdict.kind) {
+		case "owed":
+			return undefined;
+		case "accounted":
+			return new StreamError(StreamCode.Old);
+		case "stale":
+			return verdict.under < update ? undefined : verdict.error;
+		case "accounted-stale":
+			return verdict.under < update ? new StreamError(StreamCode.Old) : verdict.error;
+		case "dropped":
+			return verdict.error;
+	}
 }
 
 // The paused groups of `entry`, created on first use.
@@ -3307,7 +3322,13 @@ export class Subscriber {
 			});
 			if (yields) {
 				ingest ??= { index: group.frameStart };
-				yielding = { owed, unowedUnder: owed ? undefined : unowedUnder };
+				yielding = {
+					verdict: owed
+						? { kind: "owed" }
+						: unowedUnder !== undefined
+							? { kind: "stale", under: unowedUnder, error: new StreamError(StreamCode.Old) }
+							: { kind: "accounted" },
+				};
 				entry.yielding ??= new Map();
 				entry.yielding.set(group.sequence, yielding);
 			}
@@ -3337,11 +3358,7 @@ export class Subscriber {
 				// A drop named the group first: the publisher gave it up, so nothing continues it. One
 				// that overtook the stream's header carried a stale verdict.
 				// A stale drop an update sent since superseded no longer ends the group.
-				const superseded = yielding.staleUnder !== undefined && yielding.staleUnder < entry.update;
-				const dropped = superseded ? undefined : yielding.dropped;
-				const owedNow =
-					yielding.owed || (yielding.unowedUnder !== undefined && yielding.unowedUnder < entry.update);
-				const given = dropped ?? (owedNow ? undefined : new StreamError(StreamCode.Old));
+				const given = yieldError(yielding.verdict, entry.update);
 				if (given) {
 					producer.abort(given);
 					return;
@@ -3413,10 +3430,17 @@ export class Subscriber {
 	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error, staleUnder?: bigint): void {
 		for (const [sequence, yielding] of entry.yielding ?? []) {
 			if (sequence < start || sequence >= end) continue;
-			// A final verdict stands, whatever stale one follows.
-			if (staleUnder !== undefined && yielding.dropped && yielding.staleUnder === undefined) continue;
-			yielding.dropped = error;
-			yielding.staleUnder = staleUnder;
+			const verdict = yielding.verdict;
+			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
+			else if (verdict.kind !== "dropped")
+				yielding.verdict = {
+					kind:
+						verdict.kind === "accounted" || verdict.kind === "accounted-stale"
+							? "accounted-stale"
+							: "stale",
+					under: staleUnder,
+					error,
+				};
 		}
 		const paused = entry.paused;
 		if (!paused) return;

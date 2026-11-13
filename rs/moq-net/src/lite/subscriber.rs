@@ -264,15 +264,46 @@ impl PausedGroup {
 struct Yielding {
 	/// The stream reading the group, as [`TrackEntry::read_yielding`] numbered it.
 	stream: u64,
-	/// The publisher still owed the group when the stream arrived: no drop named it first.
-	owed: bool,
-	/// The error a drop named the group with while the stream was read.
-	dropped: Option<Error>,
-	/// For a stale drop, the updates sent when it arrived: the next update supersedes it.
-	stale_under: Option<u64>,
-	/// When a stale drop that overtook the stream is all that left the group unowed, the
-	/// updates sent when the stream arrived: once another is sent, the group is owed again.
-	unowed_under: Option<u64>,
+	verdict: YieldVerdict,
+}
+
+/// A stale verdict expires on the next update; a final drop never does. A group already
+/// accounted before its header stays accounted even if a later stale drop expires.
+enum YieldVerdict {
+	Owed,
+	Accounted,
+	Stale { under: u64, error: Error },
+	AccountedStale { under: u64, error: Error },
+	Dropped(Error),
+}
+
+impl YieldVerdict {
+	fn updated(self, updates: u64) -> Self {
+		match self {
+			Self::Stale { under, .. } if under < updates => Self::Owed,
+			Self::AccountedStale { under, .. } if under < updates => Self::Accounted,
+			verdict => verdict,
+		}
+	}
+
+	fn drop_with(&mut self, error: Error, under: Option<u64>) {
+		*self = match under {
+			Some(_) if matches!(self, Self::Dropped(_)) => return,
+			Some(under) if matches!(self, Self::Accounted | Self::AccountedStale { .. }) => {
+				Self::AccountedStale { under, error }
+			}
+			Some(under) => Self::Stale { under, error },
+			None => Self::Dropped(error),
+		};
+	}
+
+	fn error(self) -> Option<Error> {
+		match self {
+			Self::Owed => None,
+			Self::Accounted => Some(Error::Stream(crate::StreamError::Old)),
+			Self::Stale { error, .. } | Self::AccountedStale { error, .. } | Self::Dropped(error) => Some(error),
+		}
+	}
 }
 
 /// What a group stream's header opened in its subscription's copy.
@@ -287,10 +318,7 @@ struct Opened {
 	/// A continuation's frame its YIELDED reset cut short, which it completes. Boxed, as
 	/// most groups have none.
 	partial: Option<Box<frame::Producer>>,
-	/// The publisher owed the group when the stream arrived; see [`Yielding::owed`].
-	owed: bool,
-	/// See [`Yielding::unowed_under`].
-	unowed_under: Option<u64>,
+	verdict: YieldVerdict,
 	track: track::Producer,
 	framing: lite::Framing,
 	reading: Reading,
@@ -501,8 +529,17 @@ impl TrackEntry {
 				}
 			}
 		}
-		let unowed_under = (!owed && stale).then(|| self.tail.read().updates());
-		self.place(hdr, version, received, reading, owed, unowed_under)
+		let verdict = if owed {
+			YieldVerdict::Owed
+		} else if stale {
+			YieldVerdict::Stale {
+				under: self.tail.read().updates(),
+				error: Error::Stream(crate::StreamError::Old),
+			}
+		} else {
+			YieldVerdict::Accounted
+		};
+		self.place(hdr, version, received, reading, verdict)
 	}
 
 	/// Whether a YIELDED reset paused the group `sequence`, which the cache still holds. One the
@@ -554,8 +591,7 @@ impl TrackEntry {
 		Some(Ok(Open::Group(Opened {
 			group,
 			partial: partial.map(Box::new),
-			owed: true,
-			unowed_under: None,
+			verdict: YieldVerdict::Owed,
 			track: producer.clone(),
 			framing: *framing,
 			reading,
@@ -576,23 +612,11 @@ impl TrackEntry {
 		state.groups.insert(sequence, paused);
 	}
 
-	/// Track a stream reading `sequence` that a YIELDED reset would pause, which `owed` says
-	/// the publisher owed when it arrived; see [`Yielding::unowed_under`].
-	///
-	/// Returns the stream's token for [`Self::end_yielding`].
-	fn read_yielding(&mut self, sequence: u64, owed: bool, unowed_under: Option<u64>) -> u64 {
+	/// Track a stream reading `sequence`, returning its token for [`Self::end_yielding`].
+	fn read_yielding(&mut self, sequence: u64, verdict: YieldVerdict) -> u64 {
 		self.yield_streams += 1;
 		let stream = self.yield_streams;
-		self.yielding.insert(
-			sequence,
-			Yielding {
-				stream,
-				owed,
-				dropped: None,
-				stale_under: None,
-				unowed_under,
-			},
-		);
+		self.yielding.insert(sequence, Yielding { stream, verdict });
 		stream
 	}
 
@@ -605,15 +629,7 @@ impl TrackEntry {
 			Some(yielding) if yielding.stream == stream => self.yielding.remove(&sequence)?,
 			_ => return None,
 		};
-		let updates = self.tail.read().updates();
-		if yielding.stale_under.is_some_and(|under| under < updates) {
-			yielding.dropped = None;
-			yielding.stale_under = None;
-		}
-		if yielding.unowed_under.is_some_and(|under| under < updates) {
-			yielding.owed = true;
-			yielding.unowed_under = None;
-		}
+		yielding.verdict = yielding.verdict.updated(self.tail.read().updates());
 		Some(yielding)
 	}
 
@@ -624,12 +640,7 @@ impl TrackEntry {
 	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error, stale: bool) {
 		let updates = stale.then(|| self.tail.read().updates());
 		for (_, yielding) in self.yielding.range_mut(groups.clone()) {
-			// A final verdict stands, whatever stale one follows.
-			if stale && yielding.dropped.is_some() && yielding.stale_under.is_none() {
-				continue;
-			}
-			yielding.dropped = Some(err.clone());
-			yielding.stale_under = updates;
+			yielding.verdict.drop_with(err.clone(), updates);
 		}
 		let Some(registry) = &self.paused else {
 			return;
@@ -658,7 +669,7 @@ impl TrackEntry {
 		};
 		let received = producer.create_group_at(group::Info { sequence: hdr.sequence }, hdr.frame_start);
 		// Served again, so owed again.
-		self.place(hdr, version, received, reading, true, None)
+		self.place(hdr, version, received, reading, YieldVerdict::Owed)
 	}
 
 	/// Give a stream what the cache answered for its header.
@@ -668,8 +679,7 @@ impl TrackEntry {
 		version: Version,
 		received: Result<track::Received, Error>,
 		reading: Reading,
-		owed: bool,
-		unowed_under: Option<u64>,
+		verdict: YieldVerdict,
 	) -> Result<Open, Error> {
 		let Some(Accepted { producer, framing }) = &self.copy else {
 			return Err(Error::Cancel);
@@ -703,8 +713,7 @@ impl TrackEntry {
 		Ok(Open::Group(Opened {
 			group: crate::recv::Group::new(group),
 			partial: None,
-			owed,
-			unowed_under,
+			verdict,
 			track: producer.clone(),
 			framing: *framing,
 			reading,
@@ -1786,8 +1795,7 @@ impl GroupRecv {
 		let Opened {
 			group,
 			partial: cut,
-			owed: arrived_owed,
-			unowed_under,
+			verdict,
 			track,
 			framing,
 			reading,
@@ -1798,7 +1806,7 @@ impl GroupRecv {
 				.subscribes
 				.lock()
 				.get_mut(&hdr.subscribe)
-				.map(|entry| entry.read_yielding(hdr.sequence, arrived_owed, unowed_under)),
+				.map(|entry| entry.read_yielding(hdr.sequence, verdict)),
 			false => None,
 		};
 		let (priority, order) = track
@@ -1854,13 +1862,7 @@ impl GroupRecv {
 				// A drop named the group first: the publisher gave it up, so nothing continues it.
 				// One that overtook the stream's header carried a stale verdict.
 				let err = match yielding {
-					Some(Yielding {
-						owed: true,
-						dropped: None,
-						..
-					}) => None,
-					Some(Yielding { dropped: Some(err), .. }) => Some(err),
-					Some(Yielding { owed: false, .. }) => Some(Error::Stream(crate::StreamError::Old)),
+					Some(yielding) => yielding.verdict.error(),
 					None => Some(Error::Cancel),
 				};
 				if let Some(err) = err {
@@ -5725,8 +5727,8 @@ mod tests {
 			length_first: true,
 		};
 		let mut entry = TrackEntry::accepted(track, framing, kio::Producer::new(Tail::default()));
-		let replaced = entry.read_yielding(3, true, None);
-		let replacement = entry.read_yielding(3, true, None);
+		let replaced = entry.read_yielding(3, YieldVerdict::Owed);
+		let replacement = entry.read_yielding(3, YieldVerdict::Owed);
 		assert!(
 			entry.end_yielding(3, replaced).is_none(),
 			"the replaced stream's record is gone"
@@ -5734,7 +5736,7 @@ mod tests {
 		let yielding = entry
 			.end_yielding(3, replacement)
 			.expect("the replacement's record stays");
-		assert!(yielding.owed && yielding.dropped.is_none());
+		assert!(matches!(yielding.verdict, YieldVerdict::Owed));
 	}
 
 	/// Lite-07: a paused group the cache gave up on lets go of the subscription's end once a
