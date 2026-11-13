@@ -36,7 +36,8 @@
 //! 8-byte connection IDs whose first byte is congruent to the member's
 //! [`Shard::index`] modulo [`Shard::count`], and whose fourth byte has both
 //! bits of `0x18` set, a pattern no valid SRT data header carries, so a short
-//! header from another protocol on the port keeps the 4-tuple hash.
+//! header from another protocol on the port is balanced by its source address
+//! and port instead, one flow to one member.
 //! `moq_quic::RandomConnectionIdGenerator::set_shard` issues exactly those.
 //! The kernel selects `socks[A % count]` for a returned accumulator `A`, so
 //! feeding it that byte lands on the owner.
@@ -56,9 +57,30 @@
 //! BPF toolchain in the build, and no map to keep alive across restarts. The
 //! cost is that the kernel selects by *position*, so the group has to be bound
 //! once, in order, and never resized, which is why [`bind`] does all of it.
+//!
+//! # Handing the port to a successor
+//!
+//! A group bound with [`Config::handoff`] holds two generations of members, one
+//! per process, so an upgraded process can serve the port beside the one it
+//! replaces. Each process serves one generation and issues connection IDs whose
+//! index names a member of it, so the predecessor's connections keep reaching
+//! the predecessor. The successor takes every member by file descriptor
+//! ([`Bound::handoff`], [`Bound::adopt`]) rather than binding its own: both
+//! processes then hold every member, so neither one exiting closes a socket and
+//! renumbers the survivors, which is what positional steering cannot survive.
+//!
+//! A client's first Initial carries a connection ID it invented, which names no
+//! member, so those packets go to whichever generation last called
+//! [`Bound::steer`]: the newest process takes every new handshake. A Handshake
+//! or short-header packet carries an ID the server chose and reaches its exact
+//! member while two generations serve ([`Steer::Beside`]), or the newest
+//! generation's member of the same position once the other is gone
+//! ([`Steer::Alone`]), where the connection ID generator refuses it.
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
 
 /// One member's slot in a group of sockets sharing a port via `SO_REUSEPORT`.
 ///
@@ -134,63 +156,119 @@ pub enum Error {
 	/// The steering filter could not be attached.
 	#[error("failed to steer the reuseport group")]
 	Steer(#[source] io::Error),
+
+	/// A handed-off group did not describe the sockets it carried.
+	#[error("cannot adopt the handed-off reuseport group: {0}")]
+	Adopt(String),
 }
 
-/// Bind a steered group of `count` sockets sharing `addr`.
-///
-/// Everything a steered group has to get right happens here rather than in its
-/// caller, because none of it is visible in a socket afterwards:
-///
-/// - The port is locked before the first member binds and stays locked until the
-///   returned group and every socket it handed out are gone, so a second
-///   same-UID group cannot interleave into this one. Hold the group for as long
-///   as its sockets are served.
-/// - The member count is checked once, against what the steering filter can
-///   address, and never changes.
-/// - Members bind in index order, which is the order the kernel numbers them
-///   by, and the filter is attached before any socket is released.
-///
-/// A `count` of zero is a group of one: a lone member is a valid group.
-///
-/// An ephemeral port (`0`) is resolved first, with a plain bind that is
-/// dropped again, and the group then takes that port like a named one.
-/// Never a reuseport bind of port `0`: Linux counts a port held only by
-/// same-UID reuseport sockets as free for one, so the kernel could hand
-/// back a port another group holds and this one would silently join it. A
-/// plain bind conflicts with every holder. Another socket taking the port
-/// before the first member binds fails that bind with
-/// [`io::ErrorKind::AddrInUse`].
+/// Bind a steered group of `count` sockets sharing `addr`, with no room for a
+/// successor: [`Config::bind`] with [`Config::handoff`] off.
 pub fn bind(addr: SocketAddr, count: u16) -> Result<Bound, Error> {
-	let count = count.max(1);
-	if count > MAX_SHARDS {
-		return Err(Error::Count { count, max: MAX_SHARDS });
+	Config::new(addr, count).bind()
+}
+
+/// The shape of a steered group, for [`Config::bind`].
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct Config {
+	/// The address every member binds. Port `0` resolves an ephemeral port first.
+	pub addr: SocketAddr,
+	/// How many members this process serves. Zero is a group of one.
+	pub count: u16,
+	/// Also bind a second generation of `count` members, held in reserve for a
+	/// successor process to [`adopt`](Bound::adopt) and serve beside this one.
+	/// Doubles the members the steering filter has to address. Defaults to off.
+	pub handoff: bool,
+}
+
+impl Config {
+	/// A group of `count` members on `addr`, with no room for a successor.
+	pub fn new(addr: SocketAddr, count: u16) -> Self {
+		Self {
+			addr,
+			count,
+			handoff: false,
+		}
 	}
 
-	let addr = match addr.port() {
-		0 => crate::bind::udp(crate::bind::Udp::new(addr))
-			.and_then(|socket| socket.local_addr())
-			.map_err(Error::Resolve)?,
-		_ => addr,
-	};
+	/// Bind the group and steer it.
+	///
+	/// Everything a steered group has to get right happens here rather than in its
+	/// caller, because none of it is visible in a socket afterwards:
+	///
+	/// - The port is locked before the first member binds and stays locked until the
+	///   returned group and every socket it handed out are gone, so a second
+	///   same-UID group cannot interleave into this one. Hold the group for as long
+	///   as its sockets are served.
+	/// - The member count is checked once, against what the steering filter can
+	///   address, and never changes.
+	/// - Members bind in index order, which is the order the kernel numbers them
+	///   by, and the filter is attached before any socket is released.
+	///
+	/// This process serves the first generation and takes every new handshake.
+	///
+	/// An ephemeral port (`0`) is resolved first, with a plain bind that is
+	/// dropped again, and the group then takes that port like a named one.
+	/// Never a reuseport bind of port `0`: Linux counts a port held only by
+	/// same-UID reuseport sockets as free for one, so the kernel could hand
+	/// back a port another group holds and this one would silently join it. A
+	/// plain bind conflicts with every holder. Another socket taking the port
+	/// before the first member binds fails that bind with
+	/// [`io::ErrorKind::AddrInUse`].
+	pub fn bind(self) -> Result<Bound, Error> {
+		let count = self.count.max(1);
+		let generations = match self.handoff {
+			true => 2,
+			false => 1,
+		};
+		let total = count.saturating_mul(generations);
+		if u32::from(count) * u32::from(generations) > u32::from(MAX_SHARDS) {
+			return Err(Error::Count {
+				count: total,
+				max: MAX_SHARDS,
+			});
+		}
 
-	let port = addr.port();
-	let lock = Lock::acquire(port).map_err(|_| Error::Overlap { port })?;
+		let addr = match self.addr.port() {
+			0 => crate::bind::udp(crate::bind::Udp::new(self.addr))
+				.and_then(|socket| socket.local_addr())
+				.map_err(Error::Resolve)?,
+			_ => self.addr,
+		};
 
-	let mut sockets = Vec::with_capacity(usize::from(count));
-	for index in 0..count {
-		let socket = member(addr, index).map_err(|source| Error::Bind { index, source })?;
-		sockets.push((Shard { index, count }, socket));
+		let port = addr.port();
+		let lock = Lock::acquire(port).map_err(|_| Error::Overlap { port })?;
+
+		let mut slots = Vec::with_capacity(usize::from(total));
+		for index in 0..total {
+			slots.push(member(addr, index).map_err(|source| Error::Bind { index, source })?);
+		}
+
+		let group = Bound {
+			slots,
+			count,
+			generation: 0,
+			next: 0,
+			addr,
+			_lock: lock,
+		};
+		// The last member to bind is the first point the filter covers the whole array.
+		group.steer(Steer::Alone).map_err(Error::Steer)?;
+		Ok(group)
 	}
+}
 
-	let (_, last) = sockets.last().expect("a group always has at least one member");
-	attach(last, count).map_err(Error::Steer)?;
-
-	Ok(Bound {
-		sockets,
-		next: 0,
-		addr,
-		_lock: lock,
-	})
+/// Which connections the newest generation receives, set by [`Bound::steer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Steer {
+	/// Another generation still serves its connections: every connection ID a
+	/// server chose reaches the member that issued it.
+	Beside,
+	/// No other generation serves: every packet reaches this generation, and one
+	/// for a connection the other generation issued is refused by its connection
+	/// ID generator rather than queued on a socket nobody reads.
+	Alone,
 }
 
 /// A complete steered group that retains every member socket.
@@ -198,11 +276,17 @@ pub fn bind(addr: SocketAddr, count: u16) -> Result<Bound, Error> {
 /// [`member`](Self::member) returns duplicate handles to the retained sockets.
 /// Dropping one handle stops serving that slot without removing it from the
 /// kernel group or renumbering any survivor. Dropping this group closes every
-/// retained member together and releases the port.
+/// retained member together and releases the port, unless a successor that
+/// [`adopt`](Self::adopt)ed it still holds them.
 #[derive(Debug)]
 pub struct Bound {
-	sockets: Vec<(Shard, UdpSocket)>,
-	next: usize,
+	/// Every member in kernel order: one generation of `count`, or two with a handoff.
+	slots: Vec<UdpSocket>,
+	/// Members per generation, which is how many this process serves.
+	count: u16,
+	/// The generation this process serves.
+	generation: u16,
+	next: u16,
 	addr: SocketAddr,
 
 	/// Held for exactly as long as the complete socket group, and released by
@@ -211,9 +295,9 @@ pub struct Bound {
 }
 
 impl Bound {
-	/// How many sockets share the port.
+	/// How many sockets this process serves.
 	pub fn count(&self) -> u16 {
-		self.sockets.len().try_into().expect("group count fits u16")
+		self.count
 	}
 
 	/// The address every member holds, with an ephemeral port already resolved.
@@ -221,31 +305,165 @@ impl Bound {
 		self.addr
 	}
 
+	/// How many generations the group holds members for: two when bound for a handoff.
+	fn generations(&self) -> u16 {
+		u16::try_from(self.slots.len() / usize::from(self.count)).expect("at most 256 members")
+	}
+
 	/// The next socket to serve, or `None` once every member was handed out.
 	///
 	/// The group retains the underlying socket, so dropping the returned handle
 	/// cannot resize the kernel's reuseport array.
 	pub fn member(&mut self) -> io::Result<Option<Socket>> {
-		let Some((shard, socket)) = self.sockets.get(self.next) else {
+		if self.next >= self.count {
 			return Ok(None);
+		}
+		let index = self.generation * self.count + self.next;
+		let socket = self.slots[usize::from(index)].try_clone()?;
+		let shard = Shard {
+			index,
+			count: u16::try_from(self.slots.len()).expect("at most 256 members"),
 		};
-		let socket = socket.try_clone()?;
+		let worker = self.next;
 		self.next += 1;
-		Ok(Some(Socket { shard: *shard, socket }))
+		Ok(Some(Socket { shard, worker, socket }))
 	}
+
+	/// Make this process's generation the one every new handshake reaches.
+	///
+	/// [`Config::bind`] steers its group already. A successor calls this once it
+	/// serves, with [`Steer::Beside`] while its predecessor still serves and
+	/// [`Steer::Alone`] once it is gone. The filter belongs to the whole group, so
+	/// the latest call from either process wins.
+	pub fn steer(&self, steer: Steer) -> io::Result<()> {
+		let first = self.slots.first().expect("a group always has at least one member");
+		attach(
+			first,
+			Program {
+				count: self.count,
+				total: u16::try_from(self.slots.len()).expect("at most 256 members"),
+				base: self.generation * self.count,
+				exact: steer == Steer::Beside,
+			},
+		)
+	}
+
+	/// Duplicate every member and the port lock for a successor to [`adopt`](Self::adopt).
+	///
+	/// Refused with [`io::ErrorKind::Unsupported`] for a group bound without
+	/// [`Config::handoff`], which has no generation to give away.
+	#[cfg(target_os = "linux")]
+	pub fn handoff(&self) -> io::Result<Handoff> {
+		if self.generations() < 2 {
+			return Err(io::Error::new(
+				io::ErrorKind::Unsupported,
+				"the reuseport group was bound without room for a successor",
+			));
+		}
+		let sockets = self
+			.slots
+			.iter()
+			.map(|socket| socket.try_clone().map(OwnedFd::from))
+			.collect::<io::Result<_>>()?;
+		let lock = self
+			._lock
+			.as_ref()
+			.map(|lock| lock._file.try_clone().map(OwnedFd::from))
+			.transpose()?;
+		Ok(Handoff {
+			addr: self.addr,
+			count: self.count,
+			generation: self.generation,
+			sockets,
+			lock,
+		})
+	}
+
+	/// Serve the generation a predecessor's [`handoff`](Self::handoff) left free.
+	///
+	/// Nothing is steered here: the predecessor keeps every new handshake until
+	/// this process is ready to serve and calls [`steer`](Self::steer).
+	#[cfg(target_os = "linux")]
+	pub fn adopt(handoff: Handoff) -> Result<Self, Error> {
+		let Handoff {
+			addr,
+			count,
+			generation,
+			sockets,
+			lock,
+		} = handoff;
+		let refuse = |reason: String| Err(Error::Adopt(reason));
+		if count == 0 || u32::from(count) * 2 > u32::from(MAX_SHARDS) {
+			return refuse(format!("{count} members per generation"));
+		}
+		if generation > 1 {
+			return refuse(format!("generation {generation} of two"));
+		}
+		if sockets.len() != usize::from(count) * 2 {
+			return refuse(format!(
+				"{} sockets for two generations of {count}",
+				sockets.len()
+			));
+		}
+		let mut slots = Vec::with_capacity(sockets.len());
+		for (index, socket) in sockets.into_iter().enumerate() {
+			let socket = UdpSocket::from(socket);
+			match socket.local_addr() {
+				Ok(local) if local == addr => slots.push(socket),
+				Ok(local) => return refuse(format!("member {index} is bound to {local}, not {addr}")),
+				Err(err) => return refuse(format!("member {index} is not a bound UDP socket: {err}")),
+			}
+		}
+		Ok(Self {
+			slots,
+			count,
+			generation: 1 - generation,
+			next: 0,
+			addr,
+			_lock: lock.map(|file| Lock {
+				_file: std::fs::File::from(file),
+			}),
+		})
+	}
+}
+
+/// A steered group on its way to a successor process: every member in kernel
+/// order and the port lock, from [`Bound::handoff`] for [`Bound::adopt`].
+///
+/// Carries file descriptors, so send it over a Unix socket with
+/// [`crate::fd::send`] and rebuild it from what [`crate::fd::recv`] returns.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct Handoff {
+	/// The address every member holds.
+	pub addr: SocketAddr,
+	/// Members per generation.
+	pub count: u16,
+	/// The generation the sender serves; the successor takes the other one.
+	pub generation: u16,
+	/// Every member, two generations of `count`, in the order the kernel numbers them.
+	pub sockets: Vec<OwnedFd>,
+	/// The lock holding the port against a second group, if the sender had one.
+	pub lock: Option<OwnedFd>,
 }
 
 /// One serving handle released by a complete [`Bound`] group.
 #[derive(Debug)]
 pub struct Socket {
 	shard: Shard,
+	worker: u16,
 	socket: UdpSocket,
 }
 
 impl Socket {
-	/// This socket's position in the group.
+	/// The slot this socket holds in the group, which its connection IDs name.
 	pub fn shard(&self) -> Shard {
 		self.shard
+	}
+
+	/// This socket's position among the ones its process serves, from zero.
+	pub fn worker(&self) -> u16 {
+		self.worker
 	}
 
 	/// Release the UDP handle while the [`Bound`] group retains its member.
@@ -472,27 +690,41 @@ fn prepare(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
 	Some(dir)
 }
 
-/// The largest group the steering filter can address.
+/// The largest group the steering filter can address, both generations counted.
 ///
 /// It selects with one byte of the connection ID, so a member past 255 could
 /// never be named: the filter's `byte % count` could never return that index.
 pub const MAX_SHARDS: u16 = 256;
 
-/// Attach the steering filter to a socket in a reuseport group of `count`.
+/// What the steering filter computes for one group.
+#[derive(Clone, Copy, Debug)]
+struct Program {
+	/// Members per generation.
+	count: u16,
+	/// Members in the group, every generation counted.
+	total: u16,
+	/// The first member of the generation that takes new handshakes.
+	base: u16,
+	/// Steer a server-chosen connection ID to the member that issued it, rather than
+	/// to the same position in the newest generation.
+	exact: bool,
+}
+
+/// Attach the steering filter to the reuseport group `socket` belongs to.
 ///
-/// Applies to the group, so once is enough, and the last member to bind is the
-/// first point where that is true.
+/// Applies to the group, so once is enough, and replaces whatever filter the
+/// group had: a successor retargets new handshakes this way.
 #[cfg(target_os = "linux")]
-fn attach(socket: &UdpSocket, count: u16) -> io::Result<()> {
+fn attach(socket: &UdpSocket, program: Program) -> io::Result<()> {
 	use std::os::fd::AsRawFd;
 
-	let program = program(count);
+	let insns = program.insns();
 	let fprog = libc::sock_fprog {
-		len: program.len() as u16,
-		filter: program.as_ptr() as *mut libc::sock_filter,
+		len: insns.len() as u16,
+		filter: insns.as_ptr() as *mut libc::sock_filter,
 	};
 
-	// SAFETY: `fprog` points at `program`, which outlives the call, and its `len`
+	// SAFETY: `fprog` points at `insns`, which outlives the call, and its `len`
 	// is that slice's length.
 	let res = unsafe {
 		libc::setsockopt(
@@ -508,12 +740,12 @@ fn attach(socket: &UdpSocket, count: u16) -> io::Result<()> {
 		return Err(io::Error::last_os_error());
 	}
 
-	tracing::debug!(count, "steering the reuseport group by connection ID");
+	tracing::debug!(?program, "steering the reuseport group by connection ID");
 	Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn attach(_socket: &UdpSocket, _count: u16) -> io::Result<()> {
+fn attach(_socket: &UdpSocket, _program: Program) -> io::Result<()> {
 	// Unreachable in practice: a member only gets here once `bind::udp` accepted
 	// `SO_REUSEPORT`, which is Linux-only.
 	Err(io::Error::new(
@@ -522,74 +754,140 @@ fn attach(_socket: &UdpSocket, _count: u16) -> io::Result<()> {
 	))
 }
 
-/// The classic-BPF program that maps a QUIC packet to its owner's index.
-///
-/// A long header is QUIC when it carries v1 or v2. A short header is QUIC when
-/// its fixed bit and relay CID marker are set. For either, the first destination
-/// CID byte is reduced modulo the group size. Everything else returns an invalid
-/// index, which asks reuseport to use its 4-tuple hash. The packet starts at
-/// offset 0 because the kernel pulls the UDP header off before running this.
-///
-/// A load past the end of the datagram aborts the program with 0, which
-/// reuseport takes as member 0, so anything too short for every load is
-/// rejected first.
-#[cfg(target_os = "linux")]
-fn program(count: u16) -> [libc::sock_filter; 18] {
-	/// Long-header form bit in the first byte of a QUIC packet.
-	const LONG_HEADER: u32 = 0x80;
-	/// Fixed bit on short headers. Greasing is disabled on sharded endpoints.
-	const FIXED_BIT: u32 = 0x40;
-	const VERSION_1: u32 = 0x0000_0001;
-	const VERSION_2: u32 = 0x6b33_43cf;
-	/// The SRT key-encryption bits overlaid by the fourth destination CID byte.
-	const MAGIC_MASK: u32 = 0x18;
-	/// 1 first byte + 4 version bytes + 1 length byte precede a long header's
-	/// destination connection ID.
-	const LONG_DCID: u32 = 6;
-	/// A short header's destination connection ID follows the first byte.
-	const SHORT_DCID: u32 = 1;
-	/// The shortest datagram every load below stays inside.
-	const MIN_LEN: u32 = LONG_DCID + 1;
+impl Program {
+	/// The classic-BPF program that maps a QUIC packet to its member's index.
+	///
+	/// A long header is QUIC when it carries v1 or v2. A short header is QUIC when
+	/// its fixed bit and relay CID marker are set. A short header and a Handshake
+	/// packet carry a connection ID the server chose, so its first byte names a
+	/// member: modulo the group size when [`exact`](Self::exact), else modulo
+	/// one generation's size, offset into the newest. An Initial or 0-RTT packet
+	/// carries the one the client invented, which names nothing, so it always
+	/// goes to the newest generation, the same member for every retransmission.
+	/// Everything else (another protocol sharing the port, or a QUIC version this
+	/// cannot read) hashes its source address and port into the newest
+	/// generation, so one flow stays on one member and never lands on a
+	/// generation nobody reads. The kernel's own 4-tuple hash would pick from
+	/// every member, the reserve generation included. The packet starts at
+	/// offset 0 because the kernel pulls the UDP header off before running
+	/// this; the addresses are read back through the network header.
+	///
+	/// A load past the end of the datagram aborts the program with 0, which
+	/// reuseport takes as member 0, so anything too short for every load is
+	/// rejected first. Jumps only go forward, which is why the two reductions
+	/// are spelled out twice.
+	#[cfg(target_os = "linux")]
+	fn insns(self) -> [libc::sock_filter; 42] {
+		/// Long-header form bit in the first byte of a QUIC packet.
+		const LONG_HEADER: u32 = 0x80;
+		/// Fixed bit on short headers. Greasing is disabled on sharded endpoints.
+		const FIXED_BIT: u32 = 0x40;
+		/// The long header's packet type bits.
+		const TYPE_MASK: u32 = 0x30;
+		/// QUIC v1's Handshake packet type (RFC 9000).
+		const HANDSHAKE_V1: u32 = 0x20;
+		/// QUIC v2's Handshake packet type (RFC 9369).
+		const HANDSHAKE_V2: u32 = 0x30;
+		const VERSION_1: u32 = 0x0000_0001;
+		const VERSION_2: u32 = 0x6b33_43cf;
+		/// The SRT key-encryption bits overlaid by the fourth destination CID byte.
+		const MAGIC_MASK: u32 = 0x18;
+		/// 1 first byte + 4 version bytes + 1 length byte precede a long header's
+		/// destination connection ID.
+		const LONG_DCID: u32 = 6;
+		/// A short header's destination connection ID follows the first byte.
+		const SHORT_DCID: u32 = 1;
+		/// The shortest datagram every load below stays inside.
+		const MIN_LEN: u32 = LONG_DCID + 1;
+		/// Loads at this offset read from the IP header rather than the payload.
+		const NET: u32 = libc::SKF_NET_OFF as u32;
+		/// Where the source address sits in an IPv4 header.
+		const V4_SRC: u32 = 12;
+		/// The last word of the source address in an IPv6 header.
+		const V6_SRC: u32 = 20;
+		/// The fixed IPv6 header, which a UDP header follows on every flow worth balancing.
+		const V6_LEN: u32 = 40;
 
-	fn insn(code: u32, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
-		libc::sock_filter {
-			code: code as u16,
-			jt,
-			jf,
-			k,
+		fn insn(code: u32, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+			libc::sock_filter {
+				code: code as u16,
+				jt,
+				jf,
+				k,
+			}
 		}
-	}
 
-	[
-		// A = datagram length; too short to be QUIC uses the kernel hash.
-		insn(libc::BPF_LD | libc::BPF_W | libc::BPF_LEN, 0, 0, 0),
-		insn(libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K, 0, 12, MIN_LEN),
-		// A = packet[0]
-		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, 0),
-		// Long header? Jump to its version check.
-		insn(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 7, 0, LONG_HEADER),
-		// A short header must retain QUIC's fixed bit.
-		insn(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 0, 9, FIXED_BIT),
-		// A = packet[4], the fourth destination CID byte.
-		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, SHORT_DCID + 3),
-		insn(libc::BPF_ALU | libc::BPF_AND | libc::BPF_K, 0, 0, MAGIC_MASK),
-		// A short header without the relay CID marker uses the kernel hash.
-		insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 0, 6, MAGIC_MASK),
-		// A = packet[1]
-		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, SHORT_DCID),
-		insn(libc::BPF_ALU | libc::BPF_MOD | libc::BPF_K, 0, 0, u32::from(count)),
-		insn(libc::BPF_RET | libc::BPF_A, 0, 0, 0),
-		// Long headers steer only supported QUIC versions.
-		insn(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 1),
-		insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 2, 0, VERSION_1),
-		insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 1, 0, VERSION_2),
-		// An out-of-range result asks reuseport to use its 4-tuple hash.
-		insn(libc::BPF_RET | libc::BPF_K, 0, 0, u32::from(count)),
-		// A = packet[6]
-		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, LONG_DCID),
-		insn(libc::BPF_ALU | libc::BPF_MOD | libc::BPF_K, 0, 0, u32::from(count)),
-		insn(libc::BPF_RET | libc::BPF_A, 0, 0, 0),
-	]
+		let count = u32::from(self.count);
+		let base = u32::from(self.base);
+		// A server-chosen ID either names its exact member, or the member at the same
+		// position in the newest generation.
+		let (server_mod, server_add) = match self.exact {
+			true => (u32::from(self.total), 0),
+			false => (count, base),
+		};
+
+		[
+			// 0: A = datagram length; too short to be QUIC is hashed as a flow.
+			insn(libc::BPF_LD | libc::BPF_W | libc::BPF_LEN, 0, 0, 0),
+			insn(libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K, 0, 25, MIN_LEN),
+			// 2: A = packet[0]
+			insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, 0),
+			// Long header? Jump to its version check at 10.
+			insn(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 6, 0, LONG_HEADER),
+			// 4: A short header must retain QUIC's fixed bit.
+			insn(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 0, 22, FIXED_BIT),
+			// 5: A = packet[4], the fourth destination CID byte.
+			insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, SHORT_DCID + 3),
+			insn(libc::BPF_ALU | libc::BPF_AND | libc::BPF_K, 0, 0, MAGIC_MASK),
+			// 7: A short header without the relay CID marker is hashed as a flow.
+			insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 0, 19, MAGIC_MASK),
+			// 8: A = packet[1], then the server-chosen reduction at 20.
+			insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, SHORT_DCID),
+			insn(libc::BPF_JMP | libc::BPF_JA, 0, 0, 10),
+			// 10: Long headers steer only supported QUIC versions.
+			insn(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 1),
+			insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 4, 0, VERSION_1),
+			insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 0, 14, VERSION_2),
+			// 13: v2: a Handshake loads the server-chosen ID at 19, else the client's at 23.
+			insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, 0),
+			insn(libc::BPF_ALU | libc::BPF_AND | libc::BPF_K, 0, 0, TYPE_MASK),
+			insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 3, 7, HANDSHAKE_V2),
+			// 16: v1: the same split by v1's type.
+			insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, 0),
+			insn(libc::BPF_ALU | libc::BPF_AND | libc::BPF_K, 0, 0, TYPE_MASK),
+			insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 0, 4, HANDSHAKE_V1),
+			// 19: A = packet[6], a Handshake's first destination CID byte.
+			insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, LONG_DCID),
+			// 20: A server-chosen ID names its member.
+			insn(libc::BPF_ALU | libc::BPF_MOD | libc::BPF_K, 0, 0, server_mod),
+			insn(libc::BPF_ALU | libc::BPF_ADD | libc::BPF_K, 0, 0, server_add),
+			insn(libc::BPF_RET | libc::BPF_A, 0, 0, 0),
+			// 23: A = packet[6], the ID the client invented, into the newest generation.
+			insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, LONG_DCID),
+			insn(libc::BPF_ALU | libc::BPF_MOD | libc::BPF_K, 0, 0, count),
+			insn(libc::BPF_ALU | libc::BPF_ADD | libc::BPF_K, 0, 0, base),
+			insn(libc::BPF_RET | libc::BPF_A, 0, 0, 0),
+			// 27: Not QUIC: hash the flow into the newest generation, by IP version.
+			insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, NET),
+			insn(libc::BPF_ALU | libc::BPF_RSH | libc::BPF_K, 0, 0, 4),
+			insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 5, 0, 6),
+			// 30: IPv4: X = the header length, A = the UDP source port, X = A, A = the source address.
+			insn(libc::BPF_LDX | libc::BPF_B | libc::BPF_MSH, 0, 0, NET),
+			insn(libc::BPF_LD | libc::BPF_H | libc::BPF_IND, 0, 0, NET),
+			insn(libc::BPF_MISC | libc::BPF_TAX, 0, 0, 0),
+			insn(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, NET + V4_SRC),
+			insn(libc::BPF_JMP | libc::BPF_JA, 0, 0, 3),
+			// 35: IPv6: the same past the fixed header.
+			insn(libc::BPF_LD | libc::BPF_H | libc::BPF_ABS, 0, 0, NET + V6_LEN),
+			insn(libc::BPF_MISC | libc::BPF_TAX, 0, 0, 0),
+			insn(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, NET + V6_SRC),
+			// 38: A = (address ^ port) % count + base.
+			insn(libc::BPF_ALU | libc::BPF_XOR | libc::BPF_X, 0, 0, 0),
+			insn(libc::BPF_ALU | libc::BPF_MOD | libc::BPF_K, 0, 0, count),
+			insn(libc::BPF_ALU | libc::BPF_ADD | libc::BPF_K, 0, 0, base),
+			insn(libc::BPF_RET | libc::BPF_A, 0, 0, 0),
+		]
+	}
 }
 
 #[cfg(test)]
@@ -663,8 +961,93 @@ mod tests {
 		assert_eq!(group.count(), 1);
 	}
 
+	/// Which member received something, given every send targets exactly one.
+	#[cfg(target_os = "linux")]
+	fn receiver(group: &[UdpSocket]) -> Option<usize> {
+		use std::os::fd::AsRawFd;
+
+		// Block until a member is readable: the filter runs on the send, but the
+		// datagram lands in the member's queue asynchronously.
+		let mut fds: Vec<_> = group
+			.iter()
+			.map(|socket| libc::pollfd {
+				fd: socket.as_raw_fd(),
+				events: libc::POLLIN,
+				revents: 0,
+			})
+			.collect();
+		let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 5_000) };
+		assert!(n >= 0, "poll failed: {}", std::io::Error::last_os_error());
+		let mut buf = [0u8; 64];
+		group.iter().position(|socket| socket.recv_from(&mut buf).is_ok())
+	}
+
+	/// Send `packet` to `addr` from a fresh source port, so nothing but its
+	/// connection ID can be steering it.
+	#[cfg(target_os = "linux")]
+	fn send(packet: &[u8], addr: SocketAddr) {
+		let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
+		sender.send_to(packet, addr).unwrap();
+	}
+
+	/// A short header carrying `id`.
+	#[cfg(target_os = "linux")]
+	fn short(id: [u8; CID_LEN]) -> Vec<u8> {
+		let mut packet = vec![0x40];
+		packet.extend_from_slice(&id);
+		packet
+	}
+
+	/// A long header of `first` byte and `version`, addressed to `id`.
+	#[cfg(target_os = "linux")]
+	fn long(first: u8, version: [u8; 4], id: [u8; CID_LEN]) -> Vec<u8> {
+		let mut packet = vec![first, version[0], version[1], version[2], version[3], CID_LEN as u8];
+		packet.extend_from_slice(&id);
+		packet
+	}
+
+	const V1: [u8; 4] = [0, 0, 0, 1];
+	const V2: [u8; 4] = [0x6b, 0x33, 0x43, 0xcf];
+
+	/// Every packet a client sends with a connection ID the server chose.
+	#[cfg(target_os = "linux")]
+	fn chosen(id: [u8; CID_LEN]) -> [(&'static str, Vec<u8>); 3] {
+		[
+			("short", short(id)),
+			("v1 handshake", long(0xe0, V1, id)),
+			("v2 handshake", long(0xf0, V2, id)),
+		]
+	}
+
+	/// Every packet a client sends with the connection ID it invented.
+	#[cfg(target_os = "linux")]
+	fn invented(id: [u8; CID_LEN]) -> [(&'static str, Vec<u8>); 4] {
+		[
+			("v1 initial", long(0xc0, V1, id)),
+			("v1 0-rtt", long(0xd0, V1, id)),
+			("v2 initial", long(0xd0, V2, id)),
+			("v2 0-rtt", long(0xe0, V2, id)),
+		]
+	}
+
+	/// Serve every member of `group`, non-blocking.
+	#[cfg(target_os = "linux")]
+	fn serve(group: &mut Bound) -> (Vec<UdpSocket>, Vec<Shard>) {
+		let mut sockets = Vec::new();
+		let mut shards = Vec::new();
+		while let Some(member) = group.member().expect("clone retained socket") {
+			assert_eq!(usize::from(member.worker()), sockets.len(), "workers count from zero");
+			shards.push(member.shard());
+			let socket = member.into_inner();
+			socket.set_nonblocking(true).unwrap();
+			sockets.push(socket);
+		}
+		(sockets, shards)
+	}
+
 	/// The whole point, end to end against a real kernel: a packet carrying a
-	/// member's connection ID has to reach that member and no other.
+	/// member's connection ID has to reach that member and no other, and a client's
+	/// retransmitted Initial has to reach the same member as its first.
 	///
 	/// This is what the 4-tuple hash cannot do. Every packet here is sent from a
 	/// different ephemeral source port, so under the default hashing the landing
@@ -675,120 +1058,218 @@ mod tests {
 		const COUNT: u16 = 4;
 
 		let mut group = bind("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
-		let mut sockets = Vec::new();
-		let mut shards = Vec::new();
-		while let Some(member) = group.member().expect("clone retained socket") {
-			shards.push(member.shard());
-			let socket = member.into_inner();
-			socket.set_nonblocking(true).unwrap();
-			sockets.push(socket);
-		}
+		let (sockets, shards) = serve(&mut group);
 		let addr = group.addr();
-
-		/// Which member received something, given every send targets exactly one.
-		fn receiver(group: &[UdpSocket]) -> Option<usize> {
-			use std::os::fd::AsRawFd;
-
-			// Block until a member is readable: the filter runs on the send, but the
-			// datagram lands in the member's queue asynchronously.
-			let mut fds: Vec<_> = group
-				.iter()
-				.map(|socket| libc::pollfd {
-					fd: socket.as_raw_fd(),
-					events: libc::POLLIN,
-					revents: 0,
-				})
-				.collect();
-			let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 5_000) };
-			assert!(n >= 0, "poll failed: {}", std::io::Error::last_os_error());
-			let mut buf = [0u8; 64];
-			group.iter().position(|socket| socket.recv_from(&mut buf).is_ok())
-		}
 
 		for (index, shard) in shards.into_iter().enumerate() {
 			let id = cid(shard);
-
-			// A short header: form bit clear, connection ID straight after.
-			let mut short = [0; CID_LEN + 1];
-			short[0] = 0x40;
-			short[1..].copy_from_slice(&id);
-			let long = |version: [u8; 4]| {
-				let mut packet = [0; CID_LEN + 6];
-				packet[..6].copy_from_slice(&[0xc0, version[0], version[1], version[2], version[3], CID_LEN as u8]);
-				packet[6..].copy_from_slice(&id);
-				packet
-			};
-			let v1 = long([0, 0, 0, 1]);
-			let v2 = long([0x6b, 0x33, 0x43, 0xcf]);
-
-			for (form, packet) in [("short", &short[..]), ("v1", &v1[..]), ("v2", &v2[..])] {
-				// A fresh source port per packet, so nothing but the connection ID
-				// can be steering this.
-				let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
-				sender.send_to(packet, addr).unwrap();
+			for (form, packet) in chosen(id).into_iter().chain(invented(id)) {
+				send(&packet, addr);
 				assert_eq!(
 					receiver(&sockets),
 					Some(index),
-					"{form} header for member {index} landed on the wrong socket"
+					"{form} for member {index} landed on the wrong socket"
 				);
 			}
 		}
 	}
 
-	/// Datagram protocols that share the port stay on the kernel's 4-tuple hash,
-	/// even when fields at the QUIC connection-ID offsets change or are missing.
+	/// Two processes serving one port through a handoff, against a real kernel:
+	/// each keeps its own connections, the newest takes every new handshake, and
+	/// the predecessor leaving renumbers nothing.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn a_successor_serves_beside_its_predecessor() {
+		const COUNT: u16 = 3;
+
+		let mut config = Config::new("127.0.0.1:0".parse().unwrap(), COUNT);
+		config.handoff = true;
+		let mut old = config.bind().unwrap();
+		let addr = old.addr();
+		let (old_sockets, old_shards) = serve(&mut old);
+		assert_eq!(old.count(), COUNT, "a process serves one generation");
+		assert_eq!(
+			old_shards,
+			(0..COUNT).map(|index| Shard { index, count: COUNT * 2 }).collect::<Vec<_>>(),
+			"the first process serves the first generation, named against both"
+		);
+
+		// Until the successor steers, it receives nothing at all.
+		let mut new = Bound::adopt(old.handoff().unwrap()).unwrap();
+		let (new_sockets, new_shards) = serve(&mut new);
+		assert_eq!(
+			new_shards,
+			(COUNT..COUNT * 2)
+				.map(|index| Shard { index, count: COUNT * 2 })
+				.collect::<Vec<_>>(),
+			"the successor serves the generation its predecessor left free"
+		);
+		let invented_id: [u8; CID_LEN] = rand::random();
+		for (form, packet) in invented(invented_id) {
+			send(&packet, addr);
+			assert!(receiver(&old_sockets).is_some(), "a {form} skipped the serving generation");
+		}
+
+		new.steer(Steer::Beside).unwrap();
+		for (generation, sockets, shards) in [(0, &old_sockets, &old_shards), (1, &new_sockets, &new_shards)] {
+			for (index, shard) in shards.iter().enumerate() {
+				for (form, packet) in chosen(cid(*shard)) {
+					send(&packet, addr);
+					assert_eq!(
+						receiver(sockets),
+						Some(index),
+						"a {form} for generation {generation} member {index} left its member"
+					);
+				}
+			}
+		}
+		for _ in 0..16 {
+			let id: [u8; CID_LEN] = rand::random();
+			for (form, packet) in invented(id) {
+				send(&packet, addr);
+				let first = receiver(&new_sockets);
+				assert!(first.is_some(), "a new {form} reached the predecessor");
+				// A retransmission repeats the ID it invented, so it reaches the same member.
+				send(&packet, addr);
+				assert_eq!(receiver(&new_sockets), first, "a retransmitted {form} changed members");
+			}
+		}
+
+		// The predecessor exits. Its sockets stay open in the successor, so nothing
+		// renumbers, and once alone the successor takes its stale packets too.
+		drop(old_sockets);
+		drop(old);
+		new.steer(Steer::Alone).unwrap();
+		for (index, shard) in new_shards.iter().enumerate() {
+			for (form, packet) in chosen(cid(*shard)) {
+				send(&packet, addr);
+				assert_eq!(receiver(&new_sockets), Some(index), "a {form} left member {index}");
+			}
+			// The predecessor's member at the same position.
+			let stale = Shard {
+				index: shard.index() - COUNT,
+				count: shard.count(),
+			};
+			for (form, packet) in chosen(cid(stale)) {
+				send(&packet, addr);
+				assert_eq!(
+					receiver(&new_sockets),
+					Some(index),
+					"a stale {form} for member {index} was not folded onto its position"
+				);
+			}
+		}
+	}
+
+	/// A group bound without room for a successor has none to give, and a
+	/// handoff that does not describe its sockets is refused.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn a_handoff_needs_a_second_generation() {
+		let group = bind("127.0.0.1:0".parse().unwrap(), 2).unwrap();
+		assert_eq!(group.handoff().unwrap_err().kind(), io::ErrorKind::Unsupported);
+
+		let mut config = Config::new("127.0.0.1:0".parse().unwrap(), 2);
+		config.handoff = true;
+		let group = config.bind().unwrap();
+		let mut handoff = group.handoff().unwrap();
+		handoff.sockets.pop();
+		assert!(matches!(Bound::adopt(handoff), Err(Error::Adopt(_))));
+
+		let mut handoff = group.handoff().unwrap();
+		handoff.addr.set_port(handoff.addr.port().wrapping_add(1));
+		assert!(matches!(Bound::adopt(handoff), Err(Error::Adopt(_))));
+
+		// Two generations must both fit the byte the filter reads.
+		let mut config = Config::new("127.0.0.1:0".parse().unwrap(), MAX_SHARDS / 2 + 1);
+		config.handoff = true;
+		assert!(matches!(config.bind(), Err(Error::Count { max: MAX_SHARDS, .. })));
+	}
+
+	/// Datagram protocols that share the port are balanced by flow, even when
+	/// fields at the QUIC connection-ID offsets change or are missing, and only
+	/// across the generation taking new handshakes: a member nobody reads would
+	/// swallow the flow.
 	#[test]
 	#[cfg(target_os = "linux")]
 	fn non_quic_flows_stay_on_one_member() {
+		use std::net::IpAddr;
+
 		const COUNT: u16 = 4;
-		let mut group = bind("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
-		let mut sockets = Vec::new();
-		while let Some(member) = group.member().expect("clone retained socket") {
-			let socket = member.into_inner();
-			socket
-				.set_read_timeout(Some(std::time::Duration::from_millis(100)))
-				.unwrap();
-			sockets.push(socket);
-		}
 
-		let flows = [
-			("rtp", [0x80, 96, 0, 1, 0, 0, 0, 1, 0x12, 0x34, 0x56, 0x78]),
-			// SRT data with KK=0b10 (no encryption); R is toggled below.
-			("srt", [0x40, 0, 0, 1, 0x10, 0, 0, 1, 0x12, 0x34, 0x56, 0x78]),
-			("stun", [0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42, 1, 2, 3, 4]),
-			("dtls", [22, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-		];
-		for (name, mut packet) in flows {
-			let mut buf = [0; 64];
-			// A flow hashed off member 0, so a filter that faults to index 0 shows up.
-			let (sender, owner) = (0..64)
-				.find_map(|_| {
-					let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
-					sender.send_to(&packet, group.addr()).unwrap();
-					let owner = sockets
-						.iter()
-						.position(|socket| socket.recv_from(&mut buf).is_ok())
-						.expect("one member receives the flow");
-					(owner != 0).then_some((sender, owner))
-				})
-				.expect("a flow hashed off member 0");
+		/// Send each protocol's flow to `addr` and require that every packet of it,
+		/// truncated or not, lands on one member of `serving`, among `group`.
+		fn flows(addr: SocketAddr, group: &[UdpSocket], serving: std::ops::Range<usize>) {
+			let flows = [
+				("rtp", [0x80, 96, 0, 1, 0, 0, 0, 1, 0x12, 0x34, 0x56, 0x78]),
+				// SRT data with KK=0b10 (no encryption); R is toggled below.
+				("srt", [0x40, 0, 0, 1, 0x10, 0, 0, 1, 0x12, 0x34, 0x56, 0x78]),
+				("stun", [0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42, 1, 2, 3, 4]),
+				("dtls", [22, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+			];
+			let local = SocketAddr::new(addr.ip(), 0);
+			for (name, mut packet) in flows {
+				// A flow hashed off the generation's first member, so a filter that
+				// faults to its first index shows up. Every flow lands in the generation.
+				let (sender, owner) = (0..64)
+					.find_map(|_| {
+						let sender = crate::bind::udp(crate::bind::Udp::new(local)).unwrap();
+						sender.send_to(&packet, addr).unwrap();
+						let owner = receiver(group).expect("one member receives the flow");
+						assert!(serving.contains(&owner), "{name} reached member {owner}, outside {serving:?}");
+						(owner != serving.start).then_some((sender, owner))
+					})
+					.expect("a flow hashed off the first member");
 
-			for sequence in 2..18u8 {
-				packet[3] = sequence;
-				if name == "srt" {
-					packet[4] ^= 0x04; // retransmission flag
+				for sequence in 2..18u8 {
+					packet[3] = sequence;
+					if name == "srt" {
+						packet[4] ^= 0x04; // retransmission flag
+					}
+					sender.send_to(&packet, addr).unwrap();
+					assert_eq!(receiver(group), Some(owner), "{name} packet {sequence} changed members");
 				}
-				sender.send_to(&packet, group.addr()).unwrap();
-				sockets[owner]
-					.recv_from(&mut buf)
-					.unwrap_or_else(|err| panic!("{name} packet {sequence} changed shards: {err}"));
+
+				// Too short to reach the connection-ID offsets the filter reads.
+				sender.send_to(&packet[..2], addr).unwrap();
+				assert_eq!(receiver(group), Some(owner), "a truncated {name} packet changed members");
 			}
 
-			// Too short to reach the connection-ID offsets the filter reads.
-			sender.send_to(&packet[..2], group.addr()).unwrap();
-			sockets[owner]
-				.recv_from(&mut buf)
-				.unwrap_or_else(|err| panic!("truncated {name} packet changed shards: {err}"));
+			// Flows spread across the generation: 64 flows on one member of four is
+			// a 4^-63 chance, not a balance.
+			let owners: std::collections::HashSet<_> = (0..64)
+				.map(|_| {
+					let sender = crate::bind::udp(crate::bind::Udp::new(local)).unwrap();
+					sender.send_to(&flows[2].1, addr).unwrap();
+					receiver(group).expect("one member receives the flow")
+				})
+				.collect();
+			assert!(owners.len() > 1, "every flow reached one member: {owners:?}");
+		}
+
+		for host in [IpAddr::from([127, 0, 0, 1]), IpAddr::from(std::net::Ipv6Addr::LOCALHOST)] {
+			let mut config = Config::new(SocketAddr::new(host, 0), COUNT);
+			config.handoff = true;
+			let old = config.bind().unwrap();
+			let addr = old.addr();
+			// Every member, the unserved generation included, so a stray lands somewhere seen.
+			let group: Vec<UdpSocket> = old
+				.handoff()
+				.unwrap()
+				.sockets
+				.into_iter()
+				.map(|fd| {
+					let socket = UdpSocket::from(fd);
+					socket.set_nonblocking(true).unwrap();
+					socket
+				})
+				.collect();
+
+			flows(addr, &group, 0..usize::from(COUNT));
+
+			let new = Bound::adopt(old.handoff().unwrap()).unwrap();
+			new.steer(Steer::Beside).unwrap();
+			flows(addr, &group, usize::from(COUNT)..usize::from(COUNT) * 2);
 		}
 	}
 
@@ -865,22 +1346,54 @@ mod tests {
 	#[test]
 	#[cfg(target_os = "linux")]
 	fn the_program_branches_to_the_right_loads() {
-		let program = program(4);
-		assert_eq!(program.len(), 18);
+		/// Where a jump at `at` lands when taken (`jt`) or not (`jf`).
+		fn target(at: usize, offset: u8) -> usize {
+			at + 1 + usize::from(offset)
+		}
 
-		// Instruction 1 sends a short datagram to the kernel-hash return at 14.
+		let program = Program {
+			count: 4,
+			total: 8,
+			base: 4,
+			exact: true,
+		}
+		.insns();
+		const HASH: usize = 27;
 		assert_eq!(program[1].k, 7, "every load must stay inside the datagram");
-		assert_eq!(program[1].jf, 12, "a short datagram must use the kernel hash");
-		assert_eq!(program[14].k, 4, "the kernel-hash return is out of range");
-		// Instruction 3 falls through to the short-header checks, and jumps to
-		// the long-header version load at 11.
-		assert_eq!(program[3].jt, 7, "long header must land on the version load");
-		assert_eq!(program[3].jf, 0, "short header must fall through");
+		assert_eq!(target(1, program[1].jf), HASH, "a short datagram is hashed as a flow");
+		assert_eq!(target(3, program[3].jt), 10, "long header must land on the version load");
+		assert_eq!(target(3, program[3].jf), 4, "short header must fall through");
+		assert_eq!(target(4, program[4].jf), HASH, "no fixed bit is hashed as a flow");
 		assert_eq!(program[5].k, 4, "short header reads the fourth CID byte");
+		assert_eq!(target(7, program[7].jf), HASH, "no marker is hashed as a flow");
 		assert_eq!(program[8].k, 1, "short header reads the shard byte");
-		assert_eq!(program[11].k, 1, "long header reads its version");
-		assert_eq!(program[15].k, 6, "long header reads past version and length");
-		assert_eq!(program[9].k, 4, "the short modulus is the group size");
-		assert_eq!(program[16].k, 4, "the long modulus is the group size");
+		assert_eq!(target(9, program[9].k as u8), 20, "short header takes the server reduction");
+		assert_eq!(program[10].k, 1, "long header reads its version");
+		assert_eq!(target(11, program[11].jt), 16, "v1 checks v1's packet types");
+		assert_eq!(target(12, program[12].jt), 13, "v2 checks v2's packet types");
+		assert_eq!(target(12, program[12].jf), HASH, "another version is hashed as a flow");
+		for (at, handshake) in [(15, 0x30), (18, 0x20)] {
+			assert_eq!(program[at].k, handshake, "the Handshake type");
+			assert_eq!(target(at, program[at].jt), 19, "a Handshake reads the server's ID");
+			assert_eq!(target(at, program[at].jf), 23, "anything else reads the client's ID");
+		}
+		assert_eq!(program[19].k, 6, "a Handshake reads past version and length");
+		assert_eq!(program[23].k, 6, "an Initial reads past version and length");
+		assert_eq!((program[20].k, program[21].k), (8, 0), "beside, a server's ID names its member");
+		assert_eq!((program[24].k, program[25].k), (4, 4), "a client's ID reaches the newest generation");
+		assert_eq!(program[HASH].k, libc::SKF_NET_OFF as u32, "a flow reads its IP version");
+		assert_eq!(target(29, program[29].jt), 35, "IPv6 reads past its fixed header");
+		assert_eq!(target(29, program[29].jf), 30, "IPv4 reads its header length");
+		assert_eq!(target(34, program[34].k as u8), 38, "IPv4 joins the flow reduction");
+		assert_eq!((program[39].k, program[40].k), (4, 4), "a flow reaches the newest generation");
+
+		let alone = Program {
+			count: 4,
+			total: 8,
+			base: 4,
+			exact: false,
+		}
+		.insns();
+		assert_eq!((alone[20].k, alone[21].k), (4, 4), "alone, a server's ID folds onto the newest");
 	}
 }
