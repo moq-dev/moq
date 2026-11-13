@@ -24,7 +24,7 @@ This README's own work, after the children:
 
 - Confirm a scheduled run on `main` passes; never dispatch Nightly. Failures
   already owned elsewhere stay there: the audio near-zero p95 row belongs to
-  [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
+  [audio playout](/quest/m2/audio-playout/README.md), the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
   [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, and the paired bench
@@ -56,6 +56,6 @@ audit ([moq-dev/moq#8648](https://github.com/moq-dev/moq/pull/8648)), the size
 report's output ([moq-dev/moq#8654](https://github.com/moq-dev/moq/pull/8654)),
 the firefox resume ([resume sync](/quest/m0/interop-green/resume-sync.md)),
 and the chromium `av_lag` rows
-([render callback](/quest/m1/audio-jitter-target/render-callback.md) and
-[congestion catch-up](/quest/m1/audio-jitter-target/congestion-catch-up.md)).
+([output latency](/quest/m2/audio-playout/output-latency.md) and
+[congestion catch-up](/quest/m2/audio-playout/congestion-catch-up.md)).
 
