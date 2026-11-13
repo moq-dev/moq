@@ -5091,9 +5091,6 @@ impl Subscription {
 	}
 }
 
-/// A subscription's run loop: one subscriber cursor serving groups and SUBSCRIBE_UPDATE
-/// messages, with a machine per group it serves, one at a time
-/// waiting for stream credit.
 /// Where a subscription's delivery starts, which SUBSCRIBE_START reports once.
 enum Start {
 	/// Lite-03/04 send no SUBSCRIBE_START, and so no drops either.
@@ -5120,7 +5117,7 @@ impl Start {
 	}
 
 	/// The resolved start, if any.
-	#[cfg(test)]
+	#[cfg(any(test, feature = "fuzz"))]
 	fn resolved(&self) -> Option<u64> {
 		match self {
 			Self::Resolved(start) => Some(*start),
@@ -5129,7 +5126,7 @@ impl Start {
 	}
 
 	/// The groups held back for the start.
-	#[cfg(test)]
+	#[cfg(any(test, feature = "fuzz"))]
 	fn skipped(&self) -> Option<&RangeMap<u64, Hole>> {
 		match self {
 			Self::Unresolved { skipped, .. } => Some(skipped),
@@ -5138,6 +5135,9 @@ impl Start {
 	}
 }
 
+/// A subscription's run loop: one subscriber cursor serving groups and SUBSCRIBE_UPDATE
+/// messages, with a machine per group it serves, one at a time
+/// waiting for stream credit.
 struct TrackRun {
 	ctx: Subscription,
 	track: track::Subscriber,
