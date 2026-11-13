@@ -13,6 +13,14 @@ it is.
 
 ## Plan
 
+Moved from m5 to m4 2026-11-13 (maintainer, /quest-plan):
+[formatter defaults](/quest/m4/formatter-defaults.md) requires it, and a quest
+requiring one in a later milestone stalls, since `quest unblocked` ranks a
+blocker by its own milestone. m4's Goal already holds conditions on outside
+parties that only later work needs.
+
+- ✅ m4 (rejected: moving formatter defaults to m5)
+
 Announced on 2026-10-15 for "the next version" and only on canary
 (`bun upgrade --canary`) when written on 2026-10-29; nixpkgs-unstable carried
 bun 1.4.2. On 2026-11-02, nixpkgs-unstable's bun 1.4.4 still answers

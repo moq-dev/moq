@@ -7,7 +7,17 @@ outbound local relays, including priorities, costs, and continuity.
 
 ## Plan
 
-The 2026-10-15 release audit keeps federation guidance in m1. Deferred P2P
+Moved from m1 to m3 2026-11-13 (maintainer, /quest-plan): it requires
+[outbound federation](/quest/m2/cluster-routing/federation.md), and a quest requiring one in a later milestone stalls,
+since `quest unblocked` ranks a blocker by its own milestone. moq-dev/quest's
+`quest check` is planned to reject such links.
+
+- ✅ m3 (rejected: m2, which the [release cut](/quest/m3/release/cut.md)
+  requires whole, so the cut would wait on this additive work; pulling the
+  blocker into m1, which would drag breaking m2 work with it)
+
+The 2026-10-15 release audit kept federation guidance in m1, until the move
+above. Deferred P2P
 owns the later application-selected peer setup and extends this concept page.
 Every feature PR still fixes docs it makes stale.
 

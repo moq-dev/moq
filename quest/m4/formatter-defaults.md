@@ -61,7 +61,7 @@ Decided with the maintainer on 2026-11-03:
 
 ## Required
 
-- [Wait for a stable bun lint](/quest/m5/bun-lint-release.md) - `bun lint`
+- [Wait for a stable bun lint](/quest/m4/bun-lint-release.md) - `bun lint`
   ships in a stable Bun that nixpkgs carries
 
 ## Related

@@ -66,4 +66,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - ties the same spec to the code
+- [Route sweeps are checked against the TLA+ model](/quest/m3/route-trace-validation.md) - ties the same spec to the code

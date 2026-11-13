@@ -9,12 +9,21 @@ resync the model.
 
 ## Plan
 
+Moved from m1 to m3 2026-11-13 (maintainer, /quest-plan): it requires
+[the router's route per scope](/quest/m2/cluster-routes/scope.md), and a quest requiring one in a later milestone stalls,
+since `quest unblocked` ranks a blocker by its own milestone. moq-dev/quest's
+`quest check` is planned to reject such links.
+
+- ✅ m3 (rejected: m2, which the [release cut](/quest/m3/release/cut.md)
+  requires whole, so the cut would wait on this additive work; pulling the
+  blocker into m1, which would drag breaking m2 work with it)
+
 Decided 2026-11-10 (maintainer, /quest-plan), as the strongest guard against
 the route model drifting from the code ([moq-dev/moq#8447](https://github.com/moq-dev/moq/pull/8447)).
 
 Decided 2026-11-10 (maintainer, a later /quest-plan the same day):
 
-- ✅ m1 (rejected: staying in m4). The mesh configs beside it, the
+- ✅ m1 (rejected: staying in m4; superseded 2026-11-13: m3, above). The mesh configs beside it, the
   [inductive invariant](/quest/m1/route-inductive.md), and the
   [cache-aware routing proof](/quest/m2/cache-routing-proof.md) all build on
   `RouteHandoff.tla`, so drift there costs the most.

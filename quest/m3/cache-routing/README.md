@@ -200,7 +200,7 @@ This README's own work, once its children land:
   broadcasts by the hash.
 - Docs: warm routes and how to price skip links in `doc/bin/relay/cluster.md`,
   and a section on the routing concept page once the
-  [routing guide](/quest/m1/routing-guide.md) has added it.
+  [routing guide](/quest/m3/routing-guide.md) has added it.
 
 ## Related
 

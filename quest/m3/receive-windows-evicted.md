@@ -17,6 +17,15 @@ alongside throughput and latency, instead of failing.
 
 ## Plan
 
+Moved from m1 to m3 2026-11-13 (maintainer, /quest-plan): it requires
+[group-drops](/quest/m2/group-drops.md), and a quest requiring one in a later milestone stalls,
+since `quest unblocked` ranks a blocker by its own milestone. moq-dev/quest's
+`quest check` is planned to reject such links.
+
+- ✅ m3 (rejected: m2, which the [release cut](/quest/m3/release/cut.md)
+  requires whole, so the cut would wait on this additive work; pulling the
+  blocker into m1, which would drag breaking m2 work with it)
+
 Moved to m1 2026-11-04 with the maintainer, after
 [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) landed the
 fitting cells: what remains waits on

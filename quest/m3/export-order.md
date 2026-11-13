@@ -11,6 +11,15 @@ an 11.7 s delay, where SRT loses about 0.
 
 ## Plan
 
+Moved from m1 to m3 2026-11-13 (maintainer, /quest-plan): it requires
+[Finalize moq-lite-07](/quest/m2/lite07-finalize.md), and a quest requiring one in a later milestone stalls,
+since `quest unblocked` ranks a blocker by its own milestone. moq-dev/quest's
+`quest check` is planned to reject such links.
+
+- ✅ m3 (rejected: m2, which the [release cut](/quest/m3/release/cut.md)
+  requires whole, so the cut would wait on this additive work; pulling the
+  blocker into m1, which would drag breaking m2 work with it)
+
 Decided 2026-11-12 (maintainer, `/quest-import` of
 [moq-dev/moq#8559](https://github.com/moq-dev/moq/issues/8559)):
 ✅ measure Ascending against Descending, then pick (rejected: Ascending for
@@ -38,7 +47,7 @@ The maintainer's reasoning, to keep in view:
 - The right order may depend on the maximum latency.
 
 The starting hypothesis to measure mirrors
-[Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md):
+[Buffered playback subscribes in ascending order](/quest/m3/buffered-ascending.md):
 an export with a nonzero playout delay (`Delay::min`) wants its window from
 the start, and goes Ascending; one that chases the live edge stays
 Descending.

@@ -16,6 +16,15 @@ ordering for the Python or FFI audio consumers.
 
 ## Plan
 
+Moved from m1 to m3 2026-11-13 (maintainer, /quest-plan): it requires
+[Finalize moq-lite-07](/quest/m2/lite07-finalize.md), and a quest requiring one in a later milestone stalls,
+since `quest unblocked` ranks a blocker by its own milestone. moq-dev/quest's
+`quest check` is planned to reject such links.
+
+- ✅ m3 (rejected: m2, which the [release cut](/quest/m3/release/cut.md)
+  requires whole, so the cut would wait on this additive work; pulling the
+  blocker into m1, which would drag breaking m2 work with it)
+
 Motivated by the moq.dev Voice demo: each TTS reply is a fresh track whose
 head arrives newest-first, which shifted Chrome's decoder timeline and
 overflowed the ring (moq-dev/moq#6523), then clipped each reply's opening
@@ -38,7 +47,7 @@ Decided 2026-10-23 by the maintainer:
   max-delay release rules go. Not chosen: delete the hold outright; keep
   #6549's rules unchanged.
 - ✅ The hold stays audio-only. Video's startup hold is the poster quest's.
-- ✅ Placed in m1, requiring [Finalize moq-lite-07](/quest/m2/lite07-finalize.md):
+- ✅ Placed in m1 (superseded 2026-11-13: m3, above), requiring [Finalize moq-lite-07](/quest/m2/lite07-finalize.md):
   lite-06 and earlier serve an ascending request newest-first, so this is a
   no-op on default sessions until lite-07 negotiates by default. `release`
   has no `order` field, so it ships in the next minor, not a 0.6.x patch.
