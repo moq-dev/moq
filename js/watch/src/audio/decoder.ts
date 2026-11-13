@@ -247,8 +247,12 @@ export class Decoder {
 			for (const range of effect.get(this.#queued) ?? []) {
 				queued = queued.add(range.end.saturatingSub(range.start.max(span.end)));
 			}
-			const hold = ringHold(effect.get(this.sync.out.delay));
-			return { start: span.start, end: span.end.add(queued.min(hold)) };
+			// The ring holds the delay less the output latency, which the speaker covers.
+			const delay = effect.get(this.sync.out.delay);
+			const ring = effect.get(this.#ring);
+			if (ring) effect.get(ring.output);
+			const held = ring ? ring.held(delay) : delay;
+			return { start: span.start, end: span.end.add(queued.min(ringHold(held))).add(delay.saturatingSub(held)) };
 		});
 		this.#track = this.sync.track({ target: playout, startup });
 		this.#signals.cleanup(() => this.#track.close());

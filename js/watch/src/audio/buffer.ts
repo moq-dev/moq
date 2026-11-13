@@ -328,7 +328,7 @@ export class AudioBuffer {
 		this.rate = rate;
 		this.#bound = props.bound ?? Duration.ZERO;
 
-		const held = this.#held(props.delay);
+		const held = this.held(props.delay);
 		this.#backpressure = new Backpressure(rate, buffered, held);
 
 		const msg: Init = {
@@ -368,10 +368,13 @@ export class AudioBuffer {
 		worklet.port.start();
 	}
 
-	// What the ring holds of a delay: the delay less the output latency it renders ahead by, though
-	// never less than one callback, the least it can render from. Its floor, its startup, and what
-	// stays encoded upstream all follow this, so a start never queues media the clock then skips.
-	#held(delay: Duration): Duration {
+	/**
+	 * What the ring holds of a delay: the delay less the output latency it renders ahead by, though
+	 * never less than one callback, the least it can render from. Its floor, its startup, and what
+	 * stays encoded upstream all follow this, so a start never queues media the clock then skips.
+	 * @internal
+	 */
+	held(delay: Duration): Duration {
 		const base = Duration.secs(this.#context.baseLatency || 0);
 		return delay.saturatingSub(this.#heard).max(base.min(delay));
 	}
@@ -491,7 +494,7 @@ export class AudioBuffer {
 	 */
 	setLatency(delay: Duration, bound: Duration = this.#bound): void {
 		this.#bound = bound;
-		const held = this.#held(delay);
+		const held = this.held(delay);
 		this.#backpressure.setLatency(held);
 		// The clock moves with the delay, so its offset starts over with the next reading.
 		this.#offset = undefined;

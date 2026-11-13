@@ -670,12 +670,16 @@ async fn play_audio<O: Output>(
 		.min(moq_mux::container::DELAY_MAX)
 	};
 
+	// How far ahead of its due time a write may sound: what the sink holds, at
+	// most its cap, plus the device's latency after it.
+	let reach = || cap + peak.lock().unwrap().peak().unwrap_or_default();
+
 	// A replacement's opening cushion and its timeline plan must agree. The
 	// callback now owns target convergence, rather than write-time padding
 	// subtracting the incoming frame before it reaches the sink. Like a hole,
 	// the cushion is silence the sink must hold, and a write ahead of its due
 	// time leads it by the device's latency too.
-	let lead = |delay: Duration| latency.max(audible(delay).min(cap).max(AUDIO_BUFFER_MIN));
+	let lead = |delay: Duration| latency.max(audible(delay).min(reach()).max(AUDIO_BUFFER_MIN));
 
 	let schedule = presentation.consume();
 	// The consumer decodes a packet once the sink has room for it. Its playhead is
@@ -1045,7 +1049,7 @@ async fn play_audio<O: Output>(
 			// when its timeline ends before the media behind it covers the hold, so
 			// that little waits here instead of overflowing the sink.
 			let held_back = wait(&mut catalog, &|| {
-				presentation.due(mapped).and_then(|due| due.checked_sub(cap))
+				presentation.due(mapped).and_then(|due| due.checked_sub(reach()))
 			})
 			.await;
 			// A fresh sink plays its first write behind an opening cushion sized before
