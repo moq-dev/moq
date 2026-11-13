@@ -117,6 +117,11 @@ export const StreamCode = Object.freeze(
 		Unroutable: 0x36 as StreamCode,
 		/** The grant does not cover this request, or no longer does. The session stays up. */
 		Unauthorized: 0x3b as StreamCode,
+		/**
+		 * The publisher reset a group's stream to make room for a higher-priority one, pausing the
+		 * group for a later stream to continue rather than giving it up (lite-07).
+		 */
+		Yielded: 0x3c as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
 		GroupTooLarge: 0x32 as StreamCode,
 		/** A frame's timedness or timestamp doesn't match its track's timescale. */

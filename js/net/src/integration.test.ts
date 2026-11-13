@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
 import { Duration, Manual, now, yieldNow } from "@moq/clock";
+import { Session as Qmux } from "@moq/qmux";
 import type * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import {
@@ -2925,3 +2926,87 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 	},
 	30_000,
 );
+
+// A qmux session pair negotiating `protocol` over an in-memory socket, each side granting the other
+// `maxStreamsUni` unidirectional streams.
+function qmuxPair(protocol: string, maxStreamsUni: bigint): { client: Qmux; server: Qmux } {
+	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
+		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
+		return {
+			url: "",
+			opened: Promise.resolve({ readable, writable, extensions: "", protocol: `qmux-01.${protocol}` }),
+			closed: closed.promise,
+			close: () => closed.resolve({ closeCode: 1000, reason: "" }),
+		};
+	};
+	// Copied, since a sender may reuse its buffer once a write resolves.
+	const pipe = () =>
+		new TransformStream<Uint8Array, Uint8Array>({ transform: (chunk, c) => c.enqueue(chunk.slice()) });
+	const up = pipe();
+	const down = pipe();
+	const config = { idleTimeout: null, maxStreamsUni };
+	const client = new Qmux(socket(down.readable, up.writable), { config });
+	const server = Qmux.accept(socket(up.readable, down.writable), { config });
+	return { client, server };
+}
+
+// On lite-07 a group whose stream a newer one reset to make room only pauses: once credit returns,
+// a new stream continues it, and its reader receives every frame without an error. Mirrors the Rust
+// `a_reset_group_resumes_without_loss`.
+test("integration: lite-07 resumes a group reset to make room without loss", async () => {
+	using clock = manual();
+	// Advance the clock until `work` settles: a waiting open makes room once it has waited about a
+	// round trip.
+	const settled = async <T>(work: Promise<T>, what: string): Promise<T> => {
+		for (let i = 0; i < 100; i++) if (await settlesWithin(work, clock, Duration.millis(10))) return work;
+		throw new Error(`${what} never settled`);
+	};
+	// One unidirectional stream of credit, so a newer group's open must reset the older one.
+	const pair = qmuxPair(Lite.ALPN_07_WIP, 1n);
+	// The server learns the negotiated protocol once its socket opens.
+	await Promise.all([pair.client.ready, pair.server.ready]);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+	const broadcast = publish(origin, Path.from("live"));
+	// Kept, so the older group is never too old for the subscription.
+	const producer = broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null });
+	const remote = wireOf(client).consume(Path.from("live"));
+	const subscriber = remote.track("0").subscribe({ order: "descending", delay: { max: Duration.millis(30_000) } });
+	try {
+		// Unfinished, so its stream holds the only credit until the newer group resets it.
+		const older = producer.appendGroup();
+		older.writeFrame(textFrame("a"));
+		const paused = await settled(subscriber.recvGroup(), "the older group");
+		if (!paused) throw new Error("no older group");
+		expect(paused.sequence).toBe(0n);
+		expect(await settled(paused.readString(), "its first frame")).toBe("a");
+
+		const newer = producer.appendGroup();
+		newer.writeFrame(textFrame("new"));
+		newer.finish();
+		const group = await settled(subscriber.recvGroup(), "the newer group taking the older one's credit");
+		expect(group?.sequence).toBe(1n);
+
+		// Written after the reset: a continuation carries them, behind the frame already held.
+		older.writeFrame(textFrame("b"));
+		older.writeFrame(textFrame("c"));
+		older.finish();
+		const rest: string[] = [];
+		for (;;) {
+			const frame = await settled(paused.readString(), "the paused group's continuation");
+			if (frame === undefined) break;
+			rest.push(frame);
+		}
+		expect(rest).toEqual(["b", "c"]);
+		expect(await paused.closed).toBeNull();
+	} finally {
+		subscriber.close();
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
