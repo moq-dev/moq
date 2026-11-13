@@ -6,9 +6,9 @@ A relay never advertises a route back over the session it learned it from.
 Since [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023), each
 neighbor holds two stream keys, so the router advertises a route back to its
 source. That is loop-free, since the source refuses a route whose path names
-it ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27;
+it ([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27;
 by the feasibility condition until
-[the switch](/quest/m2/cluster-routing/routes/switch.md) lands), but it
+[the switch](/quest/m2/cluster-routes/switch.md) lands), but it
 doubles route traffic between every pair of relays.
 
 ## Plan

@@ -19,7 +19,7 @@ on the local network so please plan that."
   the forwarding rule in `js/net`, which was feasibility, route requests,
   holds, and echoes when this was decided and is paths, withdrawals, holds,
   and the doubt since the
-  [routes epic](/quest/m2/cluster-routing/routes/README.md)'s Plan item 27, a second
+  [routes epic](/quest/m2/cluster-routes/README.md)'s Plan item 27, a second
   implementation of the part of the protocol that has produced the most
   bugs; pulling the port forward to m4). So the tab runs the router the route
   model checks, and the [P2P epic](/quest/m4/p2p/README.md)'s "no second
@@ -33,7 +33,7 @@ keeping `proxy` off, and `js/net`'s non-transit
 tab. Until then each stays true.
 
 It also settles why every publisher stays an origin node (Plan item 18 of
-[Routes and announces](/quest/m2/cluster-routing/routes/README.md)): a tab
+[Routes and announces](/quest/m2/cluster-routes/README.md)): a tab
 that forwards needs its own identity.
 
 To settle when this starts:
