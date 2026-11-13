@@ -60,17 +60,20 @@ pub(crate) enum Item {
 /// ## Ordering & age skipping
 ///
 /// Groups can arrive on the wire out of order. The consumer always reads frames *within*
-/// a group in arrival order, but across groups it advances by sequence number, skipping
+/// a group in arrival order, but across groups it advances by start, skipping
 /// a stalled or missing group once everything it could still present (bounded by where
 /// the next group begins) falls a full budget behind the newest content, the same reach
 /// [`Delay::max`] measures. With the default max delay of zero,
 /// the consumer skips aggressively: any group that has a newer alternative is dropped.
 /// With a non-zero max delay, slow groups are tolerated up to that budget before being
-/// skipped. A missing sequence gets the same tolerance, or the shorter
-/// [`set_wait`](Self::set_wait): there is no way to tell a stream that lost the delivery race
-/// from one the cache evicted. Its wait also expires that much monotonic time after the first
-/// group past it arrived, so a marker behind a hole is delivered even when the track is paused,
-/// and the holes a stalled source left behind expire together rather than one wait each.
+/// skipped. Starts are timestamps, so keys lie between any two groups: a run the publisher
+/// declared skipped ([`skip_groups`](moq_net::track::Producer::skip_groups), which appending
+/// does) holds no group, and the consumer steps over it at once. Any other run may hold a
+/// missing group, which gets the same tolerance, or the shorter [`set_wait`](Self::set_wait):
+/// there is no way to tell a stream that lost the delivery race from one the cache evicted.
+/// Its wait also expires that much monotonic time after the first group past it arrived, so
+/// a marker behind a hole is delivered even when the track is paused, and the holes a stalled
+/// source left behind expire together rather than one wait each.
 ///
 /// Delivery starts at the floor the
 /// [`Subscription::ranges`](moq_net::track::Subscription::ranges) name, raised to where the
@@ -104,8 +107,8 @@ pub(crate) enum Item {
 /// ## Gaps and ends
 ///
 /// [`poll_read`](Self::poll_read) yields [`Read::Gap`] wherever media after an item already read
-/// will never arrive: a latency skip, an evicted current group, or a sequence hole whose
-/// boundary is not contiguous within 1 ms. Whatever is lost before the first item is no
+/// will never arrive: a latency skip, an evicted current group, or a hole the publisher did not
+/// declare skipped whose boundary is not contiguous within 1 ms. Whatever is lost before the first item is no
 /// gap, since nothing was read before it. A marker group (no decodable frames: one empty
 /// payload, or on a data track one object with no bytes) is the publisher declaring a stop,
 /// read as [`Read::End`]; nothing is missing. A data track's marker carries no timestamp, so
