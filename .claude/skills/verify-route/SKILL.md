@@ -41,9 +41,9 @@ quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/
 ```
 
 Choose the config affected by the change; do not run the directory locally.
-[TLC's cost quest](/quest/m0/ci/tlc-cost.md) records that maintainer decision.
 Nightly runs every config through `just test tla`, simulating each with a
-`Simulate:` line. `Loop.cfg` is a passing regression for timer-only doubt. When calling `just rs tla`
+`Simulate:` line. The recipe uses four workers. `Loop.cfg` checks the timer-only
+doubt regression. When calling `just rs tla`
 directly, pass the arguments from that line explicitly. For covering-source
 selection, for example:
 
@@ -63,7 +63,7 @@ unless the table says otherwise.
 | `Twice.cfg` | The same, where two sessions close, as when relay 1 dies. Simulated: `num` counts behaviours per worker. | 1 claim change, 2 session changes | 40,000 behaviours, 4.0M states | a few minutes |
 | `Ring.cfg` | The publisher and three relays in a ring, with a timer that fires at any moment. | 1 claim change, 1 session change | 426,409 | a minute or two |
 | `Lag.cfg` | Relay 3 hears the publisher through relays 1 and 2: the lagging neighbour. | 2 claim changes, 1 session change | 1,299,405 | a few minutes |
-| `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | twenty minutes |
+| `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | ten minutes |
 | `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Overlap.cfg` | Five relays, three asking for `"a"`, with overlapping cheap broad and dear narrow paths. Simulated past the message budget. | 1 claim change, no session change | 1,000 behaviours per worker (4,000 on four workers), depth 500 | simulation |

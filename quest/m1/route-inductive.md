@@ -61,6 +61,12 @@ stay constants the config states. Say both bounds in the `verify-route` skill.
   `Budget` and `QuietIsSettled`. Leave it there.
 - Run it through the `tla` recipes with Apalache from the flake. If five
   relays does not fit Nightly, record the largest mesh that does and its time.
+- A refinement check such as `RefinesClaims` runs on the smallest exhaustive
+  config that exercises it, where each distinct state is checked once, not on
+  a simulated config such as `Blind.cfg`, where every sampled trace re-checks
+  it, unless measuring shows the simulated config is cheaper. `SumOver` folds
+  with `FoldSet` through the Community Modules' Java override the `tla`
+  recipes load; keep one fold for both checkers.
 
 Public API: none. Wire: none.
 

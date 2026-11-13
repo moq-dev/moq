@@ -395,10 +395,11 @@ Update(n, s0, ov, ups, gens, eb, rep, quiet) ==
 \* queued toward it. Dropping them changes no behaviour; `Budget` still counts them.
 Heeded(d, m) == d[2] # Origin
 
-\* The sum of f(x) over the finite set S.
-SumOver(S, f(_)) ==
-    LET F[T \in SUBSET S] == IF T = {} THEN 0 ELSE LET x == CHOOSE x \in T : TRUE IN f(x) + F[T \ {x}]
-    IN F[S]
+\* The sum of f(x) for each x in the finite set S.
+\* FoldSet runs natively through the Community Modules' Java override; an
+\* instance keeps their `Restrict` from clashing with this module's.
+LOCAL Ext == INSTANCE FiniteSetsExt
+SumOver(S, f(_)) == Ext!FoldSet(LAMBDA x, acc : f(x) + acc, 0, S)
 
 \* Commit the updates `rs` (a function from nodes to `Update` results), appending
 \* each node's messages to `q0`. Nodes in one step send on disjoint queues.
