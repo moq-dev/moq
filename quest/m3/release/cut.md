@@ -120,8 +120,9 @@ Open as of 2026-11-13 (maintainer, /quest-plan): where the next cycle's cuts
 live. The steps above place them in m0's release epic and have the wire cut
 require m2 and m3, but no quest may require one in a later milestone, and
 [m4](/quest/m4/README.md) and [m5](/quest/m5/README.md) now require this cut
-until it lands, a gate each cycle should re-create. A follow-up quest settles
-both before this cut re-creates its successor.
+until it lands, a gate each cycle should re-create. [Cut
+placement](/quest/m0/cut-placement.md) settles both before this cut
+re-creates its successor.
 
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
 decision below). The gate is an epic in m3 for the checks the cut needs that
@@ -174,6 +175,7 @@ with the suites above.
 
 ## Required
 
+- [Cut placement](/quest/m0/cut-placement.md) - where this cut re-creates its successor, and the gate it re-creates
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
