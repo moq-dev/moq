@@ -8576,7 +8576,7 @@ mod group_priority_test {
 				crate::track::Info::timed(),
 			);
 			let mut subscriber = track.subscribe(None);
-			let mut old = track.append_group().unwrap();
+			let mut old = track.append_next().unwrap();
 			old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
 			old.finish().unwrap();
 			let group = subscriber.recv_group().await.unwrap().expect("old group");
@@ -8618,7 +8618,7 @@ mod group_priority_test {
 			assert!(!terminal.sent.load(Ordering::Relaxed), "not until acknowledged");
 
 			kio::clock::sim::advance(Duration::from_secs(1)).await;
-			let mut edge = track.append_group().unwrap();
+			let mut edge = track.append_next().unwrap();
 			edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 				.unwrap();
 			edge.finish().unwrap();
@@ -9011,7 +9011,7 @@ mod group_priority_test {
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", info);
 		let subscriber = track.subscribe(None);
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"hello".as_slice()).unwrap();
 		group.finish().unwrap();
 		let _track = track.finish().unwrap();
@@ -9085,7 +9085,7 @@ mod group_priority_test {
 
 			for key in 0..groups {
 				for (track, serve) in &mut serves {
-					let mut group = track.append_group().unwrap();
+					let mut group = track.append_next().unwrap();
 					group
 						.write_frame(crate::Timestamp::from_millis(key).unwrap(), b"x".as_slice())
 						.unwrap();
@@ -9127,7 +9127,7 @@ mod group_priority_test {
 			Some(Timescale::MILLI),
 		);
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
 		settle_serve(&mut serve).await;
 		assert_eq!(serve.machines(), 1, "group 0 waits for credit");
@@ -9136,7 +9136,7 @@ mod group_priority_test {
 		settle_serve(&mut serve).await;
 		assert_eq!(serve.machines(), 0, "the evicted group leaves without credit");
 
-		let mut next = track.append_group().unwrap();
+		let mut next = track.append_next().unwrap();
 		next.write_frame(crate::Timestamp::from_millis(1).unwrap(), b"x".as_slice())
 			.unwrap();
 		next.finish().unwrap();
@@ -9159,7 +9159,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let mut old = track.append_next().unwrap();
 		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
 		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
@@ -9186,7 +9186,7 @@ mod group_priority_test {
 		);
 
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
-		let mut edge = track.append_group().unwrap();
+		let mut edge = track.append_next().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -9287,7 +9287,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let mut old = track.append_next().unwrap();
 		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
 		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
@@ -9315,7 +9315,7 @@ mod group_priority_test {
 		assert!(log.resets().is_empty());
 
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
-		let mut edge = track.append_group().unwrap();
+		let mut edge = track.append_next().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -9386,7 +9386,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let old = track.append_group().unwrap();
+		let old = track.append_next().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
 				timestamp: Some(crate::Timestamp::ZERO),
@@ -9427,7 +9427,7 @@ mod group_priority_test {
 		);
 
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
-		let mut edge = track.append_group().unwrap();
+		let mut edge = track.append_next().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -10176,7 +10176,7 @@ mod serve_tests {
 
 		// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
 		let append = || {
-			let mut group = h.track.append_group().unwrap();
+			let mut group = h.track.append_next().unwrap();
 			group.write_frame(timestamp(), b"x".as_slice()).unwrap();
 			group.finish().unwrap();
 		};
@@ -16867,7 +16867,7 @@ mod serve_tests {
 			);
 			let subscriber = track.subscribe(None);
 
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for payload in [b"aa", b"bb", b"cc"] {
 				group.write_frame(crate::Timestamp::ZERO, payload.as_slice()).unwrap();
 			}
@@ -18492,7 +18492,7 @@ mod tests {
 			crate::track::Info::timed(),
 		);
 		for millis in [0, 1000] {
-			let mut group = producer.append_group().unwrap();
+			let mut group = producer.append_next().unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), b"frame".as_slice())
 				.unwrap();
@@ -21959,7 +21959,7 @@ mod compression_tests {
 			);
 			let subscriber = track.subscribe(None);
 			let frames = [vec![b'a'; 1024], vec![b'b'; 1024], Vec::new()];
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for payload in &frames {
 				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
 			}

@@ -3375,7 +3375,7 @@ mod test {
 
 		let producer = track_producer("test");
 		for second in 0..3 {
-			let mut group = producer.append_group().unwrap();
+			let mut group = producer.append_next().unwrap();
 			group
 				.write_frame(Timestamp::from_millis(second * 1000).unwrap(), b"x".to_vec())
 				.unwrap();
@@ -7104,7 +7104,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let mut old = track.append_next().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
 		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
@@ -7117,7 +7117,7 @@ mod serve_group_test {
 		);
 
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
-		let mut edge = track.append_group().unwrap();
+		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -7155,7 +7155,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let mut old = track.append_next().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
@@ -7167,7 +7167,7 @@ mod serve_group_test {
 		);
 
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
-		let mut edge = track.append_group().unwrap();
+		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -7206,7 +7206,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let old = track.append_group().unwrap();
+		let old = track.append_next().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
 				timestamp: Some(Timestamp::ZERO),
@@ -7236,7 +7236,7 @@ mod serve_group_test {
 		);
 
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
-		let mut edge = track.append_group().unwrap();
+		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -7274,7 +7274,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let mut old = track.append_next().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
 		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
@@ -7287,7 +7287,7 @@ mod serve_group_test {
 		);
 
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
-		let mut edge = track.append_group().unwrap();
+		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -7454,7 +7454,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut producer = track.append_group().unwrap();
+		let mut producer = track.append_next().unwrap();
 		producer.write_frame(Timestamp::ZERO, b"head".as_slice()).unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("group");
 
@@ -7577,7 +7577,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let mut old = track.append_next().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
 		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
@@ -7588,7 +7588,7 @@ mod serve_group_test {
 		assert!(log.resets().is_empty());
 
 		kio::clock::sim::advance(Duration::from_secs(1)).await;
-		let mut edge = track.append_group().unwrap();
+		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -7724,7 +7724,7 @@ mod serve_group_test {
 		);
 		let subscriber = track.subscribe(None);
 		let (mut run, _, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), subscriber);
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(None, &b"key"[..]).unwrap();
 		group.write_frame(None, &b"more"[..]).unwrap();
 		group.finish().unwrap();
@@ -7741,7 +7741,7 @@ mod serve_group_test {
 		assert_eq!(track.demand().wanted(), Some(0), "stale request is not a join");
 		run.replace(update(Some(1)));
 		assert_eq!(track.demand().wanted(), Some(1));
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(None, &b"key"[..]).unwrap();
 		group.finish().unwrap();
 		run.replace(update(Some(1)));
@@ -11942,7 +11942,7 @@ mod tests {
 			.create_track("video", track::Info::timed())
 			.unwrap();
 		broadcast.announce().unwrap();
-		let mut open = track.append_group().unwrap();
+		let mut open = track.append_next().unwrap();
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
@@ -11991,7 +11991,7 @@ mod tests {
 
 		// The track runs a full second past the group's successor.
 		for ms in [1000, 2000] {
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(ms).unwrap(), b"x".to_vec())
 				.unwrap();

@@ -119,7 +119,7 @@ async fn a_subscription_keeps_both_ends_busy() {
 			"{version}: an announcement kept the subscriber busy"
 		);
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(Timestamp::ZERO, b"live".as_ref()).unwrap();
 		group.finish().unwrap();
 		let mut sub = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
@@ -161,7 +161,7 @@ async fn a_fetch_keeps_both_ends_busy() {
 			broadcast: _broadcast,
 		} = setup(version).await;
 
-		let mut writing = track.append_group().unwrap();
+		let mut writing = track.append_next().unwrap();
 		writing.write_frame(Timestamp::ZERO, b"first".as_ref()).unwrap();
 		let fetching = remote.track("video").unwrap();
 		let fetch = kio::clock::sim::spawn(async move {

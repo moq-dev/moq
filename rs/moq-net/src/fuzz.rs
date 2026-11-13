@@ -132,7 +132,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		..Default::default()
 	};
 	let track = broadcast.create_track("objects", info).unwrap();
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	let payload = Bytes::from_static(&[0; 64]);
 	for id in 0..frames {
 		let fields = properties.then(|| {
@@ -2100,7 +2100,7 @@ impl FrameRecv {
 
 		let streams = (0..streams)
 			.map(|_| {
-				let group = track.append_group().unwrap();
+				let group = track.append_next().unwrap();
 				let info = frame::Info {
 					size: size as u64,
 					timestamp: Some(crate::Timestamp::ZERO),

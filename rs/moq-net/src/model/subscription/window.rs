@@ -1,17 +1,13 @@
-//! A subscriber's own ranges, resolved to the group keys it reads.
+//! A subscriber's own ranges, resolved to the group starts it reads.
 //!
 //! The aggregate a publisher sees is the union of every subscriber's ranges, so it says
 //! what arrives, not what one subscriber asked for. A [`Window`] is the per-subscriber
 //! side: resolved at the hop serving the subscriber, it filters that subscriber's reads.
 
-use std::{
-	collections::{BTreeMap, BTreeSet},
-	ops,
-	sync::Arc,
-};
+use std::{ops, sync::Arc};
 
 use super::{Anchor, Layered, Range, Runs};
-use crate::{Error, Result, Timestamp};
+use crate::{Error, Result};
 
 /// One range resolved to groups: from `start` up to the exclusive `end`, `None` while it
 /// stays open.
@@ -43,14 +39,8 @@ impl<V: Clone + Eq> Accounted for rangemap::RangeMap<u64, V> {
 	}
 }
 
-/// When a serving hop's groups start, for resolving time anchors.
-///
-/// Each query answers from ordered indexes, so a time end that walks them forward a step
-/// at a time pays for each group or run it passes once, however long it stays unsettled.
+/// The groups a serving hop holds, by start, for resolving relative and time anchors.
 pub(in crate::model) trait Holdings {
-	/// Whether the track carries timestamps at all.
-	fn timed(&self) -> bool;
-
 	/// Whether the groups are a copy received over a wire that can't resolve relative or
 	/// time anchors as the publisher would, so only what [`Range::is_wire`] covers reads.
 	fn drops_anchors(&self) -> bool {
@@ -65,74 +55,40 @@ pub(in crate::model) trait Holdings {
 	}
 
 	/// Whether a [`Requests`](crate::track::Requests) handler serving the track's history
-	/// may look up a time its groups can't resolve: a time start before every group with a
-	/// known start then waits on that lookup, and a key the live feed never delivered,
-	/// or delivered and the cache evicted, may still arrive from that history.
+	/// may look up a time its groups can't resolve: a time start before every group held
+	/// then waits on that lookup.
 	fn looks_up(&self) -> bool {
 		false
 	}
 
-	/// Where `pts` falls among the groups with a known start.
-	fn containing(&self, pts: Timestamp) -> Containing;
+	/// Where `time` falls among the groups held.
+	fn containing(&self, time: u64) -> Containing;
 
-	/// The lowest group at or above `from` known to start, with where it starts.
-	fn next_start(&self, from: u64) -> Option<(u64, Timestamp)>;
+	/// The lowest group held starting at or after `from`.
+	fn next_start(&self, from: u64) -> Option<u64>;
 
-	/// The lowest held group at or above `from`, with what it says about its start.
-	fn next_held(&self, from: u64) -> Option<(u64, Held)>;
+	/// The group `back` groups before `latest`, which counts as the first, among the groups
+	/// held: `None` once fewer are held than that.
+	fn back(&self, latest: u64, back: u64) -> Option<u64>;
 
-	/// The exclusive end of the run of keys from `key` that can no longer arrive
-	/// (dropped, given up, or below where the feed starts), `None` while `key` may.
-	fn gone(&self, key: u64) -> Option<u64>;
-
-	/// Whether nothing more can arrive or start here, so a time end has nothing to wait
-	/// on and is left uncapped.
+	/// Whether nothing more can arrive here, so a time start nothing contains reaches back
+	/// to the oldest group rather than wait.
 	fn complete(&self) -> bool;
-
-	/// The runs of keys whose arrivals or drops changed since `seen`, which this then
-	/// moves on to now, or `None` once anything else a parked walk reads may have changed
-	/// (see [`Window::parked`]): the declared start, completion, whether it
-	/// [looks up](Self::looks_up) its history, or a copy the live feed never delivered, which
-	/// may hold a group or give one a start. `None` by default, which wakes every parked walk.
-	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
-		let _ = seen;
-		None
-	}
 }
 
-/// How far a [`Window`] has taken in its [`Holdings::changes`], in whatever marks the
-/// holdings keep: the revisions of the indexes reporting changed runs, and what they report
-/// no runs for.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(in crate::model) struct Seen {
-	pub runs: [u64; 2],
-	pub global: Option<[u64; 4]>,
-}
-
-/// Where a presentation time falls among the groups a hop holds.
+/// Where a time falls among the groups a hop holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::model) enum Containing {
 	/// The newest group starting at or before it.
 	Group(u64),
-	/// Every group with a known start begins after it.
+	/// Every group held starts after it.
 	Before,
-	/// No group has a known start.
+	/// No group is held.
 	Unknown,
 }
 
-/// What a held group says about where it starts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::model) enum Held {
-	/// Its frame 0 presented at this time.
-	Started(Timestamp),
-	/// It holds frame 0 and has not presented it yet.
-	Pending,
-	/// It never will: it ended empty, was aborted, or is held from past frame 0.
-	Never,
-}
-
 /// A hop that holds no groups of its own, such as a reader following route copies that
-/// resolve its ranges for it: a time end there filters nothing.
+/// resolve its ranges for it.
 pub(in crate::model) struct Unheld;
 
 impl Holdings for Unheld {
@@ -140,24 +96,16 @@ impl Holdings for Unheld {
 		false
 	}
 
-	fn timed(&self) -> bool {
-		true
-	}
-
-	fn containing(&self, _: Timestamp) -> Containing {
+	fn containing(&self, _: u64) -> Containing {
 		Containing::Unknown
 	}
 
-	fn next_start(&self, _: u64) -> Option<(u64, Timestamp)> {
+	fn next_start(&self, _: u64) -> Option<u64> {
 		None
 	}
 
-	fn next_held(&self, _: u64) -> Option<(u64, Held)> {
-		None
-	}
-
-	fn gone(&self, _: u64) -> Option<u64> {
-		None
+	fn back(&self, latest: u64, back: u64) -> Option<u64> {
+		(back == 0).then_some(latest)
 	}
 
 	fn complete(&self) -> bool {
@@ -165,19 +113,7 @@ impl Holdings for Unheld {
 	}
 }
 
-/// Whether `time` is strictly after `other`, as instants: exact across scales, unlike
-/// [`Timestamp`]'s `Ord`, which breaks a tie between scales.
-pub(in crate::model) fn later(time: Timestamp, other: Timestamp) -> bool {
-	instant(time, other).is_gt()
-}
-
-/// How `time` orders against `other` as instants, exact across scales.
-fn instant(time: Timestamp, other: Timestamp) -> std::cmp::Ordering {
-	(u128::from(time.value()) * u128::from(other.scale().as_u64()))
-		.cmp(&(u128::from(other.value()) * u128::from(time.scale().as_u64())))
-}
-
-/// A subscriber's [`Range`]s resolved to the group keys it reads.
+/// A subscriber's [`Range`]s resolved to the group starts it reads.
 #[derive(Debug)]
 pub(in crate::model) struct Window {
 	/// What these were resolved from, so only replacing the ranges resolves again.
@@ -186,33 +122,12 @@ pub(in crate::model) struct Window {
 	/// The spans still looking up their time start (see [`Self::found`]), which read nothing
 	/// meanwhile: kept apart so a probe finds them without visiting every span.
 	looking: Vec<usize>,
-	/// The spans whose time start waits on a group starting, which read nothing meanwhile.
-	/// Their end resolved when asked, so a relative one counts back from that latest group
-	/// however many arrive while they wait.
+	/// The spans whose time start waits on a group arriving, which read nothing meanwhile.
 	waiting: Vec<usize>,
-	/// The unsettled time ends, grouped by walk.
-	walks: Vec<Walk>,
-	/// The walks waiting out a gap below the group their ends fall before, which move only
-	/// once a key from the gap up to that group arrives or is given up, so a settle
-	/// wakes only the walks its [`Holdings::changes`] reach. Ends left in different gaps of
-	/// a sparse feed never merge, so walking each of them on every settle would cost the
-	/// ranges. Keyed by where each [`Parked`] starts.
-	parked: BTreeMap<u64, Parked>,
-	/// How far the parked walks have taken in the holdings' changes.
-	seen: Seen,
-	/// The groups the spans cover, an unsettled time end through its cap: every settled span
-	/// and parked walk in the fixed runs, shared with what reads them, and one run per walk
-	/// not parked layered over them, so a walk that moves rebuilds only the layer.
+	/// The groups the spans cover, shared with what reads them.
 	groups: Layered,
-	/// The part of `groups` a miss may ask for, layered the same way: see [`Self::missable`].
+	/// The part of `groups` a miss may ask for: see [`Self::missable`].
 	missable: Layered,
-	/// The groups resolved for good: the spans with a settled end, which the fixed runs hold
-	/// with the parked walks' runs.
-	resolved: Runs,
-	resolved_missable: Runs,
-	/// The fixed runs no longer hold the settled spans and parked walks: rebuilt once the
-	/// settle under way is done, which a settle or a walk parking or waking does.
-	stale: bool,
 	/// A relative anchor waits on a first group, so nothing is filtered yet.
 	pending: bool,
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
@@ -227,28 +142,20 @@ pub(in crate::model) struct Window {
 	all_named: bool,
 }
 
-/// Parked walks whose waits overlap, so a change reaching any of them wakes them all: the
-/// parked groups are disjoint, each found by one search.
-#[derive(Debug)]
-struct Parked {
-	/// The exclusive end of what they wait on, from the key it is parked under.
-	end: u64,
-	walks: Vec<Walk>,
-}
-
 /// One non-empty range, resolved.
 #[derive(Clone, Copy, Debug)]
 struct Span {
 	/// Which of the ranges it came from.
 	index: usize,
 	start: u64,
-	end: End,
+	/// The exclusive end, `None` past every group.
+	end: Option<u64>,
 	/// Whether the start names a group, rather than reaching back to the oldest one.
 	floored: bool,
 	/// A time start the groups held can't place, looked up from the track's history: the
 	/// span reads nothing until the lookup answers.
 	looking: Option<Looking>,
-	/// A time start no group has started for yet: the span reads nothing until one has.
+	/// A time start with no group held yet: the span reads nothing until one arrives.
 	waiting: bool,
 }
 
@@ -256,332 +163,15 @@ struct Span {
 /// group held, which holds the group containing it if the track's history does.
 #[derive(Clone, Copy, Debug)]
 struct Looking {
-	pts: Timestamp,
+	time: u64,
 	below: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum End {
-	/// Before this group.
-	Before(u64),
-	/// Past every group.
-	Open,
-	/// Before the first group starting after this time, once a [`Walk`] settles it.
-	Time(Timestamp),
-}
-
-/// Unsettled time ends whose walks agree, so one walk serves them all.
-///
-/// Ends that start alike walk the same groups until one starts between their times, so
-/// the ends sharing a walk differ only in when they end. A group starting at time `t`
-/// splits off the ends before `t`, which walk on, and settle, as a walk of their own.
-/// Walks that come to agree merge. Each end settles once, and a settle costs the walks
-/// rather than the ends.
-///
-/// Timestamps never rewind, so an end falls before the lowest group starting past it, once
-/// every key between it and the newest group starting at or before it is accounted
-/// for. Every position below only moves forward, so each group or run of keys is
-/// passed once, whatever a peer leaves missing.
-#[derive(Debug)]
-struct Walk {
-	/// The ends sharing it, earliest first.
-	ends: BTreeSet<Ending>,
-	trail: Trail,
-	/// The lowest group any of its spans reads, and the lowest a miss asks for: each span
-	/// reads on from its start up to the cap, so the walk's groups are one run from here.
-	low: u64,
-	low_reach: u64,
-	/// The cap when the settle under way began, inherited by the walks split off since, so
-	/// each knows whether the groups it reads moved.
-	was: Option<u64>,
-}
-
-/// An unsettled time end: the span it ends, ordered by when, as instants.
-#[derive(Clone, Copy, Debug)]
-struct Ending {
-	pts: Timestamp,
-	span: usize,
-}
-
-impl Ord for Ending {
-	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-		instant(self.pts, other.pts).then(self.span.cmp(&other.span))
-	}
-}
-
-impl PartialOrd for Ending {
-	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-		Some(self.cmp(other))
-	}
-}
-
-impl PartialEq for Ending {
-	fn eq(&self, other: &Self) -> bool {
-		self.cmp(other).is_eq()
-	}
-}
-
-impl Eq for Ending {}
-
-/// How far a [`Walk`] got: the same for every end sharing it, so walks merge once theirs
-/// are equal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Trail {
-	/// The lowest group the walk has yet to put in range for good. Each of its spans starts
-	/// here, or at or below `known`, past which [`Walk::fix`] moves it.
-	floor: u64,
-	/// The lowest group a miss asks for in what the walk reads: a time start before every
-	/// group held asks none below the oldest, since which of them it reaches is unknown
-	/// until they start.
-	reach: u64,
-	/// The newest group known to start at or before every end: it and everything below it
-	/// in the spans is in range.
-	known: Option<u64>,
-	/// The lowest group known to start after every end: where they fall once settled.
-	after: Option<u64>,
-	/// Where the walk over held groups resumes: those below it started, or never will.
-	held: u64,
-	/// Where settling resumes: every key from above `known` up to it is accounted for.
-	accounted: u64,
-	/// The exclusive cap on what is read meanwhile, `None` for none.
-	limit: Option<u64>,
-	/// The group the cap admits on speculation: the first above `known` that may still
-	/// start, which may start past the ends.
-	speculative: Option<u64>,
-}
-
-impl Trail {
-	fn new(start: u64, reach: u64) -> Self {
-		Self {
-			floor: start,
-			reach,
-			known: None,
-			after: None,
-			held: start,
-			accounted: start,
-			limit: Some(start),
-			speculative: None,
-		}
-	}
-
-	/// The lowest key not known to be in range, `None` once the last key is.
-	///
-	/// `known` is only ever found at or above every span's start, so it alone decides once
-	/// set.
-	fn unknown(&self) -> Option<u64> {
-		match self.known {
-			Some(known) => known.checked_add(1),
-			None => Some(self.floor),
-		}
-	}
-}
-
-impl Walk {
-	/// Whether every end is before `time`, so a group starting then lies past each.
-	///
-	/// When only some are, those leave as a walk of their own from here, queued in `forks`
-	/// to walk on, and this one keeps the rest: `false`.
-	fn past(&mut self, time: Timestamp, forks: &mut Vec<Walk>) -> bool {
-		let (Some(first), Some(last)) = (self.ends.first(), self.ends.last()) else {
-			return false;
-		};
-		if later(time, last.pts) {
-			return true;
-		}
-		if !later(time, first.pts) {
-			return false;
-		}
-		let rest = self.ends.split_off(&Ending { pts: time, span: 0 });
-		forks.push(Walk {
-			ends: std::mem::replace(&mut self.ends, rest),
-			trail: self.trail,
-			low: self.low,
-			low_reach: self.low_reach,
-			was: self.was,
-		});
-		false
-	}
-
-	/// Walk the held groups on from where the last call stopped, splitting off into `forks`
-	/// the ends a group starts between. Returns where the ends fall once they settle.
-	///
-	/// A split-off walks again from the state it split at: each call resumes where the
-	/// last stopped, so it takes the other branch there, passing nothing twice.
-	fn advance(&mut self, holdings: &impl Holdings, forks: &mut Vec<Walk>) -> Option<u64> {
-		// The starts index passes a group that may still start, so a stalled one never
-		// keeps a later group known to start inside the ends from being read.
-		while let Some(from) = self.trail.unknown()
-			&& let Some((key, at)) = holdings.next_start(from)
-			&& self.trail.after.is_none_or(|after| key < after)
-		{
-			match self.past(at, forks) {
-				true => self.trail.after = Some(key),
-				false => self.trail.known = Some(key),
-			}
-		}
-
-		// The first key above `known` that may still start is the one read on
-		// speculation: a held group yet to start, or a missing one that may arrive. Only a
-		// group starting inside the ends is jumped to, since it puts all below it in range.
-		self.trail.speculative = None;
-		while let Some(from) = self.trail.unknown() {
-			let at = self.trail.held.max(from);
-			if self.trail.after.is_some_and(|after| at >= after) {
-				break;
-			}
-			let next = holdings
-				.next_held(at)
-				.filter(|(key, _)| self.trail.after.is_none_or(|after| *key < after));
-			// A later group starting inside some ends but not others splits them first: those
-			// it starts past account for `at` on their own.
-			let jump = match next {
-				Some((key, Held::Started(time))) if key != at => {
-					(!self.past(time, forks)).then_some(key)
-				}
-				_ => None,
-			};
-			match next {
-				Some((key, held)) if key == at => match held {
-					Held::Started(time) => match self.past(time, forks) {
-						true => self.trail.after = Some(at),
-						false => self.trail.known = Some(at),
-					},
-					Held::Never => {}
-					Held::Pending => {
-						self.trail.held = at;
-						self.trail.speculative = Some(at);
-						break;
-					}
-				},
-				Some(_) if jump.is_some() => self.trail.known = jump,
-				// Past every held group: the next to arrive is the speculative one, judged
-				// once a settle sees it, before it is read.
-				None if self.trail.after.is_none() => {
-					self.trail.held = at;
-					break;
-				}
-				_ => match holdings.gone(at) {
-					Some(end) if end > at => {
-						self.trail.held = end;
-						continue;
-					}
-					_ => {
-						self.trail.held = at;
-						self.trail.speculative = (!holdings.complete()).then_some(at);
-						break;
-					}
-				},
-			}
-			// Nothing sits above the last key, so the walk ends on it.
-			let Some(next) = at.checked_add(1) else { break };
-			self.trail.held = next;
-		}
-		self.trail.limit = match (self.trail.speculative, self.trail.after) {
-			_ if holdings.complete() => None,
-			(Some(speculative), _) => speculative.checked_add(1),
-			(None, Some(after)) => Some(after),
-			// Every held group is accounted for: the next to arrive is the speculative one.
-			(None, None) => None,
-		};
-
-		// Settle once every key up to the first group starting past the ends can no
-		// longer start inside them.
-		let after = self.trail.after?;
-		// Everything at or below `known` is in range, and `after` lies above it.
-		self.trail.accounted = self.trail.accounted.max(self.trail.unknown().unwrap_or(after));
-		while self.trail.accounted < after {
-			let next = holdings.next_held(self.trail.accounted);
-			match next {
-				Some((key, held)) if key == self.trail.accounted => match held {
-					Held::Pending => return None,
-					// It started past the ends since the walk above stopped on it: everything
-					// below is accounted for, so they fall here.
-					Held::Started(at) if self.past(at, forks) => {
-						self.trail.after = Some(key);
-						return self.trail.after;
-					}
-					_ => self.trail.accounted += 1,
-				},
-				_ => {
-					let below = next.map_or(after, |(key, _)| key.min(after));
-					self.trail.accounted = match holdings.complete() {
-						true => below,
-						false => holdings.gone(self.trail.accounted)?.min(below),
-					};
-				}
-			}
-		}
-		self.trail.after
-	}
-
-	/// Walk on only from above `known`, what the walk has put in range for good staying in
-	/// its run from [`Self::low`]. Walks that started apart then agree once they get here.
-	fn fix(&mut self) {
-		let Some(known) = self.trail.known else { return };
-		if self.trail.floor > known {
-			return;
-		}
-		self.trail.floor = known.saturating_add(1);
-		self.trail.reach = self.trail.reach.max(self.trail.floor);
-	}
-
-	/// The walk's groups now, and the part a miss may ask for: one run each, from where its
-	/// spans start up to its cap. Everything from `low` up to `known` is in range for good,
-	/// and the cap never falls below it.
-	fn runs(&self) -> (Option<ops::RangeInclusive<u64>>, Option<ops::RangeInclusive<u64>>) {
-		let last = match self.trail.limit {
-			Some(end) => end.checked_sub(1).filter(|last| *last >= self.low),
-			None => Some(u64::MAX),
-		};
-		let Some(last) = last else {
-			return (None, None);
-		};
-		let missable = (self.low_reach <= last).then_some(self.low_reach..=last);
-		(Some(self.low..=last), missable)
-	}
-
-	/// What this walk waits on, if it can park: settling stopped at a gap that may still
-	/// arrive, below the group its ends fall before, holding from above `known` up to that
-	/// group only groups below the gap that never start.
-	///
-	/// Until a key there arrives or is given up, the walk reads the same answers. One
-	/// arriving late, even into a run given up, is in the holdings' changes, so the walk
-	/// wakes then. Costs the groups held there, which never start.
-	fn waits(&self, holdings: &impl Holdings) -> Option<ops::Range<u64>> {
-		let (gap, after, from) = (self.trail.accounted, self.trail.after?, self.trail.unknown()?);
-		if gap >= after || holdings.complete() || holdings.gone(gap).is_some() {
-			return None;
-		}
-		let mut at = from;
-		while let Some((key, held)) = holdings.next_held(at)
-			&& key < after
-		{
-			if key >= gap || held != Held::Never {
-				return None;
-			}
-			at = key + 1;
-		}
-		Some(from..after)
-	}
-
-	/// Take on `other`'s ends, its trail being this one's. Both runs end where the trails
-	/// put them, so the merged runs start at the lower of each.
-	fn merge(&mut self, mut other: Walk) {
-		self.low = self.low.min(other.low);
-		self.low_reach = self.low_reach.min(other.low_reach);
-		if other.ends.len() > self.ends.len() {
-			std::mem::swap(&mut self.ends, &mut other.ends);
-		}
-		self.ends.extend(other.ends);
-	}
 }
 
 impl Window {
 	/// Resolve `ranges`, counting relative anchors back from `latest`.
 	///
 	/// Refuses an [`Anchor::Oldest`] end with [`Error::InvalidRange`] where the hop
-	/// [resolves](Holdings::resolves) ranges itself, a time anchor on an
-	/// untimed track with [`Error::TimestampMismatch`], and an anchor a received copy's wire
+	/// [resolves](Holdings::resolves) ranges itself, and an anchor a received copy's wire
 	/// drops with [`Error::Unsupported`].
 	pub fn new(ranges: &[Range], latest: Option<u64>, holdings: &impl Holdings) -> Result<Self> {
 		let mut window = Self {
@@ -589,14 +179,8 @@ impl Window {
 			spans: Vec::new(),
 			looking: Vec::new(),
 			waiting: Vec::new(),
-			walks: Vec::new(),
-			parked: BTreeMap::new(),
-			seen: Seen::default(),
 			groups: Layered::default(),
 			missable: Layered::default(),
-			resolved: Runs::default(),
-			resolved_missable: Runs::default(),
-			stale: false,
 			pending: false,
 			settled: false,
 			covered: None,
@@ -607,7 +191,7 @@ impl Window {
 		Ok(window)
 	}
 
-	/// Whether nothing is left to resolve as groups arrive and start.
+	/// Whether nothing is left to resolve as groups arrive.
 	pub fn is_settled(&self) -> bool {
 		self.settled
 	}
@@ -618,7 +202,7 @@ impl Window {
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
-	/// time starts and ends as groups start. Returns whether the groups in range moved.
+	/// time starts once a group arrives. Returns whether the groups in range moved.
 	pub fn settle(&mut self, latest: Option<u64>, holdings: &impl Holdings) -> bool {
 		if self.pending {
 			if latest.is_none() {
@@ -628,27 +212,24 @@ impl Window {
 			let _ = self.place(latest, holdings);
 			return !self.pending;
 		}
-		let mut moved = !self.waiting.is_empty() && self.start_waiting(holdings);
-		if !self.walks.is_empty() || !self.parked.is_empty() {
-			moved |= self.walk(holdings);
-		}
-		if moved || self.stale {
-			self.rebuild();
+		let moved = !self.waiting.is_empty() && self.start_waiting(holdings);
+		if moved {
+			self.rebuild(holdings);
 		}
 		moved
 	}
 
-	/// Start the spans whose time start waits on a group starting, once one has, or once
-	/// nothing can start any more. Returns whether any did.
+	/// Start the spans whose time start waits on a group, once one arrived, or once nothing
+	/// can arrive any more. Returns whether any did.
 	fn start_waiting(&mut self, holdings: &impl Holdings) -> bool {
 		let mut started = false;
 		for position in std::mem::take(&mut self.waiting) {
-			let Anchor::Time(pts) = self.ranges[self.spans[position].index].start else {
-				unreachable!("only a time start waits on a group starting");
+			let Anchor::Time(time) = self.ranges[self.spans[position].index].start else {
+				unreachable!("only a time start waits on a group");
 			};
-			let (start, floored) = match holdings.containing(pts) {
+			let (start, floored) = match holdings.containing(time) {
 				Containing::Group(group) => (group, true),
-				// The group holding it is older than any held, or nothing held can start.
+				// The group holding it is older than any held, or nothing can arrive.
 				Containing::Before => (0, false),
 				Containing::Unknown if holdings.complete() => (0, false),
 				Containing::Unknown => {
@@ -657,186 +238,24 @@ impl Window {
 				}
 			};
 			started = true;
-			self.start_span(position, pts, start, floored, holdings);
+			self.start_span(position, time, start, floored, holdings);
 		}
 		if started {
-			self.stale = true;
 			self.name();
 		}
 		started
 	}
 
-	/// Start the span at `position`, whose time start `pts` waited, at `start`: looked up
+	/// Start the span at `position`, whose time start `time` waited, at `start`: looked up
 	/// where the groups held can't place it, as when first resolved, and otherwise reading
-	/// its groups, its time end walking from there.
-	fn start_span(&mut self, position: usize, pts: Timestamp, start: u64, floored: bool, holdings: &impl Holdings) {
+	/// its groups.
+	fn start_span(&mut self, position: usize, time: u64, start: u64, floored: bool, holdings: &impl Holdings) {
 		let span = &mut self.spans[position];
 		(span.start, span.floored, span.waiting) = (start, floored, false);
 		if let Some(below) = unresolved(start, floored, holdings) {
-			span.looking = Some(Looking { pts, below });
+			span.looking = Some(Looking { time, below });
 			self.looking.push(position);
-			return;
 		}
-		let reach = match floored {
-			true => start,
-			false => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
-		};
-		let limit = match span.end {
-			End::Before(end) => Some(end),
-			End::Open => None,
-			End::Time(end) => {
-				self.walks.push(Walk {
-					ends: BTreeSet::from([Ending {
-						pts: end,
-						span: position,
-					}]),
-					trail: Trail::new(start, reach),
-					low: start,
-					low_reach: reach,
-					was: Some(start),
-				});
-				return;
-			}
-		};
-		if let Some(last) = limit.map_or(Some(u64::MAX), |end| end.checked_sub(1))
-			&& last >= start
-		{
-			self.resolved.insert(start..=last);
-			if reach <= last {
-				self.resolved_missable.insert(reach..=last);
-			}
-		}
-	}
-
-	/// Walk each unsettled time end on, settling those that can be, and merge the walks
-	/// that come to agree. Returns whether the groups in range moved.
-	fn walk(&mut self, holdings: &impl Holdings) -> bool {
-		let mut moved = false;
-		let mut walks = std::mem::take(&mut self.walks);
-		self.wake(holdings, &mut walks);
-		for walk in &mut walks {
-			walk.was = walk.trail.limit;
-		}
-		let mut kept = Vec::with_capacity(walks.len());
-		while let Some(mut walk) = walks.pop() {
-			match walk.advance(holdings, &mut walks) {
-				Some(end) => {
-					// What settles joins the fixed runs, which readers share: copied once per
-					// settle under way, since a settle is once per end.
-					(moved, self.stale) = (true, true);
-					if walk.low < end {
-						self.resolved.insert(walk.low..=end - 1);
-					}
-					if walk.low_reach < end {
-						self.resolved_missable.insert(walk.low_reach..=end - 1);
-					}
-					for ending in walk.ends {
-						self.spans[ending.span].end = End::Before(end);
-					}
-				}
-				None => {
-					moved |= walk.trail.limit != walk.was;
-					walk.fix();
-					match walk.waits(holdings) {
-						Some(waits) => self.park(waits, walk),
-						None => kept.push(walk),
-					}
-				}
-			}
-		}
-		kept.sort_unstable_by_key(|walk| walk.trail);
-		for walk in kept {
-			match self.walks.last_mut() {
-				Some(last) if last.trail == walk.trail => last.merge(walk),
-				_ => self.walks.push(walk),
-			}
-		}
-		moved
-	}
-
-	/// Move into `walks` the parked walks a change since the last settle reaches: all of
-	/// them once the holdings can't say which.
-	fn wake(&mut self, holdings: &impl Holdings, walks: &mut Vec<Walk>) {
-		if self.parked.is_empty() {
-			// Kept current, so the first walk to park wakes only on what changes after it.
-			let _ = holdings.changes(&mut self.seen);
-			return;
-		}
-		let woke = walks.len();
-		match holdings.changes(&mut self.seen) {
-			None => walks.extend(
-				std::mem::take(&mut self.parked)
-					.into_values()
-					.flat_map(|parked| parked.walks),
-			),
-			Some(changed) => {
-				for run in changed {
-					for (_, parked) in self.overlapping(run) {
-						walks.extend(parked.walks);
-					}
-				}
-			}
-		}
-		// The fixed runs held those it woke.
-		self.stale |= walks.len() > woke;
-	}
-
-	/// Park `walk`, waiting on `waits`, with every parked walk whose wait overlaps it.
-	fn park(&mut self, waits: ops::Range<u64>, walk: Walk) {
-		self.stale = true;
-		let mut parked = Parked {
-			end: waits.end,
-			walks: vec![walk],
-		};
-		let mut start = waits.start;
-		for overlapping in self.overlapping(waits.clone()) {
-			start = start.min(overlapping.0);
-			parked.end = parked.end.max(overlapping.1.end);
-			parked.walks.extend(overlapping.1.walks);
-		}
-		self.parked.insert(start, parked);
-	}
-
-	/// Take out the parked walks whose waits overlap `run`.
-	fn overlapping(&mut self, run: ops::Range<u64>) -> Vec<(u64, Parked)> {
-		if run.is_empty() {
-			return Vec::new();
-		}
-		// They are disjoint: the one holding the run's start, then each starting inside it.
-		let below = self
-			.parked
-			.range(..=run.start)
-			.next_back()
-			.filter(|(_, parked)| parked.end > run.start)
-			.map(|(start, _)| *start);
-		let inside = self
-			.parked
-			.range(run.start.saturating_add(1)..run.end)
-			.map(|(start, _)| *start);
-		let starts: Vec<u64> = below.into_iter().chain(inside).collect();
-		starts
-			.into_iter()
-			.filter_map(|start| self.parked.remove(&start).map(|parked| (start, parked)))
-			.collect()
-	}
-
-	/// The groups an unsettled time end reads on speculation, which may start past it: a
-	/// read parked on the cap wakes when one of them starts.
-	///
-	/// A parked walk waits on a group arriving, never one starting, and an arrival changes
-	/// the track a read parks on anyway, so only the walks not parked count, here and in
-	/// [`Self::watch_starts`].
-	pub fn speculative(&self) -> impl Iterator<Item = u64> + '_ {
-		self.walks.iter().filter_map(|walk| walk.trail.speculative)
-	}
-
-	/// The lowest key whose start could still move an unsettled time start, or a time
-	/// end not parked, `None` without one or once the last key is in range.
-	pub fn watch_starts(&self) -> Option<u64> {
-		if !self.waiting.is_empty() {
-			return Some(0);
-		}
-		self.walks.iter().filter_map(|walk| walk.trail.unknown()).min()
 	}
 
 	/// Whether group `key` is in range. Everything is while a relative anchor waits.
@@ -872,16 +291,15 @@ impl Window {
 	}
 
 	/// Each range resolved, in the order given: `None` for one whose start still waits, or
-	/// still looking up its start. One empty as given, or that only resolves empty, ends at
-	/// or below its start. An unsettled time end is reported open, never at its cap.
+	/// still looking up its start. One empty as given ends at or below its start.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
 		let mut resolved: Vec<_> = self
 			.ranges
 			.iter()
 			.map(|range| match (range.start, range.end) {
-				(Anchor::Absolute(start), Some(Anchor::Absolute(end))) if range.is_empty() => Some(Resolved {
+				(Anchor::Time(start), Some(Anchor::Time(_))) if range.is_empty() => Some(Resolved {
 					start,
-					end: Some(end),
+					end: Some(start),
 					floored: true,
 				}),
 				_ => None,
@@ -890,10 +308,7 @@ impl Window {
 		for span in self.spans.iter().filter(|span| span.looking.is_none() && !span.waiting) {
 			resolved[span.index] = Some(Resolved {
 				start: span.start,
-				end: match span.end {
-					End::Before(end) => Some(end),
-					End::Open | End::Time(_) => None,
-				},
+				end: span.end,
 				floored: span.floored,
 			});
 		}
@@ -914,7 +329,7 @@ impl Window {
 	}
 
 	/// The exclusive end past every group in range, `None` when one stays open or an anchor
-	/// waits. An unsettled time end counts as open: its cap only holds reads back meanwhile.
+	/// waits.
 	pub fn end(&self) -> Option<u64> {
 		if !self.settled {
 			return None;
@@ -1002,21 +417,20 @@ impl Window {
 
 	/// The time starts still looked up, each with the exclusive end of the run below every
 	/// group held, which holds the group containing it if the track's history does.
-	pub fn lookups(&self) -> impl Iterator<Item = (Timestamp, u64)> + '_ {
+	pub fn lookups(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
 		self.looking
 			.iter()
-			.filter_map(|span| self.spans[*span].looking.map(|looking| (looking.pts, looking.below)))
+			.filter_map(|span| self.spans[*span].looking.map(|looking| (looking.time, looking.below)))
 	}
 
-	/// The lookup of time start `pts` answered with the group containing it, or the oldest
-	/// group of the history when `pts` is older than all of it: its spans start there, once
-	/// that group has started. `None`, or an answer that never started, means the history
-	/// couldn't tell, so they start where the groups held say. Returns whether the groups in
-	/// range moved.
-	pub fn found(&mut self, pts: Timestamp, group: Option<u64>, holdings: &impl Holdings) -> bool {
+	/// The lookup of time start `time` answered with the group containing it, or the oldest
+	/// group of the history when `time` is older than all of it: its spans start there, once
+	/// that group is held. `None`, or an answer not held, means the history couldn't tell, so
+	/// they start where the groups held say. Returns whether the groups in range moved.
+	pub fn found(&mut self, time: u64, group: Option<u64>, holdings: &impl Holdings) -> bool {
 		let mut found = Vec::new();
 		self.looking.retain(|span| match self.spans[*span].looking {
-			Some(looking) if looking.pts == pts => {
+			Some(looking) if looking.time == time => {
 				found.push(*span);
 				false
 			}
@@ -1025,52 +439,19 @@ impl Window {
 		if found.is_empty() {
 			return false;
 		}
-		let started = group.filter(|group| holdings.next_start(*group).is_some_and(|(found, _)| found == *group));
+		let held = group.filter(|group| holdings.next_start(*group) == Some(*group));
 		for index in found {
 			let span = &mut self.spans[index];
-			let Some(looking) = span.looking.take() else { continue };
-			let (start, floored, reach) = match (started, holdings.containing(pts)) {
-				(Some(group), _) | (None, Containing::Group(group)) => (group, true, group),
-				(None, _) => (
-					0,
-					false,
-					holdings.next_start(0).map_or(looking.below, |(oldest, _)| oldest),
-				),
-			};
-			(span.start, span.floored) = (start, floored);
-			let limit = match span.end {
-				End::Before(end) => Some(end),
-				End::Open => None,
-				// It walks from where the span reaches: a start the history couldn't place asks
-				// nothing below the oldest group held, so none of those may hold the end open.
-				End::Time(end) => {
-					self.walks.push(Walk {
-						ends: BTreeSet::from([Ending { pts: end, span: index }]),
-						trail: Trail {
-							held: reach,
-							accounted: reach,
-							..Trail::new(start, reach)
-						},
-						low: start,
-						low_reach: reach,
-						was: Some(start),
-					});
-					continue;
-				}
-			};
-			if let Some(last) = limit.map_or(Some(u64::MAX), |end| end.checked_sub(1))
-				&& last >= start
-			{
-				self.resolved.insert(start..=last);
-				if reach <= last {
-					self.resolved_missable.insert(reach..=last);
-				}
+			if span.looking.take().is_none() {
+				continue;
 			}
+			(span.start, span.floored) = match (held, holdings.containing(time)) {
+				(Some(group), _) | (None, Containing::Group(group)) => (group, true),
+				(None, _) => (0, false),
+			};
 		}
-		self.stale = true;
 		self.name();
-		self.walk(holdings);
-		self.rebuild();
+		self.rebuild(holdings);
 		true
 	}
 
@@ -1078,29 +459,15 @@ impl Window {
 		if holdings.resolves() && self.ranges.iter().any(|range| range.end == Some(Anchor::Oldest)) {
 			return Err(Error::InvalidRange);
 		}
-		let time = |anchor: Option<Anchor>| matches!(anchor, Some(Anchor::Time(_)));
-		if !holdings.timed()
-			&& self
-				.ranges
-				.iter()
-				.any(|range| time(Some(range.start)) || time(range.end))
-		{
-			return Err(Error::TimestampMismatch);
-		}
 		if holdings.drops_anchors() && !self.ranges.iter().all(Range::is_wire) {
 			return Err(Error::Unsupported);
 		}
 		self.spans.clear();
 		self.looking.clear();
 		self.waiting.clear();
-		self.walks.clear();
-		self.parked.clear();
-		let (mut fixed, mut fixed_missable) = (Vec::new(), Vec::new());
 		self.pending = false;
-		// The time ends that start alike walk alike, until a group starts between them.
-		let mut walks = std::collections::BTreeMap::<(u64, u64), BTreeSet<Ending>>::new();
 		for (index, range) in self.ranges.iter().enumerate().filter(|(_, range)| !range.is_empty()) {
-			let Some(end) = end(range.end, latest) else {
+			let Some(end) = end(range.end, latest, holdings) else {
 				self.pending = true;
 				continue;
 			};
@@ -1110,7 +477,7 @@ impl Window {
 					self.pending = true;
 					continue;
 				}
-				// Reads nothing until a group starts; see [`Self::start_waiting`].
+				// Reads nothing until a group arrives; see [`Self::start_waiting`].
 				Start::Waiting => {
 					self.waiting.push(self.spans.len());
 					self.spans.push(Span {
@@ -1126,71 +493,23 @@ impl Window {
 			};
 			// A time start the groups held can't place reads nothing until its lookup answers.
 			let looking = match range.start {
-				Anchor::Time(pts) => unresolved(start, floored, holdings).map(|below| Looking { pts, below }),
+				Anchor::Time(time) => unresolved(start, floored, holdings).map(|below| Looking { time, below }),
 				_ => None,
 			};
 			if looking.is_some() {
 				self.looking.push(self.spans.len());
-				self.spans.push(Span {
-					index,
-					start,
-					end,
-					floored,
-					looking,
-					waiting: false,
-				});
-				continue;
-			}
-			// The lowest group a miss asks for: a time start before every group held asks none
-			// below the oldest, since which of them it reaches is unknown until they start.
-			let reach = match range.start {
-				Anchor::Time(_) if !floored => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
-				_ => start,
-			};
-			let limit = match end {
-				End::Before(end) => Some(end),
-				End::Open => None,
-				End::Time(pts) => {
-					let span = self.spans.len();
-					walks.entry((start, reach)).or_default().insert(Ending { pts, span });
-					Some(start)
-				}
-			};
-			if let Some(last) = limit.map_or(Some(u64::MAX), |end| end.checked_sub(1))
-				&& last >= start
-			{
-				fixed.push(start..=last);
-				if reach <= last {
-					fixed_missable.push(reach..=last);
-				}
 			}
 			self.spans.push(Span {
 				index,
 				start,
 				end,
 				floored,
-				looking: None,
+				looking,
 				waiting: false,
 			});
 		}
 		self.name();
-		self.resolved = Runs::new(fixed);
-		self.resolved_missable = Runs::new(fixed_missable);
-		self.groups = Layered::new(Arc::new(self.resolved.clone()), Runs::default());
-		self.missable = Layered::new(Arc::new(self.resolved_missable.clone()), Runs::default());
-		self.stale = false;
-		self.walks = walks
-			.into_iter()
-			.map(|((start, reach), ends)| Walk {
-				ends,
-				trail: Trail::new(start, reach),
-				low: start,
-				low_reach: reach,
-				was: Some(start),
-			})
-			.collect();
-		self.walk(holdings);
-		self.rebuild();
+		self.rebuild(holdings);
 		Ok(())
 	}
 
@@ -1205,39 +524,33 @@ impl Window {
 		self.all_named = self.spans.iter().all(|span| span.floored);
 	}
 
-	/// The groups in range: the fixed ones, and the run each walk not parked reads now
-	/// layered over them. Costs those walks, and the fixed runs only once a settle or a walk
-	/// parking or waking changed them.
-	fn rebuild(&mut self) {
+	/// The groups in range: every span that knows where it starts, through its end.
+	fn rebuild(&mut self, holdings: &impl Holdings) {
 		self.covered = None;
 		// A span still looking up or waiting on its start reads nothing until it knows which
 		// group that is.
-		self.settled = !self.pending
-			&& self.walks.is_empty()
-			&& self.parked.is_empty()
-			&& self.looking.is_empty()
-			&& self.waiting.is_empty();
-		let (groups, missable): (Vec<_>, Vec<_>) = self.walks.iter().map(Walk::runs).unzip();
-		self.groups.set_layer(Runs::new(groups.into_iter().flatten()));
-		self.missable.set_layer(Runs::new(missable.into_iter().flatten()));
-		if std::mem::take(&mut self.stale) {
-			let parked = || {
-				self.parked
-					.values()
-					.flat_map(|parked| parked.walks.iter())
-					.map(Walk::runs)
+		self.settled = !self.pending && self.looking.is_empty() && self.waiting.is_empty();
+		let (mut groups, mut missable) = (Vec::new(), Vec::new());
+		for span in self.spans.iter().filter(|span| span.looking.is_none() && !span.waiting) {
+			let Some(last) = span.end.map_or(Some(u64::MAX), |end| end.checked_sub(1)) else {
+				continue;
 			};
-			let groups = self
-				.resolved
-				.iter()
-				.cloned()
-				.chain(parked().filter_map(|(groups, _)| groups));
-			let missable =
-				(self.resolved_missable.iter().cloned()).chain(parked().filter_map(|(_, missable)| missable));
-			let (groups, missable) = (Runs::new(groups), Runs::new(missable));
-			self.groups.set_fixed(groups);
-			self.missable.set_fixed(missable);
+			if last < span.start {
+				continue;
+			}
+			groups.push(span.start..=last);
+			// A time start before every group held asks no miss below the oldest, since which of
+			// them it reaches is unknown.
+			let reach = match (self.ranges[span.index].start, span.floored) {
+				(Anchor::Time(_), false) => holdings.next_start(0).unwrap_or(span.start),
+				_ => span.start,
+			};
+			if reach <= last {
+				missable.push(reach..=last);
+			}
 		}
+		self.groups = Layered::new(Arc::new(Runs::new(groups)), Runs::default());
+		self.missable = Layered::new(Arc::new(Runs::new(missable)), Runs::default());
 	}
 }
 
@@ -1246,7 +559,7 @@ enum Start {
 	/// At this group, and whether it names that group rather than reaching back to the
 	/// oldest one.
 	At(u64, bool),
-	/// A time start no group has started for yet, so it reads nothing.
+	/// A time start with no group held yet, so it reads nothing.
 	Waiting,
 	/// Waiting on a latest group, reading everything meanwhile.
 	Pending,
@@ -1254,21 +567,26 @@ enum Start {
 
 fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start {
 	match anchor {
-		Anchor::Absolute(start) => Start::At(start, true),
 		// Nothing sits below group 0, so the oldest start needs no latest group.
 		Anchor::Oldest => Start::At(0, false),
-		Anchor::Relative(back) => latest.map_or(Start::Pending, |latest| Start::At(latest.saturating_sub(back), true)),
-		Anchor::Time(pts) => match holdings.containing(pts) {
+		Anchor::Relative(back) => match latest {
+			None => Start::Pending,
+			Some(latest) => match holdings.back(latest, back) {
+				Some(group) => Start::At(group, true),
+				// Fewer groups are held than it counts back, so reach back to the oldest.
+				None => Start::At(0, false),
+			},
+		},
+		Anchor::Time(time) => match holdings.containing(time) {
 			Containing::Group(group) => Start::At(group, true),
 			// The group holding it is older than any held, so reach back to the oldest.
 			Containing::Before => Start::At(0, false),
 			// Before any group, as for a relative anchor, which a hop that holds none (such as
 			// a reader following route copies) leaves to the copies to resolve.
 			Containing::Unknown if latest.is_none() => Start::Pending,
-			// Nothing can start any more, so nothing held reaches past it.
+			// Nothing can arrive any more, so nothing held reaches past it.
 			Containing::Unknown if holdings.complete() => Start::At(0, false),
-			// Nothing has started yet, so wait for a group that has, rather than guess the
-			// latest: groups arrive before the frames that show where they start, so a copy
+			// Nothing is held yet, so wait for a group rather than guess from the latest: a copy
 			// can see the live edge before the groups its publisher resolved the time to.
 			Containing::Unknown => Start::Waiting,
 		},
@@ -1277,34 +595,35 @@ fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start
 
 /// The exclusive end of the run a lookup of a time start resolved to `start` searches, when
 /// the groups held can't tell which group contains it and a handler may: it is before every
-/// group known to start, or in a gap after `start`, the newest known to start at or before it.
-/// Even a gap the live feed accounted for may sit in the history once evicted.
+/// group held, or in a gap after `start`, the newest held at or before it. Even a gap the
+/// live feed accounted for may sit in the history once evicted.
 fn unresolved(start: u64, floored: bool, holdings: &impl Holdings) -> Option<u64> {
 	if !holdings.looks_up() {
 		return None;
 	}
 	if !floored {
-		return holdings.next_start(0).map(|(oldest, _)| oldest);
+		return holdings.next_start(0);
 	}
 	let next = start.checked_add(1)?;
-	let (after, _) = holdings.next_start(next)?;
+	let after = holdings.next_start(next)?;
 	(after > next).then_some(after)
 }
 
-/// Where a range stops, or `None` while it waits on a latest group. A time end's walk
-/// starts once its start is known.
-fn end(anchor: Option<Anchor>, latest: Option<u64>) -> Option<End> {
+/// Where a range stops, exclusive, or `None` while it waits on a latest group. `Some(None)`
+/// is past every group.
+fn end(anchor: Option<Anchor>, latest: Option<u64>, holdings: &impl Holdings) -> Option<Option<u64>> {
 	Some(match anchor {
-		None => End::Open,
-		Some(Anchor::Absolute(end)) => End::Before(end),
-		Some(Anchor::Relative(back)) => latest?
-			.saturating_sub(back)
-			.checked_add(1)
-			.map_or(End::Open, End::Before),
-		Some(Anchor::Time(pts)) => End::Time(pts),
+		None => None,
+		// Every end includes its group.
+		Some(Anchor::Time(time)) => time.checked_add(1),
+		Some(Anchor::Relative(back)) => match holdings.back(latest?, back) {
+			Some(group) => group.checked_add(1),
+			// It counts back past every group held, so it ends before them all.
+			None => Some(0),
+		},
 		// Refused where groups are held; a hop that holds none lets its copies refuse it, and
 		// delivers nothing meanwhile.
-		Some(Anchor::Oldest) => End::Before(0),
+		Some(Anchor::Oldest) => Some(0),
 	})
 }
 

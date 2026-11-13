@@ -1108,7 +1108,7 @@ mod hop_tests {
 		let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 		assert!(info.properties.is_none());
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(ts(5), b"key".to_vec()).unwrap();
 		let mut received = recv(&mut subscriber).await;
 		let frame = next(&mut received).await.unwrap();
@@ -1216,7 +1216,7 @@ mod hop_tests {
 		assert_eq!(subscriber.info().compression, crate::track::Compression::Deflate);
 
 		let payload = |n: u8| vec![n; 300];
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(ts(5), payload(1)).unwrap();
 		group.write_frame(ts(6), payload(2)).unwrap();
 		group.finish().unwrap();

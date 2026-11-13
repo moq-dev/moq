@@ -479,7 +479,7 @@ impl Bystander {
 	fn publish(&self) {
 		let mut sent = self.sent.borrow_mut();
 		let key = sent.len() as u64;
-		let mut group = self.track.append_group().expect("the bystander's group");
+		let mut group = self.track.append_next().expect("the bystander's group");
 		let mut frames = Vec::new();
 		for frame in 0..2u8 {
 			let mut payload = key.to_be_bytes().repeat(8);
@@ -777,7 +777,7 @@ fn record(version: Version, scenario: Scenario) -> Vec<Action> {
 					route.announce().expect("the client's announce");
 					let subscribed = async { while let Ok(None) = track.subscription_changed().await {} };
 					let _ = kio::clock::timeout(timeout, subscribed).await;
-					let mut group = track.append_group().expect("the client's group");
+					let mut group = track.append_next().expect("the client's group");
 					group.write_frame(None, Bytes::from_static(b"frame")).expect("a frame");
 					group.finish().expect("the client's group finish");
 					kio::clock::sleep(timeout).await;

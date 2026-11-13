@@ -219,7 +219,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 			frame_start,
 		} => {
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
-			let producer = track.append_group().ok()?;
+			let producer = track.append_next().ok()?;
 			let consumer = producer.consume();
 			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);

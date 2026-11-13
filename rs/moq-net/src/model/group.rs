@@ -290,8 +290,9 @@ pub(super) enum Outcome {
 	/// Frames may still be written.
 	#[default]
 	Open,
-	/// Finished with this many frames.
-	Finished(usize),
+	/// Finished with this many frames, and where it ends in its track's timescale when its
+	/// producer said it is whole: `None` when it only closed (see [`Producer::close`]).
+	Finished(usize, Option<u64>),
 	/// Finished with this many frames, then aborted to free its cache: a reader that took
 	/// every frame got the whole group, and one short of it gets the error.
 	Released(usize, Error),
@@ -303,7 +304,7 @@ impl Outcome {
 	/// The total number of frames, once finished.
 	pub(super) fn frames(&self) -> Option<usize> {
 		match self {
-			Self::Finished(frames) | Self::Released(frames, _) => Some(*frames),
+			Self::Finished(frames, _) | Self::Released(frames, _) => Some(*frames),
 			Self::Open | Self::Aborted(_) => None,
 		}
 	}
@@ -312,7 +313,7 @@ impl Outcome {
 	pub(super) fn error(&self) -> Option<&Error> {
 		match self {
 			Self::Released(_, err) | Self::Aborted(err) => Some(err),
-			Self::Open | Self::Finished(_) => None,
+			Self::Open | Self::Finished(..) => None,
 		}
 	}
 }
@@ -1222,7 +1223,7 @@ impl GroupState {
 	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
 		match &self.outcome {
 			Outcome::Released(total, err) if index < *total => Poll::Ready(Err(err.clone())),
-			Outcome::Finished(_) | Outcome::Released(..) => Poll::Ready(Ok(())),
+			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
 			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
 			Outcome::Open => {
 				// Waiting on frames the writer has yet to commit, wherever the reader skipped
@@ -1253,7 +1254,7 @@ impl GroupState {
 	/// the cache of, or the abort error.
 	fn poll_outcome(&self) -> Poll<Result<()>> {
 		match &self.outcome {
-			Outcome::Finished(_) | Outcome::Released(..) => Poll::Ready(Ok(())),
+			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
 			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
 			Outcome::Open => Poll::Pending,
 		}
@@ -2278,15 +2279,37 @@ impl Producer {
 		let _ = self.handle.close_aborted(err);
 	}
 
-	/// Mark the group as complete, returning the [`Finished`] group: no more frames can be
-	/// written, but it can still be read or aborted.
+	/// End the group whole at `end`, the exclusive end of its presentation in its track's
+	/// timescale, returning the [`Finished`] group: no more frames can be written, but it can
+	/// still be read or aborted.
 	///
-	/// Fails with the abort error if the group was already aborted.
-	pub fn finish(self) -> Result<Finished> {
+	/// A finished group's own end bounds how long it stays fresh, so the last group of a
+	/// paused or finished track ages out without a successor (see
+	/// [`track::Info::max_age`]). An `end` at or before the group's start is
+	/// [`Error::TimestampMismatch`]. Fails with the abort error if the group was already
+	/// aborted.
+	pub fn finish(self, end: u64) -> Result<Finished> {
+		if end <= self.start {
+			return Err(Error::TimestampMismatch);
+		}
+		self.end(Some(end))
+	}
+
+	/// End the group without saying where it ends, returning the [`Finished`] group: every
+	/// frame written still reaches its readers, but they can't tell the group is whole.
+	///
+	/// What a producer that doesn't know its group's end calls, and how a relay ends a
+	/// group that expired or arrived partial. Fails with the abort error if the group was
+	/// already aborted.
+	pub fn close(self) -> Result<Finished> {
+		self.end(None)
+	}
+
+	fn end(self, end: Option<u64>) -> Result<Finished> {
 		let mut state = modify(&self.handle.state)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let fin = state.next_index;
-		state.outcome = Outcome::Finished(fin);
+		state.outcome = Outcome::Finished(fin, end);
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
 		if let Some(flate) = &mut state.flate {
@@ -2786,7 +2809,7 @@ impl Handle {
 		let fall = match guard.outcome {
 			// A finished group's outcome is settled: an abort only releases its cache, so it
 			// neither failed nor was cut.
-			Outcome::Finished(_) => Fall::Released,
+			Outcome::Finished(..) => Fall::Released,
 			_ if policy => Fall::Released,
 			// A reset carrying a policy code is the upstream's cache policy, a cancel is a
 			// reader no longer wanting the group, and a fill refused as unfetchable abandons
@@ -2813,7 +2836,7 @@ impl Handle {
 		}
 		let finished = guard.outcome.frames().is_some();
 		guard.outcome = match guard.outcome {
-			Outcome::Finished(frames) => Outcome::Released(frames, err),
+			Outcome::Finished(frames, _) => Outcome::Released(frames, err),
 			_ => Outcome::Aborted(err),
 		};
 		// After the outcome exists, so a scan reading the mirror never hides a live group.
@@ -2899,6 +2922,15 @@ impl Handle {
 	/// group's end.
 	pub(super) fn is_settled(&self) -> bool {
 		self.state.read().outcome.frames().is_some()
+	}
+
+	/// Where the group ends in its track's timescale, once its producer finished it whole
+	/// (see [`Producer::finish`]).
+	pub(crate) fn end(&self) -> Option<u64> {
+		match self.state.read().outcome {
+			Outcome::Finished(_, end) => end,
+			_ => None,
+		}
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.
@@ -3231,8 +3263,8 @@ impl Clone for Demand {
 }
 
 impl Demand {
-	/// The group key this handle watches.
-	pub fn key(&self) -> u64 {
+	/// The start of the group this handle watches.
+	pub fn start(&self) -> u64 {
 		self.key
 	}
 
@@ -4136,6 +4168,15 @@ impl Consumer {
 	pub fn frame_count(&self) -> usize {
 		let state = self.cursor.state.read();
 		state.outcome.frames().unwrap_or(state.next_index)
+	}
+
+	/// Where the group ends in its track's timescale, once its producer finished it whole
+	/// with [`Producer::finish`]: `None` while it is open, or when it only closed.
+	pub fn end(&self) -> Option<u64> {
+		match self.cursor.state.read().outcome {
+			Outcome::Finished(_, end) => end,
+			_ => None,
+		}
 	}
 
 	/// The next frame, as a consumer for chunked reading.

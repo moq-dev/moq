@@ -3401,7 +3401,7 @@ mod test {
 		// Shrink the pool so the next write reclaims the held head.
 		let other = track::Producer::new(broadcast, "other", crate::track::Info::timed());
 		pool.resize(pool.used().saturating_sub(1));
-		let mut filler = other.append_group().unwrap();
+		let mut filler = other.append_next().unwrap();
 		filler.write_frame(ts(0), frame()).unwrap();
 		filler.finish().unwrap();
 		assert!(handoff.head().is_none(), "the shrink reclaimed the head");
