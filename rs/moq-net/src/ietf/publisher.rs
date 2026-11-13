@@ -6703,8 +6703,8 @@ enum ServePhase {
 /// Forwards a broadcast's datagram track; dropped once that track ends or fails.
 struct DatagramForward {
 	consumer: crate::datagram::Consumer,
-	/// Counts each datagram the transport takes.
-	meter: crate::stats::Meter,
+	/// Counts each datagram the transport takes, under the session's current tier.
+	stats: crate::stats::Scope,
 	timescale: Option<Timescale>,
 	/// The datagram track's priority, once its info resolved.
 	publisher: Option<i8>,
@@ -6773,9 +6773,9 @@ impl TrackServe {
 		if demand {
 			datagrams.set_priority(self.track.subscription().priority);
 		}
-		let meter = datagrams.delegate();
+		let stats = datagrams.delegate();
 		self.datagrams = Some(DatagramForward {
-			meter,
+			stats,
 			consumer: datagrams,
 			demand,
 			timescale: self.timescale.filter(|_| stamp),
@@ -7171,7 +7171,7 @@ impl TrackServe {
 				&datagram,
 			);
 			if sent {
-				forward.meter.datagram(datagram.payload.len() as u64);
+				forward.stats.meter().datagram(datagram.payload.len() as u64);
 			}
 		}
 	}

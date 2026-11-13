@@ -29,6 +29,8 @@ pub struct Stream {
 	unwritten: Bytes,
 	/// The end of the WebTransport header once written, which a reset must still deliver.
 	header: Option<send::Offset>,
+	/// The stream's acknowledged prefix when it was reset, which drops the handle to it.
+	acked: u64,
 	id: crate::quic::stream::Id,
 }
 
@@ -53,11 +55,21 @@ impl Stream {
 			close: close.clone(),
 			unwritten: header,
 			header: None,
+			acked: 0,
 		};
 		// Write the header now when it fits, so the peer can accept the stream before its
 		// first data. Whatever does not fit waits for that data; a failure resurfaces there.
 		let _ = this.poll_header(&kio::Waiter::noop());
 		this
+	}
+
+	/// How many leading bytes the peer acknowledged, header included.
+	fn acked_len(&self) -> u64 {
+		match &self.state {
+			State::Open(stream) => stream.acked_len(),
+			State::Finished(stream) => stream.acked_len(),
+			State::Reset(_) | State::Unsent => self.acked,
+		}
 	}
 
 	fn open(&mut self) -> Result<&mut send::Stream, Error> {
@@ -74,6 +86,7 @@ impl Stream {
 	/// A WebTransport header already written still reaches the peer, so it can tell which
 	/// session the reset belongs to.
 	fn reset_mut(&mut self, code: u32) {
+		self.acked = self.acked_len();
 		let code = self.close.encode_stream_code(code);
 		// The connection is driven on this thread, so no STOP_SENDING lands between this check
 		// and the reset: what the stream reports now is what the reset settles.
@@ -309,17 +322,12 @@ impl moq_net::transport::poll::SendStream for Stream {
 	}
 
 	/// The acknowledged bytes past the WebTransport header, none while the header is unwritten,
-	/// and none once reset: a reset drops the handle that could tell.
+	/// and once reset, those acknowledged by the reset.
 	fn delivered(&self) -> Option<u64> {
 		if self.unwritten.has_remaining() {
 			return Some(0);
 		}
-		let acked = match &self.state {
-			State::Open(stream) => stream.acked_len(),
-			State::Finished(stream) => stream.acked_len(),
-			State::Reset(_) | State::Unsent => 0,
-		};
-		Some(acked.saturating_sub(self.header.map_or(0, u64::from)))
+		Some(self.acked_len().saturating_sub(self.header.map_or(0, u64::from)))
 	}
 }
 

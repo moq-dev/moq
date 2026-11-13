@@ -2647,8 +2647,8 @@ impl Request for SubscribeServe {
 				} => {
 					if send.is_none() {
 						let info = ready!(consumer.poll_info(waiter))?;
-						let meter = consumer.delegate();
-						*send = Some(DatagramSend::new(shared, *id, info, *priority, meter));
+						let stats = consumer.delegate();
+						*send = Some(DatagramSend::new(shared, *id, info, *priority, stats));
 					}
 					let send = send.as_ref().expect("set above");
 					return match ready!(consumer.poll_recv(waiter))? {
@@ -2909,8 +2909,8 @@ impl LegacyDatagrams {
 				return Poll::Ready(false);
 			};
 			let info = info.with_timescale(self.timescale);
-			let meter = self.consumer.delegate();
-			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority, meter));
+			let stats = self.consumer.delegate();
+			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority, stats));
 		}
 		let send = self.send.as_ref().expect("set above");
 		match ready!(self.consumer.poll_recv(waiter)) {
@@ -2933,12 +2933,12 @@ struct DatagramSend {
 	publisher: i8,
 	/// The subscription's send group, or `None` on a transport without groups.
 	group: Option<GroupOf<Transport>>,
-	/// Counts each datagram the transport takes.
-	meter: crate::stats::Meter,
+	/// Counts each datagram the transport takes, under the session's current tier.
+	stats: crate::stats::Scope,
 }
 
 impl DatagramSend {
-	fn new(shared: &Shared, id: u64, info: datagram::Info, priority: i8, meter: crate::stats::Meter) -> Self {
+	fn new(shared: &Shared, id: u64, info: datagram::Info, priority: i8, stats: crate::stats::Scope) -> Self {
 		let session = shared.session.clone();
 		let group = session.send_group(crate::priority::group(priority, info.priority));
 		Self {
@@ -2949,7 +2949,7 @@ impl DatagramSend {
 			runtime: shared.runtime.clone(),
 			publisher: info.priority,
 			group,
-			meter,
+			stats,
 		}
 	}
 
@@ -2996,7 +2996,7 @@ impl DatagramSend {
 			priority: crate::priority::in_group(sequence, 0, Order::Descending),
 		};
 		if self.session.send_datagram(body, options).is_ok() {
-			self.meter.datagram(size as u64);
+			self.stats.meter().datagram(size as u64);
 		}
 		Ok(())
 	}
@@ -3076,8 +3076,8 @@ impl Request for DatagramServe {
 			// Ahead of the datagrams, which a subscriber drops until it lands.
 			writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
 			writer.buffer(&lite::DatagramsInfo::from(info))?;
-			let meter = self.consumer.delegate();
-			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority, meter));
+			let stats = self.consumer.delegate();
+			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority, stats));
 		}
 		ready!(writer.poll_flush(waiter))?;
 		let send = self.send.as_ref().expect("set above");
@@ -7969,7 +7969,7 @@ mod serve_group_test {
 			runtime: crate::time::sim(),
 			publisher: 0,
 			group,
-			meter: crate::stats::Meter::default(),
+			stats: crate::stats::Scope::default(),
 		}
 	}
 

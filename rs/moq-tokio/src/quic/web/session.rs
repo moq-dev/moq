@@ -1319,6 +1319,33 @@ mod tests {
 		}
 	}
 
+	/// A stream reports the payload the peer acknowledged, past any WebTransport header, and
+	/// keeps reporting it after a reset drops its handle to the stream.
+	#[tokio::test]
+	async fn delivered_counts_acknowledged_payload_through_a_reset() {
+		use moq_net::transport::poll::SendStream;
+
+		for framed in [false, true] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, server) = sessions(framed, client, server).await;
+			let mut send = client.open_uni(Default::default()).await.unwrap();
+			assert_eq!(send.delivered(), Some(0), "framed: {framed}");
+			send.write_all(&b"payload"[..]).await.unwrap();
+			SendStream::finish(&mut send).unwrap();
+			let recv = async {
+				let mut recv = server.accept_uni().await.unwrap();
+				recv.read_to_end(usize::MAX).await.unwrap()
+			};
+			let (closed, read) = tokio::join!(kio::wait(|waiter| SendStream::poll_closed(&send, waiter)), recv);
+			closed.unwrap();
+			assert_eq!(read, b"payload", "framed: {framed}");
+			assert_eq!(send.delivered(), Some(7), "framed: {framed}");
+
+			SendStream::reset(&mut send, 1);
+			assert_eq!(send.delivered(), Some(7), "framed: {framed}: the reset forgot it");
+		}
+	}
+
 	/// Both ends of a session export the same keying material as soon as it starts. A
 	/// WebTransport session derives its own from the connection's, so it differs from what
 	/// raw QUIC on the same connection would export.

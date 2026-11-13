@@ -542,12 +542,12 @@ impl Consumer {
 		}
 	}
 
-	/// Stop counting datagrams as they are read, and return the meter a wire publisher
-	/// counts each one on once the transport takes it.
+	/// Stop counting datagrams as they are read, and return the scope a wire publisher
+	/// counts each one under once the transport takes it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn delegate(&mut self) -> stats::Meter {
+	pub(crate) fn delegate(&mut self) -> stats::Scope {
 		self.delegated = true;
-		self.stats.meter()
+		self.stats.clone()
 	}
 
 	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
