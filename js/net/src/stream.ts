@@ -1,4 +1,4 @@
-import { fromTransport, StreamCode, TooFarBehind, toStreamCode, toTransport } from "./error.ts";
+import { fromTransport, StreamCode, Stream as StreamError, TooFarBehind, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
@@ -156,6 +156,13 @@ export interface TryOpenOptions extends Omit<OpenOptions, "sendOrder"> {
 
 	/** List the stream among the session's open group streams until it is closed or reset. */
 	group?: boolean;
+
+	/**
+	 * Whether a reset to make room for a higher stream pauses the group rather than giving it up
+	 * (lite-07): the reset carries YIELDED instead of TOO_FAR_BEHIND, and {@link Writer.preempted}
+	 * says it happened.
+	 */
+	yields?: boolean;
 }
 
 /** A send stream that reports what it sent, as W3C WebTransport's `WebTransportSendStream.getStats()` does. */
@@ -712,6 +719,10 @@ export class Writer implements OpenStream {
 	#aborted = false;
 	/** The session's open group streams, while this one is among them. */
 	#listed?: OpenStreams;
+	/** A reset to make room yields, pausing the group, rather than giving it up as too far behind. */
+	#yields = false;
+	/** The session reset it to make room for a higher-ranked open. */
+	#preempted = false;
 
 	// Scratch buffer for each primitive write, sized for the longest (a 9-byte leading-ones varint).
 	#scratch: ArrayBuffer;
@@ -844,9 +855,25 @@ export class Writer implements OpenStream {
 		return this.#closed;
 	}
 
-	/** Reset the stream to make room for a higher one, failing its writer as too far behind. */
+	/**
+	 * Reset the stream to make room for a higher one, failing its writer as too far behind, or on
+	 * a stream that {@link TryOpenOptions.yields}, as yielded.
+	 */
 	preempt() {
-		this.reset(new TooFarBehind());
+		this.#preempted = true;
+		this.reset(
+			this.#yields
+				? new StreamError(StreamCode.Yielded, { message: "yielded to a higher stream" })
+				: new TooFarBehind(),
+		);
+	}
+
+	/**
+	 * Whether the session reset this stream to make room for a higher-ranked open: a flag of this
+	 * side's own, never read off an error code the peer could send too.
+	 */
+	get preempted(): boolean {
+		return this.#preempted;
 	}
 
 	reset(reason: unknown) {
@@ -904,6 +931,7 @@ export class Writer implements OpenStream {
 		const writable = await session.uni.open(read, options.cancel);
 		if (!writable) return undefined;
 		const writer = Writer.#opened(writable, options.version, sendOrder, session.streams);
+		writer.#yields = options.yields === true;
 		if (options.group) {
 			writer.#listed = session.streams;
 			session.streams.add(writer);

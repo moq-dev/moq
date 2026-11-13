@@ -1,11 +1,25 @@
 // Renders the JS API reference from the TSDoc in every published `@moq/*` package's source:
 // one TypeDoc run over all of them, written as VitePress markdown with a sidebar.
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import {
+	cpSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	statSync,
+	utimesSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Application, type Reflection, type ReflectionGroup, ReflectionKind, type TypeDocOptions } from "typedoc";
 import { MarkdownPageEvent, type PluginOptions } from "typedoc-plugin-markdown";
 import { dedupe } from "./dedupe";
+import { fingerprint } from "./fingerprint";
 import { EntrypointRouter } from "./router";
 import { finish, Theme } from "./theme";
 
@@ -145,35 +159,39 @@ if (import.meta.main) {
 		);
 	}
 	const out = join(here, "../../lib/js/api");
-	// `--cached` reuses the last reference while no input has changed since, unless
-	// MOQ_API_REFERENCE=regenerate; the dev server passes it, a build never does.
-	const stamp = join(out, ".inputs");
-	const inputs = newest([...published.values(), here]);
-	const cached = process.argv.includes("--cached") && process.env.MOQ_API_REFERENCE !== "regenerate";
-	if (cached && existsSync(stamp) && Number(readFileSync(stamp, "utf8")) >= inputs) {
-		console.log("API reference: unchanged, reusing it; MOQ_API_REFERENCE=regenerate forces it");
+	const reference = { root, packages: [...published.values()], out, docs: join(here, "../..") };
+	// Shared by every checkout on the machine, so a fresh worktree reuses what another rendered.
+	const cache = join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "moq/api-reference");
+	const entry = join(cache, fingerprint(reference, [here, join(root, "bun.lock"), join(root, "patches")]));
+	if (existsSync(entry)) {
+		// The modification time orders entries by last use for pruning.
+		const now = new Date();
+		utimesSync(entry, now, now);
+		rmSync(out, { recursive: true, force: true });
+		cpSync(entry, out, { recursive: true });
+		console.log(`API reference: inputs unchanged, reusing ${entry}`);
 	} else {
 		const started = performance.now();
-		await generate({ root, packages: [...published.values()], out, docs: join(here, "../..") });
-		writeFileSync(stamp, String(inputs));
+		await generate(reference);
 		console.log(
 			`API reference: ${published.size} packages in ${((performance.now() - started) / 1000).toFixed(1)}s`,
 		);
-	}
-}
-
-// The newest modification time of any file or directory under `dirs`, which a deleted file
-// changes too, skipping installs and build output.
-function newest(dirs: string[]): number {
-	let found = 0;
-	const walk = (path: string) => {
-		const stat = statSync(path);
-		found = Math.max(found, stat.mtimeMs);
-		if (!stat.isDirectory()) return;
-		for (const entry of readdirSync(path)) {
-			if (!["node_modules", "dist", "result", ".vite"].includes(entry)) walk(join(path, entry));
+		// Staged then renamed, so a concurrent reader never sees a partial entry.
+		mkdirSync(cache, { recursive: true });
+		const staging = mkdtempSync(join(cache, ".staging-"));
+		cpSync(out, staging, { recursive: true });
+		try {
+			renameSync(staging, entry);
+		} catch (error) {
+			// Another checkout stored the same inputs first.
+			if (!existsSync(entry)) throw error;
+			rmSync(staging, { recursive: true });
 		}
-	};
-	for (const dir of dirs) walk(dir);
-	return found;
+		// Each entry is about 1.3 MB; keep enough for every worktree a busy machine has open,
+		// tolerating another checkout pruning the same entries.
+		const entries = readdirSync(cache)
+			.map((name) => ({ path: join(cache, name), used: statSync(join(cache, name), { throwIfNoEntry: false }) }))
+			.sort((a, b) => (b.used?.mtimeMs ?? 0) - (a.used?.mtimeMs ?? 0));
+		for (const { path } of entries.slice(32)) rmSync(path, { recursive: true, force: true });
+	}
 }

@@ -248,12 +248,14 @@ Abandon ==
     /\ IF Established
        THEN /\ phase' = "backoff"
             /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+            \* `walk_failed` drops a redirect target, as in Failed.
+            /\ target' = Start
             /\ UNCHANGED <<live, pred, queue>>
        \* The first walk fails fast: `Action::Abandon`, then the `Done` it queued.
        ELSE /\ Done
             /\ queue' = <<"Done">>
-            /\ UNCHANGED timer
-    /\ UNCHANGED <<watch, probe, target, sess, used, dialTo,
+            /\ UNCHANGED <<timer, target>>
+    /\ UNCHANGED <<watch, probe, sess, used, dialTo,
                    misdials, lc, lcSess, migrating, spred, started, ended>>
 
 BackoffEnds ==
@@ -387,15 +389,18 @@ Failed ==
     /\ dial # "none"
     /\ dial' = "none"
     /\ IF phase # "dialing"
-       THEN UNCHANGED <<phase, live, pred, queue, timer, callerVars>>
+       THEN UNCHANGED <<phase, live, pred, queue, timer, target, callerVars>>
        ELSE \/ /\ Established
                /\ phase' = "backoff"
                /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+               \* A redirect target that failed its walk is dropped: the next walk
+               \* dials the configured target (`Reconnect::configured`).
+               /\ target' = Start
                /\ UNCHANGED <<live, pred, queue, callerVars>>
             \/ /\ Done
                /\ Emit(Append(queue, "Done"), None)
-               /\ UNCHANGED timer
-    /\ UNCHANGED <<watch, probe, target, sess, used, dialTo, misdials>>
+               /\ UNCHANGED <<timer, target>>
+    /\ UNCHANGED <<watch, probe, sess, used, dialTo, misdials>>
 
 \* `Reconnect::probed`, and the dial `run` makes of a probe that got through.
 ProbeFails ==

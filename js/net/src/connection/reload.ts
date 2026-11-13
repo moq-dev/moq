@@ -324,7 +324,8 @@ export class Reload {
 	/**
 	 * The URL an accepted GOAWAY redirect assigned, or undefined while the loop dials
 	 * {@link Reload.url}. Sticky across reconnects: a redirect is an assignment, not a
-	 * detour. Cleared when a new URL or a disable/re-enable starts another sequence.
+	 * detour. Cleared when a dial to it fails, so the redial returns to {@link Reload.url},
+	 * or when a new URL or a disable/re-enable starts another sequence.
 	 */
 	readonly redirect: Getter<URL | undefined>;
 
@@ -576,6 +577,8 @@ export class Reload {
 			// Set once the session is live, so #retry can tell a healthy session that
 			// later dropped from a connect failure or a peer that flaps immediately.
 			let connected: Instant | undefined;
+			// Whether the last failure was a dial to a GOAWAY redirect's target.
+			let redirectFailed = false;
 
 			try {
 				// The WebTransport session a probe opened, which the next dial finishes its MoQ
@@ -616,6 +619,7 @@ export class Reload {
 						);
 					} catch (err) {
 						this.#setDialing(false);
+						redirectFailed = this.#redirect.peek() !== undefined;
 						throw err;
 					}
 
@@ -747,6 +751,9 @@ export class Reload {
 				}
 
 				console.warn("connection error:", err);
+				// A redirect target that no longer answers is dropped: the redial returns to the
+				// configured URL, which may still answer. Rust's Reconnect follows the same rule.
+				if (redirectFailed) this.#redirect.set(undefined);
 				this.#retry(effect, connected, err);
 			}
 		});

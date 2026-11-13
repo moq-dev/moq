@@ -6,9 +6,11 @@ import { expect, test } from "bun:test";
 import { Duration, Elapsed, Manual, sleep, timeout } from "@moq/clock";
 import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
+import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timescale, Timestamp } from "../time.ts";
@@ -356,6 +358,79 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		);
 		source.abort(new Error("done"));
 		live.close();
+	} finally {
+		for (const fill of fills) fill.close();
+		remote.close();
+		requests.close();
+		publication.broadcast.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		installed.close();
+	}
+});
+
+// Lite-07: a filled group whose stream the publisher yielded, then gave up, ends with the fill's
+// drop naming it with the group's own error, as one on a subscription does, rather than waiting
+// paused on a continuation that never comes.
+test("copy fill: a yielded group the fill's drop names ends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client }),
+		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
+	]);
+	const publication = origin.route(Path.from("room"));
+	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	write(track.createGroup(1n), 1n, "live");
+	// The archive answers group 0 with one frame and keeps it open, so its stream is still open.
+	const requests = track.requests();
+	const fills: Fill[] = [];
+	const archived = (async () => {
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		fills.push(fill);
+		const group = fill.accept(0n);
+		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
+		return group;
+	})();
+	const remote = wireOf(client).consume(Path.from("room"));
+	try {
+		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
+		const live = await reader.ordered().nextGroup();
+		expect(live?.sequence).toBe(1n);
+		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 1");
+		expect(await live?.readFrame()).toBeUndefined();
+		live?.close();
+		const history = remote
+			.track("video")
+			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+		const group = await history.recvGroup();
+		expect(group?.sequence).toBe(0n);
+		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
+		const source = await archived;
+
+		// The session resets the group's stream to make room, and the group is gone before a new
+		// stream could continue it, so the publisher drops it on the fill's subscription.
+		// The live stream has finished. The archive may be served on both the fill and
+		// the copy's expanded feed, so reset every stream still serving it.
+		await clock.advance(Duration.ZERO);
+		const open = lines(pair.server).streams.list();
+		expect(open.length).toBeGreaterThan(0);
+		for (const stream of open) stream.preempt();
+		source.abort(new StreamError(StreamCode(70), { message: "gone" }));
+
+		// Still paused without it, which the deadline, fired once every pending task settled,
+		// reports as elapsed.
+		const ended = await clock
+			.drive(timeout(Duration.millis(1000), Promise.resolve(group?.closed)))
+			.catch((err: unknown) => err);
+		expect(ended).toBeInstanceOf(StreamError);
+		expect((ended as StreamError).code).toBe(StreamCode(70));
+		history.close();
+		reader.close();
 	} finally {
 		for (const fill of fills) fill.close();
 		remote.close();

@@ -23,15 +23,19 @@ import {
 } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, hasRanges, resolvesStart, Version } from "./version.ts";
+import { ALPN_05, hasLengthFirst, hasRanges, resolvesStart, Version } from "./version.ts";
 
 // The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Duration.millis(100);
 
-/** One lite-05+ frame: a zero timestamp delta, then the length-prefixed payload. */
-function frame(payload: string): Uint8Array {
+/**
+ * One lite-05+ frame: a zero timestamp delta, then the length-prefixed payload. Lite-07 leads with
+ * the size plus one instead.
+ */
+function frame(payload: string, version: Version): Uint8Array {
 	const bytes = new TextEncoder().encode(payload);
 	// Every field is under 64, so each is a one-byte varint.
+	if (hasLengthFirst(version)) return new Uint8Array([bytes.byteLength + 1, 0, ...bytes]);
 	return new Uint8Array([0, bytes.byteLength, ...bytes]);
 }
 
@@ -44,7 +48,7 @@ function groupStream(subscriber: Subscriber, sequence: bigint) {
 		new Reader(readable, undefined, subscriber.version),
 	);
 	return {
-		write: (payload: string) => controller.enqueue(frame(payload)),
+		write: (payload: string) => controller.enqueue(frame(payload, subscriber.version)),
 		finish: () => controller.close(),
 		reset: () => controller.error(new Error("reset")),
 		handled,

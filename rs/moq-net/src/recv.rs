@@ -21,6 +21,16 @@ impl Group {
 		&self.handle
 	}
 
+	/// The index the next frame gets, counting one a frame still being written holds.
+	pub fn frame_count(&self) -> usize {
+		self.handle.frame_count()
+	}
+
+	/// Whether the parent track compresses, readable while a frame holds the writer.
+	pub fn compressed(&self) -> bool {
+		self.handle.compressed()
+	}
+
 	/// Move the writer and cancellation cleanup into its next frame.
 	pub fn create_object(&mut self, frame: frame::Header) -> Result<frame::Producer, Error> {
 		self.writer

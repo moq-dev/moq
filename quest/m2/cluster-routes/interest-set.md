@@ -10,7 +10,7 @@ floors, and hold answers sharing one FIFO per direction, and the existing
 rules hold: an edit
 that swaps prefixes for a wider or narrower one keeps every claim both cover,
 ends nothing, revives nothing, and sends nothing twice. Nothing on the wire
-or in the sessions changes here; [the route stream](/quest/m2/cluster-routing/routes/route-stream.md)
+or in the sessions changes here; [the route stream](/quest/m2/cluster-routes/route-stream.md)
 carries it.
 
 ## Plan
@@ -21,13 +21,13 @@ and every earlier routing bug was an ordering nobody had enumerated.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): ✅ this edits the path router, after
-[the route per scope](/quest/m2/cluster-routing/routes/scope.md) builds it,
+[the route per scope](/quest/m2/cluster-routes/scope.md) builds it,
 and the model as it has a route per prefix
 (`rs/moq-net/verify/route/RouteHandoff.tla`)
 (rejected: landing first on Babel's router, which
-[the switch](/quest/m2/cluster-routing/routes/switch.md) deletes). The path
+[the switch](/quest/m2/cluster-routes/switch.md) deletes). The path
 rule has no echo and no route request
-([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27), so an edit
+([epic](/quest/m2/cluster-routes/README.md) Plan item 27), so an edit
 is checked against a withdrawal that names a dead hop and against a hold and
 its answer instead.
 
@@ -40,7 +40,7 @@ Settled:
    prefixes each stamp covers anyway, since a stamp sent before a prefix was
    added says nothing about it, and a sender that knows only part of the set
    could certify nothing. This amends Plan item 10 of the
-   [epic](/quest/m2/cluster-routing/routes/README.md): the floor stays a
+   [epic](/quest/m2/cluster-routes/README.md): the floor stays a
    marker, never a region list, and gains the prefix it names.
 2. ✅ **SYNCED is per prefix, naming its id** (rejected: one SYNCED per edit,
    counted in order, which makes a small prefix wait behind a large one).
@@ -116,8 +116,8 @@ Public API: none (the router is crate-private). Wire: none.
 
 ## Required
 
-- [The router runs the path rule with a route per scope](/quest/m2/cluster-routing/routes/scope.md) - the router this edits, with a floor per route
+- [The router runs the path rule with a route per scope](/quest/m2/cluster-routes/scope.md) - the router this edits, with a floor per route
 
 ## Related
 
-- [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - deletes Babel's router; whichever lands second adapts
+- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - deletes Babel's router; whichever lands second adapts

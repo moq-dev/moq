@@ -50,7 +50,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE INTEROP_QUARANTINED RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_PUB_LIVE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_PUB_LIVE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -87,8 +87,6 @@ IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
-# 1 runs the quarantined cells too, to reproduce a flake its quest investigates.
-QUARANTINED="${INTEROP_QUARANTINED:-0}"
 
 # Binaries under test. Built from source below unless overridden to point at a
 # prebuilt (mirrors test/smoke's RELAY_BIN/CLI_BIN escape hatch).
@@ -1584,21 +1582,10 @@ run_round() {
     sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
-        if [[ "$QUARANTINED" -eq 0 && "$case" == media && "$publisher" == python && "$sub" == go ]]; then
-            echo "  SKIP  $pub -> $sub (quarantined)"
-            record skip case="$case" publisher="$publisher" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-python-go.md"
-            continue
-        fi
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
             record fail case="$case" publisher="$publisher" subscriber="$sub" detail="subscriber client unavailable"
             overall=1
-            continue
-        fi
-        # Quarantined: quest/m0/test-flakes-2/interop-go-cpp.md.
-        if [[ "$QUARANTINED" -eq 0 ]] && [[ "$pub/$sub" == go/cpp || "$pub/$sub" == rust-swapped/js || "$pub/$sub" == rust-swapped/js-native-node ]]; then
-            echo "  SKIP  $pub -> $sub (quarantined)"
-            record skip case="$case" publisher="$publisher" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-go-cpp.md"
             continue
         fi
         harness_spawn "$pub-$sub" "$LOGS/$pub-$sub.log" run_cell "$pub" "$sub" "$broadcast" "$sub_url" "$tone" "$codecs"
@@ -1721,7 +1708,8 @@ run_finish_publisher() {
 # moqsrc's watch is persistent: a finished broadcast keeps its pads, since an announcement means
 # online/offline, so GStreamer has no end, withdrawal, or session to report. It joins once the
 # broadcast has finished and checks the late tail alone: ten nonempty video buffers, and no more
-# by the time an interrupt stops the pipeline.
+# by the time an interrupt stops the pipeline. Like every finish client it stays on QUIC, since
+# leaving a WebSocket fallback that won a slow race would move it to a second session mid-read.
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
 run_finish_gst() {
     local broadcast="$1" url="$2" out="$3" version pid deadline count
@@ -1730,7 +1718,7 @@ run_finish_gst() {
     deadline=$((SECONDS + ${TIMEOUT%.*} * 2))
     [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 2))
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} connect-websocket-enabled=false \
         s.video_0 ! identity name=frames silent=false ! fakesink >"$out" 2>&1 &
     pid=$!
     count=0
@@ -1802,14 +1790,6 @@ run_finishes() {
         return
     fi
     for pub in "${PUB_LIST[@]}"; do
-        # Quarantined: quest/m0/test-flakes-2/interop-finish-fallback.md.
-        if [[ "$QUARANTINED" -eq 0 && "$pub" == rust ]]; then
-            for sub in "${SUB_LIST[@]}"; do
-                echo "  SKIP  finish $pub -> $sub (quarantined)"
-                record skip case=finish publisher="$pub" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-finish-fallback.md"
-            done
-            continue
-        fi
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
         # moq-transport requests name prefixes alone.
@@ -2737,13 +2717,7 @@ else
             [[ "$TAIL_ONLY" -eq 1 ]] || run_finishes
             if [[ "$FINISH_ONLY" -eq 0 ]]; then
                 run_tails
-                # Quarantined: quest/m0/test-flakes-2/interop-go-cpp.md.
-                if [[ "$QUARANTINED" -eq 1 ]]; then
-                    run_sockets
-                elif needs python && [[ "$VERSION" == auto ]]; then
-                    echo "  SKIP  Python/Rust sockets (quarantined)"
-                    record skip case="Python Rust sockets" publisher=python subscriber=rust detail="quarantined: quest/m0/test-flakes-2/interop-go-cpp.md"
-                fi
+                run_sockets
             fi
         fi
     done

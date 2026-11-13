@@ -1633,23 +1633,18 @@ impl Request {
 		Ok(self)
 	}
 
-	/// Finish `work` before the accept deadline, or refuse the session with the timeout code
-	/// and return [`moq_net::Error::Timeout`]; see [`moq_net::server::Handshake::expired`].
+	/// Resolve once the accept deadline passes, having refused the session with the timeout
+	/// code; never, without a deadline. See [`moq_net::server::Handshake::poll_expired`].
 	///
-	/// Admitting the session is the caller's part of the handshake, so the same
-	/// `listen.timeout` that bounds the transport and SETUP bounds it too; a peer
-	/// cannot hold a connection open behind a decision that never comes. Without a
-	/// deadline, waits forever.
-	pub async fn within<T>(&mut self, work: impl Future<Output = T>) -> crate::Result<T> {
-		let handshake = &mut self.handshake;
-		crate::runtime::scope(async move {
-			tokio::select! {
-				biased;
-				done = work => Ok(done),
-				() = handshake.expired() => Err(moq_net::Error::Timeout.into()),
-			}
-		})
-		.await
+	/// Race admission against it, so the same `listen.timeout` that bounds the transport and
+	/// SETUP bounds the caller's decision too: a peer cannot hold a connection open behind a
+	/// decision that never comes. Once it resolves, [`ok`](Self::ok) fails with the timeout.
+	#[kio::wrapper]
+	pub fn poll_expired(&mut self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		// The deadline's timer may start here, which needs a tokio runtime even when an
+		// embedder polls from outside one.
+		let _runtime = crate::runtime::enter();
+		self.handshake.poll_expired(waiter)
 	}
 
 	/// The receive window of the qmux session under this request.
@@ -2236,6 +2231,49 @@ mod tests {
 		assert!(admission.close().now_or_never().is_none());
 		drop(request);
 		assert!(admission.close().now_or_never().is_some());
+	}
+
+	/// An embedder may poll the deadline from outside any tokio runtime. A SETUP that is
+	/// already buffered resolves the handshake before its timer starts, so the timer
+	/// first starts here and still needs a runtime.
+	#[cfg(feature = "websocket")]
+	#[test]
+	fn expired_polls_outside_a_runtime() {
+		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		let admission = moq_net::server::Admission::default();
+		let (mut request, _client) = runtime.block_on(async {
+			let (client, server) = session_pair().await;
+			let mut setup = client.open_uni(SendOptions::default()).await.unwrap();
+			assert_eq!(setup.write(&[1, 1, 0]).await.unwrap(), 3);
+			setup.finish().unwrap();
+			// Let the in-memory pumps deliver the SETUP before the handshake's first poll.
+			for _ in 0..100 {
+				tokio::task::yield_now().await;
+			}
+			let handshake = moq_net::Server::new()
+				.with_timeout(Some(std::time::Duration::from_secs(60)))
+				.accept_request(moq_net::time::Instant::now(), server)
+				.await
+				.expect("a buffered SETUP");
+			let request = Request {
+				active: admission.enter().unwrap(),
+				transport: Transport::WebSocket,
+				url: None,
+				authority: None,
+				identity: None,
+				link: Link::default(),
+				handshake: Box::new(handshake),
+				under: Under::Opaque,
+				quic_limits: Default::default(),
+			};
+			(request, client)
+		});
+		assert!(tokio::runtime::Handle::try_current().is_err());
+		assert!(request.poll_expired(&kio::Waiter::noop()).is_pending());
 	}
 
 	#[cfg(feature = "websocket")]

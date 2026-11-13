@@ -19,7 +19,7 @@ FAILED once the reopen budget runs out.
 ## Run
 
 ```sh
-just test tla js/publish
+quest gate just js tla publish/verify/Publish.tla
 ```
 
 This must pass, as Nightly checks.

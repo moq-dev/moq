@@ -244,6 +244,11 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		Poll::Ready(res)
 	}
 
+	/// The stream, until the writer finishes, aborts, or closes it.
+	pub(crate) fn stream(&self) -> Option<&S> {
+		self.stream.as_ref()
+	}
+
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
 	///
 	/// Streams with HIGHER values are transmitted first. This is the transport trait's

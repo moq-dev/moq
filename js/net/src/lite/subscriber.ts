@@ -23,10 +23,12 @@ import {
 	unauthorized,
 } from "../error.ts";
 import { fillChanged, type Judged, rejectGroups, wantedRuns } from "../fill.ts";
+import type { Producer as FrameProducer } from "../frame.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
+	type Arriving,
 	bestCandidate,
 	type DropRun,
 	hiddenBelow,
@@ -73,7 +75,7 @@ import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate 
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
-import { type Group as GroupMessage, readFrames } from "./group.ts";
+import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
 import { LinkRtt } from "./link_rtt.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
@@ -100,6 +102,7 @@ import {
 	hasDatagramTracks,
 	hasFetchMaxDelay,
 	hasInstance,
+	hasLengthFirst,
 	hasMediaTime,
 	hasMinDelay,
 	hasOrder,
@@ -112,6 +115,7 @@ import {
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
+	hasYield,
 	keepsSubscribeOpen,
 	resolvesStart,
 	updateSupported,
@@ -235,6 +239,66 @@ interface SubscribeEntry {
 	filling?: boolean;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
 	unanswered?: Unanswered;
+	// Lite-07: the groups a YIELDED reset paused, once one did or a stream waits on one.
+	paused?: Pauses;
+	// Lite-07: whether a YIELDED reset pauses the group each stream is reading, by sequence, one
+	// per stream, so stream credit bounds them.
+	yielding?: Map<bigint, Yielding>;
+}
+
+// Lite-07: the groups whose stream the publisher reset with YIELDED, each held open for a later
+// stream to continue, by sequence. Mirrors the Rust `Paused`.
+interface Pauses {
+	groups: Map<bigint, PausedGroup>;
+	// How many were held after the last sweep for groups the cache gave up on, which the next
+	// waits for twice as many.
+	swept: number;
+	// Counts the pauses, waking a stream held behind a copy still arriving once that copy pauses.
+	changed: Signal<number>;
+}
+
+// A group a YIELDED reset paused: what arrived stays, and its stream still counts toward the
+// subscription's end until a continuation replaces it or a drop names the group.
+interface PausedGroup {
+	group: netGroup.Producer;
+	// The frame the reset cut short, holding the group's writer.
+	partial?: FrameProducer;
+	// Marks the paused stream read, letting go of the subscription's end.
+	read: () => void;
+}
+
+// Whether a YIELDED reset of a stream being read pauses its group.
+interface Yielding {
+	verdict: YieldVerdict;
+}
+
+// Stale drops expire on the next update. An already accounted header stays accounted.
+type YieldVerdict =
+	| { kind: "owed" }
+	| { kind: "accounted" }
+	| { kind: "stale"; under: bigint; error: Error }
+	| { kind: "accounted-stale"; under: bigint; error: Error }
+	| { kind: "dropped"; error: Error };
+
+function yieldError(verdict: YieldVerdict, update: bigint): Error | undefined {
+	switch (verdict.kind) {
+		case "owed":
+			return undefined;
+		case "accounted":
+			return new StreamError(StreamCode.Old);
+		case "stale":
+			return verdict.under < update ? undefined : verdict.error;
+		case "accounted-stale":
+			return verdict.under < update ? new StreamError(StreamCode.Old) : verdict.error;
+		case "dropped":
+			return verdict.error;
+	}
+}
+
+// The paused groups of `entry`, created on first use.
+function pausesOf(entry: SubscribeEntry): Pauses {
+	entry.paused ??= { groups: new Map(), swept: 0, changed: new Signal(0) };
+	return entry.paused;
 }
 
 // A subscribe stream's phases. Every SUBSCRIBE_UPDATE and our FIN go out on it.
@@ -1894,6 +1958,7 @@ export class Subscriber {
 			// Nothing more is re-offered on this subscription.
 			this.#reoffers.get(producer)?.set([]);
 			this.#reoffers.delete(producer);
+			this.#endPaused(entry);
 			entry.tail.close();
 			entry.unanswered?.held.close();
 			entry.datagramDemand?.();
@@ -2392,7 +2457,11 @@ export class Subscriber {
 			// the group before resetting the stream, releasing the shared frame pump too.
 			await untilAbandoned(
 				group,
-				readFrames(stream.reader, group, { scale: info.timescale ?? 0, compress: info.compress }),
+				readFrames(stream.reader, group, {
+					scale: info.timescale ?? 0,
+					compress: info.compress,
+					lengthFirst: hasLengthFirst(this.version),
+				}),
 			);
 
 			group.finish();
@@ -2583,6 +2652,7 @@ export class Subscriber {
 			if (owes()) fill.refuseGroups(run.start, run.end, failed);
 			void draining.then(() => {
 				this.#subscribes.delete(id);
+				this.#endPaused(entry);
 				entry.tail.close();
 			});
 		}
@@ -2604,6 +2674,8 @@ export class Subscriber {
 				const { start, end } = resp.drop;
 				entry.tail.account(start, end);
 				const cause = resp.drop.cause(this.version);
+				// A paused group the drop names ends there: no continuation follows.
+				this.#dropPaused(entry, start, end, cause);
 				// Only a group its publisher never had is lost for every reader; anything else,
 				// OLD included, is refused for now, as the Rust `Refusal::answer` does.
 				if (toStreamCode(cause) === StreamCode.NotFound) fill.dropGroups(start, end);
@@ -2676,7 +2748,11 @@ export class Subscriber {
 			// truncated group rather than cache it whole, as the Rust fetch's ingest does.
 			await untilAbandoned(
 				group,
-				readFrames(stream.reader, group, { scale: framing.timescale, compress: framing.compress }),
+				readFrames(stream.reader, group, {
+					scale: framing.timescale,
+					compress: framing.compress,
+					lengthFirst: hasLengthFirst(this.version),
+				}),
 			);
 			group.finish();
 			stream.close();
@@ -2880,6 +2956,8 @@ export class Subscriber {
 				// already accounted may be a stream this drop overtook.
 				const overtaken = stale ? entry.tail.overtaken(start, end) : [];
 				entry.tail.account(start, end);
+				// A paused group the drop names ends there: no continuation follows.
+				this.#dropPaused(entry, start, end, error, stale ? update : undefined);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
@@ -3188,8 +3266,22 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
+		// Lite-07: a YIELDED reset pauses the group, for a later stream to continue.
+		const yields = hasYield(this.version);
+		// Asked before this stream accounts for the group: a drop that overtook it named it.
+		let owed = !tail.covers(group.sequence, group.sequence + 1n);
+		// A stale drop that overtook this stream: the next update supersedes that verdict, so a
+		// YIELDED reset after it pauses the group.
+		const unowedUnder =
+			!owed && entry.stale?.some((run) => run.start <= group.sequence && group.sequence < run.end)
+				? entry.update
+				: undefined;
 		let producer: netGroup.Producer | undefined;
-		const read = tail.open(group.sequence);
+		let arriving: Arriving | undefined;
+		let ingest: Ingest | undefined;
+		let yielding: Yielding | undefined;
+		// Until the stream is read, or a pause hands it to the paused group.
+		let read: (() => void) | undefined = tail.open(group.sequence);
 		this.#reoffered(track, group.sequence, group.sequence + 1n);
 
 		try {
@@ -3205,20 +3297,56 @@ export class Subscriber {
 			}
 			// A duplicate of a copy still arriving, such as a lite-07 re-offer that overtook the reset
 			// of the stream it replaces, waits unread, which flow control bounds. Created once that copy
-			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed.
-			// Its own reset ends the wait; a clean end leaves it on the copy alone.
-			for (let arriving = hooks.arrivingGroup(track, group.sequence); arriving !== undefined; ) {
-				const settled = arriving;
-				await race([settled, stream.closed.then(() => settled)]);
-				arriving = hooks.arrivingGroup(track, group.sequence);
+			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed,
+			// continuing the reads of that copy, which wait while it is held. Its own reset ends the
+			// wait; a clean end leaves it on the copy alone. A lite-07 copy a YIELDED reset pauses is
+			// continued by this stream instead.
+			for (;;) {
+				const paused = yields ? this.#resume(entry, group) : undefined;
+				if (paused) {
+					// The same copy continues, so its readers need no hold.
+					arriving?.release();
+					arriving = undefined;
+					producer = paused.group;
+					ingest = { index: group.frameStart, partial: paused.partial };
+					// The publisher owes a paused group its continuation, which may yield again.
+					owed = true;
+					break;
+				}
+				// Kept held past a failure until this copy takes the group, below.
+				const next = hooks.arrivingGroup(track, group.sequence);
+				if (next === undefined) break;
+				arriving?.release();
+				arriving = next;
+				// Served again once that copy fails or pauses, so owed again.
+				owed = true;
+				const settled = arriving.settled;
+				const waits: unknown[] = [settled, stream.closed.then(() => settled)];
+				if (yields) waits.push(Signal.race(pausesOf(entry).changed));
+				await race(waits);
 			}
-			producer = hooks.receiveGroup(track, {
+			producer ??= hooks.receiveGroup(track, {
 				sequence: group.sequence,
 				start: group.frameStart,
 				fill: entry.filling,
 			});
+			// Released once this copy took the group, so the failed copy's readers find it.
+			arriving?.release();
+			if (yields) {
+				ingest ??= { index: group.frameStart };
+				yielding = {
+					verdict: owed
+						? { kind: "owed" }
+						: unowedUnder !== undefined
+							? { kind: "stale", under: unowedUnder, error: new StreamError(StreamCode.Old) }
+							: { kind: "accounted" },
+				};
+				entry.yielding ??= new Map();
+				entry.yielding.set(group.sequence, yielding);
+			}
 
-			const reading = readFrames(stream, producer, { scale: timescale, compress: entry.compress });
+			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
+			const reading = readFrames(stream, producer, format, ingest);
 			await (entry.filling ? untilAbandoned(producer, reading) : reading);
 
 			producer.finish();
@@ -3234,11 +3362,119 @@ export class Subscriber {
 				throw err;
 			}
 			const e = await sessionCause(this.#quic, err);
+			// The publisher made room for a higher-priority stream: the group pauses, keeping what
+			// arrived and the subscription's end waiting, until a later stream continues it or a drop
+			// names it. Mirrors the Rust `GroupRecv::poll_serve`.
+			if (producer && ingest && yielding && toStreamCode(e) === StreamCode.Yielded) {
+				this.#endYielding(entry, group.sequence, yielding);
+				// A drop named the group first: the publisher gave it up, so nothing continues it. One
+				// that overtook the stream's header carried a stale verdict.
+				// A stale drop an update sent since superseded no longer ends the group.
+				const given = yieldError(yielding.verdict, entry.update);
+				if (given) {
+					producer.abort(given);
+					return;
+				}
+				console.debug(`group paused: subscribe=${group.subscribe} sequence=${group.sequence}`);
+				this.#pause(entry, group.sequence, { group: producer, partial: ingest.partial, read });
+				read = undefined;
+				return;
+			}
 			producer?.abort(e);
 			stream.stop(e);
 		} finally {
-			read();
+			arriving?.release();
+			if (yielding) this.#endYielding(entry, group.sequence, yielding);
+			read?.();
 		}
+	}
+
+	// Continue the group a YIELDED reset paused with the stream whose header is `hdr`, or undefined
+	// if none with its sequence is paused, or the cache gave it up meanwhile. Mirrors the Rust
+	// `TrackEntry::resume`.
+	#resume(entry: SubscribeEntry, hdr: GroupMessage): PausedGroup | undefined {
+		const paused = entry.paused?.groups.get(hdr.sequence);
+		if (!paused) return undefined;
+		entry.paused?.groups.delete(hdr.sequence);
+		// The stream that paused it is replaced, so it no longer holds the end.
+		paused.read();
+		if (paused.group.closed.peek() !== undefined) return undefined;
+		// A continuation starting past the frames held whole would leave a hole in the group, which
+		// ends with only this stream, as a malformed FRAME does.
+		const held = hooks.groupFrameCount(paused.group) - (paused.partial ? 1 : 0);
+		if (hdr.frameStart > held) {
+			const malformed = new StreamError(StreamCode.MalformedTrack, {
+				message: `group ${hdr.sequence} continued at frame ${hdr.frameStart}, past the ${held} held`,
+			});
+			paused.group.abort(malformed);
+			throw malformed;
+		}
+		return paused;
+	}
+
+	// Pause the group `sequence`, whose stream the publisher reset with YIELDED, for a later stream
+	// to continue. Groups the cache gave up on meanwhile are swept out as the held ones double, so
+	// sweeping costs constant time per pause. Mirrors the Rust `TrackEntry::pause`.
+	#pause(entry: SubscribeEntry, sequence: bigint, paused: PausedGroup): void {
+		const registry = pausesOf(entry);
+		if (registry.groups.size >= Math.max(registry.swept, 1) * 2) {
+			for (const [held, group] of registry.groups) {
+				if (!(group.group.closed.peek() instanceof Error)) continue;
+				registry.groups.delete(held);
+				group.read();
+			}
+			registry.swept = registry.groups.size;
+		}
+		// One the cache gave up on already, which a recreated group replaces.
+		registry.groups.get(sequence)?.read();
+		registry.groups.set(sequence, paused);
+		registry.changed.update((count) => count + 1);
+	}
+
+	// Stop tracking `yielding`, the stream reading `sequence`, unless a later stream took its place.
+	#endYielding(entry: SubscribeEntry, sequence: bigint, yielding: Yielding): void {
+		if (entry.yielding?.get(sequence) === yielding) entry.yielding.delete(sequence);
+	}
+
+	// A SUBSCRIBE_DROP named `[start, end)` with `error`, under update `staleUnder` when it is a
+	// lite-07 stale verdict: a paused group ends there, and one a stream is reading ends with it if
+	// a YIELDED reset would otherwise pause it, since no continuation follows, unless an update
+	// supersedes a stale drop first. Mirrors the Rust `TrackEntry::dropped`.
+	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error, staleUnder?: bigint): void {
+		for (const [sequence, yielding] of entry.yielding ?? []) {
+			if (sequence < start || sequence >= end) continue;
+			const verdict = yielding.verdict;
+			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
+			else if (verdict.kind !== "dropped")
+				yielding.verdict = {
+					kind:
+						verdict.kind === "accounted" || verdict.kind === "accounted-stale"
+							? "accounted-stale"
+							: "stale",
+					under: staleUnder,
+					error,
+				};
+		}
+		const paused = entry.paused;
+		if (!paused) return;
+		for (const [sequence, group] of paused.groups) {
+			if (sequence < start || sequence >= end) continue;
+			paused.groups.delete(sequence);
+			group.group.abort(error);
+			group.read();
+		}
+	}
+
+	// The subscription ended: its paused groups end as cancelled with it, even while a held stream
+	// still watches for them.
+	#endPaused(entry: SubscribeEntry): void {
+		const paused = entry.paused;
+		if (!paused) return;
+		for (const group of paused.groups.values()) {
+			group.group.abort(new StreamError(StreamCode.Cancel));
+			group.read();
+		}
+		paused.groups.clear();
 	}
 
 	/**

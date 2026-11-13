@@ -655,6 +655,17 @@ function lose(sink: TrackState, sequence: bigint): void {
 	if (lost.length > LOST_KEPT) lost.splice(0, lost.length, { start: lost[0].start, end: (lost.at(-1) as Run).end });
 }
 
+// Take a group's mirror out of `sink`, so its subscriber can no longer receive it.
+function unlinkMirror(sink: TrackState, mirror: GroupConsumer): void {
+	sink.groups.mutate((groups) => {
+		const i = groups.indexOf(mirror);
+		if (i >= 0) groups.splice(i, 1);
+	});
+	const index = timelineIndex(sink.timeline, mirror.sequence);
+	if (sink.timeline[index] === mirror) sink.timeline.splice(index, 1);
+	lose(sink, mirror.sequence);
+}
+
 // The index of the first timeline group at or after `sequence`.
 function timelineIndex(timeline: readonly { sequence: bigint }[], sequence: bigint): number {
 	let lo = 0;
@@ -1345,8 +1356,9 @@ export class Producer {
 		};
 		hooks.receiveGroup = (producer, { sequence, start, fill }) => producer.#createGroup(sequence, start, fill);
 		hooks.arrivingGroup = (producer, sequence) => {
-			const closed = producer.#cached.get(sequence)?.group.closed;
-			return closed?.peek() === undefined ? closed : undefined;
+			const group = producer.#cached.get(sequence)?.group;
+			if (!group || group.closed.peek() !== undefined) return undefined;
+			return { settled: group.closed, release: hooks.holdGroup(group) };
 		};
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
@@ -1470,7 +1482,10 @@ export class Producer {
 			if (first === undefined) return;
 			start = max(start, first);
 		}
-		start = max(start, this.#wire?.served?.start ?? 0n);
+		// A START bounds the feed only while the demand keeps the floor it answered: a lowered floor
+		// asks the feed for the groups below it, which a fill must not duplicate.
+		const feed = this.#feedStart();
+		if (typeof feed === "bigint") start = max(start, feed);
 		const declared = this.#state.end.peek()?.at;
 		const end = declared === undefined ? land.end : min(land.end, finalSequence(declared));
 		const at = now();
@@ -1793,15 +1808,7 @@ export class Producer {
 	// Take a cached group's mirrors out of every sink, so a subscriber can no longer
 	// receive them. A reader already holding one keeps it as is.
 	#unlink(entry: CachedGroup): void {
-		for (const [sink, mirror] of entry.mirrors) {
-			sink.groups.mutate((groups) => {
-				const i = groups.indexOf(mirror);
-				if (i >= 0) groups.splice(i, 1);
-			});
-			const index = timelineIndex(sink.timeline, mirror.sequence);
-			if (sink.timeline[index] === mirror) sink.timeline.splice(index, 1);
-			lose(sink, mirror.sequence);
-		}
+		for (const [sink, mirror] of entry.mirrors) unlinkMirror(sink, mirror);
 		entry.charge.sub(entry.mirrors.size * cache.MIRROR_OVERHEAD);
 		entry.mirrors.clear();
 	}
@@ -1931,7 +1938,13 @@ export class Producer {
 	// against this track when it lands.
 	// `fetched` marks a group a fill answered, which the live feed never delivered: it accounts
 	// for nothing the feed owes, as the Rust `insert` records arrivals only for visible groups.
-	#publish(group: GroupProducer, fetched = false): void {
+	// `succeeds` is a failed copy of the same sequence this one takes over: its mirrors held open
+	// for a duplicate continue on this one, and each sink in `kept` keeps its mirror.
+	#publish(
+		group: GroupProducer,
+		fetched = false,
+		succeeds?: { failed: GroupProducer; kept?: Map<TrackState, GroupConsumer> },
+	): void {
 		// Before the group is cached, so the write creating it can never evict it.
 		this.#chargeDebt();
 		this.#settle();
@@ -1943,6 +1956,9 @@ export class Producer {
 			fetched: fetched || undefined,
 		};
 		hooks.chargeGroup(group, entry.charge);
+		// The failed copy's frames its continued readers still hold, billed until this entry leaves
+		// the cache, which evicts the sink mirrors holding them.
+		if (succeeds) entry.charge.bill(hooks.succeedGroup(group, succeeds.failed));
 		this.#undrop(group.sequence);
 		// No reader is handed a failed fill answer (see #withhold), withheld as it aborts so a
 		// read that follows at once cannot take it: its sequence is unknown again, owed while the
@@ -1988,7 +2004,17 @@ export class Producer {
 		this.#state.latest = max(this.#state.latest ?? 0n, group.sequence);
 		if (edge && edge !== entry && !this.#protects(edge)) this.#account.demote(edge);
 		this.#account.insert(entry);
-		for (const sink of this.#sinks) this.#mirror(entry, sink);
+		for (const sink of this.#sinks) {
+			const mirror = succeeds?.kept?.get(sink);
+			// Continued, it stays the sink's copy of the group, so the sink never holds two.
+			if (mirror && mirror.closed.peek() === undefined) {
+				entry.mirrors.set(sink, mirror);
+				entry.charge.bill(cache.MIRROR_OVERHEAD);
+				continue;
+			}
+			if (mirror) unlinkMirror(sink, mirror);
+			this.#mirror(entry, sink);
+		}
 		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
 			if (total > hooks.groupOffset(group)) this.#advanceObject({ group: group.sequence, frame: total - 1 });
@@ -2188,9 +2214,18 @@ export class Producer {
 		// publisher may re-create a group it cut or aborted.
 		this.#refuseSkipped(sequence);
 		const existing = this.#cached.get(sequence);
+		let kept: Map<TrackState, GroupConsumer> | undefined;
 		if (existing) {
 			if (!(existing.group.closed.peek() instanceof Error)) {
 				throw new Error(`duplicate group: sequence=${sequence}`);
+			}
+			// A mirror the failed copy kept open, held for a duplicate, is the new copy's to continue.
+			for (const [sink, mirror] of existing.mirrors) {
+				if (mirror.closed.peek() !== undefined || !hooks.readsMirrored(mirror)) continue;
+				kept ??= new Map();
+				kept.set(sink, mirror);
+				existing.mirrors.delete(sink);
+				existing.charge.sub(cache.MIRROR_OVERHEAD);
 			}
 			// Subscribers may have seen the aborted incarnation's start, so it stays a watermark.
 			this.#evict(existing);
@@ -2202,7 +2237,7 @@ export class Producer {
 		hooks.startGroup(group, start);
 		this.#bind(group);
 		this.#cap(group);
-		this.#publish(group, fetched);
+		this.#publish(group, fetched, existing && { failed: existing.group, kept });
 		return group;
 	}
 
@@ -3364,11 +3399,11 @@ export class Subscriber {
 		return true;
 	}
 
-	// Fresh reads of the cached groups in `[start, end)` this cursor admits and no longer judges
-	// stale, each expiring against the budget, and the runs still given up. A resumed reader asks
-	// its serving route's copy. Mirrors the Rust `reoffer_groups`.
-	#reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] } {
-		if (this.#resume) return this.#resume.reofferGroups(start, end);
+	// Fresh reads from frame `from` of the cached groups in `[start, end)` this cursor admits and no
+	// longer judges stale, each expiring against the budget, and the runs still given up. A resumed
+	// reader asks its serving route's copy. Mirrors the Rust `reoffer_groups`.
+	#reofferGroups(start: bigint, end: bigint, from = 0): { groups: GroupConsumer[]; givenUp: Run[] } {
+		if (this.#resume) return this.#resume.reofferGroups(start, end, from);
 		const groups: GroupConsumer[] = [];
 		let givenUp: Run[] = [{ start, end }];
 		const producer = this.#state.producer;
@@ -3380,7 +3415,7 @@ export class Subscriber {
 		for (const sequence of cached) {
 			const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
 			if (!admitted || this.#staleAt(sequence, drift)) continue;
-			const group = cachedMirror(producer, sequence, 0);
+			const group = cachedMirror(producer, sequence, from);
 			if (!group) continue;
 			groups.push(this.#guard(group));
 			givenUp = removeRun(givenUp, sequence, sequence + 1n);
@@ -3960,7 +3995,7 @@ export class Subscriber {
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
-		hooks.reofferGroups = (subscriber, start, end) => subscriber.#reofferGroups(start, end);
+		hooks.reofferGroups = (subscriber, start, end, from) => subscriber.#reofferGroups(start, end, from);
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>

@@ -41,6 +41,8 @@ impl Config {
 #[derive(Clone)]
 pub struct Client {
 	pub(crate) moq: moq_net::Client,
+	/// The hop from [`Client::with_peer_hop`], or `None` for a fresh one per [`Connection`].
+	pub(crate) peer_hop: Option<std::num::NonZeroU64>,
 	/// The single resolved set of protocol versions, used for credentials and moq ALPNs across
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
@@ -172,6 +174,7 @@ impl Client {
 
 		Ok(Self {
 			moq,
+			peer_hop: None,
 			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 			versions,
 			connect: config.url,
@@ -249,7 +252,9 @@ impl Client {
 
 	/// Pin the hop id a dialed peer's routes are attributed to, for a peer whose
 	/// identity the caller has established; see [`moq_net::Client::with_peer_hop`].
+	/// Without one, each [`Connection`] draws its own and keeps it across reconnects.
 	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
+		self.peer_hop = Some(hop);
 		self.moq = self.moq.with_peer_hop(hop);
 		self
 	}

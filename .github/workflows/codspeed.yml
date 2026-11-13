@@ -10,8 +10,14 @@ on:
 
 jobs:
   codspeed:
-    name: CodSpeed
+    name: CodSpeed (${{ matrix.shard }})
     if: github.ref == 'refs/heads/main'
+    # One upload of every bench is over CodSpeed's per-run limit, so each shard
+    # uploads separately and CodSpeed merges this workflow's shards.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [net, mux, rest]
     # CodSpeed's simulation runner supports x86 hosted runners.
     runs-on: ubuntu-24.04
     environment: cache-write
@@ -35,7 +41,7 @@ jobs:
       # shell's PATH rather than inside a `nix develop` it would also measure.
       - name: Build
         run: |
-          nix develop --command just rs codspeed
+          nix develop --command just rs codspeed ${{ matrix.shard }}
           echo "DEV_PATH=$(nix develop --command printenv PATH)" >> "$GITHUB_ENV"
 
       - uses: CodSpeedHQ/action@61efe07e57e55bedeab750c434504de272a56e8c # v5.6.1

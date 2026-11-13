@@ -129,6 +129,9 @@ struct Dial {
     std::string version;
     // Wait for the relay's grant and print it.
     bool grant = false;
+    // Turn off the WebSocket fallback. The finish case checks one session end to end, and
+    // leaving a fallback that won a slow race would open a second one.
+    bool quic_only = false;
 };
 
 // The session owns its connection; the client that made it can go. With `grant`, waits for
@@ -138,6 +141,9 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
     config.tls.insecure = true;
     if (!dial.version.empty()) {
         config.versions = {dial.version};
+    }
+    if (dial.quic_only) {
+        config.websocket.enabled = false;
     }
     auto client = ok(moq::Client::init(config), "client init");
     open_session = until(client->connect(url), deadline, "connect");
@@ -501,6 +507,7 @@ int main(int argc, char **argv) {
     if (url.empty() || broadcast.empty()) {
         fail("--url and --broadcast are required");
     }
+    dial.quic_only = finish || !finish_ack.empty();
     // Warnings and errors from the Rust layer, such as a publication outside the grant.
     ok(moq::log_level("warn"), "log level");
 

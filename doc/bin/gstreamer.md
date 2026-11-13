@@ -88,7 +88,7 @@ Caps that only change what the bitstream already carries (a video resolution)
 keep the track live. A run never publishes a track name it ended again: new
 codec config, a pad requested again, or a stream resumed after EOS publishes as
 `<track>/<n>`, which `track` reads back. Element properties:
-`url`, `broadcast`, `linger`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
+`url`, `broadcast`, `linger`, `connect-version`, `connect-websocket-enabled`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. Once connected, the sink reconnects for as long as the pipeline runs and only

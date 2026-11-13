@@ -49,7 +49,8 @@ Decisions (maintainer, 2026-10-13):
   queue, and no separate warm rebuilds what landed. Since
   [#6040](https://github.com/moq-dev/moq/pull/6040) the queue runs on the
   self-hosted `moq-queue` runner with mbx's local store, so the R2 writers are
-  the hosted Nightly jobs on `main`.
+  the hosted scheduled jobs on `main`: Nightly and the workflows it calls,
+  CodSpeed, Interop and TS.
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
   Reopened 2026-10-19, conditionally, to compare runners once the pipeline
@@ -89,7 +90,7 @@ frozen. The landing quest closed 2026-11-04 with busy hours merging a median
 holds the cutover record). Decided 2026-11-06 (maintainer, /quest-unblock):
 ✅ drop the trial of a second concurrent entry, which ran out of shared runner
 disk on 2026-11-05; the queue stays at one entry. Not chosen: retrying it after
-[kixelated/nixos#26](https://github.com/kixelated/nixos/pull/26)'s inode fix.
+kixel-ai/nixos#26's inode fix.
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a

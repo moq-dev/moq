@@ -966,6 +966,13 @@ impl Connection {
 		let bandwidth = moq_net::bandwidth::Allocator::new(send_bandwidth.clone());
 		let viewers = moq_net::bandwidth::Viewers::new(recv_bandwidth.clone());
 		let client = client.with_allocator(bandwidth.clone()).with_viewers(viewers.clone());
+		// Every session of one connection reaches the same peer, so they share one hop: a
+		// route one learned is then never another's to announce, such as a successor's
+		// grant check judging what its draining predecessor learned.
+		let client = match client.peer_hop {
+			Some(_) => client,
+			None => client.with_peer_hop(random_hop()),
+		};
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -1468,6 +1475,12 @@ type Probe = dyn Future<Output = crate::Result<std::pin::Pin<Box<Dial>>>> + Send
 /// The address a probe dials, and the probe in flight.
 #[cfg(all(feature = "websocket", feature = "quic"))]
 type Probing = (url::Url, std::pin::Pin<Box<Probe>>);
+
+/// A random non-zero hop id within 2^53, which older `@moq/lite` clients still decode.
+fn random_hop() -> std::num::NonZeroU64 {
+	use rand::RngExt as _;
+	std::num::NonZeroU64::MIN.saturating_add(kio::clock::rng().random_range(0..(1u64 << 53) - 1))
+}
 
 /// The live session left the WebSocket fallback: stop probing, and give QUIC its head start
 /// on the next race, since the outage that lost the last one may be over.

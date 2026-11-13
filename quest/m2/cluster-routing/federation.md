@@ -18,7 +18,7 @@ Use authenticated, namespace-scoped admission: the CDN scopes the local
 relay's connection to a path prefix, and identities it sends, its own and its
 local publishers', are qualified, so a forger or a misconfigured uplink only
 affects its own scope (decided 2026-10-14; see [Routes and
-announces](/quest/m2/cluster-routing/routes/README.md)). Decided 2026-11-04
+announces](/quest/m2/cluster-routes/README.md)). Decided 2026-11-04
 (maintainer): those identities are keyed by the route key the peer proves,
 read from a key file the local relay's uplinks share
 ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)). Without a key, a
@@ -60,8 +60,8 @@ the same PR; the combined concept/setup guide follows separately.
 Decided 2026-11-06 (maintainer; the agent picked the children): require
 only the route children federation builds on,
 session integration (landed in [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023) and [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)) and
-[acceptance](/quest/m2/cluster-routing/routes/acceptance.md), not the whole
-[route epic](/quest/m2/cluster-routing/routes/README.md). Federation is
+[acceptance](/quest/m2/cluster-routes/acceptance.md), not the whole
+[route epic](/quest/m2/cluster-routes/README.md). Federation is
 relay-to-relay, so browser route-key proofs, the Playwright pin they wait on,
 and the mixed-version follow-up (mount takeover) gates the
 lite-07 cut, not this. Its consumer, the [mesh node](/quest/m3/mesh/node.md),
@@ -75,7 +75,7 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Required
 
-- [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
+- [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
 
 ## Related
 

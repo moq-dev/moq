@@ -278,6 +278,14 @@ impl SendStream {
 		Self(Sender::Own(Box::new(stream)))
 	}
 
+	/// Whether the session reset this group stream to make room for a higher-ranked open.
+	pub(crate) fn preempted(&self) -> bool {
+		match &self.0 {
+			Sender::Own(_) => false,
+			Sender::Listed(listing) => listing.listed.lock().preempted,
+		}
+	}
+
 	/// Run `f` on the transport's stream, then leave the session's list if `unlist`.
 	fn with<T>(&mut self, unlist: bool, f: impl FnOnce(&mut dyn ErasedSend) -> T) -> T {
 		match &mut self.0 {

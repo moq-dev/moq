@@ -8,6 +8,7 @@ import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
+import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
@@ -36,7 +37,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, ALPN_06, ALPN_07_WIP, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
+import { ALPN_05, ALPN_06, ALPN_07_WIP, hasLengthFirst, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);
@@ -609,8 +610,10 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 		} else {
 			const payloads: string[] = [];
 			while (!(await client.reader.done())) {
+				// Lite-07 leads with the size plus one, then the zigzag timestamp delta.
+				const size = (await client.reader.u53()) - 1;
 				await client.reader.u62();
-				payloads.push(new TextDecoder().decode(await client.reader.read(await client.reader.u53())));
+				payloads.push(new TextDecoder().decode(await client.reader.read(size)));
 			}
 			expect(payloads).toEqual(["a", "b"].slice(startFrame - 5));
 		}
@@ -803,6 +806,8 @@ async function servedSubscription(
 
 	return {
 		client,
+		// The publisher's end of the session.
+		quic: pair.server,
 		datagrams: pair.client.datagrams.readable,
 		get track() {
 			return resolved();
@@ -878,9 +883,13 @@ async function servedSubscription(
 
 			const payloads: string[] = [];
 			while (!(await reader.done())) {
-				// Each frame is a zigzag timestamp delta, then a length-prefixed payload.
+				// Each frame is a zigzag timestamp delta, then a length-prefixed payload. Lite-07
+				// leads with the size plus one instead.
+				const lengthFirst = hasLengthFirst(version);
+				const length = lengthFirst ? (await reader.u53()) - 1 : undefined;
 				await reader.u62();
-				payloads.push(new TextDecoder().decode(await reader.read(await reader.u53())));
+				const size = length ?? (await reader.u53());
+				payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
 			return { sequence: header.sequence, frameStart: header.frameStart, payloads };
 		},
@@ -922,6 +931,61 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		const resp = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
 		expect(resp.start.starts).toEqual([3n, 1n, undefined, undefined]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Lite-07: a group whose stream the session reset to make room continues on a new stream from the
+// reset one's Frame Start, even where the cache holds only the group's tail from there, rather than
+// being dropped as OLD.
+test("lite-07 continues a yielded cached tail from its Frame Start", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, startFrame: 5 });
+	try {
+		// A received tail: the cache holds the group from frame 5, where the subscription starts.
+		const group = hooks.receiveGroup(sub.track, { sequence: 0n, start: 5 });
+		group.writeFrame(textFrame("a", Timestamp.fromMillis(0)));
+		expect(await sub.servedHeader()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+		// Unfinished, so its stream is still open when the session resets it to make room.
+		const [open] = lines(sub.quic).streams.list();
+		if (!open) throw new Error("the group stream is not open");
+		open.preempt();
+		group.writeFrame(textFrame("b", Timestamp.fromMillis(1)));
+		group.finish();
+
+		expect(await sub.servedGroup()).toEqual({ sequence: 0n, frameStart: 5, payloads: ["a", "b"] });
+
+		// Responses arrive in order, so a drop naming the continued group would precede the end.
+		sub.track.finish();
+		const after = await decodeSubscribeResponse(sub.client.reader, version);
+		expect(Object.keys(after)).toEqual(["finish"]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Lite-07: a yielded group the publisher aborts before its continuation is dropped with the
+// publisher's error, not as stale. Mirrors the Rust `lite07_yielded_group_aborted_drops_with_its_error`.
+test("lite-07 drops a yielded group the publisher aborted with its error", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n });
+	try {
+		const group = sub.track.createGroup(0n);
+		group.writeFrame(textFrame("a", Timestamp.fromMillis(0)));
+		expect(await sub.servedHeader()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+		const [open] = lines(sub.quic).streams.list();
+		if (!open) throw new Error("the group stream is not open");
+		open.preempt();
+		group.abort(new StreamError(StreamCode(70), { message: "cut" }));
+
+		const resp = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([0n, 1n, 70]);
 	} finally {
 		await sub.close();
 	}

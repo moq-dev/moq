@@ -24,7 +24,7 @@ the 2026-11-08 choice of m3 for the proof alone;
 Reopened 2026-11-11 (maintainer, /quest-plan on the route redesign, epic
 Plan item 13): a warm route propagates, and the rule that keeps it free of
 loops and stale copies is the route's path
-([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27,
+([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27,
 picked 2026-11-11 on
 [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)), which also
 removes the seqno, ROUTE_REQUEST, and the ROUTE_END echo.
@@ -68,4 +68,4 @@ Rust and `js/net` codecs in the same PR.
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the path rule this extends to warm routes
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - the path rule this extends to warm routes

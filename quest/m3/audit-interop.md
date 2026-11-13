@@ -72,7 +72,8 @@ Previous runs: [moq-dev/moq#6538](https://github.com/moq-dev/moq/pull/6538),
   Not yet filed: cloudflare/moq-rs `SubscribeRecv::error` reports a
   REQUEST_ERROR as `done` when the track has no reader.
 - Unsupported or down, not worth rechecking unless something changes:
-  PUBLISH and SUBSCRIBE_TRACKS cases, FETCH cases with a moq-dev-js
+  anything past the frozen moq-transport scope `doc/concept/standard.md`
+  states, including PUBLISH and SUBSCRIBE_TRACKS cases, FETCH cases with a moq-dev-js
   publisher (it refuses moq-transport FETCH, and on draft 18 a subscription
   carries its current group whole instead), relays without namespace discovery,
   peers speaking only moq-transport drafts 14 to 17, raw-QUIC-only relays

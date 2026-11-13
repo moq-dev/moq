@@ -32,7 +32,10 @@ clock on `kio::clock` or a device callback, advances its one driver by the
 frames that clock moved, so tests step it on virtual time. Each mix sums only
 the sources routed into it, and its readers get blocks stamped with their
 position on that clock, so a reader that falls behind skips its own audio
-without stalling the mix.
+without stalling the mix. A positioned channel takes audio already scheduled
+on that clock, such as decoded media timed against its video; given a stretch
+bound, it glides onto positions that move with a playout target, as playback
+glides onto its clock, instead of writing silence or failing at each step.
 
 Without a subscriber the encoder keeps raw PCM
 up to the track's `max_age`, then encodes the part of that history within the

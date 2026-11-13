@@ -29,7 +29,7 @@ moq-net):
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel), asked what happens to this quest now that the route rule is the path
-([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27):
+([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27):
 ✅ keep it in m1, rewritten for the path rule (rejected: m4, since the path
 argument is simpler than Babel's; deleting it and resting on the bounded
 TLC runs and the sweeps). The claim rules are where the stale copies were,
@@ -61,6 +61,12 @@ stay constants the config states. Say both bounds in the `verify-route` skill.
   `Budget` and `QuietIsSettled`. Leave it there.
 - Run it through the `tla` recipes with Apalache from the flake. If five
   relays does not fit Nightly, record the largest mesh that does and its time.
+- A refinement check such as `RefinesClaims` runs on the smallest exhaustive
+  config that exercises it, where each distinct state is checked once, not on
+  a simulated config such as `Blind.cfg`, where every sampled trace re-checks
+  it, unless measuring shows the simulated config is cheaper. `SumOver` folds
+  with `FoldSet` through the Community Modules' Java override the `tla`
+  recipes load; keep one fold for both checkers.
 
 Public API: none. Wire: none.
 

@@ -1,12 +1,13 @@
-# Stream credit by priority
+# [L] Stream credit by priority
 
 ## Goal
 
 When a peer's stream credit runs out, moq gives the streams it can open to
 its highest-priority work and makes room for more, instead of refusing or
 silently stalling. Every stream a session opens goes through one entry point
-that schedules by priority, and a higher-priority group takes over a
-lower-priority stream when no credit is left. A JS reader holds hundreds of
+that schedules by priority, and a higher-priority group resets a
+lower-priority stream (lite-07's YIELDED reset, which pauses that group) when
+no credit is left. A JS reader holds hundreds of
 live tracks through a browser's ~100-stream WebTransport cap, the most
 important ones flowing first.
 
@@ -43,6 +44,17 @@ which JS cannot raise; Chrome stalled at 103, Firefox at 100):
   reversal removed the JS half; the Rust trait kept it because the open line
   reads it. Not chosen: keeping the hook and recording why.
 
+Decided 2026-11-13 (maintainer, /quest-run): ✅ takeover moved to
+[m3](/quest/m3/group-takeover.md) (rejected: keep it here before lite-07
+finalizes; delete it), so making room is reset only.
+[moq-dev/moq#8545](https://github.com/moq-dev/moq/pull/8545)'s YIELDED
+reset already gives credit to the highest-priority groups; takeover would
+save only the ~1 RTT the reset waits for MAX_STREAMS, at the cost of a new
+wire message and multi-group streams. The 2026-11-04 choice of takeover
+before cancelling is superseded. ✅ m2 no longer requires this epic
+(rejected: keep the gate); it was an ordering rule, not a code dependency.
+
 This epic owns the end-to-end test: a browser reader and a Rust relay over
 WebTransport, 300 live tracks of mixed priority, the highest-priority ones
-receiving every group, and nothing hanging.
+receiving every group, and nothing hanging. It builds its own harness, since
+takeover no longer supplies one.

@@ -652,6 +652,7 @@ export const StreamCode: ((code: number) => StreamCode) & {
 	readonly TooFarBehind: StreamCode;
 	readonly Unauthorized: StreamCode;
 	readonly Unroutable: StreamCode;
+	readonly Yielded: StreamCode;
 };
 
 export type StreamCode = number & {

@@ -283,10 +283,10 @@ test("a redirect moves the pool key while the handle keeps its origin", async ()
 	}
 });
 
-// Replays RedialsALiveRelay in js/watch/verify/Failover.tla under FailoverRedirect.cfg: a redirect is
-// sticky, so once the relay it named dies, every redial goes back to that dead relay and never
-// to the configured URL, which still answers.
-test("residual: a redirected connection redials only its dead target", async () => {
+// Replays RedialsALiveRelay in js/watch/verify/Failover.tla under FailoverRedirect.cfg: once the relay
+// a redirect named dies, one failed dial to it drops the redirect and the redial returns to the
+// configured URL, which still answers.
+test("a redirected connection falls back to the configured URL once its target dies", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const { dials } = fleet();
@@ -299,25 +299,44 @@ test("residual: a redirected connection redials only its dead target", async () 
 		if (dead && href === moved.href) throw new Error("connection refused");
 		return new accepting(dialed, options);
 	} as unknown as typeof WebTransport;
-	const reload = new Reload({ url, websocket: { enabled: false }, delay: { initial: Duration.millis(1) } });
+	// A pooled loop keeps the WebSocket fallback; keep it local, so only the stub decides.
+	const socket = globalThis.WebSocket;
+	globalThis.WebSocket = function NoFallback() {
+		throw new Error("no fallback");
+	} as unknown as typeof WebSocket;
+	// Pooled, so the entry's key follows the URL the loop dials.
+	const handle = new Connection({ url });
 
 	try {
-		await waitUntil(() => reload.status.peek() === "connected");
-		const first = reload.established.peek();
+		await waitUntil(() => handle.status.peek() === "connected");
 		await goaway(dials[0]?.server as WebTransport, moved.href);
-		await elapse(clock, () => dials.length === 2 && reload.status.peek() === "connected");
+		await elapse(clock, () => dials.length === 2 && handle.status.peek() === "connected");
 		expect(dials[1]?.url).toBe(moved.href);
 
-		// The relay it was sent to dies and stays down. The drained session serves until its
-		// handover ends, and the redials miss it.
+		// The relay it was sent to dies and stays down.
 		dead = true;
 		const before = attempts.length;
 		dials[1]?.server.close();
-		await elapse(clock, () => attempts.length >= before + 4);
-		expect(reload.established.peek()).toBe(first);
-		expect(attempts.slice(before).every((href) => href === moved.href)).toBe(true);
+		await elapse(clock, () => dials.length === 3 && handle.status.peek() === "connected");
+		expect(attempts.slice(before)).toEqual([moved.href, url.href]);
+		expect(dials[2]?.url).toBe(url.href);
+		const origin = handle.origin.peek();
+
+		// The entry is keyed on the configured URL again: a caller asking for it shares the
+		// connection, and one asking for the dead target dials fresh.
+		const joined = new Connection({ url });
+		await waitUntil(() => joined.origin.peek() !== undefined);
+		expect(joined.origin.peek()).toBe(origin);
+		const fresh = new Connection({ url: moved });
+		await waitUntil(() => fresh.origin.peek() !== undefined);
+		expect(fresh.origin.peek()).not.toBe(origin);
+
+		joined.close();
+		fresh.close();
 	} finally {
-		reload.close();
+		globalThis.WebTransport = accepting;
+		globalThis.WebSocket = socket;
+		handle.close();
 		installed.close();
 	}
 });

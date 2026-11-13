@@ -46,7 +46,7 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   tracks. No ICE, STUN, or hole punching; the [P2P](/quest/m4/p2p/README.md)
   line is separate.
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not
-  the [routing identity](/quest/m2/cluster-routing/routes/README.md), which each
+  the [routing identity](/quest/m2/cluster-routes/README.md), which each
   process declares fresh.
 - Addressing is announcement: each node publishes its address and status
   tracks under `mesh/node/<id>/...`, and reaching an ID is subscribing

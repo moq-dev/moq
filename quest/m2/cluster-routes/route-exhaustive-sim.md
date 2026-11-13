@@ -52,7 +52,7 @@ search covers what a model check does, recommend in the PR what to do with the
 route model's TLC runs.
 
 Decided 2026-11-12 (maintainer, pick round): the search runs on the `Router`
-after [the router quest](/quest/m2/cluster-routing/routes/scope.md)'s rewrite to
+after [the router quest](/quest/m2/cluster-routes/scope.md)'s rewrite to
 the path rule, so it checks the code that ships and nothing is built twice
 (rejected: today's Babel `Router`, which the rewrite throws away; the test-only
 `paths.rs` prototype). The storm self-check above then runs against a router
@@ -62,9 +62,8 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [The router quest](/quest/m2/cluster-routing/routes/scope.md) - rewrites `route::Router` to the path rule, the router this searches
+- [The router quest](/quest/m2/cluster-routes/scope.md) - rewrites `route::Router` to the path rule, the router this searches
 
 ## Related
 
 - [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - guards the model against the code; this checks the code itself
-- [A Rust TLA+ checker runs the models locally if it agrees with TLC](/quest/m1/tla-native-checker.md) - the other spike, a faster engine for the same specs

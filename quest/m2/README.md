@@ -27,8 +27,7 @@ fixes, and moq-c parity) live under the recurring
 cut gate, decided the same day; the [release cut](/quest/m3/release/cut.md)
 holds its template.
 
-Held by open claims: the m1 epics and quests marked below stay where they
-are until their claims merge, and the [probe epic](/quest/m2/probe/README.md)
+Held by open claims: the [probe epic](/quest/m2/probe/README.md)
 stays here while its open claims last, so the cut waits on it until the
 [re-cut follow-up](/quest/m2/recut-held.md) moves it to m3. Its padding and JS
 rung disable quests already moved to m3 on 2026-11-06.
@@ -189,6 +188,6 @@ quests that require them.
   Address groups by timestamp, and the API audit just above Cluster routing.
 - Not chosen: moving the dependents down; leaving the order as it was.
 
-## Required
-
-- [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
+Decided 2026-11-13 (maintainer, /quest-run): ✅ m2 no longer requires the m1
+stream-credit epic (rejected: keep the gate). It was an ordering rule, not a
+code dependency, and with takeover moved to m3 the epic changes no wire.
