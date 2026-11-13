@@ -2692,15 +2692,19 @@ mod tests {
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let mut group = track.append_group().unwrap();
-		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
+			.unwrap();
+		group.close().unwrap();
 		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(g0.sequence, 0);
+		assert_eq!(g0.start, 0);
 
 		// Withdraw A from DNS, then drain it.
 		crate::resolve::hosts::point(HOST, [addr_b]);
@@ -2715,15 +2719,19 @@ mod tests {
 			.expect("never redialed through the fresh resolve")
 			.unwrap();
 
-		let mut group = track.append_group().unwrap();
-		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
+			.unwrap();
+		group.close().unwrap();
 		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(g1.sequence, 1, "delivery resumes at the next group after the swap");
+		assert_eq!(g1.start, 1, "delivery resumes at the next group after the swap");
 		assert_eq!(g1.read_frame().await.unwrap().unwrap().payload[..], b"g1"[..]);
 
 		kio::clock::timeout(WAIT, session_a.closed())
@@ -2928,15 +2936,19 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
+			.unwrap();
+		group.close().unwrap();
 		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(g0.sequence, 0);
+		assert_eq!(g0.start, 0);
 
 		// Every probe fails while UDP is blocked, and the link keeps serving on WebSocket.
 		kio::clock::sleep(OUTAGE).await;
@@ -2956,15 +2968,19 @@ mod tests {
 		assert!(connection.connected(), "the move went through a disconnect");
 		assert!(!crate::websocket::won(&url), "the race still skips QUIC's head start");
 
-		let mut group = track.append_group().unwrap();
-		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
+			.unwrap();
+		group.close().unwrap();
 		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(g1.sequence, 1, "the subscription dropped across the move");
+		assert_eq!(g1.start, 1, "the subscription dropped across the move");
 		assert_eq!(g1.read_frame().await.unwrap().unwrap().payload[..], b"g1"[..]);
 
 		// The fallback session drains, closing within the handover window.

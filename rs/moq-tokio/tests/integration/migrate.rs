@@ -96,12 +96,14 @@ fn publish(origin: &moq_net::origin::Producer, name: &str) {
 	tokio::spawn(async move {
 		let _broadcast = broadcast;
 		loop {
-			let mut group = track.append_group().expect("append group");
-			let payload = group.sequence.to_string().into_bytes();
+			let mut group = track
+				.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+				.expect("append group");
+			let payload = group.start.to_string().into_bytes();
 			group
-				.write_frame(moq_net::Timestamp::ZERO, payload)
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 				.expect("write frame");
-			group.finish().expect("finish group");
+			group.close().expect("finish group");
 			kio::clock::sleep(Duration::from_millis(20)).await;
 		}
 	});
@@ -132,8 +134,8 @@ fn view(origin: &moq_net::origin::Producer, name: &str) -> tokio::sync::mpsc::Un
 			.expect("subscribe");
 		while let Some(mut group) = track.recv_group().await.expect("the subscription failed") {
 			let frame = group.read_frame().await.expect("read frame").expect("an empty group");
-			assert_eq!(frame.payload[..], group.sequence.to_string().into_bytes()[..]);
-			if seen.send(group.sequence).is_err() {
+			assert_eq!(frame.payload[..], group.start.to_string().into_bytes()[..]);
+			if seen.send(group.start).is_err() {
 				return;
 			}
 		}
