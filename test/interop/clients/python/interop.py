@@ -74,8 +74,15 @@ async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
         await asyncio.sleep(max(0.0, started + timestamp_us / 1_000_000 - loop.time()))
 
 
-def _client(url: str, version: str | None) -> moq.Client:
-    return moq.Client(url, tls=moq.ClientTls(insecure=True), versions=[] if version is None else [version])
+def _client(url: str, version: str | None, finish: bool) -> moq.Client:
+    # The finish case checks one session end to end, so it stays on QUIC: leaving a
+    # WebSocket fallback that won a slow race would open a second session.
+    return moq.Client(
+        url,
+        tls=moq.ClientTls(insecure=True),
+        versions=[] if version is None else [version],
+        websocket=moq.WebSocketConfig(enabled=False) if finish else None,
+    )
 
 
 async def _print_grant(client: moq.Client, timeout: float) -> None:
@@ -106,7 +113,7 @@ async def publish(
     tones: list[int],
     finish_ack: str | None,
 ) -> None:
-    async with _client(url, version) as client:
+    async with _client(url, version, finish_ack is not None) as client:
         if grant:
             await _print_grant(client, timeout)
         # Hold the route for the lifetime of the publish loop: dropping it retracts the broadcast.
@@ -293,7 +300,7 @@ async def subscribe(
     finish: bool,
     frames: int,
 ) -> None:
-    async with _client(url, version) as client:
+    async with _client(url, version, finish) as client:
         if grant:
             await _print_grant(client, timeout)
         if finish:
