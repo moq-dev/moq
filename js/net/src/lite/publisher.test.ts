@@ -956,12 +956,12 @@ test("lite-07 continues a yielded cached tail from its Frame Start", async () =>
 		group.writeFrame(textFrame("b", Timestamp.fromMillis(1)));
 		group.finish();
 
-		// A drop would name the group on the subscribe stream instead.
-		const next = await Promise.race([
-			sub.servedGroup(),
-			decodeSubscribeResponse(sub.client.reader, version).then((resp) => ({ resp })),
-		]);
-		expect(next).toEqual({ sequence: 0n, frameStart: 5, payloads: ["a", "b"] });
+		expect(await sub.servedGroup()).toEqual({ sequence: 0n, frameStart: 5, payloads: ["a", "b"] });
+
+		// Responses arrive in order, so a drop naming the continued group would precede the end.
+		sub.track.finish();
+		const after = await decodeSubscribeResponse(sub.client.reader, version);
+		expect(Object.keys(after)).toEqual(["finish"]);
 	} finally {
 		await sub.close();
 	}
