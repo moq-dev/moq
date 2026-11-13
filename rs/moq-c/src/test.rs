@@ -170,6 +170,21 @@ impl Callback {
 		self.rx.recv().expect("callback channel closed")
 	}
 
+	/// Wait for the next request while `reader` keeps reading: a time start the cache can't
+	/// place is looked up first, which the request handler drops, and the reader asks for its
+	/// groups only once it reads again.
+	fn recv_reading(&self, reader: &mut moq_net::track::Subscriber) -> i32 {
+		let waiter = kio::Waiter::noop();
+		loop {
+			let _ = reader.poll_recv_group(&waiter);
+			match self.rx.recv_timeout(std::time::Duration::from_millis(10)) {
+				Ok(code) => return code,
+				Err(mpsc::RecvTimeoutError::Timeout) => continue,
+				Err(mpsc::RecvTimeoutError::Disconnected) => panic!("callback channel closed"),
+			}
+		}
+	}
+
 	/// Wait for the terminal callback (code <= 0) the task delivers after close
 	/// or stream end. Must be drained before the Callback (user_data) drops,
 	/// since user_data must outlive the final callback.
@@ -5061,17 +5076,14 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		group.close().unwrap();
 		reader
 	};
-	let waiter = kio::Waiter::noop();
-	while let std::task::Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-	let first = id(group_cb.recv());
+	let first = id(group_cb.recv_reading(&mut reader));
 	let mut sequence = 0u64;
 	assert_eq!(unsafe { moq_group_request_sequence(first, &mut sequence) }, 0);
 	assert_eq!(sequence, 7);
 
 	// Reading only 8, so the fill owes nothing once 8 is let go.
 	reader.update(ascending(8, Some(8))).unwrap();
-	assert!(reader.poll_recv_group(&waiter).is_pending());
-	let next = id(group_cb.recv());
+	let next = id(group_cb.recv_reading(&mut reader));
 	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);
 	assert_eq!(sequence, 8, "group 7, which nobody reads, held the fill back");
 	assert!(moq_group_request_accept(first) < 0, "the withdrawn request");
@@ -5128,16 +5140,14 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		|request| moq_group_request_free(request),
 	] {
 		let mut reader = subscribe();
-		assert!(reader.poll_recv_group(&waiter).is_pending());
-		let request = id(group_cb.recv());
+		let request = id(group_cb.recv_reading(&mut reader));
 		assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
 		assert_eq!(sequence, 6);
 		assert_eq!(reject(request), 0);
 	}
 
 	let mut reader = subscribe();
-	assert!(reader.poll_recv_group(&waiter).is_pending());
-	let request = id(group_cb.recv());
+	let request = id(group_cb.recv_reading(&mut reader));
 	let group = id(moq_group_request_accept(request));
 	let payload = b"fetched";
 	assert_eq!(
