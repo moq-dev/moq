@@ -152,9 +152,7 @@ just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ign
 
 ## Parallel test runs
 
-Linux 6.14 up to the 7.3 fix (backported to stable kernels) charges rings to
-locked memory per user across processes, not per nextest run; other kernels
-charge them to the memory cgroup.
+Locked memory is charged per user across processes, not per nextest run.
 Unit tests use 128 SQ entries and 512 CQ entries instead of the production
 256/2048 geometry. Integration tests still exercise production rings.
 The nextest group allows four ring tests per invocation. Each socket-queue

@@ -37,9 +37,8 @@ impl Error {
 		Self::Io(std::io::Error::new(
 			err.kind(),
 			format!(
-				"{err}: Linux 6.14 until the 7.3 fix charges io_uring rings to RLIMIT_MEMLOCK ({limit}), shared by every \
-				 process of this user, so raise it with `ulimit -l` or systemd's `LimitMEMLOCK=`; other kernels charge \
-				 them to the memory cgroup"
+				"{err}: io_uring memory counts against RLIMIT_MEMLOCK ({limit}), shared by every process of this user; \
+				 raise it with `ulimit -l` or systemd's `LimitMEMLOCK=`"
 			),
 		))
 	}
