@@ -73,7 +73,15 @@ import {
 } from "./announce.ts";
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
-import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused } from "./fills.ts";
+import {
+	dropped,
+	passing,
+	RangeFills,
+	type RecoveryHandle,
+	type RecoveryTerms,
+	type Refusal,
+	type Refused,
+} from "./fills.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
@@ -2486,7 +2494,7 @@ export class Subscriber {
 		const requests = producer.requests();
 		const jobs = new Set<Promise<void>>();
 		const fills = hasRanges(this.version)
-			? new RangeFills(producer, (groups, priority) => this.#recover(broadcast, consumed, entry, groups, priority))
+			? new RangeFills(producer, (groups, terms) => this.#recover(broadcast, consumed, entry, groups, terms))
 			: undefined;
 		entry.fills = fills;
 		const driving = fills ? this.#driveFills(entry, fills) : undefined;
@@ -2552,8 +2560,8 @@ export class Subscriber {
 		}
 	}
 
-	// Ask `groups` of `copy` again on a lite-07 SUBSCRIBE of their own with no max delay, as the Rust
-	// `Recovery` does: `copy`'s subscription dropped them as stale, or delivered them before and they
+	// Ask `groups` of `copy` again on a lite-07 SUBSCRIBE of their own, with the budget of the fills
+	// owing them, as the Rust `Recovery` does with none: `copy`'s subscription dropped them as stale, or delivered them before and they
 	// were since evicted, so it never sends them again. Its groups land in the copy as a
 	// subscription's do. It FINs once every group is accounted for and read, and is over at the
 	// publisher's FIN in reply, refusing whatever it did not deliver.
@@ -2562,7 +2570,7 @@ export class Subscriber {
 		consumed: Consumed,
 		copy: SubscribeEntry,
 		groups: Run,
-		priority: number,
+		{ priority, maxDelay }: RecoveryTerms,
 	): RecoveryHandle {
 		const producer = copy.track;
 		const id = this.#subscribeNext++;
@@ -2573,7 +2581,7 @@ export class Subscriber {
 				broadcast,
 				consumed,
 				producer.name,
-				{ priority, order: "ascending", delay: { max: null } },
+				{ priority, order: "ascending", delay: { max: maxDelay } },
 				ranges,
 			),
 			ranges,
@@ -2630,7 +2638,7 @@ export class Subscriber {
 					new Deadline(),
 				);
 				let fin = false;
-				const responses = this.#recoveryResponses(stream, entry, groups, giveUp, () => fin);
+				const responses = this.#recoveryResponses(stream, entry, groups, maxDelay, giveUp, () => fin);
 				// FIN once every group is accounted for and read, as a subscriber does once its tail
 				// settles, and the publisher FINs in reply.
 				let ended = false;
@@ -2650,12 +2658,14 @@ export class Subscriber {
 					}
 					await race([Signal.race(entry.tail.changed), over, leaving]);
 				}
+				// Cancelled: nothing more is read, and our own reset ends the reads above.
 				if (left.signal.aborted && !ended) {
 					stream.abort(failed);
 					await over;
+				} else {
+					await responses;
+					stream.close();
 				}
-				await responses;
-				stream.close();
 			} catch (err) {
 				closeViolation(this.#quic, err);
 				failed = error(err);
@@ -2681,6 +2691,7 @@ export class Subscriber {
 		stream: Stream,
 		entry: SubscribeEntry,
 		groups: Run,
+		maxDelay: Duration | null,
 		giveUp: (start: bigint, end: bigint, refusal: Refusal) => void,
 		fin: () => boolean,
 	): Promise<void> {
@@ -2698,9 +2709,11 @@ export class Subscriber {
 				if (started || resp.start.starts.length !== 1)
 					throw new ProtocolViolation("unexpected recovery SUBSCRIBE_OK");
 				started = true;
-				// Below its start the publisher delivers nothing.
+				// Below its start the publisher delivers nothing: under a budget, since it judged them
+				// stale, and with none, since it lacks them.
 				const from = resp.start.starts[0] ?? groups.end;
-				giveUp(groups.start, max(groups.start, min(from, groups.end)), passing(new NotFound(`group ${groups.start}`)));
+				const below = maxDelay === null ? new NotFound(`group ${groups.start}`) : new StreamError(StreamCode.Old);
+				giveUp(groups.start, max(groups.start, min(from, groups.end)), passing(below));
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
 				const cause = resp.drop.cause(this.version);
@@ -3001,14 +3014,7 @@ export class Subscriber {
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
 				// won, even once the cache evicted it.
-				// A group a fill asked for is recovered on its own, so the copy does not record it given
-				// up meanwhile.
-				const named = stale
-					? entry.fillGroups.reduce(
-							(runs, asked) => removeRun(runs, asked.start, asked.end),
-							entry.tail.unfinished(start, end),
-						)
-					: [{ start, end }];
+				const named = stale ? entry.tail.unfinished(start, end) : [{ start, end }];
 				const recorded = named.flatMap((run) => hooks.dropTrackGroups(entry.track, run.start, run.end, hole));
 				// A final drop is never reopened, even where it replaces a stale one. A sequence
 				// already skipped stays skipped, and one whose group arrived keeps it, so no update

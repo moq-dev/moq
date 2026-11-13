@@ -413,7 +413,9 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 
 		// The session resets the group's stream to make room, and the group is gone before a new
 		// stream could continue it, so the publisher drops it on the subscription the fill rides.
-		await (await history.recvGroup())?.closed;
+		const one = await history.recvGroup();
+		expect(one?.sequence).toBe(1n);
+		while (await one?.readFrame());
 		const open = lines(pair.server).streams.list();
 		expect(open.length).toBe(1);
 		open[0]?.preempt();

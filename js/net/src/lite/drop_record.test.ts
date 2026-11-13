@@ -645,30 +645,43 @@ async function lostRun(lost: "forgot" | "shed", readers: ("wide" | "narrow")[]):
 	if (lost === "shed") relay.pool.resize();
 	const before = chained.fetches();
 	const heard = wire.heard.length;
+	let received: bigint[] = [];
 
 	for (const name of readers) {
 		if (name === "wide") {
 			const wide = chained.remote.track("video").subscribe(WIDE);
 			const filled = await drain(clock, wide);
 			expect(filled.filter((row) => row[0] !== "group")).toEqual([]);
-			expect(groupsOf(filled)).toEqual(expect.arrayContaining([1n, 2n]));
+			received = groupsOf(filled) as bigint[];
+			expect(received).toEqual(expect.arrayContaining([1n, 2n]));
 			if (lost === "forgot") expect(chained.fetches().up).toBeGreaterThan(before.up);
 			wide.close();
 		} else {
-			// Judged stale by its own budget, or filled and then judged.
+			// Judged stale by its own budget, or filled and then judged. Once every hop forgot the
+			// run, the relay recovers it on a SUBSCRIBE of its own, whose publisher resolves the
+			// start within that range: its newest group, 2, is the head it hands out, and no hop
+			// still holds group 3 to judge it by.
 			const narrow = chained.remote.track("video").subscribe({
 				delay: { max: Duration.millis(1500) },
 				ranges: [{ start: { absolute: 1n } }],
 			});
 			const judged = await drain(clock, narrow);
 			expect(groupsOf(judged)).not.toContain(1n);
-			expect(groupsOf(judged)).not.toContain(2n);
+			if (lost === "shed") expect(groupsOf(judged)).not.toContain(2n);
 			narrow.close();
 		}
 	}
-	// Nothing a narrow budget gave up is named dropped on the wire, where it would settle every
-	// reader, wide ones too.
-	if (readers.includes("wide")) expect(wire.heard.slice(heard)).toEqual([]);
+	// Nothing a narrow budget gave up is named dropped for good on the wire, where it would settle
+	// every reader, wide ones too: a stale drop is reopened by the next update. The update asking
+	// for a recovered run may re-offer a group its recovery already delivered, whose duplicate
+	// stream the relay resets, which settles no reader.
+	if (readers.includes("wide")) {
+		const final = wire.heard
+			.slice(heard)
+			.filter((row) => row.kind !== "drop" || row.error !== StreamCode.Old)
+			.filter((row) => !(row.end === row.start + 1n && received.includes(row.start)));
+		expect(final).toEqual([]);
+	}
 	expect(chained.ended()).toBe(false);
 
 	reader.close();
