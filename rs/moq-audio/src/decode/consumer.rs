@@ -2579,8 +2579,9 @@ mod tests {
 	/// sample count either way, and an unoptimized Opus codec takes minutes over
 	/// the whole corpus. [`opus_states_its_own_frame_duration`] covers Opus. The
 	/// lowest common rate keeps each packet small, since only its duration counts.
-	/// With `hole`, the group after each end marker never arrives, so the consumer reads a
-	/// gap between the marker and what resumes.
+	/// With `hole`, the publisher leaves the starts between each end marker and what resumes
+	/// undeclared, so whatever lay there may have been lost: a group after the marker that never
+	/// arrived.
 	async fn replay(case: &crate::jitter::tests::Case, hole: bool) -> Vec<f64> {
 		use crate::jitter::tests::duration;
 
@@ -2619,28 +2620,27 @@ mod tests {
 
 		let payload: Bytes = vec![0u8; samples * size_of::<f32>()].into();
 		let mut series = Vec::with_capacity(case.arrival.len());
-		// The sequence of the next group, one per packet and one per marker.
-		let mut sequence = 0;
 		for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
+			// The track's timescale is microseconds, so this is also the packet group's start.
+			let micros = media as u64 * 1000;
 			// The marker goes out as the utterance stops, so it is read during the silence
 			// rather than alongside what resumes it.
 			if case.ends.contains(&index) {
 				producer.discontinuity().unwrap();
-				sequence += 1;
 				match consumer.read().await.unwrap() {
 					Some(Read::End { .. }) => {}
 					other => panic!("packet {index} is preceded by {other:?}, not its end"),
 				}
+				// A seek creates the group without appending it, so nothing declares the starts
+				// before it skipped.
 				if hole {
-					sequence += 1;
-					producer.seek(sequence).unwrap();
+					producer.seek(micros).unwrap();
 				}
 			}
-			sequence += 1;
 			CLOCK.set(Some(origin.saturating_add(duration(arrival))));
 			producer
 				.write(moq_mux::container::Frame {
-					timestamp: Timestamp::from_micros(media as u64 * 1000).unwrap(),
+					timestamp: Timestamp::from_micros(micros).unwrap(),
 					duration: None,
 					payload: payload.clone(),
 					keyframe: true,
