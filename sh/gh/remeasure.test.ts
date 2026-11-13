@@ -21,7 +21,7 @@ test("release remeasurement executes trusted code with protected write credentia
 	expect(workflow.permissions).toEqual({ contents: "read" });
 	const job = workflow.jobs.remeasure;
 	expect(job.if).toContain("github.event.workflow_run.head_repository.full_name == github.repository");
-	expect(job.environment).toBe("${{ github.ref == 'refs/heads/main' && 'bot' || '' }}");
+	expect(job.environment).toBe("bot");
 	expect(job.steps[0].with).toEqual({ "persist-credentials": false });
 	const token = job.steps.find((step: { id?: string }) => step.id === "token");
 	expect(token.if).toContain("github.ref == 'refs/heads/main'");
@@ -36,6 +36,7 @@ test("publishing attempts remeasure even after a partial publish fails", async (
 			for (const repository of ["moq-dev/moq", "outsider/moq"]) {
 				const github = {
 					repository: "moq-dev/moq",
+					ref: "refs/heads/main",
 					event_name: "workflow_run",
 					event: {
 						workflow_run: {
