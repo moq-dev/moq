@@ -130,7 +130,6 @@ transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
-- [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
 - [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - rewrites lite-07's one-hop warm routes and `Serves` for routes that propagate
 
 ## Related

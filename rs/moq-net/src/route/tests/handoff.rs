@@ -28,6 +28,7 @@ both!(
 	a_relay_lets_go_of_a_scope_its_uplinks_lost,
 	a_claim_above_an_interest_is_presented_at_it,
 	widening_past_a_changed_claim_moves_it_up,
+	widening_while_the_relay_lost_the_origin_moves_the_claim_up,
 	a_claim_withdrawn_under_a_live_one_ends,
 	wildcard_claims_end_per_origin_and_are_certified_below,
 	origin_restart_takes_a_fresh_identity_for_its_claims,
@@ -629,6 +630,36 @@ fn widening_past_a_changed_claim_moves_it_up(rule: Rule) {
 	sim.watch(client, "");
 	assert!(sim.run());
 	sim.connect(client, relay);
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/"), Some(true));
+	assert_eq!(sim.shown(client).len(), 1);
+	assert_eq!(false_ends(&sim.events), 0);
+}
+
+/// A client widens past a claim that changed while its relay had lost the
+/// origin. When the relay gets the origin back, the client's narrow
+/// presentation moves up to the changed claim without ending.
+fn widening_while_the_relay_lost_the_origin_moves_the_claim_up(rule: Rule) {
+	let (origin, relay, client) = (0, 1, 2);
+	let mut sim = Sim::with(rule, 3);
+	sim.leaf(origin);
+	sim.leaf(client);
+	sim.join(origin, relay, 1);
+	sim.join(client, relay, 1);
+	sim.originate(origin, 7, 0);
+	assert!(sim.run());
+	sim.announce(origin, "live/", 2, None);
+	sim.watch(client, "live/b");
+	for (from, to) in [(origin, relay), (origin, relay), (relay, client), (relay, client)] {
+		assert!(sim.deliver(from, to));
+	}
+	assert_eq!(sim.shows(client, 7, "live/b"), Some(true));
+
+	// The relay's answer to the old interest is still queued when the client widens.
+	sim.disconnect(origin, relay);
+	sim.announce(origin, "live/", 0, None);
+	sim.watch(client, "");
+	sim.connect(origin, relay);
 	assert!(sim.run());
 	assert_eq!(sim.shows(client, 7, "live/"), Some(true));
 	assert_eq!(sim.shown(client).len(), 1);

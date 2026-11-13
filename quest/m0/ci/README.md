@@ -89,7 +89,7 @@ frozen. The landing quest closed 2026-11-04 with busy hours merging a median
 holds the cutover record). Decided 2026-11-06 (maintainer, /quest-unblock):
 ✅ drop the trial of a second concurrent entry, which ran out of shared runner
 disk on 2026-11-05; the queue stays at one entry. Not chosen: retrying it after
-[kixelated/nixos#26](https://github.com/kixelated/nixos/pull/26)'s inode fix.
+kixel-ai/nixos#26's inode fix.
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
