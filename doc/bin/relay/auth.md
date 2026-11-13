@@ -177,8 +177,9 @@ A native client can instead replace its configured tokens through its
 connection's tokens (`Connection::tokens()`, `session.tokens()` in the
 bindings): the next dial presents them, a live session presents them in band and
 withdraws each old one once its replacement is answered, `answered()` reports
-the relay's verdict, and once a session has connected, a refusal is retried with
-backoff like any other failure, presenting whatever tokens are current.
+the relay's verdict, and once a session has connected, a refusal that closes
+it is retried with backoff like any other failure, within the retry window,
+presenting whatever tokens are current.
 Older versions refuse in-band tokens.
 
 Each accepted token adds its publish and subscribe patterns to the session's

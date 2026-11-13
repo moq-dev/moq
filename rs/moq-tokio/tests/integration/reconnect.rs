@@ -181,7 +181,9 @@ async fn a_protocol_violation_reconnects() {
 	let first = sessions.recv().await.unwrap();
 	first.abort(moq_net::Error::ProtocolViolation);
 	tokio::select! {
-		_ = sessions.recv() => {}
+		session = sessions.recv() => {
+			assert!(session.is_some(), "the server stopped before a replacement connected");
+		}
 		result = connection.closed() => panic!("ended after a protocol violation: {result:?}"),
 		_ = kio::clock::sleep(Duration::from_secs(10)) => panic!("never redialed after a protocol violation"),
 	};

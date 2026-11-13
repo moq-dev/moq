@@ -308,6 +308,12 @@ impl Client {
 		Connection::new(self.clone(), addrs.into())
 	}
 
+	/// With no transport compiled in, no URL can be dialed.
+	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")))]
+	pub(crate) fn reaches(&self, _url: &Url) -> bool {
+		false
+	}
+
 	/// Whether this client has a transport that can ever dial `url`, decided from its scheme
 	/// and the backends and certificate it was built with, not from a failed dial.
 	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]

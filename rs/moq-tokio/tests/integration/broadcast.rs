@@ -3484,7 +3484,9 @@ async fn reconnect_retries_a_session_level_rejection() {
 		let connection = test_client().connect(url);
 		for _ in 0..2 {
 			tokio::select! {
-				_ = accepts.recv() => {}
+				accepted = accepts.recv() => {
+					assert_eq!(accepted, Some(()), "the server stopped accepting");
+				}
 				result = connection.closed() => panic!("{code:?} ended the loop: {result:?}"),
 				_ = kio::clock::sleep(TIMEOUT) => panic!("{code:?} was never redialed"),
 			}

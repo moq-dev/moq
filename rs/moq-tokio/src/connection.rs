@@ -22,7 +22,9 @@ pub use moq_net::reconnect::Restart;
 /// An address no backend of `client` can dial never works. A status the peer actually sent
 /// is its answer, not this address's, so unless it invites another attempt it settles the
 /// walk. An auth rejection arrives as [`Error::Connect`] with its status already consumed,
-/// so it is checked alongside the statuses. Nothing else about the error's kind matters.
+/// so it is checked alongside the statuses. An in-band code with no [`crate::ConnectError`],
+/// such as `EXPIRED_AUTH_TOKEN`, walks on like any other failure: settling it too would read
+/// the error's kind. Nothing else about the error's kind matters.
 fn verdict(client: &Client, url: &url::Url, err: &Error) -> Verdict {
 	if !client.reaches(url) {
 		return Verdict::Unusable;
