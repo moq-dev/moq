@@ -1289,10 +1289,16 @@ impl TrackState {
 		self.drops.get(&key).is_some_and(|hole| *hole == Hole::Skip)
 	}
 
-	/// The exclusive end of the run the publisher declared skipped at `key`, when one covers it.
-	fn skip_end(&self, key: u64) -> Option<u64> {
+	/// The exclusive end of the run at `key` that no group will fill: one the publisher
+	/// declared skipped, or with `dropped`, also one given up for good. A stale drop is not:
+	/// a wider budget takes it back.
+	fn hole_end(&self, key: u64, dropped: bool) -> Option<u64> {
 		let (run, hole) = self.drops.get_key_value(&key)?;
-		(*hole == Hole::Skip).then_some(run.end)
+		let gone = match hole {
+			Hole::Skip => true,
+			Hole::Drop { stale, .. } => dropped && stale.is_none(),
+		};
+		gone.then_some(run.end)
 	}
 
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
@@ -3938,16 +3944,16 @@ fn poll_largest(
 	Poll::Ready(cache.take_largest(seen, bounds))
 }
 
-/// The lowest key of `runs`, which ascend, that no run `skip_end` reports skipped covers.
-pub(super) fn first_unskipped(
+/// The lowest key of `runs`, which ascend, that no hole `hole_end` reports covers.
+pub(super) fn first_open(
 	runs: impl Iterator<Item = ops::RangeInclusive<u64>>,
-	skip_end: impl Fn(u64) -> Option<u64>,
+	hole_end: impl Fn(u64) -> Option<u64>,
 ) -> Option<u64> {
 	let mut floor = 0;
 	for run in runs {
 		let mut key = (*run.start()).max(floor);
 		while key <= *run.end() {
-			match skip_end(key) {
+			match hole_end(key) {
 				Some(end) => key = end,
 				None => return Some(key),
 			}
@@ -6325,13 +6331,13 @@ impl Consumer {
 		self.with_state(|state| Holdings::back(&*state?.read(), latest, back))
 	}
 
-	/// The exclusive end of the run the publisher declared skipped at `key`, when one covers
-	/// it; see [`Subscriber::next_in_range`].
-	pub(super) fn skip_end(&self, key: u64) -> Option<u64> {
+	/// The exclusive end of the run at `key` that no group will fill: one declared skipped,
+	/// or with `dropped`, also one given up for good. See [`Subscriber::next_in_range`].
+	pub(super) fn hole_end(&self, key: u64, dropped: bool) -> Option<u64> {
 		if let Some(serving) = self.serving() {
-			return serving.skip_end(key);
+			return serving.hole_end(key, dropped);
 		}
-		self.with_state(|state| state?.read().skip_end(key))
+		self.with_state(|state| state?.read().hole_end(key, dropped))
 	}
 
 	/// The keys of `span` the cache holds, lowest first.
@@ -9982,15 +9988,16 @@ impl Subscriber {
 
 	/// The lowest group at or above `from` this subscriber's ranges and
 	/// [`Self::with_range`] floor cover, past the starts the publisher declared skipped
-	/// (see [`Producer::skip_groups`]), `None` when none does: the groups between are never
-	/// read, so a reader waiting on each group in key need not wait for them. `Some` from
-	/// there while a relative anchor waits on the first group, which can't say yet.
+	/// (see [`Producer::skip_groups`]) and those given up for good, `None` when none does:
+	/// the groups between are never read, so a reader waiting on each group in key need not
+	/// wait for them. A wire before lite-07 forwards a skip as such a drop. `Some` from there
+	/// while a relative anchor waits on the first group, which can't say yet.
 	pub fn next_in_range(&self, from: u64) -> Option<u64> {
 		let from = from.max(self.bounds().start);
 		match &self.inner {
 			Inner::Plain(cursor) => {
 				let state = cursor.state.read();
-				first_unskipped(cursor.filter.window.runs(from), |key| state.skip_end(key))
+				first_open(cursor.filter.window.runs(from), |key| state.hole_end(key, true))
 			}
 			Inner::Resume(resume, _) => resume.next_in_range(from),
 		}
@@ -10010,7 +10017,7 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => {
 				let state = cursor.state.read();
-				first_unskipped(run, |key| state.skip_end(key)).is_none()
+				first_open(run, |key| state.hole_end(key, false)).is_none()
 			}
 			Inner::Resume(resume, _) => resume.is_skipped(run),
 		}
@@ -12697,8 +12704,8 @@ mod test {
 	}
 
 	/// The next group in range passes over the starts the publisher declared skipped,
-	/// whether by appending past them or outright, so a reader waiting on each group in key
-	/// need not wait for them.
+	/// whether by appending past them or outright, and those given up for good, so a reader
+	/// waiting on each group in key need not wait for them.
 	#[test]
 	fn the_next_group_in_range_passes_over_skips() {
 		let producer = track_producer("test", Info::default().with_max_age(None));
@@ -12717,6 +12724,12 @@ mod test {
 		assert_eq!(subscriber.next_in_range(11), Some(20));
 		assert!(subscriber.is_skipped(11..20));
 		assert!(!subscriber.is_skipped(11..21));
+
+		// A drop for good is passed over too, as a wire before lite-07 forwards a skip, but
+		// it was produced, so it is no skip.
+		producer.drop_groups(20..30, StreamError::NotFound);
+		assert_eq!(subscriber.next_in_range(20), Some(30));
+		assert!(!subscriber.is_skipped(20..30));
 	}
 
 	/// A group finished whole ages from its own end, which a zero budget waits for too: a

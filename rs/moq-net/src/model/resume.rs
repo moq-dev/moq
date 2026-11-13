@@ -898,10 +898,10 @@ impl Subscriber {
 	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {
 		let mut reader = self.reader();
 		reader.window();
-		// The serving route's copy holds what its publisher declared skipped.
+		// The serving route's copy holds what its publisher skipped or gave up.
 		let serving = reader.copies.last().map(|copy| copy.track.clone());
-		track::first_unskipped(reader.window.runs(from), |key| {
-			serving.as_ref().and_then(|track| track.skip_end(key))
+		track::first_open(reader.window.runs(from), |key| {
+			serving.as_ref().and_then(|track| track.hole_end(key, true))
 		})
 	}
 
@@ -912,7 +912,7 @@ impl Subscriber {
 		let Some(serving) = serving else {
 			return false;
 		};
-		track::first_unskipped(run, |key| serving.skip_end(key)).is_none()
+		track::first_open(run, |key| serving.hole_end(key, false)).is_none()
 	}
 
 	/// The groups the reader's ranges name from `from` on; see
