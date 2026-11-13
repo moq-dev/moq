@@ -60,8 +60,10 @@ fn main() {
 		},
 		..Default::default()
 	};
+	// From the source alone: `with_crate` asks `cargo metadata`, which needs the
+	// workspace and the registry, and a per-crate Nix build has neither.
 	cbindgen::Builder::new()
-		.with_crate(&crate_dir)
+		.with_src(PathBuf::from(&crate_dir).join("src/lib.rs"))
 		.with_config(config)
 		.with_language(cbindgen::Language::C)
 		.generate()
