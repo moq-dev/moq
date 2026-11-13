@@ -277,7 +277,7 @@ EndGoaway(s, uri) ==
          /\ Emit(<<"Migrating">>, s)
          /\ UNCHANGED watch
 
-\* `Reconnect::closed` for a close a retry may repair.
+\* `Reconnect::closed`: every close retries, whatever its error.
 EndClosed ==
     /\ live' = None
     /\ phase' = "backoff"
