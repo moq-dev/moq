@@ -21,13 +21,13 @@ Decided the same day (maintainer, /quest-plan): ✅ plan it.
 - Decide whether it is a revival the contract forbids or one it excuses: a
   replay after a collection or a restart is allowed only until the
   withdrawal behind it lands
-  ([epic](/quest/m2/cluster-routing/routes/README.md), handoff contract). If
+  ([epic](/quest/m2/cluster-routes/README.md), handoff contract). If
   the fixture's `revivals` count misses an excuse, fix the count and say so.
 - Otherwise fix the cause and keep the shrunk case as a test.
 - If the cause is in what the path rule replaces (the distance, the seqno,
   route requests, the echo, or which neighbours certify a region), pin it as
   a `residual_` test naming
-  [the route per scope](/quest/m2/cluster-routing/routes/scope.md), whose
+  [the route per scope](/quest/m2/cluster-routes/scope.md), whose
   router must pass it, instead of fixing it twice.
 
 Public API: none. Wire: none.
