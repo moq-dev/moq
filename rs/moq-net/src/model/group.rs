@@ -6518,6 +6518,7 @@ mod test {
 	}
 
 	/// Every writer dropping after a finish aborts nothing, so a reader keeps its frames.
+	#[cfg(feature = "async")]
 	#[test]
 	fn writers_dropped_after_a_finish_abort_nothing() {
 		let mut producer = Info { sequence: 0 }.produce();
