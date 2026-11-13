@@ -2280,6 +2280,33 @@ mod tests {
 		);
 	}
 
+	/// Legacy frames carry no duration, so an audio reader reads each packet's from its codec.
+	/// One-packet groups then run back to back even where nothing declared the starts between
+	/// them skipped, as a moq-lite-06 hop can't, while a lost group is still a gap.
+	#[tokio::test(start_paused = true)]
+	async fn codec_durations_bridge_undeclared_runs_between_audio_groups() {
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		let mut reader = Consumer::new(subscription, Container::try_from(&config).unwrap());
+		// One 20 ms CELT packet per group. The group starting at 40 ms never arrives.
+		for start in [0, 20_000, 60_000] {
+			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
+			let packet = Frame {
+				timestamp: ts(start),
+				payload: Bytes::from_static(&[31 << 3, 0]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::try_from(&config).unwrap().write(&mut group, &[packet]).unwrap();
+			group.close().unwrap();
+		}
+		let _track = track.finish().unwrap();
+		assert_eq!(items(&mut reader).await, ["0", "20000", "gap 40000+20000", "60000"]);
+	}
+
 	#[tokio::test]
 	async fn a_latency_skip_is_a_gap() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
