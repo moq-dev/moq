@@ -16,8 +16,8 @@ import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, read
  */
 export type Delay = "instant" | "auto" | Duration;
 
-/** The default {@link SyncInput.stretch}: how far live audio may trail the clock before it skips. @internal */
-export const STRETCH = Duration.secs(2);
+/** The default {@link SyncInput.stretch}: how far live audio may trail the clock before it skips onto it. @internal */
+export const STRETCH = Duration.millis(200);
 
 /** The most an `"auto"` delay holds, and how far catalog `warmup` reaches back. @internal */
 export const DELAY_MAX = Container.DELAY_MAX;
@@ -33,8 +33,8 @@ export type SyncInput = {
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
 	 * timestamps) build up instead of being skipped. Audio that falls behind, as after a stall,
-	 * catches up by playing faster, and skips only what trails by more than the larger of the
-	 * lookahead and {@link SyncInput.stretch}. Always
+	 * catches up by playing faster, and skips onto the clock only when it trails by more than the
+	 * larger of the lookahead and {@link SyncInput.stretch}. Always
 	 * finite, so worst case the audio ring drops its oldest samples rather than exhausting memory.
 	 * With a nonzero lookahead, the first video
 	 * frame is a poster until every enabled media track holds the resolved delay; `lookahead` is
@@ -43,12 +43,12 @@ export type SyncInput = {
 	lookahead: Getter<Duration>;
 
 	/**
-	 * How far audio may trail the clock before it skips ahead (default: 2 s).
+	 * How far audio may trail the clock before it skips onto it (default: 200 ms).
 	 *
-	 * After a stall, audio slows down and falls behind the clock rather than dropping what arrives
-	 * late, then speeds up until it is back on it; only what trails by more than this is skipped. The
-	 * audio subscription asks for `delay + stretch`, so that late audio still arrives. A buffered
-	 * player already keeps its whole lookahead, so audio skips only past the larger of the two.
+	 * Within this, audio that falls behind the clock, as after a stall, speeds up until it is back on
+	 * it; past it, audio skips onto the clock, as video does. A buffered player already keeps its
+	 * whole lookahead, so audio skips only past the larger of the two. This sizes nothing else: the
+	 * audio subscription reaches 2 s past the delay whatever it is set to.
 	 *
 	 * Zero turns the time stretch off: received audio plays unaltered, late audio is skipped, an
 	 * underrun is silence, and drift against the publisher's clock is corrected by a small skip or

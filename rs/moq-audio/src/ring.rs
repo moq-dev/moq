@@ -5,8 +5,8 @@
 //! It opens primed with silence to its latency, can pad back up to it when the
 //! writer falls behind, and can trim back down to it when the writer runs ahead.
 //! Native playback instead enables received-audio stretch, which plays the
-//! queue onto the writer's clock (see [`Producer::due`]) and skips only audio
-//! that trails it too far; an actual underrun refills with emergency silence,
+//! queue onto the writer's clock (see [`Producer::due`]) and skips audio that
+//! trails it too far onto it; an actual underrun refills with emergency silence,
 //! which never enters the pitch search, until one window is queued again. A
 //! clock with a zero stretch turns the stretch off: the queue plays as written,
 //! and a reader more than a window off the clock skips onto it or pads silence
@@ -375,8 +375,8 @@ impl Producer {
 
 	/// Anchor what was pushed so far to the writer's clock: its end is due to
 	/// play at `at`. The stretch then plays the queue onto that clock, and the
-	/// reader skips audio trailing it by more than `stretch` plus one window. A
-	/// zero `stretch` turns the stretch off.
+	/// reader skips audio trailing it by more than `stretch` onto it. A zero
+	/// `stretch` turns the stretch off.
 	/// `jumped` is how far the clock's reference moved earlier since the last
 	/// anchor, which the reader skips too, as far as it trails the clock.
 	/// Without an anchor, the latency is the clock.
@@ -758,8 +758,9 @@ impl Consumer {
 		}
 	}
 
-	/// Skip what trails the clock by more than its bound plus one window, back
-	/// to the bound, or the jumps of its reference past one window, returning
+	/// Skip what trails the clock by more than its bound, or one window when
+	/// that is larger, onto the clock, or the jumps of its reference past one
+	/// window, returning
 	/// the frames skipped. Less than that is the stretch's to catch up, as a
 	/// writer's clock drifting fast moves the reference. A join has the bound
 	/// of nothing heard yet, so it lands on the clock past whatever backlog it
@@ -786,8 +787,9 @@ impl Consumer {
 			0
 		};
 		self.joined |= clocked && self.prime == 0;
-		let late = if inputs.lag > bound.saturating_add(window as i64) {
-			(inputs.lag - bound) as usize
+		// Onto the clock, or without one back to the bound.
+		let late = if inputs.lag > bound.max(window as i64) {
+			if clocked { inputs.lag } else { inputs.lag - bound } as usize
 		} else {
 			0
 		};

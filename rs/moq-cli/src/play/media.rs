@@ -11,7 +11,7 @@ use moq_mux::catalog::{self, Stream};
 // playout clock itself.
 use kio::clock::Instant;
 
-use super::args::Args;
+use super::args::{Args, REACH};
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, Track, joined};
 use super::timeline::{AudioTimeline, Playhead};
@@ -34,7 +34,7 @@ const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 
 /// How far past the latency it opened on the sink may be asked to hold. Its ring
 /// reaches three seconds past that latency, less a 30 ms processing window
-/// (`Sink::set_latency`), so this leaves margin, and it covers the default stretch.
+/// (`Sink::set_latency`), so this leaves margin, and it covers audio's reach past the delay.
 const SINK_ROOM: Duration = Duration::from_secs(2);
 
 /// Maximum sample frames per silence write, independent of the catalog rate.
@@ -267,7 +267,7 @@ impl<O: Output> Media<O> {
 					};
 					// Nothing older than the playhead is worth presenting, so the delay
 					// doubles as the staleness budget on the wire.
-					let max_delay = self.args.video_max_delay(&snapshot.audio);
+					let max_delay = self.args.video_delay();
 					// A decoder and its subscription, starting `lookback` groups before the live edge.
 					let open = async |delay: moq_net::track::Delay, lookback: u64| {
 						// The window's renderer refuses a GPU surface it cannot import, so
@@ -629,8 +629,7 @@ async fn play_audio<O: Output>(
 	let mut silence = Vec::new();
 
 	// The most the sink holds, within what its ring was sized for. A shared delay
-	// past it, such as a slow video encoder's or a measured target past a long
-	// stretch, stays encoded in the consumer until it is due instead, so the
+	// past it, such as a slow video encoder's, stays encoded in the consumer until it is due instead, so the
 	// ring never grows with the delay.
 	let cap = max_delay
 		.max(AUDIO_BUFFER_MIN)
@@ -675,8 +674,7 @@ async fn play_audio<O: Output>(
 	let target = || schedule.delay().clamp(AUDIO_BUFFER_MIN, cap);
 	// Anchor the sink to the shared clock: the media written so far ends at
 	// `end`, and sounds when the clock says it is due. The callback stretches
-	// onto that clock, and skips only what trails it past the stretch, which
-	// the subscription still delivers.
+	// onto that clock, and skips onto it what trails it past the stretch.
 	// The last anchor, as when its end was due, the end, and the delay. The
 	// clock's reference is when media zero arrived, `at - end - delay`: one that
 	// moved earlier jumped the clock ahead, which the sink skips rather than
@@ -734,13 +732,14 @@ async fn play_audio<O: Output>(
 		// Media went missing since the last frame, so the next one does not continue it.
 		let mut lost = false;
 		let mut ends = VecDeque::new();
-		// The subscription reaches the stretch past the shared delay wherever that moves, never
-		// below what it opened with, so audio the sink may still catch up on arrives.
+		// The subscription reaches the estimator's ceiling past the shared delay wherever that
+		// moves, never below what it opened with, so every frame late enough to move the target
+		// is observed, whatever the stretch.
 		let floor = consumer.options().delay.max.unwrap_or_default();
 		let mut asked = floor;
 		loop {
 			let seen = schedule.delay();
-			let max = seen.saturating_add(stretch).max(floor);
+			let max = seen.saturating_add(REACH).max(floor);
 			if max != asked {
 				consumer.set_max_delay(max);
 				asked = max;
@@ -1282,7 +1281,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
 		let jitter = Duration::from_millis(100);
-		// A budget past the ring, as a long `--stretch` asks for.
+		// A budget past the ring the sink was sized for.
 		options.delay = moq_audio::decode::Delay {
 			min: Some(jitter),
 			max: Some(Duration::from_secs(5)),
