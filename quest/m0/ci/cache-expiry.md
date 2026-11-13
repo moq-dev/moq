@@ -10,8 +10,8 @@ the buckets, and no doc, comment or quest still names the old windows.
 
 Decided 2026-11-13 (maintainer, /quest-plan): ✅ shorten mbx from 14 to 7 days
 (`infra/mbx/lifecycle.json`), Nix CI from 30 to 14 days
-(`infra/nix/lifecycle.json`), and shorten `refresh`'s 7-day cutoff in
-`infra/nix/justfile` to fit. Both caches are supplemental. A missing mbx
+(`infra/nix/lifecycle.json`), and fit `refresh`'s 7-day cutoff in
+`infra/nix/justfile` to the new window. Both caches are supplemental. A missing mbx
 object is a rebuild, and a narinfo whose NAR expired makes Nix fall back to
 building. The projected saving is about $7 a month. Rejected: keeping today's
 windows, and R2 Infrequent Access. mbx serves 2-5 TB of reads a day, so
@@ -25,8 +25,12 @@ expiry was applied 2026-11-07. `nix-ci-moq-dev` held 48.8 GB and grows about
 it is older than the cutoff, which restarts its age. A path survives as long
 as some `main` push refreshes it between the cutoff and the expiry. A shorter
 cutoff widens that window but copies hot objects more often, and each copy is
-a Class A request. Recommended: 3 days, about the same fraction of the expiry
-as today, which leaves 11 days for a push to `main`.
+a Class A request: copies a month scale as 30 divided by the cutoff in days.
+The Nix storage saved by the 14-day expiry is under $1 a month, so extra
+copies can cost more than it saves. Recommended: keep the 7-day cutoff, which
+under a 14-day expiry still leaves 7 days for a push to `main`. Shorten it
+only if measured closures expire between pushes, after counting the closure's
+objects and the copy requests a shorter cutoff adds.
 
 Apply both rules with `just infra mbx lifecycle` and `just infra nix
 lifecycle`, using the maintainer's wrangler login as
@@ -35,7 +39,8 @@ chose these values. Record the date and each bucket's `wrangler r2 bucket
 lifecycle list` output in the PR.
 
 Update the text that names the old windows: `infra/README.md`, the
-30-day expiry in `flake.nix`'s comments, the comment on
+30-day expiry in `flake.nix`'s comments and in `.github/workflows/smoke.yml`'s
+comment on its pinned builds, the comment on
 `refresh`, mbx-r2-verify's Goal and its 2026-11-26 measurement, which then
 splits at this change too, and
 [cachix-retire](/quest/m0/ci/cachix-retire.md)'s 30-day references if that

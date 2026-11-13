@@ -16,7 +16,12 @@ cost $38.35 (Class A $22.50, Class B $8.64, storage $7.21), almost all of it
 requests and 24.9M Class B. 4.80M of the Class A requests failed with HTTP
 412. mbx uploads each output with a conditional put (`If-None-Match`), and 85%
 of those puts fail because the object already exists. R2 still bills each one
-as Class A, about $21 a month. A shorter expiry does not touch them.
+as Class A, about $21 a month. The audit window straddles the 30 → 14-day
+expiry change of 2026-11-07, and a shorter expiry removes some 412s: an
+expired object's put succeeds instead, as a paid upload. So size the
+workaround and the upstream fix from nights after 2026-11-07 only, as
+[mbx-r2-verify](/quest/m0/ci/mbx-r2-verify.md) splits its measurement. A
+shorter expiry still leaves every repeat upload of an object that is alive.
 
 The audit named the writers as the hosted jobs on `main`: Nightly, CodSpeed,
 and `platform.yml` on push. Checked against `main` on 2026-11-13,
@@ -42,7 +47,8 @@ Decided 2026-11-13 (maintainer, /quest-plan):
   Recommended: add a write opt-in input to the rust-cache action, set it only
   on the chosen jobs, and drop the `cache-write` Environment from the jobs
   that only read, so fewer jobs hold the write key. Update the action's
-  "Hosted runs on `main` write" comment and the
+  "Hosted runs on `main` write" comment, `infra/README.md`'s "Hosted jobs on
+  `main` write what they compile", and the
   [CI epic](/quest/m0/ci/README.md)'s record of who writes.
 - ✅ The root fix belongs upstream in mbx: before the conditional put, check
   whether the object exists with a HEAD (Class B), or skip outputs mbx already
