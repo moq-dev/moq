@@ -882,6 +882,99 @@ impl RouteFollower {
 	}
 }
 
+/// The path router originating claims and answering streams, for the routes bench.
+pub struct PathRouteNode(crate::route::path::Router<usize, ()>);
+
+impl PathRouteNode {
+	/// An origin with `claims` claims, answering the given interests.
+	pub fn new(claims: usize, interests: &[&str]) -> Self {
+		let mut node = Self(crate::route::path::Router::new(1, 1, Default::default()));
+		node.0.originate(1);
+		for i in 0..claims {
+			node.own(&format!("live/{i}"), true);
+		}
+		for (peer, prefix) in interests.iter().enumerate() {
+			node.0.connect(peer, peer as u64 + 2, Default::default()).unwrap();
+			node.0.peer_interest(peer, Some(Path::new(prefix).unwrap())).unwrap();
+		}
+		node.drain();
+		node
+	}
+
+	/// Start or withdraw a claim.
+	pub fn own(&mut self, claim: &str, start: bool) {
+		let claim = Path::new(claim).unwrap();
+		if start {
+			self.0.announce(claim, ()).unwrap();
+		} else {
+			self.0.unannounce(claim).unwrap();
+		}
+	}
+
+	/// Consume messages and reader notifications, returning the messages sent.
+	pub fn drain(&mut self) -> usize {
+		let sent = self.0.drain().len();
+		self.0.events();
+		self.0.changed();
+		sent
+	}
+}
+
+/// A path router receiving one publisher and forwarding its claims to a reader.
+pub struct PathRouteRelay {
+	router: crate::route::path::Router<usize, u64>,
+	revision: u64,
+}
+
+impl PathRouteRelay {
+	/// Hear `claims` claims and answer one stream watching the root.
+	pub fn new(claims: usize) -> Self {
+		use crate::route::path::{Hop, Offer, Reach};
+		let mut relay = Self {
+			router: crate::route::path::Router::new(2, 2, Default::default()),
+			revision: 1,
+		};
+		relay.router.connect(0, 1, Default::default()).unwrap();
+		relay.router.route(
+			0,
+			1,
+			Path::empty(),
+			Some(Reach::Finite(Offer {
+				path: [Hop { node: 1, session: 0 }].into(),
+				metric: 0,
+				down_only: false,
+				rtt: None,
+			})),
+			0,
+		);
+		let snapshot = (0..claims)
+			.map(|i| (Path::new(&format!("live/{i}")).unwrap(), Some(1)))
+			.collect();
+		relay.router.batch(0, 1, Path::empty(), snapshot, Some(1), 0);
+		relay.router.connect(1, 3, Default::default()).unwrap();
+		relay.router.peer_interest(1, Some(Path::empty())).unwrap();
+		relay.drain();
+		relay
+	}
+
+	/// Receive one batch and return its forwarded messages and reader changes.
+	pub fn change(&mut self, claims: usize) -> (usize, usize) {
+		self.revision += 1;
+		let changes = (0..claims)
+			.map(|i| (Path::new(&format!("live/{i}")).unwrap(), Some(self.revision)))
+			.collect();
+		self.router.batch(0, 1, Path::empty(), changes, Some(self.revision), 0);
+		self.drain()
+	}
+
+	fn drain(&mut self) -> (usize, usize) {
+		let sent = self.router.drain().len();
+		let events = self.router.events().len();
+		self.router.changed();
+		(sent, events)
+	}
+}
+
 /// The path router following one publisher on a session per prefix, for the routes bench.
 pub struct PathRouteFollower {
 	router: crate::route::path::Router<usize, ()>,

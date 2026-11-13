@@ -1,7 +1,159 @@
 //! What a route per scope keeps: [`path::Router`] on meshes where neighbours ask for
 //! different prefixes, and how it compares with [`Router`] on the same scripts.
 
+use super::path::meet;
 use super::*;
+
+fn offered(via: Id, session: u64) -> path::Reach {
+	path::Reach::Finite(path::Offer {
+		path: [path::Hop { node: 7, session }, path::Hop { node: via, session: 1 }].into(),
+		metric: 1,
+		down_only: false,
+		rtt: None,
+	})
+}
+
+/// An interest edit keeps the newer withdrawal a narrow view already learned,
+/// even while a wider neighbour has not heard it and the new streams have not arrived.
+#[test]
+fn narrowing_keeps_the_newest_covering_withdrawal() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.batch(1, 7, p(""), vec![(p("a/b/x"), Some(1))], Some(1), 0);
+	router.route(2, 7, p("a"), Some(offered(2, 0)), 0);
+	router.batch(2, 7, p("a"), Vec::new(), Some(3), 0);
+	assert!(router.events().iter().any(|event| event.kind == Kind::End));
+	assert!(!router.shown().contains_key(&(7, p("a/b/x"))));
+
+	router.watch(p("a/b"));
+	assert!(!router.shown().contains_key(&(7, p("a/b/x"))));
+	assert!(router.events().iter().all(|event| event.kind != Kind::Start));
+}
+
+#[test]
+fn losing_a_wide_route_does_not_forget_a_kept_narrow_view() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
+	router.route(2, 7, p("a"), Some(offered(2, 0)), 0);
+	router.batch(2, 7, p("a"), Vec::new(), Some(3), 0);
+	let ended = router
+		.events()
+		.into_iter()
+		.find(|event| event.kind == Kind::End)
+		.unwrap();
+	router.route(1, 7, p(""), None, 0);
+	router.batch(2, 7, p("a"), vec![(p("a/x"), Some(2))], Some(4), 0);
+	let started = router
+		.events()
+		.into_iter()
+		.find(|event| event.kind == Kind::Start)
+		.unwrap();
+	assert_eq!(started.forgot, ended.forgot, "the narrow view kept the withdrawal");
+}
+
+#[test]
+fn flapping_a_far_node_does_not_extend_older_dead_hops() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	let mut now = Instant::now();
+	let retained = (Doubt::DEFAULT.timer.as_nanos() / HOP.as_nanos()) as usize + 1;
+	for session in 0..3 * retained {
+		router.dead(
+			1,
+			path::Dead {
+				hop: path::Hop {
+					node: 2,
+					session: session as u64,
+				},
+				far: 7,
+				moved: Vec::new(),
+				gone: true,
+			},
+			now,
+		);
+		router.timeout(now);
+		assert!(
+			router.retained().dead <= retained,
+			"dead hop {session} extended older timers"
+		);
+		now = now.saturating_add(HOP);
+	}
+}
+
+#[test]
+fn a_dead_repath_withdraws_its_claims_before_ending_the_sent_route() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	let path::Reach::Finite(mut old) = offered(1, 0) else {
+		unreachable!()
+	};
+	old.path = [
+		path::Hop { node: 7, session: 0 },
+		path::Hop { node: 6, session: 1 },
+		path::Hop { node: 4, session: 1 },
+		path::Hop { node: 1, session: 1 },
+	]
+	.into();
+	for prefix in ["", "a"] {
+		router.route(1, 7, p(prefix), Some(path::Reach::Finite(old.clone())), 0);
+		router.batch(1, 7, p(prefix), vec![(p("a/x"), Some(1))], Some(1), 0);
+	}
+	router.peer_interest(3, Some(p("a"))).unwrap();
+	// A child still names this relay, so its newer empty view is not believed yet.
+	let mut child = old;
+	child.path = [
+		path::Hop { node: 7, session: 0 },
+		path::Hop { node: 6, session: 1 },
+		path::Hop { node: 4, session: 1 },
+		path::Hop { node: 99, session: 1 },
+		path::Hop { node: 2, session: 1 },
+	]
+	.into();
+	router.route(2, 7, p("a"), Some(path::Reach::Finite(child)), 0);
+	router.batch(2, 7, p("a"), Vec::new(), Some(3), 0);
+	router.drain();
+	let path::Reach::Finite(offer) = offered(2, 1) else {
+		unreachable!()
+	};
+	router.dead(
+		2,
+		path::Dead {
+			hop: path::Hop { node: 4, session: 1 },
+			far: 6,
+			moved: vec![path::Moved {
+				id: 7,
+				prefix: p("a"),
+				offer,
+			}],
+			gone: false,
+		},
+		Instant::now(),
+	);
+	let messages = router.drain();
+	let withdrawal = messages.iter().position(|message| {
+		matches!(message,
+			path::Out::Batch { to: 3, prefix, changes, floor: Some(3), .. }
+			if *prefix == p("a") && changes.contains(&(p("a/x"), None))
+		)
+	});
+	assert!(
+		withdrawal.is_some(),
+		"the withdrawing floor must precede END: {messages:?}"
+	);
+	assert!(messages[..withdrawal.unwrap()].iter().all(|message| !matches!(
+		message,
+		path::Out::Dead { to: 3, .. } | path::Out::Route { to: 3, reach: None, .. }
+	)));
+}
 
 /// A follower holds a route per prefix for one key, each through its own relay,
 /// as a viewer session holding many announce prefixes does: one origin's claims
@@ -63,6 +215,35 @@ fn teardown_is_linear_in_prefixes_held() {
 		for pair in costs.windows(2) {
 			// Quadratic work would quadruple.
 			assert!(pair[1] <= 5 * pair[0] / 2, "{name}: {costs:?}");
+		}
+	}
+}
+
+/// Adding an unrelated scope visits the same number of routes and reader claims,
+/// regardless of how many sibling scopes this publisher already has.
+#[test]
+fn following_a_prefix_does_not_revisit_its_siblings() {
+	for claims in [1, 16] {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		let mut first = None;
+		for scope in 0..64 {
+			let before = router.work();
+			let prefix = p(&format!("live/{scope}"));
+			router.connect(scope, 1, Link::default()).unwrap();
+			router.route(scope, 7, prefix.clone(), Some(offered(1, 0)), 0);
+			let changes = (0..claims)
+				.map(|claim| (p(&format!("live/{scope}/{claim}")), Some(1)))
+				.collect();
+			router.batch(scope, 7, prefix, changes, Some(1), 0);
+			let work = router.work() - before;
+			let expected = *first.get_or_insert(work);
+			assert_eq!(
+				work, expected,
+				"scope {scope}, {claims} claims: sibling scopes were revisited"
+			);
+			router.events();
+			router.changed();
+			router.drain();
 		}
 	}
 }
@@ -286,15 +467,6 @@ fn a_cancelled_stream_cannot_restore_a_route() {
 	sim.watch(1, "b");
 	assert!(sim.run());
 	assert_eq!(sim.reaches(1, qualified("ga", 7), &p("b/x")), Some(0));
-}
-
-/// The prefix two regions share, or `None` when they are disjoint.
-fn meet(a: &Path, b: &Path) -> Option<Path> {
-	match (within(a, b), within(b, a)) {
-		(true, _) => Some(a.clone()),
-		(_, true) => Some(b.clone()),
-		_ => None,
-	}
 }
 
 /// The regions of each key that reach each node from `origin` along a path of

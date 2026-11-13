@@ -1,8 +1,9 @@
-//! A prototype router that keeps a route free of loops by its path alone.
+//! Cache-copy experiments that keep a route free of loops by its path alone.
 //!
-//! It exists to be measured against [`Router`], which keeps Babel's distance: the
-//! comparison in `compare.rs` runs one script on both. Nothing outside the tests
-//! uses it.
+//! Only `copies.rs` uses this prototype, for warm per-broadcast copies that
+//! `route::path::Router` does not implement. The router comparisons in `compare.rs`
+//! use `Sim` and the real path router. The separate cache-routing proof (#8615)
+//! replaces these experiments; they make no claim about the shipping route rule.
 //!
 //! A route is one per publisher and names every relay it crossed, each with the
 //! session that relay learned the route on. A relay uses the cheapest route whose

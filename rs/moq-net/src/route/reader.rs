@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Path;
 
-use super::view::ancestors;
+use super::view::{ancestors, within_set};
 use super::{Event, Id, Kind, Shown, within};
 
 /// How the reader sees each claim, and the events not yet taken.
 pub(crate) struct Reader<A> {
 	shown: BTreeMap<(Id, Path), Shown<A>>,
+	/// Claim paths indexed by publisher for scoped reader updates.
+	claims: BTreeMap<Id, BTreeSet<Path>>,
 	/// The identities recomputed since [`Self::changed`] last took them, each with
 	/// the claims whose shown state changed.
 	changed: BTreeMap<Id, BTreeSet<Path>>,
@@ -24,6 +26,7 @@ impl<A> Default for Reader<A> {
 	fn default() -> Self {
 		Self {
 			shown: BTreeMap::new(),
+			claims: BTreeMap::new(),
 			changed: BTreeMap::new(),
 			events: Vec::new(),
 			#[cfg(test)]
@@ -44,9 +47,14 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 
 	/// The claims of `id` the reader sees.
 	pub fn claims(&self, id: Id) -> impl Iterator<Item = &Path> {
-		(self.shown.range((id, Path::empty())..))
-			.take_while(move |((key, _), _)| *key == id)
-			.map(|((_, claim), _)| claim)
+		self.claims.get(&id).into_iter().flatten()
+	}
+
+	pub fn claims_within(&self, id: Id, prefix: &Path) -> impl Iterator<Item = &Path> {
+		self.claims
+			.get(&id)
+			.into_iter()
+			.flat_map(move |claims| within_set(claims, prefix))
 	}
 
 	/// Take the identities recomputed since the last call, each with the claims whose
@@ -160,10 +168,31 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 			}
 			changed.insert(key.1.clone());
 			match now {
-				Some(now) => self.shown.insert(key, now),
-				None => self.shown.remove(&key),
+				Some(now) => {
+					self.claims.entry(id).or_default().insert(key.1.clone());
+					self.shown.insert(key, now);
+				}
+				None => {
+					if let Some(claims) = self.claims.get_mut(&id) {
+						claims.remove(&key.1);
+						if claims.is_empty() {
+							self.claims.remove(&id);
+						}
+					}
+					self.shown.remove(&key);
+				}
 			};
 		}
+		#[cfg(test)]
+		assert_eq!(
+			self.claims(id).cloned().collect::<BTreeSet<_>>(),
+			self.shown
+				.range((id, Path::empty())..)
+				.take_while(|((key, _), _)| *key == id)
+				.map(|((_, claim), _)| claim.clone())
+				.collect(),
+			"reader claim index"
+		);
 	}
 
 	fn log(&mut self, id: Id, claim: Path, kind: Kind, item: A) {

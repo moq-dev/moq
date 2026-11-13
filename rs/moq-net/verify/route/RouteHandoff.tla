@@ -1,9 +1,8 @@
 ---------------------------- MODULE RouteHandoff ----------------------------
 (***************************************************************************)
 (* The lite-07 route rule the routes epic's Plan item 27 picked, for one   *)
-(* publisher and two prefixes, as the prototype in                         *)
-(* rs/moq-net/src/route/tests/paths.rs (`Relay` under `Rules::waits`) runs *)
-(* it, extended with a route per scope.                                    *)
+(* publisher and two prefixes, as Router in                               *)
+(* rs/moq-net/src/route/path.rs runs it, with a route per scope.            *)
 (*                                                                         *)
 (* A route is keyed by the prefix it covers: "root", or "a" inside it. A   *)
 (* relay in `Scoped` asks every neighbour for "a" alone, so a stream to it *)
@@ -22,7 +21,7 @@
 (*   is the step `Lift`, which may fire at any moment.                    *)
 (*                                                                         *)
 (* Each node's every entry point is one atomic step ending in `Update`,    *)
-(* as in the prototype. Messages travel on one FIFO per direction. A       *)
+(* as in the router. Messages travel on one FIFO per direction. A          *)
 (* session opens and closes atomically, dropping what was in flight, and   *)
 (* each opening is a new session with a new hop. A claim's attributes are  *)
 (* the revision that last set them.                                        *)
@@ -135,7 +134,7 @@ PathCost(path) ==
 Live(r) == r.on /\ ~r.held
 
 -----------------------------------------------------------------------------
-(* Selection on node n's state s (paths.rs: `select`, `pending`, `hopes`). *)
+(* Selection on node n's state s (path.rs: `select`, `pending`, `hopes`). *)
 
 Doubted(s, path) == \E i \in DOMAIN path : path[i][1] \in s.doubt
 
@@ -254,7 +253,7 @@ ShownNow(s) ==
               avail |-> Live(s.rt["root"]) \/ (c \in Narrow /\ Live(s.rt["a"]))]]
 
 -----------------------------------------------------------------------------
-(* What a node sends (paths.rs: `want`, `advertise`, `report`).            *)
+(* What a node sends (path.rs: `want`, `advertise`, `report`).            *)
 
 \* What this node wants a neighbour p to hold for key k: a path, a hold, an
 \* end, or to keep what it was sent while the next hop this node holds under
@@ -345,7 +344,7 @@ Report(n, s, ups, hop) ==
 Collect(s) ==
     LET heard == {s.rx[x[1]][x[2]].path : x \in {y \in Nodes \X Keys : s.rx[y[1]][y[2]].on}}
     IN [s EXCEPT
-          !.dead = {h \in s.dead : h[2] \in s.wait \/ \E p \in heard : HasHop(p, h)},
+          !.dead = {h \in s.dead : h \in s.expiry \/ \E p \in heard : HasHop(p, h)},
           !.doubt = {x \in s.doubt : \E p \in heard : Names(p, x)},
           !.told = [m \in Nodes |-> {h \in s.told[m] :
                        \E k \in Keys : s.tx[m][k].on /\ HasHop(s.tx[m][k].path, h)}]]
@@ -419,7 +418,7 @@ Commit(rs, q0) ==
        /\ learnt' = [n \in Nodes |-> IF n \in ns THEN learnt[n] \cup rs[n].dead ELSE learnt[n]]
 
 Quiet == \A d \in Dirs : q[d] = <<>>
-NoDoubt == \A n \in Nodes : st[n].wait = {}
+NoDoubt == \A n \in Nodes : st[n].wait = {} /\ st[n].expiry = {}
 
 \* The messages the updates `rs` send, counted before `Heeded` drops any.
 Sent(rs) == SumOver(DOMAIN rs, LAMBDA n : SumOver(Nodes, LAMBDA m : Len(rs[n].out[m])))
@@ -446,6 +445,7 @@ InitNode == [
     dead |-> {},
     doubt |-> {},
     wait |-> {},
+    expiry |-> {}, \* Pending timers belong to individual dead hops.
     tx |-> [m \in Nodes |-> [k \in Keys |-> NoSent(k)]],
     told |-> [m \in Nodes |-> {}],
     shown |-> [c \in Claims |-> NotShown]
@@ -494,7 +494,7 @@ Announce(c) == rev < MaxRev /\ ChangeClaim(c, rev + 1)
 Unannounce(c) == rev < MaxRev /\ own[c] # None /\ ChangeClaim(c, None)
 
 -----------------------------------------------------------------------------
-(* A message arrives (paths.rs: `recv`, `fail`).                            *)
+(* A message arrives (path.rs: `recv`, `fail`).                            *)
 
 \* `fail`: the session `hop` names closed. `from` reported it with what became
 \* of its own routes through it, or this node saw it close (`from` is None).
@@ -513,7 +513,7 @@ Fail(n, s, hop, from, moved, gone) ==
                             \* A neighbour that holds under this node answers once those behind it have.
                             ELSE IF ~Child(h.path, n) THEN [h EXCEPT !.state = "held"] ELSE h
                   ELSE IF h.state = "live" THEN [h EXCEPT !.state = "dead"] ELSE h]]
-    IN [s EXCEPT !.rx = rx1, !.dead = @ \cup {hop},
+    IN [s EXCEPT !.rx = rx1, !.dead = @ \cup {hop}, !.expiry = @ \cup {hop},
                  !.doubt = @ \cup ({hop[2]} \ {n}), !.wait = @ \cup ({hop[2]} \ {n})]
 
 Recv(n, s, from, msg) ==
@@ -550,10 +550,22 @@ Deliver(d) ==
 \* about such a hop is in flight: a timer long enough for the news to cross
 \* the mesh.
 Lift(n, x) ==
-    LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ {x}, !.wait = @ \ {x}],
+    LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ {x}, !.wait = @ \ {x},
+                                     !.expiry = {h \in @ : h[2] # x}],
                                      OV, up, gen, ended[n], NoReport, TRUE)]
     IN /\ x \in st[n].wait
        /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] : ~(q[d][i].t = "dead" /\ q[d][i].hop[2] = x)
+       /\ Commit(rs, q)
+       /\ Internal(Sent(rs))
+       /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
+
+\* A hop's own timer can fire before a later failure's timer on the same far
+\* node. A new DEAD cannot extend every old hop's retention indefinitely.
+Expire(n, hop) ==
+    LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.expiry = @ \ {hop}],
+                                     OV, up, gen, ended[n], NoReport, TRUE)]
+    IN /\ hop \in st[n].expiry
+       /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] : ~(q[d][i].t = "dead" /\ q[d][i].hop = hop)
        /\ Commit(rs, q)
        /\ Internal(Sent(rs))
        /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
@@ -612,6 +624,7 @@ Next ==
     \/ \E c \in Claims : Announce(c) \/ Unannounce(c)
     \/ \E d \in Dirs : Deliver(d)
     \/ \E n \in Relays, x \in Nodes : Lift(n, x)
+    \/ \E n \in Relays : \E hop \in st[n].expiry : Expire(n, hop)
     \/ \E l \in Links : Connect(l) \/ Disconnect(l)
     \/ Done
 

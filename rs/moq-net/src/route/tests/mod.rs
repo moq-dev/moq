@@ -454,7 +454,6 @@ impl Sim {
 		}
 	}
 
-	/// The mocked clock.
 	/// A node that sends only identities it serves, like a browser.
 	pub fn leaf(&mut self, node: Node) {
 		self.leaf[node] = true;
@@ -1485,35 +1484,62 @@ pub(super) fn false_ends(events: &[SimEvent]) -> usize {
 /// path rule a chain may come round only through a stale route, one whose next hop
 /// has moved since offering it: the model's `LoopsAreStale`.
 pub(super) fn assert_loop_free(sim: &Sim, nodes: usize, id: Id) {
+	if sim.paths() {
+		let claims: BTreeSet<Path> = (0..nodes)
+			.flat_map(|node| {
+				sim.path(node).routes(id).map(|(prefix, _)| prefix.clone()).chain(
+					sim.path(node)
+						.shown()
+						.keys()
+						.filter_map(move |(key, claim)| (*key == id).then_some(claim.clone())),
+				)
+			})
+			.collect();
+		for node in 0..nodes {
+			for claim in &claims {
+				assert_scoped_chain(sim, node, id, claim);
+			}
+		}
+		return;
+	}
 	for node in 0..nodes {
 		let mut chain = vec![node];
 		while let Some(next) = sim.next_hop(*chain.last().expect("a node"), id) {
 			if let Some(start) = chain.iter().position(|&seen| seen == next) {
 				let cycle = &chain[start..];
-				assert!(
-					sim.paths() && sim.stale(cycle, id),
-					"{id} loops from node {node} round {cycle:?}"
-				);
-				break;
+				panic!("{id} loops from node {node} round {cycle:?}");
 			}
 			chain.push(next);
 		}
 	}
 }
 
-impl Sim {
-	/// Whether some node of `cycle`, each routing `id` through the next, uses a route
-	/// its next hop no longer offers.
-	fn stale(&self, cycle: &[Node], id: Id) -> bool {
-		(0..cycle.len()).any(|i| {
-			let (at, next) = (cycle[i], cycle[(i + 1) % cycle.len()]);
-			let Some((prefix, _)) = (self.path(at).routes(id)).find(|(_, route)| route.offer.is_some()) else {
-				return true;
-			};
-			let heard = self.path(at).heard_offer(id, prefix, next).map(|offer| &offer.path);
-			let current =
-				(self.path(next).route_for(id, prefix)).and_then(|route| route.offer.as_ref().map(|offer| &offer.path));
-			heard.is_none() || heard != current
-		})
+/// Follow an actual request, keeping the route prefix and translated identity at
+/// each hop. A transient cycle must contain an offer its next hop no longer uses.
+fn assert_scoped_chain(sim: &Sim, node: Node, id: Id, claim: &Path) {
+	let (mut at, mut key, mut from) = (node, id, None);
+	let mut chain: Vec<(Node, bool)> = Vec::new();
+	while let Some(path::Forward::Next { next, named, prefix }) = sim.path(at).forward(key, claim, from.take()) {
+		let heard = sim.path(at).heard_offer(key, &prefix, next).map(|offer| &offer.path);
+		let current_prefix = match sim.path(next).forward(named, claim, Some((at, prefix.clone()))) {
+			Some(path::Forward::Next { prefix, .. }) => Some(prefix),
+			Some(path::Forward::Here) => Some(Path::empty()),
+			None => None,
+		};
+		let current = current_prefix
+			.as_ref()
+			.and_then(|prefix| sim.path(next).route_for(named, prefix))
+			.and_then(|route| route.offer.as_ref())
+			.map(|offer| &offer.path);
+		chain.push((at, heard.is_none() || heard != current));
+		if let Some(start) = chain.iter().position(|(seen, _)| *seen == next) {
+			assert!(
+				chain[start..].iter().any(|(_, stale)| *stale),
+				"{id} {claim:?} loops from node {node} round {chain:?}"
+			);
+			break;
+		}
+		from = Some((at, prefix));
+		(at, key) = (next, named);
 	}
 }
