@@ -324,36 +324,34 @@ impl Reader {
 		// count it twice, on the subscription and in the start's reach.
 		let playout = moq_mux::container::Playout::new(delay, std::time::Duration::ZERO);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
-		let mut subscriber = track
-			.subscribe(
-				// The whole delay from the first request, as the container keeps it, so the
-				// publisher never sees a stated zero min before the container's update.
-				playout
-					.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video)),
-			)
-			.await?;
-		// A decoder often opens on a track that is already cached: a replacement
-		// decoder subscribes while its predecessor still holds groups, and a
-		// rendition switched away from and back to stays warm on the origin for
-		// `moq_net::model::track::IDLE_LINGER` (cached groups, not an upstream subscription). A
-		// caller that asked for `Start::Latest` wants none of that backlog,
-		// because a cursor starting at sequence zero replays every cached group
-		// at decode speed before reaching live media, which on a thirty-second
-		// retention is half a minute of pictures raced through.
+		// The whole delay from the first request, as the container keeps it, so the publisher
+		// never sees a stated zero min before the container's update.
+		let mut subscription =
+			playout.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video));
+		// A decoder often opens on a track that is already cached: a replacement decoder
+		// subscribes while its predecessor still holds groups, and a rendition switched away from
+		// and back to stays warm on the origin for `moq_net::model::track::IDLE_LINGER` (cached
+		// groups, not an upstream subscription). A caller that asked for `Start::Latest` wants none
+		// of that backlog, which a cursor starting at the oldest group would replay at decode
+		// speed before reaching live media: on a thirty-second retention, half a minute of pictures
+		// raced through.
 		//
-		// This moves the local read cursor and deliberately not
-		// `Subscription::group_start`. That field is a request to the publisher,
-		// aggregated across every live subscriber, so naming a stale cached
-		// sequence there asks the publisher to rewind the track for everyone
-		// reading it. What a player wants is to skip what it already has.
-		//
-		// The live edge is known only once the feed is live: a warm copy still waiting on
-		// its source reports nothing yet, so wait for it rather than read the backlog. The
-		// wait ends with the track.
-		if options.start == Start::Latest
-			&& let Some(live_edge) = subscriber.largest().await
-		{
-			subscriber = subscriber.with_range(live_edge.group.saturating_sub(lookback)..);
+		// A relative start counts back through the groups each hop holds from its live feed's
+		// latest, never from what an ended feed left cached, so it names no stale group that would
+		// ask the publisher to rewind for everyone reading. Group starts are sparse, so only a
+		// count, not arithmetic on the live edge's start, reaches the group before it.
+		if options.start == Start::Latest {
+			subscription = subscription.with_ranges([moq_net::track::Range {
+				start: moq_net::track::Anchor::Relative(lookback),
+				end: None,
+			}]);
+		}
+		let mut subscriber = track.subscribe(subscription).await?;
+		// The live edge is known only once the feed is live: a warm copy still waiting on its
+		// source reports nothing yet. Opening waits for it, or the track's end, as `Start::Latest`
+		// promises.
+		if options.start == Start::Latest {
+			subscriber.largest().await;
 		}
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy
@@ -629,16 +627,14 @@ mod tests {
 			"a fresh consumer replayed the groups an earlier reader still holds",
 		);
 
-		// The skip is the local read cursor and nothing else. Asking for it
-		// through `Subscription::ranges` would look equivalent and is not: the
-		// floor is aggregated across every live subscriber and tells the
-		// publisher what to send, so naming a cached sequence there rewinds the
-		// track for everyone reading it. A rendition switched away from and back
-		// to is the case that bites, because its cached sequence is stale by
-		// then and the publisher resends the broadcast from it.
+		// The skip names no cached group. The ranges are aggregated across every live
+		// subscriber and tell the publisher what to send, so a start at a cached group would
+		// rewind the track for everyone reading it. A rendition switched away from and back to
+		// is the case that bites, because its cached groups are stale by then and the publisher
+		// resends the broadcast from them. The live start counts from each hop's live feed.
 		assert_eq!(
 			published.subscription().map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::oldest()]),
+			Some(vec![moq_net::track::Range::live()]),
 			"the publisher was asked to rewind the track",
 		);
 	}
@@ -1344,6 +1340,36 @@ mod tests {
 		catch_up(&mut consumer).await;
 		write(&mut live, &[6]);
 		assert_eq!(read(&mut consumer).await, (6, Lane::Max));
+	}
+
+	/// Groups are keyed by their start, so the one before the live edge lies a whole group's
+	/// span below it: the max-delay decoder reaches it by counting groups back, not by stepping
+	/// one below the live edge's start.
+	#[tokio::test]
+	async fn the_max_delay_decoder_counts_back_a_group_across_sparse_starts() {
+		let (broadcast, mut track) = live_track();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
+		let _live = group(&mut track, 4 * SECOND, &[4, 5]);
+
+		let mut consumer = dual(
+			&broadcast,
+			Start::Latest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+		let Ok(Some(Read::Frame(first))) = consumer.reader(Lane::Max).read().await else {
+			panic!("the max-delay decoder produced no picture");
+		};
+		assert_eq!(
+			first.timestamp,
+			Timestamp::from_micros(0).unwrap(),
+			"it starts a group earlier"
+		);
+		let Ok(Some(Read::Frame(first))) = consumer.reader(Lane::Min).read().await else {
+			panic!("the min-delay decoder produced no picture");
+		};
+		assert_eq!(first.timestamp, Timestamp::from_micros(4 * SECOND).unwrap());
 	}
 
 	/// A stall shorter than a sweep makes the min-delay decoder skip, while the
