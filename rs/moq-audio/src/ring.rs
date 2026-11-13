@@ -1687,6 +1687,23 @@ mod tests {
 		assert!(cons.inputs(0).lag <= 0);
 	}
 
+	/// Reads are placed where they sound, so the queue holds the target less
+	/// the device's delay, though never less than the callback being read.
+	#[test]
+	fn the_device_delay_comes_off_the_target_the_queue_holds() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(100));
+		let base = prod.base;
+		assert_eq!(prod.push(&pcm), Push::Ok);
+		let mut out = vec![0.0; 480 * 2];
+		cons.heard(1_440);
+		pull(&mut cons, &mut out, base);
+		assert_eq!(cons.inputs(0).target, 4_800 - 1_440);
+		cons.heard(48_000);
+		pull(&mut cons, &mut out, base);
+		assert_eq!(cons.inputs(0).target, 480);
+	}
+
 	#[test]
 	fn staged_audio_is_buffered_and_finish_drains_it() {
 		let (mut prod, mut cons) = channel(

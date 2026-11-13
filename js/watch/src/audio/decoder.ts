@@ -68,7 +68,7 @@ export type DecoderOutput = {
 	sampleRate: Signal<number | undefined>;
 	stats: Signal<Stats | undefined>;
 
-	// Current playback timestamp from worklet
+	// The playback timestamp sounding at the speaker, as of the worklet's last report.
 	timestamp: Signal<Duration | undefined>;
 
 	// Whether the audio buffer is stalled (waiting to fill). A silence the publisher declared, such as

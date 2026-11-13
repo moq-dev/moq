@@ -415,6 +415,30 @@ reference window restarts, so the new track's frames are measured against its
 own fastest. Its opening backlog would read as seconds late against the old
 track's arrivals.
 
+## At the speaker
+
+Audio is placed on the clock where it is heard, not where it is rendered. The
+output takes time to sound what the player hands it, so an audio track's target
+also counts that **output latency**, and video waits for it too, which lip sync
+on that device needs:
+
+```
+target = max(measured, advertised) + frame + output
+```
+
+The player reads the clock at the moment the output sounds a sample and renders
+the media due then; its buffer holds the target less the delay between render
+and speaker. The output latency is the most the device reported over the last
+5 s, since a host's report moves with where each read lands.
+
+| | Placed at | `output` |
+| --- | --- | --- |
+| Browser | `getOutputTimestamp()`, the context time sounding at a page instant, against which the clock is paired at the greatest offset, falling 0.1 ms a report | `baseLatency` plus the peak `outputLatency` |
+| Native | the callback's playback timestamp | the host's reported delay plus one device period |
+
+A fixed browser delay is still taken literally. A fixed native delay is floored
+at the output latency, since audio cannot sound sooner.
+
 ## Rise, fall, startup, and the ceiling
 
 There is **no separate rise or fall limiter**. The histogram is the only

@@ -2797,6 +2797,24 @@ mod tests {
 		);
 	}
 
+	/// The latency the clock holds is the device's peak over the window: a lower
+	/// reading holds until the higher one ages out, and a higher one takes over at once.
+	#[test]
+	fn the_output_latency_holds_its_peak_for_the_window() {
+		let start = Instant::now();
+		let at = |secs: u64| start.saturating_add(Duration::from_secs(secs));
+		let ms = Duration::from_millis;
+		let mut peak = Peak::default();
+		assert_eq!(peak.observe(None, at(0)), None);
+		assert_eq!(peak.observe(Some(ms(20)), at(0)), Some(ms(20)));
+		assert_eq!(peak.observe(Some(ms(14)), at(1)), Some(ms(20)));
+		assert_eq!(peak.observe(None, at(5)), Some(ms(20)));
+		assert_eq!(peak.observe(Some(ms(15)), at(6)), Some(ms(15)));
+		assert_eq!(peak.observe(Some(ms(40)), at(7)), Some(ms(40)));
+		// Unreported since, the last peak stands.
+		assert_eq!(peak.observe(None, at(60)), Some(ms(40)));
+	}
+
 	#[tokio::test]
 	async fn a_finite_audio_track_plays_its_final_samples() {
 		tokio::time::pause();

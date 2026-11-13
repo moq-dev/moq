@@ -1,12 +1,16 @@
 import { describe, expect, it } from "bun:test";
-import { Duration } from "@moq/clock";
-import { ringCapacity, ringHold, ringSamples, target } from "./latency";
+import { Duration, Instant } from "@moq/clock";
+import { Peak, ringCapacity, ringHold, ringSamples, target } from "./latency";
 
 const ms = (value: number) => Duration.millis(value);
 
 describe("target", () => {
 	it("adds one frame to the measured term", () => {
 		expect(target({ measured: ms(40), frame: ms(20) })).toEqual(ms(60));
+	});
+
+	it("adds the output latency, since audio is placed where it is heard", () => {
+		expect(target({ measured: ms(40), frame: ms(20), output: ms(42) })).toEqual(ms(102));
 	});
 
 	it("floors the measured term at the advertised span instead of adding it", () => {
@@ -55,5 +59,18 @@ describe("ringHold", () => {
 	it("holds exactly nothing for a target within the cap", () => {
 		expect(ringHold(ms(203.21995464852608))).toEqual(Duration.micros(0));
 		expect(ringHold(ms(500))).toEqual(Duration.micros(0));
+	});
+});
+
+describe("Peak", () => {
+	// A lower reading holds until the higher one ages out of the window; a higher one takes over at once.
+	it("holds the highest output latency for five seconds", () => {
+		const at = (secs: number) => Instant.ZERO.saturatingAdd(Duration.secs(secs));
+		const peak = new Peak();
+		expect(peak.observe(ms(120), at(0))).toEqual(ms(120));
+		expect(peak.observe(ms(104), at(1))).toEqual(ms(120));
+		expect(peak.observe(ms(112), at(5))).toEqual(ms(120));
+		expect(peak.observe(ms(108), at(6))).toEqual(ms(112));
+		expect(peak.observe(ms(128), at(7))).toEqual(ms(128));
 	});
 });
