@@ -1,6 +1,5 @@
 //! The driver: one future that owns the transport and moves the session's records over it.
 
-use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,7 +64,6 @@ impl<T: Transport> Driver<T> {
 				reading: true,
 				unflushed: false,
 				room: true,
-				outbound: VecDeque::new(),
 				phase: Phase::Open,
 				sent_bytes: 0,
 				received_bytes: 0,
@@ -202,8 +200,6 @@ struct Run<T> {
 	unflushed: bool,
 	/// The transport took everything and flushed it, so the connection may hand over more.
 	room: bool,
-	/// Records taken from the connection but not yet handed to the transport, which had no room.
-	outbound: VecDeque<Bytes>,
 	phase: Phase,
 	sent_bytes: u64,
 	received_bytes: u64,
@@ -288,36 +284,18 @@ impl<T: Transport> Run<T> {
 			state.conn.handle_timeout(now);
 		}
 
-		// Take a batch from the connection only while the transport has room for it, so a
-		// stalled transport leaves unreliable datagrams in the connection to be shed. With
-		// nothing to send, `poll_transmit` parks us until a handle queues something.
-		let mut gathered = 0;
-		if self.room && self.outbound.is_empty() {
-			while gathered < BATCH_BYTES {
-				let Poll::Ready(record) = state.conn.poll_transmit(waiter, now) else {
-					break;
-				};
-				gathered += record.len();
-				self.outbound.push_back(record);
-			}
-		}
-		// A close, local or not, starts the close bound, even while the transport holds this
-		// batch or an earlier one back. `poll_transmit` would take records the transport has no
-		// room for, so wait for the close with `poll_closed`; the transport wakes us for room.
-		let _ = state.conn.poll_closed(waiter);
-		state.check_lost();
-		if state.conn.is_closed() && matches!(self.phase, Phase::Open) {
-			self.phase = Phase::Flushing(now.saturating_add(CLOSE_TIMEOUT));
-		}
-		let drained = state.conn.is_drained();
-		let deadline = state.conn.poll_timeout();
-		// Hand the batch to the transport outside the lock: it copies each record, and
-		// tungstenite may write to the socket, while the handles on other threads wait.
+		// Hand records to the transport outside the lock: it copies each one, and tungstenite
+		// may write to the socket, while the handles on other threads wait.
 		drop(state);
 
+		// Take a record from the connection only once the transport is ready for it, and hand
+		// it over at once. The connection counts a record's stream data as delivered when it
+		// hands the record out, so one held back here would count bytes a failing session never
+		// sends. A stalled transport also leaves unreliable datagrams in the connection to be
+		// shed. With nothing to send, `poll_transmit` parks us until a handle queues something.
 		let mut written = 0;
 		let mut blocked = false;
-		while let Some(record) = self.outbound.front() {
+		while self.room && written < BATCH_BYTES {
 			match self.transport.poll_ready(waiter) {
 				Poll::Ready(Ok(())) => {}
 				Poll::Ready(Err(err)) => return Step::Failed(err),
@@ -326,12 +304,27 @@ impl<T: Transport> Run<T> {
 					break;
 				}
 			}
+			let Poll::Ready(record) = self.inner.lock().conn.poll_transmit(waiter, now) else {
+				break;
+			};
 			written += record.len();
-			let record = self.outbound.pop_front().expect("peeked above");
 			if let Err(err) = self.transport.send(record) {
 				return Step::Failed(err);
 			}
 		}
+
+		let mut state = self.inner.lock();
+		// A close, local or not, starts the close bound, even while the transport holds what
+		// the connection has to send. `poll_transmit` would take records the transport has no
+		// room for, so wait for the close with `poll_closed`; the transport wakes us for room.
+		let _ = state.conn.poll_closed(waiter);
+		state.check_lost();
+		if state.conn.is_closed() && matches!(self.phase, Phase::Open) {
+			self.phase = Phase::Flushing(now.saturating_add(CLOSE_TIMEOUT));
+		}
+		let drained = state.conn.is_drained();
+		let deadline = state.conn.poll_timeout();
+		drop(state);
 
 		self.inner.wire.set_received_bytes(self.received_bytes);
 		self.sent_bytes += written as u64;
@@ -352,7 +345,7 @@ impl<T: Transport> Run<T> {
 		let had_room = std::mem::replace(&mut self.room, flushed && !blocked);
 		self.set_stalled(!self.room);
 
-		if drained && self.outbound.is_empty() && self.room {
+		if drained && self.room {
 			return Step::Drained;
 		}
 		let closing = self.phase.deadline();
@@ -363,7 +356,7 @@ impl<T: Transport> Run<T> {
 		// Each step already wrote what the records it read made the connection say, so go again
 		// only when a batch cut a direction short, or the transport has room again for what the
 		// connection held back meanwhile.
-		if more_to_read || (self.room && (gathered >= BATCH_BYTES || !had_room)) {
+		if more_to_read || (self.room && (written >= BATCH_BYTES || !had_room)) {
 			return Step::Progress;
 		}
 		let deadline = match (deadline, closing) {
