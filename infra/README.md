@@ -272,8 +272,9 @@ merge to `main`, for x86 Linux, ARM Linux, and ARM macOS. It publishes the full
 build closure from `nix develop --profile`, uploading only missing paths, plus
 `moq-libav`, its wasm build, and its downloaded sources, which `bun install`
 builds outside the dev shell. An independent x86 Linux job builds and pushes
-the `moq-relay` and `moq` runtime closures for Smoke's nix channel, which
-reads them without write keys. Their existing Crane `cargoArtifacts` outputs
+the `moq-relay`, `moq`, and `moq-boy` closures that Smoke's nix channel and
+demo deploys pin by commit (`just gh cache-rev`), which read them without
+write keys. Their existing Crane `cargoArtifacts` outputs
 are published first so later builds can substitute them when their inputs
 are unchanged; those inputs include the patched `kio` sources. The other
 platforms have no Smoke nix lane. Runtime warms serialize: the active run
