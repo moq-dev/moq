@@ -1520,7 +1520,8 @@ mod tests {
 		// The reader may skip to the latest group, but never sees the track end before the new caps.
 		loop {
 			let group = subscriber.recv_group().await.unwrap().expect("the track continues");
-			if group.sequence == 2 {
+			let start = moq_net::Timestamp::new(group.start, group.timescale().unwrap()).unwrap();
+			if start.as_millis() == 80 {
 				break;
 			}
 		}
@@ -1550,7 +1551,7 @@ mod tests {
 			pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera"))),
 			CapsOutcome::Active("camera/1".to_string())
 		);
-		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").sequence, 0);
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 0);
 		assert!(subscriber.recv_group().await.unwrap().is_none(), "the old track ended");
 	}
 

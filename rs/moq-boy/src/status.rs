@@ -62,9 +62,18 @@ impl StatusPublisher {
 		}
 		if let Err(err) = self
 			.producer
-			.update(moq_net::Timed::from(status).at(moq_net::Timestamp::now()))
+			.update(moq_net::Timed::from(status).at(now()))
 		{
 			tracing::warn!(%err, "failed to publish status");
 		}
 	}
+}
+
+/// Milliseconds on this process's monotonic clock since its origin: the status track's timescale.
+fn now() -> moq_net::Timestamp {
+	let elapsed = kio::clock::now().saturating_duration_since(kio::clock::origin().0);
+	u64::try_from(elapsed.as_millis())
+		.ok()
+		.and_then(|millis| moq_net::Timestamp::from_millis(millis).ok())
+		.expect("a process's uptime fits a timestamp")
 }

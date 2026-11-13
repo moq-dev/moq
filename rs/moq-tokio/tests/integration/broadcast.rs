@@ -1053,8 +1053,6 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// the same bytes and the subscription rides the failover.
 #[tokio::test]
 async fn broadcast_route_migration() {
-	use moq_net::Timestamp;
-
 	// Replicas of one publisher instance, and the only version that carries it.
 	let instance = moq_net::Instance::random();
 	let lite_07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
@@ -1504,8 +1502,6 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 /// cost as another active update for the same prefix, with no retraction and an
 /// uninterrupted subscription.
 async fn route_reannounce_test(version: Option<&str>) {
-	use moq_net::Timestamp;
-
 	let version: Option<moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
 
 	// ── publisher (server) ──────────────────────────────────────────
