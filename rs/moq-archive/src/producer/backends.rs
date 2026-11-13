@@ -32,22 +32,22 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 		)
 		.unwrap();
 	for sequence in 0..groups {
-		let mut group = video.create_group(group::Info { sequence }).unwrap();
+		let mut group = video.create_group(group::Info { start: sequence }).unwrap();
 		for frame in 0..2 {
 			let pts = Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
 			group.write_frame(pts, format!("v{sequence}.{frame}")).unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	let text = source
 		.create_track(CHAT, track::Info::default().with_max_age(None))
 		.unwrap();
 	for (sequence, frames) in chat {
-		let mut group = text.create_group(group::Info { sequence: *sequence }).unwrap();
+		let mut group = text.create_group(group::Info { start: *sequence }).unwrap();
 		for frame in *frames {
 			group.write_frame(None, frame.to_string()).unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	(source, [video, text])
 }

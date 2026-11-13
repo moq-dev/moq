@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use futures::TryStreamExt;
-use moq_net::{Timescale, Timestamp};
+use moq_net::Timescale;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 
@@ -32,10 +32,11 @@ pub(super) struct Index {
 	pub timescale: Option<Timescale>,
 	/// Each object's first frame timestamp, on a timed track, and key.
 	objects: BTreeMap<Start, (Option<u64>, Path)>,
-	/// Each timed object starting a group, by that group's start timestamp with where it
-	/// starts, so a time finds the newest such object at or before it in one lookup. Group
-	/// starts never rewind, so they sort as the objects do. An object continuing a group is
-	/// left out: its first frame says nothing about where the groups after it start.
+	/// Each object starting a group, by that group's start time with where it starts, so a
+	/// time finds the newest such object at or before it in one lookup: its first frame's
+	/// timestamp on a timed track, its key on a scale-less one, whose times are bare starts.
+	/// Group starts never rewind, so they sort as the objects do. An object continuing a group
+	/// is left out: its first frame says nothing about where the groups after it start.
 	times: BTreeSet<(u64, Start)>,
 	/// The newest key listed, which the next listing starts after.
 	cursor: Path,
@@ -66,12 +67,21 @@ impl Index {
 	pub fn extend(&mut self, objects: &[Listing]) {
 		for (start, pts, path) in objects {
 			self.objects.insert(*start, (*pts, path.clone()));
-			if let Some(pts) = pts
+			if let Some(at) = self.time(*start, *pts)
 				&& start.1 == 0
 			{
-				self.times.insert((*pts, *start));
+				self.times.insert((at, *start));
 			}
 			self.cursor = path.clone();
+		}
+	}
+
+	/// The time an object starting at `start` is looked up by: its first frame's timestamp `pts`
+	/// on a timed track, its key on a scale-less one.
+	fn time(&self, start: Start, pts: Option<u64>) -> Option<u64> {
+		match self.timescale {
+			Some(_) => pts,
+			None => Some(start.0),
 		}
 	}
 
@@ -101,18 +111,12 @@ impl Index {
 		(holding, after)
 	}
 
-	/// The objects that may hold the newest group starting at or before `pts`, newest first:
+	/// The objects that may hold the newest group starting at or before `limit`, in the track's
+	/// timescale, newest first:
 	/// from the newest object starting a group at or before it, or the oldest object when none
 	/// does, up to the next object starting a group after it, which holds only later groups.
 	/// One continuing a group the next object still continues starts none, so it is skipped.
-	/// Empty on an untimed track.
-	pub fn around(&self, pts: Timestamp) -> Vec<(Start, Path)> {
-		let Some(timescale) = self.timescale else {
-			return Vec::new();
-		};
-		// A stored timestamp is whole, so it is at or before `pts` exactly when it is at or
-		// before `pts` rounded down to the track's timescale.
-		let limit = u64::try_from(pts.as_scale(timescale)).unwrap_or(u64::MAX);
+	pub fn around(&self, limit: u64) -> Vec<(Start, Path)> {
 		let from = self
 			.times
 			.range(..=(limit, (u64::MAX, u64::MAX)))
@@ -122,7 +126,7 @@ impl Index {
 		let mut around = Vec::new();
 		let mut objects = self.objects.range(from..).peekable();
 		while let Some((start, (first, path))) = objects.next() {
-			if start.1 == 0 && first.is_some_and(|first| first > limit) {
+			if start.1 == 0 && self.time(*start, *first).is_some_and(|first| first > limit) {
 				break;
 			}
 			let continued = start.1 > 0 && objects.peek().is_some_and(|(next, _)| next.0 == start.0);
@@ -145,8 +149,10 @@ impl Index {
 
 	/// Forget an object the store no longer has, such as one a DVR pruned.
 	pub fn forget(&mut self, start: Start) {
-		if let Some((Some(pts), _)) = self.objects.remove(&start) {
-			self.times.remove(&(pts, start));
+		if let Some((pts, _)) = self.objects.remove(&start)
+			&& let Some(at) = self.time(start, pts)
+		{
+			self.times.remove(&(at, start));
 		}
 	}
 }

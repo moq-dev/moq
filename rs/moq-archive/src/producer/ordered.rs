@@ -70,7 +70,7 @@ impl Ordered {
 	}
 
 	fn arrive(&mut self, group: Box<group::Consumer>, now: Instant) {
-		let sequence = group.sequence;
+		let sequence = group.start;
 		// A sequence names one group, so a copy of one already here or handed out is dropped.
 		if self.next.is_none_or(|next| sequence >= next)
 			&& let std::collections::btree_map::Entry::Vacant(entry) = self.pending.entry(sequence)
@@ -163,14 +163,14 @@ mod tests {
 	}
 
 	fn group(track: &track::Producer, sequence: u64) {
-		let mut group = track.create_group(group::Info { sequence }).unwrap();
+		let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 		group.write_frame(None, "x").unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 
 	fn next(ordered: &mut Ordered) -> Option<u64> {
 		match ordered.poll_next(&kio::Waiter::noop()) {
-			Poll::Ready(Some(group)) => Some(group.sequence),
+			Poll::Ready(Some(group)) => Some(group.start),
 			_ => None,
 		}
 	}

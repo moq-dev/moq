@@ -45,11 +45,11 @@ fn ms(ms: u64) -> Timestamp {
 
 /// Write a whole group of `(pts, payload)` frames.
 fn group(track: &track::Producer, sequence: u64, frames: &[(u64, &str)]) {
-	let mut group = track.create_group(group::Info { sequence }).unwrap();
+	let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 	for (pts, payload) in frames {
 		group.write_frame(ms(*pts), payload.to_string()).unwrap();
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 /// Let the producer catch up without moving time far.
@@ -315,7 +315,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&data).await;
 
-	let mut open = data.create_group(group::Info { sequence: 0 }).unwrap();
+	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
 	open.write_frame(None, "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
@@ -333,7 +333,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 		[[(0, vec!["a".to_string()])], [(0, vec!["b".to_string()])]]
 	);
 
-	open.finish().unwrap();
+	open.close().unwrap();
 	let _data = data.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
@@ -352,18 +352,18 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&data).await;
 
-	let mut open = data.create_group(group::Info { sequence: 0 }).unwrap();
+	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
 	for payload in ["a", "b", "c", "d", "e"] {
 		open.write_frame(None, payload).unwrap();
 		settle().await;
 		sleep(SECOND / 2).await;
 	}
-	open.finish().unwrap();
+	open.close().unwrap();
 	settle().await;
 	sleep(2 * SECOND).await;
-	let mut next = data.create_group(group::Info { sequence: 1 }).unwrap();
+	let mut next = data.create_group(group::Info { start: 1 }).unwrap();
 	next.write_frame(None, "f").unwrap();
-	next.finish().unwrap();
+	next.close().unwrap();
 	settle().await;
 	let _data = data.finish().unwrap();
 	broadcast.close();
@@ -393,7 +393,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&video).await;
 
-	let mut open = video.create_group(group::Info { sequence: 0 }).unwrap();
+	let mut open = video.create_group(group::Info { start: 0 }).unwrap();
 	open.write_frame(ms(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND / 2).await;
@@ -406,7 +406,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 
 	// The open group continues in the next object.
 	open.write_frame(ms(100), "b").unwrap();
-	open.finish().unwrap();
+	open.close().unwrap();
 	settle().await;
 	let _video = video.finish().unwrap();
 	broadcast.close();
@@ -428,8 +428,8 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	subscribed(&video).await;
 	subscribed(&data).await;
 
-	let mut timed_group = video.create_group(group::Info { sequence: 0 }).unwrap();
-	let mut untimed_group = data.create_group(group::Info { sequence: 0 }).unwrap();
+	let mut timed_group = video.create_group(group::Info { start: 0 }).unwrap();
+	let mut untimed_group = data.create_group(group::Info { start: 0 }).unwrap();
 	for (pts, payload) in [(0, "a"), (100, "b")] {
 		timed_group.write_frame(ms(pts), payload).unwrap();
 		untimed_group.write_frame(None, payload).unwrap();
@@ -446,8 +446,8 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	settle().await;
 	timed_group.write_frame(ms(300), "d").unwrap();
 	untimed_group.write_frame(None, "d").unwrap();
-	timed_group.finish().unwrap();
-	untimed_group.finish().unwrap();
+	timed_group.close().unwrap();
+	untimed_group.close().unwrap();
 	settle().await;
 	let _video = video.finish().unwrap();
 	let _data = data.finish().unwrap();
@@ -493,7 +493,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	subscribed(&video).await;
 
 	group(&video, 0, &[(0, "a")]);
-	let mut partial = video.create_group(group::Info { sequence: 1 }).unwrap();
+	let mut partial = video.create_group(group::Info { start: 1 }).unwrap();
 	partial.start_at(2).unwrap();
 	partial.write_frame(ms(500), "c").unwrap();
 	settle().await;
@@ -504,7 +504,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	let task = spawn(&store, &broadcast, config);
 	settle().await;
 	partial.write_frame(ms(600), "d").unwrap();
-	partial.finish().unwrap();
+	partial.close().unwrap();
 	settle().await;
 	let _video = video.finish().unwrap();
 	broadcast.close();
@@ -587,9 +587,9 @@ async fn track_names_stay_one_segment_through_a_resume() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	for track in &tracks {
 		subscribed(track).await;
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(None, "x").unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	settle().await;
 	sleep(SECOND).await;
@@ -713,12 +713,12 @@ async fn markers_wait_for_the_listing_to_end() {
 	subscribed(&audio).await;
 
 	group(&video, 0, &[(0, "a")]);
-	let mut last = video.create_group(group::Info { sequence: 1 }).unwrap();
+	let mut last = video.create_group(group::Info { start: 1 }).unwrap();
 	last.write_frame(ms(1000), "b").unwrap();
 	last.write_frame(ms(1100), "c").unwrap();
 	// A mid-group end: frames 0 and 1 of group 1.
-	video.finish_at(Position { group: 1, frame: 2 }, None).unwrap();
-	last.finish().unwrap();
+	video.finish_at(Position::new(1, 2), None).unwrap();
+	last.close().unwrap();
 	settle().await;
 	sleep(SECOND).await;
 	// Ended, but a track re-added under the name would continue it.

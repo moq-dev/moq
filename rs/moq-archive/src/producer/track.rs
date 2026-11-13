@@ -162,7 +162,7 @@ impl<S: ObjectStore> Track<S> {
 		let config = &shared.config;
 		let range = match self.next {
 			Some(next) => Range {
-				start: Anchor::Absolute(next.group),
+				start: Anchor::Time(next.group),
 				end: None,
 			},
 			None => Range::oldest(),
@@ -228,7 +228,7 @@ impl<S: ObjectStore> Track<S> {
 			match event {
 				Event::Frame(index, read) => self.frame(&mut current, index, read, now)?,
 				Event::Next(Some(group)) => {
-					let sequence = group.sequence;
+					let sequence = group.start;
 					// A resumed group continues after its stored frames. The clamp also starts a
 					// group whose head is held elsewhere at its first frame, rather than lagging
 					// behind it.
@@ -237,10 +237,7 @@ impl<S: ObjectStore> Track<S> {
 						.filter(|next| next.group == sequence)
 						.map_or(0, |next| next.frame);
 					let group = Box::new(group.with_range(stored..));
-					self.next = Some(Position {
-						group: sequence,
-						frame: group.index(),
-					});
+					self.next = Some(Position::new(sequence, group.index()));
 					current = Some(group);
 				}
 				Event::Next(None) => break,
@@ -266,7 +263,7 @@ impl<S: ObjectStore> Track<S> {
 		read: moq_net::Result<Option<moq_net::frame::Frame>>,
 		now: Instant,
 	) -> Result<()> {
-		let sequence = current.as_ref().expect("reading a group").sequence;
+		let sequence = current.as_ref().expect("reading a group").start;
 		match read {
 			Ok(Some(frame)) => {
 				let frame = Frame {
@@ -274,10 +271,7 @@ impl<S: ObjectStore> Track<S> {
 					payload: frame.payload,
 				};
 				self.push(sequence, index, frame, now)?;
-				self.next = Some(Position {
-					group: sequence,
-					frame: index + 1,
-				});
+				self.next = Some(Position::new(sequence, index + 1));
 			}
 			ended => {
 				if let Err(err) = ended {

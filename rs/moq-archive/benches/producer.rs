@@ -29,12 +29,12 @@ fn setup(tracks: usize, groups: u64) -> (broadcast::Producer, Vec<track::Produce
 		.map(|index| {
 			let track = source.create_track(format!("track{index}"), info.clone()).unwrap();
 			for sequence in 0..groups {
-				let mut group = track.create_group(group::Info { sequence }).unwrap();
+				let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 				for frame in 0..FRAMES_PER_GROUP {
 					let pts = Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
 					group.write_frame(pts, vec![0u8; 64]).unwrap();
 				}
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 			track
 		})
