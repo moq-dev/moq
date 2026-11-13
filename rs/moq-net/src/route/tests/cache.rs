@@ -551,7 +551,11 @@ fn a_request_crossing_a_withdrawal_is_forwarded_without_a_loop() {
 	assert!(mesh.offered(c, b, &x), "its withdrawal waits");
 
 	assert!(mesh.deliver_sub(c, b, &x));
-	assert_eq!(mesh.parent(b, &x), Some(a), "b forwards the request along its own route");
+	assert_eq!(
+		mesh.parent(b, &x),
+		Some(a),
+		"b forwards the request along its own route"
+	);
 	mesh.release(c, b);
 	mesh.release(b, c);
 	assert!(mesh.settle());
@@ -613,7 +617,11 @@ fn lan_relays_share_uplink_copies() {
 		// Readers arriving everywhere at once cross their offers on the way, and the
 		// pulls form a cycle until those cross back.
 		let total: usize = copies.iter().sum();
-		assert_eq!((total, mesh.loops), if full { (8, 5) } else { (13, 0) }, "{label}: {copies:?}");
+		assert_eq!(
+			(total, mesh.loops),
+			if full { (8, 5) } else { (13, 0) },
+			"{label}: {copies:?}"
+		);
 	}
 }
 
@@ -681,7 +689,11 @@ fn a_relay_joins_a_copy_farther_from_the_publisher() {
 		mesh.read(SIDE, &x, true);
 		assert!(mesh.settle());
 		assert_eq!(mesh.parent(SIDE, &x), Some(NEAR), "{rules:?}");
-		assert_eq!(mesh.parent(NEAR, &x), Some(FAR), "{rules:?}: NEAR joins the farther copy");
+		assert_eq!(
+			mesh.parent(NEAR, &x),
+			Some(FAR),
+			"{rules:?}: NEAR joins the farther copy"
+		);
 		assert_eq!(mesh.parent(FAR, &x), Some(HOME), "{rules:?}");
 		assert_eq!(mesh.sim.nodes[NEAR].cost(7), Some(11));
 		assert_eq!(mesh.sim.nodes[FAR].cost(7), Some(13));

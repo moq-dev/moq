@@ -797,7 +797,10 @@ impl Relay {
 			Some((_, false, _)) if reader => Some(self.hop),
 			_ => None,
 		};
-		let next = self.routes.get(&cast.0).and_then(|route| route.next.zip(route.path.clone()));
+		let next = self
+			.routes
+			.get(&cast.0)
+			.and_then(|route| route.next.zip(route.path.clone()));
 		let mut options = Vec::new();
 		for (&peer, session) in &self.sessions {
 			let hop = next.as_ref().filter(|(next, _)| *next == peer);
@@ -814,7 +817,10 @@ impl Relay {
 			// As in `select`, doubt keeps a reader from moving to a copy, not on the one
 			// it pulls: that copy's own neighbour says when it goes.
 			let doubted = pull != Some((peer, true)) && self.doubted(&copy.path);
-			let loops = copy.path.iter().any(|hop| hop.node == self.hop || serves.contains(&hop.node));
+			let loops = copy
+				.path
+				.iter()
+				.any(|hop| hop.node == self.hop || serves.contains(&hop.node));
 			if copy.dead || loops || doubted {
 				continue;
 			}
@@ -871,7 +877,9 @@ impl Relay {
 	fn pull(&mut self, cast: &Cast) {
 		let source = self.source(cast);
 		match &source {
-			Some(source) => self.via.insert(cast.clone(), (source.next, source.warm, source.carrier)),
+			Some(source) => self
+				.via
+				.insert(cast.clone(), (source.next, source.warm, source.carrier)),
 			None => self.via.remove(cast),
 		};
 		let source = source.map(|source| (source.next, source.warm));
@@ -984,7 +992,10 @@ impl Relay {
 	}
 
 	pub fn downstream(&self, cast: &Cast) -> BTreeSet<Node> {
-		self.carry.get(cast).map(|carry| carry.downstream.clone()).unwrap_or_default()
+		self.carry
+			.get(cast)
+			.map(|carry| carry.downstream.clone())
+			.unwrap_or_default()
 	}
 
 	/// Whether the copy of `cast` stays only while its linger runs.
