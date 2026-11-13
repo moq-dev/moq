@@ -60,6 +60,8 @@ export interface RecoveryHandle {
 	takeRefused(): Refused[];
 	/** Bumped each time it refuses more. */
 	readonly changed: Getter<number>;
+	/** Bumped as its streams arrive and finish, which {@link reading} reports. */
+	readonly readingChanged: Getter<unknown>;
 	/** Whether a stream of it is still being read, which cancelling would cut. */
 	reading(): boolean;
 	/** Stop asking: what is left is refused. */
@@ -167,8 +169,11 @@ export class RangeFills {
 				const done = clip(this.#recovered, run.start, run.end);
 				for (const fresh of runGaps(done, run.start, run.end))
 					insertRun(this.#toRecover, fresh.start, fresh.end);
-				// Recovered once already: this drop stands for the fills owing it now.
-				for (const again of done) this.#setRefused(again.start, again.end, dropped(error));
+				// Recovered once already: this drop stands for the fills owing it now, except where a
+				// recovery still out asks for it, whose answer it waits on.
+				for (const again of done)
+					for (const stands of runGaps(this.#recovering, again.start, again.end))
+						this.#setRefused(stands.start, stands.end, dropped(error));
 				continue;
 			}
 			this.#setRefused(run.start, run.end, dropped(error));
@@ -276,10 +281,13 @@ export class RangeFills {
 		}
 		this.#held = held;
 
-		// A refusal answers only the fills owing it now: once none covers its groups, a later request
-		// asks again, and a loss it named stays recorded on the track alone.
-		this.#refused = this.#refused.filter((run) =>
-			held.some((fill) => fill.start < run.end && run.start < fill.end),
+		// A refusal answers only the fills owing it now: trimmed to the groups a held fill still
+		// covers, so a later request for the rest asks again, and a loss it named stays recorded on
+		// the track alone.
+		const covered: Run[] = [];
+		for (const fill of held) if (fill.start < fill.end) insertRun(covered, fill.start, fill.end);
+		this.#refused = this.#refused.flatMap((run) =>
+			clip(covered, run.start, run.end).map((part) => ({ ...part, refusal: run.refusal })),
 		);
 
 		// A recovery no held fill owes any group of is cancelled, once none of its streams is still
@@ -339,7 +347,10 @@ export class RangeFills {
 			Signal.race(
 				this.#bumped,
 				tail.changed,
-				...[...this.#recoveries].map((recovery) => recovery.handle.changed),
+				...[...this.#recoveries].flatMap((recovery) => [
+					recovery.handle.changed,
+					recovery.handle.readingChanged,
+				]),
 			),
 		];
 		for (const fill of this.#held) wakes.push(fillChanged(fill));

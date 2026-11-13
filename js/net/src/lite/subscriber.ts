@@ -2713,7 +2713,14 @@ export class Subscriber {
 			fresh = [];
 			return taken;
 		};
-		return { done, takeRefused, changed, reading: () => entry.tail.reading, cancel: () => left.abort() };
+		return {
+			done,
+			takeRefused,
+			changed,
+			readingChanged: entry.tail.changed,
+			reading: () => entry.tail.reading,
+			cancel: () => left.abort(),
+		};
 	}
 
 	// Read a recovery's responses to the publisher's FIN, giving up what it names it will not

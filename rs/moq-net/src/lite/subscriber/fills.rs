@@ -148,10 +148,13 @@ impl RangeFills {
 				for fresh in self.recovered.gaps(&groups).collect::<Vec<_>>() {
 					self.recover.insert(fresh);
 				}
-				// Recovered once already: this drop stands for the fills owing it now.
+				// Recovered once already: this drop stands for the fills owing it now, except where
+				// a recovery still out asks for it, whose answer it waits on.
 				for again in self.recovered.overlapping(&groups).cloned().collect::<Vec<_>>() {
 					let again = again.start.max(groups.start)..again.end.min(groups.end);
-					self.refused.insert(again, Refusal::dropped(err.clone()));
+					for stands in self.recovering.gaps(&again).collect::<Vec<_>>() {
+						self.refused.insert(stands, Refusal::dropped(err.clone()));
+					}
 				}
 				continue;
 			}
@@ -200,20 +203,24 @@ impl RangeFills {
 	/// A refusal answers only the fills owing it now: once no held fill covers its groups, a
 	/// later request asks again, and a loss it named stays recorded on the track alone.
 	fn forget_answered(&mut self) {
-		let stale: Vec<Range<u64>> = self
+		// Trimmed to the groups a held fill still covers.
+		let mut covered = RangeSet::new();
+		for fill in &self.held {
+			let groups = fill.start().group..fill.end();
+			if !groups.is_empty() {
+				covered.insert(groups);
+			}
+		}
+		let span = self
 			.refused
 			.iter()
-			.map(|(groups, _)| groups)
-			.filter(|groups| {
-				!self
-					.held
-					.iter()
-					.any(|fill| fill.start().group < groups.end && groups.start < fill.end())
-			})
-			.cloned()
-			.collect();
-		for groups in stale {
-			self.refused.remove(groups);
+			.map(|(groups, _)| groups.clone())
+			.reduce(|a, b| a.start.min(b.start)..a.end.max(b.end));
+		let Some(span) = span else {
+			return;
+		};
+		for gap in covered.gaps(&span).collect::<Vec<_>>() {
+			self.refused.remove(gap);
 		}
 	}
 
@@ -725,6 +732,19 @@ mod tests {
 		assert_eq!(fills.refused.get(&3), Some(&Refusal::dropped(StreamError::Old)));
 		assert!(!fills.refused.get(&3).unwrap().lost, "a stale drop is never a loss");
 
+		// A stale drop repeated while a recovery still asks for the groups waits on it.
+		fills.recovering.insert(3..5);
+		fills.refuse(3..5, StreamError::Old);
+		assert_eq!(
+			fills.refused.get(&3),
+			Some(&Refusal::dropped(StreamError::Old)),
+			"kept from before"
+		);
+		fills.refused = Default::default();
+		fills.refuse(3..5, StreamError::Old);
+		assert_eq!(fills.refused.get(&3), None, "a recovery still asks for it");
+		fills.recovering = Default::default();
+
 		fills.refuse(7..9, StreamError::NotFound);
 		assert_eq!(fills.refused.get(&7), None, "no fill asked for it");
 		fills.refuse(5..6, StreamError::NotFound);
@@ -740,9 +760,11 @@ mod tests {
 		let mut fills = RangeFills::default();
 		fills.held.push(fill);
 		fills.refused.insert(1..3, Refusal::passing(StreamError::Cancel));
-		fills.refused.insert(3..4, Refusal::dropped(StreamError::NotFound));
+		fills.refused.insert(3..6, Refusal::dropped(StreamError::NotFound));
 		fills.forget_answered();
 		assert!(fills.refused.get(&1).is_some(), "the held fill still owes it");
+		assert!(fills.refused.get(&3).is_some(), "the held fill still owes it");
+		assert_eq!(fills.refused.get(&4), None, "trimmed to the groups a held fill covers");
 
 		fills.held.clear();
 		fills.forget_answered();

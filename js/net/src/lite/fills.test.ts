@@ -52,6 +52,7 @@ function recoveries() {
 		refuse(refused: Refused): void;
 		cancelled: boolean;
 		reading: boolean;
+		readingChanged: Signal<number>;
 	}[] = [];
 	const recover = (groups: Run, priority: number): RecoveryHandle => {
 		let finish!: (refused: Refused[]) => void;
@@ -64,12 +65,21 @@ function recoveries() {
 			soFar.push(refused);
 			changed.update((revision) => revision + 1);
 		};
-		const entry = { groups: { ...groups }, priority, finish, refuse, cancelled: false, reading: false };
+		const entry = {
+			groups: { ...groups },
+			priority,
+			finish,
+			refuse,
+			cancelled: false,
+			reading: false,
+			readingChanged: new Signal(0),
+		};
 		opened.push(entry);
 		return {
 			done,
 			takeRefused: () => soFar.splice(0),
 			changed,
+			readingChanged: entry.readingChanged,
 			reading: () => entry.reading,
 			cancel: () => {
 				entry.cancelled = true;
@@ -469,6 +479,60 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 	again.close();
 	later.close();
 	requests.close();
+	fills.close();
+	peer.close();
+});
+
+// The subscription repeating a stale drop, under a later update, of groups a recovery still asks
+// for refuses nothing: the fill waits on the recovery's answer.
+test("range fills: a stale drop repeated during its recovery waits on it", async () => {
+	const peer = await missing();
+	const { recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+	peer.fill.accept(0n).finish();
+	fills.poll(tail, true);
+	expect(peer.fill.wanted()).toBe(1n);
+
+	fills.close();
+	peer.close();
+});
+
+// A recovery kept only for a stream still being read wakes the fills once that stream ends, so
+// they cancel it rather than sleep on it.
+test("range fills: a recovery's stream ending wakes the fills", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+	const recovery = opened[0];
+	if (!recovery) throw new Error("no recovery");
+	recovery.reading = true;
+	peer.fill.close();
+	fills.poll(tail, true);
+	expect(recovery.cancelled).toBe(false);
+
+	const wait = fills.changed(tail).then(() => true);
+	recovery.reading = false;
+	recovery.readingChanged.update((revision) => revision + 1);
+	const idle = (async () => {
+		for (let i = 0; i < 10; i++) await yieldNow();
+		return false;
+	})();
+	expect(await Promise.race([wait, idle])).toBe(true);
+	fills.poll(tail, true);
+	expect(recovery.cancelled).toBe(true);
+
 	fills.close();
 	peer.close();
 });
