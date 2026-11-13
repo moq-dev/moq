@@ -3008,13 +3008,6 @@ impl Handle {
 		}
 	}
 
-	/// Whether this copy may yet present the group's frame 0: it holds it, and nothing
-	/// opened or ended it.
-	pub(super) fn may_start(&self) -> bool {
-		let state = self.state.read();
-		state.offset == 0 && !state.started()
-	}
-
 	/// Where the group starts in presentation time: its first frame's timestamp, or
 	/// `None` while no frame has been opened or when that frame is untimed.
 	///
@@ -3029,16 +3022,6 @@ impl Handle {
 		let state = self.state.read();
 		match state.timeline {
 			Timeline::Timed { start, .. } if state.origin != Origin::Unverified => Some(start),
-			_ => None,
-		}
-	}
-
-	/// Where the group starts in presentation time, accepted unverified or not: what a time
-	/// range counts on a track whose history a local handler serves, where no remote
-	/// publisher wrote it (see [`Self::timestamp`]).
-	pub(super) fn first_timestamp(&self) -> Option<Timestamp> {
-		match self.state.read().timeline {
-			Timeline::Timed { start, .. } => Some(start),
 			_ => None,
 		}
 	}

@@ -952,27 +952,6 @@ impl Slot {
 		}
 	}
 
-	/// Where the group starts in presentation time, from a live copy holding frame 0. A
-	/// copy joined mid-group stamps a later frame, which proves nothing about the start.
-	///
-	/// Only for time anchors. `unverified` counts a start accepted below the eviction
-	/// watermark too, which a track whose history a local handler serves trusts (see
-	/// [`Holdings::looks_up`]): no remote publisher wrote it.
-	fn start(&self, unverified: bool) -> Option<Timestamp> {
-		self.copies()
-			.filter(|group| group.live_first_frame() == Some(0))
-			.find_map(|group| match unverified {
-				true => group.first_timestamp(),
-				false => group.timestamp(),
-			})
-	}
-
-	/// Whether the group has no [`Self::start`] yet but may still get one: a copy holding
-	/// frame 0 has not presented it.
-	fn may_start(&self, unverified: bool) -> bool {
-		self.start(unverified).is_none() && self.copies().any(group::Handle::may_start)
-	}
-
 	/// The checked start of whichever copy began at frame 0.
 	fn bound(&self) -> Option<Timestamp> {
 		self.copies().find_map(group::Handle::bound)
@@ -1741,7 +1720,7 @@ impl TrackState {
 			}
 			// The map is ordered by key, so the first stamped group from the
 			// back is the newest content that exists.
-			let timestamp = slot.group.timestamp()?;
+			let timestamp = self.started_at(slot)?;
 			Some(PresentationEdge {
 				key: slot.group.start,
 				stamp: slot.stamp,
@@ -1750,14 +1729,11 @@ impl TrackState {
 		})
 	}
 
-	/// This track's own edge within `servable`, for measuring drift.
-	///
-	/// None on an untimed track, where nothing is ever stale: its groups carry no
-	/// timestamp, so looking for one would scan the whole cache on every poll.
+	/// This track's own edge within `servable`, for measuring drift. A scale-less track's
+	/// edge is its newest shown group's key, so its max age counts bare units.
 	fn drift_edge(&self, servable: &Servable) -> Edge {
-		let untimed = self.info.as_ref().is_some_and(|info| info.timescale.is_none());
 		Edge {
-			presentation: if untimed { None } else { self.live_edge(servable) },
+			presentation: self.live_edge(servable),
 			servable: servable.clone(),
 		}
 	}
@@ -1879,7 +1855,43 @@ impl TrackState {
 	/// until it presents its first frame, and so does having no successor in `servable`
 	/// at all.
 	fn reach(&self, key: u64, servable: &Servable) -> Option<Timestamp> {
-		self.successor(key, servable)?.group.timestamp()
+		if let Some(end) = self.own_end(key) {
+			return Some(end);
+		}
+		self.started_at(self.successor(key, servable)?)
+	}
+
+	/// A key, or a group's end, in presentation time: in the track's timescale, or as
+	/// milliseconds on a scale-less track, whose max age counts bare units.
+	fn presented(&self, value: u64) -> Option<Timestamp> {
+		match self.info.as_ref()?.timescale {
+			Some(scale) => Timestamp::new(value, scale).ok(),
+			None => Timestamp::from_millis(value).ok(),
+		}
+	}
+
+	/// Where the group in `slot` starts presenting: its first frame's timestamp, or its key
+	/// on a scale-less track, whose frames carry none.
+	fn started_at(&self, slot: &Slot) -> Option<Timestamp> {
+		match self.info.as_ref()?.timescale {
+			Some(_) => slot.group.timestamp(),
+			None => self.presented(slot.group.start),
+		}
+	}
+
+	/// Where group `key` ends, once its producer finished it whole: what bounds its reach
+	/// without a successor (see [`group::Producer::finish`]).
+	fn own_end(&self, key: u64) -> Option<Timestamp> {
+		self.presented(self.lookup.get(&key)?.group.end()?)
+	}
+
+	/// When group `key`, finished whole, stops presenting on the wall clock: its arrival plus
+	/// its span, which stands in for a successor arriving, so the last group of a paused or
+	/// finished track ages out without one.
+	fn ended_at(&self, key: u64) -> Option<crate::time::Instant> {
+		let slot = self.lookup.get(&key)?;
+		let span = self.presented(slot.group.end()?.checked_sub(key)?)?;
+		slot.arrived.checked_add(Duration::from(span))
 	}
 
 	/// The group after `key` that bounds it: the first servable one in `servable` whose
@@ -1923,8 +1935,10 @@ impl TrackState {
 	/// hands it to the next one. The clock is read only once there is a successor,
 	/// so judging the newest group, the common case, costs no clock read.
 	fn superseded(&self, key: u64, servable: &Servable, budget: Duration) -> bool {
-		self.arrival(key, servable)
-			.is_some_and(|successor| self.aged(successor.arrived, budget))
+		match self.arrival(key, servable) {
+			Some(successor) => self.aged(successor.arrived, budget),
+			None => self.ended_at(key).is_some_and(|ended| self.aged(ended, budget)),
+		}
 	}
 
 	/// Whether a full `budget` passed since a successor `arrived`.
@@ -1974,15 +1988,17 @@ impl TrackState {
 	/// delivering, so a group is abandoned only once everything it could still present
 	/// falls outside the budget.
 	///
-	/// A group's reach is bounded by its immediate successor (see [`Self::reach`]): it
-	/// cannot present past where the next group begins. The candidate itself needs no
-	/// timestamp: an empty group is bounded by its stamped successor the same way.
+	/// A group's reach is bounded by its own end once finished whole, else by its immediate
+	/// successor (see [`Self::reach`]): it cannot present past where the next group begins.
+	/// The candidate itself needs no timestamp: an empty group is bounded by its stamped
+	/// successor the same way.
 	///
 	/// The wall clock judges it too: a group is also stale once its successor arrived a
 	/// full `budget` ago (see [`Self::superseded`]), so a peer whose timestamps stop
-	/// advancing, an untimed track, or an empty successor that never presents cannot pin
-	/// a superseded group. Media time still convicts first when a burst arrives at once.
-	/// The newest group has no successor, so neither clock ever convicts it.
+	/// advancing or an empty successor that never presents cannot pin a superseded group.
+	/// Media time still convicts first when a burst arrives at once. A group finished whole
+	/// ages from its arrival plus its span instead when no successor arrived, so the last
+	/// group of a paused or finished track ages out; one with neither is never convicted.
 	///
 	/// The bound is exclusive, so the comparison is `>=` rather than `>`: the freshest frame
 	/// a group could still hold sits just *below* its reach, so an age equal to the budget
@@ -2044,7 +2060,11 @@ impl TrackState {
 		// is observed or wakes us, and armed for whichever successor this pass selected, so
 		// re-selecting re-arms it.
 		let arrival = self.watch_abort(waiter, |state| state.arrival(key, servable));
-		let Some(arrived) = self.superseded_at(arrival, servable, superseded) else {
+		// A group finished whole ages from its own end without one; see [`Self::ended_at`].
+		let Some(arrived) = self
+			.superseded_at(arrival, servable, superseded)
+			.or_else(|| self.ended_at(key))
+		else {
 			return false;
 		};
 		if let Some(deadline) = arrived.checked_add(budget) {
@@ -2054,15 +2074,18 @@ impl TrackState {
 			return true;
 		}
 		let reach = loop {
+			if let Some(end) = self.own_end(key) {
+				break end;
+			}
 			// An abort can change reach even after the successor is stamped. Unbounded
 			// until a group shows above, or the successor presents its first frame.
 			let Some(successor) = self.watch_abort(waiter, |state| state.successor(key, servable)) else {
 				return false;
 			};
-			let successor = &successor.group;
-			if let Some(reach) = successor.timestamp() {
+			if let Some(reach) = self.started_at(successor) {
 				break reach;
 			}
+			let successor = &successor.group;
 			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
 				return false;
 			}
@@ -9202,7 +9225,6 @@ impl Cursor {
 #[derive(Clone)]
 pub struct Control {
 	subscription: Preferences,
-	track: Consumer,
 	/// A plain cursor's servable window, republished when the ranges are replaced, so a
 	/// group it handed out is judged against them before the cursor next reads. `None`
 	/// for a reader that follows a route, which [`Self::mirror`] serves instead.
@@ -9320,7 +9342,6 @@ impl Subscriber {
 	pub fn control(&self) -> Control {
 		match &self.inner {
 			Inner::Plain(cursor) => Control {
-				track: self.consume(),
 				subscription: cursor.subscription.clone(),
 				republish: Some(Republish {
 					state: cursor.state.weak(),
@@ -9329,7 +9350,6 @@ impl Subscriber {
 				mirror: None,
 			},
 			Inner::Resume(resume, _) => Control {
-				track: self.consume(),
 				subscription: resume.subscription().clone(),
 				republish: None,
 				mirror: Some(resume.mirror()),

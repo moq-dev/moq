@@ -25,10 +25,6 @@ impl Runs {
 		Self(set.into_iter().collect())
 	}
 
-	pub fn iter(&self) -> std::slice::Iter<'_, RangeInclusive<u64>> {
-		self.0.iter()
-	}
-
 	pub fn contains(&self, key: u64) -> bool {
 		let index = self.0.partition_point(|run| *run.end() < key);
 		self.0.get(index).is_some_and(|run| *run.start() <= key)
@@ -53,25 +49,6 @@ impl Runs {
 		self.0[from..to]
 			.iter()
 			.map(move |run| (*run.start()).max(lo)..=(*run.end()).min(hi))
-	}
-
-	/// Add `run`, merging the runs it overlaps or touches. Costs a search and a shift.
-	pub fn insert(&mut self, run: RangeInclusive<u64>) {
-		if run.is_empty() {
-			return;
-		}
-		let (mut start, mut end) = run.into_inner();
-		// The first run reaching `start - 1` or later, and the first starting past `end + 1`.
-		let from = self.0.partition_point(|run| run.end().saturating_add(1) < start);
-		let to = self
-			.0
-			.partition_point(|run| *run.start() <= end.saturating_add(1))
-			.max(from);
-		if let (Some(first), Some(last)) = (self.0[from..to].first(), self.0[from..to].last()) {
-			start = start.min(*first.start());
-			end = end.max(*last.end());
-		}
-		self.0.splice(from..to, std::iter::once(start..=end));
 	}
 }
 
@@ -110,18 +87,6 @@ impl Layered {
 
 	pub fn layer(&self) -> &Runs {
 		&self.layer
-	}
-
-	/// Hold `fixed` under the layer from now on. The runs already held stay shared when they
-	/// are the same, so what shares them still differs from this only in the layer.
-	pub fn set_fixed(&mut self, fixed: Runs) {
-		if *self.fixed != fixed {
-			self.fixed = Arc::new(fixed);
-		}
-	}
-
-	pub fn set_layer(&mut self, layer: Runs) {
-		self.layer = Arc::new(layer);
 	}
 
 	/// Whether both hold the same fixed runs, so they differ only in their layers.
@@ -361,20 +326,6 @@ mod tests {
 		}
 		let unshared = Layered::new(Arc::new(Runs::default()), Runs::default());
 		assert!(unshared.gained(&Layered::default(), 0, 9).is_none());
-	}
-
-	/// Inserting a run merges what it overlaps or touches, as a set of the runs would.
-	#[test]
-	fn inserted_runs_merge_as_a_set() {
-		let mut next = generator();
-		for _ in 0..2000 {
-			let runs = random_runs(&mut next, 8, 40);
-			let mut inserted = Runs::default();
-			for run in &runs {
-				inserted.insert(run.clone());
-			}
-			assert_eq!(inserted, Runs::new(runs.clone()), "{runs:?}");
-		}
 	}
 
 	/// A run minus a set is the parts of it the set doesn't hold.

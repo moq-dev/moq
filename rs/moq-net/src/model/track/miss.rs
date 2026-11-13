@@ -79,9 +79,6 @@ pub(super) struct Misses {
 	picked: BTreeMap<u64, RangeSet<u64>>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
-	/// What became [`Self::gone`] since the cursor last took it, for its window's parked time
-	/// ends to wake on (see [`Self::take_gone`]).
-	newly_gone: RangeSet<u64>,
 	/// The window revision and cap what this holds was last clipped to, with the window's
 	/// missable groups then, `None` while every group was.
 	clipped: Option<(u64, Option<u64>, Option<Layered>)>,
@@ -346,12 +343,6 @@ impl Misses {
 			.into_iter()
 			.find_map(|runs| runs.get(&key))
 			.map(|run| run.end)
-	}
-
-	/// What became [`Self::gone`] since the last call: a time end parked on a gap this
-	/// reader's own fills gave up on walks on once told.
-	pub fn take_gone(&mut self) -> RangeSet<u64> {
-		std::mem::take(&mut self.newly_gone)
 	}
 
 	/// What was refilled after an eviction and not handed out yet.
@@ -1380,7 +1371,6 @@ impl Misses {
 			}
 			for run in left.iter() {
 				self.refused.insert(run.clone());
-				self.newly_gone.insert(run.clone());
 				self.deferred
 					.insert(run.clone(), state.arrivals.folds_at(run.start, state.miss_grace()));
 			}
@@ -1410,7 +1400,6 @@ impl Misses {
 			return;
 		}
 		self.given_up.insert(groups.clone());
-		self.newly_gone.insert(groups.clone());
 		given_up.push((groups, stale));
 	}
 }
