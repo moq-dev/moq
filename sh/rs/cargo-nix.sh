@@ -21,9 +21,11 @@ crate2nix="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#crate
 plan=nix/Cargo.nix
 hashes=nix/crate-hashes.json
 if [[ -n "$check" ]]; then
-    # Beside the committed plan, whose relative crate paths it shares.
-    plan=$(mktemp nix/.Cargo.XXXXXX.nix)
-    hashes=$(mktemp nix/.crate-hashes.XXXXXX.json)
+    # One directory deep, as nix/ is, so its relative crate paths match, and
+    # ignored, so no parallel lane's formatter lists it.
+    mkdir -p .tmp
+    plan=$(mktemp .tmp/Cargo.XXXXXX.nix)
+    hashes=$(mktemp .tmp/crate-hashes.XXXXXX.json)
     trap 'rm -f "$plan" "$hashes"' EXIT
     cp nix/crate-hashes.json "$hashes"
 fi
