@@ -1641,6 +1641,9 @@ impl Request {
 	/// decision that never comes. Once it resolves, [`ok`](Self::ok) fails with the timeout.
 	#[kio::wrapper]
 	pub fn poll_expired(&mut self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		// The deadline's timer may start here, which needs a tokio runtime even when an
+		// embedder polls from outside one.
+		let _runtime = crate::runtime::enter();
 		self.handshake.poll_expired(waiter)
 	}
 
