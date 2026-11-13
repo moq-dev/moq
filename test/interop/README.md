@@ -404,8 +404,9 @@ It runs the cells planned breaks cover
 without letting them fail the run, then rewrites `compat/planned-breaks.json`:
 a break with a failing cell is re-pinned to the releases just measured, and one
 with none is deleted. It prints each break's failing cells; the release workflow
-links those logs from the pin-update PR and retains failure artifacts. Reasons describe why a
-break is allowed; the measured pins and logs record its current extent.
+copies that report into the pin-update PR body and retains failure artifacts for
+seven days. Reasons describe why a break is allowed; the measured pins and PR
+body record its current extent.
 
 ## Media QA
 

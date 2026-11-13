@@ -1,6 +1,6 @@
 {
 	"moq-lite-07-wip": {
-		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Current and released lite-07-wip framing may differ. Reassess against every affected release; the remeasurement logs record the failing media, publication, and FETCH cells, with stable lite versions and same-source media as controls.",
+		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Current and released lite-07-wip framing may differ. Reassess against every affected release; the remeasurement PR body and logs record the failing media, publication, and FETCH cells, with stable lite versions and same-source media as controls.",
 		"releases": {
 			"moq-cli": "0.14.16",
 			"moq-relay": "0.17.16",

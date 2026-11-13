@@ -73,7 +73,7 @@ jobs:
         id: pr
         with:
           token: ${{ steps.token.outputs.token }}
-          branch: release/planned-breaks-${{ github.run_id }}-${{ github.run_attempt }}
+          branch: release/planned-breaks
           base: main
           add-paths: test/interop/compat/planned-breaks.json
           commit-message: 'chore(interop): remeasure planned breaks against published packages'
