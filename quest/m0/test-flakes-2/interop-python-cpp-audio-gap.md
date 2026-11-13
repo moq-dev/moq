@@ -60,10 +60,15 @@ spans the playout target past the hole (moq-audio sets the wait to its target
 via `set_wait`, tens of ms at `Delay.min` 0), so `aged` drops group 25 at once,
 though its stream lands in the same burst. Every other subscriber decoded it.
 
-Fix (waiting on the maintainer, see the PR): make the burst unable to age out
-a hole on its own, recommended by requiring `elapsed` (wall time since a later
-group arrived, `front.late`) for a missing sequence, so `aged` alone no longer
-skips one. A backlog join with a true hole then waits one playout delay
-(`late` is shared across the backlog, so not one per hole). Pin it with a
-mocked-time consumer test: a later group buffered past the target, then the
-missing group arriving before the wait, reads with no gap.
+Fix, part 1 (decided 2026-11-13 by the coordinator while the maintainer was
+away, landed in #8611): a missing group is no longer aged out by the shorter
+wait. `aged` now measures against the max delay in Rust and JS alike, so only
+wall time past the wait (`elapsed`) or a max-delay span skips a hole.
+
+Still reproduces (2nd of 2 runs at `CPUQuota=50%` after part 1), now by wall
+time: `skipping missing groups old=14 new=15 ... elapsed=true aged=false`,
+then `audio gap after 4488 samples, at 1171866us for 40000us`. A subscriber
+starved for longer than its playout wait (tens of ms at `Delay.min` 0) doesn't
+take in the missing group's stream before the wait expires. That is the right
+call for a real-time player, so what remains is how the interop subscribers
+should read: see #8611's `## Waiting`.

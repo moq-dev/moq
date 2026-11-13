@@ -731,9 +731,11 @@ impl<F: Container> Consumer<F> {
 			// Walk the cursor over missing sequences below the first arrived group.
 			// Groups race on independent QUIC streams (newer ones at higher priority),
 			// so a buffered higher sequence proves nothing: the missing one may be
-			// merely late, and there is no way to tell that from an eviction. The age
-			// budget is the gate: everything a missing group could still present is
-			// bounded by where the next stamped group begins. A finished track closes
+			// merely late, and there is no way to tell that from an eviction. The wait,
+			// in wall time since a later group arrived, is the gate. Media buffered past
+			// the hole proves it stale only past the max delay, not the shorter wait: a
+			// reader starved of CPU takes in a burst of groups at once, and the missing
+			// one may land in the same burst. A finished track closes
 			// the gap outright, since no new group can arrive. That proof covers only
 			// sequences that never arrived: finishing the track ends new groups, not
 			// the frames still flowing on ones already open, so arrived groups are
@@ -750,7 +752,7 @@ impl<F: Container> Consumer<F> {
 				let since = front.late;
 				let wait = self.wait.map_or(self.max_delay, |wait| wait.min(self.max_delay));
 				let elapsed = since.elapsed() >= wait;
-				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= wait);
+				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
 				let excluded = match &self.reader {
 					Reader::Reading(track) | Reader::Failed(track, _) => {
 						track.next_in_range(self.current).is_none_or(|next| next >= sequence)
@@ -1967,6 +1969,36 @@ mod tests {
 		assert_eq!(read, ["gap", "frame 2", "gap", "frame 4", "gap", "frame 6"]);
 	}
 
+	/// A burst of later groups spanning past the wait doesn't age out a missing group that lands in
+	/// the same burst: a reader starved of CPU takes in every stream at once.
+	#[tokio::test(start_paused = true)]
+	async fn a_burst_past_the_wait_does_not_age_out_a_hole() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		reader.set_wait(Duration::from_millis(100));
+		write_group(&mut track, 0, &[ts(0)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
+		write_group(&mut track, 2, &[ts(40_000), ts(200_000)]);
+		write_group(&mut track, 3, &[ts(300_000)]);
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		write_group(&mut track, 1, &[ts(20_000)]);
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
+			read.push(match item {
+				Read::Frame { group, .. } => format!("frame {group}"),
+				Read::Gap { .. } => "gap".to_string(),
+				Read::End { .. } => "end".to_string(),
+			});
+		}
+		assert_eq!(read, ["frame 1", "frame 2", "frame 2", "frame 3"]);
+	}
+
 	/// A group that arrives late below an earlier one inherits that earlier arrival: the holes
 	/// around it were already observable then.
 	#[tokio::test(start_paused = true)]
@@ -2044,11 +2076,17 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(1)).await;
 		assert_eq!(drain(&mut reader), ["gap", "frame 3"]);
 
-		// Or at once, when the newest content is already the wait past where the group after it
-		// begins.
+		// Content buffered past the wait doesn't skip it early: a burst may still carry the group.
 		write_group(&mut track, 5, &[ts(700_000)]);
 		write_group(&mut track, 6, &[ts(800_000)]);
+		assert!(drain(&mut reader).is_empty());
+		tokio::time::advance(Duration::from_millis(100)).await;
 		assert_eq!(drain(&mut reader), ["gap", "frame 5", "frame 6"]);
+
+		// It skips at once when the newest content is already the max delay past the group after it.
+		write_group(&mut track, 8, &[ts(900_000)]);
+		write_group(&mut track, 9, &[ts(1_900_000)]);
+		assert_eq!(drain(&mut reader), ["gap", "frame 8", "frame 9"]);
 	}
 
 	/// A malformed data marker group found while looking ahead fails the reader, rather than

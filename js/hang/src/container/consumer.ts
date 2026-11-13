@@ -855,8 +855,8 @@ export class Consumer {
 			// Otherwise promote #active when the first buffered group continues the timeline we left off at,
 			// when a completed empty group can be walked (empty groups mean nothing), or when the hole
 			// is proven: everything a missing group could still present ends where the first group past
-			// it begins, so once that start falls the whole wait behind the newest content, all of it
-			// would arrive too late to play. Mirrors Rust's `aged`. Where presentation left off proves only
+			// it begins, so once that start falls the max delay behind the newest content, all of it
+			// would arrive too late to play. Mirrors Rust's slow-group skip at the same budget. Where presentation left off proves only
 			// the oldest of it stale, and groups go out newest first, so a flush's newest group lands just
 			// ahead of the groups behind it, which would then arrive below the cursor and never play.
 			// Proving it here matters: #checkMaxDelay would instead drop the head, the very group to play
@@ -877,7 +877,10 @@ export class Consumer {
 					const wait = this.#holeWait(this.#delay.peek(), this.#wait.peek());
 					const bound = this.#groups.find((group) => group.start !== undefined)?.start;
 					const edge = this.#liveEdge();
-					const aged = bound !== undefined && edge !== undefined && edge - bound >= wait;
+					// Measured against the max delay, not the wait: a reader starved of CPU takes in a burst of
+					// groups at once, and the missing one may land in the same burst.
+					const aged =
+						bound !== undefined && edge !== undefined && edge - bound >= maxMicros(this.#delay.peek());
 					const elapsed = now().since(this.#hole).asMicros() >= wait;
 					// The ranges ask for nothing in between, so nothing there is owed.
 					const next = this.#track.nextInRange(this.#active);
