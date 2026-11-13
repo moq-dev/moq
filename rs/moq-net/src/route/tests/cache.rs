@@ -623,7 +623,7 @@ fn lan_relays_share_uplink_copies() {
 		let total: usize = copies.iter().sum();
 		assert_eq!(
 			(total, mesh.loops),
-			if full { (8, 5) } else { (13, 0) },
+			if full { (8, 5) } else { (15, 0) },
 			"{label}: {copies:?}"
 		);
 	}

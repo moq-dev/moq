@@ -789,7 +789,7 @@ impl Relay {
 		let rank = |node: Id| rendezvous(&cast.1, node);
 		// The carrier of the copy this relay is on: the one it joins while that is still
 		// offered, or its own, pulled along the publisher's route for a reader.
-		let on = match via {
+		let own = match via {
 			Some((next, true, carrier)) => (self.sessions.get(&next))
 				.and_then(|session| session.copies.get(cast))
 				.filter(|copy| copy.carrier == carrier)
@@ -801,6 +801,25 @@ impl Relay {
 			.routes
 			.get(&cast.0)
 			.and_then(|route| route.next.zip(route.path.clone()));
+		// Pulling along the route for others, it is on the copies it feeds: each
+		// neighbour it serves offers its copy back, along this relay's route. Joining
+		// another would hand each of them another carrier, so it joins only one that
+		// ranks below them all, and none until each has offered one: an offer along any
+		// other path is from before it took the route, and a neighbour that offers none
+		// may feed copies further on. `None` joins nothing it chooses.
+		let chosen: Option<Option<Id>> = match own {
+			Some(own) => Some(Some(own)),
+			None => (downstream.into_iter().flatten())
+				.map(|peer| {
+					let (_, path) = next.as_ref().filter(|_| pull.is_some_and(|(_, warm)| !warm))?;
+					let copy = self.sessions.get(peer)?.copies.get(cast)?;
+					copy.path.starts_with(path).then_some(copy.carrier)
+				})
+				.try_fold(None, |low: Option<Id>, carrier| {
+					let carrier = carrier?;
+					Some(Some(low.filter(|&low| rank(low) < rank(carrier)).unwrap_or(carrier)))
+				}),
+		};
 		let mut options = Vec::new();
 		for (&peer, session) in &self.sessions {
 			let hop = next.as_ref().filter(|(next, _)| *next == peer);
@@ -825,7 +844,11 @@ impl Relay {
 				continue;
 			}
 			let ranked = |on: Id| copy.carrier == on || rank(copy.carrier) < rank(on);
-			if self.rules.ranked && !on.is_none_or(ranked) {
+			let on = match hop {
+				Some(_) => Some(own),
+				None => chosen,
+			};
+			if self.rules.ranked && !on.is_some_and(|on| on.is_none_or(ranked)) {
 				continue;
 			}
 			// The next hop's copy is where its route leads; any other is a choice.
