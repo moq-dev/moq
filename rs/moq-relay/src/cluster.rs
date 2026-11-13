@@ -863,6 +863,17 @@ pub struct Config {
 }
 
 impl Config {
+	/// Whether this relay dials a static or API peer. A static list naming only this
+	/// relay dials nothing, so it runs standalone rather than as a mesh that finishes
+	/// at once.
+	pub(crate) fn dials_statics(&self) -> bool {
+		let own = self.node.as_deref().map(PeerKey::canonicalize);
+		self.connect
+			.iter()
+			.any(|peer| own.as_ref() != Some(&PeerKey::canonicalize(&peer.url)))
+			|| self.api.url.is_some()
+	}
+
 	/// Released spellings this config was parsed from, each paired with what replaced it.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
@@ -1040,6 +1051,12 @@ pub struct Options {
 
 	/// Stats publishing on the cluster's origin. Disabled by default.
 	pub stats: crate::stats::Config,
+
+	/// Holds the stats publisher back until this resolves, or its sender drops, so a
+	/// relay serving beside the one it replaces announces the node's broadcast only once
+	/// that one is gone. `None` publishes from the start. Counters still accumulate
+	/// meanwhile, and the first publish carries them.
+	pub stats_hold: Option<tokio::sync::oneshot::Receiver<()>>,
 
 	/// How peers are reached in place of the network, for tests on `kio::clock::sim`:
 	/// every peer dial becomes a [`Dial`](moq_tokio::sim::Dial) the test routes.
@@ -1441,6 +1458,7 @@ impl Cluster {
 			client,
 			peer,
 			stats,
+			stats_hold,
 			#[cfg(feature = "test-support")]
 			network,
 		} = options;
@@ -1487,7 +1505,13 @@ impl Cluster {
 		// Publish through the same origin cluster peers read from.
 		let stats_prefix = stats.reserved()?;
 		let (stats_producer, publisher) = stats.build(origin.clone())?;
-		work.push(Child::new("stats publisher", publisher.run()));
+		work.push(Child::new("stats publisher", async move {
+			if let Some(hold) = stats_hold {
+				// A dropped sender releases it as well as a send.
+				let _ = hold.await;
+			}
+			publisher.run().await;
+		}));
 		let stats = stats_producer.registry().clone();
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.hop(), "cluster initialized");
@@ -1826,15 +1850,7 @@ impl Cluster {
 			}
 		}
 
-		// A static list naming only this relay dials nothing, so it runs standalone
-		// rather than as a mesh that finishes at once.
-		let own = node.as_deref().map(PeerKey::canonicalize);
-		let statics = self
-			.config
-			.connect
-			.iter()
-			.any(|peer| own.as_ref() != Some(&PeerKey::canonicalize(&peer.url)))
-			|| self.config.api.url.is_some();
+		let statics = self.config.dials_statics();
 		let can_dial = statics || lan;
 		if !can_dial {
 			tracing::info!("no cluster peers configured; running standalone");
@@ -2291,10 +2307,13 @@ impl Cluster {
 		// replacement.
 		//
 		// A GOAWAY naming no URI is a relay draining to restart. A peer URL names
-		// that one node, so a redial would only reach the draining process again
-		// and replay both announce tables there for the rest of its window. Its
-		// routes already rank below every other, so the session serves on until
-		// the node closes it, and the redial after that finds the replacement.
+		// that one node, so the loop redials it once: a node that hands its port to
+		// a replacement serving beside it (see `handoff`) is reached that way, and
+		// the drained session leaves within its handover. A redial that reaches the
+		// draining process again is drained at once, and serves on until the node
+		// closes it rather than redialing for the rest of its window; its routes
+		// already rank below every other, and the redial after that close finds the
+		// replacement.
 		let reconnect = client
 			.with_reconnect(true)
 			.with_restart(moq_tokio::Restart::Wait)

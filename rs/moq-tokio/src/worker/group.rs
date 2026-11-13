@@ -71,6 +71,29 @@ impl Workers {
 	/// The group's shared certificate reloads run on the caller's Tokio runtime, else
 	/// the fallback, which must outlive the group; see [`Listen::load`](crate::tls::Listen::load).
 	pub fn bind(mut server: crate::server::Config, config: Config) -> Result<Self> {
+		// One resolution for the whole group. Each worker resolves its own config
+		// otherwise, so a DNS answer that rotates between queries would hand
+		// members different addresses and fail the bind on whichever member drew a
+		// fresh one.
+		let requested = materialize_bind(&mut server.listen)?;
+
+		// The group owns everything a reuseport group has to get right: it takes
+		// the port before the first member binds and holds it until the group is
+		// dropped, refuses a size the steering filter could not address, and
+		// binds one member per slot in the order the kernel numbers them by.
+		let group = moq_sock::shard::bind(requested, config.count).map_err(|err| group_error(err, requested))?;
+		Self::from_group(server, group, config.pin)
+	}
+
+	/// Serve every member of a reuseport group the caller bound, or adopted from
+	/// the process it replaces, one worker per member this process serves.
+	///
+	/// Like [`Self::bind`], with the group in place of [`Config::count`]: build
+	/// one with [`moq_sock::shard::Config`], or take a predecessor's with
+	/// [`moq_sock::shard::Bound::adopt`]. `server.listen.bind` is replaced with the
+	/// group's address. The group stays reachable through [`Self::sockets`], to
+	/// steer it or hand it on.
+	pub fn from_group(mut server: crate::server::Config, mut group: moq_sock::shard::Bound, pin: bool) -> Result<Self> {
 		if server.tls.is_some() && server.listen.tls.configured() {
 			return Err(crate::tls::Error::ConflictingServe.into());
 		}
@@ -79,27 +102,13 @@ impl Workers {
 			server.listen.tls = Default::default();
 		}
 
-		let cores = config.pin.then(cores).unwrap_or_default();
+		let cores = pin.then(cores).unwrap_or_default();
 
-		// One resolution for the whole group. Each worker resolves its own config
-		// otherwise, so a DNS answer that rotates between queries would hand
-		// members different addresses and fail the bind on whichever member drew a
-		// fresh one. A worker group always opens QUIC, including when the source
-		// server config also names a stream listener.
-		let requested = materialize_bind(&mut server.listen)?;
-
-		// The group owns everything a reuseport group has to get right: it takes
-		// the port before the first member binds and holds it until the group is
-		// dropped, refuses a size the steering filter could not address, and
-		// binds one member per slot in the order the kernel numbers them by.
-		let mut group = moq_sock::shard::bind(requested, config.count).map_err(|err| match err {
-			moq_sock::shard::Error::Count { count, max } => Error::WorkerCount { count, max },
-			moq_sock::shard::Error::Overlap { .. } => Error::WorkerOverlap { addr: requested },
-			moq_sock::shard::Error::Resolve(err)
-			| moq_sock::shard::Error::Bind { source: err, .. }
-			| moq_sock::shard::Error::Steer(err) => crate::quic::Error::BindSocket(err).into(),
-			err => crate::quic::Error::BindSocket(std::io::Error::other(err)).into(),
-		})?;
+		// The requested address, with an ephemeral port resolved. A worker group
+		// always opens QUIC, including when the source server config also names a
+		// stream listener, so the bind is written back for every worker to build.
+		let addr = group.addr();
+		server.listen.bind = Some(crate::listen::Bind::Addr(addr));
 		let count = group.count();
 
 		let shared = Arc::new(Shared::default());
@@ -108,7 +117,9 @@ impl Workers {
 		let mut certificates = None;
 
 		while let Some(member) = group.member().map_err(crate::quic::Error::BindSocket)? {
-			let index = member.shard().index();
+			// The worker's position in this process, not its slot in the group: a
+			// successor serving the second generation pins from the first core too.
+			let index = member.worker();
 			// `max(1)` because an empty core list means pinning is off, not that
 			// there are no workers.
 			let core = cores.get(index as usize % cores.len().max(1)).copied();
@@ -125,8 +136,6 @@ impl Workers {
 			workers.push(worker);
 		}
 
-		// The requested address, with an ephemeral port resolved.
-		let addr = group.addr();
 		tracing::info!(workers = count, pinned = !cores.is_empty(), %addr, "bound QUIC workers");
 
 		Ok(Self {
@@ -137,6 +146,12 @@ impl Workers {
 			addr,
 			_group: group,
 		})
+	}
+
+	/// The reuseport group the workers serve, to [steer](moq_sock::shard::Bound::steer)
+	/// or [hand to a successor](moq_sock::shard::Bound::handoff).
+	pub fn sockets(&self) -> &moq_sock::shard::Bound {
+		&self._group
 	}
 
 	/// The address every worker is bound to.
@@ -197,6 +212,18 @@ impl Workers {
 		// Joining blocks, so it goes to the pool that exists for that rather than
 		// stalling whichever executor thread happened to run this.
 		let _ = crate::runtime::scope(async move { tokio::task::spawn_blocking(move || join(threads)).await }).await;
+	}
+}
+
+/// The worker-group error for a reuseport group that could not form on `requested`.
+fn group_error(err: moq_sock::shard::Error, requested: SocketAddr) -> Error {
+	match err {
+		moq_sock::shard::Error::Count { count, max } => Error::WorkerCount { count, max },
+		moq_sock::shard::Error::Overlap { .. } => Error::WorkerOverlap { addr: requested },
+		moq_sock::shard::Error::Resolve(err)
+		| moq_sock::shard::Error::Bind { source: err, .. }
+		| moq_sock::shard::Error::Steer(err) => crate::quic::Error::BindSocket(err).into(),
+		err => crate::quic::Error::BindSocket(std::io::Error::other(err)).into(),
 	}
 }
 
@@ -267,6 +294,12 @@ impl Group {
 	/// The address every worker is bound to.
 	pub fn local_addr(&self) -> SocketAddr {
 		self.addr
+	}
+
+	/// The reuseport group the workers serve, to [steer](moq_sock::shard::Bound::steer)
+	/// or [hand to a successor](moq_sock::shard::Bound::handoff).
+	pub fn sockets(&self) -> &moq_sock::shard::Bound {
+		&self._group
 	}
 
 	/// The certificates the workers are serving, tracking hot reloads.
@@ -624,7 +657,7 @@ impl Worker {
 		core: Option<CoreId>,
 		shared: Arc<Shared>,
 	) -> Result<Self> {
-		let index = member.shard().index();
+		let index = member.worker();
 		let (ready_tx, ready_rx) = std::sync::mpsc::channel();
 		let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
 		let (spawn_tx, spawn_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -723,7 +756,7 @@ fn run(
 	mut spawn: tokio::sync::mpsc::UnboundedReceiver<Spawn>,
 	shared: Arc<Shared>,
 ) {
-	let index = member.shard().index();
+	let index = member.worker();
 	if let Some(core) = core {
 		pin(index, core);
 	}

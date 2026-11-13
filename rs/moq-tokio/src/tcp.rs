@@ -355,6 +355,20 @@ impl Listener {
 		.await
 	}
 
+	/// Serve a listening socket the caller bound, such as one taken over from the
+	/// process this one replaces.
+	pub(crate) fn from_std(listener: std::net::TcpListener) -> Result<Self> {
+		listener.set_nonblocking(true)?;
+		Ok(Self {
+			listener: tokio::net::TcpListener::from_std(listener)?,
+			protocols: Vec::new(),
+			health: crate::accept::Health::new("tcp"),
+			session: crate::qmux_default(),
+			tls: None,
+			serve: None,
+		})
+	}
+
 	/// Serve TLS with `config`, built from `serve` with an ALPN list that already
 	/// names each `qmux-01.<protocol>` pair to accept.
 	pub(crate) fn with_tls(mut self, serve: crate::tls::Serve, config: std::sync::Arc<rustls::ServerConfig>) -> Self {

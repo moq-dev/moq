@@ -214,13 +214,17 @@ impl Server {
 		self.socket.local_addr().unwrap()
 	}
 
-	pub(crate) async fn bind(config: Config) -> anyhow::Result<Option<Self>> {
+	/// Bind the configured listener, or serve `held`, already bound, in its place.
+	pub(crate) async fn bind(config: Config, held: Option<std::net::UdpSocket>) -> anyhow::Result<Option<Self>> {
 		let Some(bind) = config.bind else {
 			return Ok(None);
 		};
-		let socket = tokio::net::UdpSocket::bind(bind)
-			.await
-			.context("failed to bind STUN listener")?;
+		let socket = match held {
+			Some(socket) => tokio::net::UdpSocket::from_std(socket).context("failed to serve the STUN listener")?,
+			None => tokio::net::UdpSocket::bind(bind)
+				.await
+				.context("failed to bind STUN listener")?,
+		};
 		tracing::info!(addr = %socket.local_addr()?, kind = "stun", "listening");
 		Ok(Some(Self {
 			socket,
@@ -431,10 +435,13 @@ mod tests {
 
 	#[tokio::test]
 	async fn udp_listener_replies_and_disabled_listener_binds_nothing() {
-		assert!(Server::bind(Config::default()).await.unwrap().is_none());
-		let server = Server::bind(Config {
-			bind: Some("127.0.0.1:0".parse().unwrap()),
-		})
+		assert!(Server::bind(Config::default(), None).await.unwrap().is_none());
+		let server = Server::bind(
+			Config {
+				bind: Some("127.0.0.1:0".parse().unwrap()),
+			},
+			None,
+		)
 		.await
 		.unwrap()
 		.unwrap();

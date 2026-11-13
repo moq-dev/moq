@@ -14,8 +14,9 @@ pub enum Bind {
 }
 
 impl Bind {
+	/// The socket address this names, resolving a host now.
 	#[cfg(feature = "quic")]
-	pub(crate) fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
+	pub fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
 		match self {
 			Self::Addr(addr) => Ok(*addr),
 			Self::Host(host, port) => crate::util::resolve(Some(&format!("{host}:{port}")), ""),

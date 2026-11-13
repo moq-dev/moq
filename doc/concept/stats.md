@@ -186,7 +186,10 @@ generate more stats.
 The broadcast stays announced for the producer's life. Each announcement
 carries a fresh [instance](/concept/moq-lite#publisher-instances) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
-old one, and no relay serves it groups cached under the old instance. A reader
+old one, and no relay serves it groups cached under the old instance. A relay
+taking over through [handoff](/bin/relay/config#handoff) announces its broadcast
+only once the relay it replaced exits, so a node has one instance at a time;
+its counters run from its start, and its first publish carries them. A reader
 treats each instance as its own set of counters. The instance rides moq-lite 07
 announcements; over anything else the receiving session mints one per
 announcement, so a reader sees the same change as an end and a start at the path.

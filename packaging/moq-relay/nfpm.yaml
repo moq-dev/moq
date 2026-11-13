@@ -40,6 +40,12 @@ contents:
     file_info:
       mode: 0644
 
+  # Opt-in: copied into moq-relay.service.d to make a restart a handoff.
+  - src: packaging/moq-relay/handoff.conf
+    dst: /usr/share/moq-relay/handoff.conf
+    file_info:
+      mode: 0644
+
 # Per-packager overrides for distro-specific runtime dependencies.
 overrides:
   deb:

@@ -289,18 +289,23 @@ EndClosed ==
 \* `Phase::Live`: a GOAWAY is checked before the close.
 Goaway(s) == watch /\ sess[s].goaway # NoGoaway
 
+\* `Restart::Wait` serves out a restart in place on a session drained before
+\* it was healthy; an older one redials once, as `Restart::Redial` does.
+WaitOut(s) == Restart = "wait" /\ sess[s].goaway = "" /\ sess[s].age = 0
+
 LiveEnds ==
     /\ queue = <<>>
     /\ ~PredDue
     /\ phase = "live"
     /\ \/ /\ Goaway(live)
-          /\ Restart = "wait" /\ sess[live].goaway = ""
-          \* `Restart::Wait`: drop the latch and serve until the peer closes.
+          /\ WaitOut(live)
+          \* `Restart::Wait`, drained before healthy: the redial reached the
+          \* draining process again, so drop the latch and serve until it closes.
           /\ watch' = FALSE
           /\ UNCHANGED <<phase, live, probe, pred, target, queue, sess, timer>>
           /\ CallerSame
        \/ /\ Goaway(live)
-          /\ ~(Restart = "wait" /\ sess[live].goaway = "")
+          /\ ~WaitOut(live)
           /\ EndGoaway(live, sess[live].goaway)
        \/ /\ ~Goaway(live)
           /\ ~sess[live].open

@@ -51,6 +51,9 @@ pub struct Settings {
 	#[usage(flatten)]
 	internal: Internal,
 
+	#[usage(flatten)]
+	handoff: Handoff,
+
 	#[usage(env = "MOQ_DRAIN_TIMEOUT", cli("--drain-timeout"))]
 	drain_timeout: Option<String>,
 }
@@ -276,4 +279,14 @@ struct PeerQuic {
 struct Stun {
 	#[usage(env = "MOQ_STUN_BIND", cli("--stun-bind"))]
 	bind: Option<String>,
+}
+
+#[derive(usage_rs::Config)]
+#[usage(prefix = "handoff")]
+struct Handoff {
+	#[usage(env = "MOQ_HANDOFF_SOCKET", cli("--handoff-socket"))]
+	socket: Option<String>,
+
+	#[usage(env = "MOQ_HANDOFF_SUPERVISE", cli("--handoff-supervise"))]
+	supervise: Option<bool>,
 }

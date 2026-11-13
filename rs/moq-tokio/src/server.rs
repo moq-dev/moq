@@ -108,7 +108,7 @@ impl crate::listen::Config {
 
 /// Default bind address used when [`crate::listen::Config::bind`] is not set.
 #[cfg(feature = "quic")]
-pub(crate) const DEFAULT_BIND: net::SocketAddr =
+pub const DEFAULT_BIND: net::SocketAddr =
 	net::SocketAddr::V6(net::SocketAddrV6::new(net::Ipv6Addr::UNSPECIFIED, 443, 0, 0));
 
 /// Which listeners a [`Server`] opens, out of the ones its config describes.
@@ -201,6 +201,31 @@ pub struct Config {
 	/// take its [`webrtc`](crate::quic::demux::Demux::webrtc) feed or read its counters.
 	#[cfg(feature = "quic")]
 	pub demux: crate::quic::demux::Demux,
+
+	/// Stream listeners the caller already holds, served in place of binding the
+	/// configured addresses.
+	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+	pub streams: Streams,
+}
+
+/// Stream listeners bound outside the [`Server`], for [`Config::streams`]: the
+/// sockets a process took over from the one it replaces, which go on accepting
+/// the connections already queued on them.
+///
+/// Each still needs its listener configured (`listen.tcp.bind`,
+/// `listen.unix.bind`), which says how to serve it; the socket replaces only the
+/// bind. A Unix socket's path belongs to whoever bound it, so a listener served
+/// from one never unlinks it.
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct Streams {
+	/// Served for `listen.tcp.bind`. Must be listening.
+	#[cfg(feature = "tcp")]
+	pub tcp: Option<std::net::TcpListener>,
+	/// Served for `listen.unix.bind`. Must be listening.
+	#[cfg(all(feature = "uds", unix))]
+	pub unix: Option<std::os::unix::net::UnixListener>,
 }
 
 impl Config {
@@ -229,6 +254,8 @@ impl Config {
 			stats: self.stats.clone(),
 			admission: self.admission.clone(),
 			demux: self.demux.clone(),
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+			streams: Streams::default(),
 		}
 	}
 }
@@ -283,6 +310,8 @@ impl Server {
 			stats,
 			#[cfg(feature = "quic")]
 			demux,
+			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+				streams: prebound,
 		} = config;
 
 		// Refuse here rather than in `init`, so a caller that skipped its own check
@@ -396,6 +425,23 @@ impl Server {
 		// Collect the configured stream listeners (at most one TCP, one Unix).
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let mut stream_binds = Vec::new();
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		let Streams {
+			#[cfg(feature = "tcp")]
+				tcp: mut prebound_tcp,
+			#[cfg(all(feature = "uds", unix))]
+				unix: mut prebound_unix,
+		} = prebound;
+		#[cfg(feature = "tcp")]
+		if prebound_tcp.is_some() && !(build_streams && config.tcp.bind.is_some()) {
+			return Err(Error::NoBackend("server::Config::streams.tcp needs --listen-tcp-bind"));
+		}
+		#[cfg(all(feature = "uds", unix))]
+		if prebound_unix.is_some() && !(build_streams && config.unix.bind.is_some()) {
+			return Err(Error::NoBackend(
+				"server::Config::streams.unix needs --listen-unix-bind",
+			));
+		}
 		#[cfg(feature = "tcp")]
 		if let Some(addr) = config.tcp.bind.filter(|_| build_streams) {
 			let tls = match config.tcp.tls == Some(true) {
@@ -407,11 +453,11 @@ impl Server {
 				)?),
 				false => None,
 			};
-			stream_binds.push(StreamBind::Tcp(addr, tls));
+			stream_binds.push(StreamBind::Tcp(addr, tls, prebound_tcp.take()));
 		}
 		#[cfg(all(feature = "uds", unix))]
 		if let Some(path) = config.unix.bind.clone().filter(|_| build_streams) {
-			stream_binds.push(StreamBind::Unix(path));
+			stream_binds.push(StreamBind::Unix(path, prebound_unix.take()));
 		}
 		// `None` (or an all-empty allowlist) means the listener enforces nothing.
 		#[cfg(all(feature = "uds", unix))]
@@ -880,6 +926,18 @@ impl Listener {
 		crate::runtime::scope(self.server.shutdown()).await;
 	}
 
+	/// Stop accepting on the stream (`tcp`/`unix`) listeners and release their
+	/// sockets, leaving QUIC and every accepted session alone.
+	///
+	/// For a process handing its listeners to a successor that holds the same
+	/// sockets: what is queued on them is the successor's to accept. A handshake
+	/// still in flight is dropped, and its client dials again. Later
+	/// [`accept`](Self::accept) calls see no stream listener.
+	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+	pub async fn close_streams(&mut self) {
+		crate::runtime::scope(self.server.streams.shutdown()).await;
+	}
+
 	/// The address the QUIC listener bound to, useful when the config asked for
 	/// port 0.
 	///
@@ -1003,11 +1061,13 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 /// A configured stream listener (`--listen-tcp-bind` / `--listen-unix-bind`).
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 enum StreamBind {
-	/// With its TLS when the listener serves `tls://`.
+	/// With its TLS when the listener serves `tls://`, and the socket to serve
+	/// when the caller bound it.
 	#[cfg(feature = "tcp")]
-	Tcp(net::SocketAddr, Option<TcpTls>),
+	Tcp(net::SocketAddr, Option<TcpTls>, Option<std::net::TcpListener>),
+	/// With the socket to serve when the caller bound it.
 	#[cfg(all(feature = "uds", unix))]
-	Unix(PathBuf),
+	Unix(PathBuf, Option<std::os::unix::net::UnixListener>),
 }
 
 /// The TLS a `--listen-tcp-tls` listener serves, reloading its certificate
@@ -1064,7 +1124,7 @@ impl StreamBind {
 			#[cfg(feature = "tcp")]
 			Self::Tcp(..) => "tcp",
 			#[cfg(all(feature = "uds", unix))]
-			Self::Unix(_) => "unix",
+			Self::Unix(..) => "unix",
 		}
 	}
 }
@@ -1145,12 +1205,15 @@ impl StreamListeners {
 			let alpns = self.versions.alpns();
 			match bind {
 				#[cfg(feature = "tcp")]
-				StreamBind::Tcp(addr, tls) => {
+				StreamBind::Tcp(addr, tls, prebound) => {
 					if tls.is_none() && !addr.ip().is_loopback() {
 						tracing::warn!(%addr, "tcp listener bound to a non-loopback address; qmux is UNENCRYPTED, ensure the network is trusted");
 					}
-					let mut listener = crate::tcp::Listener::bind(addr)
-						.await?
+					let listener = match prebound {
+						Some(listener) => crate::tcp::Listener::from_std(listener)?,
+						None => crate::tcp::Listener::bind(addr).await?,
+					};
+					let mut listener = listener
 						.with_protocols(alpns)
 						.with_quic(&self.quic)
 						.with_accept_health(health);
@@ -1165,9 +1228,12 @@ impl StreamListeners {
 					pending.push(BoundListener::Tcp(listener));
 				}
 				#[cfg(all(feature = "uds", unix))]
-				StreamBind::Unix(path) => {
-					let listener = crate::unix::Listener::bind(&path)
-						.await?
+				StreamBind::Unix(path, prebound) => {
+					let listener = match prebound {
+						Some(listener) => crate::unix::Listener::from_std(listener, &path)?,
+						None => crate::unix::Listener::bind(&path).await?,
+					};
+					let listener = listener
 						.with_protocols(alpns)
 						.with_quic(&self.quic)
 						.with_accept_health(health);
@@ -1922,6 +1988,72 @@ mod tests {
 			std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW * 2)
 		);
 		assert_eq!(window.stream, 256 * 1024);
+	}
+
+	/// Stream sockets the caller holds, as a process holds the ones it took over from its
+	/// predecessor, are served in place of binding: a session dialed before the server
+	/// existed is accepted off the queue. Closing the streams then leaves the caller's
+	/// sockets listening and the Unix path in place, for whoever serves them next.
+	#[cfg(all(feature = "tcp", feature = "uds", unix))]
+	#[tokio::test]
+	async fn held_stream_sockets_are_served_and_left_to_their_holder() {
+		kio::clock::host_time(); // real sockets
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+		let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		let addr = tcp.local_addr().unwrap();
+		// Short, unique, and under /tmp: macOS caps AF_UNIX paths near 104 bytes.
+		let path = PathBuf::from(format!("/tmp/moq-tokio-held-{}.sock", std::process::id()));
+		let _ = std::fs::remove_file(&path);
+		let unix = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+		let client = crate::connect::Config::default()
+			.init(Default::default())
+			.expect("client init");
+		let _queued = client.connect(format!("tcp://{addr}/").parse::<Url>().unwrap());
+
+		let mut listen = crate::listen::Config::default();
+		listen.tcp.bind = Some(addr);
+		listen.unix.bind = Some(path.clone());
+		let mut config = Config {
+			listen,
+			..Default::default()
+		};
+		config.streams.tcp = Some(tcp.try_clone().unwrap());
+		config.streams.unix = Some(unix.try_clone().unwrap());
+		let mut listener = config.init().expect("server init").listen().await.expect("listen");
+		assert_eq!(listener.tcp_local_addr(), Some(addr), "served the held socket");
+		kio::clock::timeout(TIMEOUT, listener.accept())
+			.await
+			.expect("the queued session never arrived")
+			.expect("accept");
+
+		let _unix = client.connect(format!("unix://{}", path.display()).parse::<Url>().unwrap());
+		kio::clock::timeout(TIMEOUT, listener.accept())
+			.await
+			.expect("the unix session never arrived")
+			.expect("accept");
+
+		listener.close_streams().await;
+		assert!(path.exists(), "closing the streams unlinked a path it did not bind");
+		std::os::unix::net::UnixStream::connect(&path).expect("the held unix socket stopped listening");
+		std::net::TcpStream::connect(addr).expect("the held tcp socket stopped listening");
+		assert!(
+			tokio::net::TcpListener::bind(addr).await.is_err(),
+			"the holder's socket was released"
+		);
+
+		drop((tcp, unix));
+		let _ = std::fs::remove_file(&path);
+	}
+
+	/// A held socket with no listener configured for it would be served by nothing.
+	#[cfg(feature = "tcp")]
+	#[test]
+	fn a_held_stream_socket_needs_its_listener() {
+		let mut config = Config::default();
+		config.streams.tcp = Some(std::net::TcpListener::bind("127.0.0.1:0").unwrap());
+		assert!(matches!(config.init_streams(), Err(Error::NoBackend(_))));
 	}
 
 	/// A millisecond track: the frames written here carry timestamps.
