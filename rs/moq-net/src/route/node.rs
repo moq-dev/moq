@@ -1747,6 +1747,47 @@ mod tests {
 		}))
 	}
 
+	/// A route that already crossed as many nodes as one may is not forwarded, since this
+	/// node's hop would take it past what any peer can decode, so a session never fails to
+	/// encode one. One hop fewer forwards at exactly the limit.
+	#[test]
+	fn a_route_at_the_hop_limit_is_not_forwarded() {
+		use crate::route::MAX_HOPS;
+		for (hops, forwarded) in [(MAX_HOPS - 1, Some(MAX_HOPS)), (MAX_HOPS, None)] {
+			let relay = Node::new(2, 2);
+			let to_b = relay.answer(Link::default(), Path::empty()).unwrap();
+			let from_a = relay.receive(Link::default(), Path::empty()).unwrap();
+			from_a.route(
+				5,
+				Some(Reach::Finite(Advert {
+					seqno: 1,
+					metric: 1,
+					down_only: false,
+					rtt: None,
+					hops: (100..100 + hops as u64).collect(),
+				})),
+			);
+			// A route goes on the wire only with a claim it shows, once that is served.
+			let live = claim(&Instance::random(), 0);
+			from_a.batch(5, vec![(p("live"), Some(live.clone()))], Some(0));
+			from_a.serving(5, &p("live"), &live);
+			let sent: Vec<_> = (outputs(&to_b).into_iter())
+				.filter_map(|output| match output {
+					Output::Route {
+						id: 5,
+						reach: Some(Reach::Finite(advert)),
+					} => Some(advert),
+					_ => None,
+				})
+				.collect();
+			assert_eq!(sent.iter().map(|advert| advert.hops.len()).max(), forwarded, "{hops} hops");
+			for advert in sent {
+				let start = crate::lite::AnnounceBroadcast::RouteStart { node: 5, advert };
+				crate::coding::Encode::encode_bytes(&start, crate::lite::Version::Lite07).unwrap();
+			}
+		}
+	}
+
 	/// A relay's own seqno advances only when a session over which another node
 	/// learned a path to it closes: a client that forwards nothing costs no ROUTE.
 	#[test]
