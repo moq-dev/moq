@@ -115,7 +115,7 @@ impl Recording {
 		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
 		catalog
-			.update(moq_net::Timed::from(&self::catalog()).at(Timestamp::ZERO))
+			.update(moq_json::Timed::from(&self::catalog()).at(Timestamp::ZERO))
 			.unwrap();
 
 		let mut sources = HashMap::new();

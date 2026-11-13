@@ -60,14 +60,14 @@ mod test {
 		));
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
 		producer
-			.append(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+			.append(crate::Timed::from(&json!({ "n": 1 })).at(at))
 			.unwrap();
 		assert!(matches!(
 			producer.append(&json!({ "n": 2 })),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
 		producer
-			.append(moq_net::Timed::from(&json!({ "n": 3 })).at(at))
+			.append(crate::Timed::from(&json!({ "n": 3 })).at(at))
 			.unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
@@ -81,14 +81,14 @@ mod test {
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
 		let huge = moq_net::Timestamp::from_scale((1 << 61) - 1, 1).unwrap();
 		producer
-			.append(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+			.append(crate::Timed::from(&json!({ "n": 1 })).at(at))
 			.unwrap();
 		assert!(matches!(
-			producer.append(moq_net::Timed::from(&json!({ "n": 2 })).at(huge)),
+			producer.append(crate::Timed::from(&json!({ "n": 2 })).at(huge)),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
 		producer
-			.append(moq_net::Timed::from(&json!({ "n": 3 })).at(at))
+			.append(crate::Timed::from(&json!({ "n": 3 })).at(at))
 			.unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
@@ -186,7 +186,7 @@ mod test {
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let record = json!({ "n": 1 });
-		let size = producer.append(moq_net::Timed::from(&record).at(captured)).unwrap();
+		let size = producer.append(crate::Timed::from(&record).at(captured)).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
@@ -249,7 +249,7 @@ mod test {
 		bad.insert((1, 2), 3);
 		assert!(
 			producer
-				.append(moq_net::Timed::from(&bad).at(moq_net::Timestamp::from_millis(0).unwrap()))
+				.append(crate::Timed::from(&bad).at(moq_net::Timestamp::from_millis(0).unwrap()))
 				.is_err()
 		);
 
@@ -298,8 +298,8 @@ mod test {
 	}
 
 	/// `value` at [`rewound`], so the append gets as far as a published group before it fails.
-	fn late(value: &Value) -> moq_net::Timed<&Value> {
-		moq_net::Timed::from(value).at(rewound())
+	fn late(value: &Value) -> crate::Timed<&Value> {
+		crate::Timed::from(value).at(rewound())
 	}
 
 	/// A failed write must reach the consumer, not just the caller. A clean close drains a reader to

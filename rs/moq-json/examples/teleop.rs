@@ -5,7 +5,8 @@
 use std::task::Poll;
 
 use moq_json::{snapshot, stream};
-use moq_net::{Timed, Timescale, Timestamp, broadcast, track};
+use moq_json::Timed;
+use moq_net::{Timescale, Timestamp, broadcast, track};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -80,9 +80,9 @@ mod test {
 		let first = moq_net::Timestamp::from_millis(100).unwrap();
 		let second = moq_net::Timestamp::from_millis(200).unwrap();
 		producer
-			.push(moq_net::Timed::from(&json!({ "n": 1 })).at(first))
+			.push(crate::Timed::from(&json!({ "n": 1 })).at(first))
 			.unwrap();
-		producer.pop(moq_net::Timed::from(1u64).at(second)).unwrap();
+		producer.pop(crate::Timed::from(1u64).at(second)).unwrap();
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
 			panic!("expected the window group");
@@ -109,8 +109,8 @@ mod test {
 			"a refused header published a group"
 		);
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
-		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
-		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
+		producer.push(crate::Timed::from(&rec(1)).at(at)).unwrap();
+		producer.push(crate::Timed::from(&rec(2)).at(at)).unwrap();
 		let _finished = producer.finish().unwrap();
 		let pushed: Vec<_> = drain(&mut consumer(track))
 			.into_iter()
@@ -139,13 +139,13 @@ mod test {
 			));
 		};
 
-		refused(producer.push(moq_net::Timed::from(&rec(1)).at(huge)));
+		refused(producer.push(crate::Timed::from(&rec(1)).at(huge)));
 		assert_eq!(largest(&mut track), None, "a refused header published a group");
 
-		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
-		refused(producer.push(moq_net::Timed::from(&rec(2)).at(huge)));
-		refused(producer.pop(moq_net::Timed::from(1u64).at(huge)));
-		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
+		producer.push(crate::Timed::from(&rec(1)).at(at)).unwrap();
+		refused(producer.push(crate::Timed::from(&rec(2)).at(huge)));
+		refused(producer.pop(crate::Timed::from(1u64).at(huge)));
+		producer.push(crate::Timed::from(&rec(2)).at(at)).unwrap();
 		assert_eq!(largest(&mut track), Some(100), "a refused op rolled the group");
 
 		let _finished = producer.finish().unwrap();
@@ -170,9 +170,9 @@ mod test {
 		let mut producer = Producer::new(track, ProducerConfig::default());
 		let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 
-		producer.push(moq_net::Timed::from(&rec(1)).at(at(100))).unwrap();
-		producer.push(moq_net::Timed::from(&rec(2)).at(at(200))).unwrap();
-		producer.pop(moq_net::Timed::from(1u64).at(at(300))).unwrap();
+		producer.push(crate::Timed::from(&rec(1)).at(at(100))).unwrap();
+		producer.push(crate::Timed::from(&rec(2)).at(at(200))).unwrap();
+		producer.pop(crate::Timed::from(1u64).at(at(300))).unwrap();
 		let events: Vec<_> = drain_timed(&mut live).into_iter().map(|e| (e.value, e.at)).collect();
 		assert_eq!(
 			events,
@@ -198,7 +198,7 @@ mod test {
 		// A reader joining at a later group learns of the retained record from its header, so it
 		// gets the header frame's time rather than the record's original push time.
 		producer.cut().unwrap();
-		producer.push(moq_net::Timed::from(&rec(3)).at(at(400))).unwrap();
+		producer.push(crate::Timed::from(&rec(3)).at(at(400))).unwrap();
 		let late = late.with_range(1..);
 		let mut late = consumer(late);
 		let events: Vec<_> = drain_timed(&mut late).into_iter().map(|e| (e.value, e.at)).collect();
@@ -320,7 +320,7 @@ mod test {
 	}
 
 	/// Drain every event currently available, with its frame timestamp.
-	fn drain_timed(consumer: &mut Consumer<Value>) -> Vec<moq_net::Timed<Event<Value>>> {
+	fn drain_timed(consumer: &mut Consumer<Value>) -> Vec<crate::Timed<Event<Value>>> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(event))) = consumer.poll_next(&waiter) {
@@ -749,9 +749,9 @@ mod test {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
 		for n in 0..4 {
-			producer.push(moq_net::Timed::from(&rec(n)).at(ms(100 + n))).unwrap();
+			producer.push(crate::Timed::from(&rec(n)).at(ms(100 + n))).unwrap();
 		}
-		producer.pop(moq_net::Timed::from(1).at(ms(200))).unwrap();
+		producer.pop(crate::Timed::from(1).at(ms(200))).unwrap();
 
 		let mut late = producer.consume();
 		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
@@ -776,7 +776,7 @@ mod test {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
-			producer.push(moq_net::Timed::from(&rec(n as u64)).at(ms(at))).unwrap();
+			producer.push(crate::Timed::from(&rec(n as u64)).at(ms(at))).unwrap();
 		}
 
 		let mut late = producer.consume();
@@ -784,7 +784,7 @@ mod test {
 			producer.poll_refresh(&waiter).is_pending(),
 			"no group may share the open group's start"
 		);
-		producer.push(moq_net::Timed::from(&rec(4)).at(ms(140))).unwrap();
+		producer.push(crate::Timed::from(&rec(4)).at(ms(140))).unwrap();
 		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
 		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
 			Poll::Ready(Ok(Some(group))) => Some(group),
@@ -854,7 +854,7 @@ mod test {
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
 		// Rewound past the first group, so the header group is published before the write fails.
-		assert!(producer.push(moq_net::Timed::from(&rec(1)).at(rewound())).is_err());
+		assert!(producer.push(crate::Timed::from(&rec(1)).at(rewound())).is_err());
 		assert_eq!(producer.range(), 0..0);
 		assert!(producer.window().is_empty());
 

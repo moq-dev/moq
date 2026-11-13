@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::Timestamp;
+use moq_net::Timestamp;
 
 /// A value to publish, and optionally when it was captured.
 ///

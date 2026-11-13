@@ -48,12 +48,12 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// Get the next event and its frame's timestamp, or `None` once the track ends.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<Event<T>>>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<Event<T>>>>> {
 		loop {
 			// Drain what the last frame produced before reading more, so every queued event is that
 			// frame's and shares its timestamp.
 			if let Some(value) = self.decoder.next_event() {
-				return Poll::Ready(Ok(Some(moq_net::Timed { value, at: self.at })));
+				return Poll::Ready(Ok(Some(crate::Timed { value, at: self.at })));
 			}
 
 			let Some(group) = &mut self.group else {

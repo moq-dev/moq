@@ -601,7 +601,7 @@ async fn read_feedback(
 	lines: tokio::sync::mpsc::Sender<String>,
 ) -> anyhow::Result<()> {
 	let mut track = reader(broadcast.track(hang::echo::TRACK)?);
-	while let Some(moq_net::Timed { value: feedback, .. }) = track.latest().await? {
+	while let Some(moq_json::Timed { value: feedback, .. }) = track.latest().await? {
 		let line = EchoLine {
 			broadcast: path.as_str(),
 			feedback,

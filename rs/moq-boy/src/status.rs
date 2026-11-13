@@ -62,7 +62,7 @@ impl StatusPublisher {
 		}
 		if let Err(err) = self
 			.producer
-			.update(moq_net::Timed::from(status).at(now()))
+			.update(moq_json::Timed::from(status).at(now()))
 		{
 			tracing::warn!(%err, "failed to publish status");
 		}

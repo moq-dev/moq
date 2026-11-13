@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 
 use super::{Encoded, Encoder};
 use crate::refresh::Refresh;
-use moq_net::Timed;
+use crate::Timed;
 
 use crate::{Error, Result};
 

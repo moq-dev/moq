@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
-use moq_net::Timed;
+use crate::Timed;
 use serde::Serialize;
 use serde_json::Value;
 

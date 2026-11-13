@@ -22,7 +22,7 @@ The `poll_*` methods work by default. Enable the `async` Cargo feature to await
 
 Compression is the track's: create it with `Info::default().with_compression(Compression::Deflate)`,
 which JSON benefits from, and readers see plain frames either way. A bare value stays untimed; publish
-`moq_net::Timed::from(&value).at(captured)` to retain a capture timestamp.
+`moq_json::Timed::from(&value).at(captured)` to retain a capture timestamp.
 The timestamp must match the track: an untimed track has no timescale, and a
 timed track requires a timestamp on every write. Editing guards take the
 same optional capture time when opened, including when they publish on drop.

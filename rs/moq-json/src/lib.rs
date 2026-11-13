@@ -29,7 +29,10 @@ pub mod snapshot;
 mod state;
 pub mod stream;
 mod strict;
+mod timed;
 pub mod window;
+
+pub use timed::Timed;
 
 /// Test support for the codec bench, enabled by the `bench` feature: the merge-patch diff.
 #[cfg(feature = "bench")]

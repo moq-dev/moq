@@ -77,7 +77,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Skips every group a newer one has superseded. Finish the current group's buffered frames
 	/// before taking the next. Lost groups resynchronize from a later snapshot.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		self.poll_read(waiter, false)
 	}
 
@@ -86,11 +86,11 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		self.poll_read(waiter, true)
 	}
 
-	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<crate::Timed<T>>>> {
 		if skip {
 			// Jump to the newest group the reader already has; a newer one supersedes the rest.
 			while let Poll::Ready(Some(group)) = self.track.poll_next_group(waiter)? {
@@ -121,7 +121,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 				Poll::Ready(Ok(Some(frame))) => {
 					self.apply(&frame.payload)?;
 					if !skip {
-						return Poll::Ready(Ok(self.decoder.decode()?.map(|value| moq_net::Timed {
+						return Poll::Ready(Ok(self.decoder.decode()?.map(|value| crate::Timed {
 							value,
 							at: frame.timestamp,
 						})));
@@ -150,7 +150,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 			}
 		}
 		if let Some(at) = advanced {
-			Poll::Ready(Ok(self.decoder.decode()?.map(|value| moq_net::Timed { value, at })))
+			Poll::Ready(Ok(self.decoder.decode()?.map(|value| crate::Timed { value, at })))
 		} else if finished {
 			Poll::Ready(Ok(None))
 		} else {
@@ -242,7 +242,7 @@ mod timestamps {
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
 				producer
-					.update(moq_net::Timed {
+					.update(crate::Timed {
 						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
 						at: Some(at),
 					})

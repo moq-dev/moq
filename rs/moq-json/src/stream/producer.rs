@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use super::Encoder;
-use moq_net::Timed;
+use crate::Timed;
 
 use crate::Result;
 

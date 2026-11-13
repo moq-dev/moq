@@ -95,7 +95,7 @@ impl Node {
 		}
 		let at = moq_net::Timestamp::from_millis(self.published).unwrap();
 		self.published += 1;
-		self.bucket.update(moq_net::Timed::from(&self.frame).at(at)).unwrap();
+		self.bucket.update(moq_json::Timed::from(&self.frame).at(at)).unwrap();
 	}
 }
 

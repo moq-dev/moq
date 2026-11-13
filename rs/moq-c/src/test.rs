@@ -2234,7 +2234,7 @@ fn timestamps_round_trip_exactly() {
 			.unwrap()
 			.clone();
 		let mut json = moq_json::stream::Producer::<serde_json::Value>::new(producer, Default::default());
-		json.append(moq_net::Timed {
+		json.append(moq_json::Timed {
 			value: &serde_json::json!(1),
 			at: written.map(|written| written.try_into().unwrap()),
 		})

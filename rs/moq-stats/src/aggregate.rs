@@ -1407,7 +1407,7 @@ mod tests {
 				tiers: BTreeMap::from([(String::new(), bucket)]),
 			};
 			self.bucket
-				.update(moq_net::Timed::from(&frame).at(next_stamp(&self.track)))
+				.update(moq_json::Timed::from(&frame).at(next_stamp(&self.track)))
 				.expect("publish");
 		}
 
@@ -2017,7 +2017,7 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(moq_net::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(next_stamp(&self.track)))
+				.update(moq_json::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(next_stamp(&self.track)))
 				.expect("publish");
 		}
 	}

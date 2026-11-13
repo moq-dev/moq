@@ -80,7 +80,7 @@
 
 use std::task::{Poll, ready};
 
-use moq_net::Timed;
+use moq_json::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

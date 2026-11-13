@@ -116,7 +116,7 @@ mod test {
 			let (mut producer, track) = producer_on(cfg(deltas), timed());
 			let at = moq_net::Timestamp::from_millis(100).unwrap();
 			producer
-				.update(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+				.update(crate::Timed::from(&json!({ "n": 1 })).at(at))
 				.unwrap();
 			assert!(matches!(
 				producer.update(&json!({ "n": 2 })),
@@ -136,10 +136,10 @@ mod test {
 			let (mut producer, track) = producer_on(cfg(deltas), timed());
 			let at = moq_net::Timestamp::from_millis(100).unwrap();
 			producer
-				.update(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+				.update(crate::Timed::from(&json!({ "n": 1 })).at(at))
 				.unwrap();
 			assert!(matches!(
-				producer.update(moq_net::Timed::from(&json!({ "n": 2 })).at(huge)),
+				producer.update(crate::Timed::from(&json!({ "n": 2 })).at(huge)),
 				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 			));
 			let _finished = producer.finish().unwrap();
@@ -475,9 +475,9 @@ mod test {
 		let first = moq_net::Timestamp::from_millis(1_000).unwrap();
 		let second = moq_net::Timestamp::from_millis(2_000).unwrap();
 		let value = json!({ "a": 1, "b": "x".repeat(64) });
-		let size = producer.update(moq_net::Timed::from(&value).at(first)).unwrap();
+		let size = producer.update(crate::Timed::from(&value).at(first)).unwrap();
 		let changed = json!({ "a": 2, "b": "x".repeat(64) });
-		let delta = producer.update(moq_net::Timed::from(&changed).at(second)).unwrap();
+		let delta = producer.update(crate::Timed::from(&changed).at(second)).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
@@ -563,11 +563,11 @@ mod test {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
 		producer
-			.update(moq_net::Timed::from(&json!({ "n": 0 })).at(ms(100)))
+			.update(crate::Timed::from(&json!({ "n": 0 })).at(ms(100)))
 			.unwrap();
 		for n in 1..=3 {
 			producer
-				.update(moq_net::Timed::from(&json!({ "n": n })).at(ms(100 + n)))
+				.update(crate::Timed::from(&json!({ "n": n })).at(ms(100 + n)))
 				.unwrap();
 		}
 
@@ -590,7 +590,7 @@ mod test {
 		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
 			producer
-				.update(moq_net::Timed::from(&json!({ "n": n })).at(ms(at)))
+				.update(crate::Timed::from(&json!({ "n": n })).at(ms(at)))
 				.unwrap();
 		}
 
@@ -601,7 +601,7 @@ mod test {
 		);
 
 		producer
-			.update(moq_net::Timed::from(&json!({ "n": 4 })).at(ms(140)))
+			.update(crate::Timed::from(&json!({ "n": 4 })).at(ms(140)))
 			.unwrap();
 		assert!(matches!(
 			producer.poll_refresh(&kio::Waiter::noop()),
@@ -620,7 +620,7 @@ mod test {
 		let (mut producer, track) = producer_on(cfg(true), timed().with_refresh(1));
 		for n in 0..=3 {
 			producer
-				.update(moq_net::Timed::from(&json!({ "n": n })).at(ms(100 + n)))
+				.update(crate::Timed::from(&json!({ "n": n })).at(ms(100 + n)))
 				.unwrap();
 		}
 
@@ -640,7 +640,7 @@ mod test {
 		assert_eq!(frames(&mut fresh), vec![(Some(ms(103)), json!({ "n": 3 }))]);
 
 		producer
-			.update(moq_net::Timed::from(&json!({ "n": 4 })).at(ms(104)))
+			.update(crate::Timed::from(&json!({ "n": 4 })).at(ms(104)))
 			.unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(track).last(), Some(&json!({ "n": 4 })));
@@ -1053,7 +1053,7 @@ mod test {
 		let mut producer = Producer::<Value>::new(track, cfg(false));
 
 		assert!(matches!(
-			producer.update(moq_net::Timed::from(&json!({ "a": 1 })).at(rewound())),
+			producer.update(crate::Timed::from(&json!({ "a": 1 })).at(rewound())),
 			Err(crate::Error::Net(_))
 		));
 

@@ -1492,7 +1492,7 @@ impl Publish {
 		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window.producer.push(moq_net::Timed::from(&value).at(timestamp))?;
+		window.producer.push(moq_json::Timed::from(&value).at(timestamp))?;
 		Ok(())
 	}
 
@@ -1500,7 +1500,7 @@ impl Publish {
 	/// `timestamp` on the broadcast clock.
 	pub fn json_window_pop(&mut self, window: Id, count: u64, timestamp: moq_net::Timestamp) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window.producer.pop(moq_net::Timed::from(count).at(timestamp))?;
+		window.producer.pop(moq_json::Timed::from(count).at(timestamp))?;
 		Ok(())
 	}
 

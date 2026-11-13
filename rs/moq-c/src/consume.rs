@@ -252,7 +252,7 @@ impl<T> Timed<T> {
 }
 
 /// A JSON value pre-serialized to a string, with its frame timestamp.
-fn json_value(value: moq_net::Timed<serde_json::Value>) -> Result<Timed<String>, Error> {
+fn json_value(value: moq_json::Timed<serde_json::Value>) -> Result<Timed<String>, Error> {
 	Ok(Timed::new(serde_json::to_string(&value.value)?, value.at))
 }
 
@@ -266,7 +266,7 @@ struct JsonWindowEvent {
 
 impl JsonWindowEvent {
 	/// Pre-serialize an event, keeping its frame timestamp.
-	fn new(event: moq_net::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Timed<Self>, Error> {
+	fn new(event: moq_json::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Timed<Self>, Error> {
 		use moq_json::window::Event;
 
 		let (kind, range, json) = match event.value {
