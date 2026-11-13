@@ -3,9 +3,17 @@ use std::time::Duration;
 
 use moq_net::Timestamp;
 
+/// Where one codec frame's packet starts and ends, its codec priming folded in.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Stamp {
+	pub start: Timestamp,
+	pub end: Timestamp,
+}
+
 pub(super) struct Raw {
 	pub samples: Vec<f32>,
-	pub timestamp: Timestamp,
+	pub stamp: Stamp,
+	/// Where the frame's input ends, which retention ages from.
 	pub end: Timestamp,
 	pub reset: bool,
 	pub discontinuity: bool,
@@ -108,7 +116,10 @@ mod tests {
 		for index in 0..200 {
 			backlog.push(Raw {
 				samples: vec![index as f32; 1920],
-				timestamp: Timestamp::ZERO,
+				stamp: Stamp {
+					start: Timestamp::ZERO,
+					end: Timestamp::ZERO,
+				},
 				end: Timestamp::from_micros(20_000).unwrap(),
 				reset: false,
 				discontinuity: false,
