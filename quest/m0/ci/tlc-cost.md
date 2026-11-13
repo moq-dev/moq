@@ -89,5 +89,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A Rust TLA+ checker is rechecked once the route model drops `SumOver`](/quest/m2/tla-native-recheck.md) - a faster engine for the same specs, waiting on this quest's `SumOver` rewrite
+- [A Rust TLA+ checker is rechecked once the route model drops SumOver](/quest/m2/tla-native-recheck.md) - a faster engine for the same specs, waiting on this quest's `SumOver` rewrite
 - [The route rules hold from any state, not only the runs TLC reaches](/quest/m1/route-inductive.md) - rewrites `SumOver` and adds the refinement check named above

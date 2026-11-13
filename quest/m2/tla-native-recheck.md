@@ -1,4 +1,4 @@
-# [M] A Rust TLA+ checker is rechecked once the route model drops `SumOver`
+# [M] A Rust TLA+ checker is rechecked once the route model drops SumOver
 
 ## Goal
 
