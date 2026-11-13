@@ -9996,6 +9996,26 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether the publisher declared every start in `groups` skipped, never to be produced
+	/// (see [`Producer::skip_groups`], which appending does between groups), so no group can
+	/// arrive there: true for an empty range. Unlike [`Self::next_in_range`], this ignores the
+	/// subscriber's ranges. A copy knows only the skips its wire forwarded.
+	///
+	/// What tells a reader that nothing lies between two groups, or before a track's first.
+	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
+		let Some(last) = groups.end.checked_sub(1).filter(|last| *last >= groups.start) else {
+			return true;
+		};
+		let run = std::iter::once(groups.start..=last);
+		match &self.inner {
+			Inner::Plain(cursor) => {
+				let state = cursor.state.read();
+				first_unskipped(run, |key| state.skip_end(key)).is_none()
+			}
+			Inner::Resume(resume, _) => resume.is_skipped(run),
+		}
+	}
+
 	/// The groups from `from` up to the exclusive `end` that this subscriber's ranges and
 	/// [`Self::with_range`] bounds name, lowest first: the groups it is owed, without the
 	/// ones between disjoint ranges.
@@ -12685,11 +12705,18 @@ mod test {
 		let subscriber = producer.subscribe(Subscription::default());
 		producer.append_group(0).unwrap().close().unwrap();
 		assert_eq!(subscriber.next_in_range(1), Some(1), "nothing skipped yet");
+		assert!(!subscriber.is_skipped(1..2));
 		producer.append_group(10).unwrap().close().unwrap();
 		assert_eq!(subscriber.next_in_range(1), Some(10));
 		assert_eq!(subscriber.next_in_range(11), Some(11));
+		assert!(subscriber.is_skipped(1..10));
+		assert!(!subscriber.is_skipped(0..10), "group 0 is held");
+		assert!(!subscriber.is_skipped(1..11), "group 10 is held");
+		assert!(subscriber.is_skipped(5..5), "an empty range");
 		producer.skip_groups(11..20);
 		assert_eq!(subscriber.next_in_range(11), Some(20));
+		assert!(subscriber.is_skipped(11..20));
+		assert!(!subscriber.is_skipped(11..21));
 	}
 
 	/// A group finished whole ages from its own end, which a zero budget waits for too: a

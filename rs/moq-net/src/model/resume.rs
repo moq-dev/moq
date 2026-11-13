@@ -905,6 +905,16 @@ impl Subscriber {
 		})
 	}
 
+	/// Whether the serving route's copy holds every group of `run` declared skipped; see
+	/// [`track::Subscriber::is_skipped`].
+	pub(super) fn is_skipped(&self, run: impl Iterator<Item = std::ops::RangeInclusive<u64>>) -> bool {
+		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
+		let Some(serving) = serving else {
+			return false;
+		};
+		track::first_unskipped(run, |key| serving.skip_end(key)).is_none()
+	}
+
 	/// The groups the reader's ranges name from `from` on; see
 	/// [`track::Subscriber::runs_in_range`].
 	pub(super) fn runs(&self, from: u64) -> Vec<std::ops::RangeInclusive<u64>> {
