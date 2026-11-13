@@ -28,14 +28,14 @@ come back, drain with a GOAWAY, and lose or move their path to the origin.
 | --- | --- | --- |
 | `OfflineOnlyWhenUnreachable` | The viewer sees OFFLINE only when no relay can reach the broadcast. | Holds: the viewer's relay crashing reads CONNECTING until the redial lands and its announcements arrive. |
 | `KeepsReconnecting` | A viewer whose relay left keeps reconnecting while some relay is up. | Holds with moq-relay (`Failover.cfg`). Breaks with a relay whose GOAWAY names another host (`FailoverRedirectRefused.cfg`): the default `same-host` policy refuses it and stops the loop. |
-| `RedialsALiveRelay` | A reconnecting viewer can land on a relay that is up. | Holds with moq-relay. Breaks under `FailoverRedirect.cfg`: a followed redirect is sticky, so once that relay dies every redial goes back to it, never to the configured URL. |
+| `RedialsALiveRelay` | A reconnecting viewer can land on a relay that is up. | Holds, including under `FailoverRedirect.cfg`: a failed dial to a followed redirect's relay drops the redirect, so the next redial goes to the configured URL. |
 
 A GOAWAY whose replacement connects within the handover keeps playing, and a move to another
 path to the origin only stalls. `Failover.cfg` plays relays as moq-relay runs them, draining with
 an empty-URI GOAWAY; `FailoverRedirect.cfg` and `FailoverRedirectRefused.cfg` let relays name a URI. The crash replays through
 `src/offline.test.ts` (a dropped session reads connecting), the refused redirect through `a refused
-redirect ends the connection instead of reconnecting` in `@moq/net`, and the sticky redirect
-through `residual: a redirected connection redials only its dead target` there.
+redirect ends the connection instead of reconnecting` in `@moq/net`, and the fallback from a dead redirect
+through `a redirected connection falls back to the configured URL once its target dies` there.
 
 ## Run
 

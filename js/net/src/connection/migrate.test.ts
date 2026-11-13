@@ -245,10 +245,10 @@ test("a redirect moves the pool key while the handle keeps its origin", async ()
 	}
 });
 
-// Replays RedialsALiveRelay in js/watch/verify/Failover.tla under FailoverRedirect.cfg: a redirect is
-// sticky, so once the relay it named dies, every redial goes back to that dead relay and never
-// to the configured URL, which still answers.
-test("residual: a redirected connection redials only its dead target", async () => {
+// Replays RedialsALiveRelay in js/watch/verify/Failover.tla under FailoverRedirect.cfg: once the relay
+// a redirect named dies, one failed dial to it drops the redirect and the redial returns to the
+// configured URL, which still answers.
+test("a redirected connection falls back to the configured URL once its target dies", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const { dials } = fleet();
@@ -273,9 +273,10 @@ test("residual: a redirected connection redials only its dead target", async () 
 		dead = true;
 		const before = attempts.length;
 		dials[1]?.server.close();
-		await elapse(clock, () => attempts.length >= before + 4);
-		expect(reload.status.peek()).not.toBe("connected");
-		expect(attempts.slice(before).every((href) => href === moved.href)).toBe(true);
+		await elapse(clock, () => dials.length === 3 && reload.status.peek() === "connected");
+		expect(attempts.slice(before)).toEqual([moved.href, url.href]);
+		expect(dials[2]?.url).toBe(url.href);
+		expect(reload.redirect.peek()).toBeUndefined();
 	} finally {
 		reload.close();
 		installed.close();

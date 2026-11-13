@@ -372,6 +372,9 @@ pub enum Action<A, E> {
 pub struct Reconnect<A, E> {
 	config: Config,
 	targets: Vec<A>,
+	// The addresses the caller configured, which a failed walk to a redirect returns to.
+	// None until a GOAWAY redirect replaces `targets`.
+	configured: Option<Vec<A>>,
 	tokens: Option<auth::Tokens>,
 	retry: Retry<E>,
 	redirects: Redirects,
@@ -509,6 +512,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			retry: Retry::new(Pacing::new(&config.backoff).initial, now),
 			config,
 			targets,
+			configured: None,
 			tokens: None,
 			redirects: Redirects::default(),
 			phase: Phase::Start,
@@ -898,6 +902,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 		self.queue.push_back(Action::Retrying(err.clone()));
 		self.retry.last = Some(err);
+		// A redirect target that no longer answers is dropped: the next walk dials the
+		// configured addresses, which may still answer.
+		if let Some(configured) = self.configured.take() {
+			self.targets = configured;
+		}
 		// No URL here: with several targets there isn't one to name, and each attempt
 		// already logged the address it tried.
 		self.back_off(now, self.config.backoff.timeout, false, "reconnecting after backoff");
@@ -965,7 +974,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		// us to this session.
 		let url = match assigned {
 			Some(target) => {
-				self.targets = vec![A::from(target.clone())];
+				let redirected = std::mem::replace(&mut self.targets, vec![A::from(target.clone())]);
+				self.configured.get_or_insert(redirected);
 				target
 			}
 			None => url,
