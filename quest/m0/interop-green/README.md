@@ -10,9 +10,10 @@ so it only needs to stay green.
 
 ## Waiting
 
-- moq-dev/moq: the next scheduled Interop run on `main` passes, once
-  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) merges and the
-  [resumed-audio child](/quest/m0/interop-green/resume-sync.md) lands. Check
+- moq-dev/moq: the next scheduled Interop run on `main` passes, once the
+  [resumed-audio child](/quest/m0/interop-green/resume-sync.md) lands
+  ([moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572), the max-age
+  fix, merged 2026-11-12). Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
