@@ -1691,8 +1691,9 @@ test.each([false, true])("a duplicate of an arriving copy waits for it to settle
 			[0n, 7],
 			[2n, 8],
 		] as const) {
+			// The size plus one first, as above.
+			await resend.u53(2);
 			await resend.u62(timestamp);
-			await resend.u53(1);
 			await resend.write(new Uint8Array([payload]));
 		}
 		const duplicate = new Reader(

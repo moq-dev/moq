@@ -3739,8 +3739,9 @@ struct Cursor {
 	// Read a compressed group's stored slices rather than its inflated copy.
 	raw: bool,
 
-	// Whether the last frame handed out to stream from this copy was still being written.
-	// Left uncommitted when the copy fails, it is torn.
+	// Whether the last frame handed out to stream from this copy was still being written,
+	// until a skip past it. Left uncommitted when the copy fails, it is torn. A whole read
+	// after it follows its commit, so it can leave this set.
 	partial: bool,
 
 	// Whether the group is compressed, so a plain read inflates under the state's lock.
@@ -4469,7 +4470,14 @@ impl Consumer {
 		let raw = reader.cursor.raw;
 		let state = self.cursor.state.read();
 		// A plain read inflates from frame 0, and a copy that shed the frame can't serve it.
-		!state.sparse() && (raw || state.flate.is_none() || state.offset == 0) && state.check_read(index, raw).is_ok()
+		!state.sparse()
+			&& (raw || state.flate.is_none() || state.offset == 0)
+			&& state.check_read(index, raw).is_ok()
+			// Inflating a frame past the inflated ones needs every slice since, so none shed.
+			&& state.plain(raw).is_none_or(|plain| {
+				let len = plain.len.load(Ordering::Acquire);
+				len > index || len >= state.held()
+			})
 	}
 
 	fn recover(&self) -> Option<&super::resume::Recover> {
@@ -4708,7 +4716,13 @@ impl Consumer {
 			}
 		};
 		match next.poll_finished_once(waiter) {
-			Poll::Ready(res) => Poll::Ready(res.map(|_| index)),
+			Poll::Ready(res) => {
+				// The failed copy holds no end, so the copy that answered releases the demand.
+				if res.is_ok() {
+					next.release_if_finished();
+				}
+				Poll::Ready(res.map(|_| index))
+			}
 			Poll::Pending => {
 				// Dropped, it would leave the copy unwanted, and a fetch could abandon it.
 				self.carry.get_or_insert_default().finishing = Some((drained, next));
@@ -4796,6 +4810,7 @@ impl Cursor {
 		self.index = index;
 		// The batch was drained from below the new cursor, so it can't be reused.
 		self.prefetch = Prefetch::default();
+		self.partial = false;
 	}
 
 	fn skip_to(&mut self, index: u64) {
@@ -4805,6 +4820,8 @@ impl Cursor {
 		}
 		self.index = index;
 		self.prefetch = Prefetch::default();
+		// The frame handed out partly is given up below the skip, so a failure tears nothing.
+		self.partial = false;
 	}
 
 	fn poll_next_frame(
@@ -6905,6 +6922,31 @@ mod test {
 		let mut late = group.consume();
 		assert!(matches!(read_plain(&mut late), Err(Error::Evicted)));
 		assert!(matches!(raw.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
+	}
+
+	/// A compressed copy that shed its front slices before any plain read inflated them
+	/// continues no plain reader, even past them: inflating its frame needs them. A raw
+	/// reader takes the stored slice.
+	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
+	#[cfg(feature = "async")]
+	fn a_copy_shed_before_inflating_continues_no_plain_reader() {
+		let pool = cache::Pool::unbounded();
+		let mut group = compressed_group(&pool);
+		for frame in &mebibytes(40) {
+			group.write_frame(None, frame.clone()).unwrap();
+		}
+		let held = group.handle.state.read().held();
+		assert!(held > 1, "the slices were shed");
+		let copy = group.consume();
+		let mut plain = group.consume();
+		plain.skip_to(held as u64);
+		assert!(!copy.continues(&plain, held));
+		assert!(
+			matches!(read_plain(&mut plain), Err(Error::Evicted)),
+			"inflating needs them"
+		);
+		assert!(copy.continues(&group.consume().compressed(), held));
 	}
 
 	/// The inflated copy charges each frame's slot, so empty frames count toward its tail.
