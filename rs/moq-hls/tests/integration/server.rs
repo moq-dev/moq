@@ -37,14 +37,18 @@ async fn respond_serves_a_route_rewritten_into_scope() {
 
 /// A recorder's cursor gets the media of a publisher whose moq-lite has no FETCH: the cursor's
 /// own subscription carries every group to the subscriber's cache.
+///
+/// moq-lite-01 to 04 can't say the starts between two groups were skipped, so the reader waits
+/// out its feed budget at each gap before it records past one.
 #[tokio::test(start_paused = true)]
 async fn a_cursor_records_a_publisher_without_fetch() {
-	for version in [
-		"moq-lite-01",
-		"moq-lite-02",
-		"moq-lite-03",
-		"moq-lite-04",
-		"moq-lite-05",
+	const HOLELESS: std::time::Duration = std::time::Duration::from_secs(45);
+	for (version, wait) in [
+		("moq-lite-01", HOLELESS),
+		("moq-lite-02", HOLELESS),
+		("moq-lite-03", HOLELESS),
+		("moq-lite-04", HOLELESS),
+		("moq-lite-05", TIMEOUT),
 	] {
 		let pair = Pair::new(version.parse().unwrap(), Default::default()).await;
 		let mut publisher = Publisher::new(&pair.publisher, "live", Default::default());
@@ -81,7 +85,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		.unwrap_or_else(|_| panic!("{version}: the cursor never subscribed"));
 
 		publisher.write(0, 5, 1);
-		let segment = kio::clock::timeout(TIMEOUT, next)
+		let segment = kio::clock::timeout(wait, next)
 			.await
 			.unwrap_or_else(|_| panic!("{version}: no segment recorded"))
 			.unwrap_or_else(|err| panic!("{version}: {err}"))
