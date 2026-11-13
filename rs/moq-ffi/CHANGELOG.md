@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.26](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.25...moq-ffi-v0.4.26) - 2026-11-12
+
+### Fixed
+
+- Go module static libraries no longer embed LLVM bitcode, which newer Go cgo toolchains reject ([#8585](https://github.com/moq-dev/moq/pull/8585))
+
 ## [0.4.25](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.24...moq-ffi-v0.4.25) - 2026-11-11
 
 ### Other
