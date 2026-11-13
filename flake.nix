@@ -2,7 +2,7 @@
   description = "MoQ - Media over QUIC";
 
   # nix.moq.dev caches the default branch's dev shell, along with moq-relay
-  # and moq on x86 Linux, with a 30-day expiry:
+  # and moq on x86 Linux, with a 14-day expiry:
   #   nix run github:moq-dev/moq#moq-relay --accept-flake-config
   # Release Nix retains tagged packages permanently once a release cut
   # carries that workflow from main; earlier tags still build from source.
@@ -10,7 +10,7 @@
   # --accept-flake-config opts into the nixConfig below for one command. To
   # trust the cache permanently instead, add these settings to nix.conf.
   #
-  # The CI paths expire 30 days after upload, possibly before a path
+  # The CI paths expire 14 days after upload, possibly before a path
   # that depends on them; `fallback` builds whatever is missing instead of
   # failing the substitution.
   nixConfig = {

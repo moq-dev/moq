@@ -63,7 +63,7 @@ Decided 2026-11-13 (maintainer, /quest-plan):
   Waiting to approve posting it. An agent could post it, but the maintainer
   approves each post outside their orgs.
 - Rejected: only shortening the expiry, which leaves the failed writes alone
-  ([cache-expiry](/quest/m0/ci/cache-expiry.md) shortens it for storage).
+  (shortened to 7 days on 2026-11-12 for storage).
 
 Measure before and after over enough scheduled nights to separate the change
 from the spread between nights:
@@ -77,7 +77,7 @@ from the spread between nights:
 
 An expired object turns a 412 into a successful upload. Compare nights under
 one lifecycle window, or note the
-[cache-expiry](/quest/m0/ci/cache-expiry.md) change between them.
+2026-11-12 expiry change between them.
 
 If the PR lands before upstream fixes this, rewrite this quest to what is
 left: the posting approval and the upstream fix. Plan the mbx bump that adopts
@@ -89,4 +89,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - its 2026-11-26 bucket measurement and its Windows report to mbx overlap this one's numbers and upstream contact
-- [Supplemental caches expire sooner](/quest/m0/ci/cache-expiry.md) - the storage side of the same bill
