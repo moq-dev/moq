@@ -1657,10 +1657,9 @@ mod tests {
 			recorder.played().iter().any(|part| part.sample == 0.5),
 			"audio never resumed"
 		);
-		assert!(
-			recorder.latencies().len() >= 2,
-			"the late burst never started a fresh sink"
-		);
+		// The burst lands within the reach, so it continues the sink rather than
+		// aging out into a hole; the real ring skips it onto the clock.
+		assert_eq!(recorder.latencies().len(), 1, "the late burst replaced the sink");
 		assert!(shown.len() > 50, "video stalled: {} pictures", shown.len());
 		for (timestamp, at) in shown {
 			let due = start.saturating_add(delay).saturating_add(Duration::from(timestamp));
@@ -2052,12 +2051,13 @@ mod tests {
 			producer.write(packet(index, 0.25)).unwrap();
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
-		// Video declares an end two seconds out, holding the audio replacement back.
+		// Video declares an end six seconds out, holding the audio replacement
+		// back past its age budget, the delay plus the estimator's 2 s reach.
 		let video = presentation.track(moq_mux::container::Kind::Video);
 		video.declare();
-		video.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
+		video.end(moq_net::Timestamp::from_millis(6_000).unwrap()).unwrap();
 		producer.discontinuity().unwrap();
-		const REPLACEMENT: u64 = 100;
+		const REPLACEMENT: u64 = 300;
 		for index in 0..REPLACEMENT {
 			producer.write(packet(5 + index, 0.5)).unwrap();
 			kio::clock::sleep(PACKET_DURATION).await;

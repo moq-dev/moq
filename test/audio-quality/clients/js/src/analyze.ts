@@ -97,7 +97,9 @@ export function recovery(samples: { at: Ms; lag: Ms | undefined; stalled: boolea
 	for (let i = 0; i < samples.length; i++) {
 		const onset = samples[i] as Point;
 		const before = samples.flatMap((s, j) =>
-			s.at >= onset.at - REST_MS && j < i && !disturbed.has(j) && !s.stalled && s.lag !== undefined ? [s.lag] : [],
+			s.at >= onset.at - REST_MS && j < i && !disturbed.has(j) && !s.stalled && s.lag !== undefined
+				? [s.lag]
+				: [],
 		);
 		const rest = median(before);
 		if (rest === undefined) continue;

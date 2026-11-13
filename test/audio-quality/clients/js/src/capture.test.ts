@@ -138,7 +138,6 @@ test("the observer asks for the decoder's delay plus its stretch and warmup, not
 		} as Catalog.AudioConfig),
 		delay: new Signal(Duration.millis(100)),
 		maxDelay: new Signal(Duration.millis(100)),
-		stretch: new Signal(Duration.secs(2)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();

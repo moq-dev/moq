@@ -127,12 +127,12 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 	return result;
 }
 
-/** The subscription "auto" asks for at the default stretch: the target plus the stretch. */
-const stretched = (target: Duration) => maxDelay({ delay: target, maxDelay: target, stretch: STRETCH });
+/** The subscription "auto" asks for: the target plus the estimator's 2 s ceiling. */
+const reached = (target: Duration) => maxDelay({ delay: target, maxDelay: target });
 
 /** The target the estimator settles on by the end of `t`, given the subscription "auto" asks for. */
 async function settled(t: Arrival[]): Promise<number> {
-	const { targets } = await measure(t, stretched);
+	const { targets } = await measure(t, reached);
 	return targets[targets.length - 1];
 }
 
@@ -244,7 +244,7 @@ describe("subscription budget", () => {
 	}
 
 	it("reaches a flush that starts after the target settled", async () => {
-		const { targets, delivered } = await measure(t, stretched);
+		const { targets, delivered } = await measure(t, reached);
 		expect(targets[PACED - 1]).toBe(2 * CHUNK_MS);
 		expect(delivered).toBe(t.length);
 		// Every flush lands whole, so its 100ms reaches the 95th percentile within a few intervals.
