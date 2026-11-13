@@ -372,10 +372,10 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	}
 });
 
-// Lite-07: a filled group whose stream the publisher yielded, then gave up, ends with the fill's
-// drop naming it with the group's own error, as one on a subscription does, rather than waiting
-// paused on a continuation that never comes.
-test("copy fill: a yielded group the fill's drop names ends", async () => {
+// Lite-07: a filled group whose stream the publisher yielded, then gave up, ends with the drop the
+// copy's subscription, which the fill rides, names it with: the group's own error, rather than
+// waiting paused on a continuation that never comes.
+test("copy fill: a yielded group its subscription's drop names ends", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
@@ -422,12 +422,11 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 		const one = await history.recvGroup();
 		expect(one?.sequence).toBe(1n);
 		while (await one?.readFrame());
-		// The live stream has finished. The archive may be served on both the fill and
-		// the copy's expanded feed, so reset every stream still serving it.
+		// The live stream has finished, so the archived group's is the only one still open.
 		await clock.advance(Duration.ZERO);
 		const open = lines(pair.server).streams.list();
-		expect(open.length).toBeGreaterThan(0);
-		for (const stream of open) stream.preempt();
+		expect(open.length).toBe(1);
+		open[0]?.preempt();
 		source.abort(new StreamError(StreamCode(70), { message: "gone" }));
 
 		// Still paused without it, which the deadline, fired once every pending task settled,

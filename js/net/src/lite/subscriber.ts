@@ -2636,12 +2636,13 @@ export class Subscriber {
 		this.#subscribes.set(id, entry);
 		const done = (async () => {
 			let failed: Error = new StreamError(StreamCode.Cancel, { message: "recovery ended" });
+			let stream: Stream | undefined;
 			try {
 				while ((await this.#auth?.ready(broadcast, "subscribe", { signal, until: () => leaving })) === false) {
 					if (left.signal.aborted) return refused;
 				}
 				if (this.#denied(broadcast)) throw unauthorized(broadcast);
-				const stream = await this.#exchange(
+				const opened = await this.#exchange(
 					{ sendOrder: sendOrder({ priority }), version: this.version },
 					async (stream) => {
 						await stream.writer.u53(StreamId.Subscribe);
@@ -2651,8 +2652,9 @@ export class Subscriber {
 					signal,
 					new Deadline(),
 				);
+				stream = opened;
 				let fin = false;
-				const responses = this.#recoveryResponses(stream, entry, groups, giveUp, () => fin);
+				const responses = this.#recoveryResponses(opened, entry, groups, giveUp, () => fin);
 				// FIN once every group is accounted for and read, as a subscriber does once its tail
 				// settles, and the publisher FINs in reply.
 				let ended = false;
@@ -2667,22 +2669,26 @@ export class Subscriber {
 				while (!ended && !left.signal.aborted) {
 					if (entry.tail.covers(groups.start, groups.end) && !entry.tail.reading) {
 						fin = true;
-						stream.writer.close();
+						opened.writer.close();
 						break;
 					}
 					await race([Signal.race(entry.tail.changed), over, leaving]);
 				}
+				// After our FIN, a cancel still stops the wait for the publisher's.
+				if (!ended) await race([over, leaving]);
 				// Cancelled: nothing more is read, and our own reset ends the reads above.
-				if (left.signal.aborted && !ended) {
-					stream.abort(failed);
+				if (!ended) {
+					opened.abort(failed);
 					await over;
 				} else {
 					await responses;
-					stream.close();
+					opened.close();
 				}
 			} catch (err) {
 				closeViolation(this.#quic, err);
 				failed = error(err);
+				// The publisher reset its side, or reading failed: give back our side too.
+				stream?.abort(failed);
 			} finally {
 				left.abort();
 				this.#subscribes.delete(id);

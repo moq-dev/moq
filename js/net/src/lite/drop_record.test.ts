@@ -681,7 +681,15 @@ async function lostRun(lost: "forgot" | "shed", readers: ("wide" | "narrow")[]):
 		const final = wire.heard
 			.slice(heard)
 			.filter((row) => row.kind !== "drop" || row.error !== StreamCode.Old)
-			.filter((row) => !(row.end === row.start + 1n && received.includes(row.start)));
+			.filter(
+				(row) =>
+					!(
+						row.kind === "drop" &&
+						row.error !== StreamCode.NotFound &&
+						row.end === row.start + 1n &&
+						received.includes(row.start)
+					),
+			);
 		expect(final).toEqual([]);
 	}
 	expect(chained.ended()).toBe(false);

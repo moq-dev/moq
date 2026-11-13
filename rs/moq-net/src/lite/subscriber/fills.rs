@@ -173,6 +173,26 @@ impl RangeFills {
 		self.skipped = Default::default();
 	}
 
+	/// A refusal the source did not name lost answers only the fills owing it now: once no
+	/// held fill covers its groups, a later request for them asks again.
+	fn forget_answered(&mut self) {
+		let stale: Vec<Range<u64>> = self
+			.refused
+			.iter()
+			.filter(|(groups, refusal)| {
+				!refusal.lost
+					&& !self
+						.held
+						.iter()
+						.any(|fill| fill.start().group < groups.end && groups.start < fill.end())
+			})
+			.map(|(groups, _)| groups.clone())
+			.collect();
+		for groups in stale {
+			self.refused.remove(groups);
+		}
+	}
+
 	/// Whether a [`Recovery`] is still out, whose groups the subscription's tail does not wait
 	/// for.
 	pub fn recovering(&self) -> bool {
@@ -231,12 +251,18 @@ impl RangeFills {
 				}
 			}
 		}
-		// Each stale run goes out on its own subscription with no max delay, once.
+		// Each stale run goes out on its own subscription with no max delay, once, with the
+		// priority of the fills held now: the last ask may predate them.
+		let priority = self
+			.held
+			.iter()
+			.map(|fill| fill.priority())
+			.fold(self.ask.priority, i8::max);
 		for run in std::mem::take(&mut self.recover).iter() {
 			self.recovered.insert(run.clone());
 			self.recovering.insert(run.clone());
 			self.recoveries
-				.push(Recovery::new(serve, serving, run.clone(), &self.ask));
+				.push(Recovery::new(serve, serving, run.clone(), priority));
 		}
 		// What a finished recovery did not deliver stands refused.
 		let mut done = Vec::new();
@@ -298,6 +324,8 @@ impl RangeFills {
 			}
 		});
 		self.held = held;
+
+		self.forget_answered();
 
 		// A recovery no held fill owes any group of is cancelled, once none of its streams is
 		// still being read or nobody reads the track, and a group is recovered once for the
@@ -437,10 +465,10 @@ enum RecoveryState {
 }
 
 impl Recovery {
-	fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, ask: &FillAsk) -> Self {
+	fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
 		let subscription = Subscription::default()
 			.with_ranges([track::Range::groups(groups.clone())])
-			.with_priority(ask.priority)
+			.with_priority(priority)
 			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending);
 		let ranges = vec![lite::Range {
@@ -655,6 +683,24 @@ mod tests {
 		fills.refuse(5..6, StreamError::NotFound);
 		assert_eq!(fills.refused.get(&5), Some(&Refusal::dropped(StreamError::NotFound)));
 		assert!(fills.refused.get(&5).unwrap().lost, "the publisher never had it");
+	}
+
+	/// A refusal the source did not name lost stands while a held fill covers its groups,
+	/// and ends with them, so a later request asks again. A loss stays.
+	#[test]
+	fn a_passing_refusal_ends_with_its_fills() {
+		let (_producer, _requests, _reader, fill) = missed();
+		let mut fills = RangeFills::default();
+		fills.held.push(fill);
+		fills.refused.insert(1..3, Refusal::passing(StreamError::Cancel));
+		fills.refused.insert(3..4, Refusal::dropped(StreamError::NotFound));
+		fills.forget_answered();
+		assert!(fills.refused.get(&1).is_some(), "the held fill still owes it");
+
+		fills.held.clear();
+		fills.forget_answered();
+		assert_eq!(fills.refused.get(&1), None, "no fill owes it any more");
+		assert!(fills.refused.get(&3).is_some(), "a loss stays");
 	}
 
 	/// A track whose cache evicted groups 1..4, with a reader of them whose fill is the next

@@ -206,11 +206,14 @@ export class RangeFills {
 				}
 			}
 		}
-		// Each stale run goes out on its own subscription with no max delay, once.
+		// Each stale run goes out on its own subscription with no max delay, once, with the priority
+		// of the fills held now: the last ask may predate them.
+		let priority = this.ask.priority;
+		for (const fill of this.#held) priority = Math.max(priority, fill.priority);
 		for (const run of this.#toRecover.splice(0)) {
 			insertRun(this.#recovered, run.start, run.end);
 			insertRun(this.#recovering, run.start, run.end);
-			this.#recoveries.add(new Recovery(run, this.#recover(run, this.ask.priority), () => this.#bump()));
+			this.#recoveries.add(new Recovery(run, this.#recover(run, priority), () => this.#bump()));
 		}
 		// What a finished recovery did not deliver stands refused.
 		for (const done of this.#recoveries) {
@@ -249,6 +252,12 @@ export class RangeFills {
 			}
 		}
 		this.#held = held;
+
+		// A refusal the source did not name lost answers only the fills owing it now: once none
+		// covers its groups, a later request for them asks again.
+		this.#refused = this.#refused.filter(
+			(run) => run.refusal.lost || held.some((fill) => fill.start < run.end && run.start < fill.end),
+		);
 
 		// A recovery no held fill owes any group of is cancelled, once none of its streams is still
 		// being read or nobody reads the track, and a group is recovered once for the fills owing it
