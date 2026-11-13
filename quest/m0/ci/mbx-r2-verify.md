@@ -10,8 +10,7 @@ that closes this:
   wrote.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
   store it replaced, from the same commit before and after.
-- Each object expires a fixed time after upload (14 days since 2026-11-07;
-  [cache-expiry](/quest/m0/ci/cache-expiry.md) shortens it to 7), so a crate
+- Each object expires a fixed time after upload (7 days since 2026-11-12), so a crate
   no hosted job builds in that window stays cold for the next hosted job. Count how often a Nightly
   job pays that rebuild, including when `Cargo.lock` changed more than 8 times
   since the previous Nightly (see Plan).
@@ -66,7 +65,7 @@ The first scheduled Nightly on mbx 1.28.0,
 (2026-10-27), settled the bump: every hosted job reports `configured
 read-write, effective read-write`, and macOS refused only a manifest already
 oversized before it. Six such manifests stay unreadable until the
-lifecycle deletes them, typically within a day of the 14-day rule applied 2026-11-07: `a90076a4...`,
+lifecycle deletes them, typically within a day of the 7-day rule applied 2026-11-12: `a90076a4...`,
 `5cb8fb79...`, `b0310ce4...`, `18d136a6...` (17235558 bytes, first refused in
 [40090959108](https://github.com/moq-dev/moq/actions/runs/40090959108)),
 `2ed9df47...` and `0d4f4e3f...`. A refusal for any other digest means the
@@ -109,7 +108,7 @@ compilation is "not looked up".
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
   example the lockfile changes or the expiry (30 days until 2026-11-07, 14
-  since).
+  days afterward, then 7 since 2026-11-12).
 - Linux: Nightly's Linux jobs check out at depth 1, so mbx finds no earlier
   lockfile and reuses only a manifest written for the identical `Cargo.lock`.
   The doctest job hit 0 on 2026-10-24 and 2026-10-27, 115 on 2026-10-25, and
@@ -227,9 +226,8 @@ Workspace builds (hits / misses / not looked up):
   `bucketName` and grouped by `actionType`), authenticated with the
   `oauth_token` in `~/.config/.wrangler/config/default.toml`. Record them
   here beside the 2026-11-07 baseline, split at each lifecycle change (that
-  date's, and [cache-expiry](/quest/m0/ci/cache-expiry.md)'s once applied),
-  and count the Nightly jobs that rebuilt a crate the expiry deleted, listing as unknown any it cannot attribute. If cache-expiry's 7-day rule is
-  applied, this count waits until that rule has run for at least 7 days,
+  date's, and 2026-11-12's 7-day rule),
+  and count the Nightly jobs that rebuilt a crate the expiry deleted, listing as unknown any it cannot attribute. This count waits until the 7-day rule has run for at least 7 days,
   so the shorter window has data. Bring the lifecycle back to the
   maintainer only if that count argues for lengthening it.
 

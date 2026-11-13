@@ -48,9 +48,10 @@ as such, not to re-send objects of a result the remote already holds, and to
 keep speculative prefetch from spending the budget the build's own restores
 need. Add the after numbers there once measured.
 
-Measure the first scheduled nights after #8631 against 2026-11-12, under the
-same lifecycle window (note [cache-expiry](/quest/m0/ci/cache-expiry.md) if
-it applies in between):
+Measure the first scheduled nights after #8631 against 2026-11-12. The
+7-day expiry was applied that same day, after the 14-day rule of 2026-11-07,
+so the baseline night may predate its first deletions while every later
+night runs under it; note that beside the comparison:
 
 - Class A requests by action and response status, and 412s, per hour, from
   Cloudflare's GraphQL `r2OperationsAdaptiveGroups` filtered on `bucketName`,
@@ -76,4 +77,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - its Windows misses may share this cause, since Windows also reached its 10 GiB budget
-- [Supplemental caches expire sooner](/quest/m0/ci/cache-expiry.md) - the storage side of the same bill

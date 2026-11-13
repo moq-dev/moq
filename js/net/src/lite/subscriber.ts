@@ -28,6 +28,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
+	type Arriving,
 	bestCandidate,
 	type DropRun,
 	hiddenBelow,
@@ -268,10 +269,30 @@ interface PausedGroup {
 
 // Whether a YIELDED reset of a stream being read pauses its group.
 interface Yielding {
-	// The publisher still owed the group when the stream arrived: no drop named it first.
-	owed: boolean;
-	// The error a drop named the group with while the stream was read.
-	dropped?: Error;
+	verdict: YieldVerdict;
+}
+
+// Stale drops expire on the next update. An already accounted header stays accounted.
+type YieldVerdict =
+	| { kind: "owed" }
+	| { kind: "accounted" }
+	| { kind: "stale"; under: bigint; error: Error }
+	| { kind: "accounted-stale"; under: bigint; error: Error }
+	| { kind: "dropped"; error: Error };
+
+function yieldError(verdict: YieldVerdict, update: bigint): Error | undefined {
+	switch (verdict.kind) {
+		case "owed":
+			return undefined;
+		case "accounted":
+			return new StreamError(StreamCode.Old);
+		case "stale":
+			return verdict.under < update ? undefined : verdict.error;
+		case "accounted-stale":
+			return verdict.under < update ? new StreamError(StreamCode.Old) : verdict.error;
+		case "dropped":
+			return verdict.error;
+	}
 }
 
 // The paused groups of `entry`, created on first use.
@@ -2936,7 +2957,7 @@ export class Subscriber {
 				const overtaken = stale ? entry.tail.overtaken(start, end) : [];
 				entry.tail.account(start, end);
 				// A paused group the drop names ends there: no continuation follows.
-				this.#dropPaused(entry, start, end, error);
+				this.#dropPaused(entry, start, end, error, stale ? update : undefined);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
@@ -3249,7 +3270,14 @@ export class Subscriber {
 		const yields = hasYield(this.version);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.sequence, group.sequence + 1n);
+		// A stale drop that overtook this stream: the next update supersedes that verdict, so a
+		// YIELDED reset after it pauses the group.
+		const unowedUnder =
+			!owed && entry.stale?.some((run) => run.start <= group.sequence && group.sequence < run.end)
+				? entry.update
+				: undefined;
 		let producer: netGroup.Producer | undefined;
+		let arriving: Arriving | undefined;
 		let ingest: Ingest | undefined;
 		let yielding: Yielding | undefined;
 		// Until the stream is read, or a pause hands it to the paused group.
@@ -3269,23 +3297,31 @@ export class Subscriber {
 			}
 			// A duplicate of a copy still arriving, such as a lite-07 re-offer that overtook the reset
 			// of the stream it replaces, waits unread, which flow control bounds. Created once that copy
-			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed.
-			// Its own reset ends the wait; a clean end leaves it on the copy alone. A lite-07 copy a
-			// YIELDED reset pauses is continued by this stream instead.
+			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed,
+			// continuing the reads of that copy, which wait while it is held. Its own reset ends the
+			// wait; a clean end leaves it on the copy alone. A lite-07 copy a YIELDED reset pauses is
+			// continued by this stream instead.
 			for (;;) {
 				const paused = yields ? this.#resume(entry, group) : undefined;
 				if (paused) {
+					// The same copy continues, so its readers need no hold.
+					arriving?.release();
+					arriving = undefined;
 					producer = paused.group;
 					ingest = { index: group.frameStart, partial: paused.partial };
 					// The publisher owes a paused group its continuation, which may yield again.
 					owed = true;
 					break;
 				}
-				const arriving = hooks.arrivingGroup(track, group.sequence);
-				if (arriving === undefined) break;
+				// Kept held past a failure until this copy takes the group, below.
+				const next = hooks.arrivingGroup(track, group.sequence);
+				if (next === undefined) break;
+				arriving?.release();
+				arriving = next;
 				// Served again once that copy fails or pauses, so owed again.
 				owed = true;
-				const waits: unknown[] = [arriving, stream.closed.then(() => arriving)];
+				const settled = arriving.settled;
+				const waits: unknown[] = [settled, stream.closed.then(() => settled)];
 				if (yields) waits.push(Signal.race(pausesOf(entry).changed));
 				await race(waits);
 			}
@@ -3294,9 +3330,17 @@ export class Subscriber {
 				start: group.frameStart,
 				fill: entry.filling,
 			});
+			// Released once this copy took the group, so the failed copy's readers find it.
+			arriving?.release();
 			if (yields) {
 				ingest ??= { index: group.frameStart };
-				yielding = { owed };
+				yielding = {
+					verdict: owed
+						? { kind: "owed" }
+						: unowedUnder !== undefined
+							? { kind: "stale", under: unowedUnder, error: new StreamError(StreamCode.Old) }
+							: { kind: "accounted" },
+				};
 				entry.yielding ??= new Map();
 				entry.yielding.set(group.sequence, yielding);
 			}
@@ -3325,7 +3369,8 @@ export class Subscriber {
 				this.#endYielding(entry, group.sequence, yielding);
 				// A drop named the group first: the publisher gave it up, so nothing continues it. One
 				// that overtook the stream's header carried a stale verdict.
-				const given = yielding.dropped ?? (yielding.owed ? undefined : new StreamError(StreamCode.Old));
+				// A stale drop an update sent since superseded no longer ends the group.
+				const given = yieldError(yielding.verdict, entry.update);
 				if (given) {
 					producer.abort(given);
 					return;
@@ -3338,6 +3383,7 @@ export class Subscriber {
 			producer?.abort(e);
 			stream.stop(e);
 		} finally {
+			arriving?.release();
 			if (yielding) this.#endYielding(entry, group.sequence, yielding);
 			read?.();
 		}
@@ -3390,12 +3436,24 @@ export class Subscriber {
 		if (entry.yielding?.get(sequence) === yielding) entry.yielding.delete(sequence);
 	}
 
-	// A SUBSCRIBE_DROP named `[start, end)` with `error`: a paused group ends there, and one a stream
-	// is reading ends with it if a YIELDED reset would otherwise pause it, since no continuation
-	// follows. Mirrors the Rust `TrackEntry::dropped`.
-	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error): void {
+	// A SUBSCRIBE_DROP named `[start, end)` with `error`, under update `staleUnder` when it is a
+	// lite-07 stale verdict: a paused group ends there, and one a stream is reading ends with it if
+	// a YIELDED reset would otherwise pause it, since no continuation follows, unless an update
+	// supersedes a stale drop first. Mirrors the Rust `TrackEntry::dropped`.
+	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error, staleUnder?: bigint): void {
 		for (const [sequence, yielding] of entry.yielding ?? []) {
-			if (sequence >= start && sequence < end) yielding.dropped = error;
+			if (sequence < start || sequence >= end) continue;
+			const verdict = yielding.verdict;
+			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
+			else if (verdict.kind !== "dropped")
+				yielding.verdict = {
+					kind:
+						verdict.kind === "accounted" || verdict.kind === "accounted-stale"
+							? "accounted-stale"
+							: "stale",
+					under: staleUnder,
+					error,
+				};
 		}
 		const paused = entry.paused;
 		if (!paused) return;

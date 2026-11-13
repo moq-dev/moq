@@ -33,7 +33,7 @@ mod probe;
 #[cfg(feature = "async")]
 mod publisher;
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
-pub use publisher::CoverageBench;
+pub use publisher::{CoverageBench, PausedBench};
 #[cfg(feature = "async")]
 mod replay;
 #[cfg(feature = "async")]
