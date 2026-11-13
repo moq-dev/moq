@@ -87,8 +87,8 @@ export const frameMs = (row: Row): Ms => (row.codec === "aac" ? (1024 / row.rate
  * resting point to leave. Audio rests at the median lag of the {@link REST_MS} before each sample,
  * leaving out earlier disturbances; one starts at the first sample stalled or more than `frame` off
  * that rest, either way, and ends at the next sample back within `frame` of it. One still open at
- * the end lasts to the last sample. Samples before `from` only set the rest: a disturbance counts
- * once it starts at or after `from`.
+ * the end lasts to the last sample, so a later one, always shorter, cannot raise the longest. Samples
+ * before `from` only set the rest, so where audio settled during a tune-in is its rest at `from`.
  */
 export function recovery(
 	samples: { at: Ms; lag: Ms | undefined; stalled: boolean }[],
@@ -99,7 +99,7 @@ export function recovery(
 	// Samples inside a disturbance, which say nothing about where audio rests.
 	const disturbed = new Set<number>();
 	let longest: Ms | null = null;
-	for (let i = 0; i < samples.length; i++) {
+	for (let i = samples.findIndex((s) => s.at >= from); i >= 0 && i < samples.length; i++) {
 		const onset = samples[i] as Point;
 		const before = samples.flatMap((s, j) =>
 			s.at >= onset.at - REST_MS && j < i && !disturbed.has(j) && !s.stalled && s.lag !== undefined
@@ -108,14 +108,13 @@ export function recovery(
 		);
 		const rest = median(before);
 		if (rest === undefined) continue;
-		const counted = onset.at >= from;
-		if (counted) longest ??= 0;
+		longest ??= 0;
 		const back = (s: Point) => !s.stalled && s.lag !== undefined && Math.abs(s.lag - rest) <= frame;
 		if (back(onset) || (onset.lag === undefined && !onset.stalled)) continue;
 		let end = samples.findIndex((s, j) => j > i && back(s));
 		if (end < 0) end = samples.length - 1;
 		for (let j = i; j < end; j++) disturbed.add(j);
-		if (counted) longest = Math.max(longest ?? 0, (samples[end] as Point).at - onset.at);
+		longest = Math.max(longest, (samples[end] as Point).at - onset.at);
 		i = end;
 	}
 	return longest;
