@@ -236,11 +236,13 @@ const traces: Omit<Case, "target">[] = [
 	},
 	{
 		name: "outage",
-		about: "Even audio with a 1.5 s outage 10 s in: a queue serving one frame per 300 ms, then draining the backlog, so its delays climb past a second across four intervals. The frames stuck behind it are one stall, which folds once, so the one-off leaves the target where it was. Three more outages 3 s apart from 30 s still raise it, and it decays once they stop.",
+		about: "Even audio with a 1.5 s outage 10 s in: a queue serving one frame per 300 ms, then draining the backlog, so its delays climb past a second across four intervals. The frames stuck behind it are one stall, which folds once, so the one-off leaves the target where it was. So does a 1.5 s blackout 20 s in, whose empty intervals belong to the stall that ends them. Three more outages 3 s apart from 30 s still raise it, and it decays once they stop.",
 		frame: FRAME,
 		...(() => {
 			let trace = paced(3000, FRAME, 50);
-			for (const at of [10_000, 30_000, 33_000, 36_000]) trace = outage(trace, at + 50, 1500, 300);
+			trace = outage(trace, 10_050, 1500, 300);
+			trace = outage(trace, 20_050, 1500, 1500);
+			for (const at of [30_000, 33_000, 36_000]) trace = outage(trace, at + 50, 1500, 300);
 			return trace;
 		})(),
 	},

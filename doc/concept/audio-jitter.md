@@ -110,19 +110,41 @@ observe(arrival, media):
     delay = max(0, (arrival - ref.arrival) - (media - ref.media))
 
     if first observation:
-        origin = arrival; interval = 0; peak = delay; return
+        origin = arrival; interval = 0; peak = delay; note(arrival, delay); return
 
     index = floor((arrival - origin) / RESAMPLE)
     resumed = ended; ended = false
     if index <= interval:
-        peak = max(peak, delay); return
+        peak = max(peak, delay); note(arrival, delay); return
 
-    fold(bucket of peak)
+    close(bucket of peak)
+    idle = index - interval - 1
     if resumed:                         # a declared silence folds nothing
-        origin = arrival; index = 0
+        settle(); origin = arrival; index = 0
+    else if a stall is open or delay > RESAMPLE:
+        pending = idle                  # a stall may own the empty intervals
     else:
-        fold(nothing) for each elapsed empty interval, at most IDLE_MAX
-    interval = index; peak = delay
+        fold(nothing) for each of the idle intervals, at most IDLE_MAX
+    interval = index; peak = delay; due = +inf; late = -inf
+    note(arrival, delay)
+
+note(arrival, delay):                   # due and late start at +inf and -inf
+    if delay > RESAMPLE:                # stalled: due in an earlier interval
+        due = min(due, arrival - delay); late = max(late, arrival)
+
+close(bucket):                          # pending starts at 0 and is spent here
+    if late > -inf and a stall is open and due < stall.late:
+        stall.bucket = max(stall.bucket, bucket); stall.late = late
+        stall.span += pending + 1; pending = 0
+        return                          # still behind the same stall
+    settle()
+    if late > -inf: open a stall with bucket, late, span = pending
+    else: fold(nothing) min(pending, IDLE_MAX) times; fold(bucket)
+    pending = 0
+
+settle():                               # a stall is one observation
+    if a stall is open:
+        fold(stall.bucket); fold(nothing) min(stall.span, IDLE_MAX) times; close it
 
 end():                                  # a declared end precedes the next observation
     if not first observation: ended = true
@@ -224,6 +246,42 @@ form worth stating: the histogram halves a sample's weight after
 about **135 s**. The forget factor decays **once per resampled observation, not
 once per arrival**. Applying a per-observation factor per arrival is the mistake
 the #3517 branch makes, and the resulting number reads plausible either way.
+
+### One observation per stall
+
+An outage spans intervals, and the max per interval alone would count it once
+per interval. A link that stops for 1.5 s and then delivers its backlog would
+fold four or five peaks of a second or more, far past the 5% the quantile
+needs, and a one-off would hold the target, and video with it, a second behind
+live for 10 to 25 s after the link recovered. Those intervals are one event for
+the same reason a queue's hundred frames are.
+
+A frame whose delay exceeds `RESAMPLE` was due in an earlier interval than the
+one it arrived in, so it is **stalled**, and `arrival - delay` is when it was
+due. An interval holding a stalled frame due before the open stall's latest
+stalled frame arrived is still behind that stall: it joins it instead of
+folding. The empty intervals before a stalled interval belong to its stall as
+well, since a link that stops outright delivers nothing until its backlog
+arrives. The stall ends at the
+first interval that does not continue it, and only then folds, once, its
+largest delay, then one idle fold for each other interval it spanned. So the
+estimate keeps its wall-clock time constant, and the stall's single observation
+does not take the weight the idle folds return to the prior, which an
+observation after them would reclaim up to `FRESH_MAX`.
+
+The test is on due time, not on adjacency, so a publisher that flushes a second
+or more of media at once still counts each flush: the first frame of the next
+flush was due only after the previous one arrived. Recurring outages still
+raise the target, a few of them within a half-life, which is the evidence a
+recurring stall deserves. A lateness under one interval never stalls, so
+ordinary jitter, shorter flushes, reordering, and a step in the path's delay fold one
+observation per interval.
+
+A link that keeps falling further behind never ends its stall, and the estimate
+holds where it was rather than climbing to the ceiling. No buffer
+covers that link: the max age decides what plays, not the target. The open
+stall is three numbers, so a publisher that chains stalls on purpose costs
+nothing.
 
 ### The histogram
 
@@ -430,7 +488,10 @@ can hear, so the target should rise readily and fall grudgingly, and it does:
   hundreds of punctual frames around it.
 - **Falling** is driven by the forget factor alone, over the 20 s half-life
   above. Old mass in the tail has to decay out before the quantile can move
-  down, and nothing can make it decay faster.
+  down, and nothing can make it decay faster. What keeps a one-off from holding
+  the target is that it puts little mass there: an outage is
+  [one observation](#one-observation-per-stall), however many intervals its
+  backlog spans.
 - **A single bad observation does not move the target on its own.** Once the
   prior is spent it adds `1 - FORGET` weight, 1.7%, well under the 5% the 95th
   percentile needs. It takes a few intervals of genuine lateness before the
@@ -606,6 +667,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
 | `spike` | A recurring stall raises the target, and it decays once the stalls stop |
 | `straggler` | One late interval after the prior is spent leaves the target where it was |
+| `outage` | A one-off 1.5 s outage whose backlog arrives over several intervals is one stall and leaves the target where it was, while three more 3 s apart raise it |
 | `fixed` | An explicit delay ignores the arrivals entirely |
 
 `reference.ts` beside them generated the numbers. It is **not normative and not

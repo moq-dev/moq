@@ -286,6 +286,8 @@ pub(crate) struct Estimator {
 
 	/// The stall still open, folded once it ends.
 	stall: Option<Stall>,
+	/// Empty intervals before this one, held until it shows whether they belong to a stall.
+	pending: f64,
 
 	histogram: [f64; BUCKETS],
 	/// How much of the histogram is still the prior's rather than evidence.
@@ -306,6 +308,7 @@ impl Estimator {
 			due: f64::INFINITY,
 			late: f64::NEG_INFINITY,
 			stall: None,
+			pending: 0.0,
 			histogram: std::array::from_fn(prior),
 			prior: 1.0,
 		}
@@ -357,9 +360,9 @@ impl Estimator {
 			self.interval = 0.0;
 		} else {
 			let idle = interval - self.interval - 1.0;
-			if let Some(stall) = &mut self.stall {
-				// Whether these belong to the stall depends on whether it continues after them.
-				stall.span += idle;
+			if self.stall.is_some() || delay > RESAMPLE {
+				// A stall may own these: the open one if it continues, or one this frame opens.
+				self.pending = idle;
 			} else {
 				// An interval with no arrival relaxes the estimate toward the prior.
 				for _ in 0..f64::min(idle, IDLE_MAX) as u32 {
@@ -388,12 +391,13 @@ impl Estimator {
 	/// are within an interval.
 	fn close(&mut self, bucket: usize) {
 		let stalled = self.late != f64::NEG_INFINITY;
+		let pending = std::mem::take(&mut self.pending);
 		if stalled
 			&& let Some(stall) = &mut self.stall
 			&& self.due < stall.late
 		{
 			stall.bucket = stall.bucket.max(bucket);
-			stall.span += 1.0;
+			stall.span += pending + 1.0;
 			stall.late = self.late;
 			return;
 		}
@@ -403,9 +407,12 @@ impl Estimator {
 			self.stall = Some(Stall {
 				bucket,
 				late: self.late,
-				span: 0.0,
+				span: pending,
 			});
 		} else {
+			for _ in 0..f64::min(pending, IDLE_MAX) as u32 {
+				self.fold(None);
+			}
 			self.fold(Some(bucket));
 		}
 	}

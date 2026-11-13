@@ -86,6 +86,8 @@ export class Estimator {
 	#stallLate = 0;
 	/** Intervals the open stall spanned besides the one it folds as. */
 	#span = 0;
+	/** Empty intervals before this one, held until it shows whether they belong to a stall. */
+	#pending = 0;
 
 	#histogram = prior();
 	/** How much of the histogram is still the prior's rather than evidence. */
@@ -151,9 +153,9 @@ export class Estimator {
 			this.#interval = 0;
 		} else {
 			const idle = interval - this.#interval - 1;
-			if (this.#stall !== undefined) {
-				// Whether these belong to the stall depends on whether it continues after them.
-				this.#span += idle;
+			if (this.#stall !== undefined || delay > RESAMPLE) {
+				// A stall may own these: the open one if it continues, or one this frame opens.
+				this.#pending = idle;
 			} else {
 				for (let i = 0; i < Math.min(idle, IDLE_MAX); i++) {
 					this.#fold(undefined);
@@ -179,9 +181,11 @@ export class Estimator {
 	// still behind that stall, so it joins it rather than counting again.
 	#close(bucket: number): void {
 		const stalled = this.#late !== Number.NEGATIVE_INFINITY;
+		const pending = this.#pending;
+		this.#pending = 0;
 		if (stalled && this.#stall !== undefined && this.#due < this.#stallLate) {
 			this.#stall = Math.max(this.#stall, bucket);
-			this.#span += 1;
+			this.#span += pending + 1;
 			this.#stallLate = this.#late;
 			return;
 		}
@@ -189,9 +193,10 @@ export class Estimator {
 		this.#settle();
 		if (stalled) {
 			this.#stall = bucket;
-			this.#span = 0;
+			this.#span = pending;
 			this.#stallLate = this.#late;
 		} else {
+			for (let i = 0; i < Math.min(pending, IDLE_MAX); i++) this.#fold(undefined);
 			this.#fold(bucket);
 		}
 	}
