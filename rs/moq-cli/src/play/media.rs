@@ -686,7 +686,7 @@ async fn play_audio<O: Output>(
 			.max(sink.output_latency().unwrap_or(AUDIO_BUFFER_MIN))
 	};
 	// The device's output latency the clock holds for.
-	let output = Mutex::new(Peak::default());
+	let peak = Mutex::new(Peak::default());
 	// Anchor the sink to the shared clock: the media written so far ends at
 	// `end`, and sounds when the clock says it is due. The callback stretches
 	// onto that clock, and skips only what trails it past the stretch, which
@@ -1026,7 +1026,7 @@ async fn play_audio<O: Output>(
 			// Audio is placed on the clock where it is heard, so the device's output
 			// latency is part of the delay video waits for too. A fixed delay is
 			// floored at it instead, since audio cannot sound any sooner.
-			let device = output.lock().unwrap().observe(sink.output_latency(), Instant::now());
+			let device = peak.lock().unwrap().observe(sink.output_latency(), Instant::now());
 			let held = if estimate {
 				delay + device.unwrap_or_default()
 			} else {
