@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
 		for i in 0..3 {
 			stream.producer.write_frame(None, vec![own + i])?;
 		}
-		let finished = stream.producer.finish()?;
+		let finished = stream.producer.close()?;
 		for i in 0..3 {
 			let frame = stream.consumer.read_frame().await?.context("short TCP half")?;
 			ensure!(frame.payload.as_ref() == [peer + i], "wrong TCP frame");
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
 		ensure!(stream.consumer.read_frame().await?.is_none(), "extra TCP frame");
 		Box::new((finished, stream.consumer))
 	} else {
-		let mut stream = if dial {
+		let stream = if dial {
 			endpoint.dial_track("acceptor", None)?.await?
 		} else {
 			accepted_track(&endpoint).await?
@@ -89,15 +89,15 @@ async fn main() -> anyhow::Result<()> {
 		let mut reader = stream.consumer.ordered();
 		for i in 0..3 {
 			if dial {
-				stream.producer.write_frame(None, vec![own + i])?;
+				send(&stream.producer, vec![own + i])?;
 			}
 			let mut group = reader.next_group().await?.context("short track half")?;
-			ensure!(group.sequence == u64::from(i), "wrong group sequence");
+			ensure!(group.start == u64::from(i), "wrong group start");
 			let frame = group.read_frame().await?.context("empty track message")?;
 			ensure!(frame.payload.as_ref() == [peer + i], "wrong track frame");
 			ensure!(group.read_frame().await?.is_none(), "extra frame in track message");
 			if !dial {
-				stream.producer.write_frame(None, vec![own + i])?;
+				send(&stream.producer, vec![own + i])?;
 			}
 		}
 		let finished = stream.producer.finish()?;
@@ -128,14 +128,14 @@ async fn main() -> anyhow::Result<()> {
 			reset.producer.abort(moq_net::Error::App(6))?;
 		}
 	} else {
-		let mut reset = if dial {
+		let reset = if dial {
 			endpoint.dial_track("acceptor", None)?.await?
 		} else {
 			accepted_track(&endpoint).await?
 		};
 		let mut reader = reset.consumer.ordered();
 		if dial {
-			reset.producer.write_frame(None, vec![48])?;
+			send(&reset.producer, vec![48])?;
 			ensure!(reader.next_group().await.is_err(), "track RST became FIN");
 			eprintln!("socket reset verified track dial");
 		} else {
@@ -166,6 +166,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // An Incoming's claimed original dial can disappear before verification.
+/// Send `payload` as a group of its own. A session track carries no timescale, so its groups
+/// count up from 0.
+fn send(track: &moq_net::track::Producer, payload: Vec<u8>) -> anyhow::Result<()> {
+	let mut group = track.append_group(track.largest().map_or(0, |largest| largest.group + 1))?;
+	group.write_frame(None, payload)?;
+	group.close()?;
+	Ok(())
+}
+
 async fn accepted_tcp(endpoint: &moq_net::socket::Endpoint) -> anyhow::Result<moq_net::socket::TcpStream> {
 	loop {
 		let incoming = endpoint.accept_tcp().await?;

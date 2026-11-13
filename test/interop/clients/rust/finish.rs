@@ -98,10 +98,12 @@ async fn main() -> anyhow::Result<()> {
 			format!("{}.health", args.broadcast),
 			moq_net::origin::RouteOptions::hidden(),
 		)?;
-		let mut track = health
+		let track = health
 			.broadcast()
 			.create_track("live", moq_net::track::Info::default())?;
-		track.write_frame(None, b"session-alive".to_vec())?;
+		let mut group = track.append_group(0)?;
+		group.write_frame(None, b"session-alive".to_vec())?;
+		group.close()?;
 		let _track = track.finish()?;
 		health.announce()?;
 		let ack = args.finish_ack.context("publisher needs --finish-ack")?;
@@ -139,7 +141,10 @@ async fn main() -> anyhow::Result<()> {
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
 						.with_delay(moq_net::track::Delay::default().with_max(args.timeout))
-						.with_range(0..),
+						.with_ranges([moq_net::track::Range {
+							start: moq_net::track::Anchor::Time(0),
+							end: None,
+						}]),
 				))
 				.await?;
 			let format = moq_mux::catalog::hang::Container::try_from(config)?;

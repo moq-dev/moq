@@ -18,10 +18,10 @@ async fn endpoint(
 }
 
 fn write(track: &mut moq_net::track::Producer, sequence: u64) -> anyhow::Result<()> {
-	let mut group = track.append_group()?;
-	ensure!(group.sequence == sequence, "wrong local sequence");
+	// The track carries no timescale, so its groups count up from 0.
+	let mut group = track.append_group(sequence)?;
 	group.write_frame(None, vec![sequence as u8; 32])?;
-	group.finish()?;
+	group.close()?;
 	Ok(())
 }
 

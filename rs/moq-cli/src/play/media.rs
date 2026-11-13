@@ -1192,7 +1192,8 @@ mod tests {
 		producer.write(packet(0, 0.25)).unwrap();
 		tokio::task::yield_now().await;
 		producer.discontinuity().unwrap();
-		producer.write(packet(0, 0.5)).unwrap();
+		// The resume starts after the marker: group starts only move forward.
+		producer.write(packet(1, 0.5)).unwrap();
 		let _finished = producer.finish().unwrap();
 		task.await.unwrap();
 		// The resume keeps the sink, which fills the declared silence with comfort noise.

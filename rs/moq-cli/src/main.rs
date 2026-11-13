@@ -1301,11 +1301,11 @@ mod tests {
 					.unwrap();
 				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 				let track = broadcast.broadcast().create_track("status", info).unwrap();
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_group(0).unwrap();
 				group
 					.write_frame(moq_net::Timestamp::ZERO, b"admitted".as_ref())
 					.unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 				let (auth, admissions) = moq_relay::auth::Auth::embedded("test-cli");
 				let (trigger, observer) = moq_relay::shutdown::Observer::new(TIMEOUT);
 				let serving = Serving {
@@ -1502,9 +1502,9 @@ mod tests {
 			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.broadcast().create_track("live", info).unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"live".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let reader = relay.consume();
 		let mut live = reader

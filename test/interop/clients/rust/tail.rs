@@ -43,22 +43,28 @@ fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Re
 	// Declare the end before the final group's payload is even available.
 	track.finish_at(moq_net::track::Position::group(GROUPS), None)?;
 	for sequence in 0..GROUPS {
-		let mut group = track.append_group()?;
+		let mut group = track.append_group(sequence)?;
 		if mode == Some("drop") && sequence == 1 {
 			group.abort(moq_net::Error::App(1))?;
 			continue;
 		}
 		for frame in frames(sequence, mode) {
-			group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+			group.write_frame(at(sequence), frame)?;
 		}
-		group.finish()?;
+		group.close()?;
 	}
 	Ok(())
 }
 
+/// Where group `sequence` starts: its key, in the track's milliseconds, which the groups count up
+/// in so every runtime reads the same keys.
+fn at(sequence: u64) -> moq_net::Timestamp {
+	moq_net::Timestamp::from_millis(sequence).expect("a small timestamp")
+}
+
 /// Read one whole group, checking every frame's bytes, and report when the `late` head is in.
 async fn read(group: &mut moq_net::group::Consumer, mode: Option<&str>) -> anyhow::Result<()> {
-	let sequence = group.sequence;
+	let sequence = group.start;
 	for (index, want) in frames(sequence, mode).iter().enumerate() {
 		let frame = group.read_frame().await?.context("short group")?;
 		ensure!(frame.payload[..] == want[..], "wrong frame {index} in group {sequence}");
@@ -155,9 +161,9 @@ async fn main() -> anyhow::Result<()> {
 				}
 				let mut head = None;
 				if late {
-					let mut group = track.append_group()?;
+					let mut group = track.append_group(0)?;
 					for frame in frames(0, mode).into_iter().take(LATE_HEAD) {
-						group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+						group.write_frame(at(0), frame)?;
 					}
 					head = Some(group);
 				}
@@ -175,15 +181,15 @@ async fn main() -> anyhow::Result<()> {
 						"subscriber did not read the head"
 					);
 					for frame in frames(0, mode).into_iter().skip(LATE_HEAD) {
-						group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+						group.write_frame(at(0), frame)?;
 					}
-					group.finish()?;
+					group.close()?;
 					for sequence in 1..LATE_GROUPS {
-						let mut group = track.append_group()?;
+						let mut group = track.append_group(sequence)?;
 						for frame in frames(sequence, mode) {
-							group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+							group.write_frame(at(sequence), frame)?;
 						}
-						group.finish()?;
+						group.close()?;
 					}
 					_finished = Some(track.finish()?);
 				} else if !cached {
@@ -255,11 +261,7 @@ async fn main() -> anyhow::Result<()> {
 				let mut track = remote.subscribe(Some(options)).await?;
 				for sequence in 0..LATE_GROUPS {
 					let mut group = track.recv_group().await?.context("missing group")?;
-					ensure!(
-						group.sequence == sequence,
-						"joined group {} for {sequence}",
-						group.sequence
-					);
+					ensure!(group.start == sequence, "joined group {} for {sequence}", group.start);
 					read(&mut group, mode).await?;
 				}
 				ensure!(track.recv_group().await?.is_none(), "extra group");
@@ -274,7 +276,10 @@ async fn main() -> anyhow::Result<()> {
 			}
 			let options = moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
-				.with_range(0..);
+				.with_ranges([moq_net::track::Range {
+					start: moq_net::track::Anchor::Time(0),
+					end: None,
+				}]);
 			let mut track = remote.subscribe(Some(options)).await?;
 			if compress {
 				ensure!(
@@ -285,7 +290,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 			let mut seen = Vec::new();
 			while let Some(mut group) = track.recv_group().await? {
-				let sequence = group.sequence;
+				let sequence = group.start;
 				ensure!(sequence < GROUPS, "unexpected group {sequence}");
 				read(&mut group, mode).await?;
 				seen.push(sequence);

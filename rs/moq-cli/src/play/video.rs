@@ -1248,14 +1248,16 @@ mod tests {
 			.unwrap();
 		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: Vec<u64>| {
-			let mut group = published.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = published
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			let frames: Vec<_> = stamps
 				.into_iter()
 				.enumerate()
 				.map(|(index, ms)| frame(ms, index == 0))
 				.collect();
 			format.write(&mut group, &frames).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		write(10, vec![100, 80, 90, 110]);
 		write(11, vec![200, 180, 190, 210]);
@@ -1689,10 +1691,11 @@ mod tests {
 				// A publisher finishes a group when it starts the next one.
 				self.seal(sequence);
 			}
-			let group = self
-				.groups
-				.entry(sequence)
-				.or_insert_with(|| self.track.create_group(moq_net::group::Info { sequence }).unwrap());
+			let group = self.groups.entry(sequence).or_insert_with(|| {
+				self.track
+					.create_group(moq_net::group::Info { start: sequence })
+					.unwrap()
+			});
 			let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 			format
 				.write(group, &[frame(index * 33, index.is_multiple_of(self.sweep))])
@@ -1703,7 +1706,7 @@ mod tests {
 		fn seal(&mut self, sequence: u64) {
 			let open = self.groups.split_off(&sequence);
 			for (_, group) in std::mem::replace(&mut self.groups, open) {
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 		}
 

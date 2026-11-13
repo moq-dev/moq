@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 			for payload in PAYLOADS {
 				stream.producer.write_frame(None, payload)?;
 			}
-			stream.producer.finish()?;
+			stream.producer.close()?;
 			group(&mut stream.consumer).await?;
 			println!("drained");
 			ack().await?;
@@ -78,17 +78,18 @@ async fn main() -> anyhow::Result<()> {
 			ensure!(stream.consumer.info().max_age.is_none(), "track has an age limit");
 			let producer = stream.producer;
 			let mut consumer = stream.consumer.ordered();
-			for _ in 0..3 {
-				let mut group = producer.append_group()?;
+			// The track carries no timescale, so its groups count up from 0.
+			for start in 0..3 {
+				let mut group = producer.append_group(start)?;
 				for payload in PAYLOADS {
 					group.write_frame(None, payload)?;
 				}
-				group.finish()?;
+				group.close()?;
 			}
 			let _producer = producer.finish()?;
 			for sequence in 0..3 {
 				let mut next = consumer.next_group().await?.context("short track")?;
-				ensure!(next.sequence == sequence, "wrong group order");
+				ensure!(next.start == sequence, "wrong group order");
 				group(&mut next).await?;
 			}
 			ensure!(consumer.next_group().await?.is_none(), "extra group");

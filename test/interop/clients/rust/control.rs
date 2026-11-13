@@ -14,11 +14,11 @@ async fn main() -> anyhow::Result<()> {
 	let track = route
 		.broadcast()
 		.create_track("video", moq_net::track::Info::default().with_priority(2))?;
-	let mut group = track.create_group(moq_net::group::Info { sequence: 4 })?;
+	let mut group = track.create_group(moq_net::group::Info { start: 4 })?;
 	for byte in [1, 2] {
 		group.write_frame(None, vec![byte])?;
 	}
-	group.finish()?;
+	group.close()?;
 	route.announce()?;
 
 	let socket = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?).await?;

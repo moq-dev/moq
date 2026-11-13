@@ -152,7 +152,9 @@ async fn main() -> anyhow::Result<()> {
 				let first = container.decode(frame)?.into_iter().next().context("an empty group")?;
 				// A discontinuity marker has no payload and starts no segment.
 				let mark = if first.payload.is_empty() { ":marker" } else { "" };
-				out.push(format!("{}:{}{mark}", group.sequence, first.timestamp.as_millis()));
+				// Group starts are left out: moq-mux keys groups by start while @moq/hang still
+				// numbers them, and the schedule is what both must agree on.
+				out.push(format!("{}{mark}", first.timestamp.as_millis()));
 			}
 			ensure!(!out.is_empty(), "{kind} {name} published no groups");
 			println!("hls {kind} {name} groups={}", out.join(","));
