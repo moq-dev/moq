@@ -36,3 +36,8 @@ budget, a `Failure::Lost` group (aborted or evicted; it logs
 Next: run the full `--all` matrix in a loop on a loaded host, and keep the cpp
 subscriber's `RUST_LOG=moq_mux=debug` output so the skip reason
 (`skipping slow groups` / `current group evicted`) shows up.
+
+Maintainer decision (2026-11-13): keep the quest and loop the full `--all`
+matrix with `RUST_LOG=moq_mux=debug` until it reproduces, then fix the root
+cause. Rejected: adding skip logging and parking the quest; closing it as not
+reproducible. If 15–20 full matrices pass, stop and record the run count.
