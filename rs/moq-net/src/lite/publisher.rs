@@ -3557,7 +3557,7 @@ mod test {
 				.finish_at(track::Position::group(7), Some(Error::App(7)))
 				.unwrap();
 			let next = |subscriber: &mut track::Subscriber| {
-				kio::wait(|waiter| poll_recv_next(subscriber, true, true, end_error, waiter)).now_or_never()
+				kio::wait(|waiter| poll_recv_next(subscriber, Some(ALL), true, end_error, waiter)).now_or_never()
 			};
 			match (end_error || capped, next(&mut subscriber)) {
 				(true, Some(Ok(Recv::Boundary(end)))) => {
@@ -4687,6 +4687,9 @@ fn final_sequence(end: track::Position) -> u64 {
 	end.final_sequence().unwrap_or(u64::MAX)
 }
 
+/// Every group sequence, for [`poll_recv_next`] to hand out any.
+const ALL: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
+
 /// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order).
 ///
 /// Groups are served in arrival order (`poll_recv_group`), not sequence order: on a relay, a
@@ -4694,8 +4697,9 @@ fn final_sequence(end: track::Position) -> u64 {
 /// permanently skip the older group even though it is cached and in demand. Staleness is
 /// governed by max age and the subscriber's max delay, not arrival raciness.
 ///
-/// Without `groups` the cursor hands out none, leaving them in the cache, so it never reports
-/// [`Recv::Finished`] either.
+/// The cursor hands out the next group only if its sequence lies in `groups`, leaving it in
+/// the cache otherwise, and without `groups` none at all. Either way it then never reports
+/// [`Recv::Finished`].
 ///
 /// When `emit_boundary` is set, a declared-but-not-yet-reached final sequence surfaces as
 /// [`Recv::Boundary`] in an idle moment (after groups), so the caller can send
@@ -4706,7 +4710,7 @@ fn final_sequence(end: track::Position) -> u64 {
 /// that end finishes like a clean one. Otherwise reaching it is the error, which resets.
 fn poll_recv_next(
 	track: &mut track::Subscriber,
-	groups: bool,
+	groups: Option<(Bound<u64>, Bound<u64>)>,
 	emit_boundary: bool,
 	end_error: bool,
 	waiter: &kio::Waiter,
@@ -4714,8 +4718,8 @@ fn poll_recv_next(
 	{
 		let mut groups_finished = false;
 		let next = match groups {
-			true => track.poll_recv_group(waiter),
-			false => Poll::Pending,
+			Some(admit) => track.poll_recv_group_in(admit, waiter),
+			None => Poll::Pending,
 		};
 		match next {
 			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
@@ -4755,7 +4759,7 @@ fn poll_recv_next(
 /// The async form of [`poll_recv_next`], for callers with nothing else to poll.
 #[cfg(test)]
 async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result<Recv, Error> {
-	kio::wait(|waiter| poll_recv_next(track, true, emit_boundary, true, waiter)).await
+	kio::wait(|waiter| poll_recv_next(track, Some(ALL), emit_boundary, true, waiter)).await
 }
 
 /// Bound `group` to what this subscription asked for, or `None` when it cannot be served
@@ -5033,11 +5037,9 @@ struct Paused {
 }
 
 impl Paused {
-	/// Whether `a` ranks above `b` for a subscription's stream credit, by sequence in its
-	/// `order`, as [`crate::priority::in_group`] ranks them.
-	fn outranks(order: crate::track::Order, a: &Self, b: &Self) -> bool {
-		crate::priority::in_group(a.group.sequence, a.frame_start, order)
-			> crate::priority::in_group(b.group.sequence, b.frame_start, order)
+	/// Its rank for the subscription's stream credit in `order`, higher first.
+	fn rank(&self, order: crate::track::Order) -> i64 {
+		crate::priority::in_group(self.group.sequence, self.frame_start, order)
 	}
 }
 
@@ -5133,9 +5135,6 @@ struct TrackRun {
 	paused: std::collections::VecDeque<Paused>,
 	// Lite-07: the group `opening` holds continues a paused one.
 	continuing: bool,
-	// Lite-07: a group the cursor handed out while a continuation waited for credit, ranked
-	// below it. One at most: the cursor hands out no other until it opens.
-	stashed: Option<Paused>,
 	end_sent: bool,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
@@ -5143,7 +5142,8 @@ struct TrackRun {
 	/// The one group waiting for stream credit. The rest of the backlog waits in the cache,
 	/// which bills, ages, and evicts it, and the cursor's budget skips whatever went stale
 	/// meanwhile: a machine per parked group would hold state for as long as the peer
-	/// withholds credit.
+	/// withholds credit. One that cannot make room gives way to a group that outranks it
+	/// (see [`Self::stuck`]).
 	opening: Option<GroupServe>,
 	/// The groups with a stream, serving or awaiting the acknowledgement of their FIN.
 	children: kio::Tasks<GroupServe>,
@@ -5202,7 +5202,6 @@ impl TrackRun {
 			reoffered: Default::default(),
 			paused: Default::default(),
 			continuing: false,
-			stashed: None,
 			end_sent: false,
 			opening: None,
 			children: kio::Tasks::new(),
@@ -5605,27 +5604,16 @@ impl TrackRun {
 
 		// A paused group takes the next stream credit, ahead of re-offers and new groups, the
 		// highest-ranked first. It is owed already, and the subscriber holds its group open until
-		// it continues. A group stashed behind a continuation goes first if it outranks them all.
-		let best = match self.opening.is_none() {
-			true => self.best_paused(),
-			false => None,
-		};
-		if self.opening.is_none()
-			&& let Some(stashed) = self.stashed.take()
+		// it continues. A group waiting for credit it cannot make room for gives way to one that
+		// outranks it.
+		let order = self.ctx.steer_current().order;
+		let stuck = self.stuck();
+		if let Some(best) = self.best_paused()
+			&& (self.opening.is_none() || stuck.is_some_and(|waiting| self.paused[best].rank(order) > waiting))
 		{
-			let order = self.ctx.steer_current().order;
-			match best.map(|best| &self.paused[best]) {
-				Some(paused) if !Paused::outranks(order, &stashed, paused) => self.stashed = Some(stashed),
-				_ => {
-					self.open(stashed.group, stashed.frame_start);
-					return Poll::Ready(Ok(ControlFlow::Continue(())));
-				}
-			}
-		}
-		if self.opening.is_none()
-			&& let Some(Paused { group, frame_start }) = best.and_then(|best| self.paused.remove(best))
-		{
+			let Paused { group, frame_start } = self.paused.remove(best).expect("best is in range");
 			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, frame_start, "continuing paused group");
+			self.give_way();
 			self.open(group, frame_start);
 			self.continuing = true;
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -5657,11 +5645,21 @@ impl TrackRun {
 
 		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
 		let emit_boundary = self.emit_range && !self.end_sent;
-		// A continuation waiting for credit ranks below every stream it could take, so it must
-		// not hold back a newer group that outranks one of them: the cursor hands one more out.
-		let groups = self.opening.is_none() || (self.continuing && self.stashed.is_none());
+		// A group waiting for credit it cannot make room for must not hold back one that could:
+		// a group that outranks it takes its place. Newest first sheds the backlog, so the cursor
+		// hands out every group and one ranked below the waiting one is given up. Oldest first
+		// drains it in order, so the cursor hands out only a group that outranks the waiting
+		// one, and the rest waits in the cache. Behind a group that can make room, the backlog
+		// waits in the cache either way.
+		let admit = match &self.opening {
+			None => Some(ALL),
+			Some(waiting) => stuck.map(|_| match order {
+				Order::Descending => ALL,
+				Order::Ascending => (Bound::Unbounded, Bound::Excluded(waiting.sequence)),
+			}),
+		};
 		let end_error = self.ctx.version.has_end_error();
-		if let Poll::Ready(res) = poll_recv_next(&mut self.track, groups, emit_boundary, end_error, waiter) {
+		if let Poll::Ready(res) = poll_recv_next(&mut self.track, admit, emit_boundary, end_error, waiter) {
 			match res? {
 				Recv::Group(group) => {
 					// Never a second stream for a sequence this subscription already accounted
@@ -5692,6 +5690,15 @@ impl TrackRun {
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
+					if let Some(waiting) = &self.opening
+						&& crate::priority::in_group(sequence, 0, order)
+							< crate::priority::in_group(waiting.sequence, 0, order)
+					{
+						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "shedding a group ranked below one waiting for credit");
+						self.mark_served(sequence);
+						self.shed(sequence);
+						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					}
 					match self.emit_range && self.start.is_none() {
 						true => self.first = Some(group),
 						false => self.serve(group),
@@ -6053,32 +6060,57 @@ impl TrackRun {
 		Ok(())
 	}
 
-	/// Open a group machine for `group`, which waits for stream credit before the cursor
-	/// hands out another.
+	/// Open a group machine for `group`, which waits for stream credit. The cursor hands it
+	/// out past a group already waiting only if it outranks that one, which gives way.
 	fn serve(&mut self, group: group::Consumer) {
 		let sequence = group.sequence;
 		let frame_start = group.index();
 		self.mark_served(sequence);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
-		let Some(waiting) = self.opening.take() else {
-			return self.open(group, frame_start);
+		self.give_way();
+		self.open(group, frame_start);
+	}
+
+	/// The rank of the group waiting for stream credit, if it cannot make room: it ranks below
+	/// every stream this subscription holds, so it waits for credit to return, while a group
+	/// that outranks one of those streams would take it over now.
+	fn stuck(&mut self) -> Option<i64> {
+		let waiting = self.opening.as_ref()?;
+		let order = self.ctx.steer_current().order;
+		let rank = |serve: &GroupServe| crate::priority::in_group(serve.sequence, serve.frame_start, order);
+		let waiting = rank(waiting);
+		let mut held = self.children.iter().map(rank).peekable();
+		(held.peek().is_some() && held.all(|held| held > waiting)).then_some(waiting)
+	}
+
+	/// Take the group waiting for stream credit out of line, for one that outranks it: a
+	/// continuation goes back among the paused, and a new group is given up as one expired
+	/// under the subscription's budget is, which a lite-07 update may re-offer. Either way at
+	/// most one group per subscription waits for credit.
+	fn give_way(&mut self) {
+		let Some(mut waiting) = self.opening.take() else {
+			return;
 		};
-		// Lite-07: handed out while a continuation waits for credit. The higher-ranked of the two
-		// waits for it, and the other right behind; a continuation goes back among the paused.
-		debug_assert!(self.continuing, "only a continuation shares the wait");
-		let serving = Paused { group, frame_start };
-		let continuation = Paused {
-			group: waiting.group.clone(),
-			frame_start: waiting.frame_start,
-		};
-		if Paused::outranks(self.ctx.steer_current().order, &serving, &continuation) {
-			drop(waiting);
-			self.continuing = false;
-			self.paused.push_back(continuation);
-			self.open(serving.group, serving.frame_start);
-		} else {
-			self.opening = Some(waiting);
-			self.stashed = Some(serving);
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = waiting.sequence, "giving way to a higher-ranked group");
+		match std::mem::take(&mut self.continuing) {
+			true => self.paused.push_back(Paused {
+				group: waiting.group.clone(),
+				frame_start: waiting.frame_start,
+			}),
+			false => waiting.settle_failed(&Error::Old),
+		}
+	}
+
+	/// Give up a group the cursor handed out without a stream, as one expired under the
+	/// subscription's budget is.
+	fn shed(&self, sequence: u64) {
+		if self.ctx.version.has_track_stream() {
+			self.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.push((sequence, StreamError::Old));
 		}
 	}
 
@@ -6087,7 +6119,7 @@ impl TrackRun {
 	fn best_paused(&mut self) -> Option<usize> {
 		let order = self.ctx.steer_current().order;
 		(0..self.paused.len()).reduce(|best, next| {
-			match Paused::outranks(order, &self.paused[next], &self.paused[best]) {
+			match self.paused[next].rank(order) > self.paused[best].rank(order) {
 				true => next,
 				false => best,
 			}
