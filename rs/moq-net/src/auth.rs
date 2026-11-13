@@ -926,7 +926,7 @@ impl Link {
 		&self.handle.state
 	}
 
-	fn id(&self) -> u64 {
+	pub(crate) fn id(&self) -> u64 {
 		self.attached.id
 	}
 

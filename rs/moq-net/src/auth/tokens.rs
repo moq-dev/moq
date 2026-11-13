@@ -183,27 +183,24 @@ impl Tokens {
 	#[cfg(feature = "async")]
 	pub(crate) fn connected(&self, session: &crate::Session) {
 		if session.auth().state.same_channel(&self.handle.state) {
-			self.connect(session.credential());
+			self.connect(session.link().id(), session.credential());
 		}
 	}
 
-	fn connect(&self, credential: Option<&super::Credential>) {
+	/// Bind the session on `link`, even one that already closed: that close may be its answer.
+	fn connect(&self, link: u64, credential: Option<&super::Credential>) {
 		let mut state = self.handle.state.lock();
 		state.record();
 		let connected = match credential {
-			Some(auth) => Some(Connected::Slot {
-				link: auth.presented.link.expect("a session's own credential"),
+			Some(auth) => Connected::Slot {
+				link,
 				id: auth.presented.id,
-			}),
-			// The handle backs one open session at a time: the one just built, unless it ended.
-			None => state
-				.links
-				.iter()
-				.rev()
-				.find(|(_, link)| link.closed.is_none())
-				.map(|(link, _)| Connected::Accepted { link: *link }),
+			},
+			None => Connected::Accepted { link },
 		};
-		state.configured.as_mut().expect("built by Tokens::new").session = connected;
+		state.configured.as_mut().expect("built by Tokens::new").session = Some(connected);
+		// A session that closed before this bound it has its answer already.
+		state.record();
 	}
 }
 
@@ -564,7 +561,7 @@ mod tests {
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, supported, requests).unwrap();
 		let credential = supported.then(|| link.present(Bytes::new(), true).unwrap());
-		set.connect(credential.as_ref());
+		set.connect(link.id(), credential.as_ref());
 		Session { link, credential }
 	}
 
@@ -791,7 +788,7 @@ mod tests {
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, false, false).unwrap();
 		link.await_setup();
-		set.connect(None);
+		set.connect(link.id(), None);
 		link
 	}
 
@@ -812,6 +809,19 @@ mod tests {
 		let set = Tokens::new(tokens(&["connection"]));
 		let link = dial_awaiting_setup(&set);
 		link.close(Error::Session(SessionError::Unauthorized));
+		refused(&set, SessionError::Unauthorized);
+	}
+
+	/// A refusal that closes the session before the reconnect loop binds it still answers.
+	#[test]
+	fn a_credential_refused_before_the_session_is_bound_is_no_grant() {
+		let set = Tokens::new(tokens(&["connection"]));
+		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
+		set.commit(&presented);
+		let link = Link::attach(&set.handle, false, false).unwrap();
+		link.await_setup();
+		link.close(Error::Session(SessionError::Unauthorized));
+		set.connect(link.id(), None);
 		refused(&set, SessionError::Unauthorized);
 	}
 
