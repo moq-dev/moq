@@ -50,6 +50,9 @@ test("recovery runs from a disturbance to audio back within a frame of where it 
 	expect(recovery(at(rest), 20)).toBe(0);
 	// Nothing before the first sample to rest on.
 	expect(recovery(at(["stalled"]), 20)).toBeNull();
+	// What precedes `from` only sets the rest, so a disturbance right at it is still measured.
+	expect(recovery(at([...rest, "stalled", 200, 30]), 20, 1500)).toBe(500);
+	expect(recovery(at(["stalled", 30, ...rest]), 20, 500)).toBe(0);
 });
 
 test("percentile is nearest rank", () => {

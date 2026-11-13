@@ -87,9 +87,14 @@ export const frameMs = (row: Row): Ms => (row.codec === "aac" ? (1024 / row.rate
  * resting point to leave. Audio rests at the median lag of the {@link REST_MS} before each sample,
  * leaving out earlier disturbances; one starts at the first sample stalled or more than `frame` off
  * that rest, either way, and ends at the next sample back within `frame` of it. One still open at
- * the end lasts to the last sample.
+ * the end lasts to the last sample. Samples before `from` only set the rest: a disturbance counts
+ * once it starts at or after `from`.
  */
-export function recovery(samples: { at: Ms; lag: Ms | undefined; stalled: boolean }[], frame: Ms): Ms | null {
+export function recovery(
+	samples: { at: Ms; lag: Ms | undefined; stalled: boolean }[],
+	frame: Ms,
+	from: Ms = Number.NEGATIVE_INFINITY,
+): Ms | null {
 	type Point = (typeof samples)[number];
 	// Samples inside a disturbance, which say nothing about where audio rests.
 	const disturbed = new Set<number>();
@@ -103,13 +108,14 @@ export function recovery(samples: { at: Ms; lag: Ms | undefined; stalled: boolea
 		);
 		const rest = median(before);
 		if (rest === undefined) continue;
-		longest ??= 0;
+		const counted = onset.at >= from;
+		if (counted) longest ??= 0;
 		const back = (s: Point) => !s.stalled && s.lag !== undefined && Math.abs(s.lag - rest) <= frame;
 		if (back(onset) || (onset.lag === undefined && !onset.stalled)) continue;
 		let end = samples.findIndex((s, j) => j > i && back(s));
 		if (end < 0) end = samples.length - 1;
 		for (let j = i; j < end; j++) disturbed.add(j);
-		longest = Math.max(longest, (samples[end] as Point).at - onset.at);
+		if (counted) longest = Math.max(longest ?? 0, (samples[end] as Point).at - onset.at);
 		i = end;
 	}
 	return longest;
@@ -238,9 +244,14 @@ export function analyze(input: Input): Summary {
 	});
 	// Measured against where audio rested before each disturbance, not zero: a player may settle a
 	// little either side of the clock, and how far is `av_lag_ms_p50`'s to grade.
+	// The warmup's last `REST_MS` sets where audio rests going into the window, so a disturbance at its
+	// start is measured too.
 	const recover = recovery(
-		window.map((s) => ({ at: s.at, lag: s.stalled ? undefined : lagOf(s), stalled: s.stalled === true })),
+		samples
+			.filter((s) => s.at >= t0 - REST_MS && s.at <= t1)
+			.map((s) => ({ at: s.at, lag: s.stalled ? undefined : lagOf(s), stalled: s.stalled === true })),
 		frameMs(row),
+		t0,
 	);
 	const stalledShare = window.length > 0 ? window.filter((s) => s.stalled).length / window.length : null;
 
