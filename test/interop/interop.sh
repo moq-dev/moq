@@ -1716,7 +1716,8 @@ run_finish_publisher() {
 # moqsrc's watch is persistent: a finished broadcast keeps its pads, since an announcement means
 # online/offline, so GStreamer has no end, withdrawal, or session to report. It joins once the
 # broadcast has finished and checks the late tail alone: ten nonempty video buffers, and no more
-# by the time an interrupt stops the pipeline.
+# by the time an interrupt stops the pipeline. Like every finish client it stays on QUIC, since
+# leaving a WebSocket fallback that won a slow race would move it to a second session mid-read.
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
 run_finish_gst() {
     local broadcast="$1" url="$2" out="$3" version pid deadline count
@@ -1725,7 +1726,7 @@ run_finish_gst() {
     deadline=$((SECONDS + ${TIMEOUT%.*} * 2))
     [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 2))
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} connect-websocket-enabled=false \
         s.video_0 ! identity name=frames silent=false ! fakesink >"$out" 2>&1 &
     pid=$!
     count=0
@@ -1797,14 +1798,6 @@ run_finishes() {
         return
     fi
     for pub in "${PUB_LIST[@]}"; do
-        # Quarantined: quest/m0/test-flakes-2/interop-finish-fallback.md.
-        if [[ "$QUARANTINED" -eq 0 && "$pub" == rust ]]; then
-            for sub in "${SUB_LIST[@]}"; do
-                echo "  SKIP  finish $pub -> $sub (quarantined)"
-                record skip case=finish publisher="$pub" subscriber="$sub" detail="quarantined: quest/m0/test-flakes-2/interop-finish-fallback.md"
-            done
-            continue
-        fi
         name="finish-$pub"
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
         # moq-transport requests name prefixes alone.
