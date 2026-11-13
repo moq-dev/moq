@@ -25,9 +25,9 @@ fn broadcast(payload: &[u8]) -> (moq_net::origin::Producer, impl Sized) {
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_group(0).unwrap();
 	group.write_frame(moq_net::Timestamp::ZERO, payload.to_vec()).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	(origin, (broadcast, track))
 }
 

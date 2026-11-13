@@ -827,7 +827,7 @@ mod tests {
 		.unwrap();
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: &[u64]| {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let frames: Vec<_> = stamps
 				.iter()
 				.enumerate()
@@ -839,7 +839,7 @@ mod tests {
 				})
 				.collect();
 			wire.write(&mut group, &frames).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		write(10, &[1000, 800, 900, 1100]);
 		write(11, &[2000, 1800, 1900, 2100]);
@@ -992,7 +992,9 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		read(&mut consumer).await;
 		read(&mut consumer).await;
-		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
+		// The discontinuity marker starts a microsecond before the content's end, so content
+		// resuming there still starts a later group.
+		assert_eq!(reads, ["frame 100000", "end 133332", "frame 200000", "none"]);
 	}
 
 	/// A read dropped while a threaded flush is in flight loses nothing: the
@@ -1167,7 +1169,7 @@ mod tests {
 	}
 
 	fn group(track: &mut moq_net::track::Producer, sequence: u64, seconds: &[u64]) -> moq_net::group::Producer {
-		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 		write(&mut group, seconds);
 		group
 	}
@@ -1244,7 +1246,7 @@ mod tests {
 	async fn a_cold_join_hands_over_to_the_max_delay_decoder() {
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
-		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
 		let mut live = group(&mut track, 1, &[4, 5]);
 
 		let mut consumer = dual(
@@ -1275,7 +1277,7 @@ mod tests {
 	async fn a_huge_warmup_reaches_back_by_the_cap() {
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
-		group(&mut track, 0, &[0]).finish().unwrap();
+		group(&mut track, 0, &[0]).close().unwrap();
 		let _consumer = Consumer::new(
 			&broadcast.consume(),
 			&warmup_catalog(Some(std::time::Duration::from_secs(3600))),
@@ -1327,7 +1329,7 @@ mod tests {
 			"the max-delay decoder started at the live edge"
 		);
 		tokio::time::resume();
-		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
 		let Ok(Some(Read::Frame(first))) = max.read().await else {
 			panic!("the max-delay decoder produced no picture");
 		};
@@ -1368,7 +1370,7 @@ mod tests {
 			write(&mut first, &[second]);
 			shown.push(read(&mut consumer).await);
 		}
-		first.finish().unwrap();
+		first.close().unwrap();
 		let mut stalled = group(&mut track, 1, &[4]);
 		shown.push(read(&mut consumer).await);
 
@@ -1392,7 +1394,7 @@ mod tests {
 		);
 
 		write(&mut stalled, &[5, 6, 7]);
-		stalled.finish().unwrap();
+		stalled.close().unwrap();
 		catch_up(&mut consumer).await;
 		for second in 9..12 {
 			write(&mut live, &[second]);
@@ -1428,7 +1430,7 @@ mod tests {
 		.await;
 
 		// Written as it is read: a zero budget would skip a backlog.
-		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
 		let mut shown = Vec::new();
 		for _ in 0..4 {
 			shown.push(read(&mut consumer).await.0);
@@ -1442,7 +1444,7 @@ mod tests {
 		catch_up(&mut consumer).await;
 
 		write(&mut stalled, &[5, 6, 7]);
-		stalled.finish().unwrap();
+		stalled.close().unwrap();
 		write(&mut live, &[13]);
 		shown.push(read(&mut consumer).await.0);
 		assert_eq!(shown, [0, 1, 2, 3, 4, 8, 9, 10, 11, 12, 13]);
@@ -1453,8 +1455,8 @@ mod tests {
 	#[tokio::test]
 	async fn the_tail_drains_from_both_decoders() {
 		let (broadcast, mut track) = live_track();
-		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
-		group(&mut track, 1, &[4, 5]).finish().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
+		group(&mut track, 1, &[4, 5]).close().unwrap();
 		let _track = track.finish().unwrap();
 
 		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
@@ -1588,7 +1590,7 @@ mod tests {
 	async fn a_max_delay_decode_error_fails_the_read() {
 		let (broadcast, mut track) = live_track();
 		// Only the max-delay decoder reads group 0, a group before the live edge.
-		let mut earlier = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut earlier = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video)
 			.write(
 				&mut earlier,
@@ -1601,7 +1603,7 @@ mod tests {
 			)
 			.unwrap();
 		write(&mut earlier, &[1, 2, 3]);
-		earlier.finish().unwrap();
+		earlier.close().unwrap();
 		let _live = group(&mut track, 1, &[4, 5]);
 
 		let mut consumer = dual(

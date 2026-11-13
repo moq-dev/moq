@@ -1977,7 +1977,7 @@ mod tests {
 							for frame in format.decode(wire).unwrap() {
 								// A duration marker closes the group but is not an encoded picture.
 								if format.end(&frame).is_none() {
-									published.send((group.sequence, frame.payload.len())).unwrap();
+									published.send((group.start, frame.payload.len())).unwrap();
 								}
 							}
 						}
@@ -2118,10 +2118,11 @@ mod tests {
 
 				let name = rendition_name(&consumer).await;
 				let mut track = consumer.track(&name).unwrap();
-				for group in 0..2 {
-					camera.push_native(surface(), us(group * 2_000_000));
-					while track.largest().await.expect("the track is live").group < group {}
-				}
+				// Each frame opens a group of its own, starting at the frame's pts.
+				camera.push_native(surface(), us(0));
+				let first = track.largest().await.expect("the track is live").group;
+				camera.push_native(surface(), us(2_000_000));
+				while track.largest().await.expect("the track is live").group < first + 2_000_000 {}
 				assert_eq!(
 					opens.load(Ordering::SeqCst),
 					1,
@@ -2138,10 +2139,10 @@ mod tests {
 					)
 					.await
 					.unwrap();
-				for sequence in 0..2 {
-					let group = subscriber.recv_group().await.unwrap().expect("a cached group");
-					assert_eq!(group.sequence, sequence);
-				}
+				// The groups start their frames' pts apart, wherever the capture's timeline begins.
+				let first = subscriber.recv_group().await.unwrap().expect("a cached group").start;
+				let second = subscriber.recv_group().await.unwrap().expect("a cached group").start;
+				assert_eq!(second - first, 2_000_000);
 
 				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
 				run.abort();
