@@ -366,11 +366,18 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 		for timed in [false, true] {
 			let mut data = vec![(index * 2) as u8, timed as u8, 3];
 			let timing = version.wire_timescale(timed.then_some(Timescale::MILLI)).is_some();
+			// Lite-07 leads with the size plus one; earlier versions end the header with it.
+			let length_first = version.has_length_first();
 			for (n, payload) in [&b"abc"[..], b"", b"defgh"].into_iter().enumerate() {
+				if length_first {
+					data.push(payload.len() as u8 + 1);
+				}
 				if timing {
 					data.push(if n == 0 { 0 } else { 2 });
 				}
-				data.push(payload.len() as u8);
+				if !length_first {
+					data.push(payload.len() as u8);
+				}
 				data.extend_from_slice(payload);
 			}
 			push(data);
@@ -382,8 +389,8 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 	let mut data = vec![(lite07 * 2) as u8, 0x10, 2, 0];
 	for payload in [&b"ab"[..], b"c"] {
 		// Object 0 is the first record's absolute ID, then each next one is a zero delta,
-		// and neither has a property block.
-		data.extend_from_slice(&[0, 0, payload.len() as u8]);
+		// and neither has a property block. The frame's size follows, plus one.
+		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1]);
 		data.extend_from_slice(payload);
 	}
 	push(data);
@@ -463,7 +470,7 @@ pub(super) fn limit_seeds() -> Vec<super::Seed> {
 	};
 	for size in super::limits(&[group::MAX_CACHE_BYTES]) {
 		let mut data = vec![(lite07 * 2) as u8, 0, 3];
-		data.extend(varint(size));
+		data.extend(varint(size + 1));
 		data.extend_from_slice(&[0; 4]);
 		push(data);
 	}
