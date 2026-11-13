@@ -171,7 +171,9 @@ impl Mesh {
 	/// Every unheld queue with something to deliver.
 	fn busy(&self) -> Vec<Queue> {
 		(self.sim.busy().into_iter().map(|(from, to)| Queue::Route(from, to)))
-			.chain((self.sim.busy_subs().into_iter()).map(|(from, to, cast, stream)| Queue::Sub(from, to, cast, stream)))
+			.chain(
+				(self.sim.busy_subs().into_iter()).map(|(from, to, cast, stream)| Queue::Sub(from, to, cast, stream)),
+			)
 			.collect()
 	}
 
@@ -330,7 +332,11 @@ impl Mesh {
 					.filter(|&n| self.parent(n, cast) == Some(node))
 					.collect();
 				assert_eq!(relay.downstream(cast), feeds, "{label}: {cast:?} at node {node}");
-				assert_eq!(relay.streams(cast), feeds.len(), "{label}: {cast:?} at node {node}: one stream each");
+				assert_eq!(
+					relay.streams(cast),
+					feeds.len(),
+					"{label}: {cast:?} at node {node}: one stream each"
+				);
 				assert!(!relay.lingering(cast), "{label}: {cast:?} at node {node}");
 				if node != origin {
 					let demand = relay.reading(cast) || !feeds.is_empty();
