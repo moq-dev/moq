@@ -63,7 +63,7 @@ lint *args:
     git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
-    cargo shear
+    cargo shear --deny-warnings
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
     cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
     cargo hakari generate --diff
