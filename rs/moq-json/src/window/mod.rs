@@ -146,7 +146,7 @@ mod test {
 		refused(producer.push(moq_net::Timed::from(&rec(2)).at(huge)));
 		refused(producer.pop(moq_net::Timed::from(1u64).at(huge)));
 		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
-		assert_eq!(largest(&mut track), Some(0), "a refused op rolled the group");
+		assert_eq!(largest(&mut track), Some(100), "a refused op rolled the group");
 
 		let _finished = producer.finish().unwrap();
 		let pushed: Vec<_> = drain(&mut consumer(track))
@@ -287,27 +287,29 @@ mod test {
 		Consumer::new(track, ConsumerConfig::default())
 	}
 
-	/// A timed track whose first group already starts at ten seconds, so a group that a frame at
-	/// [`rewound`] opens is published by `append_group` and then refused by `write_frame` for
-	/// starting before it. That stands in for any post-`append_group` write failure (the reported
-	/// one is a frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
+	/// A timed track whose first group starts at 0 but whose first frame is at ten seconds, so a
+	/// group a frame at [`rewound`] opens is published by `append_group` and then refused by
+	/// `write_frame` for starting before that frame. That stands in for any post-`append_group`
+	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
+	/// allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
 				bytes::Bytes::from_static(b"{}"),
 			)
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		track
 	}
 
-	/// Before [`rejecting_track`]'s first group starts, so a group opened at it is refused.
+	/// Past [`rejecting_track`]'s first group start but before its first frame, so a group opened
+	/// at it is refused.
 	fn rewound() -> moq_net::Timestamp {
 		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
@@ -660,7 +662,7 @@ mod test {
 			let first = encoder.push(&rec(0)).unwrap();
 			let payload = first.payload.clone();
 			first.commit();
-			let mut lost = track.append_group().unwrap();
+			let mut lost = track.append_group(0).unwrap();
 			lost.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
 			assert_eq!(
 				drain(&mut consumer),
@@ -674,9 +676,11 @@ mod test {
 			let second = encoder.push(&rec(1)).unwrap();
 			let payload = second.payload.clone();
 			second.commit();
-			let mut checkpoint = track.append_group().unwrap();
-			checkpoint.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
-			checkpoint.finish().unwrap();
+			let mut checkpoint = track.append_group(1).unwrap();
+			checkpoint
+				.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), payload)
+				.unwrap();
+			checkpoint.close().unwrap();
 			let _track = track.finish().unwrap();
 
 			assert_eq!(
@@ -718,7 +722,7 @@ mod test {
 		})
 		.last()
 		.expect("the fresh group");
-		assert_eq!(fresh.sequence, 1);
+		assert_eq!(fresh.start, 1);
 		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
 			panic!("expected the restating header");
 		};
@@ -763,10 +767,11 @@ mod test {
 		assert_eq!(header.timestamp, Some(ms(200)));
 	}
 
-	/// An op may carry a timestamp older than its group's first frame, but a new group may not start
-	/// before that frame, so the restating header takes the newest timestamp written.
+	/// An op may carry a timestamp older than its group's first frame, but a new group must start
+	/// past that frame, so a refresh whose newest timestamp is still the group's own start waits for
+	/// a later edit, then restates the window there.
 	#[test]
-	fn a_refresh_after_an_older_edit_starts_at_the_newest_timestamp() {
+	fn a_refresh_after_older_edits_waits_for_a_later_one() {
 		let waiter = kio::Waiter::noop();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
@@ -775,6 +780,11 @@ mod test {
 		}
 
 		let mut late = producer.consume();
+		assert!(
+			producer.poll_refresh(&waiter).is_pending(),
+			"no group may share the open group's start"
+		);
+		producer.push(moq_net::Timed::from(&rec(4)).at(ms(140))).unwrap();
 		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
 		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
 			Poll::Ready(Ok(Some(group))) => Some(group),
@@ -785,7 +795,8 @@ mod test {
 		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
 			panic!("expected the restating header");
 		};
-		assert_eq!(header.timestamp, Some(ms(130)));
+		assert_eq!(fresh.start, 140);
+		assert_eq!(header.timestamp, Some(ms(140)));
 	}
 
 	/// Without a ratio no join asks for a group, and a finished producer stops refreshing.

@@ -270,27 +270,29 @@ mod test {
 		);
 	}
 
-	/// A timed track whose first group already starts at ten seconds, so a group that a frame at
-	/// [`rewound`] opens is published by `append_group` and then refused by `write_frame` for
-	/// starting before it. That stands in for any post-`append_group` write failure (the reported
-	/// one is a frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
+	/// A timed track whose first group starts at 0 but whose first frame is at ten seconds, so a
+	/// group a frame at [`rewound`] opens is published by `append_group` and then refused by
+	/// `write_frame` for starting before that frame. That stands in for any post-`append_group`
+	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
+	/// allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
 				bytes::Bytes::from_static(b"{}"),
 			)
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		track
 	}
 
-	/// Before [`rejecting_track`]'s first group starts, so a group opened at it is refused.
+	/// Past [`rejecting_track`]'s first group start but before its first frame, so a group opened
+	/// at it is refused.
 	fn rewound() -> moq_net::Timestamp {
 		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
@@ -384,13 +386,13 @@ mod test {
 		let subscriber = track.subscribe(subscription);
 
 		// Both groups stay open, the way a publisher writing to two at once leaves them.
-		let mut first = track.append_group().unwrap();
+		let mut first = track.append_group(0).unwrap();
 		first
-			.write_frame(moq_net::Timestamp::now(), br#"{"n":0}"#.as_slice())
+			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), br#"{"n":0}"#.as_slice())
 			.unwrap();
-		let mut second = track.append_group().unwrap();
+		let mut second = track.append_group(1).unwrap();
 		second
-			.write_frame(moq_net::Timestamp::now(), br#"{"n":1}"#.as_slice())
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), br#"{"n":1}"#.as_slice())
 			.unwrap();
 
 		let mut consumer = consume(subscriber);
@@ -407,7 +409,7 @@ mod test {
 
 		// Sticky: a later read must not report the rest of the first group as a whole log.
 		first
-			.write_frame(moq_net::Timestamp::now(), br#"{"n":2}"#.as_slice())
+			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), br#"{"n":2}"#.as_slice())
 			.unwrap();
 		assert!(matches!(
 			consumer.poll_next(&waiter),

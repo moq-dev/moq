@@ -92,8 +92,10 @@ impl<T: Serialize> Producer<T> {
 	/// A join wants one once the open group's deltas outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its snapshot (see
 	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
-	/// reads the cached group, then the new one. The snapshot carries the newest timestamp written, so the new group never starts before the last.
-	/// Nothing happens before the first update, or on a track without a ratio.
+	/// reads the cached group, then the new one. The snapshot carries the newest timestamp written,
+	/// where its group starts; while that is the newest group's own start, the refresh waits for a
+	/// later update, since two groups never share a start. Nothing happens before the first update,
+	/// or on a track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
 	/// beside the updates. Errors once the track is closed.
@@ -186,7 +188,7 @@ impl<T: Serialize> Producer<T> {
 		})
 	}
 
-	/// Finish the open group, so the deltas already written stop being provisional.
+	/// Close the open group, so the deltas already written stop being provisional.
 	///
 	/// No replacement group opens until the next [`update`](Self::update) or [`poll_refresh`](Self::poll_refresh), which emits a full
 	/// snapshot as its first frame even when the value is unchanged. A consumer joining at that group
@@ -382,13 +384,13 @@ impl<T> Inner<T> {
 		self.state.abort(err);
 	}
 
-	/// Finish the open group, leaving the next update to open a replacement with a full snapshot.
+	/// Close the open group, leaving the next update to open a replacement with a full snapshot.
 	fn cut(&mut self) -> Result<()> {
 		if self.track.group.is_none() {
 			return Ok(());
 		}
 
-		// The group closes either way below, so reset first: a `finish` error must not leave the
+		// The group closes either way below, so reset first: a `close` error must not leave the
 		// encoder emitting deltas against a snapshot whose group is gone.
 		self.encoder.reset();
 		self.track.cut()
@@ -424,6 +426,11 @@ impl<T: Serialize> Inner<T> {
 		std::task::ready!(self.refresh.poll(self.track.largest, waiter))?;
 
 		let Inner { track, encoder, at, .. } = self;
+		// Two groups never share a start, so a refresh at the newest group's own start waits for a
+		// later write. Checked before encoding, since a snapshot dropped unwritten resets the encoder.
+		if !crate::starts_past(&track.inner, *at) {
+			return std::task::Poll::Pending;
+		}
 		// A group was written, so a value was encoded and there is one to restate.
 		let Some(frame) = encoder.snapshot()? else {
 			return std::task::Poll::Pending;
@@ -460,7 +467,7 @@ struct Track {
 	/// The group a delta would be appended to, open only while deltas are enabled.
 	group: Option<moq_net::group::Producer>,
 
-	/// The sequence of the newest group written, which a refresh has to pass.
+	/// The start of the newest group written, which a refresh has to pass.
 	largest: Option<u64>,
 
 	/// Whether the encoder can emit deltas at all. With them off every frame is a snapshot, so a
@@ -469,10 +476,10 @@ struct Track {
 }
 
 impl Track {
-	/// Finish the open group without opening a replacement.
+	/// Close the open group without opening a replacement.
 	fn cut(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.finish()?;
+			group.close()?;
 		}
 		Ok(())
 	}
@@ -504,20 +511,26 @@ impl Track {
 		}
 	}
 
-	/// Close the open group and write a snapshot as the first frame of a new one.
+	/// Write a snapshot as the first frame of a new group starting at `timestamp`, then close the
+	/// previous group.
+	///
+	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], refused
+	/// before the previous group closes.
 	fn write_snapshot(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
+		let start = crate::group_start(&self.inner, timestamp);
+		let mut group = self.inner.append_group(start)?;
+		self.largest = Some(start);
+
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(group) = self.group.take() {
-			group.finish()?;
+		if let Some(previous) = self.group.take() {
+			previous.close()?;
 		}
 
-		let mut group = self.inner.append_group()?;
-		self.largest = Some(group.sequence);
 		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
 			// any subscriber that advanced into it with nothing to read and no end.
-			let _ = group.finish();
+			let _ = group.close();
 			return Err(err.into());
 		}
 
@@ -525,7 +538,7 @@ impl Track {
 			// Keep the group open so future deltas can be appended to it.
 			true => self.group = Some(group),
 			// One frame per group, identical to a plain JSON track.
-			false => drop(group.finish()?),
+			false => drop(group.close()?),
 		}
 
 		Ok(())
@@ -542,7 +555,7 @@ impl Track {
 
 	fn finish(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.finish()?;
+			group.close()?;
 		}
 		// Another handle may have declared the end already, which stands. This shared state
 		// keeps its own clone, whose appends the end refuses.

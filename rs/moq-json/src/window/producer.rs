@@ -79,7 +79,7 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().pop(count.into())
 	}
 
-	/// Finish the open group, leaving the next edit to open a replacement with a header.
+	/// Close the open group, leaving the next edit to open a replacement with a header.
 	///
 	/// Idempotent: cutting when no group is open does nothing. A caller that stores complete groups
 	/// cuts after its edits, so every edit so far sits in a group no later frame can extend.
@@ -92,8 +92,10 @@ impl<T> Producer<T> {
 	/// A join wants one once the open group's ops outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its header (see
 	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
-	/// reads the cached group, then the new one. The header carries the newest timestamp written. Nothing happens before
-	/// the first edit, or on a track without a ratio.
+	/// reads the cached group, then the new one. The header carries the newest timestamp written, where
+	/// its group starts; while that is the newest group's own start, the refresh waits for a later
+	/// edit, since two groups never share a start. Nothing happens before the first edit, or on a
+	/// track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
 	/// beside the edits. Errors once the track is finished or closed.
@@ -218,6 +220,11 @@ impl<T> Inner<T> {
 		std::task::ready!(self.refresh.poll(self.track.largest, waiter))?;
 
 		let Inner { track, encoder, at, .. } = self;
+		// Two groups never share a start, so a refresh at the newest group's own start waits for a
+		// later write. Checked before encoding, since a header dropped unwritten resets the encoder.
+		if !crate::starts_past(&track.inner, *at) {
+			return std::task::Poll::Pending;
+		}
 		let frame = encoder.snapshot()?;
 		track.write(*at, &frame)?;
 		frame.commit();
@@ -228,10 +235,10 @@ impl<T> Inner<T> {
 		let Some(group) = self.track.group.take() else {
 			return Ok(());
 		};
-		// The group closes either way, so reset first: a `finish` error must not leave the encoder
+		// The group closes either way, so reset first: a `close` error must not leave the encoder
 		// appending ops to a group that is gone.
 		self.encoder.reset();
-		group.finish()?;
+		group.close()?;
 		Ok(())
 	}
 
@@ -312,7 +319,7 @@ struct Track {
 	/// encoder too, or the encoder's next op would have no group to land in.
 	group: Option<moq_net::group::Producer>,
 
-	/// The sequence of the newest group written, which a refresh has to pass.
+	/// The start of the newest group written, which a refresh has to pass.
 	largest: Option<u64>,
 }
 
@@ -336,20 +343,26 @@ impl Track {
 		}
 	}
 
-	/// Close the open group and write the header as the first frame of a new one.
+	/// Write the header as the first frame of a new group starting at `timestamp`, then close the
+	/// previous group.
+	///
+	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], refused
+	/// before the previous group closes.
 	fn write_header(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
+		let start = crate::group_start(&self.inner, timestamp);
+		let mut group = self.inner.append_group(start)?;
+		self.largest = Some(start);
+
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(group) = self.group.take() {
-			group.finish()?;
+		if let Some(previous) = self.group.take() {
+			previous.close()?;
 		}
 
-		let mut group = self.inner.append_group()?;
-		self.largest = Some(group.sequence);
 		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
 			// any subscriber that advanced into it with nothing to read and no end.
-			let _ = group.finish();
+			let _ = group.close();
 			return Err(err.into());
 		}
 
@@ -368,7 +381,7 @@ impl Track {
 
 	fn finish(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.finish()?;
+			group.close()?;
 		}
 		// Another handle may have declared the end already, which stands. This shared state
 		// keeps its own clone, whose appends the end refuses.

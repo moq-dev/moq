@@ -141,7 +141,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 					) =>
 				{
 					// A later group starts a fresh snapshot.
-					tracing::warn!(track = self.name, group = group.sequence, error = ?err,
+					tracing::warn!(track = self.name, group = group.start, error = ?err,
 						"snapshot group lost; waiting for a newer one");
 					self.group = None;
 				}

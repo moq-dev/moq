@@ -185,7 +185,7 @@ impl<T: Serialize> Inner<T> {
 			}
 		};
 
-		let opened = track.open();
+		let opened = track.open(at);
 		let published = opened.is_ok();
 		let result = match opened {
 			Ok(()) => track.write(at, record.payload()),
@@ -230,10 +230,11 @@ struct Track {
 }
 
 impl Track {
-	/// Open the log's group if it isn't already.
-	fn open(&mut self) -> std::result::Result<(), moq_net::Error> {
+	/// Open the log's group if it isn't already, starting at its first record's `timestamp`.
+	fn open(&mut self, timestamp: Option<moq_net::Timestamp>) -> std::result::Result<(), moq_net::Error> {
 		if self.group.is_none() {
-			self.group = Some(self.inner.append_group()?);
+			let start = crate::group_start(&self.inner, timestamp);
+			self.group = Some(self.inner.append_group(start)?);
 		}
 		Ok(())
 	}
@@ -272,7 +273,7 @@ impl Track {
 		// would leave the track open with `group` already taken, so a later append would open a
 		// second group. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
-			Some(group) => group.finish().map(drop),
+			Some(group) => group.close().map(drop),
 			None => Ok(()),
 		};
 		// This shared state keeps its own clone, whose appends the end refuses.

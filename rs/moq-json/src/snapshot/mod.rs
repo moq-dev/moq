@@ -255,9 +255,9 @@ mod test {
 			let waiter = kio::Waiter::noop();
 
 			// Group 0 delivers a value, then stays open with the reader parked on its next frame.
-			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 			group
-				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
+				.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(br#"{"a":1}"#))
 				.unwrap();
 			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
 			assert!(consumer.poll_latest(&waiter).is_pending());
@@ -270,9 +270,12 @@ mod test {
 			);
 
 			// The replacement arrives and the reader picks up where the value now lives.
-			let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 			group
-				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":2}"#))
+				.write_frame(
+					moq_net::Timestamp::from_millis(1).unwrap(),
+					Bytes::from_static(br#"{"a":2}"#),
+				)
 				.unwrap();
 			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 2 })));
 		}
@@ -289,9 +292,9 @@ mod test {
 		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
+			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(br#"{"a":1}"#))
 			.unwrap();
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
 
@@ -547,7 +550,7 @@ mod test {
 		assert!(producer.poll_refresh(&waiter).is_pending(), "answered once");
 
 		let mut fresh = groups(&mut late).pop().expect("the fresh group");
-		assert_eq!(fresh.sequence, 1);
+		assert_eq!(fresh.start, 1);
 		assert_eq!(frames(&mut fresh), vec![(None, json!({ "n": 2, "p": 0 }))]);
 
 		producer.update(&json!({ "n": 3, "p": 0 })).unwrap();
@@ -574,14 +577,15 @@ mod test {
 			Poll::Ready(Ok(()))
 		));
 		let mut fresh = groups(&mut late).pop().expect("the fresh group");
-		assert_eq!(fresh.sequence, 1);
+		assert_eq!(fresh.start, 103);
 		assert_eq!(frames(&mut fresh), vec![(Some(ms(103)), json!({ "n": 3 }))]);
 	}
 
-	/// A delta may carry a timestamp older than its group's first frame, but a new group may not
-	/// start before that frame, so the restatement takes the newest timestamp written.
+	/// A delta may carry a timestamp older than its group's first frame, but a new group must start
+	/// past that frame, so a refresh whose newest timestamp is still the group's own start waits for a
+	/// later update, then restates the value there.
 	#[test]
-	fn a_refresh_after_an_older_update_starts_at_the_newest_timestamp() {
+	fn a_refresh_after_older_updates_waits_for_a_later_one() {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
@@ -591,13 +595,21 @@ mod test {
 		}
 
 		let mut late = producer.consume();
+		assert!(
+			producer.poll_refresh(&kio::Waiter::noop()).is_pending(),
+			"no group may share the open group's start"
+		);
+
+		producer
+			.update(moq_net::Timed::from(&json!({ "n": 4 })).at(ms(140)))
+			.unwrap();
 		assert!(matches!(
 			producer.poll_refresh(&kio::Waiter::noop()),
 			Poll::Ready(Ok(()))
 		));
 		let mut fresh = groups(&mut late).pop().expect("the fresh group");
-		assert_eq!(fresh.sequence, 1);
-		assert_eq!(frames(&mut fresh), vec![(Some(ms(130)), json!({ "n": 3 }))]);
+		assert_eq!(fresh.start, 140);
+		assert_eq!(frames(&mut fresh), vec![(Some(ms(140)), json!({ "n": 4 }))]);
 	}
 
 	/// A refresh restates the last value written, never one whose update was rejected, and the next
@@ -624,7 +636,7 @@ mod test {
 			Poll::Ready(Ok(()))
 		));
 		let mut fresh = groups(&mut late).pop().expect("the fresh group");
-		assert_eq!(fresh.sequence, 1);
+		assert_eq!(fresh.start, 103);
 		assert_eq!(frames(&mut fresh), vec![(Some(ms(103)), json!({ "n": 3 }))]);
 
 		producer
@@ -1004,27 +1016,29 @@ mod test {
 		assert!(matches!(producer.update(&json!({ "a": 3 })), Err(crate::Error::Net(_))));
 	}
 
-	/// A timed track whose first group already starts at ten seconds, so a group that a frame at
-	/// [`rewound`] opens is published by `append_group` and then refused by `write_frame` for
-	/// starting before it. That stands in for any post-`append_group` write failure (the reported
-	/// one is a frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
+	/// A timed track whose first group starts at 0 but whose first frame is at ten seconds, so a
+	/// group a frame at [`rewound`] opens is published by `append_group` and then refused by
+	/// `write_frame` for starting before that frame. That stands in for any post-`append_group`
+	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
+	/// allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
 				bytes::Bytes::from_static(b"{}"),
 			)
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		track
 	}
 
-	/// Before [`rejecting_track`]'s first group starts, so a group opened at it is refused.
+	/// Past [`rejecting_track`]'s first group start but before its first frame, so a group opened
+	/// at it is refused.
 	fn rewound() -> moq_net::Timestamp {
 		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
@@ -1127,7 +1141,7 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();
@@ -1141,7 +1155,7 @@ mod test {
 				Bytes::from(serde_json::to_vec(&json!({ "a": 1 })).unwrap()),
 			)
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		match consumer.poll_latest(&waiter) {
 			Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "a": 1 })),
