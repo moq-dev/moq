@@ -21,8 +21,12 @@ Record what this run learned (inventory method, findings, what to check
 first) in the cut's PR notes or a follow-up quest, so the next run starts from
 it. Only `/quest-delete` ends the recurrence.
 
-Starts once m2 lands, so the features it reviews are the ones that ship; the
-cut waits for it. Feature changes break downstream builds, which is why this
+Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ this run
+starts now, on the features `main` has today, with a delta pass after m2
+(rejected: one pass after m2 lands, which puts every approved change behind
+the routes chain instead of beside it). The first pass's PR rewrites this
+quest to the delta pass: features m2 added or changed since, with
+[m2](/quest/m2/README.md) under `Required`. The cut waits for the delta pass. Feature changes break downstream builds, which is why this
 runs before the cut rather than with the post-release audits. Like the [API
 shape review](/quest/m3/release/api-review.md), this run changes no code
 (decided 2026-10-26): it proposes each change with a recommendation, asks the
@@ -58,7 +62,3 @@ What to check first (seeded 2026-10-26):
 
 Related: the [cost audit](/quest/m3/audit-cost.md) owns per-crate build
 cost and which dependencies exist.
-
-## Required
-
-- [Breaking release readiness](/quest/m2/README.md) - the release's features are final before they are reviewed

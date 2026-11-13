@@ -17,8 +17,8 @@ Check by asking the maintainer which machines are available. As of
 2026-10-05 only part is on hand. The maintainer's desktop has an Intel Arrow
 Lake iGPU (iHD 26.1.2, `renderD128`) and an AMD RX 9070 (RADV, Mesa 26.0.8,
 `renderD129`), so it has a second render node; that check moved to
-[VA-API external images](/quest/m3/vaapi-vulkan-import.md). The
-[multi-vendor GPU quests](/quest/m3/gpu-release.md) test on it.
+[VA-API external images](/quest/m5/vaapi-vulkan-import.md). The
+[multi-vendor GPU quests](/quest/m5/gpu-release.md) test on it.
 
 Checked 2026-10-08 on that desktop: `vainfo` lists only `VAEntrypointEncSlice`
 on the iGPU (H.264, HEVC, HEVC Main10, AV1), no `EncSliceLP`, so the
@@ -29,6 +29,13 @@ empty).
 Decided 2026-10-08: the embedded-device condition folds in here, since a Pi
 4 or 5 serves both the PipeWire camera pass and the embedded video check.
 Record the device, OS image, and driver when one is on hand.
+
+Checked 2026-11-12 (/quest-audit): part of the Windows condition holds. The
+maintainer's `windows` host (Windows 11, NVIDIA RTX 2070) has hosted agents
+natively since 2026-11-10, so the Windows GPU probes and the Media Foundation
+encode of a GPU export can run there. It has no camera, so the MJPEG and YUY2
+camera items still wait. Whether the maintainer's macOS laptop is Apple Silicon
+is not recorded; ask.
 
 The validation can start with whatever subset is available; split the rest
 out of [Video hardware validation](/quest/m5/video-hardware.md) when that

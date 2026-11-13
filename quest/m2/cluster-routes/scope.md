@@ -19,6 +19,15 @@ farther one offers. The `residual_` tests in
 `rs/moq-net/src/route/tests/residual.rs` pass as plain tests on it, and a
 sweep over meshes with scoped relays holds the rules at every quiet point.
 
+A route also carries the sticky down-only flag
+([epic](/quest/m2/cluster-routes/README.md) Plan item 29, decided
+2026-11-12): set when the route is learned over a link marked `upstream`,
+never cleared, and never offered over an upstream link. The model
+(`RouteHandoff.tla`) gains the flag and that export rule before the router
+builds on it, since the prototype left upstream marks out, and a `Sim` mesh
+with two uplinks checks that no route learned from one upstream reaches the
+other, directly or through a LAN peer.
+
 Sessions, the wire, the draft, and `js/net` keep today's router until
 [the switch](/quest/m2/cluster-routes/switch.md), so nothing a peer
 or an application sees changes here.

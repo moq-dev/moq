@@ -19,6 +19,12 @@ release execution, and bug fixes in shipped code; m4 holds tests, tooling,
 benchmarks, optimizations, and features nobody waits on yet. m5 holds work
 gated on the outside world, or speculative work with no named consumer.
 
+[lab](/quest/lab/README.md) sits beside the milestones, outside their order
+(decided 2026-11-12, maintainer, /quest-audit): experiments and measurements
+that touch no published API, wire format, or CLI surface. They start any
+time, merge whenever, never gate a cut, and stay in place when the
+milestones shift.
+
 A change is breaking when a published consumer or a deployed peer must adapt
 to it: the public Rust, JS, or bindings API, a frozen wire version, the hang
 catalog JSON, a stored or exported container format, or CLI flags, config

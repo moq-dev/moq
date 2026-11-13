@@ -25,7 +25,7 @@ and [moq-dev/moq#7308](https://github.com/moq-dev/moq/pull/7308).
   a plain table, so it imports as plain channels or fails as an invalid
   table. [moq-dev/moq#7336](https://github.com/moq-dev/moq/pull/7336) refuses family 3 in fMP4 only. Refuse it in `parse` itself
   (recommended, since no consumer can render a demixing matrix today), or
-  carry it as `ambisonic` if [VR and ambisonic fMP4](/quest/m4/mux-vr-ambisonic-fmp4.md)
+  carry it as `ambisonic` if [VR and ambisonic fMP4](/quest/m5/mux-vr-ambisonic-fmp4.md)
   wants it.
 
 Cover both with unit tests beside [moq-dev/moq#7336](https://github.com/moq-dev/moq/pull/7336)'s

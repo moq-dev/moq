@@ -58,4 +58,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the estimator whose budgets these rows extend
-- [ViSQOL grading](/quest/m4/audio-visqol.md) - adds a quality score to the same harness
+- [ViSQOL grading](/quest/m5/audio-visqol.md) - adds a quality score to the same harness

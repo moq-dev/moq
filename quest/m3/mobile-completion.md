@@ -25,8 +25,11 @@ Promoted from m2 on 2026-10-09 by maintainer priority, with both capture
 quests. Deferred back to m2 in #5427 (`8f0dfa760`) with those capture
 quests; mobile completion does not gate the next breaking cut.
 
+Corrected 2026-11-12 (/quest-audit): Dart on iOS left `Required`. The mobile
+SDK is the Swift and Kotlin bindings, so the Dart asset proof does not gate
+it; that quest moved to m4.
+
 ## Required
 
-- [Dart on iOS](/quest/m3/dart-ios.md) - the Dart iOS asset proof
 - [iOS capture](/quest/m3/mobile-capture-ios.md) - deliver the selected iOS capture path
 - [Android capture](/quest/m3/mobile-capture-android.md) - deliver the selected Android capture and codec path

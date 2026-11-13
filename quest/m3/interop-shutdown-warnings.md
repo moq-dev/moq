@@ -11,7 +11,7 @@ cause or shown to be expected, in which case the harness stops printing it.
 ## Plan
 
 Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
-[moq-dev/moq#7701](https://github.com/moq-dev/moq/pull/7701)): milestone m2.
+[moq-dev/moq#7701](https://github.com/moq-dev/moq/pull/7701)).
 
 - Publisher linger: `stop_publisher` in `test/interop/interop.sh`
   (around lines 1138–1152) warns "publisher '$lang' was still running 10 s

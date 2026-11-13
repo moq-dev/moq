@@ -10,8 +10,8 @@ shows that main can't reach the collision, and this quest is deleted.
 ## Plan
 
 Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
-[moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680)): milestone m2,
-reproduce first.
+[moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680)): reproduce
+first.
 
 - #7680's local review, while backporting the joined-head FETCH fix,
   flagged a possible pre-existing collision on main. An Absolute joining
@@ -22,7 +22,7 @@ reproduce first.
   that interleaves an older-history FETCH with an Absolute join on drafts
   18, 20, and 22. If the test passes, delete the quest with the test kept as
   coverage.
-- Check [the fill redesign](/quest/m3/ietf-fill-refill.md) first. It deletes
+- Check [the fill redesign](/quest/m4/ietf-fill-refill.md) first. It deletes
   the `Fill` handoff and may make this moot. If it lands first, rerun the
   test against it.
 
@@ -30,4 +30,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [A moq-transport group head fills its hole in place](/quest/m3/ietf-fill-refill.md) - the fill redesign that may remove the race
+- [A moq-transport group head is a flight](/quest/m4/ietf-fill-refill.md) - the fill redesign that may remove the race

@@ -30,7 +30,7 @@ tracking since PR #3345 and closes with this.
   Playwright has a worker `MediaStreamTrackProcessor` or transfers a
   `MediaStreamTrack`; the harness's capability probe already reports the path
   taken, and the fixture must take it.
-- Safari publishers then pace from `getStats()`'s `estimatedSendRate`, which Safari 26.4 still reports as null, so they hold their rate until WebKit fills it (decided 2026-11-07 in [Browser publishers adapt to their send estimate](/quest/m2/probe/browser-send-estimate.md)). Check the `return_object_property_estimatedSendRate` entry under `api.WebTransport.getStats` in browser-compat-data, or a Safari publisher's `Reservation.rate`, and record which.
+- Safari publishers then pace from `getStats()`'s `estimatedSendRate`, which Safari 26.4 still reports as null, so they hold their rate until WebKit fills it (decided 2026-11-07 in [Browser publishers adapt to their send estimate](/quest/m3/probe/browser-send-estimate.md)). Check the `return_object_property_estimatedSendRate` entry under `api.WebTransport.getStats` in browser-compat-data, or a Safari publisher's `Reservation.rate`, and record which.
 - Update `doc/lib/js/index.md`.
 - `parseUserAgent` in `js/net/src/connection/browser.ts` already returns
   the Safari and iOS versions (bowser left in

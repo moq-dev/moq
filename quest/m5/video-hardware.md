@@ -16,7 +16,7 @@ V4L2 `VIDIOC_EXPBUF` source is dropped with the export itself (see
 Decided 2026-10-08: the VAAPI low-power entrypoint check is dropped. Neither
 Meteor Lake nor the Arrow Lake test host exposes `EncSliceLP`, so no machine
 on hand reaches that fallback. A render node other than the first is checked
-by [VA-API external images](/quest/m3/vaapi-vulkan-import.md).
+by [VA-API external images](/quest/m5/vaapi-vulkan-import.md).
 
 - **Windows Media Foundation capture**: the camera opens while capture is
   enabled and closes when it is disabled, so the LED is off whenever capture
@@ -35,7 +35,8 @@ by [VA-API external images](/quest/m3/vaapi-vulkan-import.md).
 - **OBS follows its grant on a shaped uplink**: stream from a real OBS build
   through `tc netem` (or `rs/moq-shaper`), narrow and reopen the link, and
   confirm the Stats tab's video target drops at once, climbs back over a few
-  seconds, and the encoder output follows (`cpp/obs/src/moq-rate.h`).
+  seconds, and the encoder output follows (the grant handling in
+  `cpp/obs/src/moq-output.cpp`).
 
 ### PipeWire DMA-BUF capture on KDE
 
@@ -81,7 +82,7 @@ runner hosts (found by the m0 coverage audit):
 - WGC conversion and encode: `wgc_conversion_crops_odd_edges_and_preserves_color`,
   `wgc_conversion_workload`, and
   `wgc_nv12_encodes_with_matching_color_on_gpu_and_software`. The `wgc_*`
-  capture tests belong to [Windows.Graphics.Capture](/quest/m4/capture-wgc.md).
+  capture tests belong to [Windows.Graphics.Capture](/quest/m3/capture-wgc.md).
 - Media Foundation encode: `mediafoundation_cpu_rgba` and
   `mediafoundation_camera_texture`.
 
@@ -91,6 +92,10 @@ Fix only a defect a run hits. Precedent for what this catches: NVENC
 validation on an RTX 3070 Ti found that NVENC rejects stream-ordered pool
 memory, so buffers registered with it must come from plain `cuMemAlloc`. That
 is not a bug any amount of review finds.
+
+## Waiting
+
+- Maintainer: whether to split the items the `windows` host (RTX 2070, no camera; see [hardware access](/quest/m5/video-hardware-access.md)) can run today, the Windows GPU probes and the two dx12 export tests, into their own quest with `Hosts: windows`. Options: split them into m4 (or into lab, since running ignored tests changes no API), or keep everything here until the whole hardware set is on hand. Recommendation: split into m4 with `Hosts: windows`, since a downstream studio's Windows run lists this quest as related and those tests need nothing else.
 
 ## Required
 

@@ -24,7 +24,7 @@ Implement in `moq-quic`.
   deadline, estimate the arrival instant as now plus the forward one-way
   delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay.
   Measure whether receive-time differences (`moq_congestion::Acked::received`,
-  from the [realtime epic](/quest/m3/quic-realtime/README.md)) improve that
+  from the [realtime epic](/quest/m4/quic-realtime.md)) improve that
   estimate, accounting for clock offset, drift, and uncertainty. They do not
   alone measure absolute one-way delay. If the estimate is past the deadline,
   reset the stream with a dedicated error code and drop its retransmit ranges,

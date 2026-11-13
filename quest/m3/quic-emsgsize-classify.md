@@ -9,11 +9,8 @@ logged and counted, so it can't be dropped silently again.
 
 ## Plan
 
-Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs), milestone:
-
-- m0
-- m1
-- ✅ m2
+Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): ✅ later work, which is m3 since the 2026-11-05 re-cut (rejected: m0;
+m1).
 
 From [moq-dev/moq#7649](https://github.com/moq-dev/moq/pull/7649), which
 capped a GSO train at what one UDP send carries after full trains above a

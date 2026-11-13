@@ -11,12 +11,12 @@ rather than the sum of them.
 ## Plan
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375) (merged),
-which finished the transcode rungs quest and lists this as a follow-up. Milestone m3: [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375)'s probe memo
+which finished the transcode rungs quest and lists this as a follow-up. It is deferred because [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375)'s probe memo
 already makes each shape probe once, so this only matters for a source that
 keeps changing to new sizes.
 
 The resolve for an unmemoized shape runs serially inside the `select!` in
-`Transcoder::run` (`rs/moq-transcode/src/lib.rs:117`, loop at `:170`),
+`Transcoder::run` (`rs/moq-transcode/src/lib.rs:119`, loop at `:168`),
 blocking every rung meanwhile. Open the per-rung encoders concurrently (a
 `kio::Tasks` or joined futures), and have the loop keep encoding while the
 resolve is pending. Only the resolve for the newest source shape may

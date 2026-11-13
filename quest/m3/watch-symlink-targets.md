@@ -9,7 +9,7 @@ covers roots, served chains, and client certificates.
 ## Plan
 
 Decided 2026-11-05 (maintainer, follow-up from
-[moq-dev/moq#7906](https://github.com/moq-dev/moq/pull/7906)): ✅ m2.
+[moq-dev/moq#7906](https://github.com/moq-dev/moq/pull/7906)): this joined what was then m2, later work, which is m3 since the 2026-11-05 re-cut.
 
 `watch::callback` (`rs/moq-tokio/src/watch.rs`) watches each configured
 file's directory. Its filter already reloads when a path resolves somewhere

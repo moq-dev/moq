@@ -14,7 +14,6 @@ ends and restarts the path, which a refused follower re-asks today.
 Planned 2026-11-04 with the maintainer, from a review thread declined on
 [moq-dev/moq#7836](https://github.com/moq-dev/moq/pull/7836)
 ([`follow.rs`](https://github.com/moq-dev/moq/pull/7836#discussion_r4471135777)).
-Milestone m2 (maintainer).
 
 The gap: since #7836, a refused `Following` (its `refused` flag in
 `rs/moq-net/src/model/follow.rs`) waits for an announcement change before

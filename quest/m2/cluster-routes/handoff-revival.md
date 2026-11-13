@@ -10,6 +10,8 @@ revival. The scenario that revives one today is a plain test.
 
 ## Plan
 
+Moved to m1 2026-11-12 (maintainer, /quest-audit): no API or wire change, so it no longer gates lite-07 through the routes epic.
+
 Found 2026-11-11 by running the sweep past its 150 scenarios: scenario 16316
 revives a claim, on `main` at `688312b9eb`, and no earlier one does. It is
 the same whichever neighbours the router believes. It has not been traced.

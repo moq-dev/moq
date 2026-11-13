@@ -23,10 +23,7 @@ m1 quest on 2026-10-22.
   for its migration note, since squash commits drop the PR body. Write each
   note into its package's guide. The API-diff report below catches breaks a
   PR left unmarked; a behavior break with no `!` stays with PR review.
-- Correct Unreleased entries that a later PR overturned. Known: `js/net/MIGRATE.md`
-  still describes `request(path, { announced: true })`, which
-  [moq-dev/moq#7173](https://github.com/moq-dev/moq/pull/7173) replaced with
-  `follow(path)` (decided 2026-10-29). Also known, from
+- Correct Unreleased entries that a later PR overturned. Known, from
   [moq-dev/moq#7036](https://github.com/moq-dev/moq/pull/7036)'s rename of
   `used` to `wanted` (Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30 /quest-complete follow-ups)): `rs/moq-json/MIGRATE.md`
   should say `producer.demand().wanted().is_some()`, not
@@ -79,9 +76,6 @@ m1 quest on 2026-10-22.
   - moq-webrtc: `rs/moq-webrtc/MIGRATE.md` is still titled "Migrating
     moq-rtc" and documents `wire::Source`, which
     [moq-dev/moq#6454](https://github.com/moq-dev/moq/pull/6454) removed.
-  - moq-boy: `rs/moq-boy/MIGRATE.md` documents `.socket/{name}` and
-    `.socket/viewer-*` paths and grants; the code serves `.server/{name}`
-    and `.client/{id}`.
   - moq-cli: `rtmp` is listed under `--max-delay` but its flag is `--delay`;
     the `--connect-once` removal and the `MOQ_LISTEN_TLS_*` to
     `MOQ_HLS_TLS_*` rename are missing; the `export archive` entry reads as a

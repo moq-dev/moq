@@ -6,14 +6,16 @@ When a peer's grant changes (a new `AUTH_OK`), a moq-lite announce stream's cost
 
 ## Plan
 
-Found by [moq-dev/moq#7536](https://github.com/moq-dev/moq/pull/7536), which swept the worst known peer grant shapes over `AUTH_OK` size and left this scope question to a follow-up (its decision 2, recommended there because it is route fan-out rather than grant algebra). On a regrant, each announce stream's `regrant` (`AnnounceRun` in `rs/moq-net/src/lite/publisher.rs`, about line 1045):
+Found by [moq-dev/moq#7536](https://github.com/moq-dev/moq/pull/7536), which swept the worst known peer grant shapes over `AUTH_OK` size and left this scope question to a follow-up (its decision 2, recommended there because it is route fan-out rather than grant algebra). On a regrant, each announce stream's `regrant` (`AnnounceRun::regrant` in `rs/moq-net/src/lite/publisher.rs`, line 1207 at 4bf501b535):
 
 - filters every live route through `permitted` (a match against every member of the new permit) to find what the new grant revokes, and
 - when the grant grew, takes a fresh `origin.announced()` snapshot of every route under its prefix and matches each one it doesn't hold.
 
-So one `AUTH_OK` costs routes × members per stream, times K announce streams, a product none of [peer grant bound](/quest/m4/peer-grant-bound.md)'s options remove.
+So one `AUTH_OK` costs routes × members per stream, times K announce streams, a product none of [peer grant bound](/quest/m5/peer-grant-bound.md)'s options remove.
 
-Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2, its own quest beside the grant-algebra bound.
+Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): its own quest beside the grant-algebra bound.
+
+Re-scoped 2026-11-12 (/quest-audit): [Each side says everything about routing on one stream](/quest/m2/cluster-routes/route-stream.md) gives a lite-07 side one Announce Stream and turns a token-scope change into an edit of its interest set, so on lite-07 the factor K becomes one and the per-stream `regrant` this plan targets remains only for lite-06 and older. Start after it lands: re-measure the regrant (or interest-set edit) cost on lite-07 with the benches below, and apply the steps that follow to whichever path still pays routes × members. If only the older versions still pay it, say so in the PR and leave them.
 
 - Derive the change once per `AUTH_OK`, not per stream: the members added and removed between the old and new grant. Each stream then re-checks only the routes under a changed member's prefix, using the origin's prefix structure to find them instead of walking every route. A member's prefix here is its literal segments before its first wildcard (`*` or `**`), since grant members are `Patterns` (`Permit` in `rs/moq-net/src/auth.rs`); a member that starts with a wildcard has no literal prefix and re-checks every route under the stream's prefix, as today. Bench that shape on its own row, and test wildcard members, removed members, and old and new grants that overlap.
 - A grown grant needs only routes under the added members, not a whole-origin snapshot per stream.
@@ -22,7 +24,11 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 
 Public API: none. Wire: none.
 
+## Required
+
+- [Each side says everything about routing on one stream](/quest/m2/cluster-routes/route-stream.md) - replaces lite-07's per-stream regrant with one interest-set edit per side, which this re-scopes to
+
 ## Related
 
-- [Bound peer grant processing by design](/quest/m4/peer-grant-bound.md) - may change the received-grant type this compares against; whichever lands second adapts
+- [Bound peer grant processing by design](/quest/m5/peer-grant-bound.md) - may change the received-grant type this compares against; whichever lands second adapts
 - [Announce interest streams share one route table](/quest/m4/announce-interest-memory.md) - the per-stream route state that this walk reads

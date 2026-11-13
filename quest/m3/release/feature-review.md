@@ -18,7 +18,12 @@ Record what this run learned (inventory method, findings, what to check first)
 in the cut's PR notes or a follow-up quest, so the next run starts from it.
 Only `/quest-delete` ends the recurrence.
 
-Starts once m2 lands; the cut waits for it. Inventory the work lines from the
+Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ this run
+starts now, on what has landed, with a delta pass after m2 (rejected: one pass
+after m2 lands, which puts every finding behind the routes chain instead of
+beside it). The first pass's PR rewrites this quest to the delta pass: what
+m2 landed since, with [m2](/quest/m2/README.md) under `Required`. The cut
+waits for the delta pass. Inventory the work lines from the
 epics and quests deleted since the last release and from `git log` by area.
 Judge each one adversarially (AGENTS.md) and challenge its premise, not only
 its execution: is the feature worth supporting at all, and would a simpler
@@ -33,7 +38,3 @@ separate TS audit): everything since the 2026-10-11 TS audit, judged against
 the contracts in the [MPEG-TS guide](/doc/bin/ts.md).
 Question each TS capability's premise the way the move to distinct importer
 epochs dropped active-active publishers.
-
-## Required
-
-- [Breaking release readiness](/quest/m2/README.md) - the release's code is final before it is reviewed

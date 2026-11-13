@@ -16,4 +16,4 @@ non-consuming `Encoder::drain` is `pub(super)`
 (`rs/moq-audio/src/encode/encoder.rs`). A studio media file's sound
 ([moq-dev/studio#44](https://github.com/moq-dev/studio/pull/44)) loses its last ~26 ms when a clip ends but the
 source stays live. Related: [An audio track's final flush joins its open
-group](/quest/m3/audio-flush-group.md).
+group](/quest/m4/audio-flush-group.md).

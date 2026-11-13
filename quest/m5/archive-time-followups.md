@@ -48,4 +48,4 @@ Public API: `track::Fill` gains a lookup refusal; moq-ffi `MoqFill` gains
 
 ## Related
 
-- [DVR rewind](/quest/m3/archive-dvr.md) - the consumer of time seeks
+- [DVR rewind](/quest/m4/archive-dvr.md) - the consumer of time seeks

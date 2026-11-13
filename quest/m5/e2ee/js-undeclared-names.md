@@ -13,7 +13,7 @@ broadcast the same way.
 Decided with the maintainer on 2026-10-24:
 
 - One quest, both halves; amended 2026-11-03 (maintainer): the `@moq/net`
-  half moved to [its own quest](/quest/m3/net-broadcast-requests.md), which
+  half moved to [its own quest](/quest/m4/net-broadcast-requests.md), which
   plaintext users (Kixel's T3 host) need first, and this keeps the
   `@moq/crypto` half.
 - `@moq/crypto` mirrors the Rust handler exactly: it opens each request's
@@ -34,5 +34,5 @@ Public API: a request handler on `@moq/crypto`'s broadcast producer. Wire: none.
 
 ## Required
 
-- [`@moq/net` broadcasts expose their requests](/quest/m3/net-broadcast-requests.md) - the public handler this wraps; split out 2026-11-03 so plaintext users get it first
+- [`@moq/net` broadcasts expose their requests](/quest/m4/net-broadcast-requests.md) - the public handler this wraps; split out 2026-11-03 so plaintext users get it first
 - [JS mirror](/quest/m5/net-wrap/js.md) - the `@moq/net` interfaces the `@moq/crypto` wrappers implement

@@ -6,7 +6,7 @@
 
 ## Plan
 
-Decided 2026-10-30 (maintainer, follow-up planning): m2. Use the same start resolution the container consumer uses rather than a second one. With `min` and warmup at 0, the start is unchanged. Add a test of a cold join with a 2-group-old start. [Audio join budget](https://github.com/moq-dev/moq/pull/7342) changes the same `joining_latest` path in `rs/moq-audio/src/decode/consumer.rs`; whichever lands second builds its start on the other's.
+Decided 2026-10-30 (maintainer, follow-up planning): use the same start resolution the container consumer uses rather than a second one. With `min` and warmup at 0, the start is unchanged. Add a test of a cold join with a 2-group-old start. [Audio join budget](https://github.com/moq-dev/moq/pull/7342) has merged; the `Start::Latest` join in `rs/moq-audio/src/decode/consumer.rs` still narrows to `live_edge.group..`, while moq-video's decoder subtracts its lookback (`rs/moq-video/src/decode/consumer.rs`), so build on that.
 
 Public API: none. Wire: none.
 

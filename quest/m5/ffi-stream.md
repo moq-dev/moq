@@ -10,14 +10,17 @@ and writes the stream in-process.
 
 ## Plan
 
-Decided 2026-10-28 with the maintainer (moq.pro T3 planning interview): the
-named consumer is moq.pro's
-[T3 Code over MoQ](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/t3/README.md)
-line, whose React Native app reaches its host through a native module over
-these bindings instead of the WebSocket fallback, so a lossy mobile link keeps
-QUIC's per-stream recovery.
+Decided 2026-10-28 with the maintainer (a downstream planning interview):
+planned for a downstream application's React Native app, to reach its host
+through a native module over these bindings instead of the WebSocket
+fallback, so a lossy mobile link keeps QUIC's per-stream recovery.
 
-Wrap the [Rust surface](/quest/m3/stream/rust.md) in `moq-ffi` with the same
+No named consumer remains (checked 2026-11-12, /quest-audit): that
+application's mobile module now wraps a WebTransport binding rather than
+moq-ffi, and carries its traffic in groups rather than byte streams. It stays
+parked here until a binding user asks for byte streams.
+
+Wrap the [Rust surface](/quest/m1/stream/rust.md) in `moq-ffi` with the same
 path layout and priority knob, and surface it through the generated Swift and
 Kotlin packages. Use an async read and write shape that matches how the
 bindings already expose frames; report the choice. Add a Kotlin or Swift
@@ -25,5 +28,5 @@ binding test against a JS peer to the interop suite.
 
 ## Required
 
-- [Rust byte streams](/quest/m3/stream/rust.md) - the surface these bindings wrap
-- [JS byte streams](/quest/m3/stream/js.md) - the peer the interop test runs against
+- [Rust byte streams](/quest/m1/stream/rust.md) - the surface these bindings wrap
+- [JS byte streams](/quest/m4/stream-js.md) - the peer the interop test runs against

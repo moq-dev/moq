@@ -44,6 +44,11 @@ change the implementation needs updates the draft's Warm Routes section in
 the same PR, in lite-07 while it is unpublished and in the next version
 after.
 
+Noted 2026-11-12 (/quest-audit): this plan predates the path rule (epic Plan
+item 8, [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)). Its
+one-hop warm routes and feasibility-distance eligibility are rewritten once
+[moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) settles.
+
 ## Required
 
 - [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - the rule for routes that propagate, its fixtures, and the wire this implements

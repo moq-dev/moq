@@ -16,8 +16,6 @@ Publishing remains opt-in, with one **Use MoQ encoders** choice for video and au
 
 The quests separate portable decoding, audio, and publishing so each can land and be validated independently. moq-ffi's decoded frames own their surface and convert to CPU pixels only on request (#4094); a surface decode exposes the platform surface as a borrowed view, which each platform GPU quest extends to its own surface type.
 
-Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the macOS and Windows GPU encoder inputs moved to m2 (listed under Related), because each needs physical-hardware proof, and Linux GPU input is already m2/m3.
-
 ## Related
 
 - [Video hardware validation](/quest/m5/video-hardware.md) - physical hardware evidence is required for each claimed GPU path

@@ -33,3 +33,10 @@ in this repository and in moq.pro's plans, which kept the io_uring tuning
 quests (fleet relays on io_uring workers), broadcast fairness, and the
 transcode and NVENC quests (production transcoding). Re-plan one when a
 consumer asks.
+
+Parked 2026-11-12 (maintainer, /quest-audit before the cut): 29 quests the
+audit judged not worth their weight (no consumer in this repository or the
+downstream plans, and no bug in shipped code) are kept here instead of
+deleted (rejected: deleting them; leaving them in m3 and m4). Each says so in
+its Plan. The tuning experiments that touch no published surface moved to
+[lab](/quest/lab/README.md).

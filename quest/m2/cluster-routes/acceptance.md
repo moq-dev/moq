@@ -98,6 +98,14 @@ benchmark smoke alone does not enforce complexity, so add operation-count
 regressions. Bound held routes, doubts, and remembered dead hops under
 same-clock churn.
 
+Decided 2026-11-12 (maintainer, /quest-audit; epic Plan item 30): three
+fixtures from routing prior art, as tests before any design change. A
+relay vanishes and its neighbours notice up to the 3 s keep-alive apart,
+which shows whether the doubt timer must follow the keep-alive or relay
+keep-alives must shorten. Three relays whose local priorities form a dispute
+wheel settle, or the test pins how they fail (RFC 4264). A primary route
+fails and returns, and every relay ends back on it.
+
 ## Required
 
 - [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the sessions and the route rule these fixtures accept

@@ -27,10 +27,30 @@ fixes, and moq-c parity) live under the recurring
 cut gate, decided the same day; the [release cut](/quest/m3/release/cut.md)
 holds its template.
 
-Held by open claims: the [probe epic](/quest/m2/probe/README.md)
-stays here while its open claims last, so the cut waits on it until the
-[re-cut follow-up](/quest/m2/recut-held.md) moves it to m3. Its padding and JS
-rung disable quests already moved to m3 on 2026-11-06.
+Decided 2026-11-12 (maintainer, /quest-audit before the cut):
+
+- ✅ Left m2, so the cut stops waiting on them: the
+  [probe epic](/quest/m3/probe/README.md) to m3 and the routes
+  [browser proof](/quest/m5/routes-browser-proof.md) to m5 (each waits on a
+  browser release and breaks nothing); the docs-only and additive quests and
+  outbound federation to [m1](/quest/m1/README.md); and
+  [unbounded groups](/quest/m3/unbounded-groups/README.md) to m3, whose byte
+  offset goes on the wire version after lite-07 (rejected for each: staying
+  in m2). The padding and JS rung disable quests are parked in m5.
+- ✅ Joined m2, each a small break the cut would otherwise freeze: the mesh
+  [grant shape](/quest/m2/mesh-grant-shape.md) and
+  [key budget](/quest/m2/mesh-device-bounds.md), since `moq_auth::mesh`
+  publishes for the first time at this cut;
+  [auth key validation](/quest/m2/auth-key-validation.md); the
+  [RTMPS connect](/quest/m2/rtmp-rtmps-tcurl.md) signature;
+  [usage's derived settings](/quest/m2/usage-derive-settings.md);
+  [first-publish versions](/quest/m2/first-publish-versions.md); and three
+  API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md),
+  [the capture selections](/quest/m2/api-capture-fences.md), and
+  [the acknowledgment hook's trait](/quest/m2/api-ack-hook-trait.md). None
+  is on the routes chain, which stays the critical path.
+- ✅ Under the path rule a route keeps one sticky down-only flag beside its
+  path; see the [routes epic](/quest/m2/cluster-routes/README.md).
 
 Carried from m1's Plan before the re-cut, where "m1" means the whole pre-cut
 milestone, now m1 and m2:
@@ -85,7 +105,7 @@ warmup rule for the shipping dual decoder, the binding migration guide fixes,
 and the API-diff tooling. Public routes now wait on cluster routing.
 
 Added 2026-10-20 (maintainer): the probe target, native probing, and the
-native rung disable moved up from the [m2 probe epic](/quest/m2/probe/README.md),
+native rung disable moved up from the [m2 probe epic](/quest/m3/probe/README.md),
 so Rust, FFI, and OBS publishers recover a stopped rendition in this release;
 padding and the browser's rung disable stayed in m2, with only padding's
 lite-07 stream type here. Both moved to m3 on 2026-11-06 (maintainer,

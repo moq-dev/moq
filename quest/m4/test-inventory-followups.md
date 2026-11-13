@@ -11,7 +11,6 @@ each orphan once.
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7316](https://github.com/moq-dev/moq/pull/7316) (merged),
 which finished the opt-in test inventory quest.
-Milestone m2 (user: "use recommended for any CI/flakes").
 
 [moq-dev/moq#7316](https://github.com/moq-dev/moq/pull/7316)'s review fixed a false pass: reaching any `gh nightly` group counted
 every branch of `sh/gh/nightly.sh`. It now binds a `just` call's literal

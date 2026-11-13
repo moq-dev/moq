@@ -24,7 +24,7 @@ Decided 2026-11-08 (maintainer, /quest-plan):
 
 1. ✅ **Node routes are the cold cost, and optional per-broadcast warm routes
    are the warm cost.** The per-origin ROUTE metric of
-   [Cluster routing](/quest/m2/cluster-routing/README.md) stays the cold
+   [Cluster routing](/quest/m1/cluster-routing/README.md) stays the cold
    cost, static and one per origin. A relay carrying a broadcast may
    advertise a warm route for it. This revises Cluster routing's non-goal of
    cache-dependent route prices. (rejected: per-broadcast forwarding with a
@@ -204,5 +204,5 @@ This README's own work, once its children land:
 
 ## Related
 
-- [Cluster routing](/quest/m2/cluster-routing/README.md) - the node routes and feasibility distances this ranks on
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - the node routes and feasibility distances this ranks on
 - [Relays split horizon per session](/quest/m3/route-split-horizon.md) - per-session suppression of node routes, beside warm routes' per-neighbor rule

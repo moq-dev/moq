@@ -62,10 +62,11 @@ on lite-07 (`track.Consumer.fetchGroup` in JS).
   Subscribe sections. Run `just drafts check`.
 - Run `just test interop --all`.
 
-Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
-Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)), since both rewrite the JS fill code
-(`js/net/src/lite/subscriber.ts` `#runFills`) and the same lite-07 draft
-sections.
+Drop set, which this waited on (2026-11-05) because both rewrite the JS fill
+code (`js/net/src/lite/subscriber.ts` `#runFills`) and the same lite-07 draft
+sections, finished in
+[moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476) on 2026-11-12.
+Build on its fill and miss code as it stands.
 
 Public API: none expected. Wire: lite-07 (unpublished) SUBSCRIBE anchors lose
 their frame.

@@ -12,7 +12,7 @@ draft-18 interop `tail` and `finish` cells pass with a Rust publisher.
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
-[moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306): m2, as
+[moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306), as
 recommended. [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) (merged) kept the join after finish.
 
 [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) keeps the subscription's request open after PUBLISH_DONE but does not

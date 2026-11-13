@@ -29,4 +29,4 @@ Public API/wire: documentation only, reflecting completed implementations.
 
 ## Required
 
-- [Outbound federation](/quest/m2/cluster-routing/federation.md) - tested operator configuration
+- [Outbound federation](/quest/m1/cluster-routing/federation.md) - tested operator configuration

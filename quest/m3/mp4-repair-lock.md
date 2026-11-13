@@ -8,7 +8,7 @@
 
 Found by [moq-dev/moq#7560](https://github.com/moq-dev/moq/pull/7560), which adds `moq repair mp4`: it can't tell a running `export mp4` still writes the file, and repairing one corrupts it. #7560 merged 2026-11-02.
 
-Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2. An advisory lock taken by the recorder and checked by repair, as #7560 suggested.
+Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): an advisory lock taken by the recorder and checked by repair, as #7560 suggested.
 
 - The CLI owns the lock, not moq-mux: `repair` in moq-mux takes `impl Read + Seek` and stays file-agnostic. Use an exclusive `flock`-style lock on the open file (`std::fs::File::try_lock` is stable in Rust 1.89), held for the recording's life and released by the OS if the recorder dies, so a crashed recording stays repairable.
 - Supported or refused (`AGENTS.md`), on both sides. The recorder fails at startup if it can't take the lock, a filesystem without lock support included, since its recording could never be repaired safely. `repair` takes the same lock non-blocking before scanning and refuses if it can't: held means a recorder still has the file open, and any other lock error (no lock support) refuses with that error rather than repairing unlocked.

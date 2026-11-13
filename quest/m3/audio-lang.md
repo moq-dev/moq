@@ -14,10 +14,12 @@ Reported in [moq-dev/moq#7945](https://github.com/moq-dev/moq/issues/7945).
 Today audio renditions have no language field in either catalog
 (`js/hang/src/catalog/audio.ts`, `rs/hang/src/catalog/audio/mod.rs`), while
 text renditions already have `lang` (`js/hang/src/catalog/text.ts`). Watch
-ranks every enabled audio rendition together (`ranked()`), so two languages
-compete on bitrate. `controls.audio.target` can already pin a rendition by
-name. The hang-to-MSF export sets `altGroup = 1` on all audio
-(`rs/moq-mux/src/catalog/msf/producer.rs`), marking languages as switchable
+picks from every enabled audio rendition together (`#select` in
+`js/watch/src/audio/source.ts`, the first by container kind), so with two
+languages it takes whichever comes first. `controls.audio.target` can already
+pin a rendition by name. The hang-to-MSF export sets `altGroup = 1` on all
+audio once a broadcast has more than one audio rendition
+(`rs/moq-mux/src/catalog/producer.rs`), marking languages as switchable
 bitrates, and the MSF-to-hang consumers keep `lang` for text only.
 
 Decided 2026-11-05 (maintainer, /quest-import):

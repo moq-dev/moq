@@ -10,8 +10,10 @@ served it are deleted once the generated `moq-c` publishes. The generated
 
 - #4288 renamed libmoq to `moq-c` (`rs/moq-c`); this quest deletes that
   hand-written crate.
-- Decided 2026-10-25 (maintainer): the hand-written `moq-c` 0.7 ships at the
-  m1 cut, so it is a published package when the generated 0.8 replaces it.
+- Decided 2026-10-25 (maintainer): the hand-written `moq-c` ships at the
+  next cut, so it is a published package when the generated one replaces it
+  (0.7.0 and 0.8.0 on `main`; `just version` sets both to the cut's shared
+  minor).
   Its `MIGRATE.md` history carries into the generated package. This replaces
   the 2026-10-20 premise that it never published.
 - `rs/moq-c/native-libs/` serves the generated package too, and
