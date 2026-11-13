@@ -65,6 +65,14 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		}
 	}
 
+	/// [`Self::settle`], then wake `waiter` once more of what the stream took is delivered, so
+	/// a stream idle after its last frame still bills that frame as it lands.
+	fn poll_settle(&mut self, waiter: &kio::Waiter) {
+		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
+			poll_settle(delivery, stream, self.written, waiter);
+		}
+	}
+
 	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session) -> Self {
 		self.stats = stats.clone();
 		self
@@ -269,6 +277,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// Resolves once the stream is closed, or the [Self::finish] is acknowledged by the peer.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.poll_settle(waiter);
 		let closed = ready!(self.stream.as_mut().unwrap().poll_closed(waiter));
 		self.settle();
 		Poll::Ready(closed.map_err(|err| self.version.transport_error(err)))
@@ -320,6 +329,27 @@ fn delivered<S: crate::transport::poll::SendStream>(stream: &S, written: u64) ->
 	stream.delivered().unwrap_or(written).min(written)
 }
 
+/// Bill what `stream` delivered of its `written` bytes, then register `waiter` for more while
+/// a frame the stream took waits on delivery. A wake that brings nothing stops it, so a stream
+/// that will deliver no more parks instead of spinning.
+fn poll_settle<S: crate::transport::poll::SendStream>(
+	delivery: &mut crate::stats::Delivery,
+	stream: &S,
+	written: u64,
+	waiter: &kio::Waiter,
+) {
+	let mut through = delivered(stream, written);
+	delivery.deliver(through);
+	while delivery.waiting(written) && stream.poll_delivered(waiter).is_ready() {
+		let now = delivered(stream, written);
+		if now <= through {
+			return;
+		}
+		through = now;
+		delivery.deliver(through);
+	}
+}
+
 /// A [`Writer`] whose stream has sent its FIN, waiting for the peer to acknowledge it.
 ///
 /// Dropping it never resets the stream, so what was written still arrives.
@@ -336,6 +366,9 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Closing<S, V> {
 		let Some(stream) = &self.stream else {
 			return Poll::Ready(Ok(()));
 		};
+		if let Some(delivery) = &mut self.delivery {
+			poll_settle(delivery, stream, self.written, waiter);
+		}
 		let closed = ready!(stream.poll_closed(waiter));
 		self.settle();
 		Poll::Ready(closed.map_err(|err| self.version.transport_error(err)))
@@ -506,8 +539,23 @@ mod tests {
 		);
 	}
 
-	/// A stream that takes every write, with a delivered prefix the test moves.
-	struct Acked(std::sync::Arc<std::sync::atomic::AtomicU64>);
+	/// A stream that takes every write, with a delivered prefix the test moves. It counts the
+	/// polls waiting on delivery, which stay pending.
+	#[derive(Clone, Default)]
+	struct Acked {
+		acked: std::sync::Arc<std::sync::atomic::AtomicU64>,
+		waits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+	}
+
+	impl Acked {
+		fn ack(&self, through: u64) {
+			self.acked.store(through, std::sync::atomic::Ordering::Relaxed);
+		}
+
+		fn waits(&self) -> usize {
+			self.waits.swap(0, std::sync::atomic::Ordering::Relaxed)
+		}
+	}
 
 	impl crate::transport::poll::SendStream for Acked {
 		type Error = Stopped;
@@ -534,12 +582,18 @@ mod tests {
 		}
 
 		fn delivered(&self) -> Option<u64> {
-			Some(self.0.load(std::sync::atomic::Ordering::Relaxed))
+			Some(self.acked.load(std::sync::atomic::Ordering::Relaxed))
+		}
+
+		fn poll_delivered(&self, _: &kio::Waiter) -> Poll<()> {
+			self.waits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			Poll::Pending
 		}
 	}
 
 	/// A frame's bytes bill as the transport delivers them, not as the stream takes them,
-	/// and the frame once its last byte is: a reset never bills what it discarded.
+	/// and the frame once its last byte is: a reset never bills what it discarded. A stream
+	/// waiting on its peer waits on delivery too, so its last frame bills as it lands.
 	#[test]
 	fn egress_bills_delivered_payload() {
 		let registry = crate::stats::Registry::new(crate::stats::Config::new());
@@ -551,8 +605,8 @@ mod tests {
 				.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
 				.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
 		};
-		let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-		let mut writer = Writer::new(Acked(acked.clone()), crate::lite::Version::Lite05);
+		let stream = Acked::default();
+		let mut writer = Writer::new(stream.clone(), crate::lite::Version::Lite05);
 		writer.bill(registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default()));
 		let waiter = &kio::Waiter::noop();
 
@@ -564,23 +618,36 @@ mod tests {
 			writer.buffer_raw(&[b'x'; 100]);
 		}
 		assert!(writer.poll_flush(waiter).is_ready());
-		writer.settle();
+		assert!(writer.poll_closed(waiter).is_pending());
 		assert_eq!(billed(), (0, 0), "the stream took it all, the transport delivered none");
+		assert_eq!(stream.waits(), 1, "the wait for the peer waits on delivery too");
 
 		// Into the first frame's size: none of its payload.
-		acked.store(2, std::sync::atomic::Ordering::Relaxed);
-		writer.settle();
+		stream.ack(2);
+		assert!(writer.poll_closed(waiter).is_pending());
 		assert_eq!(billed(), (0, 0));
 
 		// Through the first frame and half the second.
-		acked.store(3 + 100 + 2 + 50, std::sync::atomic::Ordering::Relaxed);
-		writer.settle();
+		stream.ack(3 + 100 + 2 + 50);
+		assert!(writer.poll_closed(waiter).is_pending());
 		assert_eq!(billed(), (150, 1));
 
+		// All of it: nothing is left to wait on.
+		stream.waits();
+		stream.ack(3 + 100 + 2 + 100);
+		assert!(writer.poll_closed(waiter).is_pending());
+		assert_eq!(billed(), (200, 2));
+		assert_eq!(stream.waits(), 0);
+
 		// A reset bills what was delivered by then, and nothing after.
-		acked.store(3 + 100 + 2 + 80, std::sync::atomic::Ordering::Relaxed);
+		writer.buffer_varint(100).unwrap();
+		writer.frame(100);
+		writer.buffer_raw(&[b'x'; 100]);
+		assert!(writer.poll_flush(waiter).is_ready());
+		stream.ack(1 + 2 * (2 + 100) + 2 + 30);
 		writer.abort(&Error::Cancel);
-		assert_eq!(billed(), (180, 1));
+		stream.ack(u64::MAX);
+		assert_eq!(billed(), (230, 2));
 	}
 
 	/// Writes some bytes, then errors: the shape of a partial encode.

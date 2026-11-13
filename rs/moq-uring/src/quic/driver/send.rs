@@ -157,6 +157,12 @@ impl Stream {
 		self.0.acked_len()
 	}
 
+	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
+	/// never will.
+	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0.poll_all_acked(waiter)
+	}
+
 	/// Move the stream into a send group, or with `None` back to the ungrouped streams, which
 	/// go before every group.
 	///
@@ -210,6 +216,11 @@ impl Finished {
 	/// How many leading bytes the peer acknowledged. See [`Stream::acked_len()`].
 	pub(crate) fn acked_len(&self) -> u64 {
 		self.0.acked_len()
+	}
+
+	/// Wait for every byte to be acknowledged. See [`Stream::poll_all_acked()`].
+	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0.poll_all_acked(waiter)
 	}
 
 	/// Move the stream into a send group. See [`Stream::set_group()`].
@@ -293,6 +304,18 @@ impl Half {
 	/// How many leading bytes the peer acknowledged, each counted once.
 	fn acked_len(&self) -> u64 {
 		self.shared.conn.borrow_mut().send_stream(self.id).acked_len()
+	}
+
+	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
+	/// never will, as after a reset or `STOP_SENDING`.
+	fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let mut conn = self.shared.conn.borrow_mut();
+		let mut stream = conn.send_stream(self.id);
+		let offset = stream.offset();
+		match stream.poll_acked(waiter, offset) {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
 	}
 
 	fn set_group(&mut self, group: Option<&Group>) {

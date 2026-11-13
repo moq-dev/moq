@@ -1019,6 +1019,10 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 	fn delivered(&self) -> Option<u64> {
 		self.inner.delivered()
 	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.inner.poll_delivered(waiter)
+	}
 }
 
 impl poll::RecvStream for Recorded<memory::RecvStream> {

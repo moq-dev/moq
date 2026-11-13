@@ -602,6 +602,7 @@ trait ErasedSend: Send + Sync {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
 	fn acknowledged(&self) -> Option<bool>;
 	fn delivered(&self) -> Option<u64>;
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()>;
 }
 
 trait ErasedRecv: Send + Sync {
@@ -785,6 +786,10 @@ impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
 
 	fn delivered(&self) -> Option<u64> {
 		poll::SendStream::delivered(self)
+	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		poll::SendStream::poll_delivered(self, waiter)
 	}
 }
 
@@ -1004,6 +1009,10 @@ impl poll::SendStream for SendStream {
 
 	fn delivered(&self) -> Option<u64> {
 		self.get().delivered()
+	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.get().poll_delivered(waiter)
 	}
 }
 

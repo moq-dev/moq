@@ -329,6 +329,16 @@ impl moq_net::transport::poll::SendStream for Stream {
 		}
 		Some(self.acked_len().saturating_sub(self.header.map_or(0, u64::from)))
 	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match &self.state {
+			// The header goes first, and a write waits on it.
+			_ if self.unwritten.has_remaining() => Poll::Pending,
+			State::Open(stream) => stream.poll_all_acked(waiter),
+			State::Finished(stream) => stream.poll_all_acked(waiter),
+			State::Reset(_) | State::Unsent => Poll::Pending,
+		}
+	}
 }
 
 impl moq_net::transport::poll::SendGroup for send::Group {

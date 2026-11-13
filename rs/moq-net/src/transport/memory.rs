@@ -682,6 +682,15 @@ impl poll::SendStream for SendStream {
 	fn delivered(&self) -> Option<u64> {
 		Some(self.channel.lock().taken)
 	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.channel
+			.poll(waiter, |channel| match channel.queued {
+				0 => Poll::Ready(()),
+				_ => Poll::Pending,
+			})
+			.map(drop)
+	}
 }
 
 impl Drop for SendStream {

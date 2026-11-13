@@ -7378,6 +7378,10 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 	fn delivered(&self) -> Option<u64> {
 		self.inner.lock().unwrap().stream.delivered()
 	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.inner.lock().unwrap().stream.poll_delivered(waiter)
+	}
 }
 
 /// Write one group's frames in the negotiated draft's FETCH object layout.

@@ -2108,6 +2108,11 @@ impl Delivery {
 		self.frames.push_back((start, start + size));
 	}
 
+	/// Whether a frame's payload the stream took before offset `written` waits on delivery.
+	pub(crate) fn waiting(&self, written: u64) -> bool {
+		!self.frames.is_empty() && self.through < written
+	}
+
 	/// Bill the payload before stream offset `through`, which never goes back.
 	pub(crate) fn deliver(&mut self, through: u64) {
 		if through <= self.through {

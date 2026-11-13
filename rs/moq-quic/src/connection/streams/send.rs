@@ -572,8 +572,7 @@ impl<'a> Stream<'a> {
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
-	#[cfg(test)]
-	pub(crate) fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+	pub fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		match self.acked(offset) {
 			Ok(true) => Poll::Ready(Ok(())),
 			Ok(false) => {

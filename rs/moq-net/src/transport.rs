@@ -792,6 +792,15 @@ pub mod poll {
 			None
 		}
 
+		/// Resolves once the transport delivered every byte written so far, so a caller
+		/// tracking [`Self::delivered`] learns of progress without polling for it. It may
+		/// resolve without progress, and stays pending once nothing more will be delivered, as
+		/// after a reset. Never resolves by default.
+		fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+			let _ = waiter;
+			Poll::Pending
+		}
+
 		/// Write some of the buffer, returning how many bytes were accepted.
 		fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self> {
 			Write {

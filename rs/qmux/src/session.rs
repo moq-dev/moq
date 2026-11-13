@@ -613,6 +613,16 @@ impl poll::SendStream for SendStream {
 	fn delivered(&self) -> Option<u64> {
 		Some(self.inner.lock().conn.send_stream(self.id).acked_len())
 	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
+		let offset = stream.offset();
+		match stream.poll_acked(waiter, offset) {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
+	}
 }
 
 impl Drop for SendStream {
