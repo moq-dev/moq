@@ -1,15 +1,26 @@
-# [L] A higher-priority group takes over an acknowledged stream on lite-07
+# [L] A higher-priority group takes over an acknowledged stream in a later lite version
 
 ## Goal
 
-On lite-07, when an open waits for credit and a lower-priority group stream's
+In a lite version after lite-07, when an open waits for credit and a lower-priority group stream's
 sent data is all acknowledged, the new group takes that stream over at once:
 the group stream ends one group with GROUP_END and starts another, needing no
 credit. The group that lost its stream pauses and a later stream continues
-it, as a YIELDED reset's group already does. moq-transport and older lite
+it, as a YIELDED reset's group already does. moq-transport, lite-07, and older lite
 versions keep reset only.
 
 ## Plan
+
+Decided 2026-11-13 (maintainer, /quest-run): ✅ move this quest from m1 to
+m3 (rejected: keep it in m1 before lite-07 finalizes; delete it).
+[moq-dev/moq#8545](https://github.com/moq-dev/moq/pull/8545)'s YIELDED reset
+already gives stream credit to the highest-priority groups under a browser's
+~100-stream cap; takeover saves only the ~1 RTT a reset waits for
+MAX_STREAMS, at the cost of a new wire message (GROUP_END) and multi-group
+streams in Rust and JS, and lite-07's finalization does not need it.
+Takeover comes in a later lite version only if measurements show that round
+trip matters; the decisions below still hold, with "lite-07" read as that
+version.
 
 Decided 2026-11-04 (maintainer): only a stream whose sent data is all
 acknowledged qualifies, since a QUIC stream is ordered and the new group's
@@ -53,8 +64,17 @@ acknowledged; a stream mid-frame falls back to the YIELDED reset, so no frame
 waits on a handoff. `SubscribeAccounting.tla` gains GROUP_END the way it gained
 YIELDED.
 
-Public API: none. Wire: lite-07 GROUP_END and group stream takeover.
+Decided 2026-11-13 (maintainer, the pick round of
+[moq-dev/moq#8545](https://github.com/moq-dev/moq/pull/8545)): ✅ the new
+Group may belong to any subscription on the session (rejected: only the
+subscription whose stream it takes over), since stream credit is
+session-wide and the waiting higher-priority group is usually another
+track's. `GroupRecv` rebinds the stream at each GROUP message.
 
-## Waiting
+Public API: none. Wire: GROUP_END and group stream takeover in a later lite
+version.
 
-- Maintainer: whether the new Group may belong to any subscription on the session, or only to the subscription whose stream it takes over. Options: (1) any subscription; (2) the same subscription only. Recommend (1): stream credit is session-wide, and the higher-priority group waiting for it is usually another track's (a browser holding hundreds of tracks), so (2) would rarely find a stream to take; the cost is that `GroupRecv` rebinds a stream to another subscription at each GROUP message, which multi-group parsing needs anyway.
+## Related
+
+- [Stream credit by priority](/quest/m1/stream-credit/README.md) - the reset-based priority scheduling this would shave a round trip off
+- [Finalize lite-07](/quest/m2/lite07-finalize.md) - freezes lite-07 without takeover
