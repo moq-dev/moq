@@ -49,9 +49,9 @@ Decided with the maintainer, 2026-10-13:
   [moq-dev/moq#8533](https://github.com/moq-dev/moq/pull/8533)): Babel goes. A route is
   kept free of loops by its path, a withdrawal that names the hop that died,
   holds, and a timed doubt
-  ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27). A
+  ([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27). A
   detour no longer waits on the publisher, and today's router keeps Babel
-  until [the switch](/quest/m2/cluster-routing/routes/switch.md) lands. From
+  until [the switch](/quest/m2/cluster-routes/switch.md) lands. From
   then, "feasible" in this Plan reads as: the route's path does not name the
   relay and no doubt keeps the relay off it.
 - An origin declares its own routing identity, fresh per process or tab
@@ -106,7 +106,7 @@ Decided with the maintainer, 2026-10-13:
 
 The handoff proof showed a complete neighbor snapshot does not prove its
 claims are current; receivers merge origin-versioned views by floor instead.
-The routing contract is recorded in [Routes and announces](/quest/m2/cluster-routing/routes/README.md)
+The routing contract is recorded in [Routes and announces](/quest/m2/cluster-routes/README.md)
 with deterministic counterexamples: path-only subscriptions that reselect
 origins at every hop loop and deadlock, so forwarded requests name their
 identity; feasibility makes transit priorities depend on arrival order;
@@ -129,7 +129,7 @@ The 300 ms update hold alone is no longer the baseline. Keep regression
 coverage for announcement churn, idle work, active continuity, and retained
 state separately; fewer control bytes does not prove cheaper runtime work.
 
-The earlier simulator estimates remain in [Routes and announces](/quest/m2/cluster-routing/routes/README.md).
+The earlier simulator estimates remain in [Routes and announces](/quest/m2/cluster-routes/README.md).
 They do not prove the handoff correct; its fixtures do. Preserve public synthetic
 fixtures and controlled-time regressions, including residual stale revival,
 not only results from deployment tooling. Do not claim per-origin aggregation
@@ -145,6 +145,10 @@ per-broadcast warm routes rank against (decided 2026-11-08, maintainer).
 Each implementation updates the docs it makes stale. The separate
 [routing guide](/quest/m1/routing-guide.md) explains the combined design and
 setup after the capabilities land.
+
+## Required
+
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - shared routing contract and implementation
 
 ## Related
 

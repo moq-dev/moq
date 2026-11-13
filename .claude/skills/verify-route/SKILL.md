@@ -5,7 +5,7 @@ description: Model-check the lite-07 route rule (`rs/moq-net/verify/route/RouteH
 
 # Verify the route rule
 
-`rs/moq-net/verify/route/RouteHandoff.tla` models one publisher's routes across a mesh, under the rule the routes epic's Plan item 27 picked: a route names every relay it crossed with the session it learned it on, a closed session is named in one DEAD message per neighbour, a relay with no route holds until those that learned it from the relay answer, and a closed session casts doubt on its far end until a timer fires. It follows the prototype `Relay` in `rs/moq-net/src/route/tests/paths.rs` under `Rules::waits`, adds a route per prefix (`"root"`, and `"a"` inside it, which relays in `Scoped` ask for alone), and keeps dead hops until their timer fires. Every entry point is one atomic step ending in `Update`; messages share one FIFO per direction. The timer is the step `Lift`, which may fire at any moment, or with `Patient` only once no DEAD about its node is in flight. `route::Router` still runs Babel's distance; [the router quest](/quest/m2/cluster-routing/routes/scope.md) builds this rule.
+`rs/moq-net/verify/route/RouteHandoff.tla` models one publisher's routes across a mesh, under the rule the routes epic's Plan item 27 picked: a route names every relay it crossed with the session it learned it on, a closed session is named in one DEAD message per neighbour, a relay with no route holds until those that learned it from the relay answer, and a closed session casts doubt on its far end until a timer fires. It follows the prototype `Relay` in `rs/moq-net/src/route/tests/paths.rs` under `Rules::waits`, adds a route per prefix (`"root"`, and `"a"` inside it, which relays in `Scoped` ask for alone), and keeps dead hops until their timer fires. Every entry point is one atomic step ending in `Update`; messages share one FIFO per direction. The timer is the step `Lift`, which may fire at any moment, or with `Patient` only once no DEAD about its node is in flight. `route::Router` still runs Babel's distance; [the router quest](/quest/m2/cluster-routes/scope.md) builds this rule.
 
 ## Rules
 
@@ -40,10 +40,10 @@ What the timer costs, as the configs show it: fired late, it costs only the wait
 ## Run
 
 ```sh
-just rs tla moq-net/verify/route/RouteHandoff.tla
-just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Ring.cfg
-just test tla rs/moq-net/verify/route/RouteClaims.cfg
-just test tla rs/moq-net/verify/route
+quest gate just rs tla moq-net/verify/route/RouteHandoff.tla
+quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Ring.cfg
+quest gate just test tla rs/moq-net/verify/route/RouteClaims.cfg
+quest gate just test tla rs/moq-net/verify/route
 ```
 
 `just test tla rs/moq-net/verify/route` runs every config, as Nightly does, simulating each one with a `Simulate:` line, checking each with an `Apalache:` line through Apalache, and expecting `Loop.cfg` to break. Every TLC config but `Loop.cfg` also checks `RefinesClaims`, which costs about two thirds more time. Times are with `-workers 4`. `Patient` is TRUE unless the table says otherwise.

@@ -3295,6 +3295,7 @@ impl Request for FetchServe {
 						}
 						buffer_frame_info(
 							writer,
+							shared.version,
 							batched.frame.timestamp,
 							batched.inflated,
 							batched.frame.payload.len() as u64,
@@ -3330,6 +3331,7 @@ impl Request for FetchServe {
 								}
 								buffer_frame_info(
 									writer,
+									shared.version,
 									next.timestamp,
 									next.inflated,
 									next.size,
@@ -3555,7 +3557,7 @@ mod test {
 				.finish_at(track::Position::group(7), Some(Error::App(7)))
 				.unwrap();
 			let next = |subscriber: &mut track::Subscriber| {
-				kio::wait(|waiter| poll_recv_next(subscriber, true, true, end_error, waiter)).now_or_never()
+				kio::wait(|waiter| poll_recv_next(subscriber, Some(ALL), true, end_error, waiter)).now_or_never()
 			};
 			match (end_error || capped, next(&mut subscriber)) {
 				(true, Some(Ok(Recv::Boundary(end)))) => {
@@ -4585,8 +4587,13 @@ mod announce_test {
 /// model layer (`group::Producer::create_frame`) already converted a timed frame into
 /// the track timescale, so its raw value goes straight onto the wire. Mirrors the
 /// decode in the subscriber's `run_group`.
+#[allow(
+	clippy::too_many_arguments,
+	reason = "one FRAME header's fields, each from its own source"
+)]
 fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
+	version: Version,
 	timestamp: Option<crate::Timestamp>,
 	inflated: Option<u64>,
 	size: u64,
@@ -4594,6 +4601,14 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	prev_ts: &mut u64,
 	runtime: &crate::time::Deadlines,
 ) -> Result<(), Error> {
+	// Lite-07 leads with the size plus one, leaving 0 for GROUP_END.
+	let length_first = version.has_length_first();
+	if length_first {
+		let length = size
+			.checked_add(1)
+			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		writer.buffer_varint(length)?;
+	}
 	if let Some(stamp) = stamp {
 		buffer_zigzag_delta(writer, stamp.wire(timestamp, runtime)?, prev_ts)?;
 	}
@@ -4601,7 +4616,9 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if let Some(inflated) = inflated {
 		writer.buffer_varint(inflated)?;
 	}
-	writer.buffer_varint(size)?;
+	if !length_first {
+		writer.buffer_varint(size)?;
+	}
 	Ok(())
 }
 
@@ -4670,6 +4687,9 @@ fn final_sequence(end: track::Position) -> u64 {
 	end.final_sequence().unwrap_or(u64::MAX)
 }
 
+/// Every group sequence, for [`poll_recv_next`] to hand out any.
+const ALL: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
+
 /// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order).
 ///
 /// Groups are served in arrival order (`poll_recv_group`), not sequence order: on a relay, a
@@ -4677,8 +4697,9 @@ fn final_sequence(end: track::Position) -> u64 {
 /// permanently skip the older group even though it is cached and in demand. Staleness is
 /// governed by max age and the subscriber's max delay, not arrival raciness.
 ///
-/// Without `groups` the cursor hands out none, leaving them in the cache, so it never reports
-/// [`Recv::Finished`] either.
+/// The cursor hands out the next group only if its sequence lies in `groups`, leaving it in
+/// the cache otherwise, and without `groups` none at all. Either way it then never reports
+/// [`Recv::Finished`].
 ///
 /// When `emit_boundary` is set, a declared-but-not-yet-reached final sequence surfaces as
 /// [`Recv::Boundary`] in an idle moment (after groups), so the caller can send
@@ -4689,7 +4710,7 @@ fn final_sequence(end: track::Position) -> u64 {
 /// that end finishes like a clean one. Otherwise reaching it is the error, which resets.
 fn poll_recv_next(
 	track: &mut track::Subscriber,
-	groups: bool,
+	groups: Option<(Bound<u64>, Bound<u64>)>,
 	emit_boundary: bool,
 	end_error: bool,
 	waiter: &kio::Waiter,
@@ -4697,8 +4718,8 @@ fn poll_recv_next(
 	{
 		let mut groups_finished = false;
 		let next = match groups {
-			true => track.poll_recv_group(waiter),
-			false => Poll::Pending,
+			Some(admit) => track.poll_recv_group_in(admit, waiter),
+			None => Poll::Pending,
 		};
 		match next {
 			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
@@ -4738,7 +4759,7 @@ fn poll_recv_next(
 /// The async form of [`poll_recv_next`], for callers with nothing else to poll.
 #[cfg(test)]
 async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result<Recv, Error> {
-	kio::wait(|waiter| poll_recv_next(track, true, emit_boundary, true, waiter)).await
+	kio::wait(|waiter| poll_recv_next(track, Some(ALL), emit_boundary, true, waiter)).await
 }
 
 /// Bound `group` to what this subscription asked for, or `None` when it cannot be served
@@ -5001,6 +5022,25 @@ struct GroupOutcomes {
 	unencodable: Mutex<Option<Error>>,
 	/// Groups whose stream failed, with why, for the control stream to name.
 	dropped: Mutex<Vec<(u64, StreamError)>>,
+	/// Lite-07: groups whose stream the session reset to make room, for the run loop to
+	/// continue on a new stream.
+	paused: Mutex<Vec<Paused>>,
+}
+
+/// A group whose stream the session reset with YIELDED to make room for a higher-ranked
+/// open: the subscriber keeps what arrived, and a new stream continues the group.
+struct Paused {
+	/// An unread copy of the reset stream's cursor, at its `Frame Start`: the reset may have
+	/// discarded frames the transport acknowledged, so the continuation starts there.
+	group: group::Consumer,
+	frame_start: u64,
+}
+
+impl Paused {
+	/// Its rank for the subscription's stream credit in `order`, higher first.
+	fn rank(&self, order: crate::track::Order) -> i64 {
+		crate::priority::in_group(self.group.sequence, self.frame_start, order)
+	}
 }
 
 impl Subscription {
@@ -5089,6 +5129,12 @@ struct TrackRun {
 	// The expired groups an update re-offers, still cached and in range, each served again
 	// on its own stream as stream credit allows.
 	reoffered: std::collections::VecDeque<group::Consumer>,
+	// Lite-07: the paused groups, each continued on its own stream ahead of re-offers and new
+	// groups, the highest-ranked first. Each paused while holding a stream, so stream credit
+	// bounds them.
+	paused: std::collections::VecDeque<Paused>,
+	// Lite-07: the group `opening` holds continues a paused one.
+	continuing: bool,
 	end_sent: bool,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
@@ -5096,7 +5142,8 @@ struct TrackRun {
 	/// The one group waiting for stream credit. The rest of the backlog waits in the cache,
 	/// which bills, ages, and evicts it, and the cursor's budget skips whatever went stale
 	/// meanwhile: a machine per parked group would hold state for as long as the peer
-	/// withholds credit.
+	/// withholds credit. One that cannot make room gives way to a group that outranks it
+	/// (see [`Self::stuck`]).
 	opening: Option<GroupServe>,
 	/// The groups with a stream, serving or awaiting the acknowledgement of their FIN.
 	children: kio::Tasks<GroupServe>,
@@ -5153,6 +5200,8 @@ impl TrackRun {
 			update: 0,
 			redrop: RangeSet::new(),
 			reoffered: Default::default(),
+			paused: Default::default(),
+			continuing: false,
 			end_sent: false,
 			opening: None,
 			children: kio::Tasks::new(),
@@ -5433,7 +5482,8 @@ impl TrackRun {
 		{
 			// The track side takes groups again.
 			Idle::disarm(&mut self.idle);
-			let opening = self.opening.take().expect("polled above");
+			let mut opening = self.opening.take().expect("polled above");
+			self.continuing = false;
 			match res {
 				Ok(()) => self.children.push(opening),
 				Err(err) => opening.settle_failed(&err),
@@ -5454,6 +5504,12 @@ impl TrackRun {
 			return Poll::Ready(Err(err));
 		}
 
+		let paused = std::mem::take(&mut *self.ctx.outcomes.paused.lock().unwrap());
+		if !paused.is_empty() {
+			// The track side continues them.
+			Idle::disarm(&mut self.idle);
+			self.paused.extend(paused);
+		}
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
 			for (sequence, err) in dropped {
@@ -5546,6 +5602,23 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
+		// A paused group takes the next stream credit, ahead of re-offers and new groups, the
+		// highest-ranked first. It is owed already, and the subscriber holds its group open until
+		// it continues. A group waiting for credit it cannot make room for gives way to one that
+		// outranks it.
+		let order = self.ctx.steer_current().order;
+		let stuck = self.stuck();
+		if let Some(best) = self.best_paused()
+			&& (self.opening.is_none() || stuck.is_some_and(|waiting| self.paused[best].rank(order) > waiting))
+		{
+			let Paused { group, frame_start } = self.paused.remove(best).expect("best is in range");
+			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, frame_start, "continuing paused group");
+			self.give_way();
+			self.open(group, frame_start);
+			self.continuing = true;
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
+
 		// A group an update re-offers takes the next stream credit, ahead of new ones, unless a
 		// verdict sent since accounted for it.
 		if self.opening.is_none()
@@ -5572,9 +5645,21 @@ impl TrackRun {
 
 		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
 		let emit_boundary = self.emit_range && !self.end_sent;
-		let groups = self.opening.is_none();
+		// A group waiting for credit it cannot make room for must not hold back one that could:
+		// a group that outranks it takes its place. Newest first sheds the backlog, so the cursor
+		// hands out every group and one ranked below the waiting one is given up. Oldest first
+		// drains it in order, so the cursor hands out only a group that outranks the waiting
+		// one, and the rest waits in the cache. Behind a group that can make room, the backlog
+		// waits in the cache either way.
+		let admit = match &self.opening {
+			None => Some(ALL),
+			Some(waiting) => stuck.map(|_| match order {
+				Order::Descending => ALL,
+				Order::Ascending => (Bound::Unbounded, Bound::Excluded(waiting.sequence)),
+			}),
+		};
 		let end_error = self.ctx.version.has_end_error();
-		if let Poll::Ready(res) = poll_recv_next(&mut self.track, groups, emit_boundary, end_error, waiter) {
+		if let Poll::Ready(res) = poll_recv_next(&mut self.track, admit, emit_boundary, end_error, waiter) {
 			match res? {
 				Recv::Group(group) => {
 					// Never a second stream for a sequence this subscription already accounted
@@ -5605,6 +5690,15 @@ impl TrackRun {
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
+					if let Some(waiting) = &self.opening
+						&& crate::priority::in_group(sequence, 0, order)
+							< crate::priority::in_group(waiting.sequence, 0, order)
+					{
+						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "shedding a group ranked below one waiting for credit");
+						self.mark_served(sequence);
+						self.shed(sequence);
+						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					}
 					match self.emit_range && self.start.is_none() {
 						true => self.first = Some(group),
 						false => self.serve(group),
@@ -5618,7 +5712,8 @@ impl TrackRun {
 					writer.buffer(&lite::SubscribeResponse::Finish(end))?;
 				}
 				Recv::Finished => {
-					if !self.children.is_empty() {
+					// A continuation waiting for credit is still in flight too.
+					if !self.children.is_empty() || self.opening.is_some() {
 						return Poll::Pending;
 					}
 					// Lite-07 sends no FIN to say nothing was served, so a track that ended
@@ -5965,15 +6060,84 @@ impl TrackRun {
 		Ok(())
 	}
 
-	/// Open a group machine for `group`, which waits for stream credit before the cursor
-	/// hands out another.
+	/// Open a group machine for `group`, which waits for stream credit. The cursor hands it
+	/// out past a group already waiting only if it outranks that one, which gives way.
 	fn serve(&mut self, group: group::Consumer) {
 		let sequence = group.sequence;
 		let frame_start = group.index();
-		// The stream stops at the end frame, before the group may end.
-		let capped = self.frames.end(sequence).is_some();
 		self.mark_served(sequence);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
+		self.give_way();
+		self.open(group, frame_start);
+	}
+
+	/// The rank of the group waiting for stream credit, if it cannot make room: it ranks below
+	/// every stream this subscription could take over, so it waits for credit to return, while
+	/// a group that outranks one of those streams would take it over now. A finished stream
+	/// waiting for its acknowledgement can't be taken over, so it isn't ranked.
+	fn stuck(&mut self) -> Option<i64> {
+		let waiting = self.opening.as_ref()?;
+		let order = self.ctx.steer_current().order;
+		let rank = |serve: &GroupServe| crate::priority::in_group(serve.sequence, serve.frame_start, order);
+		let waiting = rank(waiting);
+		let mut held = self
+			.children
+			.iter()
+			.filter(|serve| serve.serving())
+			.map(rank)
+			.peekable();
+		(held.peek().is_some() && held.all(|held| held > waiting)).then_some(waiting)
+	}
+
+	/// Take the group waiting for stream credit out of line, for one that outranks it: a
+	/// continuation goes back among the paused, and a new group is given up as one expired
+	/// under the subscription's budget is, which a lite-07 update may re-offer. Either way at
+	/// most one group per subscription waits for credit.
+	fn give_way(&mut self) {
+		let Some(mut waiting) = self.opening.take() else {
+			return;
+		};
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = waiting.sequence, "giving way to a higher-ranked group");
+		match std::mem::take(&mut self.continuing) {
+			true => self.paused.push_back(Paused {
+				group: waiting.group.clone(),
+				frame_start: waiting.frame_start,
+			}),
+			false => waiting.settle_failed(&Error::Old),
+		}
+	}
+
+	/// Give up a group the cursor handed out without a stream, as one expired under the
+	/// subscription's budget is.
+	fn shed(&self, sequence: u64) {
+		if self.ctx.version.has_track_stream() {
+			self.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.push((sequence, StreamError::Old));
+		}
+	}
+
+	/// The position of the highest-ranked paused group in this subscription's current order,
+	/// the next to continue.
+	fn best_paused(&mut self) -> Option<usize> {
+		let order = self.ctx.steer_current().order;
+		(0..self.paused.len()).reduce(|best, next| {
+			match self.paused[next].rank(order) > self.paused[best].rank(order) {
+				true => next,
+				false => best,
+			}
+		})
+	}
+
+	/// Open a group machine streaming `group` from `frame_start`, which waits for stream
+	/// credit before the cursor hands out another.
+	fn open(&mut self, group: group::Consumer, frame_start: u64) {
+		let sequence = group.sequence;
+		// The stream stops at the end frame, before the group may end.
+		let capped = self.frames.end(sequence).is_some();
 
 		// Use the latest steer for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let steer = self.ctx.steer_current();
@@ -6146,6 +6310,12 @@ struct GroupServe {
 	frame_start: u64,
 	/// The stream stops at a subscription's end frame, so its FIN cannot end the group.
 	capped: bool,
+	/// Lite-07 without the `ietf` extension's object records: an unread copy of `group` at
+	/// `frame_start`, which a new stream continues from if the session resets this one to
+	/// make room.
+	rewind: Option<group::Consumer>,
+	/// The session reset the stream to make room, pausing the group.
+	paused: bool,
 	// Lite05+ delta-encodes per-frame timestamps within the group. The first
 	// frame's delta is absolute (against an implicit prev value of 0), every
 	// subsequent delta is signed against the previous frame.
@@ -6185,6 +6355,11 @@ enum GroupState {
 }
 
 impl GroupServe {
+	/// Whether it holds a stream still sending, which a higher-ranked group may take over.
+	fn serving(&self) -> bool {
+		matches!(self.state, GroupState::Serve { .. })
+	}
+
 	fn new(
 		ctx: GroupContext,
 		sequence: u64,
@@ -6198,7 +6373,10 @@ impl GroupServe {
 			true => group.compressed(),
 			false => group,
 		};
+		let rewind = Self::yields(&ctx).then(|| group.clone());
 		Self {
+			rewind,
+			paused: false,
 			ctx,
 			rank,
 			open: Default::default(),
@@ -6247,9 +6425,14 @@ impl GroupServe {
 				priority: handle.send_order().into(),
 			},
 		};
-		// A higher-priority open waiting for credit can reset this stream: the reader fell
-		// too far behind the publisher's streams, and the control stream drops the group.
-		let preempt = self.ctx.version.encode_stream_code(&StreamError::TooFarBehind);
+		// A higher-priority open waiting for credit can reset this stream. Lite-07 pauses the
+		// group, for a later stream to continue. Otherwise the reader fell too far behind the
+		// publisher's streams, and the control stream drops the group.
+		let preempt = match self.rewind.is_some() {
+			true => StreamError::Yielded,
+			false => StreamError::TooFarBehind,
+		};
+		let preempt = self.ctx.version.encode_stream_code(&preempt);
 		let stream = match ready!(session.poll_open_group(&mut self.open, waiter, options, preempt)) {
 			Ok(stream) => stream,
 			Err(err) => {
@@ -6411,6 +6594,7 @@ impl GroupServe {
 									.and_then(|()| {
 										buffer_frame_info(
 											writer,
+											self.ctx.version,
 											batched.frame.timestamp,
 											batched.inflated,
 											batched.frame.payload.len() as u64,
@@ -6465,6 +6649,7 @@ impl GroupServe {
 											.and_then(|()| {
 												buffer_frame_info(
 													writer,
+													self.ctx.version,
 													next.timestamp,
 													next.inflated,
 													next.size,
@@ -6503,11 +6688,18 @@ impl GroupServe {
 							match writer.finish() {
 								Ok(()) => self.state = GroupState::Closed { writer },
 								// The writer drops here: the Drop reset stands in for the
-								// abort, exactly like the old `finish()?`.
-								Err(err) => return Poll::Ready(Err(err)),
+								// abort, exactly like the old `finish()?`. A preempt from
+								// another task can land between the last flush and the FIN,
+								// which then fails, and only pauses the group too.
+								Err(err) => {
+									self.paused = self.preempted(&writer);
+									return Poll::Ready(Err(err));
+								}
 							}
 						}
 						Err(err) => {
+							// Read before the abort releases the stream.
+							self.paused = self.preempted(&writer);
 							writer.abort(&err);
 							return Poll::Ready(Err(err));
 						}
@@ -6554,17 +6746,40 @@ impl kio::Task for GroupServe {
 }
 
 impl GroupServe {
+	/// Whether a stream reset to make room pauses its group: lite-07, unless the stream
+	/// carries the `ietf` extension's object records, which a continuation cannot resume.
+	fn yields(ctx: &GroupContext) -> bool {
+		ctx.version.has_yield() && !ctx.ietf
+	}
+
+	/// Whether the session reset `writer`'s stream to make room, pausing a group that yields.
+	fn preempted(&self, writer: &Writer<crate::transport::boxed::SendStream, Version>) -> bool {
+		self.rewind.is_some() && writer.stream().is_some_and(|stream| stream.preempted())
+	}
+
 	/// Account for a group that failed with `err`: a reset can lose its header, and a group
-	/// that never got a stream has none, so the control stream names it with that error.
-	fn settle_failed(&self, err: &Error) {
-		if self.ctx.version.has_track_stream() {
-			self.ctx
-				.outcomes
-				.dropped
-				.lock()
-				.unwrap()
-				.push((self.sequence, StreamError::from(err)));
+	/// that never got a stream has none, so the control stream names it with that error. A
+	/// group the session paused is continued instead.
+	fn settle_failed(&mut self, err: &Error) {
+		if !self.ctx.version.has_track_stream() {
+			return;
 		}
+		if self.paused
+			&& let Some(group) = self.rewind.take()
+		{
+			let paused = Paused {
+				group,
+				frame_start: self.frame_start,
+			};
+			self.ctx.outcomes.paused.lock().unwrap().push(paused);
+			return;
+		}
+		self.ctx
+			.outcomes
+			.dropped
+			.lock()
+			.unwrap()
+			.push((self.sequence, StreamError::from(err)));
 	}
 }
 

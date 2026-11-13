@@ -23,6 +23,17 @@ nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
 
+Decided 2026-11-12 (maintainer, coordinator session): ✅ bump mbx to 1.30.0
+first, then file the Windows misses upstream with 1.30.0 evidence (rejected:
+file now on 1.29.2). 1.30.0 adds `mbx analyze` and `mbx stats` explanations
+of why a compilation missed, and
+[jdx/mr-boxington#903](https://github.com/jdx/mr-boxington/pull/903) fixes
+local store eviction on Windows. The Windows platform job now runs
+`mbx analyze` after its workspace build. It compares only against builds
+recorded on the same runner, so on a fresh hosted runner a cross-run miss
+likely reads as "misses with no earlier recording"; the report still names
+the remaining causes and is what an upstream issue should carry.
+
 Decided 2026-11-07 (maintainer, /quest-unblock): agents collect the R2
 numbers with this desktop's wrangler login, and the maintainer only picks the
 lifecycle. Baseline that day: 720,249 objects / 1.2 TB, with 18,006,968
@@ -81,8 +92,9 @@ compilation is "not looked up".
   under its own workspace, so the install order does not matter; it stays
   where `main` has it. mbx v1.29.1 (2026-11-01) includes
   [#870](https://github.com/jdx/mr-boxington/pull/870), and
-  `.github/actions/rust-cache/action.yml` pins 1.29.2 (2026-11-03) since
-  [#7653](https://github.com/moq-dev/moq/pull/7653). The fix also offers
+  `.github/actions/rust-cache/action.yml` pinned 1.29.2 (2026-11-03) from
+  [#7653](https://github.com/moq-dev/moq/pull/7653) until the 1.30.0 bump
+  below. The fix also offers
   legacy CRLF identities, so an in-window manifest from 1.28.0 remains usable.
   Verified 2026-11-05: the scheduled
   [Windows job](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127326015447)
@@ -193,13 +205,12 @@ Workspace builds (hits / misses / not looked up):
 
 ## Waiting
 
-- Maintainer: Windows Nightly misses about 90% of the keys it looks up
-  (above), so R2 barely pays on Windows. Options: approve filing it upstream
-  on jdx/mr-boxington with the three runs' summaries, asking why Windows
-  lookups miss between runs and for the summary to name the manifest identity
-  (recommended, since #870 shows upstream fixes such issues quickly); or
-  accept it until the 2026-11-26 numbers. Done when the issue is filed or
-  the decision is recorded here.
+- GitHub Actions: the first scheduled Nightly on mbx 1.30.0 shows whether
+  Windows still misses most looked-up keys (above). If it does, file an issue
+  on jdx/mr-boxington with that run's `Explain Rust cache misses` output and
+  cache summary, following its CONTRIBUTING.md and AGENTS.md AI disclosure
+  rules (the maintainer approved filing). If the misses are gone, record that
+  run's numbers here. Either way, drop this item.
 - GitHub Actions: the first scheduled Nightly after #8342 (2026-11-12 afternoon or
   later) must show each Linux Rust-cache job's hits against its depth-1
   baseline (above, or for the `Nightly` matrix, the `Tests` matrix's other

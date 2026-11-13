@@ -71,12 +71,6 @@ impl Default for Input {
 }
 
 impl Input {
-	/// The longest [`latency`](Self::latency) a sink accepts. Well past any
-	/// playout delay worth presenting, and it bounds the ring the device thread
-	/// walks. Public so a caller taking the depth from its own configuration can
-	/// refuse an impossible one before it opens a device.
-	pub const LATENCY_MAX: Duration = Duration::from_secs(10);
-
 	fn validate(&self) -> Result<(), Error> {
 		if self.sample_rate == 0 {
 			return Err(Error::Unsupported("sample rate must be > 0".into()));
@@ -87,10 +81,10 @@ impl Input {
 				self.layout
 			)));
 		}
-		if self.latency.is_zero() || self.latency > Self::LATENCY_MAX {
+		if self.latency.is_zero() || self.latency > moq_mux::container::DELAY_MAX {
 			return Err(Error::Unsupported(format!(
 				"playback latency must be non-zero and at most {:?} (got {:?})",
-				Self::LATENCY_MAX,
+				moq_mux::container::DELAY_MAX,
 				self.latency
 			)));
 		}
@@ -261,7 +255,7 @@ impl Sink {
 	/// what it holds runs short of it, and speeds up past it only to catch up
 	/// with the clock [`due`](Self::due) anchors it to.
 	///
-	/// Must be non-zero, at most [`Input::LATENCY_MAX`], and fit in the current
+	/// Must be non-zero, at most [`moq_mux::container::DELAY_MAX`], and fit in the current
 	/// ring. Each device open or rebuild allocates the then-current target plus
 	/// three seconds, less a 30 ms processing window reserved as headroom.
 	/// Does not resize or reset the device.
@@ -980,7 +974,7 @@ mod tests {
 	/// device could ever drain is a delay nobody asked for.
 	#[test]
 	fn rejects_a_latency_it_cannot_buffer() {
-		for latency in [Duration::ZERO, Input::LATENCY_MAX + Duration::from_secs(1)] {
+		for latency in [Duration::ZERO, moq_mux::container::DELAY_MAX + Duration::from_secs(1)] {
 			let input = Input {
 				latency,
 				..Default::default()
@@ -989,7 +983,7 @@ mod tests {
 		}
 
 		Input {
-			latency: Input::LATENCY_MAX,
+			latency: moq_mux::container::DELAY_MAX,
 			..Default::default()
 		}
 		.validate()
@@ -1006,7 +1000,7 @@ mod tests {
 		for latency in [
 			Duration::ZERO,
 			Duration::from_secs(4),
-			Input::LATENCY_MAX + Duration::from_secs(1),
+			moq_mux::container::DELAY_MAX + Duration::from_secs(1),
 		] {
 			assert!(sink.set_latency(latency).is_err());
 			assert_eq!(sink.input().latency, LATENCY);

@@ -11,8 +11,8 @@ Follow RELEASE.md's release procedure: merge release into main first,
 then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Right after merging release into main, set
 every eligible package with `just version 0.22.0` for this cut, then one
-minor up per cut, following [Versions](/RELEASE.md#versions), including
-packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
+minor up per later API or wire cut, following
+[Versions](/RELEASE.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
 exempt from that version (`version.json`), so check each against its
 registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
 from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
@@ -51,22 +51,49 @@ cached groups on drafts 14 to 22. ✅ No backport (maintainer, 2026-11-04;
 [moq-dev/moq#7815](https://github.com/moq-dev/moq/pull/7815)), so check
 both fixes reach release.
 
-Recurs once per major release (decided 2026-10-19; shift rule replaced
-2026-11-05). The PR that finishes the cut shifts the milestones, as the root
-[questline](/quest/README.md) describes: this epic's remaining publication
-and adoption quests move to m0, m3's other quests split by kind into m1
-(additive) and m2 (breaking), m4's move to m3, m5 stays, and every link to a
-moved path is rewritten. A recurring cut-gate child that its last run
-re-created in m3, such as the [vendor
-sync](/quest/m3/vendor-sync/README.md), moves under the re-created
-gate instead. That PR also removes this path from every `Required`, which
-releases the audits waiting on it. It then re-creates the cut gate at `quest/m2/cut-gate/README.md` from
-the template below, and
-this quest, the [API shape review](/quest/m3/release/api-review.md), the
-[feature review](/quest/m3/release/feature-review.md), and the [Cargo feature
-review](/quest/m3/release/feature-flags.md) at the same paths under a fresh
-release epic in m3. Each keeps its Goal and recurrence paragraph and requires
-the new `/quest/m2/README.md`, and the cut also requires all three reviews.
+Recurs once per cut (decided 2026-10-19 as once per major release; per cut,
+in three kinds, 2026-11-09). The kinds, what each publishes, and which checks
+each runs are in [Releases](/RELEASE.md#releases). This run is the
+`0.22.0` cut: it still waits on all of m2. Once it merges into `release` and
+release-plz has published every package it bumps (the API diff's baselines), a
+PR on `main` sets `phase` in `version.json` to `additive` (the cut PR keeps
+the old phase, so its API diff only reports its breaks) and performs the re-split the root
+[questline](/quest/README.md) describes. This epic's remaining publication and
+adoption quests move to a release epic in m0, m3's other quests sort by kind
+into m1 (additive), m2 (API breaks) and m3 (wire changes), m4 stays, m5 moves
+to m6 and m5 starts empty, each milestone README's Goal is rewritten for its
+new role, and each audit's recurrence names m4 instead of m3.
+
+Every cut's PR removes this path from every `Required`, which releases the
+audits waiting on it, rewrites every link to a moved path, and re-creates this
+quest as `/quest/m0/release/cut.md`, in m0's release epic (created if the
+cut moved nothing there), keeping its Goal and this paragraph, with no `Required` and a `## Waiting` item for the
+maintainer's instruction naming the next cut and its kind. Each later run
+follows that kind:
+
+- **Additive**: the readiness checks, with the API diff refusing any break.
+  Changed JS packages and binding wrappers take patch bumps on `main` first;
+  release-plz proposes the Rust patches.
+- **API or wire**: first re-create the [API shape
+  review](/quest/m3/release/api-review.md), the [feature
+  review](/quest/m3/release/feature-review.md), the [Cargo feature
+  review](/quest/m3/release/feature-flags.md), and the [migration
+  audit](/quest/m3/release/migrate-audit.md) beside it in m0's release
+  epic, each keeping
+  its Goal and recurrence paragraph, scoped to what changed since the last
+  breaking cut and requiring nothing, and add them to this quest's
+  `Required`. Then advance the shared minor with `just version`.
+- **Wire**, which ends the cycle: also require `/quest/m2/README.md` and
+  `/quest/m3/README.md`, which the cut can wait on because it lives in m0,
+  not m3; finalize the cycle's wire version, then, once it merges
+  into `release` and its packages are published, set `phase` back to `additive` on `main`, and shift the milestones: remaining publication and adoption
+  quests to m0, m4's quests by kind into m1, m2 and m3, m5's to m4, and m6
+  stays the deferred bucket.
+
+The `0.22.0` cut and each wire cut also re-create the cut gate in m3 from the
+template below; a recurring cut-gate child that the last run re-created in
+the later-work milestone, such as the [vendor
+sync](/quest/m3/vendor-sync/README.md), moves under it.
 Only `/quest-delete` ends the recurrence.
 
 From the 2026-10-25 pre-cut run:
@@ -85,16 +112,17 @@ merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
   `release` branch release-plz proposal that bumps it.
 
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
-decision below). The gate is an epic in m2 for the checks the cut needs that
+decision below). The gate is an epic in m3 for the checks the cut needs that
 break nothing: `main` is no slower than `release`, vendored code has the
 upstream fixes it needs, and the hand-written `moq-c` is at parity with
 moq-ffi. It has no work of its own and completes when every child merges. It
-recurs once per release cycle, always in m2, and never re-creates itself: m2
-holds it and the cut requires m2, so a copy made before the cut would block
-that cut forever. Re-create its README with that Goal and this recurrence, a
-fresh "main is no slower than release" child with its Goal and no
+recurs once per release cycle, always in m3, and never re-creates itself: m3
+holds it and the cycle's wire cut requires m3, so a copy made before that cut
+would block it forever. Cuts earlier in the cycle do not wait on it, but each
+confirms on its candidate that the gate's finished checks still hold.
+Re-create its README with that Goal and this recurrence, a fresh "main is no slower than release" child with its Goal and no
 measurements yet, and the [vendor sync](/quest/m3/vendor-sync/README.md)
-questline that the last run re-created in m3. Only `/quest-delete` ends the
+questline that the last run re-created in the later-work milestone. Only `/quest-delete` ends the
 recurrence.
 
 Decided 2026-11-09 (maintainer, /quest-unblock): the cut, not the gate,
@@ -139,5 +167,4 @@ with the suites above.
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
-- [Cycle phases](/quest/m3/release/cycle-phases.md) - the shift this cut performs sorts by additive, API and wire, and its recurrence is rewritten to match
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

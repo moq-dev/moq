@@ -381,6 +381,7 @@ mod tests {
 			timescale,
 			ietf: Some(version),
 			compressed: false,
+			length_first: false,
 		}
 	}
 

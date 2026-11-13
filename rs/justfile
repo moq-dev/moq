@@ -19,7 +19,10 @@ default:
     just check
 
 # Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
-# Pass `-config rs/<path>.cfg` for a config not named after the spec.
+# Pass `-config rs/<path>.cfg` for a config not named after the spec, and
+# `../<path>.tla` for a spec outside `rs/`, such as a generated one in `.tmp/`.
+# TLC runs at the lowest priority with a 4 GB heap, which no model here outgrows:
+# the JVM otherwise takes a quarter of RAM per run.
 [positional-arguments]
 tla spec *args:
     #!/usr/bin/env bash
@@ -38,11 +41,12 @@ tla spec *args:
     # TLC reads `TLA-Library` only for a spec named without a directory.
     lib=$(nix build "$root#apalache" --no-link --print-out-paths)/share/tla
     cd "$(dirname "$spec")"
-    export JAVA_TOOL_OPTIONS="-DTLA-Library=$lib"
-    exec nix shell --inputs-from "$root" nixpkgs#tlaplus --command tlc -workers auto -cleanup -metadir "$(mktemp -d)" "${args[@]}" "$(basename "$spec")"
+    export JAVA_TOOL_OPTIONS="-Xmx4g -DTLA-Library=$lib"
+    exec nice -n 19 nix shell --inputs-from "$root" nixpkgs#tlaplus18 --command tlc -workers auto -cleanup -noGenerateSpecTE -metadir "$(mktemp -d)" "${args[@]}" "$(basename "$spec")"
 
 # Check a TLA+ spec with Apalache, e.g. `just rs apalache typecheck moq-net/verify/route/RouteHandoff.tla`.
-# Its output goes to a temporary directory; set `JVM_ARGS=-Xmx16g` for a larger heap.
+# Its output goes to a temporary directory. Apalache's heap is 4 GB unless
+# `JVM_ARGS` sets `-Xmx`.
 [positional-arguments]
 apalache command spec *args:
     #!/usr/bin/env bash
@@ -50,7 +54,7 @@ apalache command spec *args:
     command=$1
     spec=rs/$2
     shift 2
-    exec nix shell .#apalache --command apalache-mc "$command" --out-dir="$(mktemp -d)" "$@" "$spec"
+    exec nice -n 19 nix shell .#apalache --command apalache-mc "$command" --out-dir="$(mktemp -d)" "$@" "$spec"
 
 # Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
 # Pass `-D=<VARIANT>` for a variant the model defines.
@@ -89,7 +93,7 @@ lint *args:
     git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
-    cargo shear
+    cargo shear --deny-warnings
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
     cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
     cargo hakari generate --diff

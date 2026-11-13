@@ -1,12 +1,13 @@
 import { Duration, Instant, now, sleep } from "@moq/clock";
+import { Container } from "@moq/hang";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 /**
  * How far playback trails the live edge.
  *
  * `"auto"` (the default) holds the largest playout target the registered decoders measure from how
- * late their frames arrive (see doc/concept/audio-jitter.md). A `Duration` fixes the delay at
- * exactly that value and disables adaptation.
+ * late their frames arrive (see doc/concept/audio-jitter.md), at most 10 s. A `Duration` fixes the
+ * delay at exactly that value and disables adaptation.
  *
  * `"instant"` drops the buffer and the pacing together: nothing is held, and the wait before
  * presenting a frame never sleeps, so it presents as soon as it exists. It also overrides
@@ -17,6 +18,9 @@ export type Delay = "instant" | "auto" | Duration;
 
 /** The default {@link SyncInput.stretch}: how far live audio may trail the clock before it skips. @internal */
 export const STRETCH = Duration.secs(2);
+
+/** The most an `"auto"` delay holds, and how far catalog `warmup` reaches back. @internal */
+export const DELAY_MAX = Container.DELAY_MAX;
 
 /** Signals the sync reads. */
 export type SyncInput = {
@@ -66,7 +70,7 @@ export type SyncOutput = {
 	reference: Signal<number | undefined>;
 
 	// The resolved delay from the live edge to the playhead: the configured number, or in "auto" the
-	// largest registered playout target. Zero for "instant".
+	// largest registered playout target, at most DELAY_MAX. Zero for "instant".
 	delay: Signal<Duration>;
 
 	// The media timestamp of the most recently received frame.
@@ -488,6 +492,9 @@ export class Sync {
 			for (const { props } of effect.get(this.#clock.parts)) {
 				delay = delay.max(effect.get(props.target) ?? Duration.ZERO);
 			}
+			// Capped once, on the resolved delay, so audio and video stay on one clock. The
+			// subscription's max delay follows it.
+			delay = delay.min(DELAY_MAX);
 		}
 
 		this.#clock.out.delay.set(delay);

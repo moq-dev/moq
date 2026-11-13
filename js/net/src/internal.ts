@@ -175,8 +175,8 @@ export interface Run {
 /** Add `[start, end)` to sorted, disjoint, non-adjacent `runs`, merging every run it touches. */
 export function insertRun(runs: Run[], start: bigint, end: bigint): void {
 	if (start >= end) return;
-	let first = 0;
-	while (first < runs.length && runs[first].end < start) first++;
+	// Merging a run it touches, so the first that ends at or past `start`.
+	const first = runsFrom(runs, start - 1n);
 	let last = first;
 	while (last < runs.length && runs[last].start <= end) last++;
 	const merged =
@@ -192,6 +192,19 @@ export function removeRun<R extends Run>(runs: readonly R[], start: bigint, end:
 			{ ...run, start: max(run.start, end), end: run.end },
 		].filter((part) => part.start < part.end),
 	);
+}
+
+/** Take `[start, end)` out of sorted, disjoint `runs` in place, each part keeping its run's fields. */
+export function cutRun<R extends Run>(runs: R[], start: bigint, end: bigint): void {
+	if (start >= end) return;
+	const from = runsFrom(runs, start);
+	let to = from;
+	while (to < runs.length && runs[to].start < end) to++;
+	if (from === to) return;
+	const parts: R[] = [];
+	if (runs[from].start < start) parts.push({ ...runs[from], end: start });
+	if (runs[to - 1].end > end) parts.push({ ...runs[to - 1], start: end });
+	runs.splice(from, to - from, ...parts);
 }
 
 /**
@@ -306,11 +319,24 @@ export function dropAt(drops: readonly DropRun[], sequence: bigint): Error | und
 	return drops.find((run) => run.start <= sequence && sequence < run.end)?.error;
 }
 
+/** The index of the first of sorted, disjoint `runs` ending past `sequence`. */
+export function runsFrom(runs: readonly Run[], sequence: bigint): number {
+	let lo = 0;
+	let hi = runs.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (runs[mid].end <= sequence) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
+}
+
 /** The parts of `[start, end)` that sorted, disjoint `runs` do not cover, in order. */
 export function runGaps(runs: readonly Run[], start: bigint, end: bigint): Run[] {
 	const gaps: Run[] = [];
 	let next = start;
-	for (const run of runs) {
+	for (let i = runsFrom(runs, start); i < runs.length; i++) {
+		const run = runs[i];
 		if (next >= end) break;
 		if (run.start > next) gaps.push({ start: next, end: min(run.start, end) });
 		next = max(next, run.end);
@@ -485,7 +511,7 @@ export interface ResumeSource {
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
 	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
-	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] };
+	reofferGroups(start: bigint, end: bigint, from?: number): { groups: GroupConsumer[]; givenUp: Run[] };
 	/**
 	 * See {@link hooks.reofferStale}: the stale runs queued here, those this reader reported, which a
 	 * route change keeps, and those the serving copy reported.
@@ -779,9 +805,16 @@ export const hooks: {
 	 * Fresh reads of the groups in `[start, end)` a subscriber's track still caches, its range still
 	 * admits, and its current budget no longer judges stale, each expiring against that budget, and
 	 * the runs still given up: for a wire whose update re-offers a group whose stream it gave up as
-	 * stale. Mirrors the Rust crate-private `track::Subscriber::reoffer_groups`.
+	 * stale, or a lite-07 continuation of a group whose stream yielded. Each read starts at frame
+	 * `from`, so a group whose cache holds only frames past it is given up. Mirrors the Rust
+	 * crate-private `track::Subscriber::reoffer_groups`.
 	 */
-	reofferGroups: (subscriber: Subscriber, start: bigint, end: bigint) => { groups: GroupConsumer[]; givenUp: Run[] };
+	reofferGroups: (
+		subscriber: Subscriber,
+		start: bigint,
+		end: bigint,
+		from?: number,
+	) => { groups: GroupConsumer[]; givenUp: Run[] };
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */

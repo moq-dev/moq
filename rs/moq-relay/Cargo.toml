@@ -17,6 +17,18 @@ rust-version = "1.95"
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+# Where `cargo binstall` finds the binaries release-binary.yml attaches to this
+# crate's GitHub release; keep it in step with that workflow's archive layout.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-v{ version }-{ target }/bin/{ bin }{ binary-ext }"
+
+# The Windows zip holds the binary at its root.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"
+
 [[bin]]
 name = "moq-relay"
 path = "src/main.rs"

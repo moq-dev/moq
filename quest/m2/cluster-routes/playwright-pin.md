@@ -8,7 +8,7 @@ draft-ietf-webtrans-http3, so the route key lane
 (`test/interop/clients/js/route-key.ts`) proves the Chromium tab. The lane
 already requires a proof from Chromium 158 on, so the bump changes no
 expectation. Firefox's exporter departs from the draft in every build so far;
-[its own quest](/quest/m2/cluster-routing/routes/browser-proof.md) carries
+[its own quest](/quest/m2/cluster-routes/browser-proof.md) carries
 that bump.
 
 The root flake's `pkgs.playwright-driver` supplies `PLAYWRIGHT_BROWSERS_PATH`
@@ -41,8 +41,9 @@ rebuild and pin browser binaries outside nixpkgs.
   kixelated/nixpkgs fork the same day,
   [NixOS/nixpkgs#585789](https://github.com/NixOS/nixpkgs/pull/585789) (it also
   fixes `update.sh` for 1.65's SHA-pinned driver version and rebases the
-  python driver patch). Advance it by answering that PR's review; then wait
-  for it to reach `nixpkgs-unstable`. Decided 2026-11-11 (maintainer,
+  python driver patch). A reviewer approved it on 2026-11-12, so it waits
+  for a nixpkgs committer to merge it, then for it to reach
+  `nixpkgs-unstable`. Decided 2026-11-11 (maintainer,
   /quest-unblock): an agent drafts each review fix on the fork's branch with
   an `Assisted-by:` trailer, as nixpkgs' CONTRIBUTING.md requires, plus a separate AI-disclosure line in
   the reply itself, which that policy requires apart from commits; the

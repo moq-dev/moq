@@ -811,6 +811,11 @@ struct Slot {
 	// so an abandoned fetch leaves the group servable rather than gone. Boxed: rare.
 	head: Option<Box<group::Handle>>,
 
+	// A final drop of this group while a fetched head still filling served it: the head wins
+	// if it finishes, and the drop is why the group is gone if it dies first. Kept here rather
+	// than in the track's drops, so no drop sits beside a group readers are handed.
+	dropped: Option<Error>,
+
 	// A cut on an ended track that outlived its expiry: readers no longer get it, as they
 	// no longer get the group it was. Atomic because an ended track's sweep holds only a
 	// read guard, so it cannot reclaim the slot.
@@ -846,9 +851,22 @@ impl Slot {
 	/// serves its end: a reader is handed the group to see that error, never a missing group.
 	fn cut(&self) -> Option<&Error> {
 		match self.visible && !self.serves_end() && !self.retired.load(Ordering::Relaxed) {
-			true => self.group.cut_error(),
+			true => self.verdict(),
 			false => None,
 		}
+	}
+
+	/// Why the publisher gave this group up, whichever copy serves it: the live copy's cut,
+	/// or a final drop that a fetched head outlived only while it filled, once the head
+	/// failed. A copy that finished won over the drop, even once freed, and a head the cache
+	/// let go ages out like any group, as the slot it goes with does.
+	fn verdict(&self) -> Option<&Error> {
+		self.group.cut_error().or_else(|| {
+			self.dropped.as_ref().filter(|_| {
+				!self.copies().any(group::Handle::is_settled)
+					&& self.head.as_deref().is_some_and(|head| head.fate().failed())
+			})
+		})
 	}
 
 	/// Whether a cursor hands this slot out: walked, or cut.
@@ -1585,7 +1603,7 @@ impl TrackState {
 	fn reclaim_aborted(&mut self, sequence: u64) {
 		if let Some(slot) = self.uncache(sequence)
 			&& slot.visible
-			&& let Some(err) = slot.group.cut_error()
+			&& let Some(err) = slot.verdict()
 			&& let Some(end) = sequence.checked_add(1)
 		{
 			self.drop_groups(sequence..end, Hole::drop(StreamError::from(err)));
@@ -2731,6 +2749,7 @@ impl TrackState {
 				visible,
 				arrived: now,
 				head: None,
+				dropped: None,
 				retired: AtomicBool::new(false),
 			},
 		);
@@ -3698,6 +3717,10 @@ impl TrackState {
 				if !protected {
 					group.handle().cache_demote();
 				}
+				// A replacing head inherits the drop the slot holds, announcing it if it dies.
+				if slot.dropped.is_some() {
+					group.handle().carry_drop();
+				}
 				if let Some(head) = slot.head.replace(Box::new(group.handle())) {
 					self.detach(&head);
 				}
@@ -4447,8 +4470,11 @@ impl Producer {
 	}
 
 	/// Record `groups` given up as `hole` describes, returning the runs recorded: a drop
-	/// leaves a skipped sequence skipped, and a stale verdict leaves a group that arrived and
-	/// was not aborted, since a group stream wins over its drop.
+	/// leaves a skipped sequence skipped, and a group a copy still serves whole, since a group
+	/// stream wins over its drop: a stale drop leaves it still arriving or not, and a final one
+	/// ends the live copy still arriving but leaves a group finished here or served by a
+	/// fetched head. A head still filling holds that final drop until it finishes, which
+	/// wins, or dies, which leaves the drop as the slot's cut.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn give_up(&self, groups: ops::Range<u64>, hole: Hole) -> RangeSet<u64> {
 		let error = match &hole {
@@ -4465,40 +4491,54 @@ impl Producer {
 		if groups.is_empty() {
 			return RangeSet::new();
 		}
-		let (runs, open): (_, Vec<group::Handle>) = match self.modify() {
+		let (runs, open, carried, cache): (_, Vec<group::Handle>, Vec<u64>, _) = match self.modify() {
 			Ok(mut state) => {
-				// Only the live feed's copy: a drop judges the subscription, so a fetched head
-				// or fetch-only backfill may still complete.
-				let open: Vec<_> = state
-					.lookup
-					.range(groups.clone())
-					.filter(|(_, slot)| slot.visible && !slot.group.is_aborted())
-					.map(|(&sequence, slot)| (sequence, slot.group.clone()))
-					.collect();
-				let recorded = match hole.stale_budget() {
-					// A lite-07 publisher may serve a group after its stale drop, and the group's
-					// stream may land first: the group wins, still arriving or not.
-					Some(_) => {
-						let mut left = RangeSet::new();
-						left.insert(groups);
-						for (sequence, _) in &open {
-							if let Some(end) = sequence.checked_add(1) {
-								left.remove(*sequence..end);
-							}
-						}
-						let mut runs = RangeSet::new();
-						for run in left.iter() {
-							runs.extend(state.drop_groups(run.clone(), hole.clone()).iter().cloned());
-						}
-						(runs, Vec::new())
+				let stale = hole.stale_budget().is_some();
+				let mut left = RangeSet::new();
+				left.insert(groups.clone());
+				let mut open = Vec::new();
+				let mut carried = Vec::new();
+				for (&sequence, slot) in state.lookup.range_mut(groups) {
+					if !slot.visible {
+						continue;
 					}
-					None => (
-						state.drop_groups(groups, hole),
-						open.into_iter().map(|(_, group)| group).collect(),
-					),
-				};
+					// A final drop ends only the live feed's copy still arriving: a drop judges
+					// the subscription, so a fetched head or fetch-only backfill may still complete.
+					let arriving = !slot.group.is_aborted() && !slot.group.is_settled();
+					if !stale && arriving {
+						open.push(slot.group.clone());
+					}
+					// A lite-07 publisher may serve a group after its stale drop, and the group's
+					// stream may land first. A group a copy still serves whole stays, whichever
+					// copy serves it, as a re-sent copy the subscriber refused leaves it: naming
+					// it given up would hide it from every reader.
+					let ended = !stale && arriving && std::ptr::eq(slot.serving(), &slot.group);
+					if !ended
+						&& slot.serves_end()
+						&& let Some(end) = sequence.checked_add(1)
+					{
+						left.remove(sequence..end);
+						// A fetched head still filling may yet die, leaving the live copy this
+						// drop ended: the slot keeps the drop to surface as its cut then, and
+						// the head announces its death to cut watchers. A copy that finished
+						// already won.
+						if !stale
+							&& !slot.copies().any(group::Handle::is_settled)
+							&& let Some(head) = slot.head.as_deref()
+						{
+							slot.dropped = Some(Error::Stream(error.clone()));
+							head.carry_drop();
+							carried.push(sequence);
+						}
+					}
+				}
+				let mut runs = RangeSet::new();
+				for run in left.iter() {
+					runs.extend(state.drop_groups(run.clone(), hole.clone()).iter().cloned());
+				}
 				state.charge_debt();
-				recorded
+				let cache = state.cache.clone();
+				(runs, open, carried, cache)
 			}
 			Err(_) => return RangeSet::new(),
 		};
@@ -4506,6 +4546,23 @@ impl Producer {
 		// reset lands, with the track guard released.
 		for group in open {
 			group.abort_open(Error::Stream(error.clone()));
+		}
+		// A head, or one replacing it, that died before the live copy above ended announced its
+		// drop while that copy still served, so a cursor may have passed it by: announce every
+		// drop the slot now shows as its cut. Pairs with the fence in a head's abort: a head
+		// this misses announces after it, with the live copy ended.
+		if !carried.is_empty() {
+			std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+			let cut: Vec<u64> = {
+				let state = self.state.read();
+				carried
+					.into_iter()
+					.filter(|sequence| state.lookup.get(sequence).and_then(Slot::cut).is_some())
+					.collect()
+			};
+			for sequence in cut {
+				cache.aborted(sequence, true);
+			}
 		}
 		runs
 	}
@@ -7816,12 +7873,13 @@ impl DropCursor {
 		}
 	}
 
-	/// Record `slot`, cached at `sequence`, if it holds a cut no fetched copy covers: a
-	/// copy still serving the group's end delivers it, so it is never also dropped.
+	/// Record `slot`, cached at `sequence`, if it holds a cut no fetched copy covers, or a
+	/// final drop a fetched head died before winning over: a copy still serving the group's
+	/// end delivers it, so it is never also dropped.
 	fn cut(record: &mut Record, sequence: u64, slot: &Slot) {
 		if slot.visible
 			&& !slot.serves_end()
-			&& let Some(err) = slot.group.cut_error()
+			&& let Some(err) = slot.verdict()
 			&& let Some(end) = sequence.checked_add(1)
 		{
 			record
@@ -9552,10 +9610,31 @@ impl Subscriber {
 		self.poll_group(false, waiter)
 	}
 
+	/// [`Self::poll_recv_group`], handing out the next group only if its sequence lies in
+	/// `admit`: one outside stays next, and the read is `Pending` without parking on it.
+	#[cfg(feature = "async")]
+	pub(crate) fn poll_recv_group_in(
+		&mut self,
+		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
+		self.poll_group_in(false, admit, waiter)
+	}
+
 	/// The next group in arrival order, or in sequence order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		let res = self.poll_group_unsettled(ordered, waiter);
+		self.poll_group_in(ordered, (ops::Bound::Unbounded, ops::Bound::Unbounded), waiter)
+	}
+
+	/// [`Self::poll_group`], refusing a next group whose sequence lies outside `admit`.
+	fn poll_group_in(
+		&mut self,
+		ordered: bool,
+		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
+		let res = self.poll_group_unsettled(ordered, admit, waiter);
 		// What the read settled is billed now, and pays what it can of its readers' debt. The
 		// group it hands out stays above the fold until its reader accounts for it.
 		let handed = match &res {
@@ -9568,7 +9647,12 @@ impl Subscriber {
 		}
 	}
 
-	fn poll_group_unsettled(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+	fn poll_group_unsettled(
+		&mut self,
+		ordered: bool,
+		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
 		if self.record().failed() {
 			return Poll::Ready(Err(Error::Lagged));
 		}
@@ -9586,12 +9670,16 @@ impl Subscriber {
 			_ => {}
 		}
 		match self.poll_peek_group(ordered, waiter) {
-			Poll::Ready(Ok(Some(reserved))) => Poll::Ready(self.take(reserved).map(Some)),
+			Poll::Ready(Ok(Some(reserved))) if admit.contains(&reserved.sequence()) => {
+				Poll::Ready(self.take(reserved).map(Some))
+			}
 			res => {
 				// What the peek skipped for age counts even when nothing is handed out.
 				self.count_stale(&self.stats.meter());
 				match res {
 					Poll::Ready(Ok(None)) => Poll::Ready(self.ended()),
+					// Refused: it stays next, so nothing behind it is either.
+					Poll::Ready(Ok(Some(_))) => Poll::Pending,
 					res => res.map(|res| res.map(|_| None)),
 				}
 			}
@@ -10927,17 +11015,181 @@ mod test {
 		indexed();
 		producer.drop_groups(15..25, StreamError::Cancel);
 		indexed();
-		producer
-			.create_group(group::Info { sequence: 17 })
-			.unwrap()
-			.finish()
-			.unwrap();
+		// Still arriving, so the next drop ends it and covers it again.
+		let _recreated = producer.create_group(group::Info { sequence: 17 }).unwrap();
 		indexed();
 		producer.drop_groups(14..26, StreamError::Old);
 		indexed();
 		assert_eq!(
 			producer.state.read().drops_changes.since(0).collect::<Vec<_>>(),
 			vec![10..30]
+		);
+	}
+
+	/// A final drop ends a group still arriving, but leaves one that finished here to every
+	/// reader, as a group arriving after its drop replaces it.
+	#[test]
+	fn a_final_drop_leaves_a_finished_group() {
+		let producer = track_producer("test", Info::default());
+		producer
+			.create_group(group::Info { sequence: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let open = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer.drop_groups(0..2, StreamError::Cancel);
+
+		let drops: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.clone()).collect();
+		assert_eq!(drops, vec![1..2]);
+		assert!(open.is_aborted(), "the group still arriving ends");
+		let mut consumer = producer.subscribe(None);
+		assert_eq!(consumer.assert_group().sequence, 0);
+	}
+
+	/// A drop leaves a group a fetched head serves whole, whatever its live copy is doing: a
+	/// final drop still ends a live copy still arriving, and the head serves in its place.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_leaves_a_group_a_fetched_head_serves() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut lives = Vec::new();
+		for sequence in 0..2 {
+			let mut live = producer.create_group(group::Info { sequence }).unwrap();
+			live.start_at(1).unwrap();
+			live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+				.unwrap();
+			let fetch = consumer.fetch_group(sequence, None);
+			let request = dynamic.requested_fill_group().await.unwrap();
+			let mut head = request.accept(Info::timed()).unwrap();
+			for payload in [&b"snapshot"[..], b"delta"] {
+				head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+					.unwrap();
+			}
+			head.finish().unwrap();
+			fetch.await.unwrap();
+			lives.push(live);
+		}
+		lives.pop().unwrap().abort(Error::Cancel).unwrap();
+
+		producer.drop_groups(0..1, StreamError::App(5));
+		producer.give_up(1..2, Hole::stale(Duration::from_millis(500)));
+
+		assert!(producer.state.read().drops.iter().next().is_none());
+		assert!(lives[0].is_aborted(), "the live copy still arriving ends");
+		let mut sub = producer.subscribe(None);
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+		for sequence in 0..2 {
+			assert_eq!(sub.assert_group().sequence, sequence);
+		}
+	}
+
+	/// A live group 0 fed from frame 1, plus a fetched head still arriving that serves it
+	/// whole.
+	#[cfg(feature = "async")]
+	async fn arriving_head(producer: &Producer) -> (group::Producer, group::Producer) {
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		let _fetch = consumer.fetch_group(0, None);
+		let request = dynamic.requested_fill_group().await.unwrap();
+		let mut head = request.accept(Info::timed()).unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		(live, head)
+	}
+
+	/// A final drop of a group a fetched head is still filling waits on the head: once the
+	/// head dies unfinished, the drop is why the group is gone, so a reader starting there
+	/// sees it rather than stall, even for a drop that abandons the live copy without a cut.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_final_drop_outlives_a_head_that_dies() {
+		let producer = track_producer("test", Info::timed());
+		let (live, head) = arriving_head(&producer).await;
+
+		producer.drop_groups(0..1, StreamError::Old);
+		assert!(live.is_aborted(), "the live copy still arriving ends");
+		{
+			let state = producer.state.read();
+			assert!(state.drops.iter().next().is_none(), "the head still serves the group");
+			assert!(state.given_up(0).is_none());
+		}
+
+		head.abort(Error::Cancel).unwrap();
+		let state = producer.state.read();
+		assert!(state.lookup[&0].is_read(), "a reader is handed the drop");
+		assert!(matches!(state.given_up(0), Some(Error::Stream(StreamError::Old))));
+	}
+
+	/// A drop cursor that scanned while the head filled hears the drop once the head dies:
+	/// the head's abort is announced as the cut it leaves.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_cursor_hears_a_final_drop_a_dying_head_leaves() {
+		let producer = track_producer("test", Info::timed());
+		let (_live, head) = arriving_head(&producer).await;
+		let mut sub = producer.subscribe(None);
+
+		producer.drop_groups(0..1, StreamError::Old);
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+
+		head.abort(Error::Cancel).unwrap();
+		match sub.poll_drop(&kio::Waiter::noop()) {
+			Poll::Ready((run, hole)) => {
+				assert_eq!(run, 0..1);
+				assert!(matches!(hole.error(), StreamError::Old));
+			}
+			Poll::Pending => panic!("the drop the head left is reported"),
+		}
+	}
+
+	/// A live copy that finished wins over a final drop for good, even while a fetched head
+	/// still fills, and even once both copies are gone.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_live_copy_wins_over_a_final_drop_a_head_waits_on() {
+		let producer = track_producer("test", Info::timed());
+		let (live, head) = arriving_head(&producer).await;
+		let live = live.finish().unwrap();
+
+		producer.drop_groups(0..1, StreamError::Old);
+		head.abort(Error::Cancel).unwrap();
+		live.abort(Error::Evicted).unwrap();
+		let state = producer.state.read();
+		assert!(state.drops.iter().next().is_none());
+		assert!(state.given_up(0).is_none());
+	}
+
+	/// A fetched head that finishes after a final drop of its group wins over the drop, even
+	/// once it is later freed: no drop is ever recorded beside it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_head_that_finishes_wins_over_a_final_drop() {
+		let producer = track_producer("test", Info::timed());
+		let (_live, mut head) = arriving_head(&producer).await;
+
+		producer.drop_groups(0..1, StreamError::Old);
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		let head = head.finish().unwrap();
+		{
+			let state = producer.state.read();
+			assert!(state.drops.iter().next().is_none());
+			assert!(state.given_up(0).is_none());
+		}
+		let mut sub = producer.subscribe(None);
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		head.abort(Error::Evicted).unwrap();
+		assert!(
+			producer.state.read().given_up(0).is_none(),
+			"a freed head was still whole"
 		);
 	}
 
@@ -23927,6 +24179,67 @@ mod test {
 		}
 		assert!(subscriber.poll_drop(&waiter).is_pending());
 		assert!(matches!(dynamic.poll_requested_fill(&waiter), Poll::Ready(Ok(_))));
+	}
+
+	/// A fill's OLD answer under the publisher's max age binds every reader, so the track holds
+	/// it as a stale verdict under that age rather than a loss for good: the readers waiting now
+	/// are refused, a later reader no wider is settled without asking, and once the verdict is forgotten, as new terms or the
+	/// drop set's expiry window forget one, a reader asks again. Mirrors JS.
+	#[test]
+	#[cfg(feature = "async")]
+	#[expect(clippy::single_range_in_vec_init, reason = "the forgotten runs are a set, here one")]
+	fn a_fills_old_answer_under_the_max_age_is_held_until_forgotten() {
+		let max_age = Duration::from_secs(10);
+		let mut producer = track_producer("test", Info::timed().with_max_age(max_age));
+		let dynamic = producer.requests();
+		producer.start_at(3).unwrap();
+		write_group(&producer, 3);
+		// No subscription feeds the copy, so nothing below the start arrives but what a fill does.
+		producer.set_unfed(true);
+		let terms = || {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(60)))
+				.with_ranges([Range::groups(0..)])
+		};
+		let mut subscriber = producer.subscribe(terms());
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), [3]);
+		// A reader of the run alone, which the verdict does not settle, waits on the same fill.
+		let mut bounded = producer.subscribe(terms().with_ranges([Range::groups(0..3)]));
+		assert!(drain_groups(&mut bounded).is_empty());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("a fill is asked below the start");
+		};
+		fill.reject_groups(0..3, Error::Old);
+		drop(fill);
+		assert_eq!(drained_drops(&mut subscriber), [(0, 3)]);
+		assert_eq!(
+			drained_drops(&mut bounded),
+			[(0, 3)],
+			"the readers waiting now are refused"
+		);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+		assert_eq!(
+			producer.state.read().drops.get(&0),
+			Some(&Hole::stale(max_age)),
+			"held under the max age, which a widening reverses"
+		);
+
+		let mut later = producer.subscribe(terms());
+		assert_eq!(drain_groups(&mut later), [3]);
+		assert_eq!(drained_drops(&mut later), [(0, 3)]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the verdict is not asked again"
+		);
+
+		assert_eq!(producer.supersede_stale(None), RangeSet::from_iter([0..3]));
+		let mut again = producer.subscribe(terms());
+		assert_eq!(drain_groups(&mut again), [3]);
+		assert!(
+			matches!(dynamic.poll_requested_fill(&waiter), Poll::Ready(Ok(_))),
+			"a forgotten verdict is asked again"
+		);
 	}
 
 	/// Every group a set of ranges names, as a received copy's upstream terms judge them.

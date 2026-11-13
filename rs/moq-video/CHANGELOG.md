@@ -11,13 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A V4L2 camera that opens and never delivers a frame no longer blocks its capture thread forever: reads time out after a second, so dropping the `capture::Stream` stops the thread and closes the device promptly.
 - The PipeWire camera listing hides nodes that offer no format the backend converts, such as an IR camera with only GREY, as the V4L2 listing already does.
+- `capture::cameras()` lists a webcam once with the `pipewire` feature: the dedupe read `api.v4l2.path`, which a PipeWire registry global lacks, and now reads `object.path`.
+- A PipeWire camera that another client already runs opens and captures, sharing that client's mode, where it used to time out waiting for a format or a frame.
 
 ### Added
 
+- `capture::portal::Selection::restore_token` watches the portal restore token (`RestoreTokenConsumer::changed` reports the latest token, or `None` once cleared, coalescing changes in between), and `with_restore_token` seeds one, so a caller can persist a screen-cast grant across processes and skip the picker on a compositor that keeps grants. `RestoreToken` redacts itself in `Debug` output.
 - `encode::Config::resize` scales a frame at another size inside the encoder, so a `Sink` does it on its own thread rather than the caller's.
 
 ### Changed
 
+- The ScreenCast portal grant now lasts until the user revokes it (`PersistMode::ExplicitlyRevoked`) instead of ending with the process, so a persisted restore token can skip the picker in a later process on a compositor that keeps grants.
+- With the `pipewire` feature, `capture::cameras()` lists a webcam that a PipeWire node fronts as `pipewire:<node name>`, ahead of the V4L2 devices, instead of as `/dev/videoN`, since PipeWire shares the camera while V4L2 holds it exclusively. A `/dev/videoN` id still opens V4L2.
+- With the `pipewire` feature, `Source::Camera(None)` opens PipeWire's default camera outside a sandbox when PipeWire lists a camera, and `/dev/video0` otherwise.
 - [**breaking**] `encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the catalog, so a caller declares the encoder's GOP with `reserve().with_timeline_hint(gop)`.
 
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-video-v0.1.9...moq-video-v0.1.10) - 2026-10-05
