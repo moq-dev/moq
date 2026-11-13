@@ -17,6 +17,7 @@ mod paths;
 mod residual;
 mod routing;
 mod rtt;
+mod scope;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -369,6 +370,8 @@ pub(super) struct Sim {
 	/// The same for [`path::Router`], by prefix.
 	offered: BTreeMap<(Node, Node, Id, Path), path::Offer>,
 	pub stats: Stats,
+	/// The work of routers a restart replaced.
+	spent: usize,
 	pub events: Vec<SimEvent>,
 	/// Deliveries the cache layer has yet to take.
 	notes: Vec<Note>,
@@ -403,6 +406,7 @@ impl Sim {
 			routed: BTreeMap::new(),
 			offered: BTreeMap::new(),
 			stats: Stats::default(),
+			spent: 0,
 			events: Vec::new(),
 			notes: Vec::new(),
 		}
@@ -542,6 +546,28 @@ impl Sim {
 		self.flush();
 	}
 
+	/// Every session of `node` closes at once, as a node shutting down closes them.
+	pub fn isolate(&mut self, node: Node) {
+		let peers: Vec<Node> = self.peers(node).collect();
+		for &peer in &peers {
+			self.up.remove(&Self::pair(node, peer));
+			for key in [(node, peer), (peer, node)] {
+				self.queues.remove(&key);
+				self.acks.remove(&key);
+				self.held.remove(&key);
+			}
+			match &mut self.nodes[peer] {
+				Relay::Distance(router) => router.disconnect([node]),
+				Relay::Path(router) => router.disconnect([node], self.now),
+			}
+		}
+		match &mut self.nodes[node] {
+			Relay::Distance(router) => router.disconnect(peers),
+			Relay::Path(router) => router.disconnect(peers, self.now),
+		}
+		self.flush();
+	}
+
 	/// The process at `node` exits: its sessions close and its state is lost.
 	pub fn kill(&mut self, node: Node) {
 		let peers: Vec<Node> = self.peers(node).collect();
@@ -552,6 +578,9 @@ impl Sim {
 		self.declared[node] = None;
 		let restarts = self.restarts[node];
 		let seed = fnv("restart", &[node as u64, u64::from(restarts)]);
+		if let Relay::Path(router) = &self.nodes[node] {
+			self.spent += router.work();
+		}
 		self.nodes[node] = Relay::new(self.rule, hop(node, restarts), seed);
 		let watch = self.watch[node].clone();
 		match &mut self.nodes[node] {
@@ -1081,6 +1110,11 @@ impl Sim {
 				});
 			}
 		}
+	}
+
+	/// Routes, prefixes, and streams visited across every node, under the path rule.
+	pub fn work(&self) -> usize {
+		self.spent + (0..self.nodes.len()).map(|node| self.path(node).work()).sum::<usize>()
 	}
 
 	/// Identities recomputed across every node.
