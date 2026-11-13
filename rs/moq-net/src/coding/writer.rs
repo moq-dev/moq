@@ -50,8 +50,10 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	}
 
 	/// The next `size` bytes written after what is buffered are one frame's payload.
+	///
+	/// It asks the transport nothing: this runs per frame on every subscriber stream, and the
+	/// serve loop's next park, close or drop bills what was delivered by then.
 	pub(crate) fn frame(&mut self, size: u64) {
-		self.settle();
 		let start = self.written + (self.buffer.len() - self.flushed) as u64;
 		if let Some(delivery) = &mut self.delivery {
 			delivery.frame(start, size);
@@ -61,7 +63,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// Bill the payload the transport has delivered so far.
 	fn settle(&mut self) {
 		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
-			delivery.deliver(delivered(stream, self.written));
+			settle(delivery, stream, self.written);
 		}
 	}
 
@@ -330,6 +332,14 @@ fn delivered<S: crate::transport::poll::SendStream>(stream: &S, written: u64) ->
 	stream.delivered().unwrap_or(written).min(written)
 }
 
+/// Bill what `stream` delivered of its `written` bytes. A stream with nothing waiting is not
+/// asked, since the transport may lock to answer.
+fn settle<S: crate::transport::poll::SendStream>(delivery: &mut crate::stats::Delivery, stream: &S, written: u64) {
+	if delivery.waiting(written) {
+		delivery.deliver(delivered(stream, written));
+	}
+}
+
 /// Bill what `stream` delivered of its `written` bytes, then register `waiter` for more while
 /// a frame the stream took waits on delivery. A wake that brings nothing stops it, so a stream
 /// that will deliver no more parks instead of spinning.
@@ -383,7 +393,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Closing<S, V> {
 impl<S: crate::transport::poll::SendStream, V> Closing<S, V> {
 	fn settle(&mut self) {
 		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
-			delivery.deliver(delivered(stream, self.written));
+			settle(delivery, stream, self.written);
 		}
 	}
 }
@@ -423,7 +433,7 @@ impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 impl<S: crate::transport::poll::SendStream, V> Drop for Writer<S, V> {
 	fn drop(&mut self) {
 		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
-			delivery.deliver(delivered(stream, self.written));
+			settle(delivery, stream, self.written);
 		}
 		if let Some(mut stream) = self.stream.take() {
 			// Unlike the Quinn default, we abort the stream on drop.
