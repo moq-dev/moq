@@ -29,6 +29,12 @@ step of the jitter target, which moq's traces show jumping as far as 40 to
 step down skips as much. `moq play` glides through the same steps, since its
 sink stretches.
 
+With a nonzero bound, a write is due at its position rather than placed
+there: one whose position falls before the channel's queued audio, as after
+a step down, or past it, as after a step up, still queues after that audio,
+and the channel converges on the position, where today's exact channel
+refuses an overlap and pads a gap with silence.
+
 Reuse the ring and stretch the playback sink runs (`ring.rs`, whose
 `Consumer::stretch` the sink enables, and `stretch.rs`) rather than a second
 implementation; the bus's `Live` channels already queue through that ring,
