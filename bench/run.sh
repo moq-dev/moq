@@ -452,13 +452,38 @@ criterion_build_base() {
     criterion_build "$out" "$WORKTREE" ${args[@]+"${args[@]}"}
 }
 
+# Seconds a target may print nothing before it counts as hung. Criterion prints at the start
+# and end of every case, so the longest quiet stretch is one case's setup and measurement.
+# Without the bound, a revision that hangs in one case holds the whole Nightly leg to its
+# timeout, which cancels it and loses every other result.
+CRITERION_IDLE_SECONDS=${BENCH_CRITERION_IDLE_SECONDS:-600}
+
 # Run one built target as cargo bench would, from its package directory, with results under HOME/KEY.
+# Kills it and fails when it prints nothing for CRITERION_IDLE_SECONDS.
 criterion_exec() {
-    local list=$1 home=$2 key=$3 package executable
+    local list=$1 home=$2 key=$3 package executable pid fd line last=
     shift 3
     IFS=$'\t' read -r _ package executable < <(target_line "$list" "$key") || return 1
     printf '\nCriterion %s: %s\n' "${home#"$RUN"/}" "$key"
-    (cd "$package" && CRITERION_HOME=$home/$key "$executable" --bench "$@" </dev/null)
+    exec {fd}< <(cd "$package" && CRITERION_HOME=$home/$key exec "$executable" --bench "$@" </dev/null)
+    pid=$!
+    while true; do
+        if IFS= read -r -t "$CRITERION_IDLE_SECONDS" -u "$fd" line; then
+            printf '%s\n' "$line"
+            [[ -z $line ]] || last=$line
+        elif (($? > 128)); then
+            kill -KILL "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            exec {fd}<&-
+            printf 'Criterion %s hung: no output for %ds after: %s\n' "$key" "$CRITERION_IDLE_SECONDS" "$last" >&2
+            return 1
+        else
+            [[ -z $line ]] || printf '%s' "$line"
+            break
+        fi
+    done
+    exec {fd}<&-
+    wait "$pid"
 }
 
 target_line() {
