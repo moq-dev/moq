@@ -311,6 +311,12 @@ impl RangeFills {
 		// Every run a held fill still owes, recovered or not.
 		let mut owed = RangeSet::new();
 		let mut held = std::mem::take(&mut self.held);
+		// Not asked of the subscription: a run being recovered waits on its own, and a group
+		// already refused is answered once its fill reaches it.
+		let mut waiting = self.recovering.clone();
+		for (groups, _) in self.refused.iter() {
+			waiting.insert(groups.clone());
+		}
 		let this = &*self;
 		held.retain_mut(|fill| {
 			if fill.poll_withdrawn(waiter).is_ready() {
@@ -334,8 +340,7 @@ impl RangeFills {
 					continue;
 				}
 				owed.insert(run.clone());
-				// A run being recovered waits on its own subscription.
-				for gap in this.recovering.gaps(&run) {
+				for gap in waiting.gaps(&run) {
 					ask.groups.insert(gap);
 				}
 				ask.add(fill);

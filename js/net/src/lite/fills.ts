@@ -247,6 +247,10 @@ export class RangeFills {
 		// Every run a held fill still owes, recovered or not.
 		const owed: Run[] = [];
 		const held: track.Fill[] = [];
+		// Not asked of the subscription: a run being recovered waits on its own, and a group already
+		// refused is answered once its fill reaches it.
+		const waiting = [...this.#recovering];
+		for (const refused of this.#refused) insertRun(waiting, refused.start, refused.end);
 		for (const fill of this.#held) {
 			for (;;) {
 				const run = nextRun(fill);
@@ -263,9 +267,7 @@ export class RangeFills {
 					continue;
 				}
 				insertRun(owed, run.start, run.end);
-				// A run being recovered waits on its own subscription.
-				for (const gap of runGaps(this.#recovering, run.start, run.end))
-					insertRun(ask.groups, gap.start, gap.end);
+				for (const gap of runGaps(waiting, run.start, run.end)) insertRun(ask.groups, gap.start, gap.end);
 				ask.priority = Math.max(ask.priority, fill.priority);
 				held.push(fill);
 				break;
