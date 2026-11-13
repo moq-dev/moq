@@ -46,13 +46,22 @@ host noise for these nightlies to settle (rejected: re-measure on a quiet
 host first; investigate #8507's review fixes first). If the nightlies
 reproduce it, report it rather than budget it.
 
+Decided 2026-11-13 (maintainer, /quest-plan): ✅ count only nights after
+[the congestion fix](/quest/m1/audio-jitter-target/congestion-catch-up.md)
+lands too, so the congestion rows budget the fixed player (rejected:
+calibrate the other rows now and re-measure congestion later).
+
 Native rows stay report-only; enforcing them belongs to
 [Audio outlives video under bufferbloat](/quest/m4/audio-bufferbloat-av.md).
 
 ## Waiting
 
 - moq-dev/moq: seven scheduled Nightly runs on `main` after the stretch model
-  merges. Find them with `gh run list --workflow nightly.yml --event
+  and the congestion fix merge. Find them with `gh run list --workflow nightly.yml --event
   schedule` and download each with `gh run download <id> -n
   audio-quality-run` as it lands, since artifacts expire after 7 days. Never
   dispatch the nightly by hand.
+
+## Required
+
+- [Congestion catch-up](/quest/m1/audio-jitter-target/congestion-catch-up.md) - the congestion behavior the ceilings budget
