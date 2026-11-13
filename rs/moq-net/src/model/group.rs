@@ -3901,10 +3901,17 @@ impl Consumer {
 
 	/// Attach an egress payload meter, counting this as one delivered group.
 	/// Called by a tagged track when it hands the consumer to a subscriber or fetch.
-	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
+	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		meter.group();
 		self.stats = meter;
 		self
+	}
+
+	/// Hand this consumer's payload counts, and its clones' made after, to a wire writer that
+	/// bills them as the transport delivers them. See [`stats::Meter::delegate`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn delegate(&mut self) -> stats::Meter {
+		self.stats.delegate()
 	}
 
 	/// Keep applying this subscription's drift budget while the group is read.
