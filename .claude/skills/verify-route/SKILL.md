@@ -51,7 +51,7 @@ quest gate just test tla rs/moq-net/verify/route
 | `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | twenty minutes |
 | `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
-| `Overlap.cfg` | Five relays, three asking for `"a"`, with overlapping cheap broad and dear narrow paths. Simulated. | 1 claim change, no session change | 12,000 behaviours requested | simulation |
+| `Overlap.cfg` | Five relays, three asking for `"a"`, with overlapping cheap broad and dear narrow paths. Simulated past the message budget. | 1 claim change, no session change | 4,000 behaviours requested, depth 500 | simulation |
 | `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Open finding: `RequestsLoopFree` breaks. | 3 session changes | 979,474 when it breaks | a few minutes |
 
 Run them last, one at a time. First run what answers in seconds: the router's tests (`quest gate just rs test -p moq-net --lib -E 'test(/route::tests::(handoff|residual|scope|compare)/)'`, with `MOQ_ROUTE_SCENARIOS` raising the sweeps' count), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
