@@ -1,15 +1,16 @@
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
 [page] announce: prefix=
-[page] announced: broadcast=sc-0f36943a8e383268495f7e6be15a5aac active=true
-[page] announced: broadcast=sc-21c5d2995254f75cc9b181337b26cec9 active=true
+[page] announced: broadcast=sc-6f135254c8a3963ea30d5bf9dde336b2 active=true
+[page] announced: broadcast=sc-8508f2f58413c0f9b9955c4c9748618b active=true
 [page] announced: broadcast=sp-blume-town-test active=true
-[page] announced: broadcast=vs-b37009c86729c9decc8ba09d98aeab88 active=true
-[page] announced: broadcast=smoke-js-web-4257-17471.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-js-web-4257-17471.hang track=catalog.json
-[page] subscribe ok: id=0 broadcast=smoke-js-web-4257-17471.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4257-17471.hang {video: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-js-web-4257-17471.hang track=video
-[page] subscribe ok: id=1 broadcast=smoke-js-web-4257-17471.hang track=video
-[page] subscribe update: id=1 broadcast=smoke-js-web-4257-17471.hang track=video
-decoded 3 frames from smoke-js-web-4257-17471.hang (vite)
+[page] announced: broadcast=smoke-js-web-4246-12180.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-js-web-4246-12180.hang track=catalog.json
+[page] subscribe ok: id=0 broadcast=smoke-js-web-4246-12180.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4246-12180.hang {video: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-js-web-4246-12180.hang track=video
+[page] subscribe ok: id=1 broadcast=smoke-js-web-4246-12180.hang track=video
+[page] subscribe update: id=1 broadcast=smoke-js-web-4246-12180.hang track=video
+[page] received catalog hang smoke-js-web-4246-12180.hang {video: Object, clock: Object}
+[page] subscribe update: id=1 broadcast=smoke-js-web-4246-12180.hang track=video
+decoded 6 frames from smoke-js-web-4246-12180.hang (vite)
