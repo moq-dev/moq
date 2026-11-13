@@ -287,6 +287,26 @@ impl Version {
 		)
 	}
 
+	/// Whether FRAME leads with its `Payload Length`, the payload size plus one. Added in
+	/// lite-07; an earlier FRAME ends its header with the payload size.
+	pub(crate) fn has_length_first(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether a Group Stream reset with YIELDED pauses its group, which a later stream
+	/// continues. Added in lite-07; an earlier publisher out of stream credit gives the reset
+	/// group up.
+	#[cfg(feature = "async")]
+	pub(crate) fn has_yield(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether SUBSCRIBE_DROP's Error Code is a stream error code, ending a dropped group's
 	/// reader as a reset keeping its header would. Added in lite-07; earlier versions carry
 	/// an application-specific code there.

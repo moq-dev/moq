@@ -990,10 +990,11 @@ contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
 builds only single-threaded targets without I/O, and Nightly keeps measuring
 every bench. Workspace benches import `criterion`, which `rs/bench-harness`
 resolves to Criterion, or to CodSpeed's instrumented Criterion under
-`cargo codspeed`. Nothing gates on it.
+`cargo codspeed`. Nothing gates on it. CI uploads three shards (`net`, `mux`,
+`rest`), since CodSpeed rejects a run of more than about 1,000 benchmarks.
 
 ```bash
-nix develop --command just rs codspeed
+nix develop --command just rs codspeed net  # or mux, rest
 nix develop --command cargo codspeed run
 ```
 

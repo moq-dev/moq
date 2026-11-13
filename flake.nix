@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/93c9c2ef65f074e82094bf5272076db44ac19030";
+      url = "github:moq-dev/quest/2a80c90206a8136e9e8d86d524d766caa42bc267";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };

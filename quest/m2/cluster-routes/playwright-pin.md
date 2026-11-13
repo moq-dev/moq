@@ -8,7 +8,7 @@ draft-ietf-webtrans-http3, so the route key lane
 (`test/interop/clients/js/route-key.ts`) proves the Chromium tab. The lane
 already requires a proof from Chromium 158 on, so the bump changes no
 expectation. Firefox's exporter departs from the draft in every build so far;
-[its own quest](/quest/m2/cluster-routing/routes/browser-proof.md) carries
+[its own quest](/quest/m2/cluster-routes/browser-proof.md) carries
 that bump.
 
 The root flake's `pkgs.playwright-driver` supplies `PLAYWRIGHT_BROWSERS_PATH`

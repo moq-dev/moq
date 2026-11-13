@@ -98,6 +98,9 @@ type dialOptions struct {
 	version string
 	// grant waits for the relay's grant and prints it.
 	grant bool
+	// quicOnly turns off the WebSocket fallback. The finish case checks one session end to
+	// end, and leaving a fallback that won a slow race would open a second one.
+	quicOnly bool
 }
 
 // dial connects to url, printing the relay's grant in the Rust client's
@@ -106,6 +109,10 @@ func dial(ctx context.Context, url string, opts dialOptions, timeout time.Durati
 	config := moq.ClientConfig{TLS: moq.ClientTLS{Insecure: true}}
 	if opts.version != "" {
 		config.Versions = []string{opts.version}
+	}
+	if opts.quicOnly {
+		enabled := false
+		config.WebSocket.Enabled = &enabled
 	}
 	client, err := moq.Dial(ctx, url, config)
 	if err != nil || !opts.grant {
@@ -633,7 +640,7 @@ func run() error {
 	}
 	wait := time.Duration(*timeout * float64(time.Second))
 	ctx := context.Background()
-	opts := dialOptions{version: *version, grant: *grant}
+	opts := dialOptions{version: *version, grant: *grant, quicOnly: *finish || *finishAck != ""}
 	switch role {
 	case "publish":
 		var tones []float64

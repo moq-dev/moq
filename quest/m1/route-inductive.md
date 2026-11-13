@@ -29,7 +29,7 @@ moq-net):
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel), asked what happens to this quest now that the route rule is the path
-([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27):
+([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27):
 ✅ keep it in m1, rewritten for the path rule (rejected: m4, since the path
 argument is simpler than Babel's; deleting it and resting on the bounded
 TLC runs and the sweeps). The claim rules are where the stale copies were,
