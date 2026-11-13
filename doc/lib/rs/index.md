@@ -14,7 +14,7 @@ then add [hang](/lib/rs/hang) for media. To run a tool without embedding it,
 see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 [Repository map](/setup/repository) locates internal crates and their tests.
 
-Transport cryptography comes from [rind](https://github.com/moq-dev/rind).
+Transport cryptography comes from [rind](https://github.com/kixel-ai/rind).
 It supports every x86\_64 CPU, aarch64 with NEON (including Raspberry Pi 4,
 CM4, and Zero 2 W without crypto extensions), and armv7. Setup reports a
 missing required CPU feature before starting transport cryptography.

@@ -20,8 +20,8 @@
 //! - `sctp_proto`: <https://github.com/algesten/sctp-proto> 0.10.7, as published
 //!   on crates.io.
 //! - `str0m_rind` and dimpl's `crypto::rind`, the stack's crypto providers:
-//!   <https://github.com/moq-dev/rind>'s `rind-str0m` (as of
-//!   [`86567aad`](https://github.com/moq-dev/rind/commit/86567aadabc22d2b2ac23ea534598a0fffc66538),
+//!   <https://github.com/kixel-ai/rind>'s `rind-str0m` (as of
+//!   [`86567aad`](https://github.com/kixel-ai/rind/commit/86567aadabc22d2b2ac23ea534598a0fffc66538),
 //!   which targeted the str0m revision above) and `rind-dimpl` 0.1.12, ported to
 //!   the rind release the workspace pins.
 //!

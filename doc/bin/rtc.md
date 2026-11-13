@@ -43,5 +43,5 @@ Once the original publisher leaves, the session ends with an error, and the
 player or `export rtc --connect` must reconnect to reach the replacement.
 `--connect` runs until its session ends.
 
-Built on a vendored, trimmed copy of [str0m](https://github.com/algesten/str0m), with DTLS and SRTP on [rind](https://github.com/moq-dev/rind); the library is
+Built on a vendored, trimmed copy of [str0m](https://github.com/algesten/str0m), with DTLS and SRTP on [rind](https://github.com/kixel-ai/rind); the library is
 [`moq-webrtc`](https://github.com/moq-dev/moq/tree/main/rs/moq-webrtc).
