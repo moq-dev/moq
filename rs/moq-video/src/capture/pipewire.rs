@@ -1040,12 +1040,9 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					(raw.mapoffset, raw.maxsize)
 				};
 				let dmabuf = data.type_() == DataType::DmaBuf;
-				let chunk_size = data.chunk().size();
-				let size = if dmabuf {
-					dma_buf_chunk_size(chunk_size, maxsize)
-				} else {
-					clamp_chunk_size(chunk_size, maxsize)
-				};
+				// A DMA-BUF's chunk size sizes only an encoded frame, which spans its
+				// chunk; a raw frame's size comes from its layout.
+				let size = clamp_chunk_size(data.chunk().size(), maxsize);
 				let stride = match u32::try_from(data.chunk().stride()) {
 					Ok(stride) if stride > 0 => stride,
 					_ => match state.format.format() {
@@ -1098,18 +1095,9 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						return;
 					};
 					let offset = normalize_dma_buf_offset(chunk_offset, maxsize);
-					// The chunk size is advisory for a DMA-BUF; only a stated maxsize
-					// bounds the frame here. The allocation check below is the real one.
-					if !dma_buf_maxsize_contains(required, maxsize) {
-						tracing::warn!(
-							required,
-							maxsize,
-							"DMA-BUF frame is larger than the buffer's stated maxsize"
-						);
-						return;
-					}
+					// The fd's own allocation is the bound: the chunk size and maxsize are advisory.
 					let allocation_size = match dma_buf_allocation_size(fd.as_fd(), map_offset) {
-						Ok(Some(size)) if offset.checked_add(required).is_some_and(|end| end <= size) => Some(size),
+						Ok(Some(size)) if dma_buf_frame_fits(offset, required, size) => Some(size),
 						Ok(Some(size)) => {
 							tracing::warn!(
 								required,
@@ -1185,13 +1173,9 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					tracing::warn!("pipewire buffer has zero maximum size");
 					return;
 				};
-				// A DMA-BUF chunk may report size 0 for "the whole buffer", as on
-				// the import path above.
-				let complete = if dmabuf {
-					dma_buf_chunk_contains(required, chunk_size, maxsize)
-				} else {
-					required <= size
-				};
+				// A DMA-BUF's chunk size is advisory, as on the import path above;
+				// `allocation_size`, the stated maxsize, bounds it.
+				let complete = dmabuf || required <= size;
 				if !complete || required > allocation_size {
 					tracing::warn!(
 						required,
@@ -1369,21 +1353,12 @@ fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
 	size.min(maxsize) as usize
 }
 
-fn dma_buf_chunk_size(size: u32, maxsize: u32) -> usize {
-	if maxsize == 0 {
-		size as usize
-	} else {
-		clamp_chunk_size(size, maxsize)
-	}
-}
-
-// A producer cannot always know a DMA-BUF's byte size: xdg-desktop-portal-hyprland
+// A producer cannot always state a DMA-BUF's size: xdg-desktop-portal-hyprland
 // leaves maxsize 0 and writes a placeholder chunk size of 9, flagging bad frames
-// CORRUPTED instead (see `chunk_kind`). The chunk size is not used to read the
-// frame (the layout and the fd's own allocation size are), so only a nonzero
-// maxsize, the producer's stated allocation, bounds it here.
-fn dma_buf_maxsize_contains(required: usize, maxsize: u32) -> bool {
-	maxsize == 0 || required <= maxsize as usize
+// CORRUPTED instead (see `chunk_kind`). So the frame is bounded by the fd's own
+// allocation, which must hold it at its offset.
+fn dma_buf_frame_fits(offset: usize, required: usize, allocation: usize) -> bool {
+	offset.checked_add(required).is_some_and(|end| end <= allocation)
 }
 
 fn chunk_bytes(data: &[u8], offset: usize, size: usize) -> Option<Cow<'_, [u8]>> {
@@ -1746,6 +1721,9 @@ mod tests {
 	use super::*;
 	use crate::capture::Config;
 
+	/// `SPA_VIDEO_TRANSFER_SMPTE2084`, spelled out: PipeWire 1.0.x headers predate it.
+	const SPA_VIDEO_TRANSFER_SMPTE2084: spa::sys::spa_video_transfer_function = 14;
+
 	/// The serialized format offer must parse back as a valid pod.
 	#[test]
 	fn format_offer_is_valid_pod() {
@@ -1903,23 +1881,27 @@ mod tests {
 	fn chunk_size_is_clamped_to_the_allocation() {
 		assert_eq!(clamp_chunk_size(18, 16), 16);
 		assert_eq!(clamp_chunk_size(8, 16), 8);
-		assert_eq!(dma_buf_chunk_size(8, 16), 8);
-		assert_eq!(dma_buf_chunk_size(8, 0), 8);
-		assert!(dma_buf_maxsize_contains(16, 0));
-		assert!(dma_buf_maxsize_contains(16, 16));
+		assert_eq!(clamp_chunk_size(8, 0), 0);
 	}
 
-	// xdg-desktop-portal-hyprland's shape for a 4K BGRx frame.
+	// xdg-desktop-portal-hyprland's shape for a 4K BGRx frame: maxsize 0 and a
+	// placeholder chunk size of 9, with the frame's allocation held by the fd.
 	#[test]
 	fn dma_buf_placeholder_chunk_size_is_accepted() {
-		let required = 3840 * 2160 * 4;
+		let layout = FrameLayout {
+			stride: 3840 * 4,
+			width: 3840,
+			height: 2160,
+			source_height: 2160,
+		};
+		let required = frame_data_size(VideoFormat::BGRx, layout).unwrap();
 		assert_eq!(required, 33_177_600);
-		assert_eq!(dma_buf_chunk_size(9, 0), 9);
-		assert!(dma_buf_maxsize_contains(required, 0));
+		// The clamped chunk size is 0 here, which a DMA-BUF chunk still accepts.
 		assert_eq!(
-			chunk_kind(dma_buf_chunk_size(9, 0), spa::buffer::ChunkFlags::empty(), true),
+			chunk_kind(clamp_chunk_size(9, 0), spa::buffer::ChunkFlags::empty(), true),
 			ChunkKind::Data
 		);
+		assert!(dma_buf_frame_fits(0, required, required));
 		// A bad frame is flagged, which still rejects it.
 		assert_eq!(
 			chunk_kind(9, spa::buffer::ChunkFlags::CORRUPTED, true),
@@ -1928,10 +1910,13 @@ mod tests {
 	}
 
 	#[test]
-	fn dma_buf_frame_larger_than_maxsize_is_rejected() {
-		assert!(!dma_buf_maxsize_contains(17, 16));
-		assert!(!dma_buf_maxsize_contains(33_177_600, 33_177_599));
-		assert!(dma_buf_maxsize_contains(33_177_600, 33_177_600));
+	fn dma_buf_frame_must_fit_its_allocation_at_its_offset() {
+		assert!(dma_buf_frame_fits(0, 33_177_600, 33_177_600));
+		assert!(!dma_buf_frame_fits(0, 33_177_600, 33_177_599));
+		// The offset counts against the allocation, not only the frame.
+		assert!(!dma_buf_frame_fits(4096, 33_177_600, 33_177_600));
+		assert!(dma_buf_frame_fits(4096, 33_177_600 - 4096, 33_177_600));
+		assert!(!dma_buf_frame_fits(usize::MAX, 1, usize::MAX));
 	}
 
 	#[test]
@@ -2047,7 +2032,7 @@ mod tests {
 		assert!(pipewire_color(Kind::Screen, format, 1920, 1080).is_err());
 		format.set_color_range(spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN);
 		format.set_color_matrix(spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN);
-		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_SMPTE2084);
+		format.set_transfer_function(SPA_VIDEO_TRANSFER_SMPTE2084);
 		assert!(pipewire_color(Kind::Screen, format, 1920, 1080).is_err());
 
 		let layout = FrameLayout {
