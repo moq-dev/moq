@@ -40,8 +40,9 @@ decoding only the opus rendition into the swapped tone, and
 a `moq-lite-07-wip` Rust publisher and a JS subscriber that logged
 `moq-lite-06`; the Python/Rust sockets lane on `moq-lite-07-wip` also ended
 with only `Error: unroutable`, and passed in three narrowed reruns. Check
-whether they share this cell's cause, and that of
-[interop-python-go.md](/quest/m0/test-flakes-2/interop-python-go.md), whose
-Go subscriber also closed its session for publishing outside its grant.
+whether they share this cell's cause, and that of the `python -> go` cell,
+whose Go subscriber also closed its session for publishing outside its grant:
+two sessions of one `moq_tokio::Connection` drew different peer hops, fixed by
+[moq-dev/moq#8587](https://github.com/moq-dev/moq/pull/8587).
 `INTEROP_QUARANTINED=1` runs every quarantined lane, the sockets lane
 included.
