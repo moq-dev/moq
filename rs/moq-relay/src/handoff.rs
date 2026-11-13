@@ -761,15 +761,17 @@ mod imp {
 	}
 
 	/// Stand in for the relay as a service's main process, per `handoff.supervise`:
-	/// start the relay as a child with this process's arguments, pass it SIGTERM and
-	/// SIGINT, forward its readiness, and return its exit code once it exits. On
-	/// SIGUSR2 return 0 at once and leave it running, to drain beside the relay
-	/// that replaces it.
+	/// start the relay as a child with this process's arguments, pass it SIGTERM,
+	/// SIGINT, and SIGUSR1 (a heap profile's), forward its readiness, and return its
+	/// exit code once it exits. On SIGUSR2 return 0 at once and leave it running, to
+	/// drain beside the relay that replaces it.
 	///
 	/// A service manager takes readiness only from its main process, which the relay
 	/// no longer is; it also takes it from nothing else, so a relay left draining can
 	/// never speak for the service.
 	pub async fn supervise(config: &Config) -> anyhow::Result<i32> {
+		use std::os::unix::process::ExitStatusExt;
+
 		use tokio::signal::unix::{SignalKind, signal};
 
 		let path = config
@@ -779,6 +781,7 @@ mod imp {
 		// Before the relay starts, so no signal for it is missed.
 		let mut terminate = signal(SignalKind::terminate())?;
 		let mut interrupt = signal(SignalKind::interrupt())?;
+		let mut profile = signal(SignalKind::user_defined1())?;
 		let mut leave = signal(SignalKind::user_defined2())?;
 
 		let exe = std::env::current_exe().context("failed to find this binary")?;
@@ -811,10 +814,12 @@ mod imp {
 				status = child.wait() => {
 					let status = status.context("failed to wait for the relay")?;
 					tracing::info!(%status, "the relay exited");
-					break status.code().unwrap_or(1);
+					// One a signal ended exits as a shell reports it, 128 plus the signal.
+					break status.code().or_else(|| status.signal().map(|signal| 128 + signal)).unwrap_or(1);
 				}
 				Some(()) = terminate.recv() => pass(pid, libc::SIGTERM),
 				Some(()) = interrupt.recv() => pass(pid, libc::SIGINT),
+				Some(()) = profile.recv() => pass(pid, libc::SIGUSR1),
 				Some(()) = leave.recv() => {
 					tracing::info!(pid, "leaving the relay to drain beside the one replacing it");
 					break 0;

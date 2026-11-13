@@ -451,6 +451,22 @@ async fn a_restart_starts_the_new_relay_beside_the_old() {
 	let status = exited(&mut new, "the new stand-in").await;
 	assert_eq!(status.code(), Some(0), "{status}");
 
+	// SIGUSR1, a heap profile's signal, reaches the relay rather than ending the
+	// stand-in. Built without jemalloc, the relay dies of it, and the stand-in exits
+	// as a shell reports that.
+	#[cfg(not(feature = "jemalloc"))]
+	{
+		let mut last = stand_in(dir.path(), &cert, &key, &notify_path);
+		ready(&notify).await;
+		// SAFETY: kill has no memory-safety preconditions.
+		assert_eq!(
+			unsafe { libc::kill(last.id().unwrap() as libc::pid_t, libc::SIGUSR1) },
+			0
+		);
+		let status = exited(&mut last, "the last stand-in").await;
+		assert_eq!(status.code(), Some(128 + libc::SIGUSR1), "{status}");
+	}
+
 	// Each stand-in removed the socket its relay notified it on.
 	let left: Vec<_> = std::fs::read_dir(dir.path())
 		.unwrap()
