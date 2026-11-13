@@ -42,14 +42,17 @@ bar, not speed:
   its first violation after exploring a different, order-dependent part of
   the space. The specs use
   `RECURSIVE`, `CHOOSE`, `CASE`, `LAMBDA`, `Sequences`, `FiniteSets`,
-  `CONSTRAINT`, and `VIEW`, unmodified.
+  `CONSTRAINT`, and `VIEW`, unmodified; the route model also folds with the
+  Community Modules' `FoldSet` (`FiniteSetsExt`, through `INSTANCE`), which
+  `sh/tlc.py` puts on TLC's classpath.
 - Measure both engines at equal worker counts through `quest gate` on a quiet
   host, against TLC as the `tla` recipes run it. The 2026-11-10 baseline, on a
   24-core desktop and the route model as it stood then (3.67M distinct
   states): about 50 s and 930 CPU-seconds on TLC 1.8.0 with Java 21, down from
   about 118 s and 1,730 on TLC 1.7.4 with Java 8, with CPU-seconds near flat
-  from 2 to 24 workers. The model has since changed, so remeasure TLC and
-  report the table in the PR.
+  from 2 to 24 workers. The model has since changed, and `FoldSet` cut TLC's
+  core-seconds on most route configs by 1.4 to 3.6 times, so remeasure TLC
+  and report the table in the PR.
 - A config the checker cannot run, such as one with a `\* Simulate:` line
   that `sh/tla.sh` samples at random, stays on TLC; the recipe picks the engine per config and errors rather than
   falling back at runtime.
@@ -63,5 +66,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [TLC runs cost fewer core-seconds and share the host](/quest/m0/ci/tlc-cost.md) - makes TLC itself cheaper, which moves this quest's baseline
 - [Every delivery order of a small mesh runs on the real route layer](/quest/m2/cluster-routes/route-exhaustive-sim.md) - the other spike, which checks the Rust instead of a faster model

@@ -29,9 +29,11 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# The newest release built for nixpkgs' TLC 1.8.0, a June 2023 build: later
+# ones call `OpValue.eval`, which TLC added that November. Move both together.
 COMMUNITY = (
-    "https://github.com/tlaplus/CommunityModules/releases/download/202611060952/CommunityModules-202611060952.jar",
-    "sha256-+c7u9A6Pp6eUQymAIlbs7cGMgWWPtOVXaLCT4Lxhfig=",
+    "https://github.com/tlaplus/CommunityModules/releases/download/202311011627/CommunityModules-deps-202311011627.jar",
+    "sha256-Ca3VmiMGYV/SODGw+cI8ENQOvPZj/5TdLZOtwSz5o9s=",
 )
 
 

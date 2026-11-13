@@ -41,7 +41,9 @@ class Claim(unittest.TestCase):
 
     def test_a_child_holding_the_lock_keeps_the_run_alive(self):
         meta, fd = tlc.claim(self.base)
-        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE, pass_fds=(fd,))
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE, pass_fds=(fd,)
+        )
         os.close(fd)
         try:
             tlc.claim(self.base)
