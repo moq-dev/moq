@@ -3806,12 +3806,13 @@ impl Consumer {
 	/// finished, with the cause. Finishing alone does not end it.
 	#[cfg(feature = "async")]
 	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		self.cursor
-			.poll(waiter, |state| match state.outcome.error() {
-				Some(err) => Poll::Ready(Ok(err.clone())),
-				None => Poll::Pending,
-			})
-			.map(|res| res.unwrap_or_else(|err| err))
+		let abort = |state: &GroupState| state.outcome.error().cloned().map_or(Poll::Pending, Poll::Ready);
+		// Not `Cursor::poll`: it reads a closed channel as `Dropped`, but every writer dropping
+		// after a finish aborts nothing, and with no writer left nothing ever will.
+		match ready!(self.cursor.state.poll(waiter, |state| abort(state))) {
+			Ok(err) => Poll::Ready(err),
+			Err(state) => abort(&state),
+		}
 	}
 
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
@@ -6513,6 +6514,20 @@ mod test {
 		assert!(matches!(handle.poll_aborted(&waiter), Poll::Ready(Error::Cancel)));
 		assert!(handle.cut_error().is_none());
 		assert!(!handle.fate().failed());
+		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	/// Every writer dropping after a finish aborts nothing, so a reader keeps its frames.
+	#[test]
+	fn writers_dropped_after_a_finish_abort_nothing() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		let mut consumer = producer.consume();
+		drop(producer.finish().unwrap());
+		let waiter = kio::Waiter::noop();
+
+		assert!(consumer.poll_aborted(&waiter).is_pending());
+		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 	}
 
