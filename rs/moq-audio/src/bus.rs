@@ -170,8 +170,25 @@ enum Queue {
 	Positioned(VecDeque<f32>),
 	/// A [`Positioned`] channel with a stretch bound, which plays onto the
 	/// positions its writes are due at. Filled under the mixer's lock, as a
-	/// positioned queue is. Boxed, as a live one is.
-	Stretched(Box<ring::Consumer>),
+	/// positioned queue is.
+	Stretched(Box<Stretching>),
+}
+
+/// A stretched channel's ring, whose frame clock runs `origin` behind the
+/// bus's positions.
+struct Stretching {
+	ring: ring::Consumer,
+	/// Moved whenever the channel runs dry, so the ring's clock stays within
+	/// its queued audio of the bus's however long the bus has run: the ring
+	/// holds that distance in 32 bits.
+	origin: u64,
+}
+
+impl Stretching {
+	/// Bus `position` on the ring's frame clock, which wraps.
+	fn clock(&self, position: u64) -> usize {
+		position.wrapping_sub(self.origin) as usize
+	}
 }
 
 impl Feed {
@@ -182,9 +199,9 @@ impl Feed {
 			Queue::Live(ring) => {
 				ring.read(output);
 			}
-			Queue::Stretched(ring) => {
-				// Positions wrap with the ring's frame clock, which both ends count.
-				ring.read_at_frame(output, position as usize, output.len() / channels);
+			Queue::Stretched(stretching) => {
+				let now = stretching.clock(position);
+				stretching.ring.read_at_frame(output, now, output.len() / channels);
 			}
 			Queue::Positioned(queue) => {
 				let queued = queue.len().min(output.len());
@@ -457,7 +474,8 @@ impl Bus {
 		cons.stretch(sample_rate);
 		// Writes land before the first advance, as an exact channel's do.
 		cons.start();
-		let port = self.open(input, strip, Queue::Stretched(Box::new(cons)))?;
+		let stretching = Stretching { ring: cons, origin: 0 };
+		let port = self.open(input, strip, Queue::Stretched(Box::new(stretching)))?;
 		Ok(Positioned {
 			port,
 			stretch: Some(Stretched {
@@ -1126,12 +1144,15 @@ impl Positioned {
 			.expect("an open channel keeps its feed");
 
 		if let Some(stretched) = &mut self.stretch {
-			let Queue::Stretched(cons) = &feed.queue else {
+			let Queue::Stretched(stretching) = &mut feed.queue else {
 				unreachable!("a stretched channel feeds a stretched queue");
 			};
 			// A dry channel plays silence until the write anyway, so it waits
-			// there exactly rather than playing early and slowing down.
-			let gap = if cons.available() == 0 {
+			// there exactly rather than playing early and slowing down. With
+			// nothing queued, the ring's clock restarts on the bus's here.
+			let dry = stretching.ring.available() == 0;
+			let gap = if dry {
+				stretching.origin = next.wrapping_sub(stretching.ring.consumed() as u64);
 				position.saturating_sub(next) as usize
 			} else {
 				0
@@ -1150,7 +1171,7 @@ impl Positioned {
 				silence -= samples;
 			}
 			let _ = stretched.prod.push(&pcm);
-			let due = position.wrapping_add(frames) as usize;
+			let due = stretching.clock(position.wrapping_add(frames));
 			stretched.prod.due_frame(due, stretched.bound, 0);
 			return Ok(());
 		}
@@ -2312,10 +2333,10 @@ mod tests {
 			.iter()
 			.find(|feed| feed.id == channel.port.id)
 			.unwrap();
-		let Queue::Stretched(cons) = &feed.queue else {
+		let Queue::Stretched(stretching) = &feed.queue else {
 			panic!("not stretched")
 		};
-		f(cons)
+		f(&stretching.ring)
 	}
 
 	/// How far `channel`'s audio trails the positions it was written at, whose
@@ -2440,6 +2461,33 @@ mod tests {
 		ready(&mut reader);
 		assert_eq!(stretched(&bus, &channel, |cons| cons.trimmed()), 9_600);
 		channel.write(next, &tone(0, 960)).unwrap();
+	}
+
+	/// A stretched channel plays its writes however long the bus ran before it
+	/// opened or sat idle, past the 12 hours its ring's clock spans.
+	#[test]
+	fn a_stretched_channel_plays_after_hours() {
+		const HOURS: u64 = 48_000 * 3_600 * 13;
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		bus.inner.mixer.lock().unwrap().position = HOURS;
+		let strip = Strip::default();
+		let mut channel = bus
+			.positioned(input(48_000, Layout::Stereo), strip.clone(), Duration::from_secs(2))
+			.unwrap();
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+
+		for _ in 0..2 {
+			let next = driver.position();
+			channel.write(next + 100, &tone(0, 960)).unwrap();
+			let left = mixed(&mut driver, &mut reader, &[BLOCK], 4_800);
+			assert_eq!(left.iter().position(|sample| *sample != 0.0), Some(100));
+			assert_eq!(left.iter().filter(|sample| **sample != 0.0).count(), 960);
+			// Idle as long again.
+			bus.inner.mixer.lock().unwrap().position += HOURS;
+		}
+		assert_eq!(stretched(&bus, &channel, |cons| cons.trimmed()), 0);
 	}
 
 	#[test]

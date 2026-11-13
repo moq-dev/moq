@@ -994,6 +994,13 @@ impl Consumer {
 		self.shared.read.store(true, Ordering::Relaxed);
 	}
 
+	/// Frames played or skipped so far, on the frame clock
+	/// [`read_at_frame`](Self::read_at_frame) counts: a writer that maps its
+	/// own clock onto this one lines `now` up with it while nothing is queued.
+	pub(crate) fn consumed(&self) -> usize {
+		self.consumed
+	}
+
 	/// Frames ready to read, or zero before the writer's first push.
 	pub(crate) fn available(&self) -> usize {
 		if !self.shared.pushed.load(Ordering::Relaxed) {
