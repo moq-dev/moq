@@ -3010,3 +3010,59 @@ test("integration: lite-07 resumes a group reset to make room without loss", asy
 		server.abort();
 	}
 });
+
+// Out of credit, a late group that ranks below the stream holding it waits for credit without
+// holding back a newer group that outranks that stream. Mirrors the Rust
+// `a_waiting_late_group_lets_a_newer_group_through`.
+for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
+	test(`integration: ${alpn} lets a newer group past a late one waiting for credit`, async () => {
+		using clock = manual();
+		const settled = async <T>(work: Promise<T>, what: string): Promise<T> => {
+			for (let i = 0; i < 100; i++) if (await settlesWithin(work, clock, Duration.millis(10))) return work;
+			throw new Error(`${what} never settled`);
+		};
+		const pair = qmuxPair(alpn, 1n);
+		await Promise.all([pair.client.ready, pair.server.ready]);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const broadcast = publish(origin, Path.from("live"));
+		const producer = broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null });
+		const remote = wireOf(client).consume(Path.from("live"));
+		const subscriber = remote
+			.track("0")
+			.subscribe({ order: "descending", delay: { max: Duration.millis(30_000) } });
+		try {
+			// Unfinished, so its stream holds the only credit.
+			// Each group stamped in sequence order, since the track checks a late group's start.
+			const at = (sequence: bigint) => Timestamp.fromMillis(1_000 + Number(sequence));
+			const held = producer.createGroup(2n);
+			held.writeFrame(textFrame("held", at(2n)));
+			expect((await settled(subscriber.recvGroup(), "the held group"))?.sequence).toBe(2n);
+
+			// Late and below the held stream: it waits for credit it cannot make room for.
+			const late = producer.createGroup(0n);
+			late.writeFrame(textFrame("late", at(0n)));
+			late.finish();
+
+			const newer = producer.createGroup(3n);
+			newer.writeFrame(textFrame("new", at(3n)));
+			newer.finish();
+			// lite-07 may fill the late group by a fetch first; only group 3 must not wait behind it.
+			for (;;) {
+				const group = await settled(subscriber.recvGroup(), "the newer group past the late one");
+				if (!group) throw new Error("the subscription ended");
+				if (group.sequence === 3n) break;
+				expect(group.sequence).toBe(0n);
+			}
+		} finally {
+			subscriber.close();
+			remote.close();
+			broadcast.close();
+			client.abort();
+			server.abort();
+		}
+	});
+}

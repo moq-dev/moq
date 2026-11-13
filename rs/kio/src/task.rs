@@ -330,6 +330,11 @@ impl<T> Tasks<T> {
 		self.len == 0
 	}
 
+	/// The tasks still running, in no particular order.
+	pub fn iter(&self) -> impl Iterator<Item = &T> {
+		self.children.iter().flatten().map(|occupant| &occupant.task)
+	}
+
 	/// Add a task, queued for its first poll.
 	///
 	/// Wakes the owner, so a task pushed between polls (from another arm of the

@@ -660,8 +660,8 @@ async fn a_healthy_goaway_hands_over_to_the_redirect() {
 	let peers = [(a.clone(), Peer::Serve), (b.clone(), Peer::Serve)];
 	let migrated = kio::clock::now();
 	drive(&mut machine, &peers, &mut run, |run| run.events.contains(&"retired")).await;
-	assert_eq!(run.dials, [a, b.clone()]);
-	assert_eq!(run.accepts[1], (b, migrated), "migrated without a backoff");
+	assert_eq!(run.dials, [a.clone(), b.clone()]);
+	assert_eq!(run.accepts[1], (b.clone(), migrated), "migrated without a backoff");
 	assert_eq!(
 		run.events,
 		["migrating", "retired"],
@@ -669,6 +669,19 @@ async fn a_healthy_goaway_hands_over_to_the_redirect() {
 	);
 	assert!(machine.predecessor().is_none());
 	assert!(machine.session().is_some());
+
+	// The redirect target dies and stays down: one failed dial drops it, and the next
+	// walk returns to the configured address, which still answers.
+	run.servers.clear();
+	let peers = [(a.clone(), Peer::Serve), (b.clone(), Peer::Fail(Verdict::Retry))];
+	drive(&mut machine, &peers, &mut run, |run| run.accepts.len() == 3).await;
+	assert_eq!(
+		&run.dials[2..],
+		[b, a.clone()],
+		"one failed dial to the dead target, then the configured one"
+	);
+	assert_eq!(run.accepts[2].0, a);
+	assert_eq!(machine.targets(), [a]);
 }
 
 /// Our handover window caps the peer's GOAWAY deadline, and a predecessor retiring while

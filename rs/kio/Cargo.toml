@@ -15,9 +15,9 @@ categories = ["asynchronous", "concurrency", "date-and-time", "development-tools
 [package.metadata.docs.rs]
 features = ["async", "runtime", "manual", "sim", "serde", "macros"]
 
-# The self dev-dependency below only enables features; no code names it.
+# Compile-fail fixtures are loaded by trybuild.
 [package.metadata.cargo-shear]
-ignored = ["kio"]
+ignored-paths = ["macros/tests/ui/*.rs"]
 
 [features]
 # Lean by default: without `runtime`, the clock compiles no host timer backend, and
