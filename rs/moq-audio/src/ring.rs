@@ -204,6 +204,7 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		refill: false,
 		prime: latency,
 		demand: 0,
+		heard: 0,
 		consumed: 0,
 		position: 0,
 		cleared: 0,
@@ -613,6 +614,9 @@ pub(crate) struct Consumer {
 	prime: usize,
 	/// Frames left in the device's callback as of the current read.
 	demand: usize,
+	/// Frames the device delays a read by before it sounds. Reads are placed
+	/// where they are heard, so the queue holds the target less this.
+	heard: usize,
 	consumed: usize,
 	/// Frames taken off the ring plus the comfort noise of each resume played
 	/// out: the writer's `written`, as far as the reader has reached.
@@ -653,6 +657,12 @@ impl Consumer {
 	pub(crate) fn stretch(&mut self, rate: u32) {
 		self.stretch = Some(Box::new(crate::stretch::Stretch::new(rate, self.channels)));
 		self.shared.stretch.store(true, Ordering::Relaxed);
+	}
+
+	/// Note that the device sounds what is read `frames` after the read, which
+	/// the target counts and the queue therefore does not hold.
+	pub(crate) fn heard(&mut self, frames: usize) {
+		self.heard = frames;
 	}
 
 	/// Fill `output` with queued interleaved frames, and silence past them.
@@ -732,7 +742,10 @@ impl Consumer {
 			.clocked
 			.load(Ordering::Acquire)
 			.then(|| self.shared.anchor.load(Ordering::Acquire));
+		// The target counts the device's delay, which the queue does not hold,
+		// though it still holds at least the callback being read.
 		let target = self.shared.target.load(Ordering::Relaxed);
+		let target = target.saturating_sub(self.heard).max(self.demand.min(target));
 		let level = self
 			.shared
 			.level

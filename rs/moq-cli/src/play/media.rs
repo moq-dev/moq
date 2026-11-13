@@ -27,10 +27,16 @@ enum Crossing {
 	Loss,
 }
 
-/// The floor on the speaker's buffer, whatever delay was asked for. The device
-/// pulls on a fixed clock, so a ring shallower than this drops out on ordinary
-/// network jitter, and one with no depth at all can never be read from.
+/// The depth a sink opens on, and its floor until the device reports its own
+/// latency, which replaces it. A ring with no depth at all can never be read
+/// from.
 const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
+
+/// How long the device's highest reported output latency holds. A host's report
+/// moves with where each callback lands, so the delay the clock holds for it
+/// follows the peak rather than every reading, and falls once a lower latency,
+/// as after a switch off a Bluetooth headset, has held this long.
+const OUTPUT_WINDOW: Duration = Duration::from_secs(5);
 
 /// How far past the latency it opened on the sink may be asked to hold. Its ring
 /// reaches three seconds past that latency, less a 30 ms processing window
@@ -610,6 +616,7 @@ async fn play_audio<O: Output>(
 	let arrived = tokio::sync::Notify::new();
 	let popped = tokio::sync::Notify::new();
 	let max_delay = consumer.max_delay();
+	let estimate = consumer.options().estimate;
 	let sample_rate = consumer.sample_rate();
 	let layout = consumer.layout();
 	let channels = layout.channels();
@@ -670,9 +677,16 @@ async fn play_audio<O: Output>(
 		}
 	};
 	steer(None);
-	// What the sink holds against jitter: the shared delay, floored at what the
-	// device needs and capped at what the sink was sized for.
-	let target = || schedule.delay().clamp(AUDIO_BUFFER_MIN, cap);
+	// What the sink holds: the shared delay, which counts the device's own
+	// latency, capped at what the sink was sized for and never below that latency.
+	let target = |sink: &<O::Speaker as Speaker>::Sink| {
+		schedule
+			.delay()
+			.min(cap)
+			.max(sink.output_latency().unwrap_or(AUDIO_BUFFER_MIN))
+	};
+	// The device's output latency the clock holds for.
+	let output = Mutex::new(Peak::default());
 	// Anchor the sink to the shared clock: the media written so far ends at
 	// `end`, and sounds when the clock says it is due. The callback stretches
 	// onto that clock, and skips only what trails it past the stretch, which
@@ -873,7 +887,7 @@ async fn play_audio<O: Output>(
 					// No write may come to carry a delay change, so the speaker follows it now.
 					_ = role.delay_changed(seen) => {
 						steer(wrote);
-						sink.set_latency(target())?;
+						sink.set_latency(target(&sink))?;
 						if let Some((_, end)) = wrote {
 							anchor(&mut sink, &mut anchored, end);
 						}
@@ -1009,9 +1023,16 @@ async fn play_audio<O: Output>(
 			// though the sink holds no more of it than its cap: the rest stays encoded.
 			// Capped as the catalog delay is, so a hostile advertised jitter cannot
 			// make playback retain media without bound.
-			let held = latency
-				.max(delay.max(AUDIO_BUFFER_MIN))
-				.min(moq_mux::container::DELAY_MAX);
+			// Audio is placed on the clock where it is heard, so the device's output
+			// latency is part of the delay video waits for too. A fixed delay is
+			// floored at it instead, since audio cannot sound any sooner.
+			let device = output.lock().unwrap().observe(sink.output_latency(), Instant::now());
+			let held = if estimate {
+				delay + device.unwrap_or_default()
+			} else {
+				delay.max(device.unwrap_or(AUDIO_BUFFER_MIN))
+			}
+			.min(moq_mux::container::DELAY_MAX);
 			*jitter.lock().unwrap() = Some(held);
 			moved |= role.set_target(capped(held, *stated.borrow()));
 			// The consumer releases media due further out than the sink holds only
@@ -1037,7 +1058,7 @@ async fn play_audio<O: Output>(
 			// Convergence is the callback's: it slows down when its buffer runs low and
 			// catches up with the clock once it holds more than its target, and only
 			// skips what trails the clock past what the subscription still delivers.
-			sink.set_latency(target())?;
+			sink.set_latency(target(&sink))?;
 
 			// The packet pays for the channel count; the catalog cannot allocate
 			// a duration's worth of silence before any samples arrive.
@@ -1094,6 +1115,35 @@ async fn play_audio<O: Output>(
 	let (_, sink) = tokio::try_join!(receive, play)?;
 	role.retire(Instant::now().checked_add(sink.buffered()));
 	Ok(sink)
+}
+
+/// The highest output latency the device reported within [`OUTPUT_WINDOW`].
+#[derive(Default)]
+struct Peak {
+	/// Each reading that no later one is at least as high as, oldest first, so
+	/// the front is the peak.
+	readings: VecDeque<(Instant, Duration)>,
+}
+
+impl Peak {
+	/// Fold in the latency the device reports now, if any, returning the peak.
+	fn observe(&mut self, latency: Option<Duration>, now: Instant) -> Option<Duration> {
+		if let Some(latency) = latency {
+			while self.readings.back().is_some_and(|&(_, last)| last <= latency) {
+				self.readings.pop_back();
+			}
+			self.readings.push_back((now, latency));
+		}
+		while self
+			.readings
+			.front()
+			.is_some_and(|&(at, _)| now.saturating_duration_since(at) > OUTPUT_WINDOW)
+			&& self.readings.len() > 1
+		{
+			self.readings.pop_front();
+		}
+		self.readings.front().map(|&(_, latency)| latency)
+	}
 }
 
 /// Play out what a retired sink still holds, instead of cutting the tail off

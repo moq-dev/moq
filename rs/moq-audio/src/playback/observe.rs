@@ -101,6 +101,9 @@ pub(super) struct Shared {
 	clock: AtomicU64,
 	/// [`Observation::latency`] in nanoseconds, or [`UNKNOWN`].
 	latency: AtomicU64,
+	/// The last buffer's duration at the device rate in nanoseconds: one
+	/// device period. Zero before the first.
+	period: AtomicU64,
 	quanta: AtomicU64,
 	quiet: AtomicU64,
 	/// [`Observation::comfort`] in nanoseconds.
@@ -143,6 +146,7 @@ impl Default for Shared {
 		Self {
 			clock: AtomicU64::new(0),
 			latency: AtomicU64::new(UNKNOWN),
+			period: AtomicU64::new(0),
 			quanta: AtomicU64::new(0),
 			quiet: AtomicU64::new(0),
 			comfort: AtomicU64::new(0),
@@ -168,6 +172,23 @@ impl Shared {
 	/// Route acknowledgements from the audio thread through `driver`.
 	pub(super) fn wake_with(&self, driver: Commands) {
 		let _ = self.driver.set(driver);
+	}
+
+	/// How long after a read the device sounds it, as the host last reported,
+	/// or `None` before a host has.
+	pub(super) fn delay(&self) -> Option<Duration> {
+		match self.latency.load(Ordering::Relaxed) {
+			UNKNOWN => None,
+			nanos => Some(Duration::from_nanos(nanos)),
+		}
+	}
+
+	/// The device's output latency: the host's delay plus one device period,
+	/// the most of a buffer that sounds after its read. `None` before a host
+	/// has reported a delay.
+	pub(super) fn output(&self) -> Option<Duration> {
+		let period = Duration::from_nanos(self.period.load(Ordering::Relaxed));
+		self.delay().map(|delay| delay + period)
 	}
 
 	/// Wake a [`Observer::finish`] whose measurement a callback or the last stream
@@ -344,10 +365,13 @@ impl Ledger {
 		}
 	}
 
-	/// The host's latency for the buffer being filled, if it reports one.
-	pub(super) fn latency(&self, latency: Option<Duration>) {
+	/// The host's latency for the buffer being filled, if it reports one, and
+	/// that buffer's length in frames.
+	pub(super) fn latency(&self, latency: Option<Duration>, frames: usize) {
 		let nanos = latency.map_or(UNKNOWN, |l| l.as_nanos().min(UNKNOWN as u128 - 1) as u64);
 		self.shared.latency.store(nanos, Ordering::Relaxed);
+		let period = (frames as f64 / self.rate * 1e9) as u64;
+		self.shared.period.store(period, Ordering::Relaxed);
 	}
 
 	/// Fold one mixed buffer in. `supplied` is how many of its leading frames
