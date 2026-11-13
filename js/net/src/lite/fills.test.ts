@@ -49,6 +49,7 @@ function recoveries() {
 		groups: Run;
 		priority: number;
 		finish(refused: Refused[]): void;
+		refuse(refused: Refused): void;
 		cancelled: boolean;
 		reading: boolean;
 	}[] = [];
@@ -57,10 +58,18 @@ function recoveries() {
 		const done = new Promise<Refused[]>((resolve) => {
 			finish = resolve;
 		});
-		const entry = { groups: { ...groups }, priority, finish, cancelled: false, reading: false };
+		const soFar: Refused[] = [];
+		const changed = new Signal(0);
+		const refuse = (refused: Refused) => {
+			soFar.push(refused);
+			changed.update((revision) => revision + 1);
+		};
+		const entry = { groups: { ...groups }, priority, finish, refuse, cancelled: false, reading: false };
 		opened.push(entry);
 		return {
 			done,
+			refused: () => soFar,
+			changed,
 			reading: () => entry.reading,
 			cancel: () => {
 				entry.cancelled = true;
@@ -330,6 +339,32 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 	again.close();
 	later.close();
 	requests.close();
+	fills.close();
+	peer.close();
+});
+
+// A recovery still out answers the fills owing what it already refused, rather than holding them
+// until its other streams finish.
+test("range fills: a recovery's refusal answers before it is over", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+	peer.fill.accept(0n).finish();
+	fills.poll(tail, true);
+	expect(peer.fill.wanted()).toBe(1n);
+
+	// Group 1 is refused while group 2's stream is still out.
+	const woken = fills.changed(tail);
+	opened[0]?.refuse({ start: 1n, end: 2n, refusal: dropped(new StreamError(StreamCode.NotFound)) });
+	await woken;
+	fills.poll(tail, true);
+	expect(peer.fill.wanted()).toBe(2n);
+
 	fills.close();
 	peer.close();
 });

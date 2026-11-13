@@ -287,6 +287,13 @@ impl RangeFills {
 				self.refused.insert(groups.clone(), refusal.clone());
 			}
 		}
+		// What a recovery still out already refused answers the fills owing it now, rather than
+		// waiting on its other streams.
+		for recovery in &self.recoveries {
+			for (groups, refusal) in recovery.refused.iter() {
+				self.refused.insert(groups.clone(), refusal.clone());
+			}
+		}
 
 		let mut ask = FillAsk::default();
 		// Every run a held fill still owes, recovered or not.

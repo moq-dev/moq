@@ -1,7 +1,7 @@
 // Fills a lite-07 copy asks of its upstream through a subscription rather than FETCH. Mirrors the
 // Rust `lite/subscriber/fills.rs`.
 
-import { type GetPromise, race, Signal } from "@moq/signals";
+import { type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "../error.ts";
 import { fillChanged, wantedRuns } from "../fill.ts";
 import { hooks, insertRun, type Run, removeRun, runGaps } from "../internal.ts";
@@ -53,6 +53,10 @@ export function refuseRun(runs: readonly Refused[], start: bigint, end: bigint, 
 export interface RecoveryHandle {
 	/** Resolves once it is over, with the groups it refused. */
 	done: Promise<Refused[]>;
+	/** The groups it refused so far, which answer the fills owing them before it is over. */
+	refused(): readonly Refused[];
+	/** Bumped each time {@link refused} grows. */
+	readonly changed: Getter<number>;
 	/** Whether a stream of it is still being read, which cancelling would cut. */
 	reading(): boolean;
 	/** Stop asking: what is left is refused. */
@@ -222,6 +226,11 @@ export class RangeFills {
 			this.#recovering = removeRun(this.#recovering, done.groups.start, done.groups.end);
 			for (const refused of done.refused) this.#setRefused(refused.start, refused.end, refused.refusal);
 		}
+		// What a recovery still out already refused answers the fills owing it now, rather than
+		// waiting on its other streams.
+		for (const recovery of this.#recoveries)
+			for (const refused of recovery.handle.refused())
+				this.#setRefused(refused.start, refused.end, refused.refusal);
 
 		const ask: FillAsk = { groups: [], priority: NO_PRIORITY };
 		// Every run a held fill still owes, recovered or not.
@@ -313,7 +322,13 @@ export class RangeFills {
 
 	/** Resolves once any input {@link poll} reads may have changed. */
 	changed(tail: Tail): Promise<unknown> {
-		const wakes: unknown[] = [Signal.race(this.#bumped, tail.changed)];
+		const wakes: unknown[] = [
+			Signal.race(
+				this.#bumped,
+				tail.changed,
+				...[...this.#recoveries].map((recovery) => recovery.handle.changed),
+			),
+		];
 		for (const fill of this.#held) wakes.push(fillChanged(fill));
 		for (const closed of this.#reading.values()) wakes.push(closed);
 		return race(wakes);

@@ -2627,11 +2627,13 @@ export class Subscriber {
 			left.signal.addEventListener("abort", () => resolve(), { once: true }),
 		);
 		let refused: Refused[] = [];
+		const changed = new Signal(0);
 		// What the publisher gives up of the groups, accounted for in the tail. The latest verdict on a
 		// group replaces any earlier one, so a peer repeating its drops grows nothing.
 		const giveUp = (start: bigint, end: bigint, refusal: Refusal) => {
 			entry.tail.account(start, end);
 			refused = refuseRun(refused, max(start, groups.start), min(end, groups.end), refusal);
+			changed.update((revision) => revision + 1);
 		};
 		this.#subscribes.set(id, entry);
 		const done = (async () => {
@@ -2702,7 +2704,7 @@ export class Subscriber {
 			for (const gap of unanswered) refused.push({ ...gap, refusal: passing(failed) });
 			return refused;
 		})();
-		return { done, reading: () => entry.tail.reading, cancel: () => left.abort() };
+		return { done, refused: () => refused, changed, reading: () => entry.tail.reading, cancel: () => left.abort() };
 	}
 
 	// Read a recovery's responses to the publisher's FIN, giving up what it names it will not
