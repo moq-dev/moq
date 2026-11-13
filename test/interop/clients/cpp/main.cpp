@@ -310,7 +310,11 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.delay = moq::Delay{std::chrono::nanoseconds(0), MAX_DELAY};
+    // moq-audio waits on a missing group for its playout delay, measured from arrival timing at
+    // tens of ms, so a runtime starved longer than that skips a group that is only late. This
+    // reader checks delivery between implementations, not a real-time deadline: it holds a playout
+    // delay of the max delay, waiting on a hole for the same budget it grants a late group.
+    output.delay = moq::Delay{MAX_DELAY, MAX_DELAY};
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");

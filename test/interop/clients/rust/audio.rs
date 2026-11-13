@@ -100,7 +100,12 @@ async fn decode(
 	// runtime starved by the others can fall a second behind. That is this reader's speed, not the
 	// delivery under test. A track's max-age caps it, so interop.sh's Rust publisher keeps its
 	// media at least this long.
+	// moq-audio waits on a missing group for its playout delay, measured from arrival timing at tens
+	// of ms, so a runtime starved longer than that skips a group that is only late. This reader
+	// checks delivery between implementations, not a real-time deadline: it holds a playout delay of
+	// the max delay, waiting on a hole for the same budget it grants a late group.
 	options.delay.max = Some(Duration::from_secs(5));
+	options.delay.min = options.delay.max;
 	let mut decoder = moq_audio::decode::Consumer::new(&rendition, audio, name, options).await?;
 	let rate = decoder.sample_rate();
 	let channels = decoder.layout().channels();

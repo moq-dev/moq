@@ -65,10 +65,17 @@ away, landed in #8611): a missing group is no longer aged out by the shorter
 wait. `aged` now measures against the max delay in Rust and JS alike, so only
 wall time past the wait (`elapsed`) or a max-delay span skips a hole.
 
-Still reproduces (2nd of 2 runs at `CPUQuota=50%` after part 1), now by wall
-time: `skipping missing groups old=14 new=15 ... elapsed=true aged=false`,
-then `audio gap after 4488 samples, at 1171866us for 40000us`. A subscriber
-starved for longer than its playout wait (tens of ms at `Delay.min` 0) doesn't
-take in the missing group's stream before the wait expires. That is the right
-call for a real-time player, so what remains is how the interop subscribers
-should read: see #8611's `## Waiting`.
+Still reproduced after part 1 (2nd of 2 runs at `CPUQuota=50%`), now by wall
+time: `skipping missing groups old=14 new=15 ... elapsed=true aged=false`. A
+subscriber starved longer than its playout wait (tens of ms at `Delay.min` 0)
+skips a group that is only late, which is right for a real-time player.
+
+Fix, part 2 (decided 2026-11-13 by the coordinator while the maintainer was
+away): the moq-audio interop readers (cpp, go, python, rust, c) hold a
+playout delay equal to their existing 5 s max delay, so they wait on a hole as
+long as they wait on a late group, as js-native's container reader already
+does. Afterwards 6 of 6 runs at `CPUQuota=50%` passed.
+
+Reproducing: export `RUST_LOG=warn,moq_mux=debug`, never a bare
+`moq_mux=debug`, which drops the clients' warnings and fails the
+denied-publisher check on its own.
