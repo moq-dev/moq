@@ -1556,6 +1556,101 @@ test("a yielded group a drop named ends", async () => {
 	}
 });
 
+// Lite-07: a stale drop that overtook the YIELDED reset of the stream it names holds only under the
+// update it names: once the subscriber sends another, the reset pauses the group, which the
+// publisher then continues or drops again. Mirrors the Rust
+// `a_yielded_group_pauses_once_an_update_supersedes_its_stale_drop`.
+test("a yielded group pauses once an update supersedes its stale drop", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: Duration.millis(60_000) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+
+		const first = handStream(version);
+		first.write(await liteFrame(300, new Uint8Array([1])));
+		const yielded = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
+		const group = await track.recvGroup();
+		expect(group?.sequence).toBe(3n);
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+
+		await respond(request, version, [{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.Old }) }]);
+		await drainReactions();
+		track.update({ priority: 1, delay: { max: Duration.millis(60_000) } });
+		await drainReactions();
+		first.reset(StreamCode.Yielded);
+		await yielded;
+		await drainReactions();
+
+		expect(group?.closed.peek()).toBeUndefined();
+		// The continuation picks the group up where the reset left it.
+		const second = handStream(version);
+		second.write(await liteFrame(10, new Uint8Array([2])));
+		second.finish();
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n, frameStart: 1 }), second.reader);
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
+		expect(await group?.readFrame()).toBeUndefined();
+	} finally {
+		track.close();
+		subscriber.close();
+	}
+});
+
+// Lite-07: a stale drop that overtook the header of the stream it names holds only under the update
+// it names: once the subscriber sends another, a YIELDED reset of that stream pauses the group.
+// Mirrors the Rust `a_yielded_group_pauses_once_an_update_supersedes_a_stale_drop_before_its_header`.
+test("a yielded group pauses once an update supersedes a stale drop before its header", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: Duration.millis(60_000) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+
+		await respond(request, version, [{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.Old }) }]);
+		await drainReactions();
+		const first = handStream(version);
+		first.write(await liteFrame(300, new Uint8Array([1])));
+		const yielded = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
+		const group = await track.recvGroup();
+		expect(group?.sequence).toBe(3n);
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+
+		track.update({ priority: 1, delay: { max: Duration.millis(60_000) } });
+		await drainReactions();
+		first.reset(StreamCode.Yielded);
+		await yielded;
+		await drainReactions();
+
+		expect(group?.closed.peek()).toBeUndefined();
+		// The continuation picks the group up where the reset left it.
+		const second = handStream(version);
+		second.write(await liteFrame(10, new Uint8Array([2])));
+		second.finish();
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n, frameStart: 1 }), second.reader);
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
+		expect(await group?.readFrame()).toBeUndefined();
+	} finally {
+		track.close();
+		subscriber.close();
+	}
+});
+
 // Lite-07: a malformed FRAME on a Group Stream ends only that stream and its group, never the
 // session: a Payload Length of 0, or a continuation that resends the cut frame at another size, ends
 // before completing it, or starts past the frames held. Mirrors the Rust `UniState::Group`.

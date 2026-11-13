@@ -268,10 +268,30 @@ interface PausedGroup {
 
 // Whether a YIELDED reset of a stream being read pauses its group.
 interface Yielding {
-	// The publisher still owed the group when the stream arrived: no drop named it first.
-	owed: boolean;
-	// The error a drop named the group with while the stream was read.
-	dropped?: Error;
+	verdict: YieldVerdict;
+}
+
+// Stale drops expire on the next update. An already accounted header stays accounted.
+type YieldVerdict =
+	| { kind: "owed" }
+	| { kind: "accounted" }
+	| { kind: "stale"; under: bigint; error: Error }
+	| { kind: "accounted-stale"; under: bigint; error: Error }
+	| { kind: "dropped"; error: Error };
+
+function yieldError(verdict: YieldVerdict, update: bigint): Error | undefined {
+	switch (verdict.kind) {
+		case "owed":
+			return undefined;
+		case "accounted":
+			return new StreamError(StreamCode.Old);
+		case "stale":
+			return verdict.under < update ? undefined : verdict.error;
+		case "accounted-stale":
+			return verdict.under < update ? new StreamError(StreamCode.Old) : verdict.error;
+		case "dropped":
+			return verdict.error;
+	}
 }
 
 // The paused groups of `entry`, created on first use.
@@ -2936,7 +2956,7 @@ export class Subscriber {
 				const overtaken = stale ? entry.tail.overtaken(start, end) : [];
 				entry.tail.account(start, end);
 				// A paused group the drop names ends there: no continuation follows.
-				this.#dropPaused(entry, start, end, error);
+				this.#dropPaused(entry, start, end, error, stale ? update : undefined);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
@@ -3249,6 +3269,12 @@ export class Subscriber {
 		const yields = hasYield(this.version);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.sequence, group.sequence + 1n);
+		// A stale drop that overtook this stream: the next update supersedes that verdict, so a
+		// YIELDED reset after it pauses the group.
+		const unowedUnder =
+			!owed && entry.stale?.some((run) => run.start <= group.sequence && group.sequence < run.end)
+				? entry.update
+				: undefined;
 		let producer: netGroup.Producer | undefined;
 		let ingest: Ingest | undefined;
 		let yielding: Yielding | undefined;
@@ -3296,7 +3322,13 @@ export class Subscriber {
 			});
 			if (yields) {
 				ingest ??= { index: group.frameStart };
-				yielding = { owed };
+				yielding = {
+					verdict: owed
+						? { kind: "owed" }
+						: unowedUnder !== undefined
+							? { kind: "stale", under: unowedUnder, error: new StreamError(StreamCode.Old) }
+							: { kind: "accounted" },
+				};
 				entry.yielding ??= new Map();
 				entry.yielding.set(group.sequence, yielding);
 			}
@@ -3325,7 +3357,8 @@ export class Subscriber {
 				this.#endYielding(entry, group.sequence, yielding);
 				// A drop named the group first: the publisher gave it up, so nothing continues it. One
 				// that overtook the stream's header carried a stale verdict.
-				const given = yielding.dropped ?? (yielding.owed ? undefined : new StreamError(StreamCode.Old));
+				// A stale drop an update sent since superseded no longer ends the group.
+				const given = yieldError(yielding.verdict, entry.update);
 				if (given) {
 					producer.abort(given);
 					return;
@@ -3390,12 +3423,24 @@ export class Subscriber {
 		if (entry.yielding?.get(sequence) === yielding) entry.yielding.delete(sequence);
 	}
 
-	// A SUBSCRIBE_DROP named `[start, end)` with `error`: a paused group ends there, and one a stream
-	// is reading ends with it if a YIELDED reset would otherwise pause it, since no continuation
-	// follows. Mirrors the Rust `TrackEntry::dropped`.
-	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error): void {
+	// A SUBSCRIBE_DROP named `[start, end)` with `error`, under update `staleUnder` when it is a
+	// lite-07 stale verdict: a paused group ends there, and one a stream is reading ends with it if
+	// a YIELDED reset would otherwise pause it, since no continuation follows, unless an update
+	// supersedes a stale drop first. Mirrors the Rust `TrackEntry::dropped`.
+	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error, staleUnder?: bigint): void {
 		for (const [sequence, yielding] of entry.yielding ?? []) {
-			if (sequence >= start && sequence < end) yielding.dropped = error;
+			if (sequence < start || sequence >= end) continue;
+			const verdict = yielding.verdict;
+			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
+			else if (verdict.kind !== "dropped")
+				yielding.verdict = {
+					kind:
+						verdict.kind === "accounted" || verdict.kind === "accounted-stale"
+							? "accounted-stale"
+							: "stale",
+					under: staleUnder,
+					error,
+				};
 		}
 		const paused = entry.paused;
 		if (!paused) return;
