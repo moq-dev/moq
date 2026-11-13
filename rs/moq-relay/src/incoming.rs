@@ -254,4 +254,3 @@ impl Sealed for Accepted {
 		Ok(())
 	}
 }
-

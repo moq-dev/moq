@@ -2240,7 +2240,10 @@ mod tests {
 	#[test]
 	fn expired_polls_outside_a_runtime() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
-		let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
 		let admission = moq_net::server::Admission::default();
 		let (mut request, _client) = runtime.block_on(async {
 			let (client, server) = session_pair().await;
