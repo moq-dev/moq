@@ -9,6 +9,8 @@ and a subscription ends once its groups are accounted for.
 
 ## Plan
 
+Decided 2026-11-13 (maintainer, the pick round for [moq-dev/moq#8652](https://github.com/moq-dev/moq/pull/8652)): ✅ keep this follow-up (rejected: drop it and leave the harness a manual recipe).
+
 [moq-dev/moq#8652](https://github.com/moq-dev/moq/pull/8652)'s harness found
 two rare failures, both where a relay's reset of a tab's group stream meets the
 browser. Heavy logging in the page hides them, so reproduce with the harness as
