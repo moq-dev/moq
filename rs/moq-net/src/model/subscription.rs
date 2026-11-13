@@ -275,6 +275,7 @@ impl Range {
 	/// The range from group `start` up to the exclusive group `end`, or onward for `None`:
 	/// what a legacy wire's bounds become. `None` when it holds nothing, which an exclusive
 	/// end of 0 says whatever the start.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn span(start: Option<u64>, end: Option<u64>) -> Option<Self> {
 		let end = match end {
 			Some(end) => Some(Anchor::Time(end.checked_sub(1)?)),
