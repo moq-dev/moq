@@ -1517,7 +1517,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				.filter_map(|key| {
 					let route = self.routes.get(&key)?;
 					let offer = route.offer()?;
-					if usable && (names(&offer.path, hop) || self.sessions[&peer].link.upstream && offer.down_only) {
+					if self.sessions[&peer].link.upstream && offer.down_only || usable && names(&offer.path, hop) {
 						return None;
 					}
 					let session = route.next().and_then(|next| self.sessions.get(&next));
@@ -1533,6 +1533,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		};
 		best(true)
 			.or_else(|| best(false))
+			.or_else(|| covering().find(|key| self.routes.get(key).is_some_and(|route| !route.live())))
 			.or_else(|| covering().find(|key| self.routes.contains_key(key)))
 			.map_or_else(|| prefix.clone(), |(_, prefix)| prefix)
 	}

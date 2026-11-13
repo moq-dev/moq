@@ -920,3 +920,64 @@ fn replacing_a_childs_interest_keeps_the_hold_until_its_answer() {
 		assert!(router.events().iter().all(|event| event.kind == Kind::Available));
 	}
 }
+
+/// An unusable covering path must not replace a narrow hold on an upstream
+/// stream: the child still owes an answer about the path it learned here.
+#[test]
+fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
+	for (live, held) in [("", "a"), ("a", "")] {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		for peer in [1, 2, 3] {
+			router
+				.connect(
+					peer,
+					peer as Id,
+					Link {
+						upstream: peer != 2,
+						..Link::default()
+					},
+				)
+				.unwrap();
+		}
+		router.route(1, 7, p(live), Some(offered(1, 0)), 0);
+		router.batch(1, 7, p(live), vec![(p("a/x"), Some(1))], Some(1), 0);
+		let path::Reach::Finite(mut offer) = offered(2, 0) else {
+			unreachable!()
+		};
+		offer.metric = 2;
+		router.route(2, 7, p(held), Some(path::Reach::Finite(offer)), 0);
+		router.batch(2, 7, p(held), vec![(p("a/x"), Some(1))], Some(1), 0);
+		router.peer_interest(3, Some(p("a"))).unwrap();
+		let path::Reach::Finite(mut child) = offered(3, 0) else {
+			unreachable!()
+		};
+		child.path = [
+			path::Hop { node: 7, session: 0 },
+			path::Hop { node: 2, session: 1 },
+			path::Hop { node: 99, session: 2 },
+			path::Hop { node: 3, session: 1 },
+		]
+		.into();
+		router.route(3, 7, p("a"), Some(path::Reach::Finite(child)), 0);
+		router.drain();
+		router.disconnect([2], Instant::now());
+		let messages = router.drain();
+		assert!(
+			router
+				.routes(7)
+				.any(|(prefix, route)| *prefix == p(held) && route.offer().is_none()),
+			"keep {held:?} while its child answers: {messages:?}"
+		);
+		assert!(
+			messages
+				.iter()
+				.any(|msg| matches!(msg, path::Out::Dead { to: 3, dead } if !dead.gone)),
+			"the child must hear a hold, not an end: {messages:?}"
+		);
+		assert!(
+			!messages
+				.iter()
+				.any(|msg| matches!(msg, path::Out::Route { to: 3, reach: None, .. }))
+		);
+	}
+}
