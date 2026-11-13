@@ -27,7 +27,7 @@
 (* each opening is a new session with a new hop. A claim's attributes are  *)
 (* the revision that last set them.                                        *)
 (***************************************************************************)
-EXTENDS Integers, Sequences, FiniteSets
+EXTENDS Integers, Sequences, FiniteSets, FiniteSetsExt
 
 CONSTANTS
     Nodes,        \* relays and the publisher; ordered as `select` breaks ties
@@ -377,10 +377,9 @@ Update(n, s0, ov, ups, gens, eb, rep, quiet) ==
 \* queued toward it. Dropping them changes no behaviour; `Budget` still counts them.
 Heeded(d, m) == d[2] # Origin
 
-\* The sum of f(x) over the finite set S.
-SumOver(S, f(_)) ==
-    LET F[T \in SUBSET S] == IF T = {} THEN 0 ELSE LET x == CHOOSE x \in T : TRUE IN f(x) + F[T \ {x}]
-    IN F[S]
+\* The sum of f(x) for each x in the finite set S.
+\* FoldSet runs natively through the Community Modules' Java override.
+SumOver(S, f(_)) == FoldSet(LAMBDA x, acc : f(x) + acc, 0, S)
 
 \* Commit the updates `rs` (a function from nodes to `Update` results), appending
 \* each node's messages to `q0`. Nodes in one step send on disjoint queues.
