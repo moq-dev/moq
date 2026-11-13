@@ -329,11 +329,15 @@ impl Client {
 		let quic = self.quic.as_ref().is_some_and(|quic| !quic.is_closed());
 		#[cfg(not(feature = "quic"))]
 		let quic = false;
+		#[cfg(feature = "websocket")]
+		let websocket = self.websocket.resolve().enabled;
+		#[cfg(not(feature = "websocket"))]
+		let websocket = false;
 		match scheme {
 			"tcp" | "tls" => cfg!(feature = "tcp"),
 			"unix" => cfg!(all(feature = "uds", unix)),
-			"ws" | "wss" => cfg!(feature = "websocket"),
-			"http" | "https" => quic || cfg!(feature = "websocket"),
+			"ws" | "wss" => websocket,
+			"http" | "https" => quic || websocket,
 			"moqt" | "moql" => quic,
 			_ => false,
 		}

@@ -371,20 +371,21 @@ Connected ==
           ELSE UNCHANGED <<phase, live, watch, queue, probe>>
     /\ UNCHANGED <<pred, target, timer, dialTo, probing, misdials>>
 
-\* A dial failed, with a verdict a retry may repair or one it cannot. Until a
-\* session has been established, any failure ends the policy.
+\* A dial failed. Once a session has been established, every failure retries
+\* whatever its error (an unusable address is out of scope); until then, any
+\* failure ends the policy.
 Failed ==
     /\ dial # "none"
     /\ dial' = "none"
     /\ IF phase # "dialing"
        THEN UNCHANGED <<phase, live, pred, queue, timer, callerVars>>
-       ELSE \/ /\ Established
-               /\ phase' = "backoff"
-               /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
-               /\ UNCHANGED <<live, pred, queue, callerVars>>
-            \/ /\ Done
-               /\ Emit(Append(queue, "Done"), None)
-               /\ UNCHANGED timer
+       ELSE IF Established
+            THEN /\ phase' = "backoff"
+                 /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+                 /\ UNCHANGED <<live, pred, queue, callerVars>>
+            ELSE /\ Done
+                 /\ Emit(Append(queue, "Done"), None)
+                 /\ UNCHANGED timer
     /\ UNCHANGED <<watch, probe, target, sess, used, dialTo, misdials>>
 
 \* `Reconnect::probed`, and the dial `run` makes of a probe that got through.
