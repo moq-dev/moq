@@ -1840,7 +1840,7 @@ mod test {
 
 		// Create the track before any consumer exists.
 		let track1 = producer.assert_create_track("track1", crate::track::Info::timed());
-		track1.append_next().unwrap().finish().unwrap();
+		track1.append_next().unwrap().close().unwrap();
 
 		let consumer = producer.consume();
 
@@ -1854,7 +1854,7 @@ mod test {
 		let mut track2_consumer = consumer2.track("track2").unwrap().subscribe(None).await.unwrap();
 		track2_consumer.assert_no_group();
 
-		track2.append_next().unwrap().finish().unwrap();
+		track2.append_next().unwrap().close().unwrap();
 
 		track2_consumer.assert_group();
 	}
@@ -1942,7 +1942,7 @@ mod test {
 		track3.subscribe(None).assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
-		track3.append_next().unwrap().finish().unwrap();
+		track3.append_next().unwrap().close().unwrap();
 		track1.assert_group();
 		track2.assert_group();
 
@@ -1968,7 +1968,7 @@ mod test {
 		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
-		producer1.append_next().unwrap().finish().unwrap();
+		producer1.append_next().unwrap().close().unwrap();
 		let producer1 = producer1.finish().unwrap();
 		drop(producer1);
 
@@ -1986,7 +1986,7 @@ mod test {
 		producer2
 			.create_group(crate::group::Info { start: 1 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		track2.assert_group();
 	}
@@ -2005,7 +2005,7 @@ mod test {
 		let first = dynamic.assert_request().accept(crate::track::Info::timed());
 		let mut group = first.create_group(crate::group::Info { start: 8 }).unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let first = first.finish().unwrap();
 		drop((first, track));
 
@@ -2030,7 +2030,7 @@ mod test {
 		for i in 0..1000 {
 			let track = consumer.track(&format!("requested/{i}")).unwrap().subscribe(None);
 			let served = dynamic.assert_request().accept(crate::track::Info::timed());
-			served.append_next().unwrap().finish().unwrap();
+			served.append_next().unwrap().close().unwrap();
 			drop((served, track));
 
 			let track = consumer.track(&format!("refused/{i}")).unwrap().subscribe(None);
@@ -2039,7 +2039,7 @@ mod test {
 			let created = producer
 				.create_track(format!("created/{i}"), crate::track::Info::timed())
 				.unwrap();
-			created.append_next().unwrap().finish().unwrap();
+			created.append_next().unwrap().close().unwrap();
 		}
 		let state = producer.state.lock();
 		assert!(state.tracks.len() < 16, "{} names retained", state.tracks.len());
@@ -2114,7 +2114,7 @@ mod test {
 		let mut sub = subscribing.await.expect("fulfilled by create_track");
 
 		// The fulfilled subscription is live against this very producer.
-		track.append_next().unwrap().finish().unwrap();
+		track.append_next().unwrap().close().unwrap();
 		sub.recv_group().await.expect("recv").expect("group");
 
 		// The handler never sees the request; a fresh subscribe reuses the track.
@@ -2239,7 +2239,7 @@ mod test {
 		assert!(matches!(queued.await, Err(Error::Unroutable)));
 		assert!(matches!(consumer.track("later"), Err(Error::Unroutable)));
 
-		served.append_next().unwrap().finish().unwrap();
+		served.append_next().unwrap().close().unwrap();
 		accepted.assert_group();
 	}
 
@@ -2307,7 +2307,7 @@ mod test {
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();
 		let group = fetch.accept(crate::track::Info::timed()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		pending_fetch.await.unwrap();
 
 		let mut subscriber = track.subscribe(None).await.unwrap();
@@ -2383,7 +2383,7 @@ mod test {
 		producer.close();
 		assert!(matches!(consumer.track("track1"), Err(Error::Unroutable)));
 
-		track.append_next().unwrap().finish().unwrap();
+		track.append_next().unwrap().close().unwrap();
 		subscriber.assert_group();
 		let _track = track.finish().unwrap();
 	}
@@ -2468,7 +2468,7 @@ mod test {
 		assert!(!track.is_closed());
 		let mut subscriber = viewer.await.unwrap();
 		subscriber.assert_no_group();
-		track.append_next().unwrap().finish().unwrap();
+		track.append_next().unwrap().close().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
 
 		// Once the viewer really leaves, the same teardown commits, and the lookup

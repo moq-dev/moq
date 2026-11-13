@@ -1670,7 +1670,7 @@ mod tests {
 				track
 					.create_group(crate::group::Info { start: key })
 					.unwrap()
-					.finish()
+					.close()
 					.unwrap();
 			}
 			let requests = handled.then(|| track.requests());
@@ -1731,7 +1731,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.finish()
+				.close()
 				.unwrap();
 		}
 		track.start_at(3).unwrap();
@@ -1805,7 +1805,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 2 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		let state = track.state.read();
 		assert!(state.drops.is_empty(), "recreation removed the last drop run");
@@ -1876,7 +1876,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.finish()
+				.close()
 				.unwrap();
 		}
 		track.start_at(3).unwrap();
@@ -1953,7 +1953,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.finish()
+				.close()
 				.unwrap();
 		}
 		let mut misses = Misses::default();
@@ -2004,7 +2004,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 1 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		let state = track.state.read();
 		assert!(
@@ -2090,7 +2090,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.finish()
+				.close()
 				.unwrap();
 		}
 		let mut misses = Misses::default();
@@ -2148,7 +2148,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 4 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		let state = track.state.read();
 		let opened = state.cache.pool().now_wall();
@@ -2354,7 +2354,7 @@ mod tests {
 				track
 					.create_group(crate::group::Info { start: key })
 					.unwrap()
-					.finish()
+					.close()
 					.unwrap();
 			}
 			if next(2) == 0 {
@@ -2455,7 +2455,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 8 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		// Four groups below where the feed starts, each a fill of its own.
 		let ranges = [0..1, 2..3, 4..5, 6..7].map(crate::track::Range::groups);
@@ -2530,7 +2530,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 8 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		let track = track.finish().unwrap();
 		// Group 0 lies below where the feed starts: only a fill may deliver it.

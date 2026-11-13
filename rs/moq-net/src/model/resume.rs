@@ -2700,7 +2700,7 @@ mod test {
 			let mut sub = subscribe(if routed { &logical } else { &source }, HOUR);
 			let mut history = source.create_group(group::Info { start: 0 }).unwrap();
 			history.write_frame(ts(0), b"history".as_ref()).unwrap();
-			history.finish().unwrap();
+			history.close().unwrap();
 			let mut finished = recv(&mut sub);
 			let mut live = source.create_group(group::Info { start: 1 }).unwrap();
 			live.write_frame(ts(1), b"live".as_ref()).unwrap();
@@ -2759,7 +2759,7 @@ mod test {
 			let dynamic = b.requests();
 			let mut newer = b.create_group(group::Info { start: 1 }).unwrap();
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
-			newer.finish().unwrap();
+			newer.close().unwrap();
 			routes.serve(b.consume());
 			open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
 				.unwrap();
@@ -2779,7 +2779,7 @@ mod test {
 				let mut late = b.create_group(group::Info { start: 0 }).unwrap();
 				late.write_frame(ts(0), b"first".as_ref()).unwrap();
 				late.write_frame(ts(1), b"continued".as_ref()).unwrap();
-				late.finish().unwrap();
+				late.close().unwrap();
 				assert_eq!(read(&mut held), Some(b"continued".to_vec()));
 				assert_eq!(read(&mut held), None);
 			} else {
@@ -2819,7 +2819,7 @@ mod test {
 			let dynamic = b.requests();
 			let mut newer = b.create_group(group::Info { start: 1 }).unwrap();
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
-			newer.finish().unwrap();
+			newer.close().unwrap();
 			routes.serve(b.consume());
 			open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
 				.unwrap();
@@ -2854,7 +2854,7 @@ mod test {
 			let mut late = b.create_group(group::Info { start: 0 }).unwrap();
 			late.write_frame(ts(0), b"first".as_ref()).unwrap();
 			late.write_frame(ts(1), b"continued".as_ref()).unwrap();
-			late.finish().unwrap();
+			late.close().unwrap();
 			assert_eq!(
 				read(&mut patient_held),
 				Some(b"continued".to_vec()),
@@ -3016,7 +3016,7 @@ mod test {
 		for frame in 1..4 {
 			group.write_frame(ts(frame), b"x".as_ref()).unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert_eq!(read(&mut reading), Some(b"x".to_vec()));
 		assert_eq!(read(&mut reading), Some(b"x".to_vec()));
 		assert_eq!(read(&mut reading), None);
@@ -3076,12 +3076,12 @@ mod test {
 
 	#[kio::test]
 	async fn a_returning_route_keeps_its_relative_end() {
-		returning_route(Anchor::Relative(991)).await;
+		returning_route(Anchor::Relative(2)).await;
 	}
 
 	#[kio::test]
 	async fn a_returning_route_keeps_its_resolved_time_end() {
-		returning_route(Anchor::Time(ts(10))).await;
+		returning_route(Anchor::Time(10)).await;
 	}
 
 	/// Its old cap bounds a replaced copy's wire, not the reader's resolved end. Reusing
@@ -3099,7 +3099,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: Anchor::Absolute(2),
+				start: Anchor::Time(2),
 				end: Some(end),
 			}]);
 		let mut sub = logical
@@ -3198,7 +3198,7 @@ mod test {
 		let mut warm = source.create_group(group::Info { start: 2 }).unwrap();
 		warm.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"2-0".as_ref())
 			.unwrap();
-		warm.finish().unwrap();
+		warm.close().unwrap();
 		routes.serve(source.consume());
 		assert!(resumed.is_live(), "a serving live copy is live");
 
@@ -3223,7 +3223,7 @@ mod test {
 
 		let mut group = a.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -3255,7 +3255,7 @@ mod test {
 		routes.serve(b.consume());
 
 		assert_eq!(read(&mut reading), Some(b"c".to_vec()));
-		whole.finish().unwrap();
+		whole.close().unwrap();
 		assert_eq!(read(&mut reading), None);
 		assert!(
 			sub.recv_group().now_or_never().is_none(),
@@ -3284,7 +3284,7 @@ mod test {
 
 		open.write_frame(ts(1), b"b".as_ref()).unwrap();
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
-		open.finish().unwrap();
+		open.close().unwrap();
 		assert_eq!(read(&mut reading), None);
 	}
 
@@ -3322,7 +3322,7 @@ mod test {
 		assert_eq!((request.key(), request.frame_start()), (0, 2));
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(2), frames[2].clone()).unwrap();
-		rest.finish().unwrap();
+		rest.close().unwrap();
 		assert_eq!(read(&mut reading).as_ref(), Some(&frames[2]));
 		assert_eq!(read(&mut reading), None);
 		assert_eq!(read_cached(&b.consume(), 0), frames);
@@ -3357,7 +3357,7 @@ mod test {
 		let mut corrupt = group.create_object(header).unwrap();
 		corrupt.write(slice).unwrap();
 		let group = corrupt.finish().unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(frame().to_vec()));
@@ -3405,12 +3405,12 @@ mod test {
 		pool.resize(pool.used().saturating_sub(1));
 		let mut filler = other.append_next().unwrap();
 		filler.write_frame(ts(0), frame()).unwrap();
-		filler.finish().unwrap();
+		filler.close().unwrap();
 		assert!(handoff.head().is_none(), "the shrink reclaimed the head");
 
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(1), frame()).unwrap();
-		rest.finish().unwrap();
+		rest.close().unwrap();
 		let res = reading.read_frame().now_or_never().expect("fails instead of spinning");
 		assert!(matches!(res, Err(Error::Dropped)), "{res:?}");
 	}
@@ -3590,7 +3590,7 @@ mod test {
 		assert_eq!((request.key(), request.frame_start()), (0, 1));
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
-		rest.finish().unwrap();
+		rest.close().unwrap();
 		a.abort(Error::Stream(StreamError::App(5))).unwrap();
 
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
@@ -3647,7 +3647,7 @@ mod test {
 			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
 			whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(1), b"b".as_ref()).unwrap();
-			whole.finish().unwrap();
+			whole.close().unwrap();
 			routes.serve(b.consume());
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "fetched={fetched}");
 			assert_eq!(read(&mut reading), None, "fetched={fetched}");
@@ -3680,7 +3680,7 @@ mod test {
 		assert!(fetched.read_frame().now_or_never().is_none());
 		let mut rest = pending.accept(None).unwrap();
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
-		rest.finish().unwrap();
+		rest.close().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
 		assert_eq!(read(&mut fetched), None);
 	}
@@ -3717,7 +3717,7 @@ mod test {
 		let copy = request.accept(crate::track::Info::timed());
 		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
 		group.write_frame(ts(0), b"early".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert!(
 			(&mut fetching).now_or_never().is_none(),
 			"a group is never handed out before its copy's info passes"
@@ -3744,7 +3744,7 @@ mod test {
 		let wrong = refused.accept(crate::track::Info::timed());
 		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
 		group.write_frame(ts(0), b"wrong".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		drop(staged);
 		drop(wrong);
 
@@ -3759,7 +3759,7 @@ mod test {
 		let copy = request.accept(crate::track::Info::timed());
 		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
 		group.write_frame(ts(0), b"right".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let _logical = logical.accept(crate::track::Info::timed());
 		routes.splice(copy.consume(), staged);
 		let mut fetched = fetching.now_or_never().expect("spliced").unwrap();
@@ -4098,7 +4098,7 @@ mod test {
 		assert_eq!((request.key(), request.frame_start()), (0, 2));
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(2), b"c".as_ref()).unwrap();
-		rest.finish().unwrap();
+		rest.close().unwrap();
 		assert_eq!(read(&mut reading), Some(b"c".to_vec()));
 		assert_eq!(read(&mut reading), None);
 
@@ -4134,7 +4134,7 @@ mod test {
 		assert_eq!(request.frame_start(), 1);
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
-		rest.finish().unwrap();
+		rest.close().unwrap();
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
 
@@ -4167,7 +4167,7 @@ mod test {
 		assert_eq!(request.frame_start(), 1);
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
-		rest.finish().unwrap();
+		rest.close().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
 		assert_eq!(read(&mut fetched), None);
 		let _whole = b.consume().fetch_group(0, None);
@@ -4246,7 +4246,7 @@ mod test {
 		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
 		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
-		whole.finish().unwrap();
+		whole.close().unwrap();
 		routes.serve(b.consume());
 		assert!(
 			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
@@ -4259,7 +4259,7 @@ mod test {
 		let c = copy();
 		let mut later = c.create_group(group::Info { start: 1 }).unwrap();
 		later.write_frame(ts(2), b"c".as_ref()).unwrap();
-		later.finish().unwrap();
+		later.close().unwrap();
 		routes.serve(c.consume());
 		assert_eq!(recv(&mut sub).start, 1);
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
@@ -4285,7 +4285,7 @@ mod test {
 			for key in keys {
 				let mut group = track.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(ts(key), b"x".as_ref()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 		}
 
@@ -4423,7 +4423,7 @@ mod test {
 	fn write(track: &track::Producer, key: u64) {
 		let mut group = track.create_group(group::Info { start: key }).unwrap();
 		group.write_frame(ts(key), b"x".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 
 	/// The group a peek reserves, to take later.
@@ -4697,7 +4697,7 @@ mod test {
 				let mut sub = subscribe(if nested { &outer } else { &inner }, HOUR);
 				let mut one = a.create_group(group::Info { start: 1 }).unwrap();
 				one.write_frame(ts(1), b"x".as_ref()).unwrap();
-				let one = one.finish().unwrap();
+				let one = one.close().unwrap();
 				write(&a, 3);
 				let reserved = peek(&mut sub, ordered);
 				assert_eq!(reserved.key(), 1);
@@ -4736,7 +4736,7 @@ mod test {
 					drain(&mut sub, ordered);
 					let mut two = a.create_group(group::Info { start: 2 }).unwrap();
 					two.write_frame(ts(2), b"x".as_ref()).unwrap();
-					let two = two.finish().unwrap();
+					let two = two.close().unwrap();
 					let reserved = peek(&mut sub, ordered);
 					assert_eq!(reserved.key(), 2, "{case}");
 					two.abort(Error::Evicted).unwrap();
@@ -4900,7 +4900,7 @@ mod test {
 			let mut whole = a.create_group(group::Info { start: 1 }).unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
-			whole.finish().unwrap();
+			whole.close().unwrap();
 			failing
 				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
 				.unwrap();
@@ -4944,7 +4944,7 @@ mod test {
 			let mut whole = b.create_group(group::Info { start: 1 }).unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
-			whole.finish().unwrap();
+			whole.close().unwrap();
 			failing
 				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
 				.unwrap();
@@ -5127,7 +5127,7 @@ mod test {
 		let mut whole = a.create_group(group::Info { start: 1 }).unwrap();
 		whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 		whole.write_frame(ts(2), b"b".as_ref()).unwrap();
-		whole.finish().unwrap();
+		whole.close().unwrap();
 		let mut partial = b.create_group(group::Info { start: 1 }).unwrap();
 		partial.write_frame(ts(1), b"a".as_ref()).unwrap();
 		b.clone().abort(Error::Dropped).unwrap();
@@ -5167,7 +5167,7 @@ mod test {
 			let mut whole = a.create_group(group::Info { start: 1 }).unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
-			whole.finish().unwrap();
+			whole.close().unwrap();
 			let mut failing = b.create_group(group::Info { start: 1 }).unwrap();
 			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 			let mut failing = Some(failing);
@@ -5219,7 +5219,7 @@ mod test {
 			let mut whole = a.create_group(group::Info { start: 1 }).unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
-			whole.finish().unwrap();
+			whole.close().unwrap();
 			let mut failing = b.create_group(group::Info { start: 1 }).unwrap();
 			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 			let res = match ordered {
@@ -5286,7 +5286,7 @@ mod test {
 
 			rest.write_frame(ts(9), b"b".as_ref()).unwrap();
 			rest.write_frame(ts(10), b"c".as_ref()).unwrap();
-			rest.finish().unwrap();
+			rest.close().unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "ordered={ordered}");
 			assert_eq!(read(&mut reading), Some(b"c".to_vec()));
 			assert_eq!(read(&mut reading), None);
@@ -5478,7 +5478,7 @@ mod test {
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 
 		// The replaced copy ends with the held group, declaring no end: another route continues the track.
-		held.finish().unwrap();
+		held.close().unwrap();
 		a.clone().abort(Error::Dropped).unwrap();
 		drop(reading);
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
@@ -5536,7 +5536,7 @@ mod test {
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 		let mut group = a.create_group(group::Info { start: 5 }).unwrap();
 		group.write_frame(ts(5), b"x".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert_eq!(recv(&mut sub).start, 5);
 
 		let b = copy();
@@ -5546,7 +5546,7 @@ mod test {
 		for key in [2, 6] {
 			let mut group = b.create_group(group::Info { start: key }).unwrap();
 			group.write_frame(ts(key), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		sub.set_range(..);
@@ -5566,8 +5566,8 @@ mod test {
 		let ranges = [
 			track::Range::groups(0..1),
 			track::Range {
-				start: track::Anchor::Time(ts(10_000)),
-				end: Some(track::Anchor::Time(ts(11_000))),
+				start: track::Anchor::Time(10_000),
+				end: Some(track::Anchor::Time(11_000)),
 			},
 		];
 		let subscription = Subscription::default()
@@ -5580,9 +5580,9 @@ mod test {
 			.unwrap()
 			.unwrap();
 		for key in 0..13 {
-			let mut group = a.create_group(group::Info { start: key }).unwrap();
+			let mut group = a.create_group(group::Info { start: key * 1000 }).unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		assert_eq!(recv(&mut sub).start, 0);
 
@@ -5594,15 +5594,15 @@ mod test {
 			rest.push(group.start);
 		}
 		for key in 0..13 {
-			let mut group = b.create_group(group::Info { start: key }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		while let Some(Ok(Some(group))) = sub.recv_group().now_or_never() {
 			rest.push(group.start);
 		}
 		rest.sort();
-		assert_eq!(rest, vec![10, 11]);
+		assert_eq!(rest, vec![10_000, 11_000]);
 	}
 
 	/// A replacement updated to a time range it cannot resolve yet asks for that range,
@@ -5620,7 +5620,7 @@ mod test {
 		let copy = &mut reader.copies[0];
 		copy.floor = Some(0);
 		let ranges = vec![track::Range {
-			start: track::Anchor::Time(ts(10_000)),
+			start: track::Anchor::Time(10_000),
 			end: None,
 		}];
 		let updated = Subscription::default().with_ranges(ranges.clone());
@@ -5659,9 +5659,9 @@ mod test {
 
 		let b = b.accept(crate::track::Info::timed());
 		for key in 0..7 {
-			let mut group = b.create_group(group::Info { start: key }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let mut rest = Vec::new();
 		while let Some(Ok(Some(group))) = sub.recv_group().now_or_never() {
@@ -5683,7 +5683,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: track::Anchor::Absolute(5),
+				start: track::Anchor::Time(5),
 				end: None,
 			}]);
 		let mut sub = logical
@@ -5719,8 +5719,8 @@ mod test {
 	}
 
 	/// A route's backfill widened by a later resume point asks for the wider span even once
-	/// it answered for the narrower one: a range ending relative to the latest group keeps the
-	/// reader's end, not the backfill's earlier cap.
+	/// it answered for the narrower one: a bounded range keeps the reader's end, not the
+	/// backfill's earlier cap.
 	#[kio::test]
 	async fn a_widened_backfill_reaches_past_its_earlier_cap() {
 		let routes = Producer::new();
@@ -5733,8 +5733,8 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range {
-				start: track::Anchor::Absolute(0),
-				end: Some(track::Anchor::Relative(990)),
+				start: track::Anchor::Time(0),
+				end: Some(track::Anchor::Time(10)),
 			}]);
 		let mut sub = logical
 			.consume()
@@ -5788,7 +5788,7 @@ mod test {
 		// The read subscribes the replacement, which has not answered yet.
 		assert!(sub.recv_group().now_or_never().is_none());
 		let ranges = [track::Range {
-			start: track::Anchor::Time(ts(10_000)),
+			start: track::Anchor::Time(10_000),
 			end: None,
 		}];
 		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
@@ -5796,9 +5796,9 @@ mod test {
 
 		let b = b.accept(crate::track::Info::timed());
 		for key in 0..13 {
-			let mut group = b.create_group(group::Info { start: key }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		while let Some(Ok(Some(_))) = sub.recv_group().now_or_never() {}
 
@@ -5807,7 +5807,7 @@ mod test {
 		assert!(sub.recv_group().now_or_never().is_none());
 		let start = c.subscription().expect("subscribed").ranges[0].start;
 		assert!(
-			matches!(start, track::Anchor::Absolute(group) if group >= 10),
+			matches!(start, track::Anchor::Time(group) if group >= 10_000),
 			"the replacement asks from where b resolved the time: {start:?}"
 		);
 	}
@@ -5838,9 +5838,9 @@ mod test {
 		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
 		assert!(sub.recv_group().now_or_never().is_none());
 		for key in 1..4 {
-			let mut group = b.create_group(group::Info { start: key }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		// Asked before b held any group, the relative start resolves at its first.
 		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
@@ -5876,20 +5876,20 @@ mod test {
 		assert_eq!(a.subscription().unwrap().priority, 3);
 	}
 
-	/// Capping a replaced copy never replaces a time end it has not settled: the copy keeps
-	/// filtering by time, so a group below the cap that starts past the end stays out.
+	/// Capping a replaced copy past a time end keeps the end: a group below the cap that
+	/// starts past the end stays out.
 	#[test]
 	#[cfg(feature = "async")]
 	fn capping_a_replaced_copy_keeps_its_time_end() {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
-		let mut zero = a.create_group(group::Info { start: 0 }).unwrap();
-		zero.write_frame(ts(3000), b"x".as_ref()).unwrap();
-		zero.finish().unwrap();
+		let mut first = a.create_group(group::Info { start: 3000 }).unwrap();
+		first.write_frame(ts(3000), b"x".as_ref()).unwrap();
+		first.close().unwrap();
 		let range = track::Range {
-			start: track::Anchor::Absolute(0),
-			end: Some(track::Anchor::Time(ts(3500))),
+			start: track::Anchor::Time(3000),
+			end: Some(track::Anchor::Time(3500)),
 		};
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(Duration::from_secs(30)))
@@ -5899,14 +5899,12 @@ mod test {
 		let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
 		let old = &mut reader.copies[0];
 		old.replaced = true;
-		old.until = Some(Some(4));
+		old.until = Some(Some(3800));
 		old.update(&mirrored);
-		assert_eq!(old.wire(&mirrored).ranges, vec![range], "the time end outlives the cap");
+		assert_eq!(old.wire(&mirrored).ranges, vec![range], "the time end is inside the cap");
 
-		for (key, millis) in [(1, 3600), (2, 3700)] {
-			let mut group = a.create_group(group::Info { start: key }).unwrap();
-			group.write_frame(ts(millis), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
+		for key in [3600, 3700] {
+			write(&a, key);
 		}
 		let Poll::Ready(Ok(copy)) = old.poll_ready(groups, &kio::Waiter::noop()) else {
 			panic!("the copy answered");
@@ -5915,7 +5913,7 @@ mod test {
 		while let Some(Ok(Some(group))) = copy.recv_group().now_or_never() {
 			read.push(group.start);
 		}
-		assert_eq!(read, vec![0]);
+		assert_eq!(read, vec![3000]);
 	}
 
 	#[test]
@@ -5954,7 +5952,7 @@ mod test {
 		for (track, payload) in [(&a, b"a1"), (&b, b"b1")] {
 			let mut group = track.create_group(group::Info { start: 1 }).unwrap();
 			group.write_frame(ts(1), payload.as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let mut next = recv(&mut sub);
 		assert_eq!(next.start, 1);
@@ -5979,9 +5977,9 @@ mod test {
 		let b = copy();
 		routes.serve(b.consume());
 		for key in 1..=2 {
-			let mut group = b.create_group(group::Info { start: key }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
 			group.write_frame(ts(key * 1000), b"b".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		assert!(reading.read_frame().now_or_never().is_none(), "not stale yet");
 
@@ -6021,7 +6019,7 @@ mod test {
 			let write = |key| {
 				let mut group = b.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(None, b"b".as_ref()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			};
 			if warm {
 				(1..=3).for_each(write);
@@ -6143,7 +6141,7 @@ mod test {
 			for (key, ms) in [(0, 0), (1, 1000)] {
 				let mut group = a.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(ts(ms), b"x".as_ref()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 			assert_eq!(recv(&mut sub).start, 0);
 			assert_eq!(recv(&mut sub).start, 1);
@@ -6319,7 +6317,7 @@ mod test {
 				for key in 1..=4 {
 					let mut group = b.create_group(group::Info { start: key }).unwrap();
 					group.write_frame(ts(key * 10_000), b"new".as_ref()).unwrap();
-					group.finish().unwrap();
+					group.close().unwrap();
 				}
 				assert!(matches!(chunks.read_chunk().now_or_never(), Some(Err(Error::Old))));
 				continue;
@@ -6374,7 +6372,7 @@ mod test {
 			for key in 1..=4 {
 				let mut next = b.create_group(group::Info { start: key }).unwrap();
 				next.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
-				next.finish().unwrap();
+				next.close().unwrap();
 			}
 			if partial {
 				assert!(matches!(chunks.read_chunk().now_or_never(), Some(Err(Error::Old))));
@@ -6401,7 +6399,7 @@ mod test {
 		let b = copy();
 		let mut group = b.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(ts(0), b"b".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		routes.serve(b.consume());
 		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
 		assert!(matches!(kio::Task::poll(&mut *fetching, &waiter), Poll::Ready(Ok(_))));
@@ -6430,7 +6428,7 @@ mod test {
 		for frame in 0..4u8 {
 			group.write_frame(ts(0), vec![frame]).unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		let Poll::Ready(Ok(mut group)) = kio::Task::poll(&mut *fetching, &waiter) else {
 			panic!("the fill did not resolve the fetch");
 		};
@@ -6456,9 +6454,9 @@ mod test {
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
 		for key in 1..=4 {
-			let mut group = b.create_group(group::Info { start: key }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
 			group.write_frame(ts(key * 1000), b"b".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
 	}
@@ -6612,7 +6610,7 @@ mod test {
 			frame.write(bytes::Bytes::from_static(payload)).unwrap();
 			group = frame.finish().unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		b
 	}
 
@@ -6745,7 +6743,7 @@ mod test {
 		assert_eq!((request.key(), request.frame_start()), (0, 1));
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
-		rest.finish().unwrap();
+		rest.close().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
 		assert_eq!(read(&mut fetched), None);
 	}
@@ -6873,7 +6871,7 @@ mod test {
 			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 			let mut rest = request.accept(None).unwrap();
 			rest.write_frame(ts(1), b"b".as_ref()).unwrap();
-			rest.finish().unwrap();
+			rest.close().unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "{code:?}");
 			assert_eq!(read(&mut reading), None, "{code:?}");
 		}
@@ -6933,7 +6931,7 @@ mod test {
 		for (key, ms) in [(1, 1000), (2, 2000)] {
 			let mut group = b.create_group(group::Info { start: key }).unwrap();
 			group.write_frame(ts(ms), b"x".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		assert!(matches!(fetched.read_frame().now_or_never(), Some(Err(Error::Old))));
 	}
@@ -7063,7 +7061,7 @@ mod test {
 			routes.serve(a.consume());
 		}
 		let subscription = Subscription::default().with_ranges([track::Range {
-			start: Anchor::Absolute(0),
+			start: Anchor::Time(0),
 			end: Some(Anchor::Oldest),
 		}]);
 		let mut sub = logical
@@ -7084,7 +7082,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_resumed_reader_reports_starts_within_its_time_end() {
-		for start in [Anchor::Absolute(0), Anchor::Relative(0)] {
+		for start in [Anchor::Time(0), Anchor::Relative(0)] {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let a = copy();
@@ -7094,7 +7092,7 @@ mod test {
 				.with_delay(Delay::default().with_max(HOUR))
 				.with_ranges([track::Range {
 					start,
-					end: Some(Anchor::Time(ts(1))),
+					end: Some(Anchor::Time(1)),
 				}]);
 			let mut sub = logical
 				.consume()
@@ -7280,7 +7278,7 @@ mod test {
 					for key in 1..=4 {
 						let mut next = source.create_group(group::Info { start: key }).unwrap();
 						next.write_frame(ts(key * 1000), b"next".as_ref()).unwrap();
-						next.finish().unwrap();
+						next.close().unwrap();
 					}
 					let result = reading.poll(&waiter);
 					if widen {
@@ -7390,7 +7388,7 @@ mod test {
 							writer.write_frame(ts(0), b"first".as_ref()).unwrap();
 						}
 						writer.write_frame(ts(1), b"second".as_ref()).unwrap();
-						writer.finish().unwrap();
+						writer.close().unwrap();
 					}
 					Event::Update => control
 						.update(

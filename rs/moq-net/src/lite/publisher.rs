@@ -3307,7 +3307,7 @@ mod test {
 			group
 				.write_frame(Timestamp::from_millis(second * 1000).unwrap(), b"x".to_vec())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		// What run_subscribe hands the model for a peer that sent no budget at all.
@@ -3369,7 +3369,7 @@ mod test {
 			group
 				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 
 		// Group 7 arrives first: run_track resolves the start there and raises
@@ -3408,7 +3408,7 @@ mod test {
 			group
 				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 
 		write(&mut producer, 7);
@@ -3433,7 +3433,7 @@ mod test {
 		producer
 			.create_group(group::Info { start: 5 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		producer.finish_at(track::Position::group(7), None).unwrap();
 
@@ -3455,7 +3455,7 @@ mod test {
 		producer
 			.create_group(group::Info { start: 6 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
 			Recv::Group(group) => assert_eq!(group.start, 6),
@@ -3513,7 +3513,7 @@ mod test {
 		producer
 			.create_group(group::Info { start: 2 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
 			Recv::Group(group) => assert_eq!(group.start, 2),
@@ -3524,7 +3524,7 @@ mod test {
 		producer
 			.create_group(group::Info { start: 1 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		match recv_next(&mut subscriber, false).now_or_never() {
 			Some(Ok(Recv::Group(group))) => assert_eq!(group.start, 1),
@@ -6785,20 +6785,51 @@ mod serve_group_test {
 
 		// Empty partway through group 5 covers no group, rather than all of it.
 		let empty = bounds(group(5, 3), group(5, 3));
-		assert_eq!(empty.ranges, [crate::track::Range::groups(5..5)]);
+		assert_eq!(empty.ranges, [crate::track::Range::EMPTY]);
 		assert_eq!(empty.frames, Frames::default());
 
-		// A time anchor names no group on a track the peer was told is untimed.
+		// An exclusive end at group 0 holds nothing, and one at group 1 holds group 0.
+		assert_eq!(bounds(None, group(0, 0)).ranges, [crate::track::Range::EMPTY]);
+		let first = bounds(group(0, 0), group(1, 0));
+		assert_eq!(
+			first.ranges,
+			[crate::track::Range {
+				start: crate::track::Anchor::Time(0),
+				end: Some(crate::track::Anchor::Time(0)),
+			}]
+		);
+
+		// A group ID is a start, so a time anchor names one too, timed or not.
 		let time = [lite::Range {
 			start: Some(lite::Anchor::Time(1_000)),
 			end: None,
 		}];
-		assert!(matches!(Bounds::new(&time, None), Err(Error::TimestampMismatch)));
-		let timed = Bounds::new(&time, Some(crate::Timescale::MILLI)).unwrap();
-		assert_eq!(
-			timed.ranges[0].start,
-			crate::track::Anchor::Time(Timestamp::from_millis(1_000).unwrap())
+		assert_eq!(Bounds::new(&time, false).ranges[0].start, crate::track::Anchor::Time(1_000));
+	}
+
+	/// A wire without ranges means its start as the first group at or after it, so the
+	/// frames floor there; lite-07 names the group containing it, with no floor.
+	#[test]
+	fn a_legacy_start_floors_at_its_group() {
+		let start = [lite::Range {
+			start: Some(lite::Anchor::Absolute(track::Position { group: 5, frame: 0 })),
+			end: None,
+		}];
+		let legacy = Bounds::new(&start, true);
+		assert_eq!(legacy.ranges[0].start, crate::track::Anchor::Time(5));
+		assert_eq!(legacy.frames.floor, 5);
+		assert_eq!(Bounds::new(&start, false).frames.floor, 0);
+
+		// Sparse starts 4 and 7 with a legacy start of 5 serve 7, never 4 which contains 5.
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
 		);
+		let four = track.append_group(4).unwrap();
+		let seven = track.append_group(7).unwrap();
+		assert!(position_group(four.consume(), &legacy.frames).is_none());
+		assert!(position_group(seven.consume(), &legacy.frames).is_some());
 	}
 
 	/// Ranges naming the same group serve the span covering all of their frames in it.
@@ -6845,9 +6876,8 @@ mod serve_group_test {
 				start: group(5, 2),
 				end: group(5, 4),
 			}],
-			None,
-		)
-		.unwrap();
+			false,
+		);
 		assert_eq!((inside.frames.start(5), inside.frames.end(5)), (2, Some(3)));
 	}
 
@@ -6898,7 +6928,7 @@ mod serve_group_test {
 		for i in 0..4u8 {
 			group.write_frame(Timestamp::ZERO, vec![i]).unwrap();
 		}
-		let group = group.finish().unwrap();
+		let group = group.close().unwrap();
 		let ending = |group, frame| {
 			let mut frames = Frames::default();
 			frames.add(group, 0, Some(frame));
@@ -6929,24 +6959,18 @@ mod serve_group_test {
 		}
 	}
 
-	/// Lite-05/06 cannot encode an untimed track, so one carries its send time there and
-	/// nothing on lite-07, while a timed track carries its own timestamps on every version.
-	#[kio::test]
-	async fn only_an_untimed_track_goes_out_with_send_times() {
-		let runtime = crate::time::sim();
+	/// Lite-05/06 cannot encode a scale-less track, so its frames carry their group's key
+	/// there, never a clock, and nothing on lite-07, while a timed track carries its own
+	/// timestamps on every version.
+	#[test]
+	fn a_scale_less_track_goes_out_with_its_keys() {
 		let stamped = Timestamp::from_millis(36_000_000).unwrap();
-		let sent = Timestamp::from(runtime.now()).value();
-
 		for version in [Version::Lite06, Version::Lite07] {
 			let stamp = Stamp::new(version, Some(crate::Timescale::MILLI)).unwrap();
-			assert_eq!(
-				stamp.wire(Some(stamped), &runtime).unwrap(),
-				stamped.value(),
-				"{version}"
-			);
+			assert_eq!(stamp.wire(Some(stamped), 7).unwrap(), stamped.value(), "{version}");
 		}
 		let stamp = Stamp::new(Version::Lite06, None).unwrap();
-		assert_eq!(stamp.wire(None, &runtime).unwrap(), sent);
+		assert_eq!(stamp.wire(None, 7).unwrap(), 7);
 		assert!(Stamp::new(Version::Lite07, None).is_none());
 	}
 
@@ -6967,7 +6991,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7014,7 +7037,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7027,7 +7049,7 @@ mod serve_group_test {
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
-		old.finish().unwrap();
+		old.close().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
@@ -7041,7 +7063,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.finish().unwrap();
+		edge.close().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -7065,7 +7087,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7091,7 +7112,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.finish().unwrap();
+		edge.close().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -7116,7 +7137,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7150,7 +7170,7 @@ mod serve_group_test {
 		*open = false;
 		drop(open);
 		frame.write(b"b".as_slice()).unwrap();
-		frame.finish().unwrap().finish().unwrap();
+		frame.finish().unwrap().close().unwrap();
 		assert!(
 			futures::poll!(serve.as_mut()).is_pending(),
 			"the final byte is transport-blocked"
@@ -7160,7 +7180,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.finish().unwrap();
+		edge.close().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -7184,7 +7204,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7197,7 +7216,7 @@ mod serve_group_test {
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
-		old.finish().unwrap();
+		old.close().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
@@ -7211,7 +7230,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.finish().unwrap();
+		edge.close().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 	}
@@ -7364,7 +7383,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7437,7 +7455,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7452,7 +7469,7 @@ mod serve_group_test {
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
 		let consumer = group.consume();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 		subscription.serve_group(0, 0, handle, consumer).await.unwrap();
@@ -7487,7 +7504,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7500,7 +7516,7 @@ mod serve_group_test {
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
-		old.finish().unwrap();
+		old.close().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
@@ -7512,7 +7528,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.finish().unwrap();
+		edge.close().unwrap();
 
 		assert!(matches!(futures::poll!(serve.as_mut()), Poll::Ready(Err(Error::Old))));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -7536,7 +7552,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7549,7 +7564,7 @@ mod serve_group_test {
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(Timestamp::ZERO, b"hello".as_slice()).unwrap();
 		let consumer = group.consume();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 		let queue = subscription.priority.clone();
@@ -7613,7 +7628,6 @@ mod serve_group_test {
 			steer_seen: Steer::default(),
 			version,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -7648,7 +7662,7 @@ mod serve_group_test {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(None, &b"key"[..]).unwrap();
 		group.write_frame(None, &b"more"[..]).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let update = |wanted_group| lite::SubscribeUpdate {
 			wanted_group,
 			priority: 0,
@@ -7664,7 +7678,7 @@ mod serve_group_test {
 		assert_eq!(track.demand().wanted(), Some(1));
 		let mut group = track.append_next().unwrap();
 		group.write_frame(None, &b"key"[..]).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		run.replace(update(Some(1)));
 		assert_eq!(track.demand().wanted(), Some(1), "answered request stays answered");
 		run.replace(update(Some(2)));
@@ -7676,7 +7690,7 @@ mod serve_group_test {
 		group
 			.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 
 	/// A datagram sender for subscription 0 on `session`, stamping in milliseconds.
@@ -7688,7 +7702,6 @@ mod serve_group_test {
 			id: 0,
 			version,
 			stamp: Stamp::new(version, Some(crate::Timescale::MILLI)),
-			runtime: crate::time::sim(),
 			publisher: 0,
 			group,
 		}
@@ -7859,7 +7872,7 @@ mod serve_group_test {
 				.write_frame(Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
 				.unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
 		let turns = Arc::new(AtomicU64::new(0));
@@ -7905,9 +7918,8 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		for key in 0..5 {
-			write_group(&mut track, key, key * 1000);
+			write_group(&mut track, key * 1000, key * 1000);
 		}
-		let at = |millis| Anchor::Time(Timestamp::from_millis(millis).unwrap());
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
@@ -7917,15 +7929,15 @@ mod serve_group_test {
 						end: None,
 					},
 					Range {
-						start: at(1500),
-						end: Some(Anchor::Absolute(2)),
+						start: Anchor::Time(1500),
+						end: Some(Anchor::Time(1999)),
 					},
 					// Empty, so it starts nowhere.
-					Range::groups(3..3),
-					// Empty only once its start resolves to group 4.
+					Range::EMPTY,
+					// Empty only once its start resolves to group 4000.
 					Range {
 						start: Anchor::Relative(0),
-						end: Some(Anchor::Absolute(2)),
+						end: Some(Anchor::Time(1999)),
 					},
 				]),
 		);
@@ -7941,7 +7953,7 @@ mod serve_group_test {
 			.unwrap()
 			.0
 		{
-			lite::SubscribeResponse::Start(start) => assert_eq!(start.starts, [Some(3), Some(1), None, None]),
+			lite::SubscribeResponse::Start(start) => assert_eq!(start.starts, [Some(3000), Some(1000), None, None]),
 			other => panic!("expected SUBSCRIBE_START, got {other:?}"),
 		}
 	}
@@ -9783,7 +9795,6 @@ mod serve_group_test {
 				steer_seen: Steer::default(),
 				version: Version::Lite07,
 				stamp: Stamp::new(Version::Lite07, Some(crate::Timescale::MILLI)),
-				runtime: crate::time::sim(),
 				outcomes: outcomes.clone(),
 				ietf: false,
 			};
@@ -9955,7 +9966,7 @@ mod serve_group_test {
 		headless
 			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
 			.unwrap();
-		headless.finish().unwrap();
+		headless.close().unwrap();
 		write_group(&mut track, 6, 6);
 		relay.settle();
 
@@ -9983,7 +9994,7 @@ mod serve_group_test {
 		headless
 			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
 			.unwrap();
-		headless.finish().unwrap();
+		headless.close().unwrap();
 		write_group(&mut track, 6, 6);
 		relay.settle();
 
@@ -11250,7 +11261,7 @@ mod tests {
 			for &key in keys {
 				let mut group = track.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 		}
 
@@ -11500,7 +11511,7 @@ mod tests {
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");
@@ -11514,7 +11525,7 @@ mod tests {
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		session.push(&update(Some(2), 5).encode_bytes(version).unwrap());
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
@@ -11667,7 +11678,7 @@ mod tests {
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 				appended += 1;
 			}
 			if appended == GROUPS {
@@ -11916,7 +11927,7 @@ mod tests {
 			group
 				.write_frame(crate::Timestamp::from_millis(ms).unwrap(), b"x".to_vec())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		assert!(drive(&mut serve).await, "the budget ends the response");
 		assert_eq!(session.log.resets(), vec![crate::StreamError::Old.to_code()]);

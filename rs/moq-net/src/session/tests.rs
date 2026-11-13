@@ -121,7 +121,7 @@ async fn a_subscription_keeps_both_ends_busy() {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(Timestamp::ZERO, b"live".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut sub = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
@@ -178,7 +178,7 @@ async fn a_fetch_keeps_both_ends_busy() {
 		assert!(!idle(&pair.server), "{version}: idle while a fetch is in flight");
 
 		writing.write_frame(Timestamp::ZERO, b"last".as_ref()).unwrap();
-		writing.finish().unwrap();
+		writing.close().unwrap();
 		let frames = kio::clock::timeout(TIMEOUT, fetch)
 			.await
 			.expect("fetch timeout")

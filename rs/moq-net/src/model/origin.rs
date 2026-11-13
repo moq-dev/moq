@@ -8889,7 +8889,7 @@ mod tests {
 		let track = track.accept(track::Info::timed());
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"history".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		track.abort(Error::App(7)).unwrap();
 		driver.poll(now, &waiter).unwrap();
 		let Poll::Ready(Ok(mut subscriber)) = subscribing.poll_ok(&waiter) else {
@@ -8918,7 +8918,7 @@ mod tests {
 			let source = track::Producer::new(broadcast.clone(), "catalog.json", crate::track::Info::timed());
 			let mut group = source.create_group(7u64.into()).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let source = source.finish().unwrap();
 
 			let routes = crate::model::resume::Producer::new();
@@ -9683,7 +9683,7 @@ mod tests {
 		let mut metered = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"frame".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut read = unmetered.recv_group().await.unwrap().expect("a group");
 		assert_eq!(
@@ -11180,7 +11180,7 @@ mod tests {
 				let source = request.accept(crate::track::Info::timed());
 				let mut group = source.append_next().unwrap();
 				group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 				let source = source.finish().unwrap();
 
 				let mut subscription = subscribing.await.expect("subscribe survives the retraction");
@@ -11226,7 +11226,7 @@ mod tests {
 		let source = request.request_start(None).accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let source = source.finish().unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		assert_eq!(
@@ -11723,7 +11723,7 @@ mod tests {
 		if let Some((_, group)) = &mut joined {
 			assert_eq!(read(group).await, b"d");
 		}
-		next_group.finish().unwrap();
+		next_group.close().unwrap();
 		drop((
 			joined,
 			reading,
@@ -11757,7 +11757,7 @@ mod tests {
 		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		subscription.recv_group().await.unwrap().expect("the cached group");
 		drop(subscription);
@@ -11783,7 +11783,7 @@ mod tests {
 		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.create_group(1u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let _source = source.finish().unwrap();
 
 		let mut subscription = subscribing.await.unwrap().expect("subscribe survives the retraction");
@@ -13464,7 +13464,7 @@ mod tests {
 			let track = source.create_track(name, crate::track::Info::timed()).unwrap();
 			let mut group = track.append_next().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, name.as_bytes()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			// The producer stays alive: the track is open, like a live SI track.
 			std::mem::forget(track);
 		}
@@ -13797,7 +13797,7 @@ mod tests {
 			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_next().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			request.serve(&source);
 
 			let resolved = pending.await.expect("resolves");
@@ -13852,12 +13852,12 @@ mod tests {
 		// so the track resumes at group 1.
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		request.serve(&replacement);
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"resumed".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut group = rig
 			.subscription
@@ -13989,7 +13989,7 @@ mod tests {
 	async fn deliver(track: &track::Producer, subscription: &mut track::Subscriber, payload: &'static [u8]) {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, payload).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = next_group(subscription).await.unwrap().expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], payload);
 	}
@@ -14383,7 +14383,7 @@ mod tests {
 			let track = successor.create_track("video", replacement).unwrap();
 			let mut group = track.append_next().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			request.serve(&successor);
 			rig.incumbent_track.clone().abort(Error::Dropped).unwrap();
 
@@ -14432,7 +14432,7 @@ mod tests {
 			.create_group(crate::group::Info { start: 5 })
 			.unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"five".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().start, 5);
 		let standby = rig.standby(&[10, 20]);
 		drop(incumbent);
@@ -14463,7 +14463,7 @@ mod tests {
 
 			let mut group = rig.incumbent_track.append_next().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"after".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut group = next_group(&mut rig.subscription)
 				.await
 				.expect("the subscription survives the update")
@@ -14512,7 +14512,7 @@ mod tests {
 			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_next().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			request.serve(&source);
 
 			let resolved = pending.await.expect("resolves through the incumbent");
@@ -14540,11 +14540,11 @@ mod tests {
 					let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 					let mut group = track.append_next().unwrap();
 					group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-					group.finish().unwrap();
+					group.close().unwrap();
 					request.serve(&replacement);
 					let mut group = track.append_next().unwrap();
 					group.write_frame(crate::Timestamp::ZERO, b"resumed".as_ref()).unwrap();
-					group.finish().unwrap();
+					group.close().unwrap();
 
 					let mut group = next_group(&mut subscription).await.unwrap().expect("resumed group");
 					assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"resumed");
@@ -14578,7 +14578,7 @@ mod tests {
 		let track_a = source_a.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_a.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-a".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		request.serve(&source_a);
 
 		let resolved_a = pending.await.expect("resolves");
@@ -14630,7 +14630,7 @@ mod tests {
 		let track_b = source_b.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_b.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-b".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		request.serve(&source_b);
 
 		let resolved_b = pending.await.expect("B's front is served immediately");
@@ -14670,7 +14670,7 @@ mod tests {
 		let track = source.create_track("audio", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"steady".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut audio = rig
 			.resolved
@@ -14821,7 +14821,7 @@ mod tests {
 		// A textbook clean end, innermost first: the group, the track, the broadcast.
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let track = track.finish().unwrap();
 		drop(track);
 		broadcast.broadcast().close();
@@ -14875,7 +14875,7 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let track = track.finish().unwrap();
 		drop(track);
 
@@ -14931,7 +14931,7 @@ mod tests {
 			.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
@@ -14974,7 +14974,7 @@ mod tests {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = kio::clock::timeout(Duration::from_secs(1), again.recv_group())
 			.await
 			.expect("groups past the cached edge come from the re-splice")
@@ -15008,7 +15008,7 @@ mod tests {
 		drop(subscription);
 		kio::clock::sleep(Duration::from_millis(10)).await;
 		writing.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
-		writing.finish().unwrap();
+		writing.close().unwrap();
 
 		let tail = kio::clock::timeout(Duration::from_secs(1), reading.read_frame())
 			.await
@@ -15051,7 +15051,7 @@ mod tests {
 		// The track carries on.
 		let mut next = track.append_next().unwrap();
 		next.write_frame(crate::Timestamp::ZERO, b"next".as_ref()).unwrap();
-		next.finish().unwrap();
+		next.close().unwrap();
 		let mut group = kio::clock::timeout(Duration::from_secs(1), subscription.recv_group())
 			.await
 			.expect("the next group")
@@ -15076,7 +15076,7 @@ mod tests {
 			.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		// The leaf's front view, which the next front serves from.
 		let leaf_front = leaf_consumer.request("room/alice", None).await.expect("resolves");
@@ -15124,7 +15124,7 @@ mod tests {
 			.expect("source open");
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 		drop(group);
@@ -15142,7 +15142,7 @@ mod tests {
 		// each hop to reach the leaf.
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
@@ -15182,7 +15182,7 @@ mod tests {
 			.expect("subscribe");
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -15201,7 +15201,7 @@ mod tests {
 		// Still spliced to the incumbent, still delivering.
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
 
@@ -15230,7 +15230,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		(producer, server, upstream, old, subscription)
@@ -15288,7 +15288,7 @@ mod tests {
 
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15331,7 +15331,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -15354,7 +15354,7 @@ mod tests {
 
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15396,7 +15396,7 @@ mod tests {
 
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15430,7 +15430,7 @@ mod tests {
 		}
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let _old = old.finish().unwrap();
 		replacement.abort(Error::App(7)).unwrap();
 
@@ -15453,7 +15453,7 @@ mod tests {
 		let mut later = video
 			.subscribe(crate::track::Subscription {
 				ranges: vec![crate::track::Range {
-					start: crate::track::Anchor::Absolute(3),
+					start: crate::track::Anchor::Time(3),
 					end: None,
 				}],
 				..Default::default()
@@ -15462,7 +15462,7 @@ mod tests {
 			.unwrap();
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let newcomer = producer
 			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
@@ -15624,7 +15624,7 @@ mod tests {
 		}
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"draining".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("draining group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"draining");
 		drop(group);
@@ -15645,7 +15645,7 @@ mod tests {
 		let mut again = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = old.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"after".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let outcome = kio::clock::timeout(Duration::from_secs(5), async {
 			loop {
 				match again.recv_group().await {
@@ -15693,7 +15693,7 @@ mod tests {
 			(&mut fetching).now_or_never().is_none(),
 			"an open group needs the route"
 		);
-		open.finish().unwrap();
+		open.close().unwrap();
 		let mut group = fetching.await.unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"open");
 	}
@@ -15748,7 +15748,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -15792,7 +15792,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		drop(group);
@@ -15814,11 +15814,11 @@ mod tests {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		for payload in [b"wrong0".as_ref(), b"wrong1".as_ref()] {
 			let mut group = incompatible.append_next().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, payload).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		let mut group = next_group(&mut subscription)
@@ -15852,7 +15852,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		drop(group);
@@ -15873,7 +15873,7 @@ mod tests {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		request.reject(Error::NotFound);
 
 		let mut group = next_group(&mut subscription)
@@ -16564,7 +16564,7 @@ mod tests {
 			.unwrap();
 		let mut written = track.append_next().unwrap();
 		written.write_frame(crate::Timestamp::ZERO, b"frame".as_ref()).unwrap();
-		written.finish().unwrap();
+		written.close().unwrap();
 		let _track = track.finish().unwrap();
 		let mut reader = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = reader.recv_group().await.unwrap().unwrap();

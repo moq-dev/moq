@@ -3711,7 +3711,7 @@ mod tests {
 	fn arrive(track: &track::Producer, tail: &kio::Producer<Tail>, key: u64, now: crate::time::Instant) {
 		let mut group = track.create_group(group::Info { start: key }).unwrap();
 		group.write_frame(None, &b"x"[..]).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let Ok(mut ledger) = tail.write() else {
 			panic!("ledger closed")
 		};
@@ -3828,7 +3828,7 @@ mod tests {
 			for key in [5, 6] {
 				let mut group = track.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(None, &b"x"[..]).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 			kio::clock::sleep(crate::tail::GRACE * 2).await;
 
@@ -3888,7 +3888,7 @@ mod tests {
 
 			let mut group = track.create_group(group::Info { start: 3 }).unwrap();
 			group.write_frame(None, &b"x"[..]).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			fetches.poll(&sub, now, &kio::Waiter::noop());
 			let group = fetching
 				.now_or_never()
@@ -5274,7 +5274,7 @@ mod tests {
 		before
 			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
 			.unwrap();
-		before.finish().unwrap();
+		before.close().unwrap();
 		subscriber.subscribes.lock().insert(
 			7,
 			TrackEntry::accepted(
@@ -5357,7 +5357,7 @@ mod tests {
 			);
 			let mut cached = track.create_group(group::Info { start: 0 }).unwrap();
 			cached.write_frame(Timestamp::ZERO, &b"0"[..]).unwrap();
-			cached.finish().unwrap();
+			cached.close().unwrap();
 			track.set_idle();
 			let mut entry = TrackEntry::accepted(track.clone(), Default::default(), Default::default());
 
@@ -5375,7 +5375,7 @@ mod tests {
 			newest
 				.write_frame(Timestamp::from_millis(300).unwrap(), &b"3"[..])
 				.unwrap();
-			newest.finish().unwrap();
+			newest.close().unwrap();
 			assert!(track.is_live(), "header first: {header_first}");
 
 			let subscription = crate::track::Subscription::default()
@@ -5429,7 +5429,7 @@ mod tests {
 		);
 		let mut cached = track.create_group(group::Info { start: 3 }).unwrap();
 		cached.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
-		cached.finish().unwrap();
+		cached.close().unwrap();
 		let tail = kio::Producer::new(Tail::default());
 		subscriber.subscribes.lock().insert(
 			7,
@@ -5538,7 +5538,7 @@ mod tests {
 
 			let mut original = reader.assert_group();
 			if !first_fails {
-				first.finish().unwrap();
+				first.close().unwrap();
 				let res = kio::wait(|waiter| duplicate.poll_serve(waiter)).await;
 				assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
 				let frame = original.read_frame().await.unwrap().unwrap();
@@ -5920,7 +5920,7 @@ mod tests {
 			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
 			let mut group = serving.serving.create_group(group::Info { start: 2 }).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut reader = broadcast
 				.consume()
 				.track("video")
@@ -6293,7 +6293,7 @@ mod tests {
 		};
 		let frame = |mut group: crate::group::Producer| {
 			group.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])?;
-			group.finish().map(drop)
+			group.close().map(drop)
 		};
 		let arrive = |serving: &mut ServeLoop, key| {
 			let group = serving.serving.create_group(crate::group::Info { start: key }).unwrap();
@@ -6509,7 +6509,7 @@ mod tests {
 		group
 			.write_frame(crate::Timestamp::from_millis(5).unwrap(), &b"x"[..])
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		serving
 			.apply_response(&serve, drop(1, 2, &crate::StreamError::App(5)))
@@ -8327,7 +8327,7 @@ mod tests {
 			let mut group = Some(serving.serving.append_next().unwrap());
 			if let Some(finished) = ended {
 				if finished {
-					group.take().unwrap().finish().unwrap();
+					group.take().unwrap().close().unwrap();
 				}
 				if version.has_track_stream() {
 					serving.serving.finish_at(Position::group(1), None).unwrap();
@@ -8565,7 +8565,7 @@ mod tests {
 	#[test]
 	fn wire_ranges_name_whole_groups() {
 		let group = |group| Some(lite::Anchor::Absolute(Position::group(group)));
-		let ranges = wire_ranges(&Subscription::default().with_range(5..6), None).unwrap();
+		let ranges = wire_ranges(&Subscription::default().with_range(5..6));
 		assert_eq!(
 			ranges,
 			Some(vec![lite::Range {
@@ -8573,22 +8573,32 @@ mod tests {
 				end: group(6),
 			}])
 		);
-		assert_eq!(wire_ranges(&Subscription::default().with_end(0), None).unwrap(), None);
+		assert_eq!(wire_ranges(&Subscription::default().with_end(0)), None);
 
-		// A time anchor needs the track's timescale.
-		let timed = Subscription {
-			ranges: vec![track::Range {
-				start: Anchor::Time(Timestamp::from_millis(5).unwrap()),
-				end: None,
-			}],
-			..Default::default()
-		};
-		assert!(matches!(wire_ranges(&timed, None), Err(Error::TimestampMismatch)));
+		// A time anchor names a group start, which goes out as its group ID: an end as the
+		// exclusive group past it, on any track.
+		let timed = Subscription::default().with_ranges([track::Range {
+			start: Anchor::Time(5),
+			end: Some(Anchor::Time(9)),
+		}]);
+		assert_eq!(
+			wire_ranges(&timed),
+			Some(vec![lite::Range {
+				start: group(5),
+				end: group(10),
+			}])
+		);
+		// An end before its start asks for nothing.
+		let empty = Subscription::default().with_ranges([track::Range {
+			start: Anchor::Time(5),
+			end: Some(Anchor::Time(4)),
+		}]);
+		assert_eq!(wire_ranges(&empty), None);
 
 		// Only the oldest start goes out without an anchor; any count back stays one.
 		let start = |start| {
 			let subscription = Subscription::default().with_ranges([track::Range { start, end: None }]);
-			wire_ranges(&subscription, None).unwrap().unwrap()[0].start
+			wire_ranges(&subscription).unwrap()[0].start
 		};
 		assert_eq!(start(Anchor::Oldest), None);
 		assert_eq!(
@@ -8731,7 +8741,7 @@ mod tests {
 			for frame in [&b"key"[..], b"abc", b"d"] {
 				group.write_frame(None, frame).unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		let wanted = |h: &Harness| {
 			let wire = h.wire();
@@ -9309,7 +9319,7 @@ mod tests {
 			.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		// The peer's own subscription, excluding the hop the server minted for
 		// it, is served from the local front before anything is announced back.
@@ -9370,7 +9380,7 @@ mod tests {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = sub.recv_group().await.expect("recv group").expect("track ended early");
 		assert_eq!(
 			&group.read_frame().await.expect("read frame").expect("frame").payload[..],

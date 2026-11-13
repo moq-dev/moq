@@ -951,7 +951,7 @@ mod hop_tests {
 					properties: Properties::default(),
 				})
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload.contiguous(0)[..], b"b");
@@ -1118,7 +1118,7 @@ mod hop_tests {
 		);
 		assert!(frame.fields.is_none() && received.wire().is_none());
 		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let frame = next(&mut received).await.unwrap();
 		assert_eq!(
 			(frame.timestamp, &frame.payload.contiguous(0)[..]),
@@ -1146,7 +1146,7 @@ mod hop_tests {
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
 			let mut head = track.create_group(0u64.into()).unwrap();
 			head.write_frame(ts(100), b"frame".to_vec()).unwrap();
-			head.finish().unwrap();
+			head.close().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
 			let broadcast = downstream.consume().request("room", None).await.unwrap();
 			// A listing carries no provenance, so it lists the track as native lite.
@@ -1190,7 +1190,7 @@ mod hop_tests {
 			let start = if negotiated { ts(50) } else { ts(150) };
 			let mut group = track.create_group(1u64.into()).unwrap();
 			group.write_frame(start, b"frame".to_vec()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut received = recv(&mut subscriber).await;
 			assert_eq!(received.start, 1);
 			let frame = next(&mut received).await.unwrap();
@@ -1219,7 +1219,7 @@ mod hop_tests {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(ts(5), payload(1)).unwrap();
 		group.write_frame(ts(6), payload(2)).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut received = recv(&mut subscriber).await;
 		for (millis, n) in [(5, 1), (6, 2)] {
 			let frame = next(&mut received).await.unwrap();

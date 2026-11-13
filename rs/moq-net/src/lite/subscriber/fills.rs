@@ -661,7 +661,7 @@ mod tests {
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		for key in 1..4 {
 			producer.evict(key);
@@ -708,7 +708,7 @@ mod tests {
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		for key in 1..4 {
 			let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {

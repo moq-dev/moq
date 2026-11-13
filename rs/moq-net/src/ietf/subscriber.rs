@@ -16874,7 +16874,7 @@ mod stitch_tests {
 		// Starts past the incoming group's first object, at `timestamp(0)`.
 		let mut before = h.track.create_group((KEY - 1).into()).unwrap();
 		before.write_frame(timestamp(4000), b"before".as_slice()).unwrap();
-		before.finish().unwrap();
+		before.close().unwrap();
 
 		let mut consumer = h.track.subscribe(None);
 		assert_eq!(read_group(&mut consumer).await.0, KEY - 1);
@@ -17244,7 +17244,7 @@ mod stitch_tests {
 				let dynamic = run.track.requests();
 				let consumer = run.track.consume();
 				run.track.start_at(last + 1).unwrap();
-				run.track.create_group((last + 1).into()).unwrap().finish().unwrap();
+				run.track.create_group((last + 1).into()).unwrap().close().unwrap();
 				let mut reading = consumer
 					.subscribe(Some(
 						track::Subscription::default()
@@ -17341,7 +17341,7 @@ mod stitch_tests {
 			run.track.broadcast().pool.poll(now, &kio::Waiter::noop());
 			run.track.received();
 			run.track.start_at(3).unwrap();
-			run.track.create_group(3u64.into()).unwrap().finish().unwrap();
+			run.track.create_group(3u64.into()).unwrap().close().unwrap();
 			let requests = run.track.requests();
 			let mut reader = run.track.subscribe(
 				track::Subscription::default()
@@ -17389,7 +17389,7 @@ mod stitch_tests {
 			let dynamic = run.track.requests();
 			let consumer = run.track.consume();
 			run.track.start_at(7).unwrap();
-			run.track.create_group(7u64.into()).unwrap().finish().unwrap();
+			run.track.create_group(7u64.into()).unwrap().close().unwrap();
 			let mut reading = consumer
 				.subscribe(Some(
 					track::Subscription::default()

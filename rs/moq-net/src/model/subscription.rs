@@ -502,6 +502,34 @@ impl Subscription {
 	}
 }
 
+/// Group spans for unit tests whose groups start at consecutive keys, where a span of
+/// starts counts groups.
+#[cfg(test)]
+impl Range {
+	/// The groups starting in `range`.
+	pub(crate) fn groups(range: impl RangeBounds<u64>) -> Self {
+		let start = match range.start_bound() {
+			Bound::Included(start) => Some(*start),
+			Bound::Excluded(start) => Some(start.saturating_add(1)),
+			Bound::Unbounded => None,
+		};
+		let end = match range.end_bound() {
+			Bound::Included(end) => end.checked_add(1),
+			Bound::Excluded(end) => Some(*end),
+			Bound::Unbounded => None,
+		};
+		Self::span(start, end).unwrap_or(Self::EMPTY)
+	}
+}
+
+#[cfg(test)]
+impl Subscription {
+	/// These preferences reading only the groups starting in `range`.
+	pub(crate) fn with_range(self, range: impl RangeBounds<u64>) -> Self {
+		self.with_ranges([Range::groups(range)])
+	}
+}
+
 /// The most demanding request across subscribers, folded in one at a time: the reference
 /// the track's counted aggregate is checked against.
 #[cfg(test)]
@@ -655,8 +683,37 @@ mod tests {
 		combined.finish()
 	}
 
-	fn absolute(group: u64) -> Anchor {
-		Anchor::Absolute(group)
+	fn time(start: u64) -> Anchor {
+		Anchor::Time(start)
+	}
+
+	/// Groups from `start` up to the exclusive `end`, or onward for `None`.
+	fn groups(start: u64, end: impl Into<Option<u64>>) -> Range {
+		Range {
+			start: Anchor::Time(start),
+			end: end.into().map(|end| Anchor::Time(end - 1)),
+		}
+	}
+
+	/// A hop holding every group from 0 through the latest, as contiguous starts do.
+	struct Contiguous;
+
+	impl Holdings for Contiguous {
+		fn containing(&self, time: u64) -> Containing {
+			Containing::Group(time)
+		}
+
+		fn next_start(&self, from: u64) -> Option<u64> {
+			Some(from)
+		}
+
+		fn back(&self, latest: u64, back: u64) -> Option<u64> {
+			latest.checked_sub(back)
+		}
+
+		fn complete(&self) -> bool {
+			false
+		}
 	}
 
 	fn range(start: Anchor, end: impl Into<Option<Anchor>>) -> Range {
@@ -667,20 +724,19 @@ mod tests {
 		combine(subscriptions).unwrap().ranges
 	}
 
-	/// A group range spells both ends at once, in whichever form the caller has.
+	/// A legacy span becomes inclusive time anchors: an exclusive end of 0 holds nothing,
+	/// whatever the start, and an end of 1 holds group 0.
 	#[test]
-	fn group_ranges_build_absolute_anchors() {
-		assert_eq!(Range::groups(2..=5), range(absolute(2), absolute(6)));
-		assert_eq!(Range::groups(2..6), range(absolute(2), absolute(6)));
-		assert_eq!(Range::groups(..6), range(Range::oldest().start, absolute(6)));
-		assert_eq!(Range::groups(2..), range(absolute(2), None));
-		assert_eq!(Range::groups(..), Range::oldest());
-
-		// Through the last group is unbounded.
-		assert_eq!(Range::groups(..=u64::MAX).end, None);
-
-		let sub = Subscription::default().with_range(2..=5).with_range(..);
-		assert_eq!(sub, Subscription::default());
+	fn legacy_spans_become_inclusive_time_ranges() {
+		assert_eq!(Range::span(Some(2), Some(6)), Some(range(time(2), time(5))));
+		assert_eq!(Range::span(None, Some(6)), Some(range(Anchor::Oldest, time(5))));
+		assert_eq!(Range::span(Some(2), None), Some(range(time(2), None)));
+		assert_eq!(Range::span(None, None), Some(Range::oldest()));
+		assert_eq!(Range::span(Some(0), Some(0)), None);
+		assert_eq!(Range::span(None, Some(0)), None);
+		assert_eq!(Range::span(Some(5), Some(5)), None);
+		assert_eq!(Range::span(Some(0), Some(1)), Some(range(time(0), time(0))));
+		assert!(Range::EMPTY.is_empty());
 	}
 
 	#[test]
@@ -715,7 +771,7 @@ mod tests {
 	/// group exists only the farthest offset resolves, since it is group 0 regardless.
 	#[test]
 	fn relative_starts_resolve_against_the_latest_group() {
-		let floor = |sub: &Subscription, latest| Window::new(&sub.ranges, latest, &Unheld).unwrap().floor();
+		let floor = |sub: &Subscription, latest| Window::new(&sub.ranges, latest, &Contiguous).unwrap().floor();
 
 		let live = Subscription::default().with_ranges([Range::live()]);
 		assert_eq!(floor(&live, Some(7)), Some(7));
@@ -728,35 +784,35 @@ mod tests {
 		assert_eq!(floor(&Subscription::default(), None), Some(0));
 
 		// The lowest range wins, and one unresolved range leaves the whole floor unresolved.
-		let mixed = Subscription::default().with_ranges([range(absolute(4), None), Range::live()]);
+		let mixed = Subscription::default().with_ranges([range(time(4), None), Range::live()]);
 		assert_eq!(floor(&mixed, Some(3)), Some(3));
 		assert_eq!(floor(&mixed, Some(9)), Some(4));
 		assert_eq!(floor(&mixed, None), None);
 
 		// Nothing asked for floors nowhere, and an empty range asks for nothing.
 		assert_eq!(floor(&Subscription::default().with_ranges([]), None), Some(0));
-		let empty = Subscription::default().with_ranges([Range::groups(5..5), Range::groups(10..)]);
+		let empty = Subscription::default().with_ranges([groups(5, 5), groups(10, None)]);
 		assert_eq!(floor(&empty, None), Some(10));
 	}
 
-	/// The bounds a wire without ranges carries: the lowest absolute start and the highest
-	/// absolute end, either one lost to a range that counts back from the latest group.
+	/// The bounds a wire without ranges carries: the lowest time start and the highest
+	/// exclusive time end, either one lost to a range that counts back from the latest group.
 	#[test]
 	fn bounds_project_the_ranges_for_older_wires() {
 		let sub = Subscription::default();
 		assert_eq!((sub.start(), sub.end()), (None, None));
 
-		let sub = Subscription::default().with_ranges([Range::groups(2..4), Range::groups(7..9)]);
+		let sub = Subscription::default().with_ranges([groups(2, 4), groups(7, 9)]);
 		assert_eq!((sub.start(), sub.end()), (Some(2), Some(9)));
 
-		// An explicit group 0 is a floor, unlike the default.
-		let sub = Subscription::default().with_range(0..);
+		// An explicit start at 0 is a floor, unlike the default.
+		let sub = Subscription::default().with_ranges([groups(0, None)]);
 		assert_eq!((sub.start(), sub.end()), (Some(0), None));
 
-		let sub = Subscription::default().with_ranges([Range::groups(2..4), Range::live()]);
+		let sub = Subscription::default().with_ranges([groups(2, 4), Range::live()]);
 		assert_eq!((sub.start(), sub.end()), (None, None));
 
-		let sub = Subscription::default().with_ranges([range(absolute(2), Anchor::Relative(0))]);
+		let sub = Subscription::default().with_ranges([range(time(2), Anchor::Relative(0))]);
 		assert_eq!((sub.start(), sub.end()), (Some(2), None));
 
 		// Nothing asked for is the empty range.
@@ -768,35 +824,35 @@ mod tests {
 		assert_eq!(sub.with_start(None).with_end(None), Subscription::default());
 	}
 
-	/// The aggregate is the union: overlapping and adjacent absolute ranges merge, an open
+	/// The aggregate is the union: overlapping and adjacent time ranges merge, an open
 	/// range absorbs what starts inside it, and the oldest range absorbs everything.
 	#[test]
 	fn combined_ranges_are_the_union() {
 		let sub = |ranges: &[Range]| Subscription::default().with_ranges(ranges.iter().copied());
 
 		assert_eq!(
-			ranges(&[sub(&[Range::groups(2..5)]), sub(&[Range::groups(4..8)])]),
-			vec![Range::groups(2..8)]
+			ranges(&[sub(&[groups(2, 5)]), sub(&[groups(4, 8)])]),
+			vec![groups(2, 8)]
 		);
 		assert_eq!(
-			ranges(&[sub(&[Range::groups(2..5)]), sub(&[Range::groups(5..8)])]),
-			vec![Range::groups(2..8)],
+			ranges(&[sub(&[groups(2, 5)]), sub(&[groups(5, 8)])]),
+			vec![groups(2, 8)],
 			"adjacent ranges merge"
 		);
 		assert_eq!(
-			ranges(&[sub(&[Range::groups(2..5)]), sub(&[Range::groups(6..8)])]),
-			vec![Range::groups(2..5), Range::groups(6..8)],
+			ranges(&[sub(&[groups(2, 5)]), sub(&[groups(6, 8)])]),
+			vec![groups(2, 5), groups(6, 8)],
 			"a gap stays a gap"
 		);
 		assert_eq!(
 			ranges(&[
-				sub(&[Range::groups(2..5), Range::groups(9..)]),
-				sub(&[Range::groups(4..)])
+				sub(&[groups(2, 5), groups(9, None)]),
+				sub(&[groups(4, None)])
 			]),
-			vec![Range::groups(2..)]
+			vec![groups(2, None)]
 		);
 		assert_eq!(
-			ranges(&[sub(&[Range::groups(2..5)]), Subscription::default()]),
+			ranges(&[sub(&[groups(2, 5)]), Subscription::default()]),
 			vec![Range::oldest()]
 		);
 
@@ -811,25 +867,25 @@ mod tests {
 			vec![range(Anchor::Relative(3), None)]
 		);
 
-		// An absolute floor above the live edge does not hide the live edge: both stay.
+		// A time floor above the live edge does not hide the live edge: both stay.
 		assert_eq!(
-			ranges(&[sub(&[Range::groups(4..)]), sub(&[Range::live()])]),
-			vec![Range::groups(4..), Range::live()]
+			ranges(&[sub(&[groups(4, None)]), sub(&[Range::live()])]),
+			vec![groups(4, None), Range::live()]
 		);
 
 		// Empty ranges ask for nothing.
-		assert_eq!(ranges(&[sub(&[Range::groups(5..5)])]), Vec::<Range>::new());
+		assert_eq!(ranges(&[sub(&[groups(5, 5)])]), Vec::<Range>::new());
 		assert_eq!(
-			ranges(&[sub(&[]), sub(&[Range::groups(1..2)])]),
-			vec![Range::groups(1..2)]
+			ranges(&[sub(&[]), sub(&[groups(1, 2)])]),
+			vec![groups(1, 2)]
 		);
 	}
 
 	/// Combining is order-independent and stops changing once it covers everyone.
 	#[test]
 	fn combined_ranges_settle() {
-		let a = Subscription::default().with_ranges([Range::groups(2..5), Range::live()]);
-		let b = Subscription::default().with_ranges([Range::groups(4..9)]);
+		let a = Subscription::default().with_ranges([groups(2, 5), Range::live()]);
+		let b = Subscription::default().with_ranges([groups(4, 9)]);
 		assert_eq!(combine(&[a.clone(), b.clone()]), combine(&[b.clone(), a.clone()]));
 
 		let combined = combine(&[a.clone(), b]);

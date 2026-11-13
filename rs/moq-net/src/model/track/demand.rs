@@ -315,7 +315,7 @@ mod tests {
 			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
 				0 => Anchor::Relative(rng.random_range(0..3)),
 				1 => Anchor::Oldest,
-				_ => Anchor::Absolute(rng.random_range(0..8)),
+				_ => Anchor::Time(rng.random_range(0..8)),
 			};
 			let ranges: Vec<Range> = (0..rng.random_range(0..3))
 				.map(|_| Range {
@@ -373,13 +373,13 @@ mod tests {
 	}
 
 	/// An oldest end is refused wherever it is read, so it asks nothing upstream, even
-	/// past an absolute start.
+	/// past a time start.
 	#[test]
 	fn an_oldest_end_adds_no_demand() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let producer = broadcast.create_track("demand", None).unwrap();
 		let _sub = producer.subscribe(Subscription::default().with_ranges([Range {
-			start: Anchor::Absolute(3),
+			start: Anchor::Time(3),
 			end: Some(Anchor::Oldest),
 		}]));
 		assert_eq!(producer.subscription().map(|sub| sub.ranges), Some(Vec::new()));
