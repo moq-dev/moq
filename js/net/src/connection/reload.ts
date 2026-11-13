@@ -324,7 +324,8 @@ export class Reload {
 	/**
 	 * The URL an accepted GOAWAY redirect assigned, or undefined while the loop dials
 	 * {@link Reload.url}. Sticky across reconnects: a redirect is an assignment, not a
-	 * detour. Cleared when a new URL or a disable/re-enable starts another sequence.
+	 * detour. Cleared when a dial to it fails, so the redial returns to {@link Reload.url},
+	 * or when a new URL or a disable/re-enable starts another sequence.
 	 */
 	readonly redirect: Getter<URL | undefined>;
 

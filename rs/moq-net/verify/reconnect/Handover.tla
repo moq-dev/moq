@@ -240,12 +240,14 @@ Abandon ==
     /\ IF Established
        THEN /\ phase' = "backoff"
             /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+            \* `walk_failed` drops a redirect target, as in Failed.
+            /\ target' = Start
             /\ UNCHANGED <<live, pred, queue>>
        \* The first walk fails fast: `Action::Abandon`, then the `Done` it queued.
        ELSE /\ Done
             /\ queue' = <<"Done">>
-            /\ UNCHANGED timer
-    /\ UNCHANGED <<watch, probe, target, sess, used, dialTo,
+            /\ UNCHANGED <<timer, target>>
+    /\ UNCHANGED <<watch, probe, sess, used, dialTo,
                    misdials, lc, lcSess, migrating, spred, started, ended>>
 
 BackoffEnds ==

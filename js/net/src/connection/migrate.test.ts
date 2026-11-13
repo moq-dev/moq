@@ -261,24 +261,38 @@ test("a redirected connection falls back to the configured URL once its target d
 		if (dead && href === moved.href) throw new Error("connection refused");
 		return new accepting(dialed, options);
 	} as unknown as typeof WebTransport;
-	const reload = new Reload({ url, websocket: { enabled: false }, delay: { initial: Duration.millis(1) } });
+	// Pooled, so the entry's key follows the URL the loop dials.
+	const handle = new Connection({ url });
 
 	try {
-		await waitUntil(() => reload.status.peek() === "connected");
+		await waitUntil(() => handle.status.peek() === "connected");
 		await goaway(dials[0]?.server as WebTransport, moved.href);
-		await elapse(clock, () => dials.length === 2 && reload.status.peek() === "connected");
+		await elapse(clock, () => dials.length === 2 && handle.status.peek() === "connected");
 		expect(dials[1]?.url).toBe(moved.href);
 
 		// The relay it was sent to dies and stays down.
 		dead = true;
 		const before = attempts.length;
 		dials[1]?.server.close();
-		await elapse(clock, () => dials.length === 3 && reload.status.peek() === "connected");
+		await elapse(clock, () => dials.length === 3 && handle.status.peek() === "connected");
 		expect(attempts.slice(before)).toEqual([moved.href, url.href]);
 		expect(dials[2]?.url).toBe(url.href);
-		expect(reload.redirect.peek()).toBeUndefined();
+		const origin = handle.origin.peek();
+
+		// The entry is keyed on the configured URL again: a caller asking for it shares the
+		// connection, and one asking for the dead target dials fresh.
+		const joined = new Connection({ url });
+		await waitUntil(() => joined.origin.peek() !== undefined);
+		expect(joined.origin.peek()).toBe(origin);
+		const fresh = new Connection({ url: moved });
+		await waitUntil(() => fresh.origin.peek() !== undefined);
+		expect(fresh.origin.peek()).not.toBe(origin);
+
+		joined.close();
+		fresh.close();
 	} finally {
-		reload.close();
+		globalThis.WebTransport = accepting;
+		handle.close();
 		installed.close();
 	}
 });

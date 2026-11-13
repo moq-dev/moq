@@ -969,9 +969,10 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			Ended::Closed(err) => return self.closed(now, err, healthy, live.presented.as_ref(), &url),
 		};
 
-		// An accepted redirect is an assignment: keep dialing it from here on, and only it.
-		// The peer named exactly one place to go, which retires whatever other addresses got
-		// us to this session.
+		// An accepted redirect is an assignment: keep dialing it from here on, and only it,
+		// until a walk to it fails and `walk_failed` restores the configured addresses. The
+		// peer named exactly one place to go, which retires whatever other addresses got us
+		// to this session.
 		let url = match assigned {
 			Some(target) => {
 				let redirected = std::mem::replace(&mut self.targets, vec![A::from(target.clone())]);
