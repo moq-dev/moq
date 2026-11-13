@@ -111,9 +111,15 @@ fn a_relay_behind_a_scoped_neighbour_is_blind(rule: Rule) {
 	}
 	assert_eq!(sim.reaches(relay, 7, &p("b/x")), Some(origin));
 	let first = sim.path(relay).forward(7, &p("b/x"), None);
-	assert!(matches!(first, Some(crate::route::path::Forward::Next { next, .. }) if next == wide), "{first:?}");
+	assert!(
+		matches!(first, Some(crate::route::path::Forward::Next { next, .. }) if next == wide),
+		"{first:?}"
+	);
 	let first = sim.path(relay).forward(7, &p("a/x"), None);
-	assert!(matches!(first, Some(crate::route::path::Forward::Next { next, .. }) if next == narrow), "{first:?}");
+	assert!(
+		matches!(first, Some(crate::route::path::Forward::Next { next, .. }) if next == narrow),
+		"{first:?}"
+	);
 }
 
 /// The mesh the reviews found the forgotten claim on: two origins, and six relays

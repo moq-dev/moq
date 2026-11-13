@@ -819,7 +819,10 @@ fn holds_retire_once_nothing_can_recover(rule: Rule) {
 	for relay in 0..4 {
 		assert!(sim.shown(relay).is_empty());
 		assert!(!sim.holds(relay, 7), "relay {relay}");
-		assert!(sim.paths() || !sim.remembers(relay, 7), "relay {relay} drained its distance");
+		assert!(
+			sim.paths() || !sim.remembers(relay, 7),
+			"relay {relay} drained its distance"
+		);
 	}
 	assert_eq!(false_ends(&sim.events), 0);
 	assert_eq!(sim.pending(), 0);
@@ -1233,50 +1236,23 @@ fn sweep_handoff(rule: Rule) {
 	}
 }
 
-/// The scripts `sweep_handoff` runs, on today's rule and the path rule: both settle
-/// to the same claims at every node. PROBE: tallies how the readers' histories differ.
+/// Both rules run the same external script and settle to the same claims. Their
+/// different message graphs interleave snapshots differently, so reader histories
+/// need not match, but neither may revive a known withdrawal or report a false END.
 #[test]
 fn the_rules_agree_on_every_script() {
-	let mut signatures: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
-	let mut differ = 0;
 	for scenario in 0..scenarios() {
 		let label = format!("scenario {scenario}");
-		let sims: Vec<Sim> = [Rule::Distance, Rule::PATH]
-			.into_iter()
-			.map(|rule| {
-				let mut sim = churn(rule, scenario);
-				settled(&mut sim, &label);
-				sim
-			})
-			.collect();
+		let sims = [Rule::Distance, Rule::PATH].map(|rule| {
+			let mut sim = churn(rule, scenario);
+			assert_eq!(revivals(&sim.events), 0, "{label}: {rule:?}");
+			assert_eq!(false_ends(&sim.events), 0, "{label}: {rule:?}");
+			settled(&mut sim, &label);
+			sim
+		});
 		for node in 0..RELAYS + 3 {
 			assert_eq!(sims[0].shown(node), sims[1].shown(node), "{label}: node {node}");
 		}
-		let lives = |sim: &Sim| {
-			let mut lives: BTreeMap<(Node, Id, String), Vec<Kind>> = BTreeMap::new();
-			for event in &sim.events {
-				lives.entry((event.node, event.id, event.claim.clone())).or_default().push(event.kind);
-			}
-			lives
-		};
-		let (a, b) = (lives(&sims[0]), lives(&sims[1]));
-		let keys: BTreeSet<_> = a.keys().chain(b.keys()).cloned().collect();
-		let mut differs = false;
-		for key in keys {
-			let (x, y) = (a.get(&key).cloned().unwrap_or_default(), b.get(&key).cloned().unwrap_or_default());
-			if x != y {
-				differs = true;
-				let entry = signatures.entry((format!("{x:?}"), format!("{y:?}"))).or_insert((0, scenario));
-				entry.0 += 1;
-			}
-		}
-		differ += usize::from(differs);
-	}
-	let mut sorted: Vec<_> = signatures.into_iter().collect();
-	sorted.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
-	eprintln!("PROBE {differ} of {} scripts differ, {} signatures", scenarios(), sorted.len());
-	for ((x, y), (count, scenario)) in sorted.iter().take(60) {
-		eprintln!("PROBE {count} e.g. {scenario}: distance {x} path {y}");
 	}
 }
 
@@ -1610,7 +1586,10 @@ fn a_change_of_hops_alone_lets_go_of_no_claim(rule: Rule) {
 	sim.disconnect(origin, 3);
 	assert!(sim.run());
 	// The path rule names the session too, so the route through 3 ends instead.
-	assert!(sim.paths() || sim.stats.hop_updates > hops, "a route changed its hops alone");
+	assert!(
+		sim.paths() || sim.stats.hop_updates > hops,
+		"a route changed its hops alone"
+	);
 	assert_eq!(sim.shows(4, 7, ""), Some(true));
 	sim.disconnect(2, 3);
 	assert!(sim.run());

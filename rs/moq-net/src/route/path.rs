@@ -352,7 +352,8 @@ fn meet(a: &Path, b: &Path) -> Option<Path> {
 
 /// The entries of `map` under identity `id`.
 fn of<V>(map: &BTreeMap<RouteId, V>, id: Id) -> impl Iterator<Item = (&RouteId, &V)> {
-	map.range((id, Path::empty())..).take_while(move |((key, _), _)| *key == id)
+	map.range((id, Path::empty())..)
+		.take_while(move |((key, _), _)| *key == id)
 }
 
 impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
@@ -814,6 +815,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	#[cfg(test)]
 	pub fn dump(&self) -> String {
 		let mut out = String::new();
+		out += &format!(
+			"  dead {:?} doubt {:?} filed {:?}\n",
+			self.dead, self.doubted, self.filed
+		);
+		for (peer, session) in &self.sessions {
+			out += &format!("  to {peer:?} watch {:?} sent {:?}\n", session.watch, session.tx);
+		}
 		for (key, routes) in &self.rx {
 			for (peer, heard) in routes {
 				out += &format!(
@@ -828,7 +836,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		for (key, view) in &self.views {
 			out += &format!("  view {key:?}: {view:?}\n");
 		}
-		out += &format!("  interest {} watch {:?} shown {:?}", self.interest, self.watch, self.reader.shown());
+		out += &format!(
+			"  interest {} watch {:?} shown {:?}",
+			self.interest,
+			self.watch,
+			self.reader.shown()
+		);
 		out
 	}
 
@@ -919,7 +932,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Every view a route heard carries.
 	#[cfg(test)]
 	pub fn heard(&self) -> impl Iterator<Item = (&RouteId, &View<A>)> {
-		self.rx.iter().flat_map(|(key, routes)| routes.values().map(move |heard| (key, &heard.view)))
+		self.rx
+			.iter()
+			.flat_map(|(key, routes)| routes.values().map(move |heard| (key, &heard.view)))
 	}
 
 	/// The view of `id` this node keeps for `prefix`, or its own.
@@ -964,7 +979,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				.flat_map(|session| session.tx.values())
 				.map(|sent| sent.view.items.len())
 				.sum(),
-			routes: self.routes.keys().filter(|(id, _)| !self.origins.contains_key(id)).count(),
+			routes: self
+				.routes
+				.keys()
+				.filter(|(id, _)| !self.origins.contains_key(id))
+				.count(),
 			dead: self.dead.len(),
 			doubt: self.doubted.len() + self.timers.len(),
 		}
@@ -1004,7 +1023,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		for hop in heard.offer.path.iter() {
 			self.rx_hops.entry(*hop).or_default().insert((key.clone(), from));
 		}
-		self.sessions.get_mut(&from).expect("a session").heard.insert(key.clone());
+		self.sessions
+			.get_mut(&from)
+			.expect("a session")
+			.heard
+			.insert(key.clone());
 		self.rx.entry(key).or_default().insert(from, heard);
 	}
 
@@ -1036,6 +1059,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// Re-path a heard route in place, keeping its claims.
 	fn repath(&mut self, key: &RouteId, from: N, offer: Offer) {
+		let named = self.name(from, key.0);
 		let mut heard = self.rx[key][&from].clone();
 		self.forget_heard(key, from);
 		heard.state = match self.dead_in(&offer.path) {
@@ -1044,6 +1068,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		};
 		heard.offer = offer;
 		self.hear(key.clone(), from, heard);
+		if named != key.0 {
+			self.filed.insert((key.0, from), named);
+		}
 	}
 
 	/// The identities with a heard route naming `node`.
@@ -1098,7 +1125,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				if gone {
 					self.forget_heard(&key, peer);
 				} else {
-					let heard = self.rx.get_mut(&key).and_then(|routes| routes.get_mut(&peer)).expect("heard");
+					let heard = self
+						.rx
+						.get_mut(&key)
+						.and_then(|routes| routes.get_mut(&peer))
+						.expect("heard");
 					// A neighbour that holds under this node answers once those behind it have.
 					if !child(&heard.offer.path, me) {
 						heard.state = State::Held;
@@ -1106,7 +1137,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 				continue;
 			}
-			let heard = self.rx.get_mut(&key).and_then(|routes| routes.get_mut(&peer)).expect("heard");
+			let heard = self
+				.rx
+				.get_mut(&key)
+				.and_then(|routes| routes.get_mut(&peer))
+				.expect("heard");
 			if heard.state == State::Live {
 				heard.state = State::Dead;
 			}
@@ -1228,9 +1263,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Whether a neighbour offers a route for `key` that only doubt keeps this node off.
 	fn hopes(&self, key: &RouteId) -> bool {
 		(self.rx.get(key).into_iter().flatten()).any(|(_, heard)| {
-			heard.state == State::Live
-				&& !names(&heard.offer.path, self.hop)
-				&& self.doubts_path(&heard.offer.path)
+			heard.state == State::Live && !names(&heard.offer.path, self.hop) && self.doubts_path(&heard.offer.path)
 		})
 	}
 
@@ -1296,9 +1329,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.map(|((_, prefix), view)| (prefix.clone(), view.floors.get(prefix).copied()))
 			.collect();
 		let mut keys: BTreeSet<Path> = of(&self.views, id).map(|((_, prefix), _)| prefix.clone()).collect();
-		keys.extend(
-			(of(&self.routes, id).map(|((_, prefix), _)| prefix)).filter_map(|prefix| meet(prefix, &watch)),
-		);
+		keys.extend((of(&self.routes, id).map(|((_, prefix), _)| prefix)).filter_map(|prefix| meet(prefix, &watch)));
 		for prefix in &keys {
 			let key = (id, prefix.clone());
 			if !self.presence(id, prefix) {
@@ -1313,7 +1344,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				Some(view) => view,
 				None => {
 					dirty.all = true;
-					self.above(id, prefix).map(|(_, view)| view.present(prefix)).unwrap_or_default()
+					self.above(id, prefix)
+						.map(|(_, view)| view.present(prefix))
+						.unwrap_or_default()
 				}
 			};
 			let floor = base.floors.get(prefix).copied();
@@ -1346,7 +1379,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					view.represent(heard, std::slice::from_ref(prefix), &delta.claims);
 					#[cfg(test)]
 					assert_eq!(view, heard.present(prefix), "incremental view {key:?}");
-					dirty.claims.extend(delta.claims.iter().filter(|claim| within(claim, prefix)).cloned());
+					dirty
+						.claims
+						.extend(delta.claims.iter().filter(|claim| within(claim, prefix)).cloned());
 					dirty.claims.insert(prefix.clone());
 					view
 				}
@@ -1378,7 +1413,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				continue;
 			};
 			let floor = view.floors.get(prefix);
-			if self.above(id, prefix).is_some_and(|(above, wider)| wider.floors.get(above) == floor) {
+			if self
+				.above(id, prefix)
+				.is_some_and(|(above, wider)| wider.floors.get(above) == floor)
+			{
 				self.views.remove(&key);
 				dirty.all = true;
 			}
@@ -1388,7 +1426,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Count a forget against each claim of `id` this node has shown within `prefix`,
 	/// outside `kept`.
 	fn forget(&mut self, id: Id, prefix: &Path, kept: Option<&Path>) {
-		(self.reader).forget(id, |claim| !within(claim, prefix) || kept.is_some_and(|kept| within(claim, kept)));
+		(self.reader).forget(id, |claim| {
+			!within(claim, prefix) || kept.is_some_and(|kept| within(claim, kept))
+		});
 	}
 
 	// --- Internals: sending ---
@@ -1403,6 +1443,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let Some(route) = self.routes.get(&(id, src.clone())) else {
 			return Want::End;
 		};
+		// A route qualified here is a different key from the one this next hop
+		// offered. Echoing it back would make that neighbour mistake the echo for
+		// a child of its own route under this key, and hold forever for its answer.
+		if route.next == Some(peer) && self.name(peer, id) != id {
+			return Want::End;
+		}
 		let want = match &route.offer {
 			// A route goes to the node that published it no more than to an upstream link
 			// when down-only: neither would use it.
@@ -1445,7 +1491,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 		let mut out = BTreeSet::from([watch.clone()]);
 		out.extend(
-			(of(&self.routes, id).map(|((_, prefix), _)| prefix)).filter(|prefix| within(prefix, watch)).cloned(),
+			(of(&self.routes, id).map(|((_, prefix), _)| prefix))
+				.filter(|prefix| within(prefix, watch))
+				.cloned(),
 		);
 		out.extend(of(&self.sessions[&peer].tx, id).map(|((_, prefix), _)| prefix.clone()));
 		out
@@ -1469,7 +1517,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				continue;
 			};
 			let first = !self.sessions[&peer].told.contains(&hop);
-			let (mut moved, mut holds, mut parents, mut ends, mut rest) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
+			let (mut moved, mut holds, mut parents, mut ends, mut rest) =
+				(Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
 			for key in &through {
 				self.step();
 				let want = self.want(key.0, &key.1, peer, &watch);
@@ -1482,7 +1531,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 						self.index_sent(peer, key, &offer.path);
 						self.unreflect(peer, key, &was);
 						self.reflect(peer, key, &src);
-						let sent = self.sessions.get_mut(&peer).expect("a session").tx.get_mut(key).expect("sent");
+						let sent = self
+							.sessions
+							.get_mut(&peer)
+							.expect("a session")
+							.tx
+							.get_mut(key)
+							.expect("sent");
 						sent.offer = Some(offer.clone());
 						sent.held = false;
 						sent.src = src;
@@ -1501,7 +1556,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 							if parent {
 								parents.push(key.clone());
 							}
-							let sent = self.sessions.get_mut(&peer).expect("a session").tx.get_mut(key).expect("sent");
+							let sent = self
+								.sessions
+								.get_mut(&peer)
+								.expect("a session")
+								.tx
+								.get_mut(key)
+								.expect("sent");
 							sent.held = true;
 						}
 						rest += 1;
@@ -1510,7 +1571,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					Want::End | Want::Empty => {
 						let old = sent.offer.clone().expect("sent");
 						self.unindex_sent(peer, key, &old.path);
-						let sent = self.sessions.get_mut(&peer).expect("a session").tx.get_mut(key).expect("sent");
+						let sent = self
+							.sessions
+							.get_mut(&peer)
+							.expect("a session")
+							.tx
+							.get_mut(key)
+							.expect("sent");
 						sent.offer = None;
 						sent.held = false;
 						sent.view = View::default();
@@ -1624,7 +1691,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				Want::Keep => {}
 				Want::Hold => {
 					if on && !sent.expect("sent").held {
-						self.sessions.get_mut(&peer).expect("a session").tx.get_mut(&key).expect("sent").held = true;
+						self.sessions
+							.get_mut(&peer)
+							.expect("a session")
+							.tx
+							.get_mut(&key)
+							.expect("sent")
+							.held = true;
 						self.out.push(Out::Route {
 							to: peer,
 							id,
@@ -1648,7 +1721,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 						}
 						let old = sent.and_then(|sent| sent.offer.clone()).expect("sent");
 						self.unindex_sent(peer, &key, &old.path);
-						let sent = self.sessions.get_mut(&peer).expect("a session").tx.get_mut(&key).expect("sent");
+						let sent = self
+							.sessions
+							.get_mut(&peer)
+							.expect("a session")
+							.tx
+							.get_mut(&key)
+							.expect("sent");
 						sent.offer = None;
 						sent.held = false;
 						sent.view = View::default();
@@ -1697,7 +1776,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					// change elsewhere costs it nothing. Its first floor always goes.
 					let first = sent.view.floors.is_empty() && floor.is_some();
 					if !changes.is_empty() || first {
-						let floors = floor.map(|rev| BTreeMap::from([(prefix.clone(), rev)])).unwrap_or_default();
+						let floors = floor
+							.map(|rev| BTreeMap::from([(prefix.clone(), rev)]))
+							.unwrap_or_default();
 						sent.view.apply(changes.clone(), floors);
 						self.out.push(Out::Batch {
 							to: peer,
@@ -1762,9 +1843,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			let mut check = (sent.filter(|sent| sent.offer.is_some()))
 				.map(|sent| sent.view.clone())
 				.unwrap_or_default();
-			let floors = floor.map(|rev| BTreeMap::from([(prefix.clone(), rev)])).unwrap_or_default();
+			let floors = floor
+				.map(|rev| BTreeMap::from([(prefix.clone(), rev)]))
+				.unwrap_or_default();
 			check.apply(changes.clone(), floors);
-			assert_eq!(check, view.present(prefix), "incremental presentation of {id} {prefix:?} to {peer:?}");
+			assert_eq!(
+				check,
+				view.present(prefix),
+				"incremental presentation of {id} {prefix:?} to {peer:?}"
+			);
 		}
 		(from, changes, floor)
 	}
@@ -1781,7 +1868,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// [`Self::update`] after a batch.
-	fn recompute(&mut self, ids: BTreeSet<Id>, reports: Vec<Hop>, claims: Option<(Id, Dirty)>, delta: Option<Delta<N>>) {
+	fn recompute(
+		&mut self,
+		ids: BTreeSet<Id>,
+		reports: Vec<Hop>,
+		claims: Option<(Id, Dirty)>,
+		delta: Option<Delta<N>>,
+	) {
 		let mut dirty = BTreeMap::new();
 		if let Some((id, claims)) = claims {
 			dirty.insert(id, claims);
@@ -1847,18 +1940,24 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Forget each dead hop no heard route names once its timer fired, each doubt no
 	/// heard route names under [`Lift::Unnamed`], and each told hop no sent route names.
 	fn collect_doubt(&mut self) {
-		let named: BTreeSet<Hop> = self.dead.keys().filter(|hop| self.rx_hops.contains_key(hop)).copied().collect();
+		let named: BTreeSet<Hop> = self
+			.dead
+			.keys()
+			.filter(|hop| self.rx_hops.contains_key(hop))
+			.copied()
+			.collect();
 		let timers = &self.timers;
-		self.dead.retain(|hop, far| named.contains(hop) || timers.contains_key(far));
+		self.dead
+			.retain(|hop, far| named.contains(hop) || timers.contains_key(far));
 		if self.doubt.lift == Lift::Unnamed {
 			let keep: BTreeSet<Id> = self.doubted.iter().filter(|node| self.named(**node)).copied().collect();
 			self.doubted = keep;
 		}
 		let tx_hops = &self.tx_hops;
 		for (peer, session) in self.sessions.iter_mut() {
-			session.told.retain(|hop| {
-				(tx_hops.get(hop).into_iter().flatten()).any(|(to, _)| to == peer)
-			});
+			session
+				.told
+				.retain(|hop| (tx_hops.get(hop).into_iter().flatten()).any(|(to, _)| to == peer));
 		}
 	}
 
@@ -1886,7 +1985,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let mut reflects: BTreeMap<RouteId, BTreeSet<(N, Path)>> = BTreeMap::new();
 		for (peer, session) in &self.sessions {
 			for (key, sent) in &session.tx {
-				reflects.entry((key.0, sent.src.clone())).or_default().insert((*peer, key.1.clone()));
+				reflects
+					.entry((key.0, sent.src.clone()))
+					.or_default()
+					.insert((*peer, key.1.clone()));
 			}
 		}
 		assert_eq!(reflects, self.reflects, "reflection index");
@@ -1897,7 +1999,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			views: (of(&self.views, id))
 				.map(|((_, prefix), view)| (prefix.clone(), view.floors.contains_key(prefix)))
 				.collect(),
-			routes: of(&self.routes, id).map(|((_, prefix), route)| (prefix.clone(), route.live())).collect(),
+			routes: of(&self.routes, id)
+				.map(|((_, prefix), route)| (prefix.clone(), route.live()))
+				.collect(),
 		}
 	}
 
@@ -1949,8 +2053,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			true => self.claims(id),
 			false => dirty.claims.clone(),
 		};
-		let now: BTreeMap<Path, Option<Shown<A>>> =
-			claims.iter().map(|claim| (claim.clone(), self.shown_now(id, claim))).collect();
+		let now: BTreeMap<Path, Option<Shown<A>>> = claims
+			.iter()
+			.map(|claim| (claim.clone(), self.shown_now(id, claim)))
+			.collect();
 		#[cfg(test)]
 		if !dirty.all {
 			let full = (self.claims(id).into_iter())
@@ -1980,5 +2086,4 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 		claims
 	}
-
 }

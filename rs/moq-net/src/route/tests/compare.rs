@@ -878,20 +878,27 @@ fn every_rule_converges_on_every_shape() {
 /// What the report's table shows, pinned on six relays.
 #[test]
 fn the_rules_differ_as_reported() {
-	let cost = |rule: Rule, mesh: &Mesh, change: Change| {
-		let costs = run(rule, mesh);
-		costs.into_iter().find(|(found, _)| *found == change).map(|(_, cost)| cost)
-	};
 	for mesh in [Mesh::clique(6, 1), Mesh::ring(6)] {
-		for change in [Change::Leave, Change::Rejoin, Change::Move, Change::Detour, Change::Home, Change::Transit, Change::Restart, Change::Cut, Change::Mend, Change::Shortcut, Change::Withdraw, Change::Arrive] {
-			for rule in COMPARED {
-				if let Some(cost) = cost(rule, &mesh, change) {
-					eprintln!("REPORT {} {change:?} {}: msgs {} claims {} rounds {} right {} loops {} stale {} dark {} off {} unav {}", mesh.links.len(), rule.as_str(), cost.sent.msgs, cost.sent.claims, cost.rounds, cost.right, cost.loops, cost.stale, cost.dark, cost.sent.offline, cost.sent.unavailable);
-				}
-			}
+		let costs = COMPARED.map(|rule| run(rule, &mesh).into_iter().collect::<BTreeMap<_, _>>());
+		let [distance, path, timer] = &costs;
+		// These meshes keep a heard route through the doubted node, so neither
+		// path policy lifts early. Churn below covers where they differ.
+		assert_eq!(path, timer);
+		for costs in &costs {
+			assert!(costs.values().all(|cost| cost.settled && cost.loops == 0));
 		}
+		for change in [Change::Leave, Change::Detour, Change::Home] {
+			assert!(path[&change].sent.msgs < distance[&change].sent.msgs);
+			assert_eq!(path[&change].sent.claims, 0);
+		}
+		assert_eq!(path[&Change::Detour].sent.offline, 0, "a detour keeps claims");
+		let timer_hops = (Doubt::DEFAULT.timer.as_nanos() / HOP.as_nanos()) as usize;
+		for change in [Change::Rejoin, Change::Move, Change::Detour] {
+			assert!(path[&change].right >= timer_hops, "{change:?}: wait for the doubt");
+			assert!(path[&change].right > distance[&change].right);
+		}
+		assert_eq!(path[&Change::Withdraw].sent.msgs, 0, "claims alone change no route");
 	}
-	panic!("report");
 }
 
 /// Per change, mesh size, and rule, over fixed seeds: the mean of what converging cost.

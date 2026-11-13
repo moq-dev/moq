@@ -14,7 +14,10 @@ fn follower(prefixes: usize) -> (Sim, Node) {
 	sim.join(origin, hub, 1);
 	for spoke in 0..prefixes {
 		let scope: &'static str = Box::leak(format!("live/{spoke}").into_boxed_str());
-		let grant = Grant { subject: "spokes", scope };
+		let grant = Grant {
+			subject: "spokes",
+			scope,
+		};
 		sim.link(2 + spoke, hub, SimLink::cost(1).grant(grant), SimLink::cost(1));
 		sim.join(2 + spoke, follower, 1);
 	}
@@ -52,7 +55,10 @@ fn teardown_is_linear_in_prefixes_held() {
 		assert_eq!(sim.shown(follower).len(), prefixes);
 		sim.work() - before
 	};
-	for (name, cost) in [("teardown", &teardown as &dyn Fn(usize) -> usize), ("refollow", &refollow)] {
+	for (name, cost) in [
+		("teardown", &teardown as &dyn Fn(usize) -> usize),
+		("refollow", &refollow),
+	] {
 		let costs: Vec<usize> = [8, 16, 32].into_iter().map(cost).collect();
 		for pair in costs.windows(2) {
 			// Quadratic work would quadruple.
@@ -65,6 +71,92 @@ const CLAIMS: [&str; 6] = ["a/x", "a/y/", "a/", "b/x", "b/y/z", ""];
 const WATCHES: [&str; 5] = ["", "", "a/", "b/", "a/x"];
 const SCOPES: [&str; 2] = ["a/", "b/"];
 const SUBJECTS: [&str; 2] = ["ga", "gb"];
+
+/// A DEAD that repaths a scoped route keeps the publisher's original key for
+/// forwarding: the neighbour admitted under the grant never hears the qualified key.
+#[test]
+fn a_repathed_scoped_route_keeps_its_original_key() {
+	let (origin, primary, backup, receiver, near) = (0, 1, 2, 3, 4);
+	let mut sim = Sim::with(Rule::PATH, 5);
+	sim.leaf(origin);
+	sim.join(origin, near, 1);
+	sim.join(near, primary, 1);
+	sim.join(origin, backup, 3);
+	sim.join(primary, backup, 1);
+	sim.link(
+		receiver,
+		primary,
+		SimLink::cost(1).grant(Grant {
+			subject: "ga",
+			scope: "a",
+		}),
+		SimLink::cost(1),
+	);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "a/x", 0, None);
+	assert!(sim.run());
+	let key = qualified("ga", 7);
+	assert_eq!(sim.reaches(receiver, key, &p("a/x")), Some(origin));
+	sim.disconnect(near, primary);
+	assert!(sim.run());
+	assert_eq!(sim.shows(receiver, key, "a/x"), Some(true));
+	assert_eq!(sim.reaches(receiver, key, &p("a/x")), Some(origin));
+}
+
+/// A qualified route switches onto a raw route from its former child. The raw
+/// route is a different key: the child cannot answer a hold for the qualified one.
+#[test]
+fn qualification_does_not_turn_another_key_into_a_child() {
+	let (origin, raw, relay, alternate) = (0, 1, 2, 3);
+	let grant = Grant {
+		subject: "ga",
+		scope: "a",
+	};
+	let mut sim = Sim::with(Rule::PATH, 4);
+	sim.leaf(origin);
+	sim.join(origin, raw, 1);
+	sim.link(relay, raw, SimLink::cost(4).grant(grant), SimLink::cost(1));
+	sim.link(alternate, origin, SimLink::cost(1).grant(grant), SimLink::cost(1));
+	sim.join(alternate, relay, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "a/x", 0, None);
+	assert!(sim.run());
+	let key = qualified("ga", 7);
+	assert_eq!(sim.reaches(raw, key, &p("a/x")), Some(origin));
+	sim.disconnect(alternate, relay);
+	assert!(sim.run());
+	assert_eq!(sim.shows(raw, key, "a/x"), None);
+	assert!(!sim.holds(raw, key));
+	assert_eq!(sim.reaches(relay, key, &p("a/x")), Some(origin));
+}
+
+/// Cancelling the only stream for a grant has no new stream whose SYNCED could
+/// retire its old routes. The local cancellation retires them instead.
+#[test]
+fn an_unwatched_grant_retires_its_previous_stream() {
+	let mut sim = Sim::with(Rule::PATH, 2);
+	sim.link(
+		1,
+		0,
+		SimLink::cost(1).grant(Grant {
+			subject: "ga",
+			scope: "b",
+		}),
+		SimLink::cost(1),
+	);
+	sim.originate(0, 7, 0);
+	sim.announce(0, "b/x", 0, None);
+	assert!(sim.run());
+	let key = qualified("ga", 7);
+	assert_eq!(sim.shows(1, key, "b/x"), Some(true));
+	sim.watch(1, "a");
+	assert!(sim.run());
+	assert!(!sim.holds(1, key));
+	assert!(sim.shown(1).is_empty());
+	sim.watch(1, "b");
+	assert!(sim.run());
+	assert_eq!(sim.reaches(1, key, &p("b/x")), Some(0));
+}
 
 /// The prefix two regions share, or `None` when they are disjoint.
 fn meet(a: &Path, b: &Path) -> Option<Path> {
@@ -116,9 +208,7 @@ fn mesh(sim: &Sim) -> String {
 	let mut out = String::new();
 	for a in 0..sim.nodes.len() {
 		out += &format!("  node {a} watches {:?}\n", sim.watching(a));
-		if std::env::var("DUMP").is_ok() {
-			out += &sim.path(a).dump();
-		}
+		out += &sim.path(a).dump();
 		for b in 0..sim.nodes.len() {
 			if let Some(side) = sim.links[a][b] {
 				let up = if sim.connected(a, b) { "up" } else { "down" };
@@ -158,7 +248,9 @@ fn quiet(sim: &Sim, origin: Node, label: &str) {
 			let routes: Vec<(&Path, &path::Route<Node>)> = router.routes(key).collect();
 			assert!(
 				routes.iter().all(|(_, route)| route.offer.is_some()),
-				"{label}: node {node} holds {key}"
+				"{label}: node {node} holds {key}\n{}{}",
+				router.dump(),
+				mesh(sim)
 			);
 			for (prefix, _) in &routes {
 				assert!(
@@ -170,7 +262,18 @@ fn quiet(sim: &Sim, origin: Node, label: &str) {
 				);
 			}
 			let kept = reach[node].iter().any(|(reached, _)| *reached == key);
-			assert!(kept || !router.holds(key), "{label}: node {node} keeps {key}\n{}", router.dump());
+			// A neighbour may offer our own path back under a qualified key. It is
+			// retained to answer holds but cannot feed a route or a claim view here.
+			assert!(
+				kept || routes.is_empty(),
+				"{label}: node {node} routes {key}\n{}",
+				router.dump()
+			);
+			assert!(
+				kept || router.views().all(|((id, _), _)| *id != key),
+				"{label}: node {node} keeps a view of {key}\n{}",
+				router.dump()
+			);
 			for (claim, item) in presenting(sim, 7, routes.into_iter().map(|(prefix, _)| prefix.clone())) {
 				expected.insert((key, claim), item);
 			}
@@ -192,7 +295,11 @@ fn quiet(sim: &Sim, origin: Node, label: &str) {
 			);
 		}
 		for (key, claim) in shown.keys() {
-			assert_eq!(sim.reaches(node, *key, claim), Some(origin), "{label}: node {node} {key} {claim:?}");
+			assert_eq!(
+				sim.reaches(node, *key, claim),
+				Some(origin),
+				"{label}: node {node} {key} {claim:?}"
+			);
 		}
 	}
 }
@@ -309,7 +416,8 @@ fn sweep_scoped_meshes_show_what_the_rule_says() {
 					}
 				}
 			}
-			sim.check().unwrap_or_else(|err| panic!("scenario {scenario} step {step}: {err}"));
+			sim.check()
+				.unwrap_or_else(|err| panic!("scenario {scenario} step {step}: {err}"));
 			assert_loop_free(&sim, relays + 1, 7);
 		}
 		quiet_at(&mut sim, usize::MAX);

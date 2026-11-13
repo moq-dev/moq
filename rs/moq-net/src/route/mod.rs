@@ -42,9 +42,9 @@ pub(crate) use node::Node;
 pub(crate) use proof::EXPORTER_LABEL;
 pub use proof::RouteKey;
 pub(crate) use proof::{Proof, Transcript};
+use reader::Reader;
 #[cfg(feature = "async")]
 pub(crate) use rtt::LinkRtt;
-use reader::Reader;
 pub(crate) use view::{View, within};
 use view::{above, below, covering, narrow, within_any};
 
@@ -1968,7 +1968,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			regions.as_ref().is_some_and(|regions| !within_any(claim, regions))
 				|| !ctx.own && views.get(&id).is_none_or(|view| view.as_of(claim).is_none())
 		};
-		self.reader.apply(id, &self.watch, now, |claim| ctx.live && !uncertified(claim));
+		self.reader
+			.apply(id, &self.watch, now, |claim| ctx.live && !uncertified(claim));
 	}
 
 	/// How the reader now sees each of `claims` of `id`, in `ctx`.

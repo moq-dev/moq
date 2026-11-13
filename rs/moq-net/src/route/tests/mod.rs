@@ -56,7 +56,9 @@ impl Rule {
 	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::Distance => "distance",
-			Self::Path(Doubt { lift: Lift::Unnamed, .. }) => "path",
+			Self::Path(Doubt {
+				lift: Lift::Unnamed, ..
+			}) => "path",
 			Self::Path(Doubt { lift: Lift::Timer, .. }) => "path+timer",
 		}
 	}
@@ -511,20 +513,26 @@ impl Sim {
 	/// covers of it, and for nothing where they are disjoint.
 	fn ask(&mut self, node: Node, peer: Node) {
 		let watch = self.watch[node].clone();
-		let scope = self.links[node][peer].and_then(|side| side.grant).map(|grant| p(grant.scope));
+		let scope = self.links[node][peer]
+			.and_then(|side| side.grant)
+			.map(|grant| p(grant.scope));
+		let ask = match scope {
+			None => Some(watch.clone()),
+			Some(scope) if within(&scope, &watch) => Some(scope),
+			Some(scope) if within(&watch, &scope) => Some(watch.clone()),
+			Some(_) => None,
+		};
+		let absent = ask.is_none();
 		match &mut self.nodes[peer] {
 			Relay::Distance(router) => router.peer_interest(node, watch),
-			Relay::Path(router) => {
-				let ask = match scope {
-					None => Some(watch),
-					Some(scope) if within(&scope, &watch) => Some(scope),
-					Some(scope) if within(&watch, &scope) => Some(watch),
-					Some(_) => None,
-				};
-				router.peer_interest(node, ask)
-			}
+			Relay::Path(router) => router.peer_interest(node, ask),
 		}
 		.unwrap();
+		// No replacement stream will send SYNCED when the grant is disjoint.
+		// The receiver already knows it cancelled this part of its interest.
+		if absent && let Relay::Path(router) = &mut self.nodes[node] {
+			router.synced(peer, router.interest());
+		}
 	}
 
 	pub fn connected(&self, a: Node, b: Node) -> bool {
@@ -1011,7 +1019,11 @@ impl Sim {
 					let key = (node, to, id, prefix.clone());
 					if let Some(path::Reach::Finite(offer)) = &reach {
 						let me = hop(node, self.restarts[node]);
-						assert_eq!(offer.path.last().map(|hop| hop.node), Some(me), "node {node}'s path for {id}");
+						assert_eq!(
+							offer.path.last().map(|hop| hop.node),
+							Some(me),
+							"node {node}'s path for {id}"
+						);
 						let named: BTreeSet<Id> = offer.path.iter().map(|hop| hop.node).collect();
 						assert_eq!(named.len(), offer.path.len(), "node {node} sent {id} round a loop");
 						let was = self.offered.insert(key, offer.clone());
@@ -1144,7 +1156,9 @@ impl Sim {
 	pub fn toward(&self, node: Node, id: Id) -> Option<Option<Node>> {
 		match &self.nodes[node] {
 			Relay::Distance(router) => router.selected(id).map(|route| route.next),
-			Relay::Path(router) => (router.routes(id).find(|(_, route)| route.offer.is_some())).map(|(_, route)| route.next),
+			Relay::Path(router) => {
+				(router.routes(id).find(|(_, route)| route.offer.is_some())).map(|(_, route)| route.next)
+			}
 		}
 	}
 
@@ -1493,7 +1507,8 @@ impl Sim {
 				return true;
 			};
 			let heard = self.path(at).heard_offer(id, prefix, next).map(|offer| &offer.path);
-			let current = (self.path(next).route_for(id, prefix)).and_then(|route| route.offer.as_ref().map(|offer| &offer.path));
+			let current =
+				(self.path(next).route_for(id, prefix)).and_then(|route| route.offer.as_ref().map(|offer| &offer.path));
 			heard.is_none() || heard != current
 		})
 	}

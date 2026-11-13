@@ -447,7 +447,9 @@ impl Mesh {
 	/// then to the lower hash.
 	fn best(&self, node: Node, broadcast: usize) -> Option<Node> {
 		if self.legacy.contains(&node) {
-			return self.sim.babel(node)
+			return self
+				.sim
+				.babel(node)
 				.selected(self.id(broadcast))
 				.and_then(|route| route.next);
 		}
