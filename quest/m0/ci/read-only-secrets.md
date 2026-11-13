@@ -135,12 +135,9 @@ secret `DISCORD_WEBHOOK` visible to all repositories; this repository's
 `alert` job reads the `alert` Environment's copy. Not chosen: narrowing it to
 selected repositories.
 
-Once `cachix-retire` deletes `CACHIX_AUTH_TOKEN`, an agent runs the
+`CACHIX_AUTH_TOKEN` was deleted 2026-11-07 (see
+[cachix-retire](/quest/m0/ci/cachix-retire.md)), so an agent runs the
 throwaway-branch check in the Goal, which also confirms each Environment
 refuses the branch, then deletes the branch. The branch may still see
 `MBX_R2_*` and `DISCORD_WEBHOOK`, by the decisions above; any other secret
 fails the check.
-
-## Required
-
-- [Retire Cachix](/quest/m0/ci/cachix-retire.md) - deletes `CACHIX_AUTH_TOKEN`, which the throwaway-branch check needs gone
