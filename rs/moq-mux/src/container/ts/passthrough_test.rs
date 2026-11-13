@@ -29,8 +29,11 @@ struct Object {
 struct Imported {
 	catalog: hang::catalog::Catalog,
 	objects: Vec<Object>,
-	/// The sequence of each break marker: a group of one object with no bytes.
+	/// The start of each break marker: a group of one object with no bytes.
 	markers: Vec<u64>,
+	/// The runs between consecutive groups that the publisher did not declare skipped, where a
+	/// reader can't tell that no group lies.
+	holes: Vec<std::ops::Range<u64>>,
 }
 
 impl Imported {
@@ -95,7 +98,9 @@ async fn import_onto(
 		.await?;
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();
+	let mut starts = Vec::new();
 	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group()).await?? {
+		starts.push(group.start);
 		while let Some(frame) = group.read_frame().await? {
 			if frame.payload.is_empty() {
 				markers.push(group.start);
@@ -109,10 +114,17 @@ async fn import_onto(
 			});
 		}
 	}
+	starts.sort_unstable();
+	let holes = starts
+		.windows(2)
+		.map(|pair| pair[0] + 1..pair[1])
+		.filter(|run| !track.is_skipped(run.clone()))
+		.collect();
 	Ok(Imported {
 		catalog: catalog.snapshot(),
 		objects,
 		markers,
+		holes,
 	})
 }
 
@@ -570,12 +582,21 @@ async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
 		let after = groups[jump][0].micros;
 		assert!((11_959_000..11_960_000).contains(&before), "{before}");
 		assert!((29_999_000..30_000_000).contains(&after), "{after}");
-		assert_eq!(
-			imported.markers,
-			[groups[jump - 1][0].group + 1],
+		// Starts are micros, like the objects' timestamps. The marker lies between the two groups,
+		// not below the last object it ends, and the publisher declared every other start between
+		// them skipped.
+		let [marker] = imported.markers[..] else {
+			panic!("one marker, random access {random_access}: {:?}", imported.markers);
+		};
+		assert!(
+			groups[jump - 1][0].group < marker && marker < groups[jump][0].group,
 			"a marker group between them declares the break, random access {random_access}"
 		);
-		assert_eq!(groups[jump][0].group, groups[jump - 1][0].group + 2);
+		assert!(
+			marker >= before,
+			"the marker ends the content before it: {marker} {before}"
+		);
+		assert_eq!(imported.holes, [], "random access {random_access}");
 		assert_eq!(imported.section().random_access, random_access);
 	}
 }
@@ -618,14 +639,25 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let offset = first as i64 - verbatim.objects[0].micros as i64;
 	assert!(offset < 0, "an hour in shifts back onto the capture's five seconds");
 	assert_eq!(shifted.objects.len(), verbatim.objects.len());
+	// A group starts at its first object, in micros, so the offset moves the starts too.
 	for (shifted, verbatim) in shifted.objects.iter().zip(&verbatim.objects) {
-		assert_eq!((shifted.group, &shifted.payload), (verbatim.group, &verbatim.payload));
+		assert_eq!(&shifted.payload, &verbatim.payload);
 		assert_eq!(
-			shifted.micros as i64 - verbatim.micros as i64,
-			offset,
-			"one offset for every object"
+			(
+				shifted.micros as i64 - verbatim.micros as i64,
+				shifted.group as i64 - verbatim.group as i64
+			),
+			(offset, offset),
+			"one offset for every object and its group"
 		);
 	}
+	let markers: Vec<i64> = shifted
+		.markers
+		.iter()
+		.zip(&verbatim.markers)
+		.map(|(shifted, verbatim)| *shifted as i64 - *verbatim as i64)
+		.collect();
+	assert_eq!(markers, [offset], "the break moves with the timeline");
 }
 
 /// A flagged step back is a restart: new content, which a timeline cannot step back into.
