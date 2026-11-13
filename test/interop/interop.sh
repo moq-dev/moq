@@ -87,8 +87,6 @@ IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
-# 1 runs the quarantined cells too, to reproduce a flake its quest investigates.
-QUARANTINED="${INTEROP_QUARANTINED:-0}"
 
 # Binaries under test. Built from source below unless overridden to point at a
 # prebuilt (mirrors test/smoke's RELAY_BIN/CLI_BIN escape hatch).
