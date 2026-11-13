@@ -50,7 +50,7 @@ Enrollment JSON, stored device IDs, tokens, and signed content keep their format
 
 ### Crypto runs on rind (#7570)
 
-Signing, verifying, key generation, and the HTTP clients' TLS run on [rind](https://github.com/kixel-ai/rind), a pure-Rust library, instead of aws-lc-rs, `p256`, and `p384`.
+Signing, verifying, key generation, and the HTTP clients' TLS run on [rind](https://github.com/moq-dev/rind), a pure-Rust library, instead of aws-lc-rs, `p256`, and `p384`.
 Token, JWK, and key formats are unchanged.
 
 - `Error` no longer implements `From` for `aws_lc_rs::error::{Unspecified, KeyRejected}` or `p256::elliptic_curve::{Error, pkcs8::Error}`: convert those errors in your own code, since moq-auth no longer produces them.
