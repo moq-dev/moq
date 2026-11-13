@@ -4684,8 +4684,13 @@ impl Consumer {
 		}
 		let kept = self.carry.as_mut().and_then(|carry| carry.finishing.take());
 		let mut next = match kept {
-			// It hands over to a later copy itself, should it fail too.
-			Some((at, next)) if at == drained => next,
+			// It hands over to a later copy itself, should it fail too. A cap or mode changed
+			// since asks again: the copy kept may not cover the new range.
+			Some((at, next))
+				if at == drained && next.cursor.end == self.cursor.end && next.cursor.raw == self.cursor.raw =>
+			{
+				next
+			}
 			_ => {
 				let Some(copy) = ready!(self.poll_successor_at(waiter, drained))? else {
 					return failed;
