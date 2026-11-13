@@ -19,6 +19,9 @@
   # crane's would (not on a CHANGELOG or README edit).
   filterCargoSources,
   measure ? false,
+  # Compile crates that only reach the final LTO link to LLVM bitcode alone,
+  # as cargo does under `lto = "fat"`, skipping their machine code.
+  bitcodeDeps ? false,
 }:
 let
   inherit (pkgs) lib;
@@ -46,9 +49,30 @@ let
   # on a crate's same-named `rustls` feature, which in reqwest 0.13 pulls in
   # aws-lc-rs: a crate cargo never builds, so it is not in Cargo.lock and the
   # build fails. Keeping only features cargo resolved somewhere drops those.
+  configs = (import ./Cargo.nix { inherit pkgs; }).internal.crates;
+  key = c: "${c.crateName}-${c.version}";
   cargoFeatures = lib.mapAttrs' (
-    _: c: lib.nameValuePair "${c.crateName}-${c.version}" (c.resolvedDefaultFeatures or null)
-  ) (import ./Cargo.nix { inherit pkgs; }).internal.crates;
+    _: c: lib.nameValuePair (key c) (c.resolvedDefaultFeatures or null)
+  ) configs;
+
+  # Crates the host runs or links natively: proc macros, build scripts'
+  # dependencies, and everything those depend on. In a native build crate2nix
+  # gives a crate one derivation for both sides, so these need machine code;
+  # every other dependency is only ever read by the root's LTO.
+  hostKeys =
+    let
+      deps = c: map (d: d.packageId) ((c.dependencies or [ ]) ++ (c.buildDependencies or [ ]));
+      seeds = lib.concatLists (
+        lib.mapAttrsToList (
+          id: c: map (d: d.packageId) (c.buildDependencies or [ ]) ++ lib.optional (c.procMacro or false) id
+        ) configs
+      );
+      ids = builtins.genericClosure {
+        startSet = map (id: { key = id; }) seeds;
+        operator = { key }: map (id: { key = id; }) (deps configs.${key});
+      };
+    in
+    lib.genAttrs (map (i: key configs.${i.key}) ids) (_: true);
 
   # Each root gets its own profile: only the root links a binary, with LTO.
   # Every other crate's derivation is the same in both roots, so the two
@@ -59,14 +83,16 @@ let
       host = crate.procMacro or false;
       frame = "-C force-frame-pointers=yes";
       local = isLocal crate;
-      resolved = cargoFeatures."${crate.crateName}-${crate.version}" or null;
+      resolved = cargoFeatures.${key crate} or null;
+      bitcode = bitcodeDeps && crate.crateName != root && !(hostKeys ? ${key crate});
     in
     buildRustCrate (
       crate
       // {
         codegenUnits = if host then 16 else 1;
         # Later -C flags win over buildRustCrate's own -C opt-level=3.
-        extraRustcOpts = (crate.extraRustcOpts or [ ]) ++ [ frame ] ++ lib.optional host "-C opt-level=0";
+        extraRustcOpts = (crate.extraRustcOpts or [ ]) ++ [ frame ] ++ lib.optional host "-C opt-level=0"
+          ++ lib.optional bitcode "-C linker-plugin-lto";
         extraRustcOptsForBuildRs = [
           frame
           "-C opt-level=0"

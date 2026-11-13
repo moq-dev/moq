@@ -298,6 +298,24 @@ let
         '';
       }
     );
+
+  # SPIKE: both packages as one derivation per crate (./crate2nix.nix).
+  perCrate =
+    bitcodeDeps:
+    let
+      crates = import ./crate2nix.nix {
+        pkgs = final;
+        inherit rustToolchain filterCargoSources bitcodeDeps;
+        measure = true;
+      };
+    in
+    final.symlinkJoin {
+      name = "moq-spike-crate2nix";
+      paths = [
+        crates.moq-relay
+        crates.moq-cli
+      ];
+    };
 in
 {
   moq-relay = buildPackage moqRelayArgs;
@@ -340,21 +358,8 @@ in
         (measured moqCliArgs)
       ];
     };
-    crate2nix =
-      let
-        crates = import ./crate2nix.nix {
-          pkgs = final;
-          inherit rustToolchain filterCargoSources;
-          measure = true;
-        };
-      in
-      final.symlinkJoin {
-        name = "moq-spike-crate2nix";
-        paths = [
-          crates.moq-relay
-          crates.moq-cli
-        ];
-      };
+    crate2nix = perCrate false;
+    crate2nix-bitcode = perCrate true;
   };
 
   # User-facing flake output. Bundles the plugin with wrapped gstreamer
