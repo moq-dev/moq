@@ -9059,7 +9059,8 @@ async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
 		.unwrap();
 }
 
-/// A time anchor starts at the group containing it, and an untimed track refuses one.
+/// A time anchor starts at the group containing it, and a scale-less track compares it with
+/// bare starts.
 #[tokio::test]
 async fn time_anchors_start_at_the_containing_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -9067,7 +9068,8 @@ async fn time_anchors_start_at_the_containing_group() {
 		.publish_track("events".into(), Some(unlimited_info()))
 		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
-		let group = track.append_group().unwrap();
+		// Each group starts at its frame's time, in the track's microseconds.
+		let group = track.create_group(timestamp_us).unwrap();
 		group
 			.write_frame(MoqFrame {
 				payload: b"x".to_vec(),
@@ -9101,7 +9103,7 @@ async fn time_anchors_start_at_the_containing_group() {
 			.expect("expected a group");
 		sequences.push(group.sequence());
 	}
-	assert_eq!(sequences, vec![1, 2]);
+	assert_eq!(sequences, vec![1_000, 2_000]);
 
 	let untimed = broadcast
 		.publish_track(
@@ -9113,15 +9115,7 @@ async fn time_anchors_start_at_the_containing_group() {
 		)
 		.unwrap();
 	let consumer = untimed.consume(None).unwrap();
-	assert!(matches!(
-		consumer.update(since(0)),
-		Err(MoqError::Protocol {
-			details: MoqProtocolError {
-				kind: MoqProtocolKind::TimestampMismatch,
-				..
-			}
-		})
-	));
+	consumer.update(since(0)).unwrap();
 }
 
 // Frame-only controls keep checking payloads independently of the breaks between frames.

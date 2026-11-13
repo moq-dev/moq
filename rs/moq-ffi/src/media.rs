@@ -1738,7 +1738,7 @@ mod read_tests {
 			.write(
 				&mut resumed,
 				&[moq_mux::container::Frame {
-					timestamp: timestamp(20_000),
+					timestamp: timestamp(20_001),
 					payload: bytes::Bytes::from_static(b"resumed"),
 					keyframe: true,
 					duration: None,
@@ -2136,7 +2136,10 @@ mod timebase_tests {
 				.ordered();
 			let mut group = catalogs.next_group().await.unwrap().unwrap();
 			let stamp = group.read_frame().await.unwrap().unwrap().timestamp.unwrap();
-			assert_eq!(stamp.as_micros(), first + 5_000_000, "shared={shared}");
+			// Catalogs published in the same millisecond, such as a rendition and its first estimate,
+			// start a unit apart, since each starts its own group.
+			let second = first + 5_000_000;
+			assert!((second..=second + 1_000).contains(&stamp.as_micros()), "shared={shared}");
 		}
 	}
 
