@@ -789,7 +789,7 @@ impl Consumer {
 		self.joined |= clocked && self.prime == 0;
 		// Onto the clock, or without one back to the bound.
 		let late = if inputs.lag > bound.max(window as i64) {
-			if clocked { inputs.lag } else { inputs.lag - bound } as usize
+			(if clocked { inputs.lag } else { inputs.lag - bound }) as usize
 		} else {
 			0
 		};
@@ -1411,8 +1411,8 @@ mod tests {
 		}
 	}
 
-	/// Audio trailing the clock by more than its bound and a window skips back
-	/// to the bound; less than that is the stretch's to catch up.
+	/// Audio trailing the clock by more than its bound skips onto it; less than
+	/// that is the stretch's to catch up.
 	#[test]
 	fn only_audio_past_the_bound_skips() {
 		let rate = 48_000;
@@ -1424,22 +1424,23 @@ mod tests {
 		for _ in 0..100 {
 			assert_eq!(prod.push(&pcm), Push::Ok);
 		}
-		prod.due(
-			base + Duration::from_millis(2010),
-			Duration::from_millis(1970),
-			Duration::ZERO,
-		);
+		let bound = Duration::from_millis(300);
+		prod.due(base + Duration::from_millis(2010), bound, Duration::ZERO);
 		assert_eq!(pull(&mut cons, &mut out, base), Read::Ok);
 		assert_eq!(pull(&mut cons, &mut out, base + Duration::from_millis(10)), Read::Ok);
-		// Now all due at 10 ms: the reader trails by 2000 ms.
-		let due = base + Duration::from_millis(10);
-		prod.due(due, Duration::from_millis(1970), Duration::ZERO);
+		// Now due 500 ms earlier: the reader trails by 500 ms.
+		let due = base + Duration::from_millis(1510);
+		prod.due(due, Duration::from_millis(510), Duration::ZERO);
 		assert_eq!(pull(&mut cons, &mut out, base + Duration::from_millis(20)), Read::Ok);
-		assert_eq!(cons.skips(), 0, "a window past the bound is the stretch's");
-		prod.due(due, Duration::from_millis(1960), Duration::ZERO);
+		assert_eq!(cons.skips(), 0, "within the bound is the stretch's");
+		prod.due(due, Duration::from_millis(490), Duration::ZERO);
 		let read = pull(&mut cons, &mut out, base + Duration::from_millis(30));
-		assert_eq!(read, Read::Trimmed { frames: 1920 });
-		assert_eq!(cons.trimmed(), 1920, "back to the bound");
+		let Read::Trimmed { frames } = read else {
+			panic!("{read:?}");
+		};
+		// Onto the clock, not back to the bound.
+		assert!((23_520..=24_480).contains(&frames), "{frames} frames trimmed");
+		assert!(cons.inputs(0).lag.abs() <= 480, "lag {}", cons.inputs(0).lag);
 		// A zero stretch has no bound: whatever trails the clock goes, here
 		// what is due before the second the end is due at.
 		prod.due(base + Duration::from_secs(1), Duration::ZERO, Duration::ZERO);

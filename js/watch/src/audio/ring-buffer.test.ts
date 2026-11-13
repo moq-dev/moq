@@ -1237,28 +1237,29 @@ describe("time stretch", () => {
 		expect(buffer.underruns).toBe(0);
 	});
 
-	// Audio the stretch could still catch up on plays; only what trails the clock past the bound and
-	// one window skips, back to the bound.
+	// Audio the stretch could still catch up on plays; what trails the clock past the bound, or one
+	// window when that is larger, skips onto the clock.
 	for (const bound of [0, 200]) {
-		it(`skips only audio trailing the clock past a ${bound} ms bound and a window`, () => {
+		it(`skips audio trailing the clock past a ${bound} ms bound onto it`, () => {
+			const threshold = Math.max(bound, 30);
 			const buffer = live(100, { bound });
 			write(buffer, 0, frames(800), { value: 0.5 });
 			// Joined on the clock.
 			buffer.clock(0);
 			read(buffer, QUANTUM, 1);
 
-			buffer.clock(buffer.timestamp + (bound + 30) * 1000);
+			buffer.clock(buffer.timestamp + threshold * 1000);
 			read(buffer, QUANTUM, 1);
 			expect(buffer.skips).toBe(0);
 
-			const clock = buffer.timestamp + (bound + 31) * 1000;
+			const clock = buffer.timestamp + (threshold + 1) * 1000;
 			buffer.clock(clock);
 			read(buffer, QUANTUM, 1);
 			expect(buffer.skips).toBe(1);
-			// Back to the bound, then a quantum on, which a stretch may have sped up.
+			// Onto the clock, then a quantum on.
 			const quantum = (QUANTUM * 1_000_000) / RATE;
-			expect(buffer.timestamp).toBeGreaterThanOrEqual(clock - bound * 1000 + quantum);
-			expect(buffer.timestamp).toBeLessThan(clock - bound * 1000 + 2 * quantum + 1);
+			expect(buffer.timestamp).toBeGreaterThanOrEqual(clock + quantum - 1);
+			expect(buffer.timestamp).toBeLessThan(clock + quantum + 1);
 		});
 	}
 });

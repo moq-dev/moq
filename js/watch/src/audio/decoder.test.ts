@@ -1753,21 +1753,45 @@ it.each([false, true])("releases shared startup across a hole in queued audio (C
 });
 
 // Audio may trail the clock by the stretch, or a buffered player's whole lookahead when that is longer,
-// and a zero stretch turns the time stretch off in either mode.
+// and a zero stretch turns the time stretch off in either mode. The stretch sizes nothing else: the
+// subscription reaches the estimator's 2 s ceiling past the delay whatever it is.
 for (const buffered of [false, true]) {
-	it(`bounds ${buffered ? "buffered" : "live"} audio's lag by the stretch`, async () => {
+	it(`bounds ${buffered ? "buffered" : "live"} audio's lag by the stretch alone`, async () => {
+		// The max delay each subscribe and update asked the publisher for, in order.
+		const asked: (Duration | null | undefined)[] = [];
+		const subscribe = Moq.Track.Consumer.prototype.subscribe;
+		const update = Moq.Track.Subscriber.prototype.update;
+		const subscribes = spyOn(Moq.Track.Consumer.prototype, "subscribe").mockImplementation(function (
+			this: Moq.Track.Consumer,
+			...args: Parameters<typeof subscribe>
+		) {
+			asked.push(args[0]?.delay?.max);
+			return subscribe.apply(this, args);
+		});
+		const updates = spyOn(Moq.Track.Subscriber.prototype, "update").mockImplementation(function (
+			this: Moq.Track.Subscriber,
+			...args: Parameters<typeof update>
+		) {
+			asked.push(args[0]?.delay?.max);
+			return update.apply(this, args);
+		});
 		const playback = await play(Duration.millis(100), buffered);
 		try {
 			await playback.play(12);
 			const bound = () => worklets.at(-1)?.terms?.bound;
-			expect(bound()).toBe(2000);
-			playback.stretch.set(Duration.millis(300));
+			expect(bound()).toBe(buffered ? 1000 : 200);
+			const reach = Duration.millis(2100);
+			expect(asked.at(-1)).toEqual(reach);
+			playback.stretch.set(Duration.millis(1500));
 			await microtasks();
-			expect(bound()).toBe(buffered ? 1000 : 300);
+			expect(bound()).toBe(1500);
 			playback.stretch.set(Duration.ZERO);
 			await microtasks();
 			expect(bound()).toBe(0);
+			expect(asked.at(-1)).toEqual(reach);
 		} finally {
+			subscribes.mockRestore();
+			updates.mockRestore();
 			playback.close();
 			await microtasks();
 		}
@@ -1795,7 +1819,7 @@ for (const cmaf of [false, true]) {
 
 				// Either ring keeps what it receives and plays onto the clock, which audio may trail by the
 				// larger of the lookahead and the default stretch, even at a fixed delay.
-				expect(worklets.at(-1)?.terms).toEqual({ latency: 100, target: 100, bound: 2000 });
+				expect(worklets.at(-1)?.terms).toEqual({ latency: 100, target: 100, bound: buffered ? 1000 : 200 });
 			} finally {
 				playback.close();
 				await microtasks();
