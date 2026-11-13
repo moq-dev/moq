@@ -17683,6 +17683,11 @@ mod test {
 			again.write_frame(at(302), &b"c"[..]).unwrap();
 			let res = reader.poll_finished(&waiter);
 			assert!(res.is_pending(), "the re-offer is still open: {res:?}");
+			// The end check keeps reading the re-offer, so a fetch would not abandon it.
+			assert!(
+				again.handle().poll_unwanted(&waiter).is_pending(),
+				"the re-offer stays wanted"
+			);
 			again.finish().unwrap();
 			// From where the reader stands, with frame 1 still to read.
 			assert_eq!(reader.finished().await.unwrap(), 1);
@@ -17722,6 +17727,77 @@ mod test {
 		// An uncapped reader needs frames past the head, which no copy holds.
 		assert!(reader.clone().with_end(None).read_frame().await.is_err());
 		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"c");
+		assert!(reader.read_frame().await.unwrap().is_none());
+	}
+
+	/// A reader that raises its cap past a copy's cut before reaching it learns from its end
+	/// what its frame reads will: the frames past the cut are missing, whether the ones before
+	/// it are still in the copy or already prefetched.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_raised_cap_before_a_cut_ends_in_its_error() {
+		let producer = received_producer(Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut head = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
+			.unwrap();
+		let mut reader = head.consume().with_range(..3);
+		for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
+			head.write_frame(at(millis), &payload[..]).unwrap();
+		}
+		head.finish().unwrap();
+		// Takes frames 1 and 2 into its prefetch with frame 0.
+		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
+		let mut reader = reader.with_end(None);
+		// A clone shares the cursor but not the prefetch, so frames 1 and 2 are the copy's.
+		let mut unfetched = reader.clone();
+		let res = unfetched.finished().await;
+		assert!(res.is_err(), "frame 3 is in no copy: {res:?}");
+		let res = reader.finished().await;
+		assert!(res.is_err(), "nor past the prefetch: {res:?}");
+		for payload in [b"b", b"c"] {
+			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], payload);
+		}
+		assert!(reader.read_frame().await.is_err(), "the reads agree");
+	}
+
+	/// A reader that skipped ahead of the frames its copy committed tore none of them, so it
+	/// continues on a held re-offer from where it skipped to.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_skipped_reader_continues_on_a_held_reoffer() {
+		let producer = received_producer(Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+			panic!("the first copy opens");
+		};
+		first.write_frame(at(300), &b"a"[..]).unwrap();
+		let mut reader = first.consume();
+		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
+		reader.skip_to(3);
+
+		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+			panic!("the re-offer waits on the copy still arriving");
+		};
+		first.abort(Error::Cancel).unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(
+			reader.poll_read_frame(&waiter).is_pending(),
+			"waits on the held re-offer"
+		);
+		let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { sequence: 3 }, 0) else {
+			panic!("the re-offer takes the group");
+		};
+		drop(hold);
+		for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c"), (303, b"d")] {
+			again.write_frame(at(millis), &payload[..]).unwrap();
+		}
+		again.finish().unwrap();
+		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"d");
 		assert!(reader.read_frame().await.unwrap().is_none());
 	}
 
