@@ -5882,7 +5882,7 @@ mod session_tests {
 		/// Set before a `close` so the redial meets it. The listener stays bound throughout:
 		/// rebinding a freed port races its release and other tests binding port 0.
 		admit: std::sync::Arc<Mutex<Admit>>,
-		/// Dials dropped while [`Admit::Down`], and a wakeup for each.
+		/// Dials dropped while [`Admit::Down`] or refused while [`Admit::Refuse`], and a wakeup for each.
 		dropped: tokio::sync::watch::Sender<usize>,
 	}
 
@@ -5920,7 +5920,10 @@ mod session_tests {
 										drop(request);
 										dropping.send_modify(|dropped| *dropped += 1);
 									}
-									Admit::Refuse => request.reject(moq_net::SessionError::Unauthorized).await.unwrap(),
+									Admit::Refuse => {
+										request.reject(moq_net::SessionError::Unauthorized).await.unwrap();
+										dropping.send_modify(|dropped| *dropped += 1);
+									}
 								}
 							}
 						}
@@ -6101,8 +6104,10 @@ mod session_tests {
 		relay.stop();
 	}
 
+	/// A refused redial is retried like any other failure once the source has played: the
+	/// reconnect loop does not judge the refusal's kind, so new credentials can still land.
 	#[test]
-	fn a_refused_redial_posts_a_bus_error_after_playback() {
+	fn a_refused_redial_keeps_redialing_after_playback() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 		let mut publisher = Publisher::new(&relay.origin, Default::default(), video_rendition());
@@ -6110,17 +6115,17 @@ mod session_tests {
 		rendered(&sink, &mut publisher, 1);
 		*relay.admit.lock().unwrap() = Admit::Refuse;
 		relay.close.send(moq_net::Error::GoingAway).unwrap();
-		let error = pipeline
-			.bus()
-			.unwrap()
-			.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
+		let mut refused = relay.dropped.subscribe();
+		super::RUNTIME
+			.block_on(async {
+				kio::clock::timeout(Duration::from_secs(30), refused.wait_for(|refused| *refused >= 2)).await
+			})
+			.expect("the source stopped redialing after a refusal")
+			.unwrap();
+		let error = pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error]);
 		pipeline.set_state(gst::State::Null).unwrap();
 		relay.stop();
-		let error = error.expect("refused redial did not fail the pipeline");
-		let gst::MessageView::Error(error) = error.view() else {
-			unreachable!()
-		};
-		assert!(error.debug().unwrap().contains("unauthorized"), "{error:?}");
+		assert!(error.is_none(), "a refused redial failed the pipeline: {error:?}");
 	}
 
 	#[test]
