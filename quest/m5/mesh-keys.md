@@ -19,5 +19,5 @@ Revisit when a mesh user needs confidentiality from relays.
 
 ## Related
 
-- [Mesh](/quest/m1/mesh/README.md) - the protection levels this completes
+- [Mesh](/quest/m3/mesh/README.md) - the protection levels this completes
 - [End-to-end encryption](/quest/m5/e2ee/README.md) - the AEAD and its key contract

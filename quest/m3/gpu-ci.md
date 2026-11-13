@@ -67,9 +67,9 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- Maintainer: pick the GPU runner's shape, since the 2026-10-20 VM decision conflicts with the CI epic's later no-VM decision. Options: (a) a sandboxed runner container on the CI host with the NVIDIA device nodes and the host driver's libraries bound in, as [GPU runners](/quest/lab/video-quality/gpu-runners.md) already plans for the quality job; (b) a VFIO-passthrough VM from `github-runner-vm`. Recommended: (a), then drop the VFIO text above.
+- Maintainer: pick the GPU runner's shape, since the 2026-10-20 VM decision conflicts with the CI epic's later no-VM decision. Options: (a) a sandboxed runner container on the CI host with the NVIDIA device nodes and the host driver's libraries bound in, as [GPU runners](/quest/m9/video-quality/gpu-runners.md) already plans for the quality job; (b) a VFIO-passthrough VM from `github-runner-vm`. Recommended: (a), then drop the VFIO text above.
 
 ## Related
 
 - [Video hardware validation](/quest/m5/video-hardware.md) - hardware paths nothing runs yet
-- [Video quality hardware rows](/quest/lab/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU
+- [Video quality hardware rows](/quest/m9/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU

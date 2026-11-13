@@ -14,7 +14,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
 - ✅ Fence the structs now (rejected: publishing them open and breaking
   later).
-- ✅ The mesh [relay node](/quest/m1/mesh/node.md) takes a credential handle
+- ✅ The mesh [relay node](/quest/m3/mesh/node.md) takes a credential handle
   and the application enrolls however it likes (rejected: the coordinator and
   `Enrollment` learning to issue certificates; deferring). So this quest adds
   no certificate field; it only keeps one possible.

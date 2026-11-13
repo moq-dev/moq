@@ -28,7 +28,7 @@ builds with it. `doc/bin/cli.md` tells source builders to pass
 The individual sub-features stay, so a self-compiler can still pick a subset.
 `vaapi` and `nvidia` load their driver libraries at runtime (dlopen), so they
 belong in `full`. The microphone pulls ALSA through cpal, which is why
-`full` waits on [ALSA without a load-time link](/quest/m5/capture-alsa-link.md);
+`full` waits on [ALSA without a load-time link](/quest/m3/capture-alsa-link.md);
 `play` pulls winit plus a GPU stack. macOS and Windows use OS frameworks and
 add nothing.
 
@@ -57,7 +57,7 @@ encodes through rkmpp in a vendor kernel, not V4L2, so it stays on the
 
 `pipewire` stays out of `full` (decided 2026-10-06, reaffirmed
 2026-10-26): it needs libpipewire-0.3 to load, the same load-time requirement
-[ALSA](/quest/m5/capture-alsa-link.md) removes. It joins once it loads lazily.
+[ALSA](/quest/m3/capture-alsa-link.md) removes. It joins once it loads lazily.
 
 Decided in the 2026-09-30 audit: the v4l2 encode quest folded in here, since
 its remaining work was one release feature flag and a doc note.
@@ -70,8 +70,8 @@ Renamed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 
 ## Waiting
 
-- Maintainer: what ships while cpal has no release that loads libasound at runtime (RustAudio/cpal#1421 is open; the last release is 0.18.2). (A) Wait: this quest follows [ALSA without a load-time link](/quest/m5/capture-alsa-link.md) into m5. (B) Split: ship `full` now on macOS and Windows, which link no system audio library, and leave only Linux waiting on the cpal release. (C) Linux release binaries take libasound as a load-time requirement. (D) Fork cpal, alsa, and alsa-sys. I recommend B.
+- Maintainer: what ships while cpal has no release that loads libasound at runtime (RustAudio/cpal#1421 is open; the last release is 0.18.2). (A) Wait: this quest follows [ALSA without a load-time link](/quest/m3/capture-alsa-link.md) into m5. (B) Split: ship `full` now on macOS and Windows, which link no system audio library, and leave only Linux waiting on the cpal release. (C) Linux release binaries take libasound as a load-time requirement. (D) Fork cpal, alsa, and alsa-sys. I recommend B.
 
 ## Required
 
-- [Audio capture without runtime system libraries](/quest/m5/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it
+- [Audio capture without runtime system libraries](/quest/m3/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it

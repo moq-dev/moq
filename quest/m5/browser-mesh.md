@@ -28,7 +28,7 @@ on the local network so please plan that."
 
 This lifts three statements once it lands: the P2P epic's "A browser never
 carries another peer's traffic", the
-[cluster routing](/quest/m1/cluster-routing/README.md) plan's browser tabs
+[cluster routing](/quest/m3/cluster-routing/README.md) plan's browser tabs
 keeping `proxy` off, and `js/net`'s non-transit
 tab. Until then each stays true.
 

@@ -22,7 +22,7 @@ What it costs today, from #8487's measurements: a change of hops alone is
 control messages over real sessions, and on a 32-relay full mesh one link
 coming up costs 592 route messages against 251 before the hops.
 
-[Cluster routing](/quest/m1/cluster-routing/README.md) already decided that
+[Cluster routing](/quest/m3/cluster-routing/README.md) already decided that
 "a new connection alone does not outrank a different equal-cost route", so
 this implements a settled rule. Keep the deterministic path hash among equal
 routes for a request's first hop: that choice is per request and is not this

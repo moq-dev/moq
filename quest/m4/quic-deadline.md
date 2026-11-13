@@ -91,7 +91,7 @@ Restored 2026-11-12 in m4 (maintainer, `/quest-import` of
 m5 for want of a consumer. The consumer: MPEG-TS trunks under a fixed
 `moq export ts --delay`, which compete with SRT on delivering whatever can
 still arrive within the delay. The outage loss that issue measured belongs to
-[Buffered exports pick their group order by measurement](/quest/m1/export-order.md)
+[Buffered exports pick their group order by measurement](/quest/m3/export-order.md)
 and [A path that's back is used within an RTT](/quest/m3/quic-path-return.md),
 not this quest: the early probe never exceeds the congestion window, which is
 full of unacknowledged packets during an outage. This quest is the

@@ -24,7 +24,7 @@ until the maintainer calls the cut. This quest is the mechanical rename and
 checks done at that call; the Required list is the work already known to land
 first, not a closed freeze set.
 
-The route layer of [Cluster routing](/quest/m1/cluster-routing/README.md)
+The route layer of [Cluster routing](/quest/m3/cluster-routing/README.md)
 (ROUTE_START/UPDATE/END, path-less ANNOUNCE, the native hop list dropped) lands in
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout

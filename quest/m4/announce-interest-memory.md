@@ -49,4 +49,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - reshapes the route table this walks
+- [Cluster routing](/quest/m3/cluster-routing/README.md) - reshapes the route table this walks

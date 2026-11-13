@@ -20,5 +20,5 @@ Public API: possibly a CUDA-array frame variant in moq-video's GPU frame types. 
 
 ## Related
 
-- [NVENC reuses its input and output buffers](/quest/lab/nvenc-pool.md) - per-frame allocation on the encode side, distinct from this copy
+- [NVENC reuses its input and output buffers](/quest/m9/nvenc-pool.md) - per-frame allocation on the encode side, distinct from this copy
 - [GPU CI](/quest/m3/gpu-ci.md) - the NVIDIA host this would validate on once its driver is new enough

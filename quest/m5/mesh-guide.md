@@ -18,4 +18,4 @@ libraries.
 
 ## Required
 
-- [Endpoint API](/quest/m1/mesh/endpoint.md) - the API the page centers on
+- [Endpoint API](/quest/m3/mesh/endpoint.md) - the API the page centers on

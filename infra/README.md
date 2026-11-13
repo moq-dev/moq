@@ -383,7 +383,7 @@ paths, with their old signatures, indefinitely. The next Cache push refills it.
 ## Bootstrapping the video corpus
 
 The nightly video-quality job, which [the harness
-quest](../quest/lab/video-quality/harness.md) adds, reads its clips from two
+quest](../quest/m9/video-quality/harness.md) adds, reads its clips from two
 buckets.
 `corpus-moq-dev` holds open clips and is public at `corpus.moq.dev`.
 `corpus-private-moq-dev` holds clips that cannot be redistributed. It has no

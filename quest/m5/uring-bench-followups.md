@@ -10,7 +10,7 @@ Follow-ups of [moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530), whic
 
 Moved to m5 2026-11-12 (maintainer, /quest-audit): no consumer; parked rather than deleted.
 
-- **Quiet re-run.** Record `/proc/loadavg` and run `just bench-runtime` for fanout and fanout-heavy, base against [moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530), alternating. [moq-dev/moq#7533](https://github.com/moq-dev/moq/pull/7533) and [moq-dev/moq#7534](https://github.com/moq-dev/moq/pull/7534) saw the load generator's p99 sit near 1.4 s in every run, a startup artifact inside the throughput window, so check whether a quiet host alone fixes p99 or the generator's latency window needs to exclude startup first. Record the result in the [perf epic](/quest/lab/perf/README.md).
+- **Quiet re-run.** Record `/proc/loadavg` and run `just bench-runtime` for fanout and fanout-heavy, base against [moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530), alternating. [moq-dev/moq#7533](https://github.com/moq-dev/moq/pull/7533) and [moq-dev/moq#7534](https://github.com/moq-dev/moq/pull/7534) saw the load generator's p99 sit near 1.4 s in every run, a startup artifact inside the throughput window, so check whether a quiet host alone fixes p99 or the generator's latency window needs to exclude startup first. Record the result in the [perf epic](/quest/m9/perf/README.md).
 The QUIC request-reply benchmark is now part of `worker_turns` in
 [moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530). The nightly
 `rust-shared` group retains its timing series and turn/enter counter deltas in

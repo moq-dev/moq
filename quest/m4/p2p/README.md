@@ -118,7 +118,7 @@ channel, and has no reset code without a side channel.
 
 ### Routes and migration
 
-Routing is the [cluster routing line](/quest/m1/cluster-routing/README.md)'s:
+Routing is the [cluster routing line](/quest/m3/cluster-routing/README.md)'s:
 every session speaks per-node ROUTEs and path-less ANNOUNCEs, and the
 application priority followed by total cost picks the direct link or relay.
 

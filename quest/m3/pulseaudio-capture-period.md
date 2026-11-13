@@ -29,4 +29,4 @@ needs both halves within its delay window, so this matters for `aec` too.
 
 ## Related
 
-- [A cpal release loads libasound at runtime](/quest/m5/cpal-alsa-runtime.md) - would make the PulseAudio host the default on hosts without libasound
+- [A cpal release loads libasound at runtime](/quest/m3/cpal-alsa-runtime.md) - would make the PulseAudio host the default on hosts without libasound

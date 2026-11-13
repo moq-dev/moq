@@ -11,7 +11,7 @@ no enrolled device ever holds the old grant from a release.
 
 ## Plan
 
-Split from the [Endpoint API](/quest/m1/mesh/endpoint.md) on 2026-11-12
+Split from the [Endpoint API](/quest/m3/mesh/endpoint.md) on 2026-11-12
 (maintainer, /quest-audit before the cut): ✅ the grant shape lands in m2 on
 its own (rejected: landing with the Endpoint after the cut, with the
 coordinator issuing both shapes for one release). `rs/moq-auth/src/mesh`

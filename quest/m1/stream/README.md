@@ -37,7 +37,7 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
 - Connection setup is generic: a listener accepts connections a dialer
   announces under a path prefix, and the API names peers by path. Endpoint
   identity, signing, and service names belong to the
-  [mesh](/quest/m1/mesh/README.md), which builds on this.
+  [mesh](/quest/m3/mesh/README.md), which builds on this.
 
 Amended 2026-11-01 with the maintainer (socket planning interview),
 2026-11-03 when sockets became endpoints, and 2026-11-04 when the socket's

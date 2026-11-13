@@ -11,7 +11,7 @@ instead of falling back to the main thread.
 
 ## Plan
 
-[Plan: watch worker](/quest/lab/plan-watch-worker.md) picks between an
+[Plan: watch worker](/quest/m4/plan-watch-worker.md) picks between an
 invisible page-wide worker with on-demand signal handles and
 application-spawned workers, and rewrites this quest with the result. Until
 then, the settled constraints in that quest apply here too.
@@ -32,4 +32,4 @@ Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 
 ## Required
 
-- [Plan: watch worker](/quest/lab/plan-watch-worker.md) - picks the worker model and rewrites this quest
+- [Plan: watch worker](/quest/m4/plan-watch-worker.md) - picks the worker model and rewrites this quest

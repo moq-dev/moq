@@ -98,4 +98,4 @@ Wire: possibly lite-07 (SUBSCRIBE_DROP for a stopped group), decided here.
 - [Address groups by timestamp](/quest/m2/time-addressing/model.md) - the drop range is keyed by start
 
 ## Related
-- [The receive-windows benchmark](/quest/m1/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)
+- [The receive-windows benchmark](/quest/m3/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)

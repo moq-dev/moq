@@ -61,4 +61,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Shared group serving and ingest in JS](/quest/m4/shared-serve-js.md) - the JS mirror
-- [Perf](/quest/lab/perf/README.md) - hot-path work in the same machines
+- [Perf](/quest/m9/perf/README.md) - hot-path work in the same machines

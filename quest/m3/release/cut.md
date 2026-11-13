@@ -116,6 +116,13 @@ merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
   [retired names](/quest/m3/release/retired-names.md) publishes the pointer
   above 0.0.25, with the other names this cut stops publishing.
 
+Open as of 2026-11-13 (maintainer, /quest-plan): where the next cycle's cuts
+live. The steps above place them in m0's release epic and have the wire cut
+require m2 and m3, but no quest may require one in a later milestone, and
+[m4](/quest/m4/README.md) and [m5](/quest/m5/README.md) now require this cut
+until it lands, a gate each cycle should re-create. A follow-up quest settles
+both before this cut re-creates its successor.
+
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
 decision below). The gate is an epic in m3 for the checks the cut needs that
 break nothing: `main` is no slower than `release`, vendored code has the

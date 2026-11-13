@@ -19,11 +19,23 @@ release execution, and bug fixes in shipped code; m4 holds tests, tooling,
 benchmarks, optimizations, and features nobody waits on yet. m5 holds work
 gated on the outside world, or speculative work with no named consumer.
 
-[lab](/quest/lab/README.md) sits beside the milestones, outside their order
-(decided 2026-11-12, maintainer, /quest-audit): experiments and measurements
+[m9](/quest/m9/README.md) is the lab (decided 2026-11-12, maintainer,
+/quest-audit; renamed from `lab` 2026-11-13): experiments and measurements
 that touch no published API, wire format, or CLI surface. They start any
 time, merge whenever, never gate a cut, and stay in place when the
-milestones shift.
+milestones shift. `quest` orders milestones by name, so `lab` ranked ahead
+of m0; as m9 it ranks last.
+
+Until the cut, [m4](/quest/m4/README.md) and [m5](/quest/m5/README.md)
+require the [release cut](/quest/m3/release/cut.md) (decided 2026-11-13,
+maintainer), so spare capacity goes to m0 to m3 and then to m9's lab work
+instead of to later features. m3 stays open, since it holds the cut and its
+reviews. The cut's PR deletes the cut quest, which lifts the gate.
+
+No quest requires one in a later milestone (decided 2026-11-13, maintainer):
+a blocker ranks by its own milestone, so the earlier quest would stall behind
+the later milestone's work. Additive work that builds on m2 joins m3, which
+ranks right after m2, rather than m1.
 
 A change is breaking when a published consumer or a deployed peer must adapt
 to it: the public Rust, JS, or bindings API, a frozen wire version, the hang

@@ -134,7 +134,7 @@ Decided 2026-10-16 (maintainer interview):
   (d854bf98b1), ahead of Front eviction, including `log::Writer::evict`
   advancing the base (`rs/kio/src/log.rs`). A ring buffer was rejected: an
   uncapped group has no size to give it. Numbers are in #6782 and the
-  [kio contention epic](/quest/lab/kio-channel-contention/README.md).
+  [kio contention epic](/quest/m9/kio-channel-contention/README.md).
   Accepted 2026-11-03 (maintainer), from the lock profiles in
   [moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742): no
   lock-contention regression attributable to #6782. The pre-epoch run on

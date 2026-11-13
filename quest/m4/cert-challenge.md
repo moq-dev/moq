@@ -2,7 +2,7 @@
 
 ## Goal
 
-A relay can ask a client presenting a [certificate credential](/quest/m1/mesh/cert-credentials.md)
+A relay can ask a client presenting a [certificate credential](/quest/m3/mesh/cert-credentials.md)
 to sign a fresh nonce instead of a timestamp, so a credential replayed within
 the time window admits nothing. Clients that support it answer the
 challenge; a relay configured to require it refuses time-window proofs.
@@ -25,4 +25,4 @@ exchanged during setup.
 
 ## Required
 
-- [Certificate credentials](/quest/m1/mesh/cert-credentials.md) - the credential this hardens
+- [Certificate credentials](/quest/m3/mesh/cert-credentials.md) - the credential this hardens

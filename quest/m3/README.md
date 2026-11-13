@@ -26,13 +26,14 @@ a new necessary API break brings that decision to the maintainer before
 proceeding.
 
 Decided 2026-11-03 (maintainer, Kixel's quest audit): [byte streams](/quest/m1/stream/README.md)
-and the [mesh libraries](/quest/m1/mesh/README.md) rank first here, ahead
+and the [mesh libraries](/quest/m3/mesh/README.md) rank first here, ahead
 of [release execution](/quest/m3/release/README.md). Kixel's daemon builds on
 them from `main` through a git submodule, so it needs them merged, not
 released. They stay out of m1 and m2 so the cut does not wait on them; each
 starts as soon as its prerequisites (sockets, fastest-reader pacing, outbound
 federation) land. Superseded 2026-11-12 (maintainer, /quest-audit): both moved
-to [m1](/quest/m1/README.md), since the cut no longer waits on m1.
+to [m1](/quest/m1/README.md), since the cut no longer waits on m1. The mesh
+libraries came back 2026-11-13, below; byte streams stay in m1.
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut), from a read of
 every quest against the code and the downstream quest trees:
@@ -50,3 +51,18 @@ every quest against the code and the downstream quest trees:
   now waiting: Windows capture verification, the stock HLS player test, the
   Kotlin, Swift, and Dart interop clients, VA-API render tests on real
   hardware, and the WHIP/WHEP browser test.
+
+Decided 2026-11-13 (maintainer, /quest-plan): no quest requires one in a later
+milestone, since a blocker ranks by its own milestone and the earlier quest
+would stall behind it.
+
+- ✅ The 14 m1 quests that waited on m2 work moved here, the cluster-routing
+  and mesh epics whole (rejected: m2, where the cut would wait on them;
+  pulling their 12 breaking m2 blockers into m1). The
+  [m1 README](/quest/m1/README.md) lists them.
+- ✅ [cli-packaging](/quest/m3/cli-packaging.md)'s blockers,
+  [capture-alsa-link](/quest/m3/capture-alsa-link.md) and the
+  [cpal wait](/quest/m3/cpal-alsa-runtime.md), moved here from m5 (rejected:
+  moving cli-packaging and nixpkgs-cli to m5, which waits for the cut).
+- m3 is not gated, unlike m4 and m5, because it holds the
+  [release cut](/quest/m3/release/cut.md) and its reviews.
