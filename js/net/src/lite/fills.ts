@@ -70,6 +70,9 @@ class Recovery {
 	readonly groups: Run;
 	readonly handle: RecoveryHandle;
 	refused?: Refused[];
+	// The groups it refused and handed over, which it no longer covers, so a later request for
+	// them asks again rather than waiting on its other streams.
+	readonly released: Run[] = [];
 
 	// `ended` is called once it is over, so a wait need not hold a reaction on `done`.
 	constructor(groups: Run, handle: RecoveryHandle, ended: () => void) {
@@ -232,9 +235,13 @@ export class RangeFills {
 		// What a recovery still out refused since the last poll answers the fills owing it now,
 		// rather than waiting on its other streams. Taken once, so once those fills end, a later
 		// request for the same groups asks again rather than reading it back.
-		for (const recovery of this.#recoveries)
-			for (const refused of recovery.handle.takeRefused())
+		for (const recovery of this.#recoveries) {
+			for (const refused of recovery.handle.takeRefused()) {
 				this.#setRefused(refused.start, refused.end, refused.refusal);
+				insertRun(recovery.released, refused.start, refused.end);
+				this.#recovering = removeRun(this.#recovering, refused.start, refused.end);
+			}
+		}
 
 		const ask: FillAsk = { groups: [], priority: NO_PRIORITY };
 		// Every run a held fill still owes, recovered or not.
@@ -282,7 +289,10 @@ export class RangeFills {
 			this.#recoveries.delete(recovery);
 		}
 		this.#recovering = [];
-		for (const { groups } of this.#recoveries) insertRun(this.#recovering, groups.start, groups.end);
+		// Each covers its groups less what it refused and handed over.
+		for (const { groups, released } of this.#recoveries)
+			for (const gap of runGaps(released, groups.start, groups.end))
+				insertRun(this.#recovering, gap.start, gap.end);
 		this.#recovered = this.#recovered.flatMap(({ start, end }) => clip(owed, start, end));
 
 		// A run stays asked whole while a fill still owes any of it, so the subscription changes once

@@ -176,8 +176,11 @@ impl RangeFills {
 	/// Take the refusals a recovery made since the last poll, once: each answers the fills
 	/// owing its groups now, and [`Self::forget_answered`] ends it with them, so a later request
 	/// for the same groups asks again rather than reading it back.
-	fn take_refused(&mut self, fresh: &mut RangeMap<u64, Refusal>) {
+	/// The groups taken leave the recovery's coverage in `released`.
+	fn take_refused(&mut self, fresh: &mut RangeMap<u64, Refusal>, released: &mut RangeSet<u64>) {
 		for (groups, refusal) in std::mem::take(fresh) {
+			released.insert(groups.clone());
+			self.recovering.remove(groups.clone());
 			self.refused.insert(groups, refusal);
 		}
 	}
@@ -300,7 +303,7 @@ impl RangeFills {
 		// rather than waiting on its other streams.
 		let mut recoveries = std::mem::take(&mut self.recoveries);
 		for recovery in &mut recoveries {
-			self.take_refused(&mut recovery.fresh);
+			self.take_refused(&mut recovery.fresh, &mut recovery.released);
 		}
 		self.recoveries = recoveries;
 
@@ -348,7 +351,13 @@ impl RangeFills {
 		// fills owing it now: a later request for it may recover it again.
 		self.recoveries
 			.retain(|recovery| owed.overlaps(&recovery.groups) || (read && recovery.reading()));
-		let still: RangeSet<u64> = self.recoveries.iter().map(|recovery| recovery.groups.clone()).collect();
+		// Each covers its groups less what it refused and handed over.
+		let mut still = RangeSet::new();
+		for recovery in &self.recoveries {
+			for gap in recovery.released.gaps(&recovery.groups) {
+				still.insert(gap);
+			}
+		}
 		self.recovering = still;
 		let recovered: Vec<_> = self.recovered.iter().cloned().collect();
 		self.recovered = RangeSet::new();
@@ -468,6 +477,9 @@ struct Recovery {
 	refused: RangeMap<u64, Refusal>,
 	/// Those [`RangeFills`] has yet to take: each refusal is handed over once.
 	fresh: RangeMap<u64, Refusal>,
+	/// The groups it refused and handed over, which it no longer covers, so a later request
+	/// for them asks again rather than waiting on its other streams.
+	released: RangeSet<u64>,
 }
 
 enum RecoveryState {
@@ -507,6 +519,7 @@ impl Recovery {
 			state: RecoveryState::Establish(Box::new(establish)),
 			refused: Default::default(),
 			fresh: Default::default(),
+			released: Default::default(),
 		}
 	}
 
@@ -729,14 +742,20 @@ mod tests {
 	#[test]
 	fn a_recovery_refusal_is_taken_once() {
 		let mut fills = RangeFills::default();
+		fills.recovering.insert(1..4);
 		let mut fresh = RangeMap::new();
+		let mut released = RangeSet::new();
 		fresh.insert(1..3, Refusal::passing(StreamError::Cancel));
-		fills.take_refused(&mut fresh);
+		fills.take_refused(&mut fresh, &mut released);
 		assert!(fills.refused.get(&1).is_some(), "handed over");
+		// No longer covered, so a later request asks again rather than waiting on the rest.
+		assert!(!fills.recovering.contains(&1), "released");
+		assert!(fills.recovering.contains(&3), "still recovering");
+		assert!(released.contains(&2));
 
 		// No fill owes it any more, and the recovery is still out.
 		fills.forget_answered();
-		fills.take_refused(&mut fresh);
+		fills.take_refused(&mut fresh, &mut released);
 		assert!(fills.refused.is_empty(), "not read back");
 	}
 

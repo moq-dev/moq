@@ -407,6 +407,8 @@ test("range fills: a recovery's refusal is taken once", async () => {
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(again.wanted()).toBe(1n);
+	// Asked again, rather than left to the recovery's other streams.
+	expect(fills.ask.groups.some((run) => run.start <= 1n && 1n < run.end)).toBe(true);
 
 	again.close();
 	later.close();
