@@ -1289,6 +1289,12 @@ impl TrackState {
 		self.drops.get(&key).is_some_and(|hole| *hole == Hole::Skip)
 	}
 
+	/// The exclusive end of the run the publisher declared skipped at `key`, when one covers it.
+	fn skip_end(&self, key: u64) -> Option<u64> {
+		let (run, hole) = self.drops.get_key_value(&key)?;
+		(*hole == Hole::Skip).then_some(run.end)
+	}
+
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
 	/// "never produced" is the most authoritative verdict on a key. A reader a drop
 	/// already ended stays ended, and a relay forwards the skip over the drop it reported.
@@ -3932,6 +3938,25 @@ fn poll_largest(
 	Poll::Ready(cache.take_largest(seen, bounds))
 }
 
+/// The lowest key of `runs`, which ascend, that no run `skip_end` reports skipped covers.
+pub(super) fn first_unskipped(
+	runs: impl Iterator<Item = ops::RangeInclusive<u64>>,
+	skip_end: impl Fn(u64) -> Option<u64>,
+) -> Option<u64> {
+	let mut floor = 0;
+	for run in runs {
+		let mut key = (*run.start()).max(floor);
+		while key <= *run.end() {
+			match skip_end(key) {
+				Some(end) => key = end,
+				None => return Some(key),
+			}
+		}
+		floor = key;
+	}
+	None
+}
+
 /// Ready once the track's feed is live, or nothing more can move its largest. A declared
 /// end that is not reached yet does not count: an idle copy's largest is still only what
 /// its ended feed left.
@@ -6298,6 +6323,15 @@ impl Consumer {
 			return serving.group_back(latest, back);
 		}
 		self.with_state(|state| Holdings::back(&*state?.read(), latest, back))
+	}
+
+	/// The exclusive end of the run the publisher declared skipped at `key`, when one covers
+	/// it; see [`Subscriber::next_in_range`].
+	pub(super) fn skip_end(&self, key: u64) -> Option<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.skip_end(key);
+		}
+		self.with_state(|state| state?.read().skip_end(key))
 	}
 
 	/// The keys of `span` the cache holds, lowest first.
@@ -9947,14 +9981,17 @@ impl Subscriber {
 	}
 
 	/// The lowest group at or above `from` this subscriber's ranges and
-	/// [`Self::with_range`] floor cover, `None` when none does: the groups between are
-	/// never read, so a reader waiting on each group in key need not wait for them.
-	/// `Some` from there while a relative anchor waits on the first group, which can't
-	/// say yet.
+	/// [`Self::with_range`] floor cover, past the starts the publisher declared skipped
+	/// (see [`Producer::skip_groups`]), `None` when none does: the groups between are never
+	/// read, so a reader waiting on each group in key need not wait for them. `Some` from
+	/// there while a relative anchor waits on the first group, which can't say yet.
 	pub fn next_in_range(&self, from: u64) -> Option<u64> {
 		let from = from.max(self.bounds().start);
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.filter.window.runs(from).next().map(|run| *run.start()),
+			Inner::Plain(cursor) => {
+				let state = cursor.state.read();
+				first_unskipped(cursor.filter.window.runs(from), |key| state.skip_end(key))
+			}
 			Inner::Resume(resume, _) => resume.next_in_range(from),
 		}
 	}
@@ -12637,6 +12674,22 @@ mod test {
 			let result = reading.poll_read_frame(&waiter);
 			assert!(matches!(result, Poll::Ready(Err(Error::Old))), "{info:?}: {result:?}");
 		}
+	}
+
+	/// The next group in range passes over the starts the publisher declared skipped,
+	/// whether by appending past them or outright, so a reader waiting on each group in key
+	/// need not wait for them.
+	#[test]
+	fn the_next_group_in_range_passes_over_skips() {
+		let producer = track_producer("test", Info::default().with_max_age(None));
+		let subscriber = producer.subscribe(Subscription::default());
+		producer.append_group(0).unwrap().close().unwrap();
+		assert_eq!(subscriber.next_in_range(1), Some(1), "nothing skipped yet");
+		producer.append_group(10).unwrap().close().unwrap();
+		assert_eq!(subscriber.next_in_range(1), Some(10));
+		assert_eq!(subscriber.next_in_range(11), Some(11));
+		producer.skip_groups(11..20);
+		assert_eq!(subscriber.next_in_range(11), Some(20));
 	}
 
 	/// A group finished whole ages from its own end, which a zero budget waits for too: a

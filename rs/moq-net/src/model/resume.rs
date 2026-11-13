@@ -896,7 +896,13 @@ impl Subscriber {
 	/// The lowest group at or above `from` the reader's ranges cover; see
 	/// [`track::Subscriber::next_in_range`].
 	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {
-		self.reader().window().runs(from).next().map(|run| *run.start())
+		let mut reader = self.reader();
+		reader.window();
+		// The serving route's copy holds what its publisher declared skipped.
+		let serving = reader.copies.last().map(|copy| copy.track.clone());
+		track::first_unskipped(reader.window.runs(from), |key| {
+			serving.as_ref().and_then(|track| track.skip_end(key))
+		})
 	}
 
 	/// The groups the reader's ranges name from `from` on; see
