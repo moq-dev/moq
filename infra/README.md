@@ -186,7 +186,7 @@ is done for `main`.
    just infra mbx create
    ```
 
-   `lifecycle.json` deletes every object 14 days after upload and aborts
+   `lifecycle.json` deletes every object 7 days after upload and aborts
    multipart uploads left incomplete for a day. mbx writes each compilation
    once and never refreshes it, so a result still in use expires too; the
    next writer that misses it compiles and uploads it again. After editing
@@ -279,7 +279,7 @@ are unchanged; those inputs include the patched `kio` sources. The other
 platforms have no Smoke nix lane. Runtime warms serialize: the active run
 finishes and new pushes replace only the pending run, avoiding duplicate
 builds without starving publication or delaying the dev-shell matrix.
-Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30 days
+Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 14 days
 after upload. `nix copy` never re-uploads a path the bucket already has, so a
 path many commits reuse keeps its first upload's age. Each job therefore
 records the store paths it pushed under `roots/<commit>/`, then copies every

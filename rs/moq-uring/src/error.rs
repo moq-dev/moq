@@ -17,9 +17,10 @@ impl Error {
 	/// A failed ring setup or registration, naming the locked-memory limit when
 	/// that is what ran out.
 	///
-	/// The kernel charges every ring and provided-buffer ring to the user's
-	/// `RLIMIT_MEMLOCK`, shared with every other io_uring that user runs, so a
-	/// bare `ENOMEM` points at the wrong culprit.
+	/// Linux 6.14 up to the 7.3 fix (backported to stable) charges every ring
+	/// and provided-buffer ring to the user's `RLIMIT_MEMLOCK`, shared with
+	/// every other io_uring that user runs, so a bare `ENOMEM` points at the
+	/// wrong culprit. Other kernels charge them to the memory cgroup.
 	pub(crate) fn ring(err: std::io::Error) -> Self {
 		if err.raw_os_error() != Some(libc::ENOMEM) {
 			return Self::Io(err);

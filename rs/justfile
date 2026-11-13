@@ -21,10 +21,9 @@ default:
 # Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
 # Pass `-config rs/<path>.cfg` for a config not named after the spec, and
 # `../<path>.tla` for a spec outside `rs/`, such as a generated one in `.tmp/`.
-# TLC runs at the lowest priority with a 4 GB heap, which no model here outgrows:
-# the JVM otherwise takes a quarter of RAM per run.
+# sh/tlc.py says how a run shares the host.
 tla spec *args:
-    JAVA_TOOL_OPTIONS=-Xmx4g nice -n 19 nix shell --inputs-from . nixpkgs#tlaplus18 --command tlc -workers auto -cleanup -noGenerateSpecTE -metadir "$(mktemp -d)" {{ args }} rs/{{ spec }}
+    python3 sh/tlc.py rs/{{ spec }} {{ args }}
 
 # Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
 # Pass `-D=<VARIANT>` for a variant the model defines.

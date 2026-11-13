@@ -1,6 +1,6 @@
 //! rind's cryptographic provider for dimpl.
 //!
-//! Ported from moq-dev/rind's `rind-dimpl` 0.1.12, trimmed to DTLS 1.2, with
+//! Ported from kixel-ai/rind's `rind-dimpl` 0.1.12, trimmed to DTLS 1.2, with
 //! dimpl's PSK AES-128-CCM-8 suite kept from the provider it replaces.
 
 mod digest;

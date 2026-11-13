@@ -36,10 +36,9 @@ What the timer costs, as the configs show it: fired late, it costs only the wait
 ```sh
 quest gate just rs tla moq-net/verify/route/RouteHandoff.tla
 quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Ring.cfg
-quest gate just test tla rs/moq-net/verify/route
 ```
 
-`just test tla rs/moq-net/verify/route` runs every config, as Nightly does, simulating each one with a `Simulate:` line and expecting `Loop.cfg` to break. Times are with `-workers 4`. `Patient` is TRUE unless the table says otherwise.
+Run the configs the change touches, one at a time. Nightly runs every config (`just test tla rs/moq-net/verify/route`), simulating each one with a `Simulate:` line and expecting `Loop.cfg` to break. Times are on the recipe's 4 workers. `Patient` is TRUE unless the table says otherwise.
 
 | Config | Mesh | Bounds | Distinct states | Run |
 | --- | --- | --- | --- | --- |
@@ -48,7 +47,7 @@ quest gate just test tla rs/moq-net/verify/route
 | `Twice.cfg` | The same, where two sessions close, as when relay 1 dies. Simulated: `num` counts behaviours per worker. | 1 claim change, 2 session changes | 40,000 behaviours, 4.0M states | a few minutes |
 | `Ring.cfg` | The publisher and three relays in a ring, with a timer that fires at any moment. | 1 claim change, 1 session change | 426,409 | a minute or two |
 | `Lag.cfg` | Relay 3 hears the publisher through relays 1 and 2: the lagging neighbour. | 2 claim changes, 1 session change | 1,299,405 | a few minutes |
-| `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | twenty minutes |
+| `LagWide.cfg` | The same, with relay 1 asking for `"a"` alone. | 2 claim changes, 1 session change | 4,194,747 | ten minutes |
 | `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Open finding: `RequestsLoopFree` breaks. | 3 session changes | 979,474 when it breaks | a few minutes |
