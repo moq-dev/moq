@@ -90,7 +90,8 @@ sends it SIGUSR2, and it exits at once, leaving its relay to drain while the
 next relay takes over and reports ready. A stop sends SIGTERM, which the
 stand-in passes to its relay. A relay left draining is not signaled again and
 exits at the end of its own drain, and a restart before then fails until it has,
-which `Restart=on-failure` retries.
+which `Restart=on-failure` retries. systemd logs that the old relay "remains
+running after unit stopped": that is the drain.
 
 Both relays must run as the same user. `DynamicUser=` adopts an existing system
 user named after the unit, so create one to keep the UID across restarts:

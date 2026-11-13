@@ -210,20 +210,7 @@ impl Relay {
 				server.quic = config.quic.clone();
 				server.admission = shutdown.admission.clone();
 				server.demux = demux.clone();
-				let group = match sockets.enabled() {
-					true => {
-						let addr = match &listen.bind {
-							Some(bind) => bind.resolve().context("failed to resolve listen.bind")?,
-							None => moq_tokio::server::DEFAULT_BIND,
-						};
-						sockets.group(addr, worker.count)?
-					}
-					false => None,
-				};
-				let workers = match group {
-					Some(group) => moq_tokio::worker::Workers::from_group(server, group, worker.pin),
-					None => moq_tokio::worker::Workers::bind(server, worker),
-				};
+				let workers = sockets.workers(server, worker);
 				Some(workers.context("failed to start the QUIC workers")?)
 			}
 			_ => None,

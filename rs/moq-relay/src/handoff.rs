@@ -26,12 +26,13 @@
 //! # Protocol
 //!
 //! Over the stream socket, the old relay sends a big-endian `u32` length and a JSON
-//! [`Hello`], then one byte per batch of at most [`moq_sock::fd::MAX`] descriptors,
+//! hello, then one byte per batch of at most [`moq_sock::fd::MAX`] descriptors,
 //! each batch attached to its byte, in the order the hello lists them. The new relay
 //! answers with one byte once it serves, and both hold the connection open: its end
 //! is how each learns the other exited. Both check that the peer runs as the same
 //! user.
 
+#[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -122,15 +123,19 @@ pub(crate) enum Role {
 	Control,
 }
 
+#[cfg(target_os = "linux")]
 /// The protocol version a [`Hello`] speaks; a successor refuses any other.
 const VERSION: u32 = 1;
 
+#[cfg(target_os = "linux")]
 /// The byte a successor sends once it serves.
 const TOOK: u8 = b'T';
 
+#[cfg(target_os = "linux")]
 /// The byte each batch of descriptors rides on.
 const BATCH: u8 = b'F';
 
+#[cfg(target_os = "linux")]
 /// What the old relay sends first.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Hello {
@@ -142,6 +147,7 @@ struct Hello {
 	sockets: Vec<Entry>,
 }
 
+#[cfg(target_os = "linux")]
 /// One handed-on socket, or the QUIC group's members.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Entry {
@@ -159,6 +165,7 @@ struct Entry {
 	fds: usize,
 }
 
+#[cfg(target_os = "linux")]
 /// A reuseport group's shape, beside its members' descriptors.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Group {
@@ -171,6 +178,7 @@ struct Group {
 }
 
 /// What a serving [`Handoff`] tells the rest of the relay.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct Events {
 	/// Set once a successor took over: stop accepting and drain.
 	pub handed: tokio::sync::watch::Sender<bool>,
@@ -180,6 +188,7 @@ pub(crate) struct Events {
 	pub drain: crate::shutdown::Trigger,
 }
 
+#[cfg(target_os = "linux")]
 /// Whether a socket bound to `held` serves a listener configured for `requested`:
 /// the same address, where an ephemeral request takes whatever port was resolved.
 fn serves(held: SocketAddr, requested: SocketAddr) -> bool {
@@ -376,6 +385,25 @@ mod imp {
 			));
 			self.steering = Some(bound.steering().context("failed to steer the QUIC sockets")?);
 			Ok(Some(bound))
+		}
+
+		/// The tokio QUIC workers: on the predecessor's group, or a fresh one with room
+		/// for a successor when handoff is on.
+		#[cfg(feature = "_quic")]
+		pub(crate) fn workers(
+			&mut self,
+			server: moq_tokio::server::Config,
+			config: moq_tokio::worker::Config,
+		) -> anyhow::Result<moq_tokio::worker::Workers> {
+			if !self.enabled() {
+				return Ok(moq_tokio::worker::Workers::bind(server, config)?);
+			}
+			let addr = match &server.listen.bind {
+				Some(bind) => bind.resolve().context("failed to resolve listen.bind")?,
+				None => moq_tokio::server::DEFAULT_BIND,
+			};
+			let group = self.group(addr, config.count)?.expect("handoff is on");
+			Ok(moq_tokio::worker::Workers::from_group(server, group, config.pin)?)
 		}
 
 		/// A TCP listener for `role` on `addr`: the predecessor's, or a fresh one.
@@ -878,6 +906,15 @@ mod imp {
 			false
 		}
 
+		#[cfg(feature = "_quic")]
+		pub(crate) fn workers(
+			&mut self,
+			server: moq_tokio::server::Config,
+			config: moq_tokio::worker::Config,
+		) -> anyhow::Result<moq_tokio::worker::Workers> {
+			Ok(moq_tokio::worker::Workers::bind(server, config)?)
+		}
+
 		pub(crate) fn tcp(
 			&mut self,
 			_role: Role,
@@ -886,6 +923,7 @@ mod imp {
 			Ok(None)
 		}
 
+		#[cfg(feature = "stun")]
 		pub(crate) fn udp(
 			&mut self,
 			_role: Role,
@@ -894,7 +932,7 @@ mod imp {
 			Ok(None)
 		}
 
-		#[cfg(unix)]
+		#[cfg(all(feature = "uds", unix))]
 		pub(crate) fn unix(
 			&mut self,
 			_role: Role,
@@ -968,6 +1006,7 @@ mod tests {
 
 	/// A handed-on socket's address serves the listener configured for it, and an
 	/// ephemeral port takes whatever the old relay resolved.
+	#[cfg(target_os = "linux")]
 	#[test]
 	fn a_held_socket_serves_the_same_address() {
 		let held: SocketAddr = "127.0.0.1:4443".parse().unwrap();
