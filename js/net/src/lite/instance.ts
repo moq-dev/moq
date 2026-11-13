@@ -67,6 +67,28 @@ async function encode(w: Writer, instance: Instance.Valid): Promise<void> {
 	await w.bool(Instance.isMinted(instance));
 }
 
+/** Decode lite-07's instance and epoch, with `instance` undefined when they are well framed but
+ * the instance is not one this node can use, which withdraws only the claim naming it. Mirrors
+ * rs/moq-net. */
+export async function decodeForwarded(r: Reader): Promise<{ instance?: Instance.Valid; epoch: bigint }> {
+	const bytes = await r.read(await r.u53());
+	const minted = await r.bool();
+	const epoch = await r.u62();
+	const text = utf8(bytes);
+	if (text === undefined || text.length === 0 || !text.isWellFormed()) return { epoch };
+	const named = Instance.parse(text);
+	return { instance: minted ? Mint.mint(named) : named, epoch };
+}
+
+/** `bytes` as UTF-8 text, or undefined when they are not UTF-8. */
+export function utf8(bytes: Uint8Array): string | undefined {
+	try {
+		return decoder.decode(bytes);
+	} catch {
+		return undefined;
+	}
+}
+
 function decode(bytes: Uint8Array, minted: boolean): Instance.Valid {
 	const named = Instance.parse(decoder.decode(bytes));
 	return minted ? Mint.mint(named) : named;

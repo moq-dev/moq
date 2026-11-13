@@ -312,7 +312,9 @@ fn decode_advert(r: &mut Decoder<'_>) -> Content<Advert> {
 fn decode_path(r: &mut Decoder<'_>) -> Content<Path> {
 	let bytes = r.bytes()?;
 	let path = std::str::from_utf8(bytes).ok().and_then(|path| Path::new(path).ok());
-	Ok(path.filter(|path| path.parts().count() <= Path::MAX_PARTS).ok_or(Refusal::Path))
+	Ok(path
+		.filter(|path| path.parts().count() <= Path::MAX_PARTS)
+		.ok_or(Refusal::Path))
 }
 
 /// Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded.
@@ -324,7 +326,6 @@ fn decode_suffix(r: &mut Decoder<'_>) -> Content<PathRef> {
 	}
 	Ok(decode_path(r)?.map(|rest| PathRef { base, keep, rest }))
 }
-
 
 /// Encode an ANNOUNCE_FLOOR body: the revision plus one, or 0 to certify nothing.
 fn encode_floor(w: &mut Encoder<'_>, id: u64, revision: Option<route::Rev>) -> Result<(), EncodeError> {
@@ -757,7 +758,8 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 								body.rest();
 								refused(Refusal::Node)
 							}
-							_ => decode_advert(&mut body)?.map_or_else(refused, |advert| Self::RouteStart { node, advert }),
+							_ => decode_advert(&mut body)?
+								.map_or_else(refused, |advert| Self::RouteStart { node, advert }),
 						}
 					}
 					ROUTE_UPDATE if version.has_routes() => {
@@ -1512,7 +1514,11 @@ mod tests {
 			message: Refusable::WarmUpdate { id: 7 },
 			reason,
 		};
-		assert_eq!(decode(&[13, 4, 7, 4, 0, 0]).unwrap(), refused(Refusal::Carrier), "no hops");
+		assert_eq!(
+			decode(&[13, 4, 7, 4, 0, 0]).unwrap(),
+			refused(Refusal::Carrier),
+			"no hops"
+		);
 		assert_eq!(
 			decode(&[13, 7, 7, 4, 3, 3, 5, 9, 6]).unwrap(),
 			refused(Refusal::Carrier),
@@ -2157,10 +2163,18 @@ mod tests {
 		let refused = [
 			(forge(ROUTE_START, hops(over, over)), start(1), Refusal::Hops(over)),
 			(forge(ROUTE_START, advert(0, 0, 1, 0)), start(0), Refusal::Node),
-			(forge(ROUTE_START, advert(1, route::MAX, 1, 0)), start(1), Refusal::Seqno),
+			(
+				forge(ROUTE_START, advert(1, route::MAX, 1, 0)),
+				start(1),
+				Refusal::Seqno,
+			),
 			// A flag no version defines, which may change what follows it.
 			(forge(ROUTE_START, advert(1, 0, 1, 4)), start(1), Refusal::Flags(4)),
-			(forge(ROUTE_START, advert(1, 0, 1, 0x86)), start(1), Refusal::Flags(0x86)),
+			(
+				forge(ROUTE_START, advert(1, 0, 1, 0x86)),
+				start(1),
+				Refusal::Flags(0x86),
+			),
 			// ROUTE_UPDATE's leading field is the Route ID, so 0 is a valid id here.
 			(
 				forge(ROUTE_UPDATE, advert(0, route::MAX, 1, 0)),

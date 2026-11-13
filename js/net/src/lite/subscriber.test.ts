@@ -4005,9 +4005,11 @@ async function routedStream(options?: RouteOptions, getStats?: () => Promise<unk
 		await AnnounceRequest.decode(replies, version);
 		await new AnnounceOk(PEER, 0).encode(peer, version);
 		const send = (msg: AnnounceBroadcast) => encodeAnnounceBroadcast(peer, msg, version);
-		return { announced, send, replies };
+		// Bytes as a newer or broken peer might write them.
+		const raw = (bytes: number[]) => stream.inbound.enqueue(new Uint8Array(bytes));
+		return { announced, send, raw, replies };
 	};
-	const { announced, send, replies } = await another(0);
+	const { announced, send, raw, replies } = await another(0);
 	// The TRACK request a consume of `path` opens as its `index`th stream.
 	const trackRequest = async (path: Path.Valid, index: number, pin?: Instance.Valid) => {
 		const consumed = subscriber.consume(path, pin);
@@ -4021,8 +4023,51 @@ async function routedStream(options?: RouteOptions, getStats?: () => Promise<unk
 		const request = await Track.decode(reader, version);
 		return { request, consumed, info };
 	};
-	return { subscriber, announced, send, replies, version, trackRequest, another };
+	return { subscriber, announced, send, raw, replies, version, trackRequest, another };
 }
+
+// A route or claim whose forwarded content this subscriber refuses is withdrawn alone: the session,
+// the peer's other route, and its claims stay, and the ids after it line up. Mirrors rs/moq-net.
+test("a lite-07 refused route or claim withdraws only itself", async () => {
+	const { subscriber, announced, send, raw } = await routedStream();
+	const [a, b, c, d] = ["live/a", "live/b", "live/c", "live/d"].map((path) => Path.from(path));
+	const instance = Instance.parse("i");
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await send({ status: "active", suffix: a, route: 0n, instance });
+	await send({ status: "active", suffix: b, route: 1n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "start" });
+	expect(await announced.next()).toMatchObject({ prefix: b, kind: "start" });
+
+	// ROUTE_UPDATE of Route ID 0 with a flag no version defines, and the field it might announce.
+	raw([7, 5, 0, 1, 0, 0x80, 42]);
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "offline" });
+
+	// Announce ID 2: an ANNOUNCE_START under Route ID 1 whose path has an empty segment.
+	raw([0, 13, 0, 0, 4, ...new TextEncoder().encode("x//y"), 1, 1, 0x69, 0, 0, 0]);
+	await send({ status: "endedId", id: 2n });
+	await send({ status: "active", suffix: c, route: 1n, instance });
+	await send({ status: "floor", id: 1n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: c, kind: "start" });
+
+	// Forwarded usably again, the route's claims come back.
+	await send({ status: "routeUpdate", id: 0n, advert: ADVERT });
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "start" });
+
+	// ROUTE_START to the reserved node takes Route ID 2, and its claims never show.
+	raw([6, 5, 0, 1, 0, 0, 0]);
+	await send({ status: "active", suffix: d, route: 2n, instance });
+	await send({ status: "floor", id: 2n, revision: 0n });
+	await send({ status: "endedId", id: 3n });
+	await send({ status: "floor", id: 1n, revision: 2n });
+	expect(await announced.next()).toMatchObject({ prefix: c, kind: "end" });
+
+	announced.close();
+	subscriber.close();
+});
 
 // Two streams carry one origin's claims, and a withdrawal reaches one first. Of the floors that
 // certify a claim, the newest decides whether it exists, so the lagging stream's copy is held back

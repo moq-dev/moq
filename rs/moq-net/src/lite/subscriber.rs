@@ -10244,7 +10244,10 @@ mod tests {
 		[
 			("an unknown flag", advert_body(lead, 1, 0x80, 0, &[42])),
 			("the last seqno", advert_body(lead, crate::route::MAX, 0, 0, &[])),
-			("33 hops", advert_body(lead, 1, 0, crate::route::MAX_HOPS as u64 + 1, &[])),
+			(
+				"33 hops",
+				advert_body(lead, 1, 0, crate::route::MAX_HOPS as u64 + 1, &[]),
+			),
 		]
 	}
 
@@ -10474,19 +10477,29 @@ mod tests {
 	#[kio::test]
 	async fn an_unknown_id_still_closes_the_session() {
 		let unknown: [(&str, Vec<u8>, u64); 3] = [
-			("a refused update of an unknown route", refused_adverts(5)[0].1.clone(), ROUTE_UPDATE),
+			(
+				"a refused update of an unknown route",
+				refused_adverts(5)[0].1.clone(),
+				ROUTE_UPDATE,
+			),
 			("a refused change of an unknown claim", vec![9, 0, 0], ANNOUNCE_UPDATE),
-			("a refused claim under an unknown route", {
-				let mut body = start_body(b"x//y", b"i");
-				body[7] = 5;
-				body
-			}, ANNOUNCE_START),
+			(
+				"a refused claim under an unknown route",
+				{
+					let mut body = start_body(b"x//y", b"i");
+					body[7] = 5;
+					body
+				},
+				ANNOUNCE_START,
+			),
 		];
 		for (what, body, typ) in unknown {
 			let mut script = two_routes();
 			script.extend(announce_script(Version::Lite07, &[&raw(typ, body)]));
-			let (mut prefix, _consumer) =
-				root_prefix(Version::Lite07, crate::lite::test_transport::ScriptedSession::new(script));
+			let (mut prefix, _consumer) = root_prefix(
+				Version::Lite07,
+				crate::lite::test_transport::ScriptedSession::new(script),
+			);
 			let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{what}: {err}");
 		}

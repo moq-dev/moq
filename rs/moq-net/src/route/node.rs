@@ -1780,7 +1780,11 @@ mod tests {
 					_ => None,
 				})
 				.collect();
-			assert_eq!(sent.iter().map(|advert| advert.hops.len()).max(), forwarded, "{hops} hops");
+			assert_eq!(
+				sent.iter().map(|advert| advert.hops.len()).max(),
+				forwarded,
+				"{hops} hops"
+			);
 			for advert in sent {
 				let start = crate::lite::AnnounceBroadcast::RouteStart { node: 5, advert };
 				crate::coding::Encode::encode_bytes(&start, crate::lite::Version::Lite07).unwrap();

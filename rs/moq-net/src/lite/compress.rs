@@ -34,7 +34,10 @@ impl Live {
 		if distance == 0 {
 			return Ok(None);
 		}
-		self.next.checked_sub(distance).map(Some).ok_or(Error::ProtocolViolation)
+		self.next
+			.checked_sub(distance)
+			.map(Some)
+			.ok_or(Error::ProtocolViolation)
 	}
 }
 
@@ -318,7 +321,10 @@ mod tests {
 	#[test]
 	fn a_new_stream_has_no_base() {
 		let mut decoder = AnnounceDecoder::default();
-		assert!(matches!(decoder.start(Some(path(1, 0, "a"))), Err(Error::ProtocolViolation)));
+		assert!(matches!(
+			decoder.start(Some(path(1, 0, "a"))),
+			Err(Error::ProtocolViolation)
+		));
 	}
 
 	#[test]
@@ -329,9 +335,15 @@ mod tests {
 		decoder.end(0).unwrap();
 
 		// Id 0 is two back, and retired.
-		assert!(matches!(decoder.start(Some(path(2, 1, "x"))), Err(Error::ProtocolViolation)));
+		assert!(matches!(
+			decoder.start(Some(path(2, 1, "x"))),
+			Err(Error::ProtocolViolation)
+		));
 		// Three back was never assigned.
-		assert!(matches!(decoder.start(Some(path(3, 0, "x"))), Err(Error::ProtocolViolation)));
+		assert!(matches!(
+			decoder.start(Some(path(3, 0, "x"))),
+			Err(Error::ProtocolViolation)
+		));
 		// Id 1 is still live, so reusing it works after the END.
 		let suffix = decoder.start(Some(path(1, 1, "x"))).unwrap().unwrap();
 		assert_eq!(suffix.as_str(), "b/x");
@@ -341,7 +353,10 @@ mod tests {
 	fn rejects_a_keep_longer_than_the_base() {
 		let mut decoder = AnnounceDecoder::default();
 		decoder.start(Some(literal("a/b"))).unwrap();
-		assert!(matches!(decoder.start(Some(path(1, 3, "x"))), Err(Error::ProtocolViolation)));
+		assert!(matches!(
+			decoder.start(Some(path(1, 3, "x"))),
+			Err(Error::ProtocolViolation)
+		));
 	}
 
 	/// A resolved path past the limits is content the peer forwarded: refused, its id

@@ -532,23 +532,25 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 test("AnnounceHistory keeps segments split at an escaped slash", () => {
 	const history = new AnnounceHistory();
 	history.start({ suffix: Path.from("a\\/b") });
-	// The kept `a\` is half an escape, which the rest completes or nothing does.
+	// The kept `a\` is half an escape, which the rest completes, or nothing does and the path is
+	// refused, its id assigned all the same.
 	const suffix = history.start({ suffix: Path.from("c"), pathBase: { distance: 1n, keep: 1 } });
 	expect(suffix).toBe(Path.from("a\\/c"));
-	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 1n, keep: 1 } })).toThrow(
-		ProtocolViolation,
-	);
+	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 1n, keep: 1 } })).toBeUndefined();
+	expect(history.next).toBe(3n);
 });
 
-test("AnnounceHistory rejects a resolved path past the byte limit", () => {
+test("AnnounceHistory refuses a resolved path past the byte limit", () => {
 	const history = new AnnounceHistory();
 	history.start({ suffix: Path.from("x".repeat(Path.MAX_BYTES - 2)) });
-	// `head/y` is exactly the limit, and one byte more is refused.
+	// `head/y` is exactly the limit, and one byte more is refused as content: the id is assigned,
+	// a base naming it is refused too, and its end is no violation.
 	const suffix = history.start({ suffix: Path.from("y"), pathBase: { distance: 1n, keep: 1 } });
-	expect(suffix.length).toBe(Path.MAX_BYTES);
-	expect(() => history.start({ suffix: Path.from("yz"), pathBase: { distance: 1n, keep: 1 } })).toThrow(
-		ProtocolViolation,
-	);
+	expect(suffix?.length).toBe(Path.MAX_BYTES);
+	expect(history.start({ suffix: Path.from("yz"), pathBase: { distance: 1n, keep: 1 } })).toBeUndefined();
+	expect(history.start({ suffix: Path.from("z"), pathBase: { distance: 1n, keep: 1 } })).toBeUndefined();
+	expect(history.end(2n)).toBeUndefined();
+	expect(() => history.end(2n)).toThrow(ProtocolViolation);
 });
 
 test("a keep without a base is a violation on draft-07", async () => {
