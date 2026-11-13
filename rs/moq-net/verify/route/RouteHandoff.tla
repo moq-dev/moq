@@ -338,14 +338,12 @@ Report(n, s, ups, hop) ==
                         !.told = [p \in Nodes |-> IF p \in Peers(n, ups) THEN r[p].told ELSE s.told[p]]],
         out |-> [p \in Nodes |-> IF p \in Peers(n, ups) THEN r[p].out ELSE <<>>]]
 
-\* `collect`: forget each doubt no route names any more, each dead hop no route
-\* names once the timer it started has fired, and each told hop no route sent
-\* names.
+\* `collect`: forget each dead hop no route names once its timer has fired,
+\* and each told hop no sent route names. Doubt lasts until Lift fires.
 Collect(s) ==
     LET heard == {s.rx[x[1]][x[2]].path : x \in {y \in Nodes \X Keys : s.rx[y[1]][y[2]].on}}
     IN [s EXCEPT
           !.dead = {h \in s.dead : h \in s.expiry \/ \E p \in heard : HasHop(p, h)},
-          !.doubt = {x \in s.doubt : \E p \in heard : Names(p, x)},
           !.told = [m \in Nodes |-> {h \in s.told[m] :
                        \E k \in Keys : s.tx[m][k].on /\ HasHop(s.tx[m][k].path, h)}]]
 

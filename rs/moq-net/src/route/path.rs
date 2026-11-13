@@ -149,10 +149,10 @@ pub(crate) struct Doubt {
 }
 
 impl Doubt {
-	/// A second, lifted early once no route names the node.
+	/// A second, kept until the timer fires.
 	pub const DEFAULT: Self = Self {
 		timer: Duration::from_secs(1),
-		lift: Lift::Unnamed,
+		lift: Lift::Timer,
 	};
 }
 

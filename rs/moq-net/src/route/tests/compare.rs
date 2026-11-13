@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use super::*;
 
 /// The rules compared, in the report's order.
-pub(super) const COMPARED: [Rule; 3] = [Rule::Distance, Rule::PATH, Rule::TIMER];
+pub(super) const COMPARED: [Rule; 3] = [Rule::Distance, Rule::EARLY, Rule::PATH];
 
 /// A queue of messages, or of echoed ROUTE_ENDs, from one node to another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

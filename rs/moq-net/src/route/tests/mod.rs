@@ -47,9 +47,9 @@ pub(super) enum Rule {
 impl Rule {
 	/// The path rule as the model checks it.
 	pub const PATH: Self = Self::Path(Doubt::DEFAULT);
-	/// The path rule keeping each doubt until its timer fires.
-	pub const TIMER: Self = Self::Path(Doubt {
-		lift: Lift::Timer,
+	/// The comparison rule lifting doubt once no heard route names the node.
+	pub const EARLY: Self = Self::Path(Doubt {
+		lift: Lift::Unnamed,
 		..Doubt::DEFAULT
 	});
 
@@ -58,8 +58,8 @@ impl Rule {
 			Self::Distance => "distance",
 			Self::Path(Doubt {
 				lift: Lift::Unnamed, ..
-			}) => "path",
-			Self::Path(Doubt { lift: Lift::Timer, .. }) => "path+timer",
+			}) => "path+early",
+			Self::Path(Doubt { lift: Lift::Timer, .. }) => "path",
 		}
 	}
 }

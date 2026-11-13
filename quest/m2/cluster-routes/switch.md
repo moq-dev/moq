@@ -117,10 +117,6 @@ earlier lite-07 wire change did.
 
 Public API: none expected. Wire: lite-07-wip only.
 
-## Required
-
-- [Settle the path router's remaining design choices](/quest/m2/cluster-routes/scope.md) - the maintainer's policy choice and its model checks
-
 ## Related
 
 - [Each side says everything about routing on one stream](/quest/m2/cluster-routes/route-stream.md) - moves these messages onto one stream per side afterwards

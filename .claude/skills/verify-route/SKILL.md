@@ -5,7 +5,7 @@ description: Model-check the lite-07 route rule (`rs/moq-net/verify/route/RouteH
 
 # Verify the route rule
 
-`rs/moq-net/verify/route/RouteHandoff.tla` models one publisher's routes across a mesh, under the rule the routes epic's Plan item 27 picked: a route names every relay it crossed with the session it learned it on, a closed session is named in one DEAD message per neighbour, a relay with no route holds until those that learned it from the relay answer, and a closed session casts doubt on its far end until a timer fires. It follows `route::path::Router` in `rs/moq-net/src/route/path.rs` with one publisher and a route per prefix (`"root"`, and `"a"` inside it, which relays in `Scoped` ask for alone), and keeps dead hops until their timer fires. Every entry point is one atomic step ending in `Update`; messages share one FIFO per direction. The node timer is `Lift`; each dead hop also expires independently through `Expire`, so repeated failures of one node cannot retain all its old hops. Either may fire at any moment, or with `Patient` only once no relevant DEAD is in flight. Sessions still run Babel's distance in `route::Router`: only `route::tests::Sim` drives the path router, under `Rule::PATH` or `Rule::TIMER`, until [the switch](/quest/m2/cluster-routes/switch.md) puts it on the wire.
+`rs/moq-net/verify/route/RouteHandoff.tla` models one publisher's routes across a mesh, under the rule the routes epic's Plan item 27 picked: a route names every relay it crossed with the session it learned it on, a closed session is named in one DEAD message per neighbour, a relay with no route holds until those that learned it from the relay answer, and a closed session casts doubt on its far end until a timer fires. It follows `route::path::Router` in `rs/moq-net/src/route/path.rs` with one publisher and a route per prefix (`"root"`, and `"a"` inside it, which relays in `Scoped` ask for alone), and keeps dead hops until their timer fires. Every entry point is one atomic step ending in `Update`; messages share one FIFO per direction. The node timer is `Lift`; each dead hop also expires independently through `Expire`, so repeated failures of one node cannot retain all its old hops. Either may fire at any moment, or with `Patient` only once no relevant DEAD is in flight. Sessions still run Babel's distance in `route::Router`: only `route::tests::Sim` drives the path router, under `Rule::PATH` (timer-only doubt), until [the switch](/quest/m2/cluster-routes/switch.md) puts it on the wire.
 
 ## Rules
 
@@ -25,7 +25,9 @@ Each rule is an INVARIANT; the harm says why it matters.
 | `NoStaleReturn` | No relay may use a route through a hop it once learned had died. | A dead path comes back after a relay forgot it. |
 | `QuietIsSettled` | Once nothing is in flight and every timer fired: each relay shows exactly the claims a path of open sessions carries to it, available, and a request for each reaches the publisher; no relay holds, keeps a stale route, or remembers a dead hop. | A hold never ends, a claim is shown that no path carries, or a relay behind a scoped neighbour never reaches what a farther one offers. |
 | `Budget` | From one quiet point to the next, the messages sent stay within 4 each way over each configured session per prefix and per claim, for each external change. | One change sets off announce spam, or routing never goes quiet. |
-| `RequestsLoopFree` | A request never loops. | Only `Loop.cfg` checks it, as an open finding. |
+| `RequestsLoopFree` | A request never loops. | A request cycles through relays instead of reaching the publisher. |
+
+Every config checks `RequestsLoopFree`; `Loop.cfg` pins the three-failure regression.
 
 No config checks a liveness property: `Spec` has no fairness, so TLC does not show that a hold ends. That one does is an argument over what TLC does check. `Budget` bounds the messages a burst sends, each delivery takes one message off a queue, and a doubt starts only at a close or a delivery, so a burst is a finite number of steps. A delivery is enabled while a queue holds a message and a timer may fire once no news about its node is in flight, so a burst left alone reaches the state with nothing in flight and no doubt. `QuietIsSettled` says no relay holds there.
 
@@ -41,7 +43,7 @@ quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/
 Choose the config affected by the change; do not run the directory locally.
 [TLC's cost quest](/quest/m0/ci/tlc-cost.md) records that maintainer decision.
 Nightly runs every config through `just test tla`, simulating each with a
-`Simulate:` line and expecting `Loop.cfg` to break. When calling `just rs tla`
+`Simulate:` line. `Loop.cfg` is a passing regression for timer-only doubt. When calling `just rs tla`
 directly, pass the arguments from that line explicitly. For covering-source
 selection, for example:
 
@@ -65,7 +67,7 @@ unless the table says otherwise.
 | `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Overlap.cfg` | Five relays, three asking for `"a"`, with overlapping cheap broad and dear narrow paths. Simulated past the message budget. | 1 claim change, no session change | 4,000 behaviours requested, depth 500 | simulation |
-| `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Open finding: `RequestsLoopFree` breaks. | 3 session changes | 979,474 when it breaks | a few minutes |
+| `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Checks `RequestsLoopFree` with timer-only doubt. | 3 session changes | 979,474 at the historical early-collection failure | a few minutes |
 
 Run the affected config last, with at most one TLC process at a time. First run what answers in seconds: the router's tests (`quest gate just rs test -p moq-net --lib -E 'test(/route::tests::(handoff|residual|scope|compare)/)'`, with `MOQ_ROUTE_SCENARIOS` raising the sweeps' count), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
 
@@ -75,7 +77,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `e7abef87100e001295d98130ee9760d609078ac3`, the base of the scoped path router in [moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622). Run `git log e7abef871.. -- rs/moq-net/src/route/path.rs rs/moq-net/src/route/reader.rs` to see what changed since. Prefix and reader indexes make the router's updates incremental; test-only full recomputation checks their result against the complete view. The model recomputes every prefix atomically and leaves that optimization out. `SrcKey` mirrors the router's preference for the cheapest covering live path that does not name its receiver, with the narrower scope breaking ties; `Select` plans live routes and their reflected sources before deciding holds; `Advertise1` forwards a newer floor even when the claims did not change. The router lifts a doubt as `Collect` does, once no route names its node (`Lift::Unnamed`, `Doubt::DEFAULT`); `Lift::Timer` keeps it until the timer fires: the rule `Loop.cfg`'s comment names, which passes `RequestsLoopFree` there once `Collect` keeps `doubt`. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `ae0880eece449f12c1e9f9465ca63d9662e80397`, the base of the scoped path router in [moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622). Run `git log ae0880eec.. -- rs/moq-net/src/route/path.rs rs/moq-net/src/route/reader.rs` to see what changed since. Prefix and reader indexes make the router's updates incremental; test-only full recomputation checks their result against the complete view. The model recomputes every prefix atomically and leaves that optimization out. `SrcKey` mirrors the router's preference for the cheapest covering live path that does not name its receiver, with the narrower scope breaking ties; `Select` plans live routes and their reflected sources before deciding holds; `Advertise1` forwards a newer floor even when the claims did not change. The router keeps doubt until its one-second timer fires (`Lift::Timer`, `Doubt::DEFAULT`); the model's `Collect` leaves it for `Lift`. The comparison-only `Rule::EARLY` lifts doubt once no heard route names its node and is outside this timer-only model. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
