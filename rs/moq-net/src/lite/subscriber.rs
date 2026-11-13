@@ -10341,6 +10341,25 @@ impl SubStream {
 		Some((start, self.started.is_none()))
 	}
 
+	/// Tell the copy where the publisher started each live range asked from a group's start,
+	/// which a reader's time start there resolves to when the copy holds no group at it.
+	/// Lite-07 only, where each range's start is reported.
+	fn report_time_starts(&self, serving: &track::Producer) {
+		if !self.live.reports_starts() {
+			return;
+		}
+		let starts = self
+			.live
+			.iter()
+			.filter_map(|(id, range)| match (range.start, self.starts.get(&id)) {
+				(Some(lite::Anchor::Absolute(time)), Some(Some(start))) if time.frame == 0 => {
+					Some((time.group, *start))
+				}
+				_ => None,
+			});
+		serving.time_starts(starts);
+	}
+
 	/// Declare on the copy where the live feed starts, by [`Self::feed_start`], so a reader
 	/// waiting on each group in key starts there rather than at whatever arrives first.
 	fn declare(&mut self, serving: &mut track::Producer) {
@@ -12613,6 +12632,7 @@ impl ServeLoop {
 				// Lite-07 says where every live range starts, so the declaration follows them
 				// whatever an update changed since.
 				if active.live.reports_starts() {
+					active.report_time_starts(&self.serving);
 					active.declare(&mut self.serving);
 				} else if active.start == active.requested && active.demand.is_some() {
 					let _ = match (serve.subscriber.version.resolves_start(), served) {
@@ -12657,6 +12677,7 @@ impl ServeLoop {
 					if let Ok(mut tail) = active.tail.write() {
 						tail.expire(now);
 					}
+					active.report_time_starts(&self.serving);
 					active.declare(&mut self.serving);
 				}
 			}

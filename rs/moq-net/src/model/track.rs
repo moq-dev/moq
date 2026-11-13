@@ -666,6 +666,11 @@ pub(crate) struct TrackState {
 	// wire's publisher starts one at the first group at or after it, and a copy holding part
 	// of the track cannot tell which earlier group contains the time.
 	starts_at_keys: bool,
+	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the
+	// time it asked from: a copy holding part of the track cannot tell which group contains
+	// a time it holds no group at, but its publisher reports where it resolved one. Replaced
+	// whole as the ranges change, so it holds at most one entry per live range.
+	time_starts: BTreeMap<u64, u64>,
 	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaiming a slot
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
@@ -1007,6 +1012,9 @@ impl Holdings for TrackState {
 		if self.starts_at_keys {
 			return Containing::Group(time);
 		}
+		if self.anchors == Anchors::Wire {
+			return self.containing_received(time);
+		}
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _)) => Containing::Group(key),
 			// Every key at or before it is gone, so whichever group held it will never arrive.
@@ -1041,6 +1049,35 @@ impl Holdings for TrackState {
 }
 
 impl TrackState {
+	/// [`Holdings::containing`] on a lite-07 copy, which holds only part of the track: a group
+	/// held before `time` contains it only once nothing between them is still to arrive, so
+	/// until then it waits for the group starting there, the gap's holes, a group past it,
+	/// or where the publisher reports starting the range it asked from `time`. A group past
+	/// it says the feed went by: one between still in flight, a stream overtaken, would
+	/// only add that group to the reader's range.
+	fn containing_received(&self, time: u64) -> Containing {
+		if self.lookup.contains_key(&time) {
+			return Containing::Group(time);
+		}
+		match self.time_starts.get(&time) {
+			Some(&start) if start <= time => return Containing::Group(start),
+			// The publisher serves nothing at or before it, as it does for a time older than
+			// every group it holds.
+			Some(_) => return Containing::Before,
+			None => {}
+		}
+		match self.lookup.range(..=time).next_back() {
+			Some((&key, _))
+				if self.holes_cover(key.saturating_add(1)..time.saturating_add(1), |_| true)
+					|| self.lookup.range(time..).next().is_some() =>
+			{
+				Containing::Group(key)
+			}
+			None if self.holes_cover(0..time.saturating_add(1), |_| true) => Containing::Before,
+			_ => Containing::Unknown,
+		}
+	}
+
 	/// Whether drops of a kind `kind` accepts cover every key in `keys`. An empty run is
 	/// covered, though it may overlap a drop around its start.
 	fn holes_cover(&self, keys: ops::Range<u64>, kind: impl Fn(&Hole) -> bool) -> bool {
@@ -4335,6 +4372,19 @@ impl Producer {
 	pub(crate) fn fills_from_start(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.fills_from_start = true;
+		}
+	}
+
+	/// Record where the upstream publisher started each of this lite-07 copy's live wire
+	/// ranges, as `(time, start)` pairs by the time each asked from, replacing the last set.
+	/// A reader's time start this copy cannot place among its own groups resolves to it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn time_starts(&self, starts: impl IntoIterator<Item = (u64, u64)>) {
+		let starts: BTreeMap<u64, u64> = starts.into_iter().collect();
+		if let Ok(mut state) = self.modify()
+			&& state.time_starts != starts
+		{
+			state.time_starts = starts;
 		}
 	}
 
@@ -9819,6 +9869,9 @@ impl Subscriber {
 	///
 	/// Where a reader that waits on each group in key starts when [`Self::floor`] names
 	/// none: groups arrive newest first, so the first to arrive is not the oldest served.
+	///
+	/// Pending too while a time start waits on the groups held to place it, since where its
+	/// range starts is unknown until then.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
@@ -9827,6 +9880,15 @@ impl Subscriber {
 		};
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
+		if cursor.filter.window.is_waiting() {
+			// Registered before syncing again, so a change placing it after this wakes it. A
+			// closed track places it at once, since nothing more can arrive.
+			let closed = cursor.state.poll(waiter, |_| Poll::<()>::Pending).is_ready();
+			cursor.sync();
+			if !closed && cursor.filter.window.is_waiting() {
+				return Poll::Pending;
+			}
+		}
 		let start = start.map(|start| start.max(cursor.floor()));
 		let filling = cursor.misses.as_ref().and_then(|misses| misses.lowest());
 		Poll::Ready(match (start, filling) {
@@ -13589,6 +13651,61 @@ mod test {
 			write_group(&producer, key);
 		}
 		assert_eq!(drain(&mut subscriber), vec![3000, 4000]);
+	}
+
+	/// A lite-07 copy holds only part of the track, so it places a time start only once it
+	/// knows which group contains it: one starting there, one before it once the keys between
+	/// are skipped or a later group arrived, or where its publisher reported starting the
+	/// range asked from that time. Meanwhile the reader reads the groups from the time.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_time_start_once_it_knows() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed =
+			|subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| (resolved.start, resolved.floored));
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+
+		// A group between 1000 and the time may still arrive.
+		let mut later = producer.subscribe(from(1500));
+		let mut answered = producer.subscribe(from(1700));
+		let mut skipped = producer.subscribe(from(1800));
+		let mut before = producer.subscribe(from(500));
+		let mut at = producer.subscribe(from(1000));
+		assert_eq!(placed(&mut at), Some((1000, true)), "a group starts there");
+		for subscriber in [&mut later, &mut answered, &mut skipped, &mut before] {
+			assert_eq!(placed(subscriber), None);
+		}
+		assert_eq!(drain(&mut before), vec![1000], "reads from the time meanwhile");
+		assert_eq!(drain(&mut later), Vec::<u64>::new());
+
+		// The publisher started the range asked from 1700 at 1000, and the one from 500 at 1000
+		// too, past it: nothing at or before 500 is served.
+		producer.time_starts([(1700, 1000), (500, 1000)]);
+		assert_eq!(placed(&mut answered), Some((1000, true)));
+		assert_eq!(placed(&mut before), Some((0, false)));
+		assert_eq!(placed(&mut later), None);
+
+		// Skipped keys between say nothing arrives there.
+		producer.skip_groups(1001..1801);
+		assert_eq!(placed(&mut skipped), Some((1000, true)));
+		assert_eq!(placed(&mut later), Some((1000, true)));
+
+		// A group past the time says the feed went by it.
+		let mut past = producer.subscribe(from(2500));
+		assert_eq!(placed(&mut past), None);
+		write_group(&producer, 3000);
+		assert_eq!(placed(&mut past), Some((1000, true)));
+		assert_eq!(drain(&mut past), vec![1000, 3000]);
 	}
 
 	#[test]

@@ -128,7 +128,8 @@ pub(in crate::model) struct Window {
 	/// The spans still looking up their time start (see [`Self::found`]), which read nothing
 	/// meanwhile: kept apart so a probe finds them without visiting every span.
 	looking: Vec<usize>,
-	/// The spans whose time start waits on a group arriving, which read nothing meanwhile.
+	/// The spans whose time start waits on a group arriving, which read only the groups from
+	/// that time meanwhile.
 	waiting: Vec<usize>,
 	/// The groups the spans cover, shared with what reads them.
 	groups: Layered,
@@ -161,7 +162,8 @@ struct Span {
 	/// A time start the groups held can't place, looked up from the track's history: the
 	/// span reads nothing until the lookup answers.
 	looking: Option<Looking>,
-	/// A time start with no group held yet: the span reads nothing until one arrives.
+	/// A time start the groups held can't place yet: the span reads only the groups from
+	/// that time until it can.
 	waiting: bool,
 }
 
@@ -205,6 +207,11 @@ impl Window {
 	/// Whether a relative anchor still waits on a first group.
 	pub fn is_pending(&self) -> bool {
 		self.pending
+	}
+
+	/// Whether a time start still waits on the groups held to place it.
+	pub fn is_waiting(&self) -> bool {
+		!self.waiting.is_empty()
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
@@ -484,7 +491,8 @@ impl Window {
 					self.pending = true;
 					continue;
 				}
-				// Reads nothing until a group arrives; see [`Self::start_waiting`].
+				// Reads only the groups from its time until the groups held place it; see
+				// [`Self::start_waiting`].
 				Start::Waiting => {
 					self.waiting.push(self.spans.len());
 					self.spans.push(Span {
@@ -531,17 +539,29 @@ impl Window {
 		self.all_named = self.spans.iter().all(|span| span.floored);
 	}
 
-	/// The groups in range: every span that knows where it starts, through its end.
+	/// The groups in range: every span that knows where it starts, through its end, and
+	/// every span waiting on a time start from that time.
 	fn rebuild(&mut self, holdings: &impl Holdings) {
 		self.covered = None;
-		// A span still looking up or waiting on its start reads nothing until it knows which
-		// group that is.
+		// A span still looking up its start reads nothing until it knows which group that is.
 		self.settled = !self.pending && self.looking.is_empty() && self.waiting.is_empty();
 		let (mut groups, mut missable) = (Vec::new(), Vec::new());
-		for span in self.spans.iter().filter(|span| span.looking.is_none() && !span.waiting) {
+		for span in self.spans.iter().filter(|span| span.looking.is_none()) {
 			let Some(last) = span.end.map_or(Some(u64::MAX), |end| end.checked_sub(1)) else {
 				continue;
 			};
+			// A span waiting on its time start reads from that time meanwhile, and may ask a miss
+			// there, as one reaching back past every group held does: whichever group contains
+			// it starts at or before it, so every group from there on is in range.
+			if span.waiting {
+				if let Anchor::Time(time) = self.ranges[span.index].start
+					&& time <= last
+				{
+					groups.push(time..=last);
+					missable.push(time..=last);
+				}
+				continue;
+			}
 			if last < span.start {
 				continue;
 			}
@@ -570,7 +590,8 @@ enum Start {
 	/// At this group, and whether it names that group rather than reaching back to the
 	/// oldest one.
 	At(u64, bool),
-	/// A time start with no group held yet, so it reads nothing.
+	/// A time start the groups held can't place yet, so it reads only the groups from that
+	/// time.
 	Waiting,
 	/// Waiting on a latest group, reading everything meanwhile.
 	Pending,
@@ -599,8 +620,9 @@ fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start
 			Containing::Unknown if latest.is_none() && !holdings.resolves() => Start::Pending,
 			// Nothing can arrive any more, so nothing held reaches past it.
 			Containing::Unknown if holdings.complete() => Start::At(0, false),
-			// Nothing is held yet, so wait for a group rather than guess from the latest: a copy
-			// can see the live edge before the groups its publisher resolved the time to.
+			// The groups held can't place it, so wait for one that can rather than guess from the
+			// latest: a copy can see the live edge before the groups its publisher resolved the
+			// time to.
 			Containing::Unknown => Start::Waiting,
 		},
 	}
@@ -849,8 +871,8 @@ mod tests {
 		assert_eq!(start(&[range(time(4), None), Range::oldest()], Some(9)), None);
 	}
 
-	/// A time start with no group held yet reads nothing of its range, rather than guess
-	/// the latest group, and resolves once a group arrives. A track that can receive
+	/// A time start with no group held yet reads only the groups from its time, rather than
+	/// guess the latest group, and resolves once a group arrives. A track that can receive
 	/// nothing more reaches back to the oldest group.
 	#[test]
 	fn a_time_start_waits_for_a_group() {
@@ -858,7 +880,12 @@ mod tests {
 		let ranges = [range(time(2500), None), range(Anchor::Relative(0), Anchor::Relative(0))];
 		let mut window = Window::new(&ranges, Some(9), &keys).unwrap();
 		assert!(!window.is_pending() && !window.is_settled());
-		assert_eq!(covered(&window, 0..22), vec![9], "only the other range reads");
+		assert_eq!(covered(&window, 0..22), vec![9], "only the other range reads below it");
+		assert_eq!(
+			covered(&window, 2498..2502),
+			vec![2500, 2501],
+			"the groups from the time are in range whatever contains it"
+		);
 		assert_eq!((window.floor(), window.start(), window.end()), (None, None, None));
 		assert_eq!(
 			window.resolved(),
