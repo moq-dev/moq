@@ -1,24 +1,24 @@
 [page] negotiated protocol: moqt-22
-[page] announced: broadcast=moqtail/ch06 active=true
-[page] announced: broadcast=moqtail/ch00_all active=true
-[page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=ipc/device/IPC-001/media/live/0 active=true
-[page] announced: broadcast=moqtail/ch01 active=true
-[page] announced: broadcast=moqtail/ch07_vod active=true
-[page] announced: broadcast=moqtail/ch03 active=true
-[page] announced: broadcast=moqtail/ch04 active=true
-[page] announced: broadcast=moqtail/ch00 active=true
 [page] announced: broadcast=moqtail/testsrc active=true
+[page] announced: broadcast=moqtail/ch06 active=true
+[page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=moqtail/ch00_all active=true
+[page] announced: broadcast=ipc/device/IPC-001/media/live/0 active=true
+[page] announced: broadcast=moqtail/ch07 active=true
 [page] announced: broadcast=moqtail/ch02 active=true
 [page] announced: broadcast=ipc/device/IPC-001/telemetry active=true
-[page] announced: broadcast=ipc/device/IPC-001/rpc active=true
+[page] announced: broadcast=moqtail/ch03 active=true
 [page] announced: broadcast=moqtail/ch07_all active=true
-[page] announced: broadcast=moqtail/ch07 active=true
 [page] announced: broadcast=moqtail/ch05 active=true
 [page] announced: broadcast=ipc/device/IPC-001/media/live/1 active=true
-[page] announced: broadcast=smoke-js-web-4130-1262.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4130-1262.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4130-1262.hang track=catalog.json
-[page] announced: broadcast=smoke-js-web-4130-1262.hang rerouted
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4130-1262.hang track=catalog.json
-decoded 0 frames from smoke-js-web-4130-1262.hang (vite)
+[page] announced: broadcast=moqtail/ch07_vod active=true
+[page] announced: broadcast=moqtail/ch04 active=true
+[page] announced: broadcast=ipc/device/IPC-001/rpc active=true
+[page] announced: broadcast=moqtail/ch00 active=true
+[page] announced: broadcast=moqtail/ch01 active=true
+[page] announced: broadcast=smoke-js-web-4257-13220.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4257-13220.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4257-13220.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4257-13220.hang track=catalog.json
+[page] announced: broadcast=smoke-js-web-4257-13220.hang rerouted
+decoded 0 frames from smoke-js-web-4257-13220.hang (vite)

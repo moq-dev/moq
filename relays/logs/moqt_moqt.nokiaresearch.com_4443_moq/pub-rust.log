@@ -1,30 +1,35 @@
-[2m2026-11-12T16:44:54.910635Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m5224430600026922 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-12T16:44:54.916137Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-12T16:44:54.916155Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-12T16:44:54.920313Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
-[2m2026-11-12T16:44:54.920327Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-12T16:44:55.106425Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-12T16:44:55.106467Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m852.159006ms
-[2m2026-11-12T16:44:55.959423Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
-[2m2026-11-12T16:44:56.144632Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-12T16:44:56.144682Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m1.910726722s
-[2m2026-11-12T16:44:58.056736Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
-[2m2026-11-12T16:44:58.200789Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-12T16:44:58.200830Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m3.694857797s
-[2m2026-11-12T16:45:01.896956Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
-[2m2026-11-12T16:45:02.063730Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-12T16:45:02.063773Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m2.856531236s
-[2m2026-11-12T16:45:04.921784Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: aborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-12T16:45:04.921897Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-12T16:45:04.921913Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m10
-[2m2026-11-12T16:45:04.922210Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-12T16:45:04.922216Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json.z
-[2m2026-11-12T16:45:04.922284Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog
-[2m2026-11-12T16:45:04.922296Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtimeline.z
-[2m2026-11-12T16:45:04.922300Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m0
+[2m2026-11-13T14:04:57.211206Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m8853824106919634 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-13T14:04:57.217474Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-13T14:04:57.217491Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-13T14:04:57.223161Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
+[2m2026-11-13T14:04:57.223442Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-13T14:04:57.406736Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-13T14:04:57.406776Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m708.079252ms
+[2m2026-11-13T14:04:58.115632Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
+[2m2026-11-13T14:04:58.225235Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-13T14:04:58.225257Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m1.329652337s
+[2m2026-11-13T14:04:59.555753Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
+[2m2026-11-13T14:04:59.715512Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-13T14:04:59.715542Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m2.1724144s
+[2m2026-11-13T14:05:01.889148Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
+[2m2026-11-13T14:05:01.999215Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-13T14:05:01.999242Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m2.794262417s
+[2m2026-11-13T14:05:04.794304Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:4443
+[2m2026-11-13T14:05:04.912478Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-13T14:05:04.912498Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m2.310660073s
+[2m2026-11-13T14:05:07.224094Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: aborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-13T14:05:07.224201Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-13T14:05:07.224219Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m10
+[2m2026-11-13T14:05:07.224457Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-13T14:05:07.224464Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json.z
+[2m2026-11-13T14:05:07.224554Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog
+[2m2026-11-13T14:05:07.224566Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtimeline.z
+[2m2026-11-13T14:05:07.224571Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m0
 Error: reconnect timed out after 10s: aborted by peer: the cryptographic handshake failed: error 120
-[vost#0:0/libx264 @ 0x5be1439e8580] Error submitting a packet to the muxer: Broken pipe
+[vost#0:0/libx264 @ 0x567d40d5b580] Error submitting a packet to the muxer: Broken pipe
     Last message repeated 1 times
-[out#0/h264 @ 0x5be1439e8180] Error muxing a packet
-[out#0/h264 @ 0x5be1439e8180] Task finished with error code: -32 (Broken pipe)
-[out#0/h264 @ 0x5be1439e8180] Terminating thread with return code -32 (Broken pipe)
+[out#0/h264 @ 0x567d40d5b180] Error muxing a packet
+[out#0/h264 @ 0x567d40d5b180] Task finished with error code: -32 (Broken pipe)
+[out#0/h264 @ 0x567d40d5b180] Terminating thread with return code -32 (Broken pipe)
+[out#0/h264 @ 0x567d40d5b180] Error writing trailer: Broken pipe
+[out#0/h264 @ 0x567d40d5b180] Error closing file: Broken pipe

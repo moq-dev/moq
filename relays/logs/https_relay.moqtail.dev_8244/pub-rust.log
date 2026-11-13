@@ -1,21 +1,21 @@
-[2m2026-11-12T16:43:03.993595Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m215928994278028 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-12T16:43:03.997610Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-12T16:43:03.997627Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-12T16:43:04.003591Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://relay.moqtail.dev:8244
-[2m2026-11-12T16:43:04.003614Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-12T16:43:14.004332Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: timed out connecting to https://relay.moqtail.dev:8244
-[2m2026-11-12T16:43:14.004428Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-12T16:43:14.004446Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m10
-[2m2026-11-12T16:43:14.004711Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-12T16:43:14.004720Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json.z
-[2m2026-11-12T16:43:14.004781Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog
-[2m2026-11-12T16:43:14.004791Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtimeline.z
-[2m2026-11-12T16:43:14.004795Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m0
+[2m2026-11-13T14:03:02.997829Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m6368400739666276 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-13T14:03:03.009459Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-13T14:03:03.009478Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-13T14:03:03.015941Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-13T14:03:03.015953Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://relay.moqtail.dev:8244
+[2m2026-11-13T14:03:13.016620Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: timed out connecting to https://relay.moqtail.dev:8244
+[2m2026-11-13T14:03:13.016721Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-13T14:03:13.016741Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m10
+[2m2026-11-13T14:03:13.016958Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-13T14:03:13.016964Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json.z
+[2m2026-11-13T14:03:13.017028Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog
+[2m2026-11-13T14:03:13.017039Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtimeline.z
+[2m2026-11-13T14:03:13.017042Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m0
 Error: reconnect timed out after 10s: timed out connecting to https://relay.moqtail.dev:8244
-[vost#0:0/libx264 @ 0x56ec64688580] Error submitting a packet to the muxer: Broken pipe
+[vost#0:0/libx264 @ 0x5bbec22e7580] Error submitting a packet to the muxer: Broken pipe
     Last message repeated 1 times
-[out#0/h264 @ 0x56ec64688180] Error muxing a packet
-[out#0/h264 @ 0x56ec64688180] Task finished with error code: -32 (Broken pipe)
-[out#0/h264 @ 0x56ec64688180] Terminating thread with return code -32 (Broken pipe)
-[out#0/h264 @ 0x56ec64688180] Error writing trailer: Broken pipe
-[out#0/h264 @ 0x56ec64688180] Error closing file: Broken pipe
+[out#0/h264 @ 0x5bbec22e7180] Error muxing a packet
+[out#0/h264 @ 0x5bbec22e7180] Task finished with error code: -32 (Broken pipe)
+[out#0/h264 @ 0x5bbec22e7180] Terminating thread with return code -32 (Broken pipe)
+[out#0/h264 @ 0x5bbec22e7180] Error writing trailer: Broken pipe
+[out#0/h264 @ 0x5bbec22e7180] Error closing file: Broken pipe

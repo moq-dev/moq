@@ -1,17 +1,21 @@
 [page] negotiated protocol: moqt-16
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4130-9973.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4130-9973.hang track=catalog.json
-[page] announced: broadcast=playa-test/ralo active=true
-[page] announced: broadcast=playa-test/testo active=true
+[page] announced: broadcast=smoke-rust-4257-1872.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4257-1872.hang track=catalog.json
 [page] announced: broadcast=ipc-media/sigtest active=true
 [page] announced: broadcast=openmoq/ffmpeg/artemis active=true
-[page] subscribe written: id=2 broadcast=smoke-rust-4130-9973.hang track=catalog.json
 [page] announced: broadcast=com/wowza/techdemos/moqrelay/relay1 active=true
-[page] subscribe ok: id=2 broadcast=smoke-rust-4130-9973.hang track=catalog.json
-[page] received catalog hang smoke-rust-4130-9973.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4130-9973.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4130-9973.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4130-9973.hang track=0.avc3
+[page] subscribe written: id=2 broadcast=smoke-rust-4257-1872.hang track=catalog.json
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
+[page] subscribe ok: id=2 broadcast=smoke-rust-4257-1872.hang track=catalog.json
+[page] received catalog hang smoke-rust-4257-1872.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4257-1872.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4257-1872.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4257-1872.hang track=0.avc3
 [page] dropping a group with no head: alias=4 group=2
-decoded 5 frames from smoke-rust-4130-9973.hang (vite)
+decoded 8 frames from smoke-rust-4257-1872.hang (vite)

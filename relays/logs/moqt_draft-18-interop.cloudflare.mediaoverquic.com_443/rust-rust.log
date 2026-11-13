@@ -1,14 +1,14 @@
-[2m2026-11-12T16:42:49.915009Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m1274953055563026 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-12T16:42:49.918563Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-12T16:42:49.918580Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-12T16:42:49.922573Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://draft-18-interop.cloudflare.mediaoverquic.com:443
-[2m2026-11-12T16:42:49.922822Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-12T16:42:50.088223Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-18
-[2m2026-11-12T16:42:50.088248Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://draft-18-interop.cloudflare.mediaoverquic.com:443
-[2m2026-11-12T16:42:50.268892Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4130-14033.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-12T16:42:50.375940Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4130-14033.hang [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-12T16:42:51.235752Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-rust-4130-14033.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-12T16:42:51.235794Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-rust-4130-14033.hang [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-12T16:42:51.235904Z[0m [33m WARN[0m [2mmoq_net::model::frame[0m[2m:[0m frame::Producer dropped before writing all bytes [3mgroup[0m[2m=[0m1
-[2m2026-11-12T16:42:51.235990Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
+[2m2026-11-13T14:02:47.566678Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m7593810800273656 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-13T14:02:47.572216Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-13T14:02:47.572232Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-13T14:02:47.576822Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://draft-18-interop.cloudflare.mediaoverquic.com:443
+[2m2026-11-13T14:02:47.576865Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-13T14:02:47.746753Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-18
+[2m2026-11-13T14:02:47.746775Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://draft-18-interop.cloudflare.mediaoverquic.com:443
+[2m2026-11-13T14:02:47.932725Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4257-3860.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-13T14:02:48.063612Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4257-3860.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-13T14:02:48.907428Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-rust-4257-3860.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-13T14:02:48.907461Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-rust-4257-3860.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-13T14:02:48.907565Z[0m [33m WARN[0m [2mmoq_net::model::frame[0m[2m:[0m frame::Producer dropped before writing all bytes [3mgroup[0m[2m=[0m1
+[2m2026-11-13T14:02:48.907639Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
 Error: Broken pipe (os error 32)

@@ -1,10 +1,10 @@
-[2m2026-11-12T16:46:12.535912Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m1012363880231315 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-12T16:46:12.538989Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-12T16:46:12.539006Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-12T16:46:12.542226Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-12T16:46:12.543756Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqx-main.ci.openmoq.org:4433
-[2m2026-11-12T16:46:12.686050Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-16
-[2m2026-11-12T16:46:12.686072Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://moqx-main.ci.openmoq.org:4433
-[2m2026-11-12T16:46:12.746667Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m1 [3mbroadcast[0m[2m=[0msmoke-rust-4130-4301.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-12T16:46:12.907329Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m3 [3mbroadcast[0m[2m=[0msmoke-rust-4130-4301.hang [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-12T16:46:13.902313Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: session error: connection error: closed
+[2m2026-11-13T14:06:17.705921Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m3524150435268542 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-13T14:06:17.713549Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-13T14:06:17.713568Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-13T14:06:17.718319Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqx-main.ci.openmoq.org:4433
+[2m2026-11-13T14:06:17.718565Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-13T14:06:17.864416Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-16
+[2m2026-11-13T14:06:17.864435Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://moqx-main.ci.openmoq.org:4433
+[2m2026-11-13T14:06:17.903688Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m1 [3mbroadcast[0m[2m=[0msmoke-rust-4257-3764.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-13T14:06:18.073009Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m3 [3mbroadcast[0m[2m=[0msmoke-rust-4257-3764.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-13T14:06:19.081587Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: session error: connection error: closed

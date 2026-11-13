@@ -1,18 +1,18 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4130-10744.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4130-10744.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-rust-4130-10744.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4130-10744.hang track=catalog.json
-[page] received catalog hang smoke-rust-4130-10744.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4130-10744.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4130-10744.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4130-10744.hang track=0.avc3
-[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 5
-    at e.decode (http://localhost:41857/assets/index-DuWorxF6.js:1:177134)
-    at a (http://localhost:41857/assets/index-DuWorxF6.js:1:225354)
-    at #f (http://localhost:41857/assets/index-DuWorxF6.js:1:99907)
-    at ys.tryDecode (http://localhost:41857/assets/index-DuWorxF6.js:1:99438)
-    at vf.handleGroup (http://localhost:41857/assets/index-DuWorxF6.js:1:225414)
-    at async #g (http://localhost:41857/assets/index-DuWorxF6.js:1:229903)
-decoded 4 frames from smoke-rust-4130-10744.hang (vite)
+[page] announced: broadcast=smoke-rust-4257-23093.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4257-23093.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4257-23093.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4257-23093.hang track=catalog.json
+[page] received catalog hang smoke-rust-4257-23093.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4257-23093.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4257-23093.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4257-23093.hang track=0.avc3
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 4
+    at e.decode (http://localhost:44425/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:44425/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:44425/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:44425/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:44425/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:44425/assets/index-DuWorxF6.js:1:229903)
+decoded 7 frames from smoke-rust-4257-23093.hang (vite)
