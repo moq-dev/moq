@@ -6,6 +6,14 @@ Every workspace package's `check` script, and the bench typechecks in
 `js/justfile` and `test/json-properties.sh`, run `bun check` instead of
 `tsc --noEmit`. `tsc -b` builds keep TypeScript for declaration emit.
 
+Every package with a `bench/` typechecks it in its `check` script, so a
+removed export breaks the build, not Nightly. On `main` at c681b7a09, `clock`,
+`qmux`, `signals`, and `watch` have bench sources and no `bench/tsconfig.json`,
+and `json` and `publish` typecheck theirs only in the nightly bench recipes
+(`js/justfile`), while `net`, `crypto`, `hang`, `p2p`, and `pattern` already
+check theirs (added 2026-11-12 by /quest-plan, from moq's trimmed Pullfrog
+learnings).
+
 ## Plan
 
 nixpkgs-unstable carries bun 1.4.4 as of 2026-11-02 (checked in
