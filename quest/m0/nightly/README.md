@@ -47,3 +47,15 @@ more children for the causes nothing owned. Dropped: one-night bench moves
 near the paired threshold (re-check if one repeats), a one-off
 `remote error: 52` in the browser bench smoke, and failures main or
 [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) already fixes.
+
+Decided 2026-11-13 (maintainer, /quest-plan), from the triage of run
+[43447849289](https://github.com/moq-dev/moq/actions/runs/43447849289): four
+more children, all in m0. Owned elsewhere: the fuzz build
+([moq-dev/moq#8657](https://github.com/moq-dev/moq/pull/8657)), the Python
+audit ([moq-dev/moq#8648](https://github.com/moq-dev/moq/pull/8648)), the size
+report's output ([moq-dev/moq#8654](https://github.com/moq-dev/moq/pull/8654)),
+the firefox resume ([resume sync](/quest/m0/interop-green/resume-sync.md)),
+and the chromium `av_lag` rows
+([render callback](/quest/m1/audio-jitter-target/render-callback.md) and
+[congestion catch-up](/quest/m1/audio-jitter-target/congestion-catch-up.md)).
+
