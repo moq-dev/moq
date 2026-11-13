@@ -882,6 +882,89 @@ impl RouteFollower {
 	}
 }
 
+/// The path router following one publisher on a session per prefix, for the routes bench.
+pub struct PathRouteFollower {
+	router: crate::route::path::Router<usize, ()>,
+	prefixes: Vec<Path>,
+	claims: usize,
+	next: usize,
+	now: kio::clock::Instant,
+}
+
+impl PathRouteFollower {
+	/// A route for each `live/{k}`, each carrying `claims` claims.
+	pub fn new(prefixes: usize, claims: usize) -> Self {
+		let mut follower = Self {
+			router: crate::route::path::Router::new(2, 2, crate::route::path::Doubt::default()),
+			prefixes: (0..prefixes)
+				.map(|k| Path::new(&format!("live/{k}")).unwrap())
+				.collect(),
+			claims,
+			next: 0,
+			now: kio::clock::Instant::now(),
+		};
+		for k in 0..prefixes {
+			follower.follow(k);
+		}
+		follower.drain();
+		assert_eq!(follower.router.shown().len(), prefixes * claims);
+		follower
+	}
+
+	fn follow(&mut self, k: usize) {
+		use crate::route::path::{Hop, Offer, Reach};
+		let prefix = self.prefixes[k].clone();
+		self.router.connect(k, 1, crate::route::Link::default()).unwrap();
+		self.router.route(
+			k,
+			1,
+			prefix.clone(),
+			Some(Reach::Finite(Offer {
+				path: [Hop { node: 1, session: 0 }].into(),
+				metric: 0,
+				down_only: false,
+				rtt: None,
+			})),
+			0,
+		);
+		let changes = (0..self.claims)
+			.map(|j| (Path::new(&format!("live/{k}/{j}")).unwrap(), Some(())))
+			.collect();
+		self.router.batch(k, 1, prefix, changes, Some(1), 0);
+	}
+
+	/// Close every session in one call, including the resulting timer work.
+	pub fn teardown(mut self) {
+		self.router.disconnect(0..self.prefixes.len(), self.now);
+		self.expire();
+		assert!(self.router.shown().is_empty());
+		self.drain();
+	}
+
+	/// Replace one prefix's session and snapshot, including the resulting timer work.
+	pub fn refollow(&mut self) {
+		let k = self.next % self.prefixes.len();
+		self.next += 1;
+		self.router.disconnect([k], self.now);
+		self.follow(k);
+		self.expire();
+		assert_eq!(self.router.shown().len(), self.prefixes.len() * self.claims);
+		self.drain();
+	}
+
+	fn expire(&mut self) {
+		// Advance the mocked input clock rather than waiting a real doubt interval.
+		self.now = self.now.saturating_add(crate::route::path::Doubt::default().timer);
+		self.router.timeout(self.now);
+	}
+
+	fn drain(&mut self) {
+		self.router.drain();
+		self.router.events();
+		self.router.changed();
+	}
+}
+
 /// What a client session fed into an origin hears it should ask its peer about, for
 /// the interests bench.
 pub struct Interests(crate::model::Interests);

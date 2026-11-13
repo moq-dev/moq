@@ -23,6 +23,8 @@
 //! - refollow: the same node closes one prefix's stream and opens it again. The claims
 //!   axis is expected to grow, since the stream hears its prefix's claims again; the
 //!   prefixes axis no faster than the prefixes held.
+//! - path/teardown, path/refollow: the same prefix-by-claim grid on the sans-IO path
+//!   router, including its timer work with a virtual clock.
 //!
 //! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
@@ -150,6 +152,34 @@ fn bench_refollow(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_path_teardown(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/teardown");
+	for (prefixes, claims) in FOLLOWED {
+		let id = BenchmarkId::from_parameter(format!("{prefixes}p_{claims}c"));
+		group.bench_function(id, |b| {
+			b.iter_batched(
+				|| fuzz::PathRouteFollower::new(prefixes, claims),
+				fuzz::PathRouteFollower::teardown,
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
+fn bench_path_refollow(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/refollow");
+	for (prefixes, claims) in FOLLOWED {
+		let id = BenchmarkId::from_parameter(format!("{prefixes}p_{claims}c"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let follower = fixture.get_or_insert_with(|| fuzz::PathRouteFollower::new(prefixes, claims));
+			b.iter(|| follower.refollow());
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_watched,
@@ -158,6 +188,8 @@ criterion_group!(
 	bench_lagging,
 	bench_confirmed,
 	bench_teardown,
-	bench_refollow
+	bench_refollow,
+	bench_path_teardown,
+	bench_path_refollow
 );
 criterion_main!(benches);
