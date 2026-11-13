@@ -307,28 +307,25 @@ fn draft00_rejects_qx_ping() {
 #[test]
 fn rejects_oversized_records() {
 	let now = Instant::now();
-	let mut server = Connection::new(config(Version::QMux01), Side::Server, now);
-	server.handle_record(vec![0; DEFAULT_MAX_RECORD_SIZE as usize + 1].into(), now);
-	assert_eq!(
-		transport_error(&mut server).code,
-		TransportErrorCode::PROTOCOL_VIOLATION
-	);
-
-	let mut server = Connection::new(config(Version::QMux00), Side::Server, now);
-	server.handle_record(vec![0; MAX_FRAME_SIZE + 1].into(), now);
-	assert_eq!(
-		transport_error(&mut server).code,
-		TransportErrorCode::FRAME_ENCODING_ERROR
-	);
-
-	// The same, refused by the transport before it was read
-	for (version, code) in [
-		(Version::QMux01, TransportErrorCode::PROTOCOL_VIOLATION),
-		(Version::QMux00, TransportErrorCode::FRAME_ENCODING_ERROR),
+	for (version, size) in [
+		(Version::QMux02, DEFAULT_MAX_RECORD_SIZE as usize),
+		(Version::QMux01, DEFAULT_MAX_RECORD_SIZE as usize),
+		(Version::QMux00, MAX_FRAME_SIZE),
 	] {
 		let mut server = Connection::new(config(version), Side::Server, now);
+		server.handle_record(vec![0; size + 1].into(), now);
+		assert_eq!(
+			transport_error(&mut server).code,
+			TransportErrorCode::FRAME_ENCODING_ERROR
+		);
+
+		// The same, refused by the transport before it was read
+		let mut server = Connection::new(config(version), Side::Server, now);
 		server.handle_oversized();
-		assert_eq!(transport_error(&mut server).code, code);
+		assert_eq!(
+			transport_error(&mut server).code,
+			TransportErrorCode::FRAME_ENCODING_ERROR
+		);
 		assert!(server.transmit(now).is_some(), "CONNECTION_CLOSE");
 	}
 }

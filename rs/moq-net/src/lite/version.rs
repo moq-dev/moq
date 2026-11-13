@@ -377,6 +377,16 @@ impl Version {
 		)
 	}
 
+	/// Whether the announce stream carries warm routes (WARM_START, WARM_UPDATE, and
+	/// WARM_END), and SUBSCRIBE and SUBSCRIBE_UPDATE say whom each pull serves. Added in
+	/// lite-07.
+	pub(crate) fn has_warm(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group,
 	/// so a join at any hop reaches the publisher. Added in lite-07; older peers see a
 	/// track that never refreshes.

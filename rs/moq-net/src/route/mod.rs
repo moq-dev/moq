@@ -221,6 +221,20 @@ pub(crate) struct Selected<N> {
 	pub down_only: bool,
 }
 
+/// A usable route a request for one of an identity's broadcasts may go through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Eligible<N> {
+	pub next: N,
+	/// This node's metric through it.
+	pub metric: Metric,
+	/// This node's RTT through it, when known.
+	pub rtt: Option<Duration>,
+	/// Advertised at exactly this node's feasibility distance: a request goes through
+	/// it only when the neighbor's rendezvous hash for the broadcast is below this
+	/// node's, so the hash orders the tie and no two tied nodes pull through each other.
+	pub tied: bool,
+}
+
 /// How a node's reader sees one announced claim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Shown<A> {
@@ -1090,7 +1104,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		type Rank<N> = (bool, Reverse<i8>, Metric, N);
 		let mut best: Option<(Rank<N>, Selected<N>)> = None;
 		for (&next, entry) in self.rx.get(&id)? {
-			if entry.held || !self.eligible(id, entry) {
+			if entry.held || !self.selectable(id, entry) {
 				continue;
 			}
 			let peer = &self.neighbors[&next];
@@ -1112,18 +1126,29 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		best.map(|(_, selected)| selected)
 	}
 
-	/// Every usable feasible route to `id`, with this node's metric and RTT through
-	/// each. Any of them forwards without a loop, if it [carries](Self::carries) the
-	/// claim.
-	pub fn routes(&self, id: Id) -> Vec<(N, Metric, Option<Duration>)> {
+	/// Every usable route to `id` a request may go through without a loop, if it
+	/// [carries](Self::carries) the claim: each feasible one, and each tied with this
+	/// node's feasibility distance.
+	pub fn eligible(&self, id: Id) -> Vec<Eligible<N>> {
 		if self.origins.contains_key(&id) {
 			return Vec::new();
 		}
+		let fd = self.fd.get(&id);
 		(self.rx.get(&id).into_iter().flatten())
-			.filter(|(_, entry)| !entry.held && self.eligible(id, entry))
+			.filter(|(_, entry)| !entry.held && !entry.crossed)
 			.filter_map(|(&next, entry)| {
+				let tied = fd.is_some_and(|&fd| fd == (entry.advert.seqno, entry.advert.metric));
+				if !tied && !self.feasible(id, &entry.advert) {
+					return None;
+				}
+				let metric = self.metric(next, entry)?;
 				let rtt = through_rtt(&entry.advert, &self.neighbors[&next]);
-				Some((next, self.metric(next, entry)?, rtt))
+				Some(Eligible {
+					next,
+					metric,
+					rtt,
+					tied,
+				})
 			})
 			.collect()
 	}
@@ -1286,7 +1311,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// Whether this node may select or certify through `entry`: a feasible route that
 	/// did not cross it. One that crossed it and is feasible all the same is no route
 	/// at all, since no seqno would change where it has been.
-	fn eligible(&self, id: Id, entry: &Entry) -> bool {
+	fn selectable(&self, id: Id, entry: &Entry) -> bool {
 		!entry.crossed && self.feasible(id, &entry.advert)
 	}
 
@@ -1362,7 +1387,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	/// Whether `entry`'s last finite advertisement from `next` is feasible here
 	/// and reachable across the link, as selection requires of a usable route.
 	fn reachable(&self, id: Id, next: N, entry: &Entry) -> bool {
-		self.eligible(id, entry) && self.metric(next, entry).is_some()
+		self.selectable(id, entry) && self.metric(next, entry).is_some()
 	}
 
 	/// The regions of `id` that this node's certifiers certify, those whose

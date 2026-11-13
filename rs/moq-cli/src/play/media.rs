@@ -316,7 +316,7 @@ impl<O: Output> Media<O> {
 						// An intra-refresh rendition also runs a decoder with one more sweep
 						// of budget, joining a group earlier so its pictures stay clean, as
 						// `moq_video::decode::Consumer` does. Both share one upstream request.
-						let warmup = config.warmup.unwrap_or_default().min(moq_mux::container::WARMUP_MAX);
+						let warmup = config.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
 						let refresh = if warmup.is_zero() {
 							None
 						} else {
@@ -531,7 +531,7 @@ impl Demand {
 		// playback retain media without bound.
 		let delay = delay
 			.filter(|_| args.fixed_delay().is_none())
-			.map(|delay| delay.min(moq_audio::playback::Input::LATENCY_MAX));
+			.map(|delay| delay.min(moq_mux::container::DELAY_MAX));
 		self.delay.send_if_modified(|held| {
 			let raised = delay > *held;
 			if raised {
@@ -635,7 +635,7 @@ async fn play_audio<O: Output>(
 	let cap = max_delay
 		.max(AUDIO_BUFFER_MIN)
 		.min(latency + SINK_ROOM)
-		.min(moq_audio::playback::Input::LATENCY_MAX);
+		.min(moq_mux::container::DELAY_MAX);
 
 	// The longest hole worth playing through, in samples. A hole this player would
 	// rather sit through is one it is already willing to buffer, which is what the
@@ -719,7 +719,7 @@ async fn play_audio<O: Output>(
 	// The jitter target and the catalog delay are each capped, and so is their sum,
 	// so one ceiling bounds the clock however the publisher splits its advertisement.
 	let capped = |jitter: Duration, delay: Option<Duration>| {
-		(jitter + delay.unwrap_or_default()).min(moq_audio::playback::Input::LATENCY_MAX)
+		(jitter + delay.unwrap_or_default()).min(moq_mux::container::DELAY_MAX)
 	};
 	let retarget = |delay: Option<Duration>| {
 		let Some(jitter) = *jitter.lock().unwrap() else { return };
@@ -1011,7 +1011,7 @@ async fn play_audio<O: Output>(
 			// make playback retain media without bound.
 			let held = latency
 				.max(delay.max(AUDIO_BUFFER_MIN))
-				.min(moq_audio::playback::Input::LATENCY_MAX);
+				.min(moq_mux::container::DELAY_MAX);
 			*jitter.lock().unwrap() = Some(held);
 			moved |= role.set_target(capped(held, *stated.borrow()));
 			// The consumer releases media due further out than the sink holds only
@@ -1246,7 +1246,7 @@ mod tests {
 	/// jitter's, holds the clock at that depth instead.
 	#[tokio::test]
 	async fn audio_caps_a_target_past_the_deepest_delay() {
-		let latency = moq_audio::playback::Input::LATENCY_MAX;
+		let latency = moq_mux::container::DELAY_MAX;
 		assert_on_time(
 			first_sound(Duration::from_secs(20), Duration::from_secs(5), None, None).await,
 			latency,
@@ -1257,7 +1257,7 @@ mod tests {
 	/// one ceiling, the same the browser holds.
 	#[tokio::test]
 	async fn audio_caps_a_target_plus_catalog_delay_at_the_deepest_delay() {
-		let latency = moq_audio::playback::Input::LATENCY_MAX;
+		let latency = moq_mux::container::DELAY_MAX;
 		let hour = Duration::from_secs(3600);
 		assert_on_time(first_sound(latency, latency, Some(hour), None).await, latency);
 	}

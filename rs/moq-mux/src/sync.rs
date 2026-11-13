@@ -516,7 +516,7 @@ impl Track {
 		self.clock.wake();
 	}
 
-	/// Prepare a mapping after the old media drains; dropping the wait leaves the track unchanged.
+	/// Prepare a mapping one delay before the old media drains; dropping the wait leaves the track unchanged.
 	pub fn resume(&self, transition: Transition, source: Timestamp, delay: Option<Duration>) -> Resume<'_> {
 		Resume {
 			track: self,
@@ -564,7 +564,7 @@ pub struct Resume<'a> {
 }
 
 impl Resume<'_> {
-	/// The replacement's mapping, once all declared old media has drained.
+	/// The replacement's mapping, once all declared old media is due to drain within one delay.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<Mapping>> {
 		let _ = self.track.clock.changed.poll(waiter, |_| Poll::Pending);
@@ -573,7 +573,7 @@ impl Resume<'_> {
 		if let Some(mapping) = state.transition(self.transition).and_then(|pending| pending.mapping) {
 			return Poll::Ready(Ok(mapping));
 		}
-		let end = state
+		let tail = state
 			.ends
 			.iter()
 			.flatten()
@@ -581,10 +581,15 @@ impl Resume<'_> {
 			.filter_map(|boundary| state.due(media(boundary.end)))
 			.chain(state.tails.iter().copied())
 			.max();
-		if let Some(end) = end.filter(|end| *end > now) {
-			let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(end));
-			if timer.deadline() != end {
-				timer.reset(end);
+		// Wake one delay before the tail ends: media written then plays as it ends.
+		let lead = self.delay.unwrap_or(state.delay());
+		if let Some(wake) = tail
+			.map(|end| end.checked_sub(lead).unwrap_or(now))
+			.filter(|wake| *wake > now)
+		{
+			let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(wake));
+			if timer.deadline() != wake {
+				timer.reset(wake);
 			}
 			std::task::ready!(waiter.poll_future(Pin::new(timer)));
 		}
@@ -592,7 +597,7 @@ impl Resume<'_> {
 		let own = self.track.role as usize;
 		// A transition abandoned under this resume, by a gap the caller rechecks,
 		// maps alone like one no peer joined.
-		let (mapping, paired) = state.transition(self.transition).map_or((None, None), |pending| {
+		let (mapping, paired, own_plan) = state.transition(self.transition).map_or((None, None, None), |pending| {
 			let mut plans = pending
 				.members
 				.iter()
@@ -608,7 +613,7 @@ impl Resume<'_> {
 					}))
 				})
 				.flatten();
-			(pending.mapping, origin.filter(|_| joined))
+			(pending.mapping, origin.filter(|_| joined), pending.plans[own])
 		});
 		// The peer already resumed this transition.
 		if let Some(mapping) = mapping {
@@ -618,11 +623,28 @@ impl Resume<'_> {
 		// origin, keeping the media offsets between them, even when its delay
 		// differs from the others'. Otherwise this role maps alone and a peer
 		// joining later follows it.
-		let (source, delay) = match paired {
-			Some(origin) => (origin.source, origin.delay),
-			None => (Duration::from(self.source), self.delay.unwrap_or(state.delay())),
+		let (source, delay, arrived) = match paired {
+			Some(origin) => (origin.source, origin.delay, Some(origin.arrived)),
+			None => (
+				Duration::from(self.source),
+				self.delay.unwrap_or(state.delay()),
+				own_plan.map(|plan| plan.arrived),
+			),
 		};
-		let starts = now.checked_add(delay).ok_or(Error::DelayOverflow)?;
+		// Media that arrived before the old tail ended continues its schedule:
+		// it starts one delay after arriving, or as the tail ends if later, so
+		// back-to-back segments add no hold. Only after a real gap, where the
+		// sink underruns anyway, does it re-buffer one delay from now.
+		let starts = match (tail, arrived) {
+			(Some(end), Some(arrived)) if arrived <= end => {
+				// One tick past the end: a tail whose last frame declared no
+				// duration ends at that frame's timestamp, which the first new
+				// frame must not share.
+				let after = end.checked_add(Duration::from_micros(1)).ok_or(Error::DelayOverflow)?;
+				arrived.checked_add(delay).ok_or(Error::DelayOverflow)?.max(after)
+			}
+			_ => now.checked_add(delay).ok_or(Error::DelayOverflow)?,
+		};
 		let mapping = Mapping {
 			source,
 			target: state.position(starts).unwrap_or(source),
@@ -753,6 +775,8 @@ mod tests {
 	use super::*;
 
 	const DELAY: Duration = Duration::from_millis(100);
+	/// How far past the tail's end a continuing segment starts.
+	const TICK: Duration = Duration::from_micros(1);
 
 	fn ms(millis: u64) -> Timestamp {
 		Timestamp::from_millis(millis).unwrap()
@@ -1074,8 +1098,8 @@ mod tests {
 		let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
 		audio.apply(transition, mapping);
 		assert!(
-			kio::clock::now() >= start.saturating_add(DELAY * 2),
-			"the replacement waited for the tail"
+			kio::clock::now() >= start.saturating_add(DELAY),
+			"the replacement waited until one delay before the tail ends"
 		);
 		let unchanged = clock.state.lock().unwrap().due(ms(10_500));
 		for frame in 0..10 {
@@ -1108,6 +1132,47 @@ mod tests {
 		let next = audio.map(ms(1_000)).unwrap();
 		audio.received(next, now);
 		assert_eq!(clock.state.lock().unwrap().due(next), now.checked_add(DELAY));
+	}
+
+	/// A press arriving while the previous one still plays continues its
+	/// schedule, so back-to-back presses add no delay; one after a gap
+	/// re-buffers one delay.
+	#[tokio::test]
+	async fn back_to_back_segments_keep_their_delay() {
+		tokio::time::pause();
+		let start = kio::clock::now();
+		let clock = Arc::new(Clock::new(DELAY));
+		let audio = Track::new(clock.clone(), Kind::Audio);
+		audio.received(ms(0), start);
+		for press in 1..=5u64 {
+			// Each press lasts 1 s, and the next arrives as it ends.
+			let transition = audio.declare();
+			audio.end(ms(1_000)).unwrap();
+			tokio::time::advance(start.saturating_add(Duration::from_secs(press)) - kio::clock::now()).await;
+			let arrived = kio::clock::now();
+			audio.plan(transition, ms(0), Some(DELAY));
+			let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
+			audio.apply(transition, mapping);
+			// Each press starts one tick past the tail it touches.
+			assert_eq!(
+				clock.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
+				arrived.checked_add(DELAY + TICK * press as u32),
+				"press {press} drifted"
+			);
+		}
+
+		// After a gap, the tail has drained: it re-buffers one delay from now.
+		let transition = audio.declare();
+		audio.end(ms(1_000)).unwrap();
+		tokio::time::advance(Duration::from_secs(5)).await;
+		let arrived = kio::clock::now();
+		audio.plan(transition, ms(0), Some(DELAY));
+		let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
+		audio.apply(transition, mapping);
+		assert_eq!(
+			clock.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
+			arrived.checked_add(DELAY)
+		);
 	}
 
 	#[tokio::test]
@@ -1219,8 +1284,9 @@ mod tests {
 			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
 		);
 		video.apply(next, video.resume(next, ms(5_000), None).ready().await.unwrap());
-		// The later replacement maps onto the running clock, not the audio restart's.
-		let resumed = kio::clock::now().saturating_add(DELAY);
+		// The later replacement maps onto the running clock, not the audio
+		// restart's, continuing as the tail ends since it arrived before then.
+		let resumed = kio::clock::now().saturating_add(TICK);
 		assert_eq!(
 			clock.state.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
 			Some(resumed)
@@ -1244,7 +1310,8 @@ mod tests {
 			transition,
 			video.resume(transition, ms(40), None).ready().await.unwrap(),
 		);
-		let resumed = kio::clock::now().saturating_add(DELAY);
+		// Video arrived before the tail ended, so it continues as the tail ends.
+		let resumed = kio::clock::now().saturating_add(TICK);
 		assert_eq!(
 			clock.state.lock().unwrap().due(video.map(ms(40)).unwrap()),
 			Some(resumed)
@@ -1311,8 +1378,9 @@ mod tests {
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
+		// It may map one delay before the tail ends, so its media plays as the tail ends.
 		let resume = kio::clock::timeout(
-			DELAY + Duration::from_millis(150),
+			Duration::from_millis(150),
 			video.resume(transition, ms(0), None).ready(),
 		)
 		.await;
@@ -1355,7 +1423,7 @@ mod tests {
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
 		let resume = kio::clock::timeout(
-			Duration::from_millis(250),
+			Duration::from_millis(150),
 			video.resume(transition, ms(0), None).ready(),
 		)
 		.await;
@@ -1392,7 +1460,8 @@ mod tests {
 		);
 		assert_eq!(
 			clock.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
-			Some(now.saturating_add(Duration::from_millis(200)))
+			// The pair arrived before the tail ended, so it continues as the tail ends.
+			Some(now.saturating_add(Duration::from_millis(120) + TICK))
 		);
 	}
 }

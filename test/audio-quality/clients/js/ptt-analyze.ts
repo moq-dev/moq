@@ -127,7 +127,12 @@ const presses = result.presses
 			path,
 			// The native listener: whether it resumed on this utterance's head, and how much comfort
 			// noise it played in the mute before it, filled in below once its clock is placed.
-			native: { head: resumed !== undefined, comfort: null as number | null },
+			// `lag` is its head's write-to-resume time, which includes the clocks' fixed offset.
+			native: {
+				head: resumed !== undefined,
+				lag: resumed && written ? resumed.at - written.at : null,
+				comfort: null as number | null,
+			},
 		};
 	});
 const summarize = (values: (number | null)[]) => {
@@ -227,6 +232,14 @@ if (presses.some((press) => !press.native.head)) failures.push("native: an utter
 if (presses.some((press, i) => i >= 8 && !press.native.comfort))
 	failures.push("native: a mute played no comfort noise");
 if (start === undefined || !windowed.length) failures.push("native: no playback from the first press");
+// Presses 2-8 each follow the one before with no gap, so they share one schedule. A resume that
+// re-buffers adds up to a playout delay to its head's lag, and repeated ones compound, so the run
+// must end within one delay of where it started.
+const nativeDelay = summarize(native.map((sample) => sample.delay ?? null))?.median;
+const [firstLag, lastLag] = [presses[1].native.lag, presses[7].native.lag];
+if (nativeDelay === undefined || firstLag === null || lastLag === null || lastLag - firstLag >= nativeDelay) {
+	failures.push("native: back-to-back presses grew the latency by a playout delay");
+}
 if (failures.length) {
 	console.error(failures.join("; "));
 	process.exitCode = 1;

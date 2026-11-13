@@ -30,6 +30,8 @@ export interface ConsumerProps {
 	warmup?: Net.Clock.Duration;
 }
 
+export const DELAY_MAX: Net.Clock.Duration;
+
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
 	end?(frame: Frame): Net.Clock.Duration | undefined;
