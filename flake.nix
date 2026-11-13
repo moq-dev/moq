@@ -87,6 +87,9 @@
             "clippy"
             "rust-src"
             "rust-analyzer"
+            # llvm-ar/objcopy/objdump for sh/go/package-ffi.sh's bitcode strip,
+            # which must read rustc's own LLVM output.
+            "llvm-tools"
           ];
           targets = [
             "wasm32-unknown-unknown"
