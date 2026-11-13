@@ -826,9 +826,12 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
 	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
-	drive(&mut machine, &[(peer.clone(), Peer::Goaway(String::new()))], &mut run, |run| {
-		run.accepts.len() == 2
-	})
+	drive(
+		&mut machine,
+		&[(peer.clone(), Peer::Goaway(String::new()))],
+		&mut run,
+		|run| run.accepts.len() == 2,
+	)
 	.await;
 	assert_eq!(run.events, ["migrating"]);
 	assert_eq!(settle(&mut machine).await, ["retired"], "the policy left the session");

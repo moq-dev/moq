@@ -108,7 +108,7 @@ impl crate::listen::Config {
 
 /// Default bind address used when [`crate::listen::Config::bind`] is not set.
 #[cfg(feature = "quic")]
-pub(crate) const DEFAULT_BIND: net::SocketAddr =
+pub const DEFAULT_BIND: net::SocketAddr =
 	net::SocketAddr::V6(net::SocketAddrV6::new(net::Ipv6Addr::UNSPECIFIED, 443, 0, 0));
 
 /// Which listeners a [`Server`] opens, out of the ones its config describes.
@@ -311,7 +311,7 @@ impl Server {
 			#[cfg(feature = "quic")]
 			demux,
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			streams: prebound,
+				streams: prebound,
 		} = config;
 
 		// Refuse here rather than in `init`, so a caller that skipped its own check
@@ -438,7 +438,9 @@ impl Server {
 		}
 		#[cfg(all(feature = "uds", unix))]
 		if prebound_unix.is_some() && !(build_streams && config.unix.bind.is_some()) {
-			return Err(Error::NoBackend("server::Config::streams.unix needs --listen-unix-bind"));
+			return Err(Error::NoBackend(
+				"server::Config::streams.unix needs --listen-unix-bind",
+			));
 		}
 		#[cfg(feature = "tcp")]
 		if let Some(addr) = config.tcp.bind.filter(|_| build_streams) {

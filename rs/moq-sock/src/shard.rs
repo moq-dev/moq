@@ -337,15 +337,28 @@ impl Bound {
 	/// the latest call from either process wins.
 	pub fn steer(&self, steer: Steer) -> io::Result<()> {
 		let first = self.slots.first().expect("a group always has at least one member");
-		attach(
-			first,
-			Program {
-				count: self.count,
-				total: u16::try_from(self.slots.len()).expect("at most 256 members"),
-				base: self.generation * self.count,
-				exact: steer == Steer::Beside,
-			},
-		)
+		attach(first, self.program(steer))
+	}
+
+	/// A handle that steers this group for this process's generation, for whoever
+	/// decides when new handshakes move once the group itself is serving elsewhere.
+	pub fn steering(&self) -> io::Result<Steering> {
+		let first = self.slots.first().expect("a group always has at least one member");
+		Ok(Steering {
+			socket: first.try_clone()?,
+			count: self.count,
+			total: u16::try_from(self.slots.len()).expect("at most 256 members"),
+			base: self.generation * self.count,
+		})
+	}
+
+	fn program(&self, steer: Steer) -> Program {
+		Program {
+			count: self.count,
+			total: u16::try_from(self.slots.len()).expect("at most 256 members"),
+			base: self.generation * self.count,
+			exact: steer == Steer::Beside,
+		}
 	}
 
 	/// Duplicate every member and the port lock for a successor to [`adopt`](Self::adopt).
@@ -400,10 +413,7 @@ impl Bound {
 			return refuse(format!("generation {generation} of two"));
 		}
 		if sockets.len() != usize::from(count) * 2 {
-			return refuse(format!(
-				"{} sockets for two generations of {count}",
-				sockets.len()
-			));
+			return refuse(format!("{} sockets for two generations of {count}", sockets.len()));
 		}
 		let mut slots = Vec::with_capacity(sockets.len());
 		for (index, socket) in sockets.into_iter().enumerate() {
@@ -424,6 +434,31 @@ impl Bound {
 				_file: std::fs::File::from(file),
 			}),
 		})
+	}
+}
+
+/// Steers a group for one process's generation, as [`Bound::steer`] does, from a
+/// handle of its own: holds one member open, which keeps nothing else alive.
+#[derive(Debug)]
+pub struct Steering {
+	socket: UdpSocket,
+	count: u16,
+	total: u16,
+	base: u16,
+}
+
+impl Steering {
+	/// See [`Bound::steer`].
+	pub fn steer(&self, steer: Steer) -> io::Result<()> {
+		attach(
+			&self.socket,
+			Program {
+				count: self.count,
+				total: self.total,
+				base: self.base,
+				exact: steer == Steer::Beside,
+			},
+		)
 	}
 }
 
@@ -1090,7 +1125,12 @@ mod tests {
 		assert_eq!(old.count(), COUNT, "a process serves one generation");
 		assert_eq!(
 			old_shards,
-			(0..COUNT).map(|index| Shard { index, count: COUNT * 2 }).collect::<Vec<_>>(),
+			(0..COUNT)
+				.map(|index| Shard {
+					index,
+					count: COUNT * 2
+				})
+				.collect::<Vec<_>>(),
 			"the first process serves the first generation, named against both"
 		);
 
@@ -1100,14 +1140,20 @@ mod tests {
 		assert_eq!(
 			new_shards,
 			(COUNT..COUNT * 2)
-				.map(|index| Shard { index, count: COUNT * 2 })
+				.map(|index| Shard {
+					index,
+					count: COUNT * 2
+				})
 				.collect::<Vec<_>>(),
 			"the successor serves the generation its predecessor left free"
 		);
 		let invented_id: [u8; CID_LEN] = rand::random();
 		for (form, packet) in invented(invented_id) {
 			send(&packet, addr);
-			assert!(receiver(&old_sockets).is_some(), "a {form} skipped the serving generation");
+			assert!(
+				receiver(&old_sockets).is_some(),
+				"a {form} skipped the serving generation"
+			);
 		}
 
 		new.steer(Steer::Beside).unwrap();
@@ -1136,10 +1182,11 @@ mod tests {
 		}
 
 		// The predecessor exits. Its sockets stay open in the successor, so nothing
-		// renumbers, and once alone the successor takes its stale packets too.
+		// renumbers, and once alone the successor takes its stale packets too, steered
+		// through a handle of its own as a process does once its workers own the group.
 		drop(old_sockets);
 		drop(old);
-		new.steer(Steer::Alone).unwrap();
+		new.steering().unwrap().steer(Steer::Alone).unwrap();
 		for (index, shard) in new_shards.iter().enumerate() {
 			for (form, packet) in chosen(cid(*shard)) {
 				send(&packet, addr);
@@ -1216,7 +1263,10 @@ mod tests {
 						let sender = crate::bind::udp(crate::bind::Udp::new(local)).unwrap();
 						sender.send_to(&packet, addr).unwrap();
 						let owner = receiver(group).expect("one member receives the flow");
-						assert!(serving.contains(&owner), "{name} reached member {owner}, outside {serving:?}");
+						assert!(
+							serving.contains(&owner),
+							"{name} reached member {owner}, outside {serving:?}"
+						);
 						(owner != serving.start).then_some((sender, owner))
 					})
 					.expect("a flow hashed off the first member");
@@ -1232,7 +1282,11 @@ mod tests {
 
 				// Too short to reach the connection-ID offsets the filter reads.
 				sender.send_to(&packet[..2], addr).unwrap();
-				assert_eq!(receiver(group), Some(owner), "a truncated {name} packet changed members");
+				assert_eq!(
+					receiver(group),
+					Some(owner),
+					"a truncated {name} packet changed members"
+				);
 			}
 
 			// Flows spread across the generation: 64 flows on one member of four is
@@ -1247,7 +1301,10 @@ mod tests {
 			assert!(owners.len() > 1, "every flow reached one member: {owners:?}");
 		}
 
-		for host in [IpAddr::from([127, 0, 0, 1]), IpAddr::from(std::net::Ipv6Addr::LOCALHOST)] {
+		for host in [
+			IpAddr::from([127, 0, 0, 1]),
+			IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
+		] {
 			let mut config = Config::new(SocketAddr::new(host, 0), COUNT);
 			config.handoff = true;
 			let old = config.bind().unwrap();
@@ -1361,13 +1418,21 @@ mod tests {
 		const HASH: usize = 27;
 		assert_eq!(program[1].k, 7, "every load must stay inside the datagram");
 		assert_eq!(target(1, program[1].jf), HASH, "a short datagram is hashed as a flow");
-		assert_eq!(target(3, program[3].jt), 10, "long header must land on the version load");
+		assert_eq!(
+			target(3, program[3].jt),
+			10,
+			"long header must land on the version load"
+		);
 		assert_eq!(target(3, program[3].jf), 4, "short header must fall through");
 		assert_eq!(target(4, program[4].jf), HASH, "no fixed bit is hashed as a flow");
 		assert_eq!(program[5].k, 4, "short header reads the fourth CID byte");
 		assert_eq!(target(7, program[7].jf), HASH, "no marker is hashed as a flow");
 		assert_eq!(program[8].k, 1, "short header reads the shard byte");
-		assert_eq!(target(9, program[9].k as u8), 20, "short header takes the server reduction");
+		assert_eq!(
+			target(9, program[9].k as u8),
+			20,
+			"short header takes the server reduction"
+		);
 		assert_eq!(program[10].k, 1, "long header reads its version");
 		assert_eq!(target(11, program[11].jt), 16, "v1 checks v1's packet types");
 		assert_eq!(target(12, program[12].jt), 13, "v2 checks v2's packet types");
@@ -1379,13 +1444,25 @@ mod tests {
 		}
 		assert_eq!(program[19].k, 6, "a Handshake reads past version and length");
 		assert_eq!(program[23].k, 6, "an Initial reads past version and length");
-		assert_eq!((program[20].k, program[21].k), (8, 0), "beside, a server's ID names its member");
-		assert_eq!((program[24].k, program[25].k), (4, 4), "a client's ID reaches the newest generation");
+		assert_eq!(
+			(program[20].k, program[21].k),
+			(8, 0),
+			"beside, a server's ID names its member"
+		);
+		assert_eq!(
+			(program[24].k, program[25].k),
+			(4, 4),
+			"a client's ID reaches the newest generation"
+		);
 		assert_eq!(program[HASH].k, libc::SKF_NET_OFF as u32, "a flow reads its IP version");
 		assert_eq!(target(29, program[29].jt), 35, "IPv6 reads past its fixed header");
 		assert_eq!(target(29, program[29].jf), 30, "IPv4 reads its header length");
 		assert_eq!(target(34, program[34].k as u8), 38, "IPv4 joins the flow reduction");
-		assert_eq!((program[39].k, program[40].k), (4, 4), "a flow reaches the newest generation");
+		assert_eq!(
+			(program[39].k, program[40].k),
+			(4, 4),
+			"a flow reaches the newest generation"
+		);
 
 		let alone = Program {
 			count: 4,
@@ -1394,6 +1471,10 @@ mod tests {
 			exact: false,
 		}
 		.insns();
-		assert_eq!((alone[20].k, alone[21].k), (4, 4), "alone, a server's ID folds onto the newest");
+		assert_eq!(
+			(alone[20].k, alone[21].k),
+			(4, 4),
+			"alone, a server's ID folds onto the newest"
+		);
 	}
 }
