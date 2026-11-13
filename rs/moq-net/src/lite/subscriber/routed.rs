@@ -6,7 +6,7 @@
 //! the origin, minting a source per request that names the claim's origin node.
 
 use std::{
-	collections::{BTreeMap, HashMap},
+	collections::{BTreeMap, BTreeSet, HashMap},
 	task::Poll,
 };
 
@@ -22,9 +22,13 @@ use super::{AnnouncedRoute, Subscriber};
 /// One route the peer sent on the stream, by its Route ID.
 struct WireRoute {
 	node: route::Id,
-	reach: route::Reach,
+	/// How the peer reaches the node, or `None` while this node refuses what the peer
+	/// forwarded: the node holds no such route, as if the peer had ended it.
+	reach: Option<route::Reach>,
 	/// The Announce ID of each of its live claims, by path.
 	claims: BTreeMap<Path, u64>,
+	/// The Announce IDs of its live claims whose path this node refused.
+	unnamed: BTreeSet<u64>,
 	/// How its claims differ from `committed`, by path, so what the stream keeps
 	/// between floors is bounded by its claims rather than the messages it read.
 	pending: BTreeMap<Path, Option<node::Claim>>,
@@ -47,9 +51,12 @@ impl WireRoute {
 /// One live claim the peer sent, by its Announce ID.
 struct WireClaim {
 	route: u64,
-	/// Absolute: the origin node keys every claim from the origin's root.
-	path: Path,
-	claim: node::Claim,
+	/// Absolute: the origin node keys every claim from the origin's root. `None` when this
+	/// node refused the path, which the claim then never has.
+	path: Option<Path>,
+	/// `None` while this node refuses what the peer forwarded, until an ANNOUNCE_RESTART
+	/// names all of it again.
+	claim: Option<node::Claim>,
 }
 
 /// A claim the node serves through this stream.
@@ -103,6 +110,8 @@ pub(super) struct Routed {
 	read_rtt: Option<crate::time::Deadline>,
 	/// Whether the peer has a route here, so the link's RTT is read.
 	sampling: bool,
+	/// Counts what this node refuses of the peer's routes and claims.
+	stats: crate::stats::Session,
 }
 
 impl Routed {
@@ -160,6 +169,7 @@ impl Routed {
 			rtt: Default::default(),
 			read_rtt: None,
 			sampling: false,
+			stats: subscriber.origin.stats().clone(),
 		})
 	}
 
@@ -172,41 +182,29 @@ impl Routed {
 	) -> Result<(), Error> {
 		use lite::AnnounceBroadcast as Msg;
 		match announce {
-			Msg::RouteStart { node, advert } => {
-				if self.routes.values().any(|route| route.node == node) {
-					return Err(Error::ProtocolViolation);
+			Msg::RouteStart { node, advert } => self.route_start(node, Some(route::Reach::Finite(advert)))?,
+			Msg::RouteUpdate { id, advert } => self.reach(id, Some(route::Reach::Finite(advert)))?,
+			Msg::RouteHold { id } => {
+				let route = self.routes.get(&id).ok_or(Error::ProtocolViolation)?;
+				// A refused route has nothing to hold.
+				if route.reach.is_some() {
+					self.reach(id, Some(route::Reach::Held))?;
 				}
-				self.held.push(self.slots.acquire()?);
-				let id = self.next_route;
-				self.next_route += 1;
-				let reach = route::Reach::Finite(advert);
-				self.routes.insert(
-					id,
-					WireRoute {
-						node,
-						reach: reach.clone(),
-						claims: BTreeMap::new(),
-						pending: BTreeMap::new(),
-						committed: None,
-					},
-				);
-				self.stream.route(node, Some(reach));
 			}
-			Msg::RouteUpdate { id, advert } => self.reach(id, route::Reach::Finite(advert))?,
-			Msg::RouteHold { id } => self.reach(id, route::Reach::Held)?,
 			Msg::RouteEnd { id } => {
 				let route = self.routes.remove(&id).ok_or(Error::ProtocolViolation)?;
-				for claim in route.claims.into_values() {
+				for claim in route.claims.into_values().chain(route.unnamed) {
 					decoder.end(claim)?;
 					self.claims.remove(&claim);
 					self.held.pop();
 				}
 				self.echoing.extend(self.held.pop());
-				self.stream.route(route.node, None);
+				if route.reach.is_some() {
+					self.stream.route(route.node, None);
+				}
 				self.ends.push(id);
 			}
 			Msg::Floor { id, revision } => {
-				let certifies = self.certifies();
 				let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				let changes = std::mem::take(&mut route.pending);
 				let (committed, floor) = route.committed.get_or_insert_default();
@@ -217,12 +215,11 @@ impl Routed {
 					};
 				}
 				*floor = revision;
-				// The node never held a claim the limit leaves out, so it neither starts nor ends.
-				let changes = (changes.into_iter())
-					.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
-					.collect();
-				let revision = revision.filter(|_| certifies);
-				self.stream.batch(route.node, changes, revision);
+				// A refused route files its claims once the peer forwards it usably again.
+				if route.reach.is_some() {
+					let node = route.node;
+					self.file(node, changes, revision);
+				}
 			}
 			Msg::Active {
 				suffix,
@@ -232,16 +229,20 @@ impl Routed {
 				hops,
 				cost,
 			} => {
-				let path = self.path(prefix, &decoder.start(suffix)?)?;
+				let path = decoder.start(Some(suffix))?;
+				let path = self.claim_path(prefix, path);
 				let claim = claim(instance, epoch, cost, hops)?;
-				self.start(decoder.last(), route, path, claim)?;
+				self.start(decoder.last(), route, path, Some(claim))?;
 			}
 			Msg::Update { id, hops, cost } => {
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
-				claim.claim.cost = cost.value();
-				claim.claim.chain = hops;
-				let change = (claim.path.clone(), Some(claim.claim.clone()));
-				self.pending(id, change)?;
+				// An update names none of what a refused claim lacks.
+				if let Some(held) = &mut claim.claim {
+					held.cost = cost.value();
+					held.chain = hops;
+					let change = claim.claim.clone();
+					self.pending(id, change)?;
+				}
 			}
 			Msg::Restart {
 				id,
@@ -252,14 +253,15 @@ impl Routed {
 			} => {
 				let fresh = self::claim(instance, epoch, cost, hops)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
-				claim.claim = fresh;
-				let change = (claim.path.clone(), Some(claim.claim.clone()));
+				claim.claim = Some(fresh);
+				let change = claim.claim.clone();
 				self.pending(id, change)?;
 			}
 			Msg::EndedId { id } => {
 				decoder.end(id)?;
 				self.end(id)?;
 			}
+			Msg::Refused { message, reason } => self.refused(prefix, message, reason, decoder)?,
 			// Lite-07 ends a claim by its Announce ID only.
 			Msg::Ended { .. } => return Err(Error::ProtocolViolation),
 			// Only a relay choosing a parent per broadcast uses warm routes, which this
@@ -270,27 +272,140 @@ impl Routed {
 		Ok(())
 	}
 
-	/// The absolute path of a claim under the stream's prefix.
-	fn path(&self, prefix: &Path, suffix: &Path) -> Result<Path, Error> {
-		Ok(self.root.join(&prefix.join(suffix)?)?)
-	}
-
-	fn reach(&mut self, id: u64, reach: route::Reach) -> Result<(), Error> {
-		let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
-		route.reach = reach.clone();
-		self.stream.route(route.node, Some(reach));
+	/// Apply a message whose content, which the peer only forwarded, this node refuses:
+	/// withdraw the route or claim it names, and keep the stream.
+	fn refused(
+		&mut self,
+		prefix: &Path,
+		message: lite::Refusable,
+		reason: lite::Refusal,
+		decoder: &mut lite::AnnounceDecoder,
+	) -> Result<(), Error> {
+		use lite::Refusable;
+		match message {
+			Refusable::RouteStart { node } => {
+				tracing::warn!(node, %reason, "refusing a forwarded route");
+				self.route_start(node, None)?;
+			}
+			Refusable::RouteUpdate { id } => {
+				let node = self.routes.get(&id).ok_or(Error::ProtocolViolation)?.node;
+				tracing::warn!(node, route = id, %reason, "refusing a forwarded route");
+				self.reach(id, None)?;
+			}
+			Refusable::Start { route, suffix } => {
+				let path = decoder.start(suffix)?;
+				let path = self.claim_path(prefix, path);
+				let id = decoder.last();
+				tracing::warn!(route, claim = id, %reason, "refusing a forwarded claim");
+				self.start(id, route, path, None)?;
+			}
+			Refusable::Change { id } => {
+				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
+				tracing::warn!(route = claim.route, claim = id, %reason, "refusing a forwarded claim");
+				claim.claim = None;
+				self.pending(id, None)?;
+			}
+			// Warm routes are ignored here anyway, so refusing one changes nothing.
+			Refusable::WarmStart { route } => {
+				tracing::warn!(route, %reason, "refusing a forwarded warm route");
+			}
+			Refusable::WarmUpdate { id } => {
+				tracing::warn!(warm = id, %reason, "refusing a forwarded warm route");
+			}
+		}
+		self.stats.refuse_route();
 		Ok(())
 	}
 
-	/// A claim the peer started under `route`, assigned Announce ID `id`.
-	fn start(&mut self, id: u64, route: u64, path: Path, claim: node::Claim) -> Result<(), Error> {
-		let wire = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
-		if wire.claims.contains_key(&path) {
+	/// The peer started a route to `node` with the next Route ID, reaching it by `reach`,
+	/// or `None` when this node refuses what the peer forwarded.
+	fn route_start(&mut self, node: route::Id, reach: Option<route::Reach>) -> Result<(), Error> {
+		// The peer keeps one route per origin node; a refused reserved node is none.
+		if node != 0 && self.routes.values().any(|route| route.node == node) {
 			return Err(Error::ProtocolViolation);
 		}
 		self.held.push(self.slots.acquire()?);
-		wire.claims.insert(path.clone(), id);
-		wire.change(path.clone(), Some(claim.clone()));
+		let id = self.next_route;
+		self.next_route += 1;
+		self.routes.insert(
+			id,
+			WireRoute {
+				node,
+				reach: reach.clone(),
+				claims: BTreeMap::new(),
+				unnamed: BTreeSet::new(),
+				pending: BTreeMap::new(),
+				committed: None,
+			},
+		);
+		if reach.is_some() {
+			self.stream.route(node, reach);
+		}
+		Ok(())
+	}
+
+	/// Hand the node a batch of the route to `node`, leaving out what the limit does not
+	/// admit, which the node never held, so it neither starts nor ends.
+	fn file(&self, node: route::Id, changes: BTreeMap<Path, Option<node::Claim>>, revision: Option<route::Rev>) {
+		let changes = (changes.into_iter())
+			.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
+			.collect();
+		self.stream.batch(node, changes, revision.filter(|_| self.certifies()));
+	}
+
+	/// The absolute path of a claim under the stream's prefix, or `None` when it, or the
+	/// suffix it joins, is no path this node can hold.
+	fn claim_path(&self, prefix: &Path, suffix: Option<Path>) -> Option<Path> {
+		let path = prefix.join(&suffix?).ok()?;
+		self.root.join(&path).ok()
+	}
+
+	/// The route with Route ID `id` now reaches its node by `reach`, or `None` while this
+	/// node refuses what the peer forwarded. A route refused before files again once
+	/// usable, like a route the peer ended and started over, with the claims of its last
+	/// floor.
+	fn reach(&mut self, id: u64, reach: Option<route::Reach>) -> Result<(), Error> {
+		let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
+		// The reserved node names no route, whatever the peer forwards for it.
+		let reach = reach.filter(|_| route.node != 0);
+		let refused = route.reach.is_none();
+		route.reach = reach.clone();
+		let node = route.node;
+		match (refused, reach) {
+			(true, None) => {}
+			(false, None) => self.stream.route(node, None),
+			(true, Some(reach)) => {
+				let committed = route.committed.as_ref().map(|(claims, floor)| {
+					let claims = claims.iter().map(|(path, claim)| (path.clone(), Some(claim.clone())));
+					(claims.collect(), *floor)
+				});
+				self.stream.route(node, Some(reach));
+				if let Some((claims, floor)) = committed {
+					self.file(node, claims, floor);
+				}
+			}
+			(false, Some(reach)) => self.stream.route(node, Some(reach)),
+		}
+		Ok(())
+	}
+
+	/// A claim the peer started under `route`, assigned Announce ID `id`, at `path` unless
+	/// this node refused it, and `None` while this node refuses what the peer forwarded.
+	fn start(&mut self, id: u64, route: u64, path: Option<Path>, claim: Option<node::Claim>) -> Result<(), Error> {
+		let wire = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
+		match &path {
+			Some(path) if wire.claims.contains_key(path) => return Err(Error::ProtocolViolation),
+			Some(path) => {
+				wire.claims.insert(path.clone(), id);
+				wire.change(path.clone(), claim.clone());
+			}
+			None => {
+				wire.unnamed.insert(id);
+			}
+		}
+		self.held.push(self.slots.acquire()?);
+		// A claim without a path stays refused, whatever the peer sends for it.
+		let claim = claim.filter(|_| path.is_some());
 		self.claims.insert(id, WireClaim { route, path, claim });
 		Ok(())
 	}
@@ -300,15 +415,28 @@ impl Routed {
 		let claim = self.claims.remove(&id).ok_or(Error::ProtocolViolation)?;
 		self.held.pop();
 		let route = self.routes.get_mut(&claim.route).ok_or(Error::ProtocolViolation)?;
-		route.claims.remove(&claim.path);
-		route.change(claim.path, None);
+		match claim.path {
+			Some(path) => {
+				route.claims.remove(&path);
+				route.change(path, None);
+			}
+			None => {
+				route.unnamed.remove(&id);
+			}
+		}
 		Ok(())
 	}
 
-	fn pending(&mut self, id: u64, change: (Path, Option<node::Claim>)) -> Result<(), Error> {
-		let route = self.claims.get(&id).ok_or(Error::ProtocolViolation)?.route;
-		let route = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
-		route.change(change.0, change.1);
+	/// The claim with Announce ID `id` is now `change`, pending its route's next floor.
+	fn pending(&mut self, id: u64, change: Option<node::Claim>) -> Result<(), Error> {
+		let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
+		let Some(path) = claim.path.clone() else {
+			// Nothing reaches the node for a claim without a path.
+			claim.claim = None;
+			return Ok(());
+		};
+		let route = self.routes.get_mut(&claim.route).ok_or(Error::ProtocolViolation)?;
+		route.change(path, change);
 		Ok(())
 	}
 
@@ -361,12 +489,14 @@ impl Routed {
 		ids.sort_unstable();
 		for id in &ids {
 			let route = &self.routes[id];
-			stream.route(route.node, Some(route.reach.clone()));
+			if let Some(reach) = &route.reach {
+				stream.route(route.node, Some(reach.clone()));
+			}
 		}
 		let certifies = self.certifies();
 		for id in &ids {
 			let route = &self.routes[id];
-			if let Some((claims, floor)) = &route.committed {
+			if let Some((claims, floor)) = route.committed.as_ref().filter(|_| route.reach.is_some()) {
 				let changes = (claims.iter())
 					.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
 					.map(|(path, claim)| (path.clone(), Some(claim.clone())));

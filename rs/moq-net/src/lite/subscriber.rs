@@ -822,7 +822,8 @@ impl Subscriber {
 			} => {
 				let suffix = match self.version.has_announce_id() {
 					// Every `active` assigns the next ordinal, even ones we drop locally.
-					true => run.decoder.start(suffix)?,
+					// Only lite-07 refuses a forwarded path, and it never reaches here.
+					true => run.decoder.start(Some(suffix))?.ok_or(Error::ProtocolViolation)?,
 					// Nothing references an announcement here, so there are no bases.
 					false => suffix.rest,
 				};
@@ -865,7 +866,7 @@ impl Subscriber {
 			lite::AnnounceBroadcast::EndedId { id } => {
 				// Resolve and retire the id; an unknown or already-retired id is a
 				// protocol violation.
-				let path = prefix.join(&run.decoder.end(id)?)?;
+				let path = prefix.join(&run.decoder.end(id)?.ok_or(Error::ProtocolViolation)?)?;
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 				run.announced.withdraw(&path);
 			}
@@ -913,7 +914,8 @@ impl Subscriber {
 			| lite::AnnounceBroadcast::Floor { .. }
 			| lite::AnnounceBroadcast::WarmStart { .. }
 			| lite::AnnounceBroadcast::WarmUpdate { .. }
-			| lite::AnnounceBroadcast::WarmEnd { .. } => return Err(Error::ProtocolViolation),
+			| lite::AnnounceBroadcast::WarmEnd { .. }
+			| lite::AnnounceBroadcast::Refused { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())
 	}
