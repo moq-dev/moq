@@ -46,11 +46,11 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Rou
 	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let mut track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..3u64 {
+	for key in 0..3u64 {
 		let mut group = track.append_group().unwrap();
 		for frame in 0..2 {
 			group
-				.write_frame(Timestamp::ZERO, format!("{sequence}-{frame}").into_bytes())
+				.write_frame(Timestamp::ZERO, format!("{key}-{frame}").into_bytes())
 				.unwrap();
 		}
 		group.finish().unwrap();
@@ -69,9 +69,9 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Rou
 	(broadcast, subscribed)
 }
 
-async fn fetch(broadcast: &moq_net::broadcast::Consumer, sequence: u64) -> Result<Vec<Vec<u8>>, moq_net::Error> {
+async fn fetch(broadcast: &moq_net::broadcast::Consumer, key: u64) -> Result<Vec<Vec<u8>>, moq_net::Error> {
 	let mut group = kio::clock::timeout(TIMEOUT, async {
-		broadcast.track("video").unwrap().fetch_group(sequence, None).await
+		broadcast.track("video").unwrap().fetch_group(key, None).await
 	})
 	.await
 	.expect("fetch timed out")?;
@@ -85,8 +85,8 @@ async fn fetch(broadcast: &moq_net::broadcast::Consumer, sequence: u64) -> Resul
 	Ok(frames)
 }
 
-fn frames(sequence: u64) -> Vec<Vec<u8>> {
-	(0..2).map(|frame| format!("{sequence}-{frame}").into_bytes()).collect()
+fn frames(key: u64) -> Vec<Vec<u8>> {
+	(0..2).map(|frame| format!("{key}-{frame}").into_bytes()).collect()
 }
 
 const VERSIONS: &[&str] = &["moq-transport-18", "moq-transport-22"];
@@ -139,10 +139,10 @@ async fn relayed(version: &str) {
 	let downstream = connect_mock(options).await;
 
 	let remote = resolve(&client).await;
-	for sequence in [2, 0] {
+	for key in [2, 0] {
 		assert_eq!(
-			fetch(&remote, sequence).await.expect("fetch"),
-			frames(sequence),
+			fetch(&remote, key).await.expect("fetch"),
+			frames(key),
 			"{version}"
 		);
 	}
@@ -327,10 +327,10 @@ async fn a_relay_serves_a_bounded_read_of_history_without_subscribing_upstream()
 	assert!(failures.is_empty(), "failed: {failures:?}");
 }
 
-/// Write group `sequence` of [`frames`] to a live track.
-fn write_group(track: &moq_net::track::Producer, sequence: u64) {
-	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-	for frame in frames(sequence) {
+/// Write group `key` of [`frames`] to a live track.
+fn write_group(track: &moq_net::track::Producer, key: u64) {
+	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+	for frame in frames(key) {
 		group.write_frame(Timestamp::ZERO, frame).unwrap();
 	}
 	group.finish().unwrap();
@@ -345,8 +345,8 @@ fn publish_live(
 	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("video", info).unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..groups {
-		write_group(&track, sequence);
+	for key in 0..groups {
+		write_group(&track, key);
 	}
 	(broadcast, track)
 }
@@ -494,8 +494,8 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 			// The fetch learns Largest Object (1, 1), and leaves the copy unfed.
 			let remote = resolve(&client).await;
 			assert_eq!(fetch(&remote, 0).await.expect("fetch"), frames(0));
-			for sequence in 2..4 {
-				write_group(&track, sequence);
+			for key in 2..4 {
+				write_group(&track, key);
 			}
 
 			// Past the reported edge, so it subscribes; the answer names group 3, which the
@@ -561,8 +561,8 @@ async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
 						.expect("unsubscribe timed out")
 						.unwrap();
 				}
-				for sequence in 1..4 {
-					write_group(&track, sequence);
+				for key in 1..4 {
+					write_group(&track, key);
 				}
 
 				// Past the edge the live read learned, so it subscribes; the answer names group 3.

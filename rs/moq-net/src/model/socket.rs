@@ -262,7 +262,7 @@ impl sealed::Open for TcpStream {
 			peer,
 			session,
 		} = parts;
-		let (producer, ours) = match track.create_group(group::Info { sequence: 0 }) {
+		let (producer, ours) = match track.create_group(group::Info { start: 0 }) {
 			Ok(group) => {
 				let demand = group.demand();
 				(group, Some(demand))
@@ -271,14 +271,14 @@ impl sealed::Open for TcpStream {
 			// that reports it.
 			Err(err) => {
 				let group =
-					group::Producer::new(group::Info { sequence: 0 }, track::Info::default(), Default::default());
+					group::Producer::new(group::Info { start: 0 }, track::Info::default(), Default::default());
 				let _ = group.handle().abort(err);
 				(group, None)
 			}
 		};
 		// The application reads a copy of the peer's half that the pump fills, so the
 		// session can end it: the peer's own copy is the session's, not this side's.
-		let local = group::Producer::new(group::Info { sequence: 0 }, track::Info::default(), Default::default());
+		let local = group::Producer::new(group::Info { start: 0 }, track::Info::default(), Default::default());
 		let consumer = local.consume();
 		let pump = Pump {
 			shared: shared.clone(),
@@ -1261,8 +1261,8 @@ impl Pump {
 			match subscriber.poll_recv_group(waiter) {
 				Poll::Pending => {}
 				Poll::Ready(Ok(Some(group))) => {
-					if group.sequence != 0 {
-						tracing::debug!(sequence = group.sequence, "a second group on a tcp session");
+					if group.start != 0 {
+						tracing::debug!(key = group.start, "a second group on a tcp session");
 						return Err(Error::ProtocolViolation);
 					}
 					self.received = true;
@@ -1281,7 +1281,7 @@ impl Pump {
 			while let Poll::Ready(largest) = subscriber.poll_largest(waiter) {
 				match largest {
 					Some(largest) if largest.group > 0 => {
-						tracing::debug!(sequence = largest.group, "a second group on a tcp session");
+						tracing::debug!(key = largest.group, "a second group on a tcp session");
 						return Err(Error::ProtocolViolation);
 					}
 					Some(_) => {}

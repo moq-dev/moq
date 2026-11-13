@@ -1,6 +1,6 @@
 //! Resume checked against a model of one logical track.
 //!
-//! Random sequences of route flips, route failures, give-ups, ranges, cache expiry, and
+//! Random keys of route flips, route failures, give-ups, ranges, cache expiry, and
 //! reader joins and leaves drive an origin's fronts on the simulated clock. Every reader's
 //! groups, frames, drops, and end are checked against what one plain cursor on the logical
 //! track would see: every group its range and budget allow, each once, in its order. A
@@ -73,7 +73,7 @@ impl Budget {
 
 #[derive(Clone, Copy, Debug)]
 struct Spec {
-	/// Sequence order through [`track::Ordered`] rather than arrival order.
+	/// Key order through [`track::Ordered`] rather than arrival order.
 	ordered: bool,
 	budget: Budget,
 	/// The subscription's one group range, or the default.
@@ -484,7 +484,7 @@ impl Model {
 		}
 		let parts = copy.groups.entry(group).or_default();
 		if !parts.iter().any(|part| part.from == 0)
-			&& let Ok(writer) = copy.track.create_group(group::Info { sequence: group })
+			&& let Ok(writer) = copy.track.create_group(group::Info { start: group })
 		{
 			parts.push(Part {
 				from: 0,
@@ -647,37 +647,37 @@ impl Model {
 			match polled {
 				Poll::Pending => break,
 				Poll::Ready(Ok(Some(group))) => {
-					let sequence = group.sequence;
-					if reader.reading.contains_key(&sequence) {
+					let key = group.start;
+					if reader.reading.contains_key(&key) {
 						return Err(fail(
 							index,
-							format!("group {sequence} handed out twice: {:?}", reader.handed),
+							format!("group {key} handed out twice: {:?}", reader.handed),
 						));
 					}
-					if reader.spec.ordered && reader.handed.last().is_some_and(|last| *last >= sequence) {
+					if reader.spec.ordered && reader.handed.last().is_some_and(|last| *last >= key) {
 						return Err(fail(
 							index,
-							format!("group {sequence} out of order after {:?}", reader.handed),
+							format!("group {key} out of order after {:?}", reader.handed),
 						));
 					}
-					if !reader.covers(sequence) {
+					if !reader.covers(key) {
 						return Err(fail(
 							index,
 							format!(
-								"group {sequence} outside ranges {:?} and bounds {:?}",
+								"group {key} outside ranges {:?} and bounds {:?}",
 								reader.ranges, reader.bounds
 							),
 						));
 					}
-					if !instance.written.contains_key(&sequence) {
+					if !instance.written.contains_key(&key) {
 						return Err(fail(
 							index,
-							format!("group {sequence} handed out before any route had it"),
+							format!("group {key} handed out before any route had it"),
 						));
 					}
-					reader.handed.push(sequence);
+					reader.handed.push(key);
 					reader.reading.insert(
-						sequence,
+						key,
 						Reading {
 							consumer: Some(group),
 							frames: 0,
@@ -729,7 +729,7 @@ impl Model {
 			}
 		}
 
-		for (sequence, read) in &mut reader.reading {
+		for (key, read) in &mut reader.reading {
 			let Some(consumer) = &mut read.consumer else {
 				continue;
 			};
@@ -737,12 +737,12 @@ impl Model {
 				match consumer.poll_read_frame(&waiter) {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(frame))) => {
-						let expected = payload(reader.instance, *sequence, read.frames);
-						if frame.payload[..] != expected[..] || read.frames >= frames(*sequence) {
+						let expected = payload(reader.instance, *key, read.frames);
+						if frame.payload[..] != expected[..] || read.frames >= frames(*key) {
 							return Err(fail(
 								index,
 								format!(
-									"group {sequence} frame {} read {:?}, expected {:?}",
+									"group {key} frame {} read {:?}, expected {:?}",
 									read.frames,
 									String::from_utf8_lossy(&frame.payload),
 									String::from_utf8_lossy(&expected)
@@ -752,10 +752,10 @@ impl Model {
 						read.frames += 1;
 					}
 					Poll::Ready(Ok(None)) => {
-						if read.frames != frames(*sequence) || !instance.complete.contains(sequence) {
+						if read.frames != frames(*key) || !instance.complete.contains(key) {
 							return Err(fail(
 								index,
-								format!("group {sequence} ended cleanly after {} frames", read.frames),
+								format!("group {key} ended cleanly after {} frames", read.frames),
 							));
 						}
 						read.end = Some(Ok(()));
@@ -892,11 +892,11 @@ impl Model {
 			let _ = write!(problems, "missing groups {missing:?}; ");
 		}
 		if reader.spec.budget == Budget::Hour {
-			for (sequence, read) in &reader.reading {
-				if carried(*sequence) && !instance.given_up.contains(sequence) && !matches!(read.end, Some(Ok(()))) {
+			for (key, read) in &reader.reading {
+				if carried(*key) && !instance.given_up.contains(key) && !matches!(read.end, Some(Ok(()))) {
 					let _ = write!(
 						problems,
-						"group {sequence} stopped at frame {} ({:?}); ",
+						"group {key} stopped at frame {} ({:?}); ",
 						read.frames, read.end
 					);
 				}

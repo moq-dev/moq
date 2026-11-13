@@ -237,7 +237,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 			let mut reader = reader(Bytes::copy_from_slice(&body[used..]), chunk, version);
 			let producer = track
 				.create_group(group::Info {
-					sequence: header.group_id,
+					start: header.group_id,
 				})
 				.ok()?;
 			producer

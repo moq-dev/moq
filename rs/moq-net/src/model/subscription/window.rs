@@ -1,4 +1,4 @@
-//! A subscriber's own ranges, resolved to the group sequences it reads.
+//! A subscriber's own ranges, resolved to the group keys it reads.
 //!
 //! The aggregate a publisher sees is the union of every subscriber's ranges, so it says
 //! what arrives, not what one subscriber asked for. A [`Window`] is the per-subscriber
@@ -66,7 +66,7 @@ pub(in crate::model) trait Holdings {
 
 	/// Whether a [`Requests`](crate::track::Requests) handler serving the track's history
 	/// may look up a time its groups can't resolve: a time start before every group with a
-	/// known start then waits on that lookup, and a sequence the live feed never delivered,
+	/// known start then waits on that lookup, and a key the live feed never delivered,
 	/// or delivered and the cache evicted, may still arrive from that history.
 	fn looks_up(&self) -> bool {
 		false
@@ -81,15 +81,15 @@ pub(in crate::model) trait Holdings {
 	/// The lowest held group at or above `from`, with what it says about its start.
 	fn next_held(&self, from: u64) -> Option<(u64, Held)>;
 
-	/// The exclusive end of the run of sequences from `sequence` that can no longer arrive
-	/// (dropped, given up, or below where the feed starts), `None` while `sequence` may.
-	fn gone(&self, sequence: u64) -> Option<u64>;
+	/// The exclusive end of the run of keys from `key` that can no longer arrive
+	/// (dropped, given up, or below where the feed starts), `None` while `key` may.
+	fn gone(&self, key: u64) -> Option<u64>;
 
 	/// Whether nothing more can arrive or start here, so a time end has nothing to wait
 	/// on and is left uncapped.
 	fn complete(&self) -> bool;
 
-	/// The runs of sequences whose arrivals or drops changed since `seen`, which this then
+	/// The runs of keys whose arrivals or drops changed since `seen`, which this then
 	/// moves on to now, or `None` once anything else a parked walk reads may have changed
 	/// (see [`Window::parked`]): the declared start, completion, whether it
 	/// [looks up](Self::looks_up) its history, or a copy the live feed never delivered, which
@@ -177,7 +177,7 @@ fn instant(time: Timestamp, other: Timestamp) -> std::cmp::Ordering {
 		.cmp(&(u128::from(other.value()) * u128::from(time.scale().as_u64())))
 }
 
-/// A subscriber's [`Range`]s resolved to the group sequences it reads.
+/// A subscriber's [`Range`]s resolved to the group keys it reads.
 #[derive(Debug)]
 pub(in crate::model) struct Window {
 	/// What these were resolved from, so only replacing the ranges resolves again.
@@ -193,7 +193,7 @@ pub(in crate::model) struct Window {
 	/// The unsettled time ends, grouped by walk.
 	walks: Vec<Walk>,
 	/// The walks waiting out a gap below the group their ends fall before, which move only
-	/// once a sequence from the gap up to that group arrives or is given up, so a settle
+	/// once a key from the gap up to that group arrives or is given up, so a settle
 	/// wakes only the walks its [`Holdings::changes`] reach. Ends left in different gaps of
 	/// a sparse feed never merge, so walking each of them on every settle would cost the
 	/// ranges. Keyed by where each [`Parked`] starts.
@@ -279,8 +279,8 @@ enum End {
 /// rather than the ends.
 ///
 /// Timestamps never rewind, so an end falls before the lowest group starting past it, once
-/// every sequence between it and the newest group starting at or before it is accounted
-/// for. Every position below only moves forward, so each group or run of sequences is
+/// every key between it and the newest group starting at or before it is accounted
+/// for. Every position below only moves forward, so each group or run of keys is
 /// passed once, whatever a peer leaves missing.
 #[derive(Debug)]
 struct Walk {
@@ -341,7 +341,7 @@ struct Trail {
 	after: Option<u64>,
 	/// Where the walk over held groups resumes: those below it started, or never will.
 	held: u64,
-	/// Where settling resumes: every sequence from above `known` up to it is accounted for.
+	/// Where settling resumes: every key from above `known` up to it is accounted for.
 	accounted: u64,
 	/// The exclusive cap on what is read meanwhile, `None` for none.
 	limit: Option<u64>,
@@ -364,7 +364,7 @@ impl Trail {
 		}
 	}
 
-	/// The lowest sequence not known to be in range, `None` once the last sequence is.
+	/// The lowest key not known to be in range, `None` once the last key is.
 	///
 	/// `known` is only ever found at or above every span's start, so it alone decides once
 	/// set.
@@ -411,16 +411,16 @@ impl Walk {
 		// The starts index passes a group that may still start, so a stalled one never
 		// keeps a later group known to start inside the ends from being read.
 		while let Some(from) = self.trail.unknown()
-			&& let Some((sequence, at)) = holdings.next_start(from)
-			&& self.trail.after.is_none_or(|after| sequence < after)
+			&& let Some((key, at)) = holdings.next_start(from)
+			&& self.trail.after.is_none_or(|after| key < after)
 		{
 			match self.past(at, forks) {
-				true => self.trail.after = Some(sequence),
-				false => self.trail.known = Some(sequence),
+				true => self.trail.after = Some(key),
+				false => self.trail.known = Some(key),
 			}
 		}
 
-		// The first sequence above `known` that may still start is the one read on
+		// The first key above `known` that may still start is the one read on
 		// speculation: a held group yet to start, or a missing one that may arrive. Only a
 		// group starting inside the ends is jumped to, since it puts all below it in range.
 		self.trail.speculative = None;
@@ -431,17 +431,17 @@ impl Walk {
 			}
 			let next = holdings
 				.next_held(at)
-				.filter(|(sequence, _)| self.trail.after.is_none_or(|after| *sequence < after));
+				.filter(|(key, _)| self.trail.after.is_none_or(|after| *key < after));
 			// A later group starting inside some ends but not others splits them first: those
 			// it starts past account for `at` on their own.
 			let jump = match next {
-				Some((sequence, Held::Started(time))) if sequence != at => {
-					(!self.past(time, forks)).then_some(sequence)
+				Some((key, Held::Started(time))) if key != at => {
+					(!self.past(time, forks)).then_some(key)
 				}
 				_ => None,
 			};
 			match next {
-				Some((sequence, held)) if sequence == at => match held {
+				Some((key, held)) if key == at => match held {
 					Held::Started(time) => match self.past(time, forks) {
 						true => self.trail.after = Some(at),
 						false => self.trail.known = Some(at),
@@ -472,7 +472,7 @@ impl Walk {
 					}
 				},
 			}
-			// Nothing sits above the last sequence, so the walk ends on it.
+			// Nothing sits above the last key, so the walk ends on it.
 			let Some(next) = at.checked_add(1) else { break };
 			self.trail.held = next;
 		}
@@ -484,7 +484,7 @@ impl Walk {
 			(None, None) => None,
 		};
 
-		// Settle once every sequence up to the first group starting past the ends can no
+		// Settle once every key up to the first group starting past the ends can no
 		// longer start inside them.
 		let after = self.trail.after?;
 		// Everything at or below `known` is in range, and `after` lies above it.
@@ -492,18 +492,18 @@ impl Walk {
 		while self.trail.accounted < after {
 			let next = holdings.next_held(self.trail.accounted);
 			match next {
-				Some((sequence, held)) if sequence == self.trail.accounted => match held {
+				Some((key, held)) if key == self.trail.accounted => match held {
 					Held::Pending => return None,
 					// It started past the ends since the walk above stopped on it: everything
 					// below is accounted for, so they fall here.
 					Held::Started(at) if self.past(at, forks) => {
-						self.trail.after = Some(sequence);
+						self.trail.after = Some(key);
 						return self.trail.after;
 					}
 					_ => self.trail.accounted += 1,
 				},
 				_ => {
-					let below = next.map_or(after, |(sequence, _)| sequence.min(after));
+					let below = next.map_or(after, |(key, _)| key.min(after));
 					self.trail.accounted = match holdings.complete() {
 						true => below,
 						false => holdings.gone(self.trail.accounted)?.min(below),
@@ -544,7 +544,7 @@ impl Walk {
 	/// arrive, below the group its ends fall before, holding from above `known` up to that
 	/// group only groups below the gap that never start.
 	///
-	/// Until a sequence there arrives or is given up, the walk reads the same answers. One
+	/// Until a key there arrives or is given up, the walk reads the same answers. One
 	/// arriving late, even into a run given up, is in the holdings' changes, so the walk
 	/// wakes then. Costs the groups held there, which never start.
 	fn waits(&self, holdings: &impl Holdings) -> Option<ops::Range<u64>> {
@@ -553,13 +553,13 @@ impl Walk {
 			return None;
 		}
 		let mut at = from;
-		while let Some((sequence, held)) = holdings.next_held(at)
-			&& sequence < after
+		while let Some((key, held)) = holdings.next_held(at)
+			&& key < after
 		{
-			if sequence >= gap || held != Held::Never {
+			if key >= gap || held != Held::Never {
 				return None;
 			}
-			at = sequence + 1;
+			at = key + 1;
 		}
 		Some(from..after)
 	}
@@ -830,8 +830,8 @@ impl Window {
 		self.walks.iter().filter_map(|walk| walk.trail.speculative)
 	}
 
-	/// The lowest sequence whose start could still move an unsettled time start, or a time
-	/// end not parked, `None` without one or once the last sequence is in range.
+	/// The lowest key whose start could still move an unsettled time start, or a time
+	/// end not parked, `None` without one or once the last key is in range.
 	pub fn watch_starts(&self) -> Option<u64> {
 		if !self.waiting.is_empty() {
 			return Some(0);
@@ -839,9 +839,9 @@ impl Window {
 		self.walks.iter().filter_map(|walk| walk.trail.unknown()).min()
 	}
 
-	/// Whether group `sequence` is in range. Everything is while a relative anchor waits.
-	pub fn contains(&self, sequence: u64) -> bool {
-		self.pending || self.groups.contains(sequence)
+	/// Whether group `key` is in range. Everything is while a relative anchor waits.
+	pub fn contains(&self, key: u64) -> bool {
+		self.pending || self.groups.contains(key)
 	}
 
 	/// The lowest group in range, `None` while an anchor waits. Nothing in range floors
@@ -1320,7 +1320,7 @@ mod tests {
 		Timestamp::from_millis(millis).unwrap()
 	}
 
-	/// A hop's groups by sequence, the runs that can no longer arrive, and how many held
+	/// A hop's groups by key, the runs that can no longer arrive, and how many held
 	/// groups and starts a walk asked about.
 	///
 	/// Reports changes as a track does: a group arriving and a run given up, never a group
@@ -1335,7 +1335,7 @@ mod tests {
 		/// How many fetched copies gave a group held past its frame 0 a start, which a
 		/// track counts rather than logs.
 		fetched: Cell<u64>,
-		/// Every change so far, oldest first, and what was last logged: the held sequences
+		/// Every change so far, oldest first, and what was last logged: the held keys
 		/// and how many runs were given up.
 		log: std::cell::RefCell<(Vec<ops::Range<u64>>, BTreeSet<u64>, usize)>,
 	}
@@ -1348,8 +1348,8 @@ mod tests {
 			}
 		}
 
-		fn started(sequence: u64, millis: u64) -> (u64, Held) {
-			(sequence, Held::Started(at(millis)))
+		fn started(key: u64, millis: u64) -> (u64, Held) {
+			(key, Held::Started(at(millis)))
 		}
 	}
 
@@ -1364,11 +1364,11 @@ mod tests {
 
 		fn containing(&self, pts: Timestamp) -> Containing {
 			let mut stamped = false;
-			for (&sequence, held) in self.held.iter().rev() {
+			for (&key, held) in self.held.iter().rev() {
 				let Held::Started(start) = held else { continue };
 				stamped = true;
 				if !later(*start, pts) {
-					return Containing::Group(sequence);
+					return Containing::Group(key);
 				}
 			}
 			match stamped {
@@ -1379,8 +1379,8 @@ mod tests {
 
 		fn next_start(&self, from: u64) -> Option<(u64, Timestamp)> {
 			self.asked.set(self.asked.get() + 1);
-			self.held.range(from..).find_map(|(&sequence, held)| match held {
-				Held::Started(start) => Some((sequence, *start)),
+			self.held.range(from..).find_map(|(&key, held)| match held {
+				Held::Started(start) => Some((key, *start)),
 				_ => None,
 			})
 		}
@@ -1390,13 +1390,13 @@ mod tests {
 			self.held
 				.range(from..)
 				.next()
-				.map(|(&sequence, held)| (sequence, *held))
+				.map(|(&key, held)| (key, *held))
 		}
 
-		fn gone(&self, sequence: u64) -> Option<u64> {
+		fn gone(&self, key: u64) -> Option<u64> {
 			self.gone
 				.iter()
-				.find(|gone| gone.contains(&sequence))
+				.find(|gone| gone.contains(&key))
 				.map(|gone| gone.end)
 		}
 
@@ -1407,8 +1407,8 @@ mod tests {
 		fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
 			let mut log = self.log.borrow_mut();
 			let (log, held, gone) = &mut *log;
-			let arrived = self.held.keys().filter(|sequence| !held.contains(sequence));
-			log.extend(arrived.map(|sequence| *sequence..sequence.saturating_add(1)));
+			let arrived = self.held.keys().filter(|key| !held.contains(key));
+			log.extend(arrived.map(|key| *key..key.saturating_add(1)));
 			log.extend(self.gone[*gone..].iter().cloned());
 			*held = self.held.keys().copied().collect();
 			*gone = self.gone.len();
@@ -1466,7 +1466,7 @@ mod tests {
 	}
 
 	fn covered(window: &Window, upto: u64) -> Vec<u64> {
-		(0..upto).filter(|sequence| window.contains(*sequence)).collect()
+		(0..upto).filter(|key| window.contains(*key)).collect()
 	}
 
 	/// Disjoint ranges filter to exactly their groups; the gap between them is out.
@@ -1612,7 +1612,7 @@ mod tests {
 		assert_eq!(window.floor(), Some(4));
 	}
 
-	/// An end settles only once every sequence between the newest group starting inside it
+	/// An end settles only once every key between the newest group starting inside it
 	/// and the first starting past it is accounted for.
 	#[test]
 	fn a_time_end_settles_once_nothing_below_its_end_can_arrive() {
@@ -1687,16 +1687,16 @@ mod tests {
 		assert_eq!(covered(&window, 7), vec![3, 4, 5, 6]);
 	}
 
-	/// A peer that leaves an early sequence missing and keeps sending later groups costs a
+	/// A peer that leaves an early key missing and keeps sending later groups costs a
 	/// time end each group once, not a rescan of everything since the gap on every settle.
 	#[test]
-	fn a_time_end_walks_each_group_once_behind_a_missing_sequence() {
+	fn a_time_end_walks_each_group_once_behind_a_missing_key() {
 		let mut groups = Groups::new([Groups::started(0, 0)]);
 		let mut window = Window::new(&[range(time(0), time(1_000_000))], Some(0), &groups).unwrap();
 		let count = 2_000;
-		for sequence in 2..count {
-			groups.held.insert(sequence, Held::Started(at(sequence * 10)));
-			window.settle(Some(sequence), &groups);
+		for key in 2..count {
+			groups.held.insert(key, Held::Started(at(key * 10)));
+			window.settle(Some(key), &groups);
 		}
 		assert!(!window.is_settled(), "group 1 never arrived");
 		assert!(window.contains(count - 1));
@@ -1716,9 +1716,9 @@ mod tests {
 
 		let count = 200;
 		let asked = groups.asked.get();
-		for sequence in 1..count {
-			groups.held.insert(sequence, Held::Started(at(sequence)));
-			window.settle(Some(sequence), &groups);
+		for key in 1..count {
+			groups.held.insert(key, Held::Started(at(key)));
+			window.settle(Some(key), &groups);
 		}
 		let asked = groups.asked.get() - asked;
 		assert!(asked < 8 * count as usize, "{asked} queries for {count} groups");
@@ -1766,27 +1766,27 @@ mod tests {
 			x % bound
 		};
 		let micros = |value| Anchor::Time(Timestamp::new(value, crate::Timescale::MICRO).unwrap());
-		const SEQUENCES: u64 = 16;
+		const KEYS: u64 = 16;
 		for round in 0..400 {
-			// Each group starts in its own ten milliseconds, so starts ascend with the sequence.
-			let starts: Vec<u64> = (0..SEQUENCES).map(|sequence| sequence * 10 + next(10)).collect();
+			// Each group starts in its own ten milliseconds, so starts ascend with the key.
+			let starts: Vec<u64> = (0..KEYS).map(|key| key * 10 + next(10)).collect();
 			let pts = |end: bool| match next(3) {
-				0 => micros(next(SEQUENCES * 10_000)),
+				0 => micros(next(KEYS * 10_000)),
 				// Exactly a group's start, in either scale.
-				1 if next(2) == 0 => time(starts[next(SEQUENCES) as usize]),
-				1 => micros(starts[next(SEQUENCES) as usize] * 1000),
-				_ => time(next(SEQUENCES * 10) + u64::from(end) * 5),
+				1 if next(2) == 0 => time(starts[next(KEYS) as usize]),
+				1 => micros(starts[next(KEYS) as usize] * 1000),
+				_ => time(next(KEYS * 10) + u64::from(end) * 5),
 			};
 			let ranges: Vec<Range> = (0..1 + next(12))
 				.map(|_| {
 					let start = match next(3) {
-						0 => Anchor::Absolute(next(SEQUENCES)),
+						0 => Anchor::Absolute(next(KEYS)),
 						1 => Anchor::Relative(next(4)),
 						_ => pts(false),
 					};
 					let end = match next(6) {
 						0 => None,
-						1 => Some(Anchor::Absolute(next(SEQUENCES + 2))),
+						1 => Some(Anchor::Absolute(next(KEYS + 2))),
 						_ => Some(pts(true)),
 					};
 					range(start, end)
@@ -1795,12 +1795,12 @@ mod tests {
 
 			let mut groups = Groups::default();
 			for _ in 0..next(6) {
-				let sequence = next(SEQUENCES);
+				let key = next(KEYS);
 				groups
 					.held
-					.insert(sequence, Held::Started(at(starts[sequence as usize])));
+					.insert(key, Held::Started(at(starts[key as usize])));
 			}
-			let latest = Some(next(SEQUENCES));
+			let latest = Some(next(KEYS));
 			let mut window = Window::new(&ranges, latest, &groups).unwrap();
 			let mut alone: Vec<Window> = ranges
 				.iter()
@@ -1808,48 +1808,48 @@ mod tests {
 				.collect();
 
 			for step in 0..40 {
-				let sequence = next(SEQUENCES);
-				let started = Held::Started(at(starts[sequence as usize]));
+				let key = next(KEYS);
+				let started = Held::Started(at(starts[key as usize]));
 				match next(6) {
 					0 | 1 => {
-						groups.held.entry(sequence).or_insert(Held::Pending);
+						groups.held.entry(key).or_insert(Held::Pending);
 					}
 					2 | 3 => {
-						if groups.held.get(&sequence).is_none_or(|held| *held == Held::Pending) {
-							groups.held.insert(sequence, started);
+						if groups.held.get(&key).is_none_or(|held| *held == Held::Pending) {
+							groups.held.insert(key, started);
 						}
 					}
-					4 => match groups.held.get(&sequence) {
+					4 => match groups.held.get(&key) {
 						None | Some(Held::Pending) => {
-							groups.held.insert(sequence, Held::Never);
+							groups.held.insert(key, Held::Never);
 						}
 						// A fetched head gives a group held past its frame 0 a start.
 						Some(Held::Never) if next(2) == 0 => {
-							groups.held.insert(sequence, started);
+							groups.held.insert(key, started);
 							groups.fetched.set(groups.fetched.get() + 1);
 						}
 						_ => {}
 					},
 					_ => {
-						let end = sequence + 1 + next(3);
-						if groups.held.range(sequence..end).next().is_none() {
-							groups.gone.push(sequence..end);
+						let end = key + 1 + next(3);
+						if groups.held.range(key..end).next().is_none() {
+							groups.gone.push(key..end);
 						}
 					}
 				}
 				groups.complete |= step == 39 && round % 4 == 0;
 
-				let before: Vec<u64> = covered(&window, SEQUENCES + 4);
+				let before: Vec<u64> = covered(&window, KEYS + 4);
 				let moved = window.settle(latest, &groups);
 				for window in &mut alone {
 					window.settle(latest, &groups);
 				}
 				let context = || format!("round {round} step {step}: {ranges:?} over {:?}", groups.held);
 
-				let union: Vec<u64> = (0..SEQUENCES + 4)
-					.filter(|sequence| alone.iter().any(|window| window.contains(*sequence)))
+				let union: Vec<u64> = (0..KEYS + 4)
+					.filter(|key| alone.iter().any(|window| window.contains(*key)))
 					.collect();
-				let now = covered(&window, SEQUENCES + 4);
+				let now = covered(&window, KEYS + 4);
 				assert_eq!(now, union, "{}", context());
 				assert!(moved || now == before, "{}: moved unreported", context());
 
@@ -1903,14 +1903,14 @@ mod tests {
 
 		fn next_held(&self, from: u64) -> Option<(u64, Held)> {
 			let next = self.groups.next_held(from);
-			if next.is_some_and(|(sequence, _)| sequence == self.racing) && self.asked.replace(true) {
+			if next.is_some_and(|(key, _)| key == self.racing) && self.asked.replace(true) {
 				return Some((self.racing, Held::Started(at(6000))));
 			}
 			next
 		}
 
-		fn gone(&self, sequence: u64) -> Option<u64> {
-			self.groups.gone(sequence)
+		fn gone(&self, key: u64) -> Option<u64> {
+			self.groups.gone(key)
 		}
 
 		fn complete(&self) -> bool {
@@ -1937,9 +1937,9 @@ mod tests {
 	}
 
 	#[test]
-	fn a_missing_sequence_past_a_time_end_is_the_one_read_on_speculation() {
+	fn a_missing_key_past_a_time_end_is_the_one_read_on_speculation() {
 		// 1 and 2 are missing, and 3 never starts: the walk may not pass the gap, or every
-		// sequence in it that arrives later is read past the end.
+		// key in it that arrives later is read past the end.
 		let mut groups = Groups::new([Groups::started(0, 3000), (3, Held::Never)]);
 		let mut window = Window::new(&[range(time(3000), time(3500))], Some(3), &groups).unwrap();
 		assert_eq!(covered(&window, 5), vec![0, 1]);
@@ -1961,7 +1961,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_time_end_stops_walking_at_the_last_sequence() {
+	fn a_time_end_stops_walking_at_the_last_key() {
 		let groups = Groups::new([Groups::started(u64::MAX, 3000)]);
 		let window = Window::new(&[range(Anchor::Absolute(u64::MAX), time(5000))], None, &groups).unwrap();
 		assert_eq!(
@@ -1973,7 +1973,7 @@ mod tests {
 			})]
 		);
 		assert!(window.contains(u64::MAX));
-		assert_eq!(window.watch_starts(), None, "nothing above the last sequence can start");
+		assert_eq!(window.watch_starts(), None, "nothing above the last key can start");
 	}
 
 	/// A time start no held group has started for yet reads nothing of its range, rather
@@ -1981,7 +1981,7 @@ mod tests {
 	/// nothing more reaches back to the oldest group.
 	#[test]
 	fn a_time_start_waits_for_a_group_to_start() {
-		let pending = (2..10).map(|sequence| (sequence, Held::Pending));
+		let pending = (2..10).map(|key| (key, Held::Pending));
 		let mut groups = Groups::new(pending.clone());
 		let ranges = [
 			range(time(2500), None),
@@ -2052,7 +2052,7 @@ mod tests {
 			let ranges = [range(time(2500), Anchor::Relative(0))];
 			let mut window = Window::new(&ranges, latest, &groups).unwrap();
 			assert_eq!(window.is_pending(), latest.is_none());
-			groups.held.extend((2..10).map(|sequence| (sequence, Held::Pending)));
+			groups.held.extend((2..10).map(|key| (key, Held::Pending)));
 			window.settle(Some(9), &groups);
 			assert!(!window.is_pending());
 			groups.held.insert(10, Held::Pending);

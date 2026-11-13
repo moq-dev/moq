@@ -5,11 +5,11 @@
 //! queue work, then criterion times the run. The four schedulers:
 //!
 //! - `groups`: one send group per subscription at its priority, streams ordered by group
-//!   sequence inside it (what native QUIC uses).
+//!   key inside it (what native QUIC uses).
 //! - `queue`: the publishers' `PriorityQueue`, ranking every in-flight group on the session
 //!   into one `u8` send order, re-applied to each stream whose rank moves.
-//! - `scalar-seq`: a 32-bit `[priority][group sequence]` key, which leaves 24 bits for the
-//!   sequence and compares sequences across subscriptions.
+//! - `scalar-seq`: a 32-bit `[priority][group key]` key, which leaves 24 bits for the
+//!   key and compares keys across subscriptions.
 //! - `scalar`: the priority alone, so equal subscriptions share by stream count.
 //!
 //! `fanout` sweeps subscriptions against groups in flight per subscription, timing one frame,
@@ -100,7 +100,7 @@ fn workloads() -> Vec<Workload> {
 			capacity: 20_000,
 			ticks: 3_000,
 		},
-		// Group sequences crossing 2^24, where the scalar's 24 bits wrap.
+		// Group keys crossing 2^24, where the scalar's 24 bits wrap.
 		Workload {
 			name: "wrap",
 			tracks: vec![

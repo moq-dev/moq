@@ -203,7 +203,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 			let Ok(next) = kio::clock::timeout(TIMEOUT, subscriber.recv_group()).await else {
 				break;
 			};
-			got.push(next.unwrap().expect("a group").sequence);
+			got.push(next.unwrap().expect("a group").start);
 		}
 		got.sort();
 		assert_eq!(got, vec![2, 3, 4], "{version}");

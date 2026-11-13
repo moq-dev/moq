@@ -328,11 +328,11 @@ impl RangeFills {
 			}
 			// Only the groups the cache holds, so a wide run costs what it holds.
 			for gap in self.draining.gaps(run) {
-				for sequence in edge.cached_groups(gap) {
-					if let Some(mut group) = edge.peek_group(sequence)
+				for key in edge.cached_groups(gap) {
+					if let Some(mut group) = edge.peek_group(key)
 						&& group.poll_finished(waiter).is_pending()
 					{
-						self.reading.insert(sequence, group);
+						self.reading.insert(key, group);
 					}
 				}
 			}
@@ -341,7 +341,7 @@ impl RangeFills {
 				draining.insert(run.clone());
 			}
 		}
-		self.reading.retain(|sequence, _| draining.contains(sequence));
+		self.reading.retain(|key, _| draining.contains(key));
 		self.draining = draining;
 		// What finishes a stream still asks with what its fills asked.
 		if self.held.is_empty() && !groups.is_empty() {
@@ -656,15 +656,15 @@ mod tests {
 				.with_max_age(None),
 		);
 		let requests = producer.requests();
-		for sequence in 0..6 {
-			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+		for key in 0..6 {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
 			group
-				.write_frame(crate::Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
 			group.finish().unwrap();
 		}
-		for sequence in 1..4 {
-			producer.evict(sequence);
+		for key in 1..4 {
+			producer.evict(key);
 		}
 		let (reader, fill) = ask(&producer, &requests);
 		(producer, requests, reader, fill)
@@ -703,18 +703,18 @@ mod tests {
 
 		// The lowered start asks for them again, and they arrive.
 		let (mut reader, fill) = ask(&producer, &requests);
-		for sequence in 1..4 {
-			let mut group = fill.accept(sequence, None).unwrap();
+		for key in 1..4 {
+			let mut group = fill.accept(key, None).unwrap();
 			group
-				.write_frame(crate::Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
 			group.finish().unwrap();
 		}
-		for sequence in 1..4 {
+		for key in 1..4 {
 			let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
-				panic!("group {sequence} was delivered");
+				panic!("group {key} was delivered");
 			};
-			assert_eq!(group.sequence, sequence);
+			assert_eq!(group.start, key);
 		}
 
 		// The publisher naming them not found is a loss: nobody asks again.

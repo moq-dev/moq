@@ -57,10 +57,10 @@ async fn write_paced(
 	demand: &mut group::Demand,
 	payload: Option<Bytes>,
 ) -> bool {
-	let sequence = group.sequence;
+	let key = group.start;
 	let room = kio::wait(|waiter| {
 		while let Poll::Ready(Ok(_)) = demand.poll_wanted_changed(waiter) {}
-		if fill.poll_unwanted(sequence, waiter).is_ready() && !demand.wanted() {
+		if fill.poll_unwanted(key, waiter).is_ready() && !demand.wanted() {
 			return Poll::Ready(false);
 		}
 		match &payload {

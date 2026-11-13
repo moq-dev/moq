@@ -274,11 +274,11 @@ fn replay() -> track::Subscription {
 		.with_range(0..)
 }
 
-/// Drain N cached groups from a track, in arrival order and in sequence order.
+/// Drain N cached groups from a track, in arrival order and in key order.
 ///
 /// The two differ in how they find the next group: `recv_group` walks an arrival
-/// index, while `next_group` seeks by sequence. Both should be flat in the cache
-/// depth; a per-delivery scan over the cache makes the sequence-ordered arm
+/// index, while `next_group` seeks by key. Both should be flat in the cache
+/// depth; a per-delivery scan over the cache makes the key-ordered arm
 /// quadratic in N.
 fn bench_track_recv(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
@@ -302,7 +302,7 @@ fn bench_track_recv(c: &mut Criterion) {
 				BatchSize::SmallInput,
 			);
 		});
-		g.bench_with_input(BenchmarkId::new("sequence", n), &n, |b, &n| {
+		g.bench_with_input(BenchmarkId::new("key", n), &n, |b, &n| {
 			b.iter_batched(
 				|| {
 					let ctx = filled_track(n, &payload);
@@ -326,7 +326,7 @@ fn bench_track_recv(c: &mut Criterion) {
 					let ctx = filled_track(n, &payload);
 					let mut subscriber = ctx.track.subscribe(None);
 					let edge = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
-					assert_eq!(edge.sequence, n as u64 - 1);
+					assert_eq!(edge.start, n as u64 - 1);
 					(ctx, subscriber)
 				},
 				|(ctx, mut subscriber)| {
@@ -735,7 +735,7 @@ fn contended(
 			true => {
 				let mut subscriber = track.subscribe(None);
 				let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
-				assert_eq!(group.sequence, 0, "the subscriber starts at the live group");
+				assert_eq!(group.start, 0, "the subscriber starts at the live group");
 				(Some(subscriber), group)
 			}
 			false => (None, group.consume()),

@@ -26,7 +26,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = track.create_group(group::Info { sequence: 7 }).unwrap();
+	let mut group = track.create_group(group::Info { start: 7 }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"media").unwrap();
 	group.finish().unwrap();
 	broadcast.announce().unwrap();
@@ -40,7 +40,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 	driver.poll(now, &waiter).unwrap();
 	let mut subscriber = ready(subscribing.poll_ok(&waiter)).unwrap();
 	let mut group = ready(subscriber.poll_recv_group(&waiter)).unwrap().unwrap();
-	assert_eq!(group.sequence, 7);
+	assert_eq!(group.start, 7);
 	let media: frame::Frame = ready(group.poll_read_frame(&waiter)).unwrap().unwrap();
 	assert_eq!(media.payload.as_ref(), b"media");
 	assert!(ready(group.poll_read_frame(&waiter)).unwrap().is_none());

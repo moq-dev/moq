@@ -154,7 +154,7 @@ async fn a_listed_track_serves_its_cached_group() {
 		.expect("group timeout")
 		.unwrap()
 		.expect("the group");
-	assert_eq!(group.sequence, 0);
+	assert_eq!(group.start, 0);
 	assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"first");
 }
 

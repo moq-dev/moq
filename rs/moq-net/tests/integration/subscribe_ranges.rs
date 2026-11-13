@@ -32,22 +32,22 @@ fn timed() -> Info {
 		.with_max_age(None)
 }
 
-fn write_group(track: &moq_net::track::Producer, sequence: u64) {
-	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+fn write_group(track: &moq_net::track::Producer, key: u64) {
+	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 	group.write_frame(Timestamp::now(), &b"x"[..]).unwrap();
 	group.finish().unwrap();
 }
 
-/// The next group's sequence, or `None` once the track ends or nothing arrives in time.
+/// The next group's key, or `None` once the track ends or nothing arrives in time.
 async fn next(sub: &mut moq_net::track::Subscriber) -> Option<u64> {
 	let group = kio::clock::timeout(TIMEOUT, sub.recv_group()).await.ok()?;
-	group.expect("recv_group").map(|group| group.sequence)
+	group.expect("recv_group").map(|group| group.start)
 }
 
 async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<u64> {
 	let mut got = Vec::new();
-	while let Some(sequence) = next(sub).await {
-		got.push(sequence);
+	while let Some(key) = next(sub).await {
+		got.push(key);
 	}
 	got
 }
@@ -73,8 +73,8 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 		.unwrap();
 	let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..=3 {
-		write_group(&track, sequence);
+	for key in 0..=3 {
+		write_group(&track, key);
 	}
 
 	let relay_origin = produce_origin(2);
@@ -167,8 +167,8 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 		}
 
 		// Written once the demand is read: lite-07 ends the subscription once it covers them.
-		for sequence in 0..=4 {
-			write_group(&track, sequence);
+		for key in 0..=4 {
+			write_group(&track, key);
 		}
 		let track = track.finish().unwrap();
 		let mut got = read_all(&mut reader).await;
@@ -224,10 +224,10 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 		.unwrap();
 	let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..history {
-		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+	for key in 0..history {
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 		group
-			.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 			.unwrap();
 		group.finish().unwrap();
 	}
@@ -354,7 +354,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		reader.update(initial.with_range(0..)).unwrap();
 		let mut group = fixture
 			.track
-			.create_group(moq_net::group::Info { sequence: 6 })
+			.create_group(moq_net::group::Info { start: 6 })
 			.unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"later".as_slice())
@@ -430,7 +430,7 @@ async fn draft22_can_widen_while_the_current_group_is_quiet() {
 		let fixture = range_fixture(relay).await;
 		let mut quiet = fixture
 			.track
-			.create_group(moq_net::group::Info { sequence: 6 })
+			.create_group(moq_net::group::Info { start: 6 })
 			.unwrap();
 		quiet
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"head".as_slice())
@@ -441,7 +441,7 @@ async fn draft22_can_widen_while_the_current_group_is_quiet() {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(current.sequence, 6);
+		assert_eq!(current.start, 6);
 		assert_eq!(
 			kio::clock::timeout(TIMEOUT, current.read_frame())
 				.await
@@ -510,12 +510,12 @@ async fn draft18_updates_narrow_then_widen() {
 		)
 		.await
 		.unwrap_or_else(|_| panic!("{version} relay={relay}: narrowing did not reach the publisher"));
-		for sequence in 6..8 {
-			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+		for key in 6..8 {
+			let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
 				.write_frame(
-					Timestamp::from_millis(sequence * 1000).unwrap(),
-					sequence.to_be_bytes().as_slice(),
+					Timestamp::from_millis(key * 1000).unwrap(),
+					key.to_be_bytes().as_slice(),
 				)
 				.unwrap();
 			group.finish().unwrap();
@@ -528,13 +528,13 @@ async fn draft18_updates_narrow_then_widen() {
 				.unwrap_or_else(|_| panic!("{version} relay={relay}: widening lost history; got {seen:?}"))
 				.unwrap()
 				.unwrap();
-			seen.push(group.sequence);
+			seen.push(group.start);
 			let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 				.await
 				.unwrap()
 				.unwrap()
 				.unwrap();
-			assert_eq!(frame.payload, group.sequence.to_be_bytes().as_slice());
+			assert_eq!(frame.payload, group.start.to_be_bytes().as_slice());
 			assert!(
 				kio::clock::timeout(TIMEOUT, group.read_frame())
 					.await
@@ -568,7 +568,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			));
 			let mut group = fixture
 				.track
-				.create_group(moq_net::group::Info { sequence: 6 })
+				.create_group(moq_net::group::Info { start: 6 })
 				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(6000).unwrap(), b"sibling".as_slice())
@@ -600,7 +600,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			.unwrap_or_else(|_| panic!("{version} relay={relay}: empty demand retained a wire subscription"));
 			let mut group = fixture
 				.track
-				.create_group(moq_net::group::Info { sequence: 7 })
+				.create_group(moq_net::group::Info { start: 7 })
 				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(7000).unwrap(), b"resumed".as_slice())
@@ -644,40 +644,40 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			)
 			.await
 			.unwrap_or_else(|_| panic!("relay={relay}: narrowing to {future} stalled"));
-			for sequence in start..future {
-				let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			for key in start..future {
+				let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
 				group
-					.write_frame(Timestamp::ZERO, sequence.to_be_bytes().as_slice())
+					.write_frame(Timestamp::ZERO, key.to_be_bytes().as_slice())
 					.unwrap();
 				group.finish().unwrap();
 			}
 			reader.update(initial.clone().with_range(start..)).unwrap();
-			let mut sequences = Vec::new();
+			let mut keys = Vec::new();
 			for _ in start..future {
 				let mut group = kio::clock::timeout(TIMEOUT, reader.recv_group())
 					.await
 					.unwrap_or_else(|_| {
-						panic!("relay={relay}: a filled group from {start} did not arrive; got {sequences:?}")
+						panic!("relay={relay}: a filled group from {start} did not arrive; got {keys:?}")
 					})
 					.unwrap()
 					.unwrap();
-				sequences.push(group.sequence);
+				keys.push(group.start);
 				let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 					.await
 					.unwrap()
 					.unwrap()
 					.unwrap();
-				assert_eq!(frame.payload, group.sequence.to_be_bytes().as_slice());
+				assert_eq!(frame.payload, group.start.to_be_bytes().as_slice());
 				assert!(
 					kio::clock::timeout(TIMEOUT, group.read_frame())
 						.await
-						.unwrap_or_else(|_| panic!("relay={relay}: group {} never finished", group.sequence))
+						.unwrap_or_else(|_| panic!("relay={relay}: group {} never finished", group.start))
 						.unwrap()
 						.is_none()
 				);
 			}
-			sequences.sort_unstable();
-			assert_eq!(sequences, [start]);
+			keys.sort_unstable();
+			assert_eq!(keys, [start]);
 		}
 	}
 }
@@ -721,18 +721,18 @@ async fn unresolved_time_reader_never_changes_sibling_demand() {
 				start: moq_net::track::Anchor::Absolute(0),
 				end: Some(moq_net::track::Anchor::Time(Timestamp::from_millis(10000).unwrap())),
 			}])));
-			for sequence in 6..8 {
-				if sequence == 7 {
+			for key in 6..8 {
+				if key == 7 {
 					assert!(matches!(
 						refused.take().unwrap().await,
 						Err(moq_net::Error::Unsupported)
 					));
 				}
-				let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+				let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
 				group
 					.write_frame(
-						Timestamp::from_millis(sequence * 1000).unwrap(),
-						sequence.to_be_bytes().as_slice(),
+						Timestamp::from_millis(key * 1000).unwrap(),
+						key.to_be_bytes().as_slice(),
 					)
 					.unwrap();
 				group.finish().unwrap();
@@ -741,10 +741,10 @@ async fn unresolved_time_reader_never_changes_sibling_demand() {
 					.unwrap()
 					.unwrap_or_else(|err| panic!("{version} relay={relay}: pending refusal aborted sibling: {err:?}"))
 					.unwrap();
-				assert_eq!(got.sequence, sequence);
+				assert_eq!(got.start, key);
 				assert_eq!(
 					got.read_frame().await.unwrap().unwrap().payload,
-					sequence.to_be_bytes().as_slice()
+					key.to_be_bytes().as_slice()
 				);
 				assert!(got.read_frame().await.unwrap().is_none());
 			}
@@ -766,8 +766,8 @@ async fn a_covered_bounded_subscription_stays_open() {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
 		broadcast.announce().unwrap();
-		for sequence in [0, 1, 2, 4, 5] {
-			write_group(&track, sequence);
+		for key in [0, 1, 2, 4, 5] {
+			write_group(&track, key);
 		}
 
 		let subscriber = produce_origin(2);

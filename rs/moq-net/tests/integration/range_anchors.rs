@@ -57,9 +57,9 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 		)
 		.unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..5 {
-		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-		group.write_frame(millis(sequence * 1000), &b"x"[..]).unwrap();
+	for key in 0..5 {
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		group.write_frame(millis(key * 1000), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
 
@@ -93,7 +93,7 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let mut read = Vec::new();
 	while let Ok(group) = kio::clock::timeout(TIMEOUT, reader.recv_group()).await {
 		match group? {
-			Some(group) => read.push(group.sequence),
+			Some(group) => read.push(group.start),
 			None => break,
 		}
 	}
@@ -170,7 +170,7 @@ async fn every_wire_carries_the_live_and_oldest_starts() {
 
 /// A publisher counts a relative start back from its newest group, which may hold no frame yet
 /// and so counts neither in the largest it reports nor where the copy resolves the start. The
-/// copy reports the publisher's start instead, where a reader waiting on each group in sequence
+/// copy reports the publisher's start instead, where a reader waiting on each group in key
 /// starts, rather than one below that never arrives.
 #[kio::test]
 async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group() {
@@ -183,12 +183,12 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 		.create_track("data", Info::default().with_max_age(FOREVER))
 		.unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..5 {
-		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+	for key in 0..5 {
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 		group.write_frame(None, &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
-	let mut newest = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
+	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 
 	let subscriber = produce_origin(2);
 	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
@@ -220,6 +220,6 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 		.await
 		.expect("group timeout")
 		.unwrap();
-	assert_eq!(group.map(|group| group.sequence), Some(5));
+	assert_eq!(group.map(|group| group.start), Some(5));
 	let _track = track.finish().unwrap();
 }

@@ -69,7 +69,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		.expect("group timeout")
 		.unwrap()
 		.expect("group 0");
-	assert_eq!(group.sequence, 0);
+	assert_eq!(group.start, 0);
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	// The live edge moves a full second past the stalled group's reach.
@@ -103,7 +103,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		.expect("group timeout")
 		.unwrap()
 		.expect("a group");
-	if first.sequence != 0 {
+	if first.start != 0 {
 		stalled.abort(moq_net::Error::Cancel).unwrap();
 		return None;
 	}

@@ -739,7 +739,7 @@ mod tests {
 		kio::Waiter,
 		Arc<CountWaker>,
 	) {
-		let group = crate::group::Info { sequence: 0 }.produce();
+		let group = crate::group::Info { start: 0 }.produce();
 		let mut consumer = group.consume();
 		let frame = group
 			.create_frame(crate::frame::Info {
@@ -982,7 +982,7 @@ mod tests {
 
 	/// A group 17 MB past an idle reader, so its writer is paced.
 	fn paced_group() -> (crate::group::Producer, crate::group::Consumer) {
-		let mut group = crate::group::Info { sequence: 0 }.produce();
+		let mut group = crate::group::Info { start: 0 }.produce();
 		let idle = group.consume();
 		let payload = Bytes::from(vec![0u8; 1 << 20]);
 		for _ in 0..17 {

@@ -188,12 +188,12 @@ fn bench_pending_churn(c: &mut Criterion) {
 					})
 					.collect();
 				let mut cursors: Vec<_> = (0..readers).map(|_| producer.consume().routes()).collect();
-				let mut sequence = 0u64;
+				let mut key = 0u64;
 				b.iter(|| {
-					sequence += 1;
+					key += 1;
 					drop(
 						producer
-							.route(format!("a/{sequence}"), moq_net::origin::RouteOptions::default())
+							.route(format!("a/{key}"), moq_net::origin::RouteOptions::default())
 							.unwrap(),
 					);
 				});
@@ -1123,7 +1123,7 @@ fn bench_handoff(c: &mut Criterion) {
 							.route("room/live", moq_net::origin::RouteOptions::hidden())
 							.unwrap();
 						let track = standby.broadcast().create_track("video", timed()).unwrap();
-						let mut second = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+						let mut second = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 						second.write_frame(Timestamp::ZERO, b"two".as_ref()).unwrap();
 						second.finish().unwrap();
 						// Announcing is what makes the standby a route the front can take.
@@ -1133,7 +1133,7 @@ fn bench_handoff(c: &mut Criterion) {
 						let group = replacement.recv_group().await.unwrap().expect("standby group");
 						total += started.elapsed();
 						// Rejoining the incumbent would replay its cached group 0 instead.
-						assert_eq!(group.sequence, 1, "standby group");
+						assert_eq!(group.start, 1, "standby group");
 
 						drop(subscription);
 						drop(replacement);
@@ -1681,14 +1681,14 @@ impl ResumeOverlap {
 
 enum ResumeReader {
 	Arrival(track::Subscriber),
-	Sequence(track::Ordered),
+	Key(track::Ordered),
 }
 
 impl ResumeReader {
 	fn poll_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
 		match self {
 			Self::Arrival(reader) => reader.poll_recv_group(waiter),
-			Self::Sequence(reader) => reader.poll_next_group(waiter),
+			Self::Key(reader) => reader.poll_next_group(waiter),
 		}
 	}
 }
@@ -1718,10 +1718,10 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			)
 			.unwrap();
 		let track = broadcast.broadcast().create_track("0", timed()).unwrap();
-		for sequence in order {
+		for key in order {
 			let mut group = track
 				.create_group(moq_net::group::Info {
-					sequence: sequence as u64,
+					start: key as u64,
 				})
 				.unwrap();
 			group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
@@ -1775,7 +1775,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 		.into_iter()
 		.map(|subscriber| subscriber.with_range(..))
 		.map(|subscriber| match ordered {
-			true => ResumeReader::Sequence(subscriber.ordered()),
+			true => ResumeReader::Key(subscriber.ordered()),
 			false => ResumeReader::Arrival(subscriber),
 		})
 		.collect();
@@ -1794,9 +1794,9 @@ fn bench_resume_overlap(c: &mut Criterion) {
 	group.sample_size(10);
 	for (order, ordered, waiting) in [
 		("arrival", false, false),
-		("sequence", true, false),
+		("key", true, false),
 		("arrival_waiting", false, true),
-		("sequence_waiting", true, true),
+		("key_waiting", true, true),
 	] {
 		for (readers, retained, routes) in RESUME_OVERLAP {
 			if waiting && !(readers == 1 && retained == 64 && routes >= 2) {

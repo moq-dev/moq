@@ -159,7 +159,7 @@ impl Delay {
 /// therefore needs a budget that covers it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Order {
-	/// Oldest first, draining a backlog in sequence order.
+	/// Oldest first, draining a backlog in key order.
 	Ascending,
 	/// Newest first, so congestion sheds the backlog rather than the live edge.
 	#[default]
@@ -187,7 +187,7 @@ pub enum Order {
 /// rather than guess from a partial copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
-	/// The group with this sequence.
+	/// The group with this key.
 	Absolute(u64),
 	/// The group this many before the latest, clamped to group 0: `Relative(0)` is the latest group.
 	Relative(u64),
@@ -205,7 +205,7 @@ pub enum Anchor {
 	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
 	/// reaches back to the oldest group. While no group has started at all it waits for one
 	/// that has, reading nothing of its range meanwhile. An end settles once a group starting
-	/// after it is known and every sequence below that one is accounted for (started,
+	/// after it is known and every key below that one is accounted for (started,
 	/// dropped, or never to start). Until then reads stop at the first held group that
 	/// may still start, so at the live edge at most that one group past the end is read
 	/// before its first frame shows where it starts. An untimed track
@@ -253,7 +253,7 @@ impl Range {
 	/// no end.
 	pub fn groups(groups: impl RangeBounds<u64>) -> Self {
 		let unbounded_start = matches!(groups.start_bound(), Bound::Unbounded);
-		let (start, end) = sequence_bounds(groups);
+		let (start, end) = key_bounds(groups);
 		Self {
 			start: match unbounded_start {
 				true => Self::oldest().start,
@@ -542,7 +542,7 @@ impl Combined {
 			(a, b) => a.or(b),
 		};
 		combined.ranges.extend_from_slice(&sub.ranges);
-		// Sequence-first prioritization is enabled only when every subscriber wants it.
+		// Key-first prioritization is enabled only when every subscriber wants it.
 		if let Order::Descending = sub.order {
 			combined.order = Order::Descending;
 		}
@@ -557,7 +557,7 @@ impl Combined {
 	}
 }
 
-/// A frame-precise point in a track: a group sequence and a frame index within it.
+/// A frame-precise point in a track: a group key and a frame index within it.
 ///
 /// Ordered lexicographically, so comparing positions is the same as comparing groups
 /// and only falling back to frames within one. This is the model's counterpart of the
@@ -568,7 +568,7 @@ impl Combined {
 /// unrepresentable rather than merely undefined.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position {
-	/// The group sequence.
+	/// The group key.
 	pub group: u64,
 	/// The frame index within the group, numbered from 0 in write order.
 	pub frame: u64,
@@ -619,7 +619,7 @@ impl Position {
 
 	/// The first group this exclusive end excludes whole, `None` past the last group: the
 	/// boundary a wire that cannot name a frame carries as the track's end.
-	pub(crate) fn final_sequence(self) -> Option<u64> {
+	pub(crate) fn final_key(self) -> Option<u64> {
 		self.group.checked_add(u64::from(self.frame != 0))
 	}
 }
@@ -636,7 +636,7 @@ fn exclusive_end(bound: Bound<&u64>) -> Option<u64> {
 }
 
 // Normalize discrete ranges once, including the empty range above the last index.
-pub(super) fn sequence_bounds(range: impl RangeBounds<u64>) -> (u64, Option<u64>) {
+pub(super) fn key_bounds(range: impl RangeBounds<u64>) -> (u64, Option<u64>) {
 	let start = match range.start_bound() {
 		Bound::Included(&start) => start,
 		Bound::Excluded(&start) => match start.checked_add(1) {
@@ -648,9 +648,9 @@ pub(super) fn sequence_bounds(range: impl RangeBounds<u64>) -> (u64, Option<u64>
 	(start, exclusive_end(range.end_bound()))
 }
 
-/// Whether `sequence` is strictly below an exclusive cap. `None` is unbounded.
-pub(super) fn before_end(sequence: u64, end: Option<u64>) -> bool {
-	end.is_none_or(|end| sequence < end)
+/// Whether `key` is strictly below an exclusive cap. `None` is unbounded.
+pub(super) fn before_end(key: u64, end: Option<u64>) -> bool {
+	end.is_none_or(|end| key < end)
 }
 
 #[cfg(test)]
@@ -711,13 +711,13 @@ mod tests {
 
 		// A cursor cap is the first index it withholds; an inclusive bound at the last
 		// index withholds nothing.
-		assert_eq!(sequence_bounds(..0), (0, Some(0)));
-		assert_eq!(sequence_bounds(..=5), (0, Some(6)));
-		assert_eq!(sequence_bounds(..=u64::MAX), (0, None));
-		assert_eq!(sequence_bounds(..), (0, None));
+		assert_eq!(key_bounds(..0), (0, Some(0)));
+		assert_eq!(key_bounds(..=5), (0, Some(6)));
+		assert_eq!(key_bounds(..=u64::MAX), (0, None));
+		assert_eq!(key_bounds(..), (0, None));
 		assert_eq!(
-			sequence_bounds((Bound::Unbounded, Bound::Included(5))),
-			sequence_bounds(..6)
+			key_bounds((Bound::Unbounded, Bound::Included(5))),
+			key_bounds(..6)
 		);
 	}
 

@@ -72,7 +72,7 @@ impl Chain {
 		let mut group0 = track.append_group().unwrap();
 		group0.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
 		let mut read0 = sub.recv_group().await.unwrap().unwrap();
-		assert_eq!(read0.sequence, 0);
+		assert_eq!(read0.start, 0);
 		assert_eq!(
 			read0.read_frame().await.unwrap().unwrap().payload.to_vec(),
 			payload(0, 0)
@@ -82,7 +82,7 @@ impl Chain {
 		group1.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
 		group1.finish().unwrap();
 		let mut read1 = sub.recv_group().await.unwrap().unwrap();
-		assert_eq!(read1.sequence, 1);
+		assert_eq!(read1.start, 1);
 		assert_eq!(
 			read1.read_frame().await.unwrap().unwrap().payload.to_vec(),
 			payload(1, 0)

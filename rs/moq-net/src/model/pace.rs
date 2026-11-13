@@ -178,7 +178,7 @@ mod tests {
 
 	/// An untimed group with `frames` frames of a megabyte each.
 	fn written(frames: usize) -> group::Producer {
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		let payload = Bytes::from(vec![0u8; MB]);
 		for _ in 0..frames {
 			group.write_frame(None, payload.clone()).unwrap();
@@ -286,7 +286,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	fn metadata_counts_toward_the_window() {
 		let (_flag, waiter) = flag();
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		let _reader = group.consume();
 		for id in 0..15 {
 			let mut frame = group.create_object(fielded(id, MB)).unwrap();
@@ -361,7 +361,7 @@ mod tests {
 	fn a_local_writer_waits_for_a_reader_and_room() {
 		let (flag, waiter) = flag();
 		let small = info(0);
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		assert_eq!(group.poll_ready(&waiter, &small), Poll::Pending, "nobody reads yet");
 		let mut reader = group.consume();
 		assert!(flag.woken(), "a reader arriving wakes the writer");
@@ -392,7 +392,7 @@ mod tests {
 	#[test]
 	fn a_local_writer_waits_for_room_for_its_frame() {
 		let (_flag, waiter) = flag();
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		let mut reader = group.consume();
 		group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
 		read(&mut reader);
@@ -458,7 +458,7 @@ mod tests {
 	#[test]
 	fn a_reader_ahead_of_the_writer_never_stalls_it() {
 		let (_flag, waiter) = flag();
-		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut group = group::Info { start: 0 }.produce_untimed();
 		let mut reader = group.consume().with_range(20..);
 		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
 		for _ in 0..17 {

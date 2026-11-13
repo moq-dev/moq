@@ -16,7 +16,7 @@ use super::Timestamp;
 /// successor starts, plus its budget. The edge only ever takes a timestamp some frame
 /// write presented, so the write that crosses a deadline wakes the reads behind it and
 /// nobody else. The successor itself is watched per group (its first frame, its abort),
-/// except for a group landing between the read and it, which reads park on by sequence.
+/// except for a group landing between the read and it, which reads park on by key.
 ///
 /// A parked read also goes stale once the wall clock reaches its successor's arrival plus
 /// its budget. Nothing written moves that clock, so those reads park by instant and the
@@ -34,7 +34,7 @@ pub(super) struct Wakes {
 	/// Relaxed: a read registers before resolving the edge, under the group locks a
 	/// write takes before it presents, so a write the read missed sees its deadline.
 	earliest: AtomicU64,
-	/// The lowest sequence a parked time end watches for a start, or `u64::MAX`, so a first
+	/// The lowest key a parked time end watches for a start, or `u64::MAX`, so a first
 	/// frame below every one skips the lock. Ordered by the starts index's lock, which a
 	/// read takes after registering and a first frame before checking this.
 	starts_from: AtomicU64,
@@ -45,7 +45,7 @@ pub(super) struct Wakes {
 	/// read lock, which orders them against insertion too. First-frame reveal holds only
 	/// a track read lock and must always take the parked lock instead.
 	landing_waiters: AtomicBool,
-	/// The highest sequence a servable group ever landed at, or 0, so a read with nothing
+	/// The highest key a servable group ever landed at, or 0, so a read with nothing
 	/// above it skips the track lock. Nothing landing and group 0 landing put no group
 	/// above any read, so 0 serves both. Never lowered: a group that later fails or leaves
 	/// only sends the read the slow way.
@@ -61,7 +61,7 @@ struct Parked {
 	/// The `deadlines` size that sweeps out the lists every reader has left. A read that
 	/// returns or is dropped leaves its deadline behind, and distinct budgets never share one.
 	deadlines_sweep: usize,
-	/// Reads by their group's sequence, woken when a group lands above them.
+	/// Reads by their group's key, woken when a group lands above them.
 	landings: BTreeMap<u64, kio::WaiterList>,
 	/// `landings` for groups held from another copy, also woken by their own group
 	/// landing here. Kept apart because this track may never have held them, so falling
@@ -72,7 +72,7 @@ struct Parked {
 	/// Exact cache arrivals, independent of the live edge and neighbouring groups.
 	arrivals: BTreeMap<u64, kio::WaiterList>,
 	arrival_sweep: usize,
-	/// Reads parked on a time end, by the lowest sequence whose start could move it.
+	/// Reads parked on a time end, by the lowest key whose start could move it.
 	starts: BTreeMap<u64, kio::WaiterList>,
 	starts_sweep: usize,
 	/// Reads by wall-clock deadline, released by the pool's driver.
@@ -196,34 +196,34 @@ impl Wakes {
 		next
 	}
 
-	/// A servable group was inserted at `sequence`: returns whether a landing read may be
+	/// A servable group was inserted at `key`: returns whether a landing read may be
 	/// parked for it to wake.
-	pub(super) fn land(&self, sequence: u64) -> bool {
-		self.newest.fetch_max(sequence, Ordering::Relaxed);
+	pub(super) fn land(&self, key: u64) -> bool {
+		self.newest.fetch_max(key, Ordering::Relaxed);
 		// Pairs with the fence in `watch_landing`.
 		fence(Ordering::SeqCst);
 		self.landing_waiters.load(Ordering::Relaxed)
 	}
 
-	/// Park `waiter` until a group lands above `sequence`, returning whether one already
+	/// Park `waiter` until a group lands above `key`, returning whether one already
 	/// has. Needs no track lock: a group landing after it either wakes `waiter` or is seen.
 	///
-	/// `false` means no servable group ever landed above `sequence`, so it has no successor
+	/// `false` means no servable group ever landed above `key`, so it has no successor
 	/// and neither of the budget's clocks can convict it yet.
-	pub(super) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) -> bool {
+	pub(super) fn watch_landing(&self, key: u64, waiter: &kio::Waiter) -> bool {
 		{
 			let mut parked = self.parked.lock();
-			parked.landings.entry(sequence).or_default().register(waiter);
+			parked.landings.entry(key).or_default().register(waiter);
 			self.landing_waiters.store(true, Ordering::Relaxed);
 		}
 		// Pairs with the fence in `land`.
 		fence(Ordering::SeqCst);
-		self.newest.load(Ordering::Relaxed) > sequence
+		self.newest.load(Ordering::Relaxed) > key
 	}
 
-	/// Park `waiter`, holding group `sequence` from another copy, until it or a group
+	/// Park `waiter`, holding group `key` from another copy, until it or a group
 	/// above it lands.
-	pub(super) fn watch_held(&self, sequence: u64, waiter: &kio::Waiter) {
+	pub(super) fn watch_held(&self, key: u64, waiter: &kio::Waiter) {
 		let mut parked = self.parked.lock();
 		let parked = &mut *parked;
 		// Sweep only once the map has doubled, so each sweep is paid for by the keys
@@ -233,18 +233,18 @@ impl Wakes {
 			parked.held.retain(|_, list| !list.is_empty());
 			parked.held_sweep = sweep_at(parked.held.len());
 		}
-		parked.held.entry(sequence).or_default().register(waiter);
+		parked.held.entry(key).or_default().register(waiter);
 		self.landing_waiters.store(true, Ordering::Relaxed);
 	}
 
 	/// Park until this exact group is cached, or a declared boundary excludes it.
-	pub(super) fn watch_arrival(&self, sequence: u64, waiter: &kio::Waiter) {
+	pub(super) fn watch_arrival(&self, key: u64, waiter: &kio::Waiter) {
 		let mut parked = self.parked.lock();
 		if parked.arrivals.len() >= parked.arrival_sweep {
 			parked.arrivals.retain(|_, list| !list.is_empty());
 			parked.arrival_sweep = sweep_at(parked.arrivals.len());
 		}
-		parked.arrivals.entry(sequence).or_default().register(waiter);
+		parked.arrivals.entry(key).or_default().register(waiter);
 	}
 
 	/// Park `waiter` until a group at or above `from` starts.
@@ -258,16 +258,16 @@ impl Wakes {
 		self.starts_from.fetch_min(from, Ordering::Relaxed);
 	}
 
-	/// Group `sequence` started: wake the time ends it could move.
-	pub(super) fn started(&self, sequence: u64) {
-		if sequence < self.starts_from.load(Ordering::Relaxed) {
+	/// Group `key` started: wake the time ends it could move.
+	pub(super) fn started(&self, key: u64) {
+		if key < self.starts_from.load(Ordering::Relaxed) {
 			return;
 		}
 		let mut woken = Vec::new();
 		{
 			let mut parked = self.parked.lock();
 			while let Some(entry) = parked.starts.first_entry()
-				&& *entry.key() <= sequence
+				&& *entry.key() <= key
 			{
 				woken.push(entry.remove());
 			}
@@ -292,11 +292,11 @@ impl Wakes {
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
 
-	/// A servable group landed at `sequence`, so it succeeds every read from `below`, the
+	/// A servable group landed at `key`, so it succeeds every read from `below`, the
 	/// nearest servable group beneath it, up, and continues a held group of its own
-	/// sequence. Reads below `oldest`, the first group still cached, can no longer expire
+	/// key. Reads below `oldest`, the first group still cached, can no longer expire
 	/// and are forgotten; held groups are not.
-	pub(super) fn landed(&self, below: Option<u64>, sequence: u64, oldest: u64) {
+	pub(super) fn landed(&self, below: Option<u64>, key: u64, oldest: u64) {
 		let mut woken = Vec::new();
 		{
 			let mut parked = self.parked.lock();
@@ -307,10 +307,10 @@ impl Wakes {
 				entry.remove();
 			}
 			let from = below.unwrap_or(0);
-			while let Some(at) = parked.landings.range(from..sequence).next().map(|(at, _)| *at) {
+			while let Some(at) = parked.landings.range(from..key).next().map(|(at, _)| *at) {
 				woken.extend(parked.landings.remove(&at));
 			}
-			while let Some(at) = parked.held.range(from..=sequence).next().map(|(at, _)| *at) {
+			while let Some(at) = parked.held.range(from..=key).next().map(|(at, _)| *at) {
 				woken.extend(parked.held.remove(&at));
 			}
 			parked.held_sweep = lower(parked.held_sweep, parked.held.len());
@@ -387,7 +387,7 @@ mod test {
 		assert!(wakes.land(u64::MAX));
 		assert!(
 			wakes.watch_landing(u64::MAX - 1, &waiter),
-			"the last sequence is above it"
+			"the last key is above it"
 		);
 		wakes.wake_all();
 		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
@@ -399,11 +399,11 @@ mod test {
 	fn held_groups_do_not_accumulate_across_route_switches() {
 		let wakes = Wakes::default();
 		let mut reader = None;
-		for sequence in 0..100 {
+		for key in 0..100 {
 			// The last switch's reader gave its group up.
 			drop(reader.take());
 			let waiter = parked();
-			wakes.watch_held(sequence, &waiter);
+			wakes.watch_held(key, &waiter);
 			reader = Some(waiter);
 		}
 		assert!(

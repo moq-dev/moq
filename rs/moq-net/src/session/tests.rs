@@ -131,7 +131,7 @@ async fn a_subscription_keeps_both_ends_busy() {
 			.expect("recv timeout")
 			.expect("recv")
 			.expect("the track ended");
-		assert_eq!(received.sequence, 0, "{version}");
+		assert_eq!(received.start, 0, "{version}");
 		assert!(!idle(&pair.client), "{version}: idle while serving a subscription");
 		assert!(!idle(&pair.server), "{version}: idle while holding a subscription");
 

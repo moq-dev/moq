@@ -33,7 +33,7 @@
 //! `session_delivery_datagram` writes to a datagram track per broadcast instead of groups:
 //! one datagram per track per round across publisher and viewer axes, then larger payloads
 //! and cadences, on moq-lite and moq-transport-22. Throughput counts delivered datagrams,
-//! each checked for its sequence and payload, so a lost one fails.
+//! each checked for its key and payload, so a lost one fails.
 //! Delivery uses expiry-only pools: history expires between rounds outside timing,
 //! so byte pressure cannot shed unread frames during a batch.
 //! `SESSION_EXPIRY_ONLY=1` advances the cache clock by a second instead of the 30s
@@ -522,7 +522,7 @@ fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
 	let group = group.finish().unwrap();
-	group.sequence
+	group.start
 }
 
 /// Read one whole group, returning its payload bytes so skipped work can't look
@@ -1044,8 +1044,8 @@ impl<B: Backend> Room<B> {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
 						let newest = newest[*broadcast];
-						for sequence in newest + 1 - burst..=newest {
-							let mut group = track.fetch_group(sequence, None).await.unwrap();
+						for key in newest + 1 - burst..=newest {
+							let mut group = track.fetch_group(key, None).await.unwrap();
 							while let Some(frame) = group.read_frame().await.unwrap() {
 								bytes += frame.payload.len();
 							}
@@ -1085,7 +1085,7 @@ impl<B: Backend> Room<B> {
 		}
 	}
 
-	/// Line every viewer up on the same next sequence before the strict rounds.
+	/// Line every viewer up on the same next key before the strict rounds.
 	///
 	/// A consumer is live once its track's info arrives, but on lite-05/06 the SUBSCRIBE
 	/// that carries the datagrams follows that answer, so a datagram may still miss it.
@@ -1418,8 +1418,8 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								}
 							})
 							.await;
-							for sequence in next..future {
-								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), sequence);
+							for key in next..future {
+								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), key);
 							}
 							let started = Instant::now();
 							for viewer in &mut viewers {
@@ -1461,11 +1461,11 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 						let cluster = Cluster::<B>::new(version, *shape, false).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
-							for sequence in 0..shape.history {
+							for key in 0..shape.history {
 								let mut group = track.append_group().unwrap();
 								for _ in 0..shape.group_frames {
 									group
-										.write_frame(Timestamp::from_millis(sequence as u64).unwrap(), payload.clone())
+										.write_frame(Timestamp::from_millis(key as u64).unwrap(), payload.clone())
 										.unwrap();
 								}
 								group.finish().unwrap();

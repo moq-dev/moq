@@ -101,7 +101,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 				match group.read_frame().await {
 					Ok(Some(frame)) => {
 						if tx
-							.unbounded_send((group.sequence, Ok((frame.timestamp, frame.payload.to_vec()))))
+							.unbounded_send((group.start, Ok((frame.timestamp, frame.payload.to_vec()))))
 							.is_err()
 						{
 							return;
@@ -109,7 +109,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 					}
 					Ok(None) => break,
 					Err(err) => {
-						let _ = tx.unbounded_send((group.sequence, Err(err)));
+						let _ = tx.unbounded_send((group.start, Err(err)));
 						break;
 					}
 				}
@@ -155,7 +155,7 @@ struct Topology {
 	_pushes: Vec<MockPair>,
 	s_to_a: Option<MockPair>,
 	s_to_b: MockPair,
-	sequence: u64,
+	key: u64,
 }
 
 impl Topology {
@@ -192,7 +192,7 @@ impl Topology {
 			_pushes: pushes,
 			s_to_a: Some(s_to_a),
 			s_to_b,
-			sequence: 0,
+			key: 0,
 		}
 	}
 
@@ -205,15 +205,15 @@ impl Topology {
 
 	/// Write one full group, returning what the reader should see.
 	fn group(&mut self) -> Vec<(u64, Vec<u8>)> {
-		let sequence = self.sequence;
-		self.sequence += 1;
+		let key = self.key;
+		self.key += 1;
 		let mut group = self.track.append_group().unwrap();
 		let mut written = Vec::new();
 		for frame in 0..FRAMES {
 			group
-				.write_frame(timestamp(sequence, frame), payload(sequence, frame))
+				.write_frame(timestamp(key, frame), payload(key, frame))
 				.unwrap();
-			written.push((sequence, payload(sequence, frame)));
+			written.push((key, payload(key, frame)));
 		}
 		group.finish().unwrap();
 		written
@@ -376,8 +376,8 @@ async fn restarts_across_protocols(secondary: &str) {
 			"the old route did not end its track: {rest:?}"
 		);
 		let mut fresh = topology.subscribe().await;
-		let (sequence, _, bytes) = next(&mut fresh).await;
-		assert_eq!(sequence, 1, "the fresh subscription joins the current group");
+		let (key, _, bytes) = next(&mut fresh).await;
+		assert_eq!(key, 1, "the fresh subscription joins the current group");
 		assert_eq!(bytes, payload(1, 0));
 		drop((topology.publisher, topology.cdn_b));
 	})

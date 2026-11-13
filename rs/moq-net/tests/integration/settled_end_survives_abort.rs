@@ -27,8 +27,8 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 const GROUPS: u64 = 2;
 
 /// Publish `GROUPS` finished groups, declare the end at `GROUPS`, then abort the track.
-/// Returns the sequences a consumer that starts reading only now receives, in arrival
-/// or in sequence order, and how the read ended.
+/// Returns the keys a consumer that starts reading only now receives, in arrival
+/// or in key order, and how the read ended.
 async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	let origin = produce_origin(1);
 	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
@@ -57,7 +57,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 		let mut consumer = consumer.ordered();
 		loop {
 			match consumer.next_group().await {
-				Ok(Some(group)) => got.push(group.sequence),
+				Ok(Some(group)) => got.push(group.start),
 				Ok(None) => return (got, None),
 				Err(err) => return (got, Some(err)),
 			}
@@ -65,7 +65,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	}
 	loop {
 		match consumer.recv_group().await {
-			Ok(Some(group)) => got.push(group.sequence),
+			Ok(Some(group)) => got.push(group.start),
 			Ok(None) => return (got, None),
 			Err(err) => return (got, Some(err)),
 		}
@@ -86,15 +86,15 @@ async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_reader() {
 	assert_whole(round(true, false).await, "arrival order, aborted after the end settled");
 }
 
-/// The same in sequence order: the ordered cursor ends clean too, not with the abort.
+/// The same in key order: the ordered cursor ends clean too, not with the abort.
 #[kio::test]
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_ordered_reader() {
-	assert_whole(round(true, true).await, "sequence order, aborted after the end settled");
+	assert_whole(round(true, true).await, "key order, aborted after the end settled");
 }
 
 /// Control: with no abort the same late reader gets every group, then the clean end.
 #[kio::test]
 async fn a_settled_track_delivers_every_group_to_a_late_reader() {
 	assert_whole(round(false, false).await, "arrival order, no abort");
-	assert_whole(round(false, true).await, "sequence order, no abort");
+	assert_whole(round(false, true).await, "key order, no abort");
 }

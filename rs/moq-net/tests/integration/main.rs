@@ -91,6 +91,6 @@ mod unannounce_release;
 mod untimed;
 mod viewer_target;
 mod warm_backfill;
-mod wide_sequence;
+mod wide_key;
 mod widened_max_age;
 mod zero_copy;

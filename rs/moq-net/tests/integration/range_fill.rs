@@ -53,10 +53,10 @@ impl Fixture {
 			)
 			.unwrap();
 		broadcast.announce().unwrap();
-		for sequence in 0..groups {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		for key in 0..groups {
+			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
 			group.finish().unwrap();
 		}
@@ -108,7 +108,7 @@ impl Fixture {
 	}
 }
 
-/// The sequences of the next `count` groups `reader` receives.
+/// The keys of the next `count` groups `reader` receives.
 async fn receive(reader: &mut moq_net::track::Subscriber, count: usize) -> BTreeSet<u64> {
 	let mut got = BTreeSet::new();
 	while got.len() < count {
@@ -117,7 +117,7 @@ async fn receive(reader: &mut moq_net::track::Subscriber, count: usize) -> BTree
 			.expect("group timeout")
 			.unwrap()
 			.expect("a group");
-		got.insert(group.sequence);
+		got.insert(group.start);
 	}
 	got
 }
@@ -143,7 +143,7 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		// The live subscription goes on.
 		let mut group = fixture
 			.track
-			.create_group(moq_net::group::Info { sequence: 6 })
+			.create_group(moq_net::group::Info { start: 6 })
 			.unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())

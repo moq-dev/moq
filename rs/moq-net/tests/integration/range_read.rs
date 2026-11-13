@@ -21,18 +21,18 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer.with_proxy(true)
 }
 
-fn write_group(track: &mut moq_net::track::Producer, sequence: u64) {
+fn write_group(track: &mut moq_net::track::Producer, key: u64) {
 	let mut group = track.append_group().unwrap();
-	assert_eq!(group.sequence, sequence);
+	assert_eq!(group.start, key);
 	for frame in 0..2u64 {
-		let at = Timestamp::from_millis(sequence * 100 + frame).unwrap();
-		group.write_frame(at, payload(sequence, frame)).unwrap();
+		let at = Timestamp::from_millis(key * 100 + frame).unwrap();
+		group.write_frame(at, payload(key, frame)).unwrap();
 	}
 	group.finish().unwrap();
 }
 
-fn payload(sequence: u64, frame: u64) -> Vec<u8> {
-	format!("{sequence}-{frame}").into_bytes()
+fn payload(key: u64, frame: u64) -> Vec<u8> {
+	format!("{key}-{frame}").into_bytes()
 }
 
 /// Each group a one-range read of `range` gets, read whole, until it ends.
@@ -51,8 +51,8 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Vec<u64> {
 		{
 			frames.push(frame.payload.to_vec());
 		}
-		assert_eq!(frames, [payload(group.sequence, 0), payload(group.sequence, 1)]);
-		read.push(group.sequence);
+		assert_eq!(frames, [payload(group.start, 0), payload(group.start, 1)]);
+		read.push(group.start);
 	}
 	read
 }
@@ -77,8 +77,8 @@ async fn fixture(
 		)
 		.unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..3 {
-		write_group(&mut track, sequence);
+	for key in 0..3 {
+		write_group(&mut track, key);
 	}
 
 	let middle = produce_origin(2);
@@ -141,8 +141,8 @@ async fn straddling(version: Version, relay: bool) {
 	let mut sub = remote.track("video").unwrap().subscribe(one_range(1..5)).await.unwrap();
 	let reading = kio::clock::sim::spawn(async move { read(&mut sub).await });
 	kio::clock::sleep(Duration::from_millis(50)).await;
-	for sequence in 3..6 {
-		write_group(&mut track, sequence);
+	for key in 3..6 {
+		write_group(&mut track, key);
 	}
 	// Arrival order: an older wire sends a backlog in no particular order.
 	let mut read = reading.await.unwrap();

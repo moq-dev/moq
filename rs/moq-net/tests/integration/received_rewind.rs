@@ -19,7 +19,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A group's sequence and its first frame's timestamp, or the error reading it.
+/// A group's key and its first frame's timestamp, or the error reading it.
 type Read = (u64, Result<Option<moq_net::Timestamp>, moq_net::Error>);
 
 fn millis(ms: u64) -> moq_net::Timestamp {
@@ -36,16 +36,16 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer.with_proxy(true)
 }
 
-fn write_group(track: &moq_net::track::Producer, sequence: u64) {
-	// A timed track's group starts at its sequence in seconds, so none rewinds.
-	let timestamp = track.info().timescale.map(|_| millis(sequence * 1000));
-	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+fn write_group(track: &moq_net::track::Producer, key: u64) {
+	// A timed track's group starts at its key in seconds, so none rewinds.
+	let timestamp = track.info().timescale.map(|_| millis(key * 1000));
+	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 	group.write_frame(timestamp, &b"x"[..]).unwrap();
 	group.finish().unwrap();
 }
 
 /// Groups 1 then 0 of a track at `timescale`, into a relay over `upstream` and out over
-/// `downstream`. Returns the scale the subscriber learned and, per group read, its sequence
+/// `downstream`. Returns the scale the subscriber learned and, per group read, its key
 /// and its first frame's timestamp or the error reading it.
 async fn relay(
 	upstream: &str,
@@ -104,7 +104,7 @@ async fn relay(
 				.await
 				.expect("read_frame timed out")
 				.map(|frame| frame.expect("a frame").timestamp);
-			got.push((group.sequence, read));
+			got.push((group.start, read));
 		}
 		(timescale, got)
 	});
@@ -136,10 +136,10 @@ async fn a_relay_forwards_descending_send_times_without_closing_the_track() {
 	let mut failures = Vec::new();
 	for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let (timescale, got) = relay("moq-lite-06", downstream, None).await;
-		let sequences: Vec<_> = got.iter().map(|(sequence, _)| *sequence).collect();
+		let keys: Vec<_> = got.iter().map(|(key, _)| *key).collect();
 		let refused = downstream == "moq-lite-07-wip";
 		let ok = timescale == Some(moq_net::Timescale::MILLI)
-			&& sequences == [1, 0]
+			&& keys == [1, 0]
 			&& matches!(got[0].1, Ok(Some(_)))
 			&& match &got[1].1 {
 				Err(moq_net::Error::TimestampMismatch) => refused,
@@ -206,9 +206,9 @@ async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq
 		.unwrap();
 
 	let mut got = Vec::new();
-	for sequence in [1, 0] {
+	for key in [1, 0] {
 		let read = async {
-			let mut group = remote.track("data").unwrap().fetch_group(sequence, None).await?;
+			let mut group = remote.track("data").unwrap().fetch_group(key, None).await?;
 			let timestamp = group.read_frame().await?.expect("a frame").timestamp;
 			while group.read_frame().await?.is_some() {}
 			Ok(timestamp)

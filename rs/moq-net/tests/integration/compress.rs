@@ -155,7 +155,7 @@ async fn a_start_group_arrives_whole() {
 						let published = publish(info);
 						let mut group = published
 							.track
-							.create_group(moq_net::group::Info { sequence: 5 })
+							.create_group(moq_net::group::Info { start: 5 })
 							.unwrap();
 						write(&mut group, 0..head);
 						let mut fixture = relay(published, hops, Subscription::default().with_range(5..)).await;
@@ -169,7 +169,7 @@ async fn a_start_group_arrives_whole() {
 						write(&mut group, head..5);
 						group.finish().unwrap();
 						let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
-						assert_eq!(reading.sequence, 5, "{case}");
+						assert_eq!(reading.start, 5, "{case}");
 						for index in 0..5 {
 							assert_eq!(
 								reading.read_frame().await.unwrap().unwrap().payload,

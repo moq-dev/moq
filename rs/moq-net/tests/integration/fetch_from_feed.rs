@@ -64,11 +64,11 @@ async fn relay(version: &str) -> Relay {
 	}
 }
 
-/// The error a fetch of `sequence` fails with.
-async fn fetch_err(relay: &Relay, sequence: u64) -> moq_net::Error {
-	let fetching = relay.remote.track("video").unwrap().fetch_group(sequence, None);
+/// The error a fetch of `key` fails with.
+async fn fetch_err(relay: &Relay, key: u64) -> moq_net::Error {
+	let fetching = relay.remote.track("video").unwrap().fetch_group(key, None);
 	match kio::clock::timeout(TIMEOUT, fetching).await.expect("fetch timed out") {
-		Ok(_) => panic!("group {sequence} was served"),
+		Ok(_) => panic!("group {key} was served"),
 		Err(err) => err,
 	}
 }
@@ -87,7 +87,7 @@ async fn a_fetch_is_served_from_the_live_feed() {
 			.expect("group timeout")
 			.unwrap()
 			.expect("a group")
-			.sequence;
+			.start;
 
 		// Reaches the relay before the group exists, so it can't be a plain cache hit.
 		let next = first + 1;
@@ -151,7 +151,7 @@ async fn an_unfed_fetch_is_a_miss() {
 
 		relay.track.write_frame(None, &b"1"[..]).unwrap();
 		// The publisher skips group 2, so the feed goes past it.
-		let mut skipped = relay.track.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
+		let mut skipped = relay.track.create_group(moq_net::group::Info { start: 3 }).unwrap();
 		skipped.write_frame(None, &b"3"[..]).unwrap();
 		skipped.finish().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
@@ -163,7 +163,7 @@ async fn an_unfed_fetch_is_a_miss() {
 			.expect("group timeout")
 			.unwrap()
 			.expect("a group")
-			.sequence;
+			.start;
 		assert_eq!(first, 3, "{version}");
 		let err = fetch_err(&relay, 2).await;
 		assert!(matches!(err, moq_net::Error::NotFound), "{version}: passed: {err}");

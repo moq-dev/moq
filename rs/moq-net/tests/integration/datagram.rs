@@ -224,7 +224,7 @@ async fn a_stream_track_and_a_datagram_track_share_a_name_independently() {
 		.expect("group timeout")
 		.unwrap()
 		.expect("a group");
-	assert_eq!(group.sequence, 0);
+	assert_eq!(group.start, 0);
 	assert_eq!(
 		&group.read_frame().await.unwrap().expect("a frame").payload[..],
 		b"frame"
@@ -235,7 +235,7 @@ async fn a_stream_track_and_a_datagram_track_share_a_name_independently() {
 		.expect("group timeout")
 		.unwrap()
 		.expect("a group");
-	assert_eq!(group.sequence, 1);
+	assert_eq!(group.start, 1);
 }
 
 /// On lite-07 a name that has only a datagram track has no stream track to subscribe to.
@@ -418,7 +418,7 @@ async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expect
 			.expect("end timeout");
 		match end {
 			Ok(None) => {}
-			Ok(Some(group)) => panic!("{version}: a group {}", group.sequence),
+			Ok(Some(group)) => panic!("{version}: a group {}", group.start),
 			Err(err) => panic!("{version}: {err:?}"),
 		}
 	}

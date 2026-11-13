@@ -2338,7 +2338,7 @@ enum SubscribeServe {
 		priority: i8,
 		/// Set once the track's info is known.
 		send: Option<DatagramSend>,
-		/// One past the highest sequence served, which SUBSCRIBE_FINISH declares as the end.
+		/// One past the highest key served, which SUBSCRIBE_FINISH declares as the end.
 		end: u64,
 	},
 	/// The track finished: draining the in-flight group streams before the FIN.
@@ -2393,7 +2393,7 @@ impl Request for SubscribeServe {
 			Ok(track) => track,
 			Err(err) => return Ok(Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, None)),
 		};
-		let latest = track.latest_sequence();
+		let latest = track.latest_key();
 		if Bounds::has_time(&msg.ranges) {
 			let querying = track.info().into_inner();
 			return Ok(Self::Query {
@@ -2582,7 +2582,7 @@ impl Request for SubscribeServe {
 					let latest = match shared.version {
 						Version::Lite01 | Version::Lite02 => latest,
 						_ => latest
-							.max(track.latest_sequence())
+							.max(track.latest_key())
 							.max(track.peek_largest().map(|largest| largest.group)),
 					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
@@ -2959,7 +2959,7 @@ impl DatagramSend {
 	/// dropped, as a datagram may be anywhere, if its body doesn't fit the transport's
 	/// datagram size or the transport has no room for it now.
 	///
-	/// Fails on a sequence the version's varints cannot carry (2^62 and up before lite-07):
+	/// Fails on a key the version's varints cannot carry (2^62 and up before lite-07):
 	/// every datagram its source produces later is at least as far, so the subscription can
 	/// deliver no more. One the network reordered below it is lost, as any datagram may be.
 	fn send(&self, datagram: crate::datagram::Datagram) -> Result<(), Error> {
@@ -3390,11 +3390,11 @@ mod test {
 				))
 			};
 		let drain = |subscriber: &mut track::Subscriber| {
-			let mut sequences = Vec::new();
+			let mut keys = Vec::new();
 			while let Some(Ok(Some(group))) = subscriber.recv_group().now_or_never() {
-				sequences.push(group.sequence);
+				keys.push(group.start);
 			}
-			sequences
+			keys
 		};
 
 		let mut unpinned = served(Version::Lite01);
@@ -3405,7 +3405,7 @@ mod test {
 		);
 
 		let legacy = served(Version::Lite01);
-		let mut legacy = legacy.with_range(cursor_floor(Version::Lite01, None, producer.latest_sequence())..);
+		let mut legacy = legacy.with_range(cursor_floor(Version::Lite01, None, producer.latest_key())..);
 		assert_eq!(drain(&mut legacy), vec![2]);
 
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
@@ -3414,7 +3414,7 @@ mod test {
 			track::Subscription::default()
 				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(5))),
 		);
-		let mut tolerant = tolerant.with_range(cursor_floor(Version::Lite05, None, producer.latest_sequence())..);
+		let mut tolerant = tolerant.with_range(cursor_floor(Version::Lite05, None, producer.latest_key())..);
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
@@ -3422,7 +3422,7 @@ mod test {
 			track::Subscription::default()
 				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(5))),
 		);
-		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_sequence())..);
+		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_key())..);
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
@@ -3436,8 +3436,8 @@ mod test {
 		let mut producer = track_producer("test");
 		let mut subscriber = producer.subscribe(None);
 
-		let write = |producer: &mut track::Producer, sequence: u64| {
-			let mut group = producer.create_group(crate::group::Info { sequence }).unwrap();
+		let write = |producer: &mut track::Producer, key: u64| {
+			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
 				.unwrap();
@@ -3449,8 +3449,8 @@ mod test {
 		write(&mut producer, 7);
 		match recv_next(&mut subscriber, false).await.unwrap() {
 			Recv::Group(group) => {
-				assert_eq!(group.sequence, 7);
-				subscriber.set_range(group.sequence..);
+				assert_eq!(group.start, 7);
+				subscriber.set_range(group.start..);
 			}
 			_ => panic!("expected the first group"),
 		}
@@ -3475,8 +3475,8 @@ mod test {
 				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(60))),
 		);
 
-		let write = |producer: &mut track::Producer, sequence: u64| {
-			let mut group = producer.create_group(crate::group::Info { sequence }).unwrap();
+		let write = |producer: &mut track::Producer, key: u64| {
+			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
 				.unwrap();
@@ -3485,13 +3485,13 @@ mod test {
 
 		write(&mut producer, 7);
 		match recv_next(&mut subscriber, false).await.unwrap() {
-			Recv::Group(group) => assert_eq!(group.sequence, 7),
+			Recv::Group(group) => assert_eq!(group.start, 7),
 			_ => panic!("expected the first group"),
 		}
 
 		write(&mut producer, 5);
 		match recv_next(&mut subscriber, false).await.unwrap() {
-			Recv::Group(group) => assert_eq!(group.sequence, 5),
+			Recv::Group(group) => assert_eq!(group.start, 5),
 			_ => panic!("expected the late group above the floor"),
 		}
 	}
@@ -3503,7 +3503,7 @@ mod test {
 
 		// The last group is 6 (exclusive 7), but only group 5 has been produced so far.
 		producer
-			.create_group(group::Info { sequence: 5 })
+			.create_group(group::Info { start: 5 })
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -3511,7 +3511,7 @@ mod test {
 
 		// Group 5 is delivered first.
 		match recv_next(&mut subscriber, true).await.unwrap() {
-			Recv::Group(group) => assert_eq!(group.sequence, 5),
+			Recv::Group(group) => assert_eq!(group.start, 5),
 			_ => panic!("expected group 5"),
 		}
 
@@ -3525,12 +3525,12 @@ mod test {
 		// The caller stops requesting the boundary once sent. The trailing group arrives,
 		// then the track finishes.
 		producer
-			.create_group(group::Info { sequence: 6 })
+			.create_group(group::Info { start: 6 })
 			.unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
-			Recv::Group(group) => assert_eq!(group.sequence, 6),
+			Recv::Group(group) => assert_eq!(group.start, 6),
 			_ => panic!("expected group 6"),
 		}
 		match recv_next(&mut subscriber, false).await.unwrap() {
@@ -3572,7 +3572,7 @@ mod test {
 
 	/// A relay can ingest back-to-back groups micro-reordered (the upstream leg
 	/// sends newest-first). The older group is cached and in demand, so serving
-	/// must still deliver it; a sequence cursor would skip it permanently.
+	/// must still deliver it; a key cursor would skip it permanently.
 	#[kio::test]
 	async fn recv_next_serves_late_arrival_after_newer_group() {
 		use futures::FutureExt;
@@ -3583,23 +3583,23 @@ mod test {
 		);
 
 		producer
-			.create_group(group::Info { sequence: 2 })
+			.create_group(group::Info { start: 2 })
 			.unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
-			Recv::Group(group) => assert_eq!(group.sequence, 2),
+			Recv::Group(group) => assert_eq!(group.start, 2),
 			_ => panic!("expected group 2"),
 		}
 
 		// Group 1 lands after group 2 was already served.
 		producer
-			.create_group(group::Info { sequence: 1 })
+			.create_group(group::Info { start: 1 })
 			.unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).now_or_never() {
-			Some(Ok(Recv::Group(group))) => assert_eq!(group.sequence, 1),
+			Some(Ok(Recv::Group(group))) => assert_eq!(group.start, 1),
 			Some(_) => panic!("expected the late-arriving group"),
 			None => panic!("the late-arriving group was skipped"),
 		}
@@ -4669,7 +4669,7 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 }
 
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the track
-/// declaring its exclusive final sequence, or the track finishing (the live edge having
+/// declaring its exclusive final key, or the track finishing (the live edge having
 /// reached that boundary).
 #[allow(
 	clippy::large_enum_variant,
@@ -4683,25 +4683,25 @@ enum Recv {
 
 /// The group boundary SUBSCRIBE_FINISH carries. Lite cannot name a frame, so a mid-group end
 /// rounds up past its group, whose own stream FIN says where it stops.
-fn final_sequence(end: track::Position) -> u64 {
-	end.final_sequence().unwrap_or(u64::MAX)
+fn final_key(end: track::Position) -> u64 {
+	end.final_key().unwrap_or(u64::MAX)
 }
 
-/// Every group sequence, for [`poll_recv_next`] to hand out any.
+/// Every group key, for [`poll_recv_next`] to hand out any.
 const ALL: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
 
 /// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order).
 ///
-/// Groups are served in arrival order (`poll_recv_group`), not sequence order: on a relay, a
-/// burst can be ingested micro-reordered by the upstream leg, and a sequence cursor would then
+/// Groups are served in arrival order (`poll_recv_group`), not key order: on a relay, a
+/// burst can be ingested micro-reordered by the upstream leg, and a key cursor would then
 /// permanently skip the older group even though it is cached and in demand. Staleness is
 /// governed by max age and the subscriber's max delay, not arrival raciness.
 ///
-/// The cursor hands out the next group only if its sequence lies in `groups`, leaving it in
+/// The cursor hands out the next group only if its key lies in `groups`, leaving it in
 /// the cache otherwise, and without `groups` none at all. Either way it then never reports
 /// [`Recv::Finished`].
 ///
-/// When `emit_boundary` is set, a declared-but-not-yet-reached final sequence surfaces as
+/// When `emit_boundary` is set, a declared-but-not-yet-reached final key surfaces as
 /// [`Recv::Boundary`] in an idle moment (after groups), so the caller can send
 /// SUBSCRIBE_FINISH as soon as the ending is known rather than waiting for the live edge to reach
 /// it. The caller clears `emit_boundary` after the first boundary so it fires once.
@@ -4738,12 +4738,12 @@ fn poll_recv_next(
 			let withheld = !end_error
 				&& !groups_finished
 				&& error.is_some()
-				&& res.as_ref().is_ok_and(|end| track.reaches(final_sequence(*end)));
+				&& res.as_ref().is_ok_and(|end| track.reaches(final_key(*end)));
 			if !withheld {
 				let error = error.filter(|_| end_error);
 				return Poll::Ready(res.map(|end| {
 					Recv::Boundary(lite::SubscribeFinish {
-						group: final_sequence(end),
+						group: final_key(end),
 						error: error.as_ref().map(StreamError::from),
 					})
 				}));
@@ -4770,8 +4770,8 @@ async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result
 /// partial group, so it must be skipped: a group is the unit of decodability, and only
 /// the subscriber knows whether a partial one is any use to it.
 fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Consumer> {
-	let expected = frames.start(group.sequence);
-	let end = frames.end(group.sequence).map_or(Bound::Unbounded, Bound::Included);
+	let expected = frames.start(group.start);
+	let end = frames.end(group.start).map_or(Bound::Unbounded, Bound::Included);
 
 	// The start clamps up to the first frame the group still holds, so landing higher
 	// than asked means the frames below it are gone.
@@ -5039,7 +5039,7 @@ struct Paused {
 impl Paused {
 	/// Its rank for the subscription's stream credit in `order`, higher first.
 	fn rank(&self, order: crate::track::Order) -> i64 {
-		crate::priority::in_group(self.group.sequence, self.frame_start, order)
+		crate::priority::in_group(self.group.start, self.frame_start, order)
 	}
 }
 
@@ -5073,14 +5073,14 @@ impl Subscription {
 	#[cfg(test)]
 	async fn serve_group(
 		mut self,
-		sequence: u64,
+		key: u64,
 		frame_start: u64,
 		priority: PriorityHandle,
 		group: group::Consumer,
 	) -> Result<(), Error> {
 		let mut serve = Box::new(GroupServe::new(
 			self.group_context(),
-			sequence,
+			key,
 			frame_start,
 			false,
 			Rank::Queue(priority),
@@ -5337,10 +5337,10 @@ impl TrackRun {
 		};
 		// `position_cursor` pins an unfloored SUBSCRIBE to the latest group, so a pre-06
 		// update that drops a named floor re-pins there too. On an empty track the next
-		// group is the latest, whatever its sequence.
+		// group is the latest, whatever its key.
 		let floor = match lowered {
 			None if requested.is_some() && !self.ctx.version.resolves_start() => {
-				Some(self.track.latest_sequence().unwrap_or(0))
+				Some(self.track.latest_key().unwrap_or(0))
 			}
 			floor => floor,
 		};
@@ -5375,12 +5375,12 @@ impl TrackRun {
 			// one re-offered that has not opened yet, since they may no longer admit it.
 			let mut expired = self.track.record_mut().expired();
 			for group in std::mem::take(&mut self.reoffered) {
-				expired.insert(group.sequence..group.sequence + 1);
+				expired.insert(group.start..group.start + 1);
 			}
 			expired.extend(std::mem::take(&mut self.redrop).iter().cloned());
 			for run in expired.iter() {
 				let (groups, gone) = self.track.reoffer_groups(run.clone());
-				self.owe(groups.iter().map(|group| group.sequence..group.sequence + 1).collect());
+				self.owe(groups.iter().map(|group| group.start..group.start + 1).collect());
 				self.reoffered.extend(groups);
 				self.redrop.extend(gone.iter().cloned());
 			}
@@ -5551,23 +5551,23 @@ impl TrackRun {
 		}
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
-			for (sequence, err) in dropped {
+			for (key, err) in dropped {
 				// A stream expired under this subscription's budget is a stale verdict.
 				let hole = match err {
 					// The pool folded the group while its stream was open, which is final for this
 					// reader: no update would re-offer a stale drop on it.
-					StreamError::Old if self.ctx.version.has_skip() && self.track.record_mut().folded(sequence) => {
+					StreamError::Old if self.ctx.version.has_skip() && self.track.record_mut().folded(key) => {
 						Hole::drop(StreamError::Evicted)
 					}
 					StreamError::Old => {
 						if self.ctx.version.has_skip() {
-							self.sent_stale(sequence..sequence + 1);
+							self.sent_stale(key..key + 1);
 						}
 						Hole::stale(self.track.budget())
 					}
 					err => Hole::drop(err),
 				};
-				writer.buffer(&self.hole(sequence..sequence + 1, &hole))?;
+				writer.buffer(&self.hole(key..key + 1, &hole))?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -5645,7 +5645,7 @@ impl TrackRun {
 			&& (self.opening.is_none() || stuck.is_some_and(|waiting| self.paused[best].rank(order) > waiting))
 		{
 			let Paused { group, frame_start } = self.paused.remove(best).expect("best is in range");
-			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, frame_start, "continuing paused group");
+			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key = group.start, frame_start, "continuing paused group");
 			self.give_way();
 			self.open(group, frame_start);
 			self.continuing = true;
@@ -5657,20 +5657,20 @@ impl TrackRun {
 		if self.opening.is_none()
 			&& let Some(group) = self.reoffered.pop_front()
 		{
-			let sequence = group.sequence;
+			let key = group.start;
 			// The pool folded it while it waited, which is final for this reader: tell the wire
 			// it is gone, since an update re-offered it.
-			if self.start.emits_range() && self.track.record_mut().folded(sequence) {
-				writer.buffer(&self.hole(sequence..sequence + 1, &Hole::drop(StreamError::Evicted)))?;
+			if self.start.emits_range() && self.track.record_mut().folded(key) {
+				writer.buffer(&self.hole(key..key + 1, &Hole::drop(StreamError::Evicted)))?;
 				return Poll::Ready(Ok(ControlFlow::Continue(())));
 			}
-			if self.start.emits_range() && self.track.record_mut().told(sequence) {
+			if self.start.emits_range() && self.track.record_mut().told(key) {
 				return Poll::Ready(Ok(ControlFlow::Continue(())));
 			}
 			match position_group(group, &self.frames) {
 				Some(group) => self.serve(group),
 				None => {
-					self.drop_range(sequence..sequence + 1, &Hole::drop(StreamError::NotFound), writer)?;
+					self.drop_range(key..key + 1, &Hole::drop(StreamError::NotFound), writer)?;
 				}
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -5688,49 +5688,49 @@ impl TrackRun {
 			None => Some(ALL),
 			Some(waiting) => stuck.map(|_| match order {
 				Order::Descending => ALL,
-				Order::Ascending => (Bound::Unbounded, Bound::Excluded(waiting.sequence)),
+				Order::Ascending => (Bound::Unbounded, Bound::Excluded(waiting.key)),
 			}),
 		};
 		let end_error = self.ctx.version.has_end_error();
 		if let Poll::Ready(res) = poll_recv_next(&mut self.track, admit, emit_boundary, end_error, waiter) {
 			match res? {
 				Recv::Group(group) => {
-					// Never a second stream for a sequence this subscription already accounted
+					// Never a second stream for a key this subscription already accounted
 					// for (served or dropped): a group re-created after its
 					// DROP stays dropped, since the subscriber may settle before it arrives. A
 					// stale drop a lite-07 update reopened is owed again (see `Self::owe`). A
 					// lite-07 stale drop is no final verdict, and a Group Stream wins over it, so a
 					// group handed out after one is served, as one a route the front switched to
 					// delivers: the update that reopens the drop would never re-offer it.
-					let sequence = group.sequence;
+					let key = group.start;
 					let record = self.track.record_mut();
-					if self.start.emits_range() && record.told_stale(sequence) {
-						self.replace_stale(sequence..sequence + 1);
-					} else if self.start.emits_range() && record.told(sequence) {
+					if self.start.emits_range() && record.told_stale(key) {
+						self.replace_stale(key..key + 1);
+					} else if self.start.emits_range() && record.told(key) {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
 					let Some(group) = position_group(group, &self.frames) else {
 						// Its head is gone, and this subscriber didn't ask for a
 						// partial group. Skip it rather than open a stream that can
 						// only be reset; the next servable group resolves the start.
-						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "skipping group with a missing head");
+						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "skipping group with a missing head");
 						let hole = Hole::drop(StreamError::NotFound);
 						match &mut self.start {
-							Start::Unresolved { skipped, .. } => skipped.insert(sequence..sequence + 1, hole),
+							Start::Unresolved { skipped, .. } => skipped.insert(key..key + 1, hole),
 							Start::Resolved(_) => {
-								self.drop_range(sequence..sequence + 1, &hole, writer)?;
+								self.drop_range(key..key + 1, &hole, writer)?;
 							}
 							Start::Legacy => {}
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
 					if let Some(waiting) = &self.opening
-						&& crate::priority::in_group(sequence, 0, order)
-							< crate::priority::in_group(waiting.sequence, 0, order)
+						&& crate::priority::in_group(key, 0, order)
+							< crate::priority::in_group(waiting.key, 0, order)
 					{
-						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "shedding a group ranked below one waiting for credit");
-						self.mark_served(sequence);
-						self.shed(sequence);
+						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "shedding a group ranked below one waiting for credit");
+						self.mark_served(key);
+						self.shed(key);
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
 					match &mut self.start {
@@ -5742,7 +5742,7 @@ impl TrackRun {
 					}
 				}
 				Recv::Boundary(end) => {
-					// The track declared its exclusive final sequence. Forward it now,
+					// The track declared its exclusive final key. Forward it now,
 					// even if trailing groups (below it) are still in flight, then
 					// keep serving them until the live edge reaches the boundary.
 					self.end_sent = true;
@@ -5760,9 +5760,9 @@ impl TrackRun {
 					if self.ctx.version.keeps_subscribe_open()
 						&& self.start.is_unresolved()
 						&& let Poll::Ready(Ok(fin)) = self.track.poll_finished(&kio::Waiter::noop())
-						&& final_sequence(fin) > 0
+						&& final_key(fin) > 0
 					{
-						self.resolve_held(final_sequence(fin), writer)?;
+						self.resolve_held(final_key(fin), writer)?;
 						answered = true;
 					}
 					// Nothing arrives to resolve a range still waiting on the live feed.
@@ -5806,7 +5806,7 @@ impl TrackRun {
 		self.bounded && self.opening.is_none() && self.track.covered(self.floor, skipped)
 	}
 
-	/// Lite-05+ names a sequence as soon as this cursor gives it up; whether one was taken.
+	/// Lite-05+ names a key as soon as this cursor gives it up; whether one was taken.
 	/// Before SUBSCRIBE_START there is no owed range yet, so the eventual start accounts
 	/// for it instead, including ranges skipped while finding the first servable group.
 	/// Without `probe`, only collects runs a read already gave up; see
@@ -5853,10 +5853,10 @@ impl TrackRun {
 		}
 	}
 
-	/// Record `sequence` as served, for [`Self::drop_unserved`].
-	fn mark_served(&mut self, sequence: u64) {
+	/// Record `key` as served, for [`Self::drop_unserved`].
+	fn mark_served(&mut self, key: u64) {
 		if self.start.emits_range() {
-			self.track.record_mut().tell(sequence..sequence + 1, Report::Settled);
+			self.track.record_mut().tell(key..key + 1, Report::Settled);
 		}
 	}
 
@@ -5954,7 +5954,7 @@ impl TrackRun {
 		}
 	}
 
-	/// Name every sequence from the start to the end that this subscription never got. The
+	/// Name every key from the start to the end that this subscription never got. The
 	/// track has ended, so none of them will be served now: groups the cursor passed over
 	/// (stale, or missing their head), and gaps the publisher never declared skipped.
 	///
@@ -5969,16 +5969,16 @@ impl TrackRun {
 			return Ok(false);
 		};
 		let Poll::Ready(Ok(fin)) = self.track.poll_finished(&kio::Waiter::noop()) else {
-			// A track closed without a final sequence sent no SUBSCRIBE_FINISH, so the subscriber
+			// A track closed without a final key sent no SUBSCRIBE_FINISH, so the subscriber
 			// owes itself no range either.
 			return Ok(false);
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
-		let fin = final_sequence(fin);
+		let fin = final_key(fin);
 		// Only the groups the ranges name: one between disjoint ranges is not owed, and
 		// naming it would keep a later update widening over it from delivering it.
 		let end = self.track.subscription().end().map_or(fin, |end| end.min(fin));
-		// A sequence the publisher declared skipped went out as a skip already; one it never
+		// A key the publisher declared skipped went out as a skip already; one it never
 		// declared might have existed, so it is not found.
 		let hole = Hole::drop(StreamError::NotFound);
 		let mut dropped = false;
@@ -6018,15 +6018,15 @@ impl TrackRun {
 		source: Option<u64>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
-		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
+		let mut start = source.map_or(group.start, |source| source.min(group.start));
 		// A group given up cannot be where the feed starts. This stops at the held group
 		// at the latest, since it was not skipped.
 		// Adjacent runs given up with different errors stay separate, so walk them all.
 		if let Start::Unresolved { skipped, .. } = &self.start {
-			while start < group.sequence
+			while start < group.start
 				&& let Some((given_up, _)) = skipped.get_key_value(&start)
 			{
-				start = given_up.end.min(group.sequence);
+				start = given_up.end.min(group.start);
 			}
 		}
 		self.resolve(start, None, writer)?;
@@ -6108,10 +6108,10 @@ impl TrackRun {
 	/// Open a group machine for `group`, which waits for stream credit. The cursor hands it
 	/// out past a group already waiting only if it outranks that one, which gives way.
 	fn serve(&mut self, group: group::Consumer) {
-		let sequence = group.sequence;
+		let key = group.start;
 		let frame_start = group.index();
-		self.mark_served(sequence);
-		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
+		self.mark_served(key);
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "serving group");
 		self.give_way();
 		self.open(group, frame_start);
 	}
@@ -6123,7 +6123,7 @@ impl TrackRun {
 	fn stuck(&mut self) -> Option<i64> {
 		let waiting = self.opening.as_ref()?;
 		let order = self.ctx.steer_current().order;
-		let rank = |serve: &GroupServe| crate::priority::in_group(serve.sequence, serve.frame_start, order);
+		let rank = |serve: &GroupServe| crate::priority::in_group(serve.key, serve.frame_start, order);
 		let waiting = rank(waiting);
 		let mut held = self
 			.children
@@ -6142,7 +6142,7 @@ impl TrackRun {
 		let Some(mut waiting) = self.opening.take() else {
 			return;
 		};
-		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = waiting.sequence, "giving way to a higher-ranked group");
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key = waiting.key, "giving way to a higher-ranked group");
 		match std::mem::take(&mut self.continuing) {
 			true => self.paused.push_back(Paused {
 				group: waiting.group.clone(),
@@ -6154,14 +6154,14 @@ impl TrackRun {
 
 	/// Give up a group the cursor handed out without a stream, as one expired under the
 	/// subscription's budget is.
-	fn shed(&self, sequence: u64) {
+	fn shed(&self, key: u64) {
 		if self.ctx.version.has_track_stream() {
 			self.ctx
 				.outcomes
 				.dropped
 				.lock()
 				.unwrap()
-				.push((sequence, StreamError::Old));
+				.push((key, StreamError::Old));
 		}
 	}
 
@@ -6180,9 +6180,9 @@ impl TrackRun {
 	/// Open a group machine streaming `group` from `frame_start`, which waits for stream
 	/// credit before the cursor hands out another.
 	fn open(&mut self, group: group::Consumer, frame_start: u64) {
-		let sequence = group.sequence;
+		let key = group.start;
 		// The stream stops at the end frame, before the group may end.
-		let capped = self.frames.end(sequence).is_some();
+		let capped = self.frames.end(key).is_some();
 
 		// Use the latest steer for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let steer = self.ctx.steer_current();
@@ -6190,10 +6190,10 @@ impl TrackRun {
 			Some(_) => Rank::Group,
 			// The subscribe id scopes the group tie-break: one queue serves every
 			// subscription on the session, and only groups of the same one may be
-			// ranked against each other by sequence, in that subscription's order.
+			// ranked against each other by key, in that subscription's order.
 			None => Rank::Queue(
 				self.ctx.priority.insert(
-					Priority::new(steer.priority, self.ctx.id, sequence)
+					Priority::new(steer.priority, self.ctx.id, key)
 						.with_publisher(self.ctx.publisher)
 						.with_order(steer.order),
 				),
@@ -6202,7 +6202,7 @@ impl TrackRun {
 		debug_assert!(self.opening.is_none(), "one group waits for stream credit at a time");
 		self.opening = Some(GroupServe::new(
 			self.ctx.group_context(),
-			sequence,
+			key,
 			frame_start,
 			capped,
 			rank,
@@ -6325,7 +6325,7 @@ impl CoverageBench {
 
 /// Where a group stream is ranked.
 enum Rank {
-	/// In the subscription's send group, by its sequence in the subscription's order.
+	/// In the subscription's send group, by its key in the subscription's order.
 	Group,
 	/// In the session-wide queue, on a transport without send groups.
 	Queue(PriorityHandle),
@@ -6355,7 +6355,7 @@ struct GroupServe {
 	/// Its place in line for the peer's stream credit while it waits to open.
 	open: crate::transport::open::Open,
 	group: group::Consumer,
-	sequence: u64,
+	key: u64,
 	frame_start: u64,
 	/// The stream stops at a subscription's end frame, so its FIN cannot end the group.
 	capped: bool,
@@ -6411,7 +6411,7 @@ impl GroupServe {
 
 	fn new(
 		ctx: GroupContext,
-		sequence: u64,
+		key: u64,
 		frame_start: u64,
 		capped: bool,
 		rank: Rank,
@@ -6430,7 +6430,7 @@ impl GroupServe {
 			rank,
 			open: Default::default(),
 			group,
-			sequence,
+			key,
 			frame_start,
 			capped,
 			prev_ts: 0,
@@ -6467,7 +6467,7 @@ impl GroupServe {
 		let options = match &mut self.rank {
 			Rank::Group => SendOptions {
 				group,
-				priority: crate::priority::in_group(self.sequence, self.frame_start, self.ctx.steer_seen.order),
+				priority: crate::priority::in_group(self.key, self.frame_start, self.ctx.steer_seen.order),
 			},
 			Rank::Queue(handle) => SendOptions {
 				group: None,
@@ -6495,7 +6495,7 @@ impl GroupServe {
 
 		let msg = lite::Group {
 			subscribe: self.ctx.id,
-			sequence: self.sequence,
+			key: self.key,
 			frame_start: self.frame_start,
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
@@ -6550,7 +6550,7 @@ impl GroupServe {
 					self.ctx.steer_seen = value;
 					// The run loop moves the send group itself; a stream only follows the order.
 					let order = match &mut self.rank {
-						Rank::Group => crate::priority::in_group(self.sequence, self.frame_start, value.order),
+						Rank::Group => crate::priority::in_group(self.key, self.frame_start, value.order),
 						Rank::Queue(handle) => {
 							PriorityHandle::send_order_of(handle.steer(value.priority, value.order)).into()
 						}
@@ -6774,7 +6774,7 @@ impl GroupServe {
 					};
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
-						tracing::debug!(sequence = self.sequence, "finished group");
+						tracing::debug!(key = self.key, "finished group");
 					}));
 				}
 				GroupState::Done => return Poll::Ready(Ok(())),
@@ -6828,7 +6828,7 @@ impl GroupServe {
 			.dropped
 			.lock()
 			.unwrap()
-			.push((self.sequence, StreamError::from(err)));
+			.push((self.key, StreamError::from(err)));
 	}
 }
 
@@ -6939,7 +6939,7 @@ mod serve_group_test {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { sequence: 3 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 3 }).unwrap();
 		group.start_at(5).unwrap();
 		group.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
 		let starting = |frame| {
@@ -6959,7 +6959,7 @@ mod serve_group_test {
 		assert!(position_group(group.consume(), &starting(2)).is_none());
 
 		// The offset belongs to the start group only; a later group is served whole.
-		let mut other = track.create_group(group::Info { sequence: 4 }).unwrap();
+		let mut other = track.create_group(group::Info { start: 4 }).unwrap();
 		other.write_frame(Timestamp::ZERO, b"whole".to_vec()).unwrap();
 		let consumer = position_group(other.consume(), &starting(5)).unwrap();
 		assert_eq!(consumer.index(), 0);
@@ -6973,7 +6973,7 @@ mod serve_group_test {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { sequence: 7 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 7 }).unwrap();
 		for i in 0..4u8 {
 			group.write_frame(Timestamp::ZERO, vec![i]).unwrap();
 		}
@@ -7056,7 +7056,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
@@ -7328,13 +7328,13 @@ mod serve_group_test {
 				})
 				.collect();
 
-			for sequence in 0..groups {
+			for key in 0..groups {
 				for (track, run, writer) in &mut runs {
-					write_group(track, sequence, sequence);
+					write_group(track, key, key);
 					settle_run(run, writer).await;
 				}
 				let held: usize = runs.iter().map(|(_, run, _)| run.machines()).sum();
-				assert_eq!(held, tracks, "{tracks} tracks after {} groups each", sequence + 1);
+				assert_eq!(held, tracks, "{tracks} tracks after {} groups each", key + 1);
 			}
 
 			*gate.write().ok().unwrap() = true;
@@ -7363,7 +7363,7 @@ mod serve_group_test {
 		);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(run.machines(), 1, "group 0 waits for credit");
@@ -7401,8 +7401,8 @@ mod serve_group_test {
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(1))),
 		);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
-		for sequence in 0..10 {
-			write_group(&mut track, sequence, sequence * 1000);
+		for key in 0..10 {
+			write_group(&mut track, key, key * 1000);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			assert!(run.machines() <= 1);
 			kio::clock::sim::advance(Duration::from_secs(1)).await;
@@ -7526,7 +7526,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
@@ -7625,7 +7625,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(Timestamp::ZERO, b"hello".as_slice()).unwrap();
 		let consumer = group.consume();
 		group.finish().unwrap();
@@ -7750,8 +7750,8 @@ mod serve_group_test {
 		assert_eq!(track.demand().wanted(), Some(1), "new hop judges its own ratio");
 	}
 
-	fn write_group(track: &mut track::Producer, sequence: u64, millis: u64) {
-		let mut group = track.create_group(group::Info { sequence }).unwrap();
+	fn write_group(track: &mut track::Producer, key: u64, millis: u64) {
+		let mut group = track.create_group(group::Info { start: key }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
 			.unwrap();
@@ -7800,7 +7800,7 @@ mod serve_group_test {
 		}
 	}
 
-	/// A sequence past QUIC's varints fails the send before lite-07, which carries any.
+	/// A key past QUIC's varints fails the send before lite-07, which carries any.
 	#[kio::test]
 	async fn a_datagram_past_the_wire_s_sequences_fails() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
@@ -7823,9 +7823,9 @@ mod serve_group_test {
 		let session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
 		let log = session.log.clone();
 		let send = datagram_send(Version::Lite07, session);
-		for sequence in [4, 9] {
+		for key in [4, 9] {
 			send.send(crate::datagram::Datagram {
-				sequence,
+				sequence: key,
 				timestamp: Some(Timestamp::ZERO),
 				payload: bytes::Bytes::from_static(b"d"),
 			})
@@ -7833,7 +7833,7 @@ mod serve_group_test {
 		}
 		assert_eq!(
 			log.datagram_ranks(),
-			[4, 9].map(|sequence| (Some(0), crate::priority::in_group(sequence, 0, Order::Descending)))
+			[4, 9].map(|key| (Some(0), crate::priority::in_group(key, 0, Order::Descending)))
 		);
 
 		// Without send groups, the rank goes alone.
@@ -7853,7 +7853,7 @@ mod serve_group_test {
 	}
 
 	/// On a transport with send groups, a subscription opens one at its priority and its
-	/// group streams join it, ranked newest first by sequence alone: the session-wide queue
+	/// group streams join it, ranked newest first by key alone: the session-wide queue
 	/// takes no part. A SUBSCRIBE_UPDATE moves the group once, and an order flip re-stamps
 	/// the open streams.
 	#[kio::test]
@@ -7932,7 +7932,7 @@ mod serve_group_test {
 		let log = Log::default();
 		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
 
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		for millis in 0..FRAMES as u64 {
 			group
 				.write_frame(Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
@@ -7983,8 +7983,8 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		for sequence in 0..5 {
-			write_group(&mut track, sequence, sequence * 1000);
+		for key in 0..5 {
+			write_group(&mut track, key, key * 1000);
 		}
 		let at = |millis| Anchor::Time(Timestamp::from_millis(millis).unwrap());
 		let subscriber = track.subscribe(
@@ -8067,8 +8067,8 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		for sequence in 0..5 {
-			write_group(&mut track, sequence, sequence * 1000);
+		for key in 0..5 {
+			write_group(&mut track, key, key * 1000);
 		}
 		// Bounded below the groups the added range reaches, so its start is its own.
 		let first = lite::Range::span(Some(0), 0, Some(0), None);
@@ -8101,8 +8101,8 @@ mod serve_group_test {
 		assert_eq!(started, [lite::SubscribeStarted { id: 1, start: Some(2) }]);
 
 		// Newer groups arrive, and another update leaves the range live: it still starts at 2.
-		for sequence in 5..8 {
-			write_group(&mut track, sequence, sequence * 1000);
+		for key in 5..8 {
+			write_group(&mut track, key, key * 1000);
 		}
 		let live = [(0, first), (1, back)];
 		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
@@ -8121,8 +8121,8 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		track.anchored_cached();
-		for sequence in 0..5 {
-			write_group(&mut track, sequence, sequence * 1000);
+		for key in 0..5 {
+			write_group(&mut track, key, key * 1000);
 		}
 		let subscriber = track.subscribe(
 			track::Subscription::default()
@@ -8150,7 +8150,7 @@ mod serve_group_test {
 		assert!(matches!(result, Error::Unsupported), "ended with {result:?}");
 	}
 
-	/// Where an added time start `time` resolves among `groups` (sequence and start, in
+	/// Where an added time start `time` resolves among `groups` (key and start, in
 	/// milliseconds), before and after `newer` arrives and another update leaves it live, with
 	/// whether it names that group. The run serves group `first` first.
 	async fn time_start_across_an_update(
@@ -8164,8 +8164,8 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		for (sequence, millis) in groups {
-			write_group(&mut track, *sequence, *millis);
+		for (key, millis) in groups {
+			write_group(&mut track, *key, *millis);
 		}
 		let served = lite::Range::span(Some(first), 0, Some(first), None);
 		let subscriber = track.subscribe(
@@ -8197,7 +8197,7 @@ mod serve_group_test {
 	/// still reaches back to the oldest, rather than becoming a floor at group 0.
 	#[kio::test]
 	async fn lite07_an_added_time_start_keeps_its_start() {
-		let five: Vec<_> = (0..5).map(|sequence| (sequence, sequence * 1000)).collect();
+		let five: Vec<_> = (0..5).map(|key| (key, key * 1000)).collect();
 		// 4.5 s falls in group 4, the newest starting at or before it, until group 5 starts at
 		// 4.2 s.
 		assert_eq!(
@@ -8275,7 +8275,7 @@ mod serve_group_test {
 		);
 	}
 
-	/// A sequence the publisher declared it will never produce is accounted for by SKIP
+	/// A key the publisher declared it will never produce is accounted for by SKIP
 	/// rather than a stream count.
 	#[kio::test]
 	async fn lite07_skips_a_declared_skip() {
@@ -8587,8 +8587,8 @@ mod serve_group_test {
 				write_group(&mut track, 0, 0);
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 				// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge.
-				for (sequence, millis) in [(1, 1000), (2, 2000), (3, 3000), (4, 6000)] {
-					write_group(&mut track, sequence, millis);
+				for (key, millis) in [(1, 1000), (2, 2000), (3, 3000), (4, 6000)] {
+					write_group(&mut track, key, millis);
 				}
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 				let case = format!("{version:?}, widen={widen}");
@@ -8633,8 +8633,8 @@ mod serve_group_test {
 			let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 			write_group(&mut track, 0, 0);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			for (sequence, millis) in [(1, 1000), (2, 2000), (3, 3000), (4, 6000)] {
-				write_group(&mut track, sequence, millis);
+			for (key, millis) in [(1, 1000), (2, 2000), (3, 3000), (4, 6000)] {
+				write_group(&mut track, key, millis);
 			}
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(1, 2, 0)]);
@@ -8997,10 +8997,10 @@ mod serve_group_test {
 		assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(0, 0, 0)]);
 	}
 
-	/// Lite-05 and later name every sequence below the end that the subscription never
+	/// Lite-05 and later name every key below the end that the subscription never
 	/// got once the track ends: one skipped between groups, and one past the last.
 	#[kio::test]
-	async fn the_end_drops_the_sequences_never_served() {
+	async fn the_end_drops_the_keys_never_served() {
 		for version in [Version::Lite05, Version::Lite06] {
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -9070,7 +9070,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert!(run.start.resolved().is_some());
 
-		let group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		let group = track.create_group(group::Info { start: 1 }).unwrap();
 		group.abort(Error::App(1)).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
@@ -9082,7 +9082,7 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 	}
 
-	/// A wide upstream DROP is held and forwarded as a range, never one entry per sequence,
+	/// A wide upstream DROP is held and forwarded as a range, never one entry per key,
 	/// and a wider one later forwards only what is new.
 	#[kio::test]
 	async fn a_wide_drop_is_forwarded_as_a_range() {
@@ -9190,7 +9190,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert!(run.start.resolved().is_some());
 
-		let group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		let group = track.create_group(group::Info { start: 1 }).unwrap();
 		group.abort(Error::App(1)).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
@@ -9260,7 +9260,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert!(run.start.resolved().is_some());
 
-		let mut headless = track.create_group(group::Info { sequence: 1 }).unwrap();
+		let mut headless = track.create_group(group::Info { start: 1 }).unwrap();
 		headless.start_at(1).unwrap();
 		headless
 			.write_frame(Timestamp::from_millis(1).unwrap(), b"x".as_slice())
@@ -9363,10 +9363,10 @@ mod serve_group_test {
 					),
 					false => None,
 				};
-				for sequence in 0..3 {
-					write_group(&mut track, sequence, sequence * 10);
+				for key in 0..3 {
+					write_group(&mut track, key, key * 10);
 					if let Some(keeper) = &mut keeper {
-						assert_eq!(keeper.recv_group().await.unwrap().unwrap().sequence, sequence);
+						assert_eq!(keeper.recv_group().await.unwrap().unwrap().start, key);
 					}
 				}
 				kio::clock::sim::advance(Duration::from_secs(1)).await;
@@ -9386,7 +9386,7 @@ mod serve_group_test {
 					.subscribe(track::Subscription::default().with_range(0..))
 					.await
 					.unwrap();
-				assert_eq!(live.recv_group().await.unwrap().unwrap().sequence, 2);
+				assert_eq!(live.recv_group().await.unwrap().unwrap().start, 2);
 				starts.push(kio::wait(|waiter| live.poll_start(waiter)).await);
 			}
 			assert_eq!(
@@ -9409,8 +9409,8 @@ mod serve_group_test {
 					crate::track::Info::timed(),
 				);
 				track.start_at(if warm { 0 } else { 2 }).unwrap();
-				for sequence in (if warm { 0 } else { 2 })..3 {
-					write_group(&mut track, sequence, sequence * 10);
+				for key in (if warm { 0 } else { 2 })..3 {
+					write_group(&mut track, key, key * 10);
 				}
 				kio::clock::sim::advance(Duration::from_secs(1)).await;
 				let subscriber = track.subscribe(track::Subscription::default());
@@ -9711,8 +9711,8 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, []);
 
 		run.replace(update(0));
-		for sequence in 1..5 {
-			write_group(&mut track, sequence, 0);
+		for key in 1..5 {
+			write_group(&mut track, key, 0);
 		}
 		track.finish_at(track::Position::group(5), None).unwrap();
 		drop(track);
@@ -9935,8 +9935,8 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		for sequence in 0..3 {
-			write_group(&mut track, sequence, sequence);
+		for key in 0..3 {
+			write_group(&mut track, key, key);
 		}
 		let mut relay = RelayRun::new(&mut track, 1);
 		relay.settle();
@@ -10029,7 +10029,7 @@ mod serve_group_test {
 		let mut relay = RelayRun::new(&mut track, 5);
 
 		// Group 5's first frame is gone.
-		let mut headless = track.create_group(group::Info { sequence: 5 }).unwrap();
+		let mut headless = track.create_group(group::Info { start: 5 }).unwrap();
 		headless.start_at(1).unwrap();
 		headless
 			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
@@ -10057,7 +10057,7 @@ mod serve_group_test {
 
 		track.drop_groups(4..5, StreamError::Old);
 		// Group 5's first frame is gone.
-		let mut headless = track.create_group(group::Info { sequence: 5 }).unwrap();
+		let mut headless = track.create_group(group::Info { start: 5 }).unwrap();
 		headless.start_at(1).unwrap();
 		headless
 			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
@@ -11325,9 +11325,9 @@ mod tests {
 			Empty,
 		}
 
-		fn write(track: &mut track::Producer, sequences: &[u64]) {
-			for &sequence in sequences {
-				let mut group = track.create_group(group::Info { sequence }).unwrap();
+		fn write(track: &mut track::Producer, keys: &[u64]) {
+			for &key in keys {
+				let mut group = track.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
 				group.finish().unwrap();
 			}
@@ -11454,17 +11454,17 @@ mod tests {
 							streams.entry(id).or_default().extend(bytes);
 						}
 					}
-					let mut sequences = streams
+					let mut keys = streams
 						.values()
 						.map(|bytes| {
 							crate::coding::decode_buf(&mut bytes.as_slice(), version, |r, v| {
 								assert_eq!(lite::DataType::decode(r, v)?, lite::DataType::Group);
-								Ok(lite::Group::decode(r, v)?.sequence)
+								Ok(lite::Group::decode(r, v)?.key)
 							})
 							.unwrap()
 						})
 						.collect::<Vec<_>>();
-					sequences.sort();
+					keys.sort();
 					let all: &[u64] = match answer {
 						Answer::Reported => &[3, 7, 9],
 						Answer::Warm => &[0, 3, 7, 9],
@@ -11483,7 +11483,7 @@ mod tests {
 							Answer::Empty => &[0, 3, 7],
 						}
 					};
-					assert_eq!(sequences, expected, "{version}, start={start:?}");
+					assert_eq!(keys, expected, "{version}, start={start:?}");
 					track.abort(Error::Cancel).unwrap();
 				}
 			}
@@ -11575,7 +11575,7 @@ mod tests {
 			.expect("track requested")
 			.unwrap();
 		let track = request.accept(crate::track::Info::timed().with_refresh(1));
-		let mut group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 1 }).unwrap();
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
 		}
@@ -11589,7 +11589,7 @@ mod tests {
 
 		// The asked-for group arrives, over the ratio too. A restated wanted group is now
 		// stale, so it is not another join.
-		let mut group = track.create_group(group::Info { sequence: 2 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 2 }).unwrap();
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
 		}
@@ -11742,7 +11742,7 @@ mod tests {
 		let mut appended = 0;
 		tasks.push(Box::new(move |waiter: &kio::Waiter| {
 			for _ in 0..BATCH.min(GROUPS - appended) {
-				let mut group = producer.create_group(group::Info { sequence: appended }).unwrap();
+				let mut group = producer.create_group(group::Info { start: appended }).unwrap();
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();

@@ -88,9 +88,9 @@ async fn read_snapshot(remote: &broadcast::Consumer) -> Result<track::Subscriber
 		.map_err(|_| "group had no frame")?
 		.map_err(|err| format!("read: {err}"))?
 		.ok_or("group ended empty")?;
-	match (group.sequence, frame.payload.as_ref()) {
+	match (group.start, frame.payload.as_ref()) {
 		(0, b"snapshot") => Ok(sub),
-		(sequence, payload) => Err(format!("got group {sequence} {payload:?}")),
+		(key, payload) => Err(format!("got group {key} {payload:?}")),
 	}
 }
 

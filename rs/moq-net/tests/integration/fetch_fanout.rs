@@ -51,7 +51,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 		}
 		for round in 0..3 {
 			let mut group = track.append_group().unwrap();
-			let sequence = group.sequence;
+			let key = group.start;
 			group
 				.write_frame(
 					moq_net::Timestamp::from_millis(round * 1000).unwrap(),
@@ -63,7 +63,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 				let mut group = remote
 					.track("video")
 					.unwrap()
-					.fetch_group(sequence, None)
+					.fetch_group(key, None)
 					.await
 					.unwrap();
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"payload");
@@ -75,7 +75,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 					.into_iter()
 					.filter(|kind| *kind == 3)
 					.count();
-				assert_eq!(fetches, round as usize + 1, "{version}: viewer {i}, group {sequence}");
+				assert_eq!(fetches, round as usize + 1, "{version}: viewer {i}, group {key}");
 			}
 			kio::clock::sleep(Duration::from_secs(1)).await;
 		}

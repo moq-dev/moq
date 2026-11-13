@@ -77,7 +77,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		budget(&mut source, 10, version).await;
 		// A quiet catalog survives far longer than the budget because it has no successor.
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		assert_eq!(snapshot.sequence, 0, "{version}");
+		assert_eq!(snapshot.start, 0, "{version}");
 		assert_eq!(
 			snapshot.read_frame().await.unwrap().unwrap().payload,
 			b"catalog".as_slice()

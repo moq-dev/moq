@@ -24,7 +24,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer.with_proxy(true)
 }
 
-/// Read every group from the first, frame by frame, returning each group's sequence and
+/// Read every group from the first, frame by frame, returning each group's key and
 /// payloads, and how the read ended.
 async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8>>)>, Option<Error>) {
 	let subscription = Subscription::default()
@@ -45,11 +45,11 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8
 				while let Some(frame) = kio::clock::timeout(TIMEOUT, group.read_frame())
 					.await
 					.expect("frame timeout")
-					.unwrap_or_else(|err| panic!("group {} cut short: {err:?}", group.sequence))
+					.unwrap_or_else(|err| panic!("group {} cut short: {err:?}", group.start))
 				{
 					frames.push(frame.payload.to_vec());
 				}
-				got.push((group.sequence, frames));
+				got.push((group.start, frames));
 			}
 			Ok(None) => return (got, None),
 			Err(err) => return (got, Some(err)),
@@ -60,7 +60,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8
 /// What [`read`] returns for the whole history.
 fn history() -> Vec<(u64, Vec<Vec<u8>>)> {
 	(0..GROUPS)
-		.map(|sequence| (sequence, FRAMES.iter().map(|frame| frame.to_vec()).collect()))
+		.map(|key| (key, FRAMES.iter().map(|frame| frame.to_vec()).collect()))
 		.collect()
 }
 

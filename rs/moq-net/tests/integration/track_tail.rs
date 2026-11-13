@@ -114,7 +114,7 @@ async fn connect(version: &str) -> Pair {
 /// Publish a group below the declared end (or none for an empty track), hold its stream
 /// back until the subscription ends, then deliver or lose it. The subscriber reads with
 /// `max_delay`.
-async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option<Duration>) -> Outcome {
+async fn round(version: &str, late: Late, final_key: u64, max_delay: Option<Duration>) -> Outcome {
 	let Pair {
 		pair,
 		mut track,
@@ -160,17 +160,17 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 	kio::clock::sleep(Duration::from_millis(1)).await;
 
 	pair.server_transport.hold_unis();
-	if final_sequence > 0 {
+	if final_key > 0 {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
 		group.finish().unwrap();
 	}
 	track
-		.finish_at(moq_net::track::Position::group(final_sequence), None)
+		.finish_at(moq_net::track::Position::group(final_key), None)
 		.unwrap();
 	drop(track);
 
-	if final_sequence > 0 {
+	if final_key > 0 {
 		// Paused time advances only when every task is idle, after the publisher and
 		// subscriber have processed the subscription's end.
 		kio::clock::sleep(GRACE / 10).await;
@@ -271,7 +271,7 @@ async fn a_session_death_before_the_tail_aborts_the_track() {
 	}
 }
 
-/// Skipped sequences have no stream, so lite-05+ publishers name them with SUBSCRIBE_DROP.
+/// Skipped keys have no stream, so lite-05+ publishers name them with SUBSCRIBE_DROP.
 #[kio::test]
 async fn skipped_groups_end_without_the_grace() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
@@ -437,7 +437,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 			while let Some(mut group) = sub.recv_group().await.expect("track aborted") {
 				let frame = group.read_frame().await.expect("group aborted").expect("a frame");
 				assert_eq!(&frame.payload[..], PAYLOAD);
-				groups.push(group.sequence);
+				groups.push(group.start);
 			}
 			groups
 		});

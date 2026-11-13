@@ -1825,7 +1825,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let mut group = video_track.append_group().unwrap();
 		group.write_frame(ts(1), b"v".as_ref()).unwrap();
 		let group = video_sub.recv_group().await.unwrap().expect("video still flows");
-		assert_eq!(group.sequence, 1);
+		assert_eq!(group.start, 1);
 
 		// The relay enforced it, not the client: moq-lite resets the subscription with
 		// UNAUTHORIZED, even on a version without the Auth Stream, and neither side
@@ -1918,7 +1918,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		let mut group = cam_track.append_group().unwrap();
 		group.write_frame(ts(1), b"c".as_ref()).unwrap();
 		let group = cam_sub.recv_group().await.unwrap().expect("cam still flows");
-		assert_eq!(group.sequence, 1);
+		assert_eq!(group.start, 1);
 
 		// A narrowing is not a publication outside the grant: the client stays up.
 		assert_eq!(pair.client_transport.close_reason(), None);
@@ -1986,11 +1986,11 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 	.expect("timed out");
 }
 
-/// Read groups until one at `sequence` or later arrives.
-async fn recv_through(sub: &mut moq_net::track::Subscriber, sequence: u64) {
+/// Read groups until one at `key` or later arrives.
+async fn recv_through(sub: &mut moq_net::track::Subscriber, key: u64) {
 	loop {
 		let group = sub.recv_group().await.unwrap().expect("track ended");
-		if group.sequence >= sequence {
+		if group.start >= key {
 			return;
 		}
 	}

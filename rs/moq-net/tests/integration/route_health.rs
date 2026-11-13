@@ -83,11 +83,11 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 
 	let mut seen = BTreeSet::new();
 	let mut tick = 0;
-	for sequence in 0..groups {
+	for key in 0..groups {
 		let mut group = track.append_group().unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
-			group.write_frame(timestamp, payload(sequence, frame)).unwrap();
+			group.write_frame(timestamp, payload(key, frame)).unwrap();
 			kio::clock::sleep(STEP).await;
 			tick += 1;
 			if tick == kill {
@@ -115,7 +115,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	// The rest of the killed group is left out: whether `E` keeps reading it depends on
 	// whether `O`'s copy went idle before the resume, not on the detection delay.
 	(KILLED + 1..groups)
-		.filter(|sequence| (0..FRAMES).any(|frame| !seen.contains(&(*sequence, frame))))
+		.filter(|key| (0..FRAMES).any(|frame| !seen.contains(&(*key, frame))))
 		.collect()
 }
 
@@ -226,11 +226,11 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 	let mut tick = 0u64;
 	let mut write = async |groups: u64| {
 		for _ in 0..groups {
-			let sequence = tick / FRAMES;
+			let key = tick / FRAMES;
 			let mut group = track.append_group().unwrap();
 			for frame in 0..FRAMES {
 				let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
-				group.write_frame(timestamp, payload(sequence, frame)).unwrap();
+				group.write_frame(timestamp, payload(key, frame)).unwrap();
 				kio::clock::sleep(STEP).await;
 				tick += 1;
 			}

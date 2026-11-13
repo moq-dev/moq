@@ -165,7 +165,7 @@ impl Reader {
 							return;
 						}
 					};
-					let frame = format!("{}:{}", group.sequence, String::from_utf8_lossy(&frame.payload));
+					let frame = format!("{}:{}", group.start, String::from_utf8_lossy(&frame.payload));
 					if tx.unbounded_send(Ok(frame)).is_err() {
 						return;
 					}
@@ -202,14 +202,14 @@ impl Reader {
 		let joined = self.expected.first().map(group);
 		let mut seen = self.seen.as_slice();
 		while let (Some(first), Some(joined)) = (seen.first(), joined) {
-			let sequence = group(first);
-			if sequence >= joined {
+			let key = group(first);
+			if key >= joined {
 				break;
 			}
 			if !first.ends_with(":snapshot") {
 				return Verdict::Wrong;
 			}
-			let older = seen.iter().take_while(|frame| group(frame) == sequence).count();
+			let older = seen.iter().take_while(|frame| group(frame) == key).count();
 			seen = &seen[older..];
 		}
 		let mut expected = self.expected.as_slice();
@@ -314,7 +314,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 			group
 				.write_frame(Timestamp::from_millis(clock).unwrap(), payload.as_bytes())
 				.unwrap();
-			let frame = format!("{}:{payload}", group.sequence);
+			let frame = format!("{}:{payload}", group.start);
 			for reader in readers {
 				reader.expected.push(frame.clone());
 			}
@@ -349,7 +349,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 				let Some(remote) = topology.request(step).await? else {
 					continue;
 				};
-				let fetch = remote.track("catalog.json").unwrap().fetch_group(group.sequence, None);
+				let fetch = remote.track("catalog.json").unwrap().fetch_group(group.start, None);
 				let mut fetched = match kio::clock::timeout(READ_TIMEOUT, fetch).await {
 					Ok(Ok(fetched)) => fetched,
 					Ok(Err(_)) => continue,
@@ -360,7 +360,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 					match kio::clock::timeout(READ_TIMEOUT, fetched.read_frame()).await {
 						Ok(Ok(Some(frame))) => got.push(format!(
 							"{}:{}",
-							fetched.sequence,
+							fetched.start,
 							String::from_utf8_lossy(&frame.payload)
 						)),
 						Ok(Ok(None)) => return Err(wrong(format!("{step}: fetch ended at {got:?}"))),

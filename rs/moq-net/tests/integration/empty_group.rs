@@ -55,7 +55,7 @@ async fn an_empty_group_arrives_empty() {
 			.unwrap_or_else(|_| panic!("{version}: the empty group was dropped"))
 			.unwrap()
 			.expect("a group");
-		assert_eq!(empty.sequence, 0, "{version}");
+		assert_eq!(empty.start, 0, "{version}");
 		let frame = kio::clock::timeout(TIMEOUT, empty.read_frame())
 			.await
 			.expect("frame timeout")
@@ -70,7 +70,7 @@ async fn an_empty_group_arrives_empty() {
 			.expect("group timeout")
 			.unwrap()
 			.expect("a group");
-		assert_eq!(next.sequence, 1, "{version}");
+		assert_eq!(next.start, 1, "{version}");
 		let frame = next.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.as_ref(), b"ok", "{version}");
 	}

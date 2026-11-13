@@ -760,11 +760,11 @@ impl Track {
 		}
 	}
 
-	/// Group `sequence` holds every frame it will have: a whole copy finished. A group name
+	/// Group `key` holds every frame it will have: a whole copy finished. A group name
 	/// fixes its content, so no legal write raises the largest past it.
-	pub(super) fn finish_largest(&self, sequence: u64) {
+	pub(super) fn finish_largest(&self, key: u64) {
 		let mut largest = self.largest.lock();
-		if largest.position.is_some_and(|position| position.group == sequence) {
+		if largest.position.is_some_and(|position| position.group == key) {
 			largest.open = false;
 		}
 	}
@@ -881,15 +881,15 @@ impl Track {
 		self.declared.load(Ordering::Acquire)
 	}
 
-	/// Watch every group the publisher cuts, rather than chosen sequences.
+	/// Watch every group the publisher cuts, rather than chosen keys.
 	pub(super) fn watch_cuts(&self) -> aborts::Watch {
 		self.aborts.get_or_init(Arc::default).watch_cuts()
 	}
 
-	/// Notify watchers that group `sequence` aborted, if the publisher cut it.
-	pub(super) fn aborted(&self, sequence: u64, cut: bool) {
+	/// Notify watchers that group `key` aborted, if the publisher cut it.
+	pub(super) fn aborted(&self, key: u64, cut: bool) {
 		if cut && let Some(aborts) = self.aborts.get() {
-			aborts.notify(sequence);
+			aborts.notify(key);
 		}
 	}
 

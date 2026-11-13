@@ -331,9 +331,9 @@ async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 	}
 }
 
-/// Write `sequence` as a finished group of one write.
-fn write_group(half: &track::Producer, sequence: u64) {
-	let mut group = half.create_group(group::Info { sequence }).unwrap();
+/// Write `key` as a finished group of one write.
+fn write_group(half: &track::Producer, key: u64) {
+	let mut group = half.create_group(group::Info { start: key }).unwrap();
 	group.write_frame(None, &b"data"[..]).unwrap();
 	group.finish().unwrap();
 }
@@ -446,17 +446,17 @@ async fn track_sessions_carry_messages_both_ways() {
 	}
 }
 
-/// Messages are read in sequence even when they are written, and so arrive, out of order.
+/// Messages are read in key even when they are written, and so arrive, out of order.
 #[kio::test]
-async fn track_messages_are_read_in_sequence() {
+async fn track_messages_are_read_in_key() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let (dialed, accepted) = connect_track(&alice, &bob).await;
 	let mut reader = accepted.consumer.ordered();
 
-	let write = |sequence: u64, payload: &'static [u8]| {
-		let mut group = dialed.producer.create_group(group::Info { sequence }).unwrap();
+	let write = |key: u64, payload: &'static [u8]| {
+		let mut group = dialed.producer.create_group(group::Info { start: key }).unwrap();
 		group.write_frame(None, payload).unwrap();
 		group.finish().unwrap();
 	};
@@ -483,8 +483,8 @@ async fn a_lost_track_message_does_not_block_later_ones() {
 	accepted.consumer.control().update(lossy).unwrap();
 	let mut reader = accepted.consumer.ordered();
 
-	let write = |sequence: u64, payload: &'static [u8]| {
-		let mut group = dialed.producer.create_group(group::Info { sequence }).unwrap();
+	let write = |key: u64, payload: &'static [u8]| {
+		let mut group = dialed.producer.create_group(group::Info { start: key }).unwrap();
 		group.write_frame(None, payload).unwrap();
 		group.finish().unwrap();
 	};

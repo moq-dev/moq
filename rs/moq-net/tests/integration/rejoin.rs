@@ -84,7 +84,7 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				loop {
 					let mut group = sub.recv_group().await.unwrap().unwrap();
 					group.read_frame().await.unwrap().unwrap();
-					if group.sequence == 1 {
+					if group.start == 1 {
 						break;
 					}
 				}
@@ -108,8 +108,8 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				let wanted: &[u64] = if advance { &[1, 2] } else { &[1] };
 				while !wanted.iter().all(|want| rejoined.iter().any(|(seq, _)| seq == want)) {
 					let mut group = sub.recv_group().await.unwrap().unwrap();
-					let sequence = group.sequence;
-					rejoined.push((sequence, read_all(&mut group).await));
+					let key = group.start;
+					rejoined.push((key, read_all(&mut group).await));
 				}
 				rejoined.sort_by_key(|(seq, _)| *seq);
 				let reset = rejoined.iter().find(|(seq, _)| *seq == 1).expect("reset group");
@@ -185,16 +185,16 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 			crate::support::unwanted(track.demand()).await.unwrap();
 
 			// The publisher moves on while nobody subscribes.
-			for sequence in 1..=3u64 {
+			for key in 1..=3u64 {
 				let mut group = track.append_group().unwrap();
-				group.write_frame(ts(sequence * 1000), b"new".as_ref()).unwrap();
+				group.write_frame(ts(key * 1000), b"new".as_ref()).unwrap();
 				group.finish().unwrap();
 			}
 
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(
-				group.sequence, 3,
+				group.start, 3,
 				"{version}: the rejoining reader got the stale cache first"
 			);
 		})
@@ -253,9 +253,9 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 			crate::support::unwanted(track.demand()).await.unwrap();
 
 			// The publisher moves on while nobody subscribes, all within the max age.
-			for sequence in 1..=3u64 {
+			for key in 1..=3u64 {
 				let mut group = track.append_group().unwrap();
-				group.write_frame(ts(sequence * 100), sequence.to_string()).unwrap();
+				group.write_frame(ts(key * 100), key.to_string()).unwrap();
 				group.finish().unwrap();
 			}
 
@@ -270,7 +270,7 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 			let mut rejoined = Vec::new();
 			// Arrival order, newest first: whatever the reader gets once the backlog settled.
 			while let Ok(group) = kio::clock::timeout(Duration::from_secs(1), sub.recv_group()).await {
-				rejoined.push(group.unwrap().unwrap().sequence);
+				rejoined.push(group.unwrap().unwrap().start);
 			}
 			rejoined.sort();
 			assert_eq!(rejoined, [0, 1, 2, 3], "{version}: the rejoin skipped the cache");
@@ -340,7 +340,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			let later = relay.consume().request("bench", None).await.unwrap();
 			let mut sub = later.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
-			assert_eq!(group.sequence, 0, "{version}");
+			assert_eq!(group.start, 0, "{version}");
 			let frame = group.read_frame().await;
 			assert!(
 				matches!(&frame, Ok(Some(frame)) if frame.payload == b"a0".as_ref()),
@@ -417,7 +417,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 				let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 				loop {
 					let mut group = sub.recv_group().await.unwrap().unwrap();
-					if group.sequence == 1 {
+					if group.start == 1 {
 						return read_all(&mut group).await.unwrap();
 					}
 				}
@@ -434,7 +434,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 			let local = relay.consume().request("bench", None).await.unwrap();
 			let mut sub = local.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
-			assert_eq!(group.sequence, 1, "{version}");
+			assert_eq!(group.start, 1, "{version}");
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"b0".to_vec()], "{version}");
 
 			assert_eq!(rejoin.await.unwrap(), [b"b0".to_vec()], "{version}");
@@ -488,9 +488,9 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 			crate::support::unwanted(track.demand()).await.unwrap();
 
 			// The publisher moves on while the relay's cancel is still in flight.
-			for sequence in 1..=3u64 {
+			for key in 1..=3u64 {
 				let mut group = track.append_group().unwrap();
-				group.write_frame(ts(sequence * 1000), b"new".as_ref()).unwrap();
+				group.write_frame(ts(key * 1000), b"new".as_ref()).unwrap();
 				group.finish().unwrap();
 			}
 
@@ -498,7 +498,7 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 			let group = sub.recv_group().await.unwrap().unwrap();
 			// A track that arrives untimed skips the cached group by the wall clock instead.
 			assert_eq!(
-				group.sequence, 3,
+				group.start, 3,
 				"{version}: the rejoining reader got the stale cache first"
 			);
 		})
@@ -570,17 +570,17 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 			assert!(
 				early.is_err(),
 				"{version}: the rejoining reader got the cached group {:?} first",
-				early.map(|group| group.unwrap().unwrap().sequence)
+				early.map(|group| group.unwrap().unwrap().start)
 			);
 
 			pair.server_transport.release_split();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			// A track that arrives untimed has no media age to skip the cached group by, so
 			// its reader starts at the newest group cached and reads on from there.
-			if sub.info().timescale.is_none() && group.sequence == 0 {
+			if sub.info().timescale.is_none() && group.start == 0 {
 				group = sub.recv_group().await.unwrap().unwrap();
 			}
-			assert_eq!(group.sequence, 1, "{version}");
+			assert_eq!(group.start, 1, "{version}");
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"new".to_vec()], "{version}");
 		})
 		.await
@@ -645,7 +645,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 			// Holds the relay's upstream subscription, and its copy, open throughout.
 			let (holder, _holder) = session(3).await;
 			let mut held = holder.track("catalog").unwrap().subscribe(None).await.unwrap();
-			assert_eq!(held.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			assert_eq!(held.recv_group().await.unwrap().unwrap().start, 0, "{version}");
 
 			let (leaver, leaver_session) = session(4).await;
 			let mut sub = leaver.track("catalog").unwrap().subscribe(None).await.unwrap();
@@ -668,7 +668,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 					.unwrap_or_else(|_| panic!("{version}: reader {hop} never got the latest group"))
 					.unwrap()
 					.unwrap();
-				assert_eq!(group.sequence, 0, "{version}");
+				assert_eq!(group.start, 0, "{version}");
 				assert_eq!(read_all(&mut group).await.unwrap(), [b"c0"], "{version}");
 			}
 		})
@@ -711,7 +711,7 @@ async fn rejoin_keeps_source_timestamps() {
 			// Far from any arrival time, so a frame stamped on arrival cannot pass.
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
 
-			for (sequence, ms) in [(0, 123_456), (1, 654_321)] {
+			for (key, ms) in [(0, 123_456), (1, 654_321)] {
 				let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 				crate::support::wanted(track.demand()).await.unwrap();
 				let mut group = track.append_group().unwrap();
@@ -720,7 +720,7 @@ async fn rejoin_keeps_source_timestamps() {
 
 				let mut group = loop {
 					let group = sub.recv_group().await.unwrap().unwrap();
-					if group.sequence == sequence {
+					if group.start == key {
 						break group;
 					}
 				};
@@ -728,7 +728,7 @@ async fn rejoin_keeps_source_timestamps() {
 				assert_eq!(
 					frame.timestamp.map(Timestamp::as_millis),
 					Some(u128::from(ms)),
-					"{version} group {sequence}"
+					"{version} group {key}"
 				);
 				drop((group, sub));
 				crate::support::unwanted(track.demand()).await.unwrap();
@@ -825,7 +825,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			// The publisher reconnects while the holder reads, and the old connection goes:
 			// the relay takes the track over from the new one.
 			let (mut holder, remote, pair) = session(3).await;
-			assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			assert_eq!(holder.recv_group().await.unwrap().unwrap().start, 0, "{version}");
 			// The new connection is cheaper, so the relay reports its route taking over.
 			let mut follow = relay.consume().routes();
 			assert!(
@@ -855,11 +855,11 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		} else {
 			// A reader leaves, so the relay parks the track; the holder re-splices it.
 			let (mut first, remote, pair) = session(3).await;
-			assert_eq!(first.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			assert_eq!(first.recv_group().await.unwrap().unwrap().start, 0, "{version}");
 			drop((first, remote, pair));
 			crate::support::unwanted(track.demand()).await.unwrap();
 			let (mut holder, remote, pair) = session(4).await;
-			assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			assert_eq!(holder.recv_group().await.unwrap().unwrap().start, 0, "{version}");
 			(holder, remote, pair)
 		};
 
@@ -881,7 +881,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		newer.finish().unwrap();
 		// Unnamed wires end the old holder on takeover. The late reader uses the
 		// current route on every version, and keeps that copy live for the expiry check.
-		assert_eq!(later.recv_group().await.unwrap().unwrap().sequence, 1, "{version}");
+		assert_eq!(later.recv_group().await.unwrap().unwrap().start, 1, "{version}");
 		kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
 		let old = async {
 			let mut group = later_remote.track("catalog").unwrap().fetch_group(0, None).await?;

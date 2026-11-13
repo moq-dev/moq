@@ -17,7 +17,7 @@
 //!   reader's ranges in the gaps between its groups. A group lands past them, and the reader
 //!   polls with nothing in range.
 //! - `ranges_time_gaps`: time ranges each ending between two groups of a sparsely numbered
-//!   history, so each end waits on the missing sequences of a gap of its own, beside one time
+//!   history, so each end waits on the missing keys of a gap of its own, beside one time
 //!   end past the live edge whose cap moves twice per group, as in `ranges_time_cap`.
 //! - `ranges_frames`: a lite-07 publisher's frame bounds, each range starting and ending
 //!   partway through its own group, looked up for one group as a served group does.
@@ -51,9 +51,9 @@ fn millis(millis: u64) -> Timestamp {
 	Timestamp::from_millis(millis).unwrap()
 }
 
-/// Write a one-frame group at `sequence`, presented at `at` milliseconds.
-fn land(track: &track::Producer, sequence: u64, at: u64) {
-	let mut group = track.create_group(group::Info { sequence }).unwrap();
+/// Write a one-frame group at `key`, presented at `at` milliseconds.
+fn land(track: &track::Producer, key: u64, at: u64) {
+	let mut group = track.create_group(group::Info { start: key }).unwrap();
 	group.write_frame(millis(at), Bytes::from_static(b"x")).unwrap();
 	group.finish().unwrap();
 }
@@ -140,7 +140,7 @@ impl TimeCap {
 	}
 
 	pub(crate) fn step(&mut self) {
-		let mut group = self.track.create_group(group::Info { sequence: self.next }).unwrap();
+		let mut group = self.track.create_group(group::Info { start: self.next }).unwrap();
 		let mut handed = drain(&mut self.reader);
 		group.write_frame(millis(self.next), Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();
@@ -165,7 +165,7 @@ impl FillsOut {
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		// Held and never polled, so every fill stays out.
 		let requests = track.requests();
-		// The feed starts past every range, with a sequence between each that no range asks
+		// The feed starts past every range, with a key between each that no range asks
 		// for, so each range is a fill of its own.
 		let start = ranges * 2;
 		track.start_at(start).unwrap();
@@ -203,7 +203,7 @@ pub(crate) struct Sparse {
 	next: u64,
 }
 
-/// The step between a sparse feed's sequences.
+/// The step between a sparse feed's keys.
 const STRIDE: u64 = 4;
 
 impl Sparse {
@@ -255,8 +255,8 @@ impl TimeGaps {
 		let track = broadcast.create_track("bench", timed()).unwrap();
 		// The history's groups at every multiple of the stride, ten milliseconds apart, and
 		// each range from just after one starts until halfway to the next: it ends before the
-		// next group, but the sequences between may still arrive inside it. The live feed goes
-		// on from the last, one sequence and millisecond at a time, read by a range from there.
+		// next group, but the keys between may still arrive inside it. The live feed goes
+		// on from the last, one key and millisecond at a time, read by a range from there.
 		for i in 0..=ranges {
 			land(&track, i * STRIDE, i * 10);
 		}
@@ -289,7 +289,7 @@ impl TimeGaps {
 	pub(crate) fn step(&mut self) {
 		// Each a millisecond after the last, from where the history ended.
 		let at = self.next - self.live + self.live / STRIDE * 10;
-		let mut group = self.track.create_group(group::Info { sequence: self.next }).unwrap();
+		let mut group = self.track.create_group(group::Info { start: self.next }).unwrap();
 		let mut handed = drain(&mut self.reader);
 		group.write_frame(millis(at), Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();

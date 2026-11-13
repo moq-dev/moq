@@ -211,13 +211,13 @@ pub(super) fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delive
 				match group.read_frame().await {
 					Ok(Some(frame)) => {
 						let frame = (frame.timestamp, frame.payload.to_vec());
-						if tx.unbounded_send((group.sequence, Ok(frame))).is_err() {
+						if tx.unbounded_send((group.start, Ok(frame))).is_err() {
 							return;
 						}
 					}
 					Ok(None) => break,
 					Err(err) => {
-						let _ = tx.unbounded_send((group.sequence, Err(err)));
+						let _ = tx.unbounded_send((group.start, Err(err)));
 						break;
 					}
 				}
@@ -710,9 +710,9 @@ async fn lagging_route_dies(version: Version) {
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
-	fn write(group: &mut moq_net::group::Producer, sequence: u64, frame: u64) {
-		let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
-		group.write_frame(timestamp, payload(sequence, frame)).unwrap();
+	fn write(group: &mut moq_net::group::Producer, key: u64, frame: u64) {
+		let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
+		group.write_frame(timestamp, payload(key, frame)).unwrap();
 	}
 
 	let (p, a, b, r, w) = (
@@ -761,14 +761,14 @@ async fn lagging_route_dies(version: Version) {
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);
 	settle().await;
-	for (sequence, frame) in (2..FRAMES)
+	for (key, frame) in (2..FRAMES)
 		.map(|frame| (1, frame))
 		.chain((0..FRAMES).map(|frame| (2, frame)))
 	{
-		let timestamp = Timestamp::from_millis(1_000 + sequence * 100 + frame).unwrap();
+		let timestamp = Timestamp::from_millis(1_000 + key * 100 + frame).unwrap();
 		assert_eq!(
 			next_timed(&mut rx).await,
-			(sequence, Some(timestamp), payload(sequence, frame)),
+			(key, Some(timestamp), payload(key, frame)),
 			"{version}"
 		);
 	}
@@ -831,15 +831,15 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	settle().await;
 
 	let mut after = BTreeMap::<u64, Vec<String>>::new();
-	for sequence in 0..=E_NOTICES + 3 {
+	for key in 0..=E_NOTICES + 3 {
 		let mut group = track.append_group().unwrap();
 		for frame in 0..FRAMES {
-			let timestamp = Timestamp::from_millis(sequence * 1_000 + frame * STEP.as_millis() as u64).unwrap();
-			group.write_frame(timestamp, payload(sequence, frame)).unwrap();
-			if sequence < KILLED || (sequence, frame) == (KILLED, 0) {
-				assert_eq!(next(&mut rx).await, (sequence, payload(sequence, frame)));
+			let timestamp = Timestamp::from_millis(key * 1_000 + frame * STEP.as_millis() as u64).unwrap();
+			group.write_frame(timestamp, payload(key, frame)).unwrap();
+			if key < KILLED || (key, frame) == (KILLED, 0) {
+				assert_eq!(next(&mut rx).await, (key, payload(key, frame)));
 			}
-			if (sequence, frame) == (KILLED, 0) {
+			if (key, frame) == (KILLED, 0) {
 				for pair in [&o_m1, &m1_e] {
 					pair.client_transport.set_latency(Duration::from_secs(3600));
 				}
@@ -847,11 +847,11 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 			kio::clock::sleep(STEP).await;
 		}
 		group.finish().unwrap();
-		if sequence == O_NOTICES {
+		if key == O_NOTICES {
 			o_m1.server.abort(Error::Cancel);
 			o_m1.client.abort(Error::Cancel);
 		}
-		if sequence == E_NOTICES {
+		if key == E_NOTICES {
 			// Off the group boundary, so no group's age sits on the budget.
 			kio::clock::sleep(STEP * 5 / 2).await;
 			// The groups `O` asks for again reach it newest first, as a congested `P` sends
@@ -971,13 +971,13 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 	let first = follow.available().await.unwrap().unwrap();
 	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let mut rx = read(first.track("video").unwrap().subscribe(prefs.clone()).await.unwrap());
-	let write = |replicas: &mut Vec<Replica>, sequence: u64| {
+	let write = |replicas: &mut Vec<Replica>, key: u64| {
 		for replica in replicas.iter_mut() {
-			let mut group = replica.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = replica.track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
 				.write_frame(
-					Timestamp::from_micros(1_000_000 + sequence * 1_000).unwrap(),
-					tagged(replica.name, sequence, 0),
+					Timestamp::from_micros(1_000_000 + key * 1_000).unwrap(),
+					tagged(replica.name, key, 0),
 				)
 				.unwrap();
 			group.finish().unwrap();
@@ -1094,12 +1094,12 @@ async fn replaced_behind_a_relay(version: &str) {
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
 	let mut dead = None;
-	for sequence in 0..3 {
+	for key in 0..3 {
 		for replica in &mut replicas {
 			replica.group = Some(replica.track.append_group().unwrap());
 		}
 		for frame in 0..FRAMES {
-			if sequence == 1 && frame == FRAMES / 2 {
+			if key == 1 && frame == FRAMES / 2 {
 				let replica = replicas.remove(0);
 				let link = replica.link.as_ref().unwrap();
 				link.server.abort(Error::Cancel);
@@ -1107,15 +1107,15 @@ async fn replaced_behind_a_relay(version: &str) {
 				dead = Some(replica);
 				settle().await;
 			}
-			let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
+			let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 			for replica in &mut replicas {
 				let group = replica.group.as_mut().unwrap();
 				group
-					.write_frame(timestamp, tagged(replica.name, sequence, frame))
+					.write_frame(timestamp, tagged(replica.name, key, frame))
 					.unwrap();
 			}
 			if dead.is_none() {
-				let expected = (sequence, tagged(replicas[0].name, sequence, frame));
+				let expected = (key, tagged(replicas[0].name, key, frame));
 				assert_eq!(next(&mut rx).await, expected, "{version}");
 			}
 		}
@@ -1209,8 +1209,8 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
 	let mut dead = None;
-	for sequence in 0..3 {
-		if sequence == 1 {
+	for key in 0..3 {
+		if key == 1 {
 			let replica = replicas.remove(0);
 			let link = replica.link.as_ref().unwrap();
 			link.server.abort(Error::Cancel);
@@ -1221,16 +1221,16 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 		for replica in &mut replicas {
 			let mut group = replica.track.append_group().unwrap();
 			for frame in 0..FRAMES {
-				let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
+				let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 				group
-					.write_frame(timestamp, tagged(replica.name, sequence, frame))
+					.write_frame(timestamp, tagged(replica.name, key, frame))
 					.unwrap();
 			}
 			group.finish().unwrap();
 		}
 		if compress || dead.is_none() {
 			for frame in 0..FRAMES {
-				let expected = (sequence, tagged(replicas[0].name, sequence, frame));
+				let expected = (key, tagged(replicas[0].name, key, frame));
 				assert_eq!(next(&mut rx).await, expected, "compress {compress}");
 			}
 		}
@@ -1268,7 +1268,7 @@ async fn different_compression_is_refused_behind_a_relay() {
 /// `P` serves `video` on demand and replaces its producer partway through the broadcast,
 /// the way a publisher restarts an encoder. The instance lets `P`'s own front resume the
 /// logical track onto the replacement, so `A` and `R` never see the abort. The
-/// replacement continues the track's sequences explicitly, so its first group reaches
+/// replacement continues the track's keys explicitly, so its first group reaches
 /// `R` at once instead of being skipped as one `R` already read.
 async fn producer_replaced(version: &str) {
 	let version: Version = version.parse().unwrap();
@@ -1306,12 +1306,12 @@ async fn producer_replaced(version: &str) {
 	let mut rx = read(sub);
 
 	let first = producers.next().await.unwrap();
-	for sequence in 0..2 {
+	for key in 0..2 {
 		let mut group = first.append_group().unwrap();
-		assert_eq!(group.sequence, sequence, "{version}");
+		assert_eq!(group.start, key, "{version}");
 		for frame in 0..FRAMES {
-			group.write_frame(Timestamp::ZERO, payload(sequence, frame)).unwrap();
-			assert_eq!(next(&mut rx).await, (sequence, payload(sequence, frame)), "{version}");
+			group.write_frame(Timestamp::ZERO, payload(key, frame)).unwrap();
+			assert_eq!(next(&mut rx).await, (key, payload(key, frame)), "{version}");
 		}
 		group.finish().unwrap();
 	}
@@ -1325,7 +1325,7 @@ async fn producer_replaced(version: &str) {
 		.unwrap();
 
 	// The application owns where the replacement starts, so it continues explicitly.
-	let mut group = second.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
+	let mut group = second.create_group(moq_net::group::Info { start: 2 }).unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");

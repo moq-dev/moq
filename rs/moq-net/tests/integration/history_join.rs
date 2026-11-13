@@ -55,7 +55,7 @@ async fn each_joining_viewer_reads_the_held_group() {
 				let remote = remote.unwrap().expect("the broadcast resolves");
 				let mut subscriber = remote.track("video").unwrap().subscribe(None).await.unwrap();
 				let mut group = subscriber.recv_group().await.unwrap().expect("a group");
-				assert_eq!(group.sequence, 0, "{version}: viewer {join}");
+				assert_eq!(group.start, 0, "{version}: viewer {join}");
 				let frame = group.read_frame().await.unwrap().expect("a frame");
 				assert_eq!(&frame.payload[..], b"x", "{version}: viewer {join}");
 			})

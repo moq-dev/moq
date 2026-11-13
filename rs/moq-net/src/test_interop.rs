@@ -270,7 +270,7 @@ fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i
 	let w = &mut Encoder::new(&mut buf, version.into());
 	let header = lite::Group {
 		subscribe: 5,
-		sequence: 1 << 20,
+		key: 1 << 20,
 		frame_start: 200,
 	};
 	header.encode(w, version).unwrap();

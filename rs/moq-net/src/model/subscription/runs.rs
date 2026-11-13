@@ -1,4 +1,4 @@
-//! Sets of group sequences held as sorted runs, and the layered set a [`Window`](super::Window)
+//! Sets of group keys held as sorted runs, and the layered set a [`Window`](super::Window)
 //! reads: fixed runs shared across its moves, with the few runs its time ends walk on top.
 //!
 //! A subscription may name thousands of ranges, yet an unsettled time end moves its cap on
@@ -29,9 +29,9 @@ impl Runs {
 		self.0.iter()
 	}
 
-	pub fn contains(&self, sequence: u64) -> bool {
-		let index = self.0.partition_point(|run| *run.end() < sequence);
-		self.0.get(index).is_some_and(|run| *run.start() <= sequence)
+	pub fn contains(&self, key: u64) -> bool {
+		let index = self.0.partition_point(|run| *run.end() < key);
+		self.0.get(index).is_some_and(|run| *run.start() <= key)
 	}
 
 	/// The lowest run reaching into `lo..=hi`.
@@ -129,8 +129,8 @@ impl Layered {
 		Arc::ptr_eq(&self.fixed, &other.fixed)
 	}
 
-	pub fn contains(&self, sequence: u64) -> bool {
-		self.fixed.contains(sequence) || self.layer.contains(sequence)
+	pub fn contains(&self, key: u64) -> bool {
+		self.fixed.contains(key) || self.layer.contains(key)
 	}
 
 	/// The one set holding runs, when the other holds none: its runs are the union's, each
@@ -286,7 +286,7 @@ mod tests {
 		(0..next(count + 1))
 			.map(|_| {
 				let start = next(span);
-				// Now and then a run reaching the last sequence.
+				// Now and then a run reaching the last key.
 				let end = match next(8) {
 					0 => u64::MAX,
 					_ => start + next(4),
@@ -354,9 +354,9 @@ mod tests {
 			let (lo, hi) = (next(30), 20 + next(30));
 			let gained: RangeInclusiveSet<u64> = new.gained(&old, lo, hi).unwrap().into_iter().collect();
 			let expected: Vec<u64> = (lo..=hi)
-				.filter(|sequence| new.contains(*sequence) && !old.contains(*sequence))
+				.filter(|key| new.contains(*key) && !old.contains(*key))
 				.collect();
-			let found: Vec<u64> = (lo..=hi).filter(|sequence| gained.contains(sequence)).collect();
+			let found: Vec<u64> = (lo..=hi).filter(|key| gained.contains(key)).collect();
 			assert_eq!(found, expected, "round {round}: {old:?} to {new:?} in {lo}..={hi}");
 		}
 		let unshared = Layered::new(Arc::new(Runs::default()), Runs::default());
@@ -385,7 +385,7 @@ mod tests {
 			let runs = Runs::new(random_runs(&mut next, 6, 40));
 			let start = next(40);
 			let run = start..=start + next(10);
-			let expected: Vec<u64> = run.clone().filter(|sequence| !runs.contains(*sequence)).collect();
+			let expected: Vec<u64> = run.clone().filter(|key| !runs.contains(*key)).collect();
 			let found: Vec<u64> = minus(run.clone(), &runs).flatten().collect();
 			assert_eq!(found, expected, "{run:?} minus {runs:?}");
 		}

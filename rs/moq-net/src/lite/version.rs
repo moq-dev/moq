@@ -161,7 +161,7 @@ impl Version {
 	}
 
 	/// Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices
-	/// alongside their group sequences, so a subscription or fetch can start and end
+	/// alongside their group keys, so a subscription or fetch can start and end
 	/// partway through a group. Added in lite-06.
 	///
 	/// Older versions only address whole groups, so a route change has to wait for the
@@ -224,10 +224,10 @@ impl Version {
 	}
 
 	/// Whether SUBSCRIBE's `Group Start` is an absolute floor the publisher resolves a
-	/// start from: the raw minimum group sequence (default 0), with `Subscriber Max Age`
+	/// start from: the raw minimum group key (default 0), with `Subscriber Max Age`
 	/// as the only gate on how far back delivery begins. Changed in lite-06.
 	///
-	/// Older versions encode `Group Start` as the sequence + 1, with 0 meaning the
+	/// Older versions encode `Group Start` as the key + 1, with 0 meaning the
 	/// latest group, so an absent start there pins the cursor to the live edge instead
 	/// of resolving it from the budget.
 	pub(crate) fn resolves_start(self) -> bool {
@@ -327,7 +327,7 @@ impl Version {
 		)
 	}
 
-	/// Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
+	/// Whether holes split into SUBSCRIBE_SKIP, for keys declared never produced, and
 	/// SUBSCRIBE_DROP, for groups that existed, which names the `Update` in effect when it was
 	/// given up; SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07;
 	/// earlier versions name every hole in SUBSCRIBE_DROP.

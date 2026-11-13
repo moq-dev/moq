@@ -210,12 +210,12 @@ impl Reader {
 					let sent = match group.read_frame().await {
 						Ok(Some(frame)) => tx.unbounded_send(Ok(format!(
 							"{}:{}",
-							group.sequence,
+							group.start,
 							String::from_utf8_lossy(&frame.payload)
 						))),
 						Ok(None) => break,
 						Err(err) => {
-							let _ = tx.unbounded_send(Err(format!("group {} frame: {err}", group.sequence)));
+							let _ = tx.unbounded_send(Err(format!("group {} frame: {err}", group.start)));
 							break;
 						}
 					};
@@ -348,7 +348,7 @@ enum Before {
 	Resume,
 }
 
-/// The minimal sequences the release-line splice left a late reader stuck on: it
+/// The minimal keys the release-line splice left a late reader stuck on: it
 /// subscribes, and nothing ever arrives.
 async fn late_reader(version: &str, before: Before) {
 	let version: Version = version.parse().unwrap();

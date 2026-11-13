@@ -50,7 +50,7 @@ pub struct DropSet {
 }
 
 impl DropSet {
-	/// `runs` disjoint dropped runs of `span` sequences each, read by `readers` wire cursors
+	/// `runs` disjoint dropped runs of `span` keys each, read by `readers` wire cursors
 	/// whose ranges hold the newest `reported` of them, each already reported.
 	pub fn new(readers: usize, runs: u64, reported: u64, span: u64) -> Self {
 		let broadcast = broadcast::Producer::new(broadcast::Info::default());
@@ -1081,7 +1081,7 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group {
 				subscribe: 3,
-				sequence: 1_234,
+				key: 1_234,
 				frame_start: 0,
 			}
 			.encode(w, version)
@@ -1231,7 +1231,7 @@ where
 ///
 /// Byte 0 picks the version, which is the whole point: lite-01 to lite-06 use the QUIC
 /// two-bit length tag, while lite-07 and the moq-transport drafts count leading ones, and
-/// the two disagree about which byte sequences are even legal.
+/// the two disagree about which byte keys are even legal.
 ///
 /// The leading-ones form spans the full `u64`, while the QUIC form stops at
 /// `2^62 - 1`; a value always re-encodes in the form it was read in.
@@ -1328,7 +1328,7 @@ impl Default for Messages {
 			},
 			lite_group: lite::Group {
 				subscribe: 7,
-				sequence: 123_456,
+				key: 123_456,
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {

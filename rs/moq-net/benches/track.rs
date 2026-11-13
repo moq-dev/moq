@@ -30,7 +30,7 @@
 //! each append must wake only the reads it can expire, so waking the backlog shows up
 //! as a slope over it.
 //!
-//! `track_sparse_read` hands out groups from a feed with every other sequence missing,
+//! `track_sparse_read` hands out groups from a feed with every other key missing,
 //! holding a fixed number of gaps the reader still remembers: each hand-out must cost the
 //! same however many gaps it holds, so a walk over them shows up as a slope.
 //! `track_sparse_poll` repeats a parked read over a feed holding deferred gaps, without
@@ -38,7 +38,7 @@
 //! repeated read revisits them again.
 //!
 //! `track_idle_poll` repeats every parked read over readers sharing one track, in arrival
-//! and sequence order, with nothing new: a repeated read parks again without walking the
+//! and key order, with nothing new: a repeated read parks again without walking the
 //! read path, so each costs a small constant, and a slope over the readers, or a jump in
 //! that constant, means the early exit stopped applying.
 //!
@@ -100,7 +100,7 @@
 //! cached, and the runs it skipped: a widening costs the runs it re-offers, so a scan of the
 //! cache or the audience shows up as a slope.
 //!
-//! `track_time_end` lands groups one at a time behind a sequence that never arrives, each
+//! `track_time_end` lands groups one at a time behind a key that never arrives, each
 //! drained by readers whose range ends at a time no group reaches, swept over the groups and
 //! the readers: an unsettled time end walks on from where it stopped, so a rescan of the
 //! groups behind the gap on every read shows up as a slope over them.
@@ -219,11 +219,11 @@ impl FetchReaders {
 		let track = broadcast.create_track("bench", timed()).unwrap();
 		let mut open = track.append_group().unwrap();
 		open.write_frame(Timestamp::ZERO, Bytes::from_static(b"f")).unwrap();
-		for sequence in 1..=history {
+		for key in 1..=history {
 			let mut group = track.append_group().unwrap();
 			group
 				.write_frame(
-					Timestamp::from_millis(sequence as u64).unwrap(),
+					Timestamp::from_millis(key as u64).unwrap(),
 					Bytes::from_static(b"f"),
 				)
 				.unwrap();
@@ -1281,9 +1281,9 @@ impl Sparse {
 		sparse
 	}
 
-	fn hand_out(&mut self, sequence: u64) {
-		let timestamp = self.timed.then(|| Timestamp::from_micros(sequence).unwrap());
-		let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+	fn hand_out(&mut self, key: u64) {
+		let timestamp = self.timed.then(|| Timestamp::from_micros(key).unwrap());
+		let mut group = self.track.create_group(moq_net::group::Info { start: key }).unwrap();
 		group.write_frame(timestamp, Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();
 		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
@@ -1504,8 +1504,8 @@ impl GapFlush {
 		let mut sub = track.subscribe(
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
 		);
-		let mut hand_out = |sequence: u64, millis: u64| {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		let mut hand_out = |key: u64, millis: u64| {
+			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from_static(b"x"))
 				.unwrap();
@@ -1515,7 +1515,7 @@ impl GapFlush {
 			black_box(read);
 			group
 		};
-		// Every odd sequence is missing.
+		// Every odd key is missing.
 		let handed: Vec<_> = (0..gaps).map(|gap| hand_out(gap * 2, gap)).collect();
 		hand_out(gaps * 2, gaps).finish().unwrap();
 		for group in handed {
@@ -1536,7 +1536,7 @@ impl GapFlush {
 		let mut group = self
 			.track
 			.create_group(moq_net::group::Info {
-				sequence: self.gaps * 2 + 1,
+				start: self.gaps * 2 + 1,
 			})
 			.unwrap();
 		group
@@ -1740,12 +1740,12 @@ impl BudgetWidening {
 		let mut reader = track.subscribe(narrow.clone());
 		let beside = (0..readers).map(|_| track.subscribe(narrow.clone())).collect();
 		let waiter = kio::Waiter::noop();
-		let mut write = |sequences: std::ops::Range<u64>| {
-			for sequence in sequences {
-				let mut group = track.create_group(group::Info { sequence }).unwrap();
+		let mut write = |keys: std::ops::Range<u64>| {
+			for key in keys {
+				let mut group = track.create_group(group::Info { start: key }).unwrap();
 				group
 					.write_frame(
-						Timestamp::from_millis(100 * sequence).unwrap(),
+						Timestamp::from_millis(100 * key).unwrap(),
 						Bytes::from_static(b"x"),
 					)
 					.unwrap();
@@ -1761,8 +1761,8 @@ impl BudgetWidening {
 		for run in 0..runs {
 			write(3 * run + 1..3 * run + 4);
 		}
-		for sequence in 3 * runs + 1..cached {
-			write(sequence..sequence + 1);
+		for key in 3 * runs + 1..cached {
+			write(key..key + 1);
 		}
 		Self {
 			_broadcast: broadcast,
@@ -1810,7 +1810,7 @@ fn bench_budget_widening(c: &mut Criterion) {
 }
 
 /// Readers whose range ends at a time no group reaches yet, as groups land behind a missing
-/// sequence; see [`bench_time_end`].
+/// key; see [`bench_time_end`].
 struct TimeEnd {
 	_broadcast: broadcast::Producer,
 	track: track::Producer,
@@ -1822,7 +1822,7 @@ impl TimeEnd {
 	fn new(readers: usize, groups: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let mut zero = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut zero = track.create_group(group::Info { start: 0 }).unwrap();
 		zero.write_frame(Timestamp::from_millis(0).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
 		zero.finish().unwrap();
@@ -1851,10 +1851,10 @@ impl TimeEnd {
 
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
-		for sequence in 2..self.groups + 2 {
-			let mut group = self.track.create_group(group::Info { sequence }).unwrap();
+		for key in 2..self.groups + 2 {
+			let mut group = self.track.create_group(group::Info { start: key }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence).unwrap(), Bytes::from_static(b"x"))
+				.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
 				.unwrap();
 			group.finish().unwrap();
 			for reader in &mut self.readers {
@@ -1869,7 +1869,7 @@ impl TimeEnd {
 	}
 }
 
-/// Groups landing one at a time behind a missing sequence, each drained by readers whose
+/// Groups landing one at a time behind a missing key, each drained by readers whose
 /// time end it cannot settle, swept over the groups and the readers. Each group must cost
 /// each reader the same, so a rescan behind the gap shows up as a slope over the groups.
 fn bench_time_end(c: &mut Criterion) {
@@ -1904,12 +1904,12 @@ impl Fills {
 		// The feed starts past every run, so each is a miss asked at once.
 		let start = runs * 2;
 		track.start_at(start).unwrap();
-		let mut group = track.create_group(group::Info { sequence: start }).unwrap();
+		let mut group = track.create_group(group::Info { start: start }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
 		group.finish().unwrap();
-		// One range per run, with a sequence between each that no reader asks for.
+		// One range per run, with a key between each that no reader asks for.
 		let ranges = (0..runs)
 			.map(|run| track::Range::groups(run * 2..run * 2 + 1))
 			.chain([track::Range::groups(start..)]);
@@ -1995,7 +1995,7 @@ impl RangeFills {
 		// neighbors keeps every range its own fill.
 		let start = ranges * (span + 1);
 		track.start_at(start).unwrap();
-		let mut group = track.create_group(group::Info { sequence: start }).unwrap();
+		let mut group = track.create_group(group::Info { start: start }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
@@ -2024,10 +2024,10 @@ impl RangeFills {
 			assert!(reader.poll_recv_group(&waiter).is_pending(), "everything is a miss");
 		}
 		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-			while let Some(sequence) = fill.wanted() {
-				let mut group = fill.accept(sequence, None).unwrap();
+			while let Some(key) = fill.wanted() {
+				let mut group = fill.accept(key, None).unwrap();
 				group
-					.write_frame(Timestamp::from_millis(sequence).unwrap(), Bytes::from_static(b"x"))
+					.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
 					.unwrap();
 				group.finish().unwrap();
 			}
@@ -2095,7 +2095,7 @@ impl RefusedFill {
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		let dynamic = track.requests();
 		track.start_at(Self::START).unwrap();
-		let mut group = track.create_group(group::Info { sequence: Self::START }).unwrap();
+		let mut group = track.create_group(group::Info { start: Self::START }).unwrap();
 		group.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();
 		let waiter = kio::Waiter::noop();
@@ -2109,7 +2109,7 @@ impl RefusedFill {
 				let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) else {
 					panic!("the live group is cached");
 				};
-				assert_eq!(group.sequence, Self::START);
+				assert_eq!(group.start, Self::START);
 				assert!(reader.poll_recv_group(&waiter).is_pending());
 				reader
 			})
@@ -2133,8 +2133,8 @@ impl RefusedFill {
 	fn run(&mut self, refusals: u64) {
 		let waiter = kio::Waiter::noop();
 		for refused in 1..=refusals {
-			let sequence = self.fill.wanted().unwrap();
-			self.fill.drop_groups(sequence..sequence + 1);
+			let key = self.fill.wanted().unwrap();
+			self.fill.drop_groups(key..key + 1);
 			for reader in &mut self.readers {
 				assert!(reader.poll_recv_group(&waiter).is_pending());
 			}

@@ -1572,9 +1572,9 @@ mod test {
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
 		let _open = track.append_group().unwrap();
 		let handle = consumer.track("a").unwrap();
-		assert_eq!(handle.latest_sequence(), Some(0));
+		assert_eq!(handle.latest_key(), Some(0));
 		drop(track);
-		assert_eq!(handle.latest_sequence(), None);
+		assert_eq!(handle.latest_key(), None);
 	}
 
 	/// A handle's largest reads the instance its open broadcast serves now, without asking
@@ -1608,7 +1608,7 @@ mod test {
 		let handle = consumer.track("a").unwrap();
 		producer.close();
 		drop(track);
-		assert_eq!(handle.latest_sequence(), Some(0));
+		assert_eq!(handle.latest_key(), Some(0));
 	}
 
 	#[test]
@@ -1984,7 +1984,7 @@ mod test {
 
 		// The new consumer should receive the new group, which continues past the first's.
 		producer2
-			.create_group(crate::group::Info { sequence: 1 })
+			.create_group(crate::group::Info { start: 1 })
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -2003,7 +2003,7 @@ mod test {
 
 		let track = consumer.track("media").unwrap().subscribe(None);
 		let first = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut group = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
+		let mut group = first.create_group(crate::group::Info { start: 8 }).unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
 		group.finish().unwrap();
 		let first = first.finish().unwrap();
@@ -2012,7 +2012,7 @@ mod test {
 		let track = consumer.track("media").unwrap().subscribe(None);
 		let second = dynamic.assert_request().accept(crate::track::Info::timed());
 		let mut group = second.append_group().unwrap();
-		assert_eq!(group.sequence, 0);
+		assert_eq!(group.start, 0);
 		group.write_frame(at(500), b"b".as_slice()).unwrap();
 		drop((group, second, track));
 
@@ -2336,7 +2336,7 @@ mod test {
 
 		let _track = staged.commit();
 		let mut subscriber = subscribing.await.unwrap();
-		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().sequence, 0);
+		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().start, 0);
 	}
 
 	/// Dropping a staged track uncommitted rejects the request, so its subscribers fail

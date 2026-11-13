@@ -891,7 +891,7 @@ mod hop_tests {
 			info.properties = track_properties.clone();
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
 
-			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 			group
 				.set_wire(group::Wire {
 					sparse: false,
@@ -1192,7 +1192,7 @@ mod hop_tests {
 			group.write_frame(start, b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;
-			assert_eq!(received.sequence, 1);
+			assert_eq!(received.start, 1);
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(frame.timestamp, Some(start), "{offer:?}");
 			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");

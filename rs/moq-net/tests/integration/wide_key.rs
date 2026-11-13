@@ -1,6 +1,6 @@
 #![cfg(feature = "async")]
 
-//! Group sequence boundaries, directly and through a forwarding origin.
+//! Group key boundaries, directly and through a forwarding origin.
 
 use crate::support;
 
@@ -9,10 +9,10 @@ use std::time::Duration;
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
-/// Published QUIC-varint sequences keep all their bits on the live feed, directly
+/// Published QUIC-varint keys keep all their bits on the live feed, directly
 /// and through a forwarding origin, even beyond JavaScript's exact number range.
 #[kio::test]
-async fn largest_quic_sequence_reaches_the_subscriber() {
+async fn largest_quic_key_reaches_the_subscriber() {
 	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-18"] {
 		for relayed in [false, true] {
 			let version: Version = alpn.parse().unwrap();
@@ -46,18 +46,18 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				.unwrap()
 				.unwrap();
 			let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
-			for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
+			for key in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 				// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
-				let timestamp = Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
-				let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+				let timestamp = Timestamp::from_micros(key.min((1 << 61) - 1)).unwrap();
+				let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 				group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
 				group.finish().unwrap();
 				let mut got = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
 					.await
-					.unwrap_or_else(|_| panic!("{alpn} relayed={relayed} sequence={sequence} hung"))
+					.unwrap_or_else(|_| panic!("{alpn} relayed={relayed} key={key} hung"))
 					.unwrap()
 					.unwrap();
-				assert_eq!(got.sequence, sequence, "{alpn} relayed={relayed}");
+				assert_eq!(got.start, key, "{alpn} relayed={relayed}");
 				let frame = got.read_frame().await.unwrap().unwrap();
 				assert_eq!(frame.payload, b"ladder".as_ref());
 				// Lite-02 carries no timestamps.
@@ -80,10 +80,10 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer.with_proxy(true)
 }
 
-/// The relay accepts the wide sequence from lite-07, refuses that subscription to the
+/// The relay accepts the wide key from lite-07, refuses that subscription to the
 /// lite-06 reader that cannot encode it, and keeps the session serving other tracks.
 #[kio::test]
-async fn wide_sequence_fails_only_its_subscription() {
+async fn wide_key_fails_only_its_subscription() {
 	const WIDE: u64 = 1 << 62;
 
 	let publisher = produce_origin(1);
@@ -96,7 +96,7 @@ async fn wide_sequence_fails_only_its_subscription() {
 	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = wide.create_group(moq_net::group::Info { sequence: WIDE }).unwrap();
+	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
 	let mut group = narrow.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
@@ -120,7 +120,7 @@ async fn wide_sequence_fails_only_its_subscription() {
 		.unwrap()
 		.unwrap();
 	let mut sub = cached.track("wide").unwrap().subscribe(None).await.unwrap();
-	assert_eq!(sub.recv_group().await.unwrap().unwrap().sequence, WIDE);
+	assert_eq!(sub.recv_group().await.unwrap().unwrap().start, WIDE);
 
 	let consumer = client.consume();
 	let remote = consumer
@@ -133,7 +133,7 @@ async fn wide_sequence_fails_only_its_subscription() {
 
 	let result = kio::clock::timeout(Duration::from_secs(5), async {
 		let mut sub = remote.track("wide").unwrap().subscribe(None).await?;
-		sub.recv_group().await.map(|group| group.map(|group| group.sequence))
+		sub.recv_group().await.map(|group| group.map(|group| group.start))
 	})
 	.await
 	.expect("the wide subscription hung instead of failing");
@@ -190,10 +190,10 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 
 	let mut sub = remote.track("wide").unwrap().subscribe(None).await.unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
-	assert_eq!(group.sequence, 0);
+	assert_eq!(group.start, 0);
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"first".as_ref());
 
-	let mut group = wide.create_group(moq_net::group::Info { sequence: WIDE }).unwrap();
+	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
 
 	let result = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())

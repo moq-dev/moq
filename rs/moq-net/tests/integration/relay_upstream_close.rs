@@ -80,7 +80,7 @@ async fn read(mut sub: moq_net::track::Subscriber) -> Outcome {
 			match group.read_frame().await {
 				Ok(Some(frame)) => {
 					let index: u64 = std::str::from_utf8(&frame.payload).unwrap().parse().unwrap();
-					got.push((group.sequence, index));
+					got.push((group.start, index));
 				}
 				Ok(None) => break,
 				Err(err) => return (got, Err(err)),
@@ -147,10 +147,10 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	// The subscriber now reads nothing until the upstream session is gone.
 	downstream.server_transport.hold_unis();
 	for track in &tracks {
-		for sequence in 0..GROUPS {
+		for key in 0..GROUPS {
 			let mut group = track.append_group().unwrap();
 			for index in 0..FRAMES {
-				let at = Timestamp::from_millis(sequence * FRAMES + index).unwrap();
+				let at = Timestamp::from_millis(key * FRAMES + index).unwrap();
 				group.write_frame(at, index.to_string().into_bytes()).unwrap();
 			}
 			group.finish().unwrap();

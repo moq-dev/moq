@@ -113,18 +113,18 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 				Err(err) => break Err(err),
 			};
 			assert_eq!(&head.payload[..], b"head");
-			heads.send(group.sequence).await.unwrap();
+			heads.send(group.start).await.unwrap();
 			tails.push(kio::clock::sim::spawn(async move {
 				let tail = group.read_frame().await?.expect("tail frame");
 				assert_eq!(&tail.payload[..], b"tail");
 				assert!(group.read_frame().await?.is_none(), "extra frame");
-				Ok::<_, moq_net::Error>(group.sequence)
+				Ok::<_, moq_net::Error>(group.start)
 			}));
 		};
 		let mut seen = Vec::new();
 		for tail in tails {
 			match tail.await.expect("tail reader panicked") {
-				Ok(sequence) => seen.push(sequence),
+				Ok(key) => seen.push(key),
 				Err(err) => return (seen, Err(err)),
 			}
 		}
@@ -144,13 +144,13 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	match arrival {
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();
-			for sequence in 0..GROUPS {
+			for key in 0..GROUPS {
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
 				groups.push(group);
 				// IETF requests the live edge, so observe each header before advancing it.
 				match kio::clock::timeout(TIMEOUT, opened.next()).await.expect("head timeout") {
-					Some(head) => assert_eq!(head, sequence, "{name}"),
+					Some(head) => assert_eq!(head, key, "{name}"),
 					None => panic!("{name}: the reader stopped: {:?}", reader.await),
 				}
 			}

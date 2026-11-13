@@ -475,14 +475,14 @@ impl Bystander {
 	}
 
 	/// Write the next group: two frames of the same size every time, so groups charge the
-	/// cache alike, holding the sequence so a misplaced one shows.
+	/// cache alike, holding the key so a misplaced one shows.
 	fn publish(&self) {
 		let mut sent = self.sent.borrow_mut();
-		let sequence = sent.len() as u64;
+		let key = sent.len() as u64;
 		let mut group = self.track.append_group().expect("the bystander's group");
 		let mut frames = Vec::new();
 		for frame in 0..2u8 {
-			let mut payload = sequence.to_be_bytes().repeat(8);
+			let mut payload = key.to_be_bytes().repeat(8);
 			payload.push(frame);
 			let payload = Bytes::from(payload);
 			group.write_frame(None, payload.clone()).expect("the bystander's frame");

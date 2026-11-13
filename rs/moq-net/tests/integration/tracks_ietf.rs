@@ -90,7 +90,7 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 		.await
 		.expect("frame timeout")
 		.ok()??;
-	Some((group.sequence, frame.payload.to_vec()))
+	Some((group.start, frame.payload.to_vec()))
 }
 
 /// SUBSCRIBE_TRACKS goes out only for a listing, since many peers do not answer it:

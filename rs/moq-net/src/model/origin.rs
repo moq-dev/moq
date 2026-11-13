@@ -558,7 +558,7 @@ pub enum Source {
 
 impl RouteInfo {
 	/// The stream the route serves: routes with one instance serve one continuous
-	/// sequence space, so a subscription resumes from one to another. Pass it to
+	/// key space, so a subscription resumes from one to another. Pass it to
 	/// [`Consumer::request`] to pin this stream.
 	pub fn instance(&self) -> &Instance {
 		self.instance.as_ref().expect("a delivered route has an instance")
@@ -723,10 +723,10 @@ impl RouteOptions {
 
 	/// Serve a stable `instance` at `epoch`, in place of a freshly minted one.
 	///
-	/// Only for a publisher that continues the instance's sequence space across restarts,
+	/// Only for a publisher that continues the instance's key space across restarts,
 	/// announcing a higher `epoch` each time, such as a counter persisted on disk. Readers
 	/// stitch every route of one instance together, so a publisher that restarts its
-	/// group sequences under an old instance splices unrelated groups into their tracks.
+	/// group keys under an old instance splices unrelated groups into their tracks.
 	/// The highest epoch wins over every older one of the instance, cheaper or not.
 	/// Naming an instance grants nothing: publishing still needs the path's grant.
 	pub fn with_instance(mut self, instance: Instance, epoch: u64) -> Self {
@@ -935,7 +935,7 @@ enum Held {
 /// bounded by the number of distinct prefixes. A metadata change on a live route
 /// overwrites the pending `Announce` (or is delivered as another active update),
 /// a pending `Restart` stays one until delivered whatever metadata follows it,
-/// and `UnannounceAnnounce` preserves a real retract-then-announce sequence.
+/// and `UnannounceAnnounce` preserves a real retract-then-announce key.
 type AnnounceMeta = (RouteMeta, Option<Vec<Pattern>>);
 
 enum PendingUpdate {
@@ -2438,8 +2438,8 @@ impl Producer {
 	/// This is how local content enters an origin. Fill the broadcast through
 	/// [`Route::broadcast`]. The route serves a fresh random instance, minted here and
 	/// kept for its lifetime, across [`Route::withdraw`] and [`Route::announce`], since
-	/// its sequences continue: a new route is a new stream that never splices into an
-	/// old one. A publisher that continues one sequence space across restarts may name
+	/// its keys continue: a new route is a new stream that never splices into an
+	/// old one. A publisher that continues one key space across restarts may name
 	/// a stable instance instead ([`RouteOptions::with_instance`]).
 	///
 	/// Announced at once unless created [`RouteOptions::hidden`]. A hidden route exists
@@ -2707,7 +2707,7 @@ impl Producer {
 	/// routes answering its requests, so a reader that resolved a path through it
 	/// continues on that path's answer rather than restarting. Once an exact route holding
 	/// the lent instance stops serving it (withdrawn, closed, or renamed), this route moves
-	/// to a fresh instance, as a restarted job's sequences are another stream: see
+	/// to a fresh instance, as a restarted job's keys are another stream: see
 	/// [`Claim::instance`]. A claim naming a stable instance lends nothing, and its
 	/// answers each mint their own.
 	///
@@ -3058,7 +3058,7 @@ struct Serving {
 ///
 /// A route mints its instance when it is created and keeps it for its lifetime, across
 /// [`withdraw`](Self::withdraw), [`announce`](Self::announce) and reconnects, since it
-/// owns the same broadcast and its sequences continue. A new run is a new route.
+/// owns the same broadcast and its keys continue. A new run is a new route.
 ///
 /// ```
 /// # fn run(origin: moq_net::origin::Producer) -> Result<(), moq_net::Error> {
@@ -4435,7 +4435,7 @@ impl kio::Task for FrontServeRun {
 }
 
 /// The route a front may serve from. `resolved` is the instance the front first
-/// resolved, once it has. Its routes serve one continuous sequence space, so any of them
+/// resolved, once it has. Its routes serve one continuous key space, so any of them
 /// at its newest epoch may take over. The front stays until those routes go, even once
 /// another instance wins the path: its subscriptions are sticky, and new requests
 /// resolve the winner on a fresh front.
@@ -4780,7 +4780,7 @@ impl FrontServe {
 							Err(Error::Cancel)
 						}
 					};
-					let delivered = copy.latest_sequence().is_some();
+					let delivered = copy.latest_key().is_some();
 					return Some(FrontStep::Ended(name.clone(), *source, result, delivered));
 				}
 				// Watch the demand edge in whichever direction is unmet. Only `Pending`
@@ -5275,7 +5275,7 @@ impl kio::Task for FrontServe {
 					// nothing is a refusal, which leaves a draining incumbent serving.
 					let result = match result {
 						Ok(info) => match asked.copy.poll_complete(&kio::Waiter::noop()) {
-							Poll::Ready(Err(err)) if asked.copy.latest_sequence().is_none() => Err(err),
+							Poll::Ready(Err(err)) if asked.copy.latest_key().is_none() => Err(err),
 							_ => Ok(info),
 						},
 						Err(err) => Err(err),
@@ -6632,9 +6632,9 @@ impl OriginState {
 	/// A job's route carrying `spent`, the instance it took from the prefix route `id` at
 	/// `prefix`, stopped serving it: that prefix route moves to a fresh instance.
 	///
-	/// One instance is one stream at each path, and the job's sequences end with it. Were the
+	/// One instance is one stream at each path, and the job's keys end with it. Were the
 	/// prefix route to keep the instance, its next answer for the path, a restarted job,
-	/// would splice a new sequence space into everything that holds the old one, and nothing
+	/// would splice a new key space into everything that holds the old one, and nothing
 	/// short of remembering every path it ever answered could tell. Under the table's lock,
 	/// with the job's retraction, so no request resolves the path through the old instance
 	/// in between. A prefix route already past `spent` has nothing to do.
@@ -6896,7 +6896,7 @@ impl Request {
 	/// continues on this answer; a prefix route that lends nothing has the route mint its
 	/// own. Ending the route withdraws only this path, and moves a prefix route that lent
 	/// its instance to a fresh one, so a job that ends and restarts beneath the same prefix
-	/// is a new stream for its restarted sequences. The prefix route keeps answering later
+	/// is a new stream for its restarted keys. The prefix route keeps answering later
 	/// requests. Created visible, the route announces now and answers the requesters
 	/// waiting on its path. Created [`RouteOptions::hidden`], they wait until
 	/// [`Route::announce`], so the job can fill its catalog first; dropping the route
@@ -6915,7 +6915,7 @@ impl Request {
 	/// Serve a held broadcast under this prefix route without announcing an exact route.
 	///
 	/// The answer belongs to the prefix route's instance at this path: every answer for
-	/// that path must continue the same sequence space and bytes. Start a new prefix
+	/// that path must continue the same key space and bytes. Start a new prefix
 	/// route to serve different content there. For a job that may restart independently,
 	/// use [`Self::route`]: its end moves the prefix route to another instance.
 	pub fn serve(self, broadcast: impl Consume<broadcast::Consumer>) {
@@ -7950,7 +7950,7 @@ impl Consumer {
 	///
 	/// When its serving source dies or a better route of the same instance appears,
 	/// including a higher epoch, the front switches to it, invisibly to subscribers: the
-	/// instance promises one continuous sequence space. Its routes retracting with no
+	/// instance promises one continuous key space. Its routes retracting with no
 	/// replacement ends the broadcast, and the next request re-serves the path;
 	/// tracks already in flight carry on to their own end. The broadcast also ends
 	/// once no handle holds it and none of its tracks has been read for a linger,
@@ -8944,7 +8944,7 @@ mod tests {
 			io.end(Ok(()), None);
 
 			let mut group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
-			assert_eq!(group.sequence, 7);
+			assert_eq!(group.start, 7);
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(frame.payload.as_ref(), b"snapshot");
 			assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
@@ -11234,7 +11234,7 @@ mod tests {
 				.await
 				.unwrap()
 				.expect("the catalog")
-				.sequence,
+				.start,
 			0
 		);
 		assert!(next_group(&mut subscription).await.unwrap().is_none());
@@ -11248,7 +11248,7 @@ mod tests {
 				.await
 				.unwrap()
 				.expect("the catalog")
-				.sequence,
+				.start,
 			0
 		);
 		assert!(next_group(&mut subscription).await.unwrap().is_none());
@@ -11688,7 +11688,7 @@ mod tests {
 			.unwrap_or_else(|_| panic!("dies_first={dies_first}: the later reader never got the group"))
 			.unwrap()
 			.expect("track ended");
-		assert_eq!(late.sequence, 0);
+		assert_eq!(late.start, 0);
 		for expect in [b"a", b"b", b"c"] {
 			assert_eq!(read(&mut late).await, expect, "dies_first={dies_first}");
 		}
@@ -11698,7 +11698,7 @@ mod tests {
 				.await
 				.expect("the reader joining mid-outage never got the group")
 				.unwrap();
-			assert_eq!(group.sequence, 0);
+			assert_eq!(group.start, 0);
 			for expect in [b"a", b"b", b"c"] {
 				assert_eq!(read(&mut group).await, expect);
 			}
@@ -13871,7 +13871,7 @@ mod tests {
 
 	/// Only an instance's highest epoch is eligible: a costlier route at a higher epoch
 	/// takes the front over from the cheaper older one still standing, and the reader
-	/// continues across the epoch change without a seam, since the instance's sequences
+	/// continues across the epoch change without a seam, since the instance's keys
 	/// continue. A new request joins the same broadcast.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -14429,11 +14429,11 @@ mod tests {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 		let mut group = rig
 			.incumbent_track
-			.create_group(crate::group::Info { sequence: 5 })
+			.create_group(crate::group::Info { start: 5 })
 			.unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"five".as_ref()).unwrap();
 		group.finish().unwrap();
-		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().sequence, 5);
+		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().start, 5);
 		let standby = rig.standby(&[10, 20]);
 		drop(incumbent);
 		drop(source);
@@ -15364,7 +15364,7 @@ mod tests {
 		let _old = old.finish().unwrap();
 		let end = next_group(&mut subscription)
 			.await
-			.map(|group| group.map(|group| group.sequence));
+			.map(|group| group.map(|group| group.start));
 		assert!(matches!(end, Ok(None)), "the incumbent's clean end, not {end:?}");
 	}
 
