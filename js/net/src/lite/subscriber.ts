@@ -74,7 +74,7 @@ import {
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
-import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused } from "./fills.ts";
+import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
 import { LinkRtt } from "./link_rtt.ts";
@@ -2605,13 +2605,12 @@ export class Subscriber {
 		const leaving = new Promise<void>((resolve) =>
 			left.signal.addEventListener("abort", () => resolve(), { once: true }),
 		);
-		const refused: Refused[] = [];
-		// What the publisher gives up of the groups, accounted for in the tail.
+		let refused: Refused[] = [];
+		// What the publisher gives up of the groups, accounted for in the tail. The latest verdict on a
+		// group replaces any earlier one, so a peer repeating its drops grows nothing.
 		const giveUp = (start: bigint, end: bigint, refusal: Refusal) => {
 			entry.tail.account(start, end);
-			const from = max(start, groups.start);
-			const to = min(end, groups.end);
-			if (from < to) refused.push({ start: from, end: to, refusal });
+			refused = refuseRun(refused, max(start, groups.start), min(end, groups.end), refusal);
 		};
 		this.#subscribes.set(id, entry);
 		const done = (async () => {

@@ -40,6 +40,12 @@ export function passing(error: Error): Refusal {
 	return { error, lost: false };
 }
 
+/** `runs` with `[start, end)` refused by `refusal` instead, so a repeated refusal costs nothing. */
+export function refuseRun(runs: readonly Refused[], start: bigint, end: bigint, refusal: Refusal): Refused[] {
+	if (start >= end) return [...runs];
+	return [...removeRun(runs, start, end), { start, end, refusal }].sort(byStart);
+}
+
 /**
  * A subscription asking again, with no max delay, for groups another one dropped as stale or
  * already delivered, which a fill still owes: what the subscriber opens for a {@link RangeFills}.
@@ -171,9 +177,11 @@ export class RangeFills {
 	/**
 	 * Settle each held fill against what the subscription refused, open a recovery for each run it
 	 * will not deliver, and recompute what to ask. `tail` is the subscription's, and `read` whether
-	 * anyone still reads the track. Returns whether the ask changed.
+	 * anyone still reads the track. Returns whether the ask changed, or whether it {@link isEmpty}:
+	 * a subscription holding its FIN for the fills waits on either.
 	 */
 	poll(tail: Tail, read: boolean): boolean {
+		const empty = this.isEmpty();
 		// The groups the subscription already accounted for, which it never sends again, are
 		// recovered on their own, once.
 		const asked: Run[] = [];
@@ -185,7 +193,7 @@ export class RangeFills {
 		// them again.
 		let recovery: Refused[] = [];
 		const answers = (start: bigint, end: bigint, refusal: Refusal) => {
-			if (start < end) recovery = [...removeRun(recovery, start, end), { start, end, refusal }].sort(byStart);
+			recovery = refuseRun(recovery, start, end, refusal);
 		};
 		for (const run of asked) {
 			for (const gone of tail.accounted(run.start, run.end)) {
@@ -289,7 +297,8 @@ export class RangeFills {
 		// What finishes a stream still asks with what its fills asked.
 		if (this.#held.length === 0 && groups.length > 0) ask.priority = this.ask.priority;
 		ask.groups = groups;
-		if (ask.priority === this.ask.priority && sameRuns(ask.groups, this.ask.groups)) return false;
+		if (ask.priority === this.ask.priority && sameRuns(ask.groups, this.ask.groups))
+			return this.isEmpty() !== empty;
 		this.#retireSkipped(ask.groups);
 		this.ask = ask;
 		return true;
@@ -334,8 +343,7 @@ export class RangeFills {
 	}
 
 	#setRefused(start: bigint, end: bigint, refusal: Refusal): void {
-		if (start >= end) return;
-		this.#refused = [...removeRun(this.#refused, start, end), { start, end, refusal }].sort(byStart);
+		this.#refused = refuseRun(this.#refused, start, end, refusal);
 	}
 
 	// Asking for `asked` from now on retires the range of each run not asked whole any more, and

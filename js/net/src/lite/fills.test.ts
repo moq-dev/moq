@@ -44,17 +44,23 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 
 // Recoveries a test answers by hand.
 function recoveries() {
-	const opened: { groups: Run; priority: number; finish(refused: Refused[]): void; cancelled: boolean }[] = [];
+	const opened: {
+		groups: Run;
+		priority: number;
+		finish(refused: Refused[]): void;
+		cancelled: boolean;
+		reading: boolean;
+	}[] = [];
 	const recover = (groups: Run, priority: number): RecoveryHandle => {
 		let finish!: (refused: Refused[]) => void;
 		const done = new Promise<Refused[]>((resolve) => {
 			finish = resolve;
 		});
-		const entry = { groups: { ...groups }, priority, finish, cancelled: false };
+		const entry = { groups: { ...groups }, priority, finish, cancelled: false, reading: false };
 		opened.push(entry);
 		return {
 			done,
-			reading: () => false,
+			reading: () => entry.reading,
 			cancel: () => {
 				entry.cancelled = true;
 				finish([]);
@@ -108,6 +114,40 @@ test("range fills: a stale drop of asked groups is recovered once, on a subscrip
 	fills.poll(tail, true);
 	// Refused for this fill, which moves on past them.
 	expect(peer.fill.wanted()).toBe(3n);
+
+	fills.close();
+	peer.close();
+});
+
+// The subscription holds its FIN while the fills are not empty, so a recovery ending after the
+// ask emptied still reports the change.
+test("range fills: the last recovery finishing reports the fills empty", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+	const recovery = opened[0];
+	if (!recovery) throw new Error("no recovery");
+
+	// Every group arrives while a stream of the recovery is still read, which keeps it.
+	recovery.reading = true;
+	for (let sequence = peer.fill.wanted(); sequence !== undefined; sequence = peer.fill.wanted())
+		peer.fill.accept(sequence).finish();
+	expect(fills.poll(tail, true)).toBe(true);
+	expect(fills.ask.groups).toEqual([]);
+	expect(fills.isEmpty()).toBe(false);
+
+	// The ask stays empty as the recovery ends.
+	recovery.reading = false;
+	recovery.finish([]);
+	await yieldNow();
+	expect(fills.poll(tail, true)).toBe(true);
+	expect(fills.isEmpty()).toBe(true);
+	expect(fills.poll(tail, true)).toBe(false);
 
 	fills.close();
 	peer.close();
