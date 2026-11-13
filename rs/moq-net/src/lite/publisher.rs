@@ -5036,11 +5036,24 @@ struct Paused {
 	frame_start: u64,
 }
 
-impl Paused {
-	/// Its rank for the subscription's stream credit in `order`, higher first.
-	fn rank(&self, order: crate::track::Order) -> i64 {
-		crate::priority::in_group(self.group.sequence, self.frame_start, order)
+/// Waits for the subscription's budget or the cache to give the paused group up. Each
+/// paused group wakes only its own task, so a frame written to one re-polls just that one.
+impl kio::Task for Paused {
+	type Output = Error;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		match poll_given_up(&mut self.group, waiter) {
+			Some(err) => Poll::Ready(err),
+			None => Poll::Pending,
+		}
 	}
+}
+
+/// Where a paused group waits in [`TrackRun::paused_tasks`], and where its continuation starts.
+#[derive(Clone, Copy)]
+struct PausedKey {
+	key: kio::TaskKey,
+	frame_start: u64,
 }
 
 impl Subscription {
@@ -5134,7 +5147,9 @@ struct TrackRun {
 	// sustained congestion can pause every group in turn: one the budget or the cache gives
 	// up while it waits is dropped then, which bounds them by what the cache holds, and a
 	// group paused again replaces its entry.
-	paused: std::collections::BTreeMap<u64, Paused>,
+	paused: std::collections::BTreeMap<u64, PausedKey>,
+	// Lite-07: the paused groups themselves, each waiting to be given up.
+	paused_tasks: kio::Tasks<Paused>,
 	// Lite-07: the group `opening` holds continues a paused one.
 	continuing: bool,
 	end_sent: bool,
@@ -5203,6 +5218,7 @@ impl TrackRun {
 			redrop: RangeSet::new(),
 			reoffered: Default::default(),
 			paused: Default::default(),
+			paused_tasks: kio::Tasks::new(),
 			continuing: false,
 			end_sent: false,
 			opening: None,
@@ -5510,8 +5526,9 @@ impl TrackRun {
 		if !paused.is_empty() {
 			// The track side continues them.
 			Idle::disarm(&mut self.idle);
-			self.paused
-				.extend(paused.into_iter().map(|paused| (paused.group.sequence, paused)));
+			for paused in paused {
+				self.pause(paused);
+			}
 		}
 		self.drop_given_up_paused(waiter);
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
@@ -5612,10 +5629,11 @@ impl TrackRun {
 		// outranks it.
 		let order = self.ctx.steer_current().order;
 		let stuck = self.stuck();
-		if let Some(best) = self.best_paused()
-			&& (self.opening.is_none() || stuck.is_some_and(|waiting| self.paused[&best].rank(order) > waiting))
+		if let Some((best, rank)) = self.best_paused(order)
+			&& (self.opening.is_none() || stuck.is_some_and(|waiting| rank > waiting))
 		{
-			let Paused { group, frame_start } = self.paused.remove(&best).expect("best is paused");
+			let PausedKey { key, .. } = self.paused.remove(&best).expect("best is paused");
+			let Paused { group, frame_start } = self.paused_tasks.remove(key).expect("a paused group waits");
 			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, frame_start, "continuing paused group");
 			self.give_way();
 			self.open(group, frame_start);
@@ -6104,11 +6122,10 @@ impl TrackRun {
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = waiting.sequence, "giving way to a higher-ranked group");
 		match std::mem::take(&mut self.continuing) {
 			true => {
-				let paused = Paused {
+				self.pause(Paused {
 					group: waiting.group.clone(),
 					frame_start: waiting.frame_start,
-				};
-				self.paused.insert(waiting.sequence, paused);
+				});
 			}
 			false => waiting.settle_failed(&Error::Old),
 		}
@@ -6127,32 +6144,43 @@ impl TrackRun {
 		}
 	}
 
-	/// The sequence of the highest-ranked paused group in this subscription's current order,
-	/// the next to continue.
-	fn best_paused(&mut self) -> Option<u64> {
-		let order = self.ctx.steer_current().order;
-		self.paused
-			.iter()
-			.max_by_key(|(_, paused)| paused.rank(order))
-			.map(|(&sequence, _)| sequence)
+	/// Hold a paused group until its continuation, replacing the entry of an earlier pause.
+	fn pause(&mut self, paused: Paused) {
+		let sequence = paused.group.sequence;
+		let frame_start = paused.frame_start;
+		let key = self.paused_tasks.insert(paused);
+		if let Some(old) = self.paused.insert(sequence, PausedKey { key, frame_start }) {
+			self.paused_tasks.remove(old.key);
+		}
+	}
+
+	/// The sequence and rank of the highest-ranked paused group in `order`, the next to
+	/// continue. The rank orders groups by sequence first, so it is an end of the map.
+	fn best_paused(&self, order: crate::track::Order) -> Option<(u64, i64)> {
+		let (&sequence, paused) = match order {
+			crate::track::Order::Descending => self.paused.last_key_value(),
+			crate::track::Order::Ascending => self.paused.first_key_value(),
+		}?;
+		Some((sequence, crate::priority::in_group(sequence, paused.frame_start, order)))
 	}
 
 	/// Drop each paused group the subscription's budget or the cache gave up while it waited
-	/// to continue, as a group waiting for credit would be.
+	/// to continue, as a group waiting for credit would be. Only the woken groups are polled.
 	fn drop_given_up_paused(&mut self, waiter: &kio::Waiter) {
-		if self.paused.is_empty() {
+		if self.paused_tasks.is_empty() {
 			return;
 		}
 		let mut dropped = Vec::new();
-		self.paused
-			.retain(|&sequence, paused| match poll_given_up(&mut paused.group, waiter) {
-				Some(err) => {
-					dropped.push((sequence, StreamError::from(&err)));
-					false
-				}
-				None => true,
-			});
-		if !dropped.is_empty() && self.ctx.version.has_track_stream() {
+		let _ = self.paused_tasks.poll_each(waiter, |paused, err| {
+			dropped.push((paused.group.sequence, StreamError::from(&err)));
+		});
+		if dropped.is_empty() {
+			return;
+		}
+		for (sequence, _) in &dropped {
+			self.paused.remove(sequence);
+		}
+		if self.ctx.version.has_track_stream() {
 			self.ctx.outcomes.dropped.lock().unwrap().extend(dropped);
 		}
 	}
@@ -6296,6 +6324,55 @@ impl CoverageBench {
 			Poll::Ready(res) => panic!("the subscription ended: {res:?}"),
 			Poll::Pending => Poll::Pending,
 		}
+	}
+}
+
+/// A lite-07 subscription's run loop holding paused groups that are still being written, for
+/// the `publisher` bench: each wake writes frames to some of them, then checks the paused
+/// groups for one given up and picks the next to continue.
+#[cfg(any(test, feature = "fuzz"))]
+pub struct PausedBench {
+	coverage: CoverageBench,
+	groups: Vec<group::Producer>,
+	next: usize,
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+impl PausedBench {
+	/// Pause `paused` unfinished groups, each holding one frame.
+	pub fn new(paused: u64) -> Self {
+		let mut coverage = CoverageBench::new(2, 0);
+		let mut groups = Vec::new();
+		// Past the subscribed ranges, so the run itself never serves them.
+		for sequence in 100..100 + paused {
+			let mut group = coverage.track.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(None, b"x".to_vec()).unwrap();
+			coverage.run.pause(Paused {
+				group: group.consume(),
+				frame_start: 0,
+			});
+			groups.push(group);
+		}
+		let mut this = Self {
+			coverage,
+			groups,
+			next: 0,
+		};
+		this.wake(0);
+		this
+	}
+
+	/// Write one frame to each of the next `frames` paused groups in turn, then wake once.
+	pub fn wake(&mut self, frames: usize) {
+		for _ in 0..frames {
+			let group = &mut self.groups[self.next];
+			group.write_frame(None, b"x".to_vec()).unwrap();
+			self.next = (self.next + 1) % self.groups.len();
+		}
+		let run = &mut self.coverage.run;
+		run.drop_given_up_paused(&kio::Waiter::noop());
+		let order = run.ctx.steer_current().order;
+		assert!(run.best_paused(order).is_some(), "no paused group is given up");
 	}
 }
 

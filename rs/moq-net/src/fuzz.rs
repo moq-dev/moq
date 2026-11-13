@@ -19,8 +19,8 @@ pub use ingest::ingest;
 pub use request::request;
 pub use session::{session_ietf, session_lite};
 
-/// A lite-07 publisher run loop waiting on SUBSCRIBE_START, for the publisher bench.
-pub use crate::lite::CoverageBench;
+/// Lite-07 publisher run loops for the publisher bench.
+pub use crate::lite::{CoverageBench, PausedBench};
 
 use bytes::Bytes;
 
