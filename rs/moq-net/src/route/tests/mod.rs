@@ -1150,7 +1150,7 @@ impl Sim {
 	pub fn next_hop(&self, node: Node, id: Id) -> Option<Node> {
 		match &self.nodes[node] {
 			Relay::Distance(router) => router.selected(id)?.next,
-			Relay::Path(router) => (router.routes(id).find(|(_, route)| route.offer.is_some()))?.1.next,
+			Relay::Path(router) => (router.routes(id).find(|(_, route)| route.offer().is_some()))?.1.next(),
 		}
 	}
 
@@ -1160,7 +1160,7 @@ impl Sim {
 		match &self.nodes[node] {
 			Relay::Distance(router) => router.selected(id).map(|route| route.next),
 			Relay::Path(router) => {
-				(router.routes(id).find(|(_, route)| route.offer.is_some())).map(|(_, route)| route.next)
+				(router.routes(id).find(|(_, route)| route.offer().is_some())).map(|(_, route)| route.next())
 			}
 		}
 	}
@@ -1184,7 +1184,7 @@ impl Sim {
 	pub fn routed(&self, node: Node, id: Id) -> bool {
 		match &self.nodes[node] {
 			Relay::Distance(router) => router.selected(id).is_some(),
-			Relay::Path(router) => router.routes(id).any(|(_, route)| route.offer.is_some()),
+			Relay::Path(router) => router.routes(id).any(|(_, route)| route.offer().is_some()),
 		}
 	}
 
@@ -1529,7 +1529,7 @@ fn assert_scoped_chain(sim: &Sim, node: Node, id: Id, claim: &Path) {
 		let current = current_prefix
 			.as_ref()
 			.and_then(|prefix| sim.path(next).route_for(named, prefix))
-			.and_then(|route| route.offer.as_ref())
+			.and_then(|route| route.offer())
 			.map(|offer| &offer.path);
 		chain.push((at, heard.is_none() || heard != current));
 		if let Some(start) = chain.iter().position(|(seen, _)| *seen == next) {

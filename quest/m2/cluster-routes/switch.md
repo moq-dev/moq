@@ -119,7 +119,7 @@ Public API: none expected. Wire: lite-07-wip only.
 
 ## Required
 
-- [Settle the path router's doubt lifetime](/quest/m2/cluster-routes/scope.md) - the maintainer's policy choice and its model checks
+- [Settle the path router's remaining design choices](/quest/m2/cluster-routes/scope.md) - the maintainer's policy choice and its model checks
 
 ## Related
 

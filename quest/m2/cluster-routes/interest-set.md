@@ -116,7 +116,7 @@ Public API: none (the router is crate-private). Wire: none.
 
 ## Required
 
-- [Settle the path router's doubt lifetime](/quest/m2/cluster-routes/scope.md) - the chosen route rule this extends
+- [Settle the path router's remaining design choices](/quest/m2/cluster-routes/scope.md) - the chosen route rule this extends
 
 ## Related
 

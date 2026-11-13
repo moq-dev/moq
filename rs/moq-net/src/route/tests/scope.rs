@@ -65,6 +65,19 @@ fn flapping_a_far_node_does_not_extend_older_dead_hops() {
 	let mut now = Instant::now();
 	let retained = (Doubt::DEFAULT.timer.as_nanos() / HOP.as_nanos()) as usize + 1;
 	for session in 0..3 * retained {
+		let path::Reach::Finite(mut offer) = offered(1, 0) else {
+			unreachable!()
+		};
+		offer.path = [
+			path::Hop { node: 7, session: 0 },
+			path::Hop {
+				node: 2,
+				session: session as u64,
+			},
+			path::Hop { node: 1, session: 1 },
+		]
+		.into();
+		router.route(1, 7, p(""), Some(path::Reach::Finite(offer)), 0);
 		router.dead(
 			1,
 			path::Dead {
@@ -301,7 +314,7 @@ fn widening_past_a_childs_narrower_interest_releases_the_old_scope() {
 	sim.watch(relay, "");
 	assert!(sim.run());
 	assert!(
-		sim.path(relay).routes(7).all(|(_, route)| route.offer.is_some()),
+		sim.path(relay).routes(7).all(|(_, route)| route.offer().is_some()),
 		"{}",
 		mesh(&sim)
 	);
@@ -554,7 +567,7 @@ fn quiet(sim: &Sim, origin: Node, label: &str) {
 		for &key in &keys {
 			let routes: Vec<(&Path, &path::Route<Node>)> = router.routes(key).collect();
 			assert!(
-				routes.iter().all(|(_, route)| route.offer.is_some()),
+				routes.iter().all(|(_, route)| route.offer().is_some()),
 				"{label}: node {node} holds {key}\n{}{}",
 				router.dump(),
 				mesh(sim)
@@ -737,4 +750,173 @@ fn sweep_scoped_meshes_show_what_the_rule_says() {
 		quiets > 0 && qualified_shown > 0 && narrowed_shown > 0 && cut > 0,
 		"{quiets} quiet points, {qualified_shown} qualified, {narrowed_shown} narrowed, {cut} cut"
 	);
+}
+
+/// A DEAD needs a path from this peer naming both the hop and its far end.
+#[test]
+fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	let now = Instant::now();
+	for node in 100..1100 {
+		router.dead(
+			1,
+			path::Dead {
+				hop: path::Hop { node, session: 1 },
+				far: node + 1,
+				moved: Vec::new(),
+				gone: true,
+			},
+			now,
+		);
+	}
+	assert_eq!((router.retained().dead, router.retained().doubt), (0, 0));
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.batch(1, 7, p(""), vec![(p("a"), Some(1))], Some(1), 0);
+	let hop = path::Hop { node: 1, session: 1 };
+	// Another peer has no credit for this hop, even though this node heard it.
+	router.dead(
+		2,
+		path::Dead {
+			hop,
+			far: 7,
+			moved: Vec::new(),
+			gone: true,
+		},
+		now,
+	);
+	// Nor can the advertising peer attach arbitrary far nodes to a known hop.
+	for far in 100..1100 {
+		router.dead(
+			1,
+			path::Dead {
+				hop,
+				far,
+				moved: Vec::new(),
+				gone: true,
+			},
+			now,
+		);
+	}
+	assert_eq!((router.retained().dead, router.retained().doubt), (0, 0));
+	assert!(router.shown()[&(7, p("a"))].available);
+	router.dead(
+		1,
+		path::Dead {
+			hop,
+			far: 7,
+			moved: Vec::new(),
+			gone: true,
+		},
+		now,
+	);
+	assert_eq!(router.retained().dead, 1);
+	assert!(router.routes(7).next().is_none());
+}
+
+#[test]
+fn dead_replacement_paths_obey_the_same_limit_as_route_paths() {
+	for length in [0, MAX_HOPS - 1, MAX_HOPS] {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		router.connect(1, 1, Link::default()).unwrap();
+		router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+		router.batch(1, 7, p(""), vec![(p("a"), Some(1))], Some(1), 0);
+		let offer = path::Offer {
+			path: (0..length)
+				.map(|i| path::Hop {
+					node: 100 + i as Id,
+					session: 1,
+				})
+				.collect(),
+			metric: 1,
+			down_only: false,
+			rtt: None,
+		};
+		router.dead(
+			1,
+			path::Dead {
+				hop: path::Hop { node: 1, session: 1 },
+				far: 7,
+				moved: vec![path::Moved {
+					id: 7,
+					prefix: p(""),
+					offer,
+				}],
+				gone: true,
+			},
+			Instant::now(),
+		);
+		assert_eq!(
+			router.routes(7).any(|(_, route)| route.offer().is_some()),
+			length == MAX_HOPS - 1,
+			"replacement length {length}"
+		);
+		if length == MAX_HOPS - 1 {
+			assert_eq!(router.routes(7).next().unwrap().1.offer().unwrap().path.len(), MAX_HOPS);
+		}
+	}
+}
+
+#[test]
+fn an_upstream_stream_uses_a_narrower_exportable_source() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router
+			.connect(
+				peer,
+				peer as Id,
+				Link {
+					upstream: peer != 2,
+					..Link::default()
+				},
+			)
+			.unwrap();
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
+	let path::Reach::Finite(mut narrow) = offered(2, 0) else {
+		unreachable!()
+	};
+	narrow.metric = 2;
+	router.route(2, 7, p("a"), Some(path::Reach::Finite(narrow)), 0);
+	router.peer_interest(3, Some(p("a"))).unwrap();
+	assert!(router.drain().iter().any(|msg| matches!(msg, path::Out::Route { to: 3, prefix, reach: Some(path::Reach::Finite(offer)), .. } if *prefix == p("a") && !offer.down_only && offer.path[1].node == 2)));
+}
+
+#[test]
+fn replacing_a_childs_interest_keeps_the_hold_until_its_answer() {
+	for interest in [None, Some(p("a"))] {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		for peer in [1, 2] {
+			router.connect(peer, peer as Id, Link::default()).unwrap();
+		}
+		router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+		router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
+		router.peer_interest(2, Some(p(""))).unwrap();
+		let path::Reach::Finite(mut child) = offered(2, 0) else {
+			unreachable!()
+		};
+		child.path = [
+			path::Hop { node: 7, session: 0 },
+			path::Hop { node: 1, session: 1 },
+			path::Hop { node: 99, session: 1 },
+			path::Hop { node: 2, session: 1 },
+		]
+		.into();
+		router.route(2, 7, p(""), Some(path::Reach::Finite(child)), 0);
+		router.disconnect([1], Instant::now());
+		assert!(!router.shown()[&(7, p("a/x"))].available);
+		router.events();
+		router.peer_interest(2, interest).unwrap();
+		assert!(
+			!router.shown()[&(7, p("a/x"))].available,
+			"the child still owes an answer"
+		);
+		assert!(router.events().is_empty());
+		router.route(2, 7, p(""), Some(offered(2, 0)), 0);
+		assert!(router.shown()[&(7, p("a/x"))].available);
+		assert!(router.events().iter().all(|event| event.kind == Kind::Available));
+	}
 }

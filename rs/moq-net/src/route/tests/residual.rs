@@ -23,7 +23,7 @@ fn metric(sim: &Sim, node: Node, id: Id, prefix: &str) -> Option<Metric> {
 	match sim.rule() {
 		Rule::Distance => sim.route(node, id).map(|route| route.metric),
 		Rule::Path(_) => (sim.path(node).route_for(id, &p(prefix)))
-			.and_then(|route| route.offer.as_ref())
+			.and_then(|route| route.offer())
 			.map(|offer| offer.metric),
 	}
 }

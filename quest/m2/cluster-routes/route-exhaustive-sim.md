@@ -12,7 +12,7 @@ does not fit, the PR records the numbers and lands no test.
 ## Plan
 
 Decided 2026-11-10 (maintainer, /quest-plan), as a spike: `RouteHandoff.tla`
-is a hand-kept mirror of the rule `route/tests/paths.rs` prototypes, which TLC interprets, while `Sim`
+is a hand-kept mirror of `route::path::Router` in `rs/moq-net/src/route/path.rs`, which TLC interprets, while `Sim`
 already drives the router one atomic step at a time. Searching `Sim` itself
 runs compiled code, has no model to drift, and reaches what the model leaves
 out.
