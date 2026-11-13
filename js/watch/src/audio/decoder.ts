@@ -576,12 +576,16 @@ export class Decoder {
 		});
 
 		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring and a
-		// clock anchored on the previous one would discard as already played. A return to the same
-		// instance keeps the anchor, so the relay's redelivered last group is still dropped as old.
+		// clock anchored on the previous one would discard as already played.
 		// Every handle to one instance shares `closed`, so it identifies the instance where the
 		// handle itself does not.
 		if (this.#instance !== undefined && this.#instance !== active.closed) {
 			this.sync.reset();
+			this.reset();
+		} else if (this.#instance !== undefined && phase.kind === "stopped") {
+			// The picture returns at the live edge. Re-join audio to that clock immediately,
+			// rather than stretching the retained ring's lag back over several seconds. A
+			// running rendition swap keeps its seamless handover.
 			this.reset();
 		}
 		this.#instance = active.closed;
