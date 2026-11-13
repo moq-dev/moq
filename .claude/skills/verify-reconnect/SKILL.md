@@ -30,7 +30,7 @@ quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/OfflineWhileServing.cfg
 ```
 
-The first checks every rule but the two with open findings, over four sessions: about 1.2M distinct states, under a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 240k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. `just test tla rs/moq-net/verify/reconnect` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
+The first checks every rule but the two with open findings, over four sessions: about 1.7M distinct states, about a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 290k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 
@@ -48,7 +48,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `4486b7adc108649bb3e7924554394ee30fa0e5f2`. Run `git log 4486b7adc1.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
@@ -62,4 +62,4 @@ Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07
 
 ## Not covered
 
-One configured address, so the walk across several, `ATTEMPT`, and `Verdict::Settled` and `Unusable` are left out. So are the retry window and `Failure::Exhausted`, tokens and `Verdict::Refused`, connecting once, fixed targets, and redirect-loop scoring (`Redirects`): a session's healthiness is chosen freely instead, which covers a looped one. Backoff delays and jitter are left out; every deadline can pass in any order. `Connection::close`, `Monitor`, bandwidth forwarding, and the QUIC fresh-port retry are left out, and a session's subscriptions reduce to whether the predecessor is idle. A pass covers four sessions under `Restart::Redial` and three under `Restart::Wait`, with two endpoints a GOAWAY may name and one it may not. The tests in `reconnect/tests.rs` and `moq-tokio`'s connection tests own the timing.
+One configured address, so the walk across several, `ATTEMPT`, and `Verdict::Settled` and `Unusable` are left out. So are the retry window and `Failure::Exhausted`, tokens, connecting once, fixed targets, and redirect-loop scoring (`Redirects`): a session's healthiness is chosen freely instead, which covers a looped one. Backoff delays and jitter are left out; every deadline can pass in any order. `Connection::close`, `Monitor`, bandwidth forwarding, and the QUIC fresh-port retry are left out, and a session's subscriptions reduce to whether the predecessor is idle. A pass covers four sessions under `Restart::Redial` and three under `Restart::Wait`, with two endpoints a GOAWAY may name and one it may not. The tests in `reconnect/tests.rs` and `moq-tokio`'s connection tests own the timing.

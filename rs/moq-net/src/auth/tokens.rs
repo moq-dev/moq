@@ -84,7 +84,6 @@ pub(crate) struct Dial {
 	pub(crate) token: Option<String>,
 	/// The connection credential, held out of band rather than in an AUTH stream.
 	connection: Option<String>,
-	generation: u64,
 }
 
 impl Tokens {
@@ -122,7 +121,6 @@ impl Tokens {
 		let configured = state.configured.as_mut().expect("built by Tokens::new");
 		configured.fresh = fresh;
 		configured.tokens = tokens;
-		configured.generation += 1;
 		configured.answer = None;
 		state.hold();
 	}
@@ -164,11 +162,7 @@ impl Tokens {
 		let state = self.handle.state.read();
 		let configured = state.configured.as_ref().expect("built by Tokens::new");
 		let (token, connection) = credential(url, &configured.tokens);
-		Dial {
-			token,
-			connection,
-			generation: configured.generation,
-		}
+		Dial { token, connection }
 	}
 
 	/// Make `dial` the latest, holding every token but its connection credential in band on the
@@ -189,34 +183,24 @@ impl Tokens {
 	#[cfg(feature = "async")]
 	pub(crate) fn connected(&self, session: &crate::Session) {
 		if session.auth().state.same_channel(&self.handle.state) {
-			self.connect(session.credential());
+			self.connect(session.link().id(), session.credential());
 		}
 	}
 
-	fn connect(&self, credential: Option<&super::Credential>) {
+	/// Bind the session on `link`, even one that already closed: that close may be its answer.
+	fn connect(&self, link: u64, credential: Option<&super::Credential>) {
 		let mut state = self.handle.state.lock();
 		state.record();
 		let connected = match credential {
-			Some(auth) => Some(Connected::Slot {
-				link: auth.presented.link.expect("a session's own credential"),
+			Some(auth) => Connected::Slot {
+				link,
 				id: auth.presented.id,
-			}),
-			// The handle backs one open session at a time: the one just built, unless it ended.
-			None => state
-				.links
-				.iter()
-				.rev()
-				.find(|(_, link)| link.closed.is_none())
-				.map(|(link, _)| Connected::Accepted { link: *link }),
+			},
+			None => Connected::Accepted { link },
 		};
-		state.configured.as_mut().expect("built by Tokens::new").session = connected;
-	}
-
-	/// Whether the tokens changed since `dial` was previewed, so a refusal of its credential earns
-	/// another dial.
-	pub(crate) fn changed(&self, dial: &Dial) -> bool {
-		let state = self.handle.state.read();
-		state.configured.as_ref().expect("built by Tokens::new").generation != dial.generation
+		state.configured.as_mut().expect("built by Tokens::new").session = Some(connected);
+		// A session that closed before this bound it has its answer already.
+		state.record();
 	}
 }
 
@@ -225,7 +209,6 @@ impl Tokens {
 #[derive(Default)]
 pub(super) struct Configured {
 	tokens: Vec<Token>,
-	generation: u64,
 	/// The latest dial's connection credential, never also held in band. `None` before the
 	/// first dial.
 	dialed: Option<Option<String>>,
@@ -268,11 +251,21 @@ impl Configured {
 		let (link, id) = match self.session.as_ref()? {
 			Connected::Slot { link, id } => (link, id),
 			Connected::Accepted { link } => {
-				let link = state.links.get(link).filter(|link| link.closed.is_none())?;
-				return link.accepted.then_some(Ok(()));
+				let link = state.links.get(link)?;
+				return match (link.accepted, &link.closed) {
+					(true, _) => Some(Ok(())),
+					// Closed before accepting it: the close is the answer, since the connection
+					// keeps redialing with the same credential and nothing else would answer.
+					(false, Some(err)) => Some(Err(err.clone())),
+					(false, None) => None,
+				};
 			}
 		};
-		let link = state.links.get(link).filter(|link| link.closed.is_none())?;
+		let link = state.links.get(link)?;
+		if let Some(err) = &link.closed {
+			// Cut off unanswered, like a session that closed before accepting it.
+			return link.cut.contains(id).then(|| Err(err.clone()));
+		}
 		let slot = link.slots.get(id)?;
 		match slot.phase.ended() {
 			// The moq-transport SETUP that carried it accepted it before the peer declined AUTH.
@@ -568,7 +561,7 @@ mod tests {
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, supported, requests).unwrap();
 		let credential = supported.then(|| link.present(Bytes::new(), true).unwrap());
-		set.connect(credential.as_ref());
+		set.connect(link.id(), credential.as_ref());
 		Session { link, credential }
 	}
 
@@ -795,7 +788,7 @@ mod tests {
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, false, false).unwrap();
 		link.await_setup();
-		set.connect(None);
+		set.connect(link.id(), None);
 		link
 	}
 
@@ -816,8 +809,19 @@ mod tests {
 		let set = Tokens::new(tokens(&["connection"]));
 		let link = dial_awaiting_setup(&set);
 		link.close(Error::Session(SessionError::Unauthorized));
-		assert!(answered(&set).is_pending(), "a refused session accepted the credential");
-		set.handle().abort(Error::Session(SessionError::Unauthorized));
+		refused(&set, SessionError::Unauthorized);
+	}
+
+	/// A refusal that closes the session before the reconnect loop binds it still answers.
+	#[test]
+	fn a_credential_refused_before_the_session_is_bound_is_no_grant() {
+		let set = Tokens::new(tokens(&["connection"]));
+		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
+		set.commit(&presented);
+		let link = Link::attach(&set.handle, false, false).unwrap();
+		link.await_setup();
+		link.close(Error::Session(SessionError::Unauthorized));
+		set.connect(link.id(), None);
 		refused(&set, SessionError::Unauthorized);
 	}
 
@@ -944,16 +948,6 @@ mod tests {
 		assert!(answered(&set).is_pending());
 		set.handle().abort(Error::Session(SessionError::Unauthorized));
 		refused(&set, SessionError::Unauthorized);
-	}
-
-	#[test]
-	fn only_a_change_outdates_a_dial() {
-		let set = Tokens::new(tokens(&["a"]));
-		let dial = set.preview(&"moqt://relay.example.com/".parse().unwrap());
-		set.set(tokens(&["a"]));
-		assert!(!set.changed(&dial));
-		set.set(tokens(&["b"]));
-		assert!(set.changed(&dial));
 	}
 
 	/// The first token is the connection credential, presented in SETUP.

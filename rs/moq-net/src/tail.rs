@@ -38,6 +38,8 @@ pub(crate) struct Tail {
 	// A stale drop there for a group the ledger already accounted may be one its stream
 	// overtook, so the next update owes none of it again.
 	folded: Option<Range<u64>>,
+	// How many updates were sent, so a stale drop can tell whether a later one superseded it.
+	updates: u64,
 	// What `finished` bills to the track's account, [`FINISHED_OVERHEAD`] per run, once the
 	// subscription has a copy to bill.
 	bill: Option<crate::model::track::Bill>,
@@ -64,6 +66,7 @@ impl Tail {
 			ended: false,
 			finished: RangeSet::new(),
 			folded: None,
+			updates: 0,
 			bill: None,
 		}
 	}
@@ -187,9 +190,15 @@ impl Tail {
 	/// Forget which streams finished, for an update being sent: a stale drop under an earlier
 	/// one is no verdict, so none needs them.
 	pub fn updated(&mut self) {
+		self.updates += 1;
 		self.finished = RangeSet::new();
 		self.folded = None;
 		self.rebill();
+	}
+
+	/// How many updates were sent, each superseding the stale drops before it.
+	pub fn updates(&self) -> u64 {
+		self.updates
 	}
 
 	/// Whether a data stream whose header arrived is still being read.

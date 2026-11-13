@@ -120,62 +120,6 @@ impl Range {
 	}
 }
 
-/// Whom a pull serves, which a relay choosing a parent per broadcast prices warm routes by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Serves {
-	/// The subscriber does not say.
-	Unknown,
-	/// Demand of the subscriber's own: a local reader, or pulls tracing back to two or more
-	/// relays.
-	Alone,
-	/// Demand tracing back to the relay with this Node ID alone.
-	Relay(u64),
-}
-
-impl Serves {
-	pub(super) fn encode(self, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
-		match self {
-			Self::Unknown => w.varint(0),
-			Self::Alone => w.varint(1),
-			Self::Relay(0) => Err(EncodeError::InvalidState),
-			Self::Relay(node) => {
-				w.varint(2)?;
-				w.varint(node)
-			}
-		}
-	}
-
-	pub(super) fn decode(r: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-		Ok(match r.varint()? {
-			0 => Self::Unknown,
-			1 => Self::Alone,
-			2 => match r.varint()? {
-				0 => return Err(DecodeError::InvalidValue),
-				node => Self::Relay(node),
-			},
-			_ => return Err(DecodeError::InvalidValue),
-		})
-	}
-}
-
-/// Encode whom a pull serves. This endpoint chooses no parent per broadcast, so it does not
-/// say.
-fn encode_serves(w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-	match version.has_warm() {
-		true => Serves::Unknown.encode(w),
-		false => Ok(()),
-	}
-}
-
-/// Decode whom a pull serves, and ignore it: only a relay choosing a parent per broadcast
-/// prices by it, which this endpoint does not do.
-fn decode_serves(r: &mut Decoder<'_>, version: Version) -> Result<(), DecodeError> {
-	if version.has_warm() {
-		Serves::decode(r)?;
-	}
-	Ok(())
-}
-
 impl Version {
 	/// Whether this version's SUBSCRIBE carries the subscriber's max delay preference.
 	///
@@ -209,7 +153,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			}
 		};
 		let update = decode_update(r, version)?;
-		decode_serves(r, version)?;
 
 		Ok(Self {
 			id,
@@ -245,7 +188,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			}
 		}
 		encode_update(w, version, self.update)?;
-		encode_serves(w, version)?;
 
 		Ok(())
 	}
@@ -820,7 +762,6 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			true => r.varint()?.checked_sub(1),
 			false => None,
 		};
-		decode_serves(r, version)?;
 
 		Ok(Self {
 			wanted_group,
@@ -861,7 +802,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		if version.has_refresh() {
 			w.varint_opt(self.wanted_group)?;
 		}
-		encode_serves(w, version)
+		Ok(())
 	}
 }
 
@@ -1945,10 +1886,10 @@ mod test {
 
 		msg.ranges = vec![Range::OLDEST];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last but for the update number and whom the pull serves: a count of one,
-		// then two anchors of type 0.
-		let at = buf.len() - 5;
-		assert_eq!(&buf[at..], [1, 0, 0, 0, 0]);
+		// The list is last but for the update number: a count of one, then two anchors of
+		// type 0.
+		let at = buf.len() - 4;
+		assert_eq!(&buf[at..], [1, 0, 0, 0]);
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
@@ -1957,7 +1898,7 @@ mod test {
 		));
 
 		let mut buf = encode(&msg, version).unwrap();
-		let last = buf.len() - 3;
+		let last = buf.len() - 2;
 		buf[last] = 4;
 		assert!(matches!(
 			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
@@ -2009,27 +1950,6 @@ mod test {
 			resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 				.is_err()
 		);
-	}
-
-	/// Lite-07 ends SUBSCRIBE with whom the pull serves: this endpoint says Unknown, and reads
-	/// and ignores any well-formed value. An unknown type or a relay named 0 is malformed, and
-	/// older versions carry nothing.
-	#[test]
-	fn serves_trails_subscribe_only_on_lite07() {
-		let msg = subscribe_sample();
-		let lite07 = encode(&msg, Version::Lite07).unwrap();
-		assert_eq!(lite07.last(), Some(&0));
-		let head = &lite07[..lite07.len() - 1];
-		let decode = |serves: &[u8]| {
-			let buf = [head, serves].concat();
-			crate::coding::decode_from(&mut buf.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
-		};
-		for serves in [&[0][..], &[1], &[2, 9]] {
-			decode(serves).unwrap();
-		}
-		for serves in [&[3][..], &[2, 0], &[]] {
-			assert!(decode(serves).is_err(), "{serves:?}");
-		}
 	}
 
 	/// Lite-07 carries `Wanted Group` on SUBSCRIBE_UPDATE; older versions drop it.

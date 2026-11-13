@@ -263,11 +263,15 @@ async def _decode_audio(
     exclusively, so two renditions of one codec fail rather than overwrite each other.
     """
     out = f"{out}.{audio.codec.split('.')[0]}"
+    # moq-audio waits on a missing group for its playout delay, measured from arrival timing at
+    # tens of ms, so a runtime starved longer than that skips a group that is only late. This
+    # reader checks delivery between implementations, not a real-time deadline: it holds a playout
+    # delay of the max delay, waiting on a hole for the same budget it grants a late group.
     decoder = await moq.audio.Consumer.subscribe(
         consumer,
         id,
         audio,
-        moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.Delay(max=MAX_DELAY)),
+        moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.Delay(min=MAX_DELAY, max=MAX_DELAY)),
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0
@@ -276,7 +280,7 @@ async def _decode_audio(
         async for frame in decoder:
             # moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
             if isinstance(frame, moq.audio.Gap):
-                raise RuntimeError(f"audio gap after {decoded} samples")
+                raise RuntimeError(f"audio gap after {decoded} samples, at {frame.timestamp} for {frame.duration}")
             if isinstance(frame, moq.audio.End):
                 raise RuntimeError("audio track ended early")
             samples = len(frame.data) // frame_bytes

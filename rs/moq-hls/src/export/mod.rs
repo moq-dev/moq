@@ -254,13 +254,12 @@ impl Broadcaster {
 		self.renditions.poll_ready(waiter)
 	}
 
-	/// Ready once the master playlist lists at least one rendition.
-	#[cfg_attr(
-		not(feature = "server"),
-		allow(dead_code, reason = "only the `server` feature uses it")
-	)]
-	#[cfg_attr(any(test, feature = "server"), kio::wrapper)]
-	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// Ready once the [master playlist](Self::master_playlist) lists a video rendition, or at least
+	/// one rendition while no video rendition could still be listed. A player keeps the variants of
+	/// the first master it loads, so answer a master only once this is ready, or after a bounded
+	/// wait: how long is the caller's policy.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let own = self.renditions.poll_advertised(waiter);
 		let include = self
 			.include
@@ -1394,6 +1393,53 @@ mod tests {
 		assert_eq!(sequence(&rendition), before, "the media sequence did not reset");
 
 		drop((media, catalog, broadcast));
+	}
+
+	/// Audio lists a segment before video closes its first GOP. A player keeps the variants of the
+	/// first master it loads, so the master waits for video instead of answering audio alone.
+	#[tokio::test(start_paused = true)]
+	async fn the_master_waits_for_video_while_audio_lists_first() {
+		let origin = produce_origin();
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		settle().await;
+		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
+		let mut video = video(&catalog, broadcast.broadcast(), "video0", video_config());
+		let mut audio = audio(&catalog, broadcast.broadcast(), "audio0", opus());
+		// Video's first GOP is still open, while audio has cut segments 0 and 1.
+		video.write(vp8_frame(0, true)).unwrap();
+		for micros in [0, 2_000_000, 4_000_000] {
+			let keyframe = audio.needs_keyframe();
+			audio.write(frame(micros, keyframe)).unwrap();
+			audio.cut(None).unwrap();
+		}
+
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
+		kio::clock::timeout(Duration::from_secs(5), broadcaster.ready())
+			.await
+			.expect("audio lists a segment");
+		assert!(broadcaster.rendition(Kind::Audio, "audio0").unwrap().is_advertised());
+		let waiting = tokio::spawn({
+			let broadcaster = broadcaster.clone();
+			async move { broadcaster.advertised().await }
+		});
+		kio::clock::sleep(Duration::from_millis(10)).await;
+		assert!(
+			!waiting.is_finished(),
+			"video can still be listed, so audio alone does not answer"
+		);
+
+		video.write(vp8_frame(2_000_000, true)).unwrap();
+		kio::clock::timeout(Duration::from_secs(5), waiting)
+			.await
+			.expect("video listing a segment wakes the master")
+			.unwrap();
+		let master = broadcaster.master_playlist(None);
+		assert!(master.contains("/video/video0/media.m3u8"), "{master}");
+		assert!(master.contains("/audio/audio0/media.m3u8"), "{master}");
+
+		drop((video, audio, catalog, broadcast));
 	}
 
 	/// Publish a VP8 rendition with three GOPs, 2s apart, so segments 0 and 1 are listable.

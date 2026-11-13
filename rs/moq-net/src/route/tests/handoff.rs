@@ -594,6 +594,37 @@ fn widening_past_a_changed_claim_moves_it_up() {
 	assert_eq!(false_ends(&sim.events), 0);
 }
 
+/// A client widens past a claim that changed while its relay had lost the
+/// origin. When the relay gets the origin back, the client's narrow
+/// presentation moves up to the changed claim without ending.
+#[test]
+fn widening_while_the_relay_lost_the_origin_moves_the_claim_up() {
+	let (origin, relay, client) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.leaf(client);
+	sim.join(origin, relay, 1);
+	sim.join(client, relay, 1);
+	sim.originate(origin, 7, 0);
+	assert!(sim.run());
+	sim.announce(origin, "live/", 2, None);
+	sim.watch(client, "live/b");
+	for (from, to) in [(origin, relay), (origin, relay), (relay, client), (relay, client)] {
+		assert!(sim.deliver(from, to));
+	}
+	assert_eq!(sim.shows(client, 7, "live/b"), Some(true));
+
+	// The relay's answer to the old interest is still queued when the client widens.
+	sim.disconnect(origin, relay);
+	sim.announce(origin, "live/", 0, None);
+	sim.watch(client, "");
+	sim.connect(origin, relay);
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/"), Some(true));
+	assert_eq!(sim.shown(client).len(), 1);
+	assert_eq!(false_ends(&sim.events), 0);
+}
+
 /// A claim withdrawn below one its origin still has ends: the claim above
 /// covers its path but is not the claim it was.
 #[test]

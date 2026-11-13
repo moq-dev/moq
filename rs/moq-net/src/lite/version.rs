@@ -398,8 +398,7 @@ impl Version {
 	}
 
 	/// Whether the announce stream carries warm routes (WARM_START, WARM_UPDATE, and
-	/// WARM_END), and SUBSCRIBE and SUBSCRIBE_UPDATE say whom each pull serves. Added in
-	/// lite-07.
+	/// WARM_END). Added in lite-07.
 	pub(crate) fn has_warm(self) -> bool {
 		!matches!(
 			self,

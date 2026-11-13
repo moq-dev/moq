@@ -398,12 +398,15 @@ skipped cell is logged with the break's name. Entries become errors once an
 affected release changes or no longer offers a listed version, forcing a
 re-measure. Future WIP drafts receive no automatic exception.
 
-`just test wire-compat --remeasure` is that re-measure, run after each release
-publishes (see `RELEASE.md`). It runs the cells planned breaks cover
+`just test wire-compat --remeasure` is that re-measure. Release remeasure runs
+it after Rust or JS publication changes a planned-break pin (see `RELEASE.md`).
+It runs the cells planned breaks cover
 without letting them fail the run, then rewrites `compat/planned-breaks.json`:
 a break with a failing cell is re-pinned to the releases just measured, and one
-with none is deleted. It prints each break's failing cells. Review the diff and
-refresh each reason before committing.
+with none is deleted. It prints each break's failing cells; the release workflow
+copies that report into the pin-update PR body and retains failure artifacts for
+seven days. Reasons describe why a break is allowed; the measured pins and PR
+body record its current extent.
 
 ## Media QA
 

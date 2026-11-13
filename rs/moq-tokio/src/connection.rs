@@ -17,28 +17,25 @@ use crate::{Addrs, Client, Error};
 
 pub use moq_net::reconnect::Restart;
 
-/// How a failed dial bears on the rest of the policy.
+/// How a failed dial to `url` bears on the address walk.
 ///
-/// A status the peer actually sent is its answer, not this address's, so unless it invites
-/// another attempt it settles the walk. An auth rejection arrives as [`Error::Connect`] with
-/// its status already consumed, so it is checked alongside the statuses.
-fn verdict(err: &Error) -> Verdict {
-	if let Error::MoqNet(err) = err {
-		return Verdict::from(err);
+/// An address no backend of `client` can dial never works. A status the peer actually sent
+/// is its answer, not this address's, so unless it invites another attempt it settles the
+/// walk. An auth rejection arrives as [`Error::Connect`] with its status already consumed,
+/// so it is checked alongside the statuses. An in-band code with no [`crate::ConnectError`],
+/// such as `EXPIRED_AUTH_TOKEN`, walks on like any other failure: settling it too would read
+/// the error's kind. Nothing else about the error's kind matters.
+fn verdict(client: &Client, url: &url::Url, err: &Error) -> Verdict {
+	if !client.reaches(url) {
+		return Verdict::Unusable;
 	}
-	let terminal = err.is_terminal();
-	if err.is_auth() && terminal {
-		return Verdict::Refused;
-	}
-	let settled = err.is_auth()
+	let answered = err.connect_error().is_some()
 		|| err
 			.status()
 			.is_some_and(|status| !crate::error::status_retryable(status));
-	match (settled, terminal) {
-		(true, true) => Verdict::Fatal,
-		(true, false) => Verdict::Settled,
-		(false, true) => Verdict::Unusable,
-		(false, false) => Verdict::Retry,
+	match answered {
+		true => Verdict::Settled,
+		false => Verdict::Retry,
 	}
 }
 
@@ -1114,14 +1111,7 @@ impl Connection {
 								{
 									dial_failed = true;
 								}
-								// An explicit shutdown cannot recover by retrying or opening another socket.
-								#[cfg(feature = "quic")]
-								let verdict = match quic_scheme(&url) && client.quic_closed() {
-									true => Verdict::Fatal,
-									false => verdict(&err),
-								};
-								#[cfg(not(feature = "quic"))]
-								let verdict = verdict(&err);
+								let verdict = verdict(&client, &url, &err);
 								policy.failed(kio::clock::now(), err, verdict);
 							}
 						}
@@ -2066,11 +2056,10 @@ mod tests {
 		let client = config.init(Default::default()).expect("build client");
 		let started = kio::clock::now();
 		let connection = client.connect(url("moqz://localhost/"));
-		let err = kio::clock::timeout(Duration::from_secs(1), connection.closed())
+		let _ = kio::clock::timeout(Duration::from_secs(1), connection.closed())
 			.await
 			.expect("invalid scheme kept retrying")
 			.expect_err("invalid scheme connected");
-		assert!(err.is_terminal(), "{err}");
 		assert_eq!(started.elapsed(), Duration::ZERO);
 	}
 
@@ -2090,11 +2079,10 @@ mod tests {
 			"tls://a!b:1/",
 		] {
 			let connection = client.connect(url(target));
-			let err = kio::clock::timeout(Duration::from_secs(1), connection.closed())
+			let _ = kio::clock::timeout(Duration::from_secs(1), connection.closed())
 				.await
 				.unwrap_or_else(|_| panic!("{target} kept retrying"))
 				.expect_err("invalid server name connected");
-			assert!(err.is_terminal(), "{target}: {err}");
 		}
 	}
 
@@ -2447,31 +2435,44 @@ mod tests {
 		}
 	}
 
-	/// An auth rejection or malformed handshake settles the walk like a status, so a transient
-	/// failure from another candidate cannot replace it and keep an unlimited loop retrying.
+	/// An auth rejection settles the walk like a status, an unreachable scheme is unusable, and
+	/// every other failure, a protocol violation included, is just a failed dial.
+	#[cfg(feature = "tcp")]
 	#[test]
-	fn an_auth_rejection_stops_the_walk() {
+	fn a_verdict_reads_the_address_and_the_answer_not_the_error_kind() {
+		let client = client();
+		let tcp = url("tcp://localhost:1/");
+		let verdict = |err: Error| verdict(&client, &tcp, &err);
 		assert_eq!(
-			verdict(&Error::Connect(crate::ConnectError::Unauthorized)),
-			Verdict::Refused
+			verdict(Error::Connect(crate::ConnectError::Unauthorized)),
+			Verdict::Settled
 		);
 		assert_eq!(
-			verdict(&Error::Connect(crate::ConnectError::Forbidden)),
-			Verdict::Refused
+			verdict(Error::Connect(crate::ConnectError::Forbidden)),
+			Verdict::Settled
 		);
-		assert_eq!(verdict(&Error::MoqNet(moq_net::Error::Unauthorized)), Verdict::Refused);
+		assert_eq!(verdict(Error::MoqNet(moq_net::Error::Unauthorized)), Verdict::Settled);
 		assert_eq!(
-			verdict(&Error::MoqNet(moq_net::Error::ProtocolViolation)),
-			Verdict::Fatal
-		);
-		assert_eq!(verdict(&Error::MoqNet(moq_net::Error::Closed)), Verdict::Retry);
-		assert_eq!(
-			verdict(&Error::Io(std::sync::Arc::new(
-				std::io::ErrorKind::ConnectionRefused.into()
-			))),
+			verdict(Error::MoqNet(moq_net::Error::ProtocolViolation)),
 			Verdict::Retry
 		);
-		assert_eq!(verdict(&Error::NoBackend("none")), Verdict::Unusable);
+		assert_eq!(verdict(Error::MoqNet(moq_net::Error::Expired)), Verdict::Retry);
+		assert_eq!(verdict(Error::NoBackend("none")), Verdict::Retry);
+		let unknown = url("moqz://localhost/");
+		#[cfg(feature = "websocket")]
+		{
+			let mut config = crate::connect::Config::default();
+			config.websocket.enabled = Some(false);
+			let client = config.init(Default::default()).expect("build client");
+			assert!(
+				!client.reaches(&url("wss://localhost/")),
+				"a disabled WebSocket reaches nothing"
+			);
+		}
+		assert_eq!(
+			super::verdict(&client, &unknown, &Error::MoqNet(moq_net::Error::Closed)),
+			Verdict::Unusable
+		);
 	}
 
 	/// Relays QUIC datagrams to `server`, holding them all until [`Forwarder::open`].

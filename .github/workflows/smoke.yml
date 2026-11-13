@@ -208,7 +208,7 @@ jobs:
         # the relay and CLI could even resolve different commits.
         # --print-build-logs is off, so a "building ...moq-relay" line here means
         # a cache miss on a commit that was uploaded: each Cache run refreshes
-        # that commit's closure inside the bucket's 30-day expiry
+        # that commit's closure inside the bucket's 14-day expiry
         # (infra/nix/lifecycle.json), so check its runs before calling it a cache bug.
         # The repository root, where `just gh` resolves.
         working-directory: .

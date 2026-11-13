@@ -2261,28 +2261,23 @@ async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
 	relay.abort();
 }
 
-/// The native reconnect loop treats an in-band unauthorized refusal as terminal too.
+/// Once a session went live, the native reconnect loop redials an in-band unauthorized
+/// refusal like any other close, rather than judging its kind.
 #[cfg(feature = "websocket")]
 #[tokio::test]
-async fn websocket_unauthorized_stops_native_reconnect() {
+async fn websocket_unauthorized_keeps_native_reconnect_going() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	script.on_connect(Answer::Status(401));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let connection = client().with_reconnect(true).connect(room_url("ws", port));
-	let error = kio::clock::timeout(TIMEOUT, connection.closed())
-		.await
-		.expect("unauthorized reconnect loop did not stop")
-		.unwrap_err();
-	assert_eq!(error.connect_error(), Some(moq_tokio::ConnectError::Unauthorized));
-	assert_eq!(
-		script
-			.seen
-			.lock()
-			.unwrap()
-			.iter()
-			.filter(|request| request.event == Event::Connect)
-			.count(),
-		1
+	script
+		.until("a second dial", |seen| {
+			seen.iter().filter(|request| request.event == Event::Connect).count() >= 2
+		})
+		.await;
+	assert!(
+		connection.poll_closed(&kio::Waiter::noop()).is_pending(),
+		"the refusal ended the loop"
 	);
 	relay.abort();
 }

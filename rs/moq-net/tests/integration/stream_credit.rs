@@ -710,6 +710,71 @@ async fn an_ascending_backlog_waits_behind_a_waiting_group() {
 	}
 }
 
+/// On lite-07 a paused group waiting behind another paused group's continuation is still
+/// given up once its publisher aborts it, rather than held until credit returns: the paused
+/// groups are bounded by what the cache still holds, however long congestion lasts.
+#[kio::test]
+async fn a_paused_group_given_up_while_it_waits_is_dropped() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = origin(1);
+	let viewer = origin(2);
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	let track = broadcast.broadcast().create_track("0", info).unwrap();
+	broadcast.announce().unwrap();
+
+	let mut options = MockConnectOptions::new(version);
+	options.transport.max_concurrent_uni_streams = Some(1);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(viewer.clone());
+	let _pair = connect_mock(options).await;
+
+	let remote = viewer
+		.consume()
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	let prefs = track::Subscription::default()
+		.with_order(track::Order::Descending)
+		.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+	let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+
+	// Each unfinished group resets the one before: the newest holds the only credit, group
+	// 1's continuation waits for it, and group 0 waits among the paused behind that.
+	let mut groups = Vec::new();
+	let mut readers = Vec::new();
+	for start in 0..3 {
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"a".as_slice()).unwrap();
+		let mut reader = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+			.await
+			.expect("a group arrives")
+			.unwrap()
+			.unwrap();
+		assert_eq!(reader.start, start);
+		let first = kio::clock::timeout(Duration::from_secs(5), reader.read_frame())
+			.await
+			.expect("its first frame arrives")
+			.unwrap();
+		assert_eq!(first.map(|frame| frame.payload), Some(bytes::Bytes::from_static(b"a")));
+		groups.push(group);
+		readers.push(reader);
+	}
+
+	groups.remove(0).abort(moq_net::Error::Cancel).unwrap();
+	let end = kio::clock::timeout(Duration::from_secs(5), readers[0].read_frame())
+		.await
+		.expect("the paused group is dropped while the others hold the credit");
+	assert!(end.is_err(), "the aborted paused group fails: {end:?}");
+}
+
 /// A finished stream still waiting for its acknowledgement holds credit that no group can
 /// take over, so it doesn't count when ranking a waiting group: a late group ranked above it
 /// but below the stream still serving waits, and a newer group resets that stream rather than

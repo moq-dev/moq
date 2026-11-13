@@ -3516,11 +3516,10 @@ async fn session_close_surfaces_a_rejection_code() {
 	server_handle.abort();
 }
 
-/// The same rejection under the reconnect loop: each auth code is specified, so
-/// the loop treats it as terminal instead of retrying the same credentials with
-/// backoff until the give-up timeout.
+/// The same rejection under the reconnect loop, once a session went live, redials with
+/// backoff like any other close: the loop does not judge the error's kind.
 #[tokio::test]
-async fn reconnect_stops_on_a_session_level_rejection() {
+async fn reconnect_retries_a_session_level_rejection() {
 	for code in [
 		moq_net::SessionError::Unauthorized,
 		moq_net::SessionError::MalformedAuthToken,
@@ -3529,27 +3528,26 @@ async fn reconnect_stops_on_a_session_level_rejection() {
 		let (mut server, addr) = test_server().await;
 		let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
+		let (accepted, mut accepts) = tokio::sync::mpsc::unbounded_channel();
 		let reject = code.clone();
 		let server_handle = tokio::spawn(async move {
 			while let Ok(request) = server.accept().await {
+				let _ = accepted.send(());
 				request.reject(reject.clone()).await?;
 			}
 			Ok::<_, anyhow::Error>(())
 		});
 
-		// Without classification the loop would retry until the backoff give-up (5m by
-		// default), so `closed` resolving within TIMEOUT proves it stopped on the
-		// rejection itself.
 		let connection = test_client().connect(url);
-		let err = kio::clock::timeout(TIMEOUT, connection.closed())
-			.await
-			.expect("a rejected session must stop the reconnect loop promptly")
-			.expect_err("a rejected session must surface as an error");
-		assert!(err.is_auth(), "{code:?} surfaced as {err}");
-		let moq_tokio::Error::MoqNet(closed) = &err else {
-			panic!("{code:?} surfaced as {err}");
-		};
-		assert_eq!(moq_net::SessionError::from(closed), code);
+		for _ in 0..2 {
+			tokio::select! {
+				accepted = accepts.recv() => {
+					assert_eq!(accepted, Some(()), "the server stopped accepting");
+				}
+				result = connection.closed() => panic!("{code:?} ended the loop: {result:?}"),
+				_ = kio::clock::sleep(TIMEOUT) => panic!("{code:?} was never redialed"),
+			}
+		}
 
 		server_handle.abort();
 	}

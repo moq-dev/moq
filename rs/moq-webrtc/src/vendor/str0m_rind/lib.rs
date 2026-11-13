@@ -1,6 +1,6 @@
 //! rind's cryptographic provider for str0m.
 //!
-//! Ported from moq-dev/rind's `rind-str0m`, trimmed to DTLS 1.2, with its DTLS
+//! Ported from kixel-ai/rind's `rind-str0m`, trimmed to DTLS 1.2, with its DTLS
 //! on dimpl's rind provider.
 
 mod dtls;
