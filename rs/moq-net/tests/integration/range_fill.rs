@@ -141,10 +141,7 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		assert_eq!(fixture.opened(FETCH), 0, "nothing fetched");
 
 		// The live subscription goes on.
-		let mut group = fixture
-			.track
-			.create_group(moq_net::group::Info { start: 6 })
-			.unwrap();
+		let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();

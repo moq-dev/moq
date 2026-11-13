@@ -235,11 +235,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
 			let mut reader = reader(Bytes::copy_from_slice(&body[used..]), chunk, version);
-			let producer = track
-				.create_group(group::Info {
-					start: header.group_id,
-				})
-				.ok()?;
+			let producer = track.create_group(group::Info { start: header.group_id }).ok()?;
 			producer
 				.set_wire(group::Wire {
 					sparse: false,

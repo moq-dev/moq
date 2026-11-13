@@ -140,11 +140,7 @@ async fn relayed(version: &str) {
 
 	let remote = resolve(&client).await;
 	for key in [2, 0] {
-		assert_eq!(
-			fetch(&remote, key).await.expect("fetch"),
-			frames(key),
-			"{version}"
-		);
+		assert_eq!(fetch(&remote, key).await.expect("fetch"), frames(key), "{version}");
 	}
 	assert!(
 		!subscribed.load(Ordering::SeqCst),

@@ -358,11 +358,9 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 				let mut got = Vec::new();
 				while got.len() < written.len() {
 					match kio::clock::timeout(READ_TIMEOUT, fetched.read_frame()).await {
-						Ok(Ok(Some(frame))) => got.push(format!(
-							"{}:{}",
-							fetched.start,
-							String::from_utf8_lossy(&frame.payload)
-						)),
+						Ok(Ok(Some(frame))) => {
+							got.push(format!("{}:{}", fetched.start, String::from_utf8_lossy(&frame.payload)))
+						}
 						Ok(Ok(None)) => return Err(wrong(format!("{step}: fetch ended at {got:?}"))),
 						Ok(Err(_)) => break,
 						Err(_) => return Err(stuck(format!("{step}: fetched {got:?}, then hung"))),

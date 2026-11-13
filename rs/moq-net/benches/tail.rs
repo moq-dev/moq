@@ -46,7 +46,11 @@ impl Held {
 				track.finish_at(end, None).unwrap();
 				// Group 0 never arrives: the hole that holds the reader.
 				for key in 1..=groups as u64 {
-					track.create_group(group::Info { start: key }).unwrap().finish().unwrap();
+					track
+						.create_group(group::Info { start: key })
+						.unwrap()
+						.finish()
+						.unwrap();
 				}
 				for _ in 0..groups {
 					assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(Some(_)))));

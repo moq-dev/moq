@@ -839,9 +839,7 @@ impl Misses {
 			// What the time ends' runs no longer cover is forgotten, and what they newly cover
 			// judged, within what the probe judges: from the floor up to the newest group,
 			// below the cap.
-			let last = id
-				.2
-				.map_or(Some(top), |cap| cap.checked_sub(1).map(|cap| cap.min(top)));
+			let last = id.2.map_or(Some(top), |cap| cap.checked_sub(1).map(|cap| cap.min(top)));
 			if let Some((old, view)) = &layered
 				&& let Some(last) = last
 				&& self.at.is_some_and(|previous| previous.1 != at.1)

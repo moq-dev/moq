@@ -3366,9 +3366,7 @@ mod test {
 
 		let write = |producer: &mut track::Producer, key: u64| {
 			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
-				.unwrap();
+			group.write_frame(group.key_time(), b"x".to_vec()).unwrap();
 			group.close().unwrap();
 		};
 
@@ -3405,9 +3403,7 @@ mod test {
 
 		let write = |producer: &mut track::Producer, key: u64| {
 			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
-				.unwrap();
+			group.write_frame(group.key_time(), b"x".to_vec()).unwrap();
 			group.close().unwrap();
 		};
 
@@ -5647,8 +5643,7 @@ impl TrackRun {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
 					if let Some(waiting) = &self.opening
-						&& crate::priority::in_group(key, 0, order)
-							< crate::priority::in_group(waiting.key, 0, order)
+						&& crate::priority::in_group(key, 0, order) < crate::priority::in_group(waiting.key, 0, order)
 					{
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "shedding a group ranked below one waiting for credit");
 						self.mark_served(key);
@@ -6078,12 +6073,7 @@ impl TrackRun {
 	/// subscription's budget is.
 	fn shed(&self, key: u64) {
 		if self.ctx.version.has_track_stream() {
-			self.ctx
-				.outcomes
-				.dropped
-				.lock()
-				.unwrap()
-				.push((key, StreamError::Old));
+			self.ctx.outcomes.dropped.lock().unwrap().push((key, StreamError::Old));
 		}
 	}
 
@@ -6330,14 +6320,7 @@ impl GroupServe {
 		matches!(self.state, GroupState::Serve { .. })
 	}
 
-	fn new(
-		ctx: GroupContext,
-		key: u64,
-		frame_start: u64,
-		capped: bool,
-		rank: Rank,
-		group: group::Consumer,
-	) -> Self {
+	fn new(ctx: GroupContext, key: u64, frame_start: u64, capped: bool, rank: Rank, group: group::Consumer) -> Self {
 		// A lite-07 peer receives a compressed group as stored, others inflated.
 		let group = match ctx.version.has_compression() {
 			true => group.compressed(),
@@ -6804,7 +6787,10 @@ mod serve_group_test {
 			start: Some(lite::Anchor::Time(1_000)),
 			end: None,
 		}];
-		assert_eq!(Bounds::new(&time, false).ranges[0].start, crate::track::Anchor::Time(1_000));
+		assert_eq!(
+			Bounds::new(&time, false).ranges[0].start,
+			crate::track::Anchor::Time(1_000)
+		);
 	}
 
 	/// A wire without ranges means its start as the first group at or after it, so the
@@ -6892,7 +6878,7 @@ mod serve_group_test {
 		);
 		let mut group = track.create_group(group::Info { start: 3 }).unwrap();
 		group.start_at(5).unwrap();
-		group.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
+		group.write_frame(group.key_time(), b"tail".to_vec()).unwrap();
 		let starting = |frame| {
 			let mut frames = Frames::default();
 			frames.add(3, frame, None);
@@ -6911,7 +6897,7 @@ mod serve_group_test {
 
 		// The offset belongs to the start group only; a later group is served whole.
 		let mut other = track.create_group(group::Info { start: 4 }).unwrap();
-		other.write_frame(Timestamp::ZERO, b"whole".to_vec()).unwrap();
+		other.write_frame(other.key_time(), b"whole".to_vec()).unwrap();
 		let consumer = position_group(other.consume(), &starting(5)).unwrap();
 		assert_eq!(consumer.index(), 0);
 	}
@@ -6926,7 +6912,7 @@ mod serve_group_test {
 		);
 		let mut group = track.create_group(group::Info { start: 7 }).unwrap();
 		for i in 0..4u8 {
-			group.write_frame(Timestamp::ZERO, vec![i]).unwrap();
+			group.write_frame(group.key_time(), vec![i]).unwrap();
 		}
 		let group = group.close().unwrap();
 		let ending = |group, frame| {
@@ -7048,7 +7034,7 @@ mod serve_group_test {
 		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
-		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
 		old.close().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
@@ -7098,7 +7084,7 @@ mod serve_group_test {
 		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
-		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
@@ -7215,7 +7201,7 @@ mod serve_group_test {
 		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
-		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
 		old.close().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
@@ -7304,7 +7290,7 @@ mod serve_group_test {
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		group.write_frame(group.key_time(), b"x".as_slice()).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(run.machines(), 1, "group 0 waits for credit");
 
@@ -7515,7 +7501,7 @@ mod serve_group_test {
 		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
-		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
 		old.close().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
@@ -7562,7 +7548,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(Timestamp::ZERO, b"hello".as_slice()).unwrap();
+		group.write_frame(group.key_time(), b"hello".as_slice()).unwrap();
 		let consumer = group.consume();
 		group.close().unwrap();
 
@@ -9529,7 +9515,7 @@ mod serve_group_test {
 			.with_delay(track::Delay::default().with_max(Duration::from_secs(1)));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
-		write_group(&mut track, 5, 0);
+		write_group(&mut track, 5, 5);
 		while run.start.resolved().is_none() {
 			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
 			assert!(step.is_ready(), "the start never resolved");
@@ -9550,8 +9536,8 @@ mod serve_group_test {
 			// Group 2's successor arrives with it: group 5 arrived a full budget before
 			// the update, so group 2 bounded by it would be stale on the wall clock. Group 4
 			// is, and goes unserved.
-			write_group(&mut track, 4, 0);
-			write_group(&mut track, 2, 0);
+			write_group(&mut track, 4, 4);
+			write_group(&mut track, 2, 2);
 			assert!(futures::poll!(run.as_mut()).is_pending());
 			track.finish_at(track::Position::group(6), None).unwrap();
 			drop(track);
@@ -9595,7 +9581,7 @@ mod serve_group_test {
 		run.replace(update(5));
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
-			write_group(&mut track, 5, 0);
+			write_group(&mut track, 5, 5);
 			assert!(futures::poll!(run.as_mut()).is_pending());
 		}
 
@@ -9645,7 +9631,7 @@ mod serve_group_test {
 
 		run.replace(update(0));
 		for key in 1..5 {
-			write_group(&mut track, key, 0);
+			write_group(&mut track, key, key);
 		}
 		track.finish_at(track::Position::group(5), None).unwrap();
 		drop(track);
@@ -9746,11 +9732,11 @@ mod serve_group_test {
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
 			write_group(&mut track, 0, 0);
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			write_group(&mut track, 2, 0);
+			write_group(&mut track, 2, 2);
 			assert!(futures::poll!(run.as_mut()).is_pending());
 
 			kio::clock::sim::advance(Duration::from_secs(2)).await;
-			write_group(&mut track, 4, 0);
+			write_group(&mut track, 4, 4);
 			assert!(futures::poll!(run.as_mut()).is_pending());
 			track.finish_at(track::Position::group(5), None).unwrap();
 			drop(track);
@@ -11260,7 +11246,7 @@ mod tests {
 		fn write(track: &mut track::Producer, keys: &[u64]) {
 			for &key in keys {
 				let mut group = track.create_group(group::Info { start: key }).unwrap();
-				group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+				group.write_frame(group.key_time(), b"x".as_slice()).unwrap();
 				group.close().unwrap();
 			}
 		}
@@ -11509,7 +11495,7 @@ mod tests {
 		let track = request.accept(crate::track::Info::timed().with_refresh(1));
 		let mut group = track.create_group(group::Info { start: 1 }).unwrap();
 		for frame in [&b"key"[..], b"abc", b"d"] {
-			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
+			group.write_frame(group.key_time(), frame).unwrap();
 		}
 		group.close().unwrap();
 		assert!(!drive(&mut serve).await, "the subscription ended");
@@ -11523,7 +11509,7 @@ mod tests {
 		// stale, so it is not another join.
 		let mut group = track.create_group(group::Info { start: 2 }).unwrap();
 		for frame in [&b"key"[..], b"abc", b"d"] {
-			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
+			group.write_frame(group.key_time(), frame).unwrap();
 		}
 		group.close().unwrap();
 		session.push(&update(Some(2), 5).encode_bytes(version).unwrap());
@@ -11875,7 +11861,7 @@ mod tests {
 			.unwrap();
 		broadcast.announce().unwrap();
 		let mut open = track.append_next().unwrap();
-		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
+		open.write_frame(open.key_time(), b"a".to_vec()).unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default()).unwrap();

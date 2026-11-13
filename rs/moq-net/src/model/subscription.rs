@@ -761,10 +761,7 @@ mod tests {
 		assert_eq!(key_bounds(..=5), (0, Some(6)));
 		assert_eq!(key_bounds(..=u64::MAX), (0, None));
 		assert_eq!(key_bounds(..), (0, None));
-		assert_eq!(
-			key_bounds((Bound::Unbounded, Bound::Included(5))),
-			key_bounds(..6)
-		);
+		assert_eq!(key_bounds((Bound::Unbounded, Bound::Included(5))), key_bounds(..6));
 	}
 
 	/// A relative start counts back from the latest group and clamps at group 0. Before any
@@ -845,10 +842,7 @@ mod tests {
 			"a gap stays a gap"
 		);
 		assert_eq!(
-			ranges(&[
-				sub(&[groups(2, 5), groups(9, None)]),
-				sub(&[groups(4, None)])
-			]),
+			ranges(&[sub(&[groups(2, 5), groups(9, None)]), sub(&[groups(4, None)])]),
 			vec![groups(2, None)]
 		);
 		assert_eq!(
@@ -875,10 +869,7 @@ mod tests {
 
 		// Empty ranges ask for nothing.
 		assert_eq!(ranges(&[sub(&[groups(5, 5)])]), Vec::<Range>::new());
-		assert_eq!(
-			ranges(&[sub(&[]), sub(&[groups(1, 2)])]),
-			vec![groups(1, 2)]
-		);
+		assert_eq!(ranges(&[sub(&[]), sub(&[groups(1, 2)])]), vec![groups(1, 2)]);
 	}
 
 	/// Combining is order-independent and stops changing once it covers everyone.

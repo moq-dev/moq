@@ -1276,18 +1276,16 @@ impl Reader {
 			match self.declared {
 				None => self.declared = Some(end),
 				// FETCH can name only the group boundary just after a mid-group end.
-				Some(declared)
-					if declared.frame == 0 && end.frame != 0 && declared.final_key() == end.final_key() =>
-				{
+				Some(declared) if declared.frame == 0 && end.frame != 0 && declared.final_key() == end.final_key() => {
 					self.declared = Some(end);
 				}
 				Some(_) => {}
 			}
 			// A copy over a version with no end error declares the same end cleanly. Only a copy
 			// at the end that stands says how the track ended there.
-			let same = self.declared.is_some_and(|declared| {
-				declared == end || end.frame == 0 && end.final_key() == declared.final_key()
-			});
+			let same = self
+				.declared
+				.is_some_and(|declared| declared == end || end.frame == 0 && end.final_key() == declared.final_key());
 			if same && self.declared_error.is_none() {
 				self.declared_error = copy.track.declared_error();
 			}
@@ -1396,9 +1394,7 @@ impl Reader {
 	}
 
 	fn deliverable(copy: &Copy, key: u64, delivered: &Delivered) -> bool {
-		let replaced = copy
-			.until
-			.is_some_and(|until| until.is_none_or(|until| key > until));
+		let replaced = copy.until.is_some_and(|until| until.is_none_or(|until| key > until));
 		!replaced && !delivered.contains(key)
 	}
 
@@ -1453,10 +1449,7 @@ impl Reader {
 		let mut group = sub.take(candidate.reserved)?;
 		self.observe(index, group.start);
 		// A mid-group end caps the group it falls in, as it caps a direct track's.
-		if let Some(end) = self
-			.declared
-			.filter(|end| end.frame != 0 && end.group == group.start)
-		{
+		if let Some(end) = self.declared.filter(|end| end.frame != 0 && end.group == group.start) {
 			group = group.with_end(end.frame);
 		}
 		Ok(self.hand_out(index, group))
@@ -5901,7 +5894,11 @@ mod test {
 		old.replaced = true;
 		old.until = Some(Some(3800));
 		old.update(&mirrored);
-		assert_eq!(old.wire(&mirrored).ranges, vec![range], "the time end is inside the cap");
+		assert_eq!(
+			old.wire(&mirrored).ranges,
+			vec![range],
+			"the time end is inside the cap"
+		);
 
 		for key in [3600, 3700] {
 			write(&a, key);
@@ -5983,7 +5980,7 @@ mod test {
 		}
 		assert!(reading.read_frame().now_or_never().is_none(), "not stale yet");
 
-		let mut group = b.create_group(group::Info { start: 3 }).unwrap();
+		let mut group = b.create_group(group::Info { start: 3000 }).unwrap();
 		group.write_frame(ts(3000), b"b".as_ref()).unwrap();
 		assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
 	}

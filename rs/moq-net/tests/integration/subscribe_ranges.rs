@@ -352,10 +352,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		.await
 		.expect("the narrowed range never reached the publisher");
 		reader.update(initial.with_range(0..)).unwrap();
-		let mut group = fixture
-			.track
-			.create_group(moq_net::group::Info { start: 6 })
-			.unwrap();
+		let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"later".as_slice())
 			.unwrap();
@@ -428,10 +425,7 @@ async fn draft22_resolves_cached_time_ends() {
 async fn draft22_can_widen_while_the_current_group_is_quiet() {
 	for relay in [false, true] {
 		let fixture = range_fixture(relay).await;
-		let mut quiet = fixture
-			.track
-			.create_group(moq_net::group::Info { start: 6 })
-			.unwrap();
+		let mut quiet = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 		quiet
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"head".as_slice())
 			.unwrap();
@@ -566,10 +560,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 				reader.poll_recv_group(&kio::Waiter::noop()),
 				std::task::Poll::Ready(Ok(None))
 			));
-			let mut group = fixture
-				.track
-				.create_group(moq_net::group::Info { start: 6 })
-				.unwrap();
+			let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(6000).unwrap(), b"sibling".as_slice())
 				.unwrap();
@@ -598,10 +589,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			)
 			.await
 			.unwrap_or_else(|_| panic!("{version} relay={relay}: empty demand retained a wire subscription"));
-			let mut group = fixture
-				.track
-				.create_group(moq_net::group::Info { start: 7 })
-				.unwrap();
+			let mut group = fixture.track.create_group(moq_net::group::Info { start: 7 }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(7000).unwrap(), b"resumed".as_slice())
 				.unwrap();

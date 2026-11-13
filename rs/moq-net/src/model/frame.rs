@@ -1442,10 +1442,7 @@ impl Drop for Producer {
 			&& let Some(group) = self.group.as_mut()
 		{
 			if !group.is_aborted() && !self.cancel_on_drop {
-				tracing::warn!(
-					group = group.start,
-					"frame::Producer dropped before writing all bytes"
-				);
+				tracing::warn!(group = group.start, "frame::Producer dropped before writing all bytes");
 			}
 			group.frame_abort(if self.cancel_on_drop {
 				Error::Cancel

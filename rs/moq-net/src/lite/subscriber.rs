@@ -4126,9 +4126,7 @@ mod tests {
 		assert_eq!(fetches.held.len(), 3, "one entry per fill");
 		assert!(callers.iter_mut().all(|caller| caller.now_or_never().is_none()));
 
-		let mut joined: Vec<_> = (1..=3)
-			.map(|key| track.consume().fetch_group(key, None))
-			.collect();
+		let mut joined: Vec<_> = (1..=3).map(|key| track.consume().fetch_group(key, None)).collect();
 		assert!(
 			dynamic.requested_fill().now_or_never().is_none(),
 			"joins existing fills"
@@ -5356,7 +5354,7 @@ mod tests {
 				crate::track::Info::timed(),
 			);
 			let mut cached = track.create_group(group::Info { start: 0 }).unwrap();
-			cached.write_frame(Timestamp::ZERO, &b"0"[..]).unwrap();
+			cached.write_frame(cached.key_time(), &b"0"[..]).unwrap();
 			cached.close().unwrap();
 			track.set_idle();
 			let mut entry = TrackEntry::accepted(track.clone(), Default::default(), Default::default());
@@ -5428,7 +5426,7 @@ mod tests {
 			crate::track::Info::timed(),
 		);
 		let mut cached = track.create_group(group::Info { start: 3 }).unwrap();
-		cached.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
+		cached.write_frame(cached.key_time(), &b"x"[..]).unwrap();
 		cached.close().unwrap();
 		let tail = kio::Producer::new(Tail::default());
 		subscriber.subscribes.lock().insert(
@@ -5919,7 +5917,7 @@ mod tests {
 			let request = broadcast.reserve_track("video").unwrap();
 			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
 			let mut group = serving.serving.create_group(group::Info { start: 2 }).unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
+			group.write_frame(group.key_time(), b"2".as_slice()).unwrap();
 			group.close().unwrap();
 			let mut reader = broadcast
 				.consume()
@@ -6292,7 +6290,7 @@ mod tests {
 			})
 		};
 		let frame = |mut group: crate::group::Producer| {
-			group.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])?;
+			group.write_frame(group.key_time(), &b"x"[..])?;
 			group.close().map(drop)
 		};
 		let arrive = |serving: &mut ServeLoop, key| {
@@ -6373,7 +6371,8 @@ mod tests {
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
-			encoder.varint(crate::coding::varint::zigzag(1)).unwrap();
+			// A frame at the group's key, since starts strictly increase.
+			encoder.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
 			encoder.bytes(b"x").unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::eof(script);
 			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
@@ -6502,10 +6501,7 @@ mod tests {
 				groups: first..last + 1,
 			})
 		};
-		let mut group = serving
-			.serving
-			.create_group(crate::group::Info { start: 5 })
-			.unwrap();
+		let mut group = serving.serving.create_group(crate::group::Info { start: 5 }).unwrap();
 		group
 			.write_frame(crate::Timestamp::from_millis(5).unwrap(), &b"x"[..])
 			.unwrap();
@@ -6602,7 +6598,7 @@ mod tests {
 			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
 			let producer = serving.serving.clone();
 			let mut arriving = serving.serving.create_group(group::Info { start: 2 }).unwrap();
-			arriving.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
+			arriving.write_frame(arriving.key_time(), b"2".as_slice()).unwrap();
 			let mut reader = broadcast
 				.consume()
 				.track("video")
@@ -6634,7 +6630,7 @@ mod tests {
 
 			// The track goes on: the next group still reaches the reader.
 			let mut following = producer.create_group(group::Info { start: 3 }).unwrap();
-			following.write_frame(crate::Timestamp::ZERO, b"3".as_slice()).unwrap();
+			following.write_frame(following.key_time(), b"3".as_slice()).unwrap();
 			let mut next = reader
 				.recv_group()
 				.now_or_never()
@@ -7421,9 +7417,10 @@ mod tests {
 			}
 			.encode(&mut w, version)
 			.unwrap();
-			// A one-byte payload's length plus one, then a zero timestamp delta.
+			// A one-byte payload's length plus one, then the frame at the group's key, since
+			// starts strictly increase.
 			w.varint(2).unwrap();
-			w.varint(0).unwrap();
+			w.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
 			w.u8(payload);
 			bytes
 		};
@@ -9318,7 +9315,7 @@ mod tests {
 			.create_track("video", crate::track::Info::timed())
 			.unwrap();
 		let mut group = track.append_next().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
+		group.write_frame(group.key_time(), b"local".as_ref()).unwrap();
 		group.close().unwrap();
 
 		// The peer's own subscription, excluding the hop the server minted for
@@ -9379,7 +9376,7 @@ mod tests {
 		);
 
 		let mut group = track.append_next().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
+		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
 		group.close().unwrap();
 		let mut group = sub.recv_group().await.expect("recv group").expect("track ended early");
 		assert_eq!(
@@ -10218,7 +10215,9 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 		// it asks through the live edge. SUBSCRIBE_START names a resolved start, but nothing
 		// names a resolved end, so one resolved upstream would leave the copy short.
 		let end = match range.end {
-			Some(Anchor::Time(time)) => time.checked_add(1).map(|end| lite::Anchor::Absolute(Position::group(end))),
+			Some(Anchor::Time(time)) => time
+				.checked_add(1)
+				.map(|end| lite::Anchor::Absolute(Position::group(end))),
 			None | Some(Anchor::Oldest | Anchor::Relative(_)) => None,
 		};
 		ranges.push(lite::Range { start, end });

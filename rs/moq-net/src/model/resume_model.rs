@@ -670,10 +670,7 @@ impl Model {
 						));
 					}
 					if !instance.written.contains_key(&key) {
-						return Err(fail(
-							index,
-							format!("group {key} handed out before any route had it"),
-						));
+						return Err(fail(index, format!("group {key} handed out before any route had it")));
 					}
 					reader.handed.push(key);
 					reader.reading.insert(

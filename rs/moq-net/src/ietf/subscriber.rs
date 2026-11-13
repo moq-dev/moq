@@ -6524,9 +6524,7 @@ impl OpenGroup {
 					};
 				}
 				OpenStep::ClaimEarly => {
-					if let Some((producer, next)) =
-						ready!(poll_claim_fill(fill, track, key, None, reading, waiter))?
-					{
+					if let Some((producer, next)) = ready!(poll_claim_fill(fill, track, key, None, reading, waiter))? {
 						return Poll::Ready(Ok(Opened::Group(producer, next)));
 					}
 					self.step = OpenStep::PeekFirst;
@@ -6571,14 +6569,10 @@ impl OpenGroup {
 					// unless it claims FIRST_OBJECT: a group may start past object 0.
 					if !fill.read().outstanding() {
 						let start = first.map_or(0, |first| first.id);
-						if start != 0 && !header.flags.first_object && (self.headless || fill.read().headless(key))
-						{
+						if start != 0 && !header.flags.first_object && (self.headless || fill.read().headless(key)) {
 							tracing::warn!(key, start, "no fill to stitch a mid-group stream onto");
 							// Never arriving whole, the group is dropped so readers stop owing it.
-							track.give_up(
-								key..key + 1,
-								crate::track::Hole::drop(crate::StreamError::NotFound),
-							);
+							track.give_up(key..key + 1, crate::track::Hole::drop(crate::StreamError::NotFound));
 							return Poll::Ready(Err(Error::Unsupported));
 						}
 						return Poll::Ready(Ok(Opened::Group(create(track)?, start)));
@@ -6621,10 +6615,7 @@ impl OpenGroup {
 						(Some(start), Some((producer, _))) => Ok(Opened::Group(producer, start)),
 						(Some(start), None) => {
 							tracing::warn!(key, start, "no fill to stitch a mid-group stream onto");
-							track.give_up(
-								key..key + 1,
-								crate::track::Hole::drop(crate::StreamError::NotFound),
-							);
+							track.give_up(key..key + 1, crate::track::Hole::drop(crate::StreamError::NotFound));
 							Err(Error::Unsupported)
 						}
 						(None, Some((producer, next))) => Ok(Opened::Group(producer, next)),
@@ -16267,13 +16258,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(
-			h.track.finished(),
-			Some(track::Position {
-				group: KEY,
-				frame: 1
-			})
-		);
+		assert_eq!(h.track.finished(), Some(track::Position { group: KEY, frame: 1 }));
 
 		let mut group = consumer.recv_group().await.unwrap().expect("the group arrives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");
@@ -16291,11 +16276,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		assert_eq!(h.track.finished(), Some(track::Position { group: 5, frame: 5 }));
-		assert_eq!(
-			h.track.latest_key(),
-			None,
-			"a terminal marker creates no payload group"
-		);
+		assert_eq!(h.track.latest_key(), None, "a terminal marker creates no payload group");
 	}
 
 	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no
@@ -16320,10 +16301,7 @@ mod stitch_tests {
 	/// and no group is created for it.
 	#[kio::test]
 	async fn an_end_of_track_at_object_zero_creates_no_group() {
-		let h = Harness::new(
-			Fill::Done,
-			vec![end_marker(tail_stream(KEY, 0, &[]), END_OF_TRACK)],
-		);
+		let h = Harness::new(Fill::Done, vec![end_marker(tail_stream(KEY, 0, &[]), END_OF_TRACK)]);
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
@@ -16337,10 +16315,7 @@ mod stitch_tests {
 	async fn an_empty_tail_finishes_the_filled_group() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![
-				fill_stream(KEY, &[b"head-0", b"head-1"]),
-				tail_stream(KEY, 2, &[]),
-			],
+			vec![fill_stream(KEY, &[b"head-0", b"head-1"]), tail_stream(KEY, 2, &[])],
 		);
 		let mut consumer = h.track.subscribe(None);
 
@@ -16475,10 +16450,7 @@ mod stitch_tests {
 			next: 1,
 			producer,
 		});
-		assert!(
-			matches!(fill, Fill::Failed { key: KEY }),
-			"Failed is terminal"
-		);
+		assert!(matches!(fill, Fill::Failed { key: KEY }), "Failed is terminal");
 
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
 	}
@@ -16499,10 +16471,7 @@ mod stitch_tests {
 
 		let mut fill = Fill::Failed { key: KEY };
 		fill.end();
-		assert!(
-			matches!(fill, Fill::Failed { key: KEY }),
-			"the end keeps it failed"
-		);
+		assert!(matches!(fill, Fill::Failed { key: KEY }), "the end keeps it failed");
 		fill.install(Fill::Ready {
 			key: KEY,
 			next: 1,
@@ -16539,10 +16508,7 @@ mod stitch_tests {
 	async fn a_refused_headless_group_does_not_stall_an_ordered_reader() {
 		let h = Harness::new(
 			Fill::Done,
-			vec![
-				tail_stream(KEY, 2, &[b"tail-2"]),
-				tail_stream(KEY + 1, 0, &[b"next-0"]),
-			],
+			vec![tail_stream(KEY, 2, &[b"tail-2"]), tail_stream(KEY + 1, 0, &[b"next-0"])],
 		);
 		// Subscribed before the answer, as the socket does.
 		let mut ordered = h
@@ -16584,10 +16550,7 @@ mod stitch_tests {
 	async fn a_headless_tail_after_its_fill_was_replaced_is_dropped() {
 		let h = Harness::new(
 			Fill::Done,
-			vec![
-				tail_stream(KEY, 2, &[b"tail-2"]),
-				tail_stream(KEY + 1, 0, &[b"next-0"]),
-			],
+			vec![tail_stream(KEY, 2, &[b"tail-2"]), tail_stream(KEY + 1, 0, &[b"next-0"])],
 		);
 		h.subscriber
 			.state
@@ -16718,13 +16681,7 @@ mod stitch_tests {
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
 		let mut group = consumer.recv_group().await.unwrap().expect("the fill head arrived");
 		let resume = track.resume_position();
-		assert_eq!(
-			resume,
-			Some(track::Position {
-				group: KEY,
-				frame: 1
-			})
-		);
+		assert_eq!(resume, Some(track::Position { group: KEY, frame: 1 }));
 		let err = Error::Session(crate::SessionError::App(7));
 		h.subscriber.abort(&err);
 		assert_eq!(track.resume_position(), resume);
@@ -19049,11 +19006,7 @@ mod joining_fetch_tests {
 					.run_group_fetch(Path::from_static("broadcast"), "video".into(), request, None)
 					.await;
 
-				assert_eq!(
-					consumer.final_key(),
-					None,
-					"{version}: rejected end changed the track"
-				);
+				assert_eq!(consumer.final_key(), None, "{version}: rejected end changed the track");
 				assert!(matches!(fetch.await, Err(Error::ProtocolViolation)));
 				let violation = SessionError::from(&Error::ProtocolViolation).to_code();
 				assert!(

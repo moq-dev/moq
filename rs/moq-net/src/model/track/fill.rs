@@ -452,10 +452,7 @@ impl FillState {
 			.collect();
 		let mut gaps: Vec<ops::Range<u64>> = self.covers.gaps(&span).collect();
 		for (mut groups, id) in covered {
-			let pending = self
-				.pending
-				.get_mut(&id)
-				.expect("a covered key names a pending fill");
+			let pending = self.pending.get_mut(&id).expect("a covered key names a pending fill");
 			if groups.start == pending.start.group {
 				// A reader starting in an earlier group wants this one whole.
 				let frame = match ask.start.group == groups.start {

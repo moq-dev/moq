@@ -1595,10 +1595,7 @@ impl Drop for Producer {
 			if !matches!(state.outcome, Outcome::Open) {
 				return;
 			}
-			tracing::warn!(
-				key = self.start,
-				"group::Producer dropped without finish() or abort()"
-			);
+			tracing::warn!(key = self.start, "group::Producer dropped without finish() or abort()");
 			self.handle.commit_abort(state, Error::Dropped);
 		}
 	}
@@ -1826,9 +1823,7 @@ impl Producer {
 
 		let producer = self.first_frame_track();
 		let track = producer.as_ref().map(|track| track.read());
-		let neighbors = track
-			.as_ref()
-			.and_then(|track| track.neighbors(self.handle.info.start));
+		let neighbors = track.as_ref().and_then(|track| track.neighbors(self.handle.info.start));
 		let mut state = modify(&self.handle.state)?;
 		if state.outcome.frames().is_some() {
 			return Err(Error::Closed);
@@ -1913,9 +1908,7 @@ impl Producer {
 		let bytes: u64 = frames.filled().iter().map(|frame| frame.payload.len() as u64).sum();
 		let producer = self.first_frame_track();
 		let track = producer.as_ref().map(|track| track.read());
-		let neighbors = track
-			.as_ref()
-			.and_then(|track| track.neighbors(self.handle.info.start));
+		let neighbors = track.as_ref().and_then(|track| track.neighbors(self.handle.info.start));
 		let mut state = modify(&self.handle.state)?;
 		if state.outcome.frames().is_some() {
 			return Err(Error::Closed);
@@ -2086,9 +2079,7 @@ impl Producer {
 
 		let producer = self.first_frame_track();
 		let track = producer.as_ref().map(|track| track.read());
-		let neighbors = track
-			.as_ref()
-			.and_then(|track| track.neighbors(self.handle.info.start));
+		let neighbors = track.as_ref().and_then(|track| track.neighbors(self.handle.info.start));
 		let mut state = modify(&self.handle.state)?;
 		if state.outcome.frames().is_some() {
 			return Err(Error::Closed);
@@ -4850,6 +4841,15 @@ impl Fetch {
 }
 
 #[cfg(test)]
+impl Producer {
+	/// This group's key read as milliseconds: a first frame there starts the group where its
+	/// key says, so test groups start in key order on a millisecond track.
+	pub(crate) fn key_time(&self) -> Timestamp {
+		Timestamp::from_millis(self.start).expect("a test key fits a timestamp")
+	}
+}
+
+#[cfg(test)]
 mod test {
 	use super::*;
 	use crate::frame::Frame;
@@ -5112,7 +5112,7 @@ mod test {
 					.max(kio::log::Writer::<Entry>::HEAP);
 				let before = pool.used();
 				match mode {
-					0 => group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap(),
+					0 => group.write_frame(group.key_time(), bytes::Bytes::new()).unwrap(),
 					1 => {
 						let mut buffer = frame::Buffer::<1>::new();
 						buffer.push(Frame::new(Timestamp::ZERO, bytes::Bytes::new())).unwrap();
@@ -5232,7 +5232,7 @@ mod test {
 
 		let mut untimed = Info { start: 0 }.produce_untimed();
 		assert!(matches!(
-			untimed.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")),
+			untimed.write_frame(untimed.key_time(), Bytes::from_static(b"x")),
 			Err(Error::TimestampMismatch)
 		));
 
@@ -5325,7 +5325,7 @@ mod test {
 		let groups: Vec<_> = (0..3)
 			.map(|key| {
 				let mut group = track.create_group(Info { start: key }).unwrap();
-				group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
+				group.write_frame(group.key_time(), b"f".as_ref()).unwrap();
 				group.close().unwrap()
 			})
 			.collect();
@@ -5631,7 +5631,7 @@ mod test {
 		let mut writer = Info { start: 0 }.produce();
 		let producer = writer.handle();
 		writer
-			.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+			.write_frame(writer.key_time(), Bytes::from_static(b"data"))
 			.unwrap();
 
 		// A stale consumer keeps the channel (and thus the cache) alive.
@@ -5653,7 +5653,7 @@ mod test {
 			let keep = writer.handle();
 			let producer = writer.handle();
 			writer
-				.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+				.write_frame(writer.key_time(), Bytes::from_static(b"data"))
 				.unwrap();
 			let _consumer = producer.consume();
 			writer.abort(crate::Error::Cancel).unwrap();
@@ -5668,7 +5668,7 @@ mod test {
 			let mut writer = Info { start: 0 }.produce();
 			let producer = writer.handle();
 			writer
-				.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+				.write_frame(writer.key_time(), Bytes::from_static(b"data"))
 				.unwrap();
 			let _consumer = producer.consume();
 			drop(writer);

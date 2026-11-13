@@ -210,9 +210,7 @@ impl Topology {
 		let mut group = self.track.append_group().unwrap();
 		let mut written = Vec::new();
 		for frame in 0..FRAMES {
-			group
-				.write_frame(timestamp(key, frame), payload(key, frame))
-				.unwrap();
+			group.write_frame(timestamp(key, frame), payload(key, frame)).unwrap();
 			written.push((key, payload(key, frame)));
 		}
 		group.finish().unwrap();

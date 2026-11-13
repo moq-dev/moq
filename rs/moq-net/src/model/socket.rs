@@ -273,8 +273,7 @@ impl sealed::Open for TcpStream {
 			// The track already ended, such as by the endpoint closing: hand out a half
 			// that reports it.
 			Err(err) => {
-				let group =
-					group::Producer::new(group::Info { start: 0 }, track::Info::default(), Default::default());
+				let group = group::Producer::new(group::Info { start: 0 }, track::Info::default(), Default::default());
 				let _ = group.handle().abort(err);
 				(group, None)
 			}

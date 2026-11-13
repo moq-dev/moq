@@ -688,7 +688,11 @@ mod tests {
 		}
 
 		fn never_produced(&self, keys: ops::Range<u64>) -> bool {
-			keys.is_empty() || self.skipped.iter().any(|run| run.start <= keys.start && keys.end <= run.end)
+			keys.is_empty()
+				|| self
+					.skipped
+					.iter()
+					.any(|run| run.start <= keys.start && keys.end <= run.end)
 		}
 	}
 
@@ -772,7 +776,11 @@ mod tests {
 		let window = Window::new(&[range(time(5), None)], Some(20), &keys).unwrap();
 		assert_eq!(covered(&window, [10, 20]), vec![10, 20]);
 		assert_eq!((window.floor(), window.start(), window.named()), (Some(0), None, None));
-		assert_eq!(window.missable(0).next(), Some(10..=u64::MAX), "nothing below the oldest held");
+		assert_eq!(
+			window.missable(0).next(),
+			Some(10..=u64::MAX),
+			"nothing below the oldest held"
+		);
 	}
 
 	/// Relative anchors count back through the groups held, however sparse their starts,

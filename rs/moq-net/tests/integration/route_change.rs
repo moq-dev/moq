@@ -1110,9 +1110,7 @@ async fn replaced_behind_a_relay(version: &str) {
 			let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 			for replica in &mut replicas {
 				let group = replica.group.as_mut().unwrap();
-				group
-					.write_frame(timestamp, tagged(replica.name, key, frame))
-					.unwrap();
+				group.write_frame(timestamp, tagged(replica.name, key, frame)).unwrap();
 			}
 			if dead.is_none() {
 				let expected = (key, tagged(replicas[0].name, key, frame));
@@ -1222,9 +1220,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 			let mut group = replica.track.append_group().unwrap();
 			for frame in 0..FRAMES {
 				let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
-				group
-					.write_frame(timestamp, tagged(replica.name, key, frame))
-					.unwrap();
+				group.write_frame(timestamp, tagged(replica.name, key, frame)).unwrap();
 			}
 			group.finish().unwrap();
 		}

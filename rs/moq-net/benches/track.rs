@@ -222,10 +222,7 @@ impl FetchReaders {
 		for key in 1..=history {
 			let mut group = track.append_group().unwrap();
 			group
-				.write_frame(
-					Timestamp::from_millis(key as u64).unwrap(),
-					Bytes::from_static(b"f"),
-				)
+				.write_frame(Timestamp::from_millis(key as u64).unwrap(), Bytes::from_static(b"f"))
 				.unwrap();
 			group.finish().unwrap();
 		}
@@ -1744,10 +1741,7 @@ impl BudgetWidening {
 			for key in keys {
 				let mut group = track.create_group(group::Info { start: key }).unwrap();
 				group
-					.write_frame(
-						Timestamp::from_millis(100 * key).unwrap(),
-						Bytes::from_static(b"x"),
-					)
+					.write_frame(Timestamp::from_millis(100 * key).unwrap(), Bytes::from_static(b"x"))
 					.unwrap();
 				group.finish().unwrap();
 			}

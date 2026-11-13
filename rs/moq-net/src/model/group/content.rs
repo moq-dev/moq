@@ -215,15 +215,8 @@ impl Drop for Content {
 		}
 		if let Some((index, key)) = self.index.get_mut().unwrap_or_else(PoisonError::into_inner).take() {
 			let mut state = index.state.lock().unwrap_or_else(PoisonError::into_inner);
-			if state
-				.get(&key)
-				.is_some_and(|owner| std::ptr::eq(owner.as_ptr(), self))
-			{
-				remove(
-					&mut state,
-					&key,
-					index.bill.get().expect("registered index is billed"),
-				);
+			if state.get(&key).is_some_and(|owner| std::ptr::eq(owner.as_ptr(), self)) {
+				remove(&mut state, &key, index.bill.get().expect("registered index is billed"));
 			}
 		}
 	}
@@ -252,11 +245,7 @@ impl Contents {
 			return;
 		};
 		let mut state = index.state.lock().unwrap_or_else(PoisonError::into_inner);
-		remove(
-			&mut state,
-			&key,
-			index.bill.get().expect("registered index is billed"),
-		);
+		remove(&mut state, &key, index.bill.get().expect("registered index is billed"));
 	}
 
 	pub(in crate::model) fn insert(&self, key: u64, content: &Arc<Content>, charge: &cache::Charge) {
