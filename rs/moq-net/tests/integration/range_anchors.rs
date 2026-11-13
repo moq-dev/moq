@@ -2,9 +2,10 @@
 
 //! A range anchored relative to the latest group or at a presentation time resolves where
 //! the track is held, and on a copy received over a wire that tells it enough to resolve
-//! the anchor the same way. A moq-transport copy resolves a relative anchor from the
-//! Largest Object its live join reports. A copy received over any other wire refuses the
-//! anchor instead of resolving it against the part of the track it happens to hold.
+//! the anchor the same way. Every wire carries a time anchor, as the group ID with that key.
+//! A moq-transport copy resolves a relative anchor from the Largest Object its live join
+//! reports. A copy received over any other wire refuses a relative anchor other than the
+//! live start instead of resolving it against the part of the track it happens to hold.
 
 use crate::support;
 use moq_net::track::Delay;
@@ -122,30 +123,31 @@ fn anchored() -> [(Range, Vec<u64>); 6] {
 /// rather than resolve them against the part of the track its copy happens to hold.
 #[kio::test]
 async fn each_wire_refuses_only_the_anchors_it_drops() {
+	let mut failures = Vec::new();
 	for version in std::iter::once(None).chain(VERSIONS.iter().copied().map(Some)) {
 		// Lite-07 reports the largest and asks for everything the budget allows, so its copy
 		// resolves every anchor where it is held.
-		let carried = matches!(version, None | Some("moq-lite-07-wip"));
-		// A wire without timestamps refuses a time anchor for that first.
-		let timed = !matches!(version, Some("moq-lite-03" | "moq-lite-04"));
+		let resolves = matches!(version, None | Some("moq-lite-07-wip"));
+		// A moq-transport copy joins live and resolves a relative anchor from the Largest
+		// Object, so the groups below it arrive as fills, after the live one.
+		let transport = matches!(version, Some(version) if version.starts_with("moq-transport"));
 		for (range, held) in anchored() {
 			let mut result = read(version, range).await;
-			let time = matches!(range.start, Anchor::Time(_)) || matches!(range.end, Some(Anchor::Time(_)));
-			// A moq-transport copy joins live and resolves a relative anchor from the Largest
-			// Object, so the groups below it arrive as fills, after the live one.
-			let transport = matches!(version, Some(version) if version.starts_with("moq-transport"));
-			let carried = carried || (transport && !time);
+			// Any other wire carries time anchors and the live start, and drops the rest.
+			let wire = matches!(range.start, Anchor::Time(_) | Anchor::Oldest | Anchor::Relative(0))
+				&& matches!(range.end, None | Some(Anchor::Time(_)));
+			let carried = resolves || transport || wire;
 			if transport && let Ok(read) = &mut result {
 				read.sort_unstable();
 			}
-			match (&result, time && !timed, carried) {
-				(Err(Error::TimestampMismatch), true, _) => {}
-				(Err(Error::Unsupported), false, false) => {}
-				(Ok(read), false, true) if *read == held => {}
-				_ => panic!("{version:?}: {range:?} read {result:?}"),
+			match (&result, carried) {
+				(Err(Error::Unsupported), false) => {}
+				(Ok(read), true) if *read == held => {}
+				_ => failures.push(format!("{version:?}: {range:?} read {result:?}")),
 			}
 		}
 	}
+	assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// Every wire carries the live and oldest starts, which it spells with no floor. A wire whose

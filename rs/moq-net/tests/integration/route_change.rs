@@ -834,12 +834,13 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 
 	let mut after = BTreeMap::<u64, Vec<String>>::new();
 	for key in 0..=E_NOTICES + 3 {
-		let mut group = track.append_next().unwrap();
+		// Each group starts at its first frame, a second after the last.
+		let mut group = track.append_group(key * 1_000).unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(key * 1_000 + frame * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();
 			if key < KILLED || (key, frame) == (KILLED, 0) {
-				assert_eq!(next(&mut rx).await, (key, payload(key, frame)));
+				assert_eq!(next(&mut rx).await, (key * 1_000, payload(key, frame)));
 			}
 			if (key, frame) == (KILLED, 0) {
 				for pair in [&o_m1, &m1_e] {
@@ -867,7 +868,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 		while let Ok((group, frame)) = rx.try_recv() {
 			let (_, payload) = frame.unwrap_or_else(|err| panic!("group {group} failed: {err}"));
 			after
-				.entry(group)
+				.entry(group / 1_000)
 				.or_default()
 				.push(String::from_utf8(payload).unwrap());
 		}

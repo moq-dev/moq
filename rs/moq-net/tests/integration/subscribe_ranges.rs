@@ -292,7 +292,9 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 				let mut reader = subscribe(&fixture.remote, subscription).await;
 				let mut got = Vec::new();
 				for _ in 0..2 {
-					got.push(next(&mut reader).await.expect("a mixed range group is missing"));
+					got.push(next(&mut reader).await.unwrap_or_else(|| {
+						panic!("{version} relay={relay} finished={finished}: a mixed range group is missing; got {got:?}")
+					}));
 				}
 				got.sort_unstable();
 				assert_eq!(got, [1, 5], "{version} relay={relay} finished={finished}");
@@ -364,9 +366,10 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 	}
 }
 
-/// A warm copy resolves a time end before updating upstream; an unknown end is refused.
+/// Draft 22 names groups by ID, and a time anchor is the group ID with that key, so a time
+/// end goes upstream as is, whether or not the copy holds the group it names.
 #[kio::test]
-async fn draft22_resolves_cached_time_ends() {
+async fn draft22_carries_time_ends_as_group_ids() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture(relay).await;
 		// Reaching the live group 5, so the copy subscribes: history alone is fetched.
@@ -381,12 +384,6 @@ async fn draft22_resolves_cached_time_ends() {
 		}
 		seen.sort_unstable();
 		assert_eq!(seen, [2, 3, 5]);
-		let unknown = initial.clone().with_ranges([Range {
-			start: moq_net::track::Anchor::Time(0),
-			end: Some(moq_net::track::Anchor::Time(10)),
-		}]);
-		assert!(matches!(reader.update(unknown), Err(moq_net::Error::Unsupported)));
-		assert_eq!(reader.subscription().ranges, initial.ranges);
 		reader
 			.update(initial.with_ranges([Range {
 				start: moq_net::track::Anchor::Time(0),
@@ -409,17 +406,20 @@ async fn draft22_resolves_cached_time_ends() {
 			}
 		})
 		.await
-		.expect("the resolved group end never reached the publisher");
+		.expect("the group end never reached the publisher");
 	}
+	// A cold copy holds none of the groups the end names.
 	let fixture = range_fixture(false).await;
-	let requested = Subscription::default().with_ranges([Range {
-		start: moq_net::track::Anchor::Time(0),
-		end: Some(moq_net::track::Anchor::Time(2)),
-	}]);
-	assert!(matches!(
-		fixture.remote.track("quiet").unwrap().subscribe(requested).await,
-		Err(moq_net::Error::Unsupported)
-	));
+	let requested = Subscription::default()
+		.with_ranges([Range {
+			start: moq_net::track::Anchor::Time(0),
+			end: Some(moq_net::track::Anchor::Time(2)),
+		}])
+		.with_delay(Delay::default().with_max(None));
+	let mut reader = subscribe(&fixture.remote, requested).await;
+	let mut got = read_all(&mut reader).await;
+	got.sort_unstable();
+	assert_eq!(got, [0, 1, 2]);
 }
 
 /// A quiet current group does not hold its filled head while a later range update
@@ -490,6 +490,12 @@ async fn draft18_updates_narrow_then_widen() {
 		seen.sort_unstable();
 		assert_eq!(seen, [5], "{version} relay={relay}");
 		reader.update(initial.clone().with_ranges([support::keys(6..7)])).unwrap();
+		// Group 5 is the newest, so until a later one starts it holds time 6: the narrowed
+		// range still asks from it.
+		let narrowed = Range {
+			start: moq_net::track::Anchor::Time(5),
+			end: Some(moq_net::track::Anchor::Time(6)),
+		};
 		kio::clock::timeout(
 			TIMEOUT,
 			kio::wait(|waiter| {
@@ -498,7 +504,7 @@ async fn draft18_updates_narrow_then_widen() {
 					if fixture
 						.track
 						.subscription()
-						.is_some_and(|subscription| subscription.ranges == [support::keys(6..7)])
+						.is_some_and(|subscription| subscription.ranges == [narrowed])
 					{
 						return std::task::Poll::Ready(());
 					}
@@ -624,6 +630,9 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 		for start in [0, 1, 2] {
 			let future = start + 1;
 			reader.update(initial.clone().with_ranges([support::keys(future..)])).unwrap();
+			// A time start names the newest group starting at or before it, so once the copy
+			// holds a group, the narrowing still asks from the newest one.
+			let narrowed = support::keys(start.checked_sub(1).unwrap_or(future)..);
 			kio::clock::timeout(
 				TIMEOUT,
 				kio::wait(|waiter| {
@@ -632,7 +641,7 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 						if fixture
 							.track
 							.subscription()
-							.is_some_and(|subscription| subscription.ranges == [support::keys(future..)])
+							.is_some_and(|subscription| subscription.ranges == [narrowed])
 						{
 							return std::task::Poll::Ready(());
 						}
@@ -678,76 +687,6 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			}
 			keys.sort_unstable();
 			assert_eq!(keys, [start]);
-		}
-	}
-}
-
-/// A pending refusal is local to the new reader even before it is awaited.
-#[kio::test]
-async fn unresolved_time_reader_never_changes_sibling_demand() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
-		for relay in [false, true] {
-			let mut fixture = range_fixture_version(version, relay).await;
-			let mut healthy = subscribe(&fixture.remote, Subscription::default()).await;
-			assert_eq!(next(&mut healthy).await, Some(5));
-			healthy.update(Subscription::default().with_ranges([support::keys(4..8)])).unwrap();
-			kio::clock::timeout(
-				TIMEOUT,
-				kio::wait(|waiter| {
-					assert!(healthy.poll_recv_group(waiter).is_pending());
-					loop {
-						if fixture
-							.track
-							.subscription()
-							.is_some_and(|s| s.ranges == [support::keys(4..8)])
-						{
-							return std::task::Poll::Ready(());
-						}
-						if fixture.track.poll_subscription_changed(waiter).is_pending() {
-							return std::task::Poll::Pending;
-						}
-					}
-				}),
-			)
-			.await
-			.unwrap();
-
-			let track = fixture.remote.track("quiet").unwrap();
-			// Pin the public track instance through an info request before creating the pending reader.
-			let query = track.info();
-			let track = query.track();
-
-			let mut refused = Some(track.subscribe(Subscription::default().with_ranges([Range {
-				start: moq_net::track::Anchor::Time(0),
-				end: Some(moq_net::track::Anchor::Time(10)),
-			}])));
-			for key in 6..8 {
-				if key == 7 {
-					assert!(matches!(
-						refused.take().unwrap().await,
-						Err(moq_net::Error::Unsupported)
-					));
-				}
-				let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
-				group
-					.write_frame(
-						Timestamp::from_millis(key).unwrap(),
-						key.to_be_bytes().as_slice(),
-					)
-					.unwrap();
-				group.close().unwrap();
-				let mut got = kio::clock::timeout(TIMEOUT, healthy.recv_group())
-					.await
-					.unwrap()
-					.unwrap_or_else(|err| panic!("{version} relay={relay}: pending refusal aborted sibling: {err:?}"))
-					.unwrap();
-				assert_eq!(got.start, key);
-				assert_eq!(
-					got.read_frame().await.unwrap().unwrap().payload,
-					key.to_be_bytes().as_slice()
-				);
-				assert!(got.read_frame().await.unwrap().is_none());
-			}
 		}
 	}
 }
