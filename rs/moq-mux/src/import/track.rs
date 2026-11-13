@@ -492,11 +492,11 @@ impl Track {
 		Ok(())
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
 		self.group_start = None;
 		self.reset_split();
-		import!(&mut self.kind, import => import.seek(sequence))
+		import!(&mut self.kind, import => import.seek(start))
 	}
 
 	/// Drop the partial access unit of a format split from a byte stream.
@@ -796,11 +796,11 @@ impl TrackStream {
 		stream!(&mut self.kind, _, import => import.cut(end))
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
 		stream!(&mut self.kind, split, import => {
 			split.reset();
-			import.seek(sequence)
+			import.seek(start)
 		})
 	}
 

@@ -889,19 +889,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Close the current group on every track and open the next one at `sequence`.
+	/// Close the current group on every track and open the next one at `start`.
 	///
 	/// Broadcast-wide: every track inside this MKV import advances together; per-track
 	/// control is intentionally not exposed. While a block streams in, the seek waits for it to end,
 	/// since its later frames continue its group.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+	pub fn seek(&mut self, start: u64) -> Result<()> {
 		self.input.check()?;
 		if self.block.is_some() {
-			self.seek = Some(sequence);
+			self.seek = Some(start);
 			return Ok(());
 		}
 		for track in self.tracks.values_mut() {
-			track.track.seek(sequence)?;
+			track.track.seek(start)?;
 		}
 		Ok(())
 	}
@@ -1700,8 +1700,15 @@ mod tests {
 
 	/// A SimpleBlock header for a keyframe on `track` declaring `size` payload bytes.
 	fn simple_block(track: u8, size: u64) -> Vec<u8> {
+		simple_block_at(track, size, 0)
+	}
+
+	/// A keyframe block `timecode` ticks past its cluster's.
+	fn simple_block_at(track: u8, size: u64, timecode: i16) -> Vec<u8> {
 		let mut block = header(&[0xa3], size + 4);
-		block.extend_from_slice(&[0x80 | track, 0, 0, 0x80]);
+		block.push(0x80 | track);
+		block.extend_from_slice(&timecode.to_be_bytes());
+		block.push(0x80);
 		block
 	}
 
@@ -2128,9 +2135,11 @@ mod tests {
 		let (mut import, _catalog, _consumer) = import();
 		import.decode(&live(vec![entry(1, 1, "V_VP9")])).unwrap();
 		let payload = vec![3; 1024 * 1024];
-		// Twice the most a track holds.
-		for _ in 0..64 {
-			import.decode(&simple_block(1, payload.len() as u64)).unwrap();
+		// Twice the most a track holds, one group a millisecond.
+		for timecode in 0..64 {
+			import
+				.decode(&simple_block_at(1, payload.len() as u64, timecode))
+				.unwrap();
 			import.decode(&payload).unwrap();
 		}
 		let _import = import.finish().unwrap();

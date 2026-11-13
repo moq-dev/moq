@@ -290,6 +290,10 @@ struct Outputs<E: CatalogExt> {
 	/// Keeps the broadcast open while the catalog is, so a publisher may hand its own handle to a
 	/// media producer and drop it.
 	broadcast: moq_net::broadcast::Producer,
+	/// How many groups the hang and MSF tracks each took, for tests to count publishes by: group
+	/// starts are timestamps.
+	#[cfg(test)]
+	published: Arc<[std::sync::atomic::AtomicU64; 2]>,
 }
 
 impl<E: CatalogExt> Clone for Outputs<E> {
@@ -299,6 +303,8 @@ impl<E: CatalogExt> Clone for Outputs<E> {
 			hang_track: self.hang_track.clone(),
 			msf_track: self.msf_track.clone(),
 			broadcast: self.broadcast.clone(),
+			#[cfg(test)]
+			published: self.published.clone(),
 		}
 	}
 }
@@ -310,19 +316,30 @@ impl<E: CatalogExt> Outputs<E> {
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
 		// The media timeline, so the catalog in effect at a media timestamp is the one stamped at or
-		// before it, whichever thread or runtime publishes.
-		let at = clock.now();
+		// before it, whichever thread or runtime publishes. Each catalog starts a group on both
+		// tracks, so one landing in the same millisecond as the last is stamped a unit later
+		// instead of refused.
+		let (_, at) = crate::start::next(&self.hang_track, clock.now())?;
+		let (start, at) = crate::start::next(&self.msf_track, at)?;
 		// One snapshot per group while deltas are disabled.
+		#[cfg(test)]
+		let before = self.hang_track.largest();
 		self.hang.update(moq_net::Timed::from(catalog).at(at))?;
+		#[cfg(test)]
+		if self.hang_track.largest() != before {
+			self.published[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		}
 
 		// `abort` below is what keeps the tracks consistent if this fails after the hang track was
 		// updated.
 		let Some(msf) = msf.render(catalog, &self.msf_track.broadcast().path)? else {
 			return Ok(());
 		};
-		let mut group = self.msf_track.append_group()?;
+		let mut group = self.msf_track.append_group(start)?;
+		#[cfg(test)]
+		self.published[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		group.write_frame(at, msf)?;
-		group.finish()?;
+		group.close()?;
 
 		Ok(())
 	}
@@ -514,6 +531,8 @@ impl<E: CatalogExt> Producer<E> {
 				hang_track,
 				msf_track,
 				broadcast: broadcast.clone(),
+				#[cfg(test)]
+				published: Arc::default(),
 			},
 			current: Arc::new(Mutex::new(State {
 				catalog,
@@ -1977,10 +1996,7 @@ mod test {
 		// The caller got the error, so the tracks stay usable once the catalog fits again.
 		catalog.modify().unwrap().remove_section("big").unwrap();
 		catalog.finish().unwrap();
-		assert_eq!(
-			catalog.outputs.hang_track.largest(),
-			Some(moq_net::track::Position::group(0))
-		);
+		assert_eq!(sent(&catalog), Some(0));
 	}
 
 	/// Every consumer refuses an ID naming both a video and an audio rendition, so the producer
@@ -2024,10 +2040,7 @@ mod test {
 
 		// The drop that follows `commit` must not publish a second snapshot.
 		catalog.finish().unwrap();
-		assert_eq!(
-			catalog.outputs.hang_track.largest(),
-			Some(moq_net::track::Position::group(0))
-		);
+		assert_eq!(sent(&catalog), Some(0));
 	}
 
 	/// A video rendition `video0` on `catalog`, with a keyframe group at each of `starts` (ms).
@@ -3329,8 +3342,11 @@ mod test {
 	}
 
 	/// How many catalogs have gone out on the wire.
-	fn sent(catalog: &Producer) -> Option<u64> {
-		catalog.outputs.hang_track.largest().map(|position| position.group)
+	/// How many hang catalogs went out before the newest, or `None` before the first.
+	fn sent<E: CatalogExt>(catalog: &Producer<E>) -> Option<u64> {
+		catalog.outputs.published[0]
+			.load(std::sync::atomic::Ordering::Relaxed)
+			.checked_sub(1)
 	}
 
 	/// The catalog a viewer joining now receives.
@@ -3589,8 +3605,11 @@ mod test {
 	}
 
 	/// How many MSF catalogs have gone out on the wire.
-	fn msf_sent(catalog: &Producer) -> Option<u64> {
-		catalog.outputs.msf_track.largest().map(|position| position.group)
+	/// How many MSF catalogs went out before the newest, or `None` before the first.
+	fn msf_sent<E: CatalogExt>(catalog: &Producer<E>) -> Option<u64> {
+		catalog.outputs.published[1]
+			.load(std::sync::atomic::Ordering::Relaxed)
+			.checked_sub(1)
 	}
 
 	/// The last MSF catalog on the wire.

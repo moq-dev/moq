@@ -384,9 +384,12 @@ mod tests {
 	use super::*;
 	use hang::catalog::{AudioCodec, VideoCodec};
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no max age, so a
+	/// group finished whole stays readable after its span has passed.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	fn frame(micros: u64, keyframe: bool) -> Frame {

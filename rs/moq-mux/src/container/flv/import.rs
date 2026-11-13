@@ -627,14 +627,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(track.end()?)
 	}
 
-	/// Close the current group on every track and reopen at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+	/// Close the current group on every track and reopen at `start`.
+	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
 		self.input.check()?;
 		for stream in self.video.values_mut() {
-			stream.track.seek(sequence)?;
+			stream.track.seek(start)?;
 		}
 		for stream in self.audio.values_mut() {
-			stream.track.seek(sequence)?;
+			stream.track.seek(start)?;
 		}
 		Ok(())
 	}

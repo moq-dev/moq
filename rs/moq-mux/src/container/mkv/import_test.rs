@@ -1887,7 +1887,7 @@ async fn a_seek_mid_block_waits_for_the_block() {
 		while group.read_frame().await.unwrap().is_some() {
 			frames += 1;
 		}
-		groups.push((group.sequence, frames));
+		groups.push((group.start, frames));
 	}
 	assert_eq!(groups, [(0, 2), (100, 1)]);
 }

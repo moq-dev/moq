@@ -227,9 +227,9 @@ impl Import {
 		self.catalog.set_enabled(&mut self.track, enabled)
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.track.seek(sequence)?;
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 

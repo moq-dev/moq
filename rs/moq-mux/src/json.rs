@@ -664,9 +664,12 @@ mod test {
 
 		let mut full_track = full.consume();
 		let mut delta_track = delta.consume();
-		for value in [json!({ "n": 1 }), json!({ "n": 2 })] {
-			full.update(&value, catalog.clock().now()).unwrap();
-			delta.update(&value, catalog.clock().now()).unwrap();
+		// A millisecond apart: a group starts at its value's time, and starts strictly increase.
+		let now = catalog.clock().now();
+		for (ms, value) in [json!({ "n": 1 }), json!({ "n": 2 })].into_iter().enumerate() {
+			let at = moq_net::Timestamp::from_micros(now.as_micros() as u64 + ms as u64 * 1_000).unwrap();
+			full.update(&value, at).unwrap();
+			delta.update(&value, at).unwrap();
 		}
 		full.finish().unwrap();
 		delta.finish().unwrap();

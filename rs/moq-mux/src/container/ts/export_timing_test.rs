@@ -282,12 +282,13 @@ impl Live {
 					match std::mem::take(&mut self.stalling) {
 						true => self.stalled.push(group),
 						false => {
-							group.finish().unwrap();
+							group.close().unwrap();
 						}
 					}
 				}
 				if keyframe {
-					self.group = Some(self.video.append_group().unwrap());
+					let start = video.strict_add_signed(self.offset);
+					self.group = Some(self.video.append_group(start).unwrap());
 				}
 				if stall(tick) {
 					self.stalling = true;
@@ -379,7 +380,7 @@ impl Live {
 	/// End the media tracks while the catalog can still announce more.
 	fn finish_media(&mut self) {
 		if let Some(group) = self.group.take() {
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		self.stalled.clear();
 		drop(self.video.clone().finish().unwrap());
@@ -519,7 +520,7 @@ async fn end_waits_for_catalog_and_media() {
 			// Catalog EOF fixes the layout, but the named tracks can still publish media.
 			live.run(3 * GOP, &mut [&mut leg], |_| false);
 			// Close the groups so their tails flush, leaving both tracks open for more.
-			live.group.take().unwrap().finish().unwrap();
+			live.group.take().unwrap().close().unwrap();
 			live.audio.cut(None).unwrap();
 			3 * GOP as usize
 		} else {
@@ -979,15 +980,14 @@ async fn a_successor_settles_held_video_across_a_skip_or_restart() {
 			live.run(8 * GOP + tail, &mut [&mut leg], |_| false);
 			live.fall_silent(Duration::from_secs(3), &mut [&mut leg]);
 			if restart {
-				live.group.take().unwrap().finish().unwrap();
-				let mut marker = live.video.append_group().unwrap();
+				live.group.take().unwrap().close().unwrap();
+				// A microsecond before the keyframe that resumes: group starts strictly increase.
+				let at = live.tick * VIDEO_US - 1;
+				let mut marker = live.video.append_group(at).unwrap();
 				HangContainer::Legacy(crate::container::Kind::Video)
-					.write(
-						&mut marker,
-						&[crate::container::test_util::raw_frame(live.tick * VIDEO_US, b"", true)],
-					)
+					.write(&mut marker, &[crate::container::test_util::raw_frame(at, b"", true)])
 					.unwrap();
-				marker.finish().unwrap();
+				marker.close().unwrap();
 			} else {
 				// Leave the old group blocked so the successor makes the consumer skip it.
 				live.stalling = true;
@@ -1016,7 +1016,7 @@ async fn a_clean_group_end_settles_held_video_before_a_silence() {
 		let mut leg = live.join(Duration::ZERO).await;
 		let tail = if declared { 2 } else { 8 };
 		live.run(8 * GOP + tail, &mut [&mut leg], |_| false);
-		live.group.take().unwrap().finish().unwrap();
+		live.group.take().unwrap().close().unwrap();
 		leg.poll_now();
 		live.fall_silent(Duration::from_secs(3), &mut [&mut leg]);
 		live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);

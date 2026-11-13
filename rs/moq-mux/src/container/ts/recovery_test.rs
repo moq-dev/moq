@@ -462,6 +462,8 @@ struct Recorded {
 	name: String,
 	video: bool,
 	groups: Vec<(u64, Vec<moq_net::frame::Frame>)>,
+	/// Where each group ended whole, when the import said.
+	ends: Vec<Option<u64>>,
 }
 
 /// What the import of a clip published.
@@ -505,6 +507,7 @@ async fn record(profile: Profile) -> Recording {
 			.await
 			.unwrap();
 		let mut groups = Vec::new();
+		let mut ends = Vec::new();
 		while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
 			.await
 			.unwrap()
@@ -514,9 +517,15 @@ async fn record(profile: Profile) -> Recording {
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				frames.push(frame);
 			}
-			groups.push((group.sequence, frames));
+			ends.push(group.end());
+			groups.push((group.start, frames));
 		}
-		tracks.push(Recorded { name, video, groups });
+		tracks.push(Recorded {
+			name,
+			video,
+			groups,
+			ends,
+		});
 	}
 	assert_eq!(
 		tracks.iter().map(|track| track.video).collect::<Vec<_>>(),
@@ -912,6 +921,7 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 	let consumer = broadcast.consume();
 	let groups: Vec<Vec<(u64, Vec<moq_net::frame::Frame>)>> =
 		recording.tracks.iter().map(|track| track.groups.clone()).collect();
+	let ends: Vec<Vec<Option<u64>>> = recording.tracks.iter().map(|track| track.ends.clone()).collect();
 	let start = Instant::now();
 	let publisher = tokio::spawn(async move {
 		let _keep = &broadcast;
@@ -933,20 +943,23 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 			let (sequence, frames) = &groups[t][g];
 			let Some(f) = step else {
 				let group = open[t].take().unwrap();
-				match kept[t] == frames.len() {
-					true => {
-						group.finish().unwrap();
+				match (kept[t] == frames.len(), ends[t][g]) {
+					(true, Some(end)) => {
+						group.finish(end).unwrap();
 					}
-					false => group.abort(moq_net::Error::Old).unwrap(),
+					(true, None) => {
+						group.close().unwrap();
+					}
+					(false, _) => group.abort(moq_net::Error::Old).unwrap(),
 				}
 				continue;
 			};
 			let group = open[t].get_or_insert_with(|| {
 				kept[t] = 0;
-				let info = moq_net::group::Info { sequence: *sequence };
+				let info = moq_net::group::Info { start: *sequence };
 				producers[t].create_group(info).unwrap()
 			});
-			assert_eq!(group.sequence, *sequence, "a schedule interleaves groups of track {t}");
+			assert_eq!(group.start, *sequence, "a schedule interleaves groups of track {t}");
 			group
 				.write_frame(frames[f].timestamp, frames[f].payload.clone())
 				.unwrap();

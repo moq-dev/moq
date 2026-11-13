@@ -61,7 +61,7 @@ async fn import(data: &[u8]) -> Imported {
 			if frame.payload.is_empty() {
 				let micros = objects.last().map_or(0, |object: &Object| object.micros);
 				objects.push(Object {
-					group: group.sequence,
+					group: group.start,
 					micros,
 					payload: Bytes::new(),
 				});
@@ -69,7 +69,7 @@ async fn import(data: &[u8]) -> Imported {
 			}
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
 			objects.push(Object {
-				group: group.sequence,
+				group: group.start,
 				micros: frame.timestamp.as_micros() as u64,
 				payload: frame.payload,
 			});
@@ -121,7 +121,7 @@ fn republish_cut(
 				if let Some((sequence, group)) = group.take() {
 					end(sequence, group, &cut);
 				}
-				let info = moq_net::group::Info { sequence: object.group };
+				let info = moq_net::group::Info { start: object.group };
 				group = Some((object.group, track.create_group(info).unwrap()));
 			}
 			let timestamp = moq_net::Timestamp::from_micros(object.micros).unwrap();
@@ -150,7 +150,7 @@ fn end(sequence: u64, group: moq_net::group::Producer, cut: &[u64]) {
 	match cut.contains(&sequence) {
 		true => group.abort(moq_net::Error::Old).unwrap(),
 		false => {
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 	}
 }

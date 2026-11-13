@@ -98,12 +98,12 @@ async fn import_onto(
 	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group()).await?? {
 		while let Some(frame) = group.read_frame().await? {
 			if frame.payload.is_empty() {
-				markers.push(group.sequence);
+				markers.push(group.start);
 				continue;
 			}
 			let frame = hang::container::Frame::decode(frame.payload)?;
 			objects.push(Object {
-				group: group.sequence,
+				group: group.start,
 				micros: frame.timestamp.as_micros() as u64,
 				payload: frame.payload,
 			});

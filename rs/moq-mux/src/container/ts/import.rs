@@ -7404,7 +7404,8 @@ pub(super) mod test {
 			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &opening).as_slice())
 			.unwrap();
 
-		import.seek(10).unwrap();
+		// Two seconds in, in the track's microseconds: past the group already published.
+		import.seek(2_000_000).unwrap();
 
 		// Landing mid-frame after the seek, on a fragment that parses as a header but whose
 		// declared frame ends inside a real one.
@@ -8193,8 +8194,9 @@ pub(super) mod test {
 		audio_pes_packet(pid, cc, pts, &payload)
 	}
 
-	/// Read every retained frame of `name`, with the count of timeline breaks the consumer
-	/// crossed reading them.
+	/// Read every retained frame of `name`, with the count of declared timeline breaks the consumer
+	/// crossed reading them. Gaps are not counted: these streams carry a PES of two frames a second
+	/// apart, and the hole after each reads as a gap.
 	async fn read_breaks(
 		consumer: &moq_net::broadcast::Consumer,
 		name: &str,
@@ -8212,7 +8214,8 @@ pub(super) mod test {
 		while let Ok(Ok(Some(read))) = kio::clock::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 			match read {
 				crate::container::Read::Frame { frame, .. } => frames.push(frame),
-				crate::container::Read::Gap { .. } | crate::container::Read::End { .. } => breaks += 1,
+				crate::container::Read::End { .. } => breaks += 1,
+				crate::container::Read::Gap { .. } => {}
 			}
 		}
 		(frames, breaks)
@@ -8608,20 +8611,21 @@ pub(super) mod test {
 				.as_slice(),
 			)
 			.unwrap();
+		// Each era resumes a second on, since a track's group starts only move forward.
 		import.decode(pcr_packet(PCR_PID, 24_300_000).as_slice()).unwrap();
 		import.decode(packet(true, 0, 0, &CUE).as_slice()).unwrap();
 		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
 		import.decode(pcr_packet(PCR_PID, 27_000_000).as_slice()).unwrap();
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
-		import.decode(pcr_packet(PCR_PID, 24_300_000).as_slice()).unwrap();
+		import.decode(pcr_packet(PCR_PID, 51_300_000).as_slice()).unwrap();
 		import.decode(packet(true, 1, 0, &CUE).as_slice()).unwrap();
-		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
-		import.decode(pcr_packet(PCR_PID, 27_000_000).as_slice()).unwrap();
+		import.decode(pes_packet(PCR_PID, 180_000).as_slice()).unwrap();
+		import.decode(pcr_packet(PCR_PID, 54_000_000).as_slice()).unwrap();
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
-		import.decode(pcr_packet(PCR_PID, 24_300_000).as_slice()).unwrap();
+		import.decode(pcr_packet(PCR_PID, 78_300_000).as_slice()).unwrap();
 		import.decode(packet(true, 2, 0, &CUE).as_slice()).unwrap();
-		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
-		import.decode(pcr_packet(PCR_PID, 27_000_000).as_slice()).unwrap();
+		import.decode(pes_packet(PCR_PID, 270_000).as_slice()).unwrap();
+		import.decode(pcr_packet(PCR_PID, 81_000_000).as_slice()).unwrap();
 		let _finished = import.finish().unwrap();
 		let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 		let (frames, breaks) = read_breaks(&consumer, &name, crate::container::Kind::Data).await;

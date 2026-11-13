@@ -143,9 +143,9 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 		self.inner.cut()
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.inner.seek(sequence)
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
+		self.inner.seek(start)
 	}
 }
 

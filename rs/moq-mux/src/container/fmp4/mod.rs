@@ -2147,7 +2147,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = moq_net::track::Info::default().with_timescale(timescale);
 		let track = broadcast.create_track("video", info).unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		let input = [sample(100_000), sample(33_000), sample(66_000)];
 		wire.write(&mut group, &input).unwrap();
 
@@ -2196,7 +2196,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.create_track("video", info).unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 
 		let err = wire.write(&mut group, &[sample(0)]).unwrap_err();
 		assert!(matches!(err, Error::TimescaleMismatch { .. }), "got {err:?}");
