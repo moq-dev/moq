@@ -38,14 +38,16 @@ pub(crate) fn next(
 }
 
 /// [`next`] for a group stamped one unit of the track's timescale before `timestamp`, so a group
-/// whose first frame is at `timestamp` can still follow it.
+/// whose first frame is at `timestamp` can still follow it, but never below `floor`.
 pub(crate) fn before(
 	track: &moq_net::track::Producer,
 	timestamp: moq_net::Timestamp,
+	floor: moq_net::Timestamp,
 ) -> crate::Result<(u64, moq_net::Timestamp)> {
 	let (start, _) = of(track, timestamp)?;
-	let below = moq_net::Timestamp::new(start.value().saturating_sub(1), start.scale())
-		.map_err(|_| moq_net::Error::TimestampMismatch)?;
+	let (floor, _) = of(track, floor)?;
+	let below = start.value().saturating_sub(1).max(floor.value());
+	let below = moq_net::Timestamp::new(below, start.scale()).map_err(|_| moq_net::Error::TimestampMismatch)?;
 	next(track, below)
 }
 

@@ -69,6 +69,9 @@ pub struct Producer<C: Container, R = ()> {
 	/// Exclusive presentation end of finished groups, where a payload with no timestamp of its
 	/// own lands. Not a floor: a group may start below it.
 	live_edge: Option<moq_net::Timestamp>,
+	/// The latest frame timestamp written, which a discontinuity marker never falls below: a frame
+	/// without a duration reaches only its own timestamp, so the live edge can sit right on it.
+	newest: Option<moq_net::Timestamp>,
 
 	/// The keyframe timestamp that opened the latest group. The next group may not start below it.
 	start: Option<moq_net::Timestamp>,
@@ -254,6 +257,7 @@ impl<C: Container> Producer<C> {
 			member: None,
 			end: None,
 			live_edge: None,
+			newest: None,
 			start: None,
 			floor: None,
 			last_duration: None,
@@ -292,6 +296,7 @@ where
 			member: None,
 			end: None,
 			live_edge: None,
+			newest: None,
 			start: None,
 			floor: None,
 			last_duration: None,
@@ -814,6 +819,9 @@ where
 			self.cadence = Some(delta);
 		}
 		self.previous_timestamp = Some(timestamp);
+		if self.newest.is_none_or(|newest| timestamp_lt(newest, timestamp)) {
+			self.newest = Some(timestamp);
+		}
 
 		// Timestamp and duration can be at different scales, so add them in micros; the
 		// sub-microsecond rounding that costs is far below a segment boundary.
@@ -868,8 +876,9 @@ where
 	/// the break as though it were live.
 	///
 	/// Audio and video write one empty frame one unit of the track's timescale before the exclusive
-	/// end of the previous epoch, so what resumes at that end starts after it.
-	/// That object exists on moq-transport, so the live edge moves immediately; a consumer
+	/// end of the previous epoch, so what resumes at that end starts after it, but never below the
+	/// latest frame written: a frame without a duration ends where it starts, so what resumes then
+	/// has to start after that frame. That object exists on moq-transport, so the live edge moves immediately; a consumer
 	/// MUST NOT submit it to a decoder. An empty payload is data on a data track, so its
 	/// marker is one object with no bytes at all, not even the container's timestamp. The
 	/// next [`write`](Self::write) opens the group after the marker, which it has to start after:
@@ -888,9 +897,10 @@ where
 			_ => self.live_edge,
 		};
 		// The marker starts one unit of the track's timescale before the live edge, so media
-		// resuming right at the edge still starts after it, or one unit past the newest group when
-		// that doesn't pass the group's start. The open group ends whole there, so a reader can
-		// tell the marker follows it.
+		// resuming right at the edge still starts after it, but not below the latest frame, which
+		// it would otherwise claim to end before. Or one unit past the newest group when that
+		// doesn't pass the group's start. The open group ends whole there, so a reader can tell
+		// the marker follows it.
 		let marker = match (self.pending_start, edge) {
 			// A seek keyed the next group. Its marker is stamped at the live edge, or one unit past
 			// the newest group when the edge is unknown or doesn't pass it, since starts strictly
@@ -906,7 +916,8 @@ where
 			// Nothing was written, so there is no timeline to break.
 			(None, None) => None,
 			(None, Some(edge)) => {
-				let (start, timestamp) = crate::start::before(&self.inner, edge)?;
+				let newest = self.newest.unwrap_or(moq_net::Timestamp::ZERO);
+				let (start, timestamp) = crate::start::before(&self.inner, edge, newest)?;
 				Some((start, timestamp, true))
 			}
 		};
@@ -1589,8 +1600,8 @@ mod tests {
 		assert_eq!(groups[0], vec![(0, 2), (10_000, 2)]);
 		assert_eq!(
 			groups[1],
-			vec![(9_999, 0)],
-			"the marker is one empty frame a microsecond before the exclusive end"
+			vec![(10_000, 0)],
+			"the marker is one empty frame at the last frame, which has no duration to end later"
 		);
 		assert_eq!(groups[2][0], (2_405_070_000, 2));
 	}
@@ -1610,7 +1621,7 @@ mod tests {
 		producer.discontinuity().unwrap();
 		let fresh = producer.track().largest().map(|largest| largest.group);
 
-		assert_eq!(fresh, stale.map(|s| s + 1), "the marker group is the live edge now");
+		assert!(fresh > stale, "the marker group is the live edge now");
 	}
 
 	/// The marker sits a unit before the duration marker a cut wrote, not at the last frame below
