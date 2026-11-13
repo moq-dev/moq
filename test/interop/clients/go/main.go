@@ -501,7 +501,7 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 			frame = read.Frame
 		// moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
 		case moqaudio.ReadGap:
-			return fmt.Errorf("audio gap after %d samples", decoded)
+			return fmt.Errorf("audio gap after %d samples, at %v for %v", decoded, read.Timestamp, read.Duration)
 		default: // nil, the track's end, or a ReadEnd, the encoder's
 			return errors.New("audio track ended early")
 		}

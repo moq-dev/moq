@@ -40,4 +40,30 @@ subscriber's `RUST_LOG=moq_mux=debug` output so the skip reason
 Maintainer decision (2026-11-13): keep the quest and loop the full `--all`
 matrix with `RUST_LOG=moq_mux=debug` until it reproduces, then fix the root
 cause. Rejected: adding skip logging and parking the quest; closing it as not
-reproducible. If 15–20 full matrices pass, stop and record the run count.
+reproducible.
+
+### Reproduced 2026-11-13 ([#8611](https://github.com/moq-dev/moq/pull/8611))
+
+Reproduced twice, both times as `js -> cpp`, so the publisher is not the cause:
+once in the first full `--all` matrix under host-wide `stress-ng`, and once on
+the 6th narrowed `--publishers js,python --subscribers cpp` run in a
+`systemd-run --user --scope -p CPUQuota=50%` scope (5 runs at 150% passed).
+Starve the test in its own cgroup, never the whole host.
+
+Cause: the missing-sequence walk in `rs/moq-mux/src/container/consumer.rs`
+(`if finished || elapsed || aged || excluded || full`), which until #8611 lost
+the group without logging. The failing run logged
+`skipping missing groups old=25 new=26 ... aged=true` and then
+`audio gap after 11208 samples, at 1219266us for 40000us`. A starved
+subscriber reads a burst of groups after a stall. Group 26 onward already
+spans the playout target past the hole (moq-audio sets the wait to its target
+via `set_wait`, tens of ms at `Delay.min` 0), so `aged` drops group 25 at once,
+though its stream lands in the same burst. Every other subscriber decoded it.
+
+Fix (waiting on the maintainer, see the PR): make the burst unable to age out
+a hole on its own, recommended by requiring `elapsed` (wall time since a later
+group arrived, `front.late`) for a missing sequence, so `aged` alone no longer
+skips one. A backlog join with a true hole then waits one playout delay
+(`late` is shared across the backlog, so not one per hole). Pin it with a
+mocked-time consumer test: a later group buffered past the target, then the
+missing group arriving before the wait, reads with no gap.

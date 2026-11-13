@@ -770,6 +770,16 @@ impl<F: Container> Consumer<F> {
 					if !empty && next_start.is_none_or(|start| !pts_contiguous(self.presented_end, start)) {
 						self.lose();
 					}
+					tracing::debug!(
+						old = self.current,
+						new = sequence,
+						finished,
+						elapsed,
+						aged,
+						excluded,
+						full,
+						"skipping missing groups"
+					);
 					self.current = sequence;
 					self.note_group_edge();
 					continue;

@@ -324,8 +324,13 @@ void decode_audio(
             fail("audio track ended early");
         }
         // moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
-        if (std::holds_alternative<moq::AudioRead::kGap>(read->get_variant())) {
-            fail("audio gap");
+        if (const auto *gap = std::get_if<moq::AudioRead::kGap>(&read->get_variant())) {
+            const auto at = gap->timestamp.value / gap->timestamp.scale * 1'000'000 +
+                            gap->timestamp.value % gap->timestamp.scale * 1'000'000 / gap->timestamp.scale;
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(gap->duration).count();
+            fail(("audio gap after " + std::to_string(decoded) + " samples, at " + std::to_string(at) + "us for " +
+                  std::to_string(us) + "us")
+                     .c_str());
         }
         const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
         if (!variant) {
