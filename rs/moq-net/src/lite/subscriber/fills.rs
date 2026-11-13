@@ -173,20 +173,20 @@ impl RangeFills {
 		self.skipped = Default::default();
 	}
 
-	/// A refusal the source did not name lost answers only the fills owing it now: once no
-	/// held fill covers its groups, a later request for them asks again.
+	/// A refusal answers only the fills owing it now: once no held fill covers its groups, a
+	/// later request asks again, and a loss it named stays recorded on the track alone.
 	fn forget_answered(&mut self) {
 		let stale: Vec<Range<u64>> = self
 			.refused
 			.iter()
-			.filter(|(groups, refusal)| {
-				!refusal.lost
-					&& !self
-						.held
-						.iter()
-						.any(|fill| fill.start().group < groups.end && groups.start < fill.end())
+			.map(|(groups, _)| groups)
+			.filter(|groups| {
+				!self
+					.held
+					.iter()
+					.any(|fill| fill.start().group < groups.end && groups.start < fill.end())
 			})
-			.map(|(groups, _)| groups.clone())
+			.cloned()
 			.collect();
 		for groups in stale {
 			self.refused.remove(groups);
@@ -685,10 +685,10 @@ mod tests {
 		assert!(fills.refused.get(&5).unwrap().lost, "the publisher never had it");
 	}
 
-	/// A refusal the source did not name lost stands while a held fill covers its groups,
-	/// and ends with them, so a later request asks again. A loss stays.
+	/// A refusal stands while a held fill covers its groups, and ends with them, so a later
+	/// request asks again and a loss stays recorded on the track alone.
 	#[test]
-	fn a_passing_refusal_ends_with_its_fills() {
+	fn a_refusal_ends_with_its_fills() {
 		let (_producer, _requests, _reader, fill) = missed();
 		let mut fills = RangeFills::default();
 		fills.held.push(fill);
@@ -699,8 +699,7 @@ mod tests {
 
 		fills.held.clear();
 		fills.forget_answered();
-		assert_eq!(fills.refused.get(&1), None, "no fill owes it any more");
-		assert!(fills.refused.get(&3).is_some(), "a loss stays");
+		assert!(fills.refused.is_empty(), "no fill owes them any more");
 	}
 
 	/// A track whose cache evicted groups 1..4, with a reader of them whose fill is the next

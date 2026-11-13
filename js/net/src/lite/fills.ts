@@ -253,10 +253,10 @@ export class RangeFills {
 		}
 		this.#held = held;
 
-		// A refusal the source did not name lost answers only the fills owing it now: once none
-		// covers its groups, a later request for them asks again.
-		this.#refused = this.#refused.filter(
-			(run) => run.refusal.lost || held.some((fill) => fill.start < run.end && run.start < fill.end),
+		// A refusal answers only the fills owing it now: once none covers its groups, a later request
+		// asks again, and a loss it named stays recorded on the track alone.
+		this.#refused = this.#refused.filter((run) =>
+			held.some((fill) => fill.start < run.end && run.start < fill.end),
 		);
 
 		// A recovery no held fill owes any group of is cancelled, once none of its streams is still
