@@ -66,7 +66,8 @@ jobs:
     name: Build moq-ffi (${{ matrix.target }})
     needs: [parse-version]
     if: ${{ !inputs.reuse-native }}
-    runs-on: ${{ contains(matrix.target, '-apple-') && 'macos-latest' || contains(matrix.target, '-windows-') && 'windows-latest' || 'ubuntu-latest' }}
+    # Linux ARM64 builds natively, so no cross toolchain is fetched at build time.
+    runs-on: ${{ contains(matrix.target, '-apple-') && 'macos-latest' || contains(matrix.target, '-windows-') && 'windows-latest' || matrix.target == 'aarch64-unknown-linux-gnu' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
 
     strategy:
       fail-fast: false
@@ -87,14 +88,6 @@ jobs:
 
       # No Rust cache: shipped binaries compile from source rather than from
       # whatever the shared R2 cache holds.
-
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          # g++ as well as gcc: moq-video's openh264 fallback is C++, and
-          # cc-rs looks for aarch64-linux-gnu-g++ by name.
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Install cargo-ndk (Android)
         if: contains(matrix.target, 'android')

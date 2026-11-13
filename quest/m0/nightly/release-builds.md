@@ -1,30 +1,30 @@
-# [S] Nightly's release builds pass
+# [XS] Nightly's moq-gst builds survive an apt mirror outage
 
 ## Goal
 
-The release builds Nightly runs pass every night, so the jobs that need them,
-such as `Shipping sizes`, run instead of being skipped.
+`moq-gst`'s Nightly builds stop failing when Ubuntu's apt mirrors can't be
+reached, so `Shipping sizes` still runs on those nights.
 
 ## Plan
 
-Found by the triage of Nightly run
-[43447849289](https://github.com/moq-dev/moq/actions/runs/43447849289)
-(2026-11-13): `Shipping sizes` was skipped 11-08 to 11-12 because release
-builds it depends on failed, so six days of size growth surfaced at once.
-Failures seen, each with its own cause:
+On 11-11 an apt DNS failure (`Temporary failure resolving
+'security.ubuntu.com'`) failed both `moq-gst / Build tarball` jobs and both
+`Package .deb/.rpm` jobs at their apt step, and so skipped `Shipping sizes`.
+That apt use is deliberate. The tarball job smoke-tests the plugin against
+the distro's own GStreamer, and the package job links against the distro's
+GStreamer headers. Nix can't stand in for either.
 
-- 11-12, `moq-cli / release / Build (armv7-unknown-linux-gnueabihf)`:
-  `error[E0463]: can't find crate for core`, so the toolchain lacks that
-  target's standard library.
-- 11-11, `Release FFI / Shared moq-ffi / Build moq-ffi (aarch64-unknown-linux-gnu)`:
-  apt failed with `Temporary failure resolving 'security.ubuntu.com'`, and
-  `Release C`/`Release Cpp` aarch64 then failed on a missing
-  `cpp-native-aarch64-unknown-linux-gnu` artifact.
-- 11-11/11-12: the macOS `moq-cli` tarball, the Go FFI bindings and package,
-  the Kotlin FFI package, and the aarch64 `moq-gst` builds, not yet triaged.
+The other release-build failures from 11-11 to 11-12 are fixed: armv7 by
+[#8509](https://github.com/moq-dev/moq/pull/8509), the Go bindings by
+[#8585](https://github.com/moq-dev/moq/pull/8585), and the FFI aarch64
+cross toolchain by the PR that rewrote this quest.
 
-Fix each at its root. A network fetch at build time that can fail on a DNS
-blip is a defect to remove, for example by taking the cross toolchain from
-Nix, not to retry.
+## Waiting
 
-Public API: none. Wire: none.
+- Maintainer: decide how moq-gst gets the distro GStreamer.
+  (a) Recommended: run the two Linux jobs in a container image with the apt
+  packages preinstalled, published to ghcr.io by a weekly job. That trades
+  the mirror fetch for a registry pull that GitHub already depends on.
+  (b) Accept a mirror outage as a real failure and leave it as it is.
+  Agents can't pick between these, because one adds an image to maintain
+  and the other accepts occasional red nights.
