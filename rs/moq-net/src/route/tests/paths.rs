@@ -189,6 +189,8 @@ struct Session {
 	hop: Id,
 	/// Whether the neighbour passes routes on, as a relay does and a client does not.
 	forwards: bool,
+	/// Whether the neighbour reads copies: a relay that chooses per broadcast.
+	reads: bool,
 	cost: Metric,
 	rx: BTreeMap<Id, Heard>,
 	tx: BTreeMap<Id, Sent>,
@@ -304,10 +306,8 @@ pub(super) struct Relay {
 	/// Never sends or reads a copy: it pulls along its publisher's route alone, as
 	/// an endpoint that does not choose per broadcast.
 	pub legacy: bool,
-	/// Neighbours that sent GOAWAY: a pull goes through them last.
+	/// Neighbours that sent GOAWAY: no new pull joins their copies.
 	draining: BTreeSet<Node>,
-	/// This relay sent GOAWAY, so it offers no copy: none is joined as it goes.
-	going: bool,
 	/// The source last chosen for each broadcast, pulled or only offered on: its
 	/// neighbour, whether it is a copy, and that copy's carrier.
 	via: BTreeMap<Cast, (Node, bool, Id)>,
@@ -354,7 +354,6 @@ impl Relay {
 			carry: BTreeMap::new(),
 			legacy: false,
 			draining: BTreeSet::new(),
-			going: false,
 			via: BTreeMap::new(),
 			subs: Vec::new(),
 			moves: 0,
@@ -372,12 +371,13 @@ impl Relay {
 		std::mem::take(&mut self.events)
 	}
 
-	pub fn connect(&mut self, peer: Node, hop: Id, forwards: bool, cost: Metric) {
+	pub fn connect(&mut self, peer: Node, hop: Id, forwards: bool, reads: bool, cost: Metric) {
 		self.opened += 1;
 		let session = Session {
 			id: self.opened,
 			hop,
 			forwards,
+			reads,
 			cost,
 			rx: BTreeMap::new(),
 			tx: BTreeMap::new(),
@@ -741,13 +741,7 @@ impl Relay {
 		self.warm(Some(id));
 	}
 
-	/// This relay sends GOAWAY on every session, and withdraws every copy it offers.
-	pub fn leave(&mut self) {
-		self.going = true;
-		self.warm(None);
-	}
-
-	/// `peer` sent GOAWAY: pulls go through it last.
+	/// `peer` sent GOAWAY: no new pull joins its copy.
 	pub fn goaway(&mut self, peer: Node) {
 		if self.sessions.contains_key(&peer) && self.draining.insert(peer) {
 			self.warm(None);
@@ -769,13 +763,27 @@ impl Relay {
 		self.warm(Some(cast.0));
 	}
 
-	/// Where this relay pulls `cast` from: the cheapest of its publisher's route and
-	/// each copy whose path does not name this relay. A relay already on a copy, its
-	/// own included, moves onto another only if that copy's carrier ranks below. A
-	/// neighbour that sent GOAWAY comes last, and a tie stays on the current source,
-	/// then goes to the copy.
+	/// Where this relay pulls `cast` from: the cheapest of its next hop toward the
+	/// publisher and each copy offered. Pulling through the next hop goes wherever
+	/// that neighbour pulls: its copy when it offers one, else its own route. A copy
+	/// whose path names this relay, or a neighbour it serves, would loop.
+	///
+	/// A relay already on a copy, its own included, joins another, its next hop's
+	/// included, only if that copy's carrier ranks below, so copies crossing on their
+	/// way never trade places round any cycle. Left with no source, it is on no copy,
+	/// and chooses afresh. It joins no copy of a neighbour that sent GOAWAY, and none at all
+	/// while it serves a neighbour that does not read copies, whose pulls follow the
+	/// route alone. A tie stays on the current source, then goes to the copy.
 	pub fn source(&self, cast: &Cast) -> Option<Source> {
-		let reader = self.carry.get(cast).is_some_and(|carry| carry.reader);
+		let carry = self.carry.get(cast);
+		let reader = carry.is_some_and(|carry| carry.reader);
+		let downstream = carry.map(|carry| &carry.downstream);
+		let serves: BTreeSet<Id> = (downstream.into_iter().flatten())
+			.filter_map(|peer| self.sessions.get(peer))
+			.map(|session| session.hop)
+			.collect();
+		let blind = (downstream.into_iter().flatten())
+			.any(|peer| self.sessions.get(peer).is_some_and(|session| !session.reads));
 		let via = self.via.get(cast).copied();
 		let pull = via.map(|(next, warm, _)| (next, warm));
 		let rank = |node: Id| rendezvous(&cast.1, node);
@@ -789,30 +797,33 @@ impl Relay {
 			Some((_, false, _)) if reader => Some(self.hop),
 			_ => None,
 		};
+		let next = self.routes.get(&cast.0).and_then(|route| route.next.zip(route.path.clone()));
 		let mut options = Vec::new();
-		options.extend(self.routes.get(&cast.0).and_then(|route| {
-			Some(Source {
-				next: route.next?,
-				cost: route.cost,
-				path: route.path.clone()?,
-				warm: false,
-				carrier: 0,
-			})
-		}));
-		for (&peer, session) in self.sessions.iter().filter(|_| !self.legacy) {
+		for (&peer, session) in &self.sessions {
+			let hop = next.as_ref().filter(|(next, _)| *next == peer);
 			let Some(copy) = session.copies.get(cast) else {
+				options.extend(hop.map(|(next, path)| Source {
+					next: *next,
+					cost: self.routes[&cast.0].cost,
+					path: path.clone(),
+					warm: false,
+					carrier: 0,
+				}));
 				continue;
 			};
 			// As in `select`, doubt keeps a reader from moving to a copy, not on the one
 			// it pulls: that copy's own neighbour says when it goes.
 			let doubted = pull != Some((peer, true)) && self.doubted(&copy.path);
-			if copy.dead || names(&copy.path, self.hop) || doubted {
+			let loops = copy.path.iter().any(|hop| hop.node == self.hop || serves.contains(&hop.node));
+			if copy.dead || loops || doubted {
 				continue;
 			}
-			// A relay on one copy moves onto another only if its carrier ranks lower, so
-			// copies crossing on their way never trade places, round any cycle.
 			let ranked = |on: Id| copy.carrier == on || rank(copy.carrier) < rank(on);
 			if self.rules.ranked && !on.is_none_or(ranked) {
+				continue;
+			}
+			// The next hop's copy is where its route leads; any other is a choice.
+			if hop.is_none() && (blind || self.draining.contains(&peer)) {
 				continue;
 			}
 			let Some(cost) = copy.cost.checked_add(session.cost) else {
@@ -832,9 +843,8 @@ impl Relay {
 			});
 		}
 		(options.into_iter()).min_by_key(|source| {
-			let draining = self.draining.contains(&source.next);
 			let stay = pull == Some((source.next, source.warm));
-			(draining, source.cost, !stay, !source.warm, source.next)
+			(source.cost, !stay, !source.warm, source.next)
 		})
 	}
 
@@ -844,7 +854,7 @@ impl Relay {
 	/// copy it pulls along the publisher's route at no cost. A copy's cost so rises
 	/// with every link from where it left the publisher's route.
 	fn copy(&self, cast: &Cast) -> Option<Offer> {
-		if self.own == Some(cast.0) || self.leaf || self.legacy || self.going {
+		if self.own == Some(cast.0) || self.leaf || self.legacy {
 			return None;
 		}
 		self.routes.get(&cast.0)?.path.as_ref()?;
@@ -897,8 +907,8 @@ impl Relay {
 	}
 
 	/// Bring each pull, and what each neighbour was offered, up to date, for the
-	/// copies of `id` or for every copy. A neighbour is offered no copy whose path
-	/// names it, nor one under a route it was not sent.
+	/// copies of `id` or for every copy. A neighbour that reads copies is offered this
+	/// relay's, even one whose path names it, under the route it was sent.
 	fn warm(&mut self, id: Option<Id>) {
 		let mut casts: BTreeSet<Cast> = self.carry.keys().cloned().collect();
 		for session in self.sessions.values() {
@@ -929,8 +939,10 @@ impl Relay {
 			let peers: Vec<Node> = self.sessions.keys().copied().collect();
 			for peer in peers {
 				let session = &self.sessions[&peer];
-				let routed = session.tx.contains_key(&cast.0);
-				let want = copy.clone().filter(|(path, ..)| routed && !names(path, session.hop));
+				// Even a copy whose path names the neighbour: it tells the neighbour that
+				// pulling through this relay leads back to it.
+				let routed = session.tx.contains_key(&cast.0) && session.reads;
+				let want = copy.clone().filter(|_| routed);
 				if session.casts.get(&cast) == want.as_ref() {
 					continue;
 				}
@@ -1414,7 +1426,8 @@ impl PathSim {
 			let cost = self.links[x][y].expect("a configured link");
 			let peer = hop(y, self.restarts[y]);
 			let forwards = !self.nodes[y].leaf;
-			self.nodes[x].connect(y, peer, forwards, cost);
+			let reads = forwards && !self.nodes[y].legacy;
+			self.nodes[x].connect(y, peer, forwards, reads, cost);
 		}
 		self.flush();
 	}
@@ -1507,7 +1520,6 @@ impl PathSim {
 
 	/// `node` sends GOAWAY on every session.
 	pub fn goaway(&mut self, node: Node) {
-		self.nodes[node].leave();
 		for peer in self.peers(node) {
 			self.nodes[peer].goaway(node);
 		}
