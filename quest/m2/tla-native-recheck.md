@@ -24,7 +24,8 @@ model:
 `SumOver` is a recursive function over `SUBSET S`, the likely cost for both,
 and [TLC's cost quest](/quest/m0/ci/tlc-cost.md) replaces it with
 `FoldSet`. Once that lands, rerun #8600's comparison at each checker's newest
-revision, on route and resume first:
+revision: route and resume first, since they decide cost, then every
+other exhaustive config, since adoption needs agreement on all of them:
 
 - Build each from a pinned flake input inside the Nix sandbox, and run each
   check there as a derivation under `prlimit --as=16G`, one at a time through
