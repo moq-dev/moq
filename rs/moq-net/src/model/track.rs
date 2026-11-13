@@ -746,7 +746,7 @@ pub(crate) struct TrackState {
 }
 
 /// The starts a group's first frame must fall between: a timed track never holds a group
-/// whose start is earlier than the one before it. Read under the track lock and checked
+/// whose start is at or before the one before it. Read under the track lock and checked
 /// under it, so no two groups stamped concurrently can each accept a rewind.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Neighbors {
@@ -757,11 +757,10 @@ pub(super) struct Neighbors {
 }
 
 impl Neighbors {
-	/// Refuse a `start` that rewinds past a neighbor's with [`Error::TimestampMismatch`],
-	/// or say how the group holds it. An equal start is allowed: a keyframe may land at the
-	/// previous group's start.
+	/// Refuse a `start` that rewinds past a neighbor's, or ties one, with
+	/// [`Error::TimestampMismatch`], or say how the group holds it: starts strictly increase.
 	pub(super) fn admit(&self, start: Timestamp) -> Result<group::Origin> {
-		if self.floor.is_some_and(|floor| start < floor) || self.ceiling.is_some_and(|ceiling| start > ceiling) {
+		if self.floor.is_some_and(|floor| start <= floor) || self.ceiling.is_some_and(|ceiling| start >= ceiling) {
 			return Err(Error::TimestampMismatch);
 		}
 		Ok(if self.late {
@@ -1106,7 +1105,13 @@ impl TrackState {
 			.map(|(_, start)| *start);
 		drop(bounds);
 		Some(match self.evicted {
-			Some((evicted, start)) if key <= evicted => Neighbors {
+			// The evicted group itself, fetched again, starts where it did.
+			Some((evicted, _)) if key == evicted => Neighbors {
+				floor: below,
+				ceiling: above,
+				late: true,
+			},
+			Some((evicted, start)) if key < evicted => Neighbors {
 				floor: below,
 				ceiling: Some(above.map_or(start, |above| above.min(start))),
 				late: true,

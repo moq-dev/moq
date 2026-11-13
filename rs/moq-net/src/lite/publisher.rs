@@ -2506,7 +2506,6 @@ impl Request for SubscribeServe {
 						steer_seen: steer,
 						version: shared.version,
 						stamp,
-						runtime: shared.runtime.clone(),
 						outcomes: Default::default(),
 						ietf,
 					};
@@ -2857,8 +2856,6 @@ struct DatagramSend {
 	version: Version,
 	/// How datagrams are stamped, or `None` when they carry no timestamp.
 	stamp: Option<Stamp>,
-	/// The clock an untimed track's Lite05/06 send times are read from.
-	runtime: crate::time::Deadlines,
 	/// The publisher's priority for the track, which breaks subscriber priority ties.
 	publisher: i8,
 	/// The subscription's send group, or `None` on a transport without groups.
@@ -2874,7 +2871,6 @@ impl DatagramSend {
 			id,
 			version: shared.version,
 			stamp: Stamp::new(shared.version, info.timescale),
-			runtime: shared.runtime.clone(),
 			publisher: info.priority,
 			group,
 		}
@@ -2897,7 +2893,7 @@ impl DatagramSend {
 	fn send(&self, datagram: crate::datagram::Datagram) -> Result<(), Error> {
 		let Ok(timestamp) = self
 			.stamp
-			.map(|stamp| stamp.wire(datagram.timestamp, &self.runtime))
+			.map(|stamp| stamp.wire(datagram.timestamp, datagram.sequence))
 			.transpose()
 		else {
 			return Ok(());
@@ -3233,7 +3229,7 @@ impl Request for FetchServe {
 							batched.frame.payload.len() as u64,
 							*stamp,
 							prev_ts,
-							&shared.runtime,
+							group.start,
 						)?;
 						let payload = std::mem::take(&mut batched.frame.payload);
 						if !payload.is_empty() {
@@ -3269,7 +3265,7 @@ impl Request for FetchServe {
 									next.size,
 									*stamp,
 									prev_ts,
-									&shared.runtime,
+									group.start,
 								)?;
 								*frame = Some(next);
 								return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -4531,7 +4527,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	size: u64,
 	stamp: Option<Stamp>,
 	prev_ts: &mut u64,
-	runtime: &crate::time::Deadlines,
+	key: u64,
 ) -> Result<(), Error> {
 	// Lite-07 leads with the size plus one, leaving 0 for GROUP_END.
 	let length_first = version.has_length_first();
@@ -4542,7 +4538,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 		writer.buffer_varint(length)?;
 	}
 	if let Some(stamp) = stamp {
-		buffer_zigzag_delta(writer, stamp.wire(timestamp, runtime)?, prev_ts)?;
+		buffer_zigzag_delta(writer, stamp.wire(timestamp, key)?, prev_ts)?;
 	}
 	// Only a compressed group read in its stored form has one, and only on lite-07.
 	if let Some(inflated) = inflated {
@@ -4559,8 +4555,8 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 struct Stamp {
 	/// The wire timescale TRACK_INFO declared (see [`Version::wire_timescale`]).
 	timescale: crate::Timescale,
-	/// Whether each frame's own timestamp goes out. Lite05/06 cannot encode an untimed
-	/// track, so an untimed one carries its send time instead.
+	/// Whether each frame's own timestamp goes out. Lite05/06 cannot encode a scale-less
+	/// track, so a scale-less one carries its group's key instead, its frames' time.
 	timed: bool,
 }
 
@@ -4573,12 +4569,14 @@ impl Stamp {
 		})
 	}
 
-	/// A frame or datagram's `timestamp` as its raw wire value, or its send time on
-	/// `runtime` when the track goes out untimed.
-	fn wire(self, timestamp: Option<crate::Timestamp>, runtime: &crate::time::Deadlines) -> Result<u64, Error> {
+	/// A frame or datagram's `timestamp` as its raw wire value, or `key`, its group's key
+	/// or its datagram's sequence, verbatim when the track is scale-less: nothing is
+	/// stamped with a clock.
+	fn wire(self, timestamp: Option<crate::Timestamp>, key: u64) -> Result<u64, Error> {
+		let Some(timestamp) = timestamp.filter(|_| self.timed) else {
+			return Ok(key);
+		};
 		timestamp
-			.filter(|_| self.timed)
-			.unwrap_or_else(|| crate::Timestamp::from(runtime.now()))
 			.convert(self.timescale)
 			.map(|time| time.value())
 			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))
@@ -4911,8 +4909,6 @@ struct Subscription {
 	version: Version,
 	/// How frames are stamped, or `None` when they carry no timestamp.
 	stamp: Option<Stamp>,
-	/// The clock an untimed track's Lite05/06 send times are read from.
-	runtime: crate::time::Deadlines,
 	/// Outcomes shared by the subscription and every group it serves.
 	outcomes: Arc<GroupOutcomes>,
 	/// Whether the session negotiated the `ietf` extension, so streams carry relay state.
@@ -4928,8 +4924,6 @@ struct GroupContext {
 	version: Version,
 	/// How frames are stamped, or `None` when they carry no timestamp.
 	stamp: Option<Stamp>,
-	/// The clock an untimed track's Lite05/06 send times are read from.
-	runtime: crate::time::Deadlines,
 	/// Outcomes shared by the subscription and every group it serves.
 	outcomes: Arc<GroupOutcomes>,
 	/// Whether the session negotiated the `ietf` extension, so streams carry relay state.
@@ -4985,7 +4979,6 @@ impl Subscription {
 			steer_seen: self.steer_seen,
 			version: self.version,
 			stamp: self.stamp,
-			runtime: self.runtime.clone(),
 			outcomes: self.outcomes.clone(),
 			ietf: self.ietf,
 		}
@@ -6214,7 +6207,6 @@ impl CoverageBench {
 			steer_seen: Steer::default(),
 			version,
 			stamp: None,
-			runtime: crate::time::Deadlines::new(kio::clock::now()),
 			outcomes: Default::default(),
 			ietf: false,
 		};
@@ -6578,7 +6570,7 @@ impl GroupServe {
 											batched.frame.payload.len() as u64,
 											self.ctx.stamp,
 											&mut self.prev_ts,
-											&self.ctx.runtime,
+											self.group.start,
 										)
 									});
 								if let Err(err) = buffered {
@@ -6633,7 +6625,7 @@ impl GroupServe {
 													next.size,
 													self.ctx.stamp,
 													&mut self.prev_ts,
-													&self.ctx.runtime,
+													self.group.start,
 												)
 											});
 										if let Err(err) = buffered {
