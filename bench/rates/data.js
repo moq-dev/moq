@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794506674112,
+  "lastUpdate": 1794588564543,
   "repoUrl": "https://github.com/moq-dev/moq",
   "entries": {
     "MoQ nightly throughput": [
@@ -2242,6 +2242,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=window/streams=16/frame=262144/window_mib=32/stream_window=finite/mib_per_s",
             "value": 454,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=window/streams=16/frame=262144/window_mib=32/stream_window=finite/delivered_frames",
+            "value": 1024,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=window/streams=16/frame=262144/window_mib=32/stream_window=finite/mib_per_s",
+            "value": 20,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=window/streams=16/frame=262144/window_mib=32/stream_window=finite/delivered_frames",
+            "value": 64,
+            "unit": "frames"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Luke Curley",
+            "username": "kixelated",
+            "email": "kixelated@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "7df2ebf21cb053871fb5a61571789697879c002f",
+          "message": "feat(net): a reader on a failed copy continues on the held re-offer (#8546)\n\nCo-authored-by: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-13T13:47:35Z",
+          "url": "https://github.com/moq-dev/moq/commit/7df2ebf21cb053871fb5a61571789697879c002f"
+        },
+        "date": 1794588563878,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=default/streams=16/frame=262144/window_mib=4/stream_window=finite/mib_per_s",
+            "value": 463,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=default/streams=16/frame=262144/window_mib=4/stream_window=finite/delivered_frames",
+            "value": 1024,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=default/streams=16/frame=262144/window_mib=4/stream_window=finite/mib_per_s",
+            "value": 20,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=default/streams=16/frame=262144/window_mib=4/stream_window=finite/delivered_frames",
+            "value": 64,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=streams/streams=1/frame=262144/window_mib=4/stream_window=finite/mib_per_s",
+            "value": 457,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=streams/streams=1/frame=262144/window_mib=4/stream_window=finite/delivered_frames",
+            "value": 1024,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=streams/streams=1/frame=262144/window_mib=4/stream_window=finite/mib_per_s",
+            "value": 20,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=streams/streams=1/frame=262144/window_mib=4/stream_window=finite/delivered_frames",
+            "value": 64,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=frame/streams=16/frame=16384/window_mib=4/stream_window=finite/mib_per_s",
+            "value": 224,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=frame/streams=16/frame=16384/window_mib=4/stream_window=finite/delivered_frames",
+            "value": 16384,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=frame/streams=16/frame=16384/window_mib=4/stream_window=finite/mib_per_s",
+            "value": 20,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=frame/streams=16/frame=16384/window_mib=4/stream_window=finite/delivered_frames",
+            "value": 1024,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=window/streams=16/frame=262144/window_mib=8/stream_window=finite/mib_per_s",
+            "value": 461,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=window/streams=16/frame=262144/window_mib=8/stream_window=finite/delivered_frames",
+            "value": 1024,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=window/streams=16/frame=262144/window_mib=8/stream_window=finite/mib_per_s",
+            "value": 20,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=bufferbloat/axis=window/streams=16/frame=262144/window_mib=8/stream_window=finite/delivered_frames",
+            "value": 64,
+            "unit": "frames"
+          },
+          {
+            "name": "bench-rust-test/rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/axis=window/streams=16/frame=262144/window_mib=32/stream_window=finite/mib_per_s",
+            "value": 456,
             "unit": "MiB/s"
           },
           {
