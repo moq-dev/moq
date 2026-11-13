@@ -255,6 +255,8 @@ struct Stall {
 	bucket: usize,
 	/// When the latest stalled frame arrived.
 	late: f64,
+	/// The earliest a stalled frame was due.
+	due: f64,
 	/// Intervals spanned besides the one it folds as.
 	span: f64,
 }
@@ -359,16 +361,8 @@ impl Estimator {
 			self.origin = Some(arrival);
 			self.interval = 0.0;
 		} else {
-			let idle = interval - self.interval - 1.0;
-			if self.stall.is_some() || delay > RESAMPLE {
-				// A stall may own these: the open one if it continues, or one this frame opens.
-				self.pending = idle;
-			} else {
-				// An interval with no arrival relaxes the estimate toward the prior.
-				for _ in 0..f64::min(idle, IDLE_MAX) as u32 {
-					self.fold(None);
-				}
-			}
+			// Held until this interval closes: a stall it holds owns them.
+			self.pending = interval - self.interval - 1.0;
 			self.interval = interval;
 		}
 		self.peak = delay;
@@ -388,13 +382,15 @@ impl Estimator {
 	/// Folds the interval that just ended. One whose stalled frames were due before the
 	/// open stall's last one arrived is still behind that stall, so it joins it instead
 	/// of counting again: one outage is one observation, as one queue's hundred frames
-	/// are within an interval.
+	/// are within an interval. Only for a window of due time, since back-to-back
+	/// flushes are a recurring stall, not one.
 	fn close(&mut self, bucket: usize) {
 		let stalled = self.late != f64::NEG_INFINITY;
 		let pending = std::mem::take(&mut self.pending);
 		if stalled
 			&& let Some(stall) = &mut self.stall
 			&& self.due < stall.late
+			&& self.due - stall.due < WINDOW
 		{
 			stall.bucket = stall.bucket.max(bucket);
 			stall.span += pending + 1.0;
@@ -407,6 +403,7 @@ impl Estimator {
 			self.stall = Some(Stall {
 				bucket,
 				late: self.late,
+				due: self.due,
 				span: pending,
 			});
 		} else {
@@ -533,9 +530,10 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 13] = [
+	const CORPUS: [&str; 14] = [
 		"advertised",
 		"backlog",
+		"batches",
 		"buildup",
 		"fixed",
 		"flush",
@@ -600,7 +598,9 @@ pub(crate) mod tests {
 			target.observe(50.0 + i as f64 * 20.0, i as f64 * 20.0);
 		}
 		let settled = target.millis();
+		// The gap folds once the interval after it closes.
 		target.observe(50.0 + 500.0 * 20.0 + 30_000.0, 500.0 * 20.0 + 30_000.0);
+		target.observe(50.0 + 500.0 * 20.0 + 30_500.0, 500.0 * 20.0 + 30_500.0);
 		assert!(target.millis() > settled);
 	}
 

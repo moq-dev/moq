@@ -70,6 +70,8 @@ export class Jitter {
 	#stall?: number;
 	/** When the open stall's latest stalled frame arrived. */
 	#stallLate = 0;
+	/** The earliest the open stall's frames were due. */
+	#stallDue = 0;
 	/** Intervals the open stall spanned besides the one it folds as. */
 	#span = 0;
 	/** Empty intervals before this one, held until it shows whether they belong to a stall. */
@@ -124,14 +126,8 @@ export class Jitter {
 			this.#origin = arrival;
 			this.#interval = 0;
 		} else {
-			const idle = interval - this.#interval - 1;
-			if (this.#stall !== undefined || delay > RESAMPLE) {
-				// A stall may own these: the open one if it continues, or one this frame opens.
-				this.#pending = idle;
-			} else {
-				// An interval with no arrival relaxes the estimate toward the prior at the same rate.
-				for (let i = 0; i < Math.min(idle, IDLE_MAX); i++) this.#fold(undefined);
-			}
+			// Held until this interval closes: a stall it holds owns them.
+			this.#pending = interval - this.#interval - 1;
 			this.#interval = interval;
 		}
 		this.#peak = delay;
@@ -150,12 +146,18 @@ export class Jitter {
 
 	// An interval whose stalled frames were due before the open stall's last one arrived is still
 	// behind that stall, so it joins it instead of counting again: one outage is one observation,
-	// as one queue's hundred frames are within an interval.
+	// as one queue's hundred frames are within an interval. Only for a window of due time, since
+	// back-to-back flushes are a recurring stall, not one.
 	#close(bucket: number): void {
 		const stalled = this.#late !== Number.NEGATIVE_INFINITY;
 		const pending = this.#pending;
 		this.#pending = 0;
-		if (stalled && this.#stall !== undefined && this.#due < this.#stallLate) {
+		if (
+			stalled &&
+			this.#stall !== undefined &&
+			this.#due < this.#stallLate &&
+			this.#due - this.#stallDue < WINDOW
+		) {
 			this.#stall = Math.max(this.#stall, bucket);
 			this.#span += pending + 1;
 			this.#stallLate = this.#late;
@@ -167,6 +169,7 @@ export class Jitter {
 			this.#stall = bucket;
 			this.#span = pending;
 			this.#stallLate = this.#late;
+			this.#stallDue = this.#due;
 		} else {
 			for (let i = 0; i < Math.min(pending, IDLE_MAX); i++) this.#fold(undefined);
 			this.#fold(bucket);

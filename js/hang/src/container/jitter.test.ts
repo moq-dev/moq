@@ -35,6 +35,7 @@ describe("audio jitter conformance", () => {
 		expect(cases.map((c) => c.name).sort()).toEqual([
 			"advertised",
 			"backlog",
+			"batches",
 			"buildup",
 			"fixed",
 			"flush",
@@ -95,7 +96,9 @@ describe("Jitter", () => {
 		jitter.end();
 		for (let i = 0; i < 500; i++) jitter.observe(50 + i * 20, i * 20);
 		const settled = jitter.measured;
+		// The gap folds once the interval after it closes.
 		jitter.observe(50 + 500 * 20 + 30_000, 500 * 20 + 30_000);
+		jitter.observe(50 + 500 * 20 + 30_500, 500 * 20 + 30_500);
 		expect(jitter.measured).toBeGreaterThan(settled);
 	});
 

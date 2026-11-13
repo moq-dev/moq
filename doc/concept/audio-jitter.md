@@ -118,13 +118,10 @@ observe(arrival, media):
         peak = max(peak, delay); note(arrival, delay); return
 
     close(bucket of peak)
-    idle = index - interval - 1
     if resumed:                         # a declared silence folds nothing
         settle(); origin = arrival; index = 0
-    else if a stall is open or delay > RESAMPLE:
-        pending = idle                  # a stall may own the empty intervals
-    else:
-        fold(nothing) for each of the idle intervals, at most IDLE_MAX
+    else:                               # held until this interval closes
+        pending = index - interval - 1
     interval = index; peak = delay; due = +inf; late = -inf
     note(arrival, delay)
 
@@ -133,12 +130,13 @@ note(arrival, delay):                   # due and late start at +inf and -inf
         due = min(due, arrival - delay); late = max(late, arrival)
 
 close(bucket):                          # pending starts at 0 and is spent here
-    if late > -inf and a stall is open and due < stall.late:
+    if late > -inf and a stall is open
+            and due < stall.late and due - stall.due < WINDOW:
         stall.bucket = max(stall.bucket, bucket); stall.late = late
         stall.span += pending + 1; pending = 0
         return                          # still behind the same stall
     settle()
-    if late > -inf: open a stall with bucket, late, span = pending
+    if late > -inf: open a stall with bucket, late, due, span = pending
     else: fold(nothing) min(pending, IDLE_MAX) times; fold(bucket)
     pending = 0
 
@@ -262,7 +260,9 @@ due. An interval holding a stalled frame due before the open stall's latest
 stalled frame arrived is still behind that stall: it joins it instead of
 folding. The empty intervals before a stalled interval belong to its stall as
 well, since a link that stops outright delivers nothing until its backlog
-arrives. The stall ends at the
+arrives, so empty intervals fold only once the interval after them closes and
+shows whether it is stalled: a recovery that delivers the live edge before its
+backlog is still a stall. The stall ends at the
 first interval that does not continue it, and only then folds, once, its
 largest delay, then one idle fold for each other interval it spanned. So the
 estimate keeps its wall-clock time constant, and the stall's single observation
@@ -271,17 +271,20 @@ observation after them would reclaim up to `FRESH_MAX`.
 
 The test is on due time, not on adjacency, so a publisher that flushes a second
 or more of media at once still counts each flush: the first frame of the next
-flush was due only after the previous one arrived. Recurring outages still
+flush was due only after the previous one arrived. Flushes back to back and
+newest first do chain, since each is due before the previous one finished
+arriving, and locally they look like outages one after another. So a stall
+covers at most `WINDOW` of due time, the span the delay itself is measured
+over, and longer lateness folds once per window as the recurring stall it is.
+Recurring outages still
 raise the target, a few of them within a half-life, which is the evidence a
 recurring stall deserves. A lateness under one interval never stalls, so
 ordinary jitter, shorter flushes, reordering, and a step in the path's delay fold one
 observation per interval.
 
-A link that keeps falling further behind never ends its stall, and the estimate
-holds where it was rather than climbing to the ceiling. No buffer
-covers that link: the max age decides what plays, not the target. The open
-stall is three numbers, so a publisher that chains stalls on purpose costs
-nothing.
+The open stall is four numbers, so a publisher that chains stalls on purpose
+costs nothing, and one fold per window of due time bounds how long the estimate
+goes without evidence.
 
 ### The histogram
 
@@ -542,6 +545,9 @@ the same time constant as everything else, which is what an evidence-free
 interval should do, and it raises the target rather than lowering it, so the
 error is on the safe side.
 
+Idle intervals fold when the interval after them closes, before it, unless
+that interval is [stalled](#one-observation-per-stall), whose stall owns them.
+
 `IDLE_MAX` caps how many intervals are folded at once. It exists only to bound
 the work: after 1024 folds the retained weight is about 2e-8, so the cap changes
 no output an `f64` can represent.
@@ -667,6 +673,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
 | `spike` | A recurring stall raises the target, and it decays once the stalls stop |
 | `straggler` | One late interval after the prior is spent leaves the target where it was |
+| `batches` | Back-to-back 1 s flushes delivered newest first chain their stalls, which still fold once per window of due time and raise the target |
 | `outage` | A one-off 1.5 s outage whose backlog arrives over several intervals is one stall and leaves the target where it was, while three more 3 s apart raise it |
 | `fixed` | An explicit delay ignores the arrivals entirely |
 
