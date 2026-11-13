@@ -6231,27 +6231,6 @@ mod test {
 		assert_eq!(writer.timestamp.unwrap().value(), 1000);
 	}
 
-	/// An explicit current timestamp is converted to the group's scale.
-	#[test]
-	#[cfg_attr(miri, ignore = "reads the wall clock, which Miri's isolation refuses")]
-	fn create_frame_converts_current_timestamp() {
-		use crate::Timescale;
-
-		let producer = Producer::new(
-			Info { start: 0 },
-			track::Info::default().with_timescale(Timescale::MICRO),
-			Default::default(),
-		);
-		let writer = producer
-			.create_frame(frame::Info {
-				size: 3,
-				timestamp: Some(Timestamp::now()),
-			})
-			.unwrap();
-		assert_eq!(writer.timestamp.unwrap().scale(), Timescale::MICRO);
-		assert!(!writer.timestamp.unwrap().is_zero(), "local clock should be non-zero");
-	}
-
 	/// A group can start partway in, so a route can serve the tail of a group whose
 	/// head came from somewhere else.
 	#[test]

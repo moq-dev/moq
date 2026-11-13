@@ -297,16 +297,6 @@ impl Timestamp {
 			None => Err(TimeOverflow),
 		}
 	}
-
-	/// Current point on the local monotonic clock, in milliseconds ([`Timescale::MILLI`]).
-	///
-	/// A convenience for publishers stamping their own frames, and the only model API
-	/// that reads the local clock; drivers stamp frames from the instant they are
-	/// polled with instead. There is deliberately no inverse (a [`Timestamp`] is
-	/// relative and jittered, never a clock).
-	pub fn now() -> Self {
-		crate::model::clock::now().into()
-	}
 }
 
 impl TryFrom<std::time::Duration> for Timestamp {

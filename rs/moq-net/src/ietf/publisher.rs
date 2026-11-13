@@ -1990,7 +1990,7 @@ impl SubscribeTrack {
 		// bound the subscription before subscribing so the ratio never judges it. From the
 		// start of its group, so a relay's copy holds the group's head for its other readers,
 		// as a live join would; the resolved range trims below.
-		let fixed: ServeRange = filter_range(msg.filter, LiveEdge::default());
+		let fixed: ServeRange = filter_range(msg.filter, LiveEdge::default(), |_, _| None);
 		if let Some(start) = fixed.start {
 			ServeRange {
 				start: Some(Location { object: 0, ..start }),
@@ -2034,7 +2034,7 @@ impl SubscribeTrack {
 		// current-group join (Next Object plus a StartGroup=1 fill) cover the group with no gap
 		// and no overlap.
 		let edge = live_edge(track);
-		let mut range = filter_range(msg.filter, edge);
+		let mut range = filter_range(msg.filter, edge, |latest, back| track.group_back(latest, back));
 		let fill = msg
 			.fill
 			.filter(|_| msg.forward && Filter::is_draft20(publisher.version))
@@ -6805,7 +6805,7 @@ impl TrackServe {
 					start: Some(Location { group: 0, object: 0 }),
 					end: None,
 				},
-				_ => filter_range(filter, edge),
+				_ => filter_range(filter, edge, |latest, back| cache.group_back(latest, back)),
 			};
 		}
 		let mut range = self.requested;
@@ -21192,7 +21192,10 @@ struct GroupSlice {
 }
 
 /// The Locations a single Location Filter selects, resolved against the live edge.
-fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
+///
+/// `back` counts groups back from a key, as [`track::Consumer::group_back`] does: keys are
+/// group starts, so subtracting from one counts no groups.
+fn filter_range(filter: Filter, edge: LiveEdge, back: impl Fn(u64, u64) -> Option<u64>) -> ServeRange {
 	match filter {
 		// No restriction. moq-lite starts at the beginning of the latest group, which is
 		// the join point it is built around; a subscription passes objects as they are
@@ -21207,17 +21210,20 @@ fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
 			start: edge.next,
 			end: None,
 		},
-		// `{Largest.Group + 1 - groups, 0}`: 0 is the next group and 1 is the current one.
-		// Counted from `Largest.Group`, which sits below the newest group while that
-		// group has no objects yet; only with no largest at all does the newest group
-		// stand in for it.
+		// `{Largest.Group + 1 - groups, 0}`, counted in groups: 0 is the next group and 1 is
+		// the current one. Counted from `Largest.Group`, which sits below the newest group
+		// while that group has no objects yet; only with no largest at all does the newest
+		// group stand in for it. One counting back past every group held starts at the oldest.
 		Filter::Relative(groups) => ServeRange {
 			start: edge
 				.largest
 				.map(|largest| largest.group)
 				.or(edge.latest)
 				.map(|group| Location {
-					group: group.saturating_add(1).saturating_sub(groups),
+					group: match groups.checked_sub(1) {
+						None => group.saturating_add(1),
+						Some(count) => back(group, count).unwrap_or(0),
+					},
 					object: 0,
 				}),
 			end: None,
@@ -21327,6 +21333,11 @@ mod range_tests {
 		}
 	}
 
+	/// Counts groups back over contiguous keys, as a track holding every group does.
+	fn contiguous(latest: u64, back: u64) -> Option<u64> {
+		latest.checked_sub(back)
+	}
+
 	/// A live edge of group 100 whose current group has objects 0 through 4.
 	const EDGE: LiveEdge = LiveEdge {
 		latest: Some(100),
@@ -21380,7 +21391,7 @@ mod range_tests {
 			end: Some(EndLocation { group: 9, object: None }),
 		});
 		assert_eq!(
-			filter_range(msg.filter, EDGE),
+			filter_range(msg.filter, EDGE, contiguous),
 			ServeRange {
 				start: Some(Location { group: 4, object: 0 }),
 				end: Some(EndLocation { group: 9, object: None })
@@ -21393,7 +21404,7 @@ mod range_tests {
 	#[test]
 	fn an_unfiltered_subscription_stays_live() {
 		let msg = subscribe(Filter::Unfiltered);
-		assert_eq!(filter_range(msg.filter, EDGE), ServeRange::default());
+		assert_eq!(filter_range(msg.filter, EDGE, contiguous), ServeRange::default());
 	}
 
 	/// An absolute start from group 0 is the request for history the absent filter is not.
@@ -21404,7 +21415,7 @@ mod range_tests {
 			end: None,
 		});
 		assert_eq!(
-			filter_range(msg.filter, EDGE),
+			filter_range(msg.filter, EDGE, contiguous),
 			ServeRange {
 				start: Some(Location::default()),
 				end: None
@@ -21418,7 +21429,7 @@ mod range_tests {
 	fn next_object_starts_past_the_largest_object() {
 		let msg = subscribe(Filter::NextObject);
 		assert_eq!(
-			filter_range(msg.filter, EDGE),
+			filter_range(msg.filter, EDGE, contiguous),
 			ServeRange {
 				start: Some(Location { group: 100, object: 5 }),
 				end: None,
@@ -21437,7 +21448,7 @@ mod range_tests {
 		};
 		let msg = subscribe(Filter::NextObject);
 		assert_eq!(
-			filter_range(msg.filter, edge),
+			filter_range(msg.filter, edge, contiguous),
 			ServeRange {
 				start: Some(Location { group: 101, object: 0 }),
 				end: None,
@@ -21452,7 +21463,7 @@ mod range_tests {
 		for (groups, expected) in [(0, 101), (1, 100), (2, 99), (5, 96)] {
 			let msg = subscribe(Filter::Relative(groups));
 			assert_eq!(
-				filter_range(msg.filter, EDGE),
+				filter_range(msg.filter, EDGE, contiguous),
 				ServeRange {
 					start: Some(Location {
 						group: expected,
@@ -21476,7 +21487,7 @@ mod range_tests {
 		};
 		let msg = subscribe(Filter::Relative(1));
 		assert_eq!(
-			filter_range(msg.filter, edge),
+			filter_range(msg.filter, edge, contiguous),
 			ServeRange {
 				start: Some(Location { group: 0, object: 0 }),
 				end: None,
@@ -21489,7 +21500,7 @@ mod range_tests {
 	fn relative_saturates_at_the_start() {
 		let msg = subscribe(Filter::Relative(500));
 		assert_eq!(
-			filter_range(msg.filter, EDGE),
+			filter_range(msg.filter, EDGE, contiguous),
 			ServeRange {
 				start: Some(Location { group: 0, object: 0 }),
 				end: None,
@@ -21501,7 +21512,7 @@ mod range_tests {
 	#[test]
 	fn relative_without_an_edge_stays_live() {
 		let msg = subscribe(Filter::Relative(3));
-		assert_eq!(filter_range(msg.filter, LiveEdge::default()), ServeRange::default());
+		assert_eq!(filter_range(msg.filter, LiveEdge::default(), contiguous), ServeRange::default());
 	}
 
 	/// A group created but not yet written has no objects, so the largest sits in an
@@ -21668,7 +21679,7 @@ mod range_tests {
 			}),
 		});
 		assert_eq!(
-			filter_range(msg.filter, EDGE),
+			filter_range(msg.filter, EDGE, contiguous),
 			ServeRange {
 				start: Some(Location { group: 4, object: 3 }),
 				end: Some(EndLocation {

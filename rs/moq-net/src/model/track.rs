@@ -6194,6 +6194,17 @@ impl Consumer {
 		))
 	}
 
+	/// The group `back` groups before `latest` among those the cache holds, `latest` itself
+	/// counting as the first: `None` once fewer are held. What a wire's relative start counts
+	/// back to, since keys are starts and no arithmetic on them counts groups.
+	#[cfg(feature = "async")]
+	pub(crate) fn group_back(&self, latest: u64, back: u64) -> Option<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.group_back(latest, back);
+		}
+		self.with_state(|state| Holdings::back(&*state?.read(), latest, back))
+	}
+
 	/// The keys of `span` the cache holds, lowest first.
 	#[cfg(feature = "async")]
 	pub(crate) fn cached_groups(&self, span: ops::Range<u64>) -> Vec<u64> {

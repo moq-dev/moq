@@ -537,10 +537,13 @@ pub const RECV_PARKED: i64 = i64::MIN;
 /// since a live track that falls behind skips to its newest anyway; an [`Order::Ascending`]
 /// one drains a backlog in key, so its newest group goes first.
 pub fn recv_group(priority: i8, key: u64, order: Order) -> i64 {
-	// Saturating the key at 2^48 keeps the band negative; no track gets that far.
+	// Keys are starts, which pass 2^48 on a fine timescale (nanoseconds since an epoch), so
+	// only their low 48 bits rank, keeping the band negative: groups in flight together
+	// start close together, so they keep their order except across one wrap every 2^48
+	// units, where saturating would tie every later group instead.
 	const KEY: u32 = 48;
 	const MAX: i64 = (1 << KEY) - 1;
-	let key = (key.min(MAX as u64)) as i64;
+	let key = (key & MAX as u64) as i64;
 	let kept = match order {
 		Order::Descending => key,
 		Order::Ascending => MAX - key,
