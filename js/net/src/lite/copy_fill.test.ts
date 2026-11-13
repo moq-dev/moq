@@ -399,7 +399,11 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
-		expect((await reader.ordered().nextGroup())?.sequence).toBe(1n);
+		const live = await reader.ordered().nextGroup();
+		expect(live?.sequence).toBe(1n);
+		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 1");
+		expect(await live?.readFrame()).toBeUndefined();
+		live?.close();
 		const history = remote
 			.track("video")
 			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
@@ -410,11 +414,12 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 
 		// The session resets the group's stream to make room, and the group is gone before a new
 		// stream could continue it, so the publisher drops it on the fill's subscription.
-		// Receiving the live group's header did not wait for its stream's FIN to retire.
+		// The live stream has finished. The archive may be served on both the fill and
+		// the copy's expanded feed, so reset every stream still serving it.
 		await clock.advance(Duration.ZERO);
 		const open = lines(pair.server).streams.list();
-		expect(open.length).toBe(1);
-		open[0]?.preempt();
+		expect(open.length).toBeGreaterThan(0);
+		for (const stream of open) stream.preempt();
 		source.abort(new StreamError(StreamCode(70), { message: "gone" }));
 
 		// Still paused without it, which the deadline, fired once every pending task settled,
