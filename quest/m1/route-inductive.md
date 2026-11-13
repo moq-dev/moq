@@ -92,24 +92,18 @@ Found 2026-11-12, trying it on the route model itself
   rules (`SimplePaths`, `LoopsAreStale`, `StaleIsChased`) need routes, DEAD,
   holds, and doubts, but no claims, views, or events.
 
+Decided 2026-11-12 (maintainer, /quest-unblock): ✅ split the model
+(rejected: a TLAPS proof on the route model; deleting the quest and resting
+on TLC's bounded runs and the sweeps; a host with far more memory). This
+quest proves the claim rules (`Truthful`, `NoRevival`, `NoFalseEnd`,
+`NoRegression`) on a small model with no paths, where routes come and go
+freely. [A follow-up](/quest/m1/route-loops.md) proves the loop rules
+(`SimplePaths`, `LoopsAreStale`, `StaleIsChased`) on a model without claims,
+after first measuring that Apalache fits it. TLC refinement-checks each model
+against `RouteHandoff.tla`. This PR keeps the Apalache package and the `tla`
+recipe, and drops the annotations and folds from `RouteHandoff.tla`.
+
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: how to prove the rules for runs of any length, now that
-  Apalache cannot check the route model itself. Options: (A, recommended)
-  split it: this quest proves the claim rules on a small model whose routes
-  come and go freely, and a new quest proves the loop rules on a model
-  without claims after measuring that Apalache fits it, each tied to
-  `RouteHandoff.tla` by a refinement TLC checks on its configs; (B) a TLAPS
-  proof on the route model, rejected 2026-11-10 because its steps break on
-  each model change, which the router quest is still making; (C) delete the
-  quest and rest on TLC's bounded runs and the sweeps; (D) retry on a host
-  with far more memory, which the two-relay result above makes unlikely to
-  fit any useful mesh. A recommends itself because the claim rules are the
-  ones bounded runs cover least, and a model without paths should fit five
-  relays. An agent cannot pick: it changes the method the 2026-11-10
-  decision chose.
 
 ## Related
 
