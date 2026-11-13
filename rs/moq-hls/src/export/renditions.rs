@@ -514,22 +514,33 @@ impl Producer {
 			.map(|_| ())
 	}
 
-	/// Resolve once at least one enabled rendition is [advertised](Rendition::is_advertised), so a
-	/// master playlist can list it.
-	#[cfg_attr(
-		not(feature = "server"),
-		allow(dead_code, reason = "only the `server` feature uses it")
-	)]
+	/// Resolve once an enabled video rendition is [advertised](Rendition::is_advertised), or, while
+	/// none is left that listings do not refuse, once any enabled rendition is, so a master playlist
+	/// can list it.
+	///
+	/// A player keeps the variants of the first master it loads, and audio lists a segment before
+	/// video finishes its first GOP, so a master answered on audio alone would never play video.
 	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
 			.poll_ref(waiter, |current| {
-				if current.renditions.values().any(|rendition| {
+				let advertised = |rendition: &Arc<Rendition>| {
 					rendition.is_enabled() && (self.fanout.lazy || rendition.poll_advertised(waiter).is_ready())
-				}) {
-					Poll::Ready(())
+				};
+				let mut video = current
+					.renditions
+					.values()
+					.filter(|rendition| {
+						rendition.kind == Kind::Video
+							&& rendition.is_enabled()
+							&& rendition.poll_refused(waiter).is_pending()
+					})
+					.peekable();
+				let ready = if video.peek().is_some() {
+					video.any(advertised)
 				} else {
-					Poll::Pending
-				}
+					current.renditions.values().any(advertised)
+				};
+				if ready { Poll::Ready(()) } else { Poll::Pending }
 			})
 			.map(|_| ())
 	}
