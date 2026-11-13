@@ -892,7 +892,7 @@ struct FetchParams {
 
 #[derive(Debug, Default)]
 enum FetchGroup {
-	// Return the group at the given sequence number.
+	// Return the group that starts at the given key, in the track's timescale.
 	Num(u64),
 
 	// Return the latest group.
@@ -1082,11 +1082,11 @@ async fn serve_fetch(
 			.ok()
 			.flatten()
 			.ok_or(StatusCode::NOT_FOUND)?;
-		let sequence = match params.group {
-			FetchGroup::Num(sequence) => Some(sequence),
+		let start = match params.group {
+			FetchGroup::Num(start) => Some(start),
 			FetchGroup::Latest => None,
 		};
-		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
+		let group = match async { crate::fetch_group(&broadcast.track(&track)?, start).await }.await {
 			Ok(group) => group,
 			// A miss upstream arrives as the stream reset that refused the FETCH. A group past
 			// the track's max age is gone, so it is a miss too.
@@ -1100,7 +1100,7 @@ async fn serve_fetch(
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
-		tracing::info!(%track, group = %group.sequence, "serving group");
+		tracing::info!(%track, group = %group.start, "serving group");
 
 		Ok(group)
 	})
@@ -1245,10 +1245,14 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.unwrap();
 		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
-		group.write_frame(moq_net::Timestamp::ZERO, PAYLOAD).unwrap();
-		group.finish().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
+			.unwrap();
+		group.close().unwrap();
 		let mut refused = Web::new(
 			auth::Auth::refuse("test"),
 			cluster.clone(),
@@ -1483,9 +1487,13 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
+			.unwrap();
+		group.close().unwrap();
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		for tier in ["first", "second"] {
 			for selector in [FetchGroup::Num(0), FetchGroup::Latest] {
@@ -1595,11 +1603,11 @@ mod tests {
 		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
 		// edge: past the 500ms max age, so it is no longer served.
 		for millis in [0, 1000, 2000] {
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_group(millis).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let status = serve_fetch(

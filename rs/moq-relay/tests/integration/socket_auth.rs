@@ -186,9 +186,11 @@ async fn read(reader: &mut moq_net::group::Consumer) -> Vec<u8> {
 
 /// Write `payload` as one message of a `track` session: one group.
 fn send(track: &moq_net::track::Producer, payload: &'static [u8]) {
-	let mut group = track.append_group().expect("group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("group");
 	group.write_frame(None, payload).expect("frame");
-	group.finish().expect("finish");
+	group.close().expect("finish");
 }
 
 /// Read the next message of a `track` session.
@@ -234,8 +236,8 @@ async fn prefix_grants_admit_a_session() {
 		assert_eq!(read(&mut accepted.consumer).await, b"ping", "{dialer} to {acceptor}");
 		accepted.producer.write_frame(None, &b"pong"[..]).expect("write");
 		assert_eq!(read(&mut dialed.consumer).await, b"pong", "{dialer} to {acceptor}");
-		dialed.producer.finish().expect("finish");
-		accepted.producer.finish().expect("finish");
+		dialed.producer.close().expect("finish");
+		accepted.producer.close().expect("finish");
 
 		let (dialed, accepted) = connect_track(&alice, &bob).await;
 		send(&dialed.producer, b"ping");

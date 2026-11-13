@@ -100,11 +100,13 @@ async fn transfer(
 		.expect("subscribe");
 
 	let start = kio::clock::now();
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, vec![7u8; FRAME])
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![7u8; FRAME])
 		.expect("write frame");
-	group.finish().expect("finish group");
+	group.close().expect("finish group");
 	let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 		.await
 		.expect("recv_group timeout")
