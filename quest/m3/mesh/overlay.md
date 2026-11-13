@@ -48,7 +48,7 @@ guess means everything is a core unless stated otherwise." Rejected: pricing
 alone; shaping alone; ranking links to cheaper nodes by priority, whose
 outcome under the feasibility rule depends on which route arrived first.
 That reason was written under Babel. Under the path rule
-([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27) a
+([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27) a
 relay takes the cheapest route whose path does not name it, whatever arrived
 first.
 
