@@ -8511,13 +8511,11 @@ fn server_rejects_a_session() {
 	assert!(moq_session_request_free(request) < 0, "reject consumes the request");
 
 	// The rejection closes a session the transport already established, so the client
-	// may see it connect first. It then gives up on the auth rejection rather than redialing.
-	let terminal = client_cb.recv_terminal();
-	assert_eq!(terminal.failure, MOQ_ERROR_MOQ);
-	let protocol = terminal.protocol.expect("the rejection carries a protocol close");
-	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
-	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32);
-	assert!(moq_session_close(client) < 0, "the client session already ended");
+	// sees it connect first. Once connected, the loop redials whatever the close's kind.
+	let again = id(server_cb.recv());
+	assert_eq!(moq_session_request_reject(again, 403), 0);
+	assert_eq!(moq_session_close(client), 0);
+	client_cb.recv_terminal();
 
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
