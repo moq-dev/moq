@@ -151,17 +151,20 @@ export declare class Thing {}
 	});
 });
 
-// Quarantined: quest/m0/test-flakes-2/doc-api-typedoc-timeout.md.
-test.skip("an unexported declaration that a public one names fails the run", async () => {
-	const files = {
-		"src/index.ts": `export { read } from "./access";
+// Rendered at module load, which bun does not time out, so TypeDoc's run never races the test timeout.
+const [hidden, broken] = await Promise.all([
+	settle(
+		render({
+			hidden: {
+				files: {
+					"src/index.ts": `export { read } from "./access";
 /** A public value. */
 export interface Value {
 	/** Its text. */
 	text: string;
 }
 `,
-		"src/access.ts": `/** A hidden value sharing the public one's name. */
+					"src/access.ts": `/** A hidden value sharing the public one's name. */
 interface Value {
 	/** Its count. */
 	count: number;
@@ -171,11 +174,27 @@ export function read(): Value {
 	return { count: 0 };
 }
 `,
-	};
-	await expect(render({ hidden: { files } })).rejects.toThrow(/^TypeDoc: 0 errors and \d+ warnings$/);
+				},
+			},
+		}),
+	),
+	settle(render({ broken: { files: { "src/index.ts": "/** See {@link Missing}. */\nexport const value = 1;\n" } } })),
+]);
+
+/** Resolve to the error a run rejects with, or undefined when it succeeds. */
+function settle(run: Promise<unknown>): Promise<unknown> {
+	return run.then(
+		() => undefined,
+		(err: unknown) => err,
+	);
+}
+
+test("an unexported declaration that a public one names fails the run", () => {
+	expect(hidden).toBeInstanceOf(Error);
+	expect((hidden as Error).message).toMatch(/^TypeDoc: 0 errors and \d+ warnings$/);
 });
 
-test("a link that does not resolve fails the run", async () => {
-	const files = { "src/index.ts": "/** See {@link Missing}. */\nexport const value = 1;\n" };
-	await expect(render({ broken: { files } })).rejects.toThrow(/^TypeDoc: 0 errors and \d+ warnings$/);
+test("a link that does not resolve fails the run", () => {
+	expect(broken).toBeInstanceOf(Error);
+	expect((broken as Error).message).toMatch(/^TypeDoc: 0 errors and \d+ warnings$/);
 });
