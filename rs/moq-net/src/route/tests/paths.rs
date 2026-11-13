@@ -383,21 +383,10 @@ impl Relay {
 	}
 
 	pub fn announce(&mut self, claim: Path) {
-		self.change(claim, true);
-	}
-
-	pub fn unannounce(&mut self, claim: Path) {
-		self.change(claim, false);
-	}
-
-	fn change(&mut self, claim: Path, live: bool) {
 		let id = self.own.expect("not a publisher");
 		let route = self.routes.get_mut(&id).unwrap();
 		route.rev += 1;
-		match live {
-			true => route.claims.insert(claim, route.rev),
-			false => route.claims.remove(&claim),
-		};
+		route.claims.insert(claim, route.rev);
 		self.show(id);
 		self.advertise(id);
 	}
@@ -1133,14 +1122,9 @@ pub(super) struct PathStats {
 /// [`Sim`] for the prototype: one [`Relay`] per node, joined by ordered queues.
 pub(super) struct PathSim {
 	pub nodes: Vec<Relay>,
-	rules: Rules,
-	restarts: Vec<u32>,
 	links: Vec<Vec<Option<Metric>>>,
 	up: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
-	held: BTreeSet<(Node, Node)>,
-	/// Nodes whose process is gone and has yet to restart.
-	stopped: BTreeSet<Node>,
 	pub stats: PathStats,
 	pub events: Vec<(Node, Id, String, Kind)>,
 }
@@ -1149,13 +1133,9 @@ impl PathSim {
 	pub fn new(nodes: usize, rules: Rules) -> Self {
 		Self {
 			nodes: (0..nodes).map(|node| Relay::new(hop(node, 0), rules)).collect(),
-			rules,
-			restarts: vec![0; nodes],
 			links: vec![vec![None; nodes]; nodes],
 			up: BTreeSet::new(),
 			queues: BTreeMap::new(),
-			held: BTreeSet::new(),
-			stopped: BTreeSet::new(),
 			stats: PathStats::default(),
 			events: Vec::new(),
 		}
@@ -1185,7 +1165,7 @@ impl PathSim {
 		self.up.insert(Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			let cost = self.links[x][y].expect("a configured link");
-			let peer = hop(y, self.restarts[y]);
+			let peer = hop(y, 0);
 			let forwards = !self.nodes[y].leaf;
 			self.nodes[x].connect(y, peer, forwards, cost);
 		}
@@ -1200,49 +1180,9 @@ impl PathSim {
 		self.up.remove(&Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
-			self.held.remove(&(x, y));
 			self.nodes[y].disconnect(x);
 		}
 		self.flush();
-	}
-
-	/// `peer` notices its session to `node` closed. `node`, whose process is gone,
-	/// does nothing.
-	pub fn sever(&mut self, node: Node, peer: Node) {
-		self.up.remove(&Self::pair(node, peer));
-		for key in [(node, peer), (peer, node)] {
-			self.queues.remove(&key);
-			self.held.remove(&key);
-		}
-		self.nodes[peer].disconnect(node);
-		self.flush();
-	}
-
-	fn peers(&self, node: Node) -> Vec<Node> {
-		(0..self.nodes.len())
-			.filter(|&peer| self.links[node][peer].is_some() && self.connected(node, peer))
-			.collect()
-	}
-
-	/// The process at `node` stops: nothing passes between it and `peer` from now on,
-	/// though `peer` has yet to notice, and no timer of its runs until `kill`.
-	pub fn mute(&mut self, node: Node, peer: Node) {
-		self.held.insert((node, peer));
-		self.held.insert((peer, node));
-		self.stopped.insert(node);
-	}
-
-	/// The process at `node` exits: its sessions close and its state is lost. It says
-	/// nothing on the way out, so each neighbour notices and it does not.
-	pub fn kill(&mut self, node: Node) {
-		for peer in self.peers(node) {
-			self.sever(node, peer);
-		}
-		self.stopped.remove(&node);
-		self.restarts[node] += 1;
-		let leaf = self.nodes[node].leaf;
-		self.nodes[node] = Relay::new(hop(node, self.restarts[node]), self.rules);
-		self.nodes[node].leaf = leaf;
 	}
 
 	pub fn originate(&mut self, node: Node, id: Id) {
@@ -1252,11 +1192,6 @@ impl PathSim {
 
 	pub fn announce(&mut self, node: Node, claim: &str) {
 		self.nodes[node].announce(p(claim));
-		self.flush();
-	}
-
-	pub fn unannounce(&mut self, node: Node, claim: &str) {
-		self.nodes[node].unannounce(p(claim));
 		self.flush();
 	}
 
@@ -1276,26 +1211,20 @@ impl PathSim {
 		self.nodes[node].source(&(id, p(claim)))
 	}
 
-	/// One hop of delay passes at every running node. Whether any still waits on a timer.
+	/// One hop of delay passes at every node. Whether any still waits on a timer.
 	pub fn tick(&mut self) -> bool {
 		let mut waiting = false;
-		for (node, relay) in self.nodes.iter_mut().enumerate() {
-			if !self.stopped.contains(&node) {
-				waiting |= relay.tick();
-			}
+		for relay in &mut self.nodes {
+			waiting |= relay.tick();
 		}
 		self.flush();
 		waiting
 	}
 
-	pub fn queued(&self, from: Node, to: Node) -> usize {
-		self.queues.get(&(from, to)).map_or(0, VecDeque::len)
-	}
-
-	/// The queues with a message to deliver that are not held.
+	/// The queues with a message to deliver.
 	pub fn busy(&self) -> Vec<(Node, Node)> {
 		(self.queues.iter())
-			.filter(|(key, queue)| !queue.is_empty() && !self.held.contains(key))
+			.filter(|(_, queue)| !queue.is_empty())
 			.map(|(key, _)| *key)
 			.collect()
 	}
@@ -1310,7 +1239,7 @@ impl PathSim {
 		true
 	}
 
-	/// Deliver round-robin until every unheld queue is empty, or give up.
+	/// Deliver round-robin until every queue is empty, or give up.
 	pub fn run(&mut self) -> bool {
 		for _ in 0..10_000 {
 			let ready = self.busy();
@@ -1407,33 +1336,5 @@ fn a_ring_takes_the_other_way_round() {
 			assert_eq!(sim.shows(node, 7, "a"), None, "{rules:?}: node {node}");
 			assert_eq!(sim.nodes[node].retained(), (0, 0), "{rules:?}: node {node}");
 		}
-	}
-}
-
-impl Relay {
-	pub fn dump(&self, id: Id) -> String {
-		let mut out = format!(
-			"hop {} route {:?} dead {:?} epochs {:?} doubt {:?}",
-			self.hop,
-			self.routes.get(&id).map(|r| (r.next, r.path.is_some())),
-			self.dead,
-			self.epochs,
-			self.doubt
-		);
-		for (peer, session) in &self.sessions {
-			out += &format!(
-				"\n    {peer}: rx {:?} tx {:?} told {:?}",
-				session
-					.rx
-					.get(&id)
-					.map(|h| (h.state, h.path.iter().map(|x| (x.node, x.session)).collect::<Vec<_>>())),
-				session
-					.tx
-					.get(&id)
-					.map(|s| (s.held, s.path.iter().map(|x| (x.node, x.session)).collect::<Vec<_>>())),
-				session.told
-			);
-		}
-		out
 	}
 }

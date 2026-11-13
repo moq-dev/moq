@@ -911,18 +911,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.reader.shown()
 	}
 
-	/// Whether this node shows `claim` from `id`, and whether it is available.
-	#[cfg(test)]
-	pub fn shows(&self, id: Id, claim: &Path) -> Option<bool> {
-		self.reader.get(id, claim).map(|shown| shown.available)
-	}
-
-	/// The number this node names its session to `neighbor` with.
-	#[cfg(test)]
-	pub fn session(&self, neighbor: N) -> Option<u64> {
-		self.sessions.get(&neighbor).map(|session| session.number)
-	}
-
 	/// Every view this node keeps of another publisher, by route.
 	#[cfg(test)]
 	pub fn views(&self) -> impl Iterator<Item = (&RouteId, &View<A>)> {
@@ -961,12 +949,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	fn step(&self) {
 		#[cfg(test)]
 		self.work.set(self.work.get() + 1);
-	}
-
-	/// Whether a doubt or a dead hop is still remembered.
-	#[cfg(test)]
-	pub fn doubts(&self) -> bool {
-		!self.doubted.is_empty() || !self.timers.is_empty() || !self.dead.is_empty()
 	}
 
 	#[cfg(test)]

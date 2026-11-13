@@ -122,9 +122,17 @@ impl Relay {
 	}
 
 	fn events(&mut self) -> Vec<Event<Item>> {
+		// The simulator reads full views directly. Consume change notifications
+		// alongside events, as a driver does, so they retain no script history.
 		match self {
-			Self::Distance(router) => router.events(),
-			Self::Path(router) => router.events(),
+			Self::Distance(router) => {
+				drop(router.changed());
+				router.events()
+			}
+			Self::Path(router) => {
+				drop(router.changed());
+				router.events()
+			}
 		}
 	}
 
@@ -447,10 +455,6 @@ impl Sim {
 	}
 
 	/// The mocked clock.
-	pub fn now(&self) -> Instant {
-		self.now
-	}
-
 	/// A node that sends only identities it serves, like a browser.
 	pub fn leaf(&mut self, node: Node) {
 		self.leaf[node] = true;
