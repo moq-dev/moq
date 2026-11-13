@@ -49,7 +49,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   our publishers answer only a one-group FETCH or fill and refuse wider ones
   (maintainer, 2026-10-28,
   [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), and the
-  [IETF scope freeze](/quest/m2/ietf-scope/README.md) adds no hole-marker
+  IETF scope freeze (`doc/concept/standard.md`) adds no hole-marker
   extension that would let a cache answer a range.
   [Range FETCH over known holes](/quest/m4/ietf-range-fetch.md) later answers
   a range whose every group is cached or proven never produced. A FETCH of the track's newest live group is refused

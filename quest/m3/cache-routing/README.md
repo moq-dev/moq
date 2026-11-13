@@ -151,7 +151,7 @@ Measured by the proof:
     before its warm parent makes the parent's older route ineligible, so the
     child moves off and back (2 moves in the chain fixture); origins advance
     on every announce stream open and close. Item 13's paths drop the seqno
-    ([routes epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27),
+    ([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27),
     and this churn with it.
 
 13. Reopened 2026-11-11 (maintainer, /quest-plan on the route redesign):
@@ -159,7 +159,7 @@ Measured by the proof:
     propagating, that decision was made based on this flawed setup." ✅ **A
     warm route is per broadcast and propagates**, for as long as it is
     cheaper than the route its publisher's broadcasts share
-    ([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 26). A
+    ([epic](/quest/m2/cluster-routes/README.md) Plan item 26). A
     broadcast no relay carries rides the shared route and costs no message of
     its own. Item 4 rests safety on Babel's distance, which cannot let a relay
     join a copy at a neighbour that is no closer to the publisher: the join
