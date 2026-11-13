@@ -3,14 +3,15 @@
 //! propagates, and is kept free of loops by its path.
 //!
 //! A relay with a reader of its own carries a copy, and offers it to its neighbours
-//! at no cost, with the path the copy took from the publisher and the relay as its
+//! at no cost, with the path the copy took from the publisher and itself as its
 //! carrier. Each relay pulls a broadcast it has demand for (a reader, or a
 //! neighbour's subscription) through the cheapest of its publisher's route and each
 //! copy offered whose path does not name it, and passes a copy it would join on for
-//! as long as it beats the publisher's route. A relay with a reader joins only a
-//! copy whose carrier ranks below it by the Rendezvous Hash, so two carriers never
-//! take each other's. A copy with no demand left lingers; a relay pulling only for
-//! a neighbour offers nothing of its own.
+//! as long as it beats the publisher's route, at what joining it costs. A relay on
+//! one copy, its own included, moves onto another only if that copy's carrier ranks
+//! below by the Rendezvous Hash, so copies crossing on their way never trade places.
+//! A copy with no demand left lingers; a relay pulling only for a neighbour offers
+//! nothing of its own.
 //!
 //! [`Mesh`] adds what a sweep checks to [`PathSim`]: after every step, no
 //! broadcast's pulls form a cycle; once quiet, every reader is fed and nothing
@@ -39,6 +40,12 @@ pub(super) struct Mesh {
 	/// Steps after which some broadcast's pulls formed a cycle.
 	pub loops: usize,
 	pub steps: usize,
+	/// Of those, steps after which a reader's pulls led into the cycle.
+	pub starved: usize,
+	/// The most deliveries in a row after which a cycle remained, and the current run.
+	pub longest: usize,
+	run: usize,
+	delivered: bool,
 }
 
 impl Mesh {
@@ -49,6 +56,10 @@ impl Mesh {
 			casts: Vec::new(),
 			loops: 0,
 			steps: 0,
+			starved: 0,
+			longest: 0,
+			run: 0,
+			delivered: false,
 		}
 	}
 
@@ -145,6 +156,7 @@ impl Mesh {
 	}
 
 	fn deliver_one(&mut self, queue: &Queue) {
+		self.delivered = true;
 		match queue {
 			Queue::Route(from, to) => self.sim.deliver(*from, *to),
 			Queue::Sub(from, to, cast) => self.sim.deliver_sub(*from, *to, cast),
@@ -220,9 +232,30 @@ impl Mesh {
 	/// Count a step after which some broadcast's pulls form a cycle.
 	fn step(&mut self) {
 		self.steps += 1;
-		if self.cycle().is_some() {
-			self.loops += 1;
-		}
+		let cycle = self.cycle().is_some();
+		self.loops += usize::from(cycle);
+		self.run = match cycle {
+			true => self.run + usize::from(std::mem::take(&mut self.delivered)),
+			false => 0,
+		};
+		self.delivered = false;
+		self.longest = self.longest.max(self.run);
+	}
+
+	/// Whether some reader's pulls lead into a cycle.
+	fn starving(&self) -> bool {
+		self.casts.iter().any(|cast| {
+			(0..self.nodes()).filter(|&node| self.reading(node, cast)).any(|node| {
+				let mut at = node;
+				for _ in 0..=self.nodes() {
+					match self.parent(at, cast) {
+						Some(next) => at = next,
+						None => return false,
+					}
+				}
+				true
+			})
+		})
 	}
 
 	/// A broadcast whose pulls form a cycle, and each relay's parent for it.
@@ -252,6 +285,14 @@ impl Mesh {
 	/// for neighbours whose cheapest source it is.
 	pub fn steady(&mut self, label: &str) {
 		assert!(self.busy().is_empty(), "{label}: still busy");
+		if let Some((cast, _)) = self.cycle() {
+			for n in 0..self.nodes() {
+				let r = &self.sim.nodes[n];
+				let sent: Vec<String> = (0..self.nodes()).filter_map(|m| r.offers(m, &cast).0.map(|(p, c, k)| format!("->{m}:{c}/{}{:?}", k % 1000, p.iter().map(|h| h.node % 1000).collect::<Vec<_>>()))).collect();
+				let heard: Vec<String> = (0..self.nodes()).filter_map(|m| r.offers(m, &cast).1.map(|(p, c, k)| format!("<-{m}:{c}/{}{:?}", k % 1000, p.iter().map(|h| h.node % 1000).collect::<Vec<_>>()))).collect();
+				eprintln!("  n{n} r{} parent {:?} down {:?} src {:?} route {:?} sent {sent:?} heard {heard:?}", r.reading(&cast), r.parent(&cast), r.downstream(&cast), r.source(&cast).map(|s| (s.next, s.cost, s.warm, s.carrier % 1000, s.path.iter().map(|h| h.node % 1000).collect::<Vec<_>>())), r.next(cast.0));
+			}
+		}
 		assert_eq!(self.cycle(), None, "{label}");
 		for cast in &self.casts {
 			let origin = self.origins[&cast.0];
@@ -660,8 +701,8 @@ fn a_relay_joins_a_copy_farther_from_the_publisher() {
 		assert_eq!(mesh.sim.nodes[NEAR].cost(7), Some(11));
 		assert_eq!(mesh.sim.nodes[FAR].cost(7), Some(13));
 		mesh.steady(&format!("{rules:?}"));
-		// SIDE's copy, offered to NEAR alone, since FAR's copy passed through NEAR's path.
-		assert_eq!(mesh.sim.stats.warm_msgs - before.warm_msgs, 1, "{rules:?}");
+		// SIDE's copy came through NEAR, its only neighbour, so it offers it to no one.
+		assert_eq!(mesh.sim.stats.warm_msgs - before.warm_msgs, 0, "{rules:?}");
 
 		mesh.read(FAR, &x, false);
 		assert!(mesh.settle());
@@ -744,19 +785,25 @@ fn a_copy_that_goes_takes_its_offers_along() {
 
 /// Random relay meshes with two publishers under churn: readers come and go,
 /// sessions drop and return, messages are held and delivered out of step, lingers
-/// run out, time passes, and relays drain. Once churn stops every mesh settles on
-/// the steady state, and a broadcast nobody reads has sent no copy offer. The pulls
-/// form a cycle only while a withdrawal crosses a link, which the sweep counts.
+/// run out, time passes, and relays drain, with links held or not. Once churn stops
+/// every mesh settles on the steady state, and a broadcast nobody reads has sent no
+/// copy offer. The pulls form a cycle only while a withdrawal crosses a link, which
+/// the sweep counts.
 #[test]
 fn sweep_cache_routing() {
-	sweep(200);
+	for holds in [true, false] {
+		sweep(100, holds);
+	}
 }
 
-/// The sweep at length, run nightly.
+/// The sweep at length, which nightly runs and prints what it measured.
 #[test]
 #[ignore = "slow: nightly"]
 fn sweep_cache_routing_long() {
-	sweep(3000);
+	for holds in [true, false] {
+		let out = sweep(3000, holds);
+		println!("holds {holds}: {out:?}");
+	}
 }
 
 /// What a sweep measured.
@@ -767,12 +814,16 @@ struct Sweep {
 	steps: usize,
 	/// Scenarios with any such step.
 	looped: usize,
+	/// Steps after which a reader's pulls led into a cycle.
+	starved: usize,
+	/// The most deliveries in a row after which a cycle remained.
+	longest: usize,
 	/// Copy offers and their ends sent, and reader changes, during churn.
 	warm: usize,
 	reads: usize,
 }
 
-fn sweep(scenarios: usize) -> Sweep {
+fn sweep(scenarios: usize, holds: bool) -> Sweep {
 	const RELAYS: usize = 6;
 	let mut rng = XorShift(0xcac4_e5ee);
 	let mut out = Sweep::default();
@@ -830,7 +881,8 @@ fn sweep(scenarios: usize) -> Sweep {
 					let (a, b) = links[rng.next(links.len() as u64) as usize];
 					let (from, to) = if rng.chance(50) { (a, b) } else { (b, a) };
 					match rng.chance(70) {
-						true => mesh.hold(from, to),
+						true if holds => mesh.hold(from, to),
+						true => {}
 						false => mesh.release(from, to),
 					}
 				}
@@ -859,30 +911,14 @@ fn sweep(scenarios: usize) -> Sweep {
 				mesh.connect(a, b);
 			}
 		}
-		if !mesh.settle() {
-			// Find what keeps changing.
-			for _ in 0..3 {
-				let before: Vec<Vec<Option<Node>>> = read.iter().map(|c| (0..RELAYS+2).map(|n| mesh.parent(n, c)).collect()).collect();
-				let q = mesh.busy();
-				let lingers: Vec<_> = (0..RELAYS).map(|n| mesh.sim.nodes[n].lingers()).collect();
-				eprintln!("busy {q:?}\nparents {before:?}\nlingers {lingers:?}");
-				for _ in 0..50 { let b = mesh.busy(); if let Some(x) = b.first() { mesh.deliver_one(x); } }
-			}
-			panic!("{label}");
-		}
+		assert!(mesh.settle(), "{label}");
 		mesh.steady(&label);
 		assert_eq!(mesh.warm_sent(&idle), 0, "{label}");
 		out.loops += mesh.loops;
 		out.steps += mesh.steps;
 		out.looped += usize::from(mesh.loops > 0);
+		out.starved += mesh.starved;
+		out.longest = out.longest.max(mesh.longest);
 	}
 	out
-}
-
-/// What the sweep measures, recorded for the quest: how often the pulls form a
-/// cycle, and how many copy offers a reader change costs.
-#[test]
-fn sweep_measures() {
-	let out = sweep(200);
-	println!("{out:?}");
 }
