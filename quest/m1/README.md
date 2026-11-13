@@ -22,12 +22,8 @@ publisher and OIDC quests (setup after the cut's first publishes) are
 additive. video-vaapi moved up from later work
 because a downstream iGPU transcode trial needs it now.
 
-Held here by open claims: a quest's branch is its path, so a claimed quest
-cannot move until its PR merges, and an epic moves with its children. This
-breaking epic stays in m1 for now and is listed in m2's
-`Required`, so the cut still waits on it: stream-credit. The
-[re-cut follow-up](/quest/m2/recut-held.md) moves what remains of it once
-its claims merge.
+Decided 2026-11-13 (maintainer, /quest-run): stream-credit stays in m1 and
+no longer gates m2, since takeover, its only wire change, moved to m3.
 
 ## Related
 

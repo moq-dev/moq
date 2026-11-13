@@ -6076,9 +6076,9 @@ impl TrackRun {
 	}
 
 	/// The rank of the group waiting for stream credit, if it cannot make room: it ranks below
-	/// every stream this subscription holds that a reset can still take, so it waits for credit
-	/// to return, while a group that outranks one of those streams would take it over now. A
-	/// stream past its FIN holds credit until acknowledged, but nothing can reset it.
+	/// every stream this subscription could take over, so it waits for credit to return, while
+	/// a group that outranks one of those streams would take it over now. A finished stream
+	/// waiting for its acknowledgement can't be taken over, so it isn't ranked.
 	fn stuck(&mut self) -> Option<i64> {
 		let waiting = self.opening.as_ref()?;
 		let order = self.ctx.steer_current().order;
@@ -6087,7 +6087,7 @@ impl TrackRun {
 		let mut held = self
 			.children
 			.iter()
-			.filter(|serve| matches!(serve.state, GroupState::Serve { .. }))
+			.filter(|serve| serve.serving())
 			.map(rank)
 			.peekable();
 		(held.peek().is_some() && held.all(|held| held > waiting)).then_some(waiting)
@@ -6380,6 +6380,11 @@ enum GroupState {
 }
 
 impl GroupServe {
+	/// Whether it holds a stream still sending, which a higher-ranked group may take over.
+	fn serving(&self) -> bool {
+		matches!(self.state, GroupState::Serve { .. })
+	}
+
 	fn new(
 		ctx: GroupContext,
 		sequence: u64,

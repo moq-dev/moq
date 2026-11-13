@@ -580,8 +580,7 @@ Not covered yet: publishing from engines other than Chromium in CI, the worker
 capture path, and any claim about physical playback.
 
 The relay's port is reserved for the run rather than fixed, so two checkouts can
-run the interop test at once; `INTEROP_PORT` pins one instead. `INTEROP_QUARANTINED=1`
-runs the cells quarantined for flakes, to reproduce one. A failing run keeps its
+run the interop test at once; `INTEROP_PORT` pins one instead. A failing run keeps its
 directory, including a Playwright trace of the failing page, and CI uploads it;
 `HARNESS_KEEP=1` keeps a passing run's too. See [the harness
 contract](../README.md).
