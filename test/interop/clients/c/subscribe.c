@@ -259,6 +259,12 @@ static void start_audio(ctx_t *c, int32_t catalog) {
         moq_audio_decoder_output out;
         memset(&out, 0, sizeof(out));
         out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
+        // moq-audio waits on a missing group for its playout delay, measured from arrival timing
+        // at tens of ms, so a runtime starved longer than that skips a group that is only late.
+        // This reader checks delivery between implementations, not a real-time deadline: it holds
+        // a playout delay of the max delay, waiting on a hole for the same budget it grants a late
+        // group.
+        out.delay.min_us = MAX_DELAY_US;
         out.delay.max_us = MAX_DELAY_US;
         int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
         pthread_mutex_lock(&c->mu);

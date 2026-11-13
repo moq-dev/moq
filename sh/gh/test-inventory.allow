@@ -37,6 +37,7 @@ ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
 
 # Flaked under load; disabled until fixed at its cause.
+recipe test::stream-credit /quest/m1/stream-credit/browser-resets.md
 
 # Too slow for the merge gate; the quest runs it nightly once every scenario settles.
 ignore moq-net::route::tests::cache::sweep_cache_routing_long /quest/m2/cache-routing-proof.md
