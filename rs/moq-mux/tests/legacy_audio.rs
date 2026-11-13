@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use moq_mux::catalog::hang::Container;
-use moq_mux::container::{Consumer, Frame, Producer, Read};
 use moq_mux::container::Container as _;
+use moq_mux::container::{Consumer, Frame, Producer, Read};
 
 /// How long a step may take on the paused clock before the test fails.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -23,7 +23,11 @@ fn origin() -> moq_net::origin::Producer {
 /// A publisher's origin and a subscriber's origin connected over one session on `version`.
 async fn connect(
 	version: moq_net::Version,
-) -> (moq_net::origin::Producer, moq_net::origin::Producer, [moq_net::Session; 2]) {
+) -> (
+	moq_net::origin::Producer,
+	moq_net::origin::Producer,
+	[moq_net::Session; 2],
+) {
 	let publisher = origin();
 	let subscriber = origin();
 	let mut transport = moq_net::transport::memory::Config::default();
@@ -158,7 +162,10 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 				.unwrap_or_else(|_| panic!("{version}: packet {n} never read"))
 				.unwrap()
 				.expect("a read");
-			assert!(matches!(read, Read::Frame { .. }), "{version}: packet {n} read as {read:?}");
+			assert!(
+				matches!(read, Read::Frame { .. }),
+				"{version}: packet {n} read as {read:?}"
+			);
 		}
 	}
 }

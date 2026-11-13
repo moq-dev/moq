@@ -42,7 +42,9 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, 
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 		.unwrap();
 	let mut catalog = moq_json::snapshot::Producer::new(track, Default::default());
-	catalog.update(moq_json::Timed::from(value).at(Timestamp::ZERO)).unwrap();
+	catalog
+		.update(moq_json::Timed::from(value).at(Timestamp::ZERO))
+		.unwrap();
 	let video = publication
 		.create_track("same", hang::container::track_info(1))
 		.unwrap();

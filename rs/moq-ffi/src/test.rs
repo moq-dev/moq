@@ -5210,7 +5210,10 @@ async fn raw_track_next_group_is_repeatable() {
 		.await
 		.unwrap();
 
-	for (at, payload) in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()].into_iter().enumerate() {
+	for (at, payload) in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+		.into_iter()
+		.enumerate()
+	{
 		// Each group starts at its frame's time, and starts strictly increase.
 		track
 			.write_frame(MoqFrame {

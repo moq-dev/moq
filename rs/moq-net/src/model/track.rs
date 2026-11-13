@@ -12740,7 +12740,9 @@ mod test {
 		let producer = track_producer("test", Info::timed().with_max_age(Duration::ZERO));
 		elapse(&producer, Duration::ZERO);
 		let mut group = producer.append_group(0).unwrap();
-		group.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x")).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.unwrap();
 		group.finish(40).unwrap();
 
 		let consumer = producer.consume();

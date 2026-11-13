@@ -79,9 +79,7 @@ mod test {
 		let (mut producer, mut groups) = producer_on(ProducerConfig::default(), timed());
 		let first = moq_net::Timestamp::from_millis(100).unwrap();
 		let second = moq_net::Timestamp::from_millis(200).unwrap();
-		producer
-			.push(crate::Timed::from(&json!({ "n": 1 })).at(first))
-			.unwrap();
+		producer.push(crate::Timed::from(&json!({ "n": 1 })).at(first)).unwrap();
 		producer.pop(crate::Timed::from(1u64).at(second)).unwrap();
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {

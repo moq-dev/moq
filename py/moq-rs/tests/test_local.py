@@ -211,9 +211,9 @@ def test_publish_media_cut_and_seek():
         media.write_frame(b"opus frame", moq.Timestamp(i * 20_000, 1_000_000))
         media.cut()
 
-    # The same boundary, with the next group explicitly numbered.
+    # The same boundary, with the next group's start named explicitly.
     media.write_frame(b"opus frame", moq.Timestamp(60_000, 1_000_000))
-    media.seek(42)
+    media.seek(80_000)
     media.discontinuity()
     media.write_frame(b"resumed opus frame", moq.Timestamp(100_000, 1_000_000))
 
@@ -988,18 +988,20 @@ def test_raw_sparse_groups_and_known_end():
 
 def test_raw_parallel_groups():
     """Appending a new group before finishing the previous is allowed;
-    both groups carry distinct sequences and can be written independently."""
+    both groups carry distinct starts and can be written independently."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("parallel", moq.TrackInfo(timescale=1_000_000))
 
+    # Without a start, each append takes the next start past the largest.
     g0 = track.append_group()
     g1 = track.append_group()
     assert g0.sequence == 0
     assert g1.sequence == 1
 
+    # A frame lands at or past its group's start and before the next group's.
     g0.write_frame(b"a0", moq.Timestamp(0, 1_000_000))
-    g1.write_frame(b"b0", moq.Timestamp(0, 1_000_000))
-    g0.write_frame(b"a1", moq.Timestamp(1, 1_000_000))
+    g1.write_frame(b"b0", moq.Timestamp(1, 1_000_000))
+    g0.write_frame(b"a1", moq.Timestamp(0, 1_000_000))
     g0.finish()
     g1.finish()
 
@@ -1164,7 +1166,8 @@ async def test_time_anchor_starts_at_the_group_containing_it():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("timed", moq.TrackInfo(max_age=None, timescale=1_000))
     for second in range(3):
-        group = track.append_group()
+        # Each group starts at its frame's time, in the track's milliseconds.
+        group = track.create_group(second * 1_000)
         group.write_frame(b"x", moq.Timestamp(second, 1))
         group.finish()
 
@@ -1178,7 +1181,7 @@ async def test_time_anchor_starts_at_the_group_containing_it():
     )
     group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
     assert group is not None
-    assert group.sequence == 1
+    assert group.sequence == 1_000
 
 
 async def test_raw_group_producer_consume_direct():

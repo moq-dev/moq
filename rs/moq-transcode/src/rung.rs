@@ -998,10 +998,9 @@ mod tests {
 		(rung, source, trigger)
 	}
 
-	/// A group every reader narrowed past releases the fill's one-at-a-time fetch, so the
-	/// groups the fill still owes are fetched rather than waiting behind it.
+	/// A group every reader narrowed past releases the fill's one-at-a-time fetch rather than
+	/// holding it until the group is transcoded.
 	#[tokio::test(start_paused = true)]
-	#[ignore = "anchors a reader at key 7 below a track starting at 10, which a time anchor no longer names: the group covering 7 may start anywhere below it"]
 	async fn a_group_nobody_reads_releases_its_fill() {
 		use std::task::Poll;
 		let (rung, source, _retire) = idle_rung();
@@ -1034,6 +1033,12 @@ mod tests {
 		live.close().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+		// The reader first asks where 7 falls. A group starting at 6 covers it, so the reader
+		// starts there and asks for the groups after it.
+		let lookup = fills.requested_fill().await.unwrap();
+		assert_eq!(lookup.time(), Some(7));
+		lookup.accept(6, None).unwrap().close().unwrap();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		let fill = fills.requested_fill().await.unwrap();
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
@@ -1046,19 +1051,24 @@ mod tests {
 			.unwrap();
 		assert_eq!(first.start().group, 7);
 
-		reader.update(ascending(8)).unwrap();
-		assert!(reader.poll_recv_group(&waiter).is_pending());
-		let next = kio::clock::timeout(wait, source_fills.requested_fill())
+		// The reader narrows to the live group. A group starting anywhere after 7 could still be
+		// group 7's, so only a start the cache holds narrows past it.
+		reader.update(ascending(10)).unwrap();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+		kio::clock::timeout(wait, tasks.join_next())
 			.await
 			.expect("the fill waited behind group 7, which nobody reads")
+			.unwrap()
 			.unwrap();
-		assert_eq!(next.start().group, 8);
+		assert!(
+			kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
+			"nothing the fill owed is still wanted"
+		);
 	}
 
 	/// Retirement's drain finishes a fill whose reader stopped reading: the groups still owed
 	/// are served without waiting for that reader to pick up the last one.
 	#[tokio::test(start_paused = true)]
-	#[ignore = "anchors a reader at key 7 below a track starting at 10, which a time anchor no longer names: the group covering 7 may start anywhere below it"]
 	async fn retirement_serves_a_fill_past_a_reader_that_stopped() {
 		use std::task::Poll;
 		let (rung, source, retire) = idle_rung();
@@ -1088,6 +1098,12 @@ mod tests {
 			.unwrap();
 		live.close().unwrap();
 		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+		// The reader first asks where 7 falls. A group starting at 6 covers it, so the reader
+		// starts there and asks for the groups after it.
+		let lookup = fills.requested_fill().await.unwrap();
+		assert_eq!(lookup.time(), Some(7));
+		lookup.accept(6, None).unwrap().close().unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		let fill = fills.requested_fill().await.unwrap();
 		assert_eq!((fill.start().group, fill.end()), (7, 10));

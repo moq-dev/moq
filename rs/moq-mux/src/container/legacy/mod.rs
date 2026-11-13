@@ -135,7 +135,7 @@ impl Audio {
 			Packets::Fixed { samples, rate } => (samples, rate),
 			Packets::Pcm { frame_bytes, rate } => {
 				let frame_bytes = frame_bytes as usize;
-				if payload.len() % frame_bytes != 0 {
+				if !payload.len().is_multiple_of(frame_bytes) {
 					return None;
 				}
 				(u32::try_from(payload.len() / frame_bytes).ok()?, rate)

@@ -2017,7 +2017,9 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(moq_json::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(next_stamp(&self.track)))
+				.update(
+					moq_json::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(next_stamp(&self.track)),
+				)
 				.expect("publish");
 		}
 	}

@@ -2141,7 +2141,10 @@ mod timebase_tests {
 			// Catalogs published in the same millisecond, such as a rendition and its first estimate,
 			// start a unit apart, since each starts its own group.
 			let second = first + 5_000_000;
-			assert!((second..=second + 1_000).contains(&stamp.as_micros()), "shared={shared}");
+			assert!(
+				(second..=second + 1_000).contains(&stamp.as_micros()),
+				"shared={shared}"
+			);
 		}
 	}
 

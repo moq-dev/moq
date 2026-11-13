@@ -8,8 +8,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{Encoded, Encoder};
-use crate::refresh::Refresh;
 use crate::Timed;
+use crate::refresh::Refresh;
 
 use crate::{Error, Result};
 

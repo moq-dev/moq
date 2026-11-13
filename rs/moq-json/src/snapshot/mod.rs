@@ -115,9 +115,7 @@ mod test {
 		for deltas in [false, true] {
 			let (mut producer, track) = producer_on(cfg(deltas), timed());
 			let at = moq_net::Timestamp::from_millis(100).unwrap();
-			producer
-				.update(crate::Timed::from(&json!({ "n": 1 })).at(at))
-				.unwrap();
+			producer.update(crate::Timed::from(&json!({ "n": 1 })).at(at)).unwrap();
 			assert!(matches!(
 				producer.update(&json!({ "n": 2 })),
 				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
@@ -135,9 +133,7 @@ mod test {
 		for deltas in [false, true] {
 			let (mut producer, track) = producer_on(cfg(deltas), timed());
 			let at = moq_net::Timestamp::from_millis(100).unwrap();
-			producer
-				.update(crate::Timed::from(&json!({ "n": 1 })).at(at))
-				.unwrap();
+			producer.update(crate::Timed::from(&json!({ "n": 1 })).at(at)).unwrap();
 			assert!(matches!(
 				producer.update(crate::Timed::from(&json!({ "n": 2 })).at(huge)),
 				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))

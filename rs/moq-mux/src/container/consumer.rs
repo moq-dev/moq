@@ -2304,7 +2304,10 @@ mod tests {
 				keyframe: false,
 				duration: None,
 			};
-			Container::try_from(&config).unwrap().write(&mut group, &[packet]).unwrap();
+			Container::try_from(&config)
+				.unwrap()
+				.write(&mut group, &[packet])
+				.unwrap();
 			group.close().unwrap();
 		}
 		let _track = track.finish().unwrap();

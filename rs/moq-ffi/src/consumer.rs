@@ -231,7 +231,10 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 			.with_priority(s.priority)
 			.with_delay(s.delay.into());
 		if let Some(ranges) = s.ranges {
-			let ranges = ranges.into_iter().map(MoqRange::resolve).collect::<Result<Vec<_>, _>>()?;
+			let ranges = ranges
+				.into_iter()
+				.map(MoqRange::resolve)
+				.collect::<Result<Vec<_>, _>>()?;
 			subscription = subscription.with_ranges(ranges.into_iter().flatten());
 		}
 		if let Some(order) = s.order {

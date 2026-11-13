@@ -487,10 +487,12 @@ impl MoqTrackRequests {
 	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
 		let fill = self
 			.reads
-			.wait(|requests, waiter| loop {
-				let fill = ready!(requests.poll_requested_fill(waiter))?;
-				if fill.time().is_none() {
-					return Poll::Ready(Ok(fill));
+			.wait(|requests, waiter| {
+				loop {
+					let fill = ready!(requests.poll_requested_fill(waiter))?;
+					if fill.time().is_none() {
+						return Poll::Ready(Ok(fill));
+					}
 				}
 			})
 			.await?;

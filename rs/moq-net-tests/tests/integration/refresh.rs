@@ -14,8 +14,8 @@ fn origin(hop: u64) -> origin::Producer {
 /// complete snapshot.
 #[kio::test]
 async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
-	use moq_json::snapshot;
 	use moq_json::Timed;
+	use moq_json::snapshot;
 	use moq_net::{Timescale, Timestamp};
 	use serde_json::{Value, json};
 

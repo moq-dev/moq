@@ -59,16 +59,12 @@ mod test {
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
-		producer
-			.append(crate::Timed::from(&json!({ "n": 1 })).at(at))
-			.unwrap();
+		producer.append(crate::Timed::from(&json!({ "n": 1 })).at(at)).unwrap();
 		assert!(matches!(
 			producer.append(&json!({ "n": 2 })),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
-		producer
-			.append(crate::Timed::from(&json!({ "n": 3 })).at(at))
-			.unwrap();
+		producer.append(crate::Timed::from(&json!({ "n": 3 })).at(at)).unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
@@ -80,16 +76,12 @@ mod test {
 		let (mut producer, track) = producer_on(Config::default(), timed());
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
 		let huge = moq_net::Timestamp::from_scale((1 << 61) - 1, 1).unwrap();
-		producer
-			.append(crate::Timed::from(&json!({ "n": 1 })).at(at))
-			.unwrap();
+		producer.append(crate::Timed::from(&json!({ "n": 1 })).at(at)).unwrap();
 		assert!(matches!(
 			producer.append(crate::Timed::from(&json!({ "n": 2 })).at(huge)),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
-		producer
-			.append(crate::Timed::from(&json!({ "n": 3 })).at(at))
-			.unwrap();
+		producer.append(crate::Timed::from(&json!({ "n": 3 })).at(at)).unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
