@@ -272,6 +272,9 @@ interface Yielding {
 	verdict: YieldVerdict;
 	// The stream's hold on the subscription's end, which a drop naming its group excuses.
 	counted: Counted;
+	// The drop that excused its hold: a final one's stands, and the next update reopens a stale
+	// one's, restoring the hold.
+	excuse?: "stale" | "final";
 	// End the stream as reset with YIELDED: a later stream for its group proves the publisher
 	// reset it, even where the browser lost that reset.
 	supersede: () => void;
@@ -3161,6 +3164,12 @@ export class Subscriber {
 			entry.update = update.update;
 			entry.maxDelay = update.maxDelay;
 			entry.tail.updated();
+			// A stream a stale drop excused holds the end again: that verdict no longer stands.
+			for (const yielding of entry.yielding?.values() ?? []) {
+				if (yielding.excuse !== "stale") continue;
+				yielding.excuse = undefined;
+				yielding.counted.restore();
+			}
 			const held = hooks.supersedeStale(entry.track, judged(ranges));
 			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 			// again under the new number what is still stale, so the tail owes every stale run again.
@@ -3288,8 +3297,6 @@ export class Subscriber {
 		const counted = tail.open(group.sequence);
 		// Until the stream is read, or a pause hands it to the paused group.
 		let read: (() => void) | undefined = counted.done;
-		// A stale drop already accounted for the group, so the end waits for it at most the grace.
-		if (unowedUnder !== undefined) counted.excuse();
 		this.#reoffered(track, group.sequence, group.sequence + 1n);
 
 		try {
@@ -3362,6 +3369,12 @@ export class Subscriber {
 				};
 				entry.yielding ??= new Map();
 				entry.yielding.set(group.sequence, yielding);
+				// A stale drop already accounted for the group, so the end waits for it at most the
+				// grace, until an update reopens that drop.
+				if (unowedUnder !== undefined) {
+					yielding.excuse = "stale";
+					counted.excuse();
+				}
 			}
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
@@ -3477,8 +3490,11 @@ export class Subscriber {
 		for (const [sequence, yielding] of entry.yielding ?? []) {
 			if (sequence < start || sequence >= end) continue;
 			// The drop accounts for the group, so the end no longer waits on its stream past the
-			// grace: a browser that lost the stream's reset would otherwise hold it forever.
+			// grace: a browser that lost the stream's reset would otherwise hold it forever. A final
+			// drop's excuse stands; the next update reopens a stale one's.
 			yielding.counted.excuse();
+			if (staleUnder === undefined) yielding.excuse = "final";
+			else if (yielding.excuse !== "final") yielding.excuse = "stale";
 			const verdict = yielding.verdict;
 			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
 			else if (verdict.kind !== "dropped")

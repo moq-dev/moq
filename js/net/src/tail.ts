@@ -22,6 +22,8 @@ export interface Counted {
 	 * waits for it at most the grace. Idempotent.
 	 */
 	excuse(): void;
+	/** Hold the end again: the drop that excused it no longer stands, as an update reopens a stale one. */
+	restore(): void;
 }
 
 /**
@@ -124,6 +126,13 @@ export class Tail {
 				state = "excused";
 				this.#active -= 1;
 				this.#excused.add(token);
+				this.#bump();
+			},
+			restore: () => {
+				if (state !== "excused") return;
+				state = "held";
+				this.#excused.delete(token);
+				this.#active += 1;
 				this.#bump();
 			},
 		};
