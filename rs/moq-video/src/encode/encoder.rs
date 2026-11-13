@@ -555,16 +555,22 @@ impl Encoder {
 		};
 		#[cfg(not(target_os = "linux"))]
 		let external = false;
+		// A backend that scales a GPU surface itself writes it straight into its
+		// own input, rather than into a scaled copy made here.
+		let scaled = external
+			|| self.resize.as_ref().is_some_and(|config| {
+				config.output.resolve(&frame.surface) == crate::Output::Native && self.backend.scales(&frame.surface)
+			});
 		let resized;
 		let frame = match &self.resize {
-			Some(config) if !external && frame.size() != self.size => {
+			Some(config) if !scaled && frame.size() != self.size => {
 				resized = frame.resize(self.size, config)?;
 				&resized
 			}
 			_ => frame,
 		};
 		let size = frame.size();
-		if !external && size != self.size {
+		if !scaled && size != self.size {
 			return Err(Error::codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size

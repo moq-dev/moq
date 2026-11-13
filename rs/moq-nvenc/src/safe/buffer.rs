@@ -226,8 +226,8 @@ impl Session {
 	///
 	/// # Errors
 	///
-	/// Could error if registration or mapping fails,
-	/// if the resource is invalid, or if we run out of memory.
+	/// Could error if registration fails, if the resource is invalid, or if
+	/// we run out of memory.
 	pub fn register_cuda_resource(
 		&self,
 		pitch: u32,
@@ -259,11 +259,8 @@ impl Session {
 	///
 	/// # Errors
 	///
-	/// Could error if registration or mapping fails,
-	/// if the resource is invalid, or if we run out of memory.
-	/// A mapping failure rolls registration back before releasing `marker`. If
-	/// rollback also fails, [`EncodeError::cleanup`] exposes that failure and
-	/// the marker is retained because NVENC may still refer to its allocation.
+	/// Could error if registration fails, if the resource is invalid, or if
+	/// we run out of memory. A failed registration releases `marker`.
 	///
 	/// # Safety
 	///
@@ -285,8 +282,8 @@ impl Session {
 			self.buffer_format,
 		)
 		.pitch(pitch);
-		let mapping = Mapping::new(self.encoder.clone(), marker, &mut params)?;
-		Ok(RegisteredResource { mapping, pitch })
+		let registration = Registration::new(self.encoder.clone(), marker, &mut params)?;
+		Ok(RegisteredResource { registration, pitch })
 	}
 }
 
@@ -664,69 +661,95 @@ impl Drop for BitstreamLock<'_> {
 	}
 }
 
-/// Abstraction for a registered and mapped external resource.
+/// An external resource registered with one session.
 ///
 /// The Encoder API exposes a way to use input buffers allocated externally,
-/// for example through CUDA or OpenGL.
+/// for example through CUDA or OpenGL. Register the allocation once, then
+/// [`map`](Self::map) it for each encode: registration is the expensive half,
+/// and NVENC forbids touching the allocation only while it is mapped.
 ///
-/// The buffer is automatically unmapped and unregistered when dropped.
-/// The external buffer memory should still be properly destroyed by the client.
+/// The resource is unregistered when dropped, and only then is its owner
+/// released. The external buffer memory should still be properly destroyed
+/// by the client.
 #[derive(Debug)]
 pub struct RegisteredResource<T> {
-	mapping: Mapping<Arc<Encoder>, T>,
+	registration: Registration<Arc<Encoder>, T>,
 	pitch: u32,
 }
 
 unsafe impl Send for RegisteredResource<MappedBuffer> {}
 
-/// A registered and mapped external resource plus the owner keeping its
-/// allocation alive.
-#[derive(Debug)]
-struct Mapping<A: ResourceApi, T> {
-	reg_ptr: *mut c_void,
-	map_ptr: *mut c_void,
-	api: A,
-	// Dropped only once the resource is unregistered.
-	marker: ManuallyDrop<T>,
-}
-
-impl<A: ResourceApi, T> Mapping<A, T> {
-	/// Register and map as one transaction: a mapping failure unregisters
-	/// before `marker` is released.
-	fn new(api: A, marker: T, params: &mut NV_ENC_REGISTER_RESOURCE) -> Result<Self, EncodeError> {
-		let reg_ptr = api.register_resource(params)?;
-		let map_ptr = match api.map_input_resource(reg_ptr) {
-			Ok(map_ptr) => map_ptr,
-			Err(primary) => {
-				if let Err(cleanup) = api.unregister_resource(reg_ptr) {
-					// NVENC may still refer to the allocation and there is no handle
-					// left to retry with, so leaking it is safer than freeing it.
-					std::mem::forget(marker);
-					return Err(primary.with_cleanup(cleanup));
-				}
-				return Err(primary);
-			}
-		};
-		Ok(Self {
-			reg_ptr,
-			map_ptr,
-			api,
-			marker: ManuallyDrop::new(marker),
+impl<T> RegisteredResource<T> {
+	/// Map the resource for one [`Session::encode_picture`]. It is unmapped when
+	/// the returned input drops, which [`Submission::finish`](super::Submission::finish)
+	/// hands back once NVENC has finished reading it; write the allocation only
+	/// while it is unmapped.
+	///
+	/// Mapping waits for CUDA work on the default stream to finish; work on any
+	/// other stream must be synchronized first.
+	///
+	/// # Errors
+	///
+	/// Could error if the driver cannot map the resource. The registration
+	/// stays usable.
+	pub fn map(&mut self) -> Result<MappedResource<'_, T>, EncodeError> {
+		let pitch = self.pitch;
+		Ok(MappedResource {
+			mapped: self.registration.map()?,
+			pitch,
 		})
 	}
 }
 
-/// Automatically unmap and unregister the external resource
-/// when it goes out of scope.
-impl<A: ResourceApi, T> Drop for Mapping<A, T> {
+/// A [`RegisteredResource`] mapped for one encode, unmapped on drop.
+#[derive(Debug)]
+pub struct MappedResource<'a, T> {
+	mapped: Mapped<'a, Arc<Encoder>, T>,
+	pitch: u32,
+}
+
+/// A registered external resource plus the owner keeping its allocation alive.
+#[derive(Debug)]
+struct Registration<A: ResourceApi, T> {
+	reg_ptr: *mut c_void,
+	api: A,
+	// Dropped only once the resource is unregistered.
+	marker: ManuallyDrop<T>,
+	/// Set when NVENC may still hold a mapping, so the registration and the
+	/// owner of its memory are leaked rather than released.
+	leaked: bool,
+}
+
+impl<A: ResourceApi, T> Registration<A, T> {
+	/// Register `marker`'s allocation. A failed registration holds nothing, so
+	/// `marker` is released.
+	fn new(api: A, marker: T, params: &mut NV_ENC_REGISTER_RESOURCE) -> Result<Self, EncodeError> {
+		let reg_ptr = api.register_resource(params)?;
+		Ok(Self {
+			reg_ptr,
+			api,
+			marker: ManuallyDrop::new(marker),
+			leaked: false,
+		})
+	}
+
+	fn map(&mut self) -> Result<Mapped<'_, A, T>, EncodeError> {
+		let map_ptr = self.api.map_input_resource(self.reg_ptr)?;
+		Ok(Mapped {
+			registration: self,
+			map_ptr,
+		})
+	}
+}
+
+/// Unregister the external resource when it goes out of scope.
+impl<A: ResourceApi, T> Drop for Registration<A, T> {
 	fn drop(&mut self) {
-		// A failed unmap leaves the resource mapped. Unregistering or freeing
-		// it could release memory NVENC still holds, so leak the owner instead.
-		if self.api.unmap_input_resource(self.map_ptr).is_err() {
+		if self.leaked {
 			return;
 		}
-		// As in `new`: NVENC may still refer to an allocation it failed to
-		// unregister, so leak its owner rather than free it.
+		// NVENC may still refer to an allocation it failed to unregister, so
+		// leak its owner rather than free it.
 		if self.api.unregister_resource(self.reg_ptr).is_ok() {
 			// SAFETY: dropped once, here, and never touched again.
 			unsafe { ManuallyDrop::drop(&mut self.marker) };
@@ -734,26 +757,51 @@ impl<A: ResourceApi, T> Drop for Mapping<A, T> {
 	}
 }
 
-impl<T> sealed::Input for RegisteredResource<T> {
+/// One mapping of a [`Registration`].
+#[derive(Debug)]
+struct Mapped<'a, A: ResourceApi, T> {
+	registration: &'a mut Registration<A, T>,
+	map_ptr: *mut c_void,
+}
+
+impl<A: ResourceApi, T> Mapped<'_, A, T> {
+	/// Give up a mapping the driver may still be reading: never unmap it, and
+	/// never unregister or release its allocation.
 	fn abandon(self) {
-		// Skip `Drop`, leaking the registration and the owner of its memory.
 		let this = ManuallyDrop::new(self);
 		// SAFETY: read once from a value whose destructor never runs.
-		drop(unsafe { ptr::read(&this.mapping.api) });
+		let registration = unsafe { ptr::read(&this.registration) };
+		registration.leaked = true;
 	}
 }
 
-impl<T> EncoderInput for RegisteredResource<T> {
+impl<A: ResourceApi, T> Drop for Mapped<'_, A, T> {
+	fn drop(&mut self) {
+		// A failed unmap leaves the resource mapped. Unregistering or freeing
+		// it could release memory NVENC still holds, so leak the owner instead.
+		if self.registration.api.unmap_input_resource(self.map_ptr).is_err() {
+			self.registration.leaked = true;
+		}
+	}
+}
+
+impl<T> sealed::Input for MappedResource<'_, T> {
+	fn abandon(self) {
+		self.mapped.abandon();
+	}
+}
+
+impl<T> EncoderInput for MappedResource<'_, T> {
 	fn pitch(&self) -> u32 {
 		self.pitch
 	}
 
 	fn handle(&mut self) -> *mut c_void {
-		self.mapping.map_ptr
+		self.mapped.map_ptr
 	}
 
 	fn encoder(&self) -> &Arc<Encoder> {
-		&self.mapping.api
+		&self.mapped.registration.api
 	}
 }
 
@@ -761,7 +809,6 @@ impl<T> EncoderInput for RegisteredResource<T> {
 mod tests {
 	use std::{
 		cell::{Cell, RefCell},
-		error::Error,
 		rc::Rc,
 	};
 
@@ -866,7 +913,7 @@ mod tests {
 		(Owner(alive.clone()), alive)
 	}
 
-	fn register(api: &TestApi, owner: Owner) -> Result<Mapping<&TestApi, Owner>, EncodeError> {
+	fn register(api: &TestApi, owner: Owner) -> Result<Registration<&TestApi, Owner>, EncodeError> {
 		let mut params = NV_ENC_REGISTER_RESOURCE::new(
 			NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
 			1920,
@@ -875,92 +922,67 @@ mod tests {
 			NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
 		)
 		.pitch(1920);
-		Mapping::new(api, owner, &mut params)
+		Registration::new(api, owner, &mut params)
 	}
 
 	#[test]
-	fn mapping_failure_unregisters_before_releasing_the_owner() {
-		let (owner, alive) = setup();
-		let mut api = TestApi::new(alive.clone());
-		api.map_error = Some(ErrorKind::MapFailed);
-
-		let error = register(&api, owner).expect_err("mapping should fail");
-
-		assert_eq!(error.kind(), ErrorKind::MapFailed);
-		assert!(error.cleanup().is_none());
-		assert!(!alive.get(), "owner should be released after successful rollback");
-		assert_eq!(
-			*api.calls.borrow(),
-			Calls {
-				register: 1,
-				map: 1,
-				unmap: 0,
-				unregister: 1,
-			}
-		);
-	}
-
-	#[test]
-	fn rollback_failure_retains_both_errors_and_the_owner() {
-		let (owner, alive) = setup();
-		let mut api = TestApi::new(alive.clone());
-		api.map_error = Some(ErrorKind::MapFailed);
-		api.unregister_error = Some(ErrorKind::ResourceNotRegistered);
-
-		let error = register(&api, owner).expect_err("mapping and rollback should fail");
-
-		assert_eq!(error.kind(), ErrorKind::MapFailed);
-		assert_eq!(
-			error.cleanup().map(EncodeError::kind),
-			Some(ErrorKind::ResourceNotRegistered)
-		);
-		assert_eq!(
-			error
-				.source()
-				.and_then(|source| source.downcast_ref::<EncodeError>())
-				.map(EncodeError::kind),
-			Some(ErrorKind::ResourceNotRegistered)
-		);
-		assert!(alive.get(), "a possibly registered allocation must remain owned");
-		assert_eq!(
-			*api.calls.borrow(),
-			Calls {
-				register: 1,
-				map: 1,
-				unmap: 0,
-				unregister: 1,
-			}
-		);
-	}
-
-	#[test]
-	fn mapped_resource_cleans_up_once_before_releasing_the_owner() {
+	fn one_registration_serves_every_mapping() {
 		let (owner, alive) = setup();
 		let api = TestApi::new(alive.clone());
 
-		let resource = register(&api, owner).expect("mapping should succeed");
+		let mut registration = register(&api, owner).expect("registration should succeed");
+		for _ in 0..3 {
+			drop(registration.map().expect("mapping should succeed"));
+			assert!(!api.mapped.get(), "each mapping is released before the next");
+		}
 		assert!(alive.get());
-		drop(resource);
+		drop(registration);
 
 		assert!(!alive.get(), "owner should be released after destruction");
 		assert_eq!(
 			*api.calls.borrow(),
 			Calls {
 				register: 1,
-				map: 1,
-				unmap: 1,
+				map: 3,
+				unmap: 3,
 				unregister: 1,
 			}
 		);
 	}
 
 	#[test]
-	fn failed_unmap_on_drop_retains_the_owner() {
+	fn mapping_failure_keeps_the_registration() {
+		let (owner, alive) = setup();
+		let mut api = TestApi::new(alive.clone());
+		api.map_error = Some(ErrorKind::MapFailed);
+
+		let mut registration = register(&api, owner).expect("registration should succeed");
+		let error = registration.map().expect_err("mapping should fail");
+		assert_eq!(error.kind(), ErrorKind::MapFailed);
+		assert!(alive.get());
+		drop(registration);
+
+		assert!(!alive.get(), "owner should be released after unregistering");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 0,
+				unregister: 1,
+			}
+		);
+	}
+
+	#[test]
+	fn failed_unmap_retains_the_owner() {
 		let (owner, alive) = setup();
 		let mut api = TestApi::new(alive.clone());
 		api.unmap_error = Some(ErrorKind::ResourceNotMapped);
 
-		drop(register(&api, owner).expect("mapping should succeed"));
+		let mut registration = register(&api, owner).expect("registration should succeed");
+		drop(registration.map().expect("mapping should succeed"));
+		drop(registration);
 
 		assert!(alive.get(), "a possibly mapped allocation must remain owned");
 		assert_eq!(
@@ -975,20 +997,41 @@ mod tests {
 	}
 
 	#[test]
+	fn an_abandoned_mapping_retains_the_owner() {
+		let (owner, alive) = setup();
+		let api = TestApi::new(alive.clone());
+
+		let mut registration = register(&api, owner).expect("registration should succeed");
+		registration.map().expect("mapping should succeed").abandon();
+		drop(registration);
+
+		assert!(alive.get(), "an allocation the driver may still read must remain owned");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 0,
+				unregister: 0,
+			}
+		);
+	}
+
+	#[test]
 	fn failed_unregister_on_drop_retains_the_owner() {
 		let (owner, alive) = setup();
 		let mut api = TestApi::new(alive.clone());
 		api.unregister_error = Some(ErrorKind::ResourceNotRegistered);
 
-		drop(register(&api, owner).expect("mapping should succeed"));
+		drop(register(&api, owner).expect("registration should succeed"));
 
 		assert!(alive.get(), "a possibly registered allocation must remain owned");
 		assert_eq!(
 			*api.calls.borrow(),
 			Calls {
 				register: 1,
-				map: 1,
-				unmap: 1,
+				map: 0,
+				unmap: 0,
 				unregister: 1,
 			}
 		);

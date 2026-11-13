@@ -131,6 +131,13 @@ pub(crate) trait Backend {
 	/// inherit a yes and let the refusal surface as a mislaid group boundary.
 	fn can_cut(&self) -> bool;
 
+	/// Whether [`encode`](Self::encode) scales `surface` to the session size
+	/// itself, on the surface's device, so a resizing encoder hands the frame
+	/// over at its own size. The default leaves scaling to the encoder.
+	fn scales(&self, _surface: &crate::Surface) -> bool {
+		false
+	}
+
 	/// The encoder name in use, e.g. `"videotoolbox"` (for logging and errors).
 	fn name(&self) -> &'static str;
 

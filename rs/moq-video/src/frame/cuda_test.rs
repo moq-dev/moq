@@ -96,6 +96,8 @@ fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
 	config.kind = crate::encode::Kind::Named("nvenc".into());
 	config.color = Some(color);
 	config.join = std::time::Duration::from_secs(1);
+	// A larger CUDA frame is scaled by NVENC into its own registered input.
+	config.resize = Some(crate::resize::Config::default());
 	crate::encode::Encoder::new(&config).expect("open NVENC")
 }
 
@@ -153,11 +155,10 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert!(max_diff(actual.u(), expected.u()) <= 1, "u differs from the reference");
 	assert!(max_diff(actual.v(), expected.v()) <= 1, "v differs from the reference");
 
-	let scaled = converter
-		.reserve()
-		.expect("a free buffer")
-		.resize(&converted, sd)
-		.expect("GPU resize");
+	let ctx = CudaContext::new(0).expect("CUDA device 0");
+	let mut target = Target::new(&ctx, sd).expect("CUDA target");
+	target.fill(&converted).expect("GPU resize");
+	let scaled = target.frame().clone();
 	assert_eq!(scaled.size(), sd);
 	assert_eq!(scaled.color(), Some(color));
 	let actual = scaled.download_i420().unwrap();
@@ -179,15 +180,12 @@ async fn vulkan_cuda_convert_resize_encode() {
 	// allocated.
 	let third = converter.reserve().expect("third buffer");
 	assert!(converter.reserve().is_none(), "a full pool must refuse");
-	// A slot dropped unused, or consumed by a failed resize, gives its buffer
-	// back.
+	// A slot dropped unused gives its buffer back.
 	drop(third);
-	let odd = converter.reserve().expect("an unfilled slot returned its buffer");
-	odd.resize(&converted, Size::new(81, 49))
-		.expect_err("an odd size is an error");
+	Target::new(&ctx, Size::new(81, 49)).expect_err("an odd size is an error");
 	let third = converter
 		.reserve()
-		.expect("a failed resize returned its buffer")
+		.expect("an unfilled slot returned its buffer")
 		.convert(&frame)
 		.expect("third conversion");
 	assert!(converter.reserve().is_none());
@@ -196,7 +194,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 	drop(third.convert(&frame).expect("convert into a reused buffer"));
 	eprintln!("pool bound held at capacity 3");
 
-	drop((converted, scaled, frame));
+	drop((converted, scaled, target, frame));
 	let slot = completion.wait().await.expect("completion worker stopped");
 	drop(slot);
 
@@ -235,11 +233,6 @@ async fn vulkan_cuda_convert_resize_encode() {
 			assert!(max_diff(actual.u(), reference.u()) <= 1);
 			assert!(max_diff(actual.v(), reference.v()) <= 1);
 		}
-		let scaled = converter
-			.reserve()
-			.expect("a free buffer")
-			.resize(&converted, sd)
-			.expect("GPU resize");
 		drop(frame);
 
 		let timestamp = moq_net::Timestamp::from_micros(i * 33_333).unwrap();
@@ -248,7 +241,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 			sd_encoder.cut().expect("NVENC cuts on request");
 		}
 		let packets = hd
-			.encode_all(&VideoFrame::new(Surface::Cuda(converted), timestamp))
+			.encode_all(&VideoFrame::new(Surface::Cuda(converted.clone()), timestamp))
 			.unwrap();
 		assert_eq!(packets.len(), 1, "one access unit per frame at {i}");
 		assert_eq!(packets[0].timestamp, timestamp, "timestamp preserved at {i}");
@@ -266,8 +259,9 @@ async fn vulkan_cuda_convert_resize_encode() {
 			expected = Some(reference(&gradient(size, Format::Rgba8, i as usize * 4), size, color));
 		}
 
+		// The full-size buffer: the SD session scales it into its own input.
 		let packets = sd_encoder
-			.encode_all(&VideoFrame::new(Surface::Cuda(scaled), timestamp))
+			.encode_all(&VideoFrame::new(Surface::Cuda(converted), timestamp))
 			.unwrap();
 		assert_eq!(packets.len(), 1);
 		assert_eq!(packets[0].timestamp, timestamp);
@@ -369,9 +363,9 @@ async fn vulkan_cuda_three_view_workload() {
 	// frozen frame no P-slice has to code.
 	let pictures: Vec<Vec<u8>> = (0..8).map(|i| gradient(size, Format::Rgba8, i * 37)).collect();
 
-	// Two live buffers per view (the converted frame and its scaled copy) plus
-	// one of slack, the sizing the `Converter` docs recommend.
-	let converter = Converter::new(0, color, NonZeroUsize::new(2 * VIEWS + 1).unwrap()).expect("CUDA converter");
+	// One live buffer per view plus one of slack, the sizing the `Converter`
+	// docs recommend: each SD session scales into its own input.
+	let converter = Converter::new(0, color, NonZeroUsize::new(VIEWS + 1).unwrap()).expect("CUDA converter");
 
 	let mut views = Vec::new();
 	for _ in 0..VIEWS {
@@ -383,7 +377,7 @@ async fn vulkan_cuda_three_view_workload() {
 	}
 
 	let mut upload = Stage::default();
-	let (mut publish, mut convert, mut resize) = (Stage::default(), Stage::default(), Stage::default());
+	let (mut publish, mut convert) = (Stage::default(), Stage::default());
 	let (mut encode_hd, mut encode_sd, mut complete) = (Stage::default(), Stage::default(), Stage::default());
 	let mut bytes = (0usize, 0usize);
 	let mut late = 0u64;
@@ -396,7 +390,6 @@ async fn vulkan_cuda_three_view_workload() {
 			upload = Stage::default();
 			publish = Stage::default();
 			convert = Stage::default();
-			resize = Stage::default();
 			encode_hd = Stage::default();
 			encode_sd = Stage::default();
 			complete = Stage::default();
@@ -420,16 +413,13 @@ async fn vulkan_cuda_three_view_workload() {
 				.measure(|| converter.reserve().expect("a free buffer").convert(&frame))
 				.expect("convert");
 			drop(frame);
-			let scaled = resize
-				.measure(|| converter.reserve().expect("a free buffer").resize(&converted, sd))
-				.expect("resize");
 
 			let packets = encode_hd
-				.measure(|| hd.encode_all(&VideoFrame::new(Surface::Cuda(converted), timestamp)))
+				.measure(|| hd.encode_all(&VideoFrame::new(Surface::Cuda(converted.clone()), timestamp)))
 				.expect("encode HD");
 			bytes.0 += packets.iter().map(|p| p.payload.len()).sum::<usize>();
 			let packets = encode_sd
-				.measure(|| small.encode_all(&VideoFrame::new(Surface::Cuda(scaled), timestamp)))
+				.measure(|| small.encode_all(&VideoFrame::new(Surface::Cuda(converted), timestamp)))
 				.expect("encode SD");
 			bytes.1 += packets.iter().map(|p| p.payload.len()).sum::<usize>();
 
@@ -457,9 +447,8 @@ async fn vulkan_cuda_three_view_workload() {
 	let pipeline: Duration = [
 		("publish", &publish),
 		("convert", &convert),
-		("resize", &resize),
 		("encode hd", &encode_hd),
-		("encode sd", &encode_sd),
+		("encode sd (scales)", &encode_sd),
 		("complete", &complete),
 	]
 	.iter()
