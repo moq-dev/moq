@@ -10460,12 +10460,18 @@ mod tests {
 		poll(&mut prefix);
 		cursor.assert_next_active("a");
 
+		// A restart to an empty instance is refused like the update was.
+		push(&[&raw(ANNOUNCE_RESTART, vec![0, 0, 0, 0, 0]), &floor(0, Some(4))]);
+		poll(&mut prefix);
+		cursor.assert_next_ended("a");
+		assert_eq!(refusals(&registry), 4);
+
 		// The refused claims end like any other, and `c`'s end still finds it.
 		push(&[
 			&raw(ANNOUNCE_END, vec![2]),
 			&raw(ANNOUNCE_END, vec![3]),
 			&raw(ANNOUNCE_END, vec![4]),
-			&floor(0, Some(4)),
+			&floor(0, Some(5)),
 		]);
 		poll(&mut prefix);
 		cursor.assert_next_ended("c");

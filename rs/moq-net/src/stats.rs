@@ -79,7 +79,7 @@
 //!   its final nonnegative delta. Unsupported transports contribute zero.
 //! * `routes_refused` ([`Presence`]): cumulative routes and claims that lite-07
 //!   sessions under the label forwarded and this node refused, each withdrawn while
-//!   the session stays open. Driven by [`Session::refuse_route`].
+//!   the session stays open.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the label held
 //!   at once, to compare against what bounds them. A peak never
@@ -1873,6 +1873,7 @@ impl Session {
 	}
 
 	/// Count a route or claim the peer forwarded that this node refused.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn refuse_route(&self) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
