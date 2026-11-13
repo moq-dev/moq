@@ -751,13 +751,11 @@ async fn audio_raw_publish_from_many_threads() {
 	)
 	.await
 	.unwrap();
-	// From time 0, so the decoder can tell the first packet is the track's and primes no warmup:
-	// a group starting later doesn't say whether one came before it.
 	for index in 0..8 {
 		let producer = audio.clone();
 		std::thread::spawn(move || {
 			producer.write(MoqAudioFrame {
-				timestamp: us(index * 20_000),
+				timestamp: us(250_000 + index * 20_000),
 				data: audio_tone(index as usize * 960, 960, 2),
 			})
 		})
@@ -774,7 +772,7 @@ async fn audio_raw_publish_from_many_threads() {
 			MoqAudioRead::End { end } => {
 				assert_eq!(
 					micros(end),
-					8 * 20_000,
+					250_000 + 8 * 20_000,
 					"the finish ends after the last frame"
 				);
 				continue;
@@ -783,7 +781,7 @@ async fn audio_raw_publish_from_many_threads() {
 		};
 		assert_eq!(
 			micros(frame.timestamp),
-			pcm.len() as u64 / 2 * 1_000_000 / 48_000
+			250_000 + pcm.len() as u64 / 2 * 1_000_000 / 48_000
 		);
 		pcm.extend(frame.data.as_chunks::<4>().0.iter().map(|s| f32::from_le_bytes(*s)));
 	}

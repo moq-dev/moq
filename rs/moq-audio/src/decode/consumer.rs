@@ -394,10 +394,12 @@ impl Consumer {
 					if self.end.is_some() && group != self.end_group {
 						self.restart()?;
 					}
-					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
-					// all, so reading it first means decoding from the encoder's first packet.
-					// A finished group's end marker may come first; it carries no media.
-					(frame, first && group == 0)
+					// A group with nothing below it, which its publisher declares by skipping
+					// every start before it, is the track's first, and a group delivers from its
+					// frame 0 or not at all, so reading it first means decoding from the
+					// encoder's first packet. A finished group's end marker may come first; it
+					// carries no media.
+					(frame, first && self.track.is_skipped(0..group))
 				}
 				// Behind whatever the resampler held from before the loss.
 				Some(Encoded::Gap { timestamp, duration }) => {

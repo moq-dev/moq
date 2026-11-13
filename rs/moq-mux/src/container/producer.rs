@@ -668,7 +668,14 @@ where
 			}
 			let group = match (self.pending_start.take(), start) {
 				(Some(start), _) => self.inner.create_group(moq_net::group::Info { start })?,
-				(None, Some(start)) => self.inner.append_group(start)?,
+				(None, Some(start)) => {
+					// A track's first group says nothing came before it, so a reader can tell it
+					// is the first: a decoder starting there needs no warmup.
+					if self.inner.largest().is_none() {
+						self.inner.skip_groups(0..start);
+					}
+					self.inner.append_group(start)?
+				}
 				(None, None) => unreachable!("a keyframe without a pending start has one"),
 			};
 

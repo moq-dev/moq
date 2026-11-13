@@ -6237,10 +6237,9 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 #[test]
 fn audio_raw_decode_reads_the_encoder_end() {
 	const START_US: u64 = 123_000;
-	// Past the 80 ms warmup, ending on a partial frame. The decoder primes the warmup on the
-	// first packet it reads, since a group starting past 0 doesn't say whether one came before
-	// it, so what is left past the warmup decodes.
-	const SAMPLES: usize = 4 * 960 + 860;
+	// One partial frame, shorter than the 80 ms warmup a mid-stream join trims: decoded
+	// from the track's first packet, only the codec's pre-skip is dropped.
+	const SAMPLES: usize = 860;
 
 	let origin = id(moq_origin_create());
 	let path = b"audio-raw-end-test";

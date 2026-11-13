@@ -1217,6 +1217,16 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
+	/// Whether the publisher declared every group start in `groups` skipped, so no group lies
+	/// there; see [`moq_net::track::Subscriber::is_skipped`]. A group with nothing possible
+	/// below it is its track's first. False once an error ended the reader.
+	pub fn is_skipped(&self, groups: std::ops::Range<u64>) -> bool {
+		match &self.reader {
+			Reader::Reading(track) | Reader::Failed(track, _) => track.is_skipped(groups),
+			Reader::Ended => false,
+		}
+	}
+
 	/// Set the [`Delay`], mid-stream or before the first read.
 	///
 	/// [`Delay::max`] is clamped to the track's max age like [`new`](Self::new). The
