@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Stream credit by priority, end to end: a Chromium tab reads 300 live tracks
-# through a Rust relay over WebTransport, past the browser's ~100-stream cap.
+# Stream credit by priority, end to end: a Chromium or Firefox tab reads 300
+# live tracks through a Rust relay over WebTransport, past the browser's
+# ~100-stream cap.
 # See README.md.
 set -euo pipefail
 

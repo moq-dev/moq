@@ -263,7 +263,10 @@ function judge(report: Report) {
 	const lines = stripVTControlCharacters(readFileSync(relayLog, "utf8")).split("\n");
 	const negotiated = new RegExp(`conn\\{id=(\\d+) .*negotiated version=${version} transport=webtransport`);
 	const id = lines.flatMap((line) => negotiated.exec(line)?.[1] ?? []).at(-1);
-	if (id === undefined) throw new Error(`the relay log names no WebTransport session on ${version}`);
+	if (id === undefined) {
+		failures.push(`the relay log names no WebTransport session on ${version}`);
+		return;
+	}
 	const ours = lines.filter((line) => line.includes(`conn{id=${id} `));
 	const count = (what: string) => ours.filter((line) => line.includes(what)).length;
 	const continued = count("continuing paused group");
