@@ -30,7 +30,7 @@ quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/OfflineWhileServing.cfg
 ```
 
-The first checks every rule but the two with open findings, over four sessions: about 1.2M distinct states, under a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 240k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. `just test tla rs/moq-net/verify/reconnect` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
+The first checks every rule but the two with open findings, over four sessions: about 1.2M distinct states, under a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 250k states. Both pass at the sync commit. The last two fail at the sync commit, each on its finding below, within seconds. `just test tla rs/moq-net/verify/reconnect` runs every config here, as Nightly does, and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 
@@ -56,7 +56,7 @@ Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07
 | `rs/moq-net/src/reconnect.rs` `established`, and `walk_failed` ending the first walk | `Established`, `Failed`, `Abandon` |
 | `rs/moq-net/src/reconnect.rs` `connected`, `fallback`, `failed`, `probed` | `Connected`, `Failed`, `ProbeFails`, `ProbeGetsThrough` |
 | `rs/moq-net/src/reconnect.rs` `end`, `closed`, `done`, `Predecessor` | `EndGoaway`, `EndClosed`, `Done`, `Retire`, `IdleClose` |
-| `rs/moq-net/src/reconnect.rs` `Restart::Wait` | `LiveEnds` with `Restart = "wait"` (`RestartWait.cfg`) |
+| `rs/moq-net/src/reconnect.rs` `Restart::Wait` | `LiveEnds` and `WaitOut` with `Restart = "wait"` (`RestartWait.cfg`) |
 | `rs/moq-net/src/reconnect/redirect.rs` `Redirect::target` | `Refused` and `Endpoints` |
 | `rs/moq-tokio/src/connection.rs` `run`, `Shared::connected`, `migrating`, `predecessor`, `offline`, `end` | `Connected`, `Apply`, `OnMigrating`, `OnRetired`, `OnOffline`, `OnDone` |
 
