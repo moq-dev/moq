@@ -43,9 +43,9 @@ impl Producer {
 		}
 	}
 
-	/// The group's sequence number.
-	pub fn sequence(&self) -> u64 {
-		self.inner.sequence
+	/// Where the group starts, in the track's timescale: its key on the track.
+	pub fn start(&self) -> u64 {
+		self.inner.start
 	}
 
 	/// Sign `payload` at the next frame index and write it with the signature appended.
@@ -58,20 +58,18 @@ impl Producer {
 		// Signed at the track's timescale, the value the net group stores and every hop carries.
 		let timestamp = self.track.rescale(timestamp.into())?;
 		let frame = self.inner.frame_count() as u64;
-		let body = self
-			.scope
-			.sign(&self.key, self.inner.sequence, frame, timestamp, payload);
+		let body = self.scope.sign(&self.key, self.inner.start, frame, timestamp, payload);
 		self.inner.write_frame(timestamp, body)?;
 		Ok(())
 	}
 
-	/// Finish the group. No more frames will be written.
+	/// Close the group without a known end. No more frames will be written.
 	///
 	/// # Errors
 	///
 	/// A net error if the group is already closed.
-	pub fn finish(self) -> Result<()> {
-		self.inner.finish()?;
+	pub fn close(self) -> Result<()> {
+		self.inner.close()?;
 		Ok(())
 	}
 
@@ -89,7 +87,7 @@ impl Producer {
 impl fmt::Debug for Producer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("group::Producer")
-			.field("sequence", &self.sequence())
+			.field("start", &self.start())
 			.field("frames", &self.inner.frame_count())
 			.finish()
 	}
@@ -102,7 +100,7 @@ impl fmt::Debug for Producer {
 pub struct Consumer {
 	// `None` once a frame failed to verify.
 	inner: Option<moq_net::group::Consumer>,
-	sequence: u64,
+	start: u64,
 	key: PublicKey,
 	scope: Arc<Scope>,
 }
@@ -110,16 +108,16 @@ pub struct Consumer {
 impl Consumer {
 	pub(crate) fn new(inner: moq_net::group::Consumer, key: PublicKey, scope: Arc<Scope>) -> Self {
 		Self {
-			sequence: inner.sequence,
+			start: inner.start,
 			inner: Some(inner),
 			key,
 			scope,
 		}
 	}
 
-	/// The group's sequence number.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+	/// Where the group starts, in the track's timescale: its key on the track.
+	pub fn start(&self) -> u64 {
+		self.start
 	}
 
 	/// The next verified frame, or `None` once the group finished.
@@ -140,7 +138,7 @@ impl Consumer {
 		let index = inner.index() - 1;
 		match self
 			.scope
-			.verify(&self.key, self.sequence, index, frame.timestamp, frame.payload)
+			.verify(&self.key, self.start, index, frame.timestamp, frame.payload)
 		{
 			Ok(payload) => Poll::Ready(Ok(Some(Frame {
 				timestamp: frame.timestamp,
@@ -157,7 +155,7 @@ impl Consumer {
 impl fmt::Debug for Consumer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("group::Consumer")
-			.field("sequence", &self.sequence())
+			.field("start", &self.start())
 			.field("index", &self.inner.as_ref().map(|inner| inner.index()))
 			.finish()
 	}

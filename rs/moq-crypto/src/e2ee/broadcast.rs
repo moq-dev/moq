@@ -38,7 +38,7 @@ impl Producer {
 	/// Create the track for `semantic` under its physical name.
 	///
 	/// A name this generation already produced, even on another broadcast, resumes above
-	/// every sequence it allocated.
+	/// every group start it allocated.
 	///
 	/// # Errors
 	///

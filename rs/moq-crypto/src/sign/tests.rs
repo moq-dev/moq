@@ -236,7 +236,7 @@ async fn roundtrip_through_an_origin() {
 	assert_eq!(consumer.instance(), published.signed.instance());
 	let mut track = subscribe(&consumer, "video").await;
 
-	let mut group = video.append_group().unwrap();
+	let mut group = video.append_group(1).unwrap();
 	group
 		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"keyframe")
 		.unwrap();
@@ -244,7 +244,7 @@ async fn roundtrip_through_an_origin() {
 	group
 		.write_frame(moq_net::Timestamp::from_micros(2_400).unwrap(), b"")
 		.unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	let mut received = recv_group(&mut track).await;
 	let first = received.read_frame().await.unwrap().unwrap();
@@ -265,10 +265,10 @@ async fn forged_frame_delivers_nothing_and_ends_only_its_group() {
 	let mut track = subscribe(&consumer, "stream").await;
 
 	// A relay's forgery: an unsigned frame the length of a signed one.
-	let mut forged = net.append_group().unwrap();
+	let mut forged = net.append_group(0).unwrap();
 	forged.write_frame(None, vec![0u8; 80]).unwrap();
 	forged.write_frame(None, vec![0u8; 80]).unwrap();
-	forged.finish().unwrap();
+	forged.close().unwrap();
 
 	let mut group = recv_group(&mut track).await;
 	assert!(matches!(read(&mut group).await, Err(Error::Signature)));
@@ -277,7 +277,7 @@ async fn forged_frame_delivers_nothing_and_ends_only_its_group() {
 
 	let mut next = signed.create_group(1).unwrap();
 	next.write_frame(None, b"after").unwrap();
-	next.finish().unwrap();
+	next.close().unwrap();
 	let mut group = recv_group(&mut track).await;
 	assert_eq!(read(&mut group).await.unwrap().unwrap(), &b"after"[..]);
 }
@@ -299,9 +299,9 @@ async fn frame_replayed_from_another_group_or_track_is_refused() {
 	let mut a = subscribe(&consumer, "a").await;
 	let mut b = subscribe(&consumer, "b").await;
 
-	let mut group = signed.append_group().unwrap();
+	let mut group = signed.append_group(0).unwrap();
 	group.write_frame(None, b"original").unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	let body = raw_frame(&mut raw).await;
 	assert_eq!(
 		read(&mut recv_group(&mut a).await).await.unwrap().unwrap(),
@@ -309,28 +309,28 @@ async fn frame_replayed_from_another_group_or_track_is_refused() {
 	);
 
 	// The same bytes as group 1 of the same track.
-	let mut replay = net.append_group().unwrap();
+	let mut replay = net.append_group(1).unwrap();
 	replay.write_frame(None, body.clone()).unwrap();
-	replay.finish().unwrap();
+	replay.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut a).await).await,
 		Err(Error::Signature)
 	));
 
 	// The same bytes at the same group and index of another track.
-	let mut moved = other_net.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	let mut moved = other_net.create_group(moq_net::group::Info { start: 0 }).unwrap();
 	moved.write_frame(None, body.clone()).unwrap();
-	moved.finish().unwrap();
+	moved.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut b).await).await,
 		Err(Error::Signature)
 	));
 
-	// The same bytes at frame 1 of a group at the original sequence's neighbor.
-	let mut shifted = net.append_group().unwrap();
+	// The same bytes at frame 1 of a group at the original start's neighbor.
+	let mut shifted = net.append_group(2).unwrap();
 	shifted.write_frame(None, b"filler".as_slice()).unwrap();
 	shifted.write_frame(None, body).unwrap();
-	shifted.finish().unwrap();
+	shifted.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut a).await).await,
 		Err(Error::Signature)
@@ -347,9 +347,9 @@ async fn broadcast_under_another_key_is_refused() {
 	let consumer = published.consume(victim.public()).await;
 	let mut subscribed = subscribe(&consumer, "stream").await;
 
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_group(0).unwrap();
 	group.write_frame(None, b"hello").unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut subscribed).await).await,
 		Err(Error::Signature)
@@ -362,9 +362,9 @@ async fn frame_from_an_earlier_instance_is_refused() {
 	let old = publish(&key, "mesh/node/ssh");
 	let (old_track, old_net) = old.track(&key, "stream");
 	let mut raw = old_net.subscribe(subscribe_all());
-	let mut group = old_track.append_group().unwrap();
+	let mut group = old_track.append_group(0).unwrap();
 	group.write_frame(None, b"stale").unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	let body = raw_frame(&mut raw).await;
 
 	// A restart mints a new instance, so the old instance's group 0 does not verify as the new one's.
@@ -373,9 +373,9 @@ async fn frame_from_an_earlier_instance_is_refused() {
 	let (_new_track, new_net) = new.track(&key, "stream");
 	let consumer = new.consume(key.public()).await;
 	let mut subscribed = subscribe(&consumer, "stream").await;
-	let mut replay = new_net.append_group().unwrap();
+	let mut replay = new_net.append_group(0).unwrap();
 	replay.write_frame(None, body).unwrap();
-	replay.finish().unwrap();
+	replay.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut subscribed).await).await,
 		Err(Error::Signature)
@@ -383,41 +383,45 @@ async fn frame_from_an_earlier_instance_is_refused() {
 }
 
 #[test]
-fn group_sequence_is_never_signed_twice() {
+fn group_start_is_never_signed_twice() {
 	let key = SecretKey::generate();
 	let net = moq_net::broadcast::Info::new().produce();
 	let path = moq_net::Path::new("mesh/node/ssh").unwrap();
 	let signed = broadcast::Producer::new(net, key, path, moq_net::Instance::random());
 	let track = signed.create_track("stream", None).unwrap();
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_group(0).unwrap();
 	group.write_frame(None, b"first").unwrap();
 	group.abort(moq_net::Error::Cancel).unwrap();
 
-	// Net would serve the aborted sequence again, but frames of both incarnations would verify,
+	// Net would serve the aborted start again, but frames of both incarnations would verify,
 	// so a relay holding both could splice them into one group.
 	assert!(matches!(
 		track.create_group(0),
 		Err(Error::Net(moq_net::Error::Duplicate))
 	));
-	assert_eq!(track.append_group().unwrap().sequence(), 1);
+	assert_eq!(track.append_group(1).unwrap().start(), 1);
 	assert!(matches!(
 		track.create_group(1),
 		Err(Error::Net(moq_net::Error::Duplicate))
 	));
-	assert_eq!(track.create_group(5).unwrap().sequence(), 5);
+	assert_eq!(track.create_group(5).unwrap().start(), 5);
 	assert!(matches!(
 		track.create_group(3),
 		Err(Error::Net(moq_net::Error::Duplicate))
 	));
 
-	// A replacement track continues past its predecessor's sequences under the same instance.
+	// A replacement track continues past its predecessor's starts under the same instance.
 	track.abort(moq_net::Error::Cancel).unwrap();
 	let replacement = signed.create_track("stream", None).unwrap();
 	assert!(matches!(
 		replacement.create_group(0),
 		Err(Error::Net(moq_net::Error::Duplicate))
 	));
-	assert_eq!(replacement.append_group().unwrap().sequence(), 6);
+	assert!(matches!(
+		replacement.append_group(5),
+		Err(Error::Net(moq_net::Error::Duplicate))
+	));
+	assert_eq!(replacement.append_group(6).unwrap().start(), 6);
 }
 
 #[tokio::test(start_paused = true)]
@@ -428,12 +432,12 @@ async fn group_resumed_above_frame_zero_verifies_at_its_index() {
 	let scope = Scope::new(&path, &instance, "stream");
 	let broadcast = moq_net::broadcast::Info::new().produce();
 	let track = broadcast.create_track("stream", None).unwrap();
-	let net = track.append_group().unwrap();
+	let net = track.append_group(0).unwrap();
 	let raw = net.consume();
 	let mut signed = group::Producer::new(net, track.info().clone(), key.clone(), Arc::clone(&scope));
 	signed.write_frame(None, b"zero").unwrap();
 	signed.write_frame(None, b"one").unwrap();
-	signed.finish().unwrap();
+	signed.close().unwrap();
 
 	let mut resumed = group::Consumer::new(raw.with_range(1..), key.public(), scope);
 	assert_eq!(read(&mut resumed).await.unwrap().unwrap(), &b"one"[..]);
