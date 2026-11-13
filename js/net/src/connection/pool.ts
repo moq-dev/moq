@@ -548,13 +548,14 @@ function acquire(url: string, versions?: readonly string[]): Entry & { release: 
 			if (err !== undefined && pool.get(created.key) === created) pool.delete(created.key);
 		});
 
-		// An accepted redirect moves the entry to the URL it now dials, so a later handle
-		// configured with that URL shares it, and one asking for the old URL dials fresh.
-		// A live entry already at the target wins: this one leaves the pool and serves only
-		// the handles it has until they release it.
+		// The entry follows the URL its loop dials: an accepted redirect moves it to the
+		// target, so a later handle configured with that URL shares it and one asking for
+		// the old URL dials fresh, and a dead target's dropped redirect moves it back to the
+		// configured URL. A live entry already at the new key wins: this one leaves the pool
+		// and serves only the handles it has until they release it.
+		const configured = key;
 		connection.redirect.subscribe((redirect) => {
-			if (!redirect) return;
-			const key = poolKey(redirect.href, versions);
+			const key = redirect ? poolKey(redirect.href, versions) : configured;
 			if (key === created.key) return;
 			if (pool.get(created.key) === created) pool.delete(created.key);
 			created.key = key;
