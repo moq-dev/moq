@@ -402,7 +402,7 @@ impl Subscription {
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn start(&self) -> Option<u64> {
 		let mut floor: Option<u64> = None;
-		for range in &self.ranges {
+		for range in self.ranges.iter().filter(|range| !range.is_empty()) {
 			let Anchor::Time(start) = range.start else {
 				return None;
 			};
@@ -412,13 +412,13 @@ impl Subscription {
 	}
 
 	/// The exclusive end past every range, or `None` when one is open or counts back from
-	/// the latest group. An empty list is the empty range, ending at group 0.
+	/// the latest group. An empty list, or one of empty ranges, ends at group 0.
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self) -> Option<u64> {
 		let mut end = Some(0);
-		for range in &self.ranges {
+		for range in self.ranges.iter().filter(|range| !range.is_empty()) {
 			let Some(Anchor::Time(last)) = range.end else {
 				return None;
 			};
@@ -861,10 +861,11 @@ mod tests {
 			vec![range(Anchor::Relative(3), None)]
 		);
 
-		// A time floor above the live edge does not hide the live edge: both stay.
+		// A time floor above the live edge does not hide the live edge: both stay, relative
+		// first.
 		assert_eq!(
 			ranges(&[sub(&[groups(4, None)]), sub(&[Range::live()])]),
-			vec![groups(4, None), Range::live()]
+			vec![Range::live(), groups(4, None)]
 		);
 
 		// Empty ranges ask for nothing.

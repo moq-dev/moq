@@ -1002,6 +1002,8 @@ impl Holdings for TrackState {
 	fn containing(&self, time: u64) -> Containing {
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _)) => Containing::Group(key),
+			// Every key at or before it is gone, so whichever group held it will never arrive.
+			None if self.holes_cover(0..time.saturating_add(1), |_| true) => Containing::Before,
 			None if self.lookup.is_empty() => Containing::Unknown,
 			None => Containing::Before,
 		}
@@ -1027,18 +1029,27 @@ impl Holdings for TrackState {
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
 		// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 		// evicted a group inside it.
+		self.holes_cover(keys, |hole| *hole == Hole::Skip)
+	}
+}
+
+impl TrackState {
+	/// Whether drops of a kind `kind` accepts cover every key in `keys`. An empty run is
+	/// covered, though it may overlap a drop around its start.
+	fn holes_cover(&self, keys: ops::Range<u64>, kind: impl Fn(&Hole) -> bool) -> bool {
+		if keys.is_empty() {
+			return true;
+		}
 		let mut at = keys.start;
 		for (run, hole) in self.drops.overlapping(&keys) {
-			if *hole != Hole::Skip || run.start > at {
+			if !kind(hole) || run.start > at {
 				return false;
 			}
 			at = run.end;
 		}
 		at >= keys.end
 	}
-}
 
-impl TrackState {
 	/// The upstream publisher's Largest Object, unless a frame or group received since its
 	/// report outdates it, even one the cache has since evicted.
 	fn object_edge(&self) -> Option<(u64, u64)> {
@@ -8186,12 +8197,9 @@ impl Cursor {
 	}
 
 	/// Take in a move of the floor, the ranges, or the cap: whatever it newly admits is
-	/// owed. Costs the ranges, never the cache, and only when one moved.
-	///
-	/// A time end whose cap moves on each group moves only the walks' runs layered over the
-	/// window's fixed ones, so that costs those runs: what they gain is owed only where the
-	/// cache holds a group now, the only place a scan finds one, and what they lose is cut
-	/// only from what is owed.
+	/// owed. Costs the ranges, never the cache, and only when one moved: what they gain is
+	/// owed only where the cache holds a group now, the only place a scan finds one, and
+	/// what they lose is cut only from what is owed.
 	fn admit(&mut self) {
 		let at = (self.floor(), self.filter.revision, self.end_key);
 		if self.filter.admitted_at == Some(at) {
@@ -11812,22 +11820,27 @@ mod test {
 		assert_eq!(ready_groups(&mut reader), vec![3]);
 	}
 
-	/// A live join's answer anchors a relative start where it says the feed is, both for the
-	/// copy's readers and for the bounds sent upstream, even once a newer group lands before
-	/// the one it named.
+	/// A live join's answer anchors a relative start where it says the feed is, counting back
+	/// over the groups held below it, both for the copy's readers and for the bounds sent
+	/// upstream, even once a newer group lands before the one it named.
 	#[test]
 	fn a_relative_start_counts_from_the_answered_edge() {
 		let producer = track_producer("test", Info::default());
+		// Counting back counts groups held: two below the edge the answer names.
+		for key in [2, 3] {
+			framed(&producer, key, 1).close().unwrap();
+		}
 		let back = Range {
 			start: super::super::subscription::Anchor::Relative(2),
 			end: None,
 		};
-		let mut reader = producer.subscribe(replay().with_ranges([back]));
 		producer.report_edge(4);
+		let mut reader = producer.subscribe(replay().with_ranges([back]));
 		let upstream = producer.resolve_subscription(&replay().with_ranges([back])).unwrap();
 		assert_eq!(upstream.start(), Some(2), "the answer resolves the upstream bounds");
 
 		framed(&producer, 5, 1).close().unwrap();
+		// The default max age serves only the live edge, so the groups held below it are stale.
 		assert_eq!(ready_groups(&mut reader), vec![5]);
 		assert_eq!(reader.floor(), Some(2), "the answer anchors the start");
 	}
@@ -13524,27 +13537,25 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
+	/// A start past the live edge is a time, which the newest group contains until a later
+	/// one starts: the cursor reads that group, then each one after it.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_floor_above_the_live_edge_waits_there() {
-		let mut producer = track_producer("test", Info::timed());
-		for second in 0..3 {
-			append_at(&mut producer, second * 1000);
+	fn a_start_past_the_live_edge_reads_the_group_containing_it() {
+		let producer = track_producer("test", Info::timed());
+		for key in [0, 1000, 2000] {
+			write_group(&producer, key);
 		}
 
-		// A resumed subscription names where it left off, which may not exist yet. The
-		// cursor sits at the floor rather than sliding back to what is cached.
 		let resumed = Subscription::default()
-			.with_start(7)
+			.with_start(7000)
 			.with_delay(Delay::default().with_max(Duration::from_secs(10)));
 		let mut subscriber = producer.subscribe(resumed);
-		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
-		append_at(&mut producer, 3000); // key 3: still below the floor
-		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
-		for second in 4..8 {
-			append_at(&mut producer, second * 1000);
+		assert_eq!(drain(&mut subscriber), vec![2000]);
+		for key in [3000, 4000] {
+			write_group(&producer, key);
 		}
-		assert_eq!(drain(&mut subscriber), vec![7]);
+		assert_eq!(drain(&mut subscriber), vec![3000, 4000]);
 	}
 
 	#[test]
@@ -15080,13 +15091,14 @@ mod test {
 
 	/// Drift is measured only against groups the ranges cover: a group in the gap between
 	/// two spans is never read, so it neither sets the edge nor replaces the newest group
-	/// below it. A group in the later span is read, so it does.
+	/// below it. A group in the later span is read, so it does: here group 9, which contains
+	/// its start, while group 8 below it is in the gap.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_gap_between_ranges_is_not_a_drift_edge() {
 		let ranges = || Subscription::default().with_ranges([Range::groups(0..2), Range::groups(10..12)]);
 		let producer = track_producer("test", Info::timed());
-		for (key, millis) in [(0, 0), (1, 1000), (9, 9000)] {
+		for (key, millis) in [(0, 0), (1, 1000), (8, 8000), (9, 9000)] {
 			let mut group = producer.create_group(group::Info { start: key }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(millis).unwrap(), bytes::Bytes::from_static(b"x"))
@@ -15094,7 +15106,7 @@ mod test {
 			group.close().unwrap();
 		}
 		// With no budget, the newest group the ranges cover is the edge.
-		assert_eq!(drain(&mut producer.subscribe(ranges())), vec![1]);
+		assert_eq!(drain(&mut producer.subscribe(ranges())), vec![9]);
 
 		let mut ten = producer.create_group(group::Info { start: 10 }).unwrap();
 		ten.write_frame(Timestamp::from_millis(10_000).unwrap(), bytes::Bytes::from_static(b"x"))
@@ -15118,8 +15130,12 @@ mod test {
 		let mut held = subscriber.recv_group().await.unwrap().expect("group 0");
 		assert!(held.read_frame().await.unwrap().is_some());
 
+		// The run's own group 10 is held, so its time start names it.
+		let mut ten = producer.create_group(group::Info { start: 10 }).unwrap();
+		ten.write_frame(at(10_000), bytes::Bytes::from_static(b"x")).unwrap();
+		ten.close().unwrap();
 		subscriber.update(budget.with_range(10..20)).unwrap();
-		for (key, millis) in [(1, 1000), (10, 10_000), (19, 19_000)] {
+		for (key, millis) in [(1, 1000), (19, 19_000)] {
 			let mut group = producer.create_group(group::Info { start: key }).unwrap();
 			group.write_frame(at(millis), bytes::Bytes::from_static(b"x")).unwrap();
 			group.close().unwrap();
@@ -15184,6 +15200,8 @@ mod test {
 		let expected = (Servable::NONE, Some(5));
 		for order in ["ranges first", "cap first", "cap between"] {
 			let producer = track_producer("test", Info::timed());
+			// Group 10 is held, so the time start names it.
+			producer.append_group(10).unwrap().close().unwrap();
 			let mut subscriber = producer.subscribe(Subscription::default());
 			let control = subscriber.control();
 			match order {
@@ -15437,8 +15455,12 @@ mod test {
 		let mut held = subscriber.recv_group().await.unwrap().expect("group 0");
 		assert!(held.read_frame().await.unwrap().is_some());
 
+		// The run's own group 10 is held, so its time start names it.
+		let mut ten = producer.create_group(group::Info { start: 10 }).unwrap();
+		ten.write_frame(at(10_000), bytes::Bytes::from_static(b"x")).unwrap();
+		ten.close().unwrap();
 		subscriber.control().update(budget.with_range(10..20)).unwrap();
-		for (key, millis) in [(1, 1000), (10, 10_000), (19, 19_000)] {
+		for (key, millis) in [(1, 1000), (19, 19_000)] {
 			let mut group = producer.create_group(group::Info { start: key }).unwrap();
 			group.write_frame(at(millis), bytes::Bytes::from_static(b"x")).unwrap();
 			group.close().unwrap();
@@ -21431,7 +21453,9 @@ mod test {
 		assert!(matches!(tail.now_or_never(), Some(Err(Error::Unsupported))));
 		drop(first);
 
-		let mut subscriber = producer.subscribe(replay().with_range(3..4));
+		// From group 2, which names the start, so group 3 is owed rather than looked up.
+		let mut subscriber = producer.subscribe(replay().with_range(2..4));
+		assert!(matches!(subscriber.poll_next_group(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(
 			subscriber.poll_next_group(&waiter).is_pending(),
 			"group 3 is being filled"
@@ -21462,7 +21486,9 @@ mod test {
 		assert!(matches!(fetch.now_or_never(), Some(Err(Error::NotFound))));
 		drop(first);
 
-		let mut subscriber = producer.subscribe(replay().with_range(3..4));
+		// From group 2, which names the start, so group 3 is owed rather than looked up.
+		let mut subscriber = producer.subscribe(replay().with_range(2..4));
+		assert!(matches!(subscriber.poll_next_group(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(
 			subscriber.poll_next_group(&waiter).is_pending(),
 			"group 3 is being filled"
@@ -21535,8 +21561,9 @@ mod test {
 	fn fill_wanted_changed_follows_the_group_owed() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
-		let mut subscriber = producer.subscribe(ascending(0..));
+		// Descending, so the reader narrows with its end, which settles at once.
+		let descending = |groups: Range| replay().with_ranges([groups]).with_order(Order::Descending);
+		let mut subscriber = producer.subscribe(descending(Range::groups(0..)));
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let noop = kio::Waiter::noop();
@@ -21547,12 +21574,12 @@ mod test {
 		let (flag, waiter) = Flag::waiter();
 		assert_eq!(
 			fill.poll_wanted_changed(&waiter),
-			Poll::Ready(Some(0)),
+			Poll::Ready(Some(9)),
 			"the first poll reports"
 		);
 		assert!(fill.poll_wanted_changed(&waiter).is_pending());
 
-		subscriber.update(ascending(8..)).unwrap();
+		subscriber.update(descending(Range::groups(0..9))).unwrap();
 		assert!(subscriber.poll_recv_group(&noop).is_pending());
 		assert!(flag.take(), "narrowing woke the parked poll");
 		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(8)));
@@ -21562,11 +21589,11 @@ mod test {
 		flag.take();
 		assert!(
 			fill.poll_wanted_changed(&waiter).is_pending(),
-			"group 9 waits for the reader to pick up 8"
+			"group 7 waits for the reader to pick up 8"
 		);
 		assert!(matches!(subscriber.poll_recv_group(&noop), Poll::Ready(Ok(Some(_)))));
 		assert!(flag.take(), "the reader picking it up woke the parked poll");
-		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(7)));
 		assert!(fill.poll_wanted_changed(&waiter).is_pending());
 
 		drop(subscriber);
@@ -21583,19 +21610,19 @@ mod test {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
-		let mut subscriber = producer.subscribe(ascending(9..));
-		producer.start_at(10).unwrap();
-		write_group(&producer, 10);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(1).unwrap();
+		write_group(&producer, 1);
 		let noop = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&noop) {}
 		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&noop) else {
 			panic!("below the start is a miss");
 		};
 		let (flag, waiter) = Flag::waiter();
-		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(0)));
 		assert!(fill.poll_wanted_changed(&waiter).is_pending());
 
-		write_group(&producer, 9);
+		write_group(&producer, 0);
 		assert!(flag.take(), "the owed group arriving live woke the parked poll");
 		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(None));
 		assert_eq!(fill.wanted(), None);
@@ -21610,8 +21637,9 @@ mod test {
 	fn a_narrowed_reader_leaves_the_rest_of_its_fill() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
-		let mut subscriber = producer.subscribe(ascending(0..));
+		// Descending, so the reader narrows with its end, which settles at once.
+		let descending = |groups: Range| replay().with_ranges([groups]).with_order(Order::Descending);
+		let mut subscriber = producer.subscribe(descending(Range::groups(0..)));
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
@@ -21619,30 +21647,30 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		assert_eq!(fill.wanted(), Some(0));
-		assert!(fill.is_wanted(0));
-		assert!(fill.poll_unwanted(0, &waiter).is_pending());
-
-		subscriber.update(ascending(8..)).unwrap();
-		assert!(subscriber.poll_recv_group(&waiter).is_pending());
-		assert!(fill.poll_unwanted(0, &waiter).is_ready(), "nobody reads group 0 now");
-		assert!(!fill.is_wanted(0));
-		assert!(fill.is_wanted(8));
-		assert!(fill.poll_unwanted(8, &waiter).is_pending());
-		assert_eq!(fill.wanted(), Some(8), "nobody reads below 8 any more");
-		write_filled(fill.accept(8, None), 8);
 		assert_eq!(fill.wanted(), Some(9));
+		assert!(fill.is_wanted(9));
+		assert!(fill.poll_unwanted(9, &waiter).is_pending());
+
+		subscriber.update(descending(Range::groups(0..8))).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert!(fill.poll_unwanted(9, &waiter).is_ready(), "nobody reads group 9 now");
+		assert!(!fill.is_wanted(9));
+		assert!(fill.is_wanted(7));
+		assert!(fill.poll_unwanted(7, &waiter).is_pending());
+		assert_eq!(fill.wanted(), Some(7), "nobody reads above 7 any more");
+		write_filled(fill.accept(7, None), 7);
+		assert_eq!(fill.wanted(), Some(6));
 		// Over, so what the fill refuses is a drop rather than a group still to come.
 		producer.finish_shared().unwrap();
-		fill.drop_groups(0..9);
+		fill.drop_groups(7..10);
 		drop(fill);
 
 		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
 			panic!("the filled group is read");
 		};
-		assert_eq!(group.start, 8);
-		assert_eq!(drained_drops(&mut subscriber), [(9, 10)], "only what it still read");
-		assert!(producer.state.read().drops.overlapping(&(0..8)).next().is_none());
+		assert_eq!(group.start, 7);
+		assert_eq!(drained_drops(&mut subscriber), [(0, 7)], "only what it still read");
+		assert!(producer.state.read().drops.overlapping(&(8..10)).next().is_none());
 	}
 
 	/// A group the fill accepted stays wanted until its reader takes it, even once the rest of
@@ -21686,8 +21714,9 @@ mod test {
 	fn an_accepted_groups_readers_leave_before_its_fill() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
-		let mut subscriber = producer.subscribe(ascending(0..));
+		// Descending, so the reader narrows with its end, which settles at once.
+		let descending = |groups: Range| replay().with_ranges([groups]).with_order(Order::Descending);
+		let mut subscriber = producer.subscribe(descending(Range::groups(0..)));
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
@@ -21695,17 +21724,17 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		let group = fill.group(0);
+		let group = fill.group(9);
 		let readers = group.readers();
 		let _writing = group.accept(None).unwrap();
 		assert!(readers.poll_unwanted(&waiter).is_pending());
 
-		subscriber.update(ascending(1..)).unwrap();
+		subscriber.update(descending(Range::groups(0..9))).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
-		assert!(readers.poll_unwanted(&waiter).is_ready(), "nobody reads group 0 now");
+		assert!(readers.poll_unwanted(&waiter).is_ready(), "nobody reads group 9 now");
 		assert!(
 			fill.poll_withdrawn(&waiter).is_pending(),
-			"the fill still owes 1 and up"
+			"the fill still owes 8 and down"
 		);
 	}
 
@@ -21759,9 +21788,9 @@ mod test {
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 	}
 
-	/// A time start before every group held starts at the group its lookup answers, once that
-	/// group's first frame says where it starts, asking nothing below it; a time end walks the
-	/// history below the feed's start through fills, stopping just past the group containing it.
+	/// A time start before every group held starts at the group its lookup answers, whose key
+	/// says where it starts, asking nothing below it; the misses past it through the time end
+	/// are filled.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_looked_up_time_range_reads_the_history() {
@@ -21785,14 +21814,10 @@ mod test {
 		assert_eq!(lookup.time(), Some(5));
 		let found = lookup.accept(5, None);
 		drop(lookup);
-		assert_eq!(
-			drain_groups(&mut subscriber),
-			Vec::<u64>::new(),
-			"nothing reads until the group found starts"
-		);
-		write_filled(found, 5);
 		let mut read = drain_groups(&mut subscriber);
-		// One group at a time past the start, until one starts after the end.
+		assert_eq!(read, [5], "the group found is read at once: its key is its start");
+		write_filled(found, 5);
+		// The misses past the start, through the end.
 		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			assert_eq!(fill.time(), None);
 			while let Some(key) = fill.wanted() {
@@ -21802,7 +21827,8 @@ mod test {
 			drop(fill);
 			read.extend(drain_groups(&mut subscriber));
 		}
-		assert_eq!(read, [5, 6, 7]);
+		// The misses come newest first, as the reader orders them.
+		assert_eq!(read, [5, 7, 6]);
 	}
 
 	/// A time end walking the history a handler serves takes no group the live feed
@@ -21918,8 +21944,9 @@ mod test {
 	fn a_later_reader_asks_afresh_for_what_a_fill_stopped_owing() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
-		let mut narrowed = producer.subscribe(ascending(0..));
+		// Descending, so the first reader narrows with its end, which settles at once.
+		let descending = |groups: Range| replay().with_ranges([groups]).with_order(Order::Descending);
+		let mut narrowed = producer.subscribe(descending(Range::groups(0..)));
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
@@ -21927,17 +21954,17 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		narrowed.update(ascending(8..)).unwrap();
+		narrowed.update(descending(Range::groups(0..8))).unwrap();
 		assert!(narrowed.poll_recv_group(&waiter).is_pending());
 
-		let mut later = producer.subscribe(ascending(0..));
+		let mut later = producer.subscribe(descending(Range::groups(0..)));
 		while let Poll::Ready(Ok(Some(_))) = later.poll_recv_group(&waiter) {}
 		let Poll::Ready(Ok(again)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("what the first fill stopped owing is asked afresh");
 		};
-		assert_eq!((again.start().group, again.end()), (0, 8));
-		assert_eq!(fill.wanted(), Some(8), "the first fill still owes only 8 and up");
-		assert!(!fill.is_wanted(0), "a group stops being wanted for good");
+		assert_eq!((again.start().group, again.end()), (8, 10));
+		assert_eq!(fill.wanted(), Some(7), "the first fill still owes only 7 and down");
+		assert!(!fill.is_wanted(9), "a group stops being wanted for good");
 	}
 
 	/// A descending reader's disjoint misses queue newest first, so a handler serving one fill
@@ -21951,13 +21978,15 @@ mod test {
 			producer.subscribe(replay().with_ranges([Range::groups(0..2), Range::groups(4..6), Range::groups(8..)]));
 		producer.start_at(8).unwrap();
 		write_group(&producer, 8);
+		// Held, so the middle range's time start names it and only 5 is a miss there.
+		write_group(&producer, 4);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
 		let mut asked = Vec::new();
 		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			asked.push((fill.start().group, fill.end()));
 		}
-		assert_eq!(asked, [(4, 6), (0, 2)]);
+		assert_eq!(asked, [(5, 6), (0, 2)]);
 	}
 
 	/// A group evicted after an arrival-order reader judged it cached, before it took it, is
@@ -22424,8 +22453,9 @@ mod test {
 	fn a_fetch_picks_up_its_group_in_a_batch_fill() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
-		let mut subscriber = producer.subscribe(ascending(0..));
+		// Descending, so the reader narrows past group 2 with its end, which settles at once.
+		let descending = |groups: Range| replay().with_ranges([groups]).with_order(Order::Descending);
+		let mut subscriber = producer.subscribe(descending(Range::groups(0..)));
 		producer.start_at(4).unwrap();
 		write_group(&producer, 4);
 		let waiter = kio::Waiter::noop();
@@ -22445,7 +22475,7 @@ mod test {
 			"the fetch joined the batch"
 		);
 
-		subscriber.update(ascending(3..)).unwrap();
+		subscriber.update(descending(Range::groups(0..2))).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
 		assert_eq!(
 			fill.poll_wanted_changed(&waiter),
@@ -22455,10 +22485,10 @@ mod test {
 		write_filled(fill.accept(2, None), 2);
 		assert!(
 			fill.poll_wanted_changed(&waiter).is_pending(),
-			"3 waits for 2 to be picked up"
+			"1 waits for 2 to be picked up"
 		);
 		assert!(matches!(kio::Task::poll(&mut *fetch, &waiter), Poll::Ready(Ok(_))));
-		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(3)));
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(1)));
 	}
 
 	/// A reader forgets the misses it gave up once its window moves past them, as it forgets
@@ -22502,9 +22532,11 @@ mod test {
 	fn a_descending_reader_asks_its_newest_fragment_first() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let mut middle = producer.subscribe(replay().with_range(5..6));
+		let mut middle = producer.subscribe(replay().with_range(4..6));
 		producer.start_at(8).unwrap();
 		write_group(&producer, 8);
+		// Held, so the middle reader's time start names it and only 5 is a miss.
+		write_group(&producer, 4);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = middle.poll_recv_group(&waiter) {}
 		let Poll::Ready(Ok(taken)) = dynamic.poll_requested_fill(&waiter) else {
@@ -22518,7 +22550,7 @@ mod test {
 		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			asked.push((fill.start().group, fill.end()));
 		}
-		assert_eq!(asked, [(6, 8), (0, 5)]);
+		assert_eq!(asked, [(6, 8), (0, 4)]);
 	}
 
 	/// A group the handler refused that still arrives live is delivered.
@@ -23148,8 +23180,9 @@ mod test {
 		producer
 	}
 
-	/// A live range merged with one above the live edge still starts at the newest group,
-	/// and the aggregate keeps both rather than flooring the live one at the higher start.
+	/// A live range merged with one starting past the live edge still starts at the newest
+	/// group, and the aggregate keeps both rather than flooring the live one at the higher
+	/// start. The later start is a time the newest group contains, so both read it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_live_range_merged_with_one_above_the_live_edge_gets_the_newest_group() {
@@ -23158,9 +23191,9 @@ mod test {
 		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
 		assert_eq!(
 			producer.subscription().unwrap().ranges,
-			vec![Range::groups(4..), Range::live()]
+			vec![Range::live(), Range::groups(4..)]
 		);
-		assert_eq!(drain(&mut ahead), Vec::<u64>::new());
+		assert_eq!(drain(&mut ahead), vec![3]);
 		assert_eq!(drain(&mut live), vec![3]);
 
 		append_at(&mut producer, 4);
@@ -23229,7 +23262,8 @@ mod test {
 	}
 
 	/// A relative start buffers that many groups behind the live edge, whatever a range
-	/// above the edge merged beside it asks for.
+	/// starting past the edge merged beside it asks for: that one reads from the newest
+	/// group, which contains its start.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_buffering_range_merged_with_one_above_the_live_edge_keeps_its_backlog() {
@@ -23242,7 +23276,7 @@ mod test {
 		let mut behind = producer.subscribe(replay().with_ranges([buffering]));
 		assert_eq!(
 			producer.subscription().unwrap().ranges,
-			vec![Range::groups(8..), buffering]
+			vec![buffering, Range::groups(8..)]
 		);
 		assert_eq!(drain(&mut behind), vec![3, 4, 5]);
 
@@ -23250,7 +23284,7 @@ mod test {
 			append_at(&mut producer, millis);
 		}
 		assert_eq!(drain(&mut behind), vec![6, 7, 8]);
-		assert_eq!(drain(&mut ahead), vec![8]);
+		assert_eq!(drain(&mut ahead), vec![5, 6, 7, 8]);
 	}
 
 	/// An untimed track replays from group 0 only what the wall clock hasn't made stale.
@@ -23318,7 +23352,7 @@ mod test {
 		let refused = producer.write_frame(Timestamp::from_millis(500).unwrap(), &b"x"[..]);
 		assert!(matches!(refused, Err(Error::TimestampMismatch)), "{refused:?}");
 		let state = producer.state.read();
-		assert!(state.lookup.get(&1).unwrap().group.is_aborted());
+		assert!(state.lookup.get(&500).unwrap().group.is_aborted());
 	}
 
 	/// Groups land out of key order, so a start is bounded from above as well as below.
@@ -23508,9 +23542,9 @@ mod test {
 		assert_eq!(drain(&mut late), vec![4]);
 	}
 
-	/// A relative end whose cap moves beside fixed ranges owes, of every cached group, exactly
-	/// what was owed and is still admitted, and what is newly admitted: what the moving run
-	/// gains is taken in by its run alone, and must still owe each cached group it reaches.
+	/// A cap moving beside fixed ranges owes, of every cached group, exactly what was owed and
+	/// is still admitted, and what is newly admitted: what the cap gains is owed where the
+	/// cache holds a group now, and what it loses is cut from what is owed.
 	#[test]
 	fn a_moving_cap_owes_what_it_newly_admits() {
 		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
@@ -23527,10 +23561,10 @@ mod test {
 		let mut owed = 0;
 		for round in 0..150 {
 			let producer = track_producer("test", Info::timed());
-			// One relative end, and fixed ranges around and above where the feed starts.
+			// One open range, and fixed ranges around and above where the feed starts.
 			let ranges = std::iter::once(Range {
 				start: Anchor::Time(next(KEYS)),
-				end: Some(Anchor::Relative(next(4))),
+				end: None,
 			})
 			.chain((0..1 + next(6)).map(|_| {
 				let start = next(KEYS);
@@ -23540,7 +23574,7 @@ mod test {
 			let mut groups = Vec::new();
 			for step in 0..30 {
 				let key = next(KEYS);
-				match next(4) {
+				match next(5) {
 					0 | 1 => {
 						if let Ok(mut group) = producer.create_group(group::Info { start: key }) {
 							if next(2) == 0 {
@@ -23558,6 +23592,11 @@ mod test {
 							let _ = group.write_frame(at(key * 20), bytes::Bytes::from_static(b"x"));
 						}
 					}
+					3 => match next(4) {
+						// The cap moves, and now and then lifts.
+						0 => subscriber.set_range(..),
+						_ => subscriber.set_range(..next(KEYS + 1)),
+					},
 					_ => {
 						// Read now and then, so the walk passes groups and owes them again.
 						let _ = subscriber.poll_recv_group(&kio::Waiter::noop());
@@ -23688,8 +23727,13 @@ mod test {
 	#[cfg(feature = "async")]
 	fn drops_are_named_only_within_the_ranges() {
 		let producer = track_producer("test", Info::timed());
+		// Held, so each range's time start names its own group.
+		write_group(&producer, 2);
+		write_group(&producer, 6);
 		let mut subscriber = producer.subscribe(replay().with_ranges([Range::groups(2..4), Range::groups(6..8)]));
-		producer.drop_groups(0..10, StreamError::NotFound);
+		for keys in [0..2, 3..6, 7..10] {
+			producer.drop_groups(keys, StreamError::NotFound);
+		}
 		let waiter = kio::Waiter::noop();
 		let mut dropped = Vec::new();
 		while let Poll::Ready(range) = subscriber.poll_drop(&waiter) {
@@ -23698,8 +23742,8 @@ mod test {
 		assert_eq!(
 			dropped,
 			vec![
-				(2..4, Hole::drop(StreamError::NotFound)),
-				(6..8, Hole::drop(StreamError::NotFound))
+				(3..4, Hole::drop(StreamError::NotFound)),
+				(7..8, Hole::drop(StreamError::NotFound))
 			]
 		);
 	}
@@ -23725,10 +23769,12 @@ mod test {
 		let mut covering = reader(budget, Range::groups(0..));
 		let mut narrower = reader(Duration::from_millis(100), Range::groups(0..));
 		let mut wider = reader(Duration::from_secs(5), Range::groups(0..));
-		let mut capped = reader(budget, Range::groups(0..4));
+		let mut capped = reader(budget, Range::groups(0..5));
+		// Held, so a time start there names it rather than reaching below.
+		write_group(&producer, 3);
 		let mut above = reader(budget, Range::groups(3..));
 		producer.give_up(1..3, Hole::stale(budget));
-		producer.skip_groups(3..4);
+		producer.skip_groups(4..5);
 		let waiter = kio::Waiter::noop();
 		let dropped = |subscriber: &mut Subscriber| {
 			let mut runs = Vec::new();
@@ -23737,18 +23783,18 @@ mod test {
 			}
 			runs
 		};
-		let settled = vec![(1..3, Hole::stale(budget)), (3..4, Hole::Skip)];
+		let settled = vec![(1..3, Hole::stale(budget)), (4..5, Hole::Skip)];
 		assert_eq!(dropped(&mut covering), settled);
 		assert_eq!(dropped(&mut narrower), settled, "a narrower budget is settled too");
-		assert_eq!(dropped(&mut wider), [(3..4, Hole::Skip)], "a wider budget waits");
+		assert_eq!(dropped(&mut wider), [(4..5, Hole::Skip)], "a wider budget waits");
 		assert_eq!(
 			dropped(&mut capped),
-			[(3..4, Hole::Skip)],
+			[(4..5, Hole::Skip)],
 			"a capped range may judge otherwise"
 		);
 		assert_eq!(
 			dropped(&mut above),
-			[(3..4, Hole::Skip)],
+			[(4..5, Hole::Skip)],
 			"the stale run is outside its range"
 		);
 	}
@@ -23911,7 +23957,8 @@ mod test {
 	}
 
 	/// A stale verdict settles a reader that reads every range the upstream judged it
-	/// against, however many there are, with nothing received and no fill asked. Mirrors JS.
+	/// against, however many there are, with no fill asked. Group 3 is received, so the
+	/// later range's time start names it. Mirrors JS.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_stale_verdict_settles_a_reader_of_every_range_it_judged() {
@@ -23923,6 +23970,7 @@ mod test {
 		producer.supersede_stale(judged([(0, 2), (4, 6)]));
 		producer.give_up(0..2, Hole::stale(budget));
 		producer.give_up(4..6, Hole::stale(budget));
+		producer.create_group(3u64.into()).unwrap().close().unwrap();
 		let mut subscriber = producer.subscribe(
 			Subscription::default()
 				.with_delay(Delay::default().with_max(budget))
@@ -23931,17 +23979,21 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((0..2, Hole::stale(budget))));
 		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((4..6, Hole::stale(budget))));
+		assert!(matches!(
+			subscriber.poll_recv_group(&waiter),
+			Poll::Ready(Ok(Some(group))) if group.start == 3
+		));
 		assert!(
 			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))),
-			"nothing is owed"
+			"nothing else is owed"
 		);
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "nothing is asked");
 	}
 
 	/// A reader whose ranges only partly overlap the ones a stale verdict was judged against
 	/// is settled where it reads every judged group above the run, and asks a fill for the
-	/// rest, even with nothing received: no update brings it, since its ranges add nothing to
-	/// the upstream's terms. Mirrors JS.
+	/// rest, even with only group 3 received: no update brings it, since its ranges add
+	/// nothing to the upstream's terms. Mirrors JS.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_stale_verdict_settles_a_partly_overlapping_reader_only_where_it_reads_above() {
@@ -23952,6 +24004,8 @@ mod test {
 		producer.supersede_stale(judged([(0, 2), (4, 6)]));
 		producer.give_up(0..2, Hole::stale(budget));
 		producer.give_up(4..6, Hole::stale(budget));
+		// Held, so a time start at 4 names it.
+		producer.create_group(3u64.into()).unwrap().close().unwrap();
 		let reader = |ranges: [Range; 2]| {
 			producer.subscribe(
 				Subscription::default()
@@ -23960,15 +24014,20 @@ mod test {
 			)
 		};
 		let waiter = kio::Waiter::noop();
-		// Reads every judged group above each run, and more past them: settled.
+		// Reads every judged group above each run, and more past them: settled. Its start at
+		// time 1 reaches back to the oldest group, since none held contains it.
 		let mut wider = reader([Range::groups(1..2), Range::groups(4..8)]);
-		assert_eq!(wider.poll_drop(&waiter), Poll::Ready((1..2, Hole::stale(budget))));
+		assert_eq!(wider.poll_drop(&waiter), Poll::Ready((0..2, Hole::stale(budget))));
 		assert_eq!(wider.poll_drop(&waiter), Poll::Ready((4..6, Hole::stale(budget))));
 		assert!(wider.poll_drop(&waiter).is_pending());
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "nothing is asked");
 		// Stops at 4, which the upstream judged against 5: its own newest, which no verdict
 		// convicts. Both runs are unknown to it, and asked for.
 		let mut narrower = reader([Range::groups(0..2), Range::groups(4..5)]);
+		assert!(matches!(
+			narrower.poll_recv_group(&waiter),
+			Poll::Ready(Ok(Some(group))) if group.start == 3
+		));
 		assert!(narrower.poll_recv_group(&waiter).is_pending());
 		assert!(narrower.poll_drop(&waiter).is_pending());
 		let mut asked = Vec::new();
@@ -25067,7 +25126,9 @@ mod test {
 		assert_eq!(drain(&mut live), vec![4000]);
 	}
 
-	/// A group joined mid-group still starts at its key, whatever its first frame held says.
+	/// A group joined mid-group still starts at its key, whatever its first frame held says:
+	/// a time start inside it names it. The range is open, since a bounded read takes whole
+	/// groups only.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_partial_group_starts_at_its_key() {
@@ -25083,7 +25144,7 @@ mod test {
 
 		let mut seek = producer.subscribe(replay().with_ranges([Range {
 			start: Anchor::Time(2200),
-			end: Some(Anchor::Time(2200)),
+			end: None,
 		}]));
 		assert_eq!(drain(&mut seek), vec![2000]);
 	}
@@ -26527,7 +26588,9 @@ mod test {
 		producer.create_group(0u64.into()).unwrap().close().unwrap();
 		producer.create_group(2u64.into()).unwrap().close().unwrap();
 		let producer = producer.finish().unwrap();
-		let mut reader = producer.subscribe(replay().with_order(Order::Ascending).with_range(1..2));
+		// From group 0, which a time start names without a lookup, through the hole at 1.
+		let mut reader = producer.subscribe(replay().with_order(Order::Ascending).with_range(0..2));
+		assert_eq!(read_now(&mut reader, false), Some(Some(0)));
 		assert_eq!(read_now(&mut reader, false), None, "the fill is out");
 		let fill = dynamic
 			.requested_fill_group()
@@ -26557,9 +26620,9 @@ mod test {
 		let mut reader = producer.subscribe(
 			Subscription::default()
 				.with_delay(crate::track::Delay::default().with_max(None))
-				.with_range(5..6),
+				.with_range(0..1),
 		);
-		assert_eq!(read_now(&mut reader, false), None, "group 5 may still arrive");
+		assert_eq!(read_now(&mut reader, false), None, "group 0 may still arrive");
 		assert!(dynamic.requested_fill_group().now_or_never().is_none());
 		elapse(&producer, ledger::GRACE);
 		assert_eq!(read_now(&mut reader, false), None, "the fill is out");
@@ -26568,7 +26631,7 @@ mod test {
 			.now_or_never()
 			.expect("the hole is asked once the grace passed")
 			.unwrap();
-		assert_eq!(fill.key(), 5);
+		assert_eq!(fill.key(), 0);
 		fill.reject(Error::NotFound);
 		assert_eq!(read_now(&mut reader, false), Some(None), "the refusal is final");
 
@@ -26578,7 +26641,7 @@ mod test {
 		let mut reader = producer.subscribe(
 			Subscription::default()
 				.with_delay(crate::track::Delay::default().with_max(None))
-				.with_range(5..6),
+				.with_range(0..1),
 		);
 		assert_eq!(read_now(&mut reader, false), None);
 		elapse(&producer, ledger::GRACE);
@@ -26602,7 +26665,7 @@ mod test {
 			let mut reader = producer.subscribe(
 				Subscription::default()
 					.with_delay(crate::track::Delay::default().with_max(None))
-					.with_range(5..6),
+					.with_range(0..1),
 			);
 			assert_eq!(read_now(&mut reader, false), None, "received: {received}");
 			let fill = dynamic
@@ -26610,7 +26673,7 @@ mod test {
 				.now_or_never()
 				.expect("a hole below the start is asked at once")
 				.unwrap();
-			assert_eq!(fill.key(), 5, "received: {received}");
+			assert_eq!(fill.key(), 0, "received: {received}");
 			fill.reject(Error::NotFound);
 			assert_eq!(
 				read_now(&mut reader, false),
@@ -26631,7 +26694,7 @@ mod test {
 		let (mut producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.requests();
 		producer.set_idle();
-		let mut reader = producer.subscribe(replay().with_order(Order::Ascending).with_range(1..3));
+		let mut reader = producer.subscribe(replay().with_order(Order::Ascending).with_range(0..2));
 		assert_eq!(read_now(&mut reader, false), None);
 		assert!(
 			dynamic.requested_fill().now_or_never().is_none(),
@@ -26645,14 +26708,14 @@ mod test {
 			.now_or_never()
 			.expect("the holes are asked at once")
 			.unwrap();
-		assert_eq!((fill.start(), fill.end()), (Position::group(1), 3));
-		let mut group = fill.accept(1, Info::timed()).unwrap();
+		assert_eq!((fill.start(), fill.end()), (Position::group(0), 2));
+		let mut group = fill.accept(0, Info::timed()).unwrap();
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"filled"))
 			.unwrap();
 		group.close().unwrap();
-		fill.refuse_groups(2..3, Error::Unsupported);
-		assert_eq!(read_now(&mut reader, false), Some(Some(1)));
+		fill.refuse_groups(1..2, Error::Unsupported);
+		assert_eq!(read_now(&mut reader, false), Some(Some(0)));
 		assert_eq!(read_now(&mut reader, false), Some(None), "the refusal is final");
 	}
 
@@ -26751,7 +26814,7 @@ mod test {
 		let mut reader = producer.subscribe(
 			Subscription::default()
 				.with_delay(crate::track::Delay::default().with_max(None))
-				.with_range(5..6),
+				.with_range(0..1),
 		);
 		let (flag, waiter) = Flag::waiter();
 		assert!(reader.poll_group(false, &waiter).is_pending());

@@ -294,6 +294,17 @@ impl Reader {
 		within(self.ranges) && within(self.bounds)
 	}
 
+	/// Whether the reader may be handed `group`: inside its bounds and before its range's
+	/// end. The range starts at the group containing its start time among those the copy
+	/// that resolved it held, which may be a lower one, so a group below the start may be
+	/// read too, though only one at or past where the range resolved (`resolved`).
+	fn admits(&self, group: u64, resolved: Option<u64>) -> bool {
+		let ranges = self.ranges.is_none_or(|(start, end)| {
+			group < end && (group >= start || resolved.is_none_or(|resolved| resolved <= group))
+		});
+		ranges && self.bounds.is_none_or(|(start, end)| (start..end).contains(&group))
+	}
+
 	/// Everything observed, to tell whether a poll found anything new.
 	fn observed(&self) -> (usize, usize, bool, usize) {
 		let frames = self
@@ -660,11 +671,18 @@ impl Model {
 							format!("group {key} out of order after {:?}", reader.handed),
 						));
 					}
-					if !reader.covers(key) {
+					// Only an arrival cursor says where its range resolved.
+					let resolved = match reader.cursor.as_mut().unwrap() {
+						Cursor::Arrival(sub) => {
+							sub.resolved().first().copied().flatten().map(|resolved| resolved.start)
+						}
+						Cursor::Ordered(_) => None,
+					};
+					if !reader.admits(key, resolved) {
 						return Err(fail(
 							index,
 							format!(
-								"group {key} outside ranges {:?} and bounds {:?}",
+								"group {key} outside ranges {:?} (resolved from {resolved:?}) and bounds {:?}",
 								reader.ranges, reader.bounds
 							),
 						));
@@ -996,6 +1014,41 @@ fn regressions() {
 		drops,
 	};
 	let cases = [
+		// A time start on a received copy that never reports its live edge waits for a group
+		// rather than reading everything, so it stops at its end.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(true, Budget::Hour, Some((2, 3)), false),
+				},
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::End { instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
 		// An ordered reader whose range a finished track already passed ends.
 		Case {
 			ops: vec![Op::Join {
@@ -1019,6 +1072,28 @@ fn regressions() {
 				},
 			],
 			finish: true,
+		},
+		// A copy replaced before its first group, whose cap empties the range it was asked,
+		// says nothing of where a later reader's time start resolves: the serving copy does.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { instance: 0, slot: 2 },
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, Some((1, 2)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 2,
+					group: None,
+					frames: 1,
+				},
+			],
+			finish: false,
 		},
 		// Local bounds below the subscription's range leave no drops to report.
 		Case {

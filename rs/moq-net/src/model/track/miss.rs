@@ -2450,13 +2450,16 @@ mod tests {
 			.unwrap();
 		let requests = track.requests();
 		track.start_at(8).unwrap();
-		track
-			.create_group(crate::group::Info { start: 8 })
-			.unwrap()
-			.close()
-			.unwrap();
-		// Four groups below where the feed starts, each a fill of its own.
-		let ranges = [0..1, 2..3, 4..5, 6..7].map(crate::track::Range::groups);
+		// Every range starts at a group held, so each knows where it starts without a lookup.
+		for key in [0, 2, 4, 6, 8] {
+			track
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.close()
+				.unwrap();
+		}
+		// Four groups below where the feed starts, 1, 3, 5, and 7, each a fill of its own.
+		let ranges = [0..2, 2..4, 4..6, 6..8].map(crate::track::Range::groups);
 		let mut reader = track.subscribe(
 			Subscription::default()
 				.with_delay(Delay::default().with_max(Duration::from_secs(60)))

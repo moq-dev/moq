@@ -52,7 +52,7 @@ use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::idle::{Idle, Walk};
-use super::subscription::{Accounted, Anchor, Position, Resolved, Subscription, Unheld, Window};
+use super::subscription::{Accounted, Anchor, Containing, Holdings, Position, Resolved, Subscription, Unheld, Window};
 use crate::ledger;
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
@@ -468,6 +468,33 @@ impl Consumer {
 	fn end(&self) -> Option<Option<Result<()>>> {
 		let route = self.state.read();
 		route.phase.terminal().then(|| route.phase.end().cloned())
+	}
+}
+
+/// Ranges a copy resolved, for a reader that holds no groups of its own: each time anchor
+/// names the group the copy resolved it to, so it is that group's start, not a time to
+/// look for among groups held.
+struct Placed;
+
+impl Holdings for Placed {
+	fn resolves(&self) -> bool {
+		false
+	}
+
+	fn containing(&self, time: u64) -> Containing {
+		Containing::Group(time)
+	}
+
+	fn next_start(&self, _: u64) -> Option<u64> {
+		None
+	}
+
+	fn back(&self, latest: u64, back: u64) -> Option<u64> {
+		(back == 0).then_some(latest)
+	}
+
+	fn complete(&self) -> bool {
+		true
 	}
 }
 
@@ -1080,10 +1107,19 @@ impl Reader {
 				break;
 			}
 			let copy = &mut self.copies[index];
-			let resolved = match &mut copy.sub {
+			let capped = copy.end().is_some();
+			let resolved: Vec<_> = match &mut copy.sub {
 				Sub::Ready(sub) if copy.from == self.mirrored.ranges => sub.resolved_ranges(),
 				_ => continue,
 			};
+			// A failover cap at or below where a range starts empties the copy's range, which
+			// then says nothing of where the reader's own range starts.
+			let resolved: Vec<_> = resolved
+				.into_iter()
+				.map(|resolved| {
+					resolved.filter(|resolved| !capped || resolved.end.is_none_or(|end| end > resolved.start))
+				})
+				.collect();
 			self.resolve(&resolved);
 		}
 		&self.window
@@ -1094,6 +1130,8 @@ impl Reader {
 	fn resolve(&mut self, resolved: &[Option<Resolved>]) {
 		// Once placed, relative/time starts stay pinned even while a time end settles.
 		let placed = (!self.window.is_pending()).then(|| self.window.resolved());
+		// A range the copy left unresolved keeps its anchors, which only a copy can place.
+		let mut unplaced = false;
 		let ranges: Vec<_> = self
 			.mirrored
 			.ranges
@@ -1101,6 +1139,9 @@ impl Reader {
 			.enumerate()
 			.map(|(index, range)| {
 				let Some(resolved) = resolved.get(index).copied().flatten() else {
+					unplaced |= !range.is_empty()
+						&& (matches!(range.start, Anchor::Relative(_) | Anchor::Time(1..))
+							|| matches!(range.end, Some(Anchor::Relative(_))));
 					return *range;
 				};
 				let previous = placed.as_ref().and_then(|placed| placed[index]);
@@ -1121,7 +1162,10 @@ impl Reader {
 				}
 			})
 			.collect();
-		let window = Window::new(&ranges, None, &Unheld).expect("an unheld hop refuses nothing");
+		if unplaced {
+			return;
+		}
+		let window = Window::new(&ranges, None, &Placed).expect("a placed hop refuses nothing");
 		if !window.is_pending() {
 			self.window = window;
 		}
@@ -1393,6 +1437,18 @@ impl Reader {
 		}
 	}
 
+	/// Whether the window names a group from `floor` up to `key` the reader lacks.
+	fn owes_below(&mut self, floor: u64, key: u64, delivered: &Delivered) -> bool {
+		self.window()
+			.runs(floor)
+			.take_while(|run| *run.start() < key)
+			.any(|run| {
+				!delivered
+					.gaps(*run.start()..run.end().saturating_add(1).min(key))
+					.is_empty()
+			})
+	}
+
 	fn deliverable(copy: &Copy, key: u64, delivered: &Delivered) -> bool {
 		let replaced = copy.until.is_some_and(|until| until.is_none_or(|until| key > until));
 		!replaced && !delivered.contains(key)
@@ -1519,7 +1575,15 @@ impl Reader {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(reserved))) => {
 						let key = reserved.key();
-						if !Self::deliverable(&self.copies[index], key, delivered) {
+						// A copy resolves a time start against the groups it holds, which may place
+						// it below where the reader's window did: the window decides.
+						let deliverable = Self::deliverable(&self.copies[index], key, delivered);
+						if !deliverable || !self.window().contains(key) {
+							// Skipping an ordered cursor past a group the window still owes below
+							// would lose it, though it may yet land on this copy: leave it there.
+							if ordered && deliverable && self.owes_below(floor, key, delivered) {
+								break;
+							}
 							let Sub::Ready(sub) = &mut self.copies[index].sub else {
 								unreachable!()
 							};
@@ -3159,21 +3223,25 @@ mod test {
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
+		// Held before the reader subscribes, so the second range starts at group 2 itself.
+		write(&a, 0);
+		write(&a, 2);
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
-			.with_ranges([track::Range::groups(0..1), track::Range::groups(2..3)]);
+			.with_ranges([track::Range::groups(0..1), track::Range::groups(2..4)]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		write(&a, 0);
-		assert_eq!(drain(&mut sub, false), [0]);
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [0, 2]);
 		let b = copy();
 		routes.serve(b.consume());
-		write(&b, 2);
-		assert_eq!(drain(&mut sub, false), [2]);
+		write(&b, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
 		assert_eq!(
 			copies(&routes),
 			1,
@@ -4337,11 +4405,11 @@ mod test {
 		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(4))));
 	}
 
-	/// A front's reader created with a floor above the serving copy's edge reports nothing
-	/// below it, as a plain reader does.
+	/// A front's reader whose start time is past the serving copy's edge starts at the group
+	/// containing it, so it reports that copy's largest, as a plain reader of the copy does.
 	#[test]
 	#[cfg(feature = "async")]
-	fn largest_honours_the_subscription_floor_on_the_serving_copy() {
+	fn largest_honours_the_subscription_start_on_the_serving_copy() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
@@ -4351,14 +4419,16 @@ mod test {
 			.with_range(8..);
 		let mut sub = logical
 			.consume()
-			.subscribe(subscription)
+			.subscribe(subscription.clone())
 			.now_or_never()
 			.unwrap()
 			.unwrap();
 		for key in 0..5 {
 			write(&a, key);
 		}
-		assert!(sub.largest().now_or_never().is_none(), "the largest is below the floor");
+		let mut plain = a.consume().subscribe(subscription).now_or_never().unwrap().unwrap();
+		assert_eq!(plain.largest().now_or_never(), Some(Some(Position::group(4))));
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(4))));
 		write(&a, 8);
 		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(8))));
 	}
@@ -5635,9 +5705,9 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(30));
-		let mut five = a.create_group(group::Info { start: 5 }).unwrap();
+		let mut five = a.create_group(group::Info { start: 5000 }).unwrap();
 		five.write_frame(ts(5000), b"x".as_ref()).unwrap();
-		assert_eq!(recv(&mut sub).start, 5);
+		assert_eq!(recv(&mut sub).start, 5000);
 
 		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
 		routes.serve(b.consume());
@@ -5660,7 +5730,7 @@ mod test {
 		while let Some(Ok(Some(group))) = sub.recv_group().now_or_never() {
 			rest.push(group.start);
 		}
-		assert_eq!(rest, vec![0, 1, 2, 3, 4, 6]);
+		assert_eq!(rest, vec![0, 1000, 2000, 3000, 4000, 6000]);
 	}
 
 	/// Ranges widened while only an unanswered replacement can place them keep the switch's
@@ -5837,7 +5907,7 @@ mod test {
 		}
 		// Asked before b held any group, the relative start resolves at its first.
 		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(group.start, 1);
+		assert_eq!(group.start, 1000);
 
 		// Served by a copy that can't resolve it, the same range fails.
 		let routes = Producer::new();

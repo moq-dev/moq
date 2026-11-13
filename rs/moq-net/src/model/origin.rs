@@ -15435,13 +15435,17 @@ mod tests {
 	}
 
 	/// The incumbent finishes and the newcomer aborts before its first group: a reader whose
-	/// range starts past the end, and one joining while the newcomer is awaited, end cleanly.
+	/// range starts past the last group, which contains its start, and one joining while the
+	/// newcomer is awaited, each read that group and end cleanly.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn readers_owed_nothing_below_the_incumbents_end_end_cleanly() {
 		let (producer, _server, _upstream, old, _subscription) = remote_front().await;
 		let resolved = producer.consume().request("room/alice", None).await.unwrap();
 		let video = resolved.track("video").unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"last".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut later = video
 			.subscribe(crate::track::Subscription {
 				ranges: vec![crate::track::Range {
@@ -15452,9 +15456,6 @@ mod tests {
 			})
 			.await
 			.unwrap();
-		let mut group = old.append_next().unwrap();
-		group.write_frame(group.key_time(), b"last".as_ref()).unwrap();
-		group.close().unwrap();
 
 		let newcomer = producer
 			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
@@ -15476,13 +15477,14 @@ mod tests {
 		let _old = old.finish().unwrap();
 		replacement.abort(Error::App(7)).unwrap();
 
-		assert!(matches!(next_group(&mut later).await, Ok(None)));
-		let mut group = next_group(&mut joiner)
-			.await
-			.expect("the incumbent's latest group")
-			.expect("track open");
-		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
-		assert!(matches!(next_group(&mut joiner).await, Ok(None)));
+		for reader in [&mut later, &mut joiner] {
+			let mut group = next_group(reader)
+				.await
+				.expect("the incumbent's latest group")
+				.expect("track open");
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+			assert!(matches!(next_group(reader).await, Ok(None)));
+		}
 	}
 
 	/// While the front waits for the newcomer's first group, a reader changing its

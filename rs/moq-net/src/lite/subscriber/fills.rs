@@ -645,7 +645,7 @@ mod tests {
 		assert!(fills.refused.get(&5).unwrap().lost, "the publisher never had it");
 	}
 
-	/// A track whose cache evicted groups 1..4, with a reader of them whose fill is the next
+	/// A track whose cache evicted groups 0..3, with a reader of them whose fill is the next
 	/// request.
 	fn missed() -> (track::Producer, track::Requests, track::Ordered, track::Fill) {
 		let producer = track::Producer::new(
@@ -663,26 +663,28 @@ mod tests {
 				.unwrap();
 			group.close().unwrap();
 		}
-		for key in 1..4 {
+		// From group 0, which a time start names whatever is held, so the reader asks the
+		// missing groups straight away rather than looking up where its start falls.
+		for key in 0..3 {
 			producer.evict(key);
 		}
 		let (reader, fill) = ask(&producer, &requests);
 		(producer, requests, reader, fill)
 	}
 
-	/// A reader of groups 1..4, and the fill it asks for.
+	/// A reader of groups 0..3, and the fill it asks for.
 	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::Fill) {
 		let waiter = kio::Waiter::noop();
 		let mut reader = producer
 			.subscribe(
 				Subscription::default()
 					.with_delay(Delay::default().with_max(None))
-					.with_range(1..4),
+					.with_range(0..3),
 			)
 			.ordered();
-		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 1..4 are owed");
+		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..3 are owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
-			panic!("groups 1..4 are a miss");
+			panic!("groups 0..3 are a miss");
 		};
 		(reader, fill)
 	}
@@ -694,7 +696,7 @@ mod tests {
 	fn a_skipped_start_is_never_a_loss() {
 		let waiter = kio::Waiter::noop();
 		let (producer, requests, mut reader, fill) = missed();
-		Refusal::passing(StreamError::NotFound).answer(&fill, 1..4);
+		Refusal::passing(StreamError::NotFound).answer(&fill, 0..3);
 		assert!(
 			reader.poll_next_group(&waiter).is_ready(),
 			"the reader stops waiting for the skipped groups"
@@ -703,14 +705,14 @@ mod tests {
 
 		// The lowered start asks for them again, and they arrive.
 		let (mut reader, fill) = ask(&producer, &requests);
-		for key in 1..4 {
+		for key in 0..3 {
 			let mut group = fill.accept(key, None).unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
 			group.close().unwrap();
 		}
-		for key in 1..4 {
+		for key in 0..3 {
 			let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
 				panic!("group {key} was delivered");
 			};
@@ -719,13 +721,13 @@ mod tests {
 
 		// The publisher naming them not found is a loss: nobody asks again.
 		let (producer, requests, reader, fill) = missed();
-		Refusal::dropped(StreamError::NotFound).answer(&fill, 1..4);
+		Refusal::dropped(StreamError::NotFound).answer(&fill, 0..3);
 		drop((reader, fill));
 		let mut reader = producer
 			.subscribe(
 				Subscription::default()
 					.with_delay(Delay::default().with_max(None))
-					.with_range(1..4),
+					.with_range(0..3),
 			)
 			.ordered();
 		let _ = reader.poll_next_group(&waiter);

@@ -6137,12 +6137,22 @@ pub struct CoverageBench {
 impl CoverageBench {
 	/// Subscribe to `ranges` one-group ranges, then give up the first `skipped` of them, one
 	/// wake each. A range is left open, so the start never resolves and nothing is covered.
+	///
+	/// Each range starts at a time no group held places, so it may reach back to the group
+	/// before it: giving a range up gives that group up too.
 	pub fn new(ranges: u64, skipped: u64) -> Self {
 		assert!(skipped < ranges, "a range must stay open");
 		// Every other group, so no two ranges merge into one run.
 		let wire = (0..ranges).map(|range| 2 * range..2 * range + 1);
+		// Alternating errors keep adjacent drops separate entries in the skipped record.
 		let drops = (0..skipped)
-			.map(|range| (2 * range..2 * range + 1, StreamError::NotFound))
+			.map(|range| {
+				let err = match range % 2 {
+					0 => StreamError::NotFound,
+					_ => StreamError::Cancel,
+				};
+				((2 * range).saturating_sub(1)..2 * range + 1, err)
+			})
 			.collect();
 		Self::build(wire, drops)
 	}
@@ -8029,9 +8039,9 @@ mod serve_group_test {
 		assert_eq!(resolved, Some((2, None)), "the update kept where it started");
 	}
 
-	/// An update the model refuses, here a time start that a group-only copy's cache cannot
-	/// settle, ends the subscription with the refusal and keeps the ranges it had, rather
-	/// than serving under terms the model never took.
+	/// An update the model refuses, here a relative start that a group-only copy's cache
+	/// cannot settle, ends the subscription with the refusal once the run reads under it,
+	/// rather than serving under terms the model never took.
 	#[kio::test]
 	async fn lite07_a_refused_update_ends_the_subscription() {
 		let mut track = track::Producer::new(
@@ -8039,7 +8049,8 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		track.anchored();
+		// A received copy whose wire can't say what a relative anchor counts back from.
+		track.received();
 		for key in 0..5 {
 			write_group(&mut track, key, key * 1000);
 		}
@@ -8053,38 +8064,32 @@ mod serve_group_test {
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 		}
 
-		// Swap range 0 for one ending at a time later groups may still start before.
+		// Swap range 0 for one counting back from a latest group the copy can't place.
 		let later = lite::Range {
-			start: Some(lite::Anchor::Time(1_000)),
+			start: Some(lite::Anchor::Relative(2)),
 			end: Some(lite::Anchor::Time(100_000)),
 		};
 		run.update(lite07_add(&[], 1, &[later]));
-		assert_eq!(run.ids, [0], "kept the ranges the model holds");
-		assert!(run.unstarted.is_empty(), "owes no start for a refused range");
-		let result = loop {
-			if let Poll::Ready(Err(err)) = run.poll_step(&mut writer, &kio::Waiter::noop()) {
-				break err;
-			}
-		};
+		let result = (0..100)
+			.find_map(|_| match run.poll_step(&mut writer, &kio::Waiter::noop()) {
+				Poll::Ready(Err(err)) => Some(err),
+				_ => None,
+			})
+			.expect("the refusal ends the subscription");
 		assert!(matches!(result, Error::Unsupported), "ended with {result:?}");
 	}
 
-	/// Where an added time start `time` resolves among `groups` (key and start, in
-	/// milliseconds), before and after `newer` arrives and another update leaves it live, with
-	/// whether it names that group. The run serves group `first` first.
-	async fn time_start_across_an_update(
-		groups: &[(u64, u64)],
-		first: u64,
-		time: u64,
-		newer: (u64, u64),
-	) -> [(u64, bool); 2] {
+	/// Where an added time start `time` resolves among `groups` (starts, in milliseconds),
+	/// before and after a group starting at `newer` arrives and another update leaves it live,
+	/// with whether it names that group. The run serves group `first` first.
+	async fn time_start_across_an_update(groups: &[u64], first: u64, time: u64, newer: u64) -> [(u64, bool); 2] {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
 			crate::track::Info::timed(),
 		);
-		for (key, millis) in groups {
-			write_group(&mut track, *key, *millis);
+		for &key in groups {
+			write_group(&mut track, key, key);
 		}
 		let served = lite::Range::span(Some(first), 0, Some(first), None);
 		let subscriber = track.subscribe(
@@ -8104,7 +8109,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let before = run.track.resolved()[1].expect("resolved");
 
-		write_group(&mut track, newer.0, newer.1);
+		write_group(&mut track, newer, newer);
 		let live = [(0, served), (1, time)];
 		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(99), 0, None, None)]));
 		let after = run.track.resolved()[1].expect("resolved");
@@ -8116,21 +8121,21 @@ mod serve_group_test {
 	/// still reaches back to the oldest, rather than becoming a floor at group 0.
 	#[kio::test]
 	async fn lite07_an_added_time_start_keeps_its_start() {
-		let five: Vec<_> = (0..5).map(|key| (key, key * 1000)).collect();
-		// 4.5 s falls in group 4, the newest starting at or before it, until group 5 starts at
-		// 4.2 s.
+		let five = [0, 1000, 2000, 3000, 4000];
+		// 4.5 s falls in the group at 4 s, the newest starting at or before it, until a group
+		// starts at 4.2 s.
 		assert_eq!(
-			time_start_across_an_update(&five, 0, 4500, (5, 4200)).await,
-			[(4, true), (4, true)]
+			time_start_across_an_update(&five, 0, 4500, 4200).await,
+			[(4000, true), (4000, true)]
 		);
-		// 1 s falls in group 0 until group 1 starts at 0.5 s.
+		// 1 s falls in the group at 0 until a group starts at 0.5 s.
 		assert_eq!(
-			time_start_across_an_update(&[(0, 0)], 0, 1000, (1, 500)).await,
+			time_start_across_an_update(&[0], 0, 1000, 500).await,
 			[(0, true), (0, true)]
 		);
-		// 0.1 s is older than group 5, the oldest held.
+		// 0.1 s is older than the group at 5 s, the oldest held.
 		assert_eq!(
-			time_start_across_an_update(&[(5, 5000)], 5, 100, (6, 6000)).await,
+			time_start_across_an_update(&[5000], 5000, 100, 6000).await,
 			[(0, false), (0, false)]
 		);
 	}
@@ -9437,12 +9442,13 @@ mod serve_group_test {
 	/// stays open for an update.
 	#[kio::test]
 	async fn giving_up_every_range_before_the_start_answers_it() {
-		// Disjoint ranges, then one range given up a group at a time with alternating errors.
-		for (mut bench, last) in [(CoverageBench::new(3, 2), 4), (CoverageBench::adjacent(4), 4)] {
+		// Disjoint ranges, the last given up with the group before it, which its time start may
+		// reach back to; then one range given up a group at a time with alternating errors.
+		for (mut bench, last) in [(CoverageBench::new(3, 2), 3..5), (CoverageBench::adjacent(4), 4..5)] {
 			bench.wake();
 			bench.wake();
 			assert!(bench.run.start.resolved().is_none(), "a range is still open");
-			bench.track.drop_groups(last..last + 1, StreamError::NotFound);
+			bench.track.drop_groups(last, StreamError::NotFound);
 			loop {
 				match bench.run.poll_step(&mut bench.writer, &kio::Waiter::noop()) {
 					Poll::Ready(Ok(ControlFlow::Continue(()))) => continue,
@@ -9912,8 +9918,9 @@ mod serve_group_test {
 		assert_eq!(relay.opened(), 1, "served a group below the floor");
 	}
 
-	/// A source whose feed starts below the subscriber's floor serves the floor's group, so
-	/// a newer group arriving first must not resolve the start past it.
+	/// A source whose feed starts below the subscriber's time start serves the group
+	/// containing it, so a newer group arriving first must not resolve the start past it:
+	/// with no group held placing the time yet, the start is where the source's feed starts.
 	#[kio::test]
 	async fn held_first_group_resolves_to_the_floor_under_the_source() {
 		let mut track = track::Producer::new(
@@ -9925,14 +9932,14 @@ mod serve_group_test {
 
 		write_group(&mut track, 6, 6);
 		relay.settle();
-		track.start_at(0).unwrap();
+		track.start_at(2).unwrap();
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "the held group is served");
 
 		write_group(&mut track, 5, 5);
 		relay.settle();
-		assert_eq!(relay.opened(), 2, "dropped the floor's group");
-		assert!(relay.started_at(5));
+		assert_eq!(relay.opened(), 2, "dropped the group containing the start");
+		assert!(relay.started_at(2));
 	}
 
 	/// A group skipped for a missing head before the start resolves is never served, so

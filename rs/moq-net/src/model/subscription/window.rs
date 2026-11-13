@@ -583,13 +583,15 @@ fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start
 				None => Start::At(0, false),
 			},
 		},
+		// No group starts before 0, so time 0 names group 0 whatever is held.
+		Anchor::Time(0) => Start::At(0, true),
 		Anchor::Time(time) => match holdings.containing(time) {
 			Containing::Group(group) => Start::At(group, true),
 			// The group holding it is older than any held, so reach back to the oldest.
 			Containing::Before => Start::At(0, false),
 			// Before any group, as for a relative anchor, which a hop that holds none (such as
 			// a reader following route copies) leaves to the copies to resolve.
-			Containing::Unknown if latest.is_none() => Start::Pending,
+			Containing::Unknown if latest.is_none() && !holdings.resolves() => Start::Pending,
 			// Nothing can arrive any more, so nothing held reaches past it.
 			Containing::Unknown if holdings.complete() => Start::At(0, false),
 			// Nothing is held yet, so wait for a group rather than guess from the latest: a copy

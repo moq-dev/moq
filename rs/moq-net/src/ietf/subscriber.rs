@@ -17202,10 +17202,12 @@ mod stitch_tests {
 				let consumer = run.track.consume();
 				run.track.start_at(last + 1).unwrap();
 				run.track.create_group((last + 1).into()).unwrap().close().unwrap();
+				// From group 0, which a time start names whatever is held, so the history below
+				// the feed is asked as a miss rather than looked up.
 				let mut reading = consumer
 					.subscribe(Some(
 						track::Subscription::default()
-							.with_range(KEY..last + 1)
+							.with_range(0..last + 1)
 							.with_order(crate::track::Order::Ascending)
 							.with_delay(track::Delay::default().with_max(None)),
 					))
@@ -17217,7 +17219,7 @@ mod stitch_tests {
 				let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 					fill: std::sync::Arc::new(fill),
 					timescale: None,
-					first: KEY,
+					first: 0,
 					last,
 					start: 0,
 					end: Some(2),
@@ -17300,9 +17302,10 @@ mod stitch_tests {
 			run.track.start_at(3).unwrap();
 			run.track.create_group(3u64.into()).unwrap().close().unwrap();
 			let requests = run.track.requests();
+			// From group 0, which a time start names whatever is held.
 			let mut reader = run.track.subscribe(
 				track::Subscription::default()
-					.with_range(1..3)
+					.with_range(0..3)
 					.with_delay(track::Delay::default().with_max(None)),
 			);
 			let waiter = kio::Waiter::noop();
@@ -17311,7 +17314,7 @@ mod stitch_tests {
 			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 				panic!("{version}: missing history was not requested");
 			};
-			assert_eq!((fill.start().group, fill.end()), (1, 3));
+			assert_eq!((fill.start().group, fill.end()), (0, 3));
 			run.subscriber
 				.clone()
 				.run_group_fetch(Path::from_static("broadcast"), "video".into(), fill, None)
@@ -17323,7 +17326,7 @@ mod stitch_tests {
 				.poll(now.saturating_add(crate::ledger::GRACE), &waiter);
 			assert_eq!(
 				reader.poll_drop(&waiter),
-				Poll::Ready((1..3, crate::track::Hole::drop(crate::StreamError::NotFound))),
+				Poll::Ready((0..3, crate::track::Hole::drop(crate::StreamError::NotFound))),
 				"{version}"
 			);
 			assert!(reader.poll_drop(&waiter).is_pending(), "each drop is reported once");
@@ -17347,10 +17350,12 @@ mod stitch_tests {
 			let consumer = run.track.consume();
 			run.track.start_at(7).unwrap();
 			run.track.create_group(7u64.into()).unwrap().close().unwrap();
+			// From group 0, which a time start names whatever is held, so the history below
+			// the feed is asked as a miss rather than looked up.
 			let mut reading = consumer
 				.subscribe(Some(
 					track::Subscription::default()
-						.with_range(3..7)
+						.with_range(0..7)
 						.with_order(crate::track::Order::Ascending)
 						.with_delay(track::Delay::default().with_max(None)),
 				))
@@ -17360,7 +17365,7 @@ mod stitch_tests {
 			let fill = dynamic.requested_fill().await.unwrap();
 			assert_eq!(
 				(fill.start().group, fill.end()),
-				(3, 7),
+				(0, 7),
 				"{version}: one fill for the run"
 			);
 			// Readers of the missing groups join that fill.
@@ -17368,7 +17373,7 @@ mod stitch_tests {
 			let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 				fill: std::sync::Arc::new(fill),
 				timescale: None,
-				first: 3,
+				first: 0,
 				last: 6,
 				start: 0,
 				end: None,
