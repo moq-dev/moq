@@ -191,8 +191,10 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	assert!(complete(&store).await);
 }
 
+/// A group created below one already stored is a gap, and never stalls the groups after it: the
+/// recorder reads in key order, and a local track owes nothing between the groups it holds.
 #[tokio::test(start_paused = true)]
-async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
+async fn a_late_group_is_a_gap_that_never_stalls_later_groups() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
@@ -204,15 +206,8 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 	group(&video, 2, &[(2000, "c")]);
 	group(&video, 3, &[(3000, "d")]);
 	settle().await;
-	// Group 0 is flushed alone; 2 and 3 wait on the missing 1.
+	// Nothing waits on 1, so every group is stored within the flush.
 	sleep(SECOND + SECOND / 2).await;
-	assert_eq!(
-		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0)]
-	);
-
-	// Once the max delay passes, the gap is given up and the rest follow within the flush.
-	sleep(2 * SECOND).await;
 	let stored = objects(&store, "video", true).await;
 	assert_eq!(
 		stored.keys().cloned().collect::<Vec<_>>(),
@@ -223,7 +218,7 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 		[(2, vec!["2000/c".to_string()]), (3, vec!["3000/d".to_string()]),]
 	);
 
-	// The lost group arriving too late stays a gap.
+	// A group below the stored ones arrives too late and stays a gap.
 	group(&video, 1, &[(1000, "b")]);
 	let _video = video.finish().unwrap();
 	broadcast.close();
@@ -231,40 +226,6 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 	let stored = objects(&store, "video", true).await;
 	assert_eq!(stored.len(), 2);
 	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 4, frame: 0 })));
-}
-
-/// Arrival is not sequence order, so a fresh track's first arrival waits for a lower sequence.
-#[tokio::test(start_paused = true)]
-async fn a_fresh_track_waits_for_a_group_below_its_first_arrival() {
-	let store = store();
-	let broadcast = broadcast::Info::new().produce();
-	let video = broadcast.create_track("video", timed()).unwrap();
-	let config = config().with_flush(SECOND).with_max_delay(2 * SECOND);
-	let task = spawn(&store, &broadcast, config);
-	subscribed(&video).await;
-
-	group(&video, 2, &[(2000, "c")]);
-	settle().await;
-	group(&video, 1, &[(1000, "b")]);
-	settle().await;
-	// Nothing is stored until the wait from the first arrival gives up on group 0.
-	sleep(SECOND + SECOND / 2).await;
-	assert!(objects(&store, "video", true).await.is_empty());
-
-	sleep(2 * SECOND).await;
-	let stored = objects(&store, "video", true).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(1, 0, 1000)]);
-	assert_eq!(
-		contents(&stored)[0],
-		[(1, vec!["1000/b".to_string()]), (2, vec!["2000/c".to_string()]),]
-	);
-
-	// Group 0 arriving after that is too late.
-	group(&video, 0, &[(0, "a")]);
-	let _video = video.finish().unwrap();
-	broadcast.close();
-	finished(task).await;
-	assert_eq!(objects(&store, "video", true).await.len(), 1);
 }
 
 #[tokio::test(start_paused = true)]
