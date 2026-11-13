@@ -10,13 +10,14 @@ that closes this:
   wrote.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
   store it replaced, from the same commit before and after.
-- Each object expires 14 days after upload, so a crate no hosted job builds in
-  that window stays cold for the next hosted job. Count how often a Nightly
+- Each object expires a fixed time after upload (14 days since 2026-11-07;
+  [cache-expiry](/quest/m0/ci/cache-expiry.md) shortens it to 7), so a crate
+  no hosted job builds in that window stays cold for the next hosted job. Count how often a Nightly
   job pays that rebuild, including when `Cargo.lock` changed more than 8 times
   since the previous Nightly (see Plan).
 - Bucket size and request counts after a month with capped manifests
-  (mbx 1.28.0 and later, from about 2026-11-26), against the 14-day expiry
-  in `infra/mbx/lifecycle.json`.
+  (mbx 1.28.0 and later, from about 2026-11-26), against the expiry in
+  `infra/mbx/lifecycle.json`.
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
 nightly.yml --branch main --event schedule`), never a dispatch on a branch.
@@ -225,7 +226,11 @@ Workspace builds (hits / misses / not looked up):
   Cloudflare's GraphQL API (`r2OperationsAdaptiveGroups`, filtered on
   `bucketName` and grouped by `actionType`), authenticated with the
   `oauth_token` in `~/.config/.wrangler/config/default.toml`. Record them
-  here beside the 2026-11-07 baseline, split at that date's lifecycle
-  change, and count the Nightly jobs that rebuilt a crate the 14-day expiry
-  deleted, listing as unknown any it cannot attribute. Bring the lifecycle back to the
+  here beside the 2026-11-07 baseline, split at each lifecycle change (that
+  date's, and [cache-expiry](/quest/m0/ci/cache-expiry.md)'s once applied),
+  and count the Nightly jobs that rebuilt a crate the expiry deleted, listing as unknown any it cannot attribute. Bring the lifecycle back to the
   maintainer only if that count argues for lengthening it.
+
+## Related
+
+- [The Rust cache stops paying for uploads R2 refuses](/quest/m0/ci/mbx-failed-puts.md) - measures the same bucket's requests and also reports to mbx upstream
