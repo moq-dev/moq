@@ -1063,27 +1063,27 @@ async fn a_dropped_replacement_goes_offline_over_a_closing_predecessor() {
 	assert!(matches!(next(&mut machine).await, Action::Migrating));
 	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
 	let (replacement, replacement_server) = handshake().await;
-	machine.connected(kio::clock::now(), replacement);
-	// The idle predecessor starts its graceful close under the replacement.
-	assert!(matches!(
-		machine.poll(kio::clock::now(), &kio::Waiter::noop()),
-		Action::Wait(_)
-	));
+	machine.connected(kio::clock::now(), replacement.clone());
+	// The replacement is already closed when the next poll starts the idle predecessor's
+	// graceful close, so its close is seen over a predecessor that is closing, not retired.
 	drop(replacement_server);
+	replacement.closed().await;
 
-	// Whether the graceful close finishes first only orders `Retired` against the offline.
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Offline(Some(_))), "{action:?}");
+	let (_, deadline) = machine.predecessor().expect("the predecessor is still closing");
+	// The graceful close then ends it well before its handover would.
 	let mut actions = Vec::new();
 	loop {
 		match next(&mut machine).await {
 			Action::Dial(_) => break,
 			Action::Retired => actions.push("retired"),
-			Action::Offline(Some(_)) => actions.push("offline"),
-			Action::Retrying(_) => actions.push("retrying"),
+			Action::Offline(None) => actions.push("offline"),
 			action => panic!("unexpected {action:?}"),
 		}
 	}
-	actions.sort();
-	assert_eq!(actions, ["offline", "retired"]);
+	assert_eq!(actions, ["retired", "offline"]);
+	assert!(kio::clock::now() < deadline);
 }
 
 /// A target that never reaches the preferred transport keeps its fallback session and

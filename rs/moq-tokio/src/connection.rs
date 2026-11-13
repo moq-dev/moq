@@ -2784,6 +2784,7 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_dropped_replacement_hands_back_to_the_draining_session() {
+		kio::clock::host_time(); // real TCP sockets
 		const WAIT: Duration = Duration::from_secs(10);
 
 		let origin = crate::origin::spawn();
@@ -2837,6 +2838,11 @@ mod tests {
 				.unwrap();
 		}
 
+		// The redial after B's drop fails, so no new session can replace the handed-back one
+		// before the checks read it; a failed redial still reports Migrating.
+		let dead = dead().await;
+		let dead = dead.socket_addrs(|| None).unwrap();
+		crate::resolve::hosts::point(HOST, dead);
 		session_b.abort(moq_net::Error::Cancel);
 		let state = kio::clock::timeout(WAIT, monitor.state_changed(state.revision))
 			.await
