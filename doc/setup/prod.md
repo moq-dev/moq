@@ -61,6 +61,42 @@ sudo sysctl --system
 
 macOS uses `kern.ipc.maxsockbuf`; Windows sizes each socket directly.
 
+## Upgrades
+
+On Linux a relay upgrades without cutting its sessions: the new process takes
+over the old one's sockets and serves every new session while the old one
+drains (see [`[handoff]`](/bin/relay/config#handoff)). Set `[runtime] workers`,
+then make `systemctl restart moq-relay` the upgrade with the drop-in the package
+installs as `/usr/share/moq-relay/handoff.conf`:
+
+```bash
+sudo mkdir -p /etc/systemd/system/moq-relay.service.d
+sudo cp /usr/share/moq-relay/handoff.conf /etc/systemd/system/moq-relay.service.d/
+sudo systemctl daemon-reload
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/moq-relay --handoff-supervise /etc/moq-relay/relay.toml
+Environment=MOQ_HANDOFF_SOCKET=/run/moq-relay/handoff.sock
+KillMode=process
+RestartKillSignal=SIGUSR2
+RuntimeDirectoryPreserve=restart
+```
+
+`--handoff-supervise` keeps a stand-in as the unit's main process. A restart
+sends it SIGUSR2, and it exits at once, leaving its relay to drain while the
+next relay takes over and reports ready. A stop sends SIGTERM, which the
+stand-in passes to its relay. A relay left draining is not signaled again and
+exits at the end of its own drain, and a restart before then fails until it has,
+which `Restart=on-failure` retries.
+
+Both relays must run as the same user. `DynamicUser=` adopts an existing system
+user named after the unit, so create one to keep the UID across restarts:
+`sudo useradd --system --no-create-home moq-relay`. On NixOS, set
+`services.moq-relay.handoff = true`.
+
 ## Scaling out
 
 Connect relays into a [cluster](/bin/relay/cluster) to serve multiple regions

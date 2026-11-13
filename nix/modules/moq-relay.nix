@@ -199,6 +199,16 @@ in
       description = "State directory for keys and runtime data";
     };
 
+    handoff = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Upgrade in place: a restart starts the new relay beside the old one, which
+        hands over its sockets and drains instead of cutting its sessions. Serves
+        QUIC from one worker per core unless MOQ_RUNTIME_WORKERS says otherwise.
+      '';
+    };
+
     heapDumpPrefix = lib.mkOption {
       type = lib.types.str;
       default = "/tmp/moq-relay.heap";
@@ -302,6 +312,8 @@ in
         "network.target"
       ]
       ++ lib.optional cfg.auth.enable "moq-auth.service";
+      # A changed unit restarts rather than stopping first, so a switch hands off.
+      stopIfChanged = !cfg.handoff;
 
       serviceConfig = {
         # The relay reports ready only once it serves.
@@ -330,6 +342,15 @@ in
 
         # Network capabilities for binding to ports < 1024
         AmbientCapabilities = lib.optional (cfg.port < 1024) "CAP_NET_BIND_SERVICE";
+      }
+      // lib.optionalAttrs cfg.handoff {
+        # Only the stand-in main process is signaled: on a restart it exits and leaves
+        # its relay draining, and on a stop it passes SIGTERM to the relay.
+        KillMode = "process";
+        RestartKillSignal = "SIGUSR2";
+        # The handoff socket lives here and must outlive the restart.
+        RuntimeDirectory = "moq-relay";
+        RuntimeDirectoryPreserve = "restart";
       };
 
       environment = {
@@ -342,6 +363,11 @@ in
         MOQ_LISTEN = "[::]:${toString cfg.port}";
 
         MOQ_CONNECT_TLS_INSECURE = lib.boolToString cfg.cluster.disableTlsVerify;
+      }
+      // lib.optionalAttrs cfg.handoff {
+        MOQ_HANDOFF_SOCKET = "/run/moq-relay/handoff.sock";
+        MOQ_HANDOFF_SUPERVISE = "true";
+        MOQ_RUNTIME_WORKERS = lib.mkDefault "auto";
       }
       // lib.optionalAttrs (cfg.tls.generate != [ ]) {
         # TLS configuration
