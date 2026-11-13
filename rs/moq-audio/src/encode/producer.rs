@@ -598,10 +598,14 @@ impl Producer {
 		self.track.write(mux_frame)?;
 		self.grouped += self.encoder.frame_size() as u64;
 		// Cut as soon as the group is long enough rather than when the next packet arrives, so
-		// the relay sees it finish without waiting. No boundary to give: the next packet bounds
-		// this one, and codec frames have a deterministic duration anyway.
+		// the relay sees it finish without waiting. Each packet lasts one codec frame, so the
+		// group ends whole where its last packet does and a reader can tell the group starting
+		// there continues it.
 		if self.grouped >= self.group_samples {
-			self.track.cut(None)?;
+			let duration =
+				Timestamp::from_scale(self.encoder.frame_size() as u64, u64::from(self.encoder.codec_rate()))?
+					.convert(timestamp.scale())?;
+			self.track.cut(Some(timestamp.checked_add(duration)?))?;
 		}
 		Ok(())
 	}
@@ -1854,9 +1858,8 @@ mod tests {
 			assert!(partial.read_frame().await.unwrap().is_none());
 			let mut resumed = track.recv_group().await.unwrap().expect("resumed group");
 			assert_eq!(
-				resumed.sequence,
-				partial.sequence + 2,
-				"one marker separates the anchors"
+				resumed.start, 1_000_000,
+				"the resumed group starts at its first packet, in the track's microseconds"
 			);
 			for _ in 0..5 {
 				assert!(resumed.read_frame().await.unwrap().is_some());
