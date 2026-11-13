@@ -20,6 +20,7 @@ mod config;
 mod connection;
 mod critical;
 mod fetch;
+pub mod handoff;
 mod http_client;
 mod incoming;
 pub mod internal;

@@ -123,6 +123,12 @@ pub struct Relay {
 	/// nothing on tokio serves QUIC: a stream-only relay, or the io_uring workers.
 	#[cfg(feature = "_quic")]
 	demux: Option<moq_tokio::quic::demux::Demux>,
+	/// The sockets this relay hands to the relay that replaces it. `None` unless
+	/// `handoff.socket` is set.
+	handoff: Option<crate::handoff::Handoff>,
+	/// Releases the stats publisher once the relay this one replaced has exited.
+	/// `None` unless it took over from one still serving.
+	alone: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Relay {
@@ -170,6 +176,10 @@ impl Relay {
 		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
 		let handshake_timeout = config.listen.resolved_timeout();
 
+		// Before anything binds: a relay already serving hands over its sockets, which
+		// every listener below takes in place of binding its own.
+		let mut sockets = crate::handoff::Sockets::open(&config.handoff).await?;
+
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
 		#[cfg_attr(
@@ -200,7 +210,21 @@ impl Relay {
 				server.quic = config.quic.clone();
 				server.admission = shutdown.admission.clone();
 				server.demux = demux.clone();
-				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
+				let group = match sockets.enabled() {
+					true => {
+						let addr = match &listen.bind {
+							Some(bind) => bind.resolve().context("failed to resolve listen.bind")?,
+							None => moq_tokio::server::DEFAULT_BIND,
+						};
+						sockets.group(addr, worker.count)?
+					}
+					false => None,
+				};
+				let workers = match group {
+					Some(group) => moq_tokio::worker::Workers::from_group(server, group, worker.pin),
+					None => moq_tokio::worker::Workers::bind(server, worker),
+				};
+				Some(workers.context("failed to start the QUIC workers")?)
 			}
 			_ => None,
 		};
@@ -223,7 +247,10 @@ impl Relay {
 				server.listen = listen.clone();
 				server.quic = config.quic.clone();
 				server.tls = served.clone();
-				Some(crate::uring::Workers::bind(server, worker).context("failed to start the io_uring QUIC workers")?)
+				Some(
+					crate::uring::Workers::bind(server, worker, &mut sockets)
+						.context("failed to start the io_uring QUIC workers")?,
+				)
 			}
 			_ => None,
 		};
@@ -234,6 +261,13 @@ impl Relay {
 		let quic_owned_elsewhere = workers_addr.is_some();
 
 		let mut server_config = moq_tokio::server::Config::default();
+		if let Some(addr) = listen.tcp.bind {
+			server_config.streams.tcp = sockets.tcp(crate::handoff::Role::Tcp, addr)?;
+		}
+		#[cfg(all(feature = "uds", unix))]
+		if let Some(path) = &listen.unix.bind {
+			server_config.streams.unix = sockets.unix(crate::handoff::Role::Unix, path)?;
+		}
 		server_config.listen = listen;
 		server_config.tls = served;
 		server_config.quic = config.quic.clone();
@@ -296,6 +330,13 @@ impl Relay {
 			.with_stats(config.stats);
 		cluster_options.client = config.limits.client;
 		cluster_options.peer = config.limits.peer;
+		// The node's stats broadcast has one instance at a time: the relay this one
+		// replaces keeps it until it exits, and its last counters are read first.
+		let alone = sockets.replacing().then(|| {
+			let (alone, hold) = tokio::sync::oneshot::channel();
+			cluster_options.stats_hold = Some(hold);
+			alone
+		});
 		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
 		let mut cluster = cluster.with_connect(config.connect.clone(), config.quic.clone());
 		if let Some(advertise) = advertise {
@@ -304,27 +345,46 @@ impl Relay {
 
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(Startup::Starting);
+		let http = match config.web.http.listen {
+			Some(addr) => sockets.tcp(crate::handoff::Role::WebHttp, addr)?,
+			None => None,
+		};
+		let https = match config.web.https.listen {
+			Some(addr) => sockets.tcp(crate::handoff::Role::WebHttps, addr)?,
+			None => None,
+		};
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
 			.with_listen(&config.listen)
 			.with_quic(&config.quic)
 			.with_sessions(sessions.clone())
 			.with_tls_acceptor(server.tls_acceptor());
-		let web = web.bind()?;
+		let web = web.with_bound(http, https)?.bind()?;
 		// `bind`, not `listen`: the TCP/Unix accept loops handshake as soon as
 		// they run, and `load` is not yet willing to take a session. `run`
 		// starts them on its first accept.
 		let server = server.bind().await.context("failed to bind listeners")?;
 
 		#[cfg(feature = "stun")]
-		let stun = crate::stun::Server::bind(config.stun).await?;
+		let stun = {
+			let held = match config.stun.bind {
+				Some(addr) => sockets.udp(crate::handoff::Role::Stun, addr)?,
+				None => None,
+			};
+			crate::stun::Server::bind(config.stun, held).await?
+		};
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
 		// when unconfigured. Every listener that performs a real accept(2) reports here,
 		// web and stream alike: a stream-only relay has no web listener at all, and the
 		// point is that whichever socket goes quiet is the one a scrape can see.
+		let held = match config.internal.listen {
+			Some(addr) => sockets.tcp(crate::handoff::Role::Internal, addr)?,
+			None => None,
+		};
 		let internal = internal::Internal::new(config.internal, cluster.stats.clone())
+			.with_bound(held)?
 			.with_timeout(handshake_timeout)
 			.with_cluster(&cluster)
 			.with_sessions(sessions.clone())
@@ -344,6 +404,9 @@ impl Relay {
 			Some(uring) => internal.with_uring(uring.metrics()),
 			None => internal,
 		};
+
+		// Last, once every listener holds its socket: the handoff socket itself.
+		let handoff = sockets.finish()?;
 
 		// `kind` so the QUIC line is distinguishable from the web listeners', which
 		// log the same way from `web::Web::serve` and may sit on a different port.
@@ -377,6 +440,8 @@ impl Relay {
 			uring,
 			#[cfg(feature = "_quic")]
 			demux,
+			handoff,
+			alone,
 		})
 	}
 
@@ -597,6 +662,8 @@ impl Relay {
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
+			handoff,
+			alone,
 			..
 		} = self;
 
@@ -629,11 +696,21 @@ impl Relay {
 			})
 			.transpose()?;
 
+		// Take every new QUIC handshake from the relay this one replaces: the workers
+		// are bound, so what arrives queues until they serve just below. Not once this
+		// relay is itself stopping.
+		if let Some(handoff) = handoff.as_ref()
+			&& shutdown.deadline().is_none()
+		{
+			handoff.steer_here()?;
+		}
+
 		// After the last step that can fail, since a handler outlives a
 		// failed `run`, and before anything accepts a session a signal would kill
 		// without a GOAWAY.
-		// Nothing awaits from here to the drain below, so a signal caught in between
-		// starts the drain at its first poll, as one just after READY would.
+		// Nothing awaits from here to the drain below but the note to the relay this
+		// one replaces, so a signal caught in between starts the drain at its first
+		// poll, as one just after READY would.
 		let mut handlers = signals.then(shutdown::Signals::new).transpose()?;
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -643,6 +720,12 @@ impl Relay {
 
 		// An embedder that already stopped the relay gets a drain, not a READY.
 		if shutdown.deadline().is_none() {
+			// The relay this one replaces stops accepting and drains, so READY means
+			// this one serves in its place. Its stream and web listeners are this
+			// relay's too, and queue what arrives until the loops below accept.
+			if let Some(handoff) = handoff.as_ref() {
+				handoff.took().await;
+			}
 			ready.send_replace(Startup::Serving);
 
 			#[cfg(unix)]
@@ -727,6 +810,10 @@ impl Relay {
 		let quic_on_workers = has_workers || uring_serving;
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let quic_on_workers = has_workers;
+		// Set once the relay replacing this one serves: every accept loop stops, since
+		// that relay accepts on the same sockets, and the drain starts.
+		let (handed_tx, handed) = tokio::sync::watch::channel(false);
+
 		let serve_shared = {
 			let idle = quic_on_workers && server.accept_health().is_empty();
 			let server = &mut server;
@@ -734,16 +821,27 @@ impl Relay {
 			let auth = auth.clone();
 			let shutdown = shutdown.clone();
 			let sessions = sessions.clone();
+			let mut handed = handed.clone();
 			// Boxed like the serving futures in the `select!` below.
 			Box::pin(async move {
-				match idle {
-					true => std::future::pending().await,
-					false => serve_listening(server, cluster, auth, shutdown, sessions).await,
+				if idle {
+					return std::future::pending().await;
+				}
+				let served = tokio::select! {
+					res = serve_listening(server, cluster, auth, shutdown, sessions) => Some(res),
+					true = handed_set(&mut handed) => None,
+				};
+				match served {
+					Some(res) => res,
+					None => {
+						server.close_streams().await;
+						std::future::pending().await
+					}
 				}
 			})
 		};
 
-		let stun = async move {
+		let stun = until_handed(handed.clone(), async move {
 			#[cfg(feature = "stun")]
 			match stun {
 				Some(stun) => stun.run().await,
@@ -751,15 +849,34 @@ impl Relay {
 			}
 			#[cfg(not(feature = "stun"))]
 			std::future::pending::<anyhow::Result<()>>().await
+		});
+
+		let handoff = {
+			let drain = shutdown_trigger.clone();
+			async move {
+				let Some(handoff) = handoff else {
+					return std::future::pending().await;
+				};
+				let events = crate::handoff::Events {
+					handed: handed_tx,
+					alone,
+					drain,
+				};
+				match handoff.run(events).await {
+					Ok(never) => match never {},
+					Err(err) => Err::<(), _>(err),
+				}
+			}
 		};
 		// Box the large serving futures: a debug build copies each one into this poll's
 		// stack frame several times, and an embedder's main thread pays for that frame.
 		let result = tokio::select! {
 			Err(err) = Box::pin(started.run()) => Err(err).context("cluster failed"),
-			Err(err) = Box::pin(web.serve(web_routes)) => Err(err).context("web server failed"),
+			Err(err) = Box::pin(until_handed(handed.clone(), web.serve(web_routes))) => Err(err).context("web server failed"),
 			Err(err) = stun => Err(err).context("STUN server failed"),
-			Err(err) = internal.serve(internal_routes) => Err(err).context("internal server failed"),
+			Err(err) = until_handed(handed.clone(), internal.serve(internal_routes)) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
+			Err(err) = Box::pin(handoff) => Err(err).context("handoff failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
@@ -787,6 +904,29 @@ impl Relay {
 
 		result
 	}
+}
+
+/// Serve until this relay hands its listeners to the relay replacing it, then stop
+/// accepting and pend: that relay accepts on the same sockets from here on, and the
+/// connections already accepted run on as tasks of their own. Serves on for good
+/// once `handed` can no longer change.
+async fn until_handed<T>(
+	mut handed: tokio::sync::watch::Receiver<bool>,
+	serve: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+	let served = tokio::select! {
+		res = serve => Some(res),
+		true = handed_set(&mut handed) => None,
+	};
+	match served {
+		Some(res) => res,
+		None => std::future::pending().await,
+	}
+}
+
+/// Whether `handed` was set, rather than its sender dropped unset.
+async fn handed_set(handed: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+	handed.wait_for(|handed| *handed).await.is_ok()
 }
 
 /// Two-stage shutdown: the first signal, or an embedder firing

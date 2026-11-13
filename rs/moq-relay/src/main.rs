@@ -12,5 +12,10 @@ async fn main() -> anyhow::Result<()> {
 	// embedder gets it by calling one function instead of copying this file.
 	// Extra routes and cloned handles go on the returned `Relay`; `run` keeps
 	// the listeners and workers.
-	Relay::load(Config::load()?).await?.run().await
+	let config = Config::load()?;
+	if config.handoff.supervise {
+		let code = moq_relay::handoff::supervise(&config.handoff).await?;
+		std::process::exit(code);
+	}
+	Relay::load(config).await?.run().await
 }

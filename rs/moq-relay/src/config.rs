@@ -101,6 +101,12 @@ pub struct Config {
 	#[serde(default)]
 	pub internal: internal::Config,
 
+	/// Handing this relay's sockets to the relay that replaces it, so an upgrade
+	/// serves the new process beside the old one. Disabled unless `handoff.socket` is set.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub handoff: crate::handoff::Config,
+
 	/// How long accepted sessions may keep running after a shutdown signal, e.g.
 	/// "10s" or "500ms". The first signal sends every session a GOAWAY and waits
 	/// up to this long for clients to reconnect elsewhere before force-closing
@@ -329,6 +335,7 @@ impl Config {
 		// is checked by `Cluster::new`, which embedders call directly.
 		self.quic.validate().context("invalid [quic]")?;
 		self.check_runtime()?;
+		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
 		#[cfg(feature = "cluster-lan")]
 		self.check_lan()?;
@@ -376,6 +383,28 @@ impl Config {
 		anyhow::ensure!(
 			io_uring || !workers,
 			"runtime.workers needs moq-relay built with the `quic` feature"
+		);
+		Ok(())
+	}
+
+	/// Refuse a handoff this relay could not carry out.
+	fn check_handoff(&self) -> anyhow::Result<()> {
+		// A stand-in whose relay cannot take over would leave the old relay serving
+		// after every restart, and the new one failing to bind beside it.
+		anyhow::ensure!(
+			!self.handoff.supervise || self.handoff.socket.is_some(),
+			"handoff.supervise needs handoff.socket"
+		);
+		if self.handoff.socket.is_none() {
+			return Ok(());
+		}
+		#[cfg(not(target_os = "linux"))]
+		anyhow::bail!("handoff.socket is Linux-only");
+		// The QUIC port is handed on as a reuseport group with room for a successor,
+		// which only a worker group binds.
+		anyhow::ensure!(
+			self.runtime.workers().is_some() || self.runtime.io_uring() || !self.listen.serves_quic(),
+			"handoff.socket requires runtime.workers: the QUIC port is handed on as a worker group"
 		);
 		Ok(())
 	}
@@ -915,6 +944,27 @@ root = ["ca.pem"]
 		refuse(
 			"[runtime]\nworkers = 1\nio_uring = true\n",
 			"runtime.io_uring requires listen.bind",
+		);
+
+		// A stand-in with no relay to hand over to would leave the old one serving.
+		refuse(
+			"[handoff]\nsupervise = true\n",
+			"handoff.supervise needs handoff.socket",
+		);
+		#[cfg(all(target_os = "linux", feature = "_quic"))]
+		{
+			// The QUIC port is handed on as a worker group, which the shared listener is not.
+			let quic = "[listen]\nbind = \"127.0.0.1:0\"\n";
+			let handoff = "[handoff]\nsocket = \"/run/moq-relay/handoff.sock\"\nsupervise = true\n";
+			refuse(&format!("{quic}{handoff}"), "handoff.socket requires runtime.workers");
+			resolve(&format!("{quic}[runtime]\nworkers = 1\n{handoff}"));
+			// With no QUIC listener there is no group to hand on.
+			resolve(&format!("[listen.tcp]\nbind = \"127.0.0.1:0\"\n{handoff}"));
+		}
+		#[cfg(not(target_os = "linux"))]
+		refuse(
+			"[handoff]\nsocket = \"/run/moq-relay/handoff.sock\"\n",
+			"handoff.socket is Linux-only",
 		);
 	}
 

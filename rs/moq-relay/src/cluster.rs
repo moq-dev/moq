@@ -1041,6 +1041,12 @@ pub struct Options {
 	/// Stats publishing on the cluster's origin. Disabled by default.
 	pub stats: crate::stats::Config,
 
+	/// Holds the stats publisher back until this resolves, or its sender drops, so a
+	/// relay serving beside the one it replaces announces the node's broadcast only once
+	/// that one is gone. `None` publishes from the start. Counters still accumulate
+	/// meanwhile, and the first publish carries them.
+	pub stats_hold: Option<tokio::sync::oneshot::Receiver<()>>,
+
 	/// How peers are reached in place of the network, for tests on `kio::clock::sim`:
 	/// every peer dial becomes a [`Dial`](moq_tokio::sim::Dial) the test routes.
 	/// `None` dials over sockets.
@@ -1441,6 +1447,7 @@ impl Cluster {
 			client,
 			peer,
 			stats,
+			stats_hold,
 			#[cfg(feature = "test-support")]
 			network,
 		} = options;
@@ -1487,7 +1494,13 @@ impl Cluster {
 		// Publish through the same origin cluster peers read from.
 		let stats_prefix = stats.reserved()?;
 		let (stats_producer, publisher) = stats.build(origin.clone())?;
-		work.push(Child::new("stats publisher", publisher.run()));
+		work.push(Child::new("stats publisher", async move {
+			if let Some(hold) = stats_hold {
+				// A dropped sender releases it as well as a send.
+				let _ = hold.await;
+			}
+			publisher.run().await;
+		}));
 		let stats = stats_producer.registry().clone();
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.hop(), "cluster initialized");

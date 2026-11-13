@@ -173,6 +173,19 @@ impl Internal {
 		self
 	}
 
+	/// Serve `listener`, already bound, in place of binding `internal.listen`.
+	pub(crate) fn with_bound(mut self, listener: Option<net::TcpListener>) -> anyhow::Result<Self> {
+		if let Some(listener) = listener {
+			self.addr = Some(
+				listener
+					.local_addr()
+					.context("failed to resolve internal bind address")?,
+			);
+			self.listener = Some(listener);
+		}
+		Ok(self)
+	}
+
 	/// Bind the configured listener now, so [`addr`](Self::addr) reports an ephemeral port before serving.
 	pub fn bind(mut self) -> anyhow::Result<Self> {
 		if let Some(listen) = self.config.listen
