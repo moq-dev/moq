@@ -130,6 +130,7 @@ transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 - [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - rewrites lite-07's one-hop warm routes and `Serves` for routes that propagate
+- [A relay that refuses a forwarded route drops the route, not the session](/quest/m1/refuse-route.md) - lite-07 tolerates relays on two releases before it is published (maintainer, 2026-11-13)
 
 ## Related
 

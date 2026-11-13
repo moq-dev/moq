@@ -373,9 +373,11 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 });
 
 // Lite-07: a filled group whose stream the publisher yielded, then gave up, ends with the fill's
-// drop naming it, as one on a subscription does, rather than waiting paused on a continuation that
-// never comes.
+// drop naming it with the group's own error, as one on a subscription does, rather than waiting
+// paused on a continuation that never comes.
 test("copy fill: a yielded group the fill's drop names ends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -401,7 +403,11 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
-		expect((await reader.ordered().nextGroup())?.sequence).toBe(2n);
+		const live = await reader.ordered().nextGroup();
+		expect(live?.sequence).toBe(2n);
+		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 2");
+		expect(await live?.readFrame()).toBeUndefined();
+		live?.close();
 		// Two groups, so the fill rides the subscription's ranges.
 		const history = remote
 			.track("video")
@@ -416,15 +422,21 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 		const one = await history.recvGroup();
 		expect(one?.sequence).toBe(1n);
 		while (await one?.readFrame());
+		// The live stream has finished. The archive may be served on both the fill and
+		// the copy's expanded feed, so reset every stream still serving it.
+		await clock.advance(Duration.ZERO);
 		const open = lines(pair.server).streams.list();
-		expect(open.length).toBe(1);
-		open[0]?.preempt();
-		source.abort(new Error("gone"));
+		expect(open.length).toBeGreaterThan(0);
+		for (const stream of open) stream.preempt();
+		source.abort(new StreamError(StreamCode(70), { message: "gone" }));
 
-		// Still paused without it, which the deadline reports as elapsed.
-		const ended = await timeout(Duration.millis(1000), Promise.resolve(group?.closed)).catch((err: unknown) => err);
+		// Still paused without it, which the deadline, fired once every pending task settled,
+		// reports as elapsed.
+		const ended = await clock
+			.drive(timeout(Duration.millis(1000), Promise.resolve(group?.closed)))
+			.catch((err: unknown) => err);
 		expect(ended).toBeInstanceOf(StreamError);
-		expect((ended as StreamError).code).toBe(StreamCode.Old);
+		expect((ended as StreamError).code).toBe(StreamCode(70));
 		history.close();
 		reader.close();
 	} finally {
@@ -435,5 +447,6 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 		client.abort();
 		server.abort();
 		origin.close();
+		installed.close();
 	}
 });

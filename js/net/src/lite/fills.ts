@@ -278,8 +278,10 @@ export class RangeFills {
 			// Only the groups the cache holds, so a wide run costs what it holds.
 			for (const gap of runGaps(this.#draining, run.start, run.end)) {
 				for (const sequence of hooks.arrivingIn(this.#copy, gap.start, gap.end)) {
-					const closed = hooks.arrivingGroup(this.#copy, sequence);
-					if (closed !== undefined) this.#reading.set(sequence, closed);
+					// Only watched until it ends, never taken over, so it is not held.
+					const arriving = hooks.arrivingGroup(this.#copy, sequence);
+					arriving?.release();
+					if (arriving !== undefined) this.#reading.set(sequence, arriving.settled);
 				}
 			}
 			if ([...this.#reading.keys()].some((sequence) => run.start <= sequence && sequence < run.end)) {
