@@ -10,8 +10,7 @@
 //!
 //! The first walk of the peer's addresses fails fast: if no address establishes a
 //! session, the policy ends with [`Action::Done`] carrying that walk's error rather than
-//! retrying, so a setup mistake surfaces at once instead of looping. The one exception is
-//! a refused credential the tokens have replaced since, which earns another dial. A client started
+//! retrying, so a setup mistake surfaces at once instead of looping. A client started
 //! before its peer is reachable therefore exits, for its supervisor or app to restart.
 //! Once a session has been established, a later failure backs off and retries under
 //! [`Backoff`], so restarts and redeploys still recover.
