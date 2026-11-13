@@ -10,6 +10,12 @@ records what each failed on and adopts nothing.
 
 ## Plan
 
+Decided 2026-11-13 (maintainer): ✅ m0 (rejected: m2). TLC is too slow for
+local checks: an exhaustive pass of `route/Loop.cfg` on
+[moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622) ran 76 minutes
+on four cores and 24 GB of state with its queue still growing before it was
+killed.
+
 [moq-dev/moq#8600](https://github.com/moq-dev/moq/pull/8600) compared tlx,
 tla-mc, tla-rs, and tlaplusplus with TLC 1.8.0 on every exhaustive config and
 adopted none. Each agreed with TLC wherever it finished, and tlx and tla-mc
