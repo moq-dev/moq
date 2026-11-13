@@ -970,10 +970,8 @@ impl State {
 	/// there is none. Only `claims`, whose shown state changed, are served anew, unless
 	/// the routes changed too.
 	fn home(&mut self, id: Id, claims: BTreeSet<Path>, ended: &BTreeMap<(Id, Path), bool>) {
-		// A tied route needs a broadcast's hash, which the claim ranking here lacks.
-		let routes: Routes = (self.router.eligible(id).into_iter())
-			.filter(|route| !route.tied)
-			.map(|route| (route.next, route.metric, route.rtt, self.router.name(route.next, id)))
+		let routes: Routes = (self.router.routes(id).into_iter())
+			.map(|(key, metric, rtt)| (key, metric, rtt, self.router.name(key, id)))
 			.collect();
 		let last = self.routes.get(&id).map_or(&[][..], Vec::as_slice);
 		let claims = match last == routes.as_slice() {

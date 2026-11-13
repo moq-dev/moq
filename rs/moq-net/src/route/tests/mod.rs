@@ -7,7 +7,6 @@
 
 mod cache;
 mod compare;
-mod copies;
 mod handoff;
 mod paths;
 mod residual;
@@ -115,25 +114,6 @@ enum Msg {
 		id: Id,
 		seqno: Seqno,
 	},
-	/// A warm route for one of [`cache`]'s broadcasts, on the stream carrying the
-	/// sender's routes.
-	Warm {
-		broadcast: usize,
-		warm: Option<cache::Warm>,
-	},
-}
-
-/// A delivery the cache layer reacts to.
-#[derive(Clone, Copy, Debug)]
-enum Note {
-	Warm {
-		from: Node,
-		to: Node,
-		broadcast: usize,
-		warm: Option<cache::Warm>,
-	},
-	/// A ROUTE_END, which retires the warm routes under it.
-	Ended { from: Node, to: Node, id: Id },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,8 +171,6 @@ pub(super) struct Sim {
 	routed: BTreeMap<(Node, Node, Id), Advert>,
 	pub stats: Stats,
 	pub events: Vec<SimEvent>,
-	/// Deliveries the cache layer has yet to take.
-	notes: Vec<Note>,
 }
 
 impl Sim {
@@ -216,7 +194,6 @@ impl Sim {
 			routed: BTreeMap::new(),
 			stats: Stats::default(),
 			events: Vec::new(),
-			notes: Vec::new(),
 		}
 	}
 
@@ -447,13 +424,7 @@ impl Sim {
 		};
 		let router = &mut self.nodes[to];
 		match msg {
-			Msg::Route { id, reach } => {
-				let ended = reach.is_none();
-				router.route(from, id, reach);
-				if ended {
-					self.notes.push(Note::Ended { from, to, id });
-				}
-			}
+			Msg::Route { id, reach } => router.route(from, id, reach),
 			Msg::Batch {
 				id,
 				changes,
@@ -461,12 +432,6 @@ impl Sim {
 				interest,
 			} => router.batch(from, id, changes, floor, interest),
 			Msg::Request { id, seqno } => router.request(from, id, seqno),
-			Msg::Warm { broadcast, warm } => self.notes.push(Note::Warm {
-				from,
-				to,
-				broadcast,
-				warm,
-			}),
 		}
 		self.stats.delivered += 1;
 		self.flush();
