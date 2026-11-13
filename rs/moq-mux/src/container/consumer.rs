@@ -193,10 +193,6 @@ pub struct Consumer<F: Container> {
 	// contiguity check on a delivered hole.
 	presented_end: Option<std::time::Duration>,
 
-	// The group the cursor most recently finished was a marker. It declares a break, so media in
-	// the group after it starts the new timeline rather than leaving a hole before it.
-	marked: bool,
-
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	gap: bool,
 
@@ -415,7 +411,6 @@ impl<F: Container> Consumer<F> {
 			start: None,
 			floor: None,
 			presented_end: None,
-			marked: false,
 			gap: false,
 			next: None,
 			group: 0,
@@ -716,7 +711,6 @@ impl<F: Container> Consumer<F> {
 						if let Some(end) = group.max_end.max(whole) {
 							self.presented_end = Some(end);
 						}
-						self.marked = group.marker();
 						self.pending.pop_front();
 						self.current += 1;
 						self.note_group_edge();
@@ -786,15 +780,16 @@ impl<F: Container> Consumer<F> {
 				// The groups past the hole already fill the max buffer, so it can hold none of what
 				// would arrive into it.
 				let full = self.memory.full();
-				// Group starts are timestamps, so the key past the cursor is rarely the next group's. One
-				// whose first frame, or a marker's bound, continues where the content read so far ended
-				// leaves no room for a group between them, so the cursor steps to it without waiting.
-				// Media after a marker starts the timeline the marker declared, so it continues too.
+				// Group starts are timestamps, so the key past the cursor is rarely the next group's.
+				// The publisher declares the starts it never produced, so a run it skipped holds no
+				// group to wait for or lose. Nor does one ending at a group whose first frame, or a
+				// marker's bound, continues where the content read so far ended. Either way the
+				// cursor steps to it without waiting.
+				let skipped = self.is_skipped(self.current..sequence);
 				let front = self.pending.front_mut().unwrap();
 				let _ = front.poll_min_timestamp(waiter, &self.format, false);
 				let start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
-				let continues = (self.marked && front.min_timestamp.is_some())
-					|| start.is_some_and(|start| pts_contiguous(self.presented_end, start));
+				let continues = skipped || start.is_some_and(|start| pts_contiguous(self.presented_end, start));
 				if finished || elapsed || aged || excluded || full || continues {
 					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
 					let front = self.pending.front_mut().unwrap();
@@ -806,7 +801,6 @@ impl<F: Container> Consumer<F> {
 					{
 						self.lose();
 					}
-					self.marked = false;
 					self.current = sequence;
 					self.note_group_edge();
 					continue;
@@ -2248,6 +2242,35 @@ mod tests {
 				"1000000",
 				"1010000",
 				"end 1020000",
+				"2000000",
+				"2010000"
+			]
+		);
+	}
+
+	/// Starts are timestamps, so keys lie between any two groups. A run the publisher declared
+	/// skipped holds nothing, so the reader steps over it without a gap even where the content
+	/// jumps; one it never declared may have held a group that was lost.
+	#[tokio::test(start_paused = true)]
+	async fn only_an_undeclared_run_between_groups_is_a_gap() {
+		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
+		write_group(&mut track, 0, &[ts(0), ts(10_000)]);
+		track.skip_groups(1..1_000_000);
+		write_group(&mut track, 1_000_000, &[ts(1_000_000), ts(1_010_000)]);
+		write_group(&mut track, 2_000_000, &[ts(2_000_000), ts(2_010_000)]);
+		let _track = track.finish().unwrap();
+		assert_eq!(
+			items(&mut reader).await,
+			[
+				"0",
+				"10000",
+				"1000000",
+				"1010000",
+				"gap 1010000+990000",
 				"2000000",
 				"2010000"
 			]

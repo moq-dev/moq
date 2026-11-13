@@ -457,7 +457,7 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 	}
 }
 
-/// One track as the import published it: each group's sequence and frames, in decode order.
+/// One track as the import published it: each group's start and frames, in decode order.
 struct Recorded {
 	name: String,
 	video: bool,
@@ -520,6 +520,10 @@ async fn record(profile: Profile) -> Recording {
 			ends.push(group.end());
 			groups.push((group.start, frames));
 		}
+		// The import appends each group, so nothing lies below its first or between two.
+		for run in skips(groups.iter().map(|(start, _)| *start)) {
+			assert!(track.is_skipped(run.clone()), "{name}: the import skips {run:?}");
+		}
 		tracks.push(Recorded {
 			name,
 			video,
@@ -541,6 +545,17 @@ async fn record(profile: Profile) -> Recording {
 		catalog: snapshot,
 		tracks,
 	}
+}
+
+/// The group starts skipped below the first of `starts` and between each two, which no group holds.
+fn skips(starts: impl IntoIterator<Item = u64>) -> Vec<std::ops::Range<u64>> {
+	let mut runs = Vec::new();
+	let mut next = 0;
+	for start in starts {
+		runs.push(next..start);
+		next = start + 1;
+	}
+	runs
 }
 
 /// The presentation time of a published frame, in microseconds on the catalog clock, and
@@ -922,6 +937,15 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 	let groups: Vec<Vec<(u64, Vec<moq_net::frame::Frame>)>> =
 		recording.tracks.iter().map(|track| track.groups.clone()).collect();
 	let ends: Vec<Vec<Option<u64>>> = recording.tracks.iter().map(|track| track.ends.clone()).collect();
+	// The import's skips, which a relay forwards with the first group past each: a group the path
+	// omits is not skipped, so the export sees it missing.
+	let mut skips: Vec<_> = (recording.tracks.iter())
+		.map(|track| {
+			skips(track.groups.iter().map(|(start, _)| *start))
+				.into_iter()
+				.peekable()
+		})
+		.collect();
 	let start = Instant::now();
 	let publisher = tokio::spawn(async move {
 		let _keep = &broadcast;
@@ -954,6 +978,11 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 				}
 				continue;
 			};
+			if open[t].is_none() {
+				while let Some(run) = skips[t].next_if(|run| run.end <= *sequence) {
+					producers[t].skip_groups(run);
+				}
+			}
 			let group = open[t].get_or_insert_with(|| {
 				kept[t] = 0;
 				let info = moq_net::group::Info { start: *sequence };
