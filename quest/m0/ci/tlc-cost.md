@@ -28,8 +28,8 @@ Decided 2026-11-12 (maintainer, /quest-plan):
 
 - ✅ Cap TLC's workers in `rs/justfile` and `js/justfile`, which hard-code
   `-workers auto`. Recommended: 4, which the `verify-*` skills' times
-  already assume and Nightly's runners have; the
-  [native checker quest](/quest/m1/tla-native-checker.md) measured
+  already assume and Nightly's runners have; the native checker spike
+  ([moq-dev/moq#8600](https://github.com/moq-dev/moq/pull/8600)) measured
   core-seconds near flat from 2 to 24 workers, so the cap costs wall time,
   not CPU.
 - ✅ TLC 1.8 on a modern JDK. The recipes moved to `nixpkgs#tlaplus18` in
@@ -69,8 +69,8 @@ Decided 2026-11-12 (maintainer, /quest-plan):
   `just test tla` over a directory.
 - Rejected: Apalache, which is no cheaper here and ran out of memory on the
   route model ([moq-dev/moq#8564](https://github.com/moq-dev/moq/pull/8564));
-  waiting for the Rust checker, which the m1 quest
-  spikes and this complements.
+  waiting for a Rust checker, none of which ran the route model in
+  [moq-dev/moq#8600](https://github.com/moq-dev/moq/pull/8600).
 
 Not decided: the route-inductive work in progress adds a refinement check,
 `RefinesClaims`, to the simulated `Blind.cfg`, where every sampled trace
@@ -89,5 +89,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A Rust TLA+ checker runs the models locally if it agrees with TLC](/quest/m1/tla-native-checker.md) - a faster engine for the same specs; its TLC baseline moves with this
+- [A Rust TLA+ checker is rechecked once the route model drops SumOver](/quest/m2/tla-native-recheck.md) - a faster engine for the same specs, waiting on this quest's `SumOver` rewrite
 - [The route rules hold from any state, not only the runs TLC reaches](/quest/m1/route-inductive.md) - rewrites `SumOver` and adds the refinement check named above
