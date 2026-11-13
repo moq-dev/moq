@@ -416,3 +416,59 @@ test("range fills: a recovery's refusal is taken once", async () => {
 	fills.close();
 	peer.close();
 });
+
+// A recovery ending leaves a later one's coverage of groups it released intact, so those groups
+// stay off the copy's subscription while the later one asks for them.
+test("range fills: an older recovery ending keeps a newer one's coverage", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+	const older = opened[0];
+	if (!older) throw new Error("no recovery");
+	// It refuses group 1 and keeps reading group 2, past the fill.
+	older.reading = true;
+	peer.fill.accept(0n).finish();
+	older.refuse({ start: 1n, end: 2n, refusal: passing(new StreamError(StreamCode.Cancel)) });
+	fills.poll(tail, true);
+	peer.fill.close();
+	fills.poll(tail, true);
+
+	// A later fill finds group 1 accounted for on the subscription, so a newer recovery asks for it.
+	tail.account(1n, 2n);
+	const requests = peer.track.requests();
+	const later = peer.track.subscribe({
+		ranges: [{ start: { absolute: 1n } }],
+		delay: { max: null },
+		order: "ascending",
+	});
+	void later
+		.ordered()
+		.nextGroup()
+		.catch(() => undefined);
+	const again = await requests.requestedFill();
+	if (!again) throw new Error("no fill");
+	fills.push(again);
+	fills.poll(tail, true);
+	expect(opened.map((entry) => entry.groups)).toEqual([
+		{ start: 1n, end: 3n },
+		{ start: 1n, end: 2n },
+	]);
+
+	// The older one ends first.
+	older.reading = false;
+	older.finish([]);
+	await yieldNow();
+	fills.poll(tail, true);
+	expect(fills.ask.groups.some((run) => run.start <= 1n && 1n < run.end)).toBe(false);
+
+	again.close();
+	later.close();
+	requests.close();
+	fills.close();
+	peer.close();
+});

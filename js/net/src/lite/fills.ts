@@ -229,7 +229,6 @@ export class RangeFills {
 		for (const done of this.#recoveries) {
 			if (!done.refused) continue;
 			this.#recoveries.delete(done);
-			this.#recovering = removeRun(this.#recovering, done.groups.start, done.groups.end);
 			for (const refused of done.refused) this.#setRefused(refused.start, refused.end, refused.refusal);
 		}
 		// What a recovery still out refused since the last poll answers the fills owing it now,
@@ -239,9 +238,11 @@ export class RangeFills {
 			for (const refused of recovery.handle.takeRefused()) {
 				this.#setRefused(refused.start, refused.end, refused.refusal);
 				insertRun(recovery.released, refused.start, refused.end);
-				this.#recovering = removeRun(this.#recovering, refused.start, refused.end);
 			}
 		}
+		// Rebuilt from those still out, so one ending leaves a later one's coverage of the same
+		// groups intact.
+		this.#cover();
 
 		const ask: FillAsk = { groups: [], priority: NO_PRIORITY };
 		// Every run a held fill still owes, recovered or not.
@@ -290,11 +291,7 @@ export class RangeFills {
 			recovery.handle.cancel();
 			this.#recoveries.delete(recovery);
 		}
-		this.#recovering = [];
-		// Each covers its groups less what it refused and handed over.
-		for (const { groups, released } of this.#recoveries)
-			for (const gap of runGaps(released, groups.start, groups.end))
-				insertRun(this.#recovering, gap.start, gap.end);
+		this.#cover();
 		this.#recovered = this.#recovered.flatMap(({ start, end }) => clip(owed, start, end));
 
 		// A run stays asked whole while a fill still owes any of it, so the subscription changes once
@@ -375,6 +372,14 @@ export class RangeFills {
 		const skipped = this.#skipped.find((run) => run.start <= first && first < run.end);
 		if (!skipped) return undefined;
 		return { start: skipped.start, end: skipped.end, refusal: passing(new NotFound(`group ${skipped.start}`)) };
+	}
+
+	// What the recoveries still out cover: each its groups less what it refused and handed over.
+	#cover(): void {
+		this.#recovering = [];
+		for (const { groups, released } of this.#recoveries)
+			for (const gap of runGaps(released, groups.start, groups.end))
+				insertRun(this.#recovering, gap.start, gap.end);
 	}
 
 	#setRefused(start: bigint, end: bigint, refusal: Refusal): void {

@@ -173,6 +173,18 @@ impl RangeFills {
 		self.skipped = Default::default();
 	}
 
+	/// What the recoveries still out cover: each its groups less what it refused and handed
+	/// over.
+	fn cover(&mut self) {
+		let mut still = RangeSet::new();
+		for recovery in &self.recoveries {
+			for gap in recovery.released.gaps(&recovery.groups) {
+				still.insert(gap);
+			}
+		}
+		self.recovering = still;
+	}
+
 	/// Take the refusals a recovery made since the last poll, once: each answers the fills
 	/// owing its groups now, and [`Self::forget_answered`] ends it with them, so a later request
 	/// for the same groups asks again rather than reading it back.
@@ -281,7 +293,7 @@ impl RangeFills {
 		let mut violation = None;
 		self.recoveries.retain_mut(|recovery| match recovery.poll(waiter) {
 			Poll::Ready(Ok(refused)) => {
-				done.push((recovery.groups.clone(), refused));
+				done.push(refused);
 				false
 			}
 			Poll::Ready(Err(err)) => {
@@ -293,8 +305,7 @@ impl RangeFills {
 		if let Some(err) = violation {
 			return Err(err);
 		}
-		for (groups, refused) in done {
-			self.recovering.remove(groups);
+		for refused in done {
 			for (groups, refusal) in refused.iter() {
 				self.refused.insert(groups.clone(), refusal.clone());
 			}
@@ -306,6 +317,9 @@ impl RangeFills {
 			self.take_refused(&mut recovery.fresh, &mut recovery.released);
 		}
 		self.recoveries = recoveries;
+		// Rebuilt from those still out, so one ending leaves a later one's coverage of the same
+		// groups intact.
+		self.cover();
 
 		let mut ask = FillAsk::default();
 		// Every run a held fill still owes, recovered or not.
@@ -356,14 +370,7 @@ impl RangeFills {
 		// fills owing it now: a later request for it may recover it again.
 		self.recoveries
 			.retain(|recovery| owed.overlaps(&recovery.groups) || (read && recovery.reading()));
-		// Each covers its groups less what it refused and handed over.
-		let mut still = RangeSet::new();
-		for recovery in &self.recoveries {
-			for gap in recovery.released.gaps(&recovery.groups) {
-				still.insert(gap);
-			}
-		}
-		self.recovering = still;
+		self.cover();
 		let recovered: Vec<_> = self.recovered.iter().cloned().collect();
 		self.recovered = RangeSet::new();
 		for run in recovered {
