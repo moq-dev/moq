@@ -74,14 +74,7 @@ import {
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
-import {
-	dropped,
-	passing,
-	RangeFills,
-	type RecoveryHandle,
-	type Refusal,
-	type Refused,
-} from "./fills.ts";
+import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused } from "./fills.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
 import { LinkRtt } from "./link_rtt.ts";
@@ -2493,7 +2486,9 @@ export class Subscriber {
 		const requests = producer.requests();
 		const jobs = new Set<Promise<void>>();
 		const fills = hasRanges(this.version)
-			? new RangeFills(producer, (groups, priority) => this.#recover(broadcast, consumed, entry, groups, priority))
+			? new RangeFills(producer, (groups, priority) =>
+					this.#recover(broadcast, consumed, entry, groups, priority),
+				)
 			: undefined;
 		entry.fills = fills;
 		const driving = fills ? this.#driveFills(entry, fills) : undefined;
@@ -2709,7 +2704,11 @@ export class Subscriber {
 				started = true;
 				// Below its start the publisher, asked with no max delay, lacks them.
 				const from = resp.start.starts[0] ?? groups.end;
-				giveUp(groups.start, max(groups.start, min(from, groups.end)), passing(new NotFound(`group ${groups.start}`)));
+				giveUp(
+					groups.start,
+					max(groups.start, min(from, groups.end)),
+					passing(new NotFound(`group ${groups.start}`)),
+				);
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
 				const cause = resp.drop.cause(this.version);
