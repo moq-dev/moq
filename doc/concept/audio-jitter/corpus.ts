@@ -84,6 +84,23 @@ function gap(trace: Trace, at: number, length: number): Trace {
 	return { arrival, media };
 }
 
+/**
+ * Hold a FIFO queue to one frame per `service` ms from `from` for `length` ms, as a link
+ * collapsing behind a full queue does, then drain it at 2 ms per frame.
+ */
+function outage(trace: Trace, from: number, length: number, service: number): Trace {
+	const arrival = [...trace.arrival];
+	let free = Number.NEGATIVE_INFINITY;
+	for (let i = 0; i < arrival.length; i++) {
+		const start = Math.max(arrival[i], free);
+		if (start >= from && start < from + length) free = start + service;
+		else if (start > arrival[i]) free = start + 2;
+		else free = start;
+		arrival[i] = free;
+	}
+	return { arrival, media: trace.media };
+}
+
 function paced(frames: number, frame: number, base: number): Trace {
 	return flushed(frames, frame, 1, base);
 }
@@ -215,6 +232,16 @@ const traces: Omit<Case, "target">[] = [
 				for (let i = start; i < start + 15; i++) arrival[i] = arrival[start + 14];
 			}
 			return { arrival, media: trace.media };
+		})(),
+	},
+	{
+		name: "outage",
+		about: "Even audio with a 1.5 s outage 10 s in: a queue serving one frame per 300 ms, then draining the backlog, so its delays climb past a second across four intervals. The frames stuck behind it are one stall, which folds once, so the one-off leaves the target where it was. Three more outages 3 s apart from 30 s still raise it, and it decays once they stop.",
+		frame: FRAME,
+		...(() => {
+			let trace = paced(3000, FRAME, 50);
+			for (const at of [10_000, 30_000, 33_000, 36_000]) trace = outage(trace, at + 50, 1500, 300);
+			return trace;
 		})(),
 	},
 	{

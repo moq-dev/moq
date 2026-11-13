@@ -39,6 +39,7 @@ describe("audio jitter conformance", () => {
 			"fixed",
 			"flush",
 			"idle",
+			"outage",
 			"paced",
 			"reorder",
 			"silence",
