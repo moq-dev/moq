@@ -91,15 +91,41 @@ async fn serving(registry: &Registry, count: u64, what: &str) {
 	.unwrap_or_else(|_| panic!("{what}: serving {} sessions, not {count}", active(registry)));
 }
 
-async fn connect(url: &str) -> moq_tokio::Connection {
+fn dial() -> moq_tokio::connect::Config {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
-	let client = config.init(Default::default()).unwrap().with_reconnect(false);
+	config
+}
+
+async fn established(client: moq_tokio::Client, url: &str) -> moq_tokio::Connection {
 	kio::clock::timeout(TIMEOUT, client.connect(url.parse::<url::Url>().unwrap()).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed")
+}
+
+/// A session that leaves on the relay's GOAWAY.
+async fn connect(url: &str) -> moq_tokio::Connection {
+	established(dial().init(Default::default()).unwrap().with_reconnect(false), url).await
+}
+
+/// A session that stays through the relay's drain, as a cluster peer's does: never
+/// healthy, so it reads the GOAWAY as a redial that reached the draining relay again.
+async fn stays(url: &str, quic: moq_tokio::quic::Config) -> moq_tokio::Connection {
+	let mut config = dial();
+	config.backoff.healthy = Some(Duration::from_secs(600).into());
+	established(config.init(quic).unwrap().with_restart(moq_tokio::Restart::Wait), url).await
+}
+
+/// Wait for the GOAWAY a draining relay sends `connection`.
+async fn drained(connection: &moq_tokio::Connection) {
+	let draining = connection.draining().unwrap();
+	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("the old relay never drained")
+		.unwrap();
+	assert_eq!(goaway.uri(), "");
 }
 
 #[tokio::test]
@@ -170,12 +196,7 @@ async fn takes_over(from: Backend, to: Backend) {
 	ready.wait().await.unwrap();
 
 	// The old relay drains once the new one serves.
-	let draining = held.draining().unwrap();
-	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
-		.await
-		.expect("the old relay never drained")
-		.unwrap();
-	assert_eq!(goaway.uri(), "");
+	drained(&held).await;
 
 	// New sessions, by either transport, reach the new relay.
 	let fresh = connect(&quic).await;
@@ -222,6 +243,86 @@ async fn takes_over(from: Backend, to: Backend) {
 	kio::clock::timeout(TIMEOUT, new_running)
 		.await
 		.expect("the new relay outlived its sessions")
+		.unwrap()
+		.unwrap();
+}
+
+/// A new relay that dies while the old one drains takes none of the old one's
+/// sessions with it: they still reach the old relay, and the next relay takes over
+/// from it on the same sockets.
+#[tokio::test]
+async fn the_old_relay_outlives_a_new_one_that_dies() {
+	kio::clock::host_time(); // real relays on real sockets
+	moq_tokio::crypto::install_default().unwrap();
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	// Neither an idle session nor the drain deadline ends a session within the test's
+	// timeout, so only a close that reaches the old relay ends one there.
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.idle_timeout = Some(Duration::from_secs(600).into());
+	let config = || {
+		let mut config = config(dir.path(), &cert, &key, Backend::Tokio);
+		config.quic = quic.clone();
+		config.drain_timeout = Some(Duration::from_secs(600).into());
+		config
+	};
+
+	let old = Relay::load(config()).await.unwrap().with_signals(false);
+	let addr = old.addr().unwrap();
+	let tcp = old.tcp_addr().unwrap();
+	let old_stats = old.cluster().stats.clone();
+	let staying = old.shutdown().admission().enter().unwrap();
+	let ready = old.ready();
+	let old_running = tokio::spawn(old.run());
+	ready.wait().await.unwrap();
+
+	let quic_url = format!("https://{addr}/handoff");
+	let first = stays(&quic_url, quic.clone()).await;
+	let second = stays(&quic_url, quic.clone()).await;
+	serving(&old_stats, 2, "the old relay").await;
+
+	let new = Relay::load(config()).await.unwrap().with_signals(false);
+	let ready = new.ready();
+	let new_running = tokio::spawn(new.run());
+	ready.wait().await.unwrap();
+	drained(&first).await;
+
+	// The new relay dies, and every socket it held goes with it.
+	new_running.abort();
+	assert!(new_running.await.unwrap_err().is_cancelled());
+
+	// A session of the old relay still reaches it: its close arrives there.
+	drop(first);
+	serving(&old_stats, 1, "the old relay after the new one died").await;
+
+	// The next relay takes over from the old one, on the same sockets.
+	let next = Relay::load(config())
+		.await
+		.expect("the old relay refused the next one")
+		.with_signals(false);
+	assert_eq!(next.addr(), Some(addr));
+	assert_eq!(next.tcp_addr(), Some(tcp));
+	let next_stats = next.cluster().stats.clone();
+	let trigger = next.shutdown_trigger().clone();
+	let ready = next.ready();
+	let next_running = tokio::spawn(next.run());
+	ready.wait().await.unwrap();
+	let fresh = connect(&quic_url).await;
+	let stream = connect(&format!("tcp://{tcp}/handoff")).await;
+	serving(&next_stats, 2, "the next relay").await;
+
+	drop((second, staying));
+	kio::clock::timeout(TIMEOUT, old_running)
+		.await
+		.expect("the old relay outlived its last session")
+		.unwrap()
+		.unwrap();
+
+	trigger.start();
+	drop((fresh, stream));
+	kio::clock::timeout(TIMEOUT, next_running)
+		.await
+		.expect("the next relay outlived its sessions")
 		.unwrap()
 		.unwrap();
 }
