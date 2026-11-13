@@ -186,9 +186,6 @@ pub enum Error {
 	Deprecated(crate::cli::Deprecated),
 }
 
-impl Error {
-}
-
 #[cfg(feature = "_certs")]
 crate::error::from_message! {
 	rcgen::Error => Rcgen,

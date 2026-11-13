@@ -8,13 +8,13 @@
 diff --git a/rs/moq-net/src/reconnect.rs b/rs/moq-net/src/reconnect.rs
 --- a/rs/moq-net/src/reconnect.rs
 +++ b/rs/moq-net/src/reconnect.rs
-@@ -772,7 +772,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
- 		};
+@@ -991,7 +991,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
+ 	fn closed(&mut self, now: Instant, err: Error, healthy: bool, url: &Url) {
  		let err = E::from(err);
  		// Connecting once, the session ending ends the policy with its close reason.
--		if terminal || self.config.once {
+-		if self.config.once {
 +		// MUTATION: losing an established session ends the policy instead of redialing.
-+		if terminal || self.config.once || healthy {
++		if self.config.once || healthy {
  			return self.done(Err(err));
  		}
  

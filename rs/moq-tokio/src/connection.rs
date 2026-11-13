@@ -2441,10 +2441,19 @@ mod tests {
 		let client = client();
 		let tcp = url("tcp://localhost:1/");
 		let verdict = |err: Error| verdict(&client, &tcp, &err);
-		assert_eq!(verdict(Error::Connect(crate::ConnectError::Unauthorized)), Verdict::Settled);
-		assert_eq!(verdict(Error::Connect(crate::ConnectError::Forbidden)), Verdict::Settled);
+		assert_eq!(
+			verdict(Error::Connect(crate::ConnectError::Unauthorized)),
+			Verdict::Settled
+		);
+		assert_eq!(
+			verdict(Error::Connect(crate::ConnectError::Forbidden)),
+			Verdict::Settled
+		);
 		assert_eq!(verdict(Error::MoqNet(moq_net::Error::Unauthorized)), Verdict::Settled);
-		assert_eq!(verdict(Error::MoqNet(moq_net::Error::ProtocolViolation)), Verdict::Retry);
+		assert_eq!(
+			verdict(Error::MoqNet(moq_net::Error::ProtocolViolation)),
+			Verdict::Retry
+		);
 		assert_eq!(verdict(Error::MoqNet(moq_net::Error::Expired)), Verdict::Retry);
 		assert_eq!(verdict(Error::NoBackend("none")), Verdict::Retry);
 		let unknown = url("moqz://localhost/");

@@ -506,7 +506,8 @@ async fn an_unusable_address_ends_only_a_walk_without_hope() {
 #[kio::test]
 async fn a_settled_answer_retries_once_established() {
 	let peer = url("tcp://peer:1/");
-	let mut machine = established(Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now()).unwrap());
+	let mut machine =
+		established(Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now()).unwrap());
 
 	for _ in 0..3 {
 		let Action::Dial(_) = next(&mut machine).await else {

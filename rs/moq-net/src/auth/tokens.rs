@@ -162,10 +162,7 @@ impl Tokens {
 		let state = self.handle.state.read();
 		let configured = state.configured.as_ref().expect("built by Tokens::new");
 		let (token, connection) = credential(url, &configured.tokens);
-		Dial {
-			token,
-			connection,
-		}
+		Dial { token, connection }
 	}
 
 	/// Make `dial` the latest, holding every token but its connection credential in band on the
