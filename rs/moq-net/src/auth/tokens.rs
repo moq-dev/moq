@@ -84,7 +84,6 @@ pub(crate) struct Dial {
 	pub(crate) token: Option<String>,
 	/// The connection credential, held out of band rather than in an AUTH stream.
 	connection: Option<String>,
-	generation: u64,
 }
 
 impl Tokens {
@@ -122,7 +121,6 @@ impl Tokens {
 		let configured = state.configured.as_mut().expect("built by Tokens::new");
 		configured.fresh = fresh;
 		configured.tokens = tokens;
-		configured.generation += 1;
 		configured.answer = None;
 		state.hold();
 	}
@@ -167,7 +165,6 @@ impl Tokens {
 		Dial {
 			token,
 			connection,
-			generation: configured.generation,
 		}
 	}
 
@@ -211,13 +208,6 @@ impl Tokens {
 		};
 		state.configured.as_mut().expect("built by Tokens::new").session = connected;
 	}
-
-	/// Whether the tokens changed since `dial` was previewed, so a refusal of its credential earns
-	/// another dial.
-	pub(crate) fn changed(&self, dial: &Dial) -> bool {
-		let state = self.handle.state.read();
-		state.configured.as_ref().expect("built by Tokens::new").generation != dial.generation
-	}
 }
 
 /// The configured tokens a [`Tokens`] presents, kept on its handle's state so each verdict
@@ -225,7 +215,6 @@ impl Tokens {
 #[derive(Default)]
 pub(super) struct Configured {
 	tokens: Vec<Token>,
-	generation: u64,
 	/// The latest dial's connection credential, never also held in band. `None` before the
 	/// first dial.
 	dialed: Option<Option<String>>,
@@ -944,16 +933,6 @@ mod tests {
 		assert!(answered(&set).is_pending());
 		set.handle().abort(Error::Session(SessionError::Unauthorized));
 		refused(&set, SessionError::Unauthorized);
-	}
-
-	#[test]
-	fn only_a_change_outdates_a_dial() {
-		let set = Tokens::new(tokens(&["a"]));
-		let dial = set.preview(&"moqt://relay.example.com/".parse().unwrap());
-		set.set(tokens(&["a"]));
-		assert!(!set.changed(&dial));
-		set.set(tokens(&["b"]));
-		assert!(set.changed(&dial));
 	}
 
 	/// The first token is the connection credential, presented in SETUP.

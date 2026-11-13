@@ -149,20 +149,20 @@ async fn a_refused_credential_redials_with_its_replacement() {
 	assert!(connection.connected());
 }
 
-/// Without a new credential, a refusal ends the connection rather than retrying it.
+/// A refused credential closes its session with the refusal, and the tokens get it as their answer.
 #[tokio::test]
-async fn an_unchanged_refused_credential_is_terminal() {
-	refused_credential_is_terminal(config("moq-lite-07-wip", &["old"])).await;
+async fn a_refused_credential_closes_its_session() {
+	refused_credential_closes(config("moq-lite-07-wip", &["old"])).await;
 }
 
 /// Without AUTH, a refusal after the session went live is still the answer, never a grant.
 #[tokio::test]
-async fn an_unchanged_refused_credential_without_auth_is_terminal() {
-	refused_credential_is_terminal(config("moq-lite-05", &["old"])).await;
-	refused_credential_is_terminal(config("moq-transport-22", &["old"])).await;
+async fn a_refused_credential_without_auth_closes_its_session() {
+	refused_credential_closes(config("moq-lite-05", &["old"])).await;
+	refused_credential_closes(config("moq-transport-22", &["old"])).await;
 }
 
-async fn refused_credential_is_terminal(config: moq_tokio::connect::Config) {
+async fn refused_credential_closes(config: moq_tokio::connect::Config) {
 	let version = config.version[0].to_string();
 	let mut server = serve(&version, "old").await;
 	let client = config.init(Default::default()).expect("failed to init client");

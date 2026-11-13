@@ -613,25 +613,6 @@ impl Error {
 		}
 	}
 
-	/// A fixed local error or settled rejection that another dial cannot repair.
-	pub(crate) fn is_terminal(&self) -> bool {
-		match self {
-			Self::Disabled
-			| Self::MissingHostname
-			| Self::UnsupportedScheme(_)
-			| Self::BuildRequest(_)
-			| Self::ProtocolHeader(_)
-			| Self::ConnectRejected(_) => true,
-			Self::Tls(err) => err.is_terminal(),
-			Self::Failover(failures) => {
-				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
-			}
-			_ => self
-				.status()
-				.is_some_and(|status| !crate::error::status_retryable(status)),
-		}
-	}
-
 	/// The HTTP status the server answered the upgrade with, if it answered with one at all.
 	///
 	/// qmux surfaces a non-101 WebSocket upgrade response as `Http(status)`. See

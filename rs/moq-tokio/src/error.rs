@@ -273,43 +273,6 @@ pub enum Error {
 }
 
 impl Error {
-	/// A fixed local error or settled rejection that another dial cannot repair.
-	#[cfg(feature = "net")]
-	pub(crate) fn is_terminal(&self) -> bool {
-		match self {
-			#[cfg(feature = "websocket")]
-			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
-			Self::MoqNet(err) => matches!(
-				moq_net::reconnect::Verdict::from(err),
-				moq_net::reconnect::Verdict::Refused | moq_net::reconnect::Verdict::Fatal
-			),
-			Self::Tls(err) => err.is_terminal(),
-			Self::NoBackend(_)
-			| Self::Deprecated(_)
-			| Self::IdleTimeoutRange
-			| Self::WindowRange(_)
-			| Self::ReceiveWindowTooSmall(_)
-			| Self::StreamsRange
-			| Self::KeylogUnset
-			| Self::BackoffHealthy
-			| Self::QlogUnsupported
-			| Self::ClientCertScheme(_)
-			| Self::Connect(_) => true,
-			#[cfg(feature = "quic")]
-			Self::Quic(err) => err.is_terminal(),
-			#[cfg(feature = "websocket")]
-			Self::WebSocket(err) => err.is_terminal(),
-			#[cfg(feature = "tcp")]
-			Self::Tcp(err) => matches!(
-				err.as_ref(),
-				crate::tcp::Error::MissingHostname | crate::tcp::Error::MissingPort
-			),
-			#[cfg(all(feature = "uds", unix))]
-			Self::Unix(err) => matches!(err.as_ref(), crate::unix::Error::MissingPath),
-			_ => self.is_auth(),
-		}
-	}
-
 	/// The auth rejection behind this error, digging through backend and race variants.
 	#[cfg(feature = "net")]
 	pub fn connect_error(&self) -> Option<crate::ConnectError> {
@@ -447,71 +410,10 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn a_transport_race_is_terminal_only_when_every_arm_is_terminal() {
-		let local = || Error::WebSocket(Arc::new(crate::websocket::Error::UnsupportedScheme("bad".into())));
-		let transient = || Error::Io(Arc::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)));
-		assert!(local().is_terminal());
-		assert!(!transient().is_terminal());
-		for (quic, websocket) in [(local(), transient()), (transient(), local())] {
-			assert!(
-				!Error::TransportRace {
-					quic: Arc::new(quic),
-					websocket: Arc::new(websocket)
-				}
-				.is_terminal()
-			);
-		}
-		assert!(
-			Error::TransportRace {
-				quic: Arc::new(local()),
-				websocket: Arc::new(local())
-			}
-			.is_terminal()
-		);
-		assert!(Error::Tls(Arc::new(crate::tls::Error::NoRoots)).is_terminal());
-		assert!(Error::Tls(Arc::new(crate::tls::Error::InvalidHostName("a!b".into()))).is_terminal());
-		// A root file can be briefly absent or empty while it rotates, so rereading it may succeed.
-		assert!(!Error::Tls(Arc::new(crate::tls::Error::EmptyRoots("roots.pem".into()))).is_terminal());
-		assert!(!Error::Tls(Arc::new(crate::tls::Error::Open(std::io::ErrorKind::NotFound.into()))).is_terminal());
-	}
-
-	/// Redialing with the same expired credentials cannot succeed; the caller must refresh them.
-	#[test]
-	fn expired_credentials_are_terminal() {
-		assert!(Error::MoqNet(moq_net::Error::Expired).is_terminal());
-		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_terminal());
+	fn expired_and_malformed_credentials_are_auth_rejections() {
 		assert!(Error::MoqNet(moq_net::Error::Expired).is_auth());
 		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_auth());
-	}
-
-	/// Redialing with a token the peer could not parse sends the same bytes again.
-	#[test]
-	fn malformed_credentials_are_terminal() {
-		let err = Error::MoqNet(moq_net::SessionError::MalformedAuthToken.into());
-		assert!(err.is_terminal());
-		assert!(err.is_auth());
-	}
-
-	/// Every raced address building the same malformed request is as terminal as one address doing so.
-	#[test]
-	fn an_address_race_is_terminal_only_when_every_attempt_is_terminal() {
-		use crate::failover::Attempt;
-		use crate::websocket::Error as Ws;
-
-		let addr = |port| std::net::SocketAddr::from(([127, 0, 0, 1], port));
-		let malformed = |port| Attempt {
-			addr: addr(port),
-			error: Ws::BuildRequest("fragment".into()),
-		};
-		let refused = |port| Attempt {
-			addr: addr(port),
-			error: Ws::Io(std::io::ErrorKind::ConnectionRefused.into()),
-		};
-
-		let race = |attempts| Error::WebSocket(Arc::new(Ws::Failover(attempts)));
-		assert!(race(vec![malformed(1), malformed(2)]).is_terminal());
-		assert!(!race(vec![malformed(1), refused(2)]).is_terminal());
-		assert!(!race(vec![refused(1), malformed(2)]).is_terminal());
+		assert!(Error::MoqNet(moq_net::SessionError::MalformedAuthToken.into()).is_auth());
 	}
 
 	#[test]

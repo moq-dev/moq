@@ -524,25 +524,6 @@ impl Error {
 		}
 	}
 
-	/// A fixed local error or settled rejection that another dial cannot repair.
-	pub(crate) fn is_terminal(&self) -> bool {
-		match self {
-			Self::InvalidScheme
-			| Self::UnsupportedScheme(_)
-			| Self::InvalidDnsName
-			| Self::Config(_)
-			| Self::ConnectRejected(_)
-			| Self::Limits(_) => true,
-			Self::Tls(err) => err.is_terminal(),
-			Self::Failover(failures) => {
-				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
-			}
-			_ => self
-				.status()
-				.is_some_and(|status| !crate::error::status_retryable(status)),
-		}
-	}
-
 	/// The HTTP status a server answered with, if it answered with one at all.
 	///
 	/// Two places see a real status: the insecure `http://` fingerprint bootstrap, and the
