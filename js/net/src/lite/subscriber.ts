@@ -73,6 +73,7 @@ import {
 } from "./announce.ts";
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
+import { Fetch as FetchMessage } from "./fetch.ts";
 import {
 	dropped,
 	passing,
@@ -82,7 +83,6 @@ import {
 	type Refusal,
 	type Refused,
 } from "./fills.ts";
-import { Fetch as FetchMessage } from "./fetch.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
 import { LinkRtt } from "./link_rtt.ts";
@@ -2712,7 +2712,8 @@ export class Subscriber {
 				// Below its start the publisher delivers nothing: under a budget, since it judged them
 				// stale, and with none, since it lacks them.
 				const from = resp.start.starts[0] ?? groups.end;
-				const below = maxDelay === null ? new NotFound(`group ${groups.start}`) : new StreamError(StreamCode.Old);
+				const below =
+					maxDelay === null ? new NotFound(`group ${groups.start}`) : new StreamError(StreamCode.Old);
 				giveUp(groups.start, max(groups.start, min(from, groups.end)), passing(below));
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
@@ -3221,7 +3222,8 @@ export class Subscriber {
 				for (const id of edited.fillIds) entry.fillIds.add(id);
 				// The groups a fill newly asks for wait a fresh grace too.
 				for (const run of fillGroups)
-					for (const gap of runGaps(entry.fillGroups, run.start, run.end)) entry.tail.demand(gap.start, gap.end);
+					for (const gap of runGaps(entry.fillGroups, run.start, run.end))
+						entry.tail.demand(gap.start, gap.end);
 				entry.fillGroups = fillGroups;
 				entry.floor = span.start;
 				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.

@@ -23,7 +23,8 @@ by flights, so this waits on Flights and stays in m2 with its epic.
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the byte offset rides
 FETCH's frame start plus the group header, not a SUBSCRIBE range end.
 SUBSCRIBE ranges are whole groups since 2026-11-03
-([Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md),
+(Lite-07 FETCH is single-group only,
+[moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616) and
 [moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675)), and flights
 ride lite FETCH since [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944).
 This waits for that quest.
@@ -68,7 +69,3 @@ Public API: `Position` gains a byte field, frames gain a chunked read, and
 `MAX_CACHE_BYTES` stops capping a frame.
 Wire: a byte offset on the current lite wip's FETCH frame start and group
 header.
-
-## Required
-
-- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - SUBSCRIBE ranges become whole groups, so the offset goes on FETCH

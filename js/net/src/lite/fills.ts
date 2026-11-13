@@ -155,10 +155,10 @@ export class RangeFills {
 		for (const run of clip(this.ask.groups, start, end)) {
 			if (toStreamCode(error) === StreamCode.Old) {
 				const done = this.#recoveredFor(run);
-				for (const fresh of runGaps(done, run.start, run.end)) insertRun(this.#toRecover, fresh.start, fresh.end);
+				for (const fresh of runGaps(done, run.start, run.end))
+					insertRun(this.#toRecover, fresh.start, fresh.end);
 				// Recovered once already: this drop stands for the fills owing it now.
-				for (const again of done)
-					this.#setRefused(again.start, again.end, dropped(error));
+				for (const again of done) this.#setRefused(again.start, again.end, dropped(error));
 				continue;
 			}
 			this.#setRefused(run.start, run.end, dropped(error));
@@ -214,7 +214,9 @@ export class RangeFills {
 		// it: none for a reader reaching back for history.
 		for (const run of this.#toRecover.splice(0)) {
 			const terms = this.#terms(run);
-			this.#recovered = [...cut(this.#recovered, run.start, run.end), { ...run, budget: terms.maxDelay }].sort(byStart);
+			this.#recovered = [...cut(this.#recovered, run.start, run.end), { ...run, budget: terms.maxDelay }].sort(
+				byStart,
+			);
 			insertRun(this.#recovering, run.start, run.end);
 			this.#recoveries.add(new Recovery(run, this.#recover(run, terms)));
 		}
@@ -247,7 +249,8 @@ export class RangeFills {
 				}
 				insertRun(owed, run.start, run.end);
 				// A run being recovered waits on its own subscription.
-				for (const gap of runGaps(this.#recovering, run.start, run.end)) insertRun(ask.groups, gap.start, gap.end);
+				for (const gap of runGaps(this.#recovering, run.start, run.end))
+					insertRun(ask.groups, gap.start, gap.end);
 				ask.priority = Math.max(ask.priority, fill.priority);
 				held.push(fill);
 				break;
@@ -286,7 +289,7 @@ export class RangeFills {
 			for (const gap of runGaps(this.#draining, run.start, run.end)) {
 				for (const sequence of hooks.arrivingIn(this.#copy, gap.start, gap.end)) {
 					const closed = hooks.arrivingGroup(this.#copy, sequence);
-					if (closed) this.#reading.set(sequence, closed);
+					if (closed !== undefined) this.#reading.set(sequence, closed);
 				}
 			}
 			if ([...this.#reading.keys()].some((sequence) => run.start <= sequence && sequence < run.end)) {

@@ -245,7 +245,8 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 	}
 
 	// A lite-07 range covers whole groups: a slice of one is a FETCH.
-	if (span.startFrame !== 0 || span.endFrame !== undefined) throw new Error("frame bounds not supported for this version");
+	if (span.startFrame !== 0 || span.endFrame !== undefined)
+		throw new Error("frame bounds not supported for this version");
 	await w.u53(1);
 	const range: WireRange = {};
 	if (span.startGroup !== undefined) range.start = { absolute: span.startGroup };

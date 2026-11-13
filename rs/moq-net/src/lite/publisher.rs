@@ -7,7 +7,7 @@ use crate::{SessionError, datagram, frame, group, origin, track};
 use rangemap::{RangeMap, RangeSet};
 use std::{
 	borrow::Cow,
-	collections::{BTreeMap, HashMap},
+	collections::HashMap,
 	ops::{Bound, ControlFlow, Range},
 	sync::{
 		Arc, Mutex,

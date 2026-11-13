@@ -22,7 +22,10 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 	const requests = track.requests();
 	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null }, order: "ascending" });
 	// Reading is what asks.
-	void reader.ordered().nextGroup().catch(() => undefined);
+	void reader
+		.ordered()
+		.nextGroup()
+		.catch(() => undefined);
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill");
 	expect([fill.start, fill.end]).toEqual([0n, 4n]);
@@ -127,10 +130,17 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 	// Nothing recorded: the track still holds no verdict on groups 0 and 1, so a later reader asks
 	// for them again.
 	const requests = peer.track.requests();
-	const later = peer.track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null }, order: "ascending" });
-	void later.ordered().nextGroup().catch(() => undefined);
+	const later = peer.track.subscribe({
+		ranges: [{ start: { absolute: 0n } }],
+		delay: { max: null },
+		order: "ascending",
+	});
+	void later
+		.ordered()
+		.nextGroup()
+		.catch(() => undefined);
 	const again = await requests.requestedFill();
-	expect(again && again.wanted()).toBe(0n);
+	expect(again?.wanted()).toBe(0n);
 
 	again?.close();
 	later.close();

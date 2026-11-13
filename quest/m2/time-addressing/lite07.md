@@ -49,7 +49,7 @@ lite-07 changelog) and `doc/concept/moq-lite.md`, and run `just drafts check`
 and `just test interop --all`.
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
-[Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md),
+Lite-07 FETCH is single-group only ([moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616)),
 which rewrites the same lite-07 draft sections (`Range`, Positions,
 SUBSCRIBE anchors).
 
@@ -61,4 +61,3 @@ SUBSCRIBE_DROP change.
 ## Required
 
 - [Rust groups by start](/quest/m2/time-addressing/model.md) - the model this wire carries
-- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - rewrites the same lite-07 draft sections first
