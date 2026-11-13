@@ -261,6 +261,11 @@ test("a redirected connection falls back to the configured URL once its target d
 		if (dead && href === moved.href) throw new Error("connection refused");
 		return new accepting(dialed, options);
 	} as unknown as typeof WebTransport;
+	// A pooled loop keeps the WebSocket fallback; keep it local, so only the stub decides.
+	const socket = globalThis.WebSocket;
+	globalThis.WebSocket = function NoFallback() {
+		throw new Error("no fallback");
+	} as unknown as typeof WebSocket;
 	// Pooled, so the entry's key follows the URL the loop dials.
 	const handle = new Connection({ url });
 
@@ -292,6 +297,7 @@ test("a redirected connection falls back to the configured URL once its target d
 		fresh.close();
 	} finally {
 		globalThis.WebTransport = accepting;
+		globalThis.WebSocket = socket;
 		handle.close();
 		installed.close();
 	}
