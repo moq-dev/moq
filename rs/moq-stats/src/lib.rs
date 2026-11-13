@@ -195,7 +195,7 @@ pub fn prefix_track(path: impl Into<Path>) -> String {
 /// The track name for one counter run of a bucket: `<bucket>/bucket.<epoch>.json`,
 /// or `bucket.<epoch>.json` for the empty bucket.
 ///
-/// Each run has its own name, so no name is ever reused and its MoQ group 0 is
+/// Each run has its own name, so no name is ever reused and its first MoQ group is
 /// where the run's counters start, for every reader and every relay cache. A
 /// reader finds the current run through the broadcast's track listing.
 pub fn bucket_track(bucket: impl Into<Path>, epoch: &Epoch) -> String {

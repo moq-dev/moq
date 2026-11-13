@@ -43,6 +43,8 @@ struct Node {
 	source: moq_net::origin::Route,
 	bucket: moq_json::snapshot::Producer<Body>,
 	frame: Body,
+	/// How many snapshots it published, which stamps the next a millisecond after the last.
+	published: u64,
 }
 
 impl Node {
@@ -77,6 +79,7 @@ impl Node {
 			source,
 			bucket: moq_json::snapshot::Producer::new(track, config),
 			frame,
+			published: 0,
 		}
 	}
 
@@ -90,9 +93,9 @@ impl Node {
 		{
 			usage.publisher.bytes += bytes;
 		}
-		self.bucket
-			.update(moq_net::Timed::from(&self.frame).at(moq_net::Timestamp::now()))
-			.unwrap();
+		let at = moq_net::Timestamp::from_millis(self.published).unwrap();
+		self.published += 1;
+		self.bucket.update(moq_net::Timed::from(&self.frame).at(at)).unwrap();
 	}
 }
 
