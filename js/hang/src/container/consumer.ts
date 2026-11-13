@@ -33,9 +33,9 @@ export interface ConsumerProps {
 	delay?: GetterInit<Moq.Track.Delay>;
 	/**
 	 * How long a missing group is waited for before the consumer skips past it, at most `delay.max`
-	 * (default: `delay.max`). It expires once where the first group past it begins falls this far
-	 * behind the newest content, or this much monotonic time after that group arrived, even when
-	 * it is a marker on a paused track. Groups that did arrive still play until they age past
+	 * (default: `delay.max`). It expires this much monotonic time after the first group past it
+	 * arrived, even when that group is a marker on a paused track, or sooner once where that group
+	 * begins falls `delay.max` behind the newest content. Groups that did arrive still play until they age past
 	 * `delay.max`, so a player can wait on holes for its playout delay alone while still receiving
 	 * the late media it catches up on.
 	 */
@@ -856,9 +856,9 @@ export class Consumer {
 			// when a completed empty group can be walked (empty groups mean nothing), or when the hole
 			// is proven: everything a missing group could still present ends where the first group past
 			// it begins, so once that start falls the max delay behind the newest content, all of it
-			// would arrive too late to play. Mirrors Rust's slow-group skip at the same budget. Where presentation left off proves only
-			// the oldest of it stale, and groups go out newest first, so a flush's newest group lands just
-			// ahead of the groups behind it, which would then arrive below the cursor and never play.
+			// would arrive too late to play. Mirrors Rust's `aged`. Where presentation left off proves
+			// only the oldest of it stale, and groups go out newest first, so a flush's newest group lands
+			// just ahead of the groups behind it, which would then arrive below the cursor and never play.
 			// Proving it here matters: #checkMaxDelay would instead drop the head, the very group to play
 			// next.
 			// After track termination no missing group can arrive, so drain across any remaining gap.

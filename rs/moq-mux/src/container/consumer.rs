@@ -66,11 +66,12 @@ pub(crate) enum Item {
 /// [`Delay::max`] measures. With the default max delay of zero,
 /// the consumer skips aggressively: any group that has a newer alternative is dropped.
 /// With a non-zero max delay, slow groups are tolerated up to that budget before being
-/// skipped. A missing sequence gets the same tolerance, or the shorter
-/// [`set_wait`](Self::set_wait): there is no way to tell a stream that lost the delivery race
-/// from one the cache evicted. Its wait also expires that much monotonic time after the first
-/// group past it arrived, so a marker behind a hole is delivered even when the track is paused,
-/// and the holes a stalled source left behind expire together rather than one wait each.
+/// skipped. A missing sequence gets the same tolerance: there is no way to tell a stream that
+/// lost the delivery race from one the cache evicted, and a reader starved of CPU may take the
+/// missing group in the same burst as the ones past it. Its wait, [`set_wait`](Self::set_wait)
+/// or the max delay, also expires that much monotonic time after the first group past it
+/// arrived, so a marker behind a hole is delivered even when the track is paused, and the holes
+/// a stalled source left behind expire together rather than one wait each.
 ///
 /// Delivery starts at the floor the
 /// [`Subscription::ranges`](moq_net::track::Subscription::ranges) name, raised to where the
@@ -1222,7 +1223,9 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
-	/// Wait at most `wait` for a missing group before skipping past it (default: the max delay).
+	/// Wait at most `wait` of monotonic time, after the first group past a missing one arrives,
+	/// before skipping past it (default: the max delay). Content age skips it once that group
+	/// begins the max delay behind the newest content, whatever the wait.
 	///
 	/// It never exceeds [`Delay::max`]. Groups that did arrive still play until they age past the
 	/// max delay, so a player can wait on holes for its playout delay alone while still receiving
