@@ -50,7 +50,7 @@ The runtime guards fail Rust and bun tests only when a timer fires on the host c
 A TLA+ model that no longer describes its code keeps passing while proving nothing, and Nightly cannot tell.
 When a PR changes a file in a `verify-*` skill's Coverage table, run that skill on the head.
 Flag a covered change the model does not mirror, a config whose result changed without its `\* Open finding:` line following, and a sync commit not moved to the PR's base once the model matches (PRs squash, so the base is the latest commit it can name).
-The flow models under `js/*/verify/` have no skill: give a PR that changes the code their README names the same check with `just test tla`.
+The flow models under `js/*/verify/` have no skill: give a PR that changes the code their README names the same check, running the configs it touches as the README shows.
 
 # Not findings
 

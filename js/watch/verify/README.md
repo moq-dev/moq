@@ -40,10 +40,13 @@ through `a redirected connection falls back to the configured URL once its targe
 ## Run
 
 ```sh
-just test tla js/watch
+quest gate just js tla watch/verify/Watch.tla
+quest gate just js tla watch/verify/Failover.tla
+quest gate just js tla watch/verify/Failover.tla -config js/watch/verify/FailoverRedirect.cfg
+quest gate just js tla watch/verify/Failover.tla -config js/watch/verify/FailoverRedirectRefused.cfg
 ```
 
-This runs every config, as Nightly does. `Watch.cfg` and `Failover.cfg` check the rules that hold
+Run the configs the change touches; Nightly runs every one (`just test tla js/watch`). `Watch.cfg` and `Failover.cfg` check the rules that hold
 and must pass; each rule that breaks has its own config, marked `\* Open finding:`, which must
 fail until the fix moves its rule into the passing one. A config checks the spec its name starts
 with.
