@@ -315,7 +315,7 @@ export class AudioBuffer {
 			/** Anchor to the first frame and hold the lookahead upstream until playback starts. */
 			buffered: boolean;
 			/** The shared clock the ring plays onto, and the reference it plays from. */
-			clock?: { now(): Duration | undefined; out: { reference: Getter<number | undefined> } };
+			clock?: { position(): number | undefined; out: { reference: Getter<number | undefined> } };
 			/** Hold consumption until the shared startup floor is ready. */
 			playing?: Getter<boolean>;
 		},
@@ -360,7 +360,7 @@ export class AudioBuffer {
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
-					if (clock) this.#clock(clock.now(), clock.out.reference.peek(), heard);
+					if (clock) this.#clock(clock.position(), clock.out.reference.peek(), heard);
 				}
 			}
 		});
@@ -422,12 +422,11 @@ export class AudioBuffer {
 
 	// Send where the shared clock stands, in the ring's coordinates, against the context time sounding
 	// at the same instant, so the ring renders each sample to sound when the clock says it is due.
-	#clock(now: Duration | undefined, reference: number | undefined, heard: number | undefined): void {
+	#clock(position: number | undefined, reference: number | undefined, heard: number | undefined): void {
 		const time = this.#context.currentTime;
 		const last = this.#reference;
 		this.#reference = reference;
-		// A clock still short of media zero reads as zero, which would pair it late; wait it out.
-		if (now === undefined || now.isZero() || heard === undefined) {
+		if (position === undefined || heard === undefined) {
 			this.#offset = undefined;
 			const msg: Clock = { type: "clock", time };
 			this.#worklet.port.postMessage(msg);
@@ -437,7 +436,7 @@ export class AudioBuffer {
 		// whole. One earlier jumped the clock ahead, which the ring skips rather than speeds through.
 		const moved = last !== undefined && reference !== undefined ? (last - reference) * 1000 : 0;
 		const jumped = Math.max(0, moved);
-		const offset = now.asMicros() - this.#backpressure.offset - heard * 1_000_000;
+		const offset = position * 1000 - this.#backpressure.offset - heard * 1_000_000;
 		const previous = this.#offset === undefined ? undefined : this.#offset + moved;
 		this.#offset =
 			previous !== undefined && Math.abs(offset - previous) < JUMP ? Math.max(offset, previous - FALL) : offset;

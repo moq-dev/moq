@@ -435,7 +435,7 @@ function fake(
 	delay: number,
 	props: {
 		bound?: number;
-		clock?: { now(): Duration | undefined; out: { reference: Getter<number | undefined> } };
+		clock?: { position(): number | undefined; out: { reference: Getter<number | undefined> } };
 	} = {},
 ) {
 	const sent: Message[] = [];
@@ -553,7 +553,9 @@ describe("AudioBuffer steering", () => {
 		let now: Duration | undefined = Duration.millis(1000);
 		const reference = new Signal<number | undefined>(0);
 		const clock = started();
-		const { buffer, sent, state, context } = fake(100, { clock: { now: () => now, out: { reference } } });
+		const { buffer, sent, state, context } = fake(100, {
+			clock: { position: () => now?.asMillis(), out: { reference } },
+		});
 		const report = (time: number, sounding: number, clock: number | undefined) => {
 			context.currentTime = time;
 			context.sounding = sounding;
@@ -590,16 +592,19 @@ describe("AudioBuffer steering", () => {
 		}
 	});
 
-	// A clock short of media zero reads as zero, which would pair it late, so it waits until it moves.
-	it("sends no clock while it reads media zero", () => {
+	// Before media zero's turn, as while an opening waits for its output to sound it, the clock pairs
+	// at its negative position rather than the zero it reads as.
+	it("pairs a clock short of media zero at its negative position", () => {
 		const clock = started();
 		const { buffer, sent, state, context } = fake(100, {
-			clock: { now: () => Duration.ZERO, out: { reference: new Signal<number | undefined>(0) } },
+			clock: { position: () => -120, out: { reference: new Signal<number | undefined>(0) } },
 		});
 		try {
 			context.sounding = 1;
 			state(ms(0), false, 0);
-			expect(sent.filter((msg) => msg.type === "clock")).toEqual([{ type: "clock", time: 0 }]);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([
+				{ type: "clock", timestamp: -1_120_000, time: 0 },
+			]);
 		} finally {
 			buffer.close();
 			clock.close();
@@ -609,7 +614,7 @@ describe("AudioBuffer steering", () => {
 	// Before the output has played anything there is no position to pair the clock with.
 	it("sends no clock until the output reports a position", () => {
 		const { buffer, sent, state } = fake(100, {
-			clock: { now: () => Duration.millis(1000), out: { reference: new Signal<number | undefined>(0) } },
+			clock: { position: () => 1000, out: { reference: new Signal<number | undefined>(0) } },
 		});
 		try {
 			state(ms(0), false, 0);

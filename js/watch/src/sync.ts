@@ -272,11 +272,17 @@ export class Clock {
 	}
 
 	now(): Duration | undefined {
+		const position = this.position();
+		// Media time is nonnegative, so a playhead before the first frame's turn reads as zero.
+		return position === undefined ? undefined : Duration.millis(Math.max(0, position));
+	}
+
+	// The media time due now in milliseconds, negative before media zero's turn.
+	position(): number | undefined {
 		if (!this.playing.peek()) return undefined;
 		const reference = this.out.reference.peek();
 		if (reference === undefined) return undefined;
-		// Media time is nonnegative, so a playhead before the first frame's turn reads as zero.
-		return Duration.millis(Math.max(0, wall() - reference - this.out.delay.peek().asMillis()));
+		return wall() - reference - this.out.delay.peek().asMillis();
 	}
 
 	async wait(part: Part, timestamp: Duration, signal?: AbortSignal): Promise<boolean> {
@@ -522,6 +528,15 @@ export class Sync {
 	 */
 	now(): Duration | undefined {
 		return this.#clock.now();
+	}
+
+	/**
+	 * {@link Sync.now} in milliseconds, negative rather than zero before media time zero's turn, as
+	 * when an opening waits for its output to sound it.
+	 * @internal
+	 */
+	position(): number | undefined {
+		return this.#clock.position();
 	}
 
 	/** Stop and release everything this holds. */
