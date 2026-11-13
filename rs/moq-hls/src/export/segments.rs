@@ -138,8 +138,8 @@ pub(crate) struct Row {
 	pub segment: u64,
 	/// The [tag](tag) of the track numbering the segment.
 	pub tag: Arc<str>,
-	/// The groups the segment holds: from its first up to the next segment's.
-	pub groups: std::ops::Range<u64>,
+	/// The groups the segment holds, by start.
+	pub groups: super::grid::Groups,
 	/// Presentation duration.
 	pub duration: Duration,
 	/// The segment's starting presentation timestamp.
@@ -396,16 +396,16 @@ impl Producer {
 	/// newest when its group may still be open.
 	pub fn init_groups(&self) -> Vec<u64> {
 		let state = self.state.read();
-		let complete = |row: &Row| row.complete || row.groups.end > row.groups.start + 1;
+		let complete = |row: &Row| row.complete || row.groups.len() > 1;
 		let mut media = state.rows.iter().rev().filter(|row| !row.stop);
-		let Some(newest) = media.next() else {
+		let Some(newest) = media.next().and_then(|row| Some((row, row.groups.first()?))) else {
 			return Vec::new();
 		};
-		if complete(newest) {
-			return vec![newest.groups.start];
+		if complete(newest.0) {
+			return vec![newest.1];
 		}
-		let older = media.find(|row| complete(row)).map(|row| row.groups.start);
-		older.into_iter().chain([newest.groups.start]).collect()
+		let older = media.find(|row| complete(row)).and_then(|row| row.groups.first());
+		older.into_iter().chain([newest.1]).collect()
 	}
 
 	/// Poll until the window lists a row, ends, fails, or closes.
@@ -709,7 +709,7 @@ mod tests {
 			index: segment,
 			segment,
 			tag: Arc::from(tag("video.hls", b"")),
-			groups: group..group + 1,
+			groups: super::super::grid::Groups::one(group),
 			duration: Duration::from_millis(duration_ms),
 			pts,
 			end: Duration::from(pts) + Duration::from_millis(duration_ms),
@@ -728,7 +728,7 @@ mod tests {
 		let window = Duration::from_secs(30);
 		live.push(row(0, 0, 0, 4_000), window);
 		let mut stop = row(1, 1, 4_000, 0);
-		stop.groups = 1..1;
+		stop.groups = Default::default();
 		stop.stop = true;
 		live.push(stop, window);
 		live.push(row(2, 1, 4_000, 4_000), window);
@@ -854,7 +854,7 @@ mod tests {
 		);
 
 		let tag = tag("video.hls", b"");
-		assert_eq!(live.row(&tag, 0).unwrap().groups, 0..1);
+		assert_eq!(live.row(&tag, 0).unwrap().groups, super::super::grid::Groups::one(0));
 		assert_eq!(live.row(&tag, 7), None, "unknown segments miss");
 		assert_eq!(live.row("00000000", 0), None, "another record track's numbering misses");
 		assert_eq!(live.init_groups(), [0], "a stop holds no media");

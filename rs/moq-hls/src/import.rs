@@ -2445,7 +2445,7 @@ mod tests {
 				Poll::Ready(Err(error)) => return (out, Some(error)),
 				other => panic!("reading a published group's first frame: {other:?}"),
 			};
-			out.push((group.sequence, frame.timestamp.unwrap().as_micros()));
+			out.push((group.start, frame.timestamp.unwrap().as_micros()));
 		}
 		(out, None)
 	}

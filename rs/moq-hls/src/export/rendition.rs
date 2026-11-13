@@ -1604,8 +1604,8 @@ enum Fetching {
 		/// every group (its real successor lives in the next group), audible on audio segments
 		/// that span many groups.
 		frames: Vec<moq_mux::container::Frame>,
-		/// The group being read, and the ones after it.
-		groups: std::ops::Range<u64>,
+		/// The group being read, and the ones after it, by start.
+		groups: std::vec::IntoIter<u64>,
 		group: Option<GroupRead>,
 	},
 	Done,
@@ -1703,7 +1703,7 @@ impl Fetch {
 					// publisher grouping far finer than its interval), 404 rather than silently
 					// truncating it to a segment shorter than its advertised duration. The live window
 					// lists such a segment as a gap instead, so only a row from elsewhere reaches this.
-					if row.groups.end.saturating_sub(row.groups.start) > rendition.max_groups() {
+					if row.groups.len() as u64 > rendition.max_groups() {
 						tracing::warn!(
 							groups = ?row.groups,
 							"segment spans more groups than one request fetches; refusing to truncate"
@@ -1724,7 +1724,7 @@ impl Fetch {
 						track,
 						muxer: rendition.muxer()?,
 						frames: Vec::new(),
-						groups: row.groups.clone(),
+						groups: row.groups.starts(),
 						group: None,
 					};
 				}
@@ -2133,7 +2133,7 @@ impl Follow {
 		// A group's place is its first frame's pts: the transport's stamp, or the container's own
 		// where the session carries none.
 		let Some(first) = first.and_then(|frame| first_frame(&self.container, frame, self.probe.as_mut())) else {
-			tracing::warn!(track = %self.track, group = group.sequence, "skipping a group without a timed first frame");
+			tracing::warn!(track = %self.track, group = group.start, "skipping a group without a timed first frame");
 			return None;
 		};
 		let (slots, read, size) = match first {
@@ -2141,10 +2141,10 @@ impl Follow {
 			// grid numbers what resumes by its own timestamps, as every edge does.
 			First::Marker(at) => {
 				self.latest = None;
-				(self.grid.stop(at), (group.sequence, None), None)
+				(self.grid.stop(at), (group.start, None), None)
 			}
 			First::Media(pts, reach, declared) => {
-				let sequence = group.sequence;
+				let sequence = group.start;
 				if let Some((_, previous, _)) = &self.latest {
 					self.spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(self.spacing);
 				}
@@ -2183,10 +2183,10 @@ impl Follow {
 		// the segments and gaps before the first holding one, and its own part of that one, then
 		// stops there.
 		let boundary = claim.boundary;
-		let theirs = |groups: &std::ops::Range<u64>| boundary.is_none_or(|boundary| groups.end > boundary + 1);
+		let theirs = |last: Option<u64>| boundary.is_none_or(|boundary| last.is_some_and(|last| last > boundary));
 		if claim.retired
 			&& let Some((sequence, Some(pts))) = read
-			&& theirs(&(sequence..sequence + 1))
+			&& theirs(Some(sequence))
 		{
 			claim.theirs_at = claim.theirs_at.or(Some(pts));
 		}
@@ -2209,13 +2209,13 @@ impl Follow {
 					pts,
 					start,
 					..
-				} if claim.retired && theirs(&groups) => match (boundary, theirs_at) {
+				} if claim.retired && theirs(groups.last()) => match (boundary, theirs_at) {
 					// The replacement can't list this segment's number again, so this instance
 					// lists the groups it had read, ending where the replacement's media starts.
-					(Some(boundary), Some(at)) if groups.start <= boundary => {
+					(Some(boundary), Some(at)) if groups.first().is_some_and(|first| first <= boundary) => {
 						let slot = grid::Slot::Media {
 							segment,
-							groups: groups.start..boundary + 1,
+							groups: groups.through(boundary),
 							pts,
 							start,
 							end: at,
@@ -2230,7 +2230,9 @@ impl Follow {
 			if !*whole {
 				// The first segment listed holds only this instance's groups, and starts whole.
 				let own = match &slot {
-					grid::Slot::Media { groups, .. } => after.is_none_or(|after| groups.start > after),
+					grid::Slot::Media { groups, .. } => {
+						after.is_none_or(|after| groups.first().is_some_and(|first| first > after))
+					}
 					_ => false,
 				};
 				if !own || !grid.starts(&slot) {
@@ -2251,7 +2253,7 @@ impl Follow {
 		if claim.retired
 			&& grid
 				.open_groups()
-				.is_some_and(|groups| theirs(&(groups.start..groups.start + 1)))
+				.is_some_and(|groups| theirs(groups.first()))
 		{
 			return Some(Ok(()));
 		}
@@ -2555,14 +2557,14 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 			start,
 			end,
 			..
-		} if groups.end.saturating_sub(groups.start) > rendition.max_groups() => {
+		} if groups.len() as u64 > rendition.max_groups() => {
 			tracing::warn!(
 				rendition = rendition.name,
 				segment,
 				?groups,
 				"a segment holds more groups than one request fetches; listing it as a gap"
 			);
-			(segment, 0..0, start, end, None, true)
+			(segment, Default::default(), start, end, None, true)
 		}
 		// Timed from where its EXTINF starts, which a group resuming past its line puts at the line.
 		grid::Slot::Media {
@@ -2573,7 +2575,7 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 			content,
 			..
 		} => (segment, groups, start, end, content, false),
-		grid::Slot::Gap { segment, pts, end } => (segment, 0..0, pts, end, None, true),
+		grid::Slot::Gap { segment, pts, end } => (segment, Default::default(), pts, end, None, true),
 		grid::Slot::Reset => unreachable!("a reset lists no row"),
 	};
 	let start = Duration::from(pts);
@@ -2885,7 +2887,7 @@ mod tests {
 			index: 0,
 			segment: 0,
 			tag: rendition.tag.clone(),
-			groups: 0..1,
+			groups: grid::Groups::one(0),
 			duration: Duration::from_secs(1),
 			pts: moq_net::Timestamp::ZERO,
 			end: Duration::from_secs(1),
@@ -2941,8 +2943,10 @@ mod tests {
 				let Poll::Ready(Ok(request)) = self.poll() else {
 					return;
 				};
-				let mut track = request.accept(moq_net::track::Info::default());
-				track.write_frame(None, Bytes::from_static(b"retained")).unwrap();
+				let track = request.accept(moq_net::track::Info::default());
+				let mut group = track.append_group(0).unwrap();
+				group.write_frame(None, Bytes::from_static(b"retained")).unwrap();
+				group.close().unwrap();
 				self.broadcast.close();
 				*self.track.lock().unwrap() = Some(track);
 			}
