@@ -377,7 +377,8 @@ fn draft00_sends_one_length_prefixed_frame_per_message() {
 
 /// A record's stream data is acknowledged only once the transport takes it, so a session that
 /// fails with records still unsent never reports them delivered. On draft-00 that holds for
-/// each frame split from one batch, not only the first.
+/// each frame split from one batch, not only the first. A stream reset between handing a record
+/// out and the transport taking it still counts the record's data.
 #[test]
 fn stream_data_is_acknowledged_once_the_transport_takes_it() {
 	for &version in Version::ALL {
@@ -398,6 +399,7 @@ fn stream_data_is_acknowledged_once_the_transport_takes_it() {
 			records.push(record);
 		}
 		assert_eq!(acked(&mut pair), (0, 0), "{version:?}: handed out, none taken");
+		pair.client.send_stream(b).reset(VarInt::from_u32(1)).unwrap();
 		pair.client.transmitted();
 		let first = acked(&mut pair);
 		assert!(first.0 + first.1 > 0, "{version:?}: the first record taken");

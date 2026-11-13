@@ -27,8 +27,8 @@ pub(super) struct Send {
 	pub(super) notify: Option<u64>,
 	/// The application gave up the stream's ID with [`Stream::release`], so its end is not kept
 	pub(super) released: bool,
-	/// The prefix the peer acknowledged before a reset truncated `pending` below it, which
-	/// `pending` then forgets
+	/// The acknowledged prefix past what `pending` still tracks: what was acknowledged before a
+	/// reset truncated it, extended by data sent before the reset and acknowledged after
 	pub(super) truncated_acked: u64,
 }
 
@@ -240,7 +240,13 @@ impl Send {
 	/// Returns whether the stream has been finished or reset, and all data it still owes the peer
 	/// has been acknowledged
 	pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
-		self.pending.ack(frame.offsets);
+		self.pending.ack(frame.offsets.clone());
+		// `pending` ignores data a reset truncated, but data sent before the reset was still
+		// delivered. Only a range continuing the prefix extends it, so a reordered one is lost.
+		let acked = self.acked_len();
+		if frame.offsets.start <= acked && frame.offsets.end > acked {
+			self.truncated_acked = frame.offsets.end;
+		}
 		match &mut self.state {
 			SendState::DataSent { finish_acked, .. } => {
 				*finish_acked |= frame.fin;
