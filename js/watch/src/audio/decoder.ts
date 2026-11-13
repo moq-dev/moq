@@ -225,11 +225,14 @@ export class Decoder {
 			const measured = effect.get(this.#measured);
 			if (measured === undefined) return undefined;
 			const delay = effect.get(this.source.out.config)?.delay;
+			const ring = effect.get(this.#ring);
 			return target({
 				measured,
 				advertised: effect.get(this.source.out.jitter),
 				frame: effect.get(this.#frame),
 				delay: delay !== undefined ? Duration.millis(delay) : undefined,
+				// Audio is placed on the clock where it is heard, so video waits for the output too.
+				output: ring ? effect.get(ring.output) : undefined,
 			});
 		});
 		const startup = this.#signals.computed((effect) => {
@@ -511,7 +514,9 @@ export class Decoder {
 		if (!ring) return;
 
 		// The ring plays onto the shared clock, slowing down onto a rise and speeding up onto a fall,
-		// and skips only audio trailing it past what the subscription still delivers.
+		// and skips only audio trailing it past what the subscription still delivers. It holds the
+		// delay less the output latency, which moves its target even under a fixed delay.
+		effect.get(ring.output);
 		const budget = this.#budget(effect);
 		ring.setLatency(budget.delay, bound(budget));
 	}

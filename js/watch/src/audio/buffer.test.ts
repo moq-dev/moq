@@ -1,11 +1,38 @@
 import { describe, expect, it } from "bun:test";
-import { Duration } from "@moq/clock";
+import { Duration, Instant, Manual, now } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import { AudioBuffer, Backpressure } from "./buffer";
 import type { Init, Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 
 const HOUR = 60 * 60 * 1000;
+
+// A manual clock moved past the page's origin, where a performance time of zero means none.
+function started(): { close(): void } {
+	const manual = new Manual();
+	const installed = manual.install();
+	manual.jump(Duration.secs(1));
+	return installed;
+}
+
+// A context that reports its output position as sounding `sounding` now, or nothing until it is set.
+function silent(): {
+	currentTime: number;
+	baseLatency: number;
+	outputLatency: number;
+	sounding?: number;
+	getOutputTimestamp(): AudioTimestamp;
+} {
+	return {
+		currentTime: 0,
+		baseLatency: 0,
+		outputLatency: 0,
+		getOutputTimestamp() {
+			if (this.sounding === undefined) return { contextTime: 0, performanceTime: 0 };
+			return { contextTime: this.sounding, performanceTime: now().since(Instant.ZERO).asMillis() };
+		},
+	};
+}
 const ms = (value: number) => value * 1000;
 
 // A buffered buffer over a real port, with the worklet's end of it left to the test.
@@ -16,7 +43,7 @@ function open(): {
 	close: () => void;
 } {
 	const channel = new MessageChannel();
-	const buffer = new AudioBuffer({ port: channel.port1 } as unknown as AudioWorkletNode, {
+	const buffer = new AudioBuffer({ port: channel.port1, context: silent() } as unknown as AudioWorkletNode, {
 		channels: 1,
 		rate: 48_000,
 		delay: Duration.millis(100),
@@ -30,6 +57,7 @@ function open(): {
 			const msg: State = {
 				type: "state",
 				timestamp: timestamp ?? 0,
+				time: 0,
 				stalled,
 				anchored: timestamp !== undefined,
 				underruns: 0,
@@ -56,7 +84,7 @@ function open(): {
 describe("AudioBuffer", () => {
 	it("transfers PCM ownership and orders control messages after the data they change", async () => {
 		const channel = new MessageChannel();
-		const buffer = new AudioBuffer({ port: channel.port1 } as unknown as AudioWorkletNode, {
+		const buffer = new AudioBuffer({ port: channel.port1, context: silent() } as unknown as AudioWorkletNode, {
 			channels: 2,
 			rate: 48_000,
 			delay: Duration.millis(100),
@@ -416,7 +444,7 @@ function fake(
 		start() {},
 	});
 	// The context's time in seconds, which the test advances.
-	const context = { currentTime: 0 };
+	const context = silent();
 	const buffer = new AudioBuffer({ port, context } as unknown as AudioWorkletNode, {
 		channels: 1,
 		rate: 1000,
@@ -425,10 +453,11 @@ function fake(
 		...(props.bound !== undefined && { bound: Duration.millis(props.bound) }),
 		clock: props.clock,
 	});
-	const state = (timestamp: number, stalled: boolean, epoch: number) => {
+	const state = (timestamp: number, stalled: boolean, epoch: number, time = 0) => {
 		const data: State = {
 			type: "state",
 			timestamp,
+			time,
 			stalled,
 			anchored: true,
 			underruns: 0,
@@ -452,7 +481,7 @@ describe("AudioBuffer past its decoded floor", () => {
 				postMessage: (msg: Message) => sent.push(msg),
 				start() {},
 			});
-			new AudioBuffer({ port } as unknown as AudioWorkletNode, {
+			new AudioBuffer({ port, context: silent() } as unknown as AudioWorkletNode, {
 				channels: 2,
 				rate: 48_000,
 				delay: Duration.millis(delay),
@@ -517,43 +546,106 @@ describe("AudioBuffer steering", () => {
 		}
 	});
 
-	// The context's time advances a render quantum at a time, so a reading of the clock lands up to a
-	// quantum late against it. The offset keeps the earliest, rises only as slowly as drift needs, and
-	// jumps when the delay moves the clock for real.
-	it("sends the clock at its earliest offset from the context's time", () => {
+	// A browser that reads its output position once per render callback reports it up to a callback
+	// early, so the offset keeps the greatest, falls only as slowly as drift needs, and moves whole when
+	// the delay or the reference moves the clock for real.
+	it("sends the clock against the context time sounding at its greatest offset", () => {
 		let now: Duration | undefined = Duration.millis(1000);
 		const reference = new Signal<number | undefined>(0);
+		const clock = started();
 		const { buffer, sent, state, context } = fake(100, { clock: { now: () => now, out: { reference } } });
-		const report = (time: number, clock: number | undefined) => {
+		const report = (time: number, sounding: number, clock: number | undefined) => {
 			context.currentTime = time;
+			context.sounding = sounding;
 			now = clock === undefined ? undefined : Duration.millis(clock);
 			state(ms(0), false, 0);
 		};
 		try {
-			report(1, 1000);
-			// Read 2 ms late: the offset rises by only 100 us.
-			report(1.25, 1252);
-			report(1.5, 1500);
+			// The output sounds 100 ms behind the context's time.
+			report(1, 0.9, 1000);
+			// Read 2 ms early: the offset falls by only 100 us.
+			report(1.25, 1.152, 1250);
+			report(1.5, 1.4, 1500);
 			// A delay change moved the clock 50 ms.
-			report(1.75, 1800);
+			report(1.75, 1.65, 1800);
 			// The reference moved 5 ms earlier: a jump the offset takes whole, under the filter's.
 			reference.set(-5);
-			report(2, 2055);
-			// A later reference is no jump.
+			report(2, 1.9, 2055);
+			// A later reference moves it back, though it is no jump.
 			reference.set(0);
-			report(2.25, 2300);
-			report(2.5, undefined);
+			report(2.25, 2.15, 2300);
+			report(2.5, 2.4, undefined);
 			expect(sent.filter((msg) => msg.type === "clock")).toEqual([
-				{ type: "clock", timestamp: 1_000_000, time: 1 },
-				{ type: "clock", timestamp: 1_250_100, time: 1.25 },
-				{ type: "clock", timestamp: 1_500_000, time: 1.5 },
-				{ type: "clock", timestamp: 1_800_000, time: 1.75 },
-				{ type: "clock", timestamp: 2_055_000, time: 2, jumped: 5000 },
-				{ type: "clock", timestamp: 2_300_000, time: 2.25 },
+				{ type: "clock", timestamp: 1_100_000, time: 1 },
+				{ type: "clock", timestamp: 1_349_900, time: 1.25 },
+				{ type: "clock", timestamp: 1_600_000, time: 1.5 },
+				{ type: "clock", timestamp: 1_900_000, time: 1.75 },
+				{ type: "clock", timestamp: 2_155_000, time: 2, jumped: 5000 },
+				{ type: "clock", timestamp: 2_400_000, time: 2.25 },
 				{ type: "clock", time: 2.5 },
 			]);
 		} finally {
 			buffer.close();
+			clock.close();
+		}
+	});
+
+	// Before the output has played anything there is no position to pair the clock with.
+	it("sends no clock until the output reports a position", () => {
+		const { buffer, sent, state } = fake(100, {
+			clock: { now: () => Duration.millis(1000), out: { reference: new Signal<number | undefined>(0) } },
+		});
+		try {
+			state(ms(0), false, 0);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([{ type: "clock", time: 0 }]);
+		} finally {
+			buffer.close();
+		}
+	});
+
+	// The ring renders ahead of the speaker by the output latency, so it holds the delay less that, and
+	// the delay the clock holds counts the base latency and the output latency's recent peak.
+	it("holds the delay less the output latency it renders ahead by", () => {
+		const { buffer, sent, state, context } = fake(300);
+		try {
+			context.baseLatency = 0.01;
+			context.outputLatency = 0.12;
+			state(ms(0), false, 0);
+			context.outputLatency = 0.104;
+			state(ms(0), false, 0);
+			expect(buffer.output.peek()).toEqual(Duration.millis(130));
+			buffer.setLatency(Duration.millis(300));
+			// A delay short of the output latency still holds one callback.
+			buffer.setLatency(Duration.millis(50));
+			expect(sent.filter((msg) => msg.type === "latency")).toEqual([
+				{ type: "latency", latency: 300, target: 180, bound: 0 },
+				{ type: "latency", latency: 128, target: 10, bound: 0 },
+			]);
+		} finally {
+			buffer.close();
+		}
+	});
+
+	// The speaker sounds what was rendered an output latency ago, so the playback timestamp is where
+	// the rendered playhead stood then, advancing at real time, and holds through a stall.
+	it("reports the playhead sounding now", () => {
+		const clock = started();
+		const { buffer, state, context } = fake(100);
+		try {
+			context.sounding = 1;
+			state(ms(5000), false, 0, 1.1);
+			// Nothing rendered at or before what is sounding: the first report, back by the difference.
+			expect(buffer.timestamp.peek()).toBe(ms(4900));
+			context.sounding = 1.12;
+			state(ms(5050), false, 0, 1.15);
+			expect(buffer.timestamp.peek()).toBe(ms(5020));
+			// The ring stalled at 5050: what sounds holds there once it has caught up.
+			context.sounding = 1.17;
+			state(ms(5050), true, 0, 1.2);
+			expect(buffer.timestamp.peek()).toBe(ms(5050));
+		} finally {
+			buffer.close();
+			clock.close();
 		}
 	});
 });

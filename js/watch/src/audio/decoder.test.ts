@@ -32,7 +32,13 @@ let moduleLoaded: Promise<void> = Promise.resolve();
 class FakeContext extends EventTarget {
 	state: AudioContextState = "running";
 	readonly currentTime = 0;
+	readonly baseLatency = 0;
+	readonly outputLatency = 0;
 	readonly sampleRate: number;
+	// No output position yet, so the ring plays without a clock.
+	getOutputTimestamp(): AudioTimestamp {
+		return { contextTime: 0, performanceTime: 0 };
+	}
 	readonly audioWorklet = { addModule: () => moduleLoaded };
 	readonly calls = { suspend: 0, resume: 0, close: 0 };
 	constructor(options: AudioContextOptions) {
@@ -113,6 +119,7 @@ class FakeWorklet {
 		const state: State = {
 			type: "state",
 			timestamp: ring.timestamp,
+			time: 0,
 			stalled: ring.stalled,
 			anchored: ring.anchored,
 			underruns: ring.underruns,

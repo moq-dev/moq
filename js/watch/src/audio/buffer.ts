@@ -1,18 +1,17 @@
-import { Duration } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import { ringHold, ringSamples } from "./latency";
+import { Peak, ringHold, ringSamples } from "./latency";
 import type { Clock, Data, End, Init, Latency, Playing, Received, Reset, State, Truncate } from "./render";
 
 // The stretch's 30 ms processing window, in microseconds.
 const WINDOW = 30_000;
 
-// How far the clock's offset from the context's time may rise per state report: far past any drift
+// How far the clock's offset from the context's time may fall per state report: far past any drift
 // between the two clocks, and well short of the render callback a reading can land within.
-const RISE = 100;
+const FALL = 100;
 
 // An offset that moves further than this moved for real, as a delay or a reference change moves it,
-// rather than by where a reading landed within a render callback. Readings after a longer callback
-// all land just after it, so they agree without the filter.
+// rather than by where a reading landed within a render callback.
 const JUMP = 10_000;
 
 /**
@@ -241,10 +240,19 @@ export class AudioBuffer {
 	readonly rate: number;
 	readonly channels: number;
 	#worklet: AudioWorkletNode;
+	// The realtime context the worklet renders in, which reports where its output stands.
+	#context: AudioContext;
 
 	readonly #timestamp = new Signal<number>(0);
-	/** Current playback timestamp, as the worklet last reported it. */
+	/** The playback timestamp sounding now, as of the worklet's last report. */
 	readonly timestamp: Getter<number> = this.#timestamp;
+
+	readonly #output = new Signal<Duration>(Duration.ZERO);
+	/**
+	 * How long the output takes to sound what the ring renders: the context's base latency plus the
+	 * highest output latency it reported over the last five seconds.
+	 */
+	readonly output: Getter<Duration> = this.#output;
 
 	readonly #stalled = new Signal<boolean>(true);
 	/** Whether the ring is stalled (waiting to fill). */
@@ -278,10 +286,16 @@ export class AudioBuffer {
 	#playing?: Getter<boolean>;
 	// How far audio may trail the shared clock before the ring skips ahead.
 	#bound: Duration;
-	// The shared clock less the context's time, in microseconds, as last sent. The context's time
-	// advances a render quantum at a time, so a reading lands up to a quantum late: the least offset is
-	// the reading taken nearest a quantum's start. It rises only slowly, as drift needs, unless it moves
-	// past any quantum, as a delay or reference change moves it.
+	// The peak output latency, between the render and the speaker, which the ring does not hold.
+	#latency = new Peak();
+	#heard = Duration.ZERO;
+	// What the worklet reported rendering, oldest first, back to what is sounding now.
+	#rendered: { time: number; timestamp: number }[] = [];
+	// The shared clock less the context time sounding at the same instant, in microseconds, as last
+	// sent. A browser that reads its output position only once per render callback reports it up to a
+	// callback early, so the greatest offset is the reading taken nearest a callback's start. It falls
+	// only slowly, as drift needs, unless it moves past any callback, as a delay or reference change
+	// moves it.
 	#offset?: number;
 	// The shared clock's reference as last sent, in milliseconds. One that moved earlier jumped the
 	// clock ahead, which the ring skips rather than speeds through, as video skips the frames it passed.
@@ -309,6 +323,7 @@ export class AudioBuffer {
 		const { channels, rate, buffered, playing, clock } = props;
 		this.#playing = props.playing;
 		this.#worklet = worklet;
+		this.#context = worklet.context as AudioContext;
 		this.channels = channels;
 		this.rate = rate;
 		this.#bound = props.bound ?? Duration.ZERO;
@@ -333,7 +348,9 @@ export class AudioBuffer {
 		this.#signals.event(worklet.port, "message", (ev: Event) => {
 			const data = (ev as MessageEvent<State>).data;
 			if (data?.type === "state") {
-				this.#timestamp.set(data.timestamp);
+				const heard = this.#sounding();
+				this.#observeOutput();
+				this.#timestamp.set(this.#heardAt(data, heard));
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
 				this.#skips.set(data.skips);
@@ -342,7 +359,7 @@ export class AudioBuffer {
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
-					if (clock) this.#clock(clock.now(), clock.out.reference.peek());
+					if (clock) this.#clock(clock.now(), clock.out.reference.peek(), heard);
 				}
 			}
 		});
@@ -350,35 +367,69 @@ export class AudioBuffer {
 		worklet.port.start();
 	}
 
-	// The terms as the worklet takes them.
+	// The terms as the worklet takes them. The ring's target is the delay less the output latency it
+	// renders ahead by, though never less than one callback, the least it can render from.
 	#terms(delay: Duration): Omit<Latency, "type"> {
+		const base = Duration.secs(this.#context.baseLatency || 0);
 		return {
 			latency: (this.#backpressure.floor / this.rate) * 1000,
-			target: delay.asMillis(),
+			target: delay.saturatingSub(this.#heard).max(base.min(delay)).asMillis(),
 			bound: this.#bound.asMillis(),
 		};
 	}
 
-	// Send where the shared clock stands, in the ring's coordinates, read together with the context's
-	// time so a late message misplaces neither. Each reading follows a state report, which lands just
-	// after the context renders a callback, when its time runs up to that callback ahead of the wall
-	// clock: the ring then trails the clock by up to one callback, the audio a callback pulls at once.
-	#clock(now: Duration | undefined, reference: number | undefined): void {
-		const time = this.#worklet.context.currentTime;
+	// The context time sounding now, in seconds, or undefined before the output has played anything.
+	// The browser reports its output position with the instant it was heard, on the page's clock.
+	#sounding(): number | undefined {
+		const position = this.#context.getOutputTimestamp();
+		if (!position.performanceTime || position.contextTime === undefined) return undefined;
+		return position.contextTime + (now().since(Instant.ZERO).asMillis() - position.performanceTime) / 1000;
+	}
+
+	// Fold in the output latency the context reports now. `baseLatency` is the callback the context
+	// renders at once; `outputLatency`, where reported, the rest of the way to the speaker.
+	#observeOutput(): void {
+		const context = this.#context;
+		this.#heard = this.#latency.observe(Duration.secs(context.outputLatency || 0), now());
+		this.#output.set(Duration.secs(context.baseLatency || 0).add(this.#heard));
+	}
+
+	// Where the playhead sounding at context time `heard` stands, from what the worklet rendered: the
+	// report rendered last at or before it, advanced at real time up to the next. Without a position,
+	// the reported playhead.
+	#heardAt(state: State, heard: number | undefined): number {
+		if (heard === undefined) {
+			this.#rendered = [];
+			return state.timestamp;
+		}
+		const rendered = this.#rendered;
+		rendered.push({ time: state.time, timestamp: state.timestamp });
+		while (rendered.length > 1 && rendered[1].time <= heard) rendered.shift();
+		const [at, next] = rendered;
+		const projected = at.timestamp + (heard - at.time) * 1_000_000;
+		return Math.max(0, next ? Math.min(projected, next.timestamp) : Math.min(projected, at.timestamp));
+	}
+
+	// Send where the shared clock stands, in the ring's coordinates, against the context time sounding
+	// at the same instant, so the ring renders each sample to sound when the clock says it is due.
+	#clock(now: Duration | undefined, reference: number | undefined, heard: number | undefined): void {
+		const time = this.#context.currentTime;
 		const last = this.#reference;
 		this.#reference = reference;
-		if (now === undefined) {
+		if (now === undefined || heard === undefined) {
 			this.#offset = undefined;
 			const msg: Clock = { type: "clock", time };
 			this.#worklet.port.postMessage(msg);
 			return;
 		}
-		// A jump is a step of the clock, not where a reading landed, so the offset takes it whole.
-		const jumped = last !== undefined && reference !== undefined ? Math.max(0, last - reference) * 1000 : 0;
-		const offset = now.asMicros() - this.#backpressure.offset - time * 1_000_000;
-		const previous = this.#offset === undefined ? undefined : this.#offset + jumped;
+		// A reference move is a step of the clock, not where a reading landed, so the offset takes it
+		// whole. One earlier jumped the clock ahead, which the ring skips rather than speeds through.
+		const moved = last !== undefined && reference !== undefined ? (last - reference) * 1000 : 0;
+		const jumped = Math.max(0, moved);
+		const offset = now.asMicros() - this.#backpressure.offset - heard * 1_000_000;
+		const previous = this.#offset === undefined ? undefined : this.#offset + moved;
 		this.#offset =
-			previous !== undefined && Math.abs(offset - previous) < JUMP ? Math.min(offset, previous + RISE) : offset;
+			previous !== undefined && Math.abs(offset - previous) < JUMP ? Math.max(offset, previous - FALL) : offset;
 		const msg: Clock = {
 			type: "clock",
 			timestamp: this.#offset + time * 1_000_000,
@@ -496,6 +547,7 @@ export class AudioBuffer {
 		this.#worklet.port.postMessage(msg);
 		this.#backpressure.reset();
 		this.#offset = undefined;
+		this.#rendered = [];
 	}
 
 	/**
