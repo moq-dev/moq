@@ -1495,7 +1495,7 @@ PYCODE
                 trap '' PIPE
                 GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
                     timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} connect-websocket-enabled=false \
+                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
                     s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
                     2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true
             )
