@@ -23,8 +23,8 @@
 //!   route and the copies offered, which `cache.rs` proves.
 //!
 //! Left out, since the comparison does not need them: scoped grants, qualified
-//! keys, interests, priorities, upstream marks, and RTT. GOAWAY only ranks a
-//! neighbour last for a broadcast's pull.
+//! keys, interests, priorities, upstream marks, and RTT. GOAWAY only keeps new
+//! pulls off a neighbour's copy.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -770,10 +770,11 @@ impl Relay {
 	///
 	/// A relay already on a copy, its own included, joins another, its next hop's
 	/// included, only if that copy's carrier ranks below, so copies crossing on their
-	/// way never trade places round any cycle. Left with no source, it is on no copy,
-	/// and chooses afresh. It joins no copy of a neighbour that sent GOAWAY, and none at all
-	/// while it serves a neighbour that does not read copies, whose pulls follow the
-	/// route alone. A tie stays on the current source, then goes to the copy.
+	/// way never trade places round any cycle. Off a copy, it is bound the same way by
+	/// the carriers of the neighbours that pull, or would pull, along its route, since
+	/// what it joins they take with it. Left with no source and no such neighbour, it
+	/// chooses afresh. It joins no copy of a neighbour that sent GOAWAY. A tie stays on
+	/// the current source, then goes to the copy.
 	pub fn source(&self, cast: &Cast) -> Option<Source> {
 		let carry = self.carry.get(cast);
 		let reader = carry.is_some_and(|carry| carry.reader);
@@ -782,8 +783,6 @@ impl Relay {
 			.filter_map(|peer| self.sessions.get(peer))
 			.map(|session| session.hop)
 			.collect();
-		let blind = (downstream.into_iter().flatten())
-			.any(|peer| self.sessions.get(peer).is_some_and(|session| !session.reads));
 		let via = self.via.get(cast).copied();
 		let pull = via.map(|(next, warm, _)| (next, warm));
 		let rank = |node: Id| rendezvous(&cast.1, node);
@@ -860,7 +859,7 @@ impl Relay {
 				continue;
 			}
 			// The next hop's copy is where its route leads; any other is a choice.
-			if hop.is_none() && (blind || self.draining.contains(&peer)) {
+			if hop.is_none() && self.draining.contains(&peer) {
 				continue;
 			}
 			let Some(cost) = copy.cost.checked_add(session.cost) else {

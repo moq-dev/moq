@@ -13,7 +13,9 @@
 //! neighbour its copy, even one whose path names that neighbour, which can then
 //! use neither. A relay on one copy moves onto another only if that copy's carrier
 //! ranks below by the Rendezvous Hash, so copies crossing on their way never trade
-//! places. A copy with no demand left lingers.
+//! places; a relay pulling along its route is held to the carriers of the
+//! neighbours behind it, which those neighbours' offers back name. A copy with no
+//! demand left lingers.
 //!
 //! [`Mesh`] adds what a sweep checks to [`PathSim`]: after every step, whether a
 //! broadcast's pulls form a cycle, which the path allows only while a withdrawal
@@ -170,7 +172,13 @@ impl Mesh {
 	/// Deliver round-robin until every unheld queue is empty, letting no linger run
 	/// out and no time pass. False if it never empties.
 	pub fn run(&mut self) -> bool {
-		for _ in 0..10_000 {
+		self.rounds(10_000)
+	}
+
+	/// Deliver up to `rounds` rounds, one message from each unheld queue per round.
+	/// Whether every unheld queue emptied.
+	fn rounds(&mut self, rounds: usize) -> bool {
+		for _ in 0..rounds {
 			let ready = self.busy();
 			if ready.is_empty() {
 				return true;
@@ -183,11 +191,13 @@ impl Mesh {
 	}
 
 	/// Run, let time pass until every doubt lifts, and let every linger run out,
-	/// until nothing changes. False if it never settles.
+	/// until nothing changes. A round of deliveries takes a hop of delay, so a long
+	/// exchange lets time pass too, if more slowly. False if it never settles.
 	pub fn settle(&mut self) -> bool {
-		for _ in 0..100 {
-			if !self.run() {
-				return false;
+		for _ in 0..1000 {
+			if !self.rounds(64) {
+				self.tick();
+				continue;
 			}
 			if self.tick() {
 				continue;
@@ -793,16 +803,24 @@ fn a_copy_that_goes_takes_its_offers_along() {
 #[test]
 fn sweep_cache_routing() {
 	for holds in [true, false] {
-		sweep(100, holds);
+		sweep(SEED, 100, holds);
 	}
 }
 
-/// The sweep at length, which nightly runs and prints what it measured.
+/// The gate's seed, and the long sweep's unless `MOQ_ROUTE_SEED` names another.
+const SEED: u64 = 0xcac4_e5ee;
+
+/// The sweep at length from `MOQ_ROUTE_SEED` over `MOQ_ROUTE_CASES` scenarios each way,
+/// which prints what it measured.
 #[test]
 #[ignore = "slow: nightly"]
 fn sweep_cache_routing_long() {
+	let setting = |name: &str, fallback: u64| std::env::var(name).map_or(fallback, |value| value.parse().expect(name));
+	let seed = setting("MOQ_ROUTE_SEED", SEED);
+	let cases = setting("MOQ_ROUTE_CASES", 3000) as usize;
+	println!("MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASES={cases}");
 	for holds in [true, false] {
-		let out = sweep(3000, holds);
+		let out = sweep(seed, cases, holds);
 		println!("holds {holds}: {out:?}");
 	}
 }
@@ -824,12 +842,12 @@ struct Sweep {
 	reads: usize,
 }
 
-fn sweep(scenarios: usize, holds: bool) -> Sweep {
+fn sweep(seed: u64, scenarios: usize, holds: bool) -> Sweep {
 	const RELAYS: usize = 6;
-	let mut rng = XorShift(0xcac4_e5ee);
+	let mut rng = XorShift(seed);
 	let mut out = Sweep::default();
 	for scenario in 0..scenarios {
-		let label = format!("scenario {scenario}");
+		let label = format!("seed {seed} holds {holds} scenario {scenario}");
 		let origins = [RELAYS, RELAYS + 1];
 		let mut mesh = Mesh::new(RELAYS + 2, PICK);
 		mesh.origin(origins[0], 100);
