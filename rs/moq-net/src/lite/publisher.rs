@@ -5098,6 +5098,10 @@ struct TrackRun {
 	// Lite-07: the group `opening` holds continues a paused one.
 	continuing: bool,
 	end_sent: bool,
+	// Lite-05/06: the track's end, declared while the start was still unresolved. Their
+	// SUBSCRIBE_START is the first message, and a SUBSCRIBE_FINISH ahead of it says no group
+	// was served, so the end waits for the start, or goes out alone once none can arrive.
+	held_end: Option<lite::SubscribeFinish>,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
 	bounded: bool,
@@ -5168,6 +5172,7 @@ impl TrackRun {
 			paused: Default::default(),
 			continuing: false,
 			end_sent: false,
+			held_end: None,
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -5666,7 +5671,11 @@ impl TrackRun {
 					// even if trailing groups (below it) are still in flight, then
 					// keep serving them until the live edge reaches the boundary.
 					self.end_sent = true;
-					writer.buffer(&lite::SubscribeResponse::Finish(end))?;
+					if self.start.is_unresolved() && !self.ctx.version.has_ranges() {
+						self.held_end = Some(end);
+					} else {
+						writer.buffer(&lite::SubscribeResponse::Finish(end))?;
+					}
 				}
 				Recv::Finished => {
 					// A continuation waiting for credit is still in flight too.
@@ -5689,6 +5698,11 @@ impl TrackRun {
 					let started = self.report_started(true, writer)?;
 					let dropped = self.drop_unserved(writer)? || answered || started;
 					if !self.ctx.version.keeps_subscribe_open() {
+						// No group arrived to resolve the start, so the end goes out alone: nothing
+						// was served.
+						if let Some(end) = self.held_end.take() {
+							writer.buffer(&lite::SubscribeResponse::Finish(end))?;
+						}
 						return Poll::Ready(Ok(ControlFlow::Break(())));
 					}
 					// Lite-07 leaves the stream open past SUBSCRIBE_FINISH: an update may still
@@ -6021,6 +6035,10 @@ impl TrackRun {
 				}
 			}
 			self.forward_range(range.start.max(start)..range.end, hole, writer)?;
+		}
+		// An end declared while this start was held follows it.
+		if let Some(end) = self.held_end.take() {
+			writer.buffer(&lite::SubscribeResponse::Finish(end))?;
 		}
 		Ok(())
 	}
@@ -9686,6 +9704,68 @@ mod serve_group_test {
 
 		write_group(&mut track, 8, 8);
 		assert_eq!(settle(&mut run), 2);
+	}
+
+	/// Lite-05/06 make SUBSCRIBE_START the first message, and a SUBSCRIBE_FINISH ahead of it
+	/// says no group was served. A copy whose end lands before its first group, as a relay's can
+	/// when its source answered both, holds the end until that group resolves the start.
+	#[kio::test]
+	async fn a_pre07_end_declared_before_the_first_group_follows_the_start() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let subscriber = track.subscribe(
+				track::Subscription::default()
+					.with_start(0)
+					.with_delay(track::Delay::default().with_max(Duration::from_secs(60))),
+			);
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			let step = |run: &mut TrackRun, writer: &mut Writer<_, _>| {
+				while let Poll::Ready(flow) = run.poll_step(writer, &kio::Waiter::noop()) {
+					if flow.unwrap().is_break() {
+						break;
+					}
+				}
+			};
+			let sent = |log: &Log| {
+				let writes = log.writes.lock().unwrap().clone();
+				let mut buf = writes.as_slice();
+				let mut sent = Vec::new();
+				while !buf.is_empty() {
+					let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
+					buf = &buf[size..];
+					sent.push(match msg {
+						lite::SubscribeResponse::Start(start) => format!("start {:?}", start.starts),
+						lite::SubscribeResponse::Finish(finish) => format!("finish {}", finish.group),
+						other => format!("{other:?}"),
+					});
+				}
+				sent
+			};
+
+			track.finish_at(track::Position::group(273), None).unwrap();
+			step(&mut run, &mut writer);
+			kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
+			assert_eq!(
+				sent(&log),
+				Vec::<String>::new(),
+				"{version:?}: the end waits for the start"
+			);
+
+			write_group(&mut track, 272, 272);
+			step(&mut run, &mut writer);
+			kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
+			// Drops for the starts skipped below the group may go between.
+			let sent = sent(&log);
+			assert_eq!(
+				(sent.first().map(String::as_str), sent.last().map(String::as_str)),
+				(Some("start [Some(272)]"), Some("finish 273")),
+				"{version:?}: {sent:?}"
+			);
+		}
 	}
 
 	/// On an empty track the re-pin has no latest group to name, so the first group the
