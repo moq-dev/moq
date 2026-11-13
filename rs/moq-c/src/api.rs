@@ -875,10 +875,12 @@ pub struct moq_range {
 pub struct moq_anchor {
 	/// `moq_anchor_kind` discriminant.
 	pub kind: u32,
-	/// The group, or with `MOQ_ANCHOR_RELATIVE` how many groups before the latest one
-	/// (0 is the latest, and an offset past the first group clamps to it).
+	/// The group's start, in its track's timescale, or with `MOQ_ANCHOR_RELATIVE` how many
+	/// groups before the latest one (0 is the latest, and an offset past every group held
+	/// reaches back to the oldest).
 	pub group: u64,
-	/// The presentation time, read only with `MOQ_ANCHOR_TIME`.
+	/// The time, read only with `MOQ_ANCHOR_TIME`, whose `value` is taken in the track's
+	/// timescale.
 	pub timestamp: moq_timestamp,
 }
 
@@ -887,11 +889,11 @@ pub struct moq_anchor {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_anchor_kind {
-	/// A fixed group, delivered from its first frame.
+	/// The group starting at `group`, delivered from its first frame.
 	MOQ_ANCHOR_ABSOLUTE = 0,
 	/// A count of groups back from the latest one.
 	MOQ_ANCHOR_RELATIVE = 1,
-	/// The group containing a presentation time. An untimed track refuses it.
+	/// The group containing a time: the newest one starting at or before it.
 	MOQ_ANCHOR_TIME = 2,
 	/// The oldest group still around, as far back as `delay.max_us` allows. A start only.
 	MOQ_ANCHOR_OLDEST = 3,
@@ -908,14 +910,31 @@ pub enum moq_order {
 	MOQ_ORDER_ASCENDING = 1,
 }
 
+/// `anchor` as a start. A group is named by its start, so an absolute group names that time.
+/// A time is taken in the track's timescale, whatever its scale says, though an invalid
+/// timestamp is still refused.
 fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Absolute(anchor.group),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Time(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
-		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => moq_net::track::Anchor::Time(anchor.timestamp.try_into()?),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => {
+			moq_net::Timestamp::try_from(anchor.timestamp)?;
+			moq_net::track::Anchor::Time(anchor.timestamp.value)
+		}
 		v if v == moq_anchor_kind::MOQ_ANCHOR_OLDEST as u32 => moq_net::track::Anchor::Oldest,
 		_ => return Err(Error::InvalidCode),
 	})
+}
+
+/// `anchor` as an end, or `None` for an absolute end at group 0, which holds nothing. An
+/// absolute end is exclusive, so it ends with the group before it.
+fn parse_end(anchor: &moq_anchor) -> Result<Option<moq_net::track::Anchor>, Error> {
+	match anchor.kind {
+		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => {
+			Ok(anchor.group.checked_sub(1).map(moq_net::track::Anchor::Time))
+		}
+		_ => parse_anchor(anchor).map(Some),
+	}
 }
 
 /// # Safety
@@ -937,13 +956,19 @@ pub(crate) unsafe fn parse_subscription(
 		let ranges = ranges
 			.iter()
 			.map(|range| {
-				Ok(moq_net::track::Range {
-					start: parse_anchor(&range.start)?,
-					end: range.end_present.then(|| parse_anchor(&range.end)).transpose()?,
-				})
+				let start = parse_anchor(&range.start)?;
+				let end = match range.end_present {
+					// One ending before group 0 holds nothing, so it is dropped.
+					true => match parse_end(&range.end)? {
+						Some(end) => Some(end),
+						None => return Ok(None),
+					},
+					false => None,
+				};
+				Ok(Some(moq_net::track::Range { start, end }))
 			})
 			.collect::<Result<Vec<_>, Error>>()?;
-		out = out.with_ranges(ranges);
+		out = out.with_ranges(ranges.into_iter().flatten());
 	}
 	Ok(out)
 }

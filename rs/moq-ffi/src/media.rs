@@ -1638,7 +1638,7 @@ mod read_tests {
 						}],
 					)
 					.unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			};
 			// Newest first, all before the first read. Group 4 covers the min delay alone, so
 			// without the warmup the start would skip group 3; only the warmup's reach keeps it.
@@ -1706,7 +1706,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		first.finish().unwrap();
+		first.close().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("expected frame")
 		};
@@ -1725,7 +1725,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		marker.finish().unwrap();
+		marker.close().unwrap();
 		assert!(
 			matches!(reader.next().await.unwrap(), Some(MoqMediaRead::Gap { timestamp, duration }) if timestamp == micros(10_000) && duration == Duration::from_millis(10))
 		);
@@ -1745,7 +1745,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		resumed.finish().unwrap();
+		resumed.close().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("end is not EOF")
 		};
@@ -1772,7 +1772,7 @@ impl MoqMediaGroupConsumer {
 	) -> Self {
 		let inner = moq_mux::container::GroupConsumer::new(group, container);
 		Self {
-			sequence: inner.sequence(),
+			sequence: inner.start(),
 			reads: Polled::new(inner).supervised(driver),
 		}
 	}
@@ -1780,7 +1780,7 @@ impl MoqMediaGroupConsumer {
 
 #[uniffi::export]
 impl MoqMediaGroupConsumer {
-	/// The sequence number of this group within the track.
+	/// The start of this group, in its track's timescale, which names it within the track.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}

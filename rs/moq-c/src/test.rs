@@ -2905,14 +2905,7 @@ fn raw_track_update_refuses_time_on_untimed() {
 			Some(moq_net::track::Info::default().with_timescale(None)),
 		)
 		.unwrap();
-	let write = |payload: &'static [u8]| {
-		State::lock()
-			.publish
-			.track_producer(track)
-			.unwrap()
-			.write_frame(None, payload)
-			.unwrap()
-	};
+	let write = |payload: &'static [u8]| State::lock().publish.track_frame(track, None, payload).unwrap();
 
 	let consume = request_broadcast(origin, path);
 	let frame_cb = Callback::new();
@@ -5044,22 +5037,25 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let group_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
-	let ascending = |start, end| {
+	let ascending = |start, end: Option<u64>| {
 		moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(None))
-			.with_range(start..end)
+			.with_ranges([moq_net::track::Range {
+				start: moq_net::track::Anchor::Time(start),
+				end: end.map(moq_net::track::Anchor::Time),
+			}])
 			.with_order(moq_net::track::Order::Ascending)
 	};
 	let mut reader = {
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
-		let reader = producer.subscribe(ascending(7, u64::MAX));
+		let reader = producer.subscribe(ascending(7, None));
 		producer.start_at(10).unwrap();
-		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		let mut group = producer.create_group(moq_net::group::Info { start: 10 }).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		reader
 	};
 	let waiter = kio::Waiter::noop();
@@ -5070,7 +5066,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	assert_eq!(sequence, 7);
 
 	// Reading only 8, so the fill owes nothing once 8 is let go.
-	reader.update(ascending(8, 9)).unwrap();
+	reader.update(ascending(8, Some(8))).unwrap();
 	assert!(reader.poll_recv_group(&waiter).is_pending());
 	let next = id(group_cb.recv());
 	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);
@@ -5103,17 +5099,20 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 		producer.start_at(10).unwrap();
-		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		let mut group = producer.create_group(moq_net::group::Info { start: 10 }).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
 		let subscription = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(None))
-			.with_range(6..7);
+			.with_ranges([moq_net::track::Range {
+				start: moq_net::track::Anchor::Time(6),
+				end: Some(moq_net::track::Anchor::Time(6)),
+			}]);
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 		producer.subscribe(subscription)
@@ -5146,7 +5145,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 	let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) else {
 		panic!("the accepted group reaches the reader");
 	};
-	assert_eq!(group.sequence, 6);
+	assert_eq!(group.start, 6);
 
 	drop(reader);
 	assert_eq!(moq_publish_requests_cancel(dynamic), 0);

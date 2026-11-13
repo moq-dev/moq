@@ -1489,7 +1489,7 @@ mod read_tests {
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
 		let write = |sequence, us, payload: bytes::Bytes| {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			format()
 				.write(
 					&mut group,
@@ -1501,7 +1501,7 @@ mod read_tests {
 					}],
 				)
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		let mut ids = Vec::<i32>::new();
 		let callback = unsafe { OnStatus::new((&mut ids as *mut Vec<i32>).cast(), Some(received)) }.unwrap();
@@ -1638,14 +1638,14 @@ mod tests {
 		}
 
 		fn write(&mut self, sequence: u64, micros: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = self.track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		async fn frame(&self) -> Option<u128> {

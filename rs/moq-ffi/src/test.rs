@@ -1496,7 +1496,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	})
 	.await
 	.expect("timed out waiting for the refresh");
-	assert_eq!(refreshed.sequence(), 1);
+	assert_eq!(refreshed.sequence(), 3000, "the restatement starts at the value's time");
 	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), 0).unwrap();
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
 		.await
@@ -1667,7 +1667,11 @@ async fn json_window_cut_restates_the_window() {
 	})
 	.await
 	.expect("timed out waiting for the cut's group");
-	assert_eq!(group.sequence(), 1, "a repeated cut opens no extra group");
+	assert_eq!(
+		group.sequence(),
+		4000,
+		"a repeated cut opens no extra group: the next starts at the next push"
+	);
 	let header = group.read_frame().await.unwrap().expect("expected the header");
 	assert_eq!(
 		serde_json::from_slice::<serde_json::Value>(&header.payload).unwrap(),
@@ -2178,10 +2182,7 @@ async fn timestamps_are_exact() {
 			start: MoqAnchor::Time { timestamp: invalid },
 			end: None,
 		};
-		assert!(matches!(
-			moq_net::track::Range::try_from(range),
-			Err(MoqError::TimeOverflow)
-		));
+		assert!(matches!(range.resolve(), Err(MoqError::TimeOverflow)));
 	}
 }
 
@@ -2364,7 +2365,8 @@ async fn fetches_cached_media_group_and_decodes_container() {
 		&consumer,
 		MoqMediaGroupConfig {
 			rendition: rendition("media", crate::media::MoqContainer::Legacy),
-			sequence: 0,
+			// The group starts at its first frame, a second in, in the track's milliseconds.
+			sequence: 1000,
 			options: Some(MoqFetchGroupOptions {
 				priority: 7,
 				max_delay: None,
@@ -2374,7 +2376,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 	.await
 	.unwrap();
 
-	assert_eq!(fetched.sequence(), 0);
+	assert_eq!(fetched.sequence(), 1000);
 	let frame = fetched.next().await.unwrap().expect("expected keyframe");
 	assert_eq!(frame.payload, b"keyframe");
 	assert_eq!(micros(frame.timestamp), 1_000_000);
@@ -2444,7 +2446,12 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 			&consumer,
 			MoqMediaGroupConfig {
 				rendition: rendition("video", crate::media::MoqContainer::Cmaf { init: init.to_vec() }),
-				sequence: 0,
+				// The group starts at its first sample, in the init's ticks.
+				sequence: moq_net::Timestamp::from_micros(2_000_000)
+					.unwrap()
+					.convert(muxer.timescale())
+					.unwrap()
+					.value(),
 				options: None,
 			},
 		),
@@ -2538,7 +2545,7 @@ async fn next_media(group: &MoqMediaGroupConsumer) -> Result<Option<MoqMediaFram
 async fn media_group_decodes_arrival_order_groups() {
 	let (_broadcast, track, consumer) = legacy_track().await;
 
-	let mut first = track.append_group().unwrap();
+	let mut first = track.append_group(0).unwrap();
 	write_legacy(&mut first, 1, 1_000_000, b"a");
 	let first_media = recv_media_group(&consumer).await;
 	assert_eq!(first_media.sequence(), 0);
@@ -2548,7 +2555,7 @@ async fn media_group_decodes_arrival_order_groups() {
 	assert!(frame.keyframe);
 
 	// A newer group lands while the first is stalled mid-way.
-	let mut second = track.append_group().unwrap();
+	let mut second = track.append_group(1).unwrap();
 	write_legacy(&mut second, 2, 1_040_000, b"c");
 	let second_media = recv_media_group(&consumer).await;
 	assert_eq!(second_media.sequence(), 1);
@@ -2566,8 +2573,8 @@ async fn media_group_decodes_arrival_order_groups() {
 	assert_eq!(micros(frame.timestamp), 1_020_000);
 	assert!(!frame.keyframe);
 
-	first.finish().unwrap();
-	second.finish().unwrap();
+	first.close().unwrap();
+	second.close().unwrap();
 	assert!(next_media(&first_media).await.unwrap().is_none());
 	assert!(next_media(&second_media).await.unwrap().is_none());
 }
@@ -2577,10 +2584,10 @@ async fn media_group_decodes_arrival_order_groups() {
 #[tokio::test]
 async fn media_group_takes_over_an_unread_group() {
 	let (_broadcast, track, consumer) = legacy_track().await;
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_group(0).unwrap();
 	write_legacy(&mut group, 1, 1_000_000, b"a");
 	write_legacy(&mut group, 2, 1_020_000, b"b");
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	let raw = recv_raw_group(&consumer).await;
 	assert!(raw.read_frame().await.unwrap().is_some());
@@ -2593,7 +2600,7 @@ async fn media_group_takes_over_an_unread_group() {
 		"the refusal kept the raw handle"
 	);
 
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_group(1).unwrap();
 	write_legacy(&mut group, 3, 1_040_000, b"c");
 	let raw = recv_raw_group(&consumer).await;
 	let media = MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
@@ -2609,7 +2616,7 @@ async fn media_group_takes_over_an_unread_group() {
 #[tokio::test]
 async fn media_group_fails_loudly_on_bad_containers() {
 	let (_broadcast, track, consumer) = legacy_track().await;
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_group(0).unwrap();
 	// A truncated varint timestamp: the 2-byte form with only its first byte.
 	write_raw(&mut group, 1, bytes::Bytes::from_static(&[0x40]));
 
@@ -5201,11 +5208,12 @@ async fn raw_track_next_group_is_repeatable() {
 		.await
 		.unwrap();
 
-	for payload in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()] {
+	for (at, payload) in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()].into_iter().enumerate() {
+		// Each group starts at its frame's time, and starts strictly increase.
 		track
 			.write_frame(MoqFrame {
 				payload: payload.clone(),
-				timestamp: Some(us(0)),
+				timestamp: Some(us(at as u64)),
 			})
 			.unwrap();
 
@@ -5260,7 +5268,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 	track
 		.write_frame(MoqFrame {
 			payload: b"two".to_vec(),
-			timestamp: Some(us(0)),
+			timestamp: Some(us(1)),
 		})
 		.unwrap();
 	let group = kio::clock::timeout(TIMEOUT, consumer.recv_group())
@@ -5409,13 +5417,13 @@ async fn raw_read_frame_skips_a_group_reset_as_old() {
 		.unwrap();
 	let consumer = MoqTrackConsumer::new(track.subscribe(None), crate::ffi::Background::default());
 
-	let expired = track.append_group().unwrap();
+	let expired = track.append_group(0).unwrap();
 	// The read holds the group when the reset lands, as one arriving over the wire does.
 	let read = spawn_parked(async move { consumer.read_frame().await }).await;
 	expired
 		.abort(moq_net::Error::Stream(moq_net::StreamError::Old))
 		.unwrap();
-	let mut later = track.append_group().unwrap();
+	let mut later = track.append_group(1).unwrap();
 	later
 		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"later".as_slice())
 		.unwrap();
@@ -5573,7 +5581,7 @@ async fn raw_read_frame_and_next_group_share_the_cursor() {
 	track
 		.write_frame(MoqFrame {
 			payload: b"second".to_vec(),
-			timestamp: Some(us(0)),
+			timestamp: Some(us(1)),
 		})
 		.unwrap();
 	let frame = kio::clock::timeout(TIMEOUT, consumer.read_frame())
@@ -8561,7 +8569,7 @@ async fn shutdown_delivers_the_finished_track() {
 			crate::ffi::run(async move {
 				let group = track.append_group()?;
 				group.write_frame(MoqFrame {
-					timestamp: Some(us(0)),
+					timestamp: Some(us(1)),
 					payload: b"last".to_vec(),
 				})?;
 				group.finish()?;

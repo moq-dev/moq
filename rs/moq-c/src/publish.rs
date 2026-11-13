@@ -112,6 +112,12 @@ enum Family {
 #[derive(Clone)]
 pub struct Children(Arc<std::sync::Mutex<Family>>);
 
+/// One past the newest group's start, or 0 on an empty track: where a group the caller gave
+/// no start for begins, which stands in until every write carries a timestamp.
+fn next_start(track: &moq_net::track::Producer) -> u64 {
+	track.largest().map_or(0, |largest| largest.group.saturating_add(1))
+}
+
 /// The family of a standalone broadcast of its own.
 #[cfg(test)]
 impl Default for Children {
@@ -1215,17 +1221,18 @@ impl Publish {
 		}
 	}
 
-	/// Append a new group to a raw track, returning a group producer.
+	/// Append a new group to a raw track, one past the newest group's start, returning a
+	/// group producer.
 	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.append_group()?;
+		let group = raw.inner.append_group(next_start(&raw.inner))?;
 		self.insert_group(group)
 	}
 
-	/// Create a raw group with an explicit sequence number.
+	/// Create a raw group starting at `sequence`, in the track's timescale, which names it.
 	pub fn track_group_at(&mut self, track: Id, sequence: u64) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.create_group(moq_net::group::Info { sequence })?;
+		let group = raw.inner.create_group(moq_net::group::Info { start: sequence })?;
 		self.insert_group(group)
 	}
 
@@ -1244,8 +1251,18 @@ impl Publish {
 		payload: &[u8],
 	) -> Result<(), Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		raw.inner
-			.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
+		let payload = bytes::Bytes::copy_from_slice(payload);
+		match timestamp {
+			// The group starts at its frame's time.
+			Some(timestamp) => raw.inner.write_frame(timestamp, payload)?,
+			// A frame without a time belongs on a scale-less track, whose group takes the next
+			// start; a timed track's group refuses it.
+			None => {
+				let mut group = raw.inner.append_group(next_start(&raw.inner))?;
+				group.write_frame(None, payload)?;
+				group.close()?;
+			}
+		}
 		Ok(())
 	}
 
@@ -1553,7 +1570,7 @@ impl Publish {
 			.remove(group)
 			.and_then(|group| group.inner.take())
 			.ok_or(Error::GroupNotFound)?;
-		group.finish()?;
+		group.close()?;
 		Ok(())
 	}
 

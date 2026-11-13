@@ -219,13 +219,14 @@ async fn net_round(
 		})
 		.collect();
 	for track in &mut tracks {
-		let mut group = track.append_group().unwrap();
+		// The group starts at its first frame's time, in the track's microseconds.
+		let mut group = track.append_group(n * case.frames() as u64).unwrap();
 		for f in 0..case.frames() {
 			let timestamp = moq_net::Timestamp::from_micros(n * case.frames() as u64 + f as u64).unwrap();
 			// Copy, as a binding's write does, so the baseline does not get zero-copy for free.
 			group.write_frame(timestamp, payload.to_vec()).unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	let mut consumers = Vec::with_capacity(readers.len());
 	for reader in readers {
