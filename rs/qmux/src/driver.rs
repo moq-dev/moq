@@ -288,11 +288,10 @@ impl<T: Transport> Run<T> {
 		// may write to the socket, while the handles on other threads wait.
 		drop(state);
 
-		// Take a record from the connection only once the transport is ready for it, and hand
-		// it over at once. The connection counts a record's stream data as delivered when it
-		// hands the record out, so one held back here would count bytes a failing session never
-		// sends. A stalled transport also leaves unreliable datagrams in the connection to be
-		// shed. With nothing to send, `poll_transmit` parks us until a handle queues something.
+		// Take a record from the connection only once the transport is ready for it, so a
+		// stalled transport leaves unreliable datagrams in the connection to be shed, and report
+		// each one the transport took, which delivers its stream data. With nothing to send,
+		// `poll_transmit` parks us until a handle queues something.
 		let mut written = 0;
 		let mut blocked = false;
 		while self.room && written < BATCH_BYTES {
@@ -311,6 +310,7 @@ impl<T: Transport> Run<T> {
 			if let Err(err) = self.transport.send(record) {
 				return Step::Failed(err);
 			}
+			self.inner.lock().conn.transmitted();
 		}
 
 		let mut state = self.inner.lock();
