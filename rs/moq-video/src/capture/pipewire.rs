@@ -1173,13 +1173,12 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					tracing::warn!("pipewire buffer has zero maximum size");
 					return;
 				};
-				// A DMA-BUF's chunk size is advisory, as on the import path above;
-				// `allocation_size`, the stated maxsize, bounds it.
-				let complete = dmabuf || required <= size;
-				if !complete || required > allocation_size {
+				if !cpu_frame_fits(dmabuf, offset, required, size, allocation_size) {
 					tracing::warn!(
 						required,
+						offset,
 						available = size,
+						allocation = allocation_size,
 						"pipewire chunk does not contain a complete frame"
 					);
 					return;
@@ -1359,6 +1358,17 @@ fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
 // allocation, which must hold it at its offset.
 fn dma_buf_frame_fits(offset: usize, required: usize, allocation: usize) -> bool {
 	offset.checked_add(required).is_some_and(|end| end <= allocation)
+}
+
+/// Whether a frame read from a CPU mapping of `allocation` bytes lies whole in it.
+/// A DMA-BUF's frame never wraps, so the mapping must hold it at its offset. A
+/// shared-memory ring buffer's frame may wrap, so its offset is not bounded.
+fn cpu_frame_fits(dmabuf: bool, offset: usize, required: usize, size: usize, allocation: usize) -> bool {
+	if dmabuf {
+		dma_buf_frame_fits(offset, required, allocation)
+	} else {
+		required <= size && required <= allocation
+	}
 }
 
 fn chunk_bytes(data: &[u8], offset: usize, size: usize) -> Option<Cow<'_, [u8]>> {
@@ -1917,6 +1927,35 @@ mod tests {
 		assert!(!dma_buf_frame_fits(4096, 33_177_600, 33_177_600));
 		assert!(dma_buf_frame_fits(4096, 33_177_600 - 4096, 33_177_600));
 		assert!(!dma_buf_frame_fits(usize::MAX, 1, usize::MAX));
+	}
+
+	/// A CPU-mapped DMA-BUF frame at a nonzero offset must not wrap to the mapping's
+	/// start. A shared-memory ring buffer's frame still may.
+	#[test]
+	fn cpu_dma_buf_frame_does_not_wrap() {
+		let maxsize = 33_177_600u32;
+		let frame = maxsize as usize;
+		let offset = normalize_chunk_offset(4096, maxsize).unwrap();
+		assert_eq!(offset, 4096);
+		// The placeholder chunk size 9 does not bound a DMA-BUF; the mapping does.
+		assert!(!cpu_frame_fits(true, offset, frame, 9, frame));
+		assert!(cpu_frame_fits(true, 0, frame, 9, frame));
+		assert!(cpu_frame_fits(false, offset, frame, frame, frame));
+		assert!(!cpu_frame_fits(false, offset, frame, frame - 1, frame));
+		assert!(!cpu_frame_fits(false, 0, frame + 1, frame + 1, frame));
+
+		// Every DMA-BUF frame the rule accepts is read whole, never wrapped.
+		let mapping = [0u8; 16];
+		for offset in 0..mapping.len() {
+			for required in 0..=mapping.len() {
+				if cpu_frame_fits(true, offset, required, 9, mapping.len()) {
+					assert!(
+						matches!(chunk_bytes(&mapping, offset, required), Some(Cow::Borrowed(_))),
+						"offset {offset}, required {required} wrapped"
+					);
+				}
+			}
+		}
 	}
 
 	#[test]
