@@ -1,6 +1,6 @@
 ---
 name: verify-route
-description: Model-check the lite-07 route rule (`rs/moq-net/verify/route/RouteHandoff.tla`, the rule the routes epic's Plan item 27 picked, as `rs/moq-net/src/route/tests/paths.rs` prototypes it) with TLA+. Use when a change touches route paths, the DEAD message for a closed session, holds, the doubt and its timer, forgetting dead hops, routes per prefix and scoped streams, the newest-floor views, what a reader is shown, or where a request goes, or when a routing bug needs every message ordering checked rather than a random sweep.
+description: Model-check the lite-07 route rule (`rs/moq-net/verify/route/RouteHandoff.tla`, the rule the routes epic's Plan item 27 picked, as `rs/moq-net/src/route/tests/paths.rs` prototypes it) with TLA+. Use when a change touches route paths, the DEAD message for a closed session, holds, the doubt and its timer, forgetting dead hops, routes per prefix and scoped streams, the newest-floor views, what a reader is shown, or where a request goes, or when a routing bug needs every message ordering checked rather than a random sweep. Also covers `RouteClaims.tla`, the claims model with no paths that it refines, where Apalache proves the claim rules for runs of any length.
 ---
 
 # Verify the route rule
@@ -27,6 +27,12 @@ Each rule is an INVARIANT; the harm says why it matters.
 | `Budget` | From one quiet point to the next, the messages sent stay within 4 each way over each configured session per prefix and per claim, for each external change. | One change sets off announce spam, or routing never goes quiet. |
 | `RequestsLoopFree` | A request never loops. | Only `Loop.cfg` checks it, as an open finding. |
 
+## Runs of any length
+
+TLC checks bounded runs. `RouteClaims.tla` keeps only what the claim rules need, with no paths: every step, any relay's routes may come and go, and claims in flight may arrive in any order, again, or never. Each config's `RefinesClaims` checks that every step of `RouteHandoff.tla` is a step there, and its `Truthful`, `NoRevival`, `NoFalseEnd`, and `NoRegression` are this model's under that mapping. Apalache checks that `IndInv` holds at `Init` (`RouteClaimsInit.cfg`) and that every step from a state where it holds keeps it (`RouteClaims.cfg`), so those four rules hold for any number of revisions, sessions, and route changes.
+
+What stays bounded: the nodes and claims the configs name, and the two claims in flight the step check starts from. The step check keeps one relay's state with five neighbours; one relay's step stands for every relay's because relays share only the claims in flight, and what a relay sends is its own view. That argument, and that a longer history than the floors name changes nothing, are not checked. The loop rules (`SimplePaths`, `LoopsAreStale`, `StaleIsChased`) have no such proof yet: [the loop rules quest](/quest/m1/route-loops.md).
+
 No config checks a liveness property: `Spec` has no fairness, so TLC does not show that a hold ends. That one does is an argument over what TLC does check. `Budget` bounds the messages a burst sends, each delivery takes one message off a queue, and a doubt starts only at a close or a delivery, so a burst is a finite number of steps. A delivery is enabled while a queue holds a message and a timer may fire once no news about its node is in flight, so a burst left alone reaches the state with nothing in flight and no doubt. `QuietIsSettled` says no relay holds there.
 
 What the timer costs, as the configs show it: fired late, it costs only the wait, and every rule holds (`RouteHandoff.cfg`). Fired early, a stale route can return, as with no doubt at all, and nothing else breaks (`Early.cfg`, which passes without `NoStaleReturn` and fails it within seconds with it). With two failures a stale route can return whatever the timer (`Twice.cfg` drops `NoStaleReturn`), and `StaleIsChased` is the bound.
@@ -36,14 +42,15 @@ What the timer costs, as the configs show it: fired late, it costs only the wait
 ```sh
 just rs tla moq-net/verify/route/RouteHandoff.tla
 just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Ring.cfg
+just test tla rs/moq-net/verify/route/RouteClaims.cfg
 just test tla rs/moq-net/verify/route
 ```
 
-`just test tla rs/moq-net/verify/route` runs every config, as Nightly does, simulating each one with a `Simulate:` line and expecting `Loop.cfg` to break. Times are with `-workers 4`. `Patient` is TRUE unless the table says otherwise.
+`just test tla rs/moq-net/verify/route` runs every config, as Nightly does, simulating each one with a `Simulate:` line, checking each with an `Apalache:` line through Apalache, and expecting `Loop.cfg` to break. Every TLC config but `Loop.cfg` also checks `RefinesClaims`, which costs about two thirds more time. Times are with `-workers 4`. `Patient` is TRUE unless the table says otherwise.
 
 | Config | Mesh | Bounds | Distinct states | Run |
 | --- | --- | --- | --- | --- |
-| `RouteHandoff.cfg` | The publisher behind relay 1, in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 407,240 | a minute or two |
+| `RouteHandoff.cfg` | The publisher behind relay 1, in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 407,240 | five minutes |
 | `Early.cfg` | The same, with a timer that fires at any moment. | 1 claim change, 1 session change | 4,178,590 | ten minutes |
 | `Twice.cfg` | The same, where two sessions close, as when relay 1 dies. Simulated: `num` counts behaviours per worker. | 1 claim change, 2 session changes | 40,000 behaviours, 4.0M states | a few minutes |
 | `Ring.cfg` | The publisher and three relays in a ring, with a timer that fires at any moment. | 1 claim change, 1 session change | 426,409 | a minute or two |
@@ -52,6 +59,8 @@ just test tla rs/moq-net/verify/route
 | `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Open finding: `RequestsLoopFree` breaks. | 3 session changes | 979,474 when it breaks | a few minutes |
+| `RouteClaims.cfg` | Apalache: one step of `RouteClaims.tla` from any state where `IndInv` holds, for one relay with five neighbours. | 2 claims in flight | none | twelve minutes |
+| `RouteClaimsInit.cfg` | Apalache: `IndInv` holds at `Init`, with five relays. | none | none | seconds |
 
 Run them last, one at a time. First run what answers in seconds: the prototype's tests (`just rs test -p moq-net --lib -E 'test(/route::tests::(paths|compare|copies)/)'`), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
 
@@ -61,7 +70,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `d3b6c2573a30541402d396f8080488646f673594`. Run `git log d3b6c2573a.. -- rs/moq-net/src/route/tests/paths.rs` to see what changed since. The model describes the prototype, extended with a route per prefix and with dead hops kept until their timer fires; `route::Router` does not run this rule yet. `Relay::collect` forgets a dead hop as soon as no route names it, so `NoStaleReturn` covers the rule the router is to run, not the prototype's. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `d3b6c2573a30541402d396f8080488646f673594`. Run `git log d3b6c2573a.. -- rs/moq-net/src/route/tests/paths.rs` to see what changed since. The model describes the prototype, extended with a route per prefix and with dead hops kept until their timer fires; `route::Router` does not run this rule yet. `Relay::collect` forgets a dead hop as soon as no route names it, so `NoStaleReturn` covers the rule the router is to run, not the prototype's. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function. `RouteClaims.tla` repeats `Know`, `ShownNow`, and the reader's events in `Events`: a change to them changes it too, and `RefinesClaims` fails until it does.
 
 | Code | Model |
 | --- | --- |

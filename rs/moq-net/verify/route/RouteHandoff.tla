@@ -783,6 +783,7 @@ ClaimsOn(d) ==
         i \in {j \in DOMAIN q[d] : q[d][j].t = "claims"}}
 
 Claimed == INSTANCE RouteClaims WITH
+    hist <- {[rev |-> r, full |-> hist[r + 1]] : r \in 0..rev},
     heard <- [x \in Relays \X Nodes \X Keys |-> Hearing(x[1], x[2], x[3])],
     offered <- [x \in Relays \X Nodes \X Keys |->
                   LET h == st[x[1]].rx[x[2]][x[3]] IN [rev |-> h.rev, items |-> h.items, full |-> Full(h.rev)]],

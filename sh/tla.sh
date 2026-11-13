@@ -4,7 +4,8 @@
 # a rule (a deadlock, invariant, property, or assertion), so a fix that should
 # promote its rule is noticed; every other config must pass. A config with a
 # `\* Simulate:` line is too large to exhaust: TLC samples it at random with the
-# arguments that line gives.
+# arguments that line gives. A config with an `\* Apalache:` line is checked
+# by Apalache instead, with the arguments that line gives.
 set -euo pipefail
 shopt -s nullglob
 cd "$(git rev-parse --show-toplevel)"
@@ -21,7 +22,8 @@ for cfg in "${configs[@]}"; do
     # The index still lists a config deleted but not yet staged.
     [ -f "$cfg" ] || continue
     # The directory's spec, or where it holds several, the one the config's name
-    # starts with. TLC's trace-exploration output (`*_TTrace_*.tla`) is no spec.
+    # starts with, else the one no other spec there extends or instantiates.
+    # TLC's trace-exploration output (`*_TTrace_*.tla`) is no spec.
     dir=$(dirname "$cfg")
     name=$(basename "$cfg")
     specs=()
@@ -34,6 +36,12 @@ for cfg in "${configs[@]}"; do
         for spec in "${all[@]}"; do
             [[ "$name" != "$(basename "$spec" .tla)"* ]] || specs+=("$spec")
         done
+        if [ ${#specs[@]} -eq 0 ]; then
+            for spec in "${all[@]}"; do
+                module=$(basename "$spec" .tla)
+                grep -qE "^[^\\]*\b(EXTENDS|INSTANCE)\b.*\b$module\b" "${all[@]}" || specs+=("$spec")
+            done
+        fi
     fi
     if [ ${#specs[@]} -ne 1 ]; then
         failed+=("$cfg: no single spec in $dir")
@@ -43,16 +51,24 @@ for cfg in "${configs[@]}"; do
     finding=false
     ! grep -q '^\\\* Open finding:' "$cfg" || finding=true
     read -ra simulate < <(sed -n 's/^\\\* Simulate: //p' "$cfg") || true
+    apalache=false
+    ! grep -q '^\\\* Apalache:' "$cfg" || apalache=true
+    read -ra checks < <(sed -n 's/^\\\* Apalache: //p' "$cfg") || true
 
     echo "::group::$cfg"
     start=$SECONDS
     status=0
-    just "$lang" tla "${specs[0]#"$lang"/}" -config "$cfg" "${simulate[@]}" || status=$?
+    if $apalache; then
+        just "$lang" apalache check "${specs[0]#"$lang"/}" --config="$cfg" "${checks[@]}" || status=$?
+    else
+        just "$lang" tla "${specs[0]#"$lang"/}" -config "$cfg" "${simulate[@]}" || status=$?
+    fi
     echo "::endgroup::"
     echo "$cfg: exit $status in $((SECONDS - start))s"
 
     # TLC exits 11 to 14 for a deadlock, a violated invariant, a violated
-    # property, and a failed assertion; anything else nonzero is an error.
+    # property, and a failed assertion, and Apalache 12 for a violated
+    # invariant; anything else nonzero is an error.
     if $finding; then
         case $status in
             11 | 12 | 13 | 14) ;;

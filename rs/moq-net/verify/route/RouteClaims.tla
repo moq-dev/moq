@@ -7,13 +7,19 @@
 (* reach any relay, in any order, any number of times, or never.          *)
 (*                                                                         *)
 (* Every floor carries `full`, the publisher's claims at its revision, so  *)
-(* a floor is truthful when its items are `full` within its key. Nothing   *)
-(* reads `full` but the rules: it stands for RouteHandoff's history.       *)
+(* a floor is truthful when its items are `full` within its key, and       *)
+(* `hist` keeps every revision with its claims. Nothing reads either but   *)
+(* the rules: they stand for RouteHandoff's history.                       *)
 (*                                                                         *)
 (* RouteHandoff refines this model (its `RefinesClaims`), so the claim     *)
 (* rules here hold there too. Apalache checks that `IndInv` holds at       *)
 (* `Init` and that every step keeps it, so they hold for runs of any       *)
-(* length: revisions, sessions, and route changes are unbounded.           *)
+(* length: revisions, sessions, and route changes are unbounded. The       *)
+(* bounds are the nodes and claims the configs name and the claims in     *)
+(* flight `IndInit` starts from. The step check keeps one relay's state,   *)
+(* with five neighbours: relays share only the claims in flight, and what  *)
+(* each sends is its own view, which its own step keeps truthful, so one   *)
+(* relay's step stands for every relay's.                                 *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, Apalache
 
@@ -22,6 +28,8 @@ CONSTANTS
     Nodes,     \* relays and the publisher
     \* @type: Int;
     Origin,    \* the publisher
+    \* @type: Set(Int);
+    Relays,    \* the relays whose state the model keeps; any other node only sends
     \* @type: Set(Str);
     Claims,    \* claim paths
     \* @type: Set(Str);
@@ -34,6 +42,7 @@ CONSTANTS
 \* @typeAlias: view = { floor: Int, items: Str -> Int, full: Str -> Int };
 \* @typeAlias: msg = { k: Str, rev: Int, items: Str -> Int, full: Str -> Int };
 \* @typeAlias: shown = { item: Int, avail: Bool };
+\* @typeAlias: past = { rev: Int, full: Str -> Int };
 \* Every relay's state is one function keyed by relay first, since Apalache
 \* cannot pick a function of functions.
 \* @typeAlias: heard = <<Int, Int, Str>> -> Str;
@@ -41,8 +50,6 @@ CONSTANTS
 \* @typeAlias: route = <<Int, Str>> -> Str;
 \* @typeAlias: views = <<Int, Str>> -> $view;
 RouteClaims_aliases == TRUE
-
-Relays == Nodes \ {Origin}
 
 \* A claim's item, the revision that last set it, or None when absent.
 None == -1
@@ -81,6 +88,8 @@ VARIABLES
     rev,         \* the publisher's claim revision
     \* @type: Str -> Int;
     own,         \* the publisher's claims
+    \* @type: Set($past);
+    hist,        \* every revision the publisher passed, with its claims then
     \* @type: $heard;
     heard,       \* heard[<<n, m, k>>]: the route n heard from m for key k
     \* @type: $offered;
@@ -102,7 +111,7 @@ VARIABLES
     \* @type: Int;
     regressions  \* reader UPDATEs to an older item
 
-vars == <<rev, own, heard, offered, route, view, shown, ended, flight,
+vars == <<rev, own, hist, heard, offered, route, view, shown, ended, flight,
           revivals, falseEnds, regressions>>
 
 -----------------------------------------------------------------------------
@@ -146,6 +155,7 @@ Sends(n, rv, ow, vw) ==
 Init ==
     /\ rev = 0
     /\ own = NoItems
+    /\ hist = {[rev |-> 0, full |-> NoItems]}
     /\ heard = [x \in HeardIdx |-> "off"]
     /\ offered = [x \in HeardIdx |-> NoFloor]
     /\ route = [x \in KeyIdx |-> "none"]
@@ -157,13 +167,13 @@ Init ==
     /\ falseEnds = 0
     /\ regressions = 0
 
-\* The publisher keeps its claims or changes one.
+\* The publisher keeps its claims or changes one, in one transition so that
+\* Apalache checks one step.
 Publish ==
-    \/ rev' = rev /\ own' = own
-    \/ \E c \in Claims, item \in {rev + 1, None} :
-          /\ item = None => own[c] # None
-          /\ rev' = rev + 1
-          /\ own' = [own EXCEPT ![c] = item]
+    \E change \in BOOLEAN, c \in Claims, item \in {rev + 1, None} :
+        /\ change /\ item = None => own[c] # None
+        /\ rev' = IF change THEN rev + 1 ELSE rev
+        /\ own' = IF change THEN [own EXCEPT ![c] = item] ELSE own
 
 \* One step: the publisher may change a claim, and every relay's routes may
 \* change. A route that stays on may take any claims in flight under its
@@ -172,6 +182,7 @@ Publish ==
 \* views, while any message in flight may be lost.
 Next ==
     /\ Publish
+    /\ hist' = hist \cup {[rev |-> rev', full |-> own']}
     /\ heard' \in [HeardIdx -> Hearings]
     /\ route' \in [KeyIdx -> Routings]
     /\ LET arrived == {[rev |-> y.rev, items |-> y.items, full |-> y.full] : y \in flight}
@@ -199,7 +210,7 @@ Next ==
           /\ revivals' = revivals + Cardinality({x \in ClaimIdx : isStart(x) /\ ended[x] = shown'[x].item})
           /\ falseEnds' = falseEnds + Cardinality({x \in ClaimIdx : isEnd(x) /\ own'[x[2]] = shown[x].item})
           /\ regressions' = regressions + Cardinality({x \in ClaimIdx : isUpdate(x) /\ shown'[x].item < shown[x].item})
-    /\ flight' \in SUBSET (flight \cup UNION {Sends(n, rev', own', view') : n \in Nodes})
+    /\ flight' \in SUBSET (flight \cup UNION {Sends(n, rev', own', view') : n \in {Origin} \cup Relays})
 
 Spec == Init /\ [][Next]_vars
 
@@ -227,33 +238,33 @@ NoRegression == regressions = 0
 (* each floor is the publisher's claims at its revision, and an item is    *)
 (* the revision that set it, so a newer floor never names an older item.   *)
 
-\* Every revision the state names, with the publisher's claims then.
-Fulls ==
-    {[rev |-> rev, full |-> own]}
-    \cup {[rev |-> view[x].floor, full |-> view[x].full] : x \in KeyIdx}
-    \cup {[rev |-> offered[x].rev, full |-> offered[x].full] : x \in HeardIdx}
-    \cup {[rev |-> y.rev, full |-> y.full] : y \in flight}
+\* Revisions r1 <= r2 of one history: an item r2 has that was set by r1
+\* is r1's item too.
+\* @type: ($past, $past) => Bool;
+Agree(f, g) ==
+    \A c \in Claims :
+        f.rev <= g.rev /\ g.full[c] # None /\ g.full[c] <= f.rev => f.full[c] = g.full[c]
 
-\* A floor: None with no claims, or a revision the publisher has passed with
-\* its claims then, within key k.
+\* A floor: None with no claims, or a revision the publisher passed, with
+\* its claims then within key k.
 \* @type: (Str, Int, Str -> Int, Str -> Int) => Bool;
 Sound(k, r, items, full) ==
     \/ r = None /\ items = NoItems /\ full = NoItems
-    \/ 0 <= r /\ r <= rev /\ items = Restrict(full, k)
+    \/ [rev |-> r, full |-> full] \in hist /\ items = Restrict(full, k)
 
 IndInv ==
     /\ Truthful
     /\ NoRevival
     /\ NoFalseEnd
     /\ NoRegression
-    \* The history the floors name: an item is the revision that set it, and
-    \* it stays set until a later revision changes it.
+    \* The history: an item is the revision that set it, and it stays set
+    \* until a later revision changes it.
     /\ rev >= 0
-    /\ \A f \in Fulls, c \in Claims : f.rev >= 0 =>
-          f.full[c] = None \/ (1 <= f.full[c] /\ f.full[c] <= f.rev)
-    /\ \A f, g \in Fulls, c \in Claims :
-          0 <= f.rev /\ f.rev <= g.rev /\ g.full[c] # None /\ g.full[c] <= f.rev =>
-              f.full[c] = g.full[c]
+    /\ [rev |-> rev, full |-> own] \in hist
+    /\ \A h \in hist :
+          /\ 0 <= h.rev /\ h.rev <= rev
+          /\ \A c \in Claims : h.full[c] = None \/ (1 <= h.full[c] /\ h.full[c] <= h.rev)
+    /\ \A h, g \in hist : Agree(h, g)
     \* Every floor is sound, and a route that is off gave none.
     /\ \A y \in flight : y.k \in Keys /\ Sound(y.k, y.rev, y.items, y.full)
     /\ \A x \in HeardIdx :
@@ -290,6 +301,13 @@ IndInit ==
     /\ ended \in [ClaimIdx -> Int]
     /\ flight = Gen(MaxFlight)
     /\ \A y \in flight : DOMAIN y.items = Claims /\ DOMAIN y.full = Claims
+    \* Just the revisions the state names. A longer history adds entries no
+    \* floor names, which a step only checks against its new revision, as
+    \* it does these.
+    /\ hist = {[rev |-> rev, full |-> own]}
+               \cup {[rev |-> view[x].floor, full |-> view[x].full] : x \in {z \in KeyIdx : view[z].floor >= 0}}
+               \cup {[rev |-> offered[x].rev, full |-> offered[x].full] : x \in {z \in HeardIdx : offered[z].rev >= 0}}
+               \cup {[rev |-> y.rev, full |-> y.full] : y \in {z \in flight : z.rev >= 0}}
     /\ revivals \in Int
     /\ falseEnds \in Int
     /\ regressions \in Int

@@ -14,8 +14,9 @@ the route model drifting from the code ([moq-dev/moq#8447](https://github.com/mo
 
 Decided 2026-11-10 (maintainer, a later /quest-plan the same day):
 
-- ✅ m1 (rejected: staying in m4). The mesh configs beside it, the
-  [inductive invariant](/quest/m1/route-inductive.md), and the
+- ✅ m1 (rejected: staying in m4). The mesh configs beside it, the claims
+  model it refines (`RouteClaims.tla`), the
+  [loop rules proof](/quest/m1/route-loops.md), and the
   [cache-aware routing proof](/quest/m2/cache-routing-proof.md) all build on
   `RouteHandoff.tla`, so drift there costs the most.
 - ✅ The other three models get trace validation too, each its own m4 quest
