@@ -711,3 +711,81 @@ async fn an_ascending_backlog_waits_behind_a_waiting_group() {
 		assert_eq!(received, [1, 2, 3], "{version}");
 	}
 }
+
+/// A finished stream still waiting for its acknowledgement holds credit that no group can
+/// take over, so it doesn't count when ranking a waiting group: a late group ranked above it
+/// but below the stream still serving waits, and a newer group resets that stream rather than
+/// waiting behind the late one, on each protocol.
+#[kio::test]
+async fn a_closing_stream_does_not_rank_a_waiting_group() {
+	const LATENCY: Duration = Duration::from_millis(100);
+	const SETTLE: Duration = Duration::from_millis(10);
+
+	for version in ["moq-lite-06", "moq-lite-07-wip"] {
+		let version: Version = version.parse().unwrap();
+		let publisher = origin(1);
+		let viewer = origin(2);
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
+		let track = broadcast.broadcast().create_track("0", info).unwrap();
+		broadcast.announce().unwrap();
+
+		let mut options = MockConnectOptions::new(version);
+		options.transport.max_concurrent_uni_streams = Some(2);
+		options.latency = LATENCY;
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(viewer.clone());
+		let _pair = connect_mock(options).await;
+
+		let remote = viewer
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let prefs = track::Subscription::default()
+			.with_order(track::Order::Descending)
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+
+		// Group 7 finishes, so its stream waits for the acknowledgement; group 10 holds the other.
+		let mut closing = track.create_group(moq_net::group::Info { sequence: 7 }).unwrap();
+		closing.write_frame(Timestamp::ZERO, b"closing".as_slice()).unwrap();
+		closing.finish().unwrap();
+		let mut held = track.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		held.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
+		kio::clock::sleep(SETTLE).await;
+
+		// Ranked above group 7 but below group 10: it can only wait for group 7's credit.
+		let mut late = track.create_group(moq_net::group::Info { sequence: 8 }).unwrap();
+		late.write_frame(Timestamp::ZERO, b"late".as_slice()).unwrap();
+		late.finish().unwrap();
+		kio::clock::sleep(SETTLE).await;
+
+		let mut newer = track.create_group(moq_net::group::Info { sequence: 11 }).unwrap();
+		newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
+		newer.finish().unwrap();
+
+		loop {
+			let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the newer group never arrives"))
+				.unwrap()
+				.unwrap();
+			assert_ne!(
+				group.sequence, 8,
+				"{version}: the newer group waits behind the late one"
+			);
+			if group.sequence == 11 {
+				break;
+			}
+		}
+		drop(held);
+	}
+}
