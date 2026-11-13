@@ -285,22 +285,23 @@ impl<O: Output> Media<O> {
 						}
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
-						let mut subscriber = track
+						let subscriber = track
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(hang::catalog::PRIORITY.video)
 									// The whole delay from the first request, so a cold join never
 									// states a zero minimum before the container's update.
-									.with_delay(delay),
+									.with_delay(delay)
+									// Counted back through the groups each hop holds from its live
+									// feed, never from a warm copy's backlog, so it names no cached
+									// group for the shared publisher subscription to rewind to.
+									// Starts are sparse, so only a count reaches the group before.
+									.with_ranges([moq_net::track::Range {
+										start: moq_net::track::Anchor::Relative(lookback),
+										end: None,
+									}]),
 							)
 							.await?;
-						// Start at the live edge without asking the shared publisher
-						// subscription to rewind to a cached sequence. The edge is known only
-						// once the feed is live, so wait for it rather than read the backlog of
-						// a warm copy still waiting on its source; the wait ends with the track.
-						if let Some(largest) = subscriber.largest().await {
-							subscriber = subscriber.with_range(largest.group.saturating_sub(lookback)..);
-						}
 						let format = catalog::hang::Container::try_from(config)?;
 						// The playout delay is the target latency, and the max how late a group may be.
 						let track =
