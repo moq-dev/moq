@@ -32,4 +32,4 @@ test before fixing it; fix 1 first.
 
 ## Related
 
-- [Takeover](/quest/m1/stream-credit/takeover.md) - the yield and resume work these findings review
+- [Takeover](/quest/m3/group-takeover.md) - the yield and resume work these findings review
