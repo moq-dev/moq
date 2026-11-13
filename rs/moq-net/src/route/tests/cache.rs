@@ -240,6 +240,7 @@ impl Mesh {
 		};
 		self.delivered = false;
 		self.longest = self.longest.max(self.run);
+		self.starved += usize::from(cycle && self.starving());
 	}
 
 	/// Whether some reader's pulls lead into a cycle.

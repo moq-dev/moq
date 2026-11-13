@@ -1524,11 +1524,6 @@ impl PathSim {
 		self.flush();
 	}
 
-	/// Where `node` would pull `cast` from.
-	pub fn source(&self, node: Node, cast: &Cast) -> Option<Source> {
-		self.nodes[node].source(cast)
-	}
-
 	/// `node` sends GOAWAY on every session.
 	pub fn goaway(&mut self, node: Node) {
 		for peer in self.peers(node) {
