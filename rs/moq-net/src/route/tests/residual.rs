@@ -75,10 +75,7 @@ fn residual_a_relay_behind_a_scoped_neighbour_is_blind() {
 			"node {node} sees it: drop the residual"
 		);
 	}
-	let routes: Vec<Node> = (sim.nodes[relay].eligible(7).into_iter())
-		.filter(|route| !route.tied)
-		.map(|route| route.next)
-		.collect();
+	let routes: Vec<Node> = sim.nodes[relay].routes(7).into_iter().map(|(next, ..)| next).collect();
 	assert_eq!(routes, [narrow], "the wide neighbour is no route either");
 }
 
