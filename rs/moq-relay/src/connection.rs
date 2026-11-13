@@ -115,11 +115,14 @@ impl<R: Incoming> Connection<R> {
 		// socket like it bounds a session, and at the handshake deadline, so a peer
 		// cannot hold the connection open behind a decision that never comes.
 		// Boxed: the admission future is large, and nesting it inline overflows debug stacks.
-		let admitted = request
-			.within(Box::pin(lifecycle.on(shared.as_ref(), admit)))
-			.await
-			.inspect_err(|_| lifecycle.cluster.refusals.record(RefusalKind::Unavailable))
-			.map_err(|err| err.context("admission timed out"))??;
+		let admitted = tokio::select! {
+			biased;
+			admitted = Box::pin(lifecycle.on(shared.as_ref(), admit)) => admitted?,
+			() = request.expired() => {
+				lifecycle.cluster.refusals.record(RefusalKind::Unavailable);
+				return Err(anyhow::Error::new(moq_net::Error::Timeout).context("admission timed out"));
+			}
+		};
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {

@@ -3364,11 +3364,11 @@ export class Subscriber {
 		return true;
 	}
 
-	// Fresh reads of the cached groups in `[start, end)` this cursor admits and no longer judges
-	// stale, each expiring against the budget, and the runs still given up. A resumed reader asks
-	// its serving route's copy. Mirrors the Rust `reoffer_groups`.
-	#reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] } {
-		if (this.#resume) return this.#resume.reofferGroups(start, end);
+	// Fresh reads from frame `from` of the cached groups in `[start, end)` this cursor admits and no
+	// longer judges stale, each expiring against the budget, and the runs still given up. A resumed
+	// reader asks its serving route's copy. Mirrors the Rust `reoffer_groups`.
+	#reofferGroups(start: bigint, end: bigint, from = 0): { groups: GroupConsumer[]; givenUp: Run[] } {
+		if (this.#resume) return this.#resume.reofferGroups(start, end, from);
 		const groups: GroupConsumer[] = [];
 		let givenUp: Run[] = [{ start, end }];
 		const producer = this.#state.producer;
@@ -3380,7 +3380,7 @@ export class Subscriber {
 		for (const sequence of cached) {
 			const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
 			if (!admitted || this.#staleAt(sequence, drift)) continue;
-			const group = cachedMirror(producer, sequence, 0);
+			const group = cachedMirror(producer, sequence, from);
 			if (!group) continue;
 			groups.push(this.#guard(group));
 			givenUp = removeRun(givenUp, sequence, sequence + 1n);
@@ -3960,7 +3960,7 @@ export class Subscriber {
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
-		hooks.reofferGroups = (subscriber, start, end) => subscriber.#reofferGroups(start, end);
+		hooks.reofferGroups = (subscriber, start, end, from) => subscriber.#reofferGroups(start, end, from);
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>

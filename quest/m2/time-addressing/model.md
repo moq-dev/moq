@@ -56,7 +56,7 @@ a producer would need per-track memory of its last number.
   subscribe-ranges children that put sequence ranges into the model and the
   wire, Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872),
   merged 2026-11-05) and
-  [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md),
+  Delete the old start bookkeeping (finished in [moq-dev/moq#8613](https://github.com/moq-dev/moq/pull/8613)),
   not the whole epic. Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)) lands first too: its
   runs keyed by group sequence convert mechanically to starts.
 - **Old relays** (decided 2026-10-26, maintainer): a released relay fills a
@@ -216,7 +216,3 @@ timestamp, untimed tracks become scale-less, `Timestamp::now` is gone, and
 `Timed` is moq-json's, and `Anchor` is `{Oldest, Relative, Time}` with inclusive
 ends.
 Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
-
-## Required
-
-- [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - the lite cursor state lives in the model before the cut rekeys it

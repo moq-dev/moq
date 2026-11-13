@@ -14,8 +14,8 @@ replace are retired.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): acceptance is of the path rule
-([epic](/quest/m2/cluster-routing/routes/README.md) Plan item 27), on the
-sessions [the switch](/quest/m2/cluster-routing/routes/switch.md) leaves.
+([epic](/quest/m2/cluster-routes/README.md) Plan item 27), on the
+sessions [the switch](/quest/m2/cluster-routes/switch.md) leaves.
 The seqno request fixtures are replaced below, since the rule has no seqno
 and no request.
 
@@ -100,8 +100,8 @@ same-clock churn.
 
 ## Required
 
-- [lite-07 sessions run the path router](/quest/m2/cluster-routing/routes/switch.md) - the sessions and the route rule these fixtures accept
+- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the sessions and the route rule these fixtures accept
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the contract and its fixtures
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - the contract and its fixtures

@@ -26,7 +26,7 @@ every ID and resets with `UNKNOWN_OBJECT_STATUS`). This narrows
 refusal, whose reason was that "serving moq-transport ranges requires
 authoritative knowledge of every group". This quest serves only ranges
 where we have that knowledge. It widens the
-[frozen scope](/quest/m2/ietf-scope/README.md), which kept only joining
+frozen scope `doc/concept/standard.md` states, which kept only joining
 `FETCH`.
 
 What makes it possible: moq-transport's Prior Group ID Gap object extension,
@@ -57,8 +57,8 @@ which has no marker for it.
   (`drop_groups`) from unknown (`refuse_groups`). Answer from what the copy
   records, without asking upstream group by group.
 - Update the "History is served one group at a time" entry in
-  `doc/concept/standard.md`, and note the narrowed freeze in the IETF scope
-  docs.
+  `doc/concept/standard.md`, and the scope paragraph above it, which
+  names a multi-group `FETCH` as refused.
 
 Test on drafts 18, 20, and 22: a range over cached groups and proven holes is
 answered with `0x8C` runs; a range with one unknown group is refused; an

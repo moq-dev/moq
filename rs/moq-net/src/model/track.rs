@@ -9610,10 +9610,31 @@ impl Subscriber {
 		self.poll_group(false, waiter)
 	}
 
+	/// [`Self::poll_recv_group`], handing out the next group only if its sequence lies in
+	/// `admit`: one outside stays next, and the read is `Pending` without parking on it.
+	#[cfg(feature = "async")]
+	pub(crate) fn poll_recv_group_in(
+		&mut self,
+		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
+		self.poll_group_in(false, admit, waiter)
+	}
+
 	/// The next group in arrival order, or in sequence order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		let res = self.poll_group_unsettled(ordered, waiter);
+		self.poll_group_in(ordered, (ops::Bound::Unbounded, ops::Bound::Unbounded), waiter)
+	}
+
+	/// [`Self::poll_group`], refusing a next group whose sequence lies outside `admit`.
+	fn poll_group_in(
+		&mut self,
+		ordered: bool,
+		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
+		let res = self.poll_group_unsettled(ordered, admit, waiter);
 		// What the read settled is billed now, and pays what it can of its readers' debt. The
 		// group it hands out stays above the fold until its reader accounts for it.
 		let handed = match &res {
@@ -9626,7 +9647,12 @@ impl Subscriber {
 		}
 	}
 
-	fn poll_group_unsettled(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+	fn poll_group_unsettled(
+		&mut self,
+		ordered: bool,
+		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
 		if self.record().failed() {
 			return Poll::Ready(Err(Error::Lagged));
 		}
@@ -9644,12 +9670,16 @@ impl Subscriber {
 			_ => {}
 		}
 		match self.poll_peek_group(ordered, waiter) {
-			Poll::Ready(Ok(Some(reserved))) => Poll::Ready(self.take(reserved).map(Some)),
+			Poll::Ready(Ok(Some(reserved))) if admit.contains(&reserved.sequence()) => {
+				Poll::Ready(self.take(reserved).map(Some))
+			}
 			res => {
 				// What the peek skipped for age counts even when nothing is handed out.
 				self.count_stale(&self.stats.meter());
 				match res {
 					Poll::Ready(Ok(None)) => Poll::Ready(self.ended()),
+					// Refused: it stays next, so nothing behind it is either.
+					Poll::Ready(Ok(Some(_))) => Poll::Pending,
 					res => res.map(|res| res.map(|_| None)),
 				}
 			}

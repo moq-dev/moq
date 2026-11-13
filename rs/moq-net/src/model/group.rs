@@ -2730,6 +2730,12 @@ impl Handle {
 		self.state.read().next_index
 	}
 
+	/// Whether the parent track compresses; see [`Producer::compressed`].
+	#[cfg(feature = "async")]
+	pub(crate) fn compressed(&self) -> bool {
+		self.track.compressed()
+	}
+
 	/// The newest object's ID, by its moq-transport object ID when the group carries one,
 	/// else its frame index; `None` before the first frame.
 	pub(crate) fn last_object(&self) -> Option<u64> {
