@@ -571,6 +571,10 @@
 
           inherit uniffi-bindgen-cpp uniffi-bindgen-dart;
 
+          # SPIKE: crane against per-crate Nix; see nix/crate2nix.nix.
+          spike-crane = overlayPkgs.moq-spike.crane;
+          spike-crate2nix = overlayPkgs.moq-spike.crate2nix;
+
           # The @moq/libav npm package, which js/libav/build.ts copies into js/libav/dist.
           moq-libav = pkgs.callPackage ./js/libav/package.nix { };
 

@@ -282,6 +282,22 @@ let
   # ./target stays per-job -- the persistent CARGO_TARGET_DIR growth that the old
   # crane checks were introduced to fix doesn't recur.
   # Release artifacts build via crane `buildPackage` below, which skips tests.
+
+  # SPIKE: `times` at the end of each crane stage, the dependency layer and
+  # the package, so builder CPU can be read back from `nix log`. postFixup
+  # rather than postInstall: crane replaces the dependency layer's install
+  # phase and runs none of the caller's install hooks there.
+  measured =
+    args:
+    buildPackage (
+      args
+      // {
+        postFixup = (args.postFixup or "") + ''
+          echo MEASURE-TIMES
+          times
+        '';
+      }
+    );
 in
 {
   moq-relay = buildPackage moqRelayArgs;
@@ -313,6 +329,33 @@ in
   moq-c = buildPackage moqCArgs;
 
   moq-gst-plugin = buildPackage moqGstPluginArgs;
+
+  # SPIKE: the crane packages CI caches, measured, and the same two as one
+  # derivation per crate (./crate2nix.nix).
+  moq-spike = {
+    crane = final.symlinkJoin {
+      name = "moq-spike-crane";
+      paths = [
+        (measured moqRelayArgs)
+        (measured moqCliArgs)
+      ];
+    };
+    crate2nix =
+      let
+        crates = import ./crate2nix.nix {
+          pkgs = final;
+          inherit rustToolchain filterCargoSources;
+          measure = true;
+        };
+      in
+      final.symlinkJoin {
+        name = "moq-spike-crate2nix";
+        paths = [
+          crates.moq-relay
+          crates.moq-cli
+        ];
+      };
+  };
 
   # User-facing flake output. Bundles the plugin with wrapped gstreamer
   # tools so a single `nix shell .#moq-gst` gives you gst-inspect-1.0 /

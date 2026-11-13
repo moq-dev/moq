@@ -1,0 +1,11 @@
+{
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_bindgen@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_core@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_internal_macros@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_macros@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_meta@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_pipeline@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_udl@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
+  "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#weedle2@5.0.0": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7"
+}
