@@ -1,7 +1,8 @@
 //! The explicit-time model works without async helpers or a runtime.
 
-use moq_net::{Error, Timestamp, broadcast, frame, group, origin, track};
+use moq_net::{Error, broadcast, frame, group, origin, track};
 use std::task::Poll;
+use crate::support::AtStart;
 
 fn ready<T>(value: Poll<T>) -> T {
 	match value {
@@ -27,7 +28,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 		)
 		.unwrap();
 	let mut group = track.create_group(group::Info { start: 7 }).unwrap();
-	group.write_frame(Timestamp::ZERO, b"media").unwrap();
+	group.write_frame(group.at_start(), b"media").unwrap();
 	group.close().unwrap();
 	broadcast.announce().unwrap();
 

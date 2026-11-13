@@ -12,6 +12,7 @@ use moq_net::{Timestamp, Version, origin, track, transport::ReceiveWindow};
 
 use crate::support::harness::{MockPair, peer, spawn};
 use crate::support::AppendNext;
+use crate::support::AtStart;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -102,7 +103,7 @@ async fn idle_reader(version: &str, window: ReceiveWindow, expected: std::ops::R
 	relay.pair.server_transport.set_receive_window(Some(window));
 
 	let mut group = relay.track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	group.write_frame(group.at_start(), payload.clone()).unwrap();
 	let mut reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 		.await
 		.expect("group timeout")
@@ -110,7 +111,7 @@ async fn idle_reader(version: &str, window: ReceiveWindow, expected: std::ops::R
 		.expect("group 0");
 	// Within the publisher's own 32 MB tail, so only the relay's pacing holds it back.
 	for _ in 1..30 {
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.write_frame(group.at_start(), payload.clone()).unwrap();
 	}
 	group.close().unwrap();
 
@@ -145,14 +146,14 @@ async fn a_reset_reaches_a_paused_relay() {
 		let mut relay = relay(version).await;
 
 		let mut group = relay.track.append_next().unwrap();
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.write_frame(group.at_start(), payload.clone()).unwrap();
 		let mut reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
 			.expect("group 0");
 		for _ in 1..30 {
-			group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+			group.write_frame(group.at_start(), payload.clone()).unwrap();
 		}
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(reader.frame_count() < 30, "{version}: the relay never paused");
@@ -178,20 +179,20 @@ async fn a_large_frame_sheds_nothing_an_idle_reader_wants() {
 		relay.pair.server_transport.set_receive_window(Some(uncapped()));
 
 		let mut group = relay.track.append_next().unwrap();
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.write_frame(group.at_start(), payload.clone()).unwrap();
 		let mut reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
 			.expect("group 0");
 		for _ in 1..15 {
-			group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+			group.write_frame(group.at_start(), payload.clone()).unwrap();
 		}
 		// Let the relay take what fits, so the publisher's egress has sent every frame the
 		// large one sheds from the publisher's own tail.
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		group
-			.write_frame(Timestamp::ZERO, Bytes::from(vec![7u8; 20 * MB]))
+			.write_frame(group.at_start(), Bytes::from(vec![7u8; 20 * MB]))
 			.unwrap();
 		group.close().unwrap();
 
@@ -225,14 +226,14 @@ async fn a_session_past_its_credit_cap_reads_on() {
 		relay.pair.server_transport.set_receive_window(Some(window));
 
 		let mut group = relay.track.append_next().unwrap();
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.write_frame(group.at_start(), payload.clone()).unwrap();
 		let reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
 			.expect("group 0");
 		for _ in 1..30 {
-			group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+			group.write_frame(group.at_start(), payload.clone()).unwrap();
 		}
 		group.close().unwrap();
 
@@ -249,7 +250,7 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 		let mut relay = relay(version).await;
 
 		let mut group = relay.track.append_next().unwrap();
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.write_frame(group.at_start(), payload.clone()).unwrap();
 		let mut fast = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
@@ -260,7 +261,7 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 		// Well past the 32 MB tail: the fast reader keeps up the whole way.
 		for index in 0..48 {
 			if index > 0 {
-				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+				group.write_frame(group.at_start(), payload.clone()).unwrap();
 			}
 			let frame = kio::clock::timeout(TIMEOUT, fast.read_frame())
 				.await
@@ -340,7 +341,7 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 					timestamp: Some(Timestamp::ZERO),
 				};
 				group.ready(&info).await;
-				group.write_frame(Timestamp::ZERO, payload).unwrap();
+				group.write_frame(group.at_start(), payload).unwrap();
 				progress.store(index + 1, std::sync::atomic::Ordering::Relaxed);
 			}
 			group.close().unwrap();

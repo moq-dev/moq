@@ -5,6 +5,7 @@
 //! not cache the frames it already has as the whole group.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 use moq_net::track::Delay;
 
@@ -64,7 +65,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	subscribed(&track).await;
 
 	let mut stalled = track.append_next().unwrap();
-	stalled.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
+	stalled.write_frame(stalled.at_start(), &b"head"[..]).unwrap();
 	let mut group = kio::clock::timeout(TIMEOUT, live.recv_group())
 		.await
 		.expect("group timeout")

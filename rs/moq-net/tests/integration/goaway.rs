@@ -7,6 +7,7 @@
 //! an observable event.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
@@ -385,7 +386,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 			.expect("create track");
 		let mut audio_group = audio.append_next().expect("append group");
 		audio_group
-			.write_frame(moq_net::Timestamp::ZERO, b"audio".as_ref())
+			.write_frame(audio_group.at_start(), b"audio".as_ref())
 			.expect("write frame");
 		audio_group.close().expect("finish group");
 
@@ -410,7 +411,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 
 		let mut group = track.append_next().expect("append group");
 		group
-			.write_frame(moq_net::Timestamp::ZERO, b"before".as_ref())
+			.write_frame(group.at_start(), b"before".as_ref())
 			.expect("write frame");
 		group.close().expect("finish group");
 
@@ -449,7 +450,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		// The EXISTING subscription keeps flowing.
 		let mut group = track.append_next().expect("append group");
 		group
-			.write_frame(moq_net::Timestamp::ZERO, b"after".as_ref())
+			.write_frame(group.at_start(), b"after".as_ref())
 			.expect("write frame");
 		group.close().expect("finish group");
 

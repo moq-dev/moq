@@ -6,11 +6,12 @@
 //! Deterministic: simulated time over the mock transport.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::{Error, Timestamp, Version};
+use moq_net::{Error, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -154,7 +155,7 @@ async fn close_delivers_a_finished_track_for(version: &str) {
 	} = setup(version).await;
 
 	let mut group = track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
+	group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
 	group.close().unwrap();
 	let _track = track.finish().unwrap();
 
@@ -298,7 +299,7 @@ async fn close_tail_for(version: &str) {
 	pair.client_transport.ack_fins();
 	pair.client_transport.hold_unis();
 	let mut group = track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
+	group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
 	group.close().unwrap();
 	let _track = track.finish().unwrap();
 	let close = kio::clock::sim::spawn(pair.client.close());
@@ -336,7 +337,7 @@ async fn close_requires_subscriber_fin_for(version: &str) {
 	pair.client_transport.ack_fins();
 	pair.server_transport.withhold_bidi_fins();
 	let mut group = track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
+	group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
 	group.close().unwrap();
 	let _track = track.finish().unwrap();
 	let started = kio::clock::now();
@@ -369,7 +370,7 @@ async fn peer_close_reads_buffered_tail(version: &str) {
 	// protocol driver has consumed the buffered stream.
 	pair.client_transport.ack_fins();
 	let mut group = track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
+	group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
 	group.close().unwrap();
 	let _track = track.finish().unwrap();
 	pair.client.close().await.expect("released draft still drains on ACKs");
@@ -395,7 +396,7 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 		*gate.write().ok().expect("receiver gate remains open") = false;
 		pair.client_transport.ack_fins();
 		let mut group = track.append_next().unwrap();
-		group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
+		group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
 		group.close().unwrap();
 		let _track = track.finish().unwrap();
 		let res = pair.client.close().await;

@@ -3,6 +3,7 @@
 //! A reader leaving and rejoining a track relayed over the in-memory mock transport.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
@@ -307,7 +308,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			broadcast.announce().unwrap();
 			// Left open, as a JSON snapshot group stays open for its deltas.
 			let mut open = track.append_next().unwrap();
-			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
+			open.write_frame(open.at_start(), b"a0".as_ref()).unwrap();
 
 			let version: Version = version.parse().unwrap();
 			let mut options = MockConnectOptions::new(version);
@@ -386,7 +387,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 			let mut open = track.append_next().unwrap();
-			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
+			open.write_frame(open.at_start(), b"a0".as_ref()).unwrap();
 
 			let version: Version = version.parse().unwrap();
 			let mut options = MockConnectOptions::new(version);
@@ -614,7 +615,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 			let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
 			broadcast.announce().unwrap();
 			let mut group = track.append_next().unwrap();
-			group.write_frame(Timestamp::ZERO, b"c0".as_ref()).unwrap();
+			group.write_frame(group.at_start(), b"c0".as_ref()).unwrap();
 			group.close().unwrap();
 
 			let mut options = MockConnectOptions::new(version);
@@ -788,7 +789,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
 		broadcast.announce().unwrap();
 		let mut group = track.append_next().unwrap();
-		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
+		group.write_frame(group.at_start(), b"catalog".as_ref()).unwrap();
 		group.close().unwrap();
 
 		let upstream = |cost| {

@@ -6,7 +6,7 @@ pub mod mock;
 use std::ops::{Bound, RangeBounds};
 
 use futures::channel::mpsc;
-use moq_net::{datagram, goaway, group, origin, track};
+use moq_net::{Timestamp, datagram, goaway, group, origin, track};
 
 /// Appending for tests that count groups rather than time them.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
@@ -19,6 +19,19 @@ pub trait AppendNext {
 impl AppendNext for track::Producer {
 	fn append_next(&self) -> moq_net::Result<group::Producer> {
 		self.append_group(self.largest().map_or(0, |largest| largest.group + 1))
+	}
+}
+
+/// A frame time for tests whose frames carry no time of their own.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub trait AtStart {
+	/// Where the group starts, as a timestamp in its timed track's timescale.
+	fn at_start(&self) -> Timestamp;
+}
+
+impl AtStart for group::Producer {
+	fn at_start(&self) -> Timestamp {
+		Timestamp::new(self.start, self.timescale().expect("a timed track")).unwrap()
 	}
 }
 

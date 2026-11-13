@@ -5,13 +5,14 @@
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 use moq_net::track::Delay;
 
 use std::time::Duration;
 
 use moq_net::track::{Position, Subscription};
-use moq_net::{Error, StreamError, Timestamp, Version};
+use moq_net::{Error, StreamError, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -91,7 +92,7 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		for _ in 0..GROUPS {
 			let mut group = track.append_next().unwrap();
 			for frame in FRAMES {
-				group.write_frame(Timestamp::ZERO, frame).unwrap();
+				group.write_frame(group.at_start(), frame).unwrap();
 			}
 			group.close().unwrap();
 		}

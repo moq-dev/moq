@@ -74,6 +74,12 @@ fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
+/// The latest frame time a millisecond track can carry, short of a wide key, which no
+/// timestamp reaches.
+fn latest() -> Timestamp {
+	Timestamp::new((1 << 61) - 1, moq_net::Timescale::MILLI).unwrap()
+}
+
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
 		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
@@ -98,7 +104,7 @@ async fn wide_key_fails_only_its_subscription() {
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();
 	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
-	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
+	group.write_frame(latest(), b"wide".as_ref()).unwrap();
 	let mut group = narrow.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
 
@@ -195,7 +201,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"first".as_ref());
 
 	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
-	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
+	group.write_frame(latest(), b"wide".as_ref()).unwrap();
 
 	let result = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
 		.await

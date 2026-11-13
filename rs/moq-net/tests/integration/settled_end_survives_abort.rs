@@ -6,9 +6,10 @@
 //! consumer that has not read them yet still gets them, then the clean end.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
-use moq_net::{Error, Timestamp};
+use moq_net::{Error};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
 /// and superseded groups stay readable.
@@ -43,7 +44,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 
 	for _ in 0..GROUPS {
 		let mut group = track.append_next().unwrap();
-		group.write_frame(Timestamp::ZERO, b"frame".as_slice()).unwrap();
+		group.write_frame(group.at_start(), b"frame".as_slice()).unwrap();
 		group.close().unwrap();
 	}
 	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();

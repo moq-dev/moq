@@ -3,11 +3,12 @@
 //! A group finished with no frames reaches the subscriber as an empty group.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version, origin};
+use moq_net::{Version, origin};
 use support::harness::{peer, subscribed};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -64,7 +65,7 @@ async fn an_empty_group_arrives_empty() {
 		assert!(frame.is_none(), "{version}: the empty group carried a frame");
 
 		let mut group = track.append_next().unwrap();
-		group.write_frame(Timestamp::ZERO, &b"ok"[..]).unwrap();
+		group.write_frame(group.at_start(), &b"ok"[..]).unwrap();
 		group.close().unwrap();
 		let mut next = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await

@@ -15,11 +15,12 @@
 //! nothing when the broadcast ends.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version};
+use moq_net::{Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -92,7 +93,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	// One frame and a textbook clean end, innermost first, with no await in between:
 	// nothing is served until the ending is done.
 	let mut group = track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+	group.write_frame(group.at_start(), PAYLOAD).unwrap();
 	group.close().unwrap();
 	let track = track.finish().unwrap();
 	drop(track);

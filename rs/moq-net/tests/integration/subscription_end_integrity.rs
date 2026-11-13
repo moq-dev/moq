@@ -20,11 +20,12 @@
 //! send" step is an idle-advance rather than a race.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version};
+use moq_net::{Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -121,7 +122,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 
 	let mut head = track.append_next().unwrap();
 	for payload in HEAD {
-		head.write_frame(Timestamp::ZERO, payload).unwrap();
+		head.write_frame(head.at_start(), payload).unwrap();
 	}
 	head.close().unwrap();
 	kio::clock::timeout(TIMEOUT, drained_rx)
@@ -133,13 +134,13 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	// declared: SUBSCRIBE_FINISH reaches the subscriber with the group still open, as it
 	// does whenever a finish races a group still in flight.
 	let mut tail = track.append_next().unwrap();
-	tail.write_frame(Timestamp::ZERO, TAIL[0]).unwrap();
+	tail.write_frame(tail.at_start(), TAIL[0]).unwrap();
 	let track = track.finish().unwrap();
 	settle().await;
 
 	// The rest of the group, its clean end, and the disconnect happen with no await in
 	// between, so the session has sent none of it when it closes.
-	tail.write_frame(Timestamp::ZERO, TAIL[1]).unwrap();
+	tail.write_frame(tail.at_start(), TAIL[1]).unwrap();
 	tail.close().unwrap();
 	drop(track);
 	let server = if drop_session {
@@ -272,7 +273,7 @@ async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<mo
 		.await
 		.expect("no subscriber appeared");
 	let mut group = track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, HEAD[0]).unwrap();
+	group.write_frame(group.at_start(), HEAD[0]).unwrap();
 	settle().await;
 
 	match kill {

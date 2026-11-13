@@ -6,11 +6,12 @@
 //! must still get it.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::{future::Future, time::Duration};
 
-use moq_net::{Error, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Error, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -53,7 +54,7 @@ fn publish(origin: &origin::Producer) -> (moq_net::origin::Route, track::Produce
 	let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
 	broadcast.announce().unwrap();
 	let mut group = track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, b"snapshot").unwrap();
+	group.write_frame(group.at_start(), b"snapshot").unwrap();
 	group.close().unwrap();
 	(broadcast, track)
 }

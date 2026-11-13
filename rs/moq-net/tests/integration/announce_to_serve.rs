@@ -11,12 +11,13 @@
 //! is a virtual sleep.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Timestamp, Version, origin};
+use moq_net::{Error, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -114,7 +115,7 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<String>) -> String {
 
 fn write_group(track: &moq_net::track::Producer, payload: &'static str) {
 	let mut group = track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, payload.as_bytes()).unwrap();
+	group.write_frame(group.at_start(), payload.as_bytes()).unwrap();
 	group.close().unwrap();
 }
 

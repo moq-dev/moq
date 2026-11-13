@@ -9,6 +9,7 @@
 //! subscribes, and the publisher then resets every group still on the wire.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 use moq_net::track::Delay;
 
@@ -18,7 +19,7 @@ use futures::channel::mpsc::TryRecvError;
 use futures::{SinkExt, StreamExt};
 
 use moq_net::track::Subscription;
-use moq_net::{Timestamp, Version};
+use moq_net::{Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -147,7 +148,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			let mut groups = Vec::new();
 			for key in 0..GROUPS {
 				let mut group = track.append_next().unwrap();
-				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
+				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
 				groups.push(group);
 				// IETF requests the live edge, so observe each header before advancing it.
 				match kio::clock::timeout(TIMEOUT, opened.next()).await.expect("head timeout") {
@@ -160,7 +161,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			// the subscriber, so the relay's downstream subscription has seen the end.
 			kio::clock::sleep(Duration::from_millis(100)).await;
 			for mut group in groups {
-				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
+				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
 				group.close().unwrap();
 			}
 		}
@@ -168,8 +169,8 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			upstream.server_transport.hold_unis();
 			for _ in 0..GROUPS {
 				let mut group = track.append_next().unwrap();
-				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
-				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
+				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
+				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
 				group.close().unwrap();
 				// IETF serves from the live edge, so let each group open its stream before
 				// the next one supersedes it.

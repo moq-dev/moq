@@ -10,6 +10,7 @@
 //! stream and are unchanged.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
@@ -76,7 +77,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 		)
 		.unwrap();
 	let mut cached = track.append_next().unwrap();
-	cached.write_frame(Timestamp::ZERO, b"cached".as_ref()).unwrap();
+	cached.write_frame(cached.at_start(), b"cached".as_ref()).unwrap();
 	cached.close().unwrap();
 	broadcast.announce().unwrap();
 

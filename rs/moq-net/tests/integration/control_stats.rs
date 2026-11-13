@@ -7,10 +7,11 @@ use crate::support::{
 	mock::create_mock_session_pair,
 };
 use moq_net::{
-	Timescale, Timestamp, origin,
+	Timescale, origin,
 	stats::{Message, Registry, Tier},
 };
 use crate::support::AppendNext;
+use crate::support::AtStart;
 
 fn origin() -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(Default::default());
@@ -55,7 +56,7 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		subscribed(&track).await;
 		let mut group = track.append_next().unwrap();
 		group
-			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![7; 64 * 1024]))
+			.write_frame(group.at_start(), bytes::Bytes::from(vec![7; 64 * 1024]))
 			.unwrap();
 		group.close().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();

@@ -7,6 +7,7 @@
 //! the fetches that report where the track ends.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::sync::Arc;
@@ -51,7 +52,7 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Rou
 		let mut group = track.append_next().unwrap();
 		for frame in 0..2 {
 			group
-				.write_frame(Timestamp::ZERO, format!("{key}-{frame}").into_bytes())
+				.write_frame(group.at_start(), format!("{key}-{frame}").into_bytes())
 				.unwrap();
 		}
 		group.close().unwrap();
@@ -328,7 +329,7 @@ async fn a_relay_serves_a_bounded_read_of_history_without_subscribing_upstream()
 fn write_group(track: &moq_net::track::Producer, key: u64) {
 	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 	for frame in frames(key) {
-		group.write_frame(Timestamp::ZERO, frame).unwrap();
+		group.write_frame(group.at_start(), frame).unwrap();
 	}
 	group.close().unwrap();
 }

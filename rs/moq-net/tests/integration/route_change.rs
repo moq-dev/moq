@@ -17,6 +17,7 @@
 //! same way.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::collections::BTreeMap;
@@ -256,7 +257,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 	// Group 0 in full through `A`.
 	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
-		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
+		group.write_frame(group.at_start(), payload(0, frame)).unwrap();
 		expected.push((0, payload(0, frame)));
 		seen.push(next(&mut rx).await);
 	}
@@ -276,7 +277,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 		if frame == split && split != 0 {
 			topology.trigger(trigger).await;
 		}
-		group.write_frame(Timestamp::ZERO, payload(1, frame)).unwrap();
+		group.write_frame(group.at_start(), payload(1, frame)).unwrap();
 		expected.push((1, payload(1, frame)));
 		seen.push(next(&mut rx).await);
 	}
@@ -285,7 +286,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 	// Group 2 entirely through the replacement.
 	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
-		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
+		group.write_frame(group.at_start(), payload(2, frame)).unwrap();
 		expected.push((2, payload(2, frame)));
 		seen.push(next(&mut rx).await);
 	}
@@ -327,7 +328,7 @@ async fn route_flaps(version: &str) {
 		{
 			topology.trigger(*trigger).await;
 		}
-		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
+		group.write_frame(group.at_start(), payload(0, frame)).unwrap();
 		expected.push((0, payload(0, frame)));
 		seen.push(next(&mut rx).await);
 	}
@@ -349,14 +350,14 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 
 	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
-		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
+		group.write_frame(group.at_start(), payload(0, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
 	}
 	group.close().unwrap();
 
 	topology.trigger(trigger).await;
 	let mut group = topology.track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
+	group.write_frame(group.at_start(), payload(1, 0)).unwrap();
 	settle().await;
 	match kio::clock::timeout(Duration::from_secs(10), rx.next())
 		.await
@@ -378,10 +379,10 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 		.expect("B serves a re-request");
 	let sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
-	group.write_frame(Timestamp::ZERO, payload(1, 1)).unwrap();
+	group.write_frame(group.at_start(), payload(1, 1)).unwrap();
 	group.close().unwrap();
 	let mut group = topology.track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, payload(2, 0)).unwrap();
+	group.write_frame(group.at_start(), payload(2, 0)).unwrap();
 	while next(&mut rx).await != (2, payload(2, 0)) {}
 }
 
@@ -437,7 +438,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	settle().await;
 
 	let mut group = track_a.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, tagged("A", 0, 0)).unwrap();
+	group.write_frame(group.at_start(), tagged("A", 0, 0)).unwrap();
 	group.close().unwrap();
 	assert_eq!(next(&mut rx).await, (0, tagged("A", 0, 0)), "{version}");
 
@@ -506,7 +507,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	let sub = second.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
 	let mut group = track_b.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, tagged("B", 0, 0)).unwrap();
+	group.write_frame(group.at_start(), tagged("B", 0, 0)).unwrap();
 	group.close().unwrap();
 	assert_eq!(next(&mut rx).await, (0, tagged("B", 0, 0)), "{version} {trigger:?}");
 }
@@ -529,7 +530,7 @@ async fn better_route_restarts(version: &str) {
 	}
 
 	let mut group = topology.track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
+	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 0)), "{version}");
 	let incumbent = consumer.request("live", None).await.unwrap();
 
@@ -543,7 +544,7 @@ async fn better_route_restarts(version: &str) {
 	}
 
 	// The incumbent's subscription carries on through `A`.
-	group.write_frame(Timestamp::ZERO, payload(0, 1)).unwrap();
+	group.write_frame(group.at_start(), payload(0, 1)).unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 1)), "{version}");
 
 	// A re-request resolves the better route on a fresh broadcast.
@@ -553,7 +554,7 @@ async fn better_route_restarts(version: &str) {
 	let mut fresh = read(sub);
 	group.close().unwrap();
 	let mut group = topology.track.append_next().unwrap();
-	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
+	group.write_frame(group.at_start(), payload(1, 0)).unwrap();
 	while next(&mut fresh).await != (1, payload(1, 0)) {}
 	assert_eq!(
 		next(&mut rx).await,
@@ -1307,7 +1308,7 @@ async fn producer_replaced(version: &str) {
 		let mut group = first.append_next().unwrap();
 		assert_eq!(group.start, key, "{version}");
 		for frame in 0..FRAMES {
-			group.write_frame(Timestamp::ZERO, payload(key, frame)).unwrap();
+			group.write_frame(group.at_start(), payload(key, frame)).unwrap();
 			assert_eq!(next(&mut rx).await, (key, payload(key, frame)), "{version}");
 		}
 		group.close().unwrap();
@@ -1324,7 +1325,7 @@ async fn producer_replaced(version: &str) {
 	// The application owns where the replacement starts, so it continues explicitly.
 	let mut group = second.create_group(moq_net::group::Info { start: 2 }).unwrap();
 	for frame in 0..FRAMES {
-		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
+		group.write_frame(group.at_start(), payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");
 	}
 	group.close().unwrap();

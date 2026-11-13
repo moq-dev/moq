@@ -9,11 +9,12 @@
 //! `used` with a round trip per hop in between.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Timestamp, Version, origin};
+use moq_net::{Version, origin};
 use support::{
 	harness::{MockConnectOptions, MockPair, connect_mock},
 	mock::MockSession,
@@ -98,7 +99,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 			kio::clock::sleep(STARTUP).await;
 			let track = request.accept(timed());
 			let mut group = track.append_next().unwrap();
-			group.write_frame(Timestamp::ZERO, b"key".as_ref()).unwrap();
+			group.write_frame(group.at_start(), b"key".as_ref()).unwrap();
 			served.0.borrow_mut().push((track, group));
 		}
 	});
@@ -191,7 +192,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		while let Ok(request) = dynamic.requested_track().await {
 			let track = request.accept(timed());
 			let mut group = track.append_next().unwrap();
-			group.write_frame(Timestamp::ZERO, b"key".as_ref()).unwrap();
+			group.write_frame(group.at_start(), b"key".as_ref()).unwrap();
 			served.borrow_mut().push((track, group));
 		}
 	});

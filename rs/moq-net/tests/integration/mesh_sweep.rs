@@ -22,11 +22,12 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 
-use moq_net::{Instance, Timescale, Timestamp, Version, cache, origin, stats, track};
+use moq_net::{Instance, Timescale, Version, cache, origin, stats, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 use crate::support::{self, Rng};
 use crate::support::AppendNext;
+use crate::support::AtStart;
 
 const VERSION: &str = "moq-lite-07-wip";
 
@@ -364,7 +365,7 @@ impl Mesh {
 				.unwrap();
 			let mut group = track.append_next().unwrap();
 			group
-				.write_frame(Timestamp::ZERO, bytes::Bytes::from(path.clone()))
+				.write_frame(group.at_start(), bytes::Bytes::from(path.clone()))
 				.unwrap();
 			group.close().unwrap();
 			route.announce().unwrap();

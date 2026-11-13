@@ -4,6 +4,7 @@
 //! subscriber on the far side of one session.
 
 use crate::support;
+use support::AtStart;
 use support::AppendNext;
 
 use std::time::Duration;
@@ -51,7 +52,7 @@ async fn after_abort(version: &str, hops: u32) {
 		.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.append_next().unwrap();
-	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
+	open.write_frame(open.at_start(), b"head".as_ref()).unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"head".as_ref());
 	track.abort(moq_net::Error::Cancel).unwrap();
@@ -92,7 +93,7 @@ async fn recreate(finish: bool) {
 	let remote = origin.consume().request("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
-	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
+	open.write_frame(open.at_start(), b"head".as_ref()).unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(group.start, 2);
 	group.read_frame().await.unwrap().unwrap();
