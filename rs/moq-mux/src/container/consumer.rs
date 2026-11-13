@@ -738,7 +738,13 @@ impl<F: Container> Consumer<F> {
 			let current_end = if let Some(current) = self.pending.front_mut()
 				&& current.start <= self.current
 			{
-				match current.poll_min_timestamp(waiter, &self.format, true) {
+				let polled = current.poll_min_timestamp(waiter, &self.format, true);
+				// A frame that landed since the read above is delivered, not judged: its end can
+				// reach the next group, and skipping there would throw it away as lost.
+				if current.ready() {
+					continue;
+				}
+				match polled {
 					Poll::Ready(Some(_)) => current.max_end,
 					_ => None,
 				}
@@ -1365,6 +1371,12 @@ impl<F: Container> GroupBuffer<F> {
 	}
 
 	/// Poll for the next frame from this group.
+	/// Whether [`Self::poll_read`] would hand out an item without reading the wire: a frame
+	/// looked ahead, or a marker it reached.
+	fn ready(&self) -> bool {
+		!self.buffered.is_empty() || self.markers.front().is_some_and(|(index, _)| *index <= self.delivered)
+	}
+
 	fn poll_read(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Event>, Failure<F::Error>>> {
 		loop {
 			if self.markers.front().is_some_and(|(index, _)| *index <= self.delivered) {
