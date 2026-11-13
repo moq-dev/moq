@@ -1802,6 +1802,58 @@ test("an update restores the hold a stale drop excused", async () => {
 	}
 });
 
+// Lite-07: a continuation judged against a stale drop while it waits out the copy it replaces holds
+// the end if an update reopened that drop meanwhile, as the copy it replaces would have.
+test("an update while a continuation waits keeps its hold on the end", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		// A stale drop overtakes the group's stream.
+		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
+		await drainReactions();
+
+		const first = handStream(version);
+		first.write(await liteFrame(0, new Uint8Array([1])));
+		void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), first.reader).catch(() => {});
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+
+		// SUBSCRIBE_FINISH starts the end's grace. The continuation arrives under the stale drop, and
+		// the update lands while it waits out the first copy.
+		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
+		await drainReactions();
+		const second = handStream(version);
+		second.write(await liteFrame(0, new Uint8Array([1])));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), second.reader);
+		track.update({ priority: 0, delay: { max: Duration.millis(60_000) } });
+		await drainReactions();
+
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
+		await clock.advance(GRACE.mul(3));
+		expect(fin).toBe(false);
+		second.write(await liteFrame(10, new Uint8Array([2])));
+		second.finish();
+		await running;
+		await request.finished;
+	} finally {
+		track.close();
+		subscriber.close();
+		installed.close();
+	}
+});
+
 // Lite-07: a malformed FRAME on a Group Stream ends only that stream and its group, never the
 // session: a Payload Length of 0, or a continuation that resends the cut frame at another size, ends
 // before completing it, or starts past the frames held. Mirrors the Rust `UniState::Group`.

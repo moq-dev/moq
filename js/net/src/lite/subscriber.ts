@@ -270,11 +270,9 @@ interface PausedGroup {
 // Whether a YIELDED reset of a stream being read pauses its group.
 interface Yielding {
 	verdict: YieldVerdict;
-	// The stream's hold on the subscription's end, which a drop naming its group excuses.
+	// The stream's hold on the subscription's end, which a drop naming its group excuses while
+	// that drop stands: see `excused`.
 	counted: Counted;
-	// The drop that excused its hold: a final one's stands, and the next update reopens a stale
-	// one's, restoring the hold.
-	excuse?: "stale" | "final";
 	// End the stream as reset with YIELDED: a later stream for its group proves the publisher
 	// reset it, even where the browser lost that reset.
 	supersede: () => void;
@@ -287,6 +285,26 @@ type YieldVerdict =
 	| { kind: "stale"; under: bigint; error: Error }
 	| { kind: "accounted-stale"; under: bigint; error: Error }
 	| { kind: "dropped"; error: Error };
+
+// Whether a drop that still stands under `update` accounts for the group, so the subscription's
+// end waits for its stream at most the grace: a browser can lose that stream's reset.
+function excused(verdict: YieldVerdict, update: bigint): boolean {
+	switch (verdict.kind) {
+		case "dropped":
+			return true;
+		case "stale":
+		case "accounted-stale":
+			return verdict.under >= update;
+		default:
+			return false;
+	}
+}
+
+// Excuse the stream's hold on the end, or restore it, as its verdict now says.
+function judge(yielding: Yielding, update: bigint): void {
+	if (excused(yielding.verdict, update)) yielding.counted.excuse();
+	else yielding.counted.restore();
+}
 
 function yieldError(verdict: YieldVerdict, update: bigint): Error | undefined {
 	switch (verdict.kind) {
@@ -3165,11 +3183,7 @@ export class Subscriber {
 			entry.maxDelay = update.maxDelay;
 			entry.tail.updated();
 			// A stream a stale drop excused holds the end again: that verdict no longer stands.
-			for (const yielding of entry.yielding?.values() ?? []) {
-				if (yielding.excuse !== "stale") continue;
-				yielding.excuse = undefined;
-				yielding.counted.restore();
-			}
+			for (const yielding of entry.yielding?.values() ?? []) judge(yielding, entry.update);
 			const held = hooks.supersedeStale(entry.track, judged(ranges));
 			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 			// again under the new number what is still stale, so the tail owes every stale run again.
@@ -3369,12 +3383,8 @@ export class Subscriber {
 				};
 				entry.yielding ??= new Map();
 				entry.yielding.set(group.sequence, yielding);
-				// A stale drop already accounted for the group, so the end waits for it at most the
-				// grace, until an update reopens that drop.
-				if (unowedUnder !== undefined) {
-					yielding.excuse = "stale";
-					counted.excuse();
-				}
+				// A stale drop that still stands may already account for the group.
+				judge(yielding, entry.update);
 			}
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
@@ -3489,12 +3499,6 @@ export class Subscriber {
 	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error, staleUnder?: bigint): void {
 		for (const [sequence, yielding] of entry.yielding ?? []) {
 			if (sequence < start || sequence >= end) continue;
-			// The drop accounts for the group, so the end no longer waits on its stream past the
-			// grace: a browser that lost the stream's reset would otherwise hold it forever. A final
-			// drop's excuse stands; the next update reopens a stale one's.
-			yielding.counted.excuse();
-			if (staleUnder === undefined) yielding.excuse = "final";
-			else if (yielding.excuse !== "final") yielding.excuse = "stale";
 			const verdict = yielding.verdict;
 			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
 			else if (verdict.kind !== "dropped")
@@ -3506,6 +3510,9 @@ export class Subscriber {
 					under: staleUnder,
 					error,
 				};
+			// A drop that stands accounts for the group, so the end no longer waits on its stream
+			// past the grace: a browser that lost the stream's reset would otherwise hold it forever.
+			judge(yielding, entry.update);
 		}
 		const paused = entry.paused;
 		if (!paused) return;
