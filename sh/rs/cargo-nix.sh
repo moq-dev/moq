@@ -28,7 +28,11 @@ if [[ -n "$check" ]]; then
     cp nix/crate-hashes.json "$hashes"
 fi
 
-"$crate2nix" generate -f Cargo.toml -o "$plan" -h "$hashes" >/dev/null
+# Quiet unless it fails: it warns about every crate the uniffi fork shadows.
+if ! log=$("$crate2nix" generate -f Cargo.toml -o "$plan" -h "$hashes" 2>&1); then
+    printf '%s\n' "$log" >&2
+    exit 1
+fi
 nixfmt "$plan"
 
 if [[ -n "$check" ]]; then
