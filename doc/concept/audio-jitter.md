@@ -721,8 +721,8 @@ playhead ahead of the clock back onto it. These are NetEq's thresholds and
 rates, untuned. A moved target moves the clock, so a rise leaves audio ahead of
 it and a fall leaves audio behind, and both become ordinary slowing down and
 speeding up: nothing parks in silence on a rise, and nothing skips buffered
-audio on a fall within the bound. A fall past it skips onto the clock, as any
-lag past it does.
+audio on a fall, within the bound. Past it, a fall skips onto the clock and a
+rise pads silence until the clock arrives, as any lag past it does.
 
 Without a clock reading the target is where the playhead belongs, so
 `lag = level - target`. The browser then never skips; native playback bounds
@@ -732,8 +732,10 @@ the lag at three quarters of its ring's capacity above the target.
 
 A playhead that trails the clock by more than `bound`, or one window when that
 is larger, skips onto the clock, dropping the staged window and the audio it
-passes, as video skips the frames a stall made late. Less than that is the
-stretch's to catch up. A join is the exception: until
+passes, as video skips the frames a stall made late. One that leads the clock
+by as much, as a target rise past the bound leaves it, plays silence until the
+clock reaches it, dropping nothing. Less than that either way is the stretch's
+to catch up. A join is the exception: until
 the player has read once on the clock, its bound is zero, so the backlog a
 subscription opens on is skipped rather than played out at the stretch's pace,
 and playback starts on the clock. A shared clock whose reference moves earlier,

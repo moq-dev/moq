@@ -5,8 +5,9 @@
 //! It opens primed with silence to its latency, can pad back up to it when the
 //! writer falls behind, and can trim back down to it when the writer runs ahead.
 //! Native playback instead enables received-audio stretch, which plays the
-//! queue onto the writer's clock (see [`Producer::due`]) and skips audio that
-//! trails it too far onto it; an actual underrun refills with emergency silence,
+//! queue onto the writer's clock (see [`Producer::due`]), skips audio that
+//! trails it too far onto it, and pads silence ahead of audio that leads it
+//! too far until the clock arrives; an actual underrun refills with emergency silence,
 //! which never enters the pitch search, until one window is queued again. A
 //! clock with a zero stretch turns the stretch off: the queue plays as written,
 //! and a reader more than a window off the clock skips onto it or pads silence
@@ -820,17 +821,22 @@ impl Consumer {
 		!self.shared.clocked.load(Ordering::Acquire) || self.shared.anchor.load(Ordering::Acquire) >> 32 != 0
 	}
 
-	/// With the stretch off, pad silence ahead of the queue once the reader is
-	/// more than a window ahead of the clock, until the clock reaches it,
-	/// returning the samples padded. The stretch would slow down instead.
+	/// Pad silence ahead of the queue once the reader is ahead of the clock by
+	/// more than its bound, or one window when that is larger, as a target rise
+	/// leaves it, until the clock reaches it, returning the samples padded.
+	/// Less than that is the stretch's to slow down onto.
 	fn pad(&mut self, output: &mut [f32]) -> usize {
 		let Some(window) = self.stretch.as_ref().map(|stretch| stretch.window) else {
 			return 0;
 		};
-		let lead = -self.inputs(0).lag;
-		let off =
-			!self.stretching() && !self.refill && !self.shared.finished.load(Ordering::Relaxed) && !self.declared();
-		self.padding = off && lead > if self.padding { 0 } else { window as i64 };
+		let inputs = self.inputs(0);
+		let lead = -inputs.lag;
+		let eligible = self.shared.clocked.load(Ordering::Acquire)
+			&& !self.refill
+			&& !self.shared.finished.load(Ordering::Relaxed)
+			&& !self.declared();
+		let threshold = inputs.bound.max(window as i64);
+		self.padding = eligible && lead > if self.padding { 0 } else { threshold };
 		if !self.padding {
 			return 0;
 		}
@@ -1450,6 +1456,52 @@ mod tests {
 		assert_eq!(cons.skips(), 2);
 		let left = cons.available() as f64 * 1000.0 / rate as f64;
 		assert!((940.0..960.0).contains(&left), "{left} ms left");
+	}
+
+	/// A reader ahead of the clock within its bound is the stretch's to slow
+	/// down onto; past it, as a target rise leaves it, it pads silence until the
+	/// clock reaches it, dropping nothing.
+	#[test]
+	fn audio_ahead_past_the_bound_pads_onto_the_clock() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
+		let base = prod.base;
+		let mut out = vec![0.0; 480 * 2];
+		for _ in 0..100 {
+			assert_eq!(prod.push(&pcm), Push::Ok);
+		}
+		let bound = Duration::from_millis(200);
+		prod.due(base + Duration::from_millis(2010), bound, Duration::ZERO);
+		assert_eq!(pull(&mut cons, &mut out, base), Read::Ok);
+		assert_eq!(pull(&mut cons, &mut out, base + Duration::from_millis(10)), Read::Ok);
+		let mut now = base + Duration::from_millis(20);
+
+		// 100 ms ahead: within the bound, so audio keeps playing.
+		prod.due(base + Duration::from_millis(2110), bound, Duration::ZERO);
+		assert_eq!(pull(&mut cons, &mut out, now), Read::Ok);
+		assert!(out.iter().any(|sample| *sample != 0.0));
+		now += Duration::from_millis(10);
+
+		// 300 ms ahead: silence until the clock reaches the reader.
+		prod.due(base + Duration::from_millis(2310), bound, Duration::ZERO);
+		let available = cons.available();
+		let lead = -cons.inputs(0).lag;
+		// The 10 ms it played since add to the 300.
+		assert!((14_400..=15_360).contains(&lead), "{lead} frames ahead");
+		let mut padded = 0;
+		loop {
+			assert_eq!(pull(&mut cons, &mut out, now), Read::Ok);
+			now += Duration::from_millis(10);
+			if out.iter().any(|sample| *sample != 0.0) {
+				break;
+			}
+			padded += 1;
+			assert!(padded <= 32, "never caught up");
+		}
+		assert!(padded >= 30, "padded {padded} reads");
+		assert!(cons.available() <= available, "padding plays nothing written");
+		assert_eq!(cons.skips(), 0);
+		assert!(cons.inputs(0).lag.abs() <= 480, "lag {}", cons.inputs(0).lag);
 	}
 
 	/// A zero stretch plays what was written unaltered: a lag under a window

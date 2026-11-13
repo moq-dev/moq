@@ -193,7 +193,8 @@ delay instead. Audio and video play from one clock and stay in sync while both
 arrive on time. After a stall, video shows each late frame as it arrives, while
 audio slows down and falls behind the clock rather than dropping what arrives
 late, then speeds up until it is back on it. Audio that trails by more than
-`--stretch` (default 200 ms) skips onto the clock, as video does. `--stretch 0` plays
+`--stretch` (default 200 ms) skips onto the clock, as video does, and audio
+that leads it by as much waits in silence. `--stretch 0` plays
 received audio unaltered: late audio is skipped, an underrun is silence, and
 drift against the publisher's clock is corrected by a small skip or pad.
 Each role follows the catalog, switching rendition when the publisher retires

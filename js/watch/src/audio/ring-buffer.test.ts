@@ -1237,6 +1237,38 @@ describe("time stretch", () => {
 		expect(buffer.underruns).toBe(0);
 	});
 
+	// A playhead ahead of the clock within the bound is the stretch's to slow down onto; past it, as a
+	// target rise leaves it, it pads silence until the clock reaches it, dropping nothing.
+	it("pads a playhead ahead of the clock past its bound onto it", () => {
+		const buffer = live(100, { bound: 200 });
+		write(buffer, 0, frames(800), { value: 0.5 });
+		buffer.clock(0);
+		read(buffer, QUANTUM, 1);
+		const quantum = (QUANTUM * 1_000_000) / RATE;
+
+		// 100 ms ahead: within the bound, so audio keeps playing.
+		let clock = buffer.timestamp - 100_000;
+		buffer.clock(clock);
+		expect(read(buffer, QUANTUM, 1)[0].some((sample) => sample !== 0)).toBe(true);
+		clock += quantum;
+
+		// 300 ms ahead: silence until the clock reaches the playhead.
+		clock = buffer.timestamp - 300_000;
+		const playhead = buffer.timestamp;
+		let padded = 0;
+		for (;;) {
+			buffer.clock(clock);
+			const [output] = read(buffer, QUANTUM, 1);
+			clock += quantum;
+			if (output.some((sample) => sample !== 0)) break;
+			padded++;
+		}
+		expect(padded).toBe(Math.floor(300_000 / quantum));
+		expect(buffer.timestamp).toBeGreaterThan(playhead);
+		expect(buffer.skips).toBe(0);
+		expect(buffer.underruns).toBe(0);
+	});
+
 	// Audio the stretch could still catch up on plays; what trails the clock past the bound, or one
 	// window when that is larger, skips onto the clock.
 	for (const bound of [0, 200]) {

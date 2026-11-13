@@ -46,7 +46,8 @@ export type SyncInput = {
 	 * How far audio may trail the clock before it skips onto it (default: 200 ms).
 	 *
 	 * Within this, audio that falls behind the clock, as after a stall, speeds up until it is back on
-	 * it; past it, audio skips onto the clock, as video does. A buffered player already keeps its
+	 * it; past it, audio skips onto the clock, as video does. Audio that leads the clock by more than
+	 * this, as a rise in the delay leaves it, waits for it in silence. A buffered player already keeps its
 	 * whole lookahead, so audio skips only past the larger of the two. This sizes nothing else: the
 	 * audio subscription reaches 2 s past the delay whatever it is set to.
 	 *

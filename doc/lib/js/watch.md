@@ -226,7 +226,8 @@ once. Audio cannot skip without losing what arrives late, so it slows down
 slightly when the audio received ahead of it runs low, falls behind the clock,
 and speeds back up once it recovers until it is back on it. Audio that trails
 by more than `stretch`, 200 ms by default, skips onto the clock as video does,
-so a long stall costs one skip instead of seconds of lag.
+so a long stall costs one skip instead of seconds of lag, and audio that leads
+it by as much, as when the delay rises, waits for it in silence.
 
 `stretch="0"` turns the time stretch off, for content where a pitch-period
 splice is audible, such as music: received audio plays unaltered, late audio
