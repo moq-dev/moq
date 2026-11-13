@@ -502,6 +502,8 @@ pub struct Consumer {
 	// The absolute index of the next datagram to read.
 	cursor: u64,
 	stats: stats::Scope,
+	// A wire publisher counts each datagram once the transport takes it, see [`Self::delegate`].
+	delegated: bool,
 }
 
 impl Consumer {
@@ -520,6 +522,7 @@ impl Consumer {
 			slot: Some(slot),
 			cursor,
 			stats,
+			delegated: false,
 		})
 	}
 
@@ -535,7 +538,16 @@ impl Consumer {
 			slot: None,
 			cursor,
 			stats: stats::Scope::default(),
+			delegated: false,
 		}
+	}
+
+	/// Stop counting datagrams as they are read, and return the meter a wire publisher
+	/// counts each one on once the transport takes it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn delegate(&mut self) -> stats::Meter {
+		self.delegated = true;
+		self.stats.meter()
 	}
 
 	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
@@ -587,7 +599,9 @@ impl Consumer {
 		let datagram = state.buffer[(index - state.offset) as usize].clone();
 		drop(state);
 		self.cursor = index + 1;
-		self.stats.meter().datagram(datagram.payload.len() as u64);
+		if !self.delegated {
+			self.stats.meter().datagram(datagram.payload.len() as u64);
+		}
 		Poll::Ready(Ok(Some(datagram)))
 	}
 
@@ -615,6 +629,7 @@ impl Consumer {
 			slot,
 			cursor: self.cursor,
 			stats: self.stats.clone(),
+			delegated: false,
 		}
 	}
 
@@ -638,6 +653,7 @@ impl Clone for Consumer {
 			slot,
 			cursor: self.cursor,
 			stats: self.stats.clone(),
+			delegated: self.delegated,
 		}
 	}
 }

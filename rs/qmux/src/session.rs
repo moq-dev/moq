@@ -608,6 +608,11 @@ impl poll::SendStream for SendStream {
 		let offset = stream.offset();
 		Some(stream.acked(offset).unwrap_or(false))
 	}
+
+	/// The bytes the transport took, which a reliable transport delivers.
+	fn delivered(&self) -> Option<u64> {
+		Some(self.inner.lock().conn.send_stream(self.id).acked_len())
+	}
 }
 
 impl Drop for SendStream {

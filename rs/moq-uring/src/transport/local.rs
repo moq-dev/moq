@@ -158,6 +158,10 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 	fn acknowledged(&self) -> Option<bool> {
 		self.0.acknowledged()
 	}
+
+	fn delivered(&self) -> Option<u64> {
+		self.0.delivered()
+	}
 }
 
 impl<T: poll::RecvStream> poll::RecvStream for Local<T> {

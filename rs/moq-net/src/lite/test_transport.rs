@@ -601,6 +601,8 @@ pub struct SinkSession {
 	bi_open_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
 	uni_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::stepped_uni`] to cap each unidirectional stream's writes.
+	uni_budget: Option<kio::Consumer<usize>>,
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
 	uni_open_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::with_unacked_fin`].
@@ -710,6 +712,14 @@ impl SinkSession {
 		}
 	}
 
+	/// Open unidirectional streams immediately, each accepting only `budget` writes.
+	pub fn stepped_uni(budget: kio::Consumer<usize>) -> Self {
+		Self {
+			uni_budget: Some(budget),
+			..Default::default()
+		}
+	}
+
 	/// Hold unidirectional stream opens until `gate` grants stream credit.
 	pub fn gated_open_uni(gate: kio::Consumer<bool>) -> Self {
 		Self::default().with_open_uni_gate(gate)
@@ -778,9 +788,10 @@ impl poll::Session for SinkSession {
 				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
 			}
 		}
-		let mut send = match &self.uni_gate {
-			Some(gate) => SinkSend::gated(self.log.clone(), gate.clone()),
-			None => SinkSend::new(self.log.clone()),
+		let mut send = match (&self.uni_gate, &self.uni_budget) {
+			(Some(gate), _) => SinkSend::gated(self.log.clone(), gate.clone()),
+			(None, Some(budget)) => SinkSend::stepped(self.log.clone(), budget.clone()),
+			(None, None) => SinkSend::new(self.log.clone()),
 		};
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok(send.opened(options)))

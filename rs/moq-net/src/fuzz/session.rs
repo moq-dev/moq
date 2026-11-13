@@ -1015,6 +1015,10 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 	fn acknowledged(&self) -> Option<bool> {
 		self.inner.acknowledged()
 	}
+
+	fn delivered(&self) -> Option<u64> {
+		self.inner.delivered()
+	}
 }
 
 impl poll::RecvStream for Recorded<memory::RecvStream> {

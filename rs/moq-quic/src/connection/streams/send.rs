@@ -292,6 +292,11 @@ impl Send {
 		self.pending.offset()
 	}
 
+	/// The end of the acknowledged prefix
+	pub(super) fn acked_len(&self) -> u64 {
+		self.pending.acked()
+	}
+
 	pub(super) fn is_pending(&self) -> bool {
 		self.pending.has_unsent_data() || matches!(self.state, SendState::DataSent { fin_pending: true, .. })
 	}
@@ -512,6 +517,19 @@ impl<'a> Stream<'a> {
 			id: self.id,
 			tag: self.state.tag,
 			value,
+		}
+	}
+
+	/// How many leading bytes of the stream the peer acknowledged, each counted once
+	///
+	/// Like [`Self::acked`], an acknowledgment only means the peer's QUIC stack holds the data.
+	/// After a reset, the prefix acknowledged before the stream was freed. Zero once the stream
+	/// is gone.
+	pub fn acked_len(&self) -> u64 {
+		match self.state.send.get(&self.id) {
+			Some(Some(stream)) => stream.acked_len(),
+			Some(None) => 0,
+			None => self.state.ends.get(&self.id).map_or(0, |&(_, acked)| acked),
 		}
 	}
 

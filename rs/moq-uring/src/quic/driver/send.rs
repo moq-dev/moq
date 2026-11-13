@@ -152,6 +152,11 @@ impl Stream {
 		self.0.acknowledged()
 	}
 
+	/// How many leading bytes the peer acknowledged.
+	pub(crate) fn acked_len(&self) -> u64 {
+		self.0.acked_len()
+	}
+
 	/// Move the stream into a send group, or with `None` back to the ungrouped streams, which
 	/// go before every group.
 	///
@@ -200,6 +205,11 @@ impl Finished {
 	/// Whether the peer acknowledged every byte written. See [`Stream::acknowledged()`].
 	pub(crate) fn acknowledged(&self) -> bool {
 		self.0.acknowledged()
+	}
+
+	/// How many leading bytes the peer acknowledged. See [`Stream::acked_len()`].
+	pub(crate) fn acked_len(&self) -> u64 {
+		self.0.acked_len()
 	}
 
 	/// Move the stream into a send group. See [`Stream::set_group()`].
@@ -278,6 +288,11 @@ impl Half {
 		let mut stream = conn.send_stream(self.id);
 		let offset = stream.offset();
 		stream.acked(offset).unwrap_or(false)
+	}
+
+	/// How many leading bytes the peer acknowledged, each counted once.
+	fn acked_len(&self) -> u64 {
+		self.shared.conn.borrow_mut().send_stream(self.id).acked_len()
 	}
 
 	fn set_group(&mut self, group: Option<&Group>) {

@@ -19,6 +19,10 @@ pub struct Writer<S: crate::transport::poll::SendStream, V> {
 	flushed: usize,
 	version: V,
 	stats: crate::stats::Session,
+	/// Bytes the stream took through this writer.
+	written: u64,
+	/// The payload this stream carries, billed as the transport delivers it. See [`Self::bill`].
+	delivery: Option<Box<crate::stats::Delivery>>,
 }
 
 impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
@@ -30,6 +34,34 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			flushed: 0,
 			version,
 			stats: Default::default(),
+			written: 0,
+			delivery: None,
+		}
+	}
+
+	/// Bill the frames announced through [`Self::frame`] to `meter`, each byte once the
+	/// transport delivered it.
+	/// A stream carrying several groups bills all of them to the first meter: a stream serves one
+	/// track, so they count alike.
+	pub(crate) fn bill(&mut self, meter: crate::stats::Meter) {
+		if self.delivery.is_none() && meter.is_tracked() {
+			self.delivery = Some(Box::new(crate::stats::Delivery::new(meter)));
+		}
+	}
+
+	/// The next `size` bytes written after what is buffered are one frame's payload.
+	pub(crate) fn frame(&mut self, size: u64) {
+		self.settle();
+		let start = self.written + (self.buffer.len() - self.flushed) as u64;
+		if let Some(delivery) = &mut self.delivery {
+			delivery.frame(start, size);
+		}
+	}
+
+	/// Bill the payload the transport has delivered so far.
+	fn settle(&mut self) {
+		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
+			delivery.deliver(delivered(stream, self.written));
 		}
 	}
 
@@ -87,7 +119,10 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		while self.flushed < self.buffer.len() {
 			let stream = self.stream.as_mut().unwrap();
 			match ready!(stream.poll_write(waiter, &self.buffer[self.flushed..])) {
-				Ok(n) => self.flushed += n,
+				Ok(n) => {
+					self.flushed += n;
+					self.written += n as u64;
+				}
 				Err(err) => {
 					self.buffer.clear();
 					self.flushed = 0;
@@ -130,11 +165,10 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// stream never reorders around the buffer.
 	pub fn poll_write<Buf: bytes::Buf>(&mut self, waiter: &kio::Waiter, buf: &mut Buf) -> Poll<Result<usize, Error>> {
 		ready!(self.poll_flush(waiter))?;
-		self.stream
-			.as_mut()
-			.unwrap()
-			.poll_write_buf(waiter, buf)
-			.map_err(|err| self.version.transport_error(err))
+		let written = ready!(self.stream.as_mut().unwrap().poll_write_buf(waiter, buf))
+			.map_err(|err| self.version.transport_error(err))?;
+		self.written += written as u64;
+		Poll::Ready(Ok(written))
 	}
 
 	/// Write the entire `Buf` to the stream.
@@ -171,6 +205,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// Consumes the writer: a later write won't compile, and the [`Drop`] fallback can't
 	/// reset a second time and overwrite the reason with a plain [`Error::Cancel`].
 	pub fn abort(mut self, err: &Error) {
+		self.settle();
 		if let Some(mut stream) = self.stream.take() {
 			// The code comes from the negotiated protocol's registry: the same number means
 			// different things on the two wires, so the version is what picks the table.
@@ -181,6 +216,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// Reset the stream with `code`, for a condition no [`StreamError`] names, which the
 	/// caller has already looked up in the negotiated protocol's registry.
 	pub(crate) fn reset(mut self, code: u32) {
+		self.settle();
 		if let Some(mut stream) = self.stream.take() {
 			stream.reset(code);
 		}
@@ -216,23 +252,26 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			self.abort(&Error::Cancel);
 			return Err(Error::Cancel);
 		}
+		self.settle();
 		let version = self.version.clone();
 		let mut stream = self.stream.take();
 		if let Some(stream) = &mut stream {
 			stream.finish().map_err(|err| version.transport_error(err))?;
 		}
-		Ok(Closing { stream, version })
+		Ok(Closing {
+			stream,
+			version,
+			written: self.written,
+			delivery: self.delivery.take(),
+		})
 	}
 
 	/// Resolves once the stream is closed, or the [Self::finish] is acknowledged by the peer.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let version = &self.version;
-		self.stream
-			.as_mut()
-			.unwrap()
-			.poll_closed(waiter)
-			.map_err(|err| version.transport_error(err))
+		let closed = ready!(self.stream.as_mut().unwrap().poll_closed(waiter));
+		self.settle();
+		Poll::Ready(closed.map_err(|err| self.version.transport_error(err)))
 	}
 
 	/// Poll-friendly [`Self::close`] for a finished writer: once the peer acknowledges
@@ -269,16 +308,26 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			flushed: self.flushed,
 			version,
 			stats: self.stats.clone(),
+			written: self.written,
+			delivery: self.delivery.take(),
 		}
 	}
+}
+
+/// How much of the `written` bytes the transport delivered: what it reports, or what it took
+/// when it cannot tell.
+fn delivered<S: crate::transport::poll::SendStream>(stream: &S, written: u64) -> u64 {
+	stream.delivered().unwrap_or(written).min(written)
 }
 
 /// A [`Writer`] whose stream has sent its FIN, waiting for the peer to acknowledge it.
 ///
 /// Dropping it never resets the stream, so what was written still arrives.
-pub struct Closing<S, V> {
+pub struct Closing<S: crate::transport::poll::SendStream, V> {
 	stream: Option<S>,
 	version: V,
+	written: u64,
+	delivery: Option<Box<crate::stats::Delivery>>,
 }
 
 impl<S: crate::transport::poll::SendStream, V: StreamCodes> Closing<S, V> {
@@ -287,9 +336,23 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Closing<S, V> {
 		let Some(stream) = &self.stream else {
 			return Poll::Ready(Ok(()));
 		};
-		stream
-			.poll_closed(waiter)
-			.map_err(|err| self.version.transport_error(err))
+		let closed = ready!(stream.poll_closed(waiter));
+		self.settle();
+		Poll::Ready(closed.map_err(|err| self.version.transport_error(err)))
+	}
+}
+
+impl<S: crate::transport::poll::SendStream, V> Closing<S, V> {
+	fn settle(&mut self) {
+		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
+			delivery.deliver(delivered(stream, self.written));
+		}
+	}
+}
+
+impl<S: crate::transport::poll::SendStream, V> Drop for Closing<S, V> {
+	fn drop(&mut self) {
+		self.settle();
 	}
 }
 
@@ -321,6 +384,9 @@ impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 
 impl<S: crate::transport::poll::SendStream, V> Drop for Writer<S, V> {
 	fn drop(&mut self) {
+		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
+			delivery.deliver(delivered(stream, self.written));
+		}
 		if let Some(mut stream) = self.stream.take() {
 			// Unlike the Quinn default, we abort the stream on drop.
 			//
@@ -438,6 +504,83 @@ mod tests {
 				.iter()
 				.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish))
 		);
+	}
+
+	/// A stream that takes every write, with a delivered prefix the test moves.
+	struct Acked(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+	impl crate::transport::poll::SendStream for Acked {
+		type Error = Stopped;
+		type Group = crate::transport::poll::Ungrouped;
+
+		fn poll_write(&mut self, _: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+			Poll::Ready(Ok(buf.len()))
+		}
+
+		fn set_priority(&mut self, _: i64) {}
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		fn reset(&mut self, _: u32) {}
+
+		fn poll_closed(&self, _: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+			Poll::Pending
+		}
+
+		fn delivered(&self) -> Option<u64> {
+			Some(self.0.load(std::sync::atomic::Ordering::Relaxed))
+		}
+	}
+
+	/// A frame's bytes bill as the transport delivers them, not as the stream takes them,
+	/// and the frame once its last byte is: a reset never bills what it discarded.
+	#[test]
+	fn egress_bills_delivered_payload() {
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let billed = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
+				.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
+		};
+		let acked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let mut writer = Writer::new(Acked(acked.clone()), crate::lite::Version::Lite05);
+		writer.bill(registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default()));
+		let waiter = &kio::Waiter::noop();
+
+		// A one-byte header, then two 100-byte frames, each behind a two-byte size.
+		writer.buffer_varint(0).unwrap();
+		for _ in 0..2 {
+			writer.buffer_varint(100).unwrap();
+			writer.frame(100);
+			writer.buffer_raw(&[b'x'; 100]);
+		}
+		assert!(writer.poll_flush(waiter).is_ready());
+		writer.settle();
+		assert_eq!(billed(), (0, 0), "the stream took it all, the transport delivered none");
+
+		// Into the first frame's size: none of its payload.
+		acked.store(2, std::sync::atomic::Ordering::Relaxed);
+		writer.settle();
+		assert_eq!(billed(), (0, 0));
+
+		// Through the first frame and half the second.
+		acked.store(3 + 100 + 2 + 50, std::sync::atomic::Ordering::Relaxed);
+		writer.settle();
+		assert_eq!(billed(), (150, 1));
+
+		// A reset bills what was delivered by then, and nothing after.
+		acked.store(3 + 100 + 2 + 80, std::sync::atomic::Ordering::Relaxed);
+		writer.abort(&Error::Cancel);
+		assert_eq!(billed(), (180, 1));
 	}
 
 	/// Writes some bytes, then errors: the shape of a partial encode.

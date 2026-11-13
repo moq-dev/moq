@@ -2647,7 +2647,8 @@ impl Request for SubscribeServe {
 				} => {
 					if send.is_none() {
 						let info = ready!(consumer.poll_info(waiter))?;
-						*send = Some(DatagramSend::new(shared, *id, info, *priority));
+						let meter = consumer.delegate();
+						*send = Some(DatagramSend::new(shared, *id, info, *priority, meter));
 					}
 					let send = send.as_ref().expect("set above");
 					return match ready!(consumer.poll_recv(waiter))? {
@@ -2908,7 +2909,8 @@ impl LegacyDatagrams {
 				return Poll::Ready(false);
 			};
 			let info = info.with_timescale(self.timescale);
-			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority));
+			let meter = self.consumer.delegate();
+			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority, meter));
 		}
 		let send = self.send.as_ref().expect("set above");
 		match ready!(self.consumer.poll_recv(waiter)) {
@@ -2931,10 +2933,12 @@ struct DatagramSend {
 	publisher: i8,
 	/// The subscription's send group, or `None` on a transport without groups.
 	group: Option<GroupOf<Transport>>,
+	/// Counts each datagram the transport takes.
+	meter: crate::stats::Meter,
 }
 
 impl DatagramSend {
-	fn new(shared: &Shared, id: u64, info: datagram::Info, priority: i8) -> Self {
+	fn new(shared: &Shared, id: u64, info: datagram::Info, priority: i8, meter: crate::stats::Meter) -> Self {
 		let session = shared.session.clone();
 		let group = session.send_group(crate::priority::group(priority, info.priority));
 		Self {
@@ -2945,6 +2949,7 @@ impl DatagramSend {
 			runtime: shared.runtime.clone(),
 			publisher: info.priority,
 			group,
+			meter,
 		}
 	}
 
@@ -2971,6 +2976,7 @@ impl DatagramSend {
 			return Ok(());
 		};
 		let sequence = datagram.sequence;
+		let size = datagram.payload.len();
 		let body = lite::Datagram {
 			subscribe: self.id,
 			sequence,
@@ -2989,7 +2995,9 @@ impl DatagramSend {
 			group: self.group.as_ref(),
 			priority: crate::priority::in_group(sequence, 0, Order::Descending),
 		};
-		let _ = self.session.send_datagram(body, options);
+		if self.session.send_datagram(body, options).is_ok() {
+			self.meter.datagram(size as u64);
+		}
 		Ok(())
 	}
 }
@@ -3068,7 +3076,8 @@ impl Request for DatagramServe {
 			// Ahead of the datagrams, which a subscriber drops until it lands.
 			writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
 			writer.buffer(&lite::DatagramsInfo::from(info))?;
-			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority));
+			let meter = self.consumer.delegate();
+			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority, meter));
 		}
 		ready!(writer.poll_flush(waiter))?;
 		let send = self.send.as_ref().expect("set above");
@@ -3248,6 +3257,7 @@ impl Request for FetchServe {
 					if shared.version.has_compression() {
 						group = group.compressed();
 					}
+					writer.bill(group.delegate());
 					let capped = msg.end_frame.is_some();
 					let timescale = stamp.map(|stamp| stamp.timescale);
 					let records = lite::ietf::Records::new(ietf, capped, timescale);
@@ -4619,6 +4629,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if !length_first {
 		writer.buffer_varint(size)?;
 	}
+	writer.frame(size);
 	Ok(())
 }
 
@@ -6476,6 +6487,8 @@ struct GroupServe {
 	state: GroupState,
 	// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
+	/// Bills the group's payload as each stream delivers it.
+	meter: crate::stats::Meter,
 }
 
 #[cfg_attr(
@@ -6522,10 +6535,11 @@ impl GroupServe {
 		group: group::Consumer,
 	) -> Self {
 		// A lite-07 peer receives a compressed group as stored, others inflated.
-		let group = match ctx.version.has_compression() {
+		let mut group = match ctx.version.has_compression() {
 			true => group.compressed(),
 			false => group,
 		};
+		let meter = group.delegate();
 		let rewind = Self::yields(&ctx).then(|| group.clone());
 		Self {
 			rewind,
@@ -6540,6 +6554,7 @@ impl GroupServe {
 			prev_ts: 0,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
+			meter,
 		}
 	}
 
@@ -6596,6 +6611,7 @@ impl GroupServe {
 		};
 		self.settle_open(true);
 		let mut writer = Writer::new(stream, self.ctx.version);
+		writer.bill(self.meter.clone());
 
 		let msg = lite::Group {
 			subscribe: self.ctx.id,
@@ -7228,6 +7244,85 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// Egress counts only payload the transport took: a group reset while its frames wait in
+	/// the read-ahead batch bills none of them, and one served whole bills every byte.
+	#[kio::test]
+	async fn egress_bills_only_payload_the_transport_took() {
+		const FRAME: usize = 1000;
+		const FRAMES: usize = 4;
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let billed = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.filter(|(_, role, _)| *role == crate::stats::Role::Publisher)
+				.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
+				.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
+		};
+		// The payload bytes among `writes`: everything but the frames' headers.
+		let payload = |writes: &[u8]| writes.iter().filter(|byte| **byte == b'x').count() as u64;
+
+		for (budget, sent_frames) in [(2, 0), (usize::MAX, FRAMES)] {
+			let budget = kio::Producer::new(budget);
+			let session = SinkSession::stepped_uni(budget.consume());
+			let log = session.log.clone();
+			let steer = kio::Producer::new(Steer::default());
+			let subscription = Subscription {
+				session: crate::driver::Transport::new(session.clone()),
+				id: 0,
+				track_name: "test".into(),
+				priority: PriorityQueue::default(),
+				publisher: 0,
+				group: None,
+				steer: steer.consume(),
+				steer_seen: Steer::default(),
+				version: Version::Lite06,
+				stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
+				runtime: crate::time::sim(),
+				outcomes: Default::default(),
+				ietf: false,
+			};
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut subscriber = track.subscribe(None);
+			let mut group = track.append_group().unwrap();
+			for _ in 0..FRAMES {
+				group.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
+			}
+			group.finish().unwrap();
+			let before = billed();
+			let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
+			let consumer = subscriber
+				.recv_group()
+				.await
+				.unwrap()
+				.expect("the group")
+				.with_meter(meter);
+
+			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+			let serve = subscription.serve_group(0, 0, handle, consumer);
+			if sent_frames == FRAMES {
+				serve.await.unwrap();
+			} else {
+				let mut serve = Box::pin(serve);
+				assert!(
+					futures::poll!(serve.as_mut()).is_pending(),
+					"the transport took 2 writes"
+				);
+				drop(serve);
+				assert!(!log.resets().is_empty(), "the unserved group resets");
+			}
+			let (bytes, frames) = billed();
+			let sent = payload(&log.writes.lock().unwrap());
+			assert_eq!(sent, (sent_frames * FRAME) as u64, "budget {:?}", *budget.read());
+			assert_eq!((bytes - before.0, frames - before.1), (sent, sent_frames as u64));
+		}
 	}
 
 	/// A group parked at its tail when the budget gives up resets with `Old`. A FIN would
@@ -7874,6 +7969,7 @@ mod serve_group_test {
 			runtime: crate::time::sim(),
 			publisher: 0,
 			group,
+			meter: crate::stats::Meter::default(),
 		}
 	}
 

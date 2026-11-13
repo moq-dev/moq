@@ -6703,6 +6703,8 @@ enum ServePhase {
 /// Forwards a broadcast's datagram track; dropped once that track ends or fails.
 struct DatagramForward {
 	consumer: crate::datagram::Consumer,
+	/// Counts each datagram the transport takes.
+	meter: crate::stats::Meter,
 	timescale: Option<Timescale>,
 	/// The datagram track's priority, once its info resolved.
 	publisher: Option<i8>,
@@ -6771,7 +6773,9 @@ impl TrackServe {
 		if demand {
 			datagrams.set_priority(self.track.subscription().priority);
 		}
+		let meter = datagrams.delegate();
 		self.datagrams = Some(DatagramForward {
+			meter,
 			consumer: datagrams,
 			demand,
 			timescale: self.timescale.filter(|_| stamp),
@@ -7154,7 +7158,7 @@ impl TrackServe {
 				}
 			};
 			let timescale = forward.timescale;
-			emit_datagram(
+			let sent = emit_datagram(
 				&self.session,
 				self.version,
 				self.request_id.0,
@@ -7166,11 +7170,15 @@ impl TrackServe {
 				publisher,
 				&datagram,
 			);
+			if sent {
+				forward.meter.datagram(datagram.payload.len() as u64);
+			}
 		}
 	}
 }
 
-/// Send one datagram track payload as OBJECT_DATAGRAM, object ID 0, best-effort.
+/// Send one datagram track payload as OBJECT_DATAGRAM, object ID 0, best-effort. Returns
+/// whether the transport took it.
 fn emit_datagram(
 	session: &Transport,
 	version: Version,
@@ -7179,19 +7187,19 @@ fn emit_datagram(
 	timescale: Option<Timescale>,
 	publisher: i8,
 	datagram: &crate::datagram::Datagram,
-) {
+) -> bool {
 	let mut properties = Vec::new();
 	if let Some(timescale) = timescale {
 		let Some(timestamp) = datagram.timestamp else {
 			tracing::debug!(sequence = datagram.sequence, "dropping a datagram without a timestamp");
-			return;
+			return false;
 		};
 		if ietf::encode_object_time(&mut Encoder::new(&mut properties, version.into()), timestamp, timescale).is_err() {
 			tracing::debug!(
 				sequence = datagram.sequence,
 				"dropping a datagram whose timestamp does not encode"
 			);
-			return;
+			return false;
 		}
 	}
 	let body = ietf::ObjectDatagram {
@@ -7208,7 +7216,7 @@ fn emit_datagram(
 			sequence = datagram.sequence,
 			"dropping a datagram this draft cannot encode"
 		);
-		return;
+		return false;
 	};
 	let max = session.max_datagram_size();
 	if body.len() > max {
@@ -7218,9 +7226,9 @@ fn emit_datagram(
 			max,
 			"dropping datagram larger than the transport limit"
 		);
-		return;
+		return false;
 	}
-	let _ = session.send_datagram(body, options);
+	session.send_datagram(body, options).is_ok()
 }
 
 /// Where one request's streams are ranked: the session's queue, keyed by the request's id
@@ -7366,6 +7374,10 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 	fn acknowledged(&self) -> Option<bool> {
 		self.inner.lock().unwrap().stream.acknowledged()
 	}
+
+	fn delivered(&self) -> Option<u64> {
+		self.inner.lock().unwrap().stream.delivered()
+	}
 }
 
 /// Write one group's frames in the negotiated draft's FETCH object layout.
@@ -7389,6 +7401,8 @@ struct FetchGroupWrite {
 	/// A long cached group is written a slice per poll, so the session's other tasks still run.
 	budget: kio::coop::Budget,
 	state: FetchGroupState,
+	/// Bills the group's payload once the first poll has the stream to bill it on.
+	meter: Option<crate::stats::Meter>,
 }
 
 enum FetchGroupState {
@@ -7412,7 +7426,7 @@ enum FetchGroupState {
 
 impl FetchGroupWrite {
 	fn new(
-		group: group::Consumer,
+		mut group: group::Consumer,
 		sequence: u64,
 		slice: GroupSlice,
 		timescale: Option<Timescale>,
@@ -7423,6 +7437,7 @@ impl FetchGroupWrite {
 			return Err(Error::Unsupported);
 		}
 		Ok(Self {
+			meter: Some(group.delegate()),
 			// A FETCH's group may be found from its first object in range.
 			index: group.index(),
 			group,
@@ -7472,6 +7487,9 @@ impl FetchGroupWrite {
 		waiter: &kio::Waiter,
 		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
 	) -> Poll<Result<(), Error>> {
+		if let Some(meter) = self.meter.take() {
+			stream.bill(meter);
+		}
 		loop {
 			match &mut self.state {
 				FetchGroupState::Yield => {
@@ -7522,6 +7540,7 @@ impl FetchGroupWrite {
 							};
 							Publisher::buffer_fetch_object(stream, header)?;
 							stream.buffer_varint(frame.size)?;
+							stream.frame(frame.size);
 							self.prior = Some(self.index);
 							self.index += 1;
 							self.state = FetchGroupState::Partial { frame, chunk: None };
@@ -7612,6 +7631,7 @@ impl FetchPayloadWrite {
 		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
 	) -> Poll<Result<(), Error>> {
 		stream.buffer_varint(self.payload.len() as u64)?;
+		stream.frame(self.payload.len() as u64);
 		wait!(Size => stream.poll_flush(waiter))?;
 		// Nothing to write for an empty payload, so it returns at once.
 		Poll::Ready(wait!(Payload => stream.poll_write_all(waiter, &mut self.payload)))
@@ -7772,6 +7792,8 @@ struct GroupServe {
 	session: Transport,
 	/// The subscription's count of opened streams, bumped once this one opens.
 	opened: Arc<AtomicU64>,
+	/// Bills the group's payload as its stream delivers it.
+	meter: crate::stats::Meter,
 	msg: ietf::GroupHeader,
 	rank: Rank<GroupOf<Transport>>,
 	/// Its place in line for the peer's stream credit while it waits to open.
@@ -7854,7 +7876,7 @@ impl GroupServe {
 		session: Transport,
 		msg: ietf::GroupHeader,
 		rank: Rank<GroupOf<Transport>>,
-		group: group::Consumer,
+		mut group: group::Consumer,
 		timescale: Option<Timescale>,
 		version: Version,
 		slice: GroupSlice,
@@ -7862,6 +7884,7 @@ impl GroupServe {
 		Self {
 			session,
 			opened: Default::default(),
+			meter: group.delegate(),
 			msg,
 			rank,
 			open: Default::default(),
@@ -7977,9 +8000,9 @@ impl GroupServe {
 		};
 		self.opened.fetch_add(1, Ordering::Relaxed);
 
-		self.state = GroupState::Describe {
-			writer: Writer::new(stream, self.version),
-		};
+		let mut writer = Writer::new(stream, self.version);
+		writer.bill(self.meter.clone());
+		self.state = GroupState::Describe { writer };
 		Poll::Ready(Ok(()))
 	}
 
@@ -8368,6 +8391,10 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 	writer.buffer_varint(object.size)?;
 	if object.size == 0 {
 		writer.buffer_varint(object.status)?;
+	}
+	// A status object carries no frame.
+	if object.status == 0 {
+		writer.frame(object.size);
 	}
 	Ok(())
 }

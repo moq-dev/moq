@@ -483,6 +483,8 @@ struct Channel {
 	messages: VecDeque<Message>,
 	/// The bytes in `messages`.
 	queued: usize,
+	/// The bytes the reader took, which stand in for delivered ones.
+	taken: u64,
 	/// How the channel closed, once it has.
 	end: Option<End>,
 	/// When a finish reaches the reader under [`Config::latency`], until the reader
@@ -674,6 +676,12 @@ impl poll::SendStream for SendStream {
 		let open = channel.end.is_none() && !self.done;
 		Some((open || finished) && channel.messages.is_empty())
 	}
+
+	/// The bytes the reader took, standing in for delivered ones as it does for
+	/// [`acknowledged`](poll::SendStream::acknowledged).
+	fn delivered(&self) -> Option<u64> {
+		Some(self.channel.lock().taken)
+	}
 }
 
 impl Drop for SendStream {
@@ -775,6 +783,7 @@ impl poll::Chunks for Chunks {
 			false => channel.messages.pop_front().expect("front exists").bytes,
 		};
 		channel.queued -= chunk.len();
+		channel.taken += chunk.len() as u64;
 
 		Poll::Ready(Ok(Some(chunk)))
 	}

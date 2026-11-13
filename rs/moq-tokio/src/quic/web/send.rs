@@ -338,6 +338,20 @@ impl moq_net::transport::poll::SendStream for Stream {
 			State::Reset(_) | State::Unsent => false,
 		})
 	}
+
+	/// The acknowledged bytes past the WebTransport header, none while the header is unwritten,
+	/// and none once reset: a reset drops the handle that could tell.
+	fn delivered(&self) -> Option<u64> {
+		if self.unwritten.has_remaining() {
+			return Some(0);
+		}
+		let acked = match &self.state {
+			State::Open(stream) => stream.acked_len(),
+			State::Finished(stream) => stream.acked_len(),
+			State::Reset(_) | State::Unsent => 0,
+		};
+		Some(acked.saturating_sub(self.header.map_or(0, u64::from)))
+	}
 }
 
 impl moq_net::transport::poll::SendGroup for send::Group {

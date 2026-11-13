@@ -781,6 +781,17 @@ pub mod poll {
 			None
 		}
 
+		/// How many leading bytes written to this stream the transport delivered, counting each
+		/// once however often it was retransmitted, or `None` when it cannot tell.
+		///
+		/// Delivered means the peer acknowledged it, or on a reliable link such as qmux's, that
+		/// the link took it. It only grows while the stream lives; after a reset it may stop
+		/// answering. Egress stats bill a frame's bytes only once delivered, and fall back to the
+		/// bytes the stream took when this is `None`.
+		fn delivered(&self) -> Option<u64> {
+			None
+		}
+
 		/// Write some of the buffer, returning how many bytes were accepted.
 		fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self> {
 			Write {
