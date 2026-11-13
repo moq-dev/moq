@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `capture::portal::Selection::restore_token` watches the portal restore token (`RestoreTokenConsumer::changed` reports the latest token, or `None` once cleared, coalescing changes in between), and `with_restore_token` seeds one, so a caller can persist a screen-cast grant across processes and skip the picker on a compositor that keeps grants. `RestoreToken` redacts itself in `Debug` output.
 - `encode::Config::resize` scales a frame at another size inside the encoder, so a `Sink` does it on its own thread rather than the caller's.
+- `decode::Consumer::arrival` reports when the access unit behind the latest picture read landed in the cache, the video counterpart of `moq_audio::decode::Consumer::arrival`. Pictures a decoder reorders or holds back keep their own access unit's arrival, so a player can tell network delay from decode delay.
 
 ### Changed
 

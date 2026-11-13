@@ -285,6 +285,16 @@ const NAMED_ONLY: &[Candidate] = &[
 		open: probe::Buffered::open,
 	},
 	Candidate {
+		name: probe::REORDER_NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: probe::Reorder::open,
+	},
+	Candidate {
+		name: probe::HOLDING_NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: probe::Reorder::open_holding,
+	},
+	Candidate {
 		name: probe::IMMEDIATE_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Immediate::open,
