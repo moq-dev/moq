@@ -12459,7 +12459,11 @@ mod tests {
 	fn a_released_paused_group_with_nothing_unread_is_dropped() {
 		let mut bench = PausedBench::new(1);
 		let run = &mut bench.coverage.run;
-		let empty = bench.coverage.track.create_group(group::Info { sequence: 200 }).unwrap();
+		let empty = bench
+			.coverage
+			.track
+			.create_group(group::Info { sequence: 200 })
+			.unwrap();
 		let empty = empty.finish().unwrap();
 		run.pause(Paused {
 			group: empty.consume(),
