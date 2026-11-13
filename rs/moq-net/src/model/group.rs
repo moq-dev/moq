@@ -1222,7 +1222,13 @@ impl GroupState {
 	/// (idle past the cache pool's expiry window, or evicted under its byte target). A reader
 	/// that already consumed every frame is missing nothing, so it gets the clean end of
 	/// group; one that fell short sees the abort rather than a silently truncated stream.
+	/// A copy cut short at the back holds nothing past its cut, which a reader reaches only
+	/// with its cap past it (one capped there ends before asking), so the frames it wants
+	/// are missing rather than the group ended.
 	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
+		if self.past_cut(index) {
+			return Poll::Ready(Err(Error::Evicted));
+		}
 		match &self.outcome {
 			Outcome::Released(total, err) if index < *total => Poll::Ready(Err(err.clone())),
 			Outcome::Finished(_) | Outcome::Released(..) => Poll::Ready(Ok(())),
@@ -1236,6 +1242,17 @@ impl GroupState {
 				Poll::Pending
 			}
 		}
+	}
+
+	/// Where this copy settled at the back cut its transport bound made. One that finished
+	/// short of its bound holds the whole group, which ends there.
+	fn cut(&self) -> Option<usize> {
+		self.outcome.frames().filter(|&frames| self.range_end == Some(frames))
+	}
+
+	/// Whether this copy settled at its back cut, with `index` at or past it.
+	fn past_cut(&self, index: usize) -> bool {
+		self.cut().is_some_and(|cut| index >= cut)
 	}
 
 	/// The relay state once the ingest has settled it, which it does before the first frame,
@@ -1265,8 +1282,13 @@ impl GroupState {
 	/// Resolve whether a reader at `index`, which already prefetched the frames below
 	/// `unread`, can still make progress, answering the same question as a read without
 	/// consuming anything.
-	fn poll_end(&self, index: usize, unread: usize, raw: bool) -> Poll<Result<()>> {
+	/// A cut short of the reader's cap `end` leaves the frames past it missing, whatever
+	/// the reader reads before it.
+	fn poll_end(&self, index: usize, unread: usize, raw: bool, end: Option<usize>) -> Poll<Result<()>> {
 		self.check_read(unread, raw)?;
+		if self.cut().is_some_and(|cut| end.is_none_or(|end| end > cut)) {
+			return Poll::Ready(Err(Error::Evicted));
+		}
 		self.poll_terminal(index)
 	}
 
@@ -2503,6 +2525,11 @@ impl Handle {
 		Arc::ptr_eq(&self.alive, &reader.cursor.alive)
 	}
 
+	/// Whether `other` is a handle of this same copy.
+	pub(super) fn is_copy(&self, other: &Handle) -> bool {
+		Arc::ptr_eq(&self.alive, &other.alive)
+	}
+
 	/// Abort the group without taking ownership of its writer.
 	// Sessions cancel a group while its writer is in a frame.
 	pub(crate) fn abort(&self, err: Error) -> Result<()> {
@@ -3127,6 +3154,7 @@ impl Handle {
 				end: None,
 				prefetch: Prefetch::default(),
 				raw: false,
+				partial: false,
 				compressed: self.track.compressed(),
 				cache: self.cache.clone(),
 				alive: self.alive.clone(),
@@ -3603,6 +3631,13 @@ pub struct Consumer {
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<Consumer>() <= 184);
 
+/// Drop an end check's held copy once the reader moved to another copy itself.
+fn drop_finishing(carry: &mut Option<Box<Carry>>) {
+	if let Some(carry) = carry {
+		carry.finishing = None;
+	}
+}
+
 /// What carries a read past the copy it reads; see [`Consumer::with_recover`] and
 /// [`track::board`].
 #[derive(Default)]
@@ -3611,6 +3646,9 @@ struct Carry {
 	recover: Option<super::resume::Recover>,
 	// Boarding or riding a flight, once the copy read shed the frame read next.
 	ride: Option<Ride>,
+	// The copy an end check waits on past the frames this reader prefetched, with the frame
+	// it reads that copy from: held between polls so the copy keeps this reader's demand.
+	finishing: Option<(usize, Consumer)>,
 }
 
 impl Clone for Carry {
@@ -3622,6 +3660,7 @@ impl Clone for Carry {
 				boarding: None,
 				..*ride
 			}),
+			finishing: None,
 		}
 	}
 }
@@ -3700,6 +3739,11 @@ struct Cursor {
 	// Read a compressed group's stored slices rather than its inflated copy.
 	raw: bool,
 
+	// Whether the last frame handed out to stream from this copy was still being written,
+	// until a skip past it. Left uncommitted when the copy fails, it is torn. A whole read
+	// after it follows its commit, so it can leave this set.
+	partial: bool,
+
 	// Whether the group is compressed, so a plain read inflates under the state's lock.
 	compressed: bool,
 
@@ -3721,6 +3765,7 @@ impl Clone for Cursor {
 			end: self.end,
 			prefetch: Prefetch::default(),
 			raw: self.raw,
+			partial: self.partial,
 			compressed: self.compressed,
 			cache: self.cache.clone(),
 			alive: self.alive.clone(),
@@ -3968,6 +4013,7 @@ impl Consumer {
 			self.cursor.end = end;
 			self.cursor.raw = raw;
 			self.adopted = true;
+			drop_finishing(&mut self.carry);
 		}
 	}
 
@@ -4353,7 +4399,13 @@ impl Consumer {
 				ride.skip -= 1;
 				continue;
 			}
-			if !matches!(res, Poll::Ready(Err(_))) || !self.shed_next() {
+			if !matches!(res, Poll::Ready(Err(_))) {
+				return res;
+			}
+			if ready!(self.poll_successor(waiter))? {
+				continue;
+			}
+			if !self.shed_next() {
 				return res;
 			}
 			// The copy just boarded shed the frame before the reader took it: pool debt
@@ -4381,6 +4433,66 @@ impl Consumer {
 		}
 	}
 
+	/// Continue on another copy of this group in the same track once the copy read failed or
+	/// ended at a cut short of the reader's cap, such as a re-offer held while that copy was
+	/// still arriving (see [`track::successor`]).
+	/// Returns whether the reader moved to one, or [`Error::Old`] once its budget gives up
+	/// on the wait.
+	fn poll_successor(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		let Some(copy) = ready!(self.poll_successor_at(waiter, self.cursor.index))? else {
+			return Poll::Ready(Ok(false));
+		};
+		self.adopt_copy(copy);
+		Poll::Ready(Ok(true))
+	}
+
+	/// The copy that continues this reader from frame `index`, at or past its cursor, once
+	/// the copy read failed or ended at a cut short of its cap; see [`Self::poll_successor`].
+	fn poll_successor_at(&mut self, waiter: &kio::Waiter, index: usize) -> Poll<Result<Option<Consumer>>> {
+		{
+			let state = self.cursor.state.read();
+			// Only a delivery failure: content that failed to inflate is the group's under its
+			// name, and a frame this reader took from the copy partly is lost with it. Ordinals
+			// stand for frames only on a dense copy. A copy cut short at the back that the
+			// reader's raised cap passed lacks the rest, like a failed one.
+			if self.expired
+				|| self.carry.as_ref().is_some_and(|carry| carry.ride.is_some())
+				|| (state.outcome.error().is_none() && !state.past_cut(index))
+				|| (!self.cursor.raw && state.malformed())
+				|| (self.cursor.partial && state.committed() < self.cursor.index)
+				|| state.sparse()
+			{
+				return Poll::Ready(Ok(None));
+			}
+		}
+		let Some(track) = self.cursor.cache.track() else {
+			return Poll::Ready(Ok(None));
+		};
+		match track::successor(&track, self, index, waiter) {
+			Poll::Ready(copy) => Poll::Ready(Ok(copy)),
+			// A stall the budget bounds, though the copy read can receive nothing more.
+			Poll::Pending => match self.poll_expiry(waiter, true) {
+				true => Poll::Ready(Err(Error::Old)),
+				false => Poll::Pending,
+			},
+		}
+	}
+
+	/// Whether this copy can continue `reader` from frame `index`.
+	pub(super) fn continues(&self, reader: &Consumer, index: usize) -> bool {
+		let raw = reader.cursor.raw;
+		let state = self.cursor.state.read();
+		// A plain read inflates from frame 0, and a copy that shed the frame can't serve it.
+		!state.sparse()
+			&& (raw || state.flate.is_none() || state.offset == 0)
+			&& state.check_read(index, raw).is_ok()
+			// Inflating a frame past the inflated ones needs every slice since, so none shed.
+			&& state.plain(raw).is_none_or(|plain| {
+				let len = plain.len.load(Ordering::Acquire);
+				len > index || len >= state.held()
+			})
+	}
+
 	fn recover(&self) -> Option<&super::resume::Recover> {
 		self.carry.as_ref()?.recover.as_ref()
 	}
@@ -4400,6 +4512,7 @@ impl Consumer {
 				self.carry = Some(Box::new(Carry {
 					recover: None,
 					ride: Some(ride),
+					finishing: None,
 				}))
 			}
 			(None, None) => {}
@@ -4428,6 +4541,15 @@ impl Consumer {
 		self.cursor.index = index;
 		self.cursor.end = end;
 		self.cursor.raw = raw;
+		drop_finishing(&mut self.carry);
+	}
+
+	/// The frames this reader has yet to read from `index` on: up to its cap.
+	pub(super) fn unread(&self, index: usize) -> Bounds {
+		Bounds {
+			start: index as u64,
+			end: self.cursor.end.map(|end| end as u64),
+		}
 	}
 
 	/// One past the last frame the copy read committed.
@@ -4543,7 +4665,89 @@ impl Consumer {
 		res
 	}
 
+	/// Like a frame read, a failed copy's end waits out a re-offer held for the group and
+	/// reports the end of the copy that took it over (see [`Self::poll_successor`]).
 	fn poll_finished_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		loop {
+			let res = self.poll_finished_copy(waiter);
+			if !matches!(res, Poll::Ready(Err(_))) {
+				return res;
+			}
+			// Frames this reader already prefetched, and those a copy cut short of its cap
+			// still holds up to the cut, are read before a successor is needed, so the end is
+			// judged past them, without leaving them behind.
+			let mut drained = self.cursor.index + self.cursor.prefetch.buffered().0 as usize;
+			{
+				let state = self.cursor.state.read();
+				if let Some(cut) = state.cut()
+					&& self.cursor.end.is_none_or(|end| end > cut)
+					&& state.check_read(drained, self.cursor.raw).is_ok()
+				{
+					drained = drained.max(cut);
+				}
+			}
+			if drained > self.cursor.index {
+				return self.poll_finished_past(waiter, drained, res);
+			}
+			if !ready!(self.poll_successor(waiter))? {
+				return res;
+			}
+		}
+	}
+
+	/// This reader's end once it drained its prefetch up to `drained`: its cap's, if
+	/// that comes first, else the end of the copy that continues it from there, judged on a
+	/// copy of the reader so its cursor stays on the frames still to drain. `failed` is the
+	/// copy's own answer, which stands without one.
+	fn poll_finished_past(
+		&mut self,
+		waiter: &kio::Waiter,
+		drained: usize,
+		failed: Poll<Result<u64>>,
+	) -> Poll<Result<u64>> {
+		let index = self.cursor.index as u64;
+		if self.cursor.end.is_some_and(|end| drained >= end) {
+			return Poll::Ready(Ok(index));
+		}
+		let kept = self.carry.as_mut().and_then(|carry| carry.finishing.take());
+		let mut next = match kept {
+			// It hands over to a later copy itself, should it fail too. A cap or mode changed
+			// since asks again: the copy kept may not cover the new range.
+			Some((at, next))
+				if at == drained && next.cursor.end == self.cursor.end && next.cursor.raw == self.cursor.raw =>
+			{
+				next
+			}
+			_ => {
+				let Some(copy) = ready!(self.poll_successor_at(waiter, drained))? else {
+					return failed;
+				};
+				let mut next = self.clone();
+				next.adopt_copy(copy);
+				next.cursor.index = drained;
+				next
+			}
+		};
+		match next.poll_finished_once(waiter) {
+			Poll::Ready(res) => {
+				// The failed copy holds no end, so the copy that answered releases the demand.
+				if res.is_ok() {
+					next.release_if_finished();
+				}
+				Poll::Ready(res.map(|_| index))
+			}
+			Poll::Pending => {
+				// Dropped, it would leave the copy unwanted, and a fetch could abandon it.
+				self.carry.get_or_insert_default().finishing = Some((drained, next));
+				match self.poll_expiry(waiter, true) {
+					true => Poll::Ready(Err(Error::Old)),
+					false => Poll::Pending,
+				}
+			}
+		}
+	}
+
+	fn poll_finished_copy(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -4552,13 +4756,13 @@ impl Consumer {
 		if self.cursor.capped() {
 			return Poll::Ready(Ok(index as u64));
 		}
-		let raw = self.cursor.raw;
+		let (raw, end) = (self.cursor.raw, self.cursor.end);
 		// Frames already prefetched are this cursor's whatever the group sheds since, so
 		// only the first one past them can be evicted.
 		let unread = index + self.cursor.prefetch.buffered().0 as usize;
 		let res = self
 			.cursor
-			.poll(waiter, |state| state.poll_end(index, unread, raw))
+			.poll(waiter, |state| state.poll_end(index, unread, raw, end))
 			.map(|res| res.map(|()| index as u64));
 		self.poll_expired_if_blocked(waiter, res)
 	}
@@ -4619,6 +4823,7 @@ impl Cursor {
 		self.index = index;
 		// The batch was drained from below the new cursor, so it can't be reused.
 		self.prefetch = Prefetch::default();
+		self.partial = false;
 	}
 
 	fn skip_to(&mut self, index: u64) {
@@ -4628,6 +4833,8 @@ impl Cursor {
 		}
 		self.index = index;
 		self.prefetch = Prefetch::default();
+		// The frame handed out partly is given up below the skip, so a failure tears nothing.
+		self.partial = false;
 	}
 
 	fn poll_next_frame(
@@ -4647,6 +4854,7 @@ impl Cursor {
 		if let Some(frame) = self.prefetch.pop_cached() {
 			self.refresh_if_stale();
 			self.index += 1;
+			self.partial = false;
 			let tail = self.index.saturating_add(self.prefetch.buffered().0 as usize)..end;
 			let info = frame::Info {
 				size: frame.payload.len() as u64,
@@ -4709,6 +4917,7 @@ impl Cursor {
 		};
 
 		self.index += 1;
+		self.partial = matches!(source, frame::Source::Partial(_));
 		// A direct read (not prefetched): count the frame here; the frame::Consumer
 		// counts its bytes per chunk as they're read out.
 		stats.frames(1);
@@ -6743,6 +6952,31 @@ mod test {
 		assert!(matches!(raw.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
 	}
 
+	/// A compressed copy that shed its front slices before any plain read inflated them
+	/// continues no plain reader, even past them: inflating its frame needs them. A raw
+	/// reader takes the stored slice.
+	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
+	#[cfg(feature = "async")]
+	fn a_copy_shed_before_inflating_continues_no_plain_reader() {
+		let pool = cache::Pool::unbounded();
+		let mut group = compressed_group(&pool);
+		for frame in &mebibytes(40) {
+			group.write_frame(None, frame.clone()).unwrap();
+		}
+		let held = group.handle.state.read().held();
+		assert!(held > 1, "the slices were shed");
+		let copy = group.consume();
+		let mut plain = group.consume();
+		plain.skip_to(held as u64);
+		assert!(!copy.continues(&plain, held));
+		assert!(
+			matches!(read_plain(&mut plain), Err(Error::Evicted)),
+			"inflating needs them"
+		);
+		assert!(copy.continues(&group.consume().compressed(), held));
+	}
+
 	/// The inflated copy charges each frame's slot, so empty frames count toward its tail.
 	#[test]
 	#[cfg(feature = "async")]
@@ -7375,6 +7609,27 @@ mod test {
 		producer.abort(Error::Cancel).unwrap();
 		assert!(matches!(capped.poll_finished(&waiter), Poll::Ready(Ok(1))));
 		assert!(matches!(whole.poll_finished(&waiter), Poll::Ready(Err(Error::Cancel))));
+	}
+
+	/// A copy its transport bound at frame 4 that finishes after frame 2 ends there: the group
+	/// holds two frames, so a reader past them reads a clean end rather than a cut.
+	#[test]
+	fn a_bounded_copy_finished_short_of_its_bound_ends_cleanly() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.bound(Bounds { start: 0, end: Some(4) }).unwrap();
+		let mut reader = producer.consume();
+		for payload in [b"a", b"b"] {
+			producer
+				.write_frame(crate::Timestamp::ZERO, Bytes::from_static(payload))
+				.unwrap();
+		}
+		producer.finish().unwrap();
+		reader.skip_to(4);
+		let waiter = kio::Waiter::noop();
+		let res = reader.poll_read_frame(&waiter);
+		assert!(matches!(res, Poll::Ready(Ok(None))), "{res:?}");
+		let res = reader.poll_finished(&waiter);
+		assert!(matches!(res, Poll::Ready(Ok(4))), "{res:?}");
 	}
 
 	/// A publisher that read every frame of a finished group still learns when the budget

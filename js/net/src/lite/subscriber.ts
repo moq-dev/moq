@@ -28,6 +28,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
+	type Arriving,
 	bestCandidate,
 	type DropRun,
 	hiddenBelow,
@@ -3276,6 +3277,7 @@ export class Subscriber {
 				? entry.update
 				: undefined;
 		let producer: netGroup.Producer | undefined;
+		let arriving: Arriving | undefined;
 		let ingest: Ingest | undefined;
 		let yielding: Yielding | undefined;
 		// Until the stream is read, or a pause hands it to the paused group.
@@ -3295,23 +3297,31 @@ export class Subscriber {
 			}
 			// A duplicate of a copy still arriving, such as a lite-07 re-offer that overtook the reset
 			// of the stream it replaces, waits unread, which flow control bounds. Created once that copy
-			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed.
-			// Its own reset ends the wait; a clean end leaves it on the copy alone. A lite-07 copy a
-			// YIELDED reset pauses is continued by this stream instead.
+			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed,
+			// continuing the reads of that copy, which wait while it is held. Its own reset ends the
+			// wait; a clean end leaves it on the copy alone. A lite-07 copy a YIELDED reset pauses is
+			// continued by this stream instead.
 			for (;;) {
 				const paused = yields ? this.#resume(entry, group) : undefined;
 				if (paused) {
+					// The same copy continues, so its readers need no hold.
+					arriving?.release();
+					arriving = undefined;
 					producer = paused.group;
 					ingest = { index: group.frameStart, partial: paused.partial };
 					// The publisher owes a paused group its continuation, which may yield again.
 					owed = true;
 					break;
 				}
-				const arriving = hooks.arrivingGroup(track, group.sequence);
-				if (arriving === undefined) break;
+				// Kept held past a failure until this copy takes the group, below.
+				const next = hooks.arrivingGroup(track, group.sequence);
+				if (next === undefined) break;
+				arriving?.release();
+				arriving = next;
 				// Served again once that copy fails or pauses, so owed again.
 				owed = true;
-				const waits: unknown[] = [arriving, stream.closed.then(() => arriving)];
+				const settled = arriving.settled;
+				const waits: unknown[] = [settled, stream.closed.then(() => settled)];
 				if (yields) waits.push(Signal.race(pausesOf(entry).changed));
 				await race(waits);
 			}
@@ -3320,6 +3330,8 @@ export class Subscriber {
 				start: group.frameStart,
 				fill: entry.filling,
 			});
+			// Released once this copy took the group, so the failed copy's readers find it.
+			arriving?.release();
 			if (yields) {
 				ingest ??= { index: group.frameStart };
 				yielding = {
@@ -3371,6 +3383,7 @@ export class Subscriber {
 			producer?.abort(e);
 			stream.stop(e);
 		} finally {
+			arriving?.release();
 			if (yielding) this.#endYielding(entry, group.sequence, yielding);
 			read?.();
 		}

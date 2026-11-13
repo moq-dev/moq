@@ -328,7 +328,8 @@ struct Opened {
 /// overtook the reset of the stream it replaces. It waits unread, which its stream credit
 /// bounds, and is discarded if that copy finishes or takes the group if it fails.
 struct Duplicate {
-	arriving: group::Handle,
+	/// The copy still arriving, whose readers wait while this holds it.
+	arriving: track::Hold,
 	/// Lite-07: where a YIELDED reset of the arriving copy pauses it, which this continues.
 	paused: Option<kio::Consumer<Paused>>,
 	track: track::Producer,
@@ -1773,7 +1774,7 @@ impl GroupRecv {
 					}
 				}
 			}
-			match duplicate.arriving.poll_closed(waiter) {
+			match duplicate.arriving.arriving().poll_closed(waiter) {
 				Poll::Pending => {
 					*open = Some(Open::Duplicate(duplicate));
 					break Poll::Pending;
@@ -1785,7 +1786,12 @@ impl GroupRecv {
 					let Some(entry) = subs.get(&hdr.subscribe) else {
 						break Poll::Ready(Err(Error::Cancel));
 					};
-					match entry.reopen(hdr, self.subscriber.version, duplicate.reading) {
+					let Duplicate { arriving, reading, .. } = duplicate;
+					let reopened = entry.reopen(hdr, self.subscriber.version, reading);
+					// Released once the group is opened again, so the failed copy's readers
+					// waiting on it find this copy.
+					drop(arriving);
+					match reopened {
 						Ok(reopened) => *open = Some(reopened),
 						Err(err) => break Poll::Ready(Err(err)),
 					}
@@ -5499,7 +5505,7 @@ mod tests {
 
 	/// A lite-07 re-offer can overtake the reset of the stream it replaces: its stream waits,
 	/// unread, until that copy settles. It is discarded once the copy finishes, and takes the
-	/// group once the copy fails.
+	/// group once the copy fails, continuing the reads of that copy.
 	#[kio::test]
 	async fn a_duplicate_of_an_arriving_copy_waits_for_it_to_settle() {
 		use crate::transport::poll::Session as _;
@@ -5516,6 +5522,8 @@ mod tests {
 			.encode(&mut encoder, version)
 			.unwrap();
 			encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
+			encoder.bytes(b"first").unwrap();
+			encoder.varint(crate::coding::varint::zigzag(1)).unwrap();
 			encoder.bytes(b"again").unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::eof(script);
 			let clock = crate::time::Deadlines::new(crate::time::Instant::now());
@@ -5575,26 +5583,29 @@ mod tests {
 			assert_eq!(tail.read().streams(), 1);
 
 			let mut original = reader.assert_group();
+			let frame = original.read_frame().await.unwrap().unwrap();
+			assert_eq!(&frame.payload[..], b"first");
 			if !first_fails {
 				first.finish().unwrap();
 				let res = kio::wait(|waiter| duplicate.poll_serve(waiter)).await;
 				assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
-				let frame = original.read_frame().await.unwrap().unwrap();
-				assert_eq!(&frame.payload[..], b"first");
 				assert!(original.read_frame().await.unwrap().is_none());
 				continue;
 			}
 
-			// The reset lands: the held stream takes the group.
+			// The reset lands: the reader already handed the original waits on the held stream
+			// rather than failing, and continues on it from its frame once it takes the group.
 			first.abort(Error::Cancel).unwrap();
+			assert!(original.poll_read_frame(&waiter).is_pending());
 			let res = kio::wait(|waiter| duplicate.poll_serve(waiter)).await;
 			assert!(res.is_ok(), "{res:?}");
-			// A reader already handed the original sees it fail, since no sequence is handed
-			// out twice; one that had not reached it reads the re-offer.
-			assert!(original.read_frame().await.is_err());
+			assert_eq!(&original.read_frame().await.unwrap().unwrap().payload[..], b"again");
+			assert!(original.read_frame().await.unwrap().is_none());
+			// One that had not reached it reads the re-offer whole.
 			let mut later = track.subscribe(subscription);
 			let mut group = later.assert_group();
 			assert_eq!(group.sequence, 3);
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"first");
 			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"again");
 			assert!(group.read_frame().await.unwrap().is_none());
 		}
