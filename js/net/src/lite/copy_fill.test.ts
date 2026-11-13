@@ -410,6 +410,8 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 
 		// The session resets the group's stream to make room, and the group is gone before a new
 		// stream could continue it, so the publisher drops it on the fill's subscription.
+		// Receiving the live group's header did not wait for its stream's FIN to retire.
+		await clock.advance(Duration.ZERO);
 		const open = lines(pair.server).streams.list();
 		expect(open.length).toBe(1);
 		open[0]?.preempt();
