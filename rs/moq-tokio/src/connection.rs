@@ -2462,7 +2462,10 @@ mod tests {
 			let mut config = crate::connect::Config::default();
 			config.websocket.enabled = Some(false);
 			let client = config.init(Default::default()).expect("build client");
-			assert!(!client.reaches(&url("wss://localhost/")), "a disabled WebSocket reaches nothing");
+			assert!(
+				!client.reaches(&url("wss://localhost/")),
+				"a disabled WebSocket reaches nothing"
+			);
 		}
 		assert_eq!(
 			super::verdict(&client, &unknown, &Error::MoqNet(moq_net::Error::Closed)),
