@@ -64,11 +64,13 @@ class Recovery {
 	readonly handle: RecoveryHandle;
 	refused?: Refused[];
 
-	constructor(groups: Run, handle: RecoveryHandle) {
+	// `ended` is called once it is over, so a wait need not hold a reaction on `done`.
+	constructor(groups: Run, handle: RecoveryHandle, ended: () => void) {
 		this.groups = groups;
 		this.handle = handle;
 		void handle.done.then((refused) => {
 			this.refused = refused;
+			ended();
 		});
 	}
 }
@@ -189,23 +191,17 @@ export class RangeFills {
 			const run = nextRun(fill);
 			if (run) insertRun(asked, run.start, run.end);
 		}
-		// What a recovery says answers only the fills owing its groups now: a later request may recover
-		// them again.
-		let recovery: Refused[] = [];
-		const answers = (start: bigint, end: bigint, refusal: Refusal) => {
-			recovery = refuseRun(recovery, start, end, refusal);
-		};
 		for (const run of asked) {
 			for (const gone of tail.accounted(run.start, run.end)) {
 				for (const gap of runGaps(this.#recovering, gone.start, gone.end)) {
 					const done = clip(this.#recovered, gap.start, gap.end);
 					for (const again of done) {
-						// Recovered once for these fills.
-						if (!this.#refusal(again.start, recovery))
-							answers(again.start, again.end, passing(new NotFound(`group ${again.start}`)));
+						// Recovered once for these fills; a later request may recover it again.
+						if (!this.#refusal(again.start))
+							this.#setRefused(again.start, again.end, passing(new NotFound(`group ${again.start}`)));
 					}
 					for (const fresh of runGaps(done, gap.start, gap.end)) {
-						if (!this.#refusal(fresh.start, recovery)) insertRun(this.#toRecover, fresh.start, fresh.end);
+						if (!this.#refusal(fresh.start)) insertRun(this.#toRecover, fresh.start, fresh.end);
 					}
 				}
 			}
@@ -214,14 +210,14 @@ export class RangeFills {
 		for (const run of this.#toRecover.splice(0)) {
 			insertRun(this.#recovered, run.start, run.end);
 			insertRun(this.#recovering, run.start, run.end);
-			this.#recoveries.add(new Recovery(run, this.#recover(run, this.ask.priority)));
+			this.#recoveries.add(new Recovery(run, this.#recover(run, this.ask.priority), () => this.#bump()));
 		}
-		// What a finished recovery did not deliver is refused to the fills owing it now.
+		// What a finished recovery did not deliver stands refused.
 		for (const done of this.#recoveries) {
 			if (!done.refused) continue;
 			this.#recoveries.delete(done);
 			this.#recovering = removeRun(this.#recovering, done.groups.start, done.groups.end);
-			for (const refused of done.refused) answers(refused.start, refused.end, refused.refusal);
+			for (const refused of done.refused) this.#setRefused(refused.start, refused.end, refused.refusal);
 		}
 
 		const ask: FillAsk = { groups: [], priority: NO_PRIORITY };
@@ -238,7 +234,7 @@ export class RangeFills {
 				// The run extends from the group owed first, which the subscription may have refused
 				// already. Refusing the run answers it, so the loop moves on.
 				const first = fill.order === "ascending" ? run.start : run.end - 1n;
-				const refused = this.#refusal(first, recovery);
+				const refused = this.#refusal(first);
 				if (refused) {
 					answer(refused.refusal, fill, max(run.start, refused.start), min(run.end, refused.end));
 					continue;
@@ -308,7 +304,6 @@ export class RangeFills {
 	changed(tail: Tail): Promise<unknown> {
 		const wakes: unknown[] = [Signal.race(this.#bumped, tail.changed)];
 		for (const fill of this.#held) wakes.push(fillChanged(fill));
-		for (const recovery of this.#recoveries) wakes.push(recovery.handle.done);
 		for (const closed of this.#reading.values()) wakes.push(closed);
 		return race(wakes);
 	}
@@ -329,12 +324,10 @@ export class RangeFills {
 		return this.#closed;
 	}
 
-	// Why the subscription, or a recovery in `recovery`, will not deliver the run of groups from
-	// `first`, if it said so.
-	#refusal(first: bigint, recovery: readonly Refused[] = []): Refused | undefined {
-		const refused =
-			this.#refused.find((run) => run.start <= first && first < run.end) ??
-			recovery.find((run) => run.start <= first && first < run.end);
+	// Why the subscription or a recovery will not deliver the run of groups from `first`, if it
+	// said so.
+	#refusal(first: bigint): Refused | undefined {
+		const refused = this.#refused.find((run) => run.start <= first && first < run.end);
 		if (refused) return refused;
 		// The subscriber's own range starting past them says nothing of the source.
 		const skipped = this.#skipped.find((run) => run.start <= first && first < run.end);

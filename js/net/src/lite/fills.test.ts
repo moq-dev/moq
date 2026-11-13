@@ -1,13 +1,14 @@
 // The rules a lite-07 copy's `RangeFills` settles its fills by. Mirrors the tests in the Rust
 // `lite/subscriber/fills.rs`.
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
+import { Signal } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { StreamCode, StreamError } from "../error.ts";
-import type { Run } from "../internal.ts";
+import { hooks, type Run } from "../internal.ts";
 import { Tail } from "../tail.ts";
 import type { Fill, Producer } from "../track.ts";
-import { RangeFills, type RecoveryHandle, type Refused } from "./fills.ts";
+import { dropped, RangeFills, type RecoveryHandle, type Refused } from "./fills.ts";
 
 const enc = new TextEncoder();
 
@@ -148,6 +149,90 @@ test("range fills: the last recovery finishing reports the fills empty", async (
 	expect(fills.poll(tail, true)).toBe(true);
 	expect(fills.isEmpty()).toBe(true);
 	expect(fills.poll(tail, true)).toBe(false);
+
+	fills.close();
+	peer.close();
+});
+
+// A recovery that ends before the fill reaches its groups still answers them once it does, with
+// the publisher's own verdict: a group it never had is recorded, so no reader asks for it again.
+test("range fills: a recovery's refusals stand until the fill reaches them", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	tail.account(1n, 3n);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+	opened[0]?.finish([{ start: 1n, end: 3n, refusal: dropped(new StreamError(StreamCode.NotFound)) }]);
+	await yieldNow();
+	fills.poll(tail, true);
+	// The fill still waits on group 0.
+	expect(peer.fill.wanted()).toBe(0n);
+
+	peer.fill.accept(0n).finish();
+	fills.poll(tail, true);
+	expect(peer.fill.wanted()).toBe(3n);
+	// Recorded as lost: a later reader is told so rather than waiting on them.
+	const later = peer.track.subscribe({ ranges: [{ start: { absolute: 1n } }], delay: { max: null } });
+	const next = hooks.tryRecvGroup(later, true);
+	expect(next.kind === "drop" ? [next.start, next.end] : next.kind).toEqual([1n, 3n]);
+
+	later.close();
+	fills.close();
+	peer.close();
+});
+
+// The serve loop waits on the fills once per tail change, so a wait that loses keeps nothing
+// registered: a stalled fill under a busy live edge would otherwise grow without bound.
+test("range fills: a lost wait releases what it listened to", async () => {
+	const peer = await missing();
+	const { recover } = recoveries();
+	const fills = new RangeFills(peer.track, recover);
+	const tail = new Tail();
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
+	fills.poll(tail, true);
+
+	// Count the change listeners every signal still holds.
+	const original = Signal.prototype.changed;
+	const awaited = original as (this: Signal<unknown>) => Promise<unknown>;
+	const listened = original as (this: Signal<unknown>, fn: (value: unknown) => void) => () => void;
+	let live = 0;
+	const changed = spyOn(Signal.prototype, "changed").mockImplementation(function (
+		this: Signal<unknown>,
+		fn?: (value: unknown) => void,
+	) {
+		live++;
+		if (!fn) return awaited.call(this).finally(() => live--);
+		let held = true;
+		const release = () => {
+			if (held) live--;
+			held = false;
+		};
+		const dispose = listened.call(this, (value: unknown) => {
+			release();
+			fn(value);
+		});
+		return () => {
+			release();
+			dispose();
+		};
+	} as typeof original);
+	try {
+		// Woken by the tail each time, as live groups arriving wake the serve loop.
+		for (let sequence = 10n; sequence < 110n; sequence++) {
+			const wait = fills.changed(tail);
+			tail.account(sequence, sequence + 1n);
+			await wait;
+		}
+		expect(live).toBe(0);
+	} finally {
+		changed.mockRestore();
+	}
 
 	fills.close();
 	peer.close();
