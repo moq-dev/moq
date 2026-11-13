@@ -92,9 +92,12 @@ in the same instant, which only such a distance prevents.
 Measured (`sweep_cache_routing_long`, 3000 scenarios each with and without
 held links, the gate's seed): every scenario settles on the steady state, an
 idle broadcast sends no warm message, and about 3.2 warm messages go out per
-reader change. A broadcast's pulls form a cycle after 0.54% of churn steps with
-held links and 0.55% without, each ending when the withdrawal crossing its
-link is delivered, at most 40 deliveries later in the sweep's random order. The
+reader change. A broadcast's pulls form a cycle after 0.39% of churn steps with
+held links and 0.50% without, each ending when the withdrawal crossing its
+link is delivered, at most 53 deliveries later in the sweep's random order.
+Each subscription is a stream of its own, so a replacement pull can overtake
+the cancel of the stream it replaces, and the steady state holds one stream
+per neighbour fed. The
 LAN fixture keeps one uplink copy per broadcast in a full mesh of 6, and 15
 copies for 8 broadcasts in a ring of 6. `settle` lets a hop of delay pass every
 64 rounds of deliveries, so a doubt lifts during a long exchange as it would.
@@ -108,9 +111,9 @@ Remaining:
 
 - Under other seeds the long sweep still finds scenarios that never settle,
   2 in 48,000 across 8 seeds (the rules first proven here failed every seed
-  within 1,200 scenarios): `MOQ_ROUTE_SEED=195939070` scenario 1958 and
-  `MOQ_ROUTE_SEED=324478056` scenario 2029, both without held links. Each
-  rule above closed one such class and exposed a rarer one, and binding a
+  within 1,200 scenarios): `MOQ_ROUTE_SEED=305419896` scenarios 196 and
+  1391, both without held links. Each rule above closed one such class and
+  exposed a rarer one, and binding a
   relay by the copy a neighbour routed through it sits on now, wherever it
   came from, made a third seed fail, so the next step is an argument that
   the rules converge, such as a TLA+ model of the copy choice alongside
