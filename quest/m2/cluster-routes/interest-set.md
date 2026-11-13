@@ -21,7 +21,7 @@ and every earlier routing bug was an ordering nobody had enumerated.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): ✅ this edits the path router, after
-[the route per scope](/quest/m2/cluster-routes/scope.md) builds it,
+[the route per scope](https://github.com/moq-dev/moq/pull/8622) builds it,
 and the model as it has a route per prefix
 (`rs/moq-net/verify/route/RouteHandoff.tla`)
 (rejected: landing first on Babel's router, which
@@ -113,10 +113,6 @@ one key, which `Sim` and the tests use, so this changes no behaviour on its
 own.
 
 Public API: none (the router is crate-private). Wire: none.
-
-## Required
-
-- [The router runs the path rule with a route per scope](/quest/m2/cluster-routes/scope.md) - the router this edits, with a floor per route
 
 ## Related
 

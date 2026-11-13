@@ -284,6 +284,8 @@ pub(super) struct Cost {
 	pub stale: usize,
 	/// Relays, summed over rounds, with no route while a path to the publisher existed.
 	pub dark: usize,
+	/// Hops of delay until every relay's route led to the publisher for good.
+	pub right: usize,
 	/// Whether it settled at all.
 	pub settled: bool,
 }
@@ -293,6 +295,8 @@ pub(super) struct Lab {
 	pub mesh: Mesh,
 	/// Open links, relay to relay and publisher to relay.
 	up: BTreeSet<(Node, Node)>,
+	/// Links opened beyond the mesh's own.
+	linked: BTreeSet<(Node, Node)>,
 	down: BTreeSet<Node>,
 	order: XorShift,
 	cost: Cost,
@@ -310,6 +314,7 @@ impl Lab {
 			net: Box::new(Sim::with(rule, nodes)),
 			mesh: mesh.clone(),
 			up: BTreeSet::new(),
+			linked: BTreeSet::new(),
 			down: BTreeSet::new(),
 			order: XorShift(0x5eed_0001),
 			cost: Cost::default(),
@@ -446,10 +451,18 @@ impl Lab {
 			self.net.tick();
 		}
 		self.cost.rounds += 1;
+		self.note();
+		true
+	}
+
+	/// Count the relays left wrong as the latest round ends.
+	fn note(&mut self) {
 		let (_, stale, dark) = self.wrong();
 		self.cost.stale += stale;
 		self.cost.dark += dark;
-		true
+		if stale + dark > 0 {
+			self.cost.right = self.cost.rounds + 1;
+		}
 	}
 
 	/// Deliver in rounds until nothing is left. False if that never happens.
@@ -468,9 +481,7 @@ impl Lab {
 		self.cost = Cost::default();
 		change(self);
 		// What the change left wrong before any message moved.
-		let (_, stale, dark) = self.wrong();
-		self.cost.stale += stale;
-		self.cost.dark += dark;
+		self.note();
 		self.cost.settled = self.settle();
 		self.cost.sent = self.net.sent() - before;
 		self.cost
@@ -483,6 +494,15 @@ impl Lab {
 
 	pub fn mend(&mut self, a: Node, b: Node) {
 		self.net.open(a, b);
+		self.up.insert(pair(a, b));
+	}
+
+	/// Open a link the mesh does not have, configuring it the first time.
+	pub fn attach(&mut self, a: Node, b: Node) {
+		match self.linked.insert(pair(a, b)) {
+			true => self.net.join(a, b, 1),
+			false => self.net.open(a, b),
+		}
 		self.up.insert(pair(a, b));
 	}
 
@@ -613,6 +633,10 @@ pub(super) enum Change {
 	Home,
 	/// The publisher's session closes.
 	Leave,
+	/// The publisher's session closes and it reconnects to the same relay at once.
+	Rejoin,
+	/// The publisher's session closes and it reconnects at once through another relay.
+	Move,
 	/// The publisher withdraws one claim.
 	Withdraw,
 }
@@ -629,6 +653,8 @@ impl Change {
 			Self::Restart => "relay_restarts",
 			Self::Home => "home_relay_dies",
 			Self::Leave => "publisher_leaves",
+			Self::Rejoin => "publisher_rejoins",
+			Self::Move => "publisher_moves",
 			Self::Withdraw => "claim_withdrawn",
 		}
 	}
@@ -653,6 +679,26 @@ pub(super) fn run(rule: Rule, mesh: &Mesh) -> Vec<(Change, Cost)> {
 	let home = mesh.homes[last];
 	apply(&mut lab, Change::Leave, &|lab| lab.cut(node, home));
 	apply(&mut lab, Change::Arrive, &|lab| lab.mend(node, home));
+	apply(&mut lab, Change::Rejoin, &|lab| {
+		lab.cut(node, home);
+		lab.mend(node, home);
+	});
+	// A relay next to its home, so the publisher's new route takes a detour no longer
+	// than the old one did.
+	let next = (mesh.links.iter()).find_map(|&(a, b, _)| match home {
+		_ if a == home => Some(b),
+		_ if b == home => Some(a),
+		_ => None,
+	});
+	if let Some(next) = next {
+		apply(&mut lab, Change::Move, &|lab| {
+			lab.cut(node, home);
+			lab.attach(node, next);
+		});
+		lab.cut(node, next);
+		lab.mend(node, home);
+		assert!(lab.settle());
+	}
 
 	for (detour, down, up) in [
 		(true, Change::Detour, Change::Shortcut),
@@ -837,10 +883,10 @@ fn the_rules_differ_as_reported() {
 		costs.into_iter().find(|(found, _)| *found == change).map(|(_, cost)| cost)
 	};
 	for mesh in [Mesh::clique(6, 1), Mesh::ring(6)] {
-		for change in [Change::Leave, Change::Detour, Change::Home, Change::Transit, Change::Restart, Change::Cut, Change::Mend, Change::Shortcut, Change::Withdraw, Change::Arrive] {
+		for change in [Change::Leave, Change::Rejoin, Change::Move, Change::Detour, Change::Home, Change::Transit, Change::Restart, Change::Cut, Change::Mend, Change::Shortcut, Change::Withdraw, Change::Arrive] {
 			for rule in COMPARED {
 				if let Some(cost) = cost(rule, &mesh, change) {
-					eprintln!("{} {change:?} {}: msgs {} claims {} rounds {} loops {} stale {} dark {} off {} unav {}", mesh.links.len(), rule.as_str(), cost.sent.msgs, cost.sent.claims, cost.rounds, cost.loops, cost.stale, cost.dark, cost.sent.offline, cost.sent.unavailable);
+					eprintln!("REPORT {} {change:?} {}: msgs {} claims {} rounds {} right {} loops {} stale {} dark {} off {} unav {}", mesh.links.len(), rule.as_str(), cost.sent.msgs, cost.sent.claims, cost.rounds, cost.right, cost.loops, cost.stale, cost.dark, cost.sent.offline, cost.sent.unavailable);
 				}
 			}
 		}
@@ -854,8 +900,8 @@ fn the_rules_differ_as_reported() {
 fn benchmark_route_rules() {
 	// As above: message counts to stdout for the report, which keeps the largest mesh
 	// alone, and the whole table to stderr.
-	println!("shape,relays,change,rule,route_messages,claim_messages,loop_messages");
-	eprintln!("shape,relays,change,rule,msgs,items,claims,rounds,stale,dark,loops,offline,unavailable");
+	println!("shape,relays,change,rule,route_messages,claim_messages,loop_messages,reroute_ms");
+	eprintln!("shape,relays,change,rule,msgs,items,claims,rounds,right,stale,dark,loops,offline,unavailable");
 	for relays in [3, 6, 12, 24] {
 		let mut rng = XorShift(0x6d6f_7100 + relays as u64);
 		let mut shapes = vec![
@@ -878,18 +924,20 @@ fn benchmark_route_rules() {
 					let (change, rule) = (change.as_str(), rule.as_str());
 					if relays == 24 {
 						println!(
-							"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1}",
+							"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1},{:.1}",
 							mean(|cost| cost.sent.msgs),
 							mean(|cost| cost.sent.claims),
 							mean(|cost| cost.loops),
+							mean(|cost| cost.right) * HOP.as_secs_f64() * 1000.0,
 						);
 					}
 					eprintln!(
-						"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
+						"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
 						mean(|cost| cost.sent.msgs),
 						mean(|cost| cost.sent.items),
 						mean(|cost| cost.sent.claims),
 						mean(|cost| cost.rounds),
+						mean(|cost| cost.right),
 						mean(|cost| cost.stale),
 						mean(|cost| cost.dark),
 						mean(|cost| cost.loops),

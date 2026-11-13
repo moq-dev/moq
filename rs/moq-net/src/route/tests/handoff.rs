@@ -1126,10 +1126,7 @@ fn sweep_scoped_handoff(rule: Rule) {
 		let links = [(origin, r1), (origin, r2), (r1, r2), (client, r1), (client, r2)];
 		sim.originate(origin, 7, 0);
 		assert!(sim.run());
-		for _step in 0..40 {
-			let debug = std::env::var("DEBUG_SCENARIO").ok().and_then(|v| v.parse::<usize>().ok()) == Some(scenario);
-			let before = sim.events.len();
-			let r = rng.0;
+		for _ in 0..40 {
 			match rng.next(8) {
 				0..=2 => {
 					let claim = CLAIMS[rng.next(CLAIMS.len() as u64) as usize];
@@ -1166,16 +1163,6 @@ fn sweep_scoped_handoff(rule: Rule) {
 				}
 			}
 			sim.settle(1);
-			if debug {
-				let mut probe = XorShift(r);
-				eprintln!("step {_step} op {} now {:?} watch {:?}", probe.next(8), sim.now(), sim.watching(client));
-				if sim.paths() {
-					eprintln!("{}", sim.path(client).dump());
-				}
-				for e in &sim.events[before..] {
-					eprintln!("   {e:?}");
-				}
-			}
 			sim.check().unwrap_or_else(|err| panic!("scenario {scenario}: {err}"));
 			assert!(
 				sim.paths() || sim.retained().certified <= SCOPES.len() + 1,
@@ -1237,24 +1224,68 @@ const CLAIMS: [&str; 4] = ["live/", "live/a/", "live/a/x", "live/b"];
 /// nothing ends falsely, and once churn stops every node shows every live
 /// origin's current claims and holds nothing for a dead one.
 fn sweep_handoff(rule: Rule) {
-	let mut rng = XorShift(0x4a4d_0ff5);
 	for scenario in 0..scenarios() {
-		let debug = std::env::var("DEBUG_SCENARIO").ok().and_then(|v| v.parse::<usize>().ok()) == Some(scenario);
-		let mut sim = churn(rule, &mut rng, debug);
+		let mut sim = churn(rule, scenario);
 		let label = format!("scenario {scenario}");
-		if debug {
-			for (i, e) in sim.events.iter().enumerate() {
-				eprintln!("ALL {i} {e:?}");
-			}
-		}
 		assert_eq!(revivals(&sim.events), 0, "{label}");
 		assert_eq!(false_ends(&sim.events), 0, "{label}");
 		settled(&mut sim, &label);
 	}
 }
 
-/// Origins sit at `RELAYS` and `RELAYS + 1`, the client at `RELAYS + 2`.
-fn churn(rule: Rule, rng: &mut XorShift, debug: bool) -> Sim {
+/// The scripts `sweep_handoff` runs, on today's rule and the path rule: both settle
+/// to the same claims at every node. PROBE: tallies how the readers' histories differ.
+#[test]
+fn the_rules_agree_on_every_script() {
+	let mut signatures: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
+	let mut differ = 0;
+	for scenario in 0..scenarios() {
+		let label = format!("scenario {scenario}");
+		let sims: Vec<Sim> = [Rule::Distance, Rule::PATH]
+			.into_iter()
+			.map(|rule| {
+				let mut sim = churn(rule, scenario);
+				settled(&mut sim, &label);
+				sim
+			})
+			.collect();
+		for node in 0..RELAYS + 3 {
+			assert_eq!(sims[0].shown(node), sims[1].shown(node), "{label}: node {node}");
+		}
+		let lives = |sim: &Sim| {
+			let mut lives: BTreeMap<(Node, Id, String), Vec<Kind>> = BTreeMap::new();
+			for event in &sim.events {
+				lives.entry((event.node, event.id, event.claim.clone())).or_default().push(event.kind);
+			}
+			lives
+		};
+		let (a, b) = (lives(&sims[0]), lives(&sims[1]));
+		let keys: BTreeSet<_> = a.keys().chain(b.keys()).cloned().collect();
+		let mut differs = false;
+		for key in keys {
+			let (x, y) = (a.get(&key).cloned().unwrap_or_default(), b.get(&key).cloned().unwrap_or_default());
+			if x != y {
+				differs = true;
+				let entry = signatures.entry((format!("{x:?}"), format!("{y:?}"))).or_insert((0, scenario));
+				entry.0 += 1;
+			}
+		}
+		differ += usize::from(differs);
+	}
+	let mut sorted: Vec<_> = signatures.into_iter().collect();
+	sorted.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
+	eprintln!("PROBE {differ} of {} scripts differ, {} signatures", scenarios(), sorted.len());
+	for ((x, y), (count, scenario)) in sorted.iter().take(60) {
+		eprintln!("PROBE {count} e.g. {scenario}: distance {x} path {y}");
+	}
+}
+
+/// Origins sit at `RELAYS` and `RELAYS + 1`, the client at `RELAYS + 2`. The script,
+/// every change made from outside, depends on `scenario` alone, so both rules run
+/// the same one; which queued message arrives next is drawn apart from it.
+fn churn(rule: Rule, scenario: usize) -> Sim {
+	let rng = &mut XorShift(0x4a4d_0ff5 ^ (scenario as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+	let mut pick = XorShift(0x5eed_0003 + scenario as u64);
 	let (first, client) = (RELAYS, RELAYS + 2);
 	let mut sim = Sim::with(rule, RELAYS + 3);
 	let mut links = Vec::new();
@@ -1280,14 +1311,7 @@ fn churn(rule: Rule, rng: &mut XorShift, debug: bool) -> Sim {
 	sim.originate(first + 1, ids[1], 0);
 	assert!(sim.run());
 
-	if debug {
-		eprintln!("links {links:?}");
-	}
-	for step in 0..40 {
-		let before = sim.events.len();
-		let mut probe = XorShift(rng.0);
-		let op = probe.next(10);
-		let arg = (probe.next(1000), probe.next(1000), probe.next(1000));
+	for _ in 0..40 {
 		match rng.next(10) {
 			0..=3 => {
 				let origin = rng.next(2) as usize;
@@ -1342,17 +1366,11 @@ fn churn(rule: Rule, rng: &mut XorShift, debug: bool) -> Sim {
 					if busy.is_empty() {
 						break;
 					}
-					match busy[rng.next(busy.len() as u64) as usize] {
+					match busy[pick.next(busy.len() as u64) as usize] {
 						(false, from, to) => sim.deliver(from, to),
 						(true, from, to) => sim.deliver_ack(from, to),
 					};
 				}
-			}
-		}
-		if debug {
-			eprintln!("step {step} op {op} {arg:?} now {:?}", sim.now());
-			for e in &sim.events[before..] {
-				eprintln!("   {e:?}");
 			}
 		}
 		sim.check().unwrap();

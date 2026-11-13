@@ -4,8 +4,8 @@
 
 Every lite-07 session, in Rust and in `js/net`, routes by the rule of the
 [epic](/quest/m2/cluster-routes/README.md)'s Plan item 27, on the
-router [the route per scope](/quest/m2/cluster-routes/scope.md)
-built. A route on the wire carries its path with a session in each hop and
+router [the route per scope](https://github.com/moq-dev/moq/pull/8622)
+built (`route::path::Router`). A route on the wire carries its path with a session in each hop and
 the prefix it covers. A relay that loses a session names that hop in one
 message, and a relay answers a neighbour that holds for it. Babel's
 distance, the seqno, ROUTE_REQUEST, and the ROUTE_END echo are gone from
@@ -64,7 +64,7 @@ Work:
 - Delete today's router with what only it used: the feasibility distance and
   its drain, seqno requests and their pending state, the echo, and their
   fixtures. A fixture that states a claim rule moves to the new router if
-  [the route per scope](/quest/m2/cluster-routes/scope.md) did not
+  [the route per scope](https://github.com/moq-dev/moq/pull/8622) did not
   move it already.
 - The Rust codec and sessions (`rs/moq-net/src/lite/`), and `js/net`'s route
   layer (`js/net/src/lite/publisher.ts`, `js/net/src/lite/subscriber.ts`,
@@ -116,10 +116,6 @@ by misparse, not by version. Relays pinned to `main` roll together, as each
 earlier lite-07 wire change did.
 
 Public API: none expected. Wire: lite-07-wip only.
-
-## Required
-
-- [The router runs the path rule with a route per scope](/quest/m2/cluster-routes/scope.md) - the router these sessions drive
 
 ## Related
 

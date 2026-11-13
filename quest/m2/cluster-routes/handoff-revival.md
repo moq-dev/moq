@@ -26,8 +26,8 @@ Decided the same day (maintainer, /quest-plan): ✅ plan it.
 - Otherwise fix the cause and keep the shrunk case as a test.
 - If the cause is in what the path rule replaces (the distance, the seqno,
   route requests, the echo, or which neighbours certify a region), pin it as
-  a `residual_` test naming
-  [the route per scope](/quest/m2/cluster-routes/scope.md), whose
-  router must pass it, instead of fixing it twice.
+  a fixture in `rs/moq-net/src/route/tests/residual.rs` that pins the bug
+  on today's router and passes on the path router (`route/path.rs`),
+  instead of fixing it twice.
 
 Public API: none. Wire: none.
