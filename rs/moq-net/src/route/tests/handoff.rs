@@ -650,13 +650,23 @@ fn widening_while_the_relay_lost_the_origin_moves_the_claim_up(rule: Rule) {
 	assert!(sim.run());
 	sim.announce(origin, "live/", 2, None);
 	sim.watch(client, "live/b");
-	for (from, to) in [(origin, relay), (origin, relay), (relay, client), (relay, client)] {
-		assert!(sim.deliver(from, to));
+	// The rules send different numbers of route/control messages before the claim.
+	for (from, to) in [(origin, relay), (relay, client)] {
+		for _ in 0..sim.queued(from, to) {
+			if sim.shows(client, 7, "live/b") == Some(true) {
+				break;
+			}
+			assert!(sim.deliver(from, to));
+		}
 	}
 	assert_eq!(sim.shows(client, 7, "live/b"), Some(true));
 
 	// The relay's answer to the old interest is still queued when the client widens.
 	sim.disconnect(origin, relay);
+	assert!(
+		sim.queued(relay, client) > 0,
+		"the old interest's answer is still queued"
+	);
 	sim.announce(origin, "live/", 0, None);
 	sim.watch(client, "");
 	sim.connect(origin, relay);
