@@ -1320,7 +1320,8 @@ mod tests {
 	}
 
 	/// A stream reports the payload the peer acknowledged, past any WebTransport header, and
-	/// keeps reporting it after a reset drops its handle to the stream.
+	/// keeps reporting it after a reset drops its handle to the stream. The acknowledgement
+	/// alone wakes a delivery waiter on a stream still open, with no FIN or further write.
 	#[tokio::test]
 	async fn delivered_counts_acknowledged_payload_through_a_reset() {
 		use moq_net::transport::poll::SendStream;
@@ -1331,14 +1332,24 @@ mod tests {
 			let mut send = client.open_uni(Default::default()).await.unwrap();
 			assert_eq!(send.delivered(), Some(0), "framed: {framed}");
 			send.write_all(&b"payload"[..]).await.unwrap();
-			SendStream::finish(&mut send).unwrap();
 			let recv = async {
 				let mut recv = server.accept_uni().await.unwrap();
-				recv.read_to_end(usize::MAX).await.unwrap()
+				let mut read = Vec::new();
+				while read.len() < 7 {
+					read.extend_from_slice(&recv.read_chunk(usize::MAX).await.unwrap().unwrap());
+				}
+				(recv, read)
 			};
-			let (closed, read) = tokio::join!(kio::wait(|waiter| SendStream::poll_closed(&send, waiter)), recv);
-			closed.unwrap();
+			let ((), (recv, read)) = tokio::join!(kio::wait(|waiter| send.poll_delivered(waiter)), recv);
 			assert_eq!(read, b"payload", "framed: {framed}");
+			assert_eq!(send.delivered(), Some(7), "framed: {framed}: delivered while open");
+
+			SendStream::finish(&mut send).unwrap();
+			let (closed, ()) = tokio::join!(kio::wait(|waiter| SendStream::poll_closed(&send, waiter)), async {
+				let mut recv = recv;
+				assert!(recv.read_chunk(usize::MAX).await.unwrap().is_none(), "framed: {framed}");
+			});
+			closed.unwrap();
 			assert_eq!(send.delivered(), Some(7), "framed: {framed}");
 
 			SendStream::reset(&mut send, 1);

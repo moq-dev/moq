@@ -7494,6 +7494,20 @@ impl FetchGroupWrite {
 		if let Some(meter) = self.meter.take() {
 			stream.bill(meter);
 		}
+		let res = self.poll_objects(waiter, stream);
+		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
+		// bill it.
+		if res.is_pending() {
+			stream.poll_settle(waiter);
+		}
+		res
+	}
+
+	fn poll_objects(
+		&mut self,
+		waiter: &kio::Waiter,
+		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
+	) -> Poll<Result<(), Error>> {
 		loop {
 			match &mut self.state {
 				FetchGroupState::Yield => {
@@ -8011,6 +8025,18 @@ impl GroupServe {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let res = self.poll_serving(waiter);
+		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
+		// bill it, rather than the next frame or the stream's end.
+		if res.is_pending()
+			&& let GroupState::Serve { writer, .. } = &mut self.state
+		{
+			writer.poll_settle(waiter);
+		}
+		res
+	}
+
+	fn poll_serving(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.poll_excluded(waiter) {
 			self.state = GroupState::Done;
 			return Poll::Ready(Err(Error::Cancel));
@@ -9177,6 +9203,88 @@ mod group_priority_test {
 		*gate.write().ok().unwrap() = true;
 		settle_serve(&mut serve).await;
 		assert_eq!(serve.opened(), 1, "the credit goes to group 1 alone");
+	}
+
+	/// A subgroup left open after its last object bills it once the transport acknowledges it.
+	/// An acknowledgement never wakes `poll_closed` (as on QUIC), so the serve loop must be
+	/// waiting on delivery while it waits for an object.
+	#[kio::test]
+	async fn an_idle_group_bills_its_last_object_when_acknowledged() {
+		const FRAME: usize = 1000;
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let billed = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.filter(|(_, role, _)| *role == crate::stats::Role::Publisher)
+				.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
+				.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
+		};
+		let log = crate::lite::test_transport::Log::default();
+		log.ack(0);
+		let session = SinkSession::new(log.clone());
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut subscriber = track.subscribe(None);
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
+		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
+		let consumer = subscriber
+			.recv_group()
+			.await
+			.unwrap()
+			.expect("the group")
+			.with_meter(meter);
+
+		let mut serve = GroupServe::new(
+			crate::driver::Transport::new(session.clone()),
+			ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			Rank::solo(kio::Producer::new(0).consume()),
+			consumer,
+			Some(Timescale::MILLI),
+			Version::Draft18,
+			GroupSlice::default(),
+		);
+		let woken = std::sync::Arc::new(Woken::default());
+		let waker = std::task::Waker::from(woken.clone());
+		let waiter = kio::Waiter::new(waker);
+		assert!(serve.poll_serve(&waiter).is_pending(), "the group stays open");
+		assert_eq!(
+			log.writes.lock().unwrap().iter().filter(|byte| **byte == b'x').count(),
+			FRAME,
+			"the transport took the object"
+		);
+		assert_eq!(billed(), (0, 0), "nothing is acknowledged yet");
+
+		woken.0.store(false, std::sync::atomic::Ordering::Relaxed);
+		log.ack(u64::MAX);
+		assert!(
+			woken.0.load(std::sync::atomic::Ordering::Relaxed),
+			"the acknowledgement wakes the serve loop"
+		);
+		assert!(serve.poll_serve(&waiter).is_pending(), "the group stays open");
+		assert_eq!(billed(), (FRAME as u64, 1));
+		drop(group);
+	}
+
+	/// A waker that records being woken.
+	#[derive(Default)]
+	struct Woken(std::sync::atomic::AtomicBool);
+
+	impl std::task::Wake for Woken {
+		fn wake(self: std::sync::Arc<Self>) {
+			self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+		}
 	}
 
 	/// A subgroup waiting for stream credit keeps its subscription expiry armed.

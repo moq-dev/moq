@@ -66,8 +66,9 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	}
 
 	/// [`Self::settle`], then wake `waiter` once more of what the stream took is delivered, so
-	/// a stream idle after its last frame still bills that frame as it lands.
-	fn poll_settle(&mut self, waiter: &kio::Waiter) {
+	/// a stream idle after its last frame still bills that frame as it lands. A serve loop
+	/// calls this whenever it parks, since a write it just made may be waiting on delivery.
+	pub(crate) fn poll_settle(&mut self, waiter: &kio::Waiter) {
 		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
 			poll_settle(delivery, stream, self.written, waiter);
 		}
@@ -338,6 +339,10 @@ fn poll_settle<S: crate::transport::poll::SendStream>(
 	written: u64,
 	waiter: &kio::Waiter,
 ) {
+	// Nothing waits, so nothing to ask the transport, which may lock to answer.
+	if !delivery.waiting(written) {
+		return;
+	}
 	let mut through = delivered(stream, written);
 	delivery.deliver(through);
 	while delivery.waiting(written) && stream.poll_delivered(waiter).is_ready() {

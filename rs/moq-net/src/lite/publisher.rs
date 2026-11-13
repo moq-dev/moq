@@ -1995,7 +1995,13 @@ impl<R: Request> RequestServe<R> {
 					self.state = RequestState::Serve(request);
 				}
 				RequestState::Serve(request) => {
-					if ready!(request.poll(&self.shared, &mut stream.writer, waiter))?.is_break() {
+					let step = request.poll(&self.shared, &mut stream.writer, waiter);
+					// Parked, perhaps right after writing a frame: an acknowledgement then wakes
+					// this to bill it.
+					if step.is_pending() {
+						stream.writer.poll_settle(waiter);
+					}
+					if ready!(step)?.is_break() {
 						let RequestState::Serve(request) =
 							std::mem::replace(&mut self.state, RequestState::Finish { finished: false })
 						else {
@@ -6647,6 +6653,18 @@ impl GroupServe {
 	/// a routine cancel. Without this the Writer's Drop fallback would report
 	/// every failure as Cancel.
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let res = self.poll_serving(waiter);
+		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
+		// bill it, rather than the next frame or the stream's end.
+		if res.is_pending()
+			&& let GroupState::Serve { writer, .. } = &mut self.state
+		{
+			writer.poll_settle(waiter);
+		}
+		res
+	}
+
+	fn poll_serving(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
 			// Queue and SUBSCRIBE_UPDATE priority changes apply on every pass, whatever
 			// the stream is blocked on, including a FIN awaiting its acknowledgement
@@ -7322,6 +7340,90 @@ mod serve_group_test {
 			let sent = payload(&log.writes.lock().unwrap());
 			assert_eq!(sent, (sent_frames * FRAME) as u64, "budget {:?}", *budget.read());
 			assert_eq!((bytes - before.0, frames - before.1), (sent, sent_frames as u64));
+		}
+	}
+
+	/// A group left open after its last frame bills that frame once the transport acknowledges
+	/// it. Nothing else happens on the stream, and an acknowledgement never wakes `poll_closed`
+	/// (as on QUIC), so the serve loop must be waiting on delivery while it waits for a frame.
+	#[kio::test]
+	async fn an_idle_group_bills_its_last_frame_when_acknowledged() {
+		const FRAME: usize = 1000;
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let billed = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.filter(|(_, role, _)| *role == crate::stats::Role::Publisher)
+				.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
+				.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
+		};
+		let session = SinkSession::default();
+		let log = session.log.clone();
+		log.ack(0);
+		let steer = kio::Producer::new(Steer::default());
+		let subscription = Subscription {
+			session: crate::driver::Transport::new(session.clone()),
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			publisher: 0,
+			group: None,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
+			version: Version::Lite06,
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
+			runtime: crate::time::sim(),
+			outcomes: Default::default(),
+			ietf: false,
+		};
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut subscriber = track.subscribe(None);
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
+		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
+		let consumer = subscriber
+			.recv_group()
+			.await
+			.unwrap()
+			.expect("the group")
+			.with_meter(meter);
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = Box::pin(subscription.serve_group(0, 0, handle, consumer));
+		let woken = Arc::new(Woken::default());
+		let waker = std::task::Waker::from(woken.clone());
+		let mut cx = std::task::Context::from_waker(&waker);
+		assert!(serve.as_mut().poll(&mut cx).is_pending(), "the group stays open");
+		assert!(
+			log.writes.lock().unwrap().iter().filter(|byte| **byte == b'x').count() == FRAME,
+			"the transport took the frame"
+		);
+		assert_eq!(billed(), (0, 0), "nothing is acknowledged yet");
+
+		woken.0.store(false, Ordering::Relaxed);
+		log.ack(u64::MAX);
+		assert!(
+			woken.0.load(Ordering::Relaxed),
+			"the acknowledgement wakes the serve loop"
+		);
+		assert!(serve.as_mut().poll(&mut cx).is_pending(), "the group stays open");
+		assert_eq!(billed(), (FRAME as u64, 1));
+		drop(group);
+	}
+
+	/// A waker that records being woken.
+	#[derive(Default)]
+	struct Woken(std::sync::atomic::AtomicBool);
+
+	impl std::task::Wake for Woken {
+		fn wake(self: Arc<Self>) {
+			self.0.store(true, Ordering::Relaxed);
 		}
 	}
 

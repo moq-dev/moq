@@ -79,6 +79,10 @@ pub struct Log {
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
 	/// Set by [`Self::fail_writes`].
 	writes_fail: Arc<AtomicBool>,
+	/// How many leading bytes of each send stream the peer acknowledged, or `None` when the
+	/// transport cannot tell. Only an advance wakes a stream's delivery waiters, as a QUIC
+	/// acknowledgement does: it never wakes `poll_closed`. See [`Self::ack`].
+	acked: kio::Shared<Option<u64>>,
 }
 
 /// One thing a send stream did, as recorded in [`Log::trail`].
@@ -107,6 +111,11 @@ impl Log {
 				code: closed.expect("closed"),
 				stream: None,
 			})
+	}
+
+	/// Acknowledge the first `bytes` of every send stream.
+	pub fn ack(&self, bytes: u64) {
+		*self.acked.lock() = Some(bytes);
 	}
 
 	/// Fail every later write on every send stream, as a peer that stopped reading
@@ -221,6 +230,8 @@ pub struct SinkSend {
 	gate: Option<kio::Consumer<bool>>,
 	budget: Option<kio::Consumer<usize>>,
 	writes: usize,
+	/// The bytes this stream took.
+	written: u64,
 	/// Set by [`finish`](poll::SendStream::finish). A finished stream is what
 	/// [`poll_closed`](poll::SendStream::poll_closed) waits on, mirroring a peer that
 	/// acknowledges the FIN; an unfinished one parks like a peer that never answers.
@@ -274,6 +285,7 @@ impl SinkSend {
 			gate: None,
 			budget: None,
 			writes: 0,
+			written: 0,
 			finished: false,
 			unacked_fin: false,
 			group: None,
@@ -297,6 +309,7 @@ impl SinkSend {
 			gate: Some(gate),
 			budget: None,
 			writes: 0,
+			written: 0,
 			finished: false,
 			unacked_fin: false,
 			group: None,
@@ -345,6 +358,7 @@ impl poll::SendStream for SinkSend {
 		} else {
 			buf
 		};
+		self.written += buf.len() as u64;
 		self.log.writes.lock().unwrap().extend_from_slice(buf);
 		self.log.record(self.id, Sent::Write(buf.to_vec()));
 		Poll::Ready(Ok(buf.len()))
@@ -386,6 +400,20 @@ impl poll::SendStream for SinkSend {
 			// Nothing to acknowledge yet, so park like a peer that never answers.
 			false => Poll::Pending,
 		}
+	}
+
+	fn delivered(&self) -> Option<u64> {
+		self.log.acked.read().map(|acked| acked.min(self.written))
+	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.log
+			.acked
+			.poll(waiter, |acked| match **acked {
+				Some(acked) if acked >= self.written => Poll::Ready(()),
+				_ => Poll::Pending,
+			})
+			.map(drop)
 	}
 }
 
