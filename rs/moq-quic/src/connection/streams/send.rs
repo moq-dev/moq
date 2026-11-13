@@ -27,6 +27,9 @@ pub(super) struct Send {
 	pub(super) notify: Option<u64>,
 	/// The application gave up the stream's ID with [`Stream::release`], so its end is not kept
 	pub(super) released: bool,
+	/// The prefix the peer acknowledged before a reset truncated `pending` below it, which
+	/// `pending` then forgets
+	pub(super) truncated_acked: u64,
 }
 
 impl Send {
@@ -41,6 +44,7 @@ impl Send {
 			stop_reason: None,
 			notify: None,
 			released: false,
+			truncated_acked: 0,
 		})
 	}
 
@@ -118,7 +122,7 @@ impl Send {
 		};
 		debug_assert!(reliable_size <= self.pending.offset());
 		let final_size = self.pending.offset();
-		self.pending.truncate(reliable_size);
+		self.truncate(reliable_size);
 		let send = at || self.pending.is_fully_acked();
 		self.state = ResetSent {
 			final_size,
@@ -171,7 +175,7 @@ impl Send {
 		}
 		*reliable_size = 0;
 		*held = false;
-		self.pending.truncate(0);
+		self.truncate(0);
 		Some(0)
 	}
 
@@ -292,9 +296,15 @@ impl Send {
 		self.pending.offset()
 	}
 
-	/// The end of the acknowledged prefix
+	/// The end of the acknowledged prefix, including what a reset discarded after it
 	pub(super) fn acked_len(&self) -> u64 {
-		self.pending.acked()
+		self.pending.acked().max(self.truncated_acked)
+	}
+
+	/// Drop the data from `end` on, remembering the acknowledged prefix
+	fn truncate(&mut self, end: u64) {
+		self.truncated_acked = self.acked_len();
+		self.pending.truncate(end);
 	}
 
 	pub(super) fn is_pending(&self) -> bool {
