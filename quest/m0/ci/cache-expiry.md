@@ -34,7 +34,8 @@ lifecycle`, using the maintainer's wrangler login as
 chose these values. Record the date and each bucket's `wrangler r2 bucket
 lifecycle list` output in the PR.
 
-Update the text that names the old windows: `infra/README.md`, the comment on
+Update the text that names the old windows: `infra/README.md`, the
+30-day expiry in `flake.nix`'s comments, the comment on
 `refresh`, mbx-r2-verify's Goal and its 2026-11-26 measurement, which then
 splits at this change too, and
 [cachix-retire](/quest/m0/ci/cachix-retire.md)'s 30-day references if that

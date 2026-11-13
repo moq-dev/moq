@@ -228,7 +228,9 @@ Workspace builds (hits / misses / not looked up):
   `oauth_token` in `~/.config/.wrangler/config/default.toml`. Record them
   here beside the 2026-11-07 baseline, split at each lifecycle change (that
   date's, and [cache-expiry](/quest/m0/ci/cache-expiry.md)'s once applied),
-  and count the Nightly jobs that rebuilt a crate the expiry deleted, listing as unknown any it cannot attribute. Bring the lifecycle back to the
+  and count the Nightly jobs that rebuilt a crate the expiry deleted, listing as unknown any it cannot attribute. If cache-expiry's 7-day rule is
+  applied, this count waits until that rule has run for at least 7 days,
+  so the shorter window has data. Bring the lifecycle back to the
   maintainer only if that count argues for lengthening it.
 
 ## Related
