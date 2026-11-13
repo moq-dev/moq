@@ -97,6 +97,9 @@ pub(crate) enum Read {
 /// before it exists.
 #[derive(Default)]
 struct Shared {
+	/// Frames the device delays a read by before it sounds. Reads are placed
+	/// where they are heard, so the queue holds the target less this.
+	heard: AtomicUsize,
 	pushed: AtomicBool,
 	read: AtomicBool,
 	/// Effective input frames played or discarded, including stretch's length
@@ -134,6 +137,16 @@ struct Shared {
 	/// plays there before the next utterance. Written only while none is pending.
 	resume_at: AtomicUsize,
 	resume_frames: AtomicUsize,
+}
+
+impl Shared {
+	/// What the queue holds of the target: the rest is the device's delay
+	/// after a read, which the target counts.
+	fn queue(&self) -> usize {
+		self.target
+			.load(Ordering::Relaxed)
+			.saturating_sub(self.heard.load(Ordering::Relaxed))
+	}
 }
 
 /// Set in [`Shared::resume`] while a resume waits for the reader.
@@ -175,6 +188,7 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 
 	let shared = Arc::new(Shared {
 		target: AtomicUsize::new(latency),
+		heard: AtomicUsize::new(0),
 		level: AtomicUsize::new(latency),
 		..Default::default()
 	});
@@ -204,7 +218,6 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		refill: false,
 		prime: latency,
 		demand: 0,
-		heard: 0,
 		consumed: 0,
 		position: 0,
 		cleared: 0,
@@ -284,7 +297,7 @@ impl Producer {
 		}
 		self.declared = false;
 		let queued = self.written.wrapping_sub(self.shared.consumed.load(Ordering::Relaxed));
-		let frames = self.shared.target.load(Ordering::Relaxed).saturating_sub(queued);
+		let frames = self.shared.queue().saturating_sub(queued);
 		let ends = self.shared.ends.load(Ordering::Relaxed);
 		let mut state = self.shared.resume.load(Ordering::Acquire);
 		while state & PENDING != 0 {
@@ -354,7 +367,7 @@ impl Producer {
 
 		if let Some(pad) = self.pad.filter(|_| !self.shared.stretch.load(Ordering::Relaxed)) {
 			let queued = self.ring.occupied_len();
-			let target = self.shared.target.load(Ordering::Relaxed) * self.channels;
+			let target = self.shared.queue() * self.channels;
 			if queued <= pad && queued < target {
 				let samples = self.ring.push_iter(std::iter::repeat_n(0.0, target - queued));
 				self.written = self.written.wrapping_add(samples / self.channels);
@@ -614,9 +627,6 @@ pub(crate) struct Consumer {
 	prime: usize,
 	/// Frames left in the device's callback as of the current read.
 	demand: usize,
-	/// Frames the device delays a read by before it sounds. Reads are placed
-	/// where they are heard, so the queue holds the target less this.
-	heard: usize,
 	consumed: usize,
 	/// Frames taken off the ring plus the comfort noise of each resume played
 	/// out: the writer's `written`, as far as the reader has reached.
@@ -662,7 +672,7 @@ impl Consumer {
 	/// Note that the device sounds what is read `frames` after the read, which
 	/// the target counts and the queue therefore does not hold.
 	pub(crate) fn heard(&mut self, frames: usize) {
-		self.heard = frames;
+		self.shared.heard.store(frames, Ordering::Relaxed);
 	}
 
 	/// Fill `output` with queued interleaved frames, and silence past them.
@@ -744,8 +754,10 @@ impl Consumer {
 			.then(|| self.shared.anchor.load(Ordering::Acquire));
 		// The target counts the device's delay, which the queue does not hold,
 		// though it still holds at least the callback being read.
-		let target = self.shared.target.load(Ordering::Relaxed);
-		let target = target.saturating_sub(self.heard).max(self.demand.min(target));
+		let target = self
+			.shared
+			.queue()
+			.max(self.demand.min(self.shared.target.load(Ordering::Relaxed)));
 		let level = self
 			.shared
 			.level
@@ -1699,6 +1711,8 @@ mod tests {
 		cons.heard(1_440);
 		pull(&mut cons, &mut out, base);
 		assert_eq!(cons.inputs(0).target, 4_800 - 1_440);
+		// A resume tops the queue up to as much, so the next utterance sounds one target out.
+		assert_eq!(prod.shared.queue(), 4_800 - 1_440);
 		cons.heard(48_000);
 		pull(&mut cons, &mut out, base);
 		assert_eq!(cons.inputs(0).target, 480);

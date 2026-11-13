@@ -653,11 +653,29 @@ async fn play_audio<O: Output>(
 
 	let mut timeline = AudioTimeline::default();
 
+	// The device's output latency the clock holds for.
+	let peak = Mutex::new(Peak::default());
+	// Audio is placed on the clock where it is heard, so the device's output
+	// latency is part of the delay video waits for too. A fixed delay is floored
+	// at it instead, since audio cannot sound any sooner. Capped as the catalog
+	// delay is, so a hostile advertised jitter cannot make playback retain media
+	// without bound.
+	let audible = |delay: Duration| {
+		let device = peak.lock().unwrap().peak();
+		if estimate {
+			delay + device.unwrap_or_default()
+		} else {
+			delay.max(device.unwrap_or(AUDIO_BUFFER_MIN))
+		}
+		.min(moq_mux::container::DELAY_MAX)
+	};
+
 	// A replacement's opening cushion and its timeline plan must agree. The
 	// callback now owns target convergence, rather than write-time padding
 	// subtracting the incoming frame before it reaches the sink. Like a hole,
-	// the cushion is silence the sink must hold.
-	let lead = |delay: Duration| latency.max(delay.min(cap).max(AUDIO_BUFFER_MIN));
+	// the cushion is silence the sink must hold, and a write ahead of its due
+	// time leads it by the device's latency too.
+	let lead = |delay: Duration| latency.max(audible(delay).min(cap).max(AUDIO_BUFFER_MIN));
 
 	let schedule = presentation.consume();
 	// The consumer decodes a packet once the sink has room for it. Its playhead is
@@ -685,8 +703,6 @@ async fn play_audio<O: Output>(
 			.min(cap)
 			.max(sink.output_latency().unwrap_or(AUDIO_BUFFER_MIN))
 	};
-	// The device's output latency the clock holds for.
-	let peak = Mutex::new(Peak::default());
 	// Anchor the sink to the shared clock: the media written so far ends at
 	// `end`, and sounds when the clock says it is due. The callback stretches
 	// onto that clock, and skips only what trails it past the stretch, which
@@ -1021,18 +1037,8 @@ async fn play_audio<O: Output>(
 			// clock holds both while the sink keeps sizing for jitter alone. The
 			// clock holds the whole measured target, which the subscription follows,
 			// though the sink holds no more of it than its cap: the rest stays encoded.
-			// Capped as the catalog delay is, so a hostile advertised jitter cannot
-			// make playback retain media without bound.
-			// Audio is placed on the clock where it is heard, so the device's output
-			// latency is part of the delay video waits for too. A fixed delay is
-			// floored at it instead, since audio cannot sound any sooner.
-			let device = peak.lock().unwrap().observe(sink.output_latency(), Instant::now());
-			let held = if estimate {
-				delay + device.unwrap_or_default()
-			} else {
-				delay.max(device.unwrap_or(AUDIO_BUFFER_MIN))
-			}
-			.min(moq_mux::container::DELAY_MAX);
+			peak.lock().unwrap().observe(sink.output_latency(), Instant::now());
+			let held = audible(delay);
 			*jitter.lock().unwrap() = Some(held);
 			moved |= role.set_target(capped(held, *stated.borrow()));
 			// The consumer releases media due further out than the sink holds only
@@ -1142,6 +1148,11 @@ impl Peak {
 		{
 			self.readings.pop_front();
 		}
+		self.peak()
+	}
+
+	/// The peak as of the last reading.
+	fn peak(&self) -> Option<Duration> {
 		self.readings.front().map(|&(_, latency)| latency)
 	}
 }

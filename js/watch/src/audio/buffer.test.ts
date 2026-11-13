@@ -603,8 +603,9 @@ describe("AudioBuffer steering", () => {
 		}
 	});
 
-	// The ring renders ahead of the speaker by the output latency, so it holds the delay less that, and
-	// the delay the clock holds counts the base latency and the output latency's recent peak.
+	// The ring renders ahead of the speaker by the output latency, so it holds the delay less that,
+	// decoded floor included, and the delay the clock holds counts the base latency and the output
+	// latency's recent peak.
 	it("holds the delay less the output latency it renders ahead by", () => {
 		const { buffer, sent, state, context } = fake(300);
 		try {
@@ -618,7 +619,7 @@ describe("AudioBuffer steering", () => {
 			// A delay short of the output latency still holds one callback.
 			buffer.setLatency(Duration.millis(50));
 			expect(sent.filter((msg) => msg.type === "latency")).toEqual([
-				{ type: "latency", latency: 300, target: 180, bound: 0 },
+				{ type: "latency", latency: 180, target: 180, bound: 0 },
 				{ type: "latency", latency: 128, target: 10, bound: 0 },
 			]);
 		} finally {
