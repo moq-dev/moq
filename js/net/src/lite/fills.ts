@@ -1,7 +1,6 @@
 // Fills a lite-07 copy asks of its upstream through a subscription rather than FETCH. Mirrors the
 // Rust `lite/subscriber/fills.rs`.
 
-import { Duration } from "@moq/clock";
 import { type GetPromise, race, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "../error.ts";
 import { fillChanged, wantedRuns } from "../fill.ts";
@@ -68,13 +67,6 @@ class Recovery {
 	}
 }
 
-/** What a recovery asks with: the terms of the fills owing its groups. */
-export interface RecoveryTerms {
-	priority: number;
-	/** The most tolerant budget, `null` for the publisher's max age alone. */
-	maxDelay: Duration | null;
-}
-
 /** What a lite-07 copy's held fills ask of its upstream subscription, beside the demand. */
 export interface FillAsk {
 	/** The groups to ask for, empty when no fill is held. */
@@ -94,14 +86,15 @@ export interface FillAsk {
  * refuses a fill. A range start speaks only for its range: once the range retires, a later one
  * asking for the same groups may start lower. A group it drops as stale is officially dropped,
  * and one it already accounted for (delivered before and since evicted) it never sends again, so
- * a recovery asks for either on its own subscription with no max delay, once.
+ * a recovery asks for either on its own subscription with no max delay, once. Nothing newer
+ * judges it stale there, so once every hop forgot a run, a narrow reader takes its stale groups.
  *
  * A group stays asked until its stream finishes, since narrowing the subscription under a stream
  * still arriving would reset it.
  */
 export class RangeFills {
 	readonly #copy: track.Producer;
-	readonly #recover: (groups: Run, terms: RecoveryTerms) => RecoveryHandle;
+	readonly #recover: (groups: Run, priority: number) => RecoveryHandle;
 	#held: track.Fill[] = [];
 	/** What the subscription asks for the fills now. */
 	ask: FillAsk = { groups: [], priority: NO_PRIORITY };
@@ -120,13 +113,12 @@ export class RangeFills {
 	#toRecover: Run[] = [];
 	// Groups a recovery asks for now, which the subscription leaves out meanwhile.
 	#recovering: Run[] = [];
-	// Groups recovered once already, with the budget they were asked under, which a second stale
-	// drop refuses to the fills that budget covers.
-	#recovered: Recovered[] = [];
+	// Groups recovered once already, which a second stale drop refuses.
+	#recovered: Run[] = [];
 	#recoveries = new Set<Recovery>();
 	#closed = false;
 
-	constructor(copy: track.Producer, recover: (groups: Run, terms: RecoveryTerms) => RecoveryHandle) {
+	constructor(copy: track.Producer, recover: (groups: Run, priority: number) => RecoveryHandle) {
 		this.#copy = copy;
 		this.#recover = recover;
 	}
@@ -154,7 +146,7 @@ export class RangeFills {
 		// Only what a fill asked for: a fill asks for nothing the subscription dropped before it.
 		for (const run of clip(this.ask.groups, start, end)) {
 			if (toStreamCode(error) === StreamCode.Old) {
-				const done = this.#recoveredFor(run);
+				const done = clip(this.#recovered, run.start, run.end);
 				for (const fresh of runGaps(done, run.start, run.end))
 					insertRun(this.#toRecover, fresh.start, fresh.end);
 				// Recovered once already: this drop stands for the fills owing it now.
@@ -189,8 +181,8 @@ export class RangeFills {
 			const run = nextRun(fill);
 			if (run) insertRun(asked, run.start, run.end);
 		}
-		// What a recovery says answers only the fills owing its groups now, under their terms: a later
-		// request, perhaps with a wider budget, may recover them again.
+		// What a recovery says answers only the fills owing its groups now: a later request may recover
+		// them again.
 		let recovery: Refused[] = [];
 		const answers = (start: bigint, end: bigint, refusal: Refusal) => {
 			if (start < end) recovery = [...removeRun(recovery, start, end), { start, end, refusal }].sort(byStart);
@@ -198,7 +190,7 @@ export class RangeFills {
 		for (const run of asked) {
 			for (const gone of tail.accounted(run.start, run.end)) {
 				for (const gap of runGaps(this.#recovering, gone.start, gone.end)) {
-					const done = this.#recoveredFor(gap);
+					const done = clip(this.#recovered, gap.start, gap.end);
 					for (const again of done) {
 						// Recovered once for these fills.
 						if (!this.#refusal(again.start, recovery))
@@ -210,15 +202,11 @@ export class RangeFills {
 				}
 			}
 		}
-		// Each stale run goes out on its own subscription, once, with the budget of the fills owing
-		// it: none for a reader reaching back for history.
+		// Each stale run goes out on its own subscription with no max delay, once.
 		for (const run of this.#toRecover.splice(0)) {
-			const terms = this.#terms(run);
-			this.#recovered = [...cut(this.#recovered, run.start, run.end), { ...run, budget: terms.maxDelay }].sort(
-				byStart,
-			);
+			insertRun(this.#recovered, run.start, run.end);
 			insertRun(this.#recovering, run.start, run.end);
-			this.#recoveries.add(new Recovery(run, this.#recover(run, terms)));
+			this.#recoveries.add(new Recovery(run, this.#recover(run, this.ask.priority)));
 		}
 		// What a finished recovery did not deliver is refused to the fills owing it now.
 		for (const done of this.#recoveries) {
@@ -269,9 +257,7 @@ export class RangeFills {
 		}
 		this.#recovering = [];
 		for (const { groups } of this.#recoveries) insertRun(this.#recovering, groups.start, groups.end);
-		this.#recovered = this.#recovered.flatMap(({ start, end, budget }) =>
-			clip(owed, start, end).map((kept) => ({ ...kept, budget })),
-		);
+		this.#recovered = this.#recovered.flatMap(({ start, end }) => clip(owed, start, end));
 
 		// A run stays asked whole while a fill still owes any of it, so the subscription changes once
 		// as a run is asked and once as it is done, and the streams of its answered groups keep
@@ -334,32 +320,6 @@ export class RangeFills {
 		return this.#closed;
 	}
 
-	// The most urgent priority and most tolerant budget among the held fills owing part of `run`.
-	#terms(run: Run): RecoveryTerms {
-		const terms: RecoveryTerms = { priority: this.ask.priority, maxDelay: Duration.ZERO };
-		for (const fill of this.#held) {
-			const owes = wantedRuns(fill).some((owed) => owed.start < run.end && run.start < owed.end);
-			if (!owes) continue;
-			terms.priority = Math.max(terms.priority, fill.priority);
-			const budget = fill.maxDelay;
-			if (budget === null || terms.maxDelay === null) terms.maxDelay = null;
-			else if (budget.asMillis() > terms.maxDelay.asMillis()) terms.maxDelay = budget;
-		}
-		return terms;
-	}
-
-	// What of `run` was recovered already under a budget covering every held fill owing it: a fill
-	// that widened since recovers it again.
-	#recoveredFor(run: Run): Run[] {
-		const needed = this.#terms(run).maxDelay;
-		const done: Run[] = [];
-		for (const recovered of this.#recovered) {
-			if (!covers(recovered.budget, needed)) continue;
-			for (const part of clip([recovered], run.start, run.end)) insertRun(done, part.start, part.end);
-		}
-		return done;
-	}
-
 	// Why the subscription, or a recovery in `recovery`, will not deliver the run of groups from
 	// `first`, if it said so.
 	#refusal(first: bigint, recovery: readonly Refused[] = []): Refused | undefined {
@@ -402,31 +362,6 @@ function nextRun(fill: track.Fill): Run | undefined {
 function answer(refusal: Refusal, fill: track.Fill, start: bigint, end: bigint): void {
 	if (refusal.lost) fill.dropGroups(start, end);
 	else fill.refuseGroups(start, end, refusal.error);
-}
-
-// A run recovered once, and the budget it was asked under: `null` for none.
-interface Recovered extends Run {
-	budget: Duration | null;
-}
-
-// Whether a recovery asked under `budget` asked as widely as `needed`.
-function covers(budget: Duration | null, needed: Duration | null): boolean {
-	if (budget === null) return true;
-	return needed !== null && needed.asMillis() <= budget.asMillis();
-}
-
-// `runs` with `[start, end)` cut out of each, keeping the rest of each entry.
-function cut<T extends Run>(runs: readonly T[], start: bigint, end: bigint): T[] {
-	const kept: T[] = [];
-	for (const run of runs) {
-		if (run.end <= start || end <= run.start) {
-			kept.push(run);
-			continue;
-		}
-		if (run.start < start) kept.push({ ...run, end: start });
-		if (end < run.end) kept.push({ ...run, start: end });
-	}
-	return kept;
 }
 
 // The parts of `runs` inside `[start, end)`.

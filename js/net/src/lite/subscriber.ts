@@ -79,7 +79,6 @@ import {
 	passing,
 	RangeFills,
 	type RecoveryHandle,
-	type RecoveryTerms,
 	type Refusal,
 	type Refused,
 } from "./fills.ts";
@@ -2494,7 +2493,7 @@ export class Subscriber {
 		const requests = producer.requests();
 		const jobs = new Set<Promise<void>>();
 		const fills = hasRanges(this.version)
-			? new RangeFills(producer, (groups, terms) => this.#recover(broadcast, consumed, entry, groups, terms))
+			? new RangeFills(producer, (groups, priority) => this.#recover(broadcast, consumed, entry, groups, priority))
 			: undefined;
 		entry.fills = fills;
 		const driving = fills ? this.#driveFills(entry, fills) : undefined;
@@ -2560,8 +2559,8 @@ export class Subscriber {
 		}
 	}
 
-	// Ask `groups` of `copy` again on a lite-07 SUBSCRIBE of their own, with the budget of the fills
-	// owing them, as the Rust `Recovery` does with none: `copy`'s subscription dropped them as stale, or delivered them before and they
+	// Ask `groups` of `copy` again on a lite-07 SUBSCRIBE of their own with no max delay, as the Rust
+	// `Recovery` does: `copy`'s subscription dropped them as stale, or delivered them before and they
 	// were since evicted, so it never sends them again. Its groups land in the copy as a
 	// subscription's do. It FINs once every group is accounted for and read, and is over at the
 	// publisher's FIN in reply, refusing whatever it did not deliver.
@@ -2570,7 +2569,7 @@ export class Subscriber {
 		consumed: Consumed,
 		copy: SubscribeEntry,
 		groups: Run,
-		{ priority, maxDelay }: RecoveryTerms,
+		priority: number,
 	): RecoveryHandle {
 		const producer = copy.track;
 		const id = this.#subscribeNext++;
@@ -2581,7 +2580,7 @@ export class Subscriber {
 				broadcast,
 				consumed,
 				producer.name,
-				{ priority, order: "ascending", delay: { max: maxDelay } },
+				{ priority, order: "ascending", delay: { max: null } },
 				ranges,
 			),
 			ranges,
@@ -2638,7 +2637,7 @@ export class Subscriber {
 					new Deadline(),
 				);
 				let fin = false;
-				const responses = this.#recoveryResponses(stream, entry, groups, maxDelay, giveUp, () => fin);
+				const responses = this.#recoveryResponses(stream, entry, groups, giveUp, () => fin);
 				// FIN once every group is accounted for and read, as a subscriber does once its tail
 				// settles, and the publisher FINs in reply.
 				let ended = false;
@@ -2691,7 +2690,6 @@ export class Subscriber {
 		stream: Stream,
 		entry: SubscribeEntry,
 		groups: Run,
-		maxDelay: Duration | null,
 		giveUp: (start: bigint, end: bigint, refusal: Refusal) => void,
 		fin: () => boolean,
 	): Promise<void> {
@@ -2709,12 +2707,9 @@ export class Subscriber {
 				if (started || resp.start.starts.length !== 1)
 					throw new ProtocolViolation("unexpected recovery SUBSCRIBE_OK");
 				started = true;
-				// Below its start the publisher delivers nothing: under a budget, since it judged them
-				// stale, and with none, since it lacks them.
+				// Below its start the publisher, asked with no max delay, lacks them.
 				const from = resp.start.starts[0] ?? groups.end;
-				const below =
-					maxDelay === null ? new NotFound(`group ${groups.start}`) : new StreamError(StreamCode.Old);
-				giveUp(groups.start, max(groups.start, min(from, groups.end)), passing(below));
+				giveUp(groups.start, max(groups.start, min(from, groups.end)), passing(new NotFound(`group ${groups.start}`)));
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
 				const cause = resp.drop.cause(this.version);

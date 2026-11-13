@@ -7,7 +7,7 @@ import { StreamCode, StreamError } from "../error.ts";
 import type { Run } from "../internal.ts";
 import { Tail } from "../tail.ts";
 import type { Fill, Producer } from "../track.ts";
-import { RangeFills, type RecoveryHandle, type RecoveryTerms, type Refused } from "./fills.ts";
+import { RangeFills, type RecoveryHandle, type Refused } from "./fills.ts";
 
 const enc = new TextEncoder();
 
@@ -44,13 +44,13 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 
 // Recoveries a test answers by hand.
 function recoveries() {
-	const opened: { groups: Run; terms: RecoveryTerms; finish(refused: Refused[]): void; cancelled: boolean }[] = [];
-	const recover = (groups: Run, terms: RecoveryTerms): RecoveryHandle => {
+	const opened: { groups: Run; priority: number; finish(refused: Refused[]): void; cancelled: boolean }[] = [];
+	const recover = (groups: Run, priority: number): RecoveryHandle => {
 		let finish!: (refused: Refused[]) => void;
 		const done = new Promise<Refused[]>((resolve) => {
 			finish = resolve;
 		});
-		const entry = { groups: { ...groups }, terms, finish, cancelled: false };
+		const entry = { groups: { ...groups }, priority, finish, cancelled: false };
 		opened.push(entry);
 		return {
 			done,
@@ -91,9 +91,9 @@ test("range fills: a stale drop of asked groups is recovered once, on a subscrip
 	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
 	fills.poll(tail, true);
 	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 1n, end: 3n }]);
-	// With the fill's own budget, none. The run already asked stays asked whole while the fill owes
-	// any of it, so the subscription does not change under the recovery.
-	expect(opened[0]?.terms.maxDelay).toBeNull();
+	// With the fill's priority. The run already asked stays asked whole while the fill owes any of
+	// it, so the subscription does not change under the recovery.
+	expect(opened[0]?.priority).toBe(peer.fill.priority);
 	expect(fills.ask.groups).toEqual([{ start: 0n, end: 4n }]);
 
 	// The recovery delivered nothing, and the next stale drop of the same groups stands.

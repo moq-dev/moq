@@ -93,7 +93,8 @@ impl FillAsk {
 /// range retires, a later one asking for the same groups may start lower. A group it drops as stale is officially dropped,
 /// and one it already accounted for (delivered before and since evicted here) it never
 /// sends again, so a [`Recovery`] asks for either on its own subscription with no max delay,
-/// once.
+/// once. Nothing newer judges it stale there, so once every hop forgot a run, a narrow reader
+/// takes its stale groups.
 ///
 /// A group stays asked until its stream finishes, since narrowing the subscription under a
 /// stream still arriving would reset it.

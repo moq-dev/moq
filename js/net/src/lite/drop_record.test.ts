@@ -613,7 +613,8 @@ for (const stale of [false, true]) {
 // Groups 1 and 2 are judged stale for the relay's subscription, under a 1.5s budget, a run the
 // relay's copy shares with all its readers, then the relay `lost` that run: it aged out past the
 // pool's idle window, or the pool shed it under pressure. The readers in `readers` subscribe next:
-// a narrow one never takes groups 1 and 2, and a wide one is filled them through the relay from
+// a narrow one is judged stale for groups 1 and 2 while the viewer still holds the run, and takes
+// them once every hop forgot it, and a wide one is filled them through the relay from
 // the publisher, which still holds them: fetched once the viewer's copy forgot the run too, and
 // re-offered over both subscriptions by the widening update while it still holds it stale.
 async function lostRun(lost: "forgot" | "shed", readers: ("wide" | "narrow")[]): Promise<void> {
@@ -657,17 +658,18 @@ async function lostRun(lost: "forgot" | "shed", readers: ("wide" | "narrow")[]):
 			if (lost === "forgot") expect(chained.fetches().up).toBeGreaterThan(before.up);
 			wide.close();
 		} else {
-			// Judged stale by its own budget, or filled and then judged. Once every hop forgot the
-			// run, the relay recovers it on a SUBSCRIBE of its own, whose publisher resolves the
-			// start within that range: its newest group, 2, is the head it hands out, and no hop
-			// still holds group 3 to judge it by.
+			// Judged stale by its own budget while the viewer still holds the run. Once every hop forgot
+			// it, the relay recovers it with no max delay, as the Rust `Recovery` does, so the narrow
+			// reader takes the stale history: no hop still holds a newer group to judge it by.
 			const narrow = chained.remote.track("video").subscribe({
 				delay: { max: Duration.millis(1500) },
 				ranges: [{ start: { absolute: 1n } }],
 			});
-			const judged = await drain(clock, narrow);
-			expect(groupsOf(judged)).not.toContain(1n);
-			if (lost === "shed") expect(groupsOf(judged)).not.toContain(2n);
+			const judged = groupsOf(await drain(clock, narrow));
+			if (lost === "shed") {
+				expect(judged).not.toContain(1n);
+				expect(judged).not.toContain(2n);
+			} else expect(judged).toEqual([1n, 2n, 3n, 4n, 5n]);
 			narrow.close();
 		}
 	}
