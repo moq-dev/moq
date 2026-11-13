@@ -99,7 +99,10 @@ jobs:
       - name: Package
         env:
           BUILD_VERSION: ${{ needs.ffi.outputs.version }}
+        # package-ffi.sh strips LLVM bitcode, which Go's cgo now rejects, with
+        # rustc's llvm-tools.
         run: |
+          rustup component add llvm-tools
           just go package-ffi \
             --version "$BUILD_VERSION" \
             --source-dir go/ffi \
