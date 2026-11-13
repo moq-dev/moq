@@ -182,6 +182,31 @@ fn an_unwatched_grant_retires_its_previous_stream() {
 	assert_eq!(sim.reaches(1, key, &p("b/x")), Some(0));
 }
 
+/// A snapshot already in flight must not restore a cancelled grant's routes.
+#[test]
+fn a_cancelled_stream_cannot_restore_a_route() {
+	let mut sim = Sim::with(Rule::PATH, 2);
+	sim.link(
+		1,
+		0,
+		SimLink::cost(1).grant(Grant {
+			subject: "ga",
+			scope: "b",
+		}),
+		SimLink::cost(1),
+	);
+	sim.originate(0, 7, 0);
+	sim.announce(0, "b/x", 0, None);
+	// The original snapshot is still in flight when the grant is cancelled.
+	sim.watch(1, "a");
+	assert!(sim.run());
+	assert!(!sim.holds(1, qualified("ga", 7)), "{}", sim.path(1).dump());
+	assert!(sim.shown(1).is_empty());
+	sim.watch(1, "b");
+	assert!(sim.run());
+	assert_eq!(sim.reaches(1, qualified("ga", 7), &p("b/x")), Some(0));
+}
+
 /// The prefix two regions share, or `None` when they are disjoint.
 fn meet(a: &Path, b: &Path) -> Option<Path> {
 	match (within(a, b), within(b, a)) {

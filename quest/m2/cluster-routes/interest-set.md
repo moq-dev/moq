@@ -114,6 +114,10 @@ own.
 
 Public API: none (the router is crate-private). Wire: none.
 
+## Required
+
+- [Settle the path router's doubt lifetime](/quest/m2/cluster-routes/scope.md) - the chosen route rule this extends
+
 ## Related
 
 - [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - deletes Babel's router; whichever lands second adapts

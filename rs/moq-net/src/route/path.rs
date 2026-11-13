@@ -225,6 +225,9 @@ struct Session<A> {
 	draining: bool,
 	/// The prefix the neighbour asked this node for, once it opened a stream.
 	watch: Option<Path>,
+	/// The newest receive stream whose initial set has arrived (or was cancelled).
+	/// Older streams cannot recreate a route after that boundary.
+	synced: u32,
 	/// The routes it offered, so closing it costs what it held.
 	heard: BTreeSet<RouteId>,
 	tx: BTreeMap<RouteId, Sent<A>>,
@@ -420,6 +423,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			rtt: None,
 			draining: false,
 			watch: None,
+			synced: 0,
 			heard: BTreeSet::new(),
 			tx: BTreeMap::new(),
 			told: BTreeSet::new(),
@@ -648,6 +652,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// A route `from` sent for `named` under `prefix`, on the stream answering interest
 	/// generation `interest`: ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD, or ROUTE_END for `None`.
 	pub fn route(&mut self, from: N, named: Id, prefix: Path, reach: Option<Reach>, interest: u32) {
+		if self.sessions.get(&from).is_none_or(|session| interest < session.synced) {
+			return;
+		}
 		let Some(id) = self.admit(from, named, &prefix) else {
 			return;
 		};
@@ -753,9 +760,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// `from`'s stream answering interest generation `interest` sent its initial set:
 	/// what an older stream left is gone.
 	pub fn synced(&mut self, from: N, interest: u32) {
-		let Some(session) = self.sessions.get(&from) else {
+		let Some(session) = self.sessions.get_mut(&from) else {
 			return;
 		};
+		session.synced = session.synced.max(interest);
 		let stale: Vec<RouteId> = (session.heard.iter())
 			.filter(|key| self.rx[*key][&from].interest < interest)
 			.cloned()
@@ -1763,11 +1771,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					sent.held = false;
 					sent.src = src;
 					sent.from = from;
-					// A floor moves only with what it covers: a route whose claims did not
-					// change still says truly what they were as of its last floor, so a
-					// change elsewhere costs it nothing. Its first floor always goes.
-					let first = sent.view.floors.is_empty() && floor.is_some();
-					if !changes.is_empty() || first {
+					// Even unchanged claims need their newer floor forwarded: a neighbour
+					// may still hold an intervening revision learned on another path.
+					let advanced = floor.is_some() && sent.view.floors.get(&prefix).copied() != floor;
+					if !changes.is_empty() || advanced {
 						let floors = floor
 							.map(|rev| BTreeMap::from([(prefix.clone(), rev)]))
 							.unwrap_or_default();

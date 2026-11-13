@@ -1236,6 +1236,37 @@ fn sweep_handoff(rule: Rule) {
 	}
 }
 
+/// A neighbour's unchanged claims at a newer floor must displace what another
+/// path taught us in between, even when that other path now comes through us.
+#[test]
+fn an_unchanged_snapshot_advances_the_floor_others_need() {
+	let (origin, primary, other) = (0, 1, 2);
+	let mut sim = Sim::with(Rule::PATH, 3);
+	sim.join(origin, primary, 1);
+	sim.join(primary, other, 1);
+	sim.join(origin, other, 3);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/a", 0, None);
+	assert!(sim.run());
+
+	sim.hold(origin, primary);
+	sim.announce(origin, "live/b", 0, None);
+	assert!(sim.run());
+	assert_eq!(sim.shows(other, 7, "live/b"), Some(true));
+	assert_eq!(sim.shows(primary, 7, "live/b"), None);
+	sim.hold(other, primary);
+	sim.disconnect(origin, other);
+	sim.disconnect(origin, primary);
+	sim.unannounce(origin, "live/b");
+	sim.release(origin, primary);
+	sim.connect(origin, primary);
+	assert!(sim.run());
+	sim.release(other, primary);
+	assert!(sim.run());
+	assert_eq!(sim.shows(other, 7, "live/b"), None, "{}", sim.path(other).dump());
+	assert_eq!(sim.reaches(other, 7, &p("live/a")), Some(origin));
+}
+
 /// Both rules run the same external script and settle to the same claims. Their
 /// different message graphs interleave snapshots differently, so reader histories
 /// need not match, but neither may revive a known withdrawal or report a false END.
@@ -1387,7 +1418,16 @@ fn settled(sim: &mut Sim, label: &str) {
 			}
 		}
 		let shown: BTreeSet<&(Id, Path)> = sim.shown(node).keys().collect();
-		assert_eq!(shown, expected.keys().collect(), "{label}: node {node}");
+		assert_eq!(
+			shown,
+			expected.keys().collect(),
+			"{label}: node {node}\n{}",
+			if sim.paths() {
+				sim.path(node).dump()
+			} else {
+				String::new()
+			}
+		);
 		for ((id, claim), shown) in sim.shown(node) {
 			assert!(shown.available, "{label}: node {node} {id} {claim}");
 			assert_eq!(
