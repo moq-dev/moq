@@ -249,6 +249,14 @@ ts-controls:
 drain *args:
     ./drain/run.sh {{ args }}
 
+# A browser tab reads 300 live tracks of mixed priority through a Rust relay over WebTransport,
+# past its ~100-stream cap: the top priority gets every group and nothing hangs. Runs lite-07 and
+# lite-06 in Chromium and Firefox; `--version` and `--engine` pick one. See stream-credit/README.md.
+
+# Stream credit by priority in the browser, end to end.
+stream-credit *args:
+    ./stream-credit/run.sh {{ args }}
+
 # The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
 video:
     uv run --no-project python ../sh/js/install.py frozen

@@ -1,4 +1,4 @@
-# [L] Stream credit by priority
+# Stream credit by priority
 
 ## Goal
 
@@ -54,7 +54,18 @@ wire message and multi-group streams. The 2026-11-04 choice of takeover
 before cancelling is superseded. ✅ m2 no longer requires this epic
 (rejected: keep the gate); it was an ordering rule, not a code dependency.
 
-This epic owns the end-to-end test: a browser reader and a Rust relay over
-WebTransport, 300 live tracks of mixed priority, the highest-priority ones
-receiving every group, and nothing hanging. It builds its own harness, since
-takeover no longer supplies one.
+The end-to-end test is `just test stream-credit` (`test/stream-credit/`), from
+[moq-dev/moq#8652](https://github.com/moq-dev/moq/pull/8652): a Chromium or
+Firefox tab reads 300 live tracks of mixed priority through `moq-relay` over
+WebTransport, on lite-07 and lite-06. The highest-priority tier receives every
+group, the tiers read in priority order, and on lite-07 the relay continues
+paused groups. It runs locally only until
+[browser-resets](/quest/m1/stream-credit/browser-resets.md) makes it pass
+reliably, since about one lite-07 cell in 20 still fails.
+
+Decided 2026-11-13 (implementer, #8652, unattended): a lite-06 reader may lose a
+starved track's final group at the track's end, and that is lite-06's limit,
+not a defect: lite-06 has no drops, so a reader cannot wait for a group the
+relay may have shed. The harness checks the final group on lite-07 only.
+Rejected: holding the relay's lite-06 SUBSCRIBE_FINISH until no group waits for
+credit, a heuristic for a version lite-07 replaces.
