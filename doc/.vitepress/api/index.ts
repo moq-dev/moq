@@ -187,8 +187,8 @@ if (import.meta.main) {
 			if (!existsSync(entry)) throw error;
 			rmSync(staging, { recursive: true });
 		}
-		// Each entry is about 1.3 MB; keep enough for every worktree a busy machine has open.
-		// Another checkout may be pruning the same entries.
+		// Each entry is about 1.3 MB; keep enough for every worktree a busy machine has open,
+		// tolerating another checkout pruning the same entries.
 		const entries = readdirSync(cache)
 			.map((name) => ({ path: join(cache, name), used: statSync(join(cache, name), { throwIfNoEntry: false }) }))
 			.sort((a, b) => (b.used?.mtimeMs ?? 0) - (a.used?.mtimeMs ?? 0));
