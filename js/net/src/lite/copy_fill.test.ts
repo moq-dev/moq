@@ -397,7 +397,11 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
-		expect((await reader.ordered().nextGroup())?.sequence).toBe(1n);
+		const live = await reader.ordered().nextGroup();
+		expect(live?.sequence).toBe(1n);
+		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 1");
+		expect(await live?.readFrame()).toBeUndefined();
+		live?.close();
 		const history = remote
 			.track("video")
 			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });

@@ -1470,7 +1470,10 @@ export class Producer {
 			if (first === undefined) return;
 			start = max(start, first);
 		}
-		start = max(start, this.#wire?.served?.start ?? 0n);
+		// A START bounds the feed only while the demand keeps the floor it answered: a lowered floor
+		// asks the feed for the groups below it, which a fill must not duplicate.
+		const feed = this.#feedStart();
+		if (typeof feed === "bigint") start = max(start, feed);
 		const declared = this.#state.end.peek()?.at;
 		const end = declared === undefined ? land.end : min(land.end, finalSequence(declared));
 		const at = now();
