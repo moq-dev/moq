@@ -98,7 +98,7 @@ impl Chain {
 			group
 				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 	}
 
@@ -318,7 +318,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		group
 			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	broadcast.announce().unwrap();
 
@@ -379,7 +379,7 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 			group
 				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		let consumer = viewer.consume();

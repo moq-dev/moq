@@ -22,7 +22,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 fn write_group(track: &track::Producer, payload: &'static [u8]) {
 	let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 	group.write_frame(None, payload).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 /// The next group `subscriber` receives, with its first frame.
@@ -157,7 +157,7 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 			.unwrap()
 			.unwrap();
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (0, b"0a".to_vec()));
-		g0.finish().unwrap();
+		g0.close().unwrap();
 		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		g1.write_frame(None, &b"1a"[..]).unwrap();
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (1, b"1a".to_vec()));

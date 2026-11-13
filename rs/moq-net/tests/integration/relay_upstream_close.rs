@@ -14,6 +14,7 @@
 //! them.
 
 use crate::support;
+use support::AppendNext;
 use moq_net::track::Delay;
 
 use std::time::Duration;
@@ -131,7 +132,7 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	for (index, track) in tracks.iter().enumerate() {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(MAX_DELAY))
-			.with_range(0..);
+			.with_ranges([support::keys(0..)]);
 		let sub = remote.track(&format!("track{index}")).unwrap().subscribe(subscription);
 		let sub = kio::clock::timeout(TIMEOUT, sub)
 			.await
@@ -148,12 +149,12 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	downstream.server_transport.hold_unis();
 	for track in &tracks {
 		for key in 0..GROUPS {
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for index in 0..FRAMES {
 				let at = Timestamp::from_millis(key * FRAMES + index).unwrap();
 				group.write_frame(at, index.to_string().into_bytes()).unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let _finished = track.clone().finish().unwrap();
 	}

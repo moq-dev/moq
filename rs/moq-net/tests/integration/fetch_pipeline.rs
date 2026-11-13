@@ -6,6 +6,7 @@
 //! `model::resume`'s staged copies.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -101,7 +102,7 @@ async fn the_first_fetch_goes_out_with_the_info_request() {
 			let _track = request.accept(timed());
 			let mut group = fill.accept(0, timed()).unwrap();
 			group.write_frame(Timestamp::ZERO, b"early".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut fetched = kio::clock::timeout(TIMEOUT, fetching)
 				.await
 				.expect("the fetch resolves")
@@ -144,9 +145,9 @@ async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	let mut links = Vec::new();
 	let mut upstream = publisher.clone();

@@ -26,6 +26,7 @@ use moq_net::{Instance, Timescale, Timestamp, Version, cache, origin, stats, tra
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 use crate::support::{self, Rng};
+use crate::support::AppendNext;
 
 const VERSION: &str = "moq-lite-07-wip";
 
@@ -361,11 +362,11 @@ impl Mesh {
 				.broadcast()
 				.create_track(TRACK, track::Info::default().with_timescale(Timescale::MILLI))
 				.unwrap();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group
 				.write_frame(Timestamp::ZERO, bytes::Bytes::from(path.clone()))
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			route.announce().unwrap();
 			Held { route, _track: track }
 		};

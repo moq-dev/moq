@@ -41,9 +41,9 @@ fn millis(ms: u64) -> Timestamp {
 	Timestamp::from_millis(ms).unwrap()
 }
 
-/// Groups 0 to 4, group `n` presenting at `n` seconds, then what a subscriber to `range`
-/// reads oldest first: through the publisher's own origin with no `version`, otherwise
-/// over one session on it.
+/// Groups at 0 to 4 seconds, each keyed by its start in milliseconds, then what a subscriber
+/// to `range` reads oldest first: through the publisher's own origin with no `version`,
+/// otherwise over one session on it.
 async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let publisher = produce_origin(1);
 	let broadcast = publisher
@@ -57,10 +57,10 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 		)
 		.unwrap();
 	broadcast.announce().unwrap();
-	for key in 0..5 {
+	for key in (0..5).map(|second| second * 1000) {
 		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-		group.write_frame(millis(key * 1000), &b"x"[..]).unwrap();
-		group.finish().unwrap();
+		group.write_frame(millis(key), &b"x"[..]).unwrap();
+		group.close().unwrap();
 	}
 
 	let subscriber = produce_origin(2);
@@ -107,17 +107,14 @@ fn range(start: Anchor, end: Option<Anchor>) -> Range {
 
 /// Relative and time anchors at each end, with what a reader of the held track reads.
 fn anchored() -> [(Range, Vec<u64>); 6] {
-	let zero = Anchor::Absolute(0);
+	let zero = Anchor::Time(0);
 	[
-		(range(Anchor::Relative(2), None), vec![2, 3, 4]),
-		(range(Anchor::Time(millis(2500)), None), vec![2, 3, 4]),
-		(range(zero, Some(Anchor::Relative(1))), vec![0, 1, 2, 3]),
-		(range(zero, Some(Anchor::Time(millis(2500)))), vec![0, 1, 2]),
-		(range(Anchor::Relative(2), Some(Anchor::Relative(1))), vec![2, 3]),
-		(
-			range(Anchor::Time(millis(1500)), Some(Anchor::Time(millis(3500)))),
-			vec![1, 2, 3],
-		),
+		(range(Anchor::Relative(2), None), vec![2000, 3000, 4000]),
+		(range(Anchor::Time(2500), None), vec![2000, 3000, 4000]),
+		(range(zero, Some(Anchor::Relative(1))), vec![0, 1000, 2000, 3000]),
+		(range(zero, Some(Anchor::Time(2500))), vec![0, 1000, 2000]),
+		(range(Anchor::Relative(2), Some(Anchor::Relative(1))), vec![2000, 3000]),
+		(range(Anchor::Time(1500), Some(Anchor::Time(3500))), vec![1000, 2000, 3000]),
 	]
 }
 
@@ -157,12 +154,12 @@ async fn each_wire_refuses_only_the_anchors_it_drops() {
 async fn every_wire_carries_the_live_and_oldest_starts() {
 	for version in VERSIONS {
 		let live = read(Some(version), Range::live()).await;
-		assert_eq!(live.unwrap().last(), Some(&4), "{version}: live reads the latest group");
+		assert_eq!(live.unwrap().last(), Some(&4000), "{version}: live reads the latest group");
 		let mut oldest = read(Some(version), Range::oldest()).await.unwrap();
 		oldest.sort_unstable();
 		let want: &[u64] = match *version {
-			"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4],
-			_ => &[0, 1, 2, 3, 4],
+			"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4000],
+			_ => &[0, 1000, 2000, 3000, 4000],
 		};
 		assert_eq!(oldest, want, "{version}: oldest reads every group its start reaches");
 	}
@@ -186,7 +183,7 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 	for key in 0..5 {
 		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 		group.write_frame(None, &b"x"[..]).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 
@@ -215,7 +212,7 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 	);
 
 	newest.write_frame(None, &b"x"[..]).unwrap();
-	newest.finish().unwrap();
+	newest.close().unwrap();
 	let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
 		.await
 		.expect("group timeout")

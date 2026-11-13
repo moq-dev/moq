@@ -10,6 +10,7 @@
 //! shrunk to the ops it needs, which the report names.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -302,7 +303,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		_upstream: upstream,
 	};
 
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	// The open group as written so far, as `group:payload`.
 	let mut written: Vec<String> = Vec::new();
 	let mut readers: Vec<Reader> = Vec::new();
@@ -326,8 +327,8 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		match *op {
 			Op::Write => write(&mut group, &mut written, &mut readers, &format!("d{step}")),
 			Op::NewGroup => {
-				group.finish().unwrap();
-				group = track.append_group().unwrap();
+				group.close().unwrap();
+				group = track.append_next().unwrap();
 				written.clear();
 				write(&mut group, &mut written, &mut readers, "snapshot");
 				// Let it reach `R`, so the newest group at the next join is unambiguous.

@@ -6,6 +6,7 @@
 //! signal compression receive the plain frames the relay inflates once for all of them.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -155,16 +156,16 @@ async fn a_start_group_arrives_whole() {
 						let published = publish(info);
 						let mut group = published.track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 						write(&mut group, 0..head);
-						let mut fixture = relay(published, hops, Subscription::default().with_range(5..)).await;
+						let mut fixture = relay(published, hops, Subscription::default().with_ranges([support::keys(5..)])).await;
 						if lite {
 							assert_eq!(
 								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
-								Anchor::Absolute(5),
+								Anchor::Time(5),
 								"{case}: upstream asks for the start group"
 							);
 						}
 						write(&mut group, head..5);
-						group.finish().unwrap();
+						group.close().unwrap();
 						let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
 						assert_eq!(reading.start, 5, "{case}");
 						for index in 0..5 {
@@ -197,7 +198,7 @@ async fn relay_serves_every_version() {
 				"{version}: compression declared"
 			);
 
-			let mut group = fixture.track.append_group().unwrap();
+			let mut group = fixture.track.append_next().unwrap();
 			group
 				.write_frame(Timestamp::from_millis(0).unwrap(), payload(0))
 				.unwrap();
@@ -219,7 +220,7 @@ async fn relay_serves_every_version() {
 			group
 				.write_frame(Timestamp::from_millis(3).unwrap(), bytes::Bytes::new())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 
 			let mut group = fixture.subscriber.recv_group().await.unwrap().expect("group");
 			for index in 0..3 {
@@ -245,13 +246,13 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 					fixture.subscriber.info().compression == moq_net::track::Compression::Deflate,
 					"{upstream} -> {downstream}"
 				);
-				let mut group = fixture.track.append_group().unwrap();
+				let mut group = fixture.track.append_next().unwrap();
 				for index in 0..3 {
 					group
 						.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
 						.unwrap();
 				}
-				group.finish().unwrap();
+				group.close().unwrap();
 				let mut received = fixture.subscriber.recv_group().await.unwrap().unwrap();
 				for index in 0..3 {
 					assert_eq!(
@@ -277,13 +278,13 @@ async fn ietf_fetch_keeps_the_stored_form() {
 				.route("bcast", moq_net::origin::RouteOptions::hidden())
 				.unwrap();
 			let track = broadcast.broadcast().create_track("data", compressed()).unwrap();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for index in 0..3 {
 				group
 					.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
 					.unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 			let _track = track.finish().unwrap();
 			broadcast.announce().unwrap();
 			let origin = produce_origin(2);

@@ -3,6 +3,7 @@
 //! A group finished with no frames reaches the subscriber as an empty group.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -49,7 +50,7 @@ async fn an_empty_group_arrives_empty() {
 			.expect("subscribe");
 		subscribed(&track).await;
 
-		track.append_group().unwrap().finish().unwrap();
+		track.append_next().unwrap().close().unwrap();
 		let mut empty = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the empty group was dropped"))
@@ -62,9 +63,9 @@ async fn an_empty_group_arrives_empty() {
 			.unwrap();
 		assert!(frame.is_none(), "{version}: the empty group carried a frame");
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(Timestamp::ZERO, &b"ok"[..]).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut next = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")

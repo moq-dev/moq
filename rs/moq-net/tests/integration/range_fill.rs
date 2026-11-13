@@ -58,7 +58,7 @@ impl Fixture {
 			group
 				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		let copy = origin(2, None);
@@ -135,7 +135,7 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		// Superseded, the copy expires them, while the reader keeps the subscription live.
 		kio::clock::sleep(cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
 		let subscribes = fixture.opened(SUBSCRIBE);
-		let mut second = fixture.subscribe([Range::groups(1..4)]).await;
+		let mut second = fixture.subscribe([support::keys(1..4)]).await;
 		assert_eq!(receive(&mut second, 3).await, (1..4).collect());
 		assert_eq!(fixture.opened(SUBSCRIBE), subscribes + 1, "recovered on one SUBSCRIBE");
 		assert_eq!(fixture.opened(FETCH), 0, "nothing fetched");
@@ -145,14 +145,14 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6].into());
 		assert_eq!(fixture.opened(SUBSCRIBE), subscribes + 1, "recovered once");
 
 		// Expired again, the history is recovered again for a later reader.
 		drop(second);
 		kio::clock::sleep(cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
-		let mut third = fixture.subscribe([Range::groups(1..4)]).await;
+		let mut third = fixture.subscribe([support::keys(1..4)]).await;
 		assert_eq!(receive(&mut third, 3).await, (1..4).collect());
 		assert_eq!(
 			fixture.opened(SUBSCRIBE),
@@ -175,7 +175,7 @@ async fn a_recovery_outlives_the_track_finishing() {
 
 		// Superseded, the copy expires them, while the reader keeps the subscription live.
 		kio::clock::sleep(cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
-		let mut second = fixture.subscribe([Range::groups(1..4)]).await;
+		let mut second = fixture.subscribe([support::keys(1..4)]).await;
 		let _track = fixture.track.finish().unwrap();
 		assert_eq!(receive(&mut second, 3).await, (1..4).collect());
 	})

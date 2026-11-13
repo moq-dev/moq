@@ -5,6 +5,7 @@
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
 use crate::support;
+use support::AppendNext;
 use moq_net::track::Delay;
 
 use std::time::Duration;
@@ -28,7 +29,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// payloads, and how the read ended.
 async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8>>)>, Option<Error>) {
 	let subscription = Subscription::default()
-		.with_range(0..)
+		.with_ranges([support::keys(0..)])
 		.with_delay(Delay::default().with_max(Duration::from_secs(30)));
 	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
@@ -88,11 +89,11 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for frame in FRAMES {
 				group.write_frame(Timestamp::ZERO, frame).unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		track.finish_at(Position::group(GROUPS), Some(Error::App(7))).unwrap();
 

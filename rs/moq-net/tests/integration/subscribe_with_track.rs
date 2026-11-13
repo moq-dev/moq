@@ -10,6 +10,7 @@
 //! stream and are unchanged.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -74,9 +75,9 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut cached = track.append_group().unwrap();
+	let mut cached = track.append_next().unwrap();
 	cached.write_frame(Timestamp::ZERO, b"cached".as_ref()).unwrap();
-	cached.finish().unwrap();
+	cached.close().unwrap();
 	broadcast.announce().unwrap();
 
 	let consumer = nodes.last().unwrap().consume();
@@ -121,10 +122,10 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	let elapsed = kio::clock::now() - start;
 	assert_eq!(frame.payload.as_ref(), b"cached", "{label}");
 
-	let mut live = track.append_group().unwrap();
+	let mut live = track.append_next().unwrap();
 	live.write_frame(Timestamp::from_millis(1).unwrap(), b"live".as_ref())
 		.unwrap();
-	live.finish().unwrap();
+	live.close().unwrap();
 	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: the live group did not arrive"))

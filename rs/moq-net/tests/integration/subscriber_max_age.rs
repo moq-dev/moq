@@ -7,6 +7,7 @@ use std::time::Duration;
 use moq_net::{Timestamp, Version, origin, track};
 
 use crate::support::harness::{peer, spawn};
+use crate::support::AppendNext;
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
@@ -49,9 +50,9 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 				track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = source.append_group().unwrap();
+		let mut group = source.append_next().unwrap();
 		group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		broadcast.announce().unwrap();
 		let consumer = viewer.consume();
 		let remote = consumer
@@ -124,9 +125,9 @@ async fn relay_forwards_the_smallest_stated_min_delay() {
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = source.append_group().unwrap();
+	let mut group = source.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	broadcast.announce().unwrap();
 
 	let cache = |origin: &origin::Producer| {

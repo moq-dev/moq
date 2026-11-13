@@ -3,6 +3,7 @@
 //! Initial catalog acquisition while the same publisher gains a second session.
 
 use crate::support;
+use support::AppendNext;
 
 use moq_net::{Error, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -71,9 +72,9 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");
 	let track = request.accept(None);
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	group.write_frame(None, b"catalog".to_vec()).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	let result = pending.await;
 	if carries_instance {
 		let mut subscription = result.expect("the same instance must acquire");

@@ -16,6 +16,7 @@ use bytes::Bytes;
 use moq_net::{Version, cache, frame, group, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
+use crate::support::AppendNext;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -86,7 +87,7 @@ fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU6
 				for index in start.frame as u32.. {
 					let payload = (index < FRAMES).then(|| numbered(index));
 					if payload.is_none() && finish {
-						group.finish().expect("finish");
+						group.close().expect("finish");
 						break;
 					}
 					if !write_paced(&mut group, &fill, &mut demand, payload).await {
@@ -158,11 +159,11 @@ async fn moq_transport_relays_a_cold_finished_group() {
 	route.announce().unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
 	serve(track.requests(), written, ended, true);
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	for index in 0..FRAMES {
 		group.write_frame(None, numbered(index)).unwrap();
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	let mut options = MockConnectOptions::new(version_parsed);
 	options.server_publish = Some(publisher.consume());
@@ -237,7 +238,7 @@ async fn chain(version: &str, replay: Replay) {
 		.expect("an instance");
 	let subscription = || {
 		track::Subscription::default()
-			.with_range(0..)
+			.with_ranges([crate::support::keys(0..)])
 			.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
 	};
 	let mut live_sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription()))
@@ -246,7 +247,7 @@ async fn chain(version: &str, replay: Replay) {
 		.expect("subscribe");
 
 	// The live reader at the bottom of the chain keeps up with the publisher.
-	let mut live = track.append_group().unwrap();
+	let mut live = track.append_next().unwrap();
 	live.write_frame(None, numbered(0)).unwrap();
 	let mut reader = kio::clock::timeout(TIMEOUT, live_sub.recv_group())
 		.await
@@ -261,7 +262,7 @@ async fn chain(version: &str, replay: Replay) {
 	}
 
 	if replay == Replay::Finished {
-		live.finish().unwrap();
+		live.close().unwrap();
 		assert!(
 			next_end(&mut reader, version).await,
 			"{version}: the live reader sees the end"

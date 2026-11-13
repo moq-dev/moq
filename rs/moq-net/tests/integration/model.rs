@@ -28,7 +28,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 		.unwrap();
 	let mut group = track.create_group(group::Info { start: 7 }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"media").unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	broadcast.announce().unwrap();
 
 	// Resolving and subscribing pass through the origin's core front tasks.

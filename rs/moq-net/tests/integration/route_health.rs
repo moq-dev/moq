@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 use moq_net::{Error, StreamError, Timestamp, Version, origin, track};
+use crate::support::AppendNext;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -84,7 +85,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	let mut seen = BTreeSet::new();
 	let mut tick = 0;
 	for key in 0..groups {
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();
@@ -106,7 +107,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 				m1_e.client.abort(Error::Cancel);
 			}
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	settle().await;
 	drain(&mut rx, &mut seen);
@@ -227,14 +228,14 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 	let mut write = async |groups: u64| {
 		for _ in 0..groups {
 			let key = tick / FRAMES;
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for frame in 0..FRAMES {
 				let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 				group.write_frame(timestamp, payload(key, frame)).unwrap();
 				kio::clock::sleep(STEP).await;
 				tick += 1;
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 	};
 	write(2).await;

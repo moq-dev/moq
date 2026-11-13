@@ -17,6 +17,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use moq_net::{Error, Timestamp, Version, group, origin, track};
+use crate::support::AppendNext;
 
 /// Within the subscriber's one-minute budget, so a group that never continues is a hang
 /// rather than a group given up as too old.
@@ -69,7 +70,7 @@ impl Chain {
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
-		let mut group0 = track.append_group().unwrap();
+		let mut group0 = track.append_next().unwrap();
 		group0.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
 		let mut read0 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(read0.start, 0);
@@ -78,9 +79,9 @@ impl Chain {
 			payload(0, 0)
 		);
 
-		let mut group1 = track.append_group().unwrap();
+		let mut group1 = track.append_next().unwrap();
 		group1.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
-		group1.finish().unwrap();
+		group1.close().unwrap();
 		let mut read1 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(read1.start, 1);
 		assert_eq!(
@@ -129,7 +130,7 @@ impl Chain {
 	fn finish_group0(&mut self) {
 		let mut group0 = self.group0.take().expect("finished once");
 		group0.write_frame(Timestamp::ZERO, payload(0, 1)).unwrap();
-		group0.finish().unwrap();
+		group0.close().unwrap();
 	}
 }
 

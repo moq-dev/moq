@@ -73,7 +73,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 		group
 			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}
 	let _source = source.finish().unwrap();

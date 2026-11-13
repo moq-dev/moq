@@ -31,7 +31,7 @@ const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
 /// From `start`, or the oldest group still around when there is none.
 fn floored(start: Option<u64>) -> Range {
 	Range {
-		start: start.map_or(Range::oldest().start, Anchor::Absolute),
+		start: start.map_or(Range::oldest().start, Anchor::Time),
 		end: None,
 	}
 }
@@ -51,7 +51,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 		let timestamp = Timestamp::from_millis(key * 1000 + frame).unwrap();
 		group.write_frame(timestamp, &b"x"[..]).unwrap();
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {

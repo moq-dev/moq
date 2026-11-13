@@ -11,6 +11,7 @@
 //! onto it is a restart that ends the subscription rather than stitching onto it.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -207,13 +208,13 @@ impl Topology {
 	fn group(&mut self) -> Vec<(u64, Vec<u8>)> {
 		let key = self.key;
 		self.key += 1;
-		let mut group = self.track.append_group().unwrap();
+		let mut group = self.track.append_next().unwrap();
 		let mut written = Vec::new();
 		for frame in 0..FRAMES {
 			group.write_frame(timestamp(key, frame), payload(key, frame)).unwrap();
 			written.push((key, payload(key, frame)));
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		written
 	}
 

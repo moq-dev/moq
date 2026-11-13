@@ -5,6 +5,7 @@
 //! moq-transport carries tokens only on the requests that name them.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -1212,7 +1213,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			})
 			.await;
 
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
 				.unwrap();
@@ -1291,7 +1292,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 			.await
 			.unwrap()
 			.unwrap();
-		let mut group = published.append_group().unwrap();
+		let mut group = published.append_next().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"first".as_ref())
 			.unwrap();
@@ -1308,7 +1309,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 		let _renewed = renewed.unwrap();
 		drop(first);
 		first_grant.closed().await;
-		let mut group = published.append_group().unwrap();
+		let mut group = published.append_next().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"renewed".as_ref())
 			.unwrap();
@@ -1363,9 +1364,9 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		});
 		let (_, setup) = issued.next().await.unwrap();
 
-		let mut group = down_track.append_group().unwrap();
+		let mut group = down_track.append_next().unwrap();
 		group.write_frame(ts(0), b"down".as_ref()).unwrap();
-		let mut group = up_track.append_group().unwrap();
+		let mut group = up_track.append_next().unwrap();
 		group.write_frame(ts(0), b"up".as_ref()).unwrap();
 
 		let remote = received
@@ -1789,9 +1790,9 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		})
 		.await;
 
-		let mut group = audio_track.append_group().unwrap();
+		let mut group = audio_track.append_next().unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
-		let mut group = video_track.append_group().unwrap();
+		let mut group = video_track.append_next().unwrap();
 		group.write_frame(ts(0), b"v".as_ref()).unwrap();
 
 		let remote = received
@@ -1822,7 +1823,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		wait_announced(&received.consume(), "room/alice/audio", false).await;
 
 		// The sibling keeps flowing.
-		let mut group = video_track.append_group().unwrap();
+		let mut group = video_track.append_next().unwrap();
 		group.write_frame(ts(1), b"v".as_ref()).unwrap();
 		let group = video_sub.recv_group().await.unwrap().expect("video still flows");
 		assert_eq!(group.start, 1);
@@ -1883,9 +1884,9 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		})
 		.await;
 
-		let mut group = mic_track.append_group().unwrap();
+		let mut group = mic_track.append_next().unwrap();
 		group.write_frame(ts(0), b"m".as_ref()).unwrap();
-		let mut group = cam_track.append_group().unwrap();
+		let mut group = cam_track.append_next().unwrap();
 		group.write_frame(ts(0), b"c".as_ref()).unwrap();
 
 		let remote = relay
@@ -1915,7 +1916,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		assert!(unauthorized(&err), "{err:?}");
 		wait_announced(&relay.consume(), "room/bob/mic", false).await;
 
-		let mut group = cam_track.append_group().unwrap();
+		let mut group = cam_track.append_next().unwrap();
 		group.write_frame(ts(1), b"c".as_ref()).unwrap();
 		let group = cam_sub.recv_group().await.unwrap().expect("cam still flows");
 		assert_eq!(group.start, 1);
@@ -1938,7 +1939,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 		broadcast.announce().unwrap();
 		// The group stays open, so the fetch is still in flight when the grant narrows.
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(ts(0), b"first".as_ref()).unwrap();
 
 		let received = produce_origin(3);
@@ -2022,7 +2023,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 		})
 		.await;
 
-		let mut group = audio_track.append_group().unwrap();
+		let mut group = audio_track.append_next().unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let remote = received
 			.consume()
@@ -2052,7 +2053,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 			.unwrap()
 			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
-		let mut group = audio_track.append_group().unwrap();
+		let mut group = audio_track.append_next().unwrap();
 		group.write_frame(ts(1), b"a".as_ref()).unwrap();
 		recv_through(&mut sub, 1).await;
 
@@ -2113,7 +2114,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 			.unwrap()
 			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
-		let mut group = mic_track.append_group().unwrap();
+		let mut group = mic_track.append_next().unwrap();
 		group.write_frame(ts(0), b"m".as_ref()).unwrap();
 		recv_through(&mut sub, 0).await;
 
@@ -2372,7 +2373,7 @@ async fn a_broadcast_relayed_from_another_client_is_not_ours_to_check(version: &
 		.await;
 		assert_eq!(granted(&pair.client).await, grant(&["local"], &[""]));
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
 			.unwrap();

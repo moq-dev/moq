@@ -9,6 +9,7 @@ use std::time::Duration;
 use moq_net::track::{Delay, Info, Range, Subscription};
 use moq_net::{Timescale, Timestamp, Version, cache, origin, track};
 
+use crate::support;
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -40,7 +41,7 @@ fn write(source: &track::Producer, key: u64, millis: u64) {
 	group
 		.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
 		.unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 /// A publisher, a relay subscribing to it, and a viewer subscribing to the relay.
@@ -201,7 +202,7 @@ async fn a_relay_eviction_is_filled_by_range_for_every_reader() {
 		let mut widened = chain.subscribe(reading(NARROW, [Range::oldest()])).await;
 		assert_eq!(received(&mut widened).await, (6..GROUPS).collect());
 		// Owed every group from 0, on the relay's own cache, and reading none of them yet.
-		let mut owed = chain.subscribe_relay(reading(None, [Range::groups(0..)])).await;
+		let mut owed = chain.subscribe_relay(reading(None, [support::keys(0..)])).await;
 
 		// Nobody touches them, so the relay and the viewer reclaim all but the live edge. Every
 		// group is stale by the wall clock now, so only a reader with no budget wants them.
@@ -211,7 +212,7 @@ async fn a_relay_eviction_is_filled_by_range_for_every_reader() {
 		widened.update(reading(None, [Range::oldest()])).unwrap();
 		assert_eq!(received(&mut widened).await, (0..6).collect(), "the widened reader");
 
-		let mut new = chain.subscribe(reading(None, [Range::groups(1..4)])).await;
+		let mut new = chain.subscribe(reading(None, [support::keys(1..4)])).await;
 		assert_eq!(received(&mut new).await, (1..4).collect(), "the new reader");
 
 		assert_eq!(received(&mut owed).await, (0..GROUPS).collect(), "the owed reader");
@@ -247,8 +248,8 @@ async fn a_huge_run_settles_in_one_step() {
 	for huge in [Huge::Dropped, Huge::Skipped, Huge::Forgotten] {
 		kio::clock::timeout(TIMEOUT * 10, async {
 			let chain = Chain::new([LITE07, LITE07], [forever(), expiring(EXPIRY), expiring(EXPIRY)]).await;
-			let everything = || reading(None, [Range::groups(0..)]);
-			let mut narrow = chain.subscribe(reading(NARROW, [Range::groups(0..)])).await;
+			let everything = || reading(None, [support::keys(0..)]);
+			let mut narrow = chain.subscribe(reading(NARROW, [support::keys(0..)])).await;
 			let mut wide = chain.subscribe(everything()).await;
 			write(&chain.source, 0, 0);
 			if let Huge::Skipped = huge {
@@ -371,13 +372,13 @@ async fn reported_drop_through(versions: [&str; 2]) {
 	// The shrink reaches the publisher before any group it narrows away exists.
 	kio::clock::timeout(TIMEOUT * 10, async {
 		let chain = Chain::new(versions, [forever(), forever(), forever()]).await;
-		let mut shrunk = chain.subscribe(reading(None, [Range::groups(0..)])).await;
-		shrunk.update(reading(None, [Range::groups(8..)])).unwrap();
+		let mut shrunk = chain.subscribe(reading(None, [support::keys(0..)])).await;
+		shrunk.update(reading(None, [support::keys(8..)])).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		chain.populate();
 		assert_eq!(received(&mut shrunk).await, [8, 9].into(), "{name}: the shrunk reader");
 
-		let mut later = chain.subscribe(reading(None, [Range::groups(0..)])).await;
+		let mut later = chain.subscribe(reading(None, [support::keys(0..)])).await;
 		assert_eq!(
 			received(&mut later).await,
 			(0..GROUPS).collect(),
@@ -405,14 +406,14 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 			};
 			// One stream of credit: group 0's, held from the relay, so the rest queue.
 			let chain = Chain::with_credit([LITE07, LITE07], [pool, forever(), forever()], Some(1)).await;
-			let mut reader = chain.subscribe(reading(None, [Range::groups(0..)])).await;
+			let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 			chain.upstream.server_transport.hold_unis();
 			let write = |key: u64| {
 				let mut group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
 				group
 					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			};
 			for key in 0..4 {
 				write(key);
@@ -446,11 +447,11 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 
 			// A later reader may subscribe afresh once the finished track's copies are gone,
 			// so only the update is held to asking nothing again.
-			let mut later = chain.subscribe(reading(None, [Range::groups(0..)])).await;
+			let mut later = chain.subscribe(reading(None, [support::keys(0..)])).await;
 			assert_eq!(drain(&mut later).await, got, "expiry={expiry}: the later reader");
 			let asked = chain.asked();
 			reader
-				.update(reading(Duration::from_secs(3600), [Range::groups(0..)]))
+				.update(reading(Duration::from_secs(3600), [support::keys(0..)]))
 				.unwrap();
 			assert_eq!(
 				drain(&mut reader).await,
@@ -528,7 +529,7 @@ async fn a_drop_under_a_superseded_budget_settles_no_reader() {
 #[kio::test]
 async fn a_run_dropped_before_the_first_group_settles_a_later_range() {
 	let chain = Chain::new([LITE07, LITE07], [forever(), forever(), forever()]).await;
-	let mut reader = chain.subscribe(reading(None, [Range::groups(0..)])).await;
+	let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 	for key in 0..2 {
 		let group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
 		group.abort(moq_net::Error::App(1)).unwrap();
@@ -536,9 +537,9 @@ async fn a_run_dropped_before_the_first_group_settles_a_later_range() {
 	write(&chain.source, 2, 0);
 	assert_eq!(received(&mut reader).await, [2].into());
 
-	let mut viewer = chain.subscribe(reading(None, [Range::groups(0..3)])).await;
+	let mut viewer = chain.subscribe(reading(None, [support::keys(0..3)])).await;
 	assert_eq!(drain(&mut viewer).await, [2].into(), "on the viewer");
-	let mut relayed = chain.subscribe_relay(reading(None, [Range::groups(0..3)])).await;
+	let mut relayed = chain.subscribe_relay(reading(None, [support::keys(0..3)])).await;
 	assert_eq!(drain(&mut relayed).await, [2].into(), "on the relay");
 }
 
@@ -557,8 +558,8 @@ async fn relay_pool_pressure_folds_final_runs_and_ends_stale_reports() {
 		kio::clock::timeout(TIMEOUT * 10, async {
 			let pool = cache::Pool::new(cache::Config::default().with_expiry(None));
 			let chain = Chain::new([LITE07, LITE07], [forever(), pool.clone(), forever()]).await;
-			let mut local = chain.subscribe_relay(reading(budget, [Range::groups(0..)])).await;
-			let mut remote = chain.subscribe(reading(budget, [Range::groups(0..)])).await;
+			let mut local = chain.subscribe_relay(reading(budget, [support::keys(0..)])).await;
+			let mut remote = chain.subscribe(reading(budget, [support::keys(0..)])).await;
 			let odd = write_odd(&chain, RUNS);
 			for (reader, name) in [(&mut local, "local"), (&mut remote, "remote")] {
 				assert_eq!(received(reader).await, odd, "stale={stale}: the {name} reader");

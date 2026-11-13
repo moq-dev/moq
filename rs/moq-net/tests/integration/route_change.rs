@@ -17,6 +17,7 @@
 //! same way.
 
 use crate::support;
+use support::AppendNext;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -253,13 +254,13 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 	let mut seen = Vec::new();
 
 	// Group 0 in full through `A`.
-	let mut group = topology.track.append_group().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
 		expected.push((0, payload(0, frame)));
 		seen.push(next(&mut rx).await);
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	// Group 1: half through `A`, then the route changes. Between groups, the change
 	// lands before the group starts at all.
@@ -270,7 +271,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 	if split == 0 {
 		topology.trigger(trigger).await;
 	}
-	let mut group = topology.track.append_group().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		if frame == split && split != 0 {
 			topology.trigger(trigger).await;
@@ -279,16 +280,16 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 		expected.push((1, payload(1, frame)));
 		seen.push(next(&mut rx).await);
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	// Group 2 entirely through the replacement.
-	let mut group = topology.track.append_group().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
 		expected.push((2, payload(2, frame)));
 		seen.push(next(&mut rx).await);
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	let render = |frames: &[(u64, Vec<u8>)]| {
 		frames
@@ -319,7 +320,7 @@ async fn route_flaps(version: &str) {
 	let triggers = [Trigger::BetterRoute, Trigger::BetterRouteDies, Trigger::Disconnect];
 	let mut expected = Vec::new();
 	let mut seen = Vec::new();
-	let mut group = topology.track.append_group().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES * (triggers.len() as u64 + 1) {
 		if frame % FRAMES == FRAMES / 2
 			&& let Some(trigger) = triggers.get((frame / FRAMES) as usize)
@@ -330,7 +331,7 @@ async fn route_flaps(version: &str) {
 		expected.push((0, payload(0, frame)));
 		seen.push(next(&mut rx).await);
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	assert_eq!(seen, expected, "{version}");
 	settle().await;
@@ -346,15 +347,15 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 	let mut rx = read(sub);
 	topology.standby().await;
 
-	let mut group = topology.track.append_group().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	topology.trigger(trigger).await;
-	let mut group = topology.track.append_group().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
 	settle().await;
 	match kio::clock::timeout(Duration::from_secs(10), rx.next())
@@ -378,8 +379,8 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 	let sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
 	group.write_frame(Timestamp::ZERO, payload(1, 1)).unwrap();
-	group.finish().unwrap();
-	let mut group = topology.track.append_group().unwrap();
+	group.close().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(2, 0)).unwrap();
 	while next(&mut rx).await != (2, payload(2, 0)) {}
 }
@@ -435,9 +436,9 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	let _b_to_r = link(version, &relay_b, &standby).await;
 	settle().await;
 
-	let mut group = track_a.append_group().unwrap();
+	let mut group = track_a.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, tagged("A", 0, 0)).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	assert_eq!(next(&mut rx).await, (0, tagged("A", 0, 0)), "{version}");
 
 	match trigger {
@@ -504,9 +505,9 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	assert!(!second.is_clone(&first), "{version}: joined the replaced broadcast");
 	let sub = second.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
-	let mut group = track_b.append_group().unwrap();
+	let mut group = track_b.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, tagged("B", 0, 0)).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	assert_eq!(next(&mut rx).await, (0, tagged("B", 0, 0)), "{version} {trigger:?}");
 }
 
@@ -527,7 +528,7 @@ async fn better_route_restarts(version: &str) {
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
 
-	let mut group = topology.track.append_group().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 0)), "{version}");
 	let incumbent = consumer.request("live", None).await.unwrap();
@@ -550,8 +551,8 @@ async fn better_route_restarts(version: &str) {
 	assert!(!replaced.is_clone(&incumbent), "{version}: joined the replaced front");
 	let sub = replaced.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut fresh = read(sub);
-	group.finish().unwrap();
-	let mut group = topology.track.append_group().unwrap();
+	group.close().unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
 	while next(&mut fresh).await != (1, payload(1, 0)) {}
 	assert_eq!(
@@ -734,16 +735,16 @@ async fn lagging_route_dies(version: Version) {
 	let b_r = lagged(version, &b, &r, Duration::ZERO).await;
 	settle().await;
 
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	for frame in 0..4 {
 		write(&mut group, 0, frame);
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 	for frame in 0..4 {
 		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
 	}
 
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	write(&mut group, 1, 0);
 	write(&mut group, 1, 1);
 	assert_eq!(next(&mut rx).await, (1, payload(1, 0)), "{version}");
@@ -751,12 +752,12 @@ async fn lagging_route_dies(version: Version) {
 	// P moves on while A is still behind.
 	write(&mut group, 1, 2);
 	write(&mut group, 1, 3);
-	group.finish().unwrap();
-	let mut group = track.append_group().unwrap();
+	group.close().unwrap();
+	let mut group = track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		write(&mut group, 2, frame);
 	}
-	let group = group.finish().unwrap();
+	let group = group.close().unwrap();
 
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);
@@ -832,7 +833,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 
 	let mut after = BTreeMap::<u64, Vec<String>>::new();
 	for key in 0..=E_NOTICES + 3 {
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(key * 1_000 + frame * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();
@@ -846,7 +847,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 			}
 			kio::clock::sleep(STEP).await;
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		if key == O_NOTICES {
 			o_m1.server.abort(Error::Cancel);
 			o_m1.client.abort(Error::Cancel);
@@ -980,7 +981,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 					tagged(replica.name, key, 0),
 				)
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 	};
 	write(&mut replicas, 0);
@@ -1096,7 +1097,7 @@ async fn replaced_behind_a_relay(version: &str) {
 	let mut dead = None;
 	for key in 0..3 {
 		for replica in &mut replicas {
-			replica.group = Some(replica.track.append_group().unwrap());
+			replica.group = Some(replica.track.append_next().unwrap());
 		}
 		for frame in 0..FRAMES {
 			if key == 1 && frame == FRAMES / 2 {
@@ -1118,7 +1119,7 @@ async fn replaced_behind_a_relay(version: &str) {
 			}
 		}
 		for replica in &mut replicas {
-			replica.group.take().unwrap().finish().unwrap();
+			replica.group.take().unwrap().close().unwrap();
 		}
 	}
 	settle().await;
@@ -1217,12 +1218,12 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 			settle().await;
 		}
 		for replica in &mut replicas {
-			let mut group = replica.track.append_group().unwrap();
+			let mut group = replica.track.append_next().unwrap();
 			for frame in 0..FRAMES {
 				let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 				group.write_frame(timestamp, tagged(replica.name, key, frame)).unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		if compress || dead.is_none() {
 			for frame in 0..FRAMES {
@@ -1303,13 +1304,13 @@ async fn producer_replaced(version: &str) {
 
 	let first = producers.next().await.unwrap();
 	for key in 0..2 {
-		let mut group = first.append_group().unwrap();
+		let mut group = first.append_next().unwrap();
 		assert_eq!(group.start, key, "{version}");
 		for frame in 0..FRAMES {
 			group.write_frame(Timestamp::ZERO, payload(key, frame)).unwrap();
 			assert_eq!(next(&mut rx).await, (key, payload(key, frame)), "{version}");
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 
 	// The encoder restarts: the old producer goes away mid-broadcast, and the resumed
@@ -1326,7 +1327,7 @@ async fn producer_replaced(version: &str) {
 		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	settle().await;
 	assert!(

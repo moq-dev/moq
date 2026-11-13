@@ -41,7 +41,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 	let timestamp = track.info().timescale.map(|_| millis(key * 1000));
 	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 	group.write_frame(timestamp, &b"x"[..]).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 /// Groups 1 then 0 of a track at `timescale`, into a relay over `upstream` and out over
@@ -83,7 +83,7 @@ async fn relay(
 
 	let subscription = Subscription::default()
 		.with_delay(Delay::default().with_max(BUDGET))
-		.with_range(0..);
+		.with_ranges([support::keys(0..)]);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")

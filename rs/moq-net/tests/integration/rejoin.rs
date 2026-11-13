@@ -3,6 +3,7 @@
 //! A reader leaving and rejoining a track relayed over the in-memory mock transport.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -74,10 +75,10 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 					track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)))
 				};
 
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(ts(0), b"a0".as_ref()).unwrap();
-				group.finish().unwrap();
-				let mut open = track.append_group().unwrap();
+				group.close().unwrap();
+				let mut open = track.append_next().unwrap();
 				open.write_frame(ts(100), b"b0".as_ref()).unwrap();
 
 				let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
@@ -93,12 +94,12 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				drop(sub);
 				crate::support::unwanted(track.demand()).await.unwrap();
 				open.write_frame(ts(133), b"b1".as_ref()).unwrap();
-				open.finish().unwrap();
+				open.close().unwrap();
 
 				if advance {
-					let mut live = track.append_group().unwrap();
+					let mut live = track.append_next().unwrap();
 					live.write_frame(ts(5000), b"c0".as_ref()).unwrap();
-					live.finish().unwrap();
+					live.close().unwrap();
 				}
 
 				let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
@@ -175,9 +176,9 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 			// Held for fetches only: it keeps the relay's copy without subscribing.
 			let _held = remote.track("video").unwrap();
 
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group.write_frame(ts(0), b"old".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
@@ -186,9 +187,9 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 
 			// The publisher moves on while nobody subscribes.
 			for key in 1..=3u64 {
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(ts(key * 1000), b"new".as_ref()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
@@ -243,9 +244,9 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 			// Held for fetches only: it keeps the relay's copy without subscribing.
 			let _held = remote.track("video").unwrap();
 
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group.write_frame(ts(0), b"0".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"0".to_vec()], "{version}");
@@ -254,13 +255,13 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 
 			// The publisher moves on while nobody subscribes, all within the max age.
 			for key in 1..=3u64 {
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(ts(key * 100), key.to_string()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 
 			pair.server_transport.hold_unis();
-			let rejoin = remote.track("video").unwrap().subscribe(prefs().with_range(0..));
+			let rejoin = remote.track("video").unwrap().subscribe(prefs().with_ranges([support::keys(0..)]));
 			let release = async {
 				kio::clock::sleep(Duration::from_millis(100)).await;
 				pair.server_transport.release_unis_reversed();
@@ -305,7 +306,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
 			// Left open, as a JSON snapshot group stays open for its deltas.
-			let mut open = track.append_group().unwrap();
+			let mut open = track.append_next().unwrap();
 			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
 
 			let version: Version = version.parse().unwrap();
@@ -384,7 +385,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 				.unwrap();
 			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 			broadcast.announce().unwrap();
-			let mut open = track.append_group().unwrap();
+			let mut open = track.append_next().unwrap();
 			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
 
 			let version: Version = version.parse().unwrap();
@@ -426,10 +427,10 @@ async fn rejoin_goes_live_without_the_join_head() {
 			kio::clock::sleep(Duration::from_millis(100)).await;
 			upstream.server_transport.drop_unis();
 
-			let mut next = track.append_group().unwrap();
+			let mut next = track.append_next().unwrap();
 			next.write_frame(Timestamp::from_millis(1000).unwrap(), b"b0".as_ref())
 				.unwrap();
-			next.finish().unwrap();
+			next.close().unwrap();
 
 			let local = relay.consume().request("bench", None).await.unwrap();
 			let mut sub = local.track("video").unwrap().subscribe(None).await.unwrap();
@@ -478,9 +479,9 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 				.unwrap();
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
 
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group.write_frame(ts(0), b"old".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
@@ -489,9 +490,9 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 
 			// The publisher moves on while the relay's cancel is still in flight.
 			for key in 1..=3u64 {
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(ts(key * 1000), b"new".as_ref()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
@@ -551,18 +552,18 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 			// Held for fetches only: it keeps the relay's copy without subscribing.
 			let _held = remote.track("video").unwrap();
 
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group.write_frame(ts(0), b"old".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
 			drop((group, sub));
 			crate::support::unwanted(track.demand()).await.unwrap();
 
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group.write_frame(ts(500), b"new".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 
 			pair.server_transport.split_unis();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
@@ -612,9 +613,9 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 				.unwrap();
 			let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
 			broadcast.announce().unwrap();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group.write_frame(Timestamp::ZERO, b"c0".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 
 			let mut options = MockConnectOptions::new(version);
 			options.server_publish = Some(publisher.consume());
@@ -714,9 +715,9 @@ async fn rejoin_keeps_source_timestamps() {
 			for (key, ms) in [(0, 123_456), (1, 654_321)] {
 				let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 				crate::support::wanted(track.demand()).await.unwrap();
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(ts(ms), b"frame".as_ref()).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 
 				let mut group = loop {
 					let group = sub.recv_group().await.unwrap().unwrap();
@@ -786,9 +787,9 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
 		broadcast.announce().unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let upstream = |cost| {
 			let mut options = MockConnectOptions::new(version);
@@ -874,11 +875,11 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		drop(group);
 
 		// A newer catalog supersedes it, so the old one expires like any other group.
-		let mut newer = track.append_group().unwrap();
+		let mut newer = track.append_next().unwrap();
 		newer
 			.write_frame(Timestamp::from_millis(1000).unwrap(), b"newer".as_ref())
 			.unwrap();
-		newer.finish().unwrap();
+		newer.close().unwrap();
 		// Unnamed wires end the old holder on takeover. The late reader uses the
 		// current route on every version, and keeps that copy live for the expiry check.
 		assert_eq!(later.recv_group().await.unwrap().unwrap().start, 1, "{version}");

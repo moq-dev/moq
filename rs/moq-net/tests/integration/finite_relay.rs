@@ -9,6 +9,7 @@
 //! subscribes, and the publisher then resets every group still on the wire.
 
 use crate::support;
+use support::AppendNext;
 use moq_net::track::Delay;
 
 use std::time::Duration;
@@ -93,7 +94,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	let reader = kio::clock::sim::spawn(async move {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(MAX_DELAY))
-			.with_range(0..);
+			.with_ranges([support::keys(0..)]);
 		let mut sub = remote
 			.track("tail")
 			.unwrap()
@@ -145,7 +146,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();
 			for key in 0..GROUPS {
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
 				groups.push(group);
 				// IETF requests the live edge, so observe each header before advancing it.
@@ -160,16 +161,16 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			kio::clock::sleep(Duration::from_millis(100)).await;
 			for mut group in groups {
 				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 		}
 		Arrival::NewestFirst => {
 			upstream.server_transport.hold_unis();
 			for _ in 0..GROUPS {
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
 				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 				// IETF serves from the live edge, so let each group open its stream before
 				// the next one supersedes it.
 				kio::clock::sleep(Duration::from_millis(10)).await;

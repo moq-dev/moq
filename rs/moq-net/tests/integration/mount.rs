@@ -5,6 +5,7 @@
 //! itself, and a reader there reaches the target.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -29,9 +30,9 @@ fn publish(origin: &origin::Producer, path: &str) -> (origin::Route, track::Prod
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, path.as_bytes().to_vec()).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	(route, track)
 }
 

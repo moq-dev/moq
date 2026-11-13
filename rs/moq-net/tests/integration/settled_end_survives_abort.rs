@@ -6,6 +6,7 @@
 //! consumer that has not read them yet still gets them, then the clean end.
 
 use crate::support;
+use support::AppendNext;
 
 use moq_net::{Error, Timestamp};
 
@@ -36,14 +37,14 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	// From the first group with a replay window: a late reader is owed the whole track,
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
-		.with_range(0..)
+		.with_ranges([support::keys(0..)])
 		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 	let mut consumer = track.subscribe(subscription);
 
 	for _ in 0..GROUPS {
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(Timestamp::ZERO, b"frame".as_slice()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
 	// Every group below the end is finished: the end has settled and the track is

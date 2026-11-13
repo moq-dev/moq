@@ -15,6 +15,7 @@
 //! nothing when the broadcast ends.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -61,7 +62,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 
 	// Resolved before the ending starts: a SUBSCRIBE sent alongside its TRACK reaches the
 	// publisher before the subscriber has the TRACK_INFO it accepts the track with.
-	let subscription = moq_net::track::Subscription::default().with_range(0..);
+	let subscription = moq_net::track::Subscription::default().with_ranges([support::keys(0..)]);
 	let mut sub = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -90,9 +91,9 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 
 	// One frame and a textbook clean end, innermost first, with no await in between:
 	// nothing is served until the ending is done.
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	let track = track.finish().unwrap();
 	drop(track);
 	if finish_broadcast {

@@ -58,7 +58,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 			.unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(FOREVER))
-			.with_range(0..)
+			.with_ranges([support::keys(0..)])
 			.with_order(order);
 		let mut sub = remote
 			.track("ordered")

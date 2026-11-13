@@ -7,6 +7,7 @@
 //! the fetches that report where the track ends.
 
 use crate::support;
+use support::AppendNext;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,13 +48,13 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Rou
 	let mut track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
 	for key in 0..3u64 {
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		for frame in 0..2 {
 			group
 				.write_frame(Timestamp::ZERO, format!("{key}-{frame}").into_bytes())
 				.unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 	let _finished = track.clone().finish().unwrap();
 
@@ -179,9 +180,9 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 			crate::support::wanted(track.demand()).await.unwrap();
 			// Far from any arrival time, so a frame stamped on arrival cannot pass.
 			let stamp = Timestamp::from_millis(123_456).unwrap();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group.write_frame(stamp, b"frame".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			let frame = group.read_frame().await.unwrap().unwrap();
@@ -213,7 +214,7 @@ async fn a_relay_fetches_without_subscribing_upstream() {
 async fn subscribe_history(track: &moq_net::track::Consumer) -> moq_net::track::Subscriber {
 	let subscription = moq_net::track::Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
-		.with_range(1..2);
+		.with_ranges([support::keys(1..2)]);
 	kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 		.await
 		.expect("subscribe timed out")
@@ -329,7 +330,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 	for frame in frames(key) {
 		group.write_frame(Timestamp::ZERO, frame).unwrap();
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 /// Publish a live track of groups `0..groups`, which the publisher keeps writing.
@@ -500,7 +501,7 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 			let subscription = moq_net::track::Subscription::default()
 				.with_order(moq_net::track::Order::Ascending)
 				.with_delay(moq_net::track::Delay::default().with_max(None))
-				.with_range(1..3);
+				.with_ranges([support::keys(1..3)]);
 			let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
 				.await
 				.expect("subscribe timed out")
@@ -564,7 +565,7 @@ async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
 				// Past the edge the live read learned, so it subscribes; the answer names group 3.
 				let subscription = moq_net::track::Subscription::default()
 					.with_delay(moq_net::track::Delay::default().with_max(None))
-					.with_range(0..1);
+					.with_ranges([support::keys(0..1)]);
 				let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
 					.await
 					.expect("subscribe timed out")
@@ -593,7 +594,7 @@ async fn a_relay_accounts_for_every_group_in_multi_group_history() {
 		let subscription = moq_net::track::Subscription::default()
 			.with_order(moq_net::track::Order::Ascending)
 			.with_delay(moq_net::track::Delay::default().with_max(None))
-			.with_range(1..3);
+			.with_ranges([support::keys(1..3)]);
 		let mut sub = copy.fresh.subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Some(group) = next_frames(&mut sub).await {

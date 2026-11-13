@@ -5,6 +5,7 @@
 //! past the live edge ends once the groups up to its end arrive.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -22,13 +23,13 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 }
 
 fn write_group(track: &mut moq_net::track::Producer, key: u64) {
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	assert_eq!(group.start, key);
 	for frame in 0..2u64 {
 		let at = Timestamp::from_millis(key * 100 + frame).unwrap();
 		group.write_frame(at, payload(key, frame)).unwrap();
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 fn payload(key: u64, frame: u64) -> Vec<u8> {
@@ -108,7 +109,7 @@ async fn fixture(
 
 fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 	Subscription::default()
-		.with_range(groups)
+		.with_ranges([support::keys(groups)])
 		.with_delay(Delay::default().with_max(None))
 		.with_order(Order::Ascending)
 }

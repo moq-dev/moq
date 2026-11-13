@@ -4,6 +4,7 @@
 //! subscriber on the far side of one session.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -49,7 +50,7 @@ async fn after_abort(version: &str, hops: u32) {
 		.unwrap()
 		.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-	let mut open = track.append_group().unwrap();
+	let mut open = track.append_next().unwrap();
 	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"head".as_ref());

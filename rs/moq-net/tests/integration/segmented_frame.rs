@@ -9,6 +9,7 @@ use bytes::Bytes;
 use moq_net::{Timestamp, Version, frame, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
+use crate::support::AppendNext;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -51,7 +52,7 @@ async fn a_segmented_frame_crosses_whole() {
 		subscribed(&track).await;
 
 		// Two frames: one read whole, one streamed.
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		for _ in 0..2 {
 			let mut frame = group
 				.create_frame(frame::Info {
@@ -64,7 +65,7 @@ async fn a_segmented_frame_crosses_whole() {
 			}
 			group = frame.finish().unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
