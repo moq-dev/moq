@@ -176,8 +176,13 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert!(mae(actual.u(), expected_sd.u()) < 4, "scaled u disagrees with the CPU");
 	assert!(mae(actual.v(), expected_sd.v()) < 4, "scaled v disagrees with the CPU");
 
-	// Three buffers live fills the pool; a fourth is not reserved, let alone
-	// allocated.
+	// Three buffers live fills the pool (the scaled copy lives in the target,
+	// not the pool); a fourth is not reserved, let alone allocated.
+	let second = converter
+		.reserve()
+		.expect("second buffer")
+		.convert(&frame)
+		.expect("second conversion");
 	let third = converter.reserve().expect("third buffer");
 	assert!(converter.reserve().is_none(), "a full pool must refuse");
 	// A slot dropped unused gives its buffer back.
@@ -194,7 +199,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 	drop(third.convert(&frame).expect("convert into a reused buffer"));
 	eprintln!("pool bound held at capacity 3");
 
-	drop((converted, scaled, target, frame));
+	drop((converted, second, scaled, target, frame));
 	let slot = completion.wait().await.expect("completion worker stopped");
 	drop(slot);
 
