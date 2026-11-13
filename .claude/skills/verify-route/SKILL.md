@@ -36,12 +36,25 @@ What the timer costs, as the configs show it: fired late, it costs only the wait
 ```sh
 quest gate just rs tla moq-net/verify/route/RouteHandoff.tla
 quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Ring.cfg
-quest gate just test tla rs/moq-net/verify/route
 ```
 
-`just test tla rs/moq-net/verify/route` runs every config, as Nightly does, simulating each one with a `Simulate:` line and expecting `Loop.cfg` to break. Times are with `-workers 4`. `Patient` is TRUE unless the table says otherwise.
+Choose the config affected by the change; do not run the directory locally.
+[TLC's cost quest](/quest/m0/ci/tlc-cost.md) records that maintainer decision.
+Nightly runs every config through `just test tla`, simulating each with a
+`Simulate:` line and expecting `Loop.cfg` to break. When calling `just rs tla`
+directly, pass the arguments from that line explicitly. For covering-source
+selection, for example:
 
-| Config | Mesh | Bounds | Distinct states | Run |
+```sh
+quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Overlap.cfg -simulate num=1000 -depth 500
+```
+
+The exhaustive counts and times below predate independent hop expiry (`Expire`);
+they are historical baselines, not validation of the current model. Nightly
+supplies the complete new counts. Times used four workers. `Patient` is TRUE
+unless the table says otherwise.
+
+| Config | Mesh | Bounds | Previous distinct states | Previous run |
 | --- | --- | --- | --- | --- |
 | `RouteHandoff.cfg` | The publisher behind relay 1, in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 407,240 | a minute or two |
 | `Early.cfg` | The same, with a timer that fires at any moment. | 1 claim change, 1 session change | 4,178,590 | ten minutes |
@@ -54,7 +67,7 @@ quest gate just test tla rs/moq-net/verify/route
 | `Overlap.cfg` | Five relays, three asking for `"a"`, with overlapping cheap broad and dear narrow paths. Simulated past the message budget. | 1 claim change, no session change | 4,000 behaviours requested, depth 500 | simulation |
 | `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Open finding: `RequestsLoopFree` breaks. | 3 session changes | 979,474 when it breaks | a few minutes |
 
-Run them last, one at a time. First run what answers in seconds: the router's tests (`quest gate just rs test -p moq-net --lib -E 'test(/route::tests::(handoff|residual|scope|compare)/)'`, with `MOQ_ROUTE_SCENARIOS` raising the sweeps' count), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
+Run the affected config last, with at most one TLC process at a time. First run what answers in seconds: the router's tests (`quest gate just rs test -p moq-net --lib -E 'test(/route::tests::(handoff|residual|scope|compare)/)'`, with `MOQ_ROUTE_SCENARIOS` raising the sweeps' count), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
 
 ## Reading a failure
 
@@ -78,4 +91,4 @@ Sync commit: `e7abef87100e001295d98130ee9760d609078ac3`, the base of the scoped 
 
 ## Not covered
 
-One publisher, so routes for several publishers are left out, and so are the copies and copy rank of cache-aware routing, which `rs/moq-net/src/route/tests/paths.rs` prototypes; the DEAD message's per-publisher batching reduces to one route per prefix. Two prefixes, one nested in the other, and a scoped relay asks every neighbour for the narrow one: no wildcards, interest edits, stream generations or cancellation, grants, qualified keys, or hidden claims. Leaves out restarts, GOAWAY, priorities, costs other than 1 and 2, RTT, upstream/down-only links, and the hop limit. Messages come only from honest routers: validation of an unrelated DEAD or its far node, and empty or overlong replacement paths, is outside the model's input domain. Rust fixtures cover those guards and exportable covering-source selection. Interest-edit fixtures also cover a cancelled stream retaining its pending child replies; the model has no stream cancellation. A claims message carries the sender's whole view for its prefix, equal to applying its changes on a FIFO stream. A route is sent on every stream whether or not the publisher has a claim there. The publisher ignores what it hears. `Overlap.cfg` also simulates five relays with every session up. No exhaustive pass has more than four relays or two session changes; `Sim`'s sweeps on the path rule (`sweep_handoff`, `sweep_scoped_handoff`, `sweep_scoped_meshes_show_what_the_rule_says`, and `compare.rs`'s churn) cover larger meshes, grants, qualified keys, interest edits, restarts, and churn.
+One publisher, so routes for several publishers are left out, and so are the copies and copy rank of cache-aware routing, which `rs/moq-net/src/route/tests/paths.rs` prototypes; the DEAD message's per-publisher batching reduces to one route per prefix. Two prefixes, one nested in the other, and a scoped relay asks every neighbour for the narrow one: no wildcards, interest edits, stream generations or cancellation, grants, qualified keys, or hidden claims. Leaves out restarts, GOAWAY, priorities, costs other than 1 and 2, RTT, upstream/down-only links, and the hop limit. Messages come only from honest routers: validation of an unrelated DEAD or its far node, and empty or overlong replacement paths, is outside the model's input domain. Rust fixtures cover those guards and exportable covering-source selection, including keeping a covering hold when every live source is unexportable. Interest-edit fixtures also cover a cancelled stream retaining its pending child replies; the model has no stream cancellation. A claims message carries the sender's whole view for its prefix, equal to applying its changes on a FIFO stream. A route is sent on every stream whether or not the publisher has a claim there. The publisher ignores what it hears. `Overlap.cfg` also simulates five relays with every session up. No exhaustive pass has more than four relays or two session changes; `Sim`'s sweeps on the path rule (`sweep_handoff`, `sweep_scoped_handoff`, `sweep_scoped_meshes_show_what_the_rule_says`, and `compare.rs`'s churn) cover larger meshes, grants, qualified keys, interest edits, restarts, and churn.
