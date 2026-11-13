@@ -58,8 +58,12 @@ Decided 2026-11-12 (maintainer, /quest-plan):
   `Start = "a"` gains nothing. Say per config whether it applies and why.
 - ✅ Pass `-checkpoint 0`, and make sure no metadir outlives its run. TLC never
   removes one it was killed in, and a signal handler cannot run on SIGKILL.
-  Recommended: put the metadir under the checkout's `.tmp/`, which goes with
-  the worktree, and remove it when the recipe exits.
+  Recommended: put the metadir under the checkout's `.tmp/`, remove it when
+  the recipe exits, and at start remove the metadirs earlier runs left there
+  that no live run owns, so a checkout that outlives killed runs does not
+  collect them. Mark ownership so a concurrent run's metadir survives, such
+  as a lock each run holds on a file in its metadir, which the kernel drops
+  when the run dies.
 - ✅ Agents check one config locally: the `verify-*` skills, `REVIEW.md`, and
   the `js/*/verify/` READMEs name single configs, and only Nightly runs
   `just test tla` over a directory.

@@ -21,7 +21,8 @@ inputs is unchanged.
   checkout defeats; one rule serves build and dev server. Keep
   `MOQ_API_REFERENCE=regenerate` only if something still needs it.
 - Inputs are what can change the output: the published packages' sources and
-  `package.json`s, their tsconfigs, the generator under
+  `package.json`s, their tsconfigs and every config those reach through
+  `extends`, such as `js/tsconfig.json`, the generator under
   `doc/.vitepress/api/`, and the TypeDoc versions and patches in `bun.lock`
   and `patches/`. A missed input serves a stale reference, so derive the
   list from what `generate` reads rather than by hand where possible.
