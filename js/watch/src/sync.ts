@@ -86,7 +86,11 @@ export type SyncOutput = {
 	maxDelay: Signal<Duration>;
 };
 
-/** A decoded span from the opening of a track's timeline. @internal */
+/**
+ * What a track holds from the opening of its timeline. `start` is the media time the clock should
+ * read as playback starts: the opening itself, or earlier by however long the track's output takes to
+ * sound it. @internal
+ */
 export type Span = { start: Duration; end: Duration };
 
 /** What a track holds in the shared clock. @internal */
