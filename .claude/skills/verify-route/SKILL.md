@@ -51,10 +51,18 @@ selection, for example:
 quest gate just rs tla moq-net/verify/route/RouteHandoff.tla -config rs/moq-net/verify/route/Overlap.cfg -simulate num=1000 -depth 500
 ```
 
-The exhaustive counts and times below predate independent hop expiry (`Expire`);
-they are historical baselines, not validation of the current model. Nightly
-supplies the complete new counts. Times used four workers. `Patient` is TRUE
-unless the table says otherwise.
+The older exhaustive counts and times below predate independent hop expiry
+(`Expire`); they are historical baselines, not validation of the current model.
+The Loop row gives its current simulation parameters. Times used four workers.
+`Patient` is TRUE unless the table says otherwise.
+
+`Loop.cfg` used to stop at the first early-collection counterexample. With
+timer-only doubt, the attempted exhaustive check was stopped by the user after
+76 minutes: 32.1M distinct states, 19.3M still queued at depth 14, and a growing
+queue. It did not complete. Routine checks now use its bounded `Simulate:` line,
+as they do for the other large configs. This samples the invariants; it is not
+an exhaustive proof. Do not rerun the full route spec exhaustively for this
+change; faster checkers are separate work.
 
 | Config | Mesh | Bounds | Previous distinct states | Previous run |
 | --- | --- | --- | --- | --- |
@@ -67,7 +75,7 @@ unless the table says otherwise.
 | `Dead.cfg` | Two relays behind a relay whose only uplink asks for `"a"` alone, one with a dear session of its own to the publisher. Simulated. | 3 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Blind.cfg` | A relay whose nearest neighbour asks for `"a"` alone, and a farther one knows everything. Simulated. | 2 claim changes, 1 session change | 40,000 behaviours, 4.8M states | ten minutes |
 | `Overlap.cfg` | Five relays, three asking for `"a"`, with overlapping cheap broad and dear narrow paths. Simulated past the message budget. | 1 claim change, no session change | 1,000 behaviours per worker (4,000 on four workers), depth 500 | simulation |
-| `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Checks `RequestsLoopFree` with timer-only doubt. | 3 session changes | 979,474 at the historical early-collection failure | a few minutes |
+| `Loop.cfg` | The publisher with a session to each of three relays in a triangle, all closing. Samples `RequestsLoopFree` with timer-only doubt. | 3 session changes | 1,000 behaviours per worker, depth 150, seed 1 | simulation |
 
 Run the affected config last, with at most one TLC process at a time. First run what answers in seconds: the router's tests (`quest gate just rs test -p moq-net --lib -E 'test(/route::tests::(handoff|residual|scope|compare)/)'`, with `MOQ_ROUTE_SCENARIOS` raising the sweeps' count), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
 
@@ -77,7 +85,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `ae0880eece449f12c1e9f9465ca63d9662e80397`, the base of the scoped path router in [moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622). Run `git log ae0880eec.. -- rs/moq-net/src/route/path.rs rs/moq-net/src/route/reader.rs` to see what changed since. Prefix and reader indexes make the router's updates incremental; test-only full recomputation checks their result against the complete view. The model recomputes every prefix atomically and leaves that optimization out. `SrcKey` mirrors the router's preference for the cheapest covering live path that does not name its receiver, with the narrower scope breaking ties; `Select` plans live routes and their reflected sources before deciding holds; `Advertise1` forwards a newer floor even when the claims did not change. The router keeps doubt until its one-second timer fires (`Lift::Timer`, `Doubt::DEFAULT`); the model's `Collect` leaves it for `Lift`. The comparison-only `Rule::EARLY` lifts doubt once no heard route names its node and is outside this timer-only model. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `e93a43cab8fa37790574d3a02a243fe3001f7784`, the base of the scoped path router in [moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622). Run `git log e93a43cab.. -- rs/moq-net/src/route/path.rs rs/moq-net/src/route/reader.rs` to see what changed since. Prefix and reader indexes make the router's updates incremental; test-only full recomputation checks their result against the complete view. The model recomputes every prefix atomically and leaves that optimization out. `SrcKey` mirrors the router's preference for the cheapest covering live path that does not name its receiver, with the narrower scope breaking ties; `Select` plans live routes and their reflected sources before deciding holds; `Advertise1` forwards a newer floor even when the claims did not change. The router keeps doubt until its one-second timer fires (`Lift::Timer`, `Doubt::DEFAULT`); the model's `Collect` leaves it for `Lift`. The comparison-only `Rule::EARLY` lifts doubt once no heard route names its node and is outside this timer-only model. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
@@ -92,5 +100,10 @@ Sync commit: `ae0880eece449f12c1e9f9465ca63d9662e80397`, the base of the scoped 
 | `rs/moq-net/src/route/tests/mod.rs` `Sim::deliver` | `Deliver` |
 
 ## Not covered
+
+The router's current watch contract supports one interest prefix per neighbour.
+Concurrent disjoint regions of one permit need the
+[interest set](/quest/m2/cluster-routes/interest-set.md), including per-prefix
+SYNCED; neither this model nor the current scoped sweep covers them.
 
 One publisher, so routes for several publishers are left out, and so are the copies and copy rank of cache-aware routing, which `rs/moq-net/src/route/tests/paths.rs` prototypes; the DEAD message's per-publisher batching reduces to one route per prefix. Two prefixes, one nested in the other, and a scoped relay asks every neighbour for the narrow one: no wildcards, interest edits, stream generations or cancellation, grants, qualified keys, or hidden claims. Leaves out restarts, GOAWAY, priorities, costs other than 1 and 2, RTT, upstream/down-only links, and the hop limit. Messages come only from honest routers: validation of an unrelated DEAD or its far node, and empty or overlong replacement paths, is outside the model's input domain. Rust fixtures cover those guards and exportable covering-source selection, including keeping a covering hold when every live source is unexportable. Interest-edit fixtures also cover a cancelled stream retaining its pending child replies; the model has no stream cancellation. A claims message carries the sender's whole view for its prefix, equal to applying its changes on a FIFO stream. A route is sent on every stream whether or not the publisher has a claim there. The publisher ignores what it hears. `Overlap.cfg` also simulates five relays with every session up. No exhaustive pass has more than four relays or two session changes; `Sim`'s sweeps on the path rule (`sweep_handoff`, `sweep_scoped_handoff`, `sweep_scoped_meshes_show_what_the_rule_says`, and `compare.rs`'s churn) cover larger meshes, grants, qualified keys, interest edits, restarts, and churn.

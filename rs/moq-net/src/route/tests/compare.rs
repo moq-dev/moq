@@ -1,6 +1,6 @@
 //! One script on both rules: [`Router`], which keeps Babel's distance, and
-//! [`path::Router`], which keeps a route loop-free by its path alone, with its doubt
-//! lifted early once no route names the node or kept until its timer fires.
+//! [`path::Router`], which keeps its doubt until the timer fires. The ignored
+//! benchmarks also compare the rejected early-collection policy.
 //!
 //! A [`Lab`] builds the same mesh on each, applies one change at a time, and
 //! delivers in rounds: every message queued when a round starts crosses its link
@@ -12,6 +12,9 @@
 use std::collections::BTreeSet;
 
 use super::*;
+
+/// The production router and its accepted replacement, checked in ordinary CI.
+const RULES: [Rule; 2] = [Rule::Distance, Rule::PATH];
 
 /// The rules compared, in the report's order.
 pub(super) const COMPARED: [Rule; 3] = [Rule::Distance, Rule::EARLY, Rule::PATH];
@@ -859,7 +862,7 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 /// never loops, even for a step.
 #[test]
 fn every_rule_settles_after_churn() {
-	for rule in COMPARED {
+	for rule in RULES {
 		let cost = churn(rule, 0..60);
 		if rule == Rule::Distance {
 			assert_eq!(cost.loops, 0);
@@ -895,7 +898,7 @@ fn every_rule_converges_on_every_shape() {
 	let mut meshes = vec![Mesh::ring(6), Mesh::clique(6, 1), Mesh::clique(4, 3)];
 	meshes.extend((0..8).map(|_| Mesh::sparse(6, &mut rng)));
 	for mesh in &meshes {
-		for rule in COMPARED {
+		for rule in RULES {
 			run(rule, mesh);
 		}
 	}
@@ -906,7 +909,7 @@ fn every_rule_converges_on_every_shape() {
 #[test]
 fn path_changes_keep_claims_and_withdrawals_keep_routes() {
 	for mesh in [Mesh::clique(6, 1), Mesh::ring(6)] {
-		let costs = COMPARED.map(|rule| run(rule, &mesh).into_iter().collect::<BTreeMap<_, _>>());
+		let costs = RULES.map(|rule| run(rule, &mesh).into_iter().collect::<BTreeMap<_, _>>());
 		for costs in &costs {
 			assert!(costs.values().all(|cost| cost.settled && cost.loops == 0));
 		}

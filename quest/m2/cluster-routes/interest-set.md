@@ -80,6 +80,13 @@ The edit rule those three imply, to prove rather than assume:
 
 Work:
 
+- Extend the current single-prefix-per-neighbour interface to all the disjoint
+  regions of one permit. `peer_interest` currently replaces its one answer and
+  SYNCED names only the neighbour; several calls under that key cannot serve
+  several regions. Update `watch`/`synced`'s contract and cover a permit with
+  `fleet/r2` and `fleet/r7` together, including an edit that absorbs both into
+  `fleet`. The router and switch preceding this quest claim only one region
+  per neighbour.
 - Start from the model and the router with the path rule. Everything a side
   says to a neighbour shares one FIFO per direction, the hold answer
   included: with one stream per side nothing overtakes anything.

@@ -9,7 +9,8 @@ whether to adopt it.
 
 ## Plan
 
-Decided 2026-11-13 (coordinator, `/quest-afk`, while the maintainer was away):
+Decided 2026-11-13 (maintainer via the authorized coordinator, `/quest-afk`,
+while the maintainer was away):
 timer-only doubt is the baseline in
 [moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622), and this exemption
 is modeled and measured separately. Early collection is rejected because it

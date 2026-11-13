@@ -216,7 +216,8 @@ impl Death {
 	}
 }
 
-/// Early collection lifts a doubt while its timer still has to retire.
+/// A node's timed doubt. Tests also represent early collection before the
+/// timer retires.
 #[derive(Clone, Copy, Debug)]
 enum Suspicion {
 	Doubted(Instant),
@@ -447,7 +448,7 @@ pub(crate) struct Router<N, A> {
 	filed: BTreeMap<(Id, N), Id>,
 	/// Dead hops, each with the node at the far end of its session.
 	dead: BTreeMap<Hop, Death>,
-	/// Each node's doubt, including its timer after an early lift.
+	/// Each node's doubt and deadline.
 	doubted: BTreeMap<Id, Suspicion>,
 	watch: Path,
 	interest: u32,
@@ -604,7 +605,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// `neighbor` asked this node for announcements under `prefix`, or for none: its
-	/// stream starts over, a complete snapshot closed by SYNCED.
+	/// stream starts over, a complete snapshot closed by SYNCED. Each neighbour has
+	/// one interest prefix; another call replaces it rather than adding a region.
 	pub fn peer_interest(&mut self, neighbor: N, prefix: Option<Path>) -> Result<(), Error> {
 		if !self.sessions.contains_key(&neighbor) {
 			return Err(Error::UnknownNeighbor);
@@ -672,9 +674,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// Change the local interest to `prefix`, returning its new generation.
-	/// The driver replaces each neighbour's streams with the intersections of
-	/// `prefix` and that session's scope regions (the whole prefix if unscoped).
-	/// It calls `synced` after all replacements' initial sets arrive.
+	/// The driver replaces each neighbour's stream with the intersection of
+	/// `prefix` and its single scope region (the whole prefix if unscoped), then
+	/// calls `synced` after the replacement's initial set arrives. This interface
+	/// supports one prefix per neighbour: disjoint regions on the same neighbour
+	/// need the interest-set extension, including its per-prefix SYNCED.
 	/// Until then, old routes stay but only new claims are
 	/// believed. With no intersection, the driver cancels the old streams and
 	/// calls `synced` locally for this generation: no replacement can answer.

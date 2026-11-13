@@ -63,8 +63,12 @@ Work:
   `carries` the claim.
   Honor `path::Router::new`'s fresh-hop-per-process contract, including when
   `Config::hop` is configured: the old seqno cannot recover reused path-hop names.
-  The driver also implements `watch`/`synced`'s scope contract for every permit
-  region, completing cancelled streams locally when no replacement can answer.
+  The driver also implements `watch`/`synced`'s single-prefix scope contract,
+  completing cancelled streams locally when no replacement can answer. This
+  stage supports one scope region per neighbour. Multi-region permits need
+  [the interest set](/quest/m2/cluster-routes/interest-set.md), including its
+  per-prefix SYNCED; requesting each region under the same neighbour key would
+  replace the previous answer. Do not claim that coverage before it lands.
 - Delete today's router with what only it used: the feasibility distance and
   its drain, seqno requests and their pending state, the echo, and their
   fixtures. A fixture that states a claim rule moves to the new router if
