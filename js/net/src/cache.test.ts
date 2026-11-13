@@ -444,7 +444,7 @@ test("a tail forgets its finished streams under debt", () => {
 	expect(pool.used).toBeLessThanOrEqual(capacity + 2 * (16 * 1024 + cache.ENTRY_OVERHEAD));
 	// A stale drop inside what the fold forgot is owed again only where the ledger had not accounted
 	// for it: there a stream may have finished and overtaken the drop.
-	tail.open(2n)();
+	tail.open(2n).done();
 	expect(tail.overtaken(0n, 4n)).toEqual([{ start: 2n, end: 3n }]);
 	expect(tail.overtaken(2n * runs, 2n * runs + 1n)).toEqual([]);
 	tail.updated();

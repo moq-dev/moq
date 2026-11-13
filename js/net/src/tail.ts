@@ -13,6 +13,17 @@ export interface TailOptions {
 	bill?: Reader;
 }
 
+/** A group stream a {@link Tail} counts, from its header until it is read to its end. */
+export interface Counted {
+	/** Mark it read to its end. Idempotent. */
+	done(): void;
+	/**
+	 * The publisher accounted for its group another way, such as a drop, so {@link Tail.settle}
+	 * waits for it at most the grace. Idempotent.
+	 */
+	excuse(): void;
+}
+
 /**
  * The group streams a subscription has received, so its end can wait for the ones still owed.
  *
@@ -29,9 +40,10 @@ export interface TailOptions {
 export class Tail {
 	// The sequences accounted for, whose gaps fold once the grace stops waiting for them.
 	#ledger = new Ledger();
-	// Group streams whose header arrived, and those still being read.
+	// Group streams whose header arrived, those still being read, and those of them excused.
 	#streams = 0;
 	#active = 0;
+	#excused = 0;
 	#changed = new Signal(0);
 	#grace: () => Duration;
 	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under that
@@ -89,21 +101,28 @@ export class Tail {
 		return this.#streams;
 	}
 
-	/**
-	 * Record a group stream whose header arrived. Returns the call that marks it read to
-	 * its end, which is idempotent.
-	 */
-	open(sequence: bigint): () => void {
+	/** Record a group stream whose header arrived, held until it is read to its end. */
+	open(sequence: bigint): Counted {
 		this.#streams += 1;
 		this.#active += 1;
 		this.#account(sequence, sequence + 1n);
 
-		let closed = false;
-		return () => {
-			if (closed) return;
-			closed = true;
-			this.#active -= 1;
-			this.#bump();
+		let state: "held" | "excused" | "done" = "held";
+		return {
+			done: () => {
+				if (state === "done") return;
+				if (state === "held") this.#active -= 1;
+				else this.#excused -= 1;
+				state = "done";
+				this.#bump();
+			},
+			excuse: () => {
+				if (state !== "held") return;
+				state = "excused";
+				this.#active -= 1;
+				this.#excused += 1;
+				this.#bump();
+			},
 		};
 	}
 
@@ -201,11 +220,12 @@ export class Tail {
 
 	/**
 	 * Wait until every stream is read to its end and `complete()` holds, or the grace passes
-	 * with nothing left being read, or `closed` settles.
+	 * with nothing left being read but excused streams, or `closed` settles.
 	 *
-	 * A stream still being read is always waited for: a group ends on its own stream's FIN
-	 * or reset, never because its track ended. The grace only gives up on streams that never
-	 * arrived.
+	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset,
+	 * never because its track ended. The grace gives up on streams that never arrived, and on
+	 * excused ones: a browser can lose a stream's reset, leaving it open forever, and the
+	 * publisher's drop already accounted for its group.
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
@@ -222,7 +242,7 @@ export class Tail {
 		);
 		try {
 			while (closed.peek() === undefined) {
-				if (this.#active === 0 && (expired || complete())) return;
+				if (this.#active === 0 && (expired || (this.#excused === 0 && complete()))) return;
 				await Signal.race(this.#changed, closed);
 			}
 		} finally {

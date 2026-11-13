@@ -1399,8 +1399,9 @@ function handStream(version: Version) {
 
 // Lite-07: a stream reset with YIELDED pauses its group, keeping the frame it cut short, and a later
 // stream continues it from the paused stream's Frame Start, whether it lands after that reset or
-// overtakes it. The group's reader gets every frame once, then its end. Mirrors the Rust
-// `a_yielded_group_continues_without_loss`.
+// overtakes it, which ends the paused stream at once, since a browser can lose its reset. The
+// group's reader gets every frame once, then its end. Mirrors the Rust
+// `a_yielded_group_continues_without_loss`, which waits for the overtaken reset instead.
 test.each([false, true])("a yielded group continues without loss (overtakes: %p)", async (overtakes) => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
@@ -1434,20 +1435,19 @@ test.each([false, true])("a yielded group continues without loss (overtakes: %p)
 		expect(group?.sequence).toBe(3n);
 		expect((await group?.readFrame())?.payload).toEqual(frames[0].payload);
 
-		let continued: Promise<void> | undefined;
+		let continued: Promise<void>;
 		if (overtakes) {
-			let held = true;
-			continued = subscriber.runGroup(header, second.reader).finally(() => {
-				held = false;
-			});
+			const stop = spyOn(first.reader, "stop");
+			continued = subscriber.runGroup(header, second.reader);
+			await yielded;
+			expect(stop).toHaveBeenCalled();
+		} else {
+			first.reset(StreamCode.Yielded);
+			await yielded;
 			await drainReactions();
-			expect(held).toBe(true);
+			expect(group?.closed.peek()).toBeUndefined();
+			continued = subscriber.runGroup(header, second.reader);
 		}
-		first.reset(StreamCode.Yielded);
-		await yielded;
-		await drainReactions();
-		expect(group?.closed.peek()).toBeUndefined();
-		continued ??= subscriber.runGroup(header, second.reader);
 		await continued;
 
 		for (const { payload } of frames.slice(1)) {
@@ -1651,6 +1651,49 @@ test("a yielded group pauses once an update supersedes a stale drop before its h
 	}
 });
 
+// Lite-07: Chromium can lose the reset of a Group Stream it has not handed to the page yet, which
+// leaves the stream open forever. A drop accounts for its group, so the subscription's end waits
+// for that stream at most the grace, whether the drop lands before or after its header.
+test.each(["before", "after"] as const)(
+	"a drop lets the end give up on a stream that never ends (drop %s its header)",
+	async (order) => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const version = Version.DRAFT_07;
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+		try {
+			await opened(0);
+			await answerTrackInfo(streams[0], version, 1000);
+			const request = await opened(1);
+			await request.reading;
+			await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+
+			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) };
+			if (order === "before") await respond(request, version, [drop]);
+			const lost = handStream(version);
+			lost.write(await liteFrame(0, new Uint8Array([1])));
+			void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), lost.reader);
+			const group = await track.recvGroup();
+			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+			if (order === "after") await respond(request, version, [drop]);
+			await respond(request, version, [{ finish: new SubscribeFinish(1n) }], true);
+			await drainReactions();
+
+			await clock.advance(GRACE.div(2));
+			expect(track.closed.peek()).toBeUndefined();
+			await clock.advance(GRACE);
+			expect(await track.recvGroup()).toBeUndefined();
+			expect(await track.closed).toBeNull();
+		} finally {
+			track.close();
+			subscriber.close();
+			installed.close();
+		}
+	},
+);
+
 // Lite-07: a malformed FRAME on a Group Stream ends only that stream and its group, never the
 // session: a Payload Length of 0, or a continuation that resends the cut frame at another size, ends
 // before completing it, or starts past the frames held. Mirrors the Rust `UniState::Group`.
@@ -1740,10 +1783,10 @@ test("a lite-06 group reset with YIELDED ends", async () => {
 	}
 });
 
-// A lite-07 re-offer can overtake the reset of the stream it replaces: it waits, unread, until that
-// copy ends. It is refused as a duplicate once the copy finishes, and takes the group once it fails,
-// continuing the reads of that copy from their frame.
-test.each([false, true])("a duplicate of an arriving copy waits for it to settle (first fails: %p)", async (fails) => {
+// A lite-07 re-offer can overtake the reset of the stream it replaces. It proves that reset, which
+// a browser can lose, so it ends that copy at once and continues the group from the frames it
+// holds: a reader already handed the group reads on, and a later one reads it whole.
+test("a re-offer ends the copy still arriving and continues its group", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
@@ -1801,30 +1844,9 @@ test.each([false, true])("a duplicate of an arriving copy waits for it to settle
 			undefined,
 			version,
 		);
-		const stop = spyOn(duplicate, "stop");
-		let held = true;
-		const receiving = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), duplicate).finally(() => {
-			held = false;
-		});
-		await drainReactions();
-		expect(held).toBe(true);
-		expect(stop).not.toHaveBeenCalled();
-
-		if (!fails) {
-			first.close();
-			await original;
-			await receiving;
-			expect(stop.mock.calls[0]?.[0]).toBeInstanceOf(Error);
-			expect(await group?.readFrame()).toBeUndefined();
-			return;
-		}
-
-		// The reset lands: the reader already handed the original waits on the held stream rather
-		// than failing, and continues on it from its frame once it takes the group.
 		const next = group?.readFrame();
-		first.error(new Error("peer reset"));
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), duplicate);
 		await original;
-		await receiving;
 		expect((await next)?.payload).toEqual(new Uint8Array([8]));
 		expect(await group?.readFrame()).toBeUndefined();
 		expect(await group?.closed).toBeNull();
@@ -3012,7 +3034,7 @@ test("a group wins over its stale drop on lite-07", async () => {
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	type Entry = {
 		track: Producer;
-		tail: { covers(start: bigint, end: bigint): boolean; open(sequence: bigint): () => void };
+		tail: { covers(start: bigint, end: bigint): boolean; open(sequence: bigint): { done(): void } };
 	};
 	let entry: Entry | undefined;
 	const internal = subscriber as unknown as {
@@ -3055,7 +3077,7 @@ test("a group wins over its stale drop on lite-07", async () => {
 		await send(old(1n));
 		const one = arrive(1n);
 		one.group.finish();
-		one.read();
+		one.read.done();
 		// The group first, still arriving when its OLD lands.
 		const two = arrive(2n);
 		await send(old(2n));
@@ -3074,8 +3096,8 @@ test("a group wins over its stale drop on lite-07", async () => {
 		// Neither the drop nor the update aborts a group still arriving.
 		expect(two.group.closed.peek()).toBeUndefined();
 		expect(three.group.closed.peek()).toBeUndefined();
-		two.read();
-		three.read();
+		two.read.done();
+		three.read.done();
 	} finally {
 		responses.mockRestore();
 		track.close();
