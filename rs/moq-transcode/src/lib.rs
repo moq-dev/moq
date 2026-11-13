@@ -427,7 +427,7 @@ mod tests {
 					frame.write_to(&mut group).unwrap();
 				}
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		Source {
@@ -498,11 +498,11 @@ mod tests {
 					.unwrap();
 				}
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 
 			for (name, subscriber) in &mut subscribers {
 				let mut group = subscriber.next_group().await.unwrap().unwrap();
-				assert_eq!(group.sequence, sequence, "{name} changed the group sequence");
+				assert_eq!(group.start, sequence, "{name} changed the group start");
 				let mut received = Vec::new();
 				while let Some(payload) = group.read_frame().await.unwrap() {
 					let frame = hang::container::Frame::decode(payload.payload).unwrap();
@@ -780,7 +780,7 @@ mod tests {
 			.unwrap()
 			.ordered();
 		let mut group = subscriber.next_group().await.unwrap().unwrap();
-		assert!(group.sequence <= 1, "unexpected sequence {}", group.sequence);
+		assert!(group.start <= 1, "unexpected sequence {}", group.start);
 		let payload = group.read_frame().await.unwrap().unwrap();
 		let frame = hang::container::Frame::decode(payload.payload).unwrap();
 		assert!(
@@ -1187,7 +1187,7 @@ mod tests {
 		)
 		.await
 		.expect("the ladder never retired the rung");
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let finished = kio::clock::timeout(std::time::Duration::from_secs(5), async {
 			while fetched.read_frame().await?.is_some() {}
@@ -1340,7 +1340,7 @@ mod tests {
 		// 7, which retirement had to leave writable.
 		let mut group = request.accept(7, None).unwrap();
 		write_keyframe(&mut group);
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut fetched = fetching
 			.await
@@ -1424,7 +1424,7 @@ mod tests {
 			.accept(7, None)
 			.expect("the fresh request lost to the abandoned encode");
 		write_keyframe(&mut group);
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let mut fetched = kio::clock::timeout(std::time::Duration::from_secs(5), retry)
 			.await
@@ -1519,7 +1519,7 @@ mod tests {
 		);
 
 		// Once the source group ends, the live path finishes its copy and leaves.
-		group.finish().unwrap();
+		group.close().unwrap();
 		while source_demand.wanted_changed().await.unwrap().is_some() {}
 
 		// Read from the cache after the live path left.
@@ -1604,7 +1604,7 @@ mod tests {
 			let mut edge = rung.clone();
 			while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
 			let mut fetched = rung.fetch_group(0, None).await.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			while fetched.read_frame().await.expect("group 0 was aborted").is_some() {}
 
 			// Queue the next source group first, so it is waiting for the live
@@ -1728,7 +1728,7 @@ mod tests {
 		// The next group arrives whole.
 		let mut next = source._track.create_group(1u64.into()).unwrap();
 		write(&mut next, &[66_666, 99_999]);
-		next.finish().unwrap();
+		next.close().unwrap();
 
 		loop {
 			match edge.largest().await {
@@ -1798,7 +1798,7 @@ mod tests {
 					let frame = hang::container::Frame::decode(payload.payload).unwrap();
 					timestamps.push(frame.timestamp.as_micros());
 				}
-				groups.push((fetched.sequence, timestamps));
+				groups.push((fetched.start, timestamps));
 			}
 
 			assert_eq!(groups, expected);
@@ -2058,7 +2058,7 @@ mod tests {
 			let mut rung = subscribe(&consumer, "video/120p").await;
 			let mut group = source._track.create_group(0u64.into()).unwrap();
 			write_keyframe(&mut group);
-			group.finish().unwrap();
+			group.close().unwrap();
 			match finish {
 				true => drop(source._track.clone().finish().unwrap()),
 				false => source._track.clone().abort(moq_net::Error::Cancel).unwrap(),
