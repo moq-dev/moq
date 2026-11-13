@@ -5129,10 +5129,12 @@ struct TrackRun {
 	// The expired groups an update re-offers, still cached and in range, each served again
 	// on its own stream as stream credit allows.
 	reoffered: std::collections::VecDeque<group::Consumer>,
-	// Lite-07: the paused groups, each continued on its own stream ahead of re-offers and new
-	// groups, the highest-ranked first. Each paused while holding a stream, so stream credit
-	// bounds them.
-	paused: std::collections::VecDeque<Paused>,
+	// Lite-07: the paused groups by sequence, each continued on its own stream ahead of
+	// re-offers and new groups, the highest-ranked first. Credit returns with each pause, so
+	// sustained congestion can pause every group in turn: one the budget or the cache gives
+	// up while it waits is dropped then, which bounds them by what the cache holds, and a
+	// group paused again replaces its entry.
+	paused: std::collections::BTreeMap<u64, Paused>,
 	// Lite-07: the group `opening` holds continues a paused one.
 	continuing: bool,
 	end_sent: bool,
@@ -5508,8 +5510,10 @@ impl TrackRun {
 		if !paused.is_empty() {
 			// The track side continues them.
 			Idle::disarm(&mut self.idle);
-			self.paused.extend(paused);
+			self.paused
+				.extend(paused.into_iter().map(|paused| (paused.group.sequence, paused)));
 		}
+		self.drop_given_up_paused(waiter);
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
 			for (sequence, err) in dropped {
@@ -5609,9 +5613,9 @@ impl TrackRun {
 		let order = self.ctx.steer_current().order;
 		let stuck = self.stuck();
 		if let Some(best) = self.best_paused()
-			&& (self.opening.is_none() || stuck.is_some_and(|waiting| self.paused[best].rank(order) > waiting))
+			&& (self.opening.is_none() || stuck.is_some_and(|waiting| self.paused[&best].rank(order) > waiting))
 		{
-			let Paused { group, frame_start } = self.paused.remove(best).expect("best is in range");
+			let Paused { group, frame_start } = self.paused.remove(&best).expect("best is paused");
 			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, frame_start, "continuing paused group");
 			self.give_way();
 			self.open(group, frame_start);
@@ -6093,10 +6097,13 @@ impl TrackRun {
 		};
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = waiting.sequence, "giving way to a higher-ranked group");
 		match std::mem::take(&mut self.continuing) {
-			true => self.paused.push_back(Paused {
-				group: waiting.group.clone(),
-				frame_start: waiting.frame_start,
-			}),
+			true => {
+				let paused = Paused {
+					group: waiting.group.clone(),
+					frame_start: waiting.frame_start,
+				};
+				self.paused.insert(waiting.sequence, paused);
+			}
 			false => waiting.settle_failed(&Error::Old),
 		}
 	}
@@ -6114,16 +6121,34 @@ impl TrackRun {
 		}
 	}
 
-	/// The position of the highest-ranked paused group in this subscription's current order,
+	/// The sequence of the highest-ranked paused group in this subscription's current order,
 	/// the next to continue.
-	fn best_paused(&mut self) -> Option<usize> {
+	fn best_paused(&mut self) -> Option<u64> {
 		let order = self.ctx.steer_current().order;
-		(0..self.paused.len()).reduce(|best, next| {
-			match self.paused[next].rank(order) > self.paused[best].rank(order) {
-				true => next,
-				false => best,
-			}
-		})
+		self.paused
+			.iter()
+			.max_by_key(|(_, paused)| paused.rank(order))
+			.map(|(&sequence, _)| sequence)
+	}
+
+	/// Drop each paused group the subscription's budget or the cache gave up while it waited
+	/// to continue, as a group waiting for credit would be.
+	fn drop_given_up_paused(&mut self, waiter: &kio::Waiter) {
+		if self.paused.is_empty() {
+			return;
+		}
+		let mut dropped = Vec::new();
+		self.paused
+			.retain(|&sequence, paused| match poll_given_up(&mut paused.group, waiter) {
+				Some(err) => {
+					dropped.push((sequence, StreamError::from(&err)));
+					false
+				}
+				None => true,
+			});
+		if !dropped.is_empty() && self.ctx.version.has_track_stream() {
+			self.ctx.outcomes.dropped.lock().unwrap().extend(dropped);
+		}
 	}
 
 	/// Open a group machine streaming `group` from `frame_start`, which waits for stream

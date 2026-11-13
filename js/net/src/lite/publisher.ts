@@ -2062,7 +2062,12 @@ export class Publisher {
 						// The subscriber keeps what arrived, and a new stream continues the group from
 						// the reset one's Frame Start, owing no drop. Mirrors the Rust `GroupServe::settle_failed`.
 						if (!(writer instanceof Error) && writer.preempted && hasYield(this.version)) {
-							const resumed = continuation(serving);
+							// The group's own failure, such as the publisher's abort or an eviction, ends
+							// it with that error, as the Rust continuation reads it off the group. Read
+							// before the release replaces it with the reset's.
+							const fate = serving.group.closed.peek();
+							hooks.releaseGroupReader(serving.group, failed);
+							const resumed = fate instanceof Error ? undefined : continuation(serving);
 							if (resumed) {
 								console.debug(
 									`continuing paused group: track=${track.name} sequence=${group.sequence} frame_start=${serving.start}`,
@@ -2071,7 +2076,7 @@ export class Publisher {
 								continue;
 							}
 							// Given up meanwhile, such as by the subscription's budget: the usual stale drop.
-							failed = new StreamError(StreamCode.Old);
+							failed = fate instanceof Error ? fate : new StreamError(StreamCode.Old);
 						}
 						if (emitRange) {
 							pendingDrops.push({ start: group.sequence, end: group.sequence + 1n, error: failed });
@@ -2645,7 +2650,9 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
-			hooks.releaseGroupReader(group, e);
+			// A reset that pauses the group leaves the reader to the caller, which reads its fate
+			// first. A reset stream is never preempted after, so the caller sees the same flag.
+			if (!(stream.preempted && hasYield(this.version))) hooks.releaseGroupReader(group, e);
 			return e;
 		} finally {
 			priority.remove(stream);

@@ -272,6 +272,8 @@ interface Yielding {
 	owed: boolean;
 	// The error a drop named the group with while the stream was read.
 	dropped?: Error;
+	// For a stale drop, the update it named: the next update supersedes it.
+	staleUnder?: bigint;
 }
 
 // The paused groups of `entry`, created on first use.
@@ -2936,7 +2938,7 @@ export class Subscriber {
 				const overtaken = stale ? entry.tail.overtaken(start, end) : [];
 				entry.tail.account(start, end);
 				// A paused group the drop names ends there: no continuation follows.
-				this.#dropPaused(entry, start, end, error);
+				this.#dropPaused(entry, start, end, error, stale ? update : undefined);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
@@ -3325,7 +3327,10 @@ export class Subscriber {
 				this.#endYielding(entry, group.sequence, yielding);
 				// A drop named the group first: the publisher gave it up, so nothing continues it. One
 				// that overtook the stream's header carried a stale verdict.
-				const given = yielding.dropped ?? (yielding.owed ? undefined : new StreamError(StreamCode.Old));
+				// A stale drop an update sent since superseded no longer ends the group.
+				const superseded = yielding.staleUnder !== undefined && yielding.staleUnder < entry.update;
+				const dropped = superseded ? undefined : yielding.dropped;
+				const given = dropped ?? (yielding.owed ? undefined : new StreamError(StreamCode.Old));
 				if (given) {
 					producer.abort(given);
 					return;
@@ -3390,12 +3395,17 @@ export class Subscriber {
 		if (entry.yielding?.get(sequence) === yielding) entry.yielding.delete(sequence);
 	}
 
-	// A SUBSCRIBE_DROP named `[start, end)` with `error`: a paused group ends there, and one a stream
-	// is reading ends with it if a YIELDED reset would otherwise pause it, since no continuation
-	// follows. Mirrors the Rust `TrackEntry::dropped`.
-	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error): void {
+	// A SUBSCRIBE_DROP named `[start, end)` with `error`, under update `staleUnder` when it is a
+	// lite-07 stale verdict: a paused group ends there, and one a stream is reading ends with it if
+	// a YIELDED reset would otherwise pause it, since no continuation follows, unless an update
+	// supersedes a stale drop first. Mirrors the Rust `TrackEntry::dropped`.
+	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error, staleUnder?: bigint): void {
 		for (const [sequence, yielding] of entry.yielding ?? []) {
-			if (sequence >= start && sequence < end) yielding.dropped = error;
+			if (sequence < start || sequence >= end) continue;
+			// A final verdict stands, whatever stale one follows.
+			if (staleUnder !== undefined && yielding.dropped && yielding.staleUnder === undefined) continue;
+			yielding.dropped = error;
+			yielding.staleUnder = staleUnder;
 		}
 		const paused = entry.paused;
 		if (!paused) return;

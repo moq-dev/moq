@@ -268,6 +268,8 @@ struct Yielding {
 	owed: bool,
 	/// The error a drop named the group with while the stream was read.
 	dropped: Option<Error>,
+	/// For a stale drop, the updates sent when it arrived: the next update supersedes it.
+	stale_under: Option<u64>,
 }
 
 /// What a group stream's header opened in its subscription's copy.
@@ -577,6 +579,7 @@ impl TrackEntry {
 				stream,
 				owed,
 				dropped: None,
+				stale_under: None,
 			},
 		);
 		stream
@@ -584,20 +587,36 @@ impl TrackEntry {
 
 	/// Stop tracking the stream reading `sequence`, returning whether a YIELDED reset pauses it.
 	/// A stream that a later one for the same group replaced finds nothing, leaving the
-	/// later stream's record in place.
+	/// later stream's record in place. A stale drop an update sent since superseded no
+	/// longer ends the group.
 	fn end_yielding(&mut self, sequence: u64, stream: u64) -> Option<Yielding> {
-		match self.yielding.get(&sequence) {
-			Some(yielding) if yielding.stream == stream => self.yielding.remove(&sequence),
-			_ => None,
+		let mut yielding = match self.yielding.get(&sequence) {
+			Some(yielding) if yielding.stream == stream => self.yielding.remove(&sequence)?,
+			_ => return None,
+		};
+		if yielding
+			.stale_under
+			.is_some_and(|updates| updates < self.tail.read().updates())
+		{
+			yielding.dropped = None;
+			yielding.stale_under = None;
 		}
+		Some(yielding)
 	}
 
-	/// A SUBSCRIBE_DROP named `groups` with `err`: a paused group ends there, and one a stream
-	/// is reading ends with it if a YIELDED reset would otherwise pause it, since no
-	/// continuation follows.
-	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error) {
+	/// A SUBSCRIBE_DROP named `groups` with `err`, `stale` when it is a lite-07 stale verdict: a
+	/// paused group ends there, and one a stream is reading ends with it if a YIELDED reset
+	/// would otherwise pause it, since no continuation follows, unless an update supersedes a
+	/// stale drop first.
+	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error, stale: bool) {
+		let updates = stale.then(|| self.tail.read().updates());
 		for (_, yielding) in self.yielding.range_mut(groups.clone()) {
+			// A final verdict stands, whatever stale one follows.
+			if stale && yielding.dropped.is_some() && yielding.stale_under.is_none() {
+				continue;
+			}
 			yielding.dropped = Some(err.clone());
+			yielding.stale_under = updates;
 		}
 		let Some(registry) = &self.paused else {
 			return;
@@ -1982,7 +2001,8 @@ impl FrameIngest {
 	/// one the group holds already, skipped, or the one a YIELDED reset cut short, completed.
 	fn dispatch(&mut self, group: &crate::recv::Group, header: frame::Header) -> Result<IngestPhase, Error> {
 		let index = self.index;
-		self.index += 1;
+		// The peer's Frame Start can number a frame past any count.
+		self.index = index.checked_add(1).ok_or(Error::ProtocolViolation)?;
 		let held = group.frame_count() as u64;
 		if index >= held {
 			return Ok(IngestPhase::Admit { header });
@@ -5857,7 +5877,7 @@ mod tests {
 			.lock()
 			.get_mut(&7)
 			.unwrap()
-			.dropped(3..4, &Error::Stream(crate::StreamError::Old));
+			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
 		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
 		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
 		assert!(res.is_ok(), "{res:?}");
@@ -5868,6 +5888,89 @@ mod tests {
 			subscriber.subscribes.lock().get(&7).unwrap().paused.is_none(),
 			"nothing paused"
 		);
+	}
+
+	/// Lite-07: a stale drop that overtook the YIELDED reset of the stream it names holds only
+	/// under the update it names: once the subscriber sends another, the reset pauses the
+	/// group, which the publisher then continues or drops again.
+	#[kio::test]
+	async fn a_yielded_group_pauses_once_an_update_supersedes_its_stale_drop() {
+		use crate::lite::test_transport::{Close, ScriptedSession};
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		lite::Group {
+			subscribe: 7,
+			sequence: 3,
+			frame_start: 0,
+		}
+		.encode(&mut encoder, version)
+		.unwrap();
+		encoder.varint(2).unwrap();
+		encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
+		script.push(b'x');
+		let yielded = ScriptedSession::new(script);
+		let clock = crate::time::Deadlines::new(crate::time::Instant::now());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: clock.clone(),
+			session: crate::driver::Transport::new(yielded.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		let subscription = crate::track::Subscription::default()
+			.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+			.with_range(0..);
+		let mut reader = track.subscribe(subscription);
+		let framing = lite::Framing {
+			timescale: Some(Timescale::MILLI),
+			ietf: None,
+			compressed: false,
+			length_first: true,
+		};
+		let tail = kio::Producer::new(Tail::default());
+		subscriber
+			.subscribes
+			.lock()
+			.insert(7, TrackEntry::accepted(track.clone(), framing, tail.clone()));
+
+		let (_, recv) = yielded.open_bi(Default::default()).await.unwrap();
+		let mut first = GroupRecv::new(
+			subscriber.clone(),
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		);
+		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
+		let mut group = reader.assert_group();
+		// The publisher gave the group up after pausing it, and its drop lands first.
+		subscriber
+			.subscribes
+			.lock()
+			.get_mut(&7)
+			.unwrap()
+			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
+		// An update supersedes it, as `buffer_update` does.
+		tail.write().ok().expect("the tail is open").updated();
+		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
+		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
+		assert!(res.is_ok(), "{res:?}");
+
+		let read = group.read_frame().await;
+		assert!(matches!(read, Ok(Some(_))), "the frame that arrived stays: {read:?}");
+		let subs = subscriber.subscribes.lock();
+		let paused = subs.get(&7).unwrap().paused.as_ref().unwrap().read();
+		assert!(paused.groups.contains_key(&3), "the group pauses");
 	}
 
 	/// A SUBSCRIBE_FINISH below a group already received contradicts that group. lite-05
@@ -10100,6 +10203,68 @@ mod tests {
 		let _a = slots.acquire().expect("the failed stream kept a slot");
 		let _b = slots.acquire().expect("the failed stream kept a slot");
 	}
+	/// A frame numbered past `u64::MAX` by a huge Frame Start is a protocol violation, not
+	/// a counter overflow.
+	#[kio::test]
+	async fn group_frame_start_past_any_count_is_refused() {
+		use crate::transport::poll::Session as _;
+		let version = Version::Lite07;
+		let session = crate::lite::test_transport::ScriptedSession::eof(Vec::new());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		subscriber.subscribes.lock().insert(
+			7,
+			TrackEntry::accepted(
+				track.clone(),
+				lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+					length_first: false,
+				},
+				Default::default(),
+			),
+		);
+		// The model takes the first frame at the last countable index, so the second frame's
+		// index is the one that cannot be counted.
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		lite::Group {
+			subscribe: 7,
+			sequence: 0,
+			frame_start: u64::MAX - 1,
+		}
+		.encode(&mut encoder, version)
+		.unwrap();
+		for _ in 0..2 {
+			encoder.varint(crate::coding::varint::zigzag(0)).unwrap();
+			encoder.bytes(b"x").unwrap();
+		}
+		let incoming = crate::lite::test_transport::ScriptedSession::eof(script);
+		let (_, recv) = incoming.open_bi(Default::default()).await.unwrap();
+		let mut group = GroupRecv::new(
+			subscriber.clone(),
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		);
+		let err = kio::wait(|waiter| group.poll_serve(waiter)).await.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation), "{err:?}");
+	}
+
 	/// Distinct live GROUP starts are copies of the same group, including while
 	/// readers retain every earlier tail. Exercise the real header/ingest path.
 	#[kio::test]
@@ -12694,7 +12859,7 @@ impl ServeLoop {
 					}
 					// A paused group the drop names ends there: no continuation follows.
 					if let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id) {
-						entry.dropped(groups.clone(), &Error::Stream(error.clone()));
+						entry.dropped(groups.clone(), &Error::Stream(error.clone()), stale);
 					}
 					match stale {
 						// Judged under the budget this subscriber sent with that update. A
