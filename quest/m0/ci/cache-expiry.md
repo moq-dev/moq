@@ -10,8 +10,8 @@ the buckets, and no doc, comment or quest still names the old windows.
 
 Decided 2026-11-13 (maintainer, /quest-plan): ✅ shorten mbx from 14 to 7 days
 (`infra/mbx/lifecycle.json`), Nix CI from 30 to 14 days
-(`infra/nix/lifecycle.json`), and fit `refresh`'s 7-day cutoff in
-`infra/nix/justfile` to the new window. Both caches are supplemental. A missing mbx
+(`infra/nix/lifecycle.json`), and keep `refresh`'s 7-day cutoff in
+`infra/nix/justfile`, which already fits the new window, updating its comment. Both caches are supplemental. A missing mbx
 object is a rebuild, and a narinfo whose NAR expired makes Nix fall back to
 building. The projected saving is about $7 a month. Rejected: keeping today's
 windows, and R2 Infrequent Access. mbx serves 2-5 TB of reads a day, so
@@ -41,8 +41,9 @@ lifecycle list` output in the PR.
 Update the text that names the old windows: `infra/README.md`, the
 30-day expiry in `flake.nix`'s comments and in `.github/workflows/smoke.yml`'s
 comment on its pinned builds, the comment on
-`refresh`, mbx-r2-verify's Goal and its 2026-11-26 measurement, which then
-splits at this change too, and
+`refresh`, mbx-r2-verify's Goal, its oversized-manifest note ("within a
+day of the 14-day rule"), its macOS expiry note ("14 since"), and its
+2026-11-26 measurement, which then splits at this change too, and
 [cachix-retire](/quest/m0/ci/cachix-retire.md)'s 30-day references if that
 quest is still open.
 
