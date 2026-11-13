@@ -32,14 +32,21 @@ Nightly bursts on the earlier nights since the 14-day expiry ran 143k to 158k
 - The budget refused 0.6 to 11.75 GiB more per job. macOS, whose default
   budget it never reached, logged no refusals and hit the most.
 
-#8631 sets `MBX_GC_MAX_SIZE=20GiB` on hosted runners, the most any job asked
-for, instead of the writer cut planned 2026-11-13: fewer writers would leave
-the refused restores in place and stop storing the read-only jobs' own units.
-Upstream, mbx should not spend the build's budget on speculative prefetch
-ahead of restores the build needs, and should not re-send objects of a result
-it just read from the remote. Its CONTRIBUTING.md and AGENTS.md, re-read
-2026-11-13, allow AI-assisted Discussions with a disclosure line and accept
-only reports from real use. #8631's body holds the drafted Discussion.
+Decided 2026-11-13 (maintainer, on #8631): ✅ lift the download budget only,
+as #8631 does with `MBX_GC_MAX_SIZE=20GiB` on hosted runners, the most any
+job asked for (rejected: lifting it and also cutting writers; cutting writers
+only, as first planned that day). Fewer writers would leave the refused
+restores in place and stop storing the read-only jobs' own units. Whether to
+cut writers is judged again once the remaining 412s are measured (below).
+
+Decided 2026-11-13 (maintainer, on #8631): ✅ post the drafted report
+upstream (rejected: not posting). Posted as
+[jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950)
+after its CONTRIBUTING.md and AGENTS.md, re-read that day, allowed
+AI-assisted Discussions from real use. It asks mbx to name a budget refusal
+as such, not to re-send objects of a result the remote already holds, and to
+keep speculative prefetch from spending the budget the build's own restores
+need. Add the after numbers there once measured.
 
 Measure the first scheduled nights after #8631 against 2026-11-12, under the
 same lifecycle window (note [cache-expiry](/quest/m0/ci/cache-expiry.md) if
@@ -56,18 +63,13 @@ it applies in between):
 
 If 412s stay high once restores succeed, size the remaining sources (repeat
 stores of units mbx did not look up, and blobs every job's session sends once)
-before reconsidering fewer writers. Plan the mbx bump that adopts an upstream
-fix as its own quest.
+and judge again whether cutting writers is worth the hits it would cost. Plan
+the mbx bump that adopts an upstream fix as its own quest.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
-- Maintainer: approve posting the Discussion drafted in
-  [#8631](https://github.com/moq-dev/moq/pull/8631)'s body to
-  jdx/mr-boxington, since each post outside the maintainer's orgs needs their
-  approval. An agent then posts it, adding the after numbers, and links it
-  here.
 - GitHub Actions: the first two scheduled Nightly runs after #8631 merges
   supply the after numbers above.
 
