@@ -23,7 +23,7 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Containing, Held, Holdings, Layered, Runs, Seen, Window, later};
+use super::subscription::{Accounted, Containing, Holdings, Layered, Runs, Window};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -529,12 +529,9 @@ enum Anchors {
 	/// still in flight below it (see [`End::tail`]): its readers' relative and time anchors are
 	/// refused (see [`Holdings::drops_anchors`]).
 	Refused,
-	/// A received copy whose wire tells it what relative and time anchors resolve against,
-	/// so they resolve here as at the publisher.
+	/// A received copy whose wire tells it what relative anchors count back from, and carries
+	/// time anchors as group starts, so they resolve here as at the publisher.
 	Wire,
-	/// A received copy that can translate only time anchors its cache has already settled. A
-	/// relative one waits for the live edge its wire reports, as under [`Self::Wire`].
-	Cached,
 }
 
 impl Anchors {
@@ -622,11 +619,6 @@ pub(crate) struct TrackState {
 	// first frame finds its neighbors without walking groups not yet stamped. Filled through
 	// the read guard a first frame holds, so it needs its own lock, never contended.
 	bounds: Mutex<BTreeMap<u64, Timestamp>>,
-
-	// Where each cached group's frame 0 presented, by key, received groups too: what
-	// a time anchor resolves against without walking groups that have not started. Filled
-	// through the read guard a first frame holds, like `bounds`.
-	starts: Mutex<BTreeMap<u64, Timestamp>>,
 
 	// The key and start of the highest-key group that left the cache holding a
 	// checked start (see [`group::Origin::Bound`]). Eviction is not a key prefix, so a
@@ -1017,13 +1009,9 @@ pub(super) const RUN_OVERHEAD: u64 =
 /// [`RUN_OVERHEAD`] is.
 pub(super) const BORN_OVERHEAD: u64 = 2 * size_of::<(ops::Range<u64>, u64)>() as u64;
 
-/// Where the groups this hop holds start, for resolving time anchors: ordered lookups in
-/// the starts index and the cache, so no query walks more than the run it answers.
+/// The groups this hop holds, for resolving relative and time anchors: ordered lookups in
+/// the cache, so no query walks more than the groups it answers.
 impl Holdings for TrackState {
-	fn timed(&self) -> bool {
-		self.info.as_ref().is_none_or(|info| info.timescale.is_some())
-	}
-
 	fn drops_anchors(&self) -> bool {
 		self.anchors == Anchors::Refused
 	}
@@ -1033,134 +1021,29 @@ impl Holdings for TrackState {
 		!self.anchors.received() && self.fills.read().has_handlers()
 	}
 
-	fn containing(&self, pts: Timestamp) -> Containing {
-		let starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
-		let (Some((&first, &first_at)), Some((&last, &last_at))) = (starts.first_key_value(), starts.last_key_value())
-		else {
-			return Containing::Unknown;
+	fn containing(&self, time: u64) -> Containing {
+		match self.lookup.range(..=time).next_back() {
+			Some((&key, _)) => Containing::Group(key),
+			None if self.lookup.is_empty() => Containing::Unknown,
+			None => Containing::Before,
+		}
+	}
+
+	fn next_start(&self, from: u64) -> Option<u64> {
+		self.lookup.range(from..).next().map(|(&key, _)| key)
+	}
+
+	fn back(&self, latest: u64, back: u64) -> Option<u64> {
+		let Some(back) = back.checked_sub(1) else {
+			return Some(latest);
 		};
-		if later(first_at, pts) {
-			return Containing::Before;
-		}
-		if !later(last_at, pts) {
-			return Containing::Group(last);
-		}
-		// Timestamps never rewind, so the starts ascend with the key: bisect the
-		// keys between the newest start known at or before `pts` and one known after.
-		let (mut best, mut low, mut high) = (first, first, last);
-		while high - low > 1 {
-			let mid = low + (high - low) / 2;
-			match starts.range(low + 1..=mid).next_back() {
-				Some((&key, &at)) if later(at, pts) => high = key,
-				Some((&key, _)) => (best, low) = (key, mid),
-				None => low = mid,
-			}
-		}
-		Containing::Group(best)
-	}
-
-	fn next_start(&self, from: u64) -> Option<(u64, Timestamp)> {
-		let starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
-		starts.range(from..).next().map(|(&key, &at)| (key, at))
-	}
-
-	fn next_held(&self, from: u64) -> Option<(u64, Held)> {
-		let (&key, slot) = self.lookup.range(from..).next()?;
-		let held = match slot.start(self.looks_up()) {
-			Some(at) => Held::Started(at),
-			None if slot.may_start(self.looks_up()) => Held::Pending,
-			None => Held::Never,
-		};
-		Some((key, held))
-	}
-
-	fn gone(&self, key: u64) -> Option<u64> {
-		let dropped = self.drops.get_key_value(&key).map(|(dropped, _)| dropped.end);
-		// The history a handler serves may still hold what the live feed never delivered, or
-		// delivered and the cache evicted, starting anywhere: only a drop, or a reader's own
-		// refused fills (see `ReaderHoldings`), says it is gone.
-		if self.looks_up() {
-			return dropped;
-		}
-		// Without a declared start, the first arrival stands in for it, as the tail's does.
-		let floor = self.start.key().or(self.arrivals.first()).unwrap_or(0);
-		if key < floor {
-			return Some(floor);
-		}
-		dropped.or_else(|| self.arrivals.run_end(key))
+		// Bounded by the cache: a huge count walks it once and reaches back to the oldest.
+		let back = usize::try_from(back).ok()?;
+		self.lookup.range(..latest).rev().nth(back).map(|(&key, _)| key)
 	}
 
 	fn complete(&self) -> bool {
 		self.outcome.is_final()
-	}
-
-	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
-		let global = [
-			self.start.key().map_or(0, |start| start.saturating_add(1)),
-			u64::from(self.complete()),
-			self.fetched,
-			// A handler appearing or leaving changes which starts count and what is gone.
-			u64::from(self.looks_up()),
-		];
-		let (ledger, drops) = (self.arrivals.changes(), &self.drops_changes);
-		let changed = (seen.global == Some(global))
-			.then(|| ledger.since(seen.runs[0]).chain(drops.since(seen.runs[1])).collect());
-		*seen = Seen {
-			runs: [ledger.revision(), drops.revision()],
-			global: Some(global),
-		};
-		changed
-	}
-}
-
-/// Where a cursor's groups start, for resolving its time anchors: its track's, with the
-/// runs its own fills refused or it gave up counted gone, so a time end walking history a
-/// handler serves passes what that history lacks.
-struct ReaderHoldings<'a> {
-	state: &'a TrackState,
-	misses: Option<&'a miss::Misses>,
-	/// What the reader's own fills gave up since its window last took it in (see
-	/// [`miss::Misses::take_gone`]): changes a parked time end wakes on beside the track's.
-	newly_gone: RangeSet<u64>,
-}
-
-impl Holdings for ReaderHoldings<'_> {
-	fn timed(&self) -> bool {
-		self.state.timed()
-	}
-
-	fn drops_anchors(&self) -> bool {
-		self.state.drops_anchors()
-	}
-
-	fn looks_up(&self) -> bool {
-		self.state.looks_up()
-	}
-
-	fn containing(&self, pts: Timestamp) -> Containing {
-		self.state.containing(pts)
-	}
-
-	fn next_start(&self, from: u64) -> Option<(u64, Timestamp)> {
-		self.state.next_start(from)
-	}
-
-	fn next_held(&self, from: u64) -> Option<(u64, Held)> {
-		self.state.next_held(from)
-	}
-
-	fn gone(&self, key: u64) -> Option<u64> {
-		self.state.gone(key).or_else(|| self.misses?.gone(key))
-	}
-
-	fn complete(&self) -> bool {
-		self.state.complete()
-	}
-
-	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
-		let mut changed = self.state.changes(seen)?;
-		changed.extend(self.newly_gone.iter().cloned());
-		Some(changed)
 	}
 }
 
@@ -1262,28 +1145,11 @@ impl TrackState {
 		})
 	}
 
-	/// Group `key` wrote its first frame: index where it starts, and share a
-	/// just-checked `bound` with its neighbors.
+	/// Group `key` wrote its first frame: share a just-checked `bound` with its neighbors.
 	pub(super) fn first_frame(&self, key: u64, bound: Option<Timestamp>) {
 		if let Some(bound) = bound {
 			self.share_bound(key, bound);
 		}
-		self.index_start(key);
-	}
-
-	/// Index where cached group `key` starts, read back through its slot so only the
-	/// cached copy holding frame 0 counts, and wake the reads a time end parks on it. On a
-	/// track whose history a handler serves, a start accepted unverified counts: the fills
-	/// below the eviction watermark that a time range walks are all unverified.
-	fn index_start(&self, key: u64) {
-		let Some(start) = self.lookup.get(&key).and_then(|slot| slot.start(self.looks_up())) else {
-			return;
-		};
-		self.starts
-			.lock()
-			.unwrap_or_else(PoisonError::into_inner)
-			.insert(key, start);
-		self.cache.wakes().started(key);
 	}
 
 	/// Record group `key`'s just-checked `start` as a bound for its neighbors. A group
@@ -2490,10 +2356,6 @@ impl TrackState {
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
 			.retain(|key, _| lookup.contains_key(key));
-		self.starts
-			.get_mut()
-			.unwrap_or_else(PoisonError::into_inner)
-			.retain(|key, _| lookup.contains_key(key));
 		(resume, OpenGroups { groups, err })
 	}
 
@@ -2502,10 +2364,6 @@ impl TrackState {
 		let slot = self.lookup.remove(&key)?;
 		self.visible.remove(&key);
 		self.bounds
-			.get_mut()
-			.unwrap_or_else(PoisonError::into_inner)
-			.remove(&key);
-		self.starts
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
 			.remove(&key);
@@ -2763,8 +2621,6 @@ impl TrackState {
 				.unwrap_or_else(PoisonError::into_inner)
 				.remove(&key);
 		}
-		// A group inserted with its first frame already written started before it was here.
-		self.index_start(key);
 		self.cache.wakes().arrived(key..=key);
 		if visible {
 			// Readers and group demand reach it at once. Its arrival starts the wall clock of
@@ -4411,15 +4267,6 @@ impl Producer {
 		}
 	}
 
-	/// Let readers use only time anchors this cache can already translate to group bounds. A
-	/// relative anchor counts back from the live edge the wire reports, once it does.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn anchored_cached(&self) {
-		if let Ok(mut state) = self.modify() {
-			state.anchors = Anchors::Cached;
-		}
-	}
-
 	/// Have this received copy's readers ask no fills below the start its publisher resolved
 	/// from the budget, for a wire whose fills and timestamps cannot bound them by it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -4682,35 +4529,42 @@ impl Producer {
 		}
 	}
 
-	/// Resolve cached time anchors before sending a wire that can name only groups.
+	/// Resolve relative anchors other than [`Range::live`](crate::track::Range::live)'s
+	/// against this copy before sending a wire that can name only groups: a start becomes
+	/// the group it resolved to, and an end the last group it includes. Fails with
+	/// [`Error::Unsupported`] while one waits on a latest group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn resolve_subscription(&self, subscription: &Subscription) -> Result<Subscription> {
-		if !subscription.ranges.iter().any(|range| !range.is_wire()) {
+		use super::subscription::{Anchor, Range};
+
+		let relative: Vec<usize> = (0..subscription.ranges.len())
+			.filter(|index| !subscription.ranges[*index].is_wire())
+			.collect();
+		if relative.is_empty() {
 			return Ok(subscription.clone());
 		}
+		let ranges: Vec<Range> = relative.iter().map(|index| subscription.ranges[*index]).collect();
 		let state = self.state.read();
-		let window = Window::new(&subscription.ranges, state.latest_live(), &*state)?;
+		let window = Window::new(&ranges, state.latest_live(), &*state)?;
 		if !window.is_settled() {
 			return Err(Error::Unsupported);
 		}
-		let resolved = window.resolved();
 		let mut subscription = subscription.clone();
-		for (range, resolved) in subscription.ranges.iter_mut().zip(resolved) {
-			if match range.start {
-				super::subscription::Anchor::Time(_) => true,
-				super::subscription::Anchor::Relative(back) => back != 0,
-				_ => false,
-			} {
-				range.start = super::subscription::Anchor::Absolute(resolved.ok_or(Error::Unsupported)?.start);
+		for (index, resolved) in relative.into_iter().zip(window.resolved()) {
+			let resolved = resolved.ok_or(Error::Unsupported)?;
+			let range = &mut subscription.ranges[index];
+			if matches!(range.start, Anchor::Relative(back) if back != 0) {
+				range.start = Anchor::Time(resolved.start);
 			}
-			if matches!(
-				range.end,
-				Some(super::subscription::Anchor::Time(_) | super::subscription::Anchor::Relative(_))
-			) {
-				range.end = resolved
-					.ok_or(Error::Unsupported)?
-					.end
-					.map(super::subscription::Anchor::Absolute);
+			if matches!(range.end, Some(Anchor::Relative(_))) {
+				*range = match resolved.end.map(|end| end.checked_sub(1)) {
+					None => Range { end: None, ..*range },
+					Some(Some(last)) => Range {
+						end: Some(Anchor::Time(last)),
+						..*range
+					},
+					Some(None) => Range::EMPTY,
+				};
 			}
 		}
 		Ok(subscription)
@@ -5948,20 +5802,6 @@ impl Consumer {
 		}
 	}
 
-	/// Refuse a new range before it changes the demand shared by this route's readers.
-	///
-	/// Only an unresolved time anchor is refused, so callers skip ranges without one
-	/// before building a consumer or locking the track's state.
-	fn refuse_subscription(&self, subscription: &Subscription) -> Result<()> {
-		if let Some(serving) = self.serving() {
-			return serving.refuse_subscription(subscription);
-		}
-		self.with_state(|state| match state {
-			Some(state) => refuse_cached_anchors(&state.read(), subscription),
-			None => Ok(()),
-		})
-	}
-
 	/// The upstream publisher's Largest Object, independently of which groups are cached.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reported_object(&self) -> Option<(u64, u64)> {
@@ -6514,10 +6354,6 @@ impl Subscribing {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.outcome.aborted().cloned().unwrap_or(Error::Dropped))??;
-		refuse_untimed(&info, &self.subscription.read())?;
-		if self.subscription.read().has_time() {
-			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&self.subscription.read())?;
-		}
 
 		let resume = self.state.read().routes.clone();
 		let inner = match resume {
@@ -6547,9 +6383,6 @@ impl Subscribing {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
-		if subscription.has_time() && subscription.ranges != self.subscription.read().ranges {
-			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&subscription)?;
-		}
 		self.subscription.update(subscription)
 	}
 }
@@ -7762,7 +7595,7 @@ struct Cursor {
 
 /// A time start a [`Cursor`]'s window looks up through a fill.
 struct Lookup {
-	pts: Timestamp,
+	time: u64,
 	/// The fill looking it up, `None` once its answer was taken in.
 	join: Option<fill::Join>,
 }
@@ -8188,28 +8021,17 @@ impl Cursor {
 			let revision = self.subscription.ranges_revision();
 			(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone()))
 		};
-		// Taken even when nothing walks, so it never piles up.
-		let newly_gone = self
-			.misses
-			.as_deref_mut()
-			.map(miss::Misses::take_gone)
-			.unwrap_or_default();
 		// A settled window has nothing to read from the track, whose lock every subscriber
 		// of it takes.
 		if replaced.is_none() && self.filter.window.is_settled() {
 			return false;
 		}
 		let state = self.state.read();
-		// Every walk reads the reader's own gone runs, so none parks on a gap they fill.
-		let holdings = ReaderHoldings {
-			state: &state,
-			misses: self.misses.as_deref(),
-			newly_gone,
-		};
+		let holdings = &*state;
 		let moved = match replaced {
 			Some((revision, ranges)) => {
 				self.filter.resolved = revision;
-				match Window::new(&ranges, state.latest_live(), &holdings) {
+				match Window::new(&ranges, state.latest_live(), holdings) {
 					Ok(window) => {
 						self.filter.window = window;
 						self.filter.refused = None;
@@ -8223,8 +8045,8 @@ impl Cursor {
 			// The live feed had no group when the ranges resolved, so the newest one then was
 			// the first to arrive, or the newest once it went live, however many have arrived
 			// or left since.
-			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_live(), &holdings),
-			None => self.filter.window.settle(state.latest_live(), &holdings),
+			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_live(), holdings),
+			None => self.filter.window.settle(state.latest_live(), holdings),
 		};
 		drop(state);
 		if moved {
@@ -8234,26 +8056,13 @@ impl Cursor {
 		moved
 	}
 
-	/// Park a read the cap of an unsettled time end holds back on what raises it: the
-	/// speculative group starting or ending, or any group it waits on starting. Returns
-	/// whether the cap already moved, so the read goes again rather than parking.
-	fn watch_time(&mut self, waiter: &kio::Waiter) -> bool {
+	/// Settle a parked read's window on the groups that arrived since: a window waiting on a
+	/// group parks on the track, which every arrival wakes. Returns whether the window
+	/// moved, so the read goes again rather than parking.
+	fn watch_time(&mut self) -> bool {
 		if self.filter.window.is_settled() || self.filter.refused.is_some() {
 			return false;
 		}
-		{
-			let state = self.state.read();
-			if let Some(from) = self.filter.window.watch_starts() {
-				state.cache.wakes().watch_start(from, waiter);
-			}
-			for key in self.filter.window.speculative() {
-				if let Some(slot) = state.lookup.get(&key) {
-					let _ = slot.serving().poll_started(waiter);
-				}
-			}
-		}
-		// Registered first, so a start landing since the last sync is either seen here or
-		// wakes the read.
 		self.sync()
 	}
 
@@ -8759,14 +8568,14 @@ impl Cursor {
 	/// Look up each time start the window can't resolve from the cache, once, and take in
 	/// the answers, parking `waiter` on the lookups still out.
 	fn look_up(&mut self, waiter: &kio::Waiter) {
-		let lookups: Vec<(Timestamp, u64)> = self.filter.window.lookups().collect();
+		let lookups: Vec<(u64, u64)> = self.filter.window.lookups().collect();
 		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
 			return;
 		}
 		let asking = &asking(&self.subscription);
 		let fills = self.state.read().fills.clone();
-		for (pts, reach) in lookups {
-			if self.filter.lookups.iter().any(|lookup| lookup.pts == pts) {
+		for (time, reach) in lookups {
+			if self.filter.lookups.iter().any(|lookup| lookup.time == time) {
 				continue;
 			}
 			let ask = fill::Ask {
@@ -8774,18 +8583,18 @@ impl Cursor {
 				end: reach,
 				frame_end: None,
 				asking: *asking,
-				time: Some(pts),
+				time: Some(time),
 			};
 			let (joins, _) = fills.lock().join(&fills, &ask);
 			self.filter.lookups.push(Lookup {
-				pts,
+				time,
 				join: joins.into_iter().next(),
 			});
 		}
 		let mut moved = false;
 		for lookup in &mut self.filter.lookups {
 			// The window stops looking once replaced; with no join, nothing can answer.
-			if !self.filter.window.lookups().any(|(pts, _)| pts == lookup.pts) {
+			if !self.filter.window.lookups().any(|(time, _)| time == lookup.time) {
 				lookup.join = None;
 				continue;
 			}
@@ -8801,22 +8610,8 @@ impl Cursor {
 				},
 			};
 			let state = self.state.read();
-			// The answer's first frame says whether it starts at or before the time.
-			if let Some(group) = answer
-				&& let Some(slot) = state.lookup.get(&group)
-				&& slot.may_start(state.looks_up())
-			{
-				let _ = slot.serving().poll_started(waiter);
-				continue;
-			}
 			lookup.join = None;
-			// What the reader's fills gave up since its last sync wakes its walks at the next.
-			let holdings = ReaderHoldings {
-				state: &state,
-				misses: self.misses.as_deref(),
-				newly_gone: RangeSet::new(),
-			};
-			moved |= self.filter.window.found(lookup.pts, answer, &holdings);
+			moved |= self.filter.window.found(lookup.time, answer, &*state);
 		}
 		if moved {
 			self.filter.revision += 1;
@@ -8981,7 +8776,7 @@ impl Cursor {
 						state.poll_recv_group(self.index, floor, &self.filter.window)
 					});
 					// A moved window moved the servable edge `drift` was judged against.
-					if polled.is_pending() && self.watch_time(waiter) {
+					if polled.is_pending() && self.watch_time() {
 						self.admit();
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
 						self.expire_heads(&drift, waiter);
@@ -9272,7 +9067,7 @@ impl Cursor {
 			let window = &self.filter.window;
 			let polled = self.poll(waiter, |state| state.poll_next_in_range(floor, end, window));
 			// A moved window moved the servable edge `drift` was judged against.
-			if polled.is_pending() && self.watch_time(waiter) {
+			if polled.is_pending() && self.watch_time() {
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 				continue;
 			}
@@ -9414,8 +9209,6 @@ pub struct Control {
 	republish: Option<Republish>,
 	/// A reader that follows a route, whose copies take the new preferences at once.
 	mirror: Option<super::resume::Mirror>,
-	// Whether the track is timed, so a time anchor on an untimed one is refused.
-	timed: bool,
 }
 
 /// What a [`Control`] needs to republish a plain cursor's [`Published`] window.
@@ -9463,15 +9256,8 @@ impl Control {
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
 	///
 	/// Returns [`Error::Closed`] if the track already ended; the update is
-	/// meaningless at that point and can usually be ignored. Refuses a time anchor on
-	/// an untimed track with [`Error::TimestampMismatch`], leaving the preferences as they were.
+	/// meaningless at that point and can usually be ignored.
 	pub fn update(&self, subscription: Subscription) -> Result<()> {
-		if !self.timed && subscription.has_time() {
-			return Err(Error::TimestampMismatch);
-		}
-		if subscription.has_time() && subscription.ranges != self.subscription.read().ranges {
-			self.track.refuse_subscription(&subscription)?;
-		}
 		self.subscription.update(subscription)?;
 		if let Some(republish) = &self.republish {
 			republish.publish(&self.subscription);
@@ -9480,25 +9266,6 @@ impl Control {
 			mirror.sync();
 		}
 		Ok(())
-	}
-}
-
-/// A group-only wire refuses an unresolved time anchor before changing shared demand.
-fn refuse_cached_anchors(state: &TrackState, subscription: &Subscription) -> Result<()> {
-	if state.anchors == Anchors::Cached && subscription.has_time() {
-		let window = Window::new(&subscription.ranges, state.latest_live(), state)?;
-		if !window.is_settled() {
-			return Err(Error::Unsupported);
-		}
-	}
-	Ok(())
-}
-
-/// Refuse `subscription` when it asks an untimed track for a presentation time.
-fn refuse_untimed(info: &Info, subscription: &Subscription) -> Result<()> {
-	match info.timescale.is_none() && subscription.has_time() {
-		true => Err(Error::TimestampMismatch),
-		false => Ok(()),
 	}
 }
 
@@ -9551,7 +9318,6 @@ impl Subscriber {
 
 	/// Create a handle for updating this subscriber's delivery preferences.
 	pub fn control(&self) -> Control {
-		let timed = self.info.timescale.is_some();
 		match &self.inner {
 			Inner::Plain(cursor) => Control {
 				track: self.consume(),
@@ -9561,14 +9327,12 @@ impl Subscriber {
 					published: cursor.published.weak(),
 				}),
 				mirror: None,
-				timed,
 			},
 			Inner::Resume(resume, _) => Control {
 				track: self.consume(),
 				subscription: resume.subscription().clone(),
 				republish: None,
 				mirror: Some(resume.mirror()),
-				timed,
 			},
 		}
 	}
@@ -10332,17 +10096,12 @@ impl Subscriber {
 	/// the cached groups they newly cover, even ones that arrived before the groups
 	/// already read. Returns [`Error::Closed`]
 	/// if the track already ended; the update is meaningless at that point and can usually
-	/// be ignored. Refuses a time anchor on an untimed track with
-	/// [`Error::TimestampMismatch`], leaving the preferences as they were.
+	/// be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
-		refuse_untimed(&self.info, &subscription)?;
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
-		if subscription.has_time() && subscription.ranges != channel.read().ranges {
-			self.consume().refuse_subscription(&subscription)?;
-		}
 		channel.update(subscription)?;
 		match &mut self.inner {
 			Inner::Plain(cursor) => {

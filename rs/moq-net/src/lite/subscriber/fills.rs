@@ -436,7 +436,7 @@ enum RecoveryState {
 impl Recovery {
 	fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, ask: &FillAsk) -> Self {
 		let subscription = Subscription::default()
-			.with_ranges([track::Range::groups(groups.clone())])
+			.with_ranges(track::Range::span(Some(groups.start), Some(groups.end)))
 			.with_priority(ask.priority)
 			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending);

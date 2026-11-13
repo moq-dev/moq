@@ -75,7 +75,7 @@ impl Group {
 
 	/// Finish receiving without running cancellation cleanup.
 	pub fn finish(mut self) -> Result<(), Error> {
-		self.writer.take().expect("group owned until consumed").finish()?;
+		self.writer.take().expect("group owned until consumed").close()?;
 		self.armed = false;
 		Ok(())
 	}

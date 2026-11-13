@@ -21,7 +21,7 @@ use std::{
 use rangemap::{RangeMap, RangeSet};
 
 use super::{Info, Order, Position, TrackState, clamp_max_delay};
-use crate::{Error, Result, StreamError, Timestamp, group, util::SendCell};
+use crate::{Error, Result, StreamError, group, util::SendCell};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
@@ -45,7 +45,7 @@ struct Pending {
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
 	// The time a lookup asks for, which owes no group.
-	time: Option<Timestamp>,
+	time: Option<u64>,
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
@@ -282,7 +282,7 @@ pub(super) struct Ask {
 	pub frame_end: Option<u64>,
 	pub asking: Asking,
 	/// A lookup of the group holding this time within the run, which owes none of it.
-	pub time: Option<Timestamp>,
+	pub time: Option<u64>,
 }
 
 /// A reader's place in one fill: the part of it the reader wants.
@@ -618,7 +618,7 @@ impl FillState {
 	}
 
 	/// Queue a fill looking up `time` within `ask`'s run, with the join waiting on its answer.
-	fn queue_lookup(&mut self, shared: &kio::Shared<FillState>, ask: &Ask, time: Timestamp) -> Join {
+	fn queue_lookup(&mut self, shared: &kio::Shared<FillState>, ask: &Ask, time: u64) -> Join {
 		let id = self.next;
 		self.next += 1;
 		let result = kio::Producer::<Outcome>::default();
@@ -853,7 +853,7 @@ struct Inner {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
-	time: Option<Timestamp>,
+	time: Option<u64>,
 	// Answered with a copy of its own rather than the cache's; see [`FillState::fly`].
 	flight: bool,
 	asks: kio::Shared<Asks>,
@@ -877,17 +877,17 @@ impl Fill {
 		self.inner.end
 	}
 
-	/// The presentation time a reader's range starts at that no group the cache holds
-	/// resolves, so this fill looks it up: [`accept`](Self::accept) the group containing it,
-	/// the newest one starting at or before it, or the oldest group when every group starts
-	/// after it. The reader's range then starts there, once that group's first frame is
-	/// written.
+	/// The time a reader's range starts at that no group the cache holds resolves, in the
+	/// track's timescale (a bare start on a scale-less track), so this fill looks it up:
+	/// [`accept`](Self::accept) the group containing it, the newest one starting at or before
+	/// it, or the oldest group when every group starts after it. The reader's range then
+	/// starts there.
 	///
 	/// A lookup owes no group, so [`wanted`](Self::wanted) is `None` and
 	/// [`is_wanted`](Self::is_wanted) false throughout; it waits only on its first accept.
 	/// Dropped unanswered, as a handler that can't resolve times does, the reader's range
 	/// reaches back to the oldest group the cache holds. `None` for a fill of groups.
-	pub fn time(&self) -> Option<Timestamp> {
+	pub fn time(&self) -> Option<u64> {
 		self.inner.time
 	}
 

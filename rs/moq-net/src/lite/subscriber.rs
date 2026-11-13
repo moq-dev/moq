@@ -10181,47 +10181,39 @@ mod tests {
 	}
 }
 
-/// The ranges a SUBSCRIBE carries for `subscription`, without the empty ones, with time
-/// anchors in `timescale`, the track's as the publisher declared it.
+/// The ranges a SUBSCRIBE carries for `subscription`, without the empty ones.
 ///
-/// A subscription always starts and ends at a group boundary, so every absolute end names
-/// a group's first frame. `None` when nothing is left to ask for, which no wire can say.
-/// The caller narrows a subscription for a wire without ranges to the one span it carries
-/// first (see [`wire_span`]).
-fn wire_ranges(subscription: &Subscription, timescale: Option<Timescale>) -> Result<Option<Vec<lite::Range>>, Error> {
-	let time = |pts: crate::Timestamp| -> Result<lite::Anchor, Error> {
-		let scale = timescale.ok_or(Error::TimestampMismatch)?;
-		let pts = pts
-			.convert(scale)
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-		Ok(lite::Anchor::Time(pts.value()))
-	};
+/// A group ID is the group's start, so a time anchor goes out as the group ID it names,
+/// on every version: a time start as the start, and a time end as the exclusive group past
+/// it. `None` when nothing is left to ask for, which no wire can say. The caller narrows a
+/// subscription for a wire without ranges to the one span it carries first (see
+/// [`wire_span`]).
+///
+/// A wire without ranges reads a start as the first group at or after it, so a time start
+/// between two groups misses the one containing it there.
+fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 	let mut ranges = Vec::with_capacity(subscription.ranges.len());
 	for range in &subscription.ranges {
-		// Nothing sorts below group 0, whatever the start.
-		if let Some(Anchor::Absolute(end)) = range.end
-			&& match range.start {
-				Anchor::Absolute(start) => end <= start,
-				_ => end == 0,
-			} {
+		if let (Anchor::Time(start), Some(Anchor::Time(end))) = (range.start, range.end)
+			&& end < start
+		{
 			continue;
 		}
 		let start = match range.start {
 			Anchor::Oldest => None,
 			Anchor::Relative(back) => Some(lite::Anchor::Relative(back)),
-			Anchor::Absolute(group) => Some(lite::Anchor::Absolute(Position::group(group))),
-			Anchor::Time(pts) => Some(time(pts)?),
+			Anchor::Time(time) => Some(lite::Anchor::Absolute(Position::group(time))),
 		};
-		// The copy resolves a relative or time end itself, against the groups it receives past
-		// it, so it asks through the live edge. SUBSCRIBE_START names a resolved start, but
-		// nothing names a resolved end, so one resolved upstream would leave the copy short.
+		// The copy resolves a relative end itself, against the groups it receives past it, so
+		// it asks through the live edge. SUBSCRIBE_START names a resolved start, but nothing
+		// names a resolved end, so one resolved upstream would leave the copy short.
 		let end = match range.end {
-			Some(Anchor::Absolute(group)) => Some(lite::Anchor::Absolute(Position::group(group))),
-			None | Some(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_)) => None,
+			Some(Anchor::Time(time)) => time.checked_add(1).map(|end| lite::Anchor::Absolute(Position::group(end))),
+			None | Some(Anchor::Oldest | Anchor::Relative(_)) => None,
 		};
 		ranges.push(lite::Range { start, end });
 	}
-	Ok((!ranges.is_empty()).then_some(ranges))
+	(!ranges.is_empty()).then_some(ranges)
 }
 
 /// `subscription` narrowed to the one span a wire without ranges carries, which the
@@ -10237,7 +10229,7 @@ fn wire_span(subscription: Subscription) -> Subscription {
 		None if subscription
 			.ranges
 			.iter()
-			.any(|range| matches!(range.start, Anchor::Absolute(_))) =>
+			.any(|range| matches!(range.start, Anchor::Time(_))) =>
 		{
 			Some(0)
 		}
@@ -10871,7 +10863,7 @@ impl TrackServe {
 			(None, Sub::Active(active)) if !fills.is_empty() => active.demand.clone(),
 			(pref, _) => pref,
 		};
-		let request = self.wire_request(pref, opening, producer.idle_newest(), producer.info().timescale)?;
+		let request = self.wire_request(pref, opening, producer.idle_newest());
 		// What goes on the wire: the demand's ranges, then the fills', under the demand's
 		// parameters. The demand alone sets the floor.
 		let request = match request {
@@ -10994,24 +10986,20 @@ impl TrackServe {
 	/// `None` when it asks for nothing.
 	///
 	/// `opening` when this opens a subscription for a copy whose newest cached group, while
-	/// idle, is `newest`. `timescale` is the track's, which only a time anchor needs.
+	/// idle, is `newest`.
 	fn wire_request(
 		&self,
 		pref: Option<Subscription>,
 		opening: bool,
 		newest: Option<u64>,
-		timescale: Option<Timescale>,
-	) -> Result<Option<(Subscription, Vec<lite::Range>)>, Error> {
+	) -> Option<(Subscription, Vec<lite::Range>)> {
 		// An empty half-open range asks for nothing, and the wire cannot say that: its
 		// bounds are inclusive, so the nearest encoding either hands back the position
 		// the caller excluded or inverts the range outright once the two bounds meet. No
 		// demand at all is the faithful translation. An absent start is the live edge, wherever that lands, so the only end that is
 		// certainly empty is the very first position, which is what `Position::default()`
 		// stands in for.
-		let Some(subscription) = pref.filter(|sub| sub.end().is_none_or(|end| end > sub.start().unwrap_or_default()))
-		else {
-			return Ok(None);
-		};
+		let subscription = pref.filter(|sub| sub.end().is_none_or(|end| end > sub.start().unwrap_or_default()))?;
 		let ranged = self.subscriber.version.has_ranges();
 		// Lite-07 carries every range asked for; an older wire one span covering them.
 		let mut subscription = match ranged {
@@ -11032,18 +11020,15 @@ impl TrackServe {
 		if opening && idle {
 			subscription = subscription.with_start(newest);
 		}
-		Ok(wire_ranges(&subscription, timescale)?.map(|ranges| (subscription, ranges)))
+		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
 	}
 
 	/// Open the SUBSCRIBE for `pref` alongside the TRACK still waiting on its TRACK_INFO,
-	/// registered with its copy pending. `None` when it asks for nothing, or names a time
-	/// that needs the track's timescale, so it waits for the info.
+	/// registered with its copy pending. `None` when it asks for nothing.
 	fn pipeline(&self, pref: Subscription) -> Result<Option<Pipelined>, Error> {
 		// A copy not accepted yet caches nothing.
-		let (subscription, ranges) = match self.wire_request(Some(pref.clone()), true, None, None) {
-			Ok(Some(request)) => request,
-			Ok(None) | Err(Error::TimestampMismatch) => return Ok(None),
-			Err(err) => return Err(err),
+		let Some((subscription, ranges)) = self.wire_request(Some(pref.clone()), true, None) else {
+			return Ok(None);
 		};
 		let establish = self.register(subscription, ranges, None);
 		Ok(Some(Pipelined {
@@ -11173,7 +11158,7 @@ impl TrackServe {
 			true => subscription,
 			false => wire_span(subscription),
 		};
-		let ranges = wire_ranges(&subscription, producer.info().timescale)?.expect("a non-empty subscription");
+		let ranges = wire_ranges(&subscription).expect("a non-empty subscription");
 		let wire = Wire {
 			subscription: subscription.clone(),
 			demand: Some(subscription),

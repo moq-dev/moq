@@ -3,14 +3,12 @@ use std::{
 	time::Duration,
 };
 
-use crate::Timestamp;
-
 mod runs;
 mod window;
 pub(super) use runs::{Layered, Runs};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
-pub(super) use window::{Containing, Held, Holdings, Seen, Unheld, Window, later};
+pub(super) use window::{Containing, Holdings, Unheld, Window};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -267,6 +265,13 @@ impl Range {
 		}
 	}
 
+	/// A range holding nothing: nothing sorts below group 0, so an exclusive end there holds
+	/// nothing, whatever the start.
+	pub(crate) const EMPTY: Self = Self {
+		start: Anchor::Time(1),
+		end: Some(Anchor::Time(0)),
+	};
+
 	/// The range from group `start` up to the exclusive group `end`, or onward for `None`:
 	/// what a legacy wire's bounds become. `None` when it holds nothing, which an exclusive
 	/// end of 0 says whatever the start.
@@ -452,11 +457,6 @@ impl Subscription {
 	/// resolves to below `floor`; an end not resolved becomes the bound.
 	pub(super) fn clamped(&self, floor: Option<u64>, end: Option<u64>, resolved: &[Option<Resolved>]) -> Self {
 		let clamping = floor.is_some() || end.is_some();
-		// Nothing sorts below group 0, so an end there holds nothing, whatever the start.
-		const EMPTY: Range = Range {
-			start: Anchor::Time(1),
-			end: Some(Anchor::Time(0)),
-		};
 		let ranges = self
 			.ranges
 			.iter()
@@ -476,13 +476,13 @@ impl Subscription {
 				let requested = match (range.end, resolved.and_then(|resolved| resolved.end)) {
 					(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(resolved)) => match resolved.checked_sub(1) {
 						Some(last) => Some(Anchor::Time(last)),
-						None => return EMPTY,
+						None => return Range::EMPTY,
 					},
 					(requested, _) => requested,
 				};
 				let end = match (requested, end.map(|end| end.checked_sub(1))) {
 					(requested, None) => requested,
-					(_, Some(None)) => return EMPTY,
+					(_, Some(None)) => return Range::EMPTY,
 					(Some(Anchor::Time(requested)), Some(Some(last))) => Some(Anchor::Time(requested.min(last))),
 					(_, Some(Some(last))) => Some(Anchor::Time(last)),
 				};

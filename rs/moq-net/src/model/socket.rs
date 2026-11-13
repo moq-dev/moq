@@ -203,7 +203,10 @@ impl Protocol {
 			// plus a joining FETCH or fill for that group's head.
 			Self::Tcp => reliable,
 			// Starts at group 0, so a burst written before the answer is kept.
-			Self::Track => reliable.with_range(0..),
+			Self::Track => reliable.with_ranges([crate::track::Range {
+				start: crate::track::Anchor::Time(0),
+				end: None,
+			}]),
 		}
 	}
 }
@@ -1313,7 +1316,7 @@ impl Pump {
 				&& self.subscriber.is_none()
 				&& let Some(local) = self.local.take()
 			{
-				let _ = local.finish();
+				let _ = local.close();
 			}
 			return Ok(());
 		};
@@ -1334,7 +1337,7 @@ impl Pump {
 				Poll::Pending => return Ok(()),
 				Poll::Ready(Ok(Some(frame))) => self.pending = Some(frame),
 				Poll::Ready(Ok(None)) => {
-					self.local.take().expect("checked above").finish()?;
+					self.local.take().expect("checked above").close()?;
 					self.remote = None;
 					return Ok(());
 				}

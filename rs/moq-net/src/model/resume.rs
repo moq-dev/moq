@@ -1108,12 +1108,14 @@ impl Reader {
 				let end = previous.and_then(|previous| previous.end).or(resolved.end);
 				track::Range {
 					start: match range.start {
-						Anchor::Relative(_) | Anchor::Time(_) => Anchor::Absolute(start),
+						Anchor::Relative(_) | Anchor::Time(_) => Anchor::Time(start),
 						start => start,
 					},
-					// A time end the copy has not settled stays one: its cap is not the end.
 					end: match (range.end, end) {
-						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => Some(Anchor::Absolute(end)),
+						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => match end.checked_sub(1) {
+							Some(last) => Some(Anchor::Time(last)),
+							None => return track::Range::EMPTY,
+						},
 						(end, _) => end,
 					},
 				}
@@ -1991,7 +1993,7 @@ impl Reader {
 			.ranges
 			.iter()
 			.map(|range| match range.start {
-				Anchor::Absolute(start) if replaced.is_none_or(|replaced| start > replaced) => start,
+				Anchor::Time(start) if replaced.is_none_or(|replaced| start > replaced) => start,
 				_ => floor,
 			})
 			.min()

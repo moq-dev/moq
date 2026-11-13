@@ -2304,18 +2304,6 @@ impl Request for TracksServe {
 /// Answers a SUBSCRIBE stream: streams the track's groups
 /// until the track ends.
 enum SubscribeServe {
-	/// A time anchor waits for the track's timescale, which places it, before the model
-	/// subscription opens.
-	Query {
-		/// Boxed: the request is far larger than the other states' handles.
-		msg: Box<lite::Subscribe<'static>>,
-		track: track::Consumer,
-		querying: track::Resolving,
-		/// The newest group when the SUBSCRIBE arrived; see [`cursor_floor`].
-		latest: Option<u64>,
-		update: Option<LiveUpdate>,
-		legacy: Option<Box<Legacy>>,
-	},
 	/// Waiting for the model subscription to be confirmed.
 	Confirm {
 		/// Boxed: the request is far larger than the other states' handles.
@@ -2394,24 +2382,13 @@ impl Request for SubscribeServe {
 			Err(err) => return Ok(Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, None)),
 		};
 		let latest = track.latest_key();
-		if Bounds::has_time(&msg.ranges) {
-			let querying = track.info().into_inner();
-			return Ok(Self::Query {
-				msg: Box::new(msg),
-				track,
-				querying,
-				latest,
-				update: None,
-				legacy,
-			});
-		}
-		let bounds = Bounds::new(&msg.ranges, None)?;
+		let bounds = Bounds::new(&msg.ranges, !shared.version.has_ranges());
 		Ok(Self::subscribe(shared, msg, bounds, &track, latest, None, legacy))
 	}
 
 	fn update(&mut self, update: LiveUpdate) {
 		match self {
-			Self::Query { update: pending, .. } | Self::Confirm { update: pending, .. } => *pending = Some(update),
+			Self::Confirm { update: pending, .. } => *pending = Some(update),
 			Self::Run(run) => run.update(update),
 			Self::Datagrams {
 				consumer,
@@ -2438,51 +2415,6 @@ impl Request for SubscribeServe {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		loop {
 			match self {
-				Self::Query { querying, legacy, .. } => {
-					let info = match querying.poll_ok(waiter) {
-						Poll::Ready(info) => info,
-						Poll::Pending => {
-							let consumer = ready!(Legacy::poll_datagrams(legacy, waiter));
-							let Self::Query { msg, update, .. } = std::mem::replace(
-								self,
-								Self::Drain {
-									children: Default::default(),
-									_track: None,
-								},
-							) else {
-								unreachable!()
-							};
-							*self = Self::datagrams(consumer, &msg, update);
-							continue;
-						}
-					};
-					let Self::Query {
-						msg,
-						track,
-						latest,
-						update,
-						legacy,
-						..
-					} = std::mem::replace(
-						self,
-						Self::Drain {
-							children: Default::default(),
-							_track: None,
-						},
-					)
-					else {
-						unreachable!()
-					};
-					let info = match info {
-						Ok(info) => info,
-						Err(err) => {
-							*self = Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, update);
-							continue;
-						}
-					};
-					let bounds = Bounds::new(&msg.ranges, info.timescale)?;
-					*self = Self::subscribe(shared, *msg, bounds, &track, latest, update, legacy);
-				}
 				Self::Confirm {
 					subscribing, legacy, ..
 				} => {
@@ -4770,6 +4702,9 @@ async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result
 /// partial group, so it must be skipped: a group is the unit of decodability, and only
 /// the subscriber knows whether a partial one is any use to it.
 fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Consumer> {
+	if group.start < frames.floor {
+		return None;
+	}
 	let expected = frames.start(group.start);
 	let end = frames.end(group.start).map_or(Bound::Unbounded, Bound::Included);
 
@@ -4791,6 +4726,9 @@ struct Frames {
 	/// What the ranges starting or ending partway through each group serve of it, keyed by
 	/// group so a lookup costs the same however many ranges there are.
 	parts: BTreeMap<u64, Part>,
+	/// The lowest group a legacy wire's start serves: its start names the first group at or
+	/// after it, where the model's time start includes the group containing it.
+	floor: u64,
 }
 
 /// What the ranges naming one group partway serve of it, merged.
@@ -4842,7 +4780,7 @@ impl FramesBench {
 				end: at(i * 2, 3),
 			})
 			.collect();
-		Self(Bounds::new(&ranges, None).expect("group anchors").frames)
+		Self(Bounds::new(&ranges, false).frames)
 	}
 
 	/// The frames served of `group`, as a served group looks them up.
@@ -4860,26 +4798,19 @@ struct Bounds {
 }
 
 impl Bounds {
-	/// Read `ranges` as they arrived, with time anchors in `timescale`, the track's as this
-	/// peer was told it.
+	/// Read `ranges` as they arrived. Group IDs are group starts, so an absolute anchor and a
+	/// time anchor both name a start.
 	///
-	/// A time anchor on a track the peer was told is untimed is refused, since it names no
-	/// group.
-	fn new(ranges: &[lite::Range], timescale: Option<crate::Timescale>) -> Result<Self, Error> {
+	/// A `legacy` wire (one without ranges) means its start as the first group starting at
+	/// or after it, never one before it that contains it, so the frames narrow to that
+	/// floor (see [`Frames::floor`]).
+	fn new(ranges: &[lite::Range], legacy: bool) -> Self {
 		use crate::track::{Anchor, Range};
 
-		let anchor = |anchor: lite::Anchor| -> Result<Anchor, Error> {
-			Ok(match anchor {
-				lite::Anchor::Absolute(position) => Anchor::Absolute(position.group),
-				lite::Anchor::Relative(back) => Anchor::Relative(back),
-				lite::Anchor::Time(pts) => {
-					let scale = timescale.ok_or(Error::TimestampMismatch)?;
-					Anchor::Time(
-						crate::Timestamp::new(pts, scale)
-							.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?,
-					)
-				}
-			})
+		let anchor = |anchor: lite::Anchor| match anchor {
+			lite::Anchor::Absolute(position) => Anchor::Time(position.group),
+			lite::Anchor::Relative(back) => Anchor::Relative(back),
+			lite::Anchor::Time(time) => Anchor::Time(time),
 		};
 
 		let mut bounds = Self {
@@ -4892,13 +4823,16 @@ impl Bounds {
 			if let (Some(lite::Anchor::Absolute(start)), Some(lite::Anchor::Absolute(end))) = (range.start, range.end)
 				&& end <= start
 			{
-				bounds.ranges.push(Range::groups(start.group..start.group));
+				bounds.ranges.push(Range::EMPTY);
 				continue;
 			}
 			let start = match range.start {
 				None => Range::oldest().start,
-				Some(start) => anchor(start)?,
+				Some(start) => anchor(start),
 			};
+			if legacy && let Some(lite::Anchor::Absolute(start)) = range.start {
+				bounds.frames.floor = bounds.frames.floor.max(start.group);
+			}
 			let first = match range.start {
 				Some(lite::Anchor::Absolute(start)) if start.frame != 0 => Some((start.group, start.frame)),
 				_ => None,
@@ -4907,14 +4841,21 @@ impl Bounds {
 			let end = match range.end {
 				None => None,
 				// A mid-group end includes its group, up to the frame before it.
-				Some(lite::Anchor::Absolute(end)) => Some(Anchor::Absolute(match end.frame.checked_sub(1) {
+				Some(lite::Anchor::Absolute(end)) => match end.frame.checked_sub(1) {
 					Some(frame) => {
 						last = Some((end.group, frame));
-						end.group.checked_add(1).ok_or(Error::ProtocolViolation)?
+						Some(Anchor::Time(end.group))
 					}
-					None => end.group,
-				})),
-				Some(end) => Some(anchor(end)?),
+					// An exclusive end at group 0 holds nothing, whatever the start.
+					None => match end.group.checked_sub(1) {
+						Some(group) => Some(Anchor::Time(group)),
+						None => {
+							bounds.ranges.push(Range::EMPTY);
+							continue;
+						}
+					},
+				},
+				Some(end) => Some(anchor(end)),
 			};
 			match (first, last) {
 				(Some((group, first)), Some((end, last))) if group == end => {
@@ -4931,20 +4872,13 @@ impl Bounds {
 			}
 			bounds.ranges.push(Range { start, end });
 		}
-		Ok(bounds)
+		bounds
 	}
 
 	/// Whether a subscription to these ranges over `version` is answered once they are
 	/// covered, even with no group to resolve its start: lite-07 with every range bounded.
 	fn ends(&self, version: Version) -> bool {
 		version.has_ranges() && self.ranges.iter().all(|range| range.end.is_some())
-	}
-
-	/// Whether any end is a presentation time, which needs the track's timescale.
-	fn has_time(ranges: &[lite::Range]) -> bool {
-		ranges.iter().any(|range| {
-			matches!(range.start, Some(lite::Anchor::Time(_))) || matches!(range.end, Some(lite::Anchor::Time(_)))
-		})
 	}
 
 	/// The model's preferences for these ranges.
@@ -5299,13 +5233,8 @@ impl TrackRun {
 		let floored = requested.is_some_and(|group| group > 0);
 		let (ids, ranges): (Vec<u64>, Vec<lite::Range>) = upd.ranges.iter().copied().unzip();
 		let ranges = self.pin(&ids, ranges);
-		let bounds = match Bounds::new(&ranges, self.ctx.stamp.map(|stamp| stamp.timescale)) {
-			Ok(bounds) => bounds,
-			Err(err) => {
-				self.refused = Some(err);
-				return;
-			}
-		};
+		let bounds = Bounds::new(&ranges, !self.ctx.version.has_ranges());
+
 		let groups = bounds.groups();
 		let (start, end) = (groups.start(), groups.end());
 		// A refusal leaves the model's ranges as they were, so this side keeps them too.
@@ -6266,7 +6195,7 @@ impl CoverageBench {
 				end: group(range.end),
 			})
 			.collect();
-		let bounds = Bounds::new(&wire, None).unwrap();
+		let bounds = Bounds::new(&wire, false);
 		let track = track::Producer::new(
 			Arc::new(crate::broadcast::Info::default()),
 			"bench",
@@ -6847,7 +6776,7 @@ mod serve_group_test {
 	#[test]
 	fn bounds_convert_to_whole_groups() {
 		let group = |group, frame| Some(lite::Anchor::Absolute(track::Position { group, frame }));
-		let bounds = |start, end| Bounds::new(&[lite::Range { start, end }], None).unwrap();
+		let bounds = |start, end| Bounds::new(&[lite::Range { start, end }], false);
 
 		let whole = bounds(None, group(6, 0));
 		assert_eq!(whole.groups().end(), Some(6));
@@ -6915,7 +6844,7 @@ mod serve_group_test {
 				end: group(6, 0),
 			},
 		];
-		let abutting = Bounds::new(&ranges, None).unwrap();
+		let abutting = Bounds::new(&ranges, false);
 		assert_eq!((abutting.frames.start(5), abutting.frames.end(5)), (0, None));
 
 		// A range inside one group keeps both of its bounds there.
@@ -7696,7 +7625,7 @@ mod serve_group_test {
 			outcomes: Default::default(),
 			ietf: false,
 		};
-		let bounds = Bounds::new(&[lite::Range::span(Some(0), 0, None, None)], None).unwrap();
+		let bounds = Bounds::new(&[lite::Range::span(Some(0), 0, None, None)], false);
 		(TrackRun::new(ctx, track, bounds, 0, steer), writer, log)
 	}
 
@@ -7707,7 +7636,7 @@ mod serve_group_test {
 		start: u64,
 	) -> (TrackRun, Writer<crate::transport::boxed::SendStream, Version>, Log) {
 		let (run, writer, log) = lite_run(version, SinkSession::new(Log::default()), track);
-		let bounds = Bounds::new(&[lite::Range::span(Some(start), 0, None, None)], None).unwrap();
+		let bounds = Bounds::new(&[lite::Range::span(Some(start), 0, None, None)], false);
 		(
 			TrackRun::new(run.ctx, run.track, bounds, start, run.steer_tx),
 			writer,
@@ -8120,7 +8049,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		track.anchored_cached();
+		track.anchored();
 		for key in 0..5 {
 			write_group(&mut track, key, key * 1000);
 		}
@@ -9866,7 +9795,7 @@ mod serve_group_test {
 				outcomes: outcomes.clone(),
 				ietf: false,
 			};
-			let bounds = Bounds::new(&[lite::Range::span(Some(start_group), 0, None, None)], None).unwrap();
+			let bounds = Bounds::new(&[lite::Range::span(Some(start_group), 0, None, None)], false);
 			Self {
 				run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
 				writer,

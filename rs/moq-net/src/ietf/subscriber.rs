@@ -426,7 +426,7 @@ impl Fill {
 	/// group: it starts at the group's first object and has no holes.
 	fn release(&mut self) {
 		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
-			let _ = producer.finish();
+			let _ = producer.close();
 		}
 	}
 
@@ -3728,11 +3728,8 @@ impl Plan {
 			.transpose();
 		// A relative anchor the copy cannot settle yet counts back from the Largest Object, so
 		// the live join that names it goes first and the answer resolves the anchor. No Group
-		// ID arithmetic spells it upstream. A time anchor names no group the answer settles.
-		let deferred = matches!(subscription, Err(Error::Unsupported))
-			&& target
-				.subscription()
-				.is_some_and(|subscription| !has_time(&subscription));
+		// ID arithmetic spells it upstream.
+		let deferred = matches!(subscription, Err(Error::Unsupported));
 		let subscription = match subscription {
 			Ok(subscription) => subscription,
 			Err(_) if deferred => None,
@@ -4618,7 +4615,7 @@ impl SubscribeOnce {
 			}
 		};
 		track.received();
-		track.anchored_cached();
+		track.anchored();
 		// Object IDs can start past zero or skip, while readers see frame ordinals, so only
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
@@ -6039,7 +6036,7 @@ impl LearnTrackStatus {
 					// Marked received before any reader sees it, so none resolves an anchor this
 					// wire dropped.
 					track.received();
-					track.anchored_cached();
+					track.anchored();
 					if let Some(largest) = ok.largest {
 						track.report_object(largest.group, largest.object);
 					}
@@ -14566,25 +14563,18 @@ fn settle_bounds(
 ) -> Result<Option<WireBounds>, Error> {
 	match resolved.resolve(track, subscription) {
 		Ok(subscription) => Ok(Some(wire_bounds(&subscription))),
-		Err(Error::Unsupported) if !has_time(subscription) => Ok(None),
+		Err(Error::Unsupported) => Ok(None),
 		Err(err) => Err(err),
 	}
-}
-
-fn has_time(subscription: &track::Subscription) -> bool {
-	subscription
-		.ranges
-		.iter()
-		.any(|range| matches!(range.start, track::Anchor::Time(_)) || matches!(range.end, Some(track::Anchor::Time(_))))
 }
 
 fn needs_resolution(subscription: &track::Subscription) -> bool {
 	subscription.ranges.iter().any(|range| {
 		let start = match range.start {
-			track::Anchor::Oldest | track::Anchor::Absolute(_) | track::Anchor::Relative(0) => false,
-			track::Anchor::Relative(_) | track::Anchor::Time(_) => true,
+			track::Anchor::Oldest | track::Anchor::Time(_) | track::Anchor::Relative(0) => false,
+			track::Anchor::Relative(_) => true,
 		};
-		start || matches!(range.end, Some(track::Anchor::Time(_) | track::Anchor::Relative(_)))
+		start || matches!(range.end, Some(track::Anchor::Relative(_)))
 	})
 }
 
@@ -14597,7 +14587,7 @@ fn wire_bounds(subscription: &track::Subscription) -> WireBounds {
 		subscription
 			.ranges
 			.iter()
-			.any(|range| matches!(range.start, track::Anchor::Absolute(_)))
+			.any(|range| matches!(range.start, track::Anchor::Time(_)))
 			.then_some(0)
 	});
 	(start, subscription.end())
@@ -16565,7 +16555,7 @@ mod stitch_tests {
 			.with_range(0..)
 			.ordered();
 		h.track.received();
-		h.track.anchored_cached();
+		h.track.anchored();
 		h.track.clone().start_at(KEY).unwrap();
 		h.subscriber
 			.state
