@@ -20,12 +20,12 @@ use moq_net::{broadcast, track};
 const TRACKS: [usize; 3] = [1, 100, 1_000];
 const SUBSCRIBERS: [usize; 3] = [1, 10, 100];
 
-/// Append a group whose delta outweighs its first frame.
-fn refreshable(track: &track::Producer) {
-	let mut group = track.append_group().unwrap();
+/// Append group `key`, whose delta outweighs its first frame.
+fn refreshable(track: &track::Producer, key: u64) {
+	let mut group = track.append_group(key).unwrap();
 	group.write_frame(None, Bytes::from_static(b"key")).unwrap();
 	group.write_frame(None, Bytes::from_static(b"delta")).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 fn join(c: &mut Criterion) {
@@ -43,7 +43,7 @@ fn join(c: &mut Criterion) {
 				.collect();
 			let track = &producers[tracks / 2];
 			let demand = track.demand();
-			refreshable(track);
+			refreshable(track, 0);
 			let mut latest = 0;
 			group.bench_function(BenchmarkId::new(format!("{tracks}x"), subscribers), |b| {
 				b.iter_custom(|iterations| {
@@ -55,8 +55,8 @@ fn join(c: &mut Criterion) {
 						elapsed += start.elapsed();
 						assert_eq!(wanted, Some(latest + 1));
 						drop(joined);
-						refreshable(track);
 						latest += 1;
+						refreshable(track, latest);
 					}
 					elapsed
 				})

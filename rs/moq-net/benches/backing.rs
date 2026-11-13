@@ -305,7 +305,9 @@ impl Cache {
 				if let Some((recv, bytes)) = slot.take() {
 					self.groups[frame.track].push((recv.finish().unwrap(), bytes));
 				}
-				*slot = Some((GroupRecv::new(self.tracks[frame.track].append_group().unwrap()), 0));
+				// A group starts at its first frame's timestamp, in the track's milliseconds.
+				let group = self.tracks[frame.track].append_group(frame.timestamp).unwrap();
+				*slot = Some((GroupRecv::new(group), 0));
 			}
 			let (recv, bytes) = slot.as_mut().expect("every track opens with a group");
 			let chunks: Vec<_> = frame.chunks.iter().map(|chunk| driver.chunk(media, *chunk)).collect();

@@ -516,12 +516,34 @@ impl MeasurementClock {
 	}
 }
 
-fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
-	let mut group = track.append_group().unwrap();
-	for _ in 0..frames {
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+/// Append the next group on a [`timed`] track, one millisecond past its largest start or at
+/// 0 on an empty track, so groups keep the key order a counter would give them.
+fn append_next(track: &track::Producer) -> group::Producer {
+	track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.unwrap()
+}
+
+/// Where a group on a [`timed`] track starts, as its frames' timestamp.
+fn at(group: &group::Producer) -> Timestamp {
+	Timestamp::from_millis(group.start).unwrap()
+}
+
+/// The groups from the one starting at `key` onward.
+fn from(key: u64) -> track::Range {
+	track::Range {
+		start: track::Anchor::Time(key),
+		end: None,
 	}
-	let group = group.finish().unwrap();
+}
+
+fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
+	let mut group = append_next(track);
+	let timestamp = at(&group);
+	for _ in 0..frames {
+		group.write_frame(timestamp, payload.clone()).unwrap();
+	}
+	let group = group.close().unwrap();
 	group.start
 }
 
@@ -1167,10 +1189,10 @@ impl<B: Backend> Room<B> {
 		self.written += 1;
 
 		for (writing, &broadcast) in self.writing.iter_mut().zip(&self.watched) {
-			let group = writing.get_or_insert_with(|| self.cluster.tracks[broadcast].append_group().unwrap());
-			group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
+			let group = writing.get_or_insert_with(|| append_next(&self.cluster.tracks[broadcast]));
+			group.write_frame(at(group), self.payload.clone()).unwrap();
 			if last {
-				writing.take().expect("written above").finish().unwrap();
+				writing.take().expect("written above").close().unwrap();
 			}
 		}
 		if last {
@@ -1377,7 +1399,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								&[TRACK],
 								Some(
 									track::Subscription::default()
-										.with_range(span..)
+										.with_ranges([from(span)])
 										.with_delay(track::Delay::default().with_max(None)),
 								),
 							)
@@ -1397,7 +1419,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								viewer.subscribers[0]
 									.update(
 										track::Subscription::default()
-											.with_range(future..)
+											.with_ranges([from(future)])
 											.with_delay(track::Delay::default().with_max(None)),
 									)
 									.unwrap();
@@ -1408,7 +1430,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								}
 								loop {
 									if cluster.tracks[0].subscription().is_some_and(|subscription| {
-										subscription.ranges == [track::Range::groups(future..)]
+										subscription.ranges == [from(future)]
 									}) {
 										return std::task::Poll::Ready(());
 									}
@@ -1426,7 +1448,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								viewer.subscribers[0]
 									.update(
 										track::Subscription::default()
-											.with_range(future - 1..)
+											.with_ranges([from(future - 1)])
 											.with_delay(track::Delay::default().with_max(None)),
 									)
 									.unwrap();
@@ -1461,14 +1483,14 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 						let cluster = Cluster::<B>::new(version, *shape, false).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
-							for key in 0..shape.history {
-								let mut group = track.append_group().unwrap();
+							for key in 0..shape.history as u64 {
+								let mut group = track.append_group(key).unwrap();
 								for _ in 0..shape.group_frames {
 									group
-										.write_frame(Timestamp::from_millis(key as u64).unwrap(), payload.clone())
+										.write_frame(Timestamp::from_millis(key).unwrap(), payload.clone())
 										.unwrap();
 								}
-								group.finish().unwrap();
+								group.close().unwrap();
 							}
 						}
 						cluster
