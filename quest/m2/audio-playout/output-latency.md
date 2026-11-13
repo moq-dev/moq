@@ -35,9 +35,10 @@ callback.
 
 Recommendations, in one PR:
 
-1. Add the output latency to each player's audio target: the render quantum
-   or measured callback size plus `outputLatency` where the browser reports
-   it, and natively the device period plus the latency the host reports. The
+1. Add the output latency to each player's audio target: in the browser,
+   `baseLatency` (or the measured callback size where it is missing) plus
+   `outputLatency` where reported, and natively the device period plus the
+   latency the host reports. The
    shared delay then covers it, so video waits that much longer, which lip
    sync on that device needs.
 2. Read the clock at output time: in the browser, pair it on the wall clock

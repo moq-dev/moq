@@ -9,7 +9,8 @@ are in sync, and neither waits on the other or on the other's settings. A
 discrepancy up to the `stretch` threshold, 200 ms by default, is corrected by
 time stretch at no more than 10%, so audio is back on the clock within about
 2 s; a larger one snaps the way video does, skipping late audio or padding
-silence when audio is ahead.
+silence when audio is ahead. A buffered player keeps what it holds: it snaps
+only past the larger of its lookahead and the threshold.
 
 The playout target is a measured estimate of arrival timing, from one written
 algorithm both players implement, and it falls back soon after a one-off

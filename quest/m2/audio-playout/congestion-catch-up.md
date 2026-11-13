@@ -34,9 +34,12 @@ Scope:
 - `stretch` defaults to 200 ms (`js/watch/src/sync.ts` `STRETCH`, `moq play
   --stretch`); zero still turns the stretch off.
 - A lag past the threshold skips onto the clock, not back to the bound, in
-  `js/watch/src/audio/ring-buffer.ts` and `rs/moq-audio/src/ring.rs`.
+  `js/watch/src/audio/ring-buffer.ts` and `rs/moq-audio/src/ring.rs`. A
+  buffered player skips only past the larger of its lookahead and the
+  threshold, as today.
 - The setting sizes nothing else. The audio subscription keeps the delay
-  plus the estimator's 2 s ceiling, so late frames are still observed.
+  plus the larger of the lookahead and the estimator's 2 s ceiling, so late
+  frames are still observed and a buffered player keeps its lookahead.
   Natively, the decode cap, the hole policy (`fill_max`), and video's wait on
   a missing group (`args.rs` `video_max_delay`) stop following it, so video
   waits its own delay. That also fixes `--delay auto --stretch 0`, where any
