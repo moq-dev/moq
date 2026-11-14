@@ -319,6 +319,8 @@ impl Sim {
 				regions: vec![p(grant.scope)],
 				qualify: Arc::new(move |id| qualified(grant.subject, id)),
 			}),
+			// One session to a peer at a time.
+			..Link::default()
 		}
 	}
 

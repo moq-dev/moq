@@ -37,7 +37,9 @@ pub use proof::RouteKey;
 pub(crate) use proof::{Proof, Transcript};
 #[cfg(feature = "async")]
 pub(crate) use rtt::LinkRtt;
-pub(crate) use view::{View, ancestors, within};
+#[cfg(feature = "async")]
+pub(crate) use view::ancestors;
+pub(crate) use view::{View, within};
 
 /// An opaque routing identity, declared by an origin or derived by [`Scope`].
 pub(crate) type Id = u64;
@@ -83,6 +85,11 @@ pub(crate) struct Link {
 	pub proxy: bool,
 	/// Set when the neighbor publishes under a scoped grant.
 	pub scope: Option<Scope>,
+	/// Which of the neighbor's sessions the stream belongs to: every stream of one session
+	/// shares it, and a later session has a higher one. [`node::Node`] sets it. Among equal
+	/// routes through one neighbor a node takes its latest session's, since an earlier one
+	/// is on its way out, as a GOAWAY migration leaves it.
+	pub session: u64,
 }
 
 impl Default for Link {
@@ -93,6 +100,7 @@ impl Default for Link {
 			upstream: false,
 			proxy: true,
 			scope: None,
+			session: 0,
 		}
 	}
 }

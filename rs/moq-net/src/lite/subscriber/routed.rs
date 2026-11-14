@@ -172,6 +172,8 @@ impl Routed {
 			// Only a stream this node answers is sent routes.
 			proxy: false,
 			scope: None,
+			// The node files the stream under its session.
+			..Default::default()
 		};
 		let node = subscriber.origin.route_node();
 		let session_key = {

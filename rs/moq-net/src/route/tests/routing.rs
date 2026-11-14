@@ -101,6 +101,39 @@ fn goaway_fails_over_and_keeps_the_draining_peer_last() {
 	);
 }
 
+/// Among equal routes a node stays on its next hop, and moves to a later session to
+/// that node: the peer a GOAWAY's sender asked to leave reconnects, and the sender
+/// moves off the old session, which ranks no lower there, so the old one can close.
+/// Another stream of the session in use, an earlier session, or another node's equal
+/// route moves nothing.
+#[test]
+fn a_later_session_to_the_next_hop_takes_over_among_equals() {
+	let session = |session| Link {
+		session,
+		..Link::default()
+	};
+	let next = |router: &path::Router<Node, Item>| router.route_for(7, &Path::empty()).and_then(path::Route::next);
+	let mut router: path::Router<Node, Item> = path::Router::new(99, 1, Doubt::default());
+	router.connect(1, 101, session(5)).unwrap();
+	router.route(1, 7, Path::empty(), offer([100, 101], 1), 0);
+	assert_eq!(next(&router), Some(1));
+
+	// Another stream of the same session, and another node's equal route.
+	router.connect(2, 101, session(5)).unwrap();
+	router.route(2, 7, Path::empty(), offer([100, 101], 1), 0);
+	router.connect(3, 102, session(9)).unwrap();
+	router.route(3, 7, Path::empty(), offer([100, 102], 1), 0);
+	assert_eq!(next(&router), Some(1), "only a later session to the next hop moves");
+
+	router.connect(4, 101, session(6)).unwrap();
+	router.route(4, 7, Path::empty(), offer([100, 101], 1), 0);
+	assert_eq!(next(&router), Some(4), "the later session takes over");
+
+	router.connect(5, 101, session(2)).unwrap();
+	router.route(5, 7, Path::empty(), offer([100, 101], 1), 0);
+	assert_eq!(next(&router), Some(4), "an earlier session does not");
+}
+
 /// Two CDN relays, each the uplink of one relay in a local mesh, reaching a
 /// CDN origin. The CDN admits each local relay under `grant`.
 fn two_uplinks(l2_marks_upstream: bool, grant: Option<Grant>) -> Sim {

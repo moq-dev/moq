@@ -1728,20 +1728,30 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// Pick the best-ranked usable live route ([`Offer::rank`]), staying on the next
-	/// hop among equals.
+	/// hop among equals: on its node, through the latest of its sessions there
+	/// ([`Link::session`]), and on the stream it uses there.
 	/// Doubt keeps this node from moving to a route, not on the one it uses.
 	fn select(&self, key: &RouteId) -> Option<Route<N>> {
 		let was = self.routes.get(key);
 		let current = was.and_then(Route::next);
 		let using = current.filter(|_| was.is_some_and(Route::live));
-		type Rank<N> = ((bool, Reverse<i8>, Metric), bool, N);
+		// The node the next hop names itself, once known.
+		let staying = (current.and_then(|next| self.sessions.get(&next)))
+			.map(|session| session.hop)
+			.filter(|hop| *hop != 0);
+		type Rank<N> = ((bool, Reverse<i8>, Metric), bool, Reverse<u64>, bool, N);
 		let mut best: Option<(Rank<N>, Offer)> = None;
 		for (&peer, heard) in self.rx.get(key).into_iter().flatten() {
 			self.step();
 			let Some(offer) = self.usable_offer(peer, heard, using) else {
 				continue;
 			};
-			let rank = (offer.rank(), Some(peer) != current, peer);
+			let session = &self.sessions[&peer];
+			let stays = Some(session.hop) == staying;
+			// The model has one session per pair of nodes: a later one to the next hop's
+			// node replaces the one in use, as a GOAWAY migration leaves it.
+			let latest = Reverse(if stays { session.link.session } else { 0 });
+			let rank = (offer.rank(), !stays, latest, Some(peer) != current, peer);
 			if best.as_ref().is_some_and(|(best, _)| *best <= rank) {
 				continue;
 			}

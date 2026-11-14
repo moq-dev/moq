@@ -191,6 +191,8 @@ impl Answer {
 			upstream: origin.upstream(),
 			proxy: origin.proxy(),
 			scope: None,
+			// The node files the stream under its session.
+			..Default::default()
 		};
 		let absolute = origin.root().join(&prefix).ok();
 		Self {

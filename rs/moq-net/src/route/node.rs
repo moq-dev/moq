@@ -1041,6 +1041,10 @@ impl State {
 		self.next_key += 1;
 		let now = self.clock.now();
 		self.router.clock(now);
+		let link = Link {
+			session: peer.tag,
+			..link
+		};
 		self.router.connect(key, peer.node, link)?;
 		self.queues.insert(key, kio::Shared::default());
 		self.streams.insert(key, peer.tag);
