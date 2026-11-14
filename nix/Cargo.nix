@@ -20163,7 +20163,10 @@ rec {
           }
         ];
         features = {
-          "fuzz" = [ "dep:arbitrary" ];
+          "fuzz" = [
+            "dep:arbitrary"
+            "sim"
+          ];
           "qlog" = [ "dep:qlog" ];
         };
         resolvedDefaultFeatures = [
