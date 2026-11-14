@@ -66,7 +66,8 @@ Examples:
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side). The WebSocket fallback and the moq-transport stack load
-on demand as separate chunks, so a session over WebTransport and moq-lite never downloads them.
+on demand as separate chunks, so a moq-lite session WebTransport wins within its head start
+never downloads them.
 Path patterns are on the
 [concept page](/concept/moq-lite#path-patterns).
 
