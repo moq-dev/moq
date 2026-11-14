@@ -27,11 +27,13 @@ driver handles, and returns a submission that keeps input and output resources
 alive until synchronous completion. Raw SDK structs remain available under
 `sys`; APIs that accept their pointers are explicitly unsafe.
 
-External input registration is transactional. If NVENC registers an allocation
-but cannot map it, the safe wrapper unregisters it before releasing its owner.
-When rollback also fails, the mapping error remains primary, the unregister
-error is available through `EncodeError::cleanup`, and the allocation stays
-owned because the driver may still refer to it.
+An external input is registered once and mapped for each encode, as NVENC
+expects: registration is the expensive call, and the allocation may be written
+only while unmapped. A registration marks itself mapped before handing out a
+mapping and clears the mark only once that mapping unmaps, so when an unmap or
+unregister fails, or a submission is abandoned or forgotten, the allocation
+stays owned because the driver may still refer to it, and no later mapping is
+allowed.
 
 The `sys` bindings are generated with bindgen from the vendored headers
 (`src/sys/headers/`); see the [upstream repo](https://github.com/ViliamVadocz/nvidia-video-codec-sdk)

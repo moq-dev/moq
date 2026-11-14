@@ -1,6 +1,7 @@
 /** Public net consumers and native browser streams, plus the shared fan-out sweep. @module */
 
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Net from "@moq/net";
 import { fanout } from "../../../../../js/net/bench/compression-fanout";
 import { createMockTransportPair } from "../../../../../js/net/src/mock";

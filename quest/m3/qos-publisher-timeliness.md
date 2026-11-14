@@ -11,9 +11,13 @@ cooperation.
 ## Plan
 
 This is the ingress mirror of the egress `lag` histogram ([viewer lag
-histogram](/quest/m3/qos/lag-histogram.md), which lands first so this reuses
-its histogram type, decided 2026-10-08) and needs no acknowledgments: the relay is the receiver, and a frame is measured
+histogram](/quest/m3/qos/lag-histogram.md)) and needs no acknowledgments: the relay is the receiver, and a frame is measured
 when its last byte arrives, because a partial frame is not useful.
+
+Changed 2026-11-12 (/quest-audit): this quest no longer waits on the lag
+histogram, which waits on the ACK hook. It defines the cumulative histogram
+type and its bucket edges, and the lag histogram reuses them. This replaces
+the 2026-10-08 order, where the egress histogram landed first.
 
 Frame timestamps are relative and jittered with no epoch, so measure each
 track against itself. Per track compute each frame's raw offset
@@ -30,7 +34,7 @@ Document the window length beside the bucket edges.
 Aggregate as a byte-weighted cumulative histogram of drift on the ingress
 (`Role::Subscriber`) side of the stats totals and prefix tracks
 (`<path>/prefix.json`) rather than the per-path rows (decided in the 2026-10-06 audit), with the same
-bucket edges and the same monotonic contract as the egress `lag` histogram. Beside it keep two cumulative
+bucket edges and the same monotonic contract the egress `lag` histogram will share. Beside it keep two cumulative
 counters: `timestamp_regressions`, frames whose timestamp is below the
 previous group's newest timestamp, and `stalls`, gaps between complete frames
 longer than a documented threshold. Compare only across group boundaries for
@@ -52,6 +56,6 @@ stall and no drift for frames it never sent; a regression across groups is
 counted while intra-group reordering is not; a track without a timescale is
 excluded.
 
-## Required
+## Related
 
-- [Viewer lag histogram](/quest/m3/qos/lag-histogram.md) - the egress histogram whose type and edges this reuses
+- [Viewer lag histogram](/quest/m3/qos/lag-histogram.md) - the egress histogram that reuses the type and edges this defines

@@ -46,4 +46,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Drop kio's epoch fence](/quest/m4/crossbeam-pin-fence.md) - the ordering in kio's log that only a weak-memory check can confirm
+- [Drop kio's epoch fence](/quest/m5/crossbeam-pin-fence.md) - the ordering in kio's log that only a weak-memory check can confirm

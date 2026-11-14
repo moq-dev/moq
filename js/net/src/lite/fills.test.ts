@@ -117,10 +117,14 @@ test("range fills: a stale drop of asked groups is recovered once, on a subscrip
 	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
 	fills.poll(tail, true);
 	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 1n, end: 3n }]);
-	// With the fill's priority. The run already asked stays asked whole while the fill owes any of
-	// it, so the subscription does not change under the recovery.
+	// With the fill's priority. The recovered run leaves the subscription, though the rest of the
+	// fill's run stays asked: left in, any later update would reopen its stale drop there, and the
+	// publisher would serve it on both.
 	expect(opened[0]?.priority).toBe(peer.fill.priority);
-	expect(fills.ask.groups).toEqual([{ start: 0n, end: 4n }]);
+	expect(fills.ask.groups).toEqual([
+		{ start: 0n, end: 1n },
+		{ start: 3n, end: 4n },
+	]);
 
 	// The recovery delivered nothing, and the next stale drop of the same groups stands.
 	opened[0]?.finish([]);

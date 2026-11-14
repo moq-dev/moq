@@ -416,6 +416,11 @@ impl RangeFills {
 		}
 		self.reading.retain(|sequence, _| draining.contains(sequence));
 		self.draining = draining;
+		// A run being recovered leaves the subscription, even out of a run kept whole: any later
+		// update reopens its stale drop there, and the publisher would serve it on both.
+		for run in self.recovering.iter() {
+			groups.remove(run.clone());
+		}
 		// What finishes a stream still asks with what its fills asked.
 		if self.held.is_empty() && !groups.is_empty() {
 			ask.priority = self.ask.priority;

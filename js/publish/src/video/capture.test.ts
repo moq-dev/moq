@@ -1,5 +1,6 @@
 import { expect, mock, test } from "bun:test";
-import { Duration, Instant, Manual } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Order } from "../order";

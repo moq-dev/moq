@@ -1,5 +1,6 @@
 /** Sweep cached-group replay to joining subscribers, and arrivals into unread backlogs. */
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Track } from "@moq/net";
 
 type Order = "monotonic" | "reverse" | "mixed";

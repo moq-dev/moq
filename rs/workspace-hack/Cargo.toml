@@ -36,7 +36,7 @@ clap_builder = { version = "4", default-features = false, features = ["cargo", "
 const-oid = { version = "0.10", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["std"] }
-der = { version = "0.8", default-features = false, features = ["alloc", "derive", "flagset", "oid"] }
+der = { version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "std", "zeroize"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "std"] }
 digest-a6292c17cd707f01 = { package = "digest", version = "0.11", features = ["alloc", "mac", "oid"] }
@@ -89,7 +89,6 @@ siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
-spki = { version = "0.8", default-features = false, features = ["alloc"] }
 subtle = { version = "2" }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -124,7 +123,7 @@ clap_builder = { version = "4", default-features = false, features = ["cargo", "
 const-oid = { version = "0.10", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["std"] }
-der = { version = "0.8", default-features = false, features = ["alloc", "derive", "flagset", "oid"] }
+der = { version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "std", "zeroize"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 derive_more-impl = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "std"] }
@@ -181,7 +180,6 @@ siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
-spki = { version = "0.8", default-features = false, features = ["alloc"] }
 subtle = { version = "2" }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
@@ -272,8 +270,6 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
-event-listener = { version = "5" }
-event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
@@ -292,7 +288,6 @@ quote = { version = "1" }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
-tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -304,8 +299,6 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
-event-listener = { version = "5" }
-event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
@@ -321,7 +314,6 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
-tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -371,8 +363,6 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
-event-listener = { version = "5" }
-event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
@@ -391,7 +381,6 @@ quote = { version = "1" }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
-tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -403,8 +392,6 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
-event-listener = { version = "5" }
-event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
@@ -420,7 +407,6 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
-tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }

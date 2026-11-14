@@ -13,16 +13,15 @@ export interface Init extends Terms {
 }
 
 /**
- * What the ring holds and steers toward. Only the floor is decoded PCM: the rest of the target, and in
- * buffered mode the lookahead, stays encoded upstream (the main thread applies the backpressure).
+ * What the ring holds and how far it lets audio trail the clock. Only the floor is decoded PCM: the
+ * rest of the target, and in buffered mode the lookahead, stays encoded upstream (the main thread
+ * applies the backpressure).
  */
 export interface Terms {
 	// The floor held as decoded PCM, which playback starts on.
 	latency: number;
-	// The playout delay the shared clock plays at: the depth the stretch keeps, decoded or not.
-	target: number;
-	// How far audio may trail the shared clock before the ring skips ahead: the subscription's max
-	// delay less the playout delay. Zero turns the time stretch off.
+	// How far audio may trail the shared clock before the ring snaps onto it: the `stretch` threshold,
+	// or for a buffered player the larger of it and the lookahead. Zero turns the time stretch off.
 	bound: number;
 }
 
@@ -55,24 +54,26 @@ export interface Data {
 	timestamp: number;
 }
 
-/** Latency update: new terms, which also move the shared clock. */
+/** Latency update: new terms, and where the shared clock they move now stands, if there is one. */
 export interface Latency extends Terms {
 	type: "latency";
+	clock?: Reading;
 }
 
 /**
  * Where the shared clock stands, for the ring to time-stretch onto. The clock runs at real time, so one
  * reading maps it onto the worklet's own time until the next.
  */
-export interface Clock {
-	type: "clock";
+export interface Reading {
 	// The clock's media time at context time `time`, in the ring's coordinates, unset while it has none.
 	timestamp?: number;
 	// The AudioContext's `currentTime` when the clock was read, in seconds.
 	time: number;
-	// How far the clock's reference moved earlier since the last reading, in microseconds, which the
-	// ring skips rather than speeds through.
-	jumped?: number;
+}
+
+/** A new reading of the shared clock. */
+export interface Clock extends Reading {
+	type: "clock";
 }
 
 /** Media arrived ending at `end`, in the ring's coordinates, decoded or not. */
