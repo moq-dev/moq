@@ -211,8 +211,17 @@ Scheduled runs
   closed` and reconnected, so the fallback took more than its 1039 ms bound.
   The JS subscriber refused the END_OF_TRACK of a withdrawn route after its own
   unsubscribe had released the track, and a protocol violation closes the whole
-  session. It passed on a rerun at `ce616b52c`.
-  [moq-dev/moq#8758](https://github.com/moq-dev/moq/pull/8758) tolerates the marker on a released track.
+  session.
+  [moq-dev/moq#8769](https://github.com/moq-dev/moq/pull/8769) tolerates the marker on a released track.
+  That is not the whole case: since [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443)
+  dropped the Chromium quarantine, `just test media --media-cases replacement`
+  at `ce616b52c` failed 4 of 14 local runs (host at load 50), as `live incumbent
+  fallback plays` on `moq-lite-06` and `moq-transport-22` or the fallback audio
+  tone, with no END_OF_TRACK violation in the log kept. Both failing logs show
+  `skipping missing groups` on the audio track before the stall, so the audio
+  stalls past the 1039 ms bound after the route falls back. Still open:
+  root-cause that hole before the next scheduled run, or quarantine `replacement`
+  on Chromium again, as on Firefox, until it is.
 
 Public API: none. Wire: none.
 
