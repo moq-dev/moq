@@ -753,8 +753,10 @@ export class Subscribe {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. Lite-07+. */
 	instance?: Instance.Valid;
-	/** The origin node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
+	/** The publisher node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
 	node: bigint;
+	/** How many leading segments of `broadcast` make up the prefix of the route it follows. Lite-07+. */
+	depth: number;
 	track: string;
 	priority: number;
 	/**
@@ -804,6 +806,7 @@ export class Subscribe {
 		broadcast: Path.Valid;
 		instance?: Instance.Valid;
 		node?: bigint;
+		depth?: number;
 		track: string;
 		priority: number;
 		order?: Order;
@@ -820,6 +823,7 @@ export class Subscribe {
 		this.broadcast = props.broadcast;
 		this.instance = props.instance;
 		this.node = props.node ?? 0n;
+		this.depth = props.depth ?? 0;
 		this.track = props.track;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
@@ -837,7 +841,7 @@ export class Subscribe {
 		await w.u62(this.id);
 		await w.string(Path.encode(this.broadcast));
 		await encodePin(w, version, this.instance);
-		await encodeNode(w, version, this.node);
+		await encodeNode(w, version, this.node, this.depth);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
 
@@ -859,7 +863,7 @@ export class Subscribe {
 		const id = await r.u62();
 		const broadcast = Path.decode(await r.string());
 		const instance = await decodePin(r, version);
-		const node = await decodeNode(r, version);
+		const { node, depth } = await decodeNode(r, version, broadcast);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
 
@@ -878,6 +882,7 @@ export class Subscribe {
 					broadcast,
 					instance,
 					node,
+					depth,
 					track,
 					priority,
 					order,

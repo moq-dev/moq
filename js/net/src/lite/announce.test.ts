@@ -8,13 +8,11 @@ import {
 	type AnnounceBroadcast,
 	AnnounceHistory,
 	AnnounceOk,
-	type AnnounceReply,
 	AnnounceRequest,
 	decodeAnnounceBroadcast,
 	decodeAnnounceBroadcastMaybe,
-	decodeAnnounceReplyMaybe,
 	encodeAnnounceBroadcast,
-	encodeAnnounceReply,
+	type Offer,
 	ROUTE_MAX,
 	ROUTE_MAX_HOPS,
 } from "./announce.ts";
@@ -376,31 +374,89 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 // `rs/moq-net/fixtures/lite.json` pins the same bytes on both sides.
 test("the route layer round-trips on draft-07", async () => {
 	const v = Version.DRAFT_07;
-	const advert = { seqno: 3n, metric: 5n, downOnly: true, rtt: undefined, hops: [7n, 9n] };
-	const cases: [AnnounceBroadcast, number[]][] = [
-		[{ status: "routeStart", node: 0x1234n, advert }, [6, 8, 0x92, 0x34, 3, 5, 1, 2, 7, 9]],
-		[{ status: "routeUpdate", id: 1n, advert: { ...advert, hops: [] } }, [7, 5, 1, 3, 5, 1, 0]],
-		// Flag 0x2: an RTT follows, 0 at the origin, whose Hops are its own alone.
-		[
-			{ status: "routeStart", node: 0x1234n, advert: { ...advert, downOnly: false, rtt: 0n, hops: [0x1234n] } },
-			[6, 9, 0x92, 0x34, 3, 5, 2, 0, 1, 0x92, 0x34],
+	const offer: Offer = {
+		path: [
+			{ node: 7n, session: 0n },
+			{ node: 9n, session: 2n },
 		],
-		[{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: 25n, hops: [] } }, [7, 6, 1, 3, 5, 3, 25, 0]],
+		draining: false,
+		priority: 0,
+		metric: 5n,
+		downOnly: true,
+		rtt: undefined,
+	};
+	const one: Offer = { ...offer, path: [{ node: 7n, session: 0n }], downOnly: false, metric: 0n };
+	const cases: [AnnounceBroadcast, number[]][] = [
+		// The path first, the publisher first, then flags, priority (offset by 128), and metric.
 		[
-			{ status: "routeUpdate", id: 1n, advert: { ...advert, rtt: ROUTE_MAX, hops: [ROUTE_MAX] } },
-			[7, 23, 1, 3, 5, 3, ...Array(9).fill(0xff), 1, ...Array(9).fill(0xff)],
+			{ status: "routeStart", node: 0x1234n, suffix: Path.empty(), offer },
+			[6, 11, 0x92, 0x34, 0, 2, 7, 0, 9, 2, 1, 128, 5],
+		],
+		// Flag 0x2: an RTT follows. Flag 0x4: a node on the path drains.
+		[
+			{
+				status: "routeUpdate",
+				id: 1n,
+				offer: {
+					...offer,
+					path: [{ node: 7n, session: 0n }],
+					draining: true,
+					priority: -3,
+					downOnly: false,
+					rtt: 25n,
+				},
+			},
+			[7, 8, 1, 1, 7, 0, 6, 125, 5, 25],
+		],
+		[
+			{ status: "routeUpdate", id: 1n, offer: { ...offer, rtt: ROUTE_MAX } },
+			[7, 18, 1, 2, 7, 0, 9, 2, 3, 128, 5, ...Array(9).fill(0xff)],
 		],
 		// As many hops as a route may carry.
 		[
 			{
 				status: "routeUpdate",
 				id: 1n,
-				advert: { ...advert, hops: Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => BigInt(i + 1)) },
+				offer: {
+					...one,
+					path: Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => ({ node: BigInt(i + 1), session: 0n })),
+				},
 			},
-			[7, 37, 1, 3, 5, 1, ROUTE_MAX_HOPS, ...Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => i + 1)],
+			[
+				7,
+				5 + 2 * ROUTE_MAX_HOPS,
+				1,
+				ROUTE_MAX_HOPS,
+				...Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => [i + 1, 0]).flat(),
+				0,
+				128,
+				0,
+			],
 		],
 		[{ status: "routeHold", id: 1n }, [0xb, 1, 1]],
 		[{ status: "routeEnd", id: 1n }, [8, 1, 1]],
+		[{ status: "dead", dead: { kind: "drain", node: 7n } }, [15, 2, 1, 7]],
+		// Each moved offer is sized, so a receiver refusing one still reads the next.
+		[
+			{
+				status: "dead",
+				dead: {
+					kind: "closed",
+					hop: { node: 7n, session: 3n },
+					far: 9n,
+					gone: false,
+					moved: [{ id: 1n, offer: one }],
+				},
+			},
+			[15, 14, 0, 7, 3, 9, 0, 1, 1, 6, 1, 7, 0, 0, 128, 0],
+		],
+		[
+			{
+				status: "dead",
+				dead: { kind: "closed", hop: { node: 7n, session: 3n }, far: 9n, gone: true, moved: [] },
+			},
+			[15, 6, 0, 7, 3, 9, 1, 0],
+		],
 		// Revision 4 travels as 5: 0 certifies nothing.
 		[{ status: "floor", id: 1n, revision: 4n }, [9, 2, 1, 5]],
 		[{ status: "floor", id: 1n, revision: undefined }, [9, 2, 1, 0]],
@@ -424,96 +480,119 @@ test("the route layer round-trips on draft-07", async () => {
 	).rejects.toThrow();
 });
 
-test("the route layer refuses the last seqno, Node ID 0, unknown flags, and too many hops", async () => {
+test("the route layer refuses Node ID 0, unknown flags, and too many hops", async () => {
 	const v = Version.DRAFT_07;
-	const last = { seqno: ROUTE_MAX, metric: 0n, downOnly: false, rtt: undefined, hops: [] };
+	const offer: Offer = {
+		path: [{ node: 1n, session: 0n }],
+		draining: false,
+		priority: 0,
+		metric: 0n,
+		downOnly: false,
+		rtt: undefined,
+	};
+	const encode = (msg: AnnounceBroadcast) => bytes((w) => encodeAnnounceBroadcast(w, msg, v), v);
+	// No node sends an offer it would refuse.
+	await expect(encode({ status: "routeStart", node: 0n, suffix: Path.empty(), offer })).rejects.toThrow();
+	await expect(encode({ status: "routeUpdate", id: 0n, offer: { ...offer, path: [] } })).rejects.toThrow();
 	await expect(
-		bytes((w) => encodeAnnounceBroadcast(w, { status: "routeStart", node: 1n, advert: last }, v), v),
+		encode({ status: "routeUpdate", id: 0n, offer: { ...offer, path: [{ node: 0n, session: 0n }] } }),
 	).rejects.toThrow();
-	const crowded = { ...last, seqno: 0n, hops: Array.from({ length: ROUTE_MAX_HOPS + 1 }, () => 1n) };
+	const crowded = Array.from({ length: ROUTE_MAX_HOPS + 1 }, () => ({ node: 1n, session: 0n }));
+	await expect(encode({ status: "routeUpdate", id: 0n, offer: { ...offer, path: crowded } })).rejects.toThrow();
 	await expect(
-		bytes((w) => encodeAnnounceBroadcast(w, { status: "routeStart", node: 1n, advert: crowded }, v), v),
-	).rejects.toThrow();
-	await expect(
-		bytes((w) => encodeAnnounceReply(w, { kind: "request", node: 0n, seqno: 1n }, v), v),
+		encode({
+			status: "dead",
+			dead: {
+				kind: "closed",
+				hop: { node: 1n, session: 0n },
+				far: 2n,
+				gone: false,
+				moved: [{ id: 0n, offer: { refused: "flags", path: offer.path } }],
+			},
+		}),
 	).rejects.toThrow();
 
 	// Built by hand, as only a nonconforming peer sends them.
-	const forged = async (body: (w: Writer) => Promise<void>) => {
+	const forged = async (type: number, body: (w: Writer) => Promise<void>) => {
 		const inner = await bytes(body, v);
 		return bytes(async (w) => {
-			await w.u53(6);
+			await w.u53(type);
 			await w.u53(inner.byteLength);
 			await w.write(inner);
 		}, v);
 	};
-	const zero = await forged(async (w) => {
-		await w.u62(0n);
-		await w.u62(0n);
-		await w.u62(0n);
-		await w.u8(0);
-	});
+	// A ROUTE_START to `node` along `path`, its flags `flags`, and nothing after them.
+	const start = (node: bigint, path: bigint[], flags: number) =>
+		forged(6, async (w) => {
+			await w.u62(node);
+			await w.u53(0);
+			await w.u62(BigInt(path.length));
+			for (const hop of path) {
+				await w.u62(hop);
+				await w.u62(0n);
+			}
+			await w.u8(flags);
+			await w.u8(128);
+			await w.u62(0n);
+		});
 	// What the sender only forwarded is refused, the message decoded all the same, so the receiver
-	// withdraws the route and keeps the stream.
+	// withdraws the route and keeps the stream, with the path a later DEAD may name.
 	const decode = (wire: Uint8Array) => decodeAnnounceBroadcast(new Reader(undefined, wire, v), v);
-	expect(await decode(zero)).toEqual({
+	const path = [{ node: 1n, session: 0n }];
+	expect(await decode(await start(0n, [1n], 0))).toEqual({
 		status: "refused",
-		message: { kind: "routeStart", node: 0n },
+		message: { kind: "routeStart", node: 0n, suffix: Path.empty(), path },
 		reason: "node",
 	});
-	const maxed = await forged(async (w) => {
-		await w.u62(1n);
-		await w.u62(ROUTE_MAX);
-		await w.u62(0n);
-		await w.u8(0);
-	});
-	expect(await decode(maxed)).toEqual({
-		status: "refused",
-		message: { kind: "routeStart", node: 1n },
-		reason: "seqno",
-	});
+	expect(await decode(await start(1n, [0n], 0))).toMatchObject({ status: "refused", reason: "node" });
 	// A flag no version defines is refused, and the RTT flag without its field is malformed.
-	const flagged = (flags: number) =>
-		forged(async (w) => {
+	expect(await decode(await start(1n, [1n], 8))).toEqual({
+		status: "refused",
+		message: { kind: "routeStart", node: 1n, suffix: Path.empty(), path },
+		reason: "flags",
+	});
+	await expect(decode(await start(1n, [1n], 2))).rejects.toThrow();
+	// More hops than a route may carry.
+	const over = Array.from({ length: ROUTE_MAX_HOPS + 1 }, () => 1n);
+	expect(await decode(await start(1n, over, 0))).toMatchObject({ status: "refused", reason: "hops" });
+	// An empty path is the sender's own error: it names itself last.
+	await expect(decode(await start(1n, [], 0))).rejects.toThrow(ProtocolViolation);
+
+	// A DEAD refuses each moved offer on its own, and still reads the next.
+	const dead = await forged(15, async (w) => {
+		await w.u62(0n);
+		await w.u62(1n);
+		await w.u62(0n);
+		await w.u62(2n);
+		await w.u8(0);
+		await w.u62(2n);
+		for (const flags of [8, 0]) {
+			await w.u62(flags === 8 ? 3n : 4n);
+			await w.u53(6);
+			await w.u62(1n);
 			await w.u62(1n);
 			await w.u62(0n);
-			await w.u62(0n);
 			await w.u8(flags);
-		});
-	expect(await decode(await flagged(4))).toMatchObject({ status: "refused", reason: "flags" });
-	await expect(decode(await flagged(2))).rejects.toThrow();
-	// More hops than a route may carry, refused before reading them.
-	const overHops = await forged(async (w) => {
-		await w.u62(1n);
-		await w.u62(0n);
-		await w.u62(0n);
-		await w.u8(0);
-		await w.u53(ROUTE_MAX_HOPS + 1);
+			await w.u8(128);
+			await w.u62(0n);
+		}
 	});
-	expect(await decode(overHops)).toMatchObject({ status: "refused", reason: "hops" });
-});
-
-test("the subscriber's replies round-trip on draft-07", async () => {
-	const v = Version.DRAFT_07;
-	for (const [msg, wire] of [
-		[{ kind: "request", node: 7n, seqno: 2n }, [0xa, 2, 7, 2]],
-		[{ kind: "echo", id: 3n }, [8, 1, 3]],
-	] as [AnnounceReply, number[]][]) {
-		const encoded = await bytes((w) => encodeAnnounceReply(w, msg, v), v);
-		expect([...encoded]).toEqual(wire);
-		expect(await decodeAnnounceReplyMaybe(new Reader(undefined, encoded, v), v)).toEqual(msg);
-	}
-	// Anything else is a violation.
-	const other = await bytes(async (w) => {
-		await w.u53(0);
-		await w.u53(0);
-	}, v);
-	await expect(decodeAnnounceReplyMaybe(new Reader(undefined, other, v), v)).rejects.toThrow(ProtocolViolation);
-	// A finished stream is no reply.
-	expect(await decodeAnnounceReplyMaybe(new Reader(undefined, new Uint8Array(), v), v)).toBeUndefined();
-	await expect(
-		bytes((w) => encodeAnnounceReply(w, { kind: "echo", id: 1n }, Version.DRAFT_06), Version.DRAFT_06),
-	).rejects.toThrow();
+	expect(await decode(dead)).toEqual({
+		status: "dead",
+		dead: {
+			kind: "closed",
+			hop: { node: 1n, session: 0n },
+			far: 2n,
+			gone: false,
+			moved: [
+				{ id: 3n, offer: { refused: "flags", path } },
+				{
+					id: 4n,
+					offer: { path, draining: false, priority: 0, metric: 0n, downOnly: false, rtt: undefined },
+				},
+			],
+		},
+	});
 });
 
 test("AnnounceHistory rejects a base that is not live", () => {

@@ -264,6 +264,7 @@ export class Connection implements Session {
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path, instance) => this.#subscriber.consume(path, instance),
+			covers: (node, at, path) => this.#subscriber.covers(node, at, path),
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,

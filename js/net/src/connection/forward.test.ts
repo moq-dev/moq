@@ -69,6 +69,9 @@ class FakeSession {
 	/** Called as the forwarder closes a request, before its stream can wind down. */
 	onClose?: () => void;
 
+	/** Whether a lite-07 claim of `node` at `at` serves `path` beneath it: the session's floors. */
+	covering?: (node: bigint, at: Path.Valid, path: Path.Valid) => boolean;
+
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
 
@@ -76,6 +79,7 @@ class FakeSession {
 	constructor({ exclusive = false } = {}) {
 		registerWire(this, {
 			consume: (path, instance) => this.consume(path, instance),
+			covers: (node, at, path) => this.covering?.(node, at, path) ?? true,
 			exclusive,
 			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
@@ -208,6 +212,43 @@ test("the origin holds each origin node's claim at a prefix", async () => {
 	unpinned.close();
 	pinned.close();
 	watch.close();
+	session.die();
+	origin.close();
+});
+
+// Two streams carry a lite-07 node's claims, and the newer floor, on the narrower one, presents
+// nothing at live/x: the node's claim at live is older knowledge there. A request for live/x skips
+// it, per request, for another node's claim at live of another instance. Mirrors `covering` in
+// rs/moq-net.
+test("the origin skips a claim above a newer floor's region", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+	const NODE_A = 0x7an;
+	const NODE_B = 0x8bn;
+	const live = origin.routes(Path.Pattern.subtree(Path.from("live")));
+	await settle();
+	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: a, node: NODE_A });
+	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: b, node: NODE_B, cost: 5n });
+	session.stream("live/**").synced();
+	await settle();
+	const x = Path.from("live/x");
+	session.covering = (node, at, path) => !(node === NODE_A && at === Path.from("live") && Path.hasPrefix(x, path));
+
+	const request = origin.request(x);
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(session.pins).toEqual([b]);
+	// Elsewhere under live the cheaper claim still serves.
+	const y = origin.request(Path.from("live/y"));
+	await settle();
+	expect(session.pins).toEqual([b, a]);
+
+	request.close();
+	y.close();
+	live.close();
 	session.die();
 	origin.close();
 });

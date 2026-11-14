@@ -185,6 +185,11 @@ export interface WireRoute {
 	 * see it.
 	 */
 	readonly node?: bigint;
+	/**
+	 * How many leading segments of a requested path make up the prefix of the lite-07 route to
+	 * {@link node}, which every request through it names. Local, as `node` is.
+	 */
+	readonly depth?: number;
 	/** See {@link RouteInfo.rtt}. */
 	readonly rtt?: Duration;
 }
@@ -209,6 +214,7 @@ export const WireRoute = {
 			draining: route.draining,
 			available: route.available,
 			node: route.node,
+			depth: route.depth,
 			rtt: route.rtt,
 		};
 	},
@@ -228,7 +234,7 @@ export function isAnonymous(route: WireRoute): boolean {
 
 /**
  * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
- * availability, origin node, and RTT.
+ * availability, origin node and route depth, and RTT.
  *
  * @internal
  */
@@ -243,6 +249,7 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		(a.draining ?? false) === (b.draining ?? false) &&
 		(a.available ?? true) === (b.available ?? true) &&
 		a.node === b.node &&
+		a.depth === b.depth &&
 		(a.rtt === b.rtt || (!!a.rtt && !!b.rtt && a.rtt.eq(b.rtt))) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])

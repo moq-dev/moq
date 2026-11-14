@@ -88,7 +88,15 @@ interface Reported {
  */
 export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
-	const exclusive = wireOf(conn).exclusive;
+	const session = wireOf(conn);
+	const exclusive = session.exclusive;
+	// A lite-07 claim covers only what its origin node's newest floor on the session still
+	// certifies beneath it, which the origin asks per request. Mirrors `covering` in rs/moq-net.
+	const covering = (prefix: Path.Valid, route: WireRoute) => {
+		const node = route.node;
+		if (node === undefined || !session.covers) return undefined;
+		return (path: Path.Valid) => session.covers?.(node, prefix, path) ?? true;
+	};
 	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
 	// Called through a closure so the session's death always detaches the current one.
 	let detach = originWire.attach(true);
@@ -111,7 +119,7 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 
 		const existing = routes.get(key);
 		if (!existing) {
-			const handle = originWire.receive(prefix, route);
+			const handle = originWire.receive(prefix, route, covering(prefix, route));
 			routes.set(key, { prefix, handle, reporters: new Map([[interest, route]]) });
 			void drive(handle, conn);
 			return;
@@ -135,7 +143,7 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 		if (restart || route.instance !== current?.instance || route.epoch !== current?.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
-			const handle = originWire.receive(existing.prefix, route);
+			const handle = originWire.receive(existing.prefix, route, covering(existing.prefix, route));
 			existing.handle.close();
 			existing.handle = handle;
 			void drive(handle, conn);
