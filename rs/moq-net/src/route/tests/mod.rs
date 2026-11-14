@@ -13,7 +13,6 @@ mod cache;
 mod compare;
 mod flap;
 mod handoff;
-mod paths;
 mod residual;
 mod routing;
 mod rtt;
@@ -896,6 +895,10 @@ impl Sim {
 			self.tick();
 		}
 		false
+	}
+
+	pub fn now(&self) -> Instant {
+		self.now
 	}
 
 	/// The next doubt timer on any node.
