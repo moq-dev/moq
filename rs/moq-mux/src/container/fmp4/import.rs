@@ -1795,27 +1795,51 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A fragment whose samples are still arriving owns its groups until its last sample, so the
 	/// seek waits for it to finish publishing.
 	pub fn seek(&mut self, start: u64) -> Result<()> {
-		self.input.check()?;
-		if self.publishing() {
-			self.deferred.seek = Some(start);
-			return Ok(());
-		}
-		self.apply_seek(start)
+		self.reposition(Seek::Start(start))
 	}
 
-	fn apply_seek(&mut self, start: u64) -> Result<()> {
+	/// Close the current group on every track, as [`seek`](Self::seek) does, but key the groups
+	/// after it at their own times: for a source that lost what came between and can't name where
+	/// it resumes until it reads it, such as an HLS reader that fell behind its playlist.
+	///
+	/// Each group closes without an end, so a reader sees the gap rather than a group that seems to
+	/// run up to the media after it.
+	pub fn rejoin(&mut self) -> Result<()> {
+		self.reposition(Seek::Own)
+	}
+
+	fn reposition(&mut self, seek: Seek) -> Result<()> {
+		self.input.check()?;
+		if self.publishing() {
+			self.deferred.seek = Some(seek);
+			return Ok(());
+		}
+		self.apply_seek(seek)
+	}
+
+	fn apply_seek(&mut self, seek: Seek) -> Result<()> {
 		for track in self.text.values_mut() {
-			let next = track.producer.next_start();
-			track.producer.seek(start.max(next))?;
+			match seek {
+				Seek::Start(start) => {
+					let next = track.producer.next_start();
+					track.producer.seek(start.max(next))?;
+				}
+				Seek::Own => track.producer.cut(None)?,
+			}
 		}
 		for track in self.tracks.values_mut() {
 			// The next group opens on a sync sample, so video drops the samples before one.
 			if track.kind == Kind::Video {
 				track.orphaned = true;
 			}
-			media!(&mut track.output, producer => producer.seek(start)?, passthrough => {
+			media!(&mut track.output, producer => match seek {
+				Seek::Start(start) => producer.seek(start)?,
+				Seek::Own => producer.cut(None)?,
+			}, passthrough => {
 				passthrough.close()?;
-				passthrough.pending_start = Some(start);
+				if let Seek::Start(start) = seek {
+					passthrough.pending_start = Some(start);
+				}
 			});
 		}
 		Ok(())
@@ -1858,8 +1882,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if discontinuity {
 			self.apply_discontinuity();
 		}
-		if let Some(sequence) = seek {
-			self.apply_seek(sequence)?;
+		if let Some(seek) = seek {
+			self.apply_seek(seek)?;
 		}
 		Ok(())
 	}
@@ -1868,8 +1892,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 /// Controls called while a fragment was still publishing, applied once it has.
 #[derive(Default)]
 struct Deferred {
-	seek: Option<u64>,
+	seek: Option<Seek>,
 	discontinuity: bool,
+}
+
+/// Where the groups after a [`seek`](Import::seek) or [`rejoin`](Import::rejoin) start.
+#[derive(Clone, Copy)]
+enum Seek {
+	/// The next group starts here, in each track's timescale.
+	Start(u64),
+	/// Each group starts at its own first sample.
+	Own,
 }
 
 /// An fMP4 import that [finished](Import::finish): every track has ended, and they can still be

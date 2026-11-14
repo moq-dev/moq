@@ -574,7 +574,7 @@ impl TrackState {
 		Ok(playlist.segments.len().saturating_sub(ANCHOR_SEGMENTS))
 	}
 
-	/// Forget where we were, so the next pushed segment re-bases the MoQ group sequence.
+	/// Forget where we were, so the next pushed segment rejoins the importer.
 	/// The byte-range cursor needs no reset: `consume_segments` rebuilds it from the
 	/// playlist prefix on every step.
 	fn reanchor(&mut self) {
@@ -706,17 +706,12 @@ impl TrackState {
 		let resource = range.resolve(url, segment.byte_range.as_ref())?;
 		let mut body = fetcher.open(&resource).await?;
 
-		// HLS media sequence names the live window, while discontinuity sequence names a
-		// new media timeline. Whenever we join, skip ahead, or cross a discontinuity, anchor
-		// the MoQ group sequence to both so consumers do not wait on groups HLS has moved
-		// past. Contiguous segments let the importer auto-increment instead; we still pack
-		// (and so validate) the sequence on that path so media sequence can't silently
-		// auto-increment into the discontinuity bits.
-		let group_sequence = moq_sequence(discontinuity_sequence, sequence)?;
-
 		// `consume_segments` resolves the effective map before every segment, so a missing
 		// importer means the playlist never carried an `EXT-X-MAP`.
 		let generation = self.generation.as_mut().ok_or(Error::MissingMap)?;
+		// Whenever we join, skip ahead, or cross a discontinuity, close the open groups without an
+		// end, so a reader sees the media HLS moved past as a gap. The groups after it are keyed
+		// by their own keyframes' times, as contiguous segments' are.
 		let reanchored =
 			self.next_sequence != Some(sequence) || generation.discontinuity != Some(discontinuity_sequence);
 		let importer = &mut generation.importer;
@@ -728,7 +723,7 @@ impl TrackState {
 			importer.discontinuity()?;
 		}
 		if reanchored {
-			importer.seek(group_sequence)?;
+			importer.rejoin()?;
 		}
 		// Every playlist entry is a source segment boundary, so declare it even when the media
 		// carries no styp. Every rendition declares the same ones; the HLS segmenter drops a cut
@@ -1286,33 +1281,6 @@ fn bump_discontinuity(sequence: u64) -> Result<u64> {
 		kind: SequenceKind::Discontinuity,
 		value: sequence,
 	})
-}
-
-/// Pack HLS discontinuity + media sequence into a single MoQ group sequence.
-///
-/// HLS media sequence alone can rewind after an upstream reset, and discontinuity
-/// sequence alone cannot order segments inside the same epoch. The lower 48 bits hold
-/// the media sequence (ample for realistic playlists) while the upper 16 bits hold the
-/// discontinuity sequence, so a new epoch always sorts after every segment of the last.
-fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64> {
-	const MEDIA_BITS: u32 = 48;
-	const MEDIA_MASK: u64 = (1u64 << MEDIA_BITS) - 1;
-	const DISCONTINUITY_MASK: u64 = u64::MAX >> MEDIA_BITS;
-
-	if media_sequence > MEDIA_MASK {
-		return Err(Error::SequenceOverflow {
-			kind: SequenceKind::Media,
-			value: media_sequence,
-		});
-	}
-	if discontinuity_sequence > DISCONTINUITY_MASK {
-		return Err(Error::SequenceOverflow {
-			kind: SequenceKind::Discontinuity,
-			value: discontinuity_sequence,
-		});
-	}
-
-	Ok((discontinuity_sequence << MEDIA_BITS) | media_sequence)
 }
 
 #[cfg(test)]
@@ -2431,8 +2399,9 @@ mod tests {
 		);
 	}
 
-	/// The first frame of every buffered group, without waiting for another source event.
-	fn group_stamps(subscriber: &mut moq_net::track::Ordered) -> (Vec<(u64, u128)>, Option<moq_net::Error>) {
+	/// The first frame of every buffered group in microseconds, without waiting for another source
+	/// event. Each group must start at its first frame, in the track's timescale.
+	fn group_stamps(subscriber: &mut moq_net::track::Ordered) -> (Vec<u128>, Option<moq_net::Error>) {
 		let mut out = Vec::new();
 		loop {
 			let mut group = match subscriber.poll_next_group(&kio::Waiter::noop()) {
@@ -2445,7 +2414,8 @@ mod tests {
 				Poll::Ready(Err(error)) => return (out, Some(error)),
 				other => panic!("reading a published group's first frame: {other:?}"),
 			};
-			out.push((group.start, frame.timestamp.as_micros().unwrap()));
+			assert_eq!(group.start, frame.timestamp.value(), "a group starts at its first frame");
+			out.push(frame.timestamp.as_micros().unwrap());
 		}
 		(out, None)
 	}
@@ -2454,9 +2424,9 @@ mod tests {
 		result: Result<usize>,
 		before: String,
 		after: String,
-		old_groups: Vec<(u64, u128)>,
+		old_groups: Vec<u128>,
 		terminal: Option<moq_net::Error>,
-		new_groups: Vec<(u64, u128)>,
+		new_groups: Vec<u128>,
 	}
 
 	/// A one-track fMP4 muxer for synthesized VP8 video or Opus audio.
@@ -2493,11 +2463,19 @@ mod tests {
 
 	/// Exercise the playlist/map path with real fMP4 produced by the exporter's muxer.
 	///
-	/// The second segment, stamped `after_us`, follows a 5 s one behind the playlist `tags`.
+	/// The second segment, stamped `after_us`, follows a 5 s one behind the playlist `tags`, and a
+	/// third follows it 2 s later.
 	async fn discontinuity(video: bool, cmaf: bool, tags: &str, after_us: u64) -> Discontinuity {
+		let after = format!("#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n#EXTINF:1,\n2.m4s\n");
+		reload(video, cmaf, &after, after_us).await
+	}
+
+	/// Import a 5 s segment `0.m4s`, then reload the playlist as `after`'s segments, where `1.m4s`
+	/// is stamped `after_us` and `2.m4s` 2 s later.
+	async fn reload(video: bool, cmaf: bool, after: &str, after_us: u64) -> Discontinuity {
 		let dir = temp_dir();
 		let muxer = synth(video);
-		write_synth(&dir, &muxer, "", &[5_000_000, after_us]);
+		write_synth(&dir, &muxer, "", &[5_000_000, after_us, after_us + 2_000_000]);
 		std::fs::copy(dir.join("init.mp4"), dir.join("other.mp4")).unwrap();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -2538,9 +2516,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let after = format!(
-			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n"
-		);
+		let after = format!("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n{after}");
 		let after = m3u8_rs::parse_media_playlist_res(after.as_bytes()).unwrap();
 		let result = track.consume_segments(&local, &after, &base).await;
 		let after_name = name(&catalog.snapshot());
@@ -2578,10 +2554,23 @@ mod tests {
 				case.result.unwrap();
 				assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 				assert_eq!(case.before, case.after);
-				assert_eq!(
-					case.old_groups,
-					[(0, 5_000_000), (moq_sequence(1, 1).unwrap(), 7_000_000)]
-				);
+				assert_eq!(case.old_groups, [5_000_000, 7_000_000, 9_000_000]);
+			}
+		}
+	}
+
+	/// A playlist that moved past segments rejoins at the next one, and every later keyframe still
+	/// opens a group of its own.
+	#[tokio::test]
+	async fn a_media_sequence_jump_keys_each_later_group_at_its_keyframe() {
+		for video in [false, true] {
+			for cmaf in [false, true] {
+				let after = "#EXT-X-MEDIA-SEQUENCE:5\n#EXTINF:1,\n1.m4s\n#EXTINF:1,\n2.m4s\n";
+				let case = reload(video, cmaf, after, 7_000_000).await;
+				assert_eq!(case.result.unwrap(), 2);
+				assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
+				assert_eq!(case.before, case.after);
+				assert_eq!(case.old_groups, [5_000_000, 7_000_000, 9_000_000]);
 			}
 		}
 	}
@@ -2615,7 +2604,7 @@ mod tests {
 					);
 					assert_eq!(case.before, case.after, "{label}");
 					assert!(case.terminal.is_none(), "{label}: {:?}", case.terminal);
-					assert_eq!(case.old_groups, [(0, 5_000_000)], "{label}");
+					assert_eq!(case.old_groups, [5_000_000], "{label}");
 				}
 			}
 		}
@@ -2677,8 +2666,9 @@ mod tests {
 					case.result.unwrap();
 					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 					assert_ne!(case.before, case.after);
-					assert_eq!(case.old_groups, [(0, 5_000_000)]);
-					assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), u128::from(after_us))]);
+					assert_eq!(case.old_groups, [5_000_000]);
+					let after_us = u128::from(after_us);
+					assert_eq!(case.new_groups, [after_us, after_us + 2_000_000]);
 				}
 			}
 		}
@@ -2976,42 +2966,5 @@ video.m3u8
 		let request = std::str::from_utf8(request).ok()?;
 		let target = request.lines().next()?.split_whitespace().nth(1)?;
 		Some(target.split('?').next().unwrap_or(target))
-	}
-
-	#[test]
-	fn moq_sequence_orders_discontinuities_after_media_sequence() {
-		// A new epoch outranks every segment of the previous one, even a higher media seq.
-		let last_of_epoch_0 = moq_sequence(0, u64::from(u32::MAX)).unwrap();
-		let first_of_epoch_1 = moq_sequence(1, 0).unwrap();
-		assert!(first_of_epoch_1 > last_of_epoch_0);
-	}
-
-	#[test]
-	fn moq_sequence_preserves_media_order_within_epoch() {
-		assert!(moq_sequence(3, 10).unwrap() > moq_sequence(3, 9).unwrap());
-	}
-
-	#[test]
-	fn moq_sequence_rejects_unrepresentable_media_sequence() {
-		let err = moq_sequence(0, 1u64 << 48).unwrap_err();
-		assert!(matches!(
-			err,
-			Error::SequenceOverflow {
-				kind: SequenceKind::Media,
-				..
-			}
-		));
-	}
-
-	#[test]
-	fn moq_sequence_rejects_unrepresentable_discontinuity_sequence() {
-		let err = moq_sequence(1u64 << 16, 0).unwrap_err();
-		assert!(matches!(
-			err,
-			Error::SequenceOverflow {
-				kind: SequenceKind::Discontinuity,
-				..
-			}
-		));
 	}
 }
