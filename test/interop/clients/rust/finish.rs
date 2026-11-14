@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 			.broadcast()
 			.create_track("live", moq_net::track::Info::default())?;
 		let mut group = track.append_group(0)?;
-		group.write_frame(None, b"session-alive".to_vec())?;
+		group.write_frame(moq_net::Timestamp::unscaled(group.start), b"session-alive".to_vec())?;
 		group.close()?;
 		let _track = track.finish()?;
 		health.announce()?;
@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
 			let mut track = health.track("live")?.subscribe(None).await?;
 			let mut group = track.recv_group().await?.context("no health group")?;
 			let frame = group.read_frame().await?.context("no health frame")?;
-			// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+			// Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
 			ensure!(frame.payload.as_ref() == b"session-alive", "health payload");
 			ensure!(
 				group.read_frame().await?.is_none() && track.recv_group().await?.is_none(),

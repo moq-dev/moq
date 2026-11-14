@@ -57,7 +57,9 @@ fn bench_sign(c: &mut Criterion) {
 			b.iter(|| {
 				let mut group = producer.append_group(start).unwrap();
 				start += 1;
-				group.write_frame(None, black_box(&payload)).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::unscaled(start), black_box(&payload))
+					.unwrap();
 				group.close().unwrap();
 			});
 		});
@@ -72,7 +74,9 @@ fn bench_sign(c: &mut Criterion) {
 			b.iter(|| {
 				let mut group = producer.append_group(start).unwrap();
 				start += 1;
-				group.write_frame(None, black_box(&payload)).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::unscaled(start), black_box(&payload))
+					.unwrap();
 				group.close().unwrap();
 				let Poll::Ready(Ok(Some(mut group))) = consumer.poll_recv_group(&waiter) else {
 					panic!("the group is delivered in-process");

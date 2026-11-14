@@ -11,7 +11,7 @@ async fn group(group: &mut moq_net::group::Consumer) -> anyhow::Result<()> {
 	for expected in PAYLOADS {
 		let frame = group.read_frame().await?.context("short group")?;
 		ensure!(frame.payload.as_ref() == expected, "wrong frame");
-		ensure!(frame.timestamp.is_none(), "unexpected timestamp");
+		ensure!(frame.timestamp.scale().is_none(), "unexpected timestamp");
 	}
 	ensure!(group.read_frame().await?.is_none(), "extra frame");
 	Ok(())
@@ -54,7 +54,9 @@ async fn main() -> anyhow::Result<()> {
 			};
 			ensure!(stream.peer() == "python", "wrong peer");
 			for payload in PAYLOADS {
-				stream.producer.write_frame(None, payload)?;
+				stream
+					.producer
+					.write_frame(moq_net::Timestamp::unscaled(stream.producer.start), payload)?;
 			}
 			stream.producer.close()?;
 			group(&mut stream.consumer).await?;
@@ -82,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 			for start in 0..3 {
 				let mut group = producer.append_group(start)?;
 				for payload in PAYLOADS {
-					group.write_frame(None, payload)?;
+					group.write_frame(moq_net::Timestamp::unscaled(start), payload)?;
 				}
 				group.close()?;
 			}

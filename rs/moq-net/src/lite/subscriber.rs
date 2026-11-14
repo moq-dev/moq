@@ -3760,7 +3760,9 @@ mod tests {
 	/// A group arriving at the relay as its header lands: cached, then accounted for.
 	fn arrive(track: &track::Producer, tail: &kio::Producer<Tail>, key: u64, now: crate::time::Instant) {
 		let mut group = track.create_group(group::Info { start: key }).unwrap();
-		group.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..]).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..])
+			.unwrap();
 		group.close().unwrap();
 		let Ok(mut ledger) = tail.write() else {
 			panic!("ledger closed")
@@ -3877,7 +3879,9 @@ mod tests {
 			let (mut track, fetching, req) = feed_fetch(3);
 			for key in [5, 6] {
 				let mut group = track.create_group(group::Info { start: key }).unwrap();
-				group.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..]).unwrap();
+				group
+					.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..])
+					.unwrap();
 				group.close().unwrap();
 			}
 			kio::clock::sleep(crate::tail::GRACE * 2).await;
@@ -3937,7 +3941,9 @@ mod tests {
 			);
 
 			let mut group = track.create_group(group::Info { start: 3 }).unwrap();
-			group.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..]).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..])
+				.unwrap();
 			group.close().unwrap();
 			fetches.poll(&sub, now, &kio::Waiter::noop());
 			let group = fetching
@@ -9009,7 +9015,9 @@ mod tests {
 		let arrive = |serving: &ServeLoop, key| {
 			let mut group = serving.serving.create_group(group::Info { start: key }).unwrap();
 			for frame in [&b"key"[..], b"abc", b"d"] {
-				group.write_frame(crate::Timestamp::unscaled(group.start), frame).unwrap();
+				group
+					.write_frame(crate::Timestamp::unscaled(group.start), frame)
+					.unwrap();
 			}
 			group.close().unwrap();
 		};

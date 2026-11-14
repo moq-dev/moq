@@ -69,7 +69,9 @@ async fn main() -> anyhow::Result<()> {
 		ensure!(stream.peer() == if dial { "acceptor" } else { "dialer" });
 		ensure!(stream.session().len() == 32);
 		for i in 0..3 {
-			stream.producer.write_frame(None, vec![own + i])?;
+			stream
+				.producer
+				.write_frame(moq_net::Timestamp::unscaled(stream.producer.start), vec![own + i])?;
 		}
 		let finished = stream.producer.close()?;
 		for i in 0..3 {
@@ -112,7 +114,9 @@ async fn main() -> anyhow::Result<()> {
 			accepted_tcp(&endpoint).await?
 		};
 		if dial {
-			reset.producer.write_frame(None, vec![48])?;
+			reset
+				.producer
+				.write_frame(moq_net::Timestamp::unscaled(reset.producer.start), vec![48])?;
 			ensure!(reset.consumer.read_frame().await.is_err(), "TCP RST became FIN");
 			eprintln!("socket reset verified tcp dial");
 		} else {
@@ -170,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
 /// count up from 0.
 fn send(track: &moq_net::track::Producer, payload: Vec<u8>) -> anyhow::Result<()> {
 	let mut group = track.append_group(track.largest().map_or(0, |largest| largest.group + 1))?;
-	group.write_frame(None, payload)?;
+	group.write_frame(moq_net::Timestamp::unscaled(group.start), payload)?;
 	group.close()?;
 	Ok(())
 }

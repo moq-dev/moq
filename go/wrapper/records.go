@@ -13,40 +13,59 @@ import (
 // Timestamp is an exact media time: Value units at Scale units per second, with Value
 // at most 2^61 - 1 and Scale non-zero and at most 2^62 - 1. A read carries the track's
 // scale, so a tick such as 90 kHz survives a read and republish exactly.
+//
+// A scale-less track has no time, so there Scale is nil and Value is the frame's group key
+// (a datagram's sequence); build one with Unscaled. The zero Timestamp is Unscaled(0).
+// Scale is a pointer, so == compares its address: compare two with reflect.DeepEqual.
 type Timestamp = ffi.MoqTimestamp
+
+// Unscaled is the scale-less timestamp at group key key, or a datagram's sequence.
+func Unscaled(key uint64) Timestamp {
+	return Timestamp{Value: key}
+}
+
+// TimestampFromScale is value units at scale units per second; a write refuses one past
+// the bounds above with ErrTimeOverflow.
+func TimestampFromScale(value, scale uint64) Timestamp {
+	return Timestamp{Value: value, Scale: &scale}
+}
 
 // TimestampFromDuration converts d exactly, at nanosecond scale, refusing a negative d.
 func TimestampFromDuration(d time.Duration) (Timestamp, error) {
 	if d < 0 {
 		return Timestamp{}, fmt.Errorf("negative timestamp: %v", d)
 	}
-	return Timestamp{Value: uint64(d), Scale: uint64(time.Second)}, nil
+	return TimestampFromScale(uint64(d), uint64(time.Second)), nil
 }
 
 // TimestampToDuration converts t to a time.Duration, rounded down to a whole
-// nanosecond, saturating past time.Duration's ~292 years. It panics on a zero
-// Scale, which no read returns.
-func TimestampToDuration(t Timestamp) time.Duration {
-	if t.Scale == 0 {
-		panic("moq: timestamp with a zero scale")
+// nanosecond, saturating past time.Duration's ~292 years. It fails on an unscaled
+// timestamp, which has no time, and on a zero Scale, which no read returns.
+func TimestampToDuration(t Timestamp) (time.Duration, error) {
+	if t.Scale == nil {
+		return 0, fmt.Errorf("unscaled timestamp #%d has no time", t.Value)
+	}
+	scale := *t.Scale
+	if scale == 0 {
+		return 0, fmt.Errorf("timestamp with a zero scale")
 	}
 	hi, lo := bits.Mul64(t.Value, uint64(time.Second))
-	if hi >= t.Scale {
-		return time.Duration(math.MaxInt64)
+	if hi >= scale {
+		return time.Duration(math.MaxInt64), nil
 	}
-	ns, _ := bits.Div64(hi, lo, t.Scale)
+	ns, _ := bits.Div64(hi, lo, scale)
 	if ns > math.MaxInt64 {
-		return time.Duration(math.MaxInt64)
+		return time.Duration(math.MaxInt64), nil
 	}
-	return time.Duration(ns)
+	return time.Duration(ns), nil
 }
 
-// Frame is a raw track frame: a payload and its presentation timestamp.
-// Timestamp is nil on an untimed track, on both publish and receive.
+// Frame is a raw track frame: a payload and its presentation timestamp, on both publish
+// and receive. On a scale-less track the timestamp is Unscaled at the frame's group key.
 type Frame = ffi.MoqFrame
 
 // Datagram is a best-effort track datagram as received: sequence number, timestamp
-// (nil from an untimed track), and payload.
+// (Unscaled at the sequence on a scale-less track), and payload.
 type Datagram = ffi.MoqDatagram
 
 // DatagramInfo fixes a datagram track's publisher priority and optional timestamp scale.

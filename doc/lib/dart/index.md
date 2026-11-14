@@ -18,13 +18,13 @@ container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init 
 and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
 Publish JSON tracks with `MoqTrackInfo(compression: MoqCompression.deflate)`; a `package:moq/json.dart` consumer reads one with no option of its own.
-A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
+Every write takes a timestamp, and the library never substitutes zero or now.
 `SnapshotProducer.update`, `StreamProducer.append`, and `WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `package:moq/json.dart` consumers return `Value` (`value`, `timestamp`) from `next()`; a snapshot consumer
 yields each state in order, and `latest()` skips to the newest.
 Media times are exact `Timestamp` records, `value` units at `scale` units per second, so a 90 kHz tick survives a
 read and republish. `Duration.toTimestamp()` converts exactly; `Timestamp.toDuration()` rounds down to a whole microsecond.
-Raw tracks with a `null` timescale are untimed on both publish and receive.
+A raw track with a `null` timescale is untimed: each frame carries `Timestamp.unscaled(key)`, its group's key, whose `scale` is `null`.
 `MoqTrackInfo.compression` set to `MoqCompression.deflate` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
@@ -132,7 +132,7 @@ print(route.instance());
 final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
-group.writeFrame(frame: Frame(payload: bytes, timestamp: null));
+group.writeFrame(frame: Frame(payload: bytes, timestamp: Timestamp.unscaled(group.sequence())));
 group.finish();
 track.finish();
 mine.close(); // ends the route too

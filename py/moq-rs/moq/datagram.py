@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from moq_ffi import MoqDatagramConsumer, MoqDatagramProducer, MoqDatagramRequest, MoqDatagramRequests
 
-from ._records import _opt_ts
 from ._stream import _Stream
 from .types import Datagram, DatagramInfo, Timestamp
 
@@ -24,9 +23,13 @@ class DatagramProducer:
         """The publisher properties fixed when this track was created."""
         return self._inner.info()
 
-    def append(self, payload: bytes, *, timestamp: Timestamp | None = None) -> int:
-        """Send a datagram and return its sequence; keep the payload below the path MTU."""
-        return self._inner.append(_opt_ts(timestamp), payload)
+    def append(self, payload: bytes, *, timestamp: Timestamp) -> int:
+        """Send a datagram and return its sequence; keep the payload below the path MTU.
+
+        On a scale-less track ``timestamp`` is :meth:`Timestamp.unscaled` at the sequence to
+        write; a scaled one takes the next sequence.
+        """
+        return self._inner.append(timestamp._ffi(), payload)
 
     def insert(self, datagram: Datagram) -> None:
         """Send a datagram at its explicit sequence; appends continue past the highest one."""

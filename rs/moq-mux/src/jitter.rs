@@ -335,8 +335,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self.committed().map_or(&self.active, |committed| &committed.old)
 	}
 
-	pub fn at(&self, generation: u64, decode: impl Into<Decode>) -> Option<Instant> {
-		let decode = decode.into();
+	pub fn at(&self, generation: u64, decode: Decode) -> Option<Instant> {
 		self.committed()
 			.and_then(|committed| committed.old.at(generation, decode))
 			.or_else(|| self.active.at(generation, decode))
@@ -382,9 +381,12 @@ impl Decode {
 	}
 }
 
-impl From<Timestamp> for Decode {
-	fn from(timestamp: Timestamp) -> Self {
-		Self::from_nanos(timestamp.as_nanos() as i128)
+impl TryFrom<Timestamp> for Decode {
+	type Error = moq_net::TimeOverflow;
+
+	/// Refused for an [unscaled](Timestamp::unscaled) timestamp, which has no time to decode at.
+	fn try_from(timestamp: Timestamp) -> Result<Self, Self::Error> {
+		Ok(Self::from_nanos(timestamp.as_nanos()? as i128))
 	}
 }
 
@@ -1304,12 +1306,12 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	/// When a frame of `generation` decoding at `decode` goes out: on the current clock, or on the
 	/// previous one while that generation's tail is still going out.
-	pub fn at(&self, generation: u64, decode: impl Into<Decode>) -> Option<Instant> {
+	pub fn at(&self, generation: u64, decode: Decode) -> Option<Instant> {
 		let clock = [self.clock, self.previous]
 			.into_iter()
 			.flatten()
 			.find(|clock| clock.generation == generation)?;
-		self.deadline(&clock, decode.into())
+		self.deadline(&clock, decode)
 	}
 
 	/// When a frame decoding at `decode` goes out on `clock`, if any instant holds it.
@@ -1795,7 +1797,7 @@ mod tests {
 		buffer.cancel();
 		assert_eq!(buffer.reporting().dropped(), 2);
 		assert_eq!(
-			buffer.at(0, ms(200)),
+			buffer.at(0, ms(200).try_into().unwrap()),
 			Some(start.saturating_add(delay).saturating_add(Duration::from_millis(200)))
 		);
 		buffer.push(0, arrival(kio::clock::now(), 200, "A resumed")).unwrap();
@@ -1917,7 +1919,9 @@ mod tests {
 			let frame = Arrival {
 				arrived: now,
 				read: now,
-				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64).into(),
+				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64)
+					.try_into()
+					.unwrap(),
 				restart: 0,
 				sync: true,
 				leading: false,
@@ -1990,7 +1994,10 @@ mod tests {
 			buffer.at(0, before_zero),
 			Some(start.saturating_add(DELAY).saturating_sub(Duration::from_nanos(22_223)))
 		);
-		assert_eq!(buffer.at(0, ms(0)), Some(start.saturating_add(DELAY)));
+		assert_eq!(
+			buffer.at(0, ms(0).try_into().unwrap()),
+			Some(start.saturating_add(DELAY))
+		);
 		kio::clock::sleep(DELAY).await;
 		assert_eq!(due(&mut buffer), ["video", "audio"]);
 	}
@@ -2050,7 +2057,7 @@ mod tests {
 		Arrival {
 			arrived,
 			read: arrived,
-			decode: ms(decode).into(),
+			decode: ms(decode).try_into().unwrap(),
 			restart: 0,
 			sync: true,
 			leading: false,
@@ -2117,7 +2124,7 @@ mod tests {
 			}
 			assert!(due(&mut buffer).is_empty());
 			assert_eq!(
-				buffer.at(0, ms(800)),
+				buffer.at(0, ms(800).try_into().unwrap()),
 				Some(start.saturating_add(Duration::from_millis(500)))
 			);
 			tokio::time::advance(Duration::from_millis(500)).await;
@@ -2550,7 +2557,7 @@ mod tests {
 		assert!(due(&mut buffer).is_empty());
 		let tail = start.saturating_add(Duration::from_millis(500));
 		assert_eq!(
-			buffer.at(1, ms(5_000)),
+			buffer.at(1, ms(5_000).try_into().unwrap()),
 			Some(tail),
 			"the export clock follows the queued tail"
 		);
@@ -2842,7 +2849,10 @@ mod tests {
 			let frame = Arrival {
 				arrived,
 				read: arrived,
-				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
+				decode: Timestamp::from_micros(decode.as_micros() as u64)
+					.unwrap()
+					.try_into()
+					.unwrap(),
 				restart: 0,
 				sync: true,
 				leading: false,
@@ -2862,8 +2872,13 @@ mod tests {
 			}
 			if hour >= settled
 				&& queued.is_zero()
-				&& let Some(deadline) = buffer.at(0, Timestamp::from_micros(decode.as_micros() as u64).unwrap())
-			{
+				&& let Some(deadline) = buffer.at(
+					0,
+					Timestamp::from_micros(decode.as_micros() as u64)
+						.unwrap()
+						.try_into()
+						.unwrap(),
+				) {
 				let slack = since(arrived, deadline) as f64 / 1e9;
 				run.worst = run.worst.max((slack - delay.as_secs_f64()).abs());
 			}
@@ -3030,7 +3045,10 @@ mod tests {
 			let frame = Arrival {
 				arrived,
 				read: arrived,
-				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
+				decode: Timestamp::from_micros(decode.as_micros() as u64)
+					.unwrap()
+					.try_into()
+					.unwrap(),
 				restart: 0,
 				sync: true,
 				leading: false,
@@ -3169,7 +3187,10 @@ mod tests {
 				let frame = Arrival {
 					arrived,
 					read: arrived,
-					decode: Timestamp::from_micros((decode * 1e6).round() as u64).unwrap().into(),
+					decode: Timestamp::from_micros((decode * 1e6).round() as u64)
+						.unwrap()
+						.try_into()
+						.unwrap(),
 					restart: 0,
 					sync: true,
 					leading: false,

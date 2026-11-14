@@ -124,7 +124,8 @@ pub enum Error {
 	#[error(transparent)]
 	Net(#[from] moq_net::Error),
 
-	/// Timestamp overflow converting to the moq microsecond timescale.
+	/// Timestamp overflow converting to the moq microsecond timescale, or an
+	/// [unscaled](moq_net::Timestamp::unscaled) timestamp, which has no time.
 	#[error(transparent)]
 	TimeOverflow(#[from] moq_net::TimeOverflow),
 }

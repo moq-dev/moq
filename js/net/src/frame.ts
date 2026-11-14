@@ -21,8 +21,11 @@ import { SEGMENT_BYTES } from "./util/limits.ts";
 export interface Info {
 	/** The payload size in bytes, which the writes must add up to exactly. */
 	size: number;
-	/** Presentation timestamp, present exactly when the track has a timescale (see `Group.Frame.timestamp`). */
-	timestamp?: Timestamp;
+	/**
+	 * Presentation timestamp, or on a scale-less track {@link Timestamp.unscaled} at its group's
+	 * key (see `Group.Frame.timestamp`).
+	 */
+	timestamp: Timestamp;
 }
 
 // A frame written in pieces, shared by its group and every mirror. Written whole, it stays the
@@ -32,7 +35,7 @@ export interface Info {
 /** @internal */
 export class Chunked implements Frame {
 	readonly size: number;
-	readonly timestamp: Timestamp | undefined;
+	readonly timestamp: Timestamp;
 	arrived?: Instant;
 	// Bytes written so far, which a streaming reader waits on.
 	readonly written = new Signal(0);
@@ -166,8 +169,8 @@ export let makeProducer: (info: Info, ops: Ops) => Producer;
 export class Producer {
 	/** The declared payload size in bytes. */
 	readonly size: number;
-	/** The frame's presentation timestamp, if its track is timed. */
-	readonly timestamp: Timestamp | undefined;
+	/** The frame's presentation timestamp, or on a scale-less track its group's key. */
+	readonly timestamp: Timestamp;
 	#ops: Ops;
 	#done = false;
 
@@ -248,8 +251,8 @@ export class Consumer {
 	readonly sequence: number;
 	/** The payload size in bytes. */
 	readonly size: number;
-	/** The frame's presentation timestamp, if its track is timed. */
-	readonly timestamp: Timestamp | undefined;
+	/** The frame's presentation timestamp, or on a scale-less track its group's key. */
+	readonly timestamp: Timestamp;
 	#frame: Frame;
 	#offset = 0;
 

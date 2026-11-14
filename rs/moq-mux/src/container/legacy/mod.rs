@@ -163,7 +163,7 @@ mod tests {
 	}
 
 	fn micros(duration: Option<moq_net::Timestamp>) -> Option<u128> {
-		duration.map(|duration| std::time::Duration::from(duration).as_micros())
+		duration.map(|duration| std::time::Duration::try_from(duration).unwrap().as_micros())
 	}
 
 	#[test]

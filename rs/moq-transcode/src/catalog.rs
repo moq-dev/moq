@@ -1078,6 +1078,6 @@ mod tests {
 		let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("the update is published");
 		};
-		assert_eq!(frame.timestamp.unwrap().as_millis(), adopted.now().as_millis());
+		assert_eq!(frame.timestamp.as_millis().unwrap(), adopted.now().as_millis().unwrap());
 	}
 }

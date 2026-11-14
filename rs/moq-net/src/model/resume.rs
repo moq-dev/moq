@@ -6148,7 +6148,8 @@ mod test {
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(1));
 			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
-			open.write_frame(crate::Timestamp::unscaled(open.start), b"a".as_ref()).unwrap();
+			open.write_frame(crate::Timestamp::unscaled(open.start), b"a".as_ref())
+				.unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 
@@ -6158,7 +6159,9 @@ mod test {
 			pool.step(Duration::ZERO);
 			let write = |key| {
 				let mut group = b.create_group(group::Info { start: key }).unwrap();
-				group.write_frame(crate::Timestamp::unscaled(group.start), b"b".as_ref()).unwrap();
+				group
+					.write_frame(crate::Timestamp::unscaled(group.start), b"b".as_ref())
+					.unwrap();
 				group.close().unwrap();
 			};
 			if warm {

@@ -324,7 +324,7 @@ impl<E: CatalogExt> Outputs<E> {
 		// One snapshot per group while deltas are disabled.
 		#[cfg(test)]
 		let before = self.hang_track.largest();
-		self.hang.update(moq_json::Timed::from(catalog).at(at))?;
+		self.hang.update(moq_json::Timed::new(catalog, at))?;
 		#[cfg(test)]
 		if self.hang_track.largest() != before {
 			self.published[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -679,11 +679,11 @@ impl<E: CatalogExt> Producer<E> {
 			let clock = &guard.state.clock;
 			let at = match wall {
 				Some(wall) => clock.reading(wall)?,
-				None => clock.now().as_micros() as i128,
+				None => clock.now().as_micros().expect("the broadcast clock is scaled") as i128,
 			};
-			super::Offset::from_micros(at - pts.as_micros() as i128)?
+			super::Offset::from_micros(at - pts.as_micros()? as i128)?
 		} else {
-			let since = std::time::Duration::from_micros(u64::try_from(pts.as_micros()).unwrap_or(u64::MAX));
+			let since = std::time::Duration::from_micros(u64::try_from(pts.as_micros()?).unwrap_or(u64::MAX));
 			// Moved, not replaced: it keeps reading the clock the broadcast was created under.
 			let clock = match wall {
 				Some(wall) => guard.state.clock.placed(since, wall)?,
@@ -2250,7 +2250,7 @@ mod test {
 			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 				panic!("captured frame is published");
 			};
-			let timestamp = frame.timestamp.expect("captured frame is timed");
+			let timestamp = frame.timestamp;
 			assert_eq!(catalog.clock().wall_clock(timestamp).unwrap(), wall);
 			assert_eq!(
 				catalog.snapshot().media.clock.unwrap().wall_clock(timestamp).unwrap(),
@@ -2336,7 +2336,7 @@ mod test {
 				while let Some(mut group) = track.next_group().await.unwrap() {
 					let first = stamps.len();
 					while let Some(frame) = group.read_frame().await.unwrap() {
-						stamps.push(frame.timestamp.unwrap().as_micros());
+						stamps.push(frame.timestamp.as_micros().unwrap());
 					}
 					starts.extend(stamps.get(first).copied());
 				}
@@ -2356,8 +2356,8 @@ mod test {
 
 	/// How far `pts` lands from `clock`'s reading now, which is zero for a frame live on arrival.
 	fn lateness(clock: &crate::Clock, pts: moq_net::Timestamp) -> std::time::Duration {
-		let now = clock.now().as_micros();
-		std::time::Duration::from_micros(now.abs_diff(pts.as_micros()) as u64)
+		let now = clock.now().as_micros().unwrap();
+		std::time::Duration::from_micros(now.abs_diff(pts.as_micros().unwrap()) as u64)
 	}
 
 	/// A `with_clock` catalog is fixed from the start: even the first importer shifts onto it,
@@ -2465,7 +2465,7 @@ mod test {
 			.unwrap();
 		assert_eq!(catalog.snapshot().media.clock, published);
 		assert!(
-			shifted.as_micros() >= 10_000_000,
+			shifted.as_micros().unwrap() >= 10_000_000,
 			"{shifted:?} lands at the clock's reading"
 		);
 	}
@@ -2490,7 +2490,7 @@ mod test {
 			"it placed the clock, so it stays verbatim"
 		);
 		let placed = catalog.clock();
-		assert_eq!(placed.reading(wall).unwrap(), pts.as_micros() as i128);
+		assert_eq!(placed.reading(wall).unwrap(), pts.as_micros().unwrap() as i128);
 
 		// Placed again on the now fixed clock, the same mapping shifts by nothing.
 		let again = catalog.timebase();
@@ -2589,7 +2589,7 @@ mod test {
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
 		// clock, which may be unset.
-		let zero = kio::clock::Wall::MOQ_EPOCH + Duration::from_micros(input.wall.as_micros() as u64);
+		let zero = kio::clock::Wall::MOQ_EPOCH + Duration::from_micros(input.wall.as_micros().unwrap() as u64);
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
 		seed.media.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
@@ -2714,7 +2714,7 @@ mod test {
 		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("the frame is published");
 		};
-		assert_eq!(frame.timestamp, Some(timestamp));
+		assert_eq!(frame.timestamp, timestamp);
 
 		// The catalog clock is fixed now, and has no wall to offset a placement onto.
 		assert!(matches!(

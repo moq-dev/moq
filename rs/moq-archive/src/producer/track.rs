@@ -296,11 +296,10 @@ impl<S: ObjectStore> Track<S> {
 	}
 
 	/// A frame's timestamp in the track's timescale, which it carries exactly when timed.
-	fn stamp(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<u64>> {
-		match (timestamp, self.timescale) {
-			(Some(timestamp), Some(timescale)) => {
-				Ok(Some(timestamp.convert(timescale).map_err(|_| Error::Timing)?.value()))
-			}
+	fn stamp(&self, timestamp: moq_net::Timestamp) -> Result<Option<u64>> {
+		match (timestamp.scale(), self.timescale) {
+			(Some(_), Some(timescale)) => Ok(Some(timestamp.convert(timescale).map_err(|_| Error::Timing)?.value())),
+			// A scale-less frame's timestamp is its group's key, which the entry already stores.
 			(None, None) => Ok(None),
 			_ => Err(Error::Timing),
 		}

@@ -124,7 +124,9 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Timestamp, track::I
 		true => producer.write_frame(millis(7), &b"frame"[..]).unwrap(),
 		false => {
 			let mut group = producer.append_group(7).unwrap();
-			group.write_frame(moq_net::Timestamp::unscaled(group.start), &b"frame"[..]).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"frame"[..])
+				.unwrap();
 			group.close().unwrap();
 		}
 	}
@@ -200,7 +202,9 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 		broadcast.announce().unwrap();
 		for _ in 0..5 {
 			let mut group = producer.append_next().unwrap();
-			group.write_frame(moq_net::Timestamp::unscaled(group.start), &b"untimed"[..]).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"untimed"[..])
+				.unwrap();
 			group.close().unwrap();
 		}
 		kio::clock::sleep(Duration::from_secs(1)).await;
@@ -254,7 +258,9 @@ async fn datagrams_arrive_as_published() {
 		// Datagrams count once the answer is back.
 		let timescale = consumer.info().await.unwrap().timescale;
 
-		producer.append(moq_net::Timestamp::unscaled(0), &b"untimed"[..]).unwrap();
+		producer
+			.append(moq_net::Timestamp::unscaled(0), &b"untimed"[..])
+			.unwrap();
 		let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
 			.await
 			.expect("datagram timeout")
@@ -297,7 +303,12 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
 		let mut group = request.accept(3, timed()).unwrap();
-		group.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"segment")).unwrap();
+		group
+			.write_frame(
+				moq_net::Timestamp::unscaled(group.start),
+				Bytes::from_static(b"segment"),
+			)
+			.unwrap();
 		group.close().unwrap();
 
 		let mut fetched = waiting.await.unwrap();

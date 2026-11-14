@@ -2445,7 +2445,7 @@ mod tests {
 				Poll::Ready(Err(error)) => return (out, Some(error)),
 				other => panic!("reading a published group's first frame: {other:?}"),
 			};
-			out.push((group.start, frame.timestamp.unwrap().as_micros()));
+			out.push((group.start, frame.timestamp.as_micros().unwrap()));
 		}
 		(out, None)
 	}
@@ -2692,7 +2692,7 @@ mod tests {
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(mut group))) = track.poll_recv_group(&kio::Waiter::noop()) {
 			while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&kio::Waiter::noop()) {
-				out.push(frame.timestamp.unwrap().as_micros());
+				out.push(frame.timestamp.as_micros().unwrap());
 			}
 		}
 		out

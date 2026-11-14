@@ -101,7 +101,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 }
 
 /// One past the newest group's start, or 0 on an empty track: where a group the caller gave
-/// no start for begins, which stands in until every write carries a timestamp.
+/// no start for begins.
 fn next_start(track: &moq_net::track::Producer) -> u64 {
 	track.largest().map_or(0, |largest| largest.group.saturating_add(1))
 }
@@ -884,20 +884,10 @@ impl MoqTrackProducer {
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp: Option<moq_net::Timestamp> = frame.timestamp.map(TryInto::try_into).transpose()?;
+		let timestamp: moq_net::Timestamp = frame.timestamp.try_into()?;
 		let mut phase = self.phase.lock().unwrap();
-		let raw = phase.raw()?;
-		match timestamp {
-			// The group starts at its frame's time.
-			Some(timestamp) => raw.write_frame(timestamp, frame.payload)?,
-			// A frame without a time belongs on a scale-less track, whose group takes the next
-			// start; a timed track's group refuses it.
-			None => {
-				let mut group = raw.append_group(next_start(raw))?;
-				group.write_frame(None, frame.payload)?;
-				group.close()?;
-			}
-		}
+		// The group starts at its frame's time, or its unscaled key on a scale-less track.
+		phase.raw()?.write_frame(timestamp, frame.payload)?;
 		Ok(())
 	}
 
@@ -1031,7 +1021,7 @@ impl MoqGroupProducer {
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
+		let timestamp = frame.timestamp.try_into()?;
 		let mut guard = self.inner.lock();
 		let GroupPhase::Writing(group) = &mut *guard else {
 			return Err(MoqError::Closed);
@@ -1050,11 +1040,17 @@ impl MoqGroupProducer {
 	/// once while a reader has taken every frame, and once the group is closed, so the next
 	/// write reports why. Fails with `Closed` after [`abort`](Self::abort).
 	pub async fn ready(&self, size: u64) -> Result<(), MoqError> {
-		let frame = moq_net::frame::Info { size, timestamp: None };
 		let mut park = kio::Park::default();
 		crate::ffi::run(kio::wait(|waiter| {
 			self.inner.poll(waiter, |group, cx| match group {
-				GroupPhase::Writing(group) => group.poll_ready(park.hold(cx), &frame).map(Ok),
+				GroupPhase::Writing(group) => {
+					// Only the size paces; the timestamp is checked by the write.
+					let frame = moq_net::frame::Info {
+						size,
+						timestamp: moq_net::Timestamp::unscaled(group.start),
+					};
+					group.poll_ready(park.hold(cx), &frame).map(Ok)
+				}
 				// The next write reports why.
 				GroupPhase::Finished(_) => Poll::Ready(Ok(())),
 				GroupPhase::Closed => Poll::Ready(Err(MoqError::Closed)),

@@ -272,7 +272,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 		.unwrap()
 		.create_frame(frame::Info {
 			size: WINDOW as u64,
-			timestamp: Some(Timestamp::from_millis(start).unwrap()),
+			timestamp: Timestamp::from_millis(start).unwrap(),
 		})
 		.unwrap();
 	low_frame.write(vec![1u8; WINDOW * 3 / 4]).unwrap();
@@ -399,7 +399,7 @@ async fn lite_frame_past_the_window_gives_way() {
 		.unwrap()
 		.create_frame(frame::Info {
 			size: 2 * WINDOW as u64,
-			timestamp: Some(Timestamp::from_millis(start).unwrap()),
+			timestamp: Timestamp::from_millis(start).unwrap(),
 		})
 		.unwrap();
 	low_frame.write(vec![1u8; 2 * WINDOW]).unwrap();
@@ -652,7 +652,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 		.unwrap()
 		.create_frame(frame::Info {
 			size: (WINDOW / 2) as u64,
-			timestamp: Some(Timestamp::from_millis(start).unwrap()),
+			timestamp: Timestamp::from_millis(start).unwrap(),
 		})
 		.unwrap();
 	frame.write(vec![1u8; WINDOW / 4]).unwrap();
@@ -754,7 +754,7 @@ async fn the_largest_unit_completes_under_pressure(version: &str) {
 			.unwrap()
 			.create_frame(frame::Info {
 				size: WINDOW as u64,
-				timestamp: Some(Timestamp::from_millis(start).unwrap()),
+				timestamp: Timestamp::from_millis(start).unwrap(),
 			})
 			.unwrap();
 		frame.write(vec![1u8; WINDOW / 4]).unwrap();

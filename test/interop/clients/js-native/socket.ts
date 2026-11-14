@@ -61,7 +61,11 @@ try {
 	const peer = role === "dial" ? 32 : 16;
 	if (stream instanceof Moq.Socket.TcpStream) {
 		// Exchange a request and reply before FIN, then drain both independent halves.
-		for (let i = 0; i < 3; i++) stream.producer.writeFrame({ payload: new Uint8Array([own + i]) });
+		for (let i = 0; i < 3; i++)
+			stream.producer.writeFrame({
+				payload: new Uint8Array([own + i]),
+				timestamp: Moq.Time.Timestamp.unscaled(stream.producer.sequence),
+			});
 		stream.producer.finish();
 		for (let i = 0; i < 3; i++)
 			assert.deepEqual((await stream.consumer.readFrame())?.payload, new Uint8Array([peer + i]));
@@ -70,11 +74,13 @@ try {
 		// Exchange each independent message as a request and reply.
 		const reader = stream.consumer.ordered();
 		for (let i = 0; i < 3; i++) {
-			if (role === "dial") stream.producer.writeFrame({ payload: new Uint8Array([own + i]) });
+			// Each message is its own group, so its frame carries that group's key.
+			const timestamp = Moq.Time.Timestamp.unscaled(BigInt(i));
+			if (role === "dial") stream.producer.writeFrame({ payload: new Uint8Array([own + i]), timestamp });
 			const frame = await reader.readFrame();
 			assert.equal(frame?.group, BigInt(i));
 			assert.deepEqual(frame?.payload, new Uint8Array([peer + i]));
-			if (role === "accept") stream.producer.writeFrame({ payload: new Uint8Array([own + i]) });
+			if (role === "accept") stream.producer.writeFrame({ payload: new Uint8Array([own + i]), timestamp });
 		}
 		stream.producer.finish();
 		assert.equal(await reader.readFrame(), undefined);
@@ -86,7 +92,8 @@ try {
 			: await endpoint.dialTrack("acceptor");
 	const resetReader = second instanceof Moq.Socket.TcpStream ? second.consumer : second.consumer.ordered();
 	if (role === "dial") {
-		second.producer.writeFrame({ payload: new Uint8Array([48]) });
+		// The first message of either kind is at key 0: a TCP stream's one group, or a track's first.
+		second.producer.writeFrame({ payload: new Uint8Array([48]), timestamp: Moq.Time.Timestamp.unscaled(0n) });
 		await assert.rejects(resetReader.readFrame());
 	} else {
 		assert.deepEqual((await resetReader.readFrame())?.payload, new Uint8Array([48]));

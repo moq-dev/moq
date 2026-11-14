@@ -510,7 +510,7 @@ mod tests {
 						frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
 						"{name} output is not Annex-B"
 					);
-					received.push(frame.timestamp.as_micros() as u64);
+					received.push(frame.timestamp.as_micros().unwrap() as u64);
 				}
 				assert_eq!(group.frame_count(), 5, "{name} dropped frames");
 				assert_eq!(received, timestamps, "{name} changed frame timestamps");
@@ -800,7 +800,7 @@ mod tests {
 		while let Some(payload) = fetched.read_frame().await.unwrap() {
 			let frame = hang::container::Frame::decode(payload.payload).unwrap();
 			assert!(!frame.payload.is_empty());
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 			first_payload = first_payload.or(Some(frame.payload));
 		}
 
@@ -1796,7 +1796,7 @@ mod tests {
 				let mut timestamps = Vec::new();
 				while let Some(payload) = fetched.read_frame().await.unwrap() {
 					let frame = hang::container::Frame::decode(payload.payload).unwrap();
-					timestamps.push(frame.timestamp.as_micros());
+					timestamps.push(frame.timestamp.as_micros().unwrap());
 				}
 				groups.push((fetched.start, timestamps));
 			}

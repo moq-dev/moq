@@ -403,7 +403,7 @@ impl Consumer {
 				}
 				// Behind whatever the resampler held from before the loss.
 				Some(Encoded::Gap { timestamp, duration }) => {
-					self.boundary = Some(timestamp.into());
+					self.boundary = Some(Duration::try_from(timestamp)?);
 					self.started = true;
 					self.restart()?;
 					self.warmup_pending = !self.warmup.is_zero();
@@ -415,7 +415,7 @@ impl Consumer {
 				// after the end, starting before it, once a fresh encoder or the track's end
 				// drains it.
 				Some(Encoded::End { group, end }) => {
-					self.boundary = Some(end.into());
+					self.boundary = Some(Duration::try_from(end)?);
 					self.end = Some(end);
 					self.end_group = group;
 					self.frames_decoded = 0;
@@ -437,14 +437,17 @@ impl Consumer {
 			// reading it off the packet, so there is nothing left to compare.
 			if self.end.is_none()
 				&& let Some(next) = self.next_start
-				&& discontinuous(next, timestamp)
+				&& discontinuous(next, timestamp)?
 			{
 				if let Some(frame) = self.gap()? {
 					self.ready.push_back(Read::Frame(frame));
 				}
 				// From where the timeline should have continued to where it did, which an
 				// overlap leaves empty.
-				let start = next.convert(timestamp.scale())?.min(timestamp);
+				let start = earlier(
+					next.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?,
+					timestamp,
+				);
 				self.ready.push_back(Read::Gap {
 					timestamp: start,
 					duration: timestamp.checked_sub(start)?,
@@ -472,7 +475,8 @@ impl Consumer {
 			// first packet has no history to warm up from: the codec's pre-skip, trimmed by
 			// the decoder, is all the priming its encoder declared.
 			if std::mem::take(&mut self.warmup_pending) && !track_start {
-				let warmup = moq_net::Timestamp::try_from(self.warmup)?.convert(timestamp.scale())?;
+				let warmup = moq_net::Timestamp::try_from(self.warmup)?
+					.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?;
 				self.warmup_until = Some(timestamp.checked_add(warmup)?);
 			}
 			// Codec delay trimmed off the front is media this packet covered even
@@ -491,7 +495,7 @@ impl Consumer {
 			if let Some(end) = self.end {
 				let terminal_start = *self
 					.terminal_start
-					.get_or_insert(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch));
+					.get_or_insert(later(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?, epoch));
 				let total = frames_between(terminal_start, end, rate)?;
 				let remaining = total.saturating_sub(self.frames_decoded);
 				decoded.truncate(remaining.saturating_mul(self.decoder.layout().channels() as usize));
@@ -504,7 +508,7 @@ impl Consumer {
 				// The codec delay is padding before the epoch, not a hole after the
 				// first short frame. Keep later output contiguous by moving it back over
 				// everything trimmed since this decoder epoch began.
-				rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch)
+				later(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?, epoch)
 			};
 			if self.end.is_some() {
 				self.frames_decoded += frames;
@@ -595,10 +599,12 @@ impl Consumer {
 			// Read before judging the head, so any update after that wakes the wait.
 			let seen = self.gate.as_ref().map_or(0, |gate| gate.read().version);
 			let deadline = match self.pending.front() {
-				Some((Encoded::Frame { frame, .. }, arrived)) => match self.admit(frame.timestamp.into(), *arrived) {
-					None => return Ok(self.pop()),
-					due => due,
-				},
+				Some((Encoded::Frame { frame, .. }, arrived)) => {
+					match self.admit(Duration::try_from(frame.timestamp)?, *arrived) {
+						None => return Ok(self.pop()),
+						due => due,
+					}
+				}
 				Some(_) => return Ok(self.pop()),
 				None => match self.ended.as_mut() {
 					Some(failed) => return failed.take().map_or(Ok(None), Err),
@@ -634,6 +640,10 @@ impl Consumer {
 			.await;
 
 			match read {
+				// A scale-less track carries group keys, not times, so there is nothing to place.
+				Some(Ok(Some(Encoded::Frame { frame, .. }))) if frame.timestamp.scale().is_none() => {
+					self.ended = Some(Some(moq_net::Error::TimestampMismatch.into()));
+				}
 				Some(Ok(Some(read))) => {
 					// The estimator times arrivals, so it learns of a declared silence as the
 					// packets around it arrive rather than as they decode. The end's own group
@@ -654,10 +664,11 @@ impl Consumer {
 					// decoder will refuse, so it is observed before anything can fail.
 					match &read {
 						Encoded::Frame { frame, .. } => {
-							let arrival = jitter::millis(now().duration_since(self.origin));
-							let media =
-								frame.timestamp.value() as f64 * 1000.0 / frame.timestamp.scale().as_u64() as f64;
-							self.target.observe(arrival, media);
+							if let Some(scale) = frame.timestamp.scale() {
+								let arrival = jitter::millis(now().duration_since(self.origin));
+								let media = frame.timestamp.value() as f64 * 1000.0 / scale.as_u64() as f64;
+								self.target.observe(arrival, media);
+							}
 						}
 						_ => self.breaks += 1,
 					}
@@ -691,7 +702,7 @@ impl Consumer {
 		// Media queued behind the packet covers the hold, or nothing more continues it.
 		let covered = self.breaks > 0
 			|| matches!(self.pending.back(), Some((Encoded::Frame { frame, .. }, _))
-				if Duration::from(frame.timestamp) >= timestamp + state.hold);
+				if Duration::try_from(frame.timestamp).is_ok_and(|end| end >= timestamp + state.hold));
 		if covered {
 			return None;
 		}
@@ -824,7 +835,7 @@ impl Consumer {
 		{
 			let channels = self.decoder.layout().channels() as usize;
 			let frames = pcm.len() / channels;
-			let duration = Duration::from(until.checked_sub(timestamp)?);
+			let duration = Duration::try_from(until.checked_sub(timestamp)?)?;
 			let trim = (duration.as_nanos() * u128::from(self.resolved_sample_rate)).div_ceil(1_000_000_000);
 			let trim = usize::try_from(trim).unwrap_or(usize::MAX).min(frames);
 			pcm.drain(..trim * channels);
@@ -884,11 +895,25 @@ fn now() -> Instant {
 /// finest quantization a packet can be assumed to have kept. That floor stays under
 /// the shortest packet anything here can send, 2.5 ms of Opus, so it never
 /// swallows a lost one.
-fn discontinuous(expected: moq_net::Timestamp, timestamp: moq_net::Timestamp) -> bool {
-	let scale = expected.scale().max(timestamp.scale());
+fn discontinuous(expected: moq_net::Timestamp, timestamp: moq_net::Timestamp) -> Result<bool, Error> {
+	let unscaled = moq_net::TimeOverflow;
+	let scale = expected
+		.scale()
+		.ok_or(unscaled)?
+		.max(timestamp.scale().ok_or(unscaled)?);
 	let quantum = scale.min(moq_net::Timescale::MILLI);
 	let tolerance = (scale.as_u64() as u128).div_ceil(quantum.as_u64() as u128) + 1;
-	expected.as_scale(scale).abs_diff(timestamp.as_scale(scale)) > tolerance
+	Ok(expected.as_scale(scale)?.abs_diff(timestamp.as_scale(scale)?) > tolerance)
+}
+
+/// The later of two timestamps on one timeline, `a` when they don't compare.
+fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b > a { b } else { a }
+}
+
+/// The earlier of two timestamps on one timeline, `a` when they don't compare.
+fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b < a { b } else { a }
 }
 
 /// `timestamp` moved forward by `frames` at `sample_rate`, in its own timescale.
@@ -897,14 +922,16 @@ fn advance(timestamp: moq_net::Timestamp, frames: usize, sample_rate: u32) -> Re
 		return Ok(timestamp);
 	}
 
-	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?.convert(timestamp.scale())?;
+	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?
+		.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?;
 	Ok(timestamp.checked_add(offset)?)
 }
 
 /// Codec-rate frames in the interval, rounding a microsecond marker to the nearest frame.
 fn frames_between(start: moq_net::Timestamp, end: moq_net::Timestamp, sample_rate: u32) -> Result<usize, Error> {
 	let duration = end.checked_sub(start)?;
-	let frames = (std::time::Duration::from(duration).as_nanos() * sample_rate as u128 + 500_000_000) / 1_000_000_000;
+	let frames =
+		(std::time::Duration::try_from(duration)?.as_nanos() * sample_rate as u128 + 500_000_000) / 1_000_000_000;
 	usize::try_from(frames).map_err(|_| Error::Unsupported("audio duration does not fit in memory".into()))
 }
 
@@ -917,10 +944,11 @@ fn rewind(timestamp: moq_net::Timestamp, frames: usize, sample_rate: u32) -> Res
 		return Ok(timestamp);
 	}
 
-	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?.convert(timestamp.scale())?;
+	let scale = timestamp.scale().ok_or(moq_net::TimeOverflow)?;
+	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?.convert(scale)?;
 	Ok(timestamp
 		.checked_sub(offset)
-		.unwrap_or(moq_net::Timestamp::new(0, timestamp.scale())?))
+		.unwrap_or(moq_net::Timestamp::new(0, scale)?))
 }
 
 #[cfg(test)]
@@ -1154,7 +1182,7 @@ mod tests {
 		let mut stamps = Vec::new();
 		let mut frames = 0;
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 			frames += frame.data.len() / size_of::<f32>();
 		}
 		(stamps, frames)
@@ -1282,7 +1310,7 @@ mod tests {
 		.await
 		.unwrap();
 		let frame = next_frame(&mut consumer).await.unwrap().unwrap();
-		assert_eq!(frame.timestamp.as_micros(), 80_000, "the backlog was replayed");
+		assert_eq!(frame.timestamp.as_micros().unwrap(), 80_000, "the backlog was replayed");
 	}
 
 	/// A latest join with a warmup loses no group the publisher bursts before its first
@@ -1358,7 +1386,7 @@ mod tests {
 		let mut stamps = Vec::new();
 		while let Some(read) = consumer.read().await.unwrap() {
 			match read {
-				Read::Frame(frame) => stamps.push(frame.timestamp.as_micros()),
+				Read::Frame(frame) => stamps.push(frame.timestamp.as_micros().unwrap()),
 				Read::Gap { timestamp, duration } => panic!("a gap of {duration:?} after {timestamp:?}"),
 				Read::End { .. } => {}
 			}
@@ -1406,7 +1434,7 @@ mod tests {
 			.unwrap();
 		let mut stamps = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(
 			stamps,
@@ -1487,7 +1515,7 @@ mod tests {
 
 		let mut stamps = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(stamps, [1_080_000, 1_100_000]);
 	}
@@ -1534,7 +1562,7 @@ mod tests {
 		.await
 		.unwrap();
 		let frame = next_frame(&mut consumer).await.unwrap().unwrap();
-		assert!(frame.timestamp.as_micros() >= 1_080_000);
+		assert!(frame.timestamp.as_micros().unwrap() >= 1_080_000);
 		let first = f32::from_le_bytes(frame.data[..4].try_into().unwrap());
 		assert!(
 			(first - 0.25).abs() < 0.0001,
@@ -1588,7 +1616,7 @@ mod tests {
 		.unwrap();
 		let (mut first, mut frames) = (None, 0);
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			first.get_or_insert(frame.timestamp.as_micros());
+			first.get_or_insert(frame.timestamp.as_micros().unwrap());
 			frames += frame.data.len() / size_of::<f32>();
 		}
 		(first, frames)
@@ -1654,7 +1682,7 @@ mod tests {
 		assert!(next_frame(&mut consumer).await.is_err());
 		let mut stamps = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(stamps, [100_000, 120_000]);
 	}
@@ -1707,7 +1735,7 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		let mut stamps = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(stamps.len(), 4, "each span's body and tail: {stamps:?}");
 		assert!(
@@ -1805,7 +1833,7 @@ mod tests {
 		// 312 samples at 48 kHz is 6.5 ms.
 		for (micros, frames) in [(0, 960 - 312), (13_500, 960), (33_500, 960)] {
 			let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
-			assert_eq!(frame.timestamp.as_micros(), micros);
+			assert_eq!(frame.timestamp.as_micros().unwrap(), micros);
 			assert_eq!(frame.data.len() / size_of::<f32>(), frames);
 		}
 	}
@@ -1847,9 +1875,13 @@ mod tests {
 		let mut reads = Vec::new();
 		while let Some(event) = consumer.read().await.unwrap() {
 			reads.push(match event {
-				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_micros()),
-				Read::Gap { timestamp, duration } => format!("gap {}+{}", timestamp.as_micros(), duration.as_micros()),
-				Read::End { end } => format!("end {}", end.as_micros()),
+				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_micros().unwrap()),
+				Read::Gap { timestamp, duration } => format!(
+					"gap {}+{}",
+					timestamp.as_micros().unwrap(),
+					duration.as_micros().unwrap()
+				),
+				Read::End { end } => format!("end {}", end.as_micros().unwrap()),
 			});
 		}
 		assert_eq!(reads, ["frame 0", "frame 20000", "gap 40000+460000", "frame 500000"]);
@@ -1980,7 +2012,7 @@ mod tests {
 		}
 
 		let first = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
-		assert_eq!(first.timestamp.as_micros(), 0);
+		assert_eq!(first.timestamp.as_micros().unwrap(), 0);
 
 		// Continuity, not a fixed number: the second frame starts where the first
 		// one's samples end, whatever they came to. Within a few frames rather than
@@ -1990,7 +2022,7 @@ mod tests {
 		let second = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		let first_frames = (first.data.len() / size_of::<f32>()) as u128;
 		let ends_at = first_frames * 1_000_000 / 48_000;
-		let gap = second.timestamp.as_micros().abs_diff(ends_at);
+		let gap = second.timestamp.as_micros().unwrap().abs_diff(ends_at);
 		assert!(gap < 100, "expected the frames to meet, got a {gap} us gap");
 	}
 
@@ -2052,7 +2084,7 @@ mod tests {
 		// It picks up where the first frame's samples ended, within the same few
 		// frames of whole-frame rounding as above.
 		let ends_at = (first_frames as u128) * 1_000_000 / 48_000;
-		let gap = tail.timestamp.as_micros().abs_diff(ends_at);
+		let gap = tail.timestamp.as_micros().unwrap().abs_diff(ends_at);
 		assert!(gap < 100, "expected the tail to meet the body, got a {gap} us gap");
 
 		// Together they cover the packet and no more: 1024 frames at 44.1 kHz is
@@ -2144,7 +2176,7 @@ mod tests {
 		// what labelling by the packet most recently submitted does, since the
 		// resampler is handing back audio from before that packet. It puts the
 		// boundary a chunk early instead of a fraction of a chunk late.
-		let delay = actual.as_micros() as i128 - expected.as_micros() as i128;
+		let delay = actual.as_micros().unwrap() as i128 - expected.as_micros().unwrap() as i128;
 		let chunk_us = 20_000i128;
 		assert!(
 			(0..chunk_us).contains(&delay),
@@ -2203,7 +2235,10 @@ mod tests {
 
 		let mut read = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			read.push((frame.timestamp.as_micros(), frame.data.len() / size_of::<f32>()));
+			read.push((
+				frame.timestamp.as_micros().unwrap(),
+				frame.data.len() / size_of::<f32>(),
+			));
 		}
 		read
 	}
@@ -2256,7 +2291,7 @@ mod tests {
 			kio::clock::timeout(wait, next_frame(consumer))
 				.await
 				.ok()
-				.map(|frame| Duration::from(frame.unwrap().unwrap().timestamp))
+				.map(|frame| Duration::try_from(frame.unwrap().unwrap().timestamp).unwrap())
 		};
 
 		// Ten packets cover 180 ms behind the first, short of the hold.
@@ -2318,7 +2353,7 @@ mod tests {
 		// The audio after the hole is stamped by its own packet. Rewinding over the
 		// resampler's buffer instead would put it ~3 ms early, in the middle of the
 		// hole, and splice the two sides together through the filter.
-		assert_eq!(read[2].0, stamps[1].as_micros());
+		assert_eq!(read[2].0, stamps[1].as_micros().unwrap());
 
 		// And the hole is the packet that never arrived: 1024 frames at 44.1 kHz.
 		let ends_at = read[1].0 + (read[1].1 as u128) * 1_000_000 / 48_000;
@@ -2361,7 +2396,7 @@ mod tests {
 		let read = pcm_gaps(44_100, 48_000, 882, &stamps).await;
 		let mut r = crate::resample::Resampler::new(44_100, 48_000, 1, 882).unwrap();
 		r.process(&[0.25; 882], stamps[0]).unwrap();
-		let expected = r.output_at(stamps[1]).unwrap().as_micros();
+		let expected = r.output_at(stamps[1]).unwrap().as_micros().unwrap();
 		assert_eq!(read[1].0, expected);
 	}
 
@@ -2440,7 +2475,11 @@ mod tests {
 		// The output begins with the first packet's samples, so it is stamped and
 		// labelled from that packet. Rewinding from the terminal one instead drops it
 		// most of a second into the future, carrying the DTX label with it.
-		assert_eq!(frame.timestamp.as_micros(), 0, "held samples moved with the jump");
+		assert_eq!(
+			frame.timestamp.as_micros().unwrap(),
+			0,
+			"held samples moved with the jump"
+		);
 		assert!(
 			frame.activity.is_active(),
 			"held samples took the terminal packet's label"
@@ -2551,7 +2590,7 @@ mod tests {
 		// The hole is real, so codec prediction starts over but stream-level pre-skip
 		// does not. The audio is stamped where the packet says rather than 2.5 ms early.
 		let second = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
-		assert_eq!(second.timestamp.as_micros(), 22_500);
+		assert_eq!(second.timestamp.as_micros().unwrap(), 22_500);
 		assert_eq!(second.data.len() / size_of::<f32>(), 960, "pre-skip was reapplied");
 
 		let third = next_frame(&mut consumer)
@@ -3040,7 +3079,7 @@ mod tests {
 		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		// `as_micros`, not `==`: the CMAF path carries the fmp4 timescale and
 		// `Timestamp`'s equality is structural, so the scales would have to match too.
-		assert_eq!(frame.timestamp.as_micros(), 0);
+		assert_eq!(frame.timestamp.as_micros().unwrap(), 0);
 		let samples = Format::F32.as_interleaved_f32(&frame.data, 2).unwrap();
 		assert_eq!(samples.len(), (960 - 312) * 2);
 	}

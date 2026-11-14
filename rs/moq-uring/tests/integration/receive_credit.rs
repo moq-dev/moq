@@ -172,7 +172,7 @@ fn partial_frame_gives_way() {
 				.expect("low group")
 				.create_frame(frame::Info {
 					size: WINDOW as u64,
-					timestamp: Some(Timestamp::from_millis(start).unwrap()),
+					timestamp: Timestamp::from_millis(start).unwrap(),
 				})
 				.expect("low frame");
 			low_frame.write(vec![1u8; WINDOW * 3 / 4]).expect("partial payload");

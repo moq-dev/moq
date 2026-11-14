@@ -72,7 +72,7 @@ impl Replies {
 /// past the newest the track holds.
 fn send(track: &moq_net::track::Producer, message: Vec<u8>) -> moq_net::Result<()> {
 	let mut group = track.append_group(track.largest().map_or(0, |largest| largest.group + 1))?;
-	group.write_frame(None, message)?;
+	group.write_frame(moq_net::Timestamp::unscaled(group.start), message)?;
 	group.close()?;
 	Ok(())
 }

@@ -283,7 +283,7 @@ impl MoqSocketTrackStream {
 mod tests {
 	use super::*;
 	use crate::error::MoqProtocolKind;
-	use crate::media::MoqFrame;
+	use crate::media::{MoqFrame, MoqTimestamp};
 	use std::future::Future;
 	use std::pin::Pin;
 	use std::task::{Context, Waker};
@@ -299,10 +299,11 @@ mod tests {
 		(a, b)
 	}
 
-	fn frame(payload: &[u8]) -> MoqFrame {
+	/// `payload` in `group`: socket tracks are scale-less, so a frame carries its group's key.
+	fn frame(group: &MoqGroupProducer, payload: &[u8]) -> MoqFrame {
 		MoqFrame {
 			payload: payload.into(),
-			timestamp: None,
+			timestamp: MoqTimestamp::unscaled(group.sequence()),
 		}
 	}
 
@@ -323,8 +324,8 @@ mod tests {
 		let reader = client.consumer();
 		let consumer = server.consumer();
 		drop(client);
-		producer.write_frame(frame(b"one")).unwrap();
-		producer.write_frame(frame(b"two")).unwrap();
+		producer.write_frame(frame(&producer, b"one")).unwrap();
+		producer.write_frame(frame(&producer, b"two")).unwrap();
 		producer.finish().unwrap();
 		drop(producer);
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().payload, b"one");
@@ -343,7 +344,10 @@ mod tests {
 		client.producer().abort(42).unwrap();
 		let error = server.consumer().read_frame().await.err().unwrap();
 		assert!(matches!(error, MoqError::Protocol { details } if details.kind == MoqProtocolKind::App));
-		other.producer().write_frame(frame(b"independent")).unwrap();
+		other
+			.producer()
+			.write_frame(frame(&other.producer(), b"independent"))
+			.unwrap();
 		other.producer().finish().unwrap();
 		assert_eq!(
 			peer.consumer().read_frame().await.unwrap().unwrap().payload,
@@ -422,10 +426,10 @@ mod tests {
 		assert!(consumer.info().max_age_unlimited);
 		// Create the later group first: the reliable ascending reader must wait for 0.
 		let later = producer.create_group(1).unwrap();
-		later.write_frame(frame(b"later")).unwrap();
+		later.write_frame(frame(&later, b"later")).unwrap();
 		later.finish().unwrap();
 		let first = producer.create_group(0).unwrap();
-		first.write_frame(frame(b"first")).unwrap();
+		first.write_frame(frame(&first, b"first")).unwrap();
 		first.finish().unwrap();
 		producer.finish().unwrap();
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().payload, b"first");

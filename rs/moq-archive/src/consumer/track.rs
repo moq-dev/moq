@@ -96,7 +96,7 @@ impl Live {
 			}
 		};
 		for frame in &entry.frames {
-			let timestamp = timestamp(frame.timestamp, self.timescale)?;
+			let timestamp = timestamp(frame.timestamp, self.timescale, entry.sequence)?;
 			open.group.write_frame(timestamp, frame.payload.clone())?;
 			open.next += 1;
 		}
@@ -335,7 +335,7 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		if index < frame {
 			continue;
 		}
-		let written = timestamp(stored.timestamp, timescale)
+		let written = timestamp(stored.timestamp, timescale, sequence)
 			.map_err(|_| moq_net::Error::ProtocolViolation)
 			.and_then(|timestamp| producer.write_frame(timestamp, stored.payload.clone()));
 		if let Err(err) = written {
@@ -364,10 +364,11 @@ pub(super) fn timescale(info: &Info) -> Result<Option<Timescale>> {
 }
 
 /// A stored timestamp on its track, which must be timed exactly when the frame is.
-fn timestamp(value: Option<u64>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
+fn timestamp(value: Option<u64>, timescale: Option<Timescale>, sequence: u64) -> Result<Timestamp> {
 	match (value, timescale) {
-		(Some(value), Some(timescale)) => Ok(Some(Timestamp::new(value, timescale).map_err(|_| Error::Id(value))?)),
-		(None, None) => Ok(None),
+		(Some(value), Some(timescale)) => Timestamp::new(value, timescale).map_err(|_| Error::Id(value)),
+		// A scale-less frame's timestamp is its group's key.
+		(None, None) => Ok(Timestamp::unscaled(sequence)),
 		_ => Err(Error::Timing),
 	}
 }

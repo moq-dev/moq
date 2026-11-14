@@ -1585,7 +1585,9 @@ mod test {
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::default()).unwrap();
 		let mut group = track.append_next().unwrap();
-		group.write_frame(crate::Timestamp::unscaled(group.start), &b"a"[..]).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), &b"a"[..])
+			.unwrap();
 		let mut handle = consumer.track("a").unwrap();
 		let waiter = kio::Waiter::noop();
 		assert_eq!(

@@ -562,7 +562,9 @@ fn bench_compressed_updates(c: &mut Criterion) {
 									)
 									.unwrap();
 								let mut group = track.append_group(0).unwrap();
-								group.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone()).unwrap();
+								group
+									.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone())
+									.unwrap();
 								group.close().unwrap();
 								track
 							})
@@ -575,7 +577,9 @@ fn bench_compressed_updates(c: &mut Criterion) {
 								for index in 0..concurrent {
 									let key = (1 + update * concurrent + index) as u64;
 									let mut group = track.append_group(key).unwrap();
-									group.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone()).unwrap();
+									group
+										.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone())
+										.unwrap();
 									groups.push(group);
 								}
 								for group in groups.drain(..) {
@@ -800,7 +804,9 @@ fn contended(
 				written = 0;
 			}
 			for _ in 0..burst {
-				group.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone()).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone())
+					.unwrap();
 			}
 			written += burst;
 			crew.run();
@@ -1059,7 +1065,8 @@ fn shed_live_group(payloads: &[Bytes]) -> Flights {
 	let mut reader = live.consume();
 	let waiter = kio::Waiter::noop();
 	for payload in payloads {
-		live.write_frame(moq_net::Timestamp::unscaled(live.start), payload.clone()).unwrap();
+		live.write_frame(moq_net::Timestamp::unscaled(live.start), payload.clone())
+			.unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_read_frame(&waiter) {}
 	}
 	Flights {
@@ -1126,7 +1133,10 @@ fn replay_flights(ctx: &Flights, payloads: &[Bytes], readers: usize, apart: usiz
 			while let Some(payload) = payloads.get(flight.next)
 				&& flight.group.poll_ready(&waiter, &frame_info(payload)).is_ready()
 			{
-				flight.group.write_frame(moq_net::Timestamp::unscaled(flight.group.start), payload.clone()).unwrap();
+				flight
+					.group
+					.write_frame(moq_net::Timestamp::unscaled(flight.group.start), payload.clone())
+					.unwrap();
 				flight.next += 1;
 				written += 1;
 			}

@@ -109,7 +109,7 @@ async fn import_onto(
 			let frame = hang::container::Frame::decode(frame.payload)?;
 			objects.push(Object {
 				group: group.start,
-				micros: frame.timestamp.as_micros() as u64,
+				micros: frame.timestamp.as_micros().unwrap() as u64,
 				payload: frame.payload,
 			});
 		}
@@ -620,11 +620,11 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let clock = catalog.clock();
 	let fixed = catalog.snapshot().media.clock;
 	tokio::time::advance(Duration::from_secs(5)).await;
-	let before = clock.now().as_micros() as u64;
+	let before = clock.now().as_micros().unwrap() as u64;
 	let shifted = import_onto(broadcast, catalog.clone(), &data, data.len(), None)
 		.await
 		.unwrap();
-	let after = clock.now().as_micros() as u64;
+	let after = clock.now().as_micros().unwrap() as u64;
 
 	assert_eq!(
 		catalog.snapshot().media.clock,

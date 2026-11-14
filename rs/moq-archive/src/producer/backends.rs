@@ -45,7 +45,9 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 	for (sequence, frames) in chat {
 		let mut group = text.create_group(group::Info { start: *sequence }).unwrap();
 		for frame in *frames {
-			group.write_frame(None, frame.to_string()).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(*sequence), frame.to_string())
+				.unwrap();
 		}
 		group.close().unwrap();
 	}

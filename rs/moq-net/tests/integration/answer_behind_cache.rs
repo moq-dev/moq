@@ -21,7 +21,9 @@ fn produce_origin(hop: u64) -> origin::Producer {
 
 fn write_group(track: &track::Producer, payload: &'static [u8]) {
 	let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
-	group.write_frame(moq_net::Timestamp::unscaled(group.start), payload).unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+		.unwrap();
 	group.close().unwrap();
 }
 
@@ -132,7 +134,8 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 		.unwrap();
 	route.announce().unwrap();
 	let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
-	g0.write_frame(moq_net::Timestamp::unscaled(g0.start), &b"0a"[..]).unwrap();
+	g0.write_frame(moq_net::Timestamp::unscaled(g0.start), &b"0a"[..])
+		.unwrap();
 
 	// A reader on the upper relay keeps its copy live after the lower relay leaves.
 	let local = kio::clock::timeout(TIMEOUT, upper.consume().follow("room", None).unwrap().available())
@@ -159,7 +162,8 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (0, b"0a".to_vec()));
 		g0.close().unwrap();
 		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
-		g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1a"[..]).unwrap();
+		g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1a"[..])
+			.unwrap();
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (1, b"1a".to_vec()));
 		let mut kept = kio::clock::timeout(TIMEOUT, keeper.recv_group())
 			.await
@@ -188,7 +192,8 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 	// The upper relay answers the resubscription before the feed moves on.
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	let mut g2 = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
-	g2.write_frame(moq_net::Timestamp::unscaled(g2.start), &b"2a"[..]).unwrap();
+	g2.write_frame(moq_net::Timestamp::unscaled(g2.start), &b"2a"[..])
+		.unwrap();
 	loop {
 		let (key, payload) = next_group(&mut subscriber).await.unwrap();
 		if key == 2 {

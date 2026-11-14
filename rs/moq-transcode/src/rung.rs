@@ -1230,7 +1230,10 @@ mod tests {
 			encoded.push(unit);
 		}
 
-		let timestamps: Vec<u64> = encoded.iter().map(|e| e.timestamp.as_micros() as u64).collect();
+		let timestamps: Vec<u64> = encoded
+			.iter()
+			.map(|e| e.timestamp.as_micros().unwrap() as u64)
+			.collect();
 		assert_eq!(
 			timestamps,
 			[0, 33_333, 66_666],

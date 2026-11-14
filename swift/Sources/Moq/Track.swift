@@ -169,8 +169,9 @@ public final class TrackProducer: Sendable {
         try ffi.skipGroups(start: start, end: end)
     }
 
-    /// Write a single-frame group with a presentation timestamp, or untimed when nil.
-    public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
+    /// Write a single-frame group with a presentation timestamp. A scale-less track has no time,
+    /// so there the timestamp is `Timestamp.unscaled(key)`, naming the new group's key.
+    public func writeFrame(_ payload: Data, timestamp: Timestamp) throws {
         try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }
 
@@ -225,9 +226,10 @@ public final class GroupProducer: Sendable {
         try await ffi.ready(size: size)
     }
 
-    /// Write a frame with a presentation timestamp, or untimed when nil. Never blocks:
-    /// without `ready`, a writer that outpaces its readers sheds the group's front instead.
-    public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
+    /// Write a frame with a presentation timestamp, or `Timestamp.unscaled(sequence)` on a
+    /// scale-less track. Never blocks: without `ready`, a writer that outpaces its readers sheds
+    /// the group's front instead.
+    public func writeFrame(_ payload: Data, timestamp: Timestamp) throws {
         try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }
 

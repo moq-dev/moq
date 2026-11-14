@@ -18,7 +18,7 @@ fn publish_catalog(
 		.unwrap();
 	let mut producer = moq_json::snapshot::Producer::new(track, Default::default());
 	producer
-		.update(moq_json::Timed::from(catalog).at(moq_net::Timestamp::ZERO))
+		.update(moq_json::Timed::new(catalog, moq_net::Timestamp::ZERO))
 		.unwrap();
 	producer
 }

@@ -904,7 +904,7 @@ async fn capture_loop<S: CaptureSource>(
 		// once at open so every queued frame maps to the shared broadcast epoch
 		// without mistaking dequeue time for acquisition time.
 		let mut capture_epoch =
-			u64::try_from(clock.now().as_micros().saturating_sub(camera.now().as_micros())).unwrap_or(u64::MAX);
+			u64::try_from(clock.now().as_micros()?.saturating_sub(camera.now().as_micros()?)).unwrap_or(u64::MAX);
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
 		let framerate = capture
@@ -1005,7 +1005,7 @@ async fn capture_loop<S: CaptureSource>(
 			if let Some(last) = last
 				&& mapped <= last
 			{
-				let behind = u64::try_from(last.as_micros() - mapped.as_micros()).unwrap_or(u64::MAX);
+				let behind = u64::try_from(last.as_micros()? - mapped.as_micros()?).unwrap_or(u64::MAX);
 				capture_epoch = capture_epoch.saturating_add(behind).saturating_add(1);
 				mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
 			}
@@ -1058,7 +1058,7 @@ async fn capture_loop<S: CaptureSource>(
 
 #[cfg(feature = "capture")]
 fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Timestamp, Error> {
-	let capture_micros = u64::try_from(timestamp.as_micros()).unwrap_or(u64::MAX);
+	let capture_micros = u64::try_from(timestamp.as_micros()?).unwrap_or(u64::MAX);
 	Ok(Timestamp::from_micros(epoch_micros.saturating_add(capture_micros))?)
 }
 
@@ -1566,7 +1566,7 @@ mod tests {
 			loop {
 				let read = track.read().await.unwrap().expect("a published frame");
 				if let moq_mux::container::Read::Frame { frame, .. } = read {
-					return u64::try_from(frame.timestamp.as_micros()).unwrap();
+					return u64::try_from(frame.timestamp.as_micros().unwrap()).unwrap();
 				}
 			}
 		}

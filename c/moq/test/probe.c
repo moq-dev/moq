@@ -495,11 +495,10 @@ int main(void)
 	result reading = {0};
 	task = moq_track_consumer_read_frame(consumer, on_frame, &reading);
 	const uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
-	moq_frame frame = moq_frame_default();
-	frame.payload.data = hello;
-	frame.payload.len = sizeof(hello);
-	moq_timestamp timestamp = {1000, 1000000};
-	frame.timestamp = &timestamp;
+	moq_frame frame = {
+		.payload = {.data = hello, .len = sizeof(hello)},
+		.timestamp = {.value = 1000, .scale = {.has_value = true, .value = 1000000}},
+	};
 	ok(moq_track_producer_write_frame(track, &frame), "write_frame");
 	moq_frame *received = await(&reading, "read_frame");
 	moq_task_free(task);
@@ -507,7 +506,8 @@ int main(void)
 	CHECK(received->payload.len == sizeof(hello));
 	CHECK(memcmp(received->payload.data, hello, sizeof(hello)) == 0);
 	/* Lite-07 carries both the Implementation parameter and frame timestamps, at any scale. */
-	CHECK(received->timestamp && received->timestamp->value * 1000000 == 1000 * received->timestamp->scale);
+	CHECK(received->timestamp.scale.has_value &&
+	      received->timestamp.value * 1000000 == 1000 * received->timestamp.scale.value);
 	moq_frame_free(received);
 	CHECK(!cancelled.done);
 

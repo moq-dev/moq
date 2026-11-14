@@ -127,6 +127,7 @@ int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_l
 int32_t moq_publish_track_group(uint32_t track);
 int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
+int32_t moq_publish_group_sequence(uint32_t group, uint64_t *dst);
 int32_t moq_publish_group_finish(uint32_t group);
 int32_t moq_publish_group_ready(uint32_t group, uint64_t size, moq_status_callback on_ready, void *user_data);
 int32_t moq_publish_track_finish(uint32_t track);
@@ -214,10 +215,10 @@ int32_t moq_audio_encoder_frame_size(uint32_t encoder);
 int32_t moq_audio_encoder_init(uint32_t encoder, moq_audio_init *dst);
 int32_t moq_audio_encoder_bitrate(uint32_t encoder, uint64_t bitrate);
 int32_t moq_audio_encoder_encode(uint32_t encoder, const float *pcm, uintptr_t pcm_len);
-int32_t moq_audio_encoder_receive(uint32_t encoder, moq_frame *dst);
+int32_t moq_audio_encoder_receive(uint32_t encoder, moq_audio_packet *dst);
 int32_t moq_audio_encoder_flush(uint32_t encoder);
 int32_t moq_audio_encoder_finish(uint32_t encoder, const float *pcm, uintptr_t pcm_len, uint64_t *discard_padding);
-int32_t moq_audio_encoder_packet(uint32_t encoder, uint32_t index, moq_frame *dst);
+int32_t moq_audio_encoder_packet(uint32_t encoder, uint32_t index, moq_audio_packet *dst);
 int32_t moq_audio_encoder_free(uint32_t encoder);
 int32_t moq_video_encoder_create(const moq_video_encoder_input *input, const moq_video_encoder_output *output);
 int32_t moq_video_encoder_encode(uint32_t encoder, const moq_video_encoder_frame *frame);
@@ -230,10 +231,14 @@ int32_t moq_video_encoder_free(uint32_t encoder);
 
 Raw track frames use the same `moq_frame` record as media frames. Timestamps
 are exact `moq_timestamp` records, `value` units at `scale` units per second.
-`moq_publish_track_frame` and `moq_publish_group_frame` convert theirs to the
-track's timescale, a microsecond one unless `moq_track_info.timescale` sets
-another, and `moq_consume_track_frame` points `moq_frame.timestamp` at the
-timestamp read, valid until the frame is freed, or NULL on an untimed track.
+A scale-less track has no time, so there `has_scale` is false and `value` is
+the frame's group key (a datagram's sequence). Every write takes a non-NULL
+timestamp: `moq_publish_track_frame` and `moq_publish_group_frame` convert
+theirs to the track's timescale, a microsecond one unless
+`moq_track_info.timescale` sets another, and `moq_publish_group_sequence` reads
+the key a scale-less group's frames carry. `moq_consume_track_frame` points
+`moq_frame.timestamp` at the timestamp read, never NULL, valid until the frame
+is freed.
 
 A zeroed `moq_track_info`, like a NULL one, advertises a zero max age, how long
 a superseded group stays fresh, so only the live edge is served. Set
@@ -242,9 +247,10 @@ which ignores `max_age_us`. Zero-initialize the struct
 (`moq_track_info info = {0};`) before assigning members, so every flag starts
 false.
 
-JSON window pushes and pops accept an optional `const moq_timestamp *timestamp`,
+JSON window pushes and pops take a required `const moq_timestamp *timestamp`,
 like snapshot updates and stream appends. It is when the edit occurred,
-converted to the track's milliseconds; pass NULL to stamp the broadcast clock.
+converted to the track's milliseconds; stamp it from `moq_publish_catalog_now`.
+A NULL timestamp fails with `MOQ_ERROR_INVALID_POINTER`.
 
 ```c
 int32_t moq_publish_json_window_push(uint32_t window, const char *value, uintptr_t value_len, const moq_timestamp *timestamp);

@@ -2010,7 +2010,8 @@ fn build_buffer(frame: moq_mux::container::Frame, kind: TrackKind) -> Result<gst
 	let buffer_mut = buffer.get_mut().unwrap();
 
 	let pts =
-		gst::ClockTime::try_from(Duration::from(frame.timestamp)).context("timestamp exceeds GStreamer clock range")?;
+		gst::ClockTime::try_from(Duration::try_from(frame.timestamp).context("an unscaled timestamp has no time")?)
+			.context("timestamp exceeds GStreamer clock range")?;
 	buffer_mut.set_pts(Some(pts));
 
 	let mut flags = buffer_mut.flags();

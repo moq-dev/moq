@@ -178,7 +178,7 @@ client = moq.Client(
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.reject(code)` to fail the subscriber.
   - Async iterator yielding `TrackRequest`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
-  - `.write_frame(payload, timestamp=None)` writes a payload with optional capture time.
+  - `.write_frame(payload, timestamp)` writes a payload with its capture time; on a scale-less track (no `timescale`) the timestamp is `Timestamp.unscaled(key)` at the frame's group key.
   - `await .ready(size)` (`GroupProducer`) waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each write for backpressure. A writer that doesn't wait sheds the front of the group instead.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
   - `.skip_groups(start, end)` (`TrackProducer`) declares groups `start` up to the exclusive `end` will never be produced, so readers move past them; creating one there then fails.
@@ -230,8 +230,8 @@ on the broadcast clock, read with `media.CatalogProducer.now()`, so their track 
 A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
-A raw frame may omit its timestamp on an untimed track, but every JSON write takes one on the
-broadcast clock. Publish JSON tracks with
+A raw frame on a scale-less track carries `Timestamp.unscaled` at its group key, but every JSON
+write takes a time on the broadcast clock. Publish JSON tracks with
 `TrackInfo(compression=moq.Compression.DEFLATE)`: the track compresses each group on the wire, and consumers read it the
 same either way. Opaque bytes go on a plain `TrackProducer`.
 
@@ -303,10 +303,10 @@ moq-transport on every relay hop; this API does not add pre-07 capability detect
 ### Types
 
 - **`media.Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
-- **`Timestamp`**. `.value: int` units at `.scale: int` units per second, exact at any scale such as 90 kHz. `Timestamp.from_timedelta(duration)` is exact at microsecond scale; `.to_timedelta()` rounds down to a whole microsecond. A write with a scale of 0 or past `2**62 - 1`, or a value past `2**61 - 1`, raises `Error.TimeOverflow`.
-- **`Frame`**. `.payload: bytes`, `.timestamp: Timestamp | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
+- **`Timestamp`**. `.value: int` units at `.scale: int | None` units per second, exact at any scale such as 90 kHz. `Timestamp.unscaled(key)` has no scale: on a scale-less track it is a frame's group key or a datagram's sequence. `Timestamp.from_timedelta(duration)` is exact at microsecond scale; `.to_timedelta()` rounds down to a whole microsecond, and raises `ValueError` when unscaled. A write with a scale of 0 or past `2**62 - 1`, or a value past `2**61 - 1`, raises `Error.TimeOverflow`.
+- **`Frame`**. `.payload: bytes`, `.timestamp: Timestamp`. The unit of every write and every raw read; on a scale-less track the timestamp is `Timestamp.unscaled` at the group key.
 - **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: Timestamp`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite.
+- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp`, `.payload: bytes`; on a scale-less track the timestamp is `Timestamp.unscaled(sequence)`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
@@ -332,7 +332,8 @@ moq-transport on every relay hop; this API does not add pre-07 capability detect
 
 Create a separate live track with `broadcast.create_datagrams(name, info)` and subscribe
 with `broadcast.consume().datagrams(name)`. The `DatagramProducer` writes with
-`append(payload, timestamp=...)` or `insert(Datagram(...))`, and the `DatagramConsumer`
+`append(payload, timestamp=...)` (on a scale-less track, `Timestamp.unscaled(sequence)` writes at that
+sequence) or `insert(Datagram(...))`, and the `DatagramConsumer`
 reads with `await recv()` or async iteration. Demand is aggregate subscriber `priority()` /
 `await priority_changed(last)`; `broadcast.requests().datagrams()` handles on-demand tracks.
 Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05 or

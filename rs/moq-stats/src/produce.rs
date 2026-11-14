@@ -532,10 +532,7 @@ impl<T: Serialize> Snapshot<T> {
 		let len = frame.payload.len();
 		let timestamp = stamp.timestamp;
 		if frame.keyframe {
-			let Some(start) = self.track.info().rescale(Some(timestamp))? else {
-				unreachable!("a timestamp rescales to a timestamp");
-			};
-			let start = start.value();
+			let start = self.track.info().rescale(timestamp)?.value();
 			// The interval already has its group, or a group starts at this timestamp (an
 			// interval under a millisecond): the uncommitted frame is encoded again next tick.
 			if self.opened.is_some_and(|opened| stamp.group <= opened)

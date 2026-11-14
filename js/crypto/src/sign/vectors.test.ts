@@ -28,9 +28,12 @@ function scope(row: Row): Scope {
 }
 
 // A row's timestamp at its timescale, or undefined when the timescale is 0 (untimed).
-function timestamp(row: Row): Time.Timestamp | undefined {
+// A scale-less row carries its group's key, which the signature does not bind.
+function timestamp(row: Row): Time.Timestamp {
 	const scale = Number(row.timescale);
-	return scale === 0 ? undefined : new Time.Timestamp(Number(row.timestamp), Time.Timescale(scale));
+	return scale === 0
+		? Time.Timestamp.unscaled(BigInt(row.group as number | string))
+		: new Time.Timestamp(Number(row.timestamp), Time.Timescale(scale));
 }
 
 test("keys", async () => {

@@ -96,9 +96,9 @@ fn describe(frame: &Frame) -> String {
 	}
 }
 
-fn read(timestamp: Option<Timestamp>, payload: Bytes) -> String {
+fn read(timestamp: Timestamp, payload: Bytes) -> String {
 	describe(&Frame {
-		timestamp: timestamp.map(Timestamp::value),
+		timestamp: timestamp.scale().map(|_| timestamp.value()),
 		payload,
 	})
 }
@@ -208,7 +208,7 @@ async fn a_recording_round_trips() {
 		sleep(Duration::from_millis(10)).await;
 	}
 	let mut group = log.create_group(group::Info { start: 0 }).unwrap();
-	group.write_frame(None, "a").unwrap();
+	group.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
 	group.close().unwrap();
 	sleep(Duration::from_millis(10)).await;
 	let _video = video.finish().unwrap();
@@ -230,7 +230,7 @@ async fn a_recording_round_trips() {
 		assert_eq!(group.start, sequence);
 		for index in 0..3 {
 			let frame = group.read_frame().await.unwrap().unwrap();
-			assert_eq!(frame.timestamp.unwrap().value(), sequence * 10_000 + index);
+			assert_eq!(frame.timestamp.value(), sequence * 10_000 + index);
 			assert_eq!(&frame.payload[..], &[sequence as u8, index as u8, 0xff]);
 		}
 		assert!(group.read_frame().await.unwrap().is_none());

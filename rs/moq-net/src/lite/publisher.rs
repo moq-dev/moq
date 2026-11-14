@@ -2912,11 +2912,7 @@ impl DatagramSend {
 	/// every datagram its source produces later is at least as far, so the subscription can
 	/// deliver no more. One the network reordered below it is lost, as any datagram may be.
 	fn send(&self, datagram: crate::datagram::Datagram) -> Result<(), Error> {
-		let Ok(timestamp) = self
-			.stamp
-			.map(|stamp| stamp.wire(datagram.timestamp))
-			.transpose()
-		else {
+		let Ok(timestamp) = self.stamp.map(|stamp| stamp.wire(datagram.timestamp)).transpose() else {
 			return Ok(());
 		};
 		let sequence = datagram.sequence;
@@ -6300,7 +6296,9 @@ impl PausedBench {
 		// Past the subscribed ranges, so the run itself never serves them.
 		for start in 100..100 + paused {
 			let mut group = coverage.track.create_group(group::Info { start }).unwrap();
-			group.write_frame(crate::Timestamp::unscaled(start), b"x".to_vec()).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(start), b"x".to_vec())
+				.unwrap();
 			coverage.run.pause(Paused {
 				group: group.consume(),
 				frame_start: 0,
@@ -7883,8 +7881,12 @@ mod serve_group_test {
 		let subscriber = track.subscribe(None);
 		let (mut run, _, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), subscriber);
 		let mut group = track.append_next().unwrap();
-		group.write_frame(crate::Timestamp::unscaled(group.start), &b"key"[..]).unwrap();
-		group.write_frame(crate::Timestamp::unscaled(group.start), &b"more"[..]).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), &b"key"[..])
+			.unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), &b"more"[..])
+			.unwrap();
 		group.close().unwrap();
 		let update = |wanted_group| lite::SubscribeUpdate {
 			wanted_group,
@@ -7900,7 +7902,9 @@ mod serve_group_test {
 		run.replace(update(Some(1)));
 		assert_eq!(track.demand().wanted(), Some(1));
 		let mut group = track.append_next().unwrap();
-		group.write_frame(crate::Timestamp::unscaled(group.start), &b"key"[..]).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), &b"key"[..])
+			.unwrap();
 		group.close().unwrap();
 		run.replace(update(Some(1)));
 		assert_eq!(track.demand().wanted(), Some(1), "answered request stays answered");
@@ -11310,7 +11314,9 @@ mod tests {
 				let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 				assert!(!drive(&mut track_info).await, "{case}: the TRACK stream is held");
 
-				datagrams.append(crate::Timestamp::unscaled(0), b"between".as_slice()).unwrap();
+				datagrams
+					.append(crate::Timestamp::unscaled(0), b"between".as_slice())
+					.unwrap();
 
 				let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(-5)).await;
 				assert!(!drive(&mut subscribe).await, "{case}: the subscription is live");
@@ -11351,7 +11357,9 @@ mod tests {
 
 			let _track = reserved.accept(crate::track::Info::timed());
 			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
-			datagrams.append(crate::Timestamp::unscaled(0), b"between".as_slice()).unwrap();
+			datagrams
+				.append(crate::Timestamp::unscaled(0), b"between".as_slice())
+				.unwrap();
 			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
 			assert_eq!(log.lock().unwrap().len(), 1, "{version:?}");
 		}
@@ -11373,7 +11381,9 @@ mod tests {
 
 			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
-			datagrams.append(crate::Timestamp::unscaled(0), b"between".as_slice()).unwrap();
+			datagrams
+				.append(crate::Timestamp::unscaled(0), b"between".as_slice())
+				.unwrap();
 			let mut newer = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 			assert!(!drive(&mut newer).await, "{version:?}: the newer TRACK stream is held");
 
@@ -11399,7 +11409,9 @@ mod tests {
 
 			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
-			first.append(crate::Timestamp::unscaled(0), b"first".as_slice()).unwrap();
+			first
+				.append(crate::Timestamp::unscaled(0), b"first".as_slice())
+				.unwrap();
 			first.finish();
 
 			let mut current = broadcast
@@ -11408,7 +11420,9 @@ mod tests {
 				.unwrap();
 			let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
-			current.append(crate::Timestamp::unscaled(0), b"current".as_slice()).unwrap();
+			current
+				.append(crate::Timestamp::unscaled(0), b"current".as_slice())
+				.unwrap();
 
 			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
 			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");

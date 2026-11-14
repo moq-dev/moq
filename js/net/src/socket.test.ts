@@ -10,6 +10,7 @@ import { Origin, Path, Socket } from "./index.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
+import { Timestamp } from "./time.ts";
 import type * as Track from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -26,7 +27,9 @@ function time() {
 	clocks.push(clock.install());
 	return clock;
 }
-const bytes = (value: number) => ({ payload: new Uint8Array([value]) });
+// A scale-less frame of `value`, in the group `key` names: a TCP half's only group, or a track
+// message's own group.
+const bytes = (value: number, key = 0n) => ({ payload: new Uint8Array([value]), timestamp: Timestamp.unscaled(key) });
 function setup() {
 	const origin = new Origin.Producer();
 	origins.add(origin);
@@ -166,7 +169,7 @@ test("track halves start reliable and ascending, preserve old messages and accep
 	expect((await local.producer.info()).maxAge).toBeNull();
 	expect(remote.consumer.subscription.peek()?.order).toBe("ascending");
 	expect(remote.consumer.subscription.peek()?.delay?.max).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
-	for (let i = 0; i < 3; i++) local.producer.writeFrame(bytes(i));
+	for (let i = 0; i < 3; i++) local.producer.writeFrame(bytes(i, BigInt(i)));
 	local.producer.finish();
 	const reader = remote.consumer.ordered();
 	for (let i = 0; i < 3; i++) {
@@ -187,7 +190,7 @@ test("a track session skips dropped groups and keeps the next message", async ()
 	const reading = reader.readFrame();
 	hooks.dropTrackGroups(local.producer, 0n, 1n, { error: new NotFound("message unavailable") });
 	const group = local.producer.createGroup(1n);
-	group.writeFrame(bytes(7));
+	group.writeFrame(bytes(7, 1n));
 	group.finish();
 	local.producer.finish();
 	await clock.advance(Duration.ZERO);
@@ -500,7 +503,7 @@ test("a second TCP group resets the session even after the first FIN", async () 
 		const producer = answer.accept();
 		const stream = await acceptance;
 		const group = producer.createGroup(initial);
-		group.writeFrame(bytes(1));
+		group.writeFrame(bytes(1, initial));
 		group.finish();
 		if (initial === 0n) {
 			expect((await stream.consumer.readFrame())?.payload).toEqual(bytes(1).payload);
@@ -548,7 +551,7 @@ test("unpaced TCP eviction is an error, never a skipped frame or clean FIN", asy
 	// The local group's bounded tail is 32 MiB. Every payload is a distinct frame identity.
 	const payload = new Uint8Array(1024 * 1024);
 	for (let i = 0; i < 32; i++) {
-		local.producer.writeFrame({ payload });
+		local.producer.writeFrame({ payload, timestamp: Timestamp.unscaled(local.producer.sequence) });
 		await clock.advance(Duration.ZERO);
 	}
 	local.producer.finish();
@@ -613,7 +616,7 @@ for (const protocol of ["tcp", "track"] as const) {
 				for (let i = 1; i <= 3; i++) group.writeFrame(bytes(i));
 				group.finish();
 			} else {
-				for (let i = 1; i <= 3; i++) staged.producer.writeFrame(bytes(i));
+				for (let i = 1; i <= 3; i++) staged.producer.writeFrame(bytes(i, BigInt(i - 1)));
 			}
 			staged.producer.finish();
 			staged.commit();

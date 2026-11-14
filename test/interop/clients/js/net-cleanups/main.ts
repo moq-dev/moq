@@ -9,20 +9,20 @@ import { createMockTransportPair } from "../../../../../js/net/src/mock";
 /** Exercise public readers and accepted connections in the browser. */
 export async function run() {
 	const group = new Net.Group.Producer(0n);
-	group.writeFrame({ payload: new TextEncoder().encode("first") });
+	group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Net.Time.Timestamp.unscaled(0n) });
 	const first = group.consume();
 	const a = await first.readString();
 	const second = group.consume();
 	const b = await second.readString();
 	first.close();
-	group.writeFrame({ payload: new TextEncoder().encode("second") });
+	group.writeFrame({ payload: new TextEncoder().encode("second"), timestamp: Net.Time.Timestamp.unscaled(0n) });
 	const c = await second.readString();
 	group.finish();
 	second.close();
 	const json = new Net.Group.Producer(0n);
 	const reader = json.consume();
-	json.writeFrame({ payload: new Uint8Array() });
-	json.writeFrame({ payload: new TextEncoder().encode("false") });
+	json.writeFrame({ payload: new Uint8Array(), timestamp: Net.Time.Timestamp.unscaled(0n) });
+	json.writeFrame({ payload: new TextEncoder().encode("false"), timestamp: Net.Time.Timestamp.unscaled(0n) });
 	json.finish();
 	let malformed = false;
 	try {

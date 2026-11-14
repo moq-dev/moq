@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
 						commands.next_line().await?.as_deref() == Some(&format!("datagram {sequence}")),
 						"missing datagram command"
 					);
-					track.append(None, vec![sequence as u8; 900])?;
+					track.append(moq_net::Timestamp::unscaled(sequence), vec![sequence as u8; 900])?;
 				}
 				ensure!(
 					commands.next_line().await?.as_deref() == Some("clean end"),
@@ -233,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
 						frame.payload.iter().all(|byte| *byte == sequence as u8),
 						"corrupt datagram"
 					);
-					ensure!(frame.timestamp.is_none(), "unexpected IETF timestamp");
+					ensure!(frame.timestamp.scale().is_none(), "unexpected IETF timestamp");
 					println!("datagram {sequence}");
 				}
 				eprintln!("datagram clean groups=0,1,2,3 bytes=3600");

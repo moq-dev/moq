@@ -45,7 +45,8 @@ function serve(fill: Fill, archive: Archive): void {
 			continue;
 		}
 		const group = fill.accept(sequence);
-		for (const frame of frames) group.writeFrame({ payload: enc.encode(frame) });
+		for (const frame of frames)
+			group.writeFrame({ payload: enc.encode(frame), timestamp: Timestamp.unscaled(group.sequence) });
 		group.finish();
 	}
 	fill.close();
@@ -72,7 +73,7 @@ function resumed(first: bigint): { broadcast: BroadcastProducer; track: Producer
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
 	const group = track.createGroup(first);
-	group.writeFrame({ payload: enc.encode(`live ${first}`) });
+	group.writeFrame({ payload: enc.encode(`live ${first}`), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	return { broadcast, track };
 }
@@ -134,7 +135,7 @@ test("fill: a fetch of a group about to be written asks the handler at once, and
 
 	// The producer gets there before the handler answers: the live write is the answer.
 	const group = track.createGroup(7n);
-	group.writeFrame({ payload: enc.encode("written") });
+	group.writeFrame({ payload: enc.encode("written"), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	expect(fill.wanted()).toBeUndefined();
 	expect(await frames(await fetching)).toEqual(["written"]);
@@ -214,7 +215,7 @@ test("fill: an answer aborted below the end does not hold the end open", async (
 		const fill = await requests.requestedFill();
 		if (!fill) throw new Error("no fill");
 		const group = fill.accept(0n);
-		group.writeFrame({ payload: enc.encode("backfill") });
+		group.writeFrame({ payload: enc.encode("backfill"), timestamp: Timestamp.unscaled(group.sequence) });
 		if (parked) {
 			track.finishAt({ group: 2n, frame: 0 });
 			await yieldNow();
@@ -350,7 +351,7 @@ test("fill: a held answer that fails keeps its frames and its failure", async ()
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill");
 	const answer = fill.accept(1n);
-	answer.writeFrame({ payload: enc.encode("fill 1") });
+	answer.writeFrame({ payload: enc.encode("fill 1"), timestamp: Timestamp.unscaled(answer.sequence) });
 	const group = await fetching;
 	const failure = new Error("archive failed");
 	answer.abort(failure);
@@ -380,7 +381,7 @@ test("fill: an answer withheld after a probe judged it is asked again", async ()
 	if (!fill) throw new Error("no fill");
 	fill.accept(0n).finish();
 	const answer = fill.accept(2n);
-	answer.writeFrame({ payload: enc.encode("fill 2") });
+	answer.writeFrame({ payload: enc.encode("fill 2"), timestamp: Timestamp.unscaled(answer.sequence) });
 	expect((await first)?.sequence).toBe(0n);
 	// Waiting on group 1, the bounded window probes everything it names, group 2 held among it.
 	const second = ordered.nextGroup();
@@ -411,7 +412,7 @@ test("fill: a gap below a group that fails after a probe is asked", async () => 
 	const ordered = reader.ordered();
 	const failed = track.createGroup(2n);
 	const group = track.createGroup(4n);
-	group.writeFrame({ payload: enc.encode("live 4") });
+	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.sequence) });
 	failed.abort(new StreamError(StreamCode.Cancel));
 	await yieldNow();
 	// Judged stale against group 4, so not asked.
@@ -437,7 +438,7 @@ test("fill: a gap the newest group rises over after a probe is asked", async () 
 	expect(reader.tryRecvGroup()?.sequence).toBe(2n);
 	expect(reader.tryRecvGroup()).toBeUndefined();
 	const group = track.createGroup(5n);
-	group.writeFrame({ payload: enc.encode("live 5") });
+	group.writeFrame({ payload: enc.encode("live 5"), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	expect(reader.tryRecvGroup()?.sequence).toBe(5n);
 	reader.tryRecvGroup();
@@ -589,7 +590,7 @@ test("fill: a group arriving after a refusal reaches the reader the refusal name
 	fill.refuseGroups(2n, 3n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
 	// Before the waiting fetch looks again.
 	const group = track.createGroup(2n);
-	group.writeFrame({ payload: enc.encode("late") });
+	group.writeFrame({ payload: enc.encode("late"), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	fill.close();
 	expect(await frames(await waiting)).toEqual(["late"]);
@@ -664,7 +665,7 @@ test("fill: a stale verdict leaves an outstanding fill owed", async () => {
 	hooks.dropTrackGroups(track, 2n, 3n, staleHole(500));
 	expect(fill.wanted()).toBe(2n);
 	const group = fill.accept(2n);
-	group.writeFrame({ payload: enc.encode("filled") });
+	group.writeFrame({ payload: enc.encode("filled"), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	expect(await frames(await fetching)).toEqual(["filled"]);
 
@@ -685,7 +686,7 @@ test("fill: a group arriving live answers the fill", async () => {
 
 	// The producer writes it itself before the handler gets to it.
 	const live = track.createGroup(1n);
-	live.writeFrame({ payload: enc.encode("live") });
+	live.writeFrame({ payload: enc.encode("live"), timestamp: Timestamp.unscaled(live.sequence) });
 	live.finish();
 	expect(fill.wanted()).toBeUndefined();
 	expect(() => fill.accept(1n)).toThrow();
@@ -798,7 +799,10 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		const track = broadcast.createTrack("video", { maxAge: null });
 		const write = (sequence: bigint) => {
 			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: enc.encode(`live ${sequence}`) });
+			group.writeFrame({
+				payload: enc.encode(`live ${sequence}`),
+				timestamp: Timestamp.unscaled(group.sequence),
+			});
 			group.finish();
 		};
 		// Holes 0-1 wait on group 2, which arrives first; holes 3-4 on group 5, half a second later.
@@ -826,7 +830,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		// Holes 0-1 are past the budget now, but 3-4 are not: the read waits on them.
 		await clock.advance(Duration.millis(600));
 		const late = fills[1].accept(3n);
-		late.writeFrame({ payload: enc.encode("old 3") });
+		late.writeFrame({ payload: enc.encode("old 3"), timestamp: Timestamp.unscaled(late.sequence) });
 		late.finish();
 		expect((await next)?.sequence).toBe(3n);
 
@@ -873,7 +877,7 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 
 	for (const sequence of [2n, 7n]) {
 		const group = fill.accept(sequence);
-		group.writeFrame({ payload: enc.encode(`old ${sequence}`) });
+		group.writeFrame({ payload: enc.encode(`old ${sequence}`), timestamp: Timestamp.unscaled(group.sequence) });
 		group.finish();
 	}
 	// The wide reader still waits on the rest of the fill; the narrow one has all it reads.
@@ -987,7 +991,7 @@ test("fill: a filled group stays wanted only while a reader will still read it",
 	if (!fill) throw new Error("no fill");
 	expect(fill.wanted()).toBe(0n);
 	const source = fill.accept(0n);
-	source.writeFrame({ payload: enc.encode("g0") });
+	source.writeFrame({ payload: enc.encode("g0"), timestamp: Timestamp.unscaled(source.sequence) });
 	const taken = await next;
 	expect(taken?.sequence).toBe(0n);
 
@@ -1413,7 +1417,7 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: Duration.millis(10_000) });
 	const live = track.createGroup(3n);
-	live.writeFrame({ payload: enc.encode("live 3") });
+	live.writeFrame({ payload: enc.encode("live 3"), timestamp: Timestamp.unscaled(live.sequence) });
 	live.finish();
 	const requests = track.requests();
 	const terms: Subscription = {

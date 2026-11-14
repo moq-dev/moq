@@ -1497,7 +1497,7 @@ mod tests {
 			panic!("first catalog")
 		};
 		assert_eq!(
-			first.media.clock.unwrap().wall.as_micros(),
+			first.media.clock.unwrap().wall.as_micros().unwrap(),
 			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
 				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
 				.as_micros(),
@@ -1540,7 +1540,7 @@ mod tests {
 				)
 			};
 			assert_eq!(
-				clock.wall.as_micros(),
+				clock.wall.as_micros().unwrap(),
 				(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(zero))
 					.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
 					.as_micros()
@@ -1558,7 +1558,7 @@ mod tests {
 				let moq_mux::container::Read::Frame { frame, .. } = read else {
 					panic!("media frame")
 				};
-				assert_eq!(frame.timestamp.as_micros(), expected * 1_000_000, "{name}");
+				assert_eq!(frame.timestamp.as_micros().unwrap(), expected * 1_000_000, "{name}");
 			}
 			run.0.set_state(gst::State::Null).unwrap();
 		}

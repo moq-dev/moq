@@ -31,7 +31,10 @@ const serving = (async () => {
 
 function write(sequence: bigint): void {
 	const group = track.createGroup(sequence);
-	group.writeFrame({ payload: new TextEncoder().encode(String(sequence)) });
+	group.writeFrame({
+		payload: new TextEncoder().encode(String(sequence)),
+		timestamp: Moq.Time.Timestamp.unscaled(sequence),
+	});
 	group.finish();
 }
 
@@ -105,7 +108,10 @@ try {
 						assert.equal(fill.end, future + 1n);
 						assert.equal(fill.maxDelay, null);
 						const group = fill.accept(future);
-						group.writeFrame({ payload: new TextEncoder().encode(String(future)) });
+						group.writeFrame({
+							payload: new TextEncoder().encode(String(future)),
+							timestamp: Moq.Time.Timestamp.unscaled(future),
+						});
 						group.finish();
 						return;
 					} finally {

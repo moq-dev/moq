@@ -2388,8 +2388,12 @@ mod tests {
 			.clone()
 			.unwrap();
 		let mut group = copy.create_group(crate::model::group::Info { start: 5 }).unwrap();
-		group.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice()).unwrap();
-		group.write_frame(crate::Timestamp::unscaled(group.start), b"delta".as_slice()).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice())
+			.unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), b"delta".as_slice())
+			.unwrap();
 
 		// A join past the ratio asks for group 6, which stays outstanding.
 		let join = track.subscribe(None).await.unwrap();

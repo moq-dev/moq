@@ -2,12 +2,13 @@ import { expect, test } from "bun:test";
 import * as z from "zod/mini";
 import { Producer } from "./group.ts";
 import { textFrame } from "./mock.ts";
+import { Timestamp } from "./time.ts";
 import * as Zod from "./zod.ts";
 
 test("read validates each frame and ends only at the end of the group", async () => {
 	const producer = new Producer(0n);
 	const consumer = producer.consume();
-	producer.writeFrame({ payload: new Uint8Array() });
+	producer.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(producer.sequence) });
 	// Falsy values are frames like any other, not the end of the stream.
 	for (const json of ["0", "false", "null", '"ok"']) producer.writeFrame(textFrame(json));
 	producer.finish();

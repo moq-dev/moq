@@ -12,7 +12,7 @@ use crate::producer::MoqTrackInfo;
 fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 	MoqFrame {
 		payload: frame.payload.to_vec(),
-		timestamp: frame.timestamp.map(Into::into),
+		timestamp: frame.timestamp.into(),
 	}
 }
 

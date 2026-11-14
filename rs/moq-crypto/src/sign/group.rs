@@ -14,7 +14,7 @@ use crate::sign::{PublicKey, SecretKey};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
 	/// Presentation timestamp at the track's timescale, or `None` when untimed. Signed.
-	pub timestamp: Option<moq_net::Timestamp>,
+	pub timestamp: moq_net::Timestamp,
 	/// The application bytes, without the signature.
 	pub payload: Bytes,
 }
@@ -54,9 +54,9 @@ impl Producer {
 	///
 	/// A net error if the group is closed, the timestamp does not match the track, or the
 	/// signed frame exceeds the frame size limit.
-	pub fn write_frame(&mut self, timestamp: impl Into<Option<moq_net::Timestamp>>, payload: &[u8]) -> Result<()> {
+	pub fn write_frame(&mut self, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<()> {
 		// Signed at the track's timescale, the value the net group stores and every hop carries.
-		let timestamp = self.track.rescale(timestamp.into())?;
+		let timestamp = self.track.rescale_in(timestamp, self.inner.start)?;
 		let frame = self.inner.frame_count() as u64;
 		let body = self.scope.sign(&self.key, self.inner.start, frame, timestamp, payload);
 		self.inner.write_frame(timestamp, body)?;

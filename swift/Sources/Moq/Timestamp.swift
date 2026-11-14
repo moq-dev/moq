@@ -5,6 +5,16 @@ private let maxValue: UInt64 = (1 << 61) - 1
 private let maxScale: UInt64 = (1 << 62) - 1
 private let attosecondsPerSecond: UInt64 = 1_000_000_000_000_000_000
 
+extension Timestamp {
+    /// The scale-less timestamp at group key `key`, mirroring Rust's `Timestamp::unscaled`.
+    ///
+    /// A scale-less track has no time, so each frame carries its group's key instead, and a
+    /// datagram its sequence; `scale` is then `nil`. Any `UInt64` is accepted.
+    public static func unscaled(_ key: UInt64) -> Timestamp {
+        Timestamp(value: key, scale: nil)
+    }
+}
+
 @available(macOS 13, iOS 16, *)
 extension Timestamp {
     /// The timestamp exactly equal to `duration`, at the finest power-of-ten scale that fits.
@@ -38,10 +48,12 @@ extension Timestamp {
     ///
     /// Exact when `scale` divides 10^18, such as microseconds or nanoseconds; a 90 kHz tick rounds,
     /// so keep the record itself to republish a read exactly. Throws `MoqError.TimeOverflow` for a
-    /// record outside the bounds a write accepts.
+    /// record outside the bounds a write accepts, or an `unscaled` one, which has no time.
     public var duration: Duration {
         get throws {
-            guard scale != 0, scale <= maxScale, value <= maxValue else { throw MoqError.TimeOverflow }
+            guard let scale, scale != 0, scale <= maxScale, value <= maxValue else {
+                throw MoqError.TimeOverflow
+            }
             let (seconds, remainder) = value.quotientAndRemainder(dividingBy: scale)
             // `remainder` is below `scale`, so the quotient is below 10^18 and fits.
             let (attoseconds, _) = scale.dividingFullWidth(remainder.multipliedFullWidth(by: attosecondsPerSecond))

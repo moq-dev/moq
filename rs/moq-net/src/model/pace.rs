@@ -181,7 +181,9 @@ mod tests {
 		let mut group = group::Info { start: 0 }.produce_untimed();
 		let payload = Bytes::from(vec![0u8; MB]);
 		for _ in 0..frames {
-			group.write_frame(crate::Timestamp::unscaled(group.start), payload.clone()).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), payload.clone())
+				.unwrap();
 		}
 		group
 	}
@@ -213,7 +215,9 @@ mod tests {
 			"within the window"
 		);
 
-		group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB])).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+			.unwrap();
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Pending, "past the window");
 		assert!(!flag.woken());
 
@@ -368,7 +372,9 @@ mod tests {
 		assert_eq!(group.poll_ready(&waiter, &small), Poll::Ready(()));
 
 		for _ in 0..17 {
-			group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB])).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+				.unwrap();
 		}
 		assert_eq!(group.poll_ready(&waiter, &small), Poll::Pending, "past the window");
 		read(&mut reader);
@@ -394,10 +400,14 @@ mod tests {
 		let (_flag, waiter) = flag();
 		let mut group = group::Info { start: 0 }.produce_untimed();
 		let mut reader = group.consume();
-		group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB])).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+			.unwrap();
 		read(&mut reader);
 		for _ in 0..8 {
-			group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB])).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+				.unwrap();
 		}
 		assert_eq!(
 			group.poll_ready(&waiter, &info(MB)),
@@ -448,7 +458,9 @@ mod tests {
 		let _reader = group.consume();
 		// A local writer never waits, so it sheds the front past the 32 MB tail.
 		for _ in 0..40 {
-			group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB])).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+				.unwrap();
 		}
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
 	}
@@ -462,7 +474,9 @@ mod tests {
 		let mut reader = group.consume().with_range(20..);
 		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());
 		for _ in 0..17 {
-			group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB])).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from(vec![0u8; MB]))
+				.unwrap();
 		}
 		// Each commit wakes the parked reader, which polls again and reports the edge.
 		assert!(reader.poll_read_frame(&kio::Waiter::noop()).is_pending());

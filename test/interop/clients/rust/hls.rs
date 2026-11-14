@@ -154,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
 				let mark = if first.payload.is_empty() { ":marker" } else { "" };
 				// Group starts are left out: moq-mux keys groups by start while @moq/hang still
 				// numbers them, and the schedule is what both must agree on.
-				out.push(format!("{}{mark}", first.timestamp.as_millis()));
+				out.push(format!("{}{mark}", first.timestamp.as_millis()?));
 			}
 			ensure!(!out.is_empty(), "{kind} {name} published no groups");
 			println!("hls {kind} {name} groups={}", out.join(","));

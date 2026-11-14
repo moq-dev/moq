@@ -536,7 +536,8 @@ impl Encoder {
 	/// here; without it, scale them with
 	/// [`Frame::resize`](crate::Frame::resize), which
 	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) lets a
-	/// hardware decoder make a no-op.
+	/// hardware decoder make a no-op. An [unscaled](moq_net::Timestamp::unscaled)
+	/// frame has no time and fails with [`Error::TimeOverflow`].
 	pub fn encode(&mut self, frame: &Frame) -> Result<(), Error> {
 		// A transposed frame is why this compares the shape rather than a byte
 		// count: 240x320 and 320x240 hold the same number of bytes.
@@ -583,7 +584,8 @@ impl Encoder {
 				encoder: self.color,
 			});
 		}
-		let timestamp = std::time::Duration::from(frame.timestamp);
+		// Video is timed: an unscaled frame has no time to space keyframes by.
+		let timestamp = std::time::Duration::try_from(frame.timestamp)?;
 		let cut = self.pending_cut || (self.backend.can_cut() && self.join.due(timestamp));
 		self.backend.encode(frame, cut)?;
 		// Cleared only once the frame is through: a failed encode produced no
@@ -696,7 +698,7 @@ impl Join {
 	/// its own count, so the next is measured from the latest.
 	fn observe(&mut self, encoded: &Encoded) {
 		if encoded.keyframe {
-			self.last = self.last.max(Some(encoded.timestamp.into()));
+			self.last = self.last.max(std::time::Duration::try_from(encoded.timestamp).ok());
 		}
 	}
 }
@@ -786,7 +788,7 @@ mod tests {
 
 		// Every encoded frame carries the timestamp of the raw frame it came from,
 		// so the stream stays in step even if a backend buffers.
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
 			"encoded timestamps not strictly increasing: {micros:?}"
@@ -915,7 +917,7 @@ mod tests {
 		assert!(!frames.is_empty(), "encoder produced no packets");
 		// VideoToolbox completes each frame before returning, so the timestamps come
 		// back one per input frame, in order.
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
 			"encoded timestamps not strictly increasing: {micros:?}"
@@ -1128,7 +1130,7 @@ mod tests {
 		assert!(!frames.is_empty(), "encoder produced no packets");
 		// The MFT buffers, so packets come back stamped with the frame they were
 		// encoded from rather than whichever frame was going in at the time.
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
 			"encoded timestamps not strictly increasing: {micros:?}"
@@ -1267,7 +1269,7 @@ mod tests {
 
 	impl Backend for Delayed {
 		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
-			let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
+			let payload = bytes::Bytes::from(frame.timestamp.as_micros().unwrap().to_string());
 			self.ready
 				.extend(self.held.replace(Encoded::new(payload, frame.timestamp, cut)));
 			Ok(())
@@ -1630,7 +1632,7 @@ mod tests {
 		for i in 0..70 {
 			for encoded in encoder.encode_all(&gray_at(i * 50_000)).unwrap() {
 				if encoded.keyframe {
-					keys.push(encoded.timestamp.as_micros() / 50_000);
+					keys.push(encoded.timestamp.as_micros().unwrap() / 50_000);
 				}
 			}
 		}
@@ -1799,7 +1801,10 @@ mod tests {
 			assert_eq!(encoded[0].timestamp, at(i - 1));
 			// And the packet really is the earlier frame's, not a mis-stamped copy of
 			// the one going in.
-			assert_eq!(&encoded[0].payload[..], at(i - 1).as_micros().to_string().as_bytes());
+			assert_eq!(
+				&encoded[0].payload[..],
+				at(i - 1).as_micros().unwrap().to_string().as_bytes()
+			);
 		}
 
 		// The tail: frame 4 never came back from an encode call, so `flush` drains

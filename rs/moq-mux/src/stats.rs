@@ -67,14 +67,18 @@ impl Received {
 	pub(crate) fn frame(&self, timestamp: moq_net::Timestamp, bytes: usize) {
 		self.frames.fetch_add(1, Relaxed);
 		self.bytes.fetch_add(bytes as u64, Relaxed);
-		// A clock before the MoQ epoch has no wire encoding, so such an arrival is never recorded.
+		// A clock before the MoQ epoch has no wire encoding, so such an arrival is never recorded,
+		// and neither is a scale-less track's unscaled key, which has no media time.
 		let Some(wall) = crate::clock::host_wall() else {
+			return;
+		};
+		let Ok(micros) = timestamp.as_micros() else {
 			return;
 		};
 		let wall = wall
 			.checked_duration_since(Wall::UNIX_EPOCH)
 			.map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(0));
-		let micros = u64::try_from(timestamp.as_micros()).unwrap_or(u64::MAX);
+		let micros = u64::try_from(micros).unwrap_or(u64::MAX);
 		self.timestamp.store(micros, Relaxed);
 		self.wall.store(wall, Relaxed);
 	}
@@ -283,7 +287,7 @@ mod tests {
 		let report = &registry.received()["hd"];
 		assert_eq!((report.frames, report.bytes), (2, 150));
 		let arrival = report.arrival.as_ref().unwrap();
-		assert_eq!(arrival.timestamp.as_millis(), 80);
+		assert_eq!(arrival.timestamp.as_millis().unwrap(), 80);
 		assert_eq!(arrival.wall, wall);
 	}
 

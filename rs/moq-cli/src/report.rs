@@ -39,6 +39,10 @@ const PRIORITY: i8 = i8::MIN;
 /// A compressed snapshot track, `None` once a write failed and closed it.
 struct ReportTrack<T> {
 	track: Option<moq_json::snapshot::Producer<T>>,
+
+	/// The track the snapshot producer writes, for its newest group. The track is scale-less, so a
+	/// write names a key: one past the newest group, where a snapshot opens the next one.
+	inner: moq_net::track::Producer,
 }
 
 impl<T: serde::Serialize> ReportTrack<T> {
@@ -52,7 +56,8 @@ impl<T: serde::Serialize> ReportTrack<T> {
 			.with_refresh(8);
 		let track = broadcast.create_track(name, info)?;
 		Ok(Self {
-			track: Some(moq_json::snapshot::Producer::new(track, Default::default())),
+			track: Some(moq_json::snapshot::Producer::new(track.clone(), Default::default())),
+			inner: track,
 		})
 	}
 
@@ -80,7 +85,12 @@ impl<T: serde::Serialize> ReportTrack<T> {
 			std::task::Poll::Ready(Err(err)) => Err(err),
 			_ => Ok(()),
 		};
-		if let Err(err) = refreshed.and_then(|()| track.update(value)) {
+		let next = self
+			.inner
+			.largest()
+			.map_or(0, |largest| largest.group.saturating_add(1));
+		let at = moq_net::Timestamp::unscaled(next);
+		if let Err(err) = refreshed.and_then(|()| track.update(moq_json::Timed::new(value, at))) {
 			tracing::warn!(%err, "a report track failed; closing it");
 			if let Some(track) = self.track.take() {
 				let _ = track.abort(moq_net::Error::Transport(err.to_string()));
@@ -632,7 +642,10 @@ mod tests {
 		let mut read = reader(track.consume());
 		let mut report = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		report
-			.update(&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }))
+			.update(moq_json::Timed::new(
+				&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }),
+				moq_net::Timestamp::unscaled(0),
+			))
 			.unwrap();
 		assert!(matches!(read.next().await, Err(moq_json::Error::TooLarge(MAX_REPORT))));
 	}
@@ -670,13 +683,23 @@ mod tests {
 		let mut lines = BufReader::new(read).lines();
 		tokio::spawn(write_echo(origin.consume(), String::new(), out));
 
-		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
+		feedback
+			.update(moq_json::Timed::new(
+				&serde_json::json!({ "n": 1 }),
+				moq_net::Timestamp::unscaled(1),
+			))
+			.unwrap();
 		let line = lines.next_line().await.unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
 
 		broadcast.withdraw();
 		kio::clock::sleep(DRAIN * 2).await;
-		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
+		feedback
+			.update(moq_json::Timed::new(
+				&serde_json::json!({ "n": 2 }),
+				moq_net::Timestamp::unscaled(2),
+			))
+			.unwrap();
 		let late = kio::clock::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
 	}
@@ -706,7 +729,12 @@ mod tests {
 		let track = route.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		route.announce().unwrap();
-		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
+		feedback
+			.update(moq_json::Timed::new(
+				&serde_json::json!({ "n": 1 }),
+				moq_net::Timestamp::unscaled(1),
+			))
+			.unwrap();
 		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("the takeover was never read").unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
@@ -747,7 +775,12 @@ mod tests {
 		let mut lines = BufReader::new(read).lines();
 		tokio::spawn(write_echo(origin.consume(), ".viewers".to_string(), out));
 
-		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
+		feedback
+			.update(moq_json::Timed::new(
+				&serde_json::json!({ "n": 1 }),
+				moq_net::Timestamp::unscaled(1),
+			))
+			.unwrap();
 		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("no feedback read").unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");

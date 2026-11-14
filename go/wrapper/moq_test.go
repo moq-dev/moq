@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"slices"
 	"sync"
@@ -129,7 +130,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != string(payload) || frame.Timestamp == nil || *frame.Timestamp != *ts(0) {
+	if frame == nil || string(frame.Payload) != string(payload) || !sameTime(frame.Timestamp, ts(0)) {
 		t.Fatalf("frame = %+v, want payload=%q ts=0", frame, payload)
 	}
 
@@ -248,7 +249,7 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 			codec.Destroy()
 		}
 		// One 20 ms Opus frame of silence at 48 kHz mono.
-		if err := producer.Write(moqaudio.Frame{Timestamp: moq.Timestamp{Scale: 48_000}, Data: make([]byte, 960*4)}); err != nil {
+		if err := producer.Write(moqaudio.Frame{Timestamp: moq.TimestampFromScale(0, 48_000), Data: make([]byte, 960*4)}); err != nil {
 			t.Fatal(err)
 		}
 		if !codecFirst {
@@ -328,7 +329,7 @@ func TestAudioConsumerDelay(t *testing.T) {
 
 	// Two 20 ms Opus frames of silence at 48 kHz mono.
 	for i := range 2 {
-		if err := audio.Write(moqaudio.Frame{Timestamp: moq.Timestamp{Value: uint64(i) * 960, Scale: 48_000}, Data: make([]byte, 960*4)}); err != nil {
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.TimestampFromScale(uint64(i)*960, 48_000), Data: make([]byte, 960*4)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -380,7 +381,7 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
-	if err := fine.Write(moqaudio.Frame{Timestamp: moq.Timestamp{Scale: 48_000}, Data: make([]byte, 120*4)}); err != nil {
+	if err := fine.Write(moqaudio.Frame{Timestamp: moq.TimestampFromScale(0, 48_000), Data: make([]byte, 120*4)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := fine.Finish(); err != nil {
@@ -463,7 +464,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		t.Fatal(err)
 	}
 	for i := range 10 {
-		if err := video.Write(moqvideo.Frame{Timestamp: moq.Timestamp{Value: uint64(i) * 1001, Scale: 30_000}, Data: rgba}); err != nil {
+		if err := video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(uint64(i)*1001, 30_000), Data: rgba}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -494,7 +495,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 
 	// Keep the encoder fed so the decoder sees frames after it joined.
 	for i := 10; i < 40; i++ {
-		if err := video.Write(moqvideo.Frame{Timestamp: moq.Timestamp{Value: uint64(i) * 1001, Scale: 30_000}, Data: rgba}); err != nil {
+		if err := video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(uint64(i)*1001, 30_000), Data: rgba}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -565,7 +566,7 @@ func TestInsertDatagramAndLargest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := track.Insert(moq.Datagram{Sequence: 7, Payload: []byte("seven")}); err != nil {
+	if err := track.Insert(moq.Datagram{Sequence: 7, Timestamp: moq.Unscaled(7), Payload: []byte("seven")}); err != nil {
 		t.Fatal(err)
 	}
 	datagram, err := consumer.Recv(ctx)
@@ -575,7 +576,7 @@ func TestInsertDatagramAndLargest(t *testing.T) {
 	if datagram == nil || datagram.Sequence != 7 || string(datagram.Payload) != "seven" {
 		t.Fatalf("got datagram %+v", datagram)
 	}
-	if next, err := track.Append(nil, []byte("next")); err != nil || next != 8 {
+	if next, err := track.Append(moq.Unscaled(8), []byte("next")); err != nil || next != 8 {
 		t.Fatalf("appended at %d, err %v", next, err)
 	}
 	if err := consumer.SetPriority(12); err != nil {
@@ -835,7 +836,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("expected a media frame, got %T", read)
 	}
 	frame := &value.Frame
-	if string(frame.Payload) != string(payload) || moq.TimestampToDuration(frame.Timestamp) != time.Second {
+	if string(frame.Payload) != string(payload) || durationOf(t, frame.Timestamp) != time.Second {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
 
@@ -861,7 +862,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != string(payload) || moq.TimestampToDuration(frame.Timestamp) != time.Second {
+	if frame == nil || string(frame.Payload) != string(payload) || durationOf(t, frame.Timestamp) != time.Second {
 		t.Fatalf("decoded frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
 }
@@ -895,7 +896,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a frame")
 	}
-	if string(frame.Payload) != "hello" || frame.Timestamp == nil || *frame.Timestamp != *ts(12_345) {
+	if string(frame.Payload) != "hello" || !sameTime(frame.Timestamp, ts(12_345)) {
 		t.Fatalf("frame = %+v, want payload=hello ts=12345", frame)
 	}
 
@@ -921,7 +922,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a group frame")
 	}
-	if string(frame.Payload) != "group" || frame.Timestamp == nil || *frame.Timestamp != *ts(23_456) {
+	if string(frame.Payload) != "group" || !sameTime(frame.Timestamp, ts(23_456)) {
 		t.Fatalf("frame = %+v, want payload=group ts=23456", frame)
 	}
 }
@@ -1014,7 +1015,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != "populated" || frame.Timestamp == nil || *frame.Timestamp != *ts(2_000) {
+	if frame == nil || string(frame.Payload) != "populated" || !sameTime(frame.Timestamp, ts(2_000)) {
 		t.Fatalf("frame = %+v, want payload=populated ts=2000", frame)
 	}
 }
@@ -1124,7 +1125,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != string(payload) || frame.Timestamp == nil || *frame.Timestamp != *ts(0) {
+	if frame == nil || string(frame.Payload) != string(payload) || !sameTime(frame.Timestamp, ts(0)) {
 		t.Fatalf("frame = %+v, want payload=%q ts=0", frame, payload)
 	}
 	if err := track.Finish(); err != nil {
@@ -1217,7 +1218,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatalf("expected a media frame, got %T", read)
 	}
 	frame := &value.Frame
-	if string(frame.Payload) != string(payload) || moq.TimestampToDuration(frame.Timestamp) != 20*time.Millisecond {
+	if string(frame.Payload) != string(payload) || durationOf(t, frame.Timestamp) != 20*time.Millisecond {
 		t.Fatalf("frame = %+v, want payload=%q ts=20000", frame, payload)
 	}
 	// The explicit pause marker is an encoder end even while the track stays open. The marker
@@ -1233,7 +1234,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value, ok := end.(moqmedia.ReadEnd); !ok || moq.TimestampToDuration(value.End) != 20*time.Millisecond+time.Microsecond {
+	if value, ok := end.(moqmedia.ReadEnd); !ok || durationOf(t, value.End) != 20*time.Millisecond+time.Microsecond {
 		t.Fatalf("expected encoder end at 20001us, got %T %+v", end, end)
 	}
 	if next, err := mediaConsumer.Next(ctx); next != nil || err != nil {
@@ -2026,11 +2027,21 @@ func TestCancellingAHiddenAnswerRefusesTheRequest(t *testing.T) {
 	}
 }
 
-// us is a raw frame's optional timestamp in microseconds.
-func us(v uint64) *uint64 { return &v }
-
 // ts is a presentation time in microseconds, the scale timedInfo declares.
-func ts(us uint64) *moq.Timestamp { return &moq.Timestamp{Value: us, Scale: 1_000_000} }
+func ts(us uint64) moq.Timestamp { return moq.TimestampFromScale(us, 1_000_000) }
+
+// sameTime reports whether a and b are the same timestamp, comparing Scale by value.
+func sameTime(a, b moq.Timestamp) bool { return reflect.DeepEqual(a, b) }
+
+// durationOf is t as a time.Duration, failing the test when it has no time.
+func durationOf(t *testing.T, ts moq.Timestamp) time.Duration {
+	t.Helper()
+	d, err := moq.TimestampToDuration(ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
 
 // timedInfo declares the microsecond timeline used by timed raw fixtures.
 func timedInfo() *moq.TrackInfo {

@@ -144,7 +144,7 @@ pub fn cmaf(data: &[u8]) -> bool {
 	let Ok(wire) = crate::container::fmp4::Wire::from_init(init) else {
 		return false;
 	};
-	let frame = moq_net::frame::Frame::new(None, Bytes::copy_from_slice(fragment));
+	let frame = moq_net::frame::Frame::new(moq_net::Timestamp::unscaled(0), Bytes::copy_from_slice(fragment));
 	wire.decode(frame).is_ok()
 }
 

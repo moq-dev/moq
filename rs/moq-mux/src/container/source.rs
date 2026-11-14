@@ -509,7 +509,7 @@ impl ExportSource {
 					if !self.spliced(frame)? {
 						continue;
 					}
-					let at = Duration::from(frame.timestamp);
+					let at = Duration::try_from(frame.timestamp)?;
 					self.latest = Some(self.latest.map_or(at, |latest| latest.max(at)));
 					self.delivered = self.group();
 				}
@@ -529,7 +529,7 @@ impl ExportSource {
 		let Some(splice) = self.splice.as_mut() else {
 			return Ok(true);
 		};
-		let at = Duration::from(frame.timestamp);
+		let at = Duration::try_from(frame.timestamp)?;
 		if sync && at > splice.read {
 			self.splice = None;
 			return Ok(true);
@@ -662,8 +662,8 @@ impl ExportSource {
 						// Say what the export never receives and where.
 						tracing::warn!(
 							track = consumer.name(),
-							at = ?std::time::Duration::from(timestamp),
-							skipped = ?std::time::Duration::from(duration),
+							at = ?timestamp,
+							skipped = ?duration,
 							"media skipped upstream; resuming at the next group"
 						);
 						self.finish_ends();
@@ -990,7 +990,7 @@ mod tests {
 			kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
 				.ok()
-				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
+				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros().unwrap()))
 		};
 		let wire = || HangContainer::Legacy(crate::container::Kind::Audio);
 		let info = || hang::container::track_info(hang::catalog::PRIORITY.audio);
@@ -1130,7 +1130,7 @@ mod tests {
 				.await
 				.expect("the read settles")
 				.unwrap()
-				.map(|frame| frame.timestamp.as_micros())
+				.map(|frame| frame.timestamp.as_micros().unwrap())
 		};
 		assert_eq!(read().await, Some(0));
 
@@ -1189,10 +1189,10 @@ mod tests {
 		.live();
 
 		let frame = kio::wait(|waiter| export.poll_read(waiter)).await.unwrap().unwrap();
-		assert_eq!(frame.timestamp.as_micros(), 48_000);
+		assert_eq!(frame.timestamp.as_micros().unwrap(), 48_000);
 		live.track.write(raw_frame(72_000, b"audio", true)).unwrap();
 		let frame = kio::wait(|waiter| export.poll_read(waiter)).await.unwrap().unwrap();
-		assert_eq!(frame.timestamp.as_micros(), 72_000);
+		assert_eq!(frame.timestamp.as_micros().unwrap(), 72_000);
 		assert_eq!(export.skips(), 0, "nothing below the start counts as skipped");
 	}
 	/// A live source picks the newest group without narrowing what the publisher sends: a
@@ -1247,7 +1247,7 @@ mod tests {
 			kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
 				.ok()
-				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
+				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros().unwrap()))
 		};
 
 		assert_eq!(read().await, None, "subscribed, with nothing published yet");
@@ -1346,7 +1346,7 @@ mod tests {
 				kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 					.await
 					.ok()
-					.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
+					.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros().unwrap()))
 			};
 			let mut timestamps = Vec::new();
 			// Only the backlog's oldest group has landed.
@@ -1407,7 +1407,7 @@ mod tests {
 				moving.b.write(marked_frame(i, 0xb1)).unwrap();
 			}
 			match (poll().await.unwrap(), first) {
-				(Ok(Some(frame)), Some(first)) => assert_eq!(frame.timestamp.as_micros(), first),
+				(Ok(Some(frame)), Some(first)) => assert_eq!(frame.timestamp.as_micros().unwrap(), first),
 				(
 					Err(crate::Error::RenditionRewound {
 						rendition,
@@ -1478,7 +1478,7 @@ mod tests {
 			let Poll::Ready(Ok(Some(frame))) = export.poll_read(&waiter) else {
 				panic!("frame ready")
 			};
-			(frame.timestamp.as_micros(), export.skips(), export.cuts())
+			(frame.timestamp.as_micros().unwrap(), export.skips(), export.cuts())
 		};
 		assert_eq!(read(&mut export), (0, 0, 0));
 		assert_eq!(read(&mut export), (40_000, 1, 0), "group 1 is missing whole");
@@ -1556,7 +1556,7 @@ mod tests {
 			let Poll::Ready(Ok(Some(frame))) = export.poll_read(&waiter) else {
 				panic!("frame ready")
 			};
-			assert_eq!(frame.timestamp.as_micros(), timestamp);
+			assert_eq!(frame.timestamp.as_micros().unwrap(), timestamp);
 			assert_eq!(
 				(export.skips(), export.markers()),
 				(generation, generation),

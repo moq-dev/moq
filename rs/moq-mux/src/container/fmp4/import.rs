@@ -1262,7 +1262,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								};
 								producer.commit(sample)?;
 								if last {
-									producer.burst(pending.run.end.checked_sub(pending.run.earliest)?.into())?;
+									let span = pending.run.end.checked_sub(pending.run.earliest)?;
+									producer.burst(span.try_into()?)?;
 								}
 							}, _ => unreachable!()),
 						}
@@ -1414,7 +1415,10 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 				.map(|duration| Timestamp::new(duration as u64, timescale))
 				.transpose()?;
 			if let Some(duration) = duration_ts {
-				self.sample_duration = Some(self.sample_duration.map_or(duration, |min| min.min(duration)));
+				self.sample_duration = Some(
+					self.sample_duration
+						.map_or(duration, |min| crate::container::earlier(min, duration)),
+				);
 			}
 
 			let presented = self.edit.present(pts)?;
@@ -1427,8 +1431,8 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 					Some(duration) => timestamp.checked_add(duration)?,
 					None => timestamp,
 				};
-				end = Some(end.map_or(sample_end, |max: Timestamp| max.max(sample_end)));
-				earliest = Some(earliest.map_or(timestamp, |min: Timestamp| min.min(timestamp)));
+				end = Some(end.map_or(sample_end, |max| crate::container::later(max, sample_end)));
+				earliest = Some(earliest.map_or(timestamp, |min| crate::container::earlier(min, timestamp)));
 
 				samples.push(Sample {
 					dts,
@@ -1639,7 +1643,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			.checked_add(run.samples.iter().map(|sample| sample.range.len()).sum())
 			.ok_or(Error::InvalidDataOffset)?;
 		let mut writer = group.create_frame(moq_net::frame::Info {
-			timestamp: Some(timestamp),
+			timestamp,
 			size: size as u64,
 		})?;
 		writer.write(prefix)?;
@@ -1665,7 +1669,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.estimator.write(timestamp, pending.size);
 		let bytes = run.samples.iter().map(|sample| sample.range.len()).sum();
 		self.sent.add(run.samples.len() as u64, bytes, keyframes);
-		self.estimator.burst(end.checked_sub(timestamp)?.into());
+		self.estimator.burst(end.checked_sub(timestamp)?.try_into()?);
 		self.estimator.reach(end);
 		self.publish_estimate()?;
 		Ok(())

@@ -185,7 +185,10 @@ impl Timestamp {
 
 	/// A scale-less track's timestamp: `key` is its group's key, with no time.
 	pub const fn unscaled(key: u64) -> Self {
-		Self { value: key, scale: None }
+		Self {
+			value: key,
+			scale: None,
+		}
 	}
 
 	/// `value` at `scale`, bounded to `2^61 - 1` when it carries a time.
@@ -394,7 +397,10 @@ impl TryFrom<Timestamp> for std::time::Duration {
 	/// The time since the track's zero, or [`TimeOverflow`] when unscaled.
 	fn try_from(time: Timestamp) -> Result<Self, Self::Error> {
 		let nanos = time.as_nanos()?;
-		Ok(std::time::Duration::new(time.as_secs()?, (nanos % 1_000_000_000) as u32))
+		Ok(std::time::Duration::new(
+			time.as_secs()?,
+			(nanos % 1_000_000_000) as u32,
+		))
 	}
 }
 
@@ -698,12 +704,16 @@ mod tests {
 		assert!(std::time::Duration::try_from(key).is_err());
 		// A key spans every group key, past where a time stops.
 		assert_eq!(Timestamp::unscaled(u64::MAX - 1).value(), u64::MAX - 1);
-		assert!(Timestamp::unscaled(u64::MAX).checked_add(Timestamp::unscaled(1)).is_err());
+		assert!(
+			Timestamp::unscaled(u64::MAX)
+				.checked_add(Timestamp::unscaled(1))
+				.is_err()
+		);
 
 		let millis = Timestamp::from_millis(7).unwrap();
 		assert_ne!(key, millis);
 		assert_eq!(key.partial_cmp(&millis), None);
-		assert!(!(key < millis) && !(key > millis));
+		assert_eq!(millis.partial_cmp(&key), None, "incomparable either way");
 		assert!(key.checked_add(millis).is_err());
 
 		let next = Timestamp::unscaled(8);

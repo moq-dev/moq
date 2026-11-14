@@ -1521,7 +1521,7 @@ mod tests {
 		loop {
 			let group = subscriber.recv_group().await.unwrap().expect("the track continues");
 			let start = moq_net::Timestamp::new(group.start, group.timescale().unwrap()).unwrap();
-			if start.as_millis() == 80 {
+			if start.as_millis().unwrap() == 80 {
 				break;
 			}
 		}
@@ -2076,7 +2076,7 @@ mod tests {
 			"the payload goes out untouched"
 		);
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			std::time::Duration::try_from(frame.timestamp).unwrap().as_micros(),
 			40_000,
 			"the frame carries the PTS mapped through the segment"
 		);
@@ -2089,7 +2089,7 @@ mod tests {
 		let frame = group.read_frame().await.unwrap().expect("a frame in the second group");
 		assert_eq!(frame.payload.as_ref(), b"second");
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			std::time::Duration::try_from(frame.timestamp).unwrap().as_micros(),
 			80_000
 		);
 	}
@@ -2195,7 +2195,7 @@ mod tests {
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.as_ref(), b"no pts", "the unstamped buffer was published");
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			std::time::Duration::try_from(frame.timestamp).unwrap().as_micros(),
 			25_000
 		);
 	}

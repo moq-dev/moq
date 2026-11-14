@@ -517,7 +517,11 @@ fn ietf_datagram_interop() {
 		};
 		let mut r = Decoder::new(properties, version.into());
 		let timestamp = ietf::decode_object_time(&mut r, Timescale::MILLI, version).unwrap();
-		assert_eq!(timestamp.map(|t| t.as_millis().unwrap()), Some(1234), "{version}: Timestamp");
+		assert_eq!(
+			timestamp.map(|t| t.as_millis().unwrap()),
+			Some(1234),
+			"{version}: Timestamp"
+		);
 	}
 }
 

@@ -33,7 +33,7 @@ export interface ConsumerProps {
 export const DELAY_MAX: Net.Clock.Duration;
 
 export interface Format {
-	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
+	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp): Frame[];
 	end?(frame: Frame): Net.Clock.Duration | undefined;
 	readonly kind?: "audio" | "video" | "data";
 }

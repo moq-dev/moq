@@ -220,10 +220,7 @@ impl Topology {
 
 	/// Write a group while `B` holds back everything it sends `S`: it arrives only if
 	/// `A` serves it.
-	async fn group_through_a(
-		&mut self,
-		rx: &mut mpsc::UnboundedReceiver<Delivery>,
-	) -> Vec<(u64, Vec<u8>, Timestamp)> {
+	async fn group_through_a(&mut self, rx: &mut mpsc::UnboundedReceiver<Delivery>) -> Vec<(u64, Vec<u8>, Timestamp)> {
 		self.s_to_b.server_transport.hold_unis();
 		let written = self.group();
 		let mut seen = Vec::new();
@@ -236,10 +233,7 @@ impl Topology {
 	}
 
 	/// Write a group and read it back, whichever CDN serves it.
-	async fn group_anywhere(
-		&mut self,
-		rx: &mut mpsc::UnboundedReceiver<Delivery>,
-	) -> Vec<(u64, Vec<u8>, Timestamp)> {
+	async fn group_anywhere(&mut self, rx: &mut mpsc::UnboundedReceiver<Delivery>) -> Vec<(u64, Vec<u8>, Timestamp)> {
 		let written = self.group();
 		let mut seen = Vec::new();
 		for _ in &written {
@@ -269,10 +263,7 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Timestamp)], groups: u64) {
 	let frames: Vec<_> = seen.iter().map(|(group, frame, _)| (*group, frame.clone())).collect();
 	assert_eq!(frames, expected);
 	for pair in seen.windows(2) {
-		assert!(
-			pair[0].2 < pair[1].2,
-			"timestamp rewound at {pair:?}"
-		);
+		assert!(pair[0].2 < pair[1].2, "timestamp rewound at {pair:?}");
 	}
 }
 

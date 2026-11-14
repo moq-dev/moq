@@ -347,7 +347,8 @@ impl Track {
 		}
 		if pts
 			.checked_sub(start)
-			.is_ok_and(|span| std::time::Duration::from(span) >= AUDIO_GROUP_WARN_AFTER)
+			.and_then(std::time::Duration::try_from)
+			.is_ok_and(|span| span >= AUDIO_GROUP_WARN_AFTER)
 		{
 			self.warned = true;
 			tracing::warn!(

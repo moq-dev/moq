@@ -35,7 +35,9 @@ mod test {
 		let mut first = track
 			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
 			.unwrap();
-		first.write_frame(None, &b"a"[..]).unwrap();
+		first
+			.write_frame(moq_net::Timestamp::unscaled(first.start), &b"a"[..])
+			.unwrap();
 		first.close().unwrap();
 		let _open = track
 			.append_group(track.largest().map_or(0, |largest| largest.group + 1))

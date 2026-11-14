@@ -139,8 +139,9 @@ func (p *StreamProducer) Finish() error {
 type Timed struct {
 	// Value is the JSON document.
 	Value stdjson.RawMessage
-	// Timestamp is on the broadcast clock, or nil on an untimed track.
-	Timestamp *moq.Timestamp
+	// Timestamp is on the broadcast clock, or moq.Unscaled at the frame's group key on a
+	// scale-less track.
+	Timestamp moq.Timestamp
 }
 
 func timed(value *ffi.MoqJsonValue) *Timed {
@@ -325,10 +326,10 @@ func (WindowEventSkip) windowEvent() {}
 type WindowTimed struct {
 	// Event is the change to the window.
 	Event WindowEvent
-	// Timestamp is on the broadcast clock, or nil on an untimed track. A record
-	// first learned of from a group's restatement carries that frame's time, not
-	// its original push time.
-	Timestamp *moq.Timestamp
+	// Timestamp is on the broadcast clock, or moq.Unscaled at the frame's group key on a
+	// scale-less track. A record first learned of from a group's restatement carries that
+	// frame's time, not its original push time.
+	Timestamp moq.Timestamp
 }
 
 func windowTimed(value *ffi.MoqJsonWindowTimed) (*WindowTimed, error) {

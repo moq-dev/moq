@@ -568,7 +568,7 @@ fn decoded(frame: &moq_net::frame::Frame) -> (u64, bool) {
 			let pts = super::psi::PesStart::parse(&frame.payload).unwrap().pts.unwrap();
 			pts * 100 / 9
 		}
-		_ => frame.timestamp.as_micros() as u64,
+		_ => frame.timestamp.as_micros().unwrap() as u64,
 	};
 	(pts, frame.payload.is_empty())
 }

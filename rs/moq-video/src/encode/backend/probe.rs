@@ -121,7 +121,7 @@ impl Backend for Probe {
 		}
 		// The payload is the frame's timestamp, so a test can tell which frame a
 		// packet came from independently of what it's stamped with.
-		let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
+		let payload = bytes::Bytes::from(frame.timestamp.as_micros()?.to_string());
 		let previous = self.held.replace(Encoded::new(payload, frame.timestamp, cut));
 		self.ready.extend(previous);
 		Ok(())

@@ -414,7 +414,7 @@ impl DatagramPair {
 		self.net
 			.insert(moq_net::datagram::Datagram {
 				sequence,
-				timestamp: Some(timestamp),
+				timestamp,
 				payload: payload.into(),
 			})
 			.unwrap();
@@ -486,7 +486,7 @@ fn datagram_roundtrip() {
 	match recv_datagram(&mut pair.consumer) {
 		Event::Datagram(d) => {
 			assert_eq!(d.sequence, 0);
-			assert_eq!(d.timestamp, Some(ms(5)));
+			assert_eq!(d.timestamp, ms(5));
 			assert_eq!(&d.plaintext[..], b"opus");
 		}
 		other => panic!("{other:?}"),
@@ -544,12 +544,43 @@ fn oversize_datagram_keeps_the_sequence() {
 	assert_eq!(pair.producer.append(ms(1), &max).unwrap(), 0);
 }
 
+/// On a scale-less datagram track the unscaled timestamp names the sequence, so `append`
+/// writes there and `insert` refuses a sequence the timestamp doesn't name.
+#[test]
+fn scale_less_datagrams_write_at_their_unscaled_sequence() {
+	let generation = test_generation();
+	let net = moq_net::broadcast::Info::new()
+		.produce()
+		.create_datagrams(
+			generation.name("events").unwrap().as_str(),
+			moq_net::datagram::Info::default(),
+		)
+		.unwrap();
+	let mut producer = generation.produce_datagrams(net.clone(), "events").unwrap();
+	let mut consumer = consume(&generation).consume_datagrams(net.consume(), "events").unwrap();
+	let unscaled = moq_net::Timestamp::unscaled;
+	assert_eq!(producer.append(unscaled(5), b"five").unwrap(), 5);
+	let err = producer.insert(6, unscaled(7), b"x").unwrap_err();
+	assert!(matches!(err, Error::Net(moq_net::Error::TimestampMismatch)), "{err:?}");
+	assert_eq!(producer.invocations(), 1, "a refused timestamp spends no sequence");
+	producer.insert(6, unscaled(6), b"six").unwrap();
+	for (sequence, payload) in [(5, b"five".as_slice()), (6, b"six".as_slice())] {
+		match recv_datagram(&mut consumer) {
+			Event::Datagram(d) => {
+				assert_eq!((d.sequence, d.timestamp), (sequence, unscaled(sequence)));
+				assert_eq!(&d.plaintext[..], payload);
+			}
+			other => panic!("{other:?}"),
+		}
+	}
+}
+
 #[test]
 fn refused_datagram_timestamp_keeps_the_sequence() {
 	let mut pair = datagram_pair("audio");
 	// (2^61-1) seconds overflows conversion to the milli-scale track.
 	let huge = moq_net::Timestamp::from_secs((1 << 61) - 1).unwrap();
-	for timestamp in [None, Some(huge)] {
+	for timestamp in [moq_net::Timestamp::unscaled(0), huge] {
 		let err = pair.producer.append(timestamp, b"x").unwrap_err();
 		assert!(matches!(err, Error::Net(moq_net::Error::TimestampMismatch)), "{err:?}");
 	}
@@ -612,7 +643,7 @@ fn one_name_keys_its_stream_and_datagram_tracks_apart() {
 	forged
 		.insert(moq_net::datagram::Datagram {
 			sequence: 0,
-			timestamp: Some(ms(1)),
+			timestamp: ms(1),
 			payload: frame,
 		})
 		.unwrap();

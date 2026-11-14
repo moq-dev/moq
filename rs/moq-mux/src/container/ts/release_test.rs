@@ -70,7 +70,7 @@ async fn import(data: &[u8]) -> Imported {
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
 			objects.push(Object {
 				group: group.start,
-				micros: frame.timestamp.as_micros() as u64,
+				micros: frame.timestamp.as_micros().unwrap() as u64,
 				payload: frame.payload,
 			});
 		}
@@ -295,7 +295,7 @@ async fn a_flagged_jump_crosses_without_holding_the_output() {
 		.map(|(i, pair)| {
 			(
 				i,
-				pair[1].1.timestamp.as_micros() as i128 - pair[0].1.timestamp.as_micros() as i128,
+				pair[1].1.timestamp.as_micros().unwrap() as i128 - pair[0].1.timestamp.as_micros().unwrap() as i128,
 			)
 		})
 		.max_by_key(|(_, step)| *step)
@@ -479,7 +479,7 @@ async fn fixtures_are_released_at_their_exact_positions() {
 				pids.contains(&0x0011) && pids.contains(&0x1abc),
 				"{name}: the SDT and the unlisted PID"
 			);
-			let last = released.last().unwrap().1.timestamp.as_micros() as u64;
+			let last = released.last().unwrap().1.timestamp.as_micros().unwrap() as u64;
 			assert!(last > fixture::WRAP / 27, "{name}: the release crosses the wrap");
 		}
 	}

@@ -841,7 +841,16 @@ mod tests {
 		write(11, &[2000, 1800, 1900, 2100]);
 		let mut got = Vec::new();
 		for _ in 0..5 {
-			got.push(consumer.next_frame().await.unwrap().unwrap().timestamp.as_micros());
+			got.push(
+				consumer
+					.next_frame()
+					.await
+					.unwrap()
+					.unwrap()
+					.timestamp
+					.as_micros()
+					.unwrap(),
+			);
 		}
 		assert_eq!(
 			got,
@@ -854,7 +863,7 @@ mod tests {
 		let _track = track.finish().unwrap();
 		got.clear();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			got.push(frame.timestamp.as_micros());
+			got.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(
 			got,
@@ -911,7 +920,7 @@ mod tests {
 
 		let mut timestamps = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(timestamps, vec![0, 33_333]);
 		assert!(
@@ -972,11 +981,15 @@ mod tests {
 		let mut reads = Vec::new();
 		let mut read = async |consumer: &mut Consumer| {
 			reads.push(match consumer.read().await.unwrap() {
-				Some(Read::Frame(frame)) => format!("frame {}", frame.timestamp.as_micros()),
+				Some(Read::Frame(frame)) => format!("frame {}", frame.timestamp.as_micros().unwrap()),
 				Some(Read::Gap { timestamp, duration }) => {
-					format!("gap {}+{}", timestamp.as_micros(), duration.as_micros())
+					format!(
+						"gap {}+{}",
+						timestamp.as_micros().unwrap(),
+						duration.as_micros().unwrap()
+					)
 				}
-				Some(Read::End { end }) => format!("end {}", end.as_micros()),
+				Some(Read::End { end }) => format!("end {}", end.as_micros().unwrap()),
 				None => "none".to_string(),
 			});
 		};
@@ -1113,7 +1126,7 @@ mod tests {
 
 		let mut timestamps = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		let expected: Vec<u128> = (0..FRAMES as u128).map(|index| index * 33_333).collect();
 		assert_eq!(timestamps, expected, "the track ended before the stream did");
@@ -1203,7 +1216,7 @@ mod tests {
 			.expect("a frame within ten seconds")
 			.unwrap()
 			.expect("the track is live");
-		let seconds = u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND;
+		let seconds = u64::try_from(frame.timestamp.as_micros().unwrap()).unwrap() / SECOND;
 		(seconds, consumer.selector.source())
 	}
 
@@ -1490,7 +1503,7 @@ mod tests {
 		let mut consumer = dual(&broadcast, Start::Oldest, 2 * WARMUP, probe::BUFFERED_NAME).await;
 		let mut shown = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			shown.push(u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND);
+			shown.push(u64::try_from(frame.timestamp.as_micros().unwrap()).unwrap() / SECOND);
 		}
 		assert_eq!(shown, [0, 1, 2, 3, 4, 5]);
 		assert!(consumer.next_frame().await.unwrap().is_none());

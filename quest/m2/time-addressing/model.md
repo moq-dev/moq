@@ -166,8 +166,8 @@ recorded only sequencing.
   historical start; lite-01/02 may not. On any that can't, an `Oldest` or
   earlier start gets the live feed, and the PR documents that exception
   rather than changing the old format.
-- **Open, for whoever starts this, with the maintainer:** how lite-05/06,
-  which carry both a sequence and frame timestamps, map on the way out.
+- **lite-05/06 egress.** Decided 2026-11-13 (maintainer, /quest-complete),
+  below.
 
 Decision prompts:
 
@@ -179,6 +179,61 @@ Decision prompts:
   convention only.
 - A scale-less frame's timestamp: ✅ its group key; any increasing number.
 - Max-age on a scale-less track: ✅ bare units; doesn't apply.
+
+### The unscaled timestamp and the PR's open calls
+
+Decided 2026-11-13 (maintainer, /quest-complete on
+[moq-dev/moq#8638](https://github.com/moq-dev/moq/pull/8638)). Why: a
+scale-less frame's timestamp is its group key (2026-11-03, above), so the
+type that carries it should say so instead of leaving it absent. Asked why
+JSON was special, the maintainer was told it isn't: only moq-json picks group
+starts for the caller.
+
+- **A scale-less key is a `Timestamp`.** ✅ `Timestamp { value: u64, scale:
+  Option<Timescale> }`, with `Timestamp::unscaled(key)` for a scale-less
+  track, whose value is the group key (a datagram's sequence). The scale-less
+  case is a typed `None`, never a scale of 0, and `Timescale` stays
+  `NonZero`. Every write takes a required `Timestamp`: moq-net's group and
+  track `write_frame` (which now works on a scale-less track, at the key),
+  `Frame::new`, datagram `append`, moq-json's `Timed::at`, and the JS, moq-ffi,
+  moq-c, and binding counterparts, with names mirrored. A timestamp whose
+  scale doesn't match its track, or an unscaled one naming another group's
+  key, is `TimestampMismatch`. Rejected: a bare `u64` key with an
+  always-scaled `Timestamp`; `Option<Timestamp>`.
+- **Conversions that need a scale are fallible.** Picked in the PR:
+  `convert`, `as_scale`, `as_secs`, `as_millis`, `as_micros`, and `as_nanos`
+  return `Result<_, TimeOverflow>`, erring on an unscaled timestamp, and
+  `Duration` is `TryFrom<Timestamp>`. There is no `Ord`: `PartialOrd` is
+  temporal across scales, compares keys when both are unscaled, and is `None`
+  between a scaled and an unscaled timestamp. `unscaled` takes any `u64`,
+  since a wide legacy key passes 2^61. In JS, where keys are `bigint`, an
+  unscaled key past 2^53 throws only when `value` is read. Confining
+  conversions to a second, always-scaled type was the alternative; it adds a
+  type to every binding for what one `Option` says.
+- **`append_group(start)` stays.** A multi-frame group still opens before its
+  first frame is written, so it needs its start up front.
+- **moq-json `Timed::at`: ✅ required, with the unscaled key on a scale-less
+  track.** A snapshot or header write opens its group at `at`, which must pass
+  every group the track holds, and a delta, op, or stream frame inside the
+  open group carries that group's key. Rejected: `Option<Timestamp>`;
+  refusing scale-less JSON tracks.
+- **lite-05/06 egress: ✅ as built.** The group ID is the key. A scale-less
+  track declares milliseconds in TRACK_INFO, because those published drafts
+  treat a `Timescale` of 0 as invalid, and its frames carry the group key.
+  The code and the draft say this is forced by the published wire. Rejected:
+  main's send-time stamps ([moq-dev/moq#5461](https://github.com/moq-dev/moq/pull/5461));
+  refusing scale-less tracks on lite-05/06.
+- **lite-01..04 lag by the hole budget: ✅ accepted.** Those wires can't say
+  the starts between two groups were skipped, so an in-order reader waits its
+  budget at each gap. Rejected: extending the legacy-ingest rule so keys below
+  the newest arrival count as never arriving.
+- **Released `@moq/hang` players reading new Legacy audio over lite-05/06: ✅
+  accept the gaps.** The packages release independently, and old players
+  report gaps until they upgrade. Rejected: shipping `@moq/hang` before or
+  with the Rust publishers.
+- **A resume after a pause over wires without declared skips: ✅ accepted.**
+  It waits up to the playout delay and reports a gap. Rejected: a heuristic
+  for older wires.
 
 ### Spike evidence
 

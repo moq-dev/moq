@@ -15225,10 +15225,7 @@ mod stitch_tests {
 		assert_eq!(key, KEY);
 		assert_eq!(
 			frames,
-			vec![
-				(timestamp(1), b"head".to_vec()),
-				(timestamp(1), b"tail".to_vec())
-			]
+			vec![(timestamp(1), b"head".to_vec()), (timestamp(1), b"tail".to_vec())]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done));
 	}
@@ -15941,7 +15938,10 @@ mod stitch_tests {
 			let mut consumer = h.track.subscribe(None);
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-			assert_eq!(read_group(&mut consumer).await, (KEY, vec![(Timestamp::unscaled(KEY), vec![42]); 3]));
+			assert_eq!(
+				read_group(&mut consumer).await,
+				(KEY, vec![(Timestamp::unscaled(KEY), vec![42]); 3])
+			);
 		}
 	}
 
@@ -19311,9 +19311,13 @@ mod new_group_tests {
 			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
 			drop(state);
 			let mut group = copy.create_group(group::Info { start: key }).unwrap();
-			group.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice()).unwrap();
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice())
+				.unwrap();
 			if delta {
-				group.write_frame(crate::Timestamp::unscaled(group.start), b"delta".as_slice()).unwrap();
+				group
+					.write_frame(crate::Timestamp::unscaled(group.start), b"delta".as_slice())
+					.unwrap();
 			}
 			self.landed.push(group);
 		}

@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Time } from "@moq/net";
 import { decodeDataSegment, decodeInitSegment, type InitSegment } from "./decode.ts";
+
+// A scale-less track's timestamp, its group's key, which carries no time.
+const UNTIMED = Time.Timestamp.unscaled(0n);
 
 // Shared with moq-mux, which decodes the same fragments, so both readers resolve a sample's size,
 // duration, and keyframe bit the same way.
@@ -24,7 +28,7 @@ describe("CMAF sample defaults", () => {
 	for (const fixture of cases) {
 		test(fixture.name, () => {
 			const init = decodeInitSegment(new Uint8Array(Buffer.from(fixture.init, "base64")));
-			const samples = decodeDataSegment(new Uint8Array(Buffer.from(fixture.fragment, "base64")), init, undefined);
+			const samples = decodeDataSegment(new Uint8Array(Buffer.from(fixture.fragment, "base64")), init, UNTIMED);
 			expect(
 				samples.map(({ timestamp, duration, keyframe, data }) => ({
 					timestamp,
@@ -87,11 +91,11 @@ describe("CMAF untrusted counts and sizes", () => {
 	});
 
 	test("a run without a sample table reads defaults until the mdat ends", () => {
-		const valid = decodeDataSegment(fragment(box("trun", words(0, 3)), 3), INIT, undefined);
+		const valid = decodeDataSegment(fragment(box("trun", words(0, 3)), 3), INIT, UNTIMED);
 		expect(valid.map((sample) => sample.duration)).toEqual([33_333, 33_333, 33_333]);
 
 		// The largest count a u32 holds, over three bytes of media: refused before any sample.
-		expect(() => decodeDataSegment(fragment(box("trun", words(0, 0xffff_ffff)), 3), INIT, undefined)).toThrow(
+		expect(() => decodeDataSegment(fragment(box("trun", words(0, 0xffff_ffff)), 3), INIT, UNTIMED)).toThrow(
 			"trun declares 4294967295 samples of 1 bytes, past the 3 mdat bytes left",
 		);
 	});
@@ -99,7 +103,7 @@ describe("CMAF untrusted counts and sizes", () => {
 	test("a sample table shorter than its count is refused before any sample", () => {
 		// sample_size present: four bytes per entry, two entries for a declared million.
 		const trun = box("trun", words(0x200, 1_000_000, 1, 1));
-		expect(() => decodeDataSegment(fragment(trun, 2), INIT, undefined)).toThrow(
+		expect(() => decodeDataSegment(fragment(trun, 2), INIT, UNTIMED)).toThrow(
 			"trun declares 1000000 samples but its table holds 2",
 		);
 	});
@@ -107,15 +111,15 @@ describe("CMAF untrusted counts and sizes", () => {
 	test("a box size that cannot advance or that overruns its parent is refused", () => {
 		// size 1 with a 64-bit size of zero: no progress.
 		const stalled = new Uint8Array([0, 0, 0, 1, ...new TextEncoder().encode("free"), 0, 0, 0, 0, 0, 0, 0, 0]);
-		expect(() => decodeDataSegment(stalled, INIT, undefined)).toThrow("Invalid free box size 0");
+		expect(() => decodeDataSegment(stalled, INIT, UNTIMED)).toThrow("Invalid free box size 0");
 		// Smaller than its own header.
-		expect(() => decodeDataSegment(words(4, 0x6672_6565), INIT, undefined)).toThrow("Invalid free box size 4");
+		expect(() => decodeDataSegment(words(4, 0x6672_6565), INIT, UNTIMED)).toThrow("Invalid free box size 4");
 		// Larger than the bytes left.
-		expect(() => decodeDataSegment(words(64, 0x6672_6565), INIT, undefined)).toThrow("Invalid free box size 64");
+		expect(() => decodeDataSegment(words(64, 0x6672_6565), INIT, UNTIMED)).toThrow("Invalid free box size 64");
 		// A child overrunning its parent, though the input continues past it.
 		const overrun = box("moof", words(16, 0x7472_6166));
 		const mdat = box("mdat", new Uint8Array(32));
-		expect(() => decodeDataSegment(new Uint8Array([...overrun, ...mdat]), INIT, undefined)).toThrow(
+		expect(() => decodeDataSegment(new Uint8Array([...overrun, ...mdat]), INIT, UNTIMED)).toThrow(
 			"Invalid traf box size 16",
 		);
 		expect(() => decodeInitSegment(stalled)).toThrow("Invalid free box size 0");

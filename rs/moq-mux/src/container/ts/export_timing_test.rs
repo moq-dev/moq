@@ -1086,12 +1086,12 @@ async fn on_a_scaled_clock(scale: f64, ticks: u64) -> (Duration, u64, Stats) {
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(ticks, &mut [&mut leg], |_| false);
 
-	let first = leg.out.first().expect("output").1.timestamp.as_micros() as u64;
+	let first = leg.out.first().expect("output").1.timestamp.as_micros().unwrap() as u64;
 	let held: Vec<Duration> = leg
 		.out
 		.iter()
-		.filter(|(_, frame)| frame.timestamp.as_micros() as u64 >= first + 10_000_000)
-		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros() as u64)))
+		.filter(|(_, frame)| frame.timestamp.as_micros().unwrap() as u64 >= first + 10_000_000)
+		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros().unwrap() as u64)))
 		.collect();
 	assert!(held.len() > 1_000, "too little output to judge: {}", held.len());
 	let spread = *held.iter().max().unwrap() - *held.iter().min().unwrap();
@@ -1153,7 +1153,7 @@ fn holds(live: &Live, leg: &Leg, from: Instant) -> Vec<Duration> {
 	leg.out
 		.iter()
 		.filter(|(sent, _)| *sent >= from)
-		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros() as u64)))
+		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros().unwrap() as u64)))
 		.collect()
 }
 
@@ -1245,7 +1245,7 @@ fn assert_same_packets(a: &Leg, b: &Leg, from: u64) {
 		leg.out
 			.iter()
 			.map(|(_, frame)| frame.clone())
-			.filter(|frame| frame.timestamp.as_micros() as u64 >= from)
+			.filter(|frame| frame.timestamp.as_micros().unwrap() as u64 >= from)
 			.collect()
 	};
 	let (a, b) = (pick(a), pick(b));
@@ -1292,7 +1292,14 @@ async fn pair_at(rate: u64, scale: f64, lag: i64, ticks: u64, stall: impl Fn(u64
 	let mut b = live.join(Duration::from_millis(100)).await;
 	live.run(ticks, &mut [&mut a, &mut b], stall);
 	live.finish(&mut [&mut a, &mut b]);
-	let joined = b.out.first().expect("the joiner rendered").1.timestamp.as_micros() as u64;
+	let joined = b
+		.out
+		.first()
+		.expect("the joiner rendered")
+		.1
+		.timestamp
+		.as_micros()
+		.unwrap() as u64;
 	(a, b, joined + 2_000_000)
 }
 
@@ -1340,7 +1347,9 @@ async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 	// The instant each slot first went out, by its PCR time.
 	let mut first = std::collections::BTreeMap::new();
 	for (sent, frame) in &leg.out {
-		first.entry(frame.timestamp.as_micros() as u64).or_insert(*sent);
+		first
+			.entry(frame.timestamp.as_micros().unwrap() as u64)
+			.or_insert(*sent);
 	}
 	let slots: Vec<(u64, Instant)> = first.into_iter().collect();
 	// (window end in seconds of PCR time, the system clock's offset in ppm)
@@ -1389,7 +1398,7 @@ async fn a_joiner_runs_at_the_delay_from_its_first_output() {
 		.out
 		.iter()
 		.map(|(sent, frame)| {
-			let media = frame.timestamp.as_micros() as u64;
+			let media = frame.timestamp.as_micros().unwrap() as u64;
 			sent.saturating_duration_since(live.send_times(media, media).1)
 		})
 		.collect();

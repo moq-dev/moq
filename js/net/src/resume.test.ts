@@ -15,6 +15,7 @@ import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
+import { Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -61,7 +62,10 @@ function copy(source: BroadcastProducer) {
 		write(sequence: bigint, frames = 1, close = true) {
 			const group = producer.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++)
-				group.writeFrame({ payload: enc.encode(`${sequence}.${frame}`) });
+				group.writeFrame({
+					payload: enc.encode(`${sequence}.${frame}`),
+					timestamp: Timestamp.unscaled(group.sequence),
+				});
 			if (close) group.finish();
 			return group;
 		},
@@ -137,7 +141,7 @@ test("returning to a route reuses its subscription and held group", async () => 
 		expect(drain(sub)).toEqual([1n]);
 		front.serve(handles[0]);
 		await clock.advance(Duration.ZERO);
-		open.writeFrame({ payload: enc.encode("0.1") });
+		open.writeFrame({ payload: enc.encode("0.1"), timestamp: Timestamp.unscaled(open.sequence) });
 		expect(dec.decode((await held.readFrame())?.payload)).toBe("0.1");
 		tracks[0].write(2n);
 		expect(drain(sub)).toEqual([2n]);
@@ -308,7 +312,7 @@ test("a backfill waits on a fill the finished route still owes", async () => {
 					continue;
 				}
 				const group = fill.accept(sequence);
-				group.writeFrame({ payload: enc.encode("2.0") });
+				group.writeFrame({ payload: enc.encode("2.0"), timestamp: Timestamp.unscaled(group.sequence) });
 				group.finish();
 			}
 			fill.close();
@@ -527,7 +531,7 @@ test("a resumed fork shares an on-demand track request", async () => {
 	const extra = wireOf(a).requested();
 	const fork = parent.fork();
 	try {
-		producer.writeFrame({ payload: enc.encode("shared") });
+		producer.writeFrame({ payload: enc.encode("shared"), timestamp: Timestamp.unscaled(0n) });
 		for (const subscriber of [parent, fork]) {
 			const group = await subscriber.recvGroup();
 			expect(dec.decode((await group?.readFrame())?.payload)).toBe("shared");
@@ -613,7 +617,8 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 		if (!active) throw new Error("expected the incumbent route");
 		sub = active.track("seq").subscribe({ delay: { max: Duration.millis(60_000) } });
 		const first = source.appendGroup();
-		for (let frame = 0; frame < 4; frame++) first.writeFrame({ payload: enc.encode(`0.${frame}`) });
+		for (let frame = 0; frame < 4; frame++)
+			first.writeFrame({ payload: enc.encode(`0.${frame}`), timestamp: Timestamp.unscaled(first.sequence) });
 		first.finish();
 		const seen: string[] = [];
 		const initial = await sub.recvGroup();
@@ -624,15 +629,18 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 		initial.close();
 
 		const open = source.appendGroup();
-		for (let frame = 0; frame < 2; frame++) open.writeFrame({ payload: enc.encode(`1.${frame}`) });
+		for (let frame = 0; frame < 2; frame++)
+			open.writeFrame({ payload: enc.encode(`1.${frame}`), timestamp: Timestamp.unscaled(open.sequence) });
 		const interrupted = await sub.recvGroup();
 		if (!interrupted) throw new Error("expected group 1");
 		expect(interrupted.sequence).toBe(1n);
 		for (let frame = 0; frame < 2; frame++) seen.push(dec.decode((await interrupted.readFrame())?.payload));
-		for (let frame = 2; frame < 4; frame++) open.writeFrame({ payload: enc.encode(`1.${frame}`) });
+		for (let frame = 2; frame < 4; frame++)
+			open.writeFrame({ payload: enc.encode(`1.${frame}`), timestamp: Timestamp.unscaled(open.sequence) });
 		open.finish();
 		const last = source.appendGroup();
-		for (let frame = 0; frame < 4; frame++) last.writeFrame({ payload: enc.encode(`2.${frame}`) });
+		for (let frame = 0; frame < 4; frame++)
+			last.writeFrame({ payload: enc.encode(`2.${frame}`), timestamp: Timestamp.unscaled(last.sequence) });
 		last.finish();
 
 		// The standby holds the complete original while the incumbent cannot pass 1.1.
@@ -1146,7 +1154,7 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 
 		const fa = a.createTrack("fetch");
 		const failing = fa.createGroup(5n);
-		failing.writeFrame({ payload: enc.encode("5.0") });
+		failing.writeFrame({ payload: enc.encode("5.0"), timestamp: Timestamp.unscaled(failing.sequence) });
 		const fetching = front.consumer.track("fetch").fetchGroup(5n);
 		for (let turn = 0; turn < turns; turn++) await Promise.resolve();
 		failing.abort(new StreamError(StreamCode.SessionClosed));
@@ -1156,8 +1164,8 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 		// group the new route never has.
 		const fb = b.createTrack("fetch");
 		const whole = fb.createGroup(5n);
-		whole.writeFrame({ payload: enc.encode("5.0") });
-		whole.writeFrame({ payload: enc.encode("5.1") });
+		whole.writeFrame({ payload: enc.encode("5.0"), timestamp: Timestamp.unscaled(whole.sequence) });
+		whole.writeFrame({ payload: enc.encode("5.1"), timestamp: Timestamp.unscaled(whole.sequence) });
 		whole.finish();
 		b.createTrack("seq");
 		front.serve(b.consume());
@@ -1865,7 +1873,7 @@ test("a failed group on a route whose replacement was refused ends with the refu
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
 	const stalled = ta.createGroup(0n);
-	stalled.writeFrame({ payload: enc.encode("0.0") });
+	stalled.writeFrame({ payload: enc.encode("0.0"), timestamp: Timestamp.unscaled(stalled.sequence) });
 	const group = sub.tryRecvGroup();
 	if (!group) throw new Error("expected group 0");
 	await group.readFrame();
@@ -1941,7 +1949,7 @@ test("a fetch never reads a replacement refused for its track properties", async
 	a.createTrack("seq", { priority: 1 });
 	const tb = b.createTrack("seq", { priority: 2 });
 	const group = tb.createGroup(0n);
-	group.writeFrame({ payload: enc.encode("b") });
+	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	front.serve(a.consume());
 	await front.consumer.track("seq").info();
@@ -1963,7 +1971,7 @@ test("the first fetch of a track says what the track is for later routes", async
 	] as const) {
 		const producer = source.createTrack("seq", { priority });
 		const group = producer.createGroup(0n);
-		group.writeFrame({ payload: enc.encode(`${priority}`) });
+		group.writeFrame({ payload: enc.encode(`${priority}`), timestamp: Timestamp.unscaled(group.sequence) });
 		group.finish();
 	}
 	front.serve(a.consume());
@@ -2020,7 +2028,7 @@ test("a fetch never hands out a group from a route refused for its properties", 
 	a.createTrack("seq", { priority: 1 });
 	const tb = b.createTrack("seq", { priority: 2 });
 	const group = tb.createGroup(0n);
-	group.writeFrame({ payload: enc.encode("b") });
+	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	front.serve(a.consume());
 	await front.consumer.track("seq").info();
@@ -2430,7 +2438,7 @@ test("a fetch waits for the copy being read to say what the track is", async () 
 	const requests = wireOf(a).requested();
 	const tb = b.createTrack("seq", { priority: 2 });
 	const group = tb.createGroup(0n);
-	group.writeFrame({ payload: enc.encode("b") });
+	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
@@ -3459,7 +3467,8 @@ test("a fetch its route already answered continues the group past that route's a
 
 	// The route answers, then aborts its track before recovery looks again.
 	const rest = new GroupProducer(0n);
-	for (const frame of ["0.0", "0.1"]) rest.writeFrame({ payload: enc.encode(frame) });
+	for (const frame of ["0.0", "0.1"])
+		rest.writeFrame({ payload: enc.encode(frame), timestamp: Timestamp.unscaled(rest.sequence) });
 	rest.finish();
 	answer(rest.consume());
 	queueMicrotask(() => ta.producer.abort(new StreamError(StreamCode(70), { message: "cut" })));
@@ -3483,7 +3492,7 @@ for (const fetched of [false, true]) {
 		const { route, asked } = counted(a, (sequence) => {
 			if (!hostile) return undefined;
 			const copy = new GroupProducer(sequence);
-			copy.writeFrame({ payload: enc.encode(`${sequence}.0`) });
+			copy.writeFrame({ payload: enc.encode(`${sequence}.0`), timestamp: Timestamp.unscaled(copy.sequence) });
 			void yieldNow().then(() => copy.abort(malformed));
 			return copy.consume();
 		});

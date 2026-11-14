@@ -53,6 +53,17 @@ use std::time::Duration;
 use moq_mux::catalog::{self, Stream};
 use rand::RngExt;
 
+/// `pts` in nanoseconds. Every timestamp the export places is scaled: a group whose first frame
+/// is [unscaled](moq_net::Timestamp::unscaled) is skipped before it reaches the grid.
+pub(crate) fn nanos(pts: moq_net::Timestamp) -> u128 {
+	pts.as_nanos().expect("the export places only scaled timestamps")
+}
+
+/// `pts` as the time since the track's zero; see [`nanos`].
+pub(crate) fn span(pts: moq_net::Timestamp) -> Duration {
+	Duration::try_from(pts).expect("the export places only scaled timestamps")
+}
+
 pub use driver::Driver;
 pub(crate) use playlist::render_media;
 #[cfg(feature = "server")]
@@ -2482,7 +2493,7 @@ mod tests {
 			json,
 		);
 		catalog
-			.update(moq_json::Timed::from(&snapshot).at(moq_net::Timestamp::ZERO))
+			.update(moq_json::Timed::new(&snapshot, moq_net::Timestamp::ZERO))
 			.unwrap();
 		let mut media = Gops {
 			track: broadcast.broadcast().create_track("video0", timed()).unwrap(),

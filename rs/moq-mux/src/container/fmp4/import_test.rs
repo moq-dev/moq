@@ -29,7 +29,7 @@ fn drain_group_starts(consumer: &mut moq_net::track::Subscriber) -> Vec<u64> {
 /// A group `start` on a track counting in `timescale`, in microseconds.
 fn micros(start: u64, timescale: Option<moq_net::Timescale>) -> u64 {
 	let timescale = timescale.expect("a timed track");
-	moq_net::Timestamp::new(start, timescale).unwrap().as_micros() as u64
+	moq_net::Timestamp::new(start, timescale).unwrap().as_micros().unwrap() as u64
 }
 
 fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
@@ -723,7 +723,7 @@ async fn published(
 		let track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, container);
 		while let Some(frame) = reader.read_frame().await.unwrap() {
-			samples.push((frame.timestamp.as_micros(), frame.keyframe, frame.payload));
+			samples.push((frame.timestamp.as_micros().unwrap(), frame.keyframe, frame.payload));
 		}
 	}
 	out
@@ -1094,7 +1094,7 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 	let mut frames = Vec::new();
 	while let Some(frame) = group.read_frame().await.unwrap() {
 		let frame = hang::container::Frame::decode(frame.payload).unwrap();
-		frames.push((frame.timestamp.as_micros(), frame.payload.to_vec()));
+		frames.push((frame.timestamp.as_micros().unwrap(), frame.payload.to_vec()));
 	}
 	// 25, 27, and 26 frames at 24 per second, in whole microseconds.
 	assert_eq!(
@@ -2703,9 +2703,9 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
-	let before = clock.now().as_micros();
+	let before = clock.now().as_micros().unwrap();
 	fmp4.decode(&live_session(start_us, 20)).unwrap();
-	let after = clock.now().as_micros();
+	let after = clock.now().as_micros().unwrap();
 	if let Some(stream) = data.as_mut() {
 		stream
 			.append(&serde_json::json!("after"), catalog.clock().now())
@@ -2736,7 +2736,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 		let mut times = Vec::new();
 		while let std::task::Poll::Ready(Ok(Some(mut group))) = stamps.poll_recv_group(&waiter) {
 			while let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-				times.push(frame.timestamp.unwrap().as_micros());
+				times.push(frame.timestamp.as_micros().unwrap());
 			}
 		}
 		assert_eq!(times.len(), 2);
@@ -2772,9 +2772,9 @@ async fn an_import_shifts_onto_an_explicit_clock() {
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
-	let before = clock.now().as_micros();
+	let before = clock.now().as_micros().unwrap();
 	fmp4.decode(&live_session(3_600_000_000, 5)).unwrap();
-	let after = clock.now().as_micros();
+	let after = clock.now().as_micros().unwrap();
 	let _finished = fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -2984,7 +2984,11 @@ async fn imports_the_sample_defaults_fixtures_in(passthrough: bool) {
 					let frame = hang::container::Frame::decode(frame.payload).unwrap();
 					// The duration marker closing a video group is no sample.
 					if !frame.payload.is_empty() {
-						samples.push((frame.timestamp.as_micros() as u64, index == 0, frame.payload.to_vec()));
+						samples.push((
+							frame.timestamp.as_micros().unwrap() as u64,
+							index == 0,
+							frame.payload.to_vec(),
+						));
 					}
 					index += 1;
 				}
@@ -3005,7 +3009,7 @@ async fn imports_the_sample_defaults_fixtures_in(passthrough: bool) {
 
 		let mut first = track.recv_group().await.unwrap().unwrap();
 		let frame = first.read_frame().await.unwrap().unwrap();
-		let frames = super::decode(frame.payload, frame.timestamp, wire.track().unwrap()).unwrap();
+		let frames = super::decode(frame.payload, Some(frame.timestamp), wire.track().unwrap()).unwrap();
 		let samples: Vec<super::FixtureSample> = frames.iter().map(super::FixtureSample::from).collect();
 		assert_eq!(samples, fixture.samples, "{}", fixture.name);
 
@@ -3145,7 +3149,7 @@ async fn webvtt_samples_become_timed_text_with_source_metadata() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let frame = reader.read_frame().await.unwrap().unwrap();
-	assert_eq!(frame.timestamp.as_micros(), 250_000);
+	assert_eq!(frame.timestamp.as_micros().unwrap(), 250_000);
 	assert_eq!(
 		&frame.payload[..],
 		b"WEBVTT\n\ncue-1\n00:00:00.250 --> 00:00:01.500 align:start\nHello\n\n"
@@ -3516,7 +3520,7 @@ async fn ttml_samples_become_timed_text_with_source_metadata() {
 	assert_eq!(config.format, hang::catalog::TextFormat::Ttml);
 	assert_eq!(config.lang.as_deref(), Some("eng"));
 	assert_eq!(config.label.as_deref(), Some("English captions"));
-	assert_eq!(frame.timestamp.as_micros(), 100_000_000);
+	assert_eq!(frame.timestamp.as_micros().unwrap(), 100_000_000);
 	assert_eq!(
 		&frame.payload[..],
 		br#"<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body begin="00:01:40" end="00:01:44"><div begin="00:00:01"><p begin="0.5s" end="2s">Hello</p></div></body></tt>"#
@@ -3539,7 +3543,7 @@ async fn ttml_follows_a_shifted_source_clock() {
 		.place(moq_net::Timestamp::from_secs(100).unwrap(), wall)
 		.unwrap();
 	let (_, frame) = imported_ttml(timebase, broadcast, &catalog, &consumer).await;
-	assert_eq!(frame.timestamp.as_micros(), 10_000_000);
+	assert_eq!(frame.timestamp.as_micros().unwrap(), 10_000_000);
 	assert_eq!(
 		&frame.payload[..],
 		br#"<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body begin="00:00:10" end="00:00:14"><div begin="00:00:01"><p begin="0.5s" end="2s">Hello</p></div></body></tt>"#
@@ -3598,7 +3602,7 @@ async fn ttml_body_begins_at_the_serialized_frame_timestamp() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let frame = reader.read_frame().await.unwrap().unwrap();
-	assert_eq!(frame.timestamp.as_micros(), 100_000_011);
+	assert_eq!(frame.timestamp.as_micros().unwrap(), 100_000_011);
 	let payload = std::str::from_utf8(&frame.payload).unwrap();
 	assert!(
 		payload.contains(r#"<body begin="00:01:40.000011" end="00:01:44.000011">"#),

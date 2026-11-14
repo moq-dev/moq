@@ -277,13 +277,13 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	subscribed(&data).await;
 
 	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
-	open.write_frame(None, "a").unwrap();
+	open.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
 	let head = untimed(0, 0);
 	let first = get(&store, &format!("data/{head}")).await.unwrap();
 
-	open.write_frame(None, "b").unwrap();
+	open.write_frame(moq_net::Timestamp::unscaled(0), "b").unwrap();
 	settle().await;
 	sleep(SECOND).await;
 	assert_eq!(get(&store, &format!("data/{head}")).await.unwrap(), first);
@@ -315,7 +315,7 @@ async fn an_untimed_group_splits_by_wall_clock() {
 
 	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
 	for payload in ["a", "b", "c", "d", "e"] {
-		open.write_frame(None, payload).unwrap();
+		open.write_frame(moq_net::Timestamp::unscaled(0), payload).unwrap();
 		settle().await;
 		sleep(SECOND / 2).await;
 	}
@@ -323,7 +323,7 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	settle().await;
 	sleep(2 * SECOND).await;
 	let mut next = data.create_group(group::Info { start: 1 }).unwrap();
-	next.write_frame(None, "f").unwrap();
+	next.write_frame(moq_net::Timestamp::unscaled(1), "f").unwrap();
 	next.close().unwrap();
 	settle().await;
 	let _data = data.finish().unwrap();
@@ -393,7 +393,9 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	let mut untimed_group = data.create_group(group::Info { start: 0 }).unwrap();
 	for (pts, payload) in [(0, "a"), (100, "b")] {
 		timed_group.write_frame(ms(pts), payload).unwrap();
-		untimed_group.write_frame(None, payload).unwrap();
+		untimed_group
+			.write_frame(moq_net::Timestamp::unscaled(0), payload)
+			.unwrap();
 	}
 	settle().await;
 	sleep(SECOND).await;
@@ -402,11 +404,11 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 
 	// Both groups grow while nothing records them.
 	timed_group.write_frame(ms(200), "c").unwrap();
-	untimed_group.write_frame(None, "c").unwrap();
+	untimed_group.write_frame(moq_net::Timestamp::unscaled(0), "c").unwrap();
 	let task = spawn(&store, &broadcast, config);
 	settle().await;
 	timed_group.write_frame(ms(300), "d").unwrap();
-	untimed_group.write_frame(None, "d").unwrap();
+	untimed_group.write_frame(moq_net::Timestamp::unscaled(0), "d").unwrap();
 	timed_group.close().unwrap();
 	untimed_group.close().unwrap();
 	settle().await;
@@ -549,7 +551,7 @@ async fn track_names_stay_one_segment_through_a_resume() {
 	for track in &tracks {
 		subscribed(track).await;
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(None, "x").unwrap();
+		group.write_frame(moq_net::Timestamp::unscaled(0), "x").unwrap();
 		group.close().unwrap();
 	}
 	settle().await;

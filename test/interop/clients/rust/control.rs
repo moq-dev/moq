@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
 		.create_track("video", moq_net::track::Info::default().with_priority(2))?;
 	let mut group = track.create_group(moq_net::group::Info { start: 4 })?;
 	for byte in [1, 2] {
-		group.write_frame(None, vec![byte])?;
+		group.write_frame(moq_net::Timestamp::unscaled(group.start), vec![byte])?;
 	}
 	group.close()?;
 	route.announce()?;

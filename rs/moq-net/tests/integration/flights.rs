@@ -71,7 +71,11 @@ async fn write_paced(
 		}
 	})
 	.await;
-	room && payload.is_some_and(|payload| group.write_frame(moq_net::Timestamp::unscaled(group.start), payload).is_ok())
+	room && payload.is_some_and(|payload| {
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.is_ok()
+	})
 }
 
 /// The origin's handler: serves each fill from the frame it starts at, paced by its riders,
@@ -162,7 +166,9 @@ async fn moq_transport_relays_a_cold_finished_group() {
 	serve(track.requests(), written, ended, true);
 	let mut group = track.append_next().unwrap();
 	for index in 0..FRAMES {
-		group.write_frame(moq_net::Timestamp::unscaled(group.start), numbered(index)).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), numbered(index))
+			.unwrap();
 	}
 	group.close().unwrap();
 
@@ -249,7 +255,8 @@ async fn chain(version: &str, replay: Replay) {
 
 	// The live reader at the bottom of the chain keeps up with the publisher.
 	let mut live = track.append_next().unwrap();
-	live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(0)).unwrap();
+	live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(0))
+		.unwrap();
 	let mut reader = kio::clock::timeout(TIMEOUT, live_sub.recv_group())
 		.await
 		.expect("group timeout")
@@ -258,7 +265,8 @@ async fn chain(version: &str, replay: Replay) {
 	assert_eq!(next(&mut reader, version, 0).await, 0);
 	for index in 1..FRAMES {
 		kio::wait(|waiter| live.poll_ready(waiter, &info(&numbered(index)))).await;
-		live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(index)).unwrap();
+		live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(index))
+			.unwrap();
 		assert_eq!(next(&mut reader, version, index).await, index, "{version}: live");
 	}
 

@@ -187,13 +187,13 @@ impl Grid {
 	/// The segment a group starting at `pts` and ending at `end` belongs to, or `None` while it
 	/// needs an `end` it doesn't have.
 	pub fn segment(&self, pts: Timestamp, end: Option<Timestamp>) -> Option<u64> {
-		let pts = pts.as_nanos();
+		let pts = super::nanos(pts);
 		let slot = pts / self.length;
 		if pts.is_multiple_of(self.length) {
 			return Some(slot as u64);
 		}
 		let line = (slot + 1) * self.length;
-		let end = end?.as_nanos();
+		let end = super::nanos(end?);
 		Some(if end > line { slot + 1 } else { slot } as u64)
 	}
 
@@ -202,7 +202,7 @@ impl Grid {
 	/// group starts after its line may follow earlier groups of the same segment.
 	pub fn starts(&self, slot: &Slot) -> bool {
 		match slot {
-			Slot::Media { segment, pts, .. } => (*segment as u128).saturating_mul(self.length) >= pts.as_nanos(),
+			Slot::Media { segment, pts, .. } => (*segment as u128).saturating_mul(self.length) >= super::nanos(*pts),
 			Slot::Gap { .. } => true,
 			Slot::Reset => false,
 		}
@@ -240,7 +240,11 @@ impl Grid {
 	/// line can exceed it.
 	fn start(&self, segment: u64, pts: Timestamp) -> Timestamp {
 		let line = self.line(segment);
-		if pts.as_nanos() > line.as_nanos() { line } else { pts }
+		if super::nanos(pts) > super::nanos(line) {
+			line
+		} else {
+			pts
+		}
 	}
 
 	/// The pts of line `segment`.
@@ -302,7 +306,7 @@ impl Grid {
 			let end = [open.stop, end, reach]
 				.into_iter()
 				.flatten()
-				.find(|end| end.as_nanos() > open.pts.as_nanos())
+				.find(|end| super::nanos(*end) > super::nanos(open.pts))
 				.unwrap_or(open.pts);
 			out.push(Slot::Media {
 				segment: open.segment,
@@ -383,10 +387,15 @@ mod test {
 				} => (
 					segment,
 					groups.first().unwrap()..groups.last().unwrap() + 1,
-					start.as_millis() as u64,
-					end.as_millis() as u64,
+					start.as_millis().unwrap() as u64,
+					end.as_millis().unwrap() as u64,
 				),
-				Slot::Gap { segment, pts, end } => (segment, 0..0, pts.as_millis() as u64, end.as_millis() as u64),
+				Slot::Gap { segment, pts, end } => (
+					segment,
+					0..0,
+					pts.as_millis().unwrap() as u64,
+					end.as_millis().unwrap() as u64,
+				),
 				Slot::Reset => panic!("unexpected reset"),
 			})
 			.collect()
@@ -651,7 +660,7 @@ mod test {
 			slots
 				.into_iter()
 				.filter_map(|slot| match slot {
-					Slot::Media { content, .. } => Some(content.map(|at| at.as_millis() as u64)),
+					Slot::Media { content, .. } => Some(content.map(|at| at.as_millis().unwrap() as u64)),
 					_ => None,
 				})
 				.collect()

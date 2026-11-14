@@ -4,7 +4,11 @@
  * cost what its bytes do, not what its count claims.
  */
 
+import { Time } from "@moq/net";
 import { decodeDataSegment, type InitSegment } from "../src/cmaf/decode.ts";
+
+// A scale-less track's timestamp, its group's key, which carries no time.
+const UNTIMED = Time.Timestamp.unscaled(0n);
 
 const runs = 200;
 
@@ -50,7 +54,7 @@ function time(segment: Uint8Array, hostile: boolean): { samples: number; micros:
 	const start = performance.now();
 	for (let run = 0; run < runs; run++) {
 		try {
-			samples = decodeDataSegment(segment, init, undefined).length;
+			samples = decodeDataSegment(segment, init, UNTIMED).length;
 			if (hostile) throw new Error("a hostile count decoded");
 		} catch (err) {
 			if (!hostile || !String(err).includes("past the")) throw err;

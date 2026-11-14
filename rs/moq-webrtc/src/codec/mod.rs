@@ -280,7 +280,7 @@ impl Track {
 				continue;
 			}
 			return Ok(Some(PacketizedFrame {
-				timestamp_us: frame.timestamp.as_micros() as u64,
+				timestamp_us: frame.timestamp.as_micros().map_err(moq_mux::Error::from)? as u64,
 				payload,
 				keyframe: frame.keyframe,
 			}));

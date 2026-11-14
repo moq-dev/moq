@@ -31,7 +31,7 @@ async def exchange(stream: socket.TcpStream | socket.TrackStream) -> None:
     assert stream.peer == "rust"
     if isinstance(stream, socket.TcpStream):
         for payload in PAYLOADS:
-            stream.producer.write_frame(payload)
+            stream.producer.write_frame(payload, moq.Timestamp.unscaled(stream.producer.sequence))
         stream.producer.finish()
         assert [frame.payload async for frame in stream.consumer] == PAYLOADS
     else:
@@ -39,7 +39,7 @@ async def exchange(stream: socket.TcpStream | socket.TrackStream) -> None:
         for _ in range(3):
             group = stream.producer.append_group()
             for payload in PAYLOADS:
-                group.write_frame(payload)
+                group.write_frame(payload, moq.Timestamp.unscaled(group.sequence))
             group.finish()
         stream.producer.finish()
         received = [(group.sequence, [frame.payload async for frame in group]) async for group in stream.consumer]

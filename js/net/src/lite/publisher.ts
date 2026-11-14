@@ -146,8 +146,8 @@ interface Stamp {
 	timescale: Timescale;
 	/**
 	 * The timed track whose frames' own timestamps go out, at its timescale, which the wire's
-	 * equals. Lite-05/06 cannot encode an untimed track, so an untimed one carries its send time
-	 * instead.
+	 * equals. Lite-05/06 cannot encode a scale-less track, so a scale-less one carries its send
+	 * time instead.
 	 */
 	timed?: { timescale?: Timescale | null };
 }
@@ -160,10 +160,9 @@ function stamping(version: Version, info: { timescale?: Timescale | null }): Sta
 	return timescale === undefined ? { timescale: wire } : { timescale: wire, timed: info };
 }
 
-/** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out untimed. */
-function wireTime(timestamp: Timestamp | undefined, stamp: Stamp): number {
-	const own = stamp.timed && rescale(stamp.timed, timestamp);
-	return own ? own.value : floorAt(Timestamp.now(), stamp.timescale);
+/** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out scale-less. */
+function wireTime(timestamp: Timestamp, stamp: Stamp): number {
+	return stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale);
 }
 
 /**
@@ -2441,7 +2440,7 @@ export class Publisher {
 				const timestamp =
 					stamp === undefined
 						? undefined
-						: datagram.timestamp === undefined
+						: datagram.timestamp.scale === undefined
 							? floorAt(Timestamp.now(), stamp.timescale)
 							: floorAt(datagram.timestamp, stamp.timescale);
 				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(

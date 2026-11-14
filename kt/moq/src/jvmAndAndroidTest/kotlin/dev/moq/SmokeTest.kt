@@ -88,10 +88,13 @@ class SmokeTest {
             val producer = request.accept(null)
             assertEquals(12.toByte(), producer.priority())
             assertNull(stream.demand().wanted())
-            producer.insert(Datagram(7uL, null, "seven".encodeToByteArray()))
+            producer.insert(Datagram(7uL, Timestamp.unscaled(7uL), "seven".encodeToByteArray()))
             val datagram = assertNotNull(consumer.recv())
             assertEquals(7uL, datagram.sequence)
             assertEquals("seven", datagram.payload.decodeToString())
+            // An unscaled append writes at the sequence it names.
+            assertEquals(9uL, producer.append(Timestamp.unscaled(9uL), "nine".encodeToByteArray()))
+            assertEquals(Timestamp.unscaled(9uL), assertNotNull(consumer.recv()).timestamp)
             consumer.cancel()
             assertNull(producer.priorityChanged(12))
             producer.finish()
@@ -399,14 +402,17 @@ class SmokeTest {
     }
 
     @Test
-    fun `raw writes without timestamps stay untimed`() = runTest {
+    fun `raw writes on a scale-less track carry the group key`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("untimed", null)
             val consumer = track.consume(null)
-            track.writeFrame(Frame(payload = "payload".encodeToByteArray()))
+            track.writeFrame(
+                Frame(payload = "payload".encodeToByteArray(), timestamp = Timestamp.unscaled(0uL))
+            )
             val frame = consumer.readFrame()
             assertEquals("payload", frame?.payload?.decodeToString())
-            assertNull(frame?.timestamp)
+            assertEquals(Timestamp.unscaled(0uL), frame?.timestamp)
+            assertNull(frame?.timestamp?.scale)
             assertNull(consumer.info().timescale)
             track.finish()
         }
@@ -503,16 +509,17 @@ class SmokeTest {
         assertNotNull(audio)
     }
 
-    /** A 90 kHz tick, a present zero, and an untimed frame survive a write and read exactly. */
+    /** A 90 kHz tick, a present zero, and an unscaled key survive a write and read exactly. */
     @Test
     fun `timestamps round-trip exactly`() = runTest {
-        for (timestamp in listOf(Timestamp(1uL, 90_000uL), Timestamp(0uL, 90_000uL), null)) {
+        for (timestamp in
+            listOf(Timestamp(1uL, 90_000uL), Timestamp(0uL, 90_000uL), Timestamp.unscaled(0uL))) {
             BroadcastProducer().use { broadcast ->
-                // A timed track refuses an untimed frame, so null goes to an untimed one.
+                // A timed track refuses an unscaled frame, so it goes to a scale-less one.
                 val track =
                     broadcast.publishTrack(
                         "ticks",
-                        timestamp?.let { TrackInfo(timescale = 90_000uL) },
+                        timestamp.scale?.let { TrackInfo(timescale = it) },
                     )
                 val consumer = track.consume(null)
                 track.writeFrame(Frame(payload = ByteArray(0), timestamp = timestamp))
@@ -548,6 +555,7 @@ class SmokeTest {
         assertEquals(Timestamp(20_000_000uL, 1_000_000_000uL), 20.milliseconds.toTimestamp())
         assertFailsWith<IllegalArgumentException> { (-1).nanoseconds.toTimestamp() }
         assertEquals(11_111.nanoseconds, Timestamp(1uL, 90_000uL).toDuration())
+        assertFailsWith<IllegalArgumentException> { Timestamp.unscaled(1uL).toDuration() }
         assertEquals(666_666_666.nanoseconds, Timestamp(2uL, 3uL).toDuration())
         assertEquals(0.nanoseconds, Timestamp(1uL, 2_000_000_000uL).toDuration())
         // The sub-second remainder times a billion overflows 64 bits at the largest scale, and the
@@ -613,11 +621,11 @@ class SmokeTest {
                 val push = assertIs<WindowEventPush>(timed.event)
                 assertEquals(n.toULong(), push.index)
                 assertEquals(Status(state = "live${n + 1}"), push.decode<Status>())
-                assertEquals((n + 1).milliseconds, timed.timestamp?.toDuration())
+                assertEquals((n + 1).milliseconds, timed.timestamp.toDuration())
             }
             val pop = checkNotNull(consumer.next())
             assertEquals(WindowEventPop(0uL, 2uL), pop.event)
-            assertEquals(4.milliseconds, pop.timestamp?.toDuration())
+            assertEquals(4.milliseconds, pop.timestamp.toDuration())
 
             // The cut's new group restates record 2, which this reader already has.
             producer.cut()

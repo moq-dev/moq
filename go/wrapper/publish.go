@@ -211,7 +211,8 @@ func (t *TrackProducer) SkipGroups(start, end uint64) error {
 	return t.inner.SkipGroups(start, end)
 }
 
-// WriteFrame writes frame as a single-frame group.
+// WriteFrame writes frame as a single-frame group, which starts at its timestamp: on a
+// scale-less track, moq.Unscaled at the new group's key.
 func (t *TrackProducer) WriteFrame(frame Frame) error {
 	return t.inner.WriteFrame(frame)
 }
@@ -282,7 +283,8 @@ func (g *GroupProducer) Ready(ctx context.Context, size uint64) error {
 }
 
 // WriteFrame appends frame to the group. It never blocks: without Ready, a writer
-// that outpaces its readers sheds the front of the group instead.
+// that outpaces its readers sheds the front of the group instead. On a scale-less track
+// the frame's timestamp is Unscaled at this group's Sequence.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
 	return g.inner.WriteFrame(frame)
 }

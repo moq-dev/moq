@@ -1,7 +1,7 @@
 import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
-import { Origin, Path } from "@moq/net";
+import { Origin, Path, Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Player } from "@moq/watch";
 
@@ -82,7 +82,10 @@ async function poster(audio: boolean, buffered: boolean) {
 	const push = (timestamp: number) => {
 		const payload = chunks.get(timestamp);
 		if (!payload) throw new Error("missing encoded frame");
-		group.writeFrame({ payload: Legacy.encodeFrame(payload, Duration.micros(timestamp)) });
+		group.writeFrame({
+			payload: Legacy.encodeFrame(payload, Duration.micros(timestamp)),
+			timestamp: Time.Timestamp.unscaled(group.sequence),
+		});
 	};
 	return {
 		push,
@@ -94,7 +97,10 @@ async function poster(audio: boolean, buffered: boolean) {
 				output(chunk) {
 					const data = new Uint8Array(chunk.byteLength);
 					chunk.copyTo(data);
-					audioGroup.writeFrame({ payload: Legacy.encodeFrame(data, Duration.micros(chunk.timestamp)) });
+					audioGroup.writeFrame({
+						payload: Legacy.encodeFrame(data, Duration.micros(chunk.timestamp)),
+						timestamp: Time.Timestamp.unscaled(audioGroup.sequence),
+					});
 				},
 				error(error) {
 					throw error;

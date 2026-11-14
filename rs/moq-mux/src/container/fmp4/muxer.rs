@@ -353,7 +353,7 @@ impl Muxer {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
 		if let Some(end) = end
-			&& let Some(last) = frames.iter_mut().max_by_key(|frame| frame.timestamp.as_micros())
+			&& let Some(last) = frames.iter_mut().max_by_key(|frame| frame.timestamp.as_micros().ok())
 			&& last.duration.is_none()
 			// Quantized at the output scale like the gaps between samples, so any end gap is
 			// whole ticks; one within a tick falls back like a sample with no successor.
@@ -438,9 +438,9 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(decoded.len(), 2);
-		assert_eq!(decoded[0].timestamp.as_micros(), 10_000_000);
+		assert_eq!(decoded[0].timestamp.as_micros().unwrap(), 10_000_000);
 		assert!(decoded[0].keyframe);
-		assert_eq!(decoded[1].timestamp.as_micros(), 10_033_000);
+		assert_eq!(decoded[1].timestamp.as_micros().unwrap(), 10_033_000);
 	}
 
 	/// A duration marker times the group's last sample through fmp4 (and HLS, which
@@ -462,7 +462,7 @@ mod tests {
 		let mut muxer = video_muxer();
 		let frames = muxer.read(&mut group).await.unwrap();
 		assert_eq!(frames.len(), 2, "the marker is not a sample");
-		assert_eq!(frames[1].duration.unwrap().as_micros(), 33_000);
+		assert_eq!(frames[1].duration.unwrap().as_micros().unwrap(), 33_000);
 
 		let fragment = muxer.fragment(0, &frames, None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(990), Some(990)]);
@@ -764,7 +764,7 @@ mod tests {
 			super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
 		)
 		.unwrap();
-		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
+		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale).unwrap(), 3_000);
 	}
 
 	// A downstream timeline fixed at 90 kHz overrides the framerate-derived default, and the
@@ -794,7 +794,7 @@ mod tests {
 			super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
 		)
 		.unwrap();
-		assert_eq!(decoded[0].timestamp.as_micros(), 33_333);
+		assert_eq!(decoded[0].timestamp.as_micros().unwrap(), 33_333);
 	}
 
 	#[test]
@@ -814,7 +814,7 @@ mod tests {
 			super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
 		)
 		.unwrap();
-		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
+		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale).unwrap(), 3_000);
 	}
 
 	// mdhd.timescale is 32 bits, but moq_net::Timescale spans the whole QUIC varint range. A
@@ -905,7 +905,7 @@ mod tests {
 		assert_eq!(decoded.len(), 4);
 		for f in &decoded {
 			assert_eq!(
-				f.duration.unwrap().as_micros(),
+				f.duration.unwrap().as_micros().unwrap(),
 				20_000,
 				"TOC duration, not the fallback"
 			);

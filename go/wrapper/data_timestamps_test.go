@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"moq.dev/moq"
@@ -11,28 +12,29 @@ import (
 )
 
 // A 90 kHz tick has no exact microsecond count, so it survives only as a record.
-var tick = moq.Timestamp{Value: 1, Scale: 90_000}
+var tick = moq.TimestampFromScale(1, 90_000)
 
 func ninetyKHz() *moq.TrackInfo {
 	scale := uint64(90_000)
 	return &moq.TrackInfo{Timescale: &scale}
 }
 
-// Every producer carries an exact timestamp or a present zero, a raw frame none at
-// all too, and the raw reader gets back exactly what was written. JSON writes
-// always take one, so they have no untimed case.
+// Every producer carries an exact timestamp or a present zero, a raw frame on a
+// scale-less track its unscaled group key too, and the raw reader gets back exactly
+// what was written. JSON writes need a timescale, so they have no scale-less case.
 func TestDataTimestamps(t *testing.T) {
 	timestamps := []struct {
 		name string
-		at   *moq.Timestamp
+		at   moq.Timestamp
 	}{
-		{"untimed", nil},
-		{"zero", &moq.Timestamp{Value: 0, Scale: 90_000}},
-		{"tick", &tick},
+		// The track's first group is key 0.
+		{"unscaled", moq.Unscaled(0)},
+		{"zero", moq.TimestampFromScale(0, 90_000)},
+		{"tick", tick},
 	}
 	for _, mode := range []string{"frame", "json snapshot", "json stream"} {
 		for _, timestamp := range timestamps {
-			if timestamp.at == nil && mode != "frame" {
+			if timestamp.at.Scale == nil && mode != "frame" {
 				continue
 			}
 			t.Run(mode+"/"+timestamp.name, func(t *testing.T) {
@@ -44,7 +46,7 @@ func TestDataTimestamps(t *testing.T) {
 				}
 				defer broadcast.Close()
 				var info *moq.TrackInfo
-				if timestamp.at != nil {
+				if timestamp.at.Scale != nil {
 					info = ninetyKHz()
 				}
 				track, err := broadcast.PublishTrack("data", info)
@@ -68,7 +70,7 @@ func TestDataTimestamps(t *testing.T) {
 					t.Fatal("missing frame")
 				}
 				want := timestamp.at
-				if (frame.Timestamp == nil) != (want == nil) || want != nil && *frame.Timestamp != *want {
+				if !reflect.DeepEqual(frame.Timestamp, want) {
 					t.Fatalf("timestamp = %+v, want %+v", frame.Timestamp, want)
 				}
 				if mode == "json snapshot" || mode == "json stream" {
@@ -88,7 +90,7 @@ func TestDataTimestamps(t *testing.T) {
 }
 
 // publishData writes one value at timestamp through the producer mode names, then finishes.
-func publishData(mode string, broadcast *moq.BroadcastProducer, track *moq.TrackProducer, payload []byte, timestamp *moq.Timestamp) error {
+func publishData(mode string, broadcast *moq.BroadcastProducer, track *moq.TrackProducer, payload []byte, timestamp moq.Timestamp) error {
 	switch mode {
 	case "frame":
 		return track.WriteFrame(moq.Frame{Payload: payload, Timestamp: timestamp})
@@ -97,7 +99,7 @@ func publishData(mode string, broadcast *moq.BroadcastProducer, track *moq.Track
 		if err != nil {
 			return err
 		}
-		if err := producer.Update(map[string]int{"n": 1}, *timestamp); err != nil {
+		if err := producer.Update(map[string]int{"n": 1}, timestamp); err != nil {
 			return err
 		}
 		return producer.Finish()
@@ -106,7 +108,7 @@ func publishData(mode string, broadcast *moq.BroadcastProducer, track *moq.Track
 		if err != nil {
 			return err
 		}
-		if err := producer.Append(map[string]int{"n": 1}, *timestamp); err != nil {
+		if err := producer.Append(map[string]int{"n": 1}, timestamp); err != nil {
 			return err
 		}
 		return producer.Finish()
@@ -121,9 +123,9 @@ func TestTimestampRefused(t *testing.T) {
 		name string
 		at   moq.Timestamp
 	}{
-		{"zero scale", moq.Timestamp{Value: 1, Scale: 0}},
-		{"scale 2^62", moq.Timestamp{Value: 1, Scale: 1 << 62}},
-		{"value 2^61", moq.Timestamp{Value: 1 << 61, Scale: 90_000}},
+		{"zero scale", moq.TimestampFromScale(1, 0)},
+		{"scale 2^62", moq.TimestampFromScale(1, 1<<62)},
+		{"value 2^61", moq.TimestampFromScale(1<<61, 90_000)},
 	} {
 		for _, mode := range []string{"frame", "json stream"} {
 			t.Run(mode+"/"+bad.name, func(t *testing.T) {
@@ -136,7 +138,7 @@ func TestTimestampRefused(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := publishData(mode, broadcast, track, []byte("x"), &bad.at); !errors.Is(err, moq.ErrTimeOverflow) {
+				if err := publishData(mode, broadcast, track, []byte("x"), bad.at); !errors.Is(err, moq.ErrTimeOverflow) {
 					t.Fatalf("err = %v, want ErrTimeOverflow", err)
 				}
 			})

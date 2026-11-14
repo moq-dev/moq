@@ -156,7 +156,7 @@ impl Release {
 				let arrival = Arrival {
 					arrived: arrived.max(self.subscribed),
 					read: kio::clock::now(),
-					decode: frame.timestamp.into(),
+					decode: frame.timestamp.try_into()?,
 					restart: track.markers(),
 					// The output opens on a group, at a random access point; from then on every
 					// object goes out on its own, so one dropped late is a gap of its packets only.

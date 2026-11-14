@@ -14,12 +14,13 @@ fn micros(value: u64) -> moq_timestamp {
 	moq_timestamp {
 		value,
 		scale: 1_000_000,
+		has_scale: true,
 	}
 }
 
-/// The timestamp a read points at, `None` when untimed.
-fn read_timestamp(timestamp: *const moq_timestamp) -> Option<moq_timestamp> {
-	unsafe { timestamp.as_ref() }.copied()
+/// The timestamp a read points at, which is never NULL.
+fn read_timestamp(timestamp: *const moq_timestamp) -> moq_timestamp {
+	*unsafe { timestamp.as_ref() }.expect("a read always carries a timestamp")
 }
 
 /// The broadcast clock's current time, which every write on the broadcast is stamped from.
@@ -1691,7 +1692,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(
 		read_timestamp(frame.timestamp),
-		Some(micros(timestamp_us)),
+		micros(timestamp_us),
 		"a media frame is always timed"
 	);
 	assert!(frame.keyframe);
@@ -2110,8 +2111,9 @@ fn track_info_max_age() {
 }
 
 /// Raw frames, datagrams, and JSON values read back exactly the timestamp written: a 90 kHz
-/// tick that microseconds cannot express, a present zero, and untimed. The C API only creates
-/// timed tracks, so the tracks and the JSON producer come from moq-net.
+/// tick that microseconds cannot express, a present zero, and a scale-less track's unscaled
+/// key. The C API only creates timed tracks, so the tracks and the JSON producer come from
+/// moq-net.
 #[test]
 fn timestamps_round_trip_exactly() {
 	let origin = id(moq_origin_create());
@@ -2122,14 +2124,17 @@ fn timestamps_round_trip_exactly() {
 	let tick = moq_timestamp {
 		value: 1,
 		scale: 90_000,
+		has_scale: true,
 	};
 	let zero = moq_timestamp {
 		value: 0,
 		scale: 90_000,
+		has_scale: true,
 	};
-	for (name, written) in [("tick", Some(tick)), ("zero", Some(zero)), ("untimed", None)] {
+	for (name, written) in [("tick", tick), ("zero", zero), ("unscaled", moq_timestamp::unscaled(0))] {
+		let scale = written.has_scale.then_some(written.scale);
 		let info =
-			moq_net::track::Info::default().with_timescale(written.map(|_| moq_net::Timescale::new(90_000).unwrap()));
+			moq_net::track::Info::default().with_timescale(scale.map(|scale| moq_net::Timescale::new(scale).unwrap()));
 		let create = |name: &str| -> u32 {
 			let mut state = State::lock();
 			state
@@ -2146,7 +2151,7 @@ fn timestamps_round_trip_exactly() {
 				name.len(),
 				&moq_datagram_info {
 					priority: 0,
-					timescale: written.map(|_| 90_000).unwrap_or_default(),
+					timescale: scale.unwrap_or_default(),
 				},
 			)
 		});
@@ -2186,7 +2191,7 @@ fn timestamps_round_trip_exactly() {
 			)
 		});
 
-		let timestamp = written.as_ref().map_or(std::ptr::null(), std::ptr::from_ref);
+		let timestamp = std::ptr::from_ref(&written);
 		let payload = b"payload";
 		assert_eq!(
 			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), timestamp) },
@@ -2236,7 +2241,7 @@ fn timestamps_round_trip_exactly() {
 		let mut json = moq_json::stream::Producer::<serde_json::Value>::new(producer, Default::default());
 		json.append(moq_json::Timed {
 			value: &serde_json::json!(1),
-			at: written.map(|written| written.try_into().unwrap()),
+			at: written.try_into().unwrap(),
 		})
 		.unwrap();
 		let value_id = id(values.recv());
@@ -2262,8 +2267,8 @@ fn timestamps_round_trip_exactly() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A write refuses a timestamp outside `moq_net::Timestamp`'s range, and an untimed write on a
-/// timed track.
+/// A write refuses a timestamp outside `moq_net::Timestamp`'s range, a NULL one, and an
+/// unscaled one on a timed track.
 #[test]
 fn timestamp_writes_refuse_out_of_range_and_mismatch() {
 	let origin = id(moq_origin_create());
@@ -2273,14 +2278,20 @@ fn timestamp_writes_refuse_out_of_range_and_mismatch() {
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 
 	for invalid in [
-		moq_timestamp { value: 0, scale: 0 },
+		moq_timestamp {
+			value: 0,
+			scale: 0,
+			has_scale: true,
+		},
 		moq_timestamp {
 			value: 0,
 			scale: 1 << 62,
+			has_scale: true,
 		},
 		moq_timestamp {
 			value: 1 << 61,
 			scale: 1_000_000,
+			has_scale: true,
 		},
 	] {
 		assert_eq!(
@@ -2291,6 +2302,10 @@ fn timestamp_writes_refuse_out_of_range_and_mismatch() {
 	}
 	assert_eq!(
 		unsafe { moq_publish_track_frame(track, name.as_ptr(), name.len(), std::ptr::null()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, name.as_ptr(), name.len(), &moq_timestamp::unscaled(0)) },
 		MOQ_ERROR_MOQ
 	);
 
@@ -2360,7 +2375,7 @@ fn raw_track_publish_consume() {
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload);
-	assert_eq!(read_timestamp(frame.timestamp), Some(micros(timestamp_us)));
+	assert_eq!(read_timestamp(frame.timestamp), micros(timestamp_us));
 	assert!(!frame.keyframe, "raw frames have no keyframe flag");
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
@@ -2386,7 +2401,7 @@ fn raw_track_publish_consume() {
 		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 		assert_eq!(received, expected);
-		assert_eq!(read_timestamp(frame.timestamp), Some(micros(timestamp_us)));
+		assert_eq!(read_timestamp(frame.timestamp), micros(timestamp_us));
 		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 	}
 
@@ -2543,7 +2558,10 @@ fn a_datagram_only_track_is_read() {
 		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
 		.expect("no datagram reader arrived");
 
-	assert_eq!(datagrams.append(None, &b"only"[..]).unwrap(), 0);
+	assert_eq!(
+		datagrams.append(moq_net::Timestamp::unscaled(0), &b"only"[..]).unwrap(),
+		0
+	);
 	let dg_id = id(dg_cb.recv());
 	let mut datagram = moq_datagram {
 		payload: std::ptr::null(),
@@ -2616,7 +2634,7 @@ fn raw_track_datagram_publish_consume() {
 	assert_eq!(unsafe { moq_consume_datagram(dg_id, &mut datagram) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(datagram.payload, datagram.payload_size) };
 	assert_eq!(received, payload);
-	assert_eq!(read_timestamp(datagram.timestamp), Some(micros(120_000)));
+	assert_eq!(read_timestamp(datagram.timestamp), micros(120_000));
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(moq_consume_datagram_free(dg_id), 0);
 
@@ -2774,7 +2792,7 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, b"one");
-	assert_eq!(read_timestamp(frame.timestamp), Some(micros(20_000)));
+	assert_eq!(read_timestamp(frame.timestamp), micros(20_000));
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	// Widen the bounded range but keep the open one, so the read stays open for the cancel.
@@ -2805,7 +2823,7 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, b"two");
-	assert_eq!(read_timestamp(frame.timestamp), Some(micros(40_000)));
+	assert_eq!(read_timestamp(frame.timestamp), micros(40_000));
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
@@ -2904,10 +2922,11 @@ fn raw_track_time_anchor() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// An untimed track refuses a time anchor update at the call, keeping its ranges. The C
-/// API only publishes timed tracks, so the track comes from moq-net.
+/// An update with an invalid time anchor is refused at the call, keeping its ranges. On a
+/// scale-less track a time anchor is a group key, so the refusal comes from the timestamp, a
+/// scale of zero. The C API only publishes timed tracks, so the track comes from moq-net.
 #[test]
-fn raw_track_update_refuses_time_on_untimed() {
+fn raw_track_update_refuses_an_invalid_anchor() {
 	let origin = id(moq_origin_create());
 	let path = b"raw-track-untimed";
 	let broadcast = publish_broadcast(origin, path);
@@ -2921,7 +2940,12 @@ fn raw_track_update_refuses_time_on_untimed() {
 			Some(moq_net::track::Info::default().with_timescale(None)),
 		)
 		.unwrap();
-	let write = |payload: &'static [u8]| State::lock().publish.track_frame(track, None, payload).unwrap();
+	// A scale-less track has no time: each frame opens the group its unscaled key names.
+	let key = std::cell::Cell::new(0);
+	let write = |payload: &'static [u8]| {
+		let timestamp = moq_net::Timestamp::unscaled(key.replace(key.get() + 1));
+		State::lock().publish.track_frame(track, timestamp, payload).unwrap()
+	};
 
 	let consume = request_broadcast(origin, path);
 	let frame_cb = Callback::new();
@@ -2945,7 +2969,11 @@ fn raw_track_update_refuses_time_on_untimed() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
 			group: 0,
-			timestamp: moq_timestamp::default(),
+			timestamp: moq_timestamp {
+				value: 0,
+				scale: 0,
+				has_scale: true,
+			},
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
@@ -3040,7 +3068,7 @@ fn json_snapshot_publish_consume() {
 			timestamp: std::ptr::null(),
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		let at = read_timestamp(value.timestamp).expect("a stamped value is timed");
+		let at = read_timestamp(value.timestamp);
 		assert!(at.value >= last);
 		last = at.value;
 		let received = unsafe { std::slice::from_raw_parts(value.json.cast::<u8>(), value.json_len) };
@@ -3110,7 +3138,7 @@ fn json_stream_publish_consume() {
 			timestamp: std::ptr::null(),
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		let at = read_timestamp(value.timestamp).expect("a stamped value is timed");
+		let at = read_timestamp(value.timestamp);
 		assert!(at.value >= last);
 		last = at.value;
 		let received = unsafe { std::slice::from_raw_parts(value.json.cast::<u8>(), value.json_len) };
@@ -3126,6 +3154,7 @@ fn json_stream_publish_consume() {
 	let at = moq_timestamp {
 		value: (last + 1_000) * 90 + 45,
 		scale: 90_000,
+		has_scale: true,
 	};
 	assert_eq!(
 		unsafe { moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len(), &at) },
@@ -3138,7 +3167,7 @@ fn json_stream_publish_consume() {
 		timestamp: std::ptr::null(),
 	};
 	assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-	let read = read_timestamp(value.timestamp).expect("a stamped value is timed");
+	let read = read_timestamp(value.timestamp);
 	assert_eq!((read.value, read.scale), (last + 1_000, 1_000));
 	assert_eq!(moq_consume_json_value_free(value_id), 0);
 
@@ -3158,7 +3187,7 @@ type WindowEvent = (
 	moq_json_window_kind,
 	std::ops::Range<u64>,
 	Option<serde_json::Value>,
-	Option<moq_net::Timestamp>,
+	moq_net::Timestamp,
 );
 
 /// Read and free the next event delivered to a JSON window consumer.
@@ -3177,7 +3206,7 @@ fn recv_window(cb: &Callback) -> WindowEvent {
 		let json = unsafe { std::slice::from_raw_parts(event.json.cast::<u8>(), event.json_len) };
 		serde_json::from_slice(json).unwrap()
 	});
-	let timestamp = read_timestamp(event.timestamp).map(|timestamp| timestamp.try_into().unwrap());
+	let timestamp = moq_net::Timestamp::try_from(read_timestamp(event.timestamp)).unwrap();
 	assert_eq!(moq_consume_json_window_event_free(event_id), 0);
 	assert!(
 		moq_consume_json_window_event_free(event_id) < 0,
@@ -3254,7 +3283,7 @@ fn json_window_publish_consume() {
 				MOQ_JSON_WINDOW_KIND_PUSH,
 				n..n + 1,
 				Some(serde_json::json!({ "n": n })),
-				Some(moq_net::Timestamp::from_millis(n).unwrap())
+				moq_net::Timestamp::from_millis(n).unwrap()
 			)
 		);
 	}
@@ -3265,7 +3294,7 @@ fn json_window_publish_consume() {
 			MOQ_JSON_WINDOW_KIND_POP,
 			0..2,
 			None,
-			Some(moq_net::Timestamp::from_millis(3).unwrap())
+			moq_net::Timestamp::from_millis(3).unwrap()
 		)
 	);
 
@@ -3298,11 +3327,16 @@ fn json_window_caller_timestamps() {
 	let event_cb = Callback::new();
 	let consumer = window_consume(consume, name, &event_cb);
 	let value = br#"{"n":1}"#;
-	let invalid = moq_timestamp { value: 1, scale: 0 };
+	let invalid = moq_timestamp {
+		value: 1,
+		scale: 0,
+		has_scale: true,
+	};
 	// Valid, but too large once converted to the track's milliseconds.
 	let unconvertible = moq_timestamp {
 		value: (1 << 61) - 1,
 		scale: 1,
+		has_scale: true,
 	};
 
 	assert_eq!(
@@ -3318,6 +3352,7 @@ fn json_window_caller_timestamps() {
 		moq_timestamp {
 			value: 111_111,
 			scale: 90_000,
+			has_scale: true,
 		},
 	] {
 		assert_eq!(
@@ -3347,7 +3382,7 @@ fn json_window_caller_timestamps() {
 				MOQ_JSON_WINDOW_KIND_PUSH,
 				n as u64..n as u64 + 1,
 				Some(serde_json::json!({ "n": 1 })),
-				Some(moq_net::Timestamp::from_millis(millis).unwrap()),
+				moq_net::Timestamp::from_millis(millis).unwrap(),
 			)
 		);
 	}
@@ -3358,7 +3393,7 @@ fn json_window_caller_timestamps() {
 			MOQ_JSON_WINDOW_KIND_POP,
 			0..1,
 			None,
-			Some(moq_net::Timestamp::from_millis(2500).unwrap())
+			moq_net::Timestamp::from_millis(2500).unwrap()
 		)
 	);
 	assert_eq!(event_cb.recv_terminal(), 0);
@@ -4729,7 +4764,7 @@ fn dynamic_serves_track_requests() {
 		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
 		payload
 	);
-	assert_eq!(read_timestamp(frame.timestamp), Some(micros(42)));
+	assert_eq!(read_timestamp(frame.timestamp), micros(42));
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	// A second request is aborted, and its subscriber sees the application code.
@@ -5200,7 +5235,7 @@ fn local_publish_consume() {
 	};
 	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.payload_size, payload.len());
-	assert_eq!(read_timestamp(frame.timestamp), Some(micros(timestamp_us)));
+	assert_eq!(read_timestamp(frame.timestamp), micros(timestamp_us));
 
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "frame payload should match");
@@ -5383,7 +5418,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "the sibling broadcast's frame should arrive");
-	assert_eq!(read_timestamp(frame.timestamp), Some(micros(timestamp_us)));
+	assert_eq!(read_timestamp(frame.timestamp), micros(timestamp_us));
 
 	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_audio_cancel(track), 0);
@@ -5997,7 +6032,7 @@ fn video_publish_consume() {
 		keyframe: false,
 	};
 	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
-	assert_eq!(read_timestamp(frame.timestamp), Some(micros(0)));
+	assert_eq!(read_timestamp(frame.timestamp), micros(0));
 	assert!(frame.payload_size > 0, "frame should have payload data");
 
 	assert_eq!(moq_consume_read_free(frame_id), 0);
@@ -7042,7 +7077,7 @@ fn multiple_frames_ordering() {
 		assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 		assert_eq!(
 			read_timestamp(frame.timestamp),
-			Some(micros(expected_ts)),
+			micros(expected_ts),
 			"frame {i} has wrong timestamp"
 		);
 
@@ -8568,7 +8603,7 @@ fn a_shared_epoch_gives_media_no_delay() {
 		unsafe { moq_publish_json_snapshot_update(json, value.as_ptr() as *const c_char, value.len(), &now) },
 		0
 	);
-	let start = moq_net::Timestamp::try_from(now).unwrap().as_micros() as u64;
+	let start = moq_net::Timestamp::try_from(now).unwrap().as_micros().unwrap() as u64;
 	write_opus(media, start, 50, 100);
 
 	let delay = audio_rendition(broadcast, &name).delay;

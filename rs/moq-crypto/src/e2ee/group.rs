@@ -15,7 +15,7 @@ use crate::e2ee::terminal::Terminal;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
 	/// Presentation timestamp, or `None` when untimed.
-	pub timestamp: Option<moq_net::Timestamp>,
+	pub timestamp: moq_net::Timestamp,
 	/// Decrypted application bytes.
 	pub plaintext: Bytes,
 }
@@ -66,14 +66,14 @@ impl Producer {
 	///
 	/// [`Error::Identity`] if the next frame exceeds 32 bits, [`Error::Exhausted`],
 	/// [`Error::Oversize`], or a net write error.
-	pub fn write_frame(&mut self, timestamp: impl Into<Option<moq_net::Timestamp>>, plaintext: &[u8]) -> Result<()> {
+	pub fn write_frame(&mut self, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<()> {
 		let inner = self.inner.as_mut().map_err(|err| err.clone())?;
 		let frame = self.next_frame;
 		if frame == u32::MAX {
 			return Err(Error::Identity);
 		}
 		// Checked before the frame identity is spent.
-		let timestamp = self.track.rescale(timestamp.into())?;
+		let timestamp = self.track.rescale_in(timestamp, self.start)?;
 		let payload = self.key.lock().expect("track key").protect(
 			self.start,
 			u64::from(frame),

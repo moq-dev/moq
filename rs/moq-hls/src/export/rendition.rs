@@ -897,7 +897,12 @@ impl Rendition {
 		let window = self.fanout.window();
 		while trimmed < inherited {
 			let rest = match rows.get(1) {
-				Some((_, second)) => rows.back().expect("two rows").1.end.saturating_sub(second.pts.into()),
+				Some((_, second)) => rows
+					.back()
+					.expect("two rows")
+					.1
+					.end
+					.saturating_sub(super::span(second.pts)),
 				None => Duration::ZERO,
 			};
 			if !segments::evicts(window, rows.len(), rest) {
@@ -1334,8 +1339,8 @@ impl Rendition {
 			.iter()
 			.filter(|row| !row.stop)
 			.map(|row| {
-				let t = row.pts.as_millis() as u64;
-				let d = row.end.saturating_sub(row.pts.into()).as_millis() as u64;
+				let t = super::span(row.pts).as_millis() as u64;
+				let d = row.end.saturating_sub(super::span(row.pts)).as_millis() as u64;
 				(t, d)
 			})
 			// A zero-duration segment cannot be requested by DASH timing.
@@ -2146,7 +2151,7 @@ impl Follow {
 			First::Media(pts, reach, declared) => {
 				let sequence = group.start;
 				if let Some((_, previous, _)) = &self.latest {
-					self.spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(self.spacing);
+					self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
 				}
 				self.latest = Some((group, pts, reach));
 				(self.grid.group(sequence, pts), (sequence, Some(pts)), declared)
@@ -2467,14 +2472,17 @@ impl Reach {
 	/// Count every sample `frames` decodes to.
 	fn add(&mut self, frames: Vec<moq_mux::container::Frame>) {
 		for frame in frames {
+			// A sample with no time can't reach anywhere on the grid.
+			let Ok(pts) = frame.timestamp.as_nanos() else {
+				continue;
+			};
 			if frame.payload.is_empty() {
 				self.marker = Some(frame.timestamp);
 				continue;
 			}
-			let pts = frame.timestamp.as_nanos();
 			self.stamps.push(pts);
-			if let Some(duration) = frame.duration {
-				self.ends = self.ends.max(Some(pts + duration.as_nanos()));
+			if let Some(Ok(duration)) = frame.duration.map(moq_net::Timestamp::as_nanos) {
+				self.ends = self.ends.max(Some(pts + duration));
 			}
 		}
 	}
@@ -2533,7 +2541,14 @@ fn first_frame(
 	let stamp = frame.timestamp;
 	let decoded = container.decode(frame).ok()?;
 	let first = decoded.first()?;
-	let pts = stamp.unwrap_or(first.timestamp);
+	// A scale-less session carries the group key, not a time, so the container's own is used.
+	let pts = if stamp.scale().is_some() {
+		stamp
+	} else {
+		first.timestamp
+	};
+	// The grid places only times.
+	pts.scale()?;
 	if first.payload.is_empty() {
 		return Some(First::Marker(pts));
 	}
@@ -2574,8 +2589,8 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 		grid::Slot::Gap { segment, pts, end } => (segment, Default::default(), pts, end, None, true),
 		grid::Slot::Reset => unreachable!("a reset lists no row"),
 	};
-	let start = Duration::from(pts);
-	let end = Duration::from(end).max(start);
+	let start = super::span(pts);
+	let end = super::span(end).max(start);
 	let duration = end - start;
 	// RFC 8216 4.3.3.1 requires every EXTINF, rounded to the nearest second, to fit the target
 	// duration. A group overrunning the interval is listed anyway: refusing it loses content, and
@@ -2596,7 +2611,7 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 		stop,
 		// Listed once a later segment started or the track ended, so its groups are all complete.
 		complete: !stop,
-		content: content.map(Duration::from),
+		content: content.map(super::span),
 	}
 }
 
@@ -2941,7 +2956,9 @@ mod tests {
 				};
 				let track = request.accept(moq_net::track::Info::default());
 				let mut group = track.append_group(0).unwrap();
-				group.write_frame(None, Bytes::from_static(b"retained")).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::unscaled(0), Bytes::from_static(b"retained"))
+					.unwrap();
 				group.close().unwrap();
 				self.broadcast.close();
 				*self.track.lock().unwrap() = Some(track);
@@ -3074,7 +3091,10 @@ mod tests {
 	}
 
 	fn millis(reach: (Option<moq_net::Timestamp>, Option<moq_net::Timestamp>)) -> (Option<u128>, Option<u128>) {
-		(reach.0.map(|t| t.as_millis()), reach.1.map(|t| t.as_millis()))
+		(
+			reach.0.map(|t| t.as_millis().unwrap()),
+			reach.1.map(|t| t.as_millis().unwrap()),
+		)
 	}
 
 	// A fragment carrying all its samples in one frame reaches as far as its samples say, however

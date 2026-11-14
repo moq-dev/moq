@@ -1569,7 +1569,7 @@ async fn export_pcr_wraps_below_zero_at_start() {
 		// The frame is paced at the slot its last leading clock asserts (plus the
 		// slot of slack), which is the newest slot that has begun by then.
 		let Some(base) = head else { continue };
-		let slot_ticks = frame.timestamp.as_micros() / 25_000 * 25_000 * 90 / 1_000;
+		let slot_ticks = frame.timestamp.as_micros().unwrap() / 25_000 * 25_000 * 90 / 1_000;
 		assert_eq!(
 			base,
 			(slot_ticks as u64).wrapping_sub(2250) & WIRE,
@@ -2275,7 +2275,7 @@ async fn programs_without_video_roundtrip_opaque_tracks() {
 				let expected = (ta + (at - a) * (tb - ta) / (b - a)) / 27;
 				let frame = reader.read_frame().await.unwrap().unwrap();
 				assert_eq!(frame.payload.as_ref(), &opaque, "audio={audio}, pes={pes}");
-				assert_eq!(frame.timestamp.as_micros(), u128::from(expected));
+				assert_eq!(frame.timestamp.as_micros().unwrap(), u128::from(expected));
 				count += 1;
 			}
 			assert_eq!(count, 8);
@@ -4210,11 +4210,16 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	assert!(!audio_pts.is_empty());
 	assert_eq!(export.discontinuity(), 1, "the marker was observed");
 
-	let resume = marked.iter().position(|f| f.timestamp.as_micros() >= 605_000_000);
+	let resume = marked
+		.iter()
+		.position(|f| f.timestamp.as_micros().unwrap() >= 605_000_000);
 	let resume = resume.unwrap_or_else(|| {
 		panic!(
 			"resumed media missing, marked timestamps {:?}",
-			marked.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>()
+			marked
+				.iter()
+				.map(|f| f.timestamp.as_micros().unwrap())
+				.collect::<Vec<_>>()
 		)
 	});
 	assert_eq!(
@@ -5909,8 +5914,14 @@ async fn a_late_clock_revision_remains_visible_between_exports() {
 	};
 	// This fixture sends each PES in the PCR slice before its decode boundary.
 	// Pin both decisions to the media grid, including the late leg's next slot.
-	assert_eq!(Duration::from(at(&b)) + PCR_INTERVAL, Duration::from_secs(4));
-	assert_eq!(Duration::from(at(&a)) + PCR_INTERVAL, Duration::from_secs(5));
+	assert_eq!(
+		Duration::try_from(at(&b)).unwrap() + PCR_INTERVAL,
+		Duration::from_secs(4)
+	);
+	assert_eq!(
+		Duration::try_from(at(&a)).unwrap() + PCR_INTERVAL,
+		Duration::from_secs(5)
+	);
 	assert_only_continuity_differs(&a, &b, Timestamp::from_millis(5_250).unwrap());
 }
 
@@ -7335,7 +7346,7 @@ fn collect_pcrs(frames: &[Frame]) -> Vec<(usize, u64, u128)> {
 					| (u64::from(packet[8]) << 9)
 					| (u64::from(packet[9]) << 1)
 					| u64::from(packet[10] >> 7);
-				pcrs.push((at, base, frame.timestamp.as_micros()));
+				pcrs.push((at, base, frame.timestamp.as_micros().unwrap()));
 			}
 			at += 1;
 		}
@@ -8547,7 +8558,7 @@ async fn a_skipped_group_flags_the_clock() {
 			assert_skip_discontinuity(&out, 2 * usize::from(missing == 60 && delay.is_zero()));
 			let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
 			for pair in out.windows(2) {
-				let jumped = pair[1].timestamp.as_micros() > pair[0].timestamp.as_micros() + 25_000;
+				let jumped = pair[1].timestamp.as_micros().unwrap() > pair[0].timestamp.as_micros().unwrap() + 25_000;
 				assert_eq!(count_discontinuity(&pair[1..]), usize::from(jumped));
 			}
 			// Each flag lands right before the audio that resumes after its hole.
@@ -11407,7 +11418,7 @@ async fn placed_pes_survives_tune_in_beside_the_keyframe() {
 	);
 	for (pes, ms) in out.iter().zip([1_500u128, 2_500]) {
 		assert_eq!(
-			slices[pes.slice].timestamp.as_micros(),
+			slices[pes.slice].timestamp.as_micros().unwrap(),
 			(ms * 1_000).div_ceil(PCR_INTERVAL.as_micros()) * PCR_INTERVAL.as_micros() + PCR_INTERVAL.as_micros(),
 			"{ms} ms: rides the first slot opening after its placement"
 		);
@@ -11542,7 +11553,9 @@ async fn placed_sections_keep_their_source_positions() {
 	let name = scte_track(&catalog.snapshot()).unwrap();
 	let cues = read_cues(&consumer, &name).await;
 	assert_eq!(
-		cues.iter().map(|(_, time)| time.as_micros() as u64).collect::<Vec<_>>(),
+		cues.iter()
+			.map(|(_, time)| time.as_micros().unwrap() as u64)
+			.collect::<Vec<_>>(),
 		source
 	);
 	let mut exporter = open_ts(

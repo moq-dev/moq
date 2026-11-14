@@ -64,10 +64,18 @@ class Timestamp:
     ``value`` is at most ``2**61 - 1`` and ``scale`` is non-zero and at most ``2**62 - 1``;
     a write past either bound raises ``moq.Error.TimeOverflow``. A read carries the
     track's timescale, and a write at another scale is floored to it.
+
+    A scale-less track has no time, so there ``scale`` is ``None`` and ``value`` is the
+    frame's group key (a datagram's sequence); build one with :meth:`unscaled`.
     """
 
     value: int
-    scale: int
+    scale: int | None
+
+    @staticmethod
+    def unscaled(key: int) -> Timestamp:
+        """The scale-less timestamp at group key (or datagram sequence) ``key``."""
+        return Timestamp(key, None)
 
     @staticmethod
     def from_timedelta(duration: timedelta) -> Timestamp:
@@ -80,7 +88,10 @@ class Timestamp:
         """This timestamp as a ``timedelta``, rounded down to a whole microsecond.
 
         The timestamp itself is exact; keep it, not the ``timedelta``, to republish a tick such as 90 kHz.
+        Raises ``ValueError`` on an :meth:`unscaled` timestamp, which has no time.
         """
+        if self.scale is None:
+            raise ValueError(f"an unscaled timestamp (key {self.value}) has no time")
         return timedelta(microseconds=self.value * 1_000_000 // self.scale)
 
     def _ffi(self) -> MoqTimestamp:
@@ -91,51 +102,44 @@ class Timestamp:
         return Timestamp(value.value, value.scale)
 
 
-def _opt_ts(value: Timestamp | None) -> MoqTimestamp | None:
-    return None if value is None else value._ffi()
-
-
-def _opt_from_ts(value: MoqTimestamp | None) -> Timestamp | None:
-    return None if value is None else Timestamp._from_ffi(value)
-
-
 @dataclass(frozen=True)
 class Frame:
     """A raw track frame: a payload and its presentation timestamp.
 
-    ``timestamp`` is ``None`` on an untimed track, on both publish and receive.
+    On a scale-less track ``timestamp`` is :meth:`Timestamp.unscaled` at the frame's
+    group key, on both publish and receive.
     """
 
     payload: bytes
-    timestamp: Timestamp | None = None
+    timestamp: Timestamp
 
     def _ffi(self) -> MoqFrame:
-        return MoqFrame(payload=self.payload, timestamp=_opt_ts(self.timestamp))
+        return MoqFrame(payload=self.payload, timestamp=self.timestamp._ffi())
 
     @staticmethod
     def _from_ffi(frame: MoqFrame) -> Frame:
-        return Frame(payload=frame.payload, timestamp=_opt_from_ts(frame.timestamp))
+        return Frame(payload=frame.payload, timestamp=Timestamp._from_ffi(frame.timestamp))
 
 
 @dataclass(frozen=True)
 class Datagram:
-    """A datagram payload with its own sequence and optional timestamp.
+    """A datagram payload with its own sequence and timestamp.
 
-    ``timestamp`` is ``None`` on a datagram read from an untimed track.
+    On a scale-less track ``timestamp`` is :meth:`Timestamp.unscaled` at ``sequence``.
     """
 
     sequence: int
-    timestamp: Timestamp | None
+    timestamp: Timestamp
     payload: bytes
 
     def _ffi(self) -> MoqDatagram:
-        return MoqDatagram(sequence=self.sequence, timestamp=_opt_ts(self.timestamp), payload=self.payload)
+        return MoqDatagram(sequence=self.sequence, timestamp=self.timestamp._ffi(), payload=self.payload)
 
     @staticmethod
     def _from_ffi(datagram: MoqDatagram) -> Datagram:
         return Datagram(
             sequence=datagram.sequence,
-            timestamp=_opt_from_ts(datagram.timestamp),
+            timestamp=Timestamp._from_ffi(datagram.timestamp),
             payload=datagram.payload,
         )
 

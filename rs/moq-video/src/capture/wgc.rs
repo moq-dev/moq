@@ -262,7 +262,7 @@ mod tests {
 				Arc::ptr_eq(frame, &pixels),
 				"reuse the owned output without a conversion"
 			);
-			assert_eq!(timestamp.as_micros(), 1_000_000 + u128::from(step) * 20_000);
+			assert_eq!(timestamp.as_micros().unwrap(), 1_000_000 + u128::from(step) * 20_000);
 			assert!(delivery.next(now.saturating_add(interval / 2)).unwrap().is_none());
 		}
 	}
@@ -275,12 +275,15 @@ mod tests {
 		delivery.replace(1, Timestamp::from_micros(1_000_000).unwrap(), now);
 		delivery.next(now).unwrap().unwrap();
 		let repeated = now.saturating_add(interval * 5);
-		assert_eq!(delivery.next(repeated).unwrap().unwrap().1.as_micros(), 1_100_000);
+		assert_eq!(
+			delivery.next(repeated).unwrap().unwrap().1.as_micros().unwrap(),
+			1_100_000
+		);
 		// This changed frame was acquired before the most recent repeated delivery.
 		delivery.replace(2, Timestamp::from_micros(1_090_000).unwrap(), repeated);
 		let (frame, timestamp) = delivery.next(repeated.saturating_add(interval)).unwrap().unwrap();
 		assert_eq!(*frame, 2);
-		assert_eq!(timestamp.as_micros(), 1_120_000);
+		assert_eq!(timestamp.as_micros().unwrap(), 1_120_000);
 
 		// Minimized, empty, or resizing sources stop repeating until new content arrives.
 		delivery.clear();
@@ -290,7 +293,7 @@ mod tests {
 		delivery.replace(3, Timestamp::from_micros(1_990_000).unwrap(), resumed);
 		let (frame, timestamp) = delivery.next(resumed).unwrap().unwrap();
 		assert_eq!(*frame, 3);
-		assert_eq!(timestamp.as_micros(), 2_000_000);
+		assert_eq!(timestamp.as_micros().unwrap(), 2_000_000);
 		assert_eq!(delivery.deadline(), Some(resumed.saturating_add(interval)));
 	}
 
@@ -340,7 +343,7 @@ mod tests {
 					break frame;
 				}
 			};
-			assert_eq!(received.timestamp.as_micros(), u128::from(step) * 20_000);
+			assert_eq!(received.timestamp.as_micros().unwrap(), u128::from(step) * 20_000);
 		}
 	}
 

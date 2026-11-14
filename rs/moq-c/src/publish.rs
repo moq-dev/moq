@@ -853,7 +853,7 @@ impl Publish {
 	}
 
 	/// The raw track producer behind a handle, for tests that publish what the C API
-	/// can't express (an untimed frame).
+	/// can't express (a scale-less track).
 	#[cfg(test)]
 	pub(crate) fn track_producer(&mut self, track: Id) -> Option<&mut moq_net::track::Producer> {
 		self.tracks.get_mut(track).map(|raw| &mut raw.inner)
@@ -1247,26 +1247,12 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Write a single-frame group to a raw track, `None` when untimed.
-	pub fn track_frame(
-		&mut self,
-		track: Id,
-		timestamp: Option<moq_net::Timestamp>,
-		payload: &[u8],
-	) -> Result<(), Error> {
+	/// Write a single-frame group to a raw track, starting at its frame's timestamp: the
+	/// unscaled group key on a scale-less track.
+	pub fn track_frame(&mut self, track: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let payload = bytes::Bytes::copy_from_slice(payload);
-		match timestamp {
-			// The group starts at its frame's time.
-			Some(timestamp) => raw.inner.write_frame(timestamp, payload)?,
-			// A frame without a time belongs on a scale-less track, whose group takes the next
-			// start; a timed track's group refuses it.
-			None => {
-				let mut group = raw.inner.append_group(next_start(&raw.inner))?;
-				group.write_frame(None, payload)?;
-				group.close()?;
-			}
-		}
+		raw.inner
+			.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
 	}
 
@@ -1492,7 +1478,7 @@ impl Publish {
 		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window.producer.push(moq_json::Timed::from(&value).at(timestamp))?;
+		window.producer.push(moq_json::Timed::new(&value, timestamp))?;
 		Ok(())
 	}
 
@@ -1500,7 +1486,7 @@ impl Publish {
 	/// `timestamp` on the broadcast clock.
 	pub fn json_window_pop(&mut self, window: Id, count: u64, timestamp: moq_net::Timestamp) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window.producer.pop(moq_json::Timed::from(count).at(timestamp))?;
+		window.producer.pop(moq_json::Timed::new(count, timestamp))?;
 		Ok(())
 	}
 
@@ -1528,13 +1514,8 @@ impl Publish {
 		}
 	}
 
-	/// Write a frame into a raw group, `None` when untimed.
-	pub fn group_frame(
-		&mut self,
-		group: Id,
-		timestamp: Option<moq_net::Timestamp>,
-		payload: &[u8],
-	) -> Result<(), Error> {
+	/// Write a frame into a raw group, at the group's unscaled key on a scale-less track.
+	pub fn group_frame(&mut self, group: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
 		let group = self.groups.get(group).ok_or(Error::GroupNotFound)?;
 		let mut group = group.inner.lock();
 		group
@@ -1565,6 +1546,14 @@ impl Publish {
 	> {
 		let entry = self.groups.get(group).ok_or(Error::GroupNotFound)?;
 		Ok((entry.inner.clone(), entry.ended.subscribe()))
+	}
+
+	/// The sequence (start) of a raw group, which names it: on a scale-less track, the
+	/// unscaled key its frames carry.
+	pub fn group_sequence(&self, group: Id) -> Result<u64, Error> {
+		let group = self.groups.get(group).ok_or(Error::GroupNotFound)?;
+		let group = group.inner.lock();
+		Ok(group.as_ref().ok_or(Error::GroupNotFound)?.start)
 	}
 
 	/// Finish a raw group. No more frames can be written.
@@ -1887,12 +1876,7 @@ impl Publish {
 		children.insert(&mut self.datagrams, entry, Child::Datagrams)
 	}
 
-	pub fn datagrams_append(
-		&mut self,
-		track: Id,
-		timestamp: Option<moq_net::Timestamp>,
-		payload: &[u8],
-	) -> Result<u64, Error> {
+	pub fn datagrams_append(&mut self, track: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<u64, Error> {
 		Ok(self
 			.datagrams
 			.get_mut(track)

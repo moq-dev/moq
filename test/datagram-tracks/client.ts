@@ -92,7 +92,12 @@ try {
 				timestamp: Moq.Time.Timestamp.fromMicros(micros),
 				payload: new Uint8Array(payload),
 			});
-		for (const { sequence, payload } of EVENTS) events.insert({ sequence, payload: new Uint8Array(payload) });
+		for (const { sequence, payload } of EVENTS)
+			events.insert({
+				sequence,
+				timestamp: Moq.Time.Timestamp.unscaled(sequence),
+				payload: new Uint8Array(payload),
+			});
 		track.writeFrame({
 			timestamp: Moq.Time.Timestamp.fromMillis(FRAME.millis),
 			payload: new Uint8Array(FRAME.payload),

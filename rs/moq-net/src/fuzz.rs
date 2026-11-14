@@ -2229,11 +2229,7 @@ impl GroupRecv {
 	}
 
 	/// Receive one frame whose payload is `chunks`, in order, and commit it.
-	pub fn frame(
-		&mut self,
-		timestamp: crate::Timestamp,
-		chunks: impl IntoIterator<Item = Bytes>,
-	) -> crate::Result<()> {
+	pub fn frame(&mut self, timestamp: crate::Timestamp, chunks: impl IntoIterator<Item = Bytes>) -> crate::Result<()> {
 		let mut size = 0;
 		self.queue
 			.borrow_mut()

@@ -23,7 +23,10 @@ fn reads_skip_an_owed_hole() {
 		let put = |start: u64| {
 			let mut group = track.create_group(group::Info { start }).unwrap();
 			group
-				.write_frame(None, serde_json::to_vec(&json!({ "n": start })).unwrap())
+				.write_frame(
+					moq_net::Timestamp::unscaled(start),
+					serde_json::to_vec(&json!({ "n": start })).unwrap(),
+				)
 				.unwrap();
 			group.close().unwrap();
 		};

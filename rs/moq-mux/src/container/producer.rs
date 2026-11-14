@@ -3,13 +3,23 @@ use bytes::Bytes;
 use super::{Container, Frame, Kind};
 
 fn add_micros(timestamp: moq_net::Timestamp, extra: moq_net::Timestamp) -> Option<moq_net::Timestamp> {
-	let micros = timestamp.as_micros().saturating_add(extra.as_micros());
+	let micros = timestamp.as_micros().ok()?.saturating_add(extra.as_micros().ok()?);
 	let micros = u64::try_from(micros).ok()?;
 	moq_net::Timestamp::from_micros(micros).ok()
 }
 
+/// Whether `left` is before `right` to the microsecond; false when either is unscaled.
 fn timestamp_lt(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
-	left.as_micros() < right.as_micros()
+	matches!((left.as_micros(), right.as_micros()), (Ok(left), Ok(right)) if left < right)
+}
+
+/// Refuse a frame without a time with [`TimestampMismatch`](moq_net::Error::TimestampMismatch):
+/// media is timed, and a scale-less track's [unscaled](moq_net::Timestamp::unscaled) key is not.
+fn timed(timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) -> Result<(), moq_net::Error> {
+	match timestamp.scale().is_some() && duration.is_none_or(|duration| duration.scale().is_some()) {
+		true => Ok(()),
+		false => Err(moq_net::Error::TimestampMismatch),
+	}
 }
 
 /// A producer for media tracks that manages group boundaries.
@@ -154,11 +164,12 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 			Some(prefix) if self.buffer_duration.is_zero() => prefix,
 			_ => return Err(crate::Error::UnsupportedContainer("a streamed frame".into())),
 		};
+		timed(timestamp, duration)?;
 		self.prepare(timestamp, keyframe)?;
 		let group = self.group.take().expect("prepare opens a group");
 		let total = prefix.len().checked_add(size).ok_or(moq_net::Error::FrameTooLarge)?;
 		let mut writer = group.create_frame(moq_net::frame::Info {
-			timestamp: Some(timestamp),
+			timestamp,
 			size: total as u64,
 		})?;
 		writer.write(prefix)?;
@@ -598,6 +609,7 @@ where
 	/// broadcast. Frames may still dip below the previous group's content: B-frames, open-GOP
 	/// leading pictures, and a keyframe that overlaps the previous group's last frame.
 	pub fn write(&mut self, frame: Frame) -> crate::Result<()> {
+		timed(frame.timestamp, frame.duration)?;
 		self.prepare(frame.timestamp, frame.keyframe)?;
 
 		// Buffer or write the frame.
@@ -708,10 +720,7 @@ where
 
 	/// Place a written frame in the write order, unless it is history; see [`Self::history`].
 	fn order(&mut self, timestamp: moq_net::Timestamp) {
-		if self
-			.history
-			.is_none_or(|until| timestamp.as_micros() > until.as_micros())
-		{
+		if self.history.is_none_or(|until| timestamp_lt(until, timestamp)) {
 			self.estimator.order(timestamp);
 		}
 	}
@@ -758,7 +767,10 @@ where
 		let reordered = std::mem::take(&mut self.reordered);
 		// Where this group's content stops: the duration marker when we write one, else the
 		// caller's bound, else the furthest point we wrote.
-		let reached = marker_at.or(end).max(self.end.take());
+		let reached = match (marker_at.or(end), self.end.take()) {
+			(Some(bound), Some(written)) => Some(super::later(written, bound)),
+			(bound, written) => bound.or(written),
+		};
 		self.last_duration = None;
 		self.previous_timestamp = None;
 
@@ -825,8 +837,13 @@ where
 
 		// Timestamp and duration can be at different scales, so add them in micros; the
 		// sub-microsecond rounding that costs is far below a segment boundary.
-		let micros = timestamp.as_micros() + duration.map(|d| d.as_micros()).unwrap_or(0);
-		let Ok(micros) = u64::try_from(micros) else { return };
+		let Ok(micros) = timestamp.as_micros() else { return };
+		let Ok(extra) = duration.map_or(Ok(0), |duration| duration.as_micros()) else {
+			return;
+		};
+		let Ok(micros) = u64::try_from(micros + extra) else {
+			return;
+		};
 		let Ok(end) = moq_net::Timestamp::from_micros(micros) else {
 			return;
 		};
@@ -960,7 +977,7 @@ where
 		let mut timestamps = self
 			.buffer
 			.iter()
-			.map(|frame| std::time::Duration::from(frame.timestamp));
+			.filter_map(|frame| std::time::Duration::try_from(frame.timestamp).ok());
 		let Some(first) = timestamps.next() else {
 			return std::time::Duration::ZERO;
 		};
@@ -994,7 +1011,8 @@ where
 			}
 			let boundary = self.buffer.get(i + 1).map(|f| f.timestamp).or(next);
 			if let Some(boundary) = boundary
-				&& let Ok(boundary) = boundary.convert(self.buffer[i].timestamp.scale())
+				&& let Some(scale) = self.buffer[i].timestamp.scale()
+				&& let Ok(boundary) = boundary.convert(scale)
 				&& let Ok(duration) = boundary.checked_sub(self.buffer[i].timestamp)
 			{
 				self.buffer[i].duration = Some(duration);
@@ -1512,7 +1530,10 @@ mod tests {
 		type Error = crate::Error;
 
 		fn write(&self, _group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
-			match frames.iter().any(|f| f.timestamp.as_micros() == self.0 as u128) {
+			match frames
+				.iter()
+				.any(|f| f.timestamp.as_micros().unwrap() == self.0 as u128)
+			{
 				true => Err(moq_net::Error::FrameTooLarge.into()),
 				false => Ok(()),
 			}
@@ -1702,7 +1723,7 @@ mod tests {
 			let mut frames = Vec::new();
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				let decoded = hang::container::Frame::decode(frame.payload).unwrap();
-				frames.push((decoded.timestamp.as_micros(), decoded.payload.len()));
+				frames.push((decoded.timestamp.as_micros().unwrap(), decoded.payload.len()));
 			}
 			groups.push(frames);
 		}
@@ -2073,7 +2094,8 @@ mod tests {
 				hang::container::Frame::decode(frame.payload)
 					.unwrap()
 					.timestamp
-					.as_micros(),
+					.as_micros()
+					.unwrap(),
 			);
 		}
 		assert_eq!(timestamps, vec![20_000, 30_000, 35_000]);
@@ -2205,7 +2227,7 @@ mod tests {
 			crate::container::Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Video));
 		let mut timestamps = Vec::new();
 		while let Some(frame) = consumer.read_frame().await.unwrap() {
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(timestamps, [1_000_000, 1_040_000, 1_050_000]);
 	}

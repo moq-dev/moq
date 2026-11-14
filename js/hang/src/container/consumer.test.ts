@@ -1601,8 +1601,8 @@ test("Consumer with CmafFormat times an untimed track from tfdt", async () => {
 	});
 
 	const group = track.createGroup(0n);
-	group.writeFrame({ payload: fragment("untimedKey") });
-	group.writeFrame({ payload: fragment("untimedDelta") });
+	group.writeFrame({ payload: fragment("untimedKey"), timestamp: Time.Timestamp.unscaled(0n) });
+	group.writeFrame({ payload: fragment("untimedDelta"), timestamp: Time.Timestamp.unscaled(0n) });
 	group.finish();
 	track.finish();
 	track.close();

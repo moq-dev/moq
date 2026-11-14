@@ -2,8 +2,9 @@ import { expect, it } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Instance, Origin, Path, type Track } from "@moq/net";
+import { Instance, Origin, Path, Time, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { key } from "../../json/src/key.test-util.ts";
 import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
@@ -42,9 +43,14 @@ it("opens a listed include only on selection, keeping its rendition IDs its own"
 	const include = publish(origin, "room/extra.hang");
 	const includeCatalog = include.createTrack(Catalog.TRACK);
 	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track: includeCatalog, deltas: false });
-	parent.createTrack("video").writeFrame({ payload: new TextEncoder().encode("source frames") });
+	parent
+		.createTrack("video")
+		.writeFrame({ payload: new TextEncoder().encode("source frames"), timestamp: Time.Timestamp.unscaled(0n) });
 	const includeVideo = include.createTrack("video");
-	includeVideo.writeFrame({ payload: new TextEncoder().encode("include frames") });
+	includeVideo.writeFrame({
+		payload: new TextEncoder().encode("include frames"),
+		timestamp: Time.Timestamp.unscaled(0n),
+	});
 
 	// The include and a source rendition share the ID "video".
 	const root = Catalog.RootSchema.parse({
@@ -65,7 +71,7 @@ it("opens a listed include only on selection, keeping its rendition IDs its own"
 		expect(includeCatalog.demand().wanted.peek()).toBeUndefined();
 
 		const child = source.include(selection, "video");
-		catalog.update({ value: { video: { renditions: { video: video("vp8") } } } });
+		catalog.update({ value: { video: { renditions: { video: video("vp8") } } }, at: key() });
 		await settle();
 		expect(includeCatalog.demand().wanted.peek()).toBeDefined();
 		expect(child.out.catalog.peek()?.video?.renditions.video?.codec).toBe("vp8");

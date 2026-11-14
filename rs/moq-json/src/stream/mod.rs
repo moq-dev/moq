@@ -442,7 +442,10 @@ mod test {
 			producer.append(next(&json!({ "n": 0 }))).unwrap();
 
 			let oversized = Value::String("x".repeat(BUDGET as usize));
-			assert!(refused(producer.append(next(&oversized))), "compression={compression:?}");
+			assert!(
+				refused(producer.append(next(&oversized))),
+				"compression={compression:?}"
+			);
 
 			producer.append(next(&json!({ "n": 1 }))).unwrap();
 			let _finished = producer.finish().unwrap();

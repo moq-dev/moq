@@ -54,8 +54,12 @@ impl Clock {
 		if wall.value() > MAX_SAFE_INTEGER {
 			return Err(crate::Error::InvalidWall(wall.value()));
 		}
-		if wall.scale().as_u64() > u32::MAX as u64 {
-			return Err(crate::Error::InvalidTimescale(wall.scale().as_u64()));
+		// A wall clock needs a scale: an unscaled timestamp has no time.
+		let scale = wall
+			.scale()
+			.ok_or(crate::Error::TimestampOverflow(moq_net::TimeOverflow))?;
+		if scale.as_u64() > u32::MAX as u64 {
+			return Err(crate::Error::InvalidTimescale(scale.as_u64()));
 		}
 		Ok(Self { wall })
 	}
@@ -63,11 +67,12 @@ impl Clock {
 	/// The wall-clock time of `pts` under this fixed mapping.
 	///
 	/// Exact down to the nanosecond; an instant finer than that (a 90 kHz tick) is floored.
-	/// Refuses a result past the JSON-safe range or the wall clock's 1970-2554 range.
+	/// Refuses a result past the JSON-safe range or the wall clock's 1970-2554 range, and an
+	/// [unscaled](moq_net::Timestamp::unscaled) `pts` or wall, which has no time.
 	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> Result<kio::clock::Wall> {
 		let overflow = || crate::Error::TimestampOverflow(moq_net::TimeOverflow);
-		let wall_scale = self.wall.scale().as_u64() as u128;
-		let pts_scale = pts.scale().as_u64() as u128;
+		let wall_scale = self.wall.scale().ok_or_else(overflow)?.as_u64() as u128;
+		let pts_scale = pts.scale().ok_or_else(overflow)?.as_u64() as u128;
 
 		// Sum as one exact fraction of a second, `num / den`, so neither side is rounded into the
 		// other's units first.
@@ -98,9 +103,13 @@ impl Serialize for Clock {
 	where
 		S: serde::Serializer,
 	{
+		let scale = self
+			.wall
+			.scale()
+			.ok_or_else(|| serde::ser::Error::custom("an unscaled wall clock has no time"))?;
 		Wire {
 			wall: self.wall.value(),
-			timescale: self.wall.scale().as_u64() as u32,
+			timescale: u32::try_from(scale.as_u64()).map_err(serde::ser::Error::custom)?,
 		}
 		.serialize(serializer)
 	}

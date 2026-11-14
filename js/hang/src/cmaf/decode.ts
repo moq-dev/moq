@@ -340,14 +340,11 @@ function isSync(flags: number): boolean {
  *
  * @param segment - The moof + mdat data
  * @param init - Parsed init segment (provides timescale and trex defaults)
- * @param timestamp - The moq-net frame timestamp carrying this segment, if its track is timed
+ * @param timestamp - The moq-net frame timestamp carrying this segment; an unscaled one, a
+ *   scale-less track's group key, carries no time, so the samples keep their `tfdt` times
  * @returns Array of decoded samples
  */
-export function decodeDataSegment(
-	segment: Uint8Array,
-	init: InitSegment,
-	timestamp: Time.Timestamp | undefined,
-): Sample[] {
+export function decodeDataSegment(segment: Uint8Array, init: InitSegment, timestamp: Time.Timestamp): Sample[] {
 	// moof and mdat at the top level; the moof's first byte is where CMAF data offsets count from.
 	const top = boxes(segment);
 	const moof = required(top, "moof", "data segment");
@@ -472,12 +469,14 @@ export function decodeDataSegment(
 	}
 
 	// A loop, not `Math.min(...ptss)`: a long fragment's sample count can exceed the argument limit.
+	// A peer may publish a scale-less track, so an unscaled timestamp keeps `tfdt` rather than throw.
+	const timed = timestamp.scale !== undefined;
 	let earliest = 0;
-	if (timestamp !== undefined) {
+	if (timed) {
 		earliest = Number.POSITIVE_INFINITY;
 		for (const pts of ptss) earliest = Math.min(earliest, pts);
 	}
-	const anchor = timestamp?.asMicros() ?? 0;
+	const anchor = timed ? timestamp.asMicros() : 0;
 	for (const [i, sample] of samples.entries()) {
 		sample.timestamp = Math.round(anchor + ((ptss[i] - earliest) * 1_000_000) / init.timescale);
 	}

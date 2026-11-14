@@ -18,8 +18,9 @@
  * const messages = signed.createTrack("messages");
  * route.announce();
  *
+ * // A scale-less track, so each frame carries its group's key.
  * const group = messages.appendGroup();
- * await group.writeFrame(undefined, payload);
+ * await group.writeFrame(Time.Timestamp.unscaled(group.sequence), payload);
  * group.finish();
  * ```
  *

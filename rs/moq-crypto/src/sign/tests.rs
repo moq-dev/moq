@@ -26,14 +26,15 @@ fn public(value: &Value) -> PublicKey {
 	value.as_str().unwrap().parse().unwrap()
 }
 
-/// A vector row's identity: its scope, group, frame, and timestamp (timescale 0 when untimed).
-fn identity(row: &Value) -> (Arc<Scope>, u64, u64, Option<moq_net::Timestamp>) {
+/// A vector row's identity: its scope, group, frame, and timestamp (timescale 0 when
+/// scale-less, where the timestamp is the group key).
+fn identity(row: &Value) -> (Arc<Scope>, u64, u64, moq_net::Timestamp) {
 	let path = moq_net::Path::new(row["path"].as_str().unwrap()).unwrap();
 	let instance = row["instance"].as_str().unwrap().parse().unwrap();
 	let scope = Scope::new(&path, &instance, row["track"].as_str().unwrap());
 	let timestamp = match row["timescale"].as_u64().unwrap() {
-		0 => None,
-		scale => Some(moq_net::Timestamp::from_scale(row["timestamp"].as_u64().unwrap(), scale).unwrap()),
+		0 => moq_net::Timestamp::unscaled(row["group"].as_u64().unwrap()),
+		scale => moq_net::Timestamp::from_scale(row["timestamp"].as_u64().unwrap(), scale).unwrap(),
 	};
 	(
 		scope,
@@ -249,10 +250,10 @@ async fn roundtrip_through_an_origin() {
 	let mut received = recv_group(&mut track).await;
 	let first = received.read_frame().await.unwrap().unwrap();
 	assert_eq!(first.payload, &b"keyframe"[..]);
-	assert_eq!(first.timestamp, Some(moq_net::Timestamp::from_millis(1).unwrap()));
+	assert_eq!(first.timestamp, moq_net::Timestamp::from_millis(1).unwrap());
 	let second = received.read_frame().await.unwrap().unwrap();
 	assert_eq!(second.payload, &b""[..]);
-	assert_eq!(second.timestamp, Some(moq_net::Timestamp::from_millis(2).unwrap()));
+	assert_eq!(second.timestamp, moq_net::Timestamp::from_millis(2).unwrap());
 	assert_eq!(read(&mut received).await.unwrap(), None);
 }
 
@@ -266,8 +267,12 @@ async fn forged_frame_delivers_nothing_and_ends_only_its_group() {
 
 	// A relay's forgery: an unsigned frame the length of a signed one.
 	let mut forged = net.append_group(0).unwrap();
-	forged.write_frame(None, vec![0u8; 80]).unwrap();
-	forged.write_frame(None, vec![0u8; 80]).unwrap();
+	forged
+		.write_frame(moq_net::Timestamp::unscaled(0), vec![0u8; 80])
+		.unwrap();
+	forged
+		.write_frame(moq_net::Timestamp::unscaled(0), vec![0u8; 80])
+		.unwrap();
 	forged.close().unwrap();
 
 	let mut group = recv_group(&mut track).await;
@@ -276,7 +281,7 @@ async fn forged_frame_delivers_nothing_and_ends_only_its_group() {
 	assert!(matches!(read(&mut group).await, Err(Error::Signature)));
 
 	let mut next = signed.create_group(1).unwrap();
-	next.write_frame(None, b"after").unwrap();
+	next.write_frame(moq_net::Timestamp::unscaled(1), b"after").unwrap();
 	next.close().unwrap();
 	let mut group = recv_group(&mut track).await;
 	assert_eq!(read(&mut group).await.unwrap().unwrap(), &b"after"[..]);
@@ -300,7 +305,7 @@ async fn frame_replayed_from_another_group_or_track_is_refused() {
 	let mut b = subscribe(&consumer, "b").await;
 
 	let mut group = signed.append_group(0).unwrap();
-	group.write_frame(None, b"original").unwrap();
+	group.write_frame(moq_net::Timestamp::unscaled(0), b"original").unwrap();
 	group.close().unwrap();
 	let body = raw_frame(&mut raw).await;
 	assert_eq!(
@@ -310,7 +315,9 @@ async fn frame_replayed_from_another_group_or_track_is_refused() {
 
 	// The same bytes as group 1 of the same track.
 	let mut replay = net.append_group(1).unwrap();
-	replay.write_frame(None, body.clone()).unwrap();
+	replay
+		.write_frame(moq_net::Timestamp::unscaled(1), body.clone())
+		.unwrap();
 	replay.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut a).await).await,
@@ -319,7 +326,9 @@ async fn frame_replayed_from_another_group_or_track_is_refused() {
 
 	// The same bytes at the same group and index of another track.
 	let mut moved = other_net.create_group(moq_net::group::Info { start: 0 }).unwrap();
-	moved.write_frame(None, body.clone()).unwrap();
+	moved
+		.write_frame(moq_net::Timestamp::unscaled(0), body.clone())
+		.unwrap();
 	moved.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut b).await).await,
@@ -328,8 +337,10 @@ async fn frame_replayed_from_another_group_or_track_is_refused() {
 
 	// The same bytes at frame 1 of a group at the original start's neighbor.
 	let mut shifted = net.append_group(2).unwrap();
-	shifted.write_frame(None, b"filler".as_slice()).unwrap();
-	shifted.write_frame(None, body).unwrap();
+	shifted
+		.write_frame(moq_net::Timestamp::unscaled(2), b"filler".as_slice())
+		.unwrap();
+	shifted.write_frame(moq_net::Timestamp::unscaled(2), body).unwrap();
 	shifted.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut a).await).await,
@@ -348,7 +359,7 @@ async fn broadcast_under_another_key_is_refused() {
 	let mut subscribed = subscribe(&consumer, "stream").await;
 
 	let mut group = track.append_group(0).unwrap();
-	group.write_frame(None, b"hello").unwrap();
+	group.write_frame(moq_net::Timestamp::unscaled(0), b"hello").unwrap();
 	group.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut subscribed).await).await,
@@ -363,7 +374,7 @@ async fn frame_from_an_earlier_instance_is_refused() {
 	let (old_track, old_net) = old.track(&key, "stream");
 	let mut raw = old_net.subscribe(subscribe_all());
 	let mut group = old_track.append_group(0).unwrap();
-	group.write_frame(None, b"stale").unwrap();
+	group.write_frame(moq_net::Timestamp::unscaled(0), b"stale").unwrap();
 	group.close().unwrap();
 	let body = raw_frame(&mut raw).await;
 
@@ -374,7 +385,7 @@ async fn frame_from_an_earlier_instance_is_refused() {
 	let consumer = new.consume(key.public()).await;
 	let mut subscribed = subscribe(&consumer, "stream").await;
 	let mut replay = new_net.append_group(0).unwrap();
-	replay.write_frame(None, body).unwrap();
+	replay.write_frame(moq_net::Timestamp::unscaled(0), body).unwrap();
 	replay.close().unwrap();
 	assert!(matches!(
 		read(&mut recv_group(&mut subscribed).await).await,
@@ -390,7 +401,7 @@ fn group_start_is_never_signed_twice() {
 	let signed = broadcast::Producer::new(net, key, path, moq_net::Instance::random());
 	let track = signed.create_track("stream", None).unwrap();
 	let mut group = track.append_group(0).unwrap();
-	group.write_frame(None, b"first").unwrap();
+	group.write_frame(moq_net::Timestamp::unscaled(0), b"first").unwrap();
 	group.abort(moq_net::Error::Cancel).unwrap();
 
 	// Net would serve the aborted start again, but frames of both incarnations would verify,
@@ -435,8 +446,8 @@ async fn group_resumed_above_frame_zero_verifies_at_its_index() {
 	let net = track.append_group(0).unwrap();
 	let raw = net.consume();
 	let mut signed = group::Producer::new(net, track.info().clone(), key.clone(), Arc::clone(&scope));
-	signed.write_frame(None, b"zero").unwrap();
-	signed.write_frame(None, b"one").unwrap();
+	signed.write_frame(moq_net::Timestamp::unscaled(0), b"zero").unwrap();
+	signed.write_frame(moq_net::Timestamp::unscaled(0), b"one").unwrap();
 	signed.close().unwrap();
 
 	let mut resumed = group::Consumer::new(raw.with_range(1..), key.public(), scope);
@@ -491,8 +502,8 @@ fn sign_interop() {
 			.enumerate()
 			.map(|(frame, payload)| {
 				let (signed, delivered) = match timestamps {
-					Some((signed, delivered)) => (Some(millis(signed[frame])), Some(delivered[frame])),
-					None => (None, None),
+					Some((signed, delivered)) => (millis(signed[frame]), Some(delivered[frame])),
+					None => (moq_net::Timestamp::unscaled(signed_as), None),
 				};
 				let body = scope.sign(&key, signed_as, frame as u64, signed, payload);
 				serde_json::json!({ "body": hex::encode(body), "timestamp": delivered })
@@ -539,9 +550,9 @@ fn sign_interop() {
 	for row in groups {
 		let scope = Scope::new(&path, &js_instance, row["track"].as_str().unwrap());
 		let group = row["group"].as_u64().unwrap();
-		let timestamp = |frame: &Value| {
-			let scale = row["timescale"].as_u64()?;
-			Some(moq_net::Timestamp::from_scale(frame["timestamp"].as_u64().unwrap(), scale).unwrap())
+		let timestamp = |frame: &Value, group: u64| match row["timescale"].as_u64() {
+			Some(scale) => moq_net::Timestamp::from_scale(frame["timestamp"].as_u64().unwrap(), scale).unwrap(),
+			None => moq_net::Timestamp::unscaled(group),
 		};
 		let frames = row["frames"].as_array().unwrap();
 		let opened: Vec<String> = frames
@@ -549,14 +560,14 @@ fn sign_interop() {
 			.enumerate()
 			.map(|(index, frame)| {
 				let body = Bytes::from(hex(&frame["body"]));
-				let opened = scope.verify(&key.public(), group, index as u64, timestamp(frame), body);
+				let opened = scope.verify(&key.public(), group, index as u64, timestamp(frame, group), body);
 				hex::encode(opened.unwrap())
 			})
 			.collect();
 		assert_eq!(opened, expected);
 		// The same body does not verify at the neighboring group.
 		let body = Bytes::from(hex(&frames[0]["body"]));
-		let relocated = scope.verify(&key.public(), group + 1, 0, timestamp(&frames[0]), body);
+		let relocated = scope.verify(&key.public(), group + 1, 0, timestamp(&frames[0], group + 1), body);
 		assert!(matches!(relocated, Err(Error::Signature)));
 	}
 	let timed: Vec<u64> = groups[2]["frames"]
@@ -570,7 +581,7 @@ fn sign_interop() {
 		.iter()
 		.map(|&micros| {
 			let at = moq_net::Timestamp::from_micros(micros).unwrap();
-			track.rescale(Some(at)).unwrap().unwrap().as_millis() as u64
+			track.rescale(at).unwrap().as_millis().unwrap() as u64
 		})
 		.collect();
 	assert_eq!(timed, rescaled);

@@ -509,7 +509,7 @@ mod tests {
 				}
 				let mut received = Vec::new();
 				while let Some(frame) = sink.receive().unwrap() {
-					received.push(frame.timestamp.as_micros());
+					received.push(frame.timestamp.as_micros().unwrap());
 				}
 				(std::thread::current().id(), received)
 			});
@@ -530,7 +530,7 @@ mod tests {
 			pollster::block_on(sink.flush()).unwrap();
 			let mut tail = Vec::new();
 			while let Some(frame) = sink.receive().unwrap() {
-				tail.push(frame.timestamp.as_micros());
+				tail.push(frame.timestamp.as_micros().unwrap());
 			}
 			drop(sink);
 			(std::thread::current().id(), tail)

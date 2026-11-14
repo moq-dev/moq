@@ -238,7 +238,9 @@ mod test {
 		let (mut producer, track) = producer(cfg(true));
 		for n in [1, 2, 3] {
 			producer
-				.update(next(&json!({ "padding": "same-long-value-so-deltas-stay-in-one-group", "n": n })))
+				.update(next(
+					&json!({ "padding": "same-long-value-so-deltas-stay-in-one-group", "n": n }),
+				))
 				.unwrap();
 		}
 		let _finished = producer.finish().unwrap();
@@ -577,9 +579,7 @@ mod test {
 	fn a_refresh_reuses_the_newest_timestamp() {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
-		producer
-			.update(crate::Timed::new(&json!({ "n": 0 }), ms(100)))
-			.unwrap();
+		producer.update(crate::Timed::new(&json!({ "n": 0 }), ms(100))).unwrap();
 		for n in 1..=3 {
 			producer
 				.update(crate::Timed::new(&json!({ "n": n }), ms(100 + n)))
@@ -604,9 +604,7 @@ mod test {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
-			producer
-				.update(crate::Timed::new(&json!({ "n": n }), ms(at)))
-				.unwrap();
+			producer.update(crate::Timed::new(&json!({ "n": n }), ms(at))).unwrap();
 		}
 
 		let mut late = producer.consume();
@@ -615,9 +613,7 @@ mod test {
 			"no group may share the open group's start"
 		);
 
-		producer
-			.update(crate::Timed::new(&json!({ "n": 4 }), ms(140)))
-			.unwrap();
+		producer.update(crate::Timed::new(&json!({ "n": 4 }), ms(140))).unwrap();
 		assert!(matches!(
 			producer.poll_refresh(&kio::Waiter::noop()),
 			Poll::Ready(Ok(()))
@@ -654,9 +650,7 @@ mod test {
 		assert_eq!(fresh.start, 103);
 		assert_eq!(frames(&mut fresh), vec![(ms(103), json!({ "n": 3 }))]);
 
-		producer
-			.update(crate::Timed::new(&json!({ "n": 4 }), ms(104)))
-			.unwrap();
+		producer.update(crate::Timed::new(&json!({ "n": 4 }), ms(104))).unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(track).last(), Some(&json!({ "n": 4 })));
 	}
@@ -857,7 +851,9 @@ mod test {
 		let mut consumer = Consumer::<Doc>::new(track.consume(), consumer::Config::default());
 		let mut producer = Producer::<Doc>::new(track, cfg(false));
 
-		producer.mutate(|doc| doc.video = Some("v1".to_string()), key()).unwrap();
+		producer
+			.mutate(|doc| doc.video = Some("v1".to_string()), key())
+			.unwrap();
 
 		// The second owner starts from the latest value and adds its own field without clobbering.
 		producer.mutate(|doc| doc.scte35 = Some(42), key()).unwrap();
@@ -1029,7 +1025,10 @@ mod test {
 		producer.update(next(&json!({ "a": 2 }))).unwrap(); // a delta, so a group is open
 		let _finished = producer.clone().finish().unwrap();
 
-		assert!(matches!(producer.update(next(&json!({ "a": 3 }))), Err(crate::Error::Net(_))));
+		assert!(matches!(
+			producer.update(next(&json!({ "a": 3 }))),
+			Err(crate::Error::Net(_))
+		));
 	}
 
 	/// A timed track whose first group starts at 0 but whose first frame is at ten seconds, so a

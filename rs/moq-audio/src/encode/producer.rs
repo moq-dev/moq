@@ -406,8 +406,14 @@ impl Producer {
 	/// produced, which [`activity`](Self::activity) reports.
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
 		self.check()?;
-		let timestamp_us = u64::try_from(frame.timestamp.as_micros())
-			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
+		let timestamp_us = (frame.timestamp.as_micros().ok())
+			.and_then(|micros| u64::try_from(micros).ok())
+			.ok_or_else(|| {
+				Error::Unsupported(format!(
+					"frame timestamp {:?} is unscaled or out of range",
+					frame.timestamp
+				))
+			})?;
 		let floor = self.stamped;
 		let anchor = *self.anchor.get_or_insert(Anchor {
 			at: timestamp_us.max(floor),
@@ -479,7 +485,7 @@ impl Producer {
 		let start = Self::timestamp(anchor, self.frames_produced, delay, codec_rate)?;
 		self.frames_produced += self.encoder.frame_size() as u64;
 		let end = Self::timestamp(anchor, self.frames_produced, delay, codec_rate)?;
-		self.stamped = end.as_micros() as u64;
+		self.stamped = end.as_micros()? as u64;
 		Ok(Stamp { start, end })
 	}
 
@@ -638,7 +644,8 @@ impl Producer {
 
 		for (index, packet) in terminal.packets.into_iter().enumerate() {
 			let offset = Timestamp::from_scale((index * terminal.frame_size) as u64, terminal.codec_rate as u64)?
-				.convert(terminal.start.scale())?;
+				.convert(terminal.start.scale().ok_or(moq_net::TimeOverflow)?)?;
+
 			let timestamp = terminal.start.checked_add(offset)?;
 			track.write(MuxFrame {
 				timestamp,
@@ -947,12 +954,15 @@ mod tests {
 		for index in 0..150 {
 			// Capture buffers need not coincide with a codec frame, even across a demand gap.
 			producer
-				.write(&pcm_frame(&vec![index as f32; 274], at(index).as_micros() as u64))
+				.write(&pcm_frame(
+					&vec![index as f32; 274],
+					at(index).as_micros().unwrap() as u64,
+				))
 				.unwrap();
 			producer
 				.write(&pcm_frame(
 					&vec![index as f32; 1646],
-					at(index).as_micros() as u64 + 2854,
+					at(index).as_micros().unwrap() as u64 + 2854,
 				))
 				.unwrap();
 		}
@@ -988,12 +998,12 @@ mod tests {
 		}
 		producer.set_active(false, at(150)).unwrap();
 		producer
-			.write(&pcm_frame(&vec![0.5; 1920], at(150).as_micros() as u64))
+			.write(&pcm_frame(&vec![0.5; 1920], at(150).as_micros().unwrap() as u64))
 			.unwrap();
 		producer.set_active(true, at(151)).unwrap();
 		assert_eq!(packet(&mut reader).await.unwrap().timestamp, at(150));
 		producer
-			.write(&pcm_frame(&vec![0.5; 1920], at(151).as_micros() as u64))
+			.write(&pcm_frame(&vec![0.5; 1920], at(151).as_micros().unwrap() as u64))
 			.unwrap();
 		assert_eq!(packet(&mut reader).await.unwrap().timestamp, at(151));
 		let _finished = producer.finish().unwrap();
@@ -1017,7 +1027,10 @@ mod tests {
 		producer.set_active(false, at(0)).unwrap();
 		for index in 0..150 {
 			producer
-				.write(&pcm_frame(&vec![index as f32; 1920], at(index).as_micros() as u64))
+				.write(&pcm_frame(
+					&vec![index as f32; 1920],
+					at(index).as_micros().unwrap() as u64,
+				))
 				.unwrap();
 		}
 		let track = consumer
@@ -1058,13 +1071,13 @@ mod tests {
 		producer.set_active(false, at(0)).unwrap();
 		for index in 0..50 {
 			producer
-				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros().unwrap() as u64))
 				.unwrap();
 		}
 		// Another track already reached the live edge.
 		for index in 45..50 {
 			other
-				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros().unwrap() as u64))
 				.unwrap();
 		}
 		loop {
@@ -1075,7 +1088,7 @@ mod tests {
 		}
 		for index in 50..55 {
 			producer
-				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros().unwrap() as u64))
 				.unwrap();
 		}
 		let producer = producer.finish().unwrap();
@@ -1129,7 +1142,7 @@ mod tests {
 		// The terminal packet carries its own end; the marker ends the epoch before the gap, ahead of it.
 		let next = reader.read().await.unwrap().unwrap();
 		assert!(
-			matches!(next, moq_mux::container::Read::End { end, .. } if end.as_micros() < 1_040_000),
+			matches!(next, moq_mux::container::Read::End { end, .. } if end.as_micros().unwrap() < 1_040_000),
 			"the final partial frame joined the epoch before the gap: {next:?}"
 		);
 	}
@@ -1171,7 +1184,7 @@ mod tests {
 
 		let first = reader.read().await.unwrap().unwrap();
 		assert!(
-			matches!(first, moq_mux::container::Read::Frame { ref frame, .. } if frame.timestamp.as_micros() == 1_000_000),
+			matches!(first, moq_mux::container::Read::Frame { ref frame, .. } if frame.timestamp.as_micros().unwrap() == 1_000_000),
 			"{first:?}"
 		);
 		// Nothing retained reaches the track after it expired.
@@ -1611,7 +1624,7 @@ mod tests {
 
 		let mut resumed_frames = 0;
 		while let Some(frame) = decoded_frame(&mut audio).await.unwrap() {
-			if frame.timestamp.as_micros() >= 1_000_000 {
+			if frame.timestamp.as_micros().unwrap() >= 1_000_000 {
 				resumed_frames += frame.data.len() / size_of::<f32>();
 			}
 		}
@@ -1715,7 +1728,7 @@ mod tests {
 			}
 			producer.write(frame).unwrap();
 			let read = packet(&mut reader).await.expect("a packet per full frame");
-			pts.push(read.timestamp.as_micros());
+			pts.push(read.timestamp.as_micros().unwrap());
 		}
 		pts
 	}
@@ -1929,7 +1942,14 @@ mod tests {
 			producer.write(&pcm_frame(&[0.1; 4 * 1024], anchor_us)).unwrap();
 			let mut pts = Vec::new();
 			for _ in 0..4 {
-				pts.push(packet(&mut reader).await.expect("a packet").timestamp.as_micros());
+				pts.push(
+					packet(&mut reader)
+						.await
+						.expect("a packet")
+						.timestamp
+						.as_micros()
+						.unwrap(),
+				);
 			}
 			pts
 		}
@@ -1980,7 +2000,14 @@ mod tests {
 			producer.write(&pcm_frame(&[0.1; 4 * 1024], resume_us)).unwrap();
 			let mut pts = Vec::new();
 			for _ in 0..8 {
-				pts.push(packet(&mut reader).await.expect("a packet").timestamp.as_micros());
+				pts.push(
+					packet(&mut reader)
+						.await
+						.expect("a packet")
+						.timestamp
+						.as_micros()
+						.unwrap(),
+				);
 			}
 			pts.split_off(4)
 		}
@@ -2027,7 +2054,7 @@ mod tests {
 		let mut published = Vec::new();
 		while let Some(frame) = packet(&mut reader).await {
 			let index = u64::from_be_bytes(frame.payload[..].try_into().unwrap());
-			published.push((index, frame.timestamp.as_micros()));
+			published.push((index, frame.timestamp.as_micros().unwrap()));
 		}
 		// Each frame is stamped 2112 frames of priming early, the drain's three silent ones too.
 		assert_eq!(
@@ -2085,7 +2112,7 @@ mod tests {
 		producer.write(&pcm_frame(&vec![0.1; 44_100], 1_000_000)).unwrap();
 
 		let first = packet(&mut reader).await.expect("a packet");
-		assert_eq!(first.timestamp.as_micros(), 1_000_000);
+		assert_eq!(first.timestamp.as_micros().unwrap(), 1_000_000);
 	}
 
 	#[tokio::test]

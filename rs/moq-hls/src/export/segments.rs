@@ -261,7 +261,7 @@ impl Producer {
 		if let Some(back) = state.rows.back() {
 			// A backward jump in pts or segment number means the publisher restarted its timeline;
 			// the old window can't be stitched onto the new one, so start over.
-			if Duration::from(row.pts) < Duration::from(back.pts) || row.segment <= back.segment {
+			if super::span(row.pts) < super::span(back.pts) || row.segment <= back.segment {
 				tracing::warn!("HLS segments jumped backwards; resetting the playlist window");
 				state.rows.clear();
 				state.resets += 1;
@@ -274,7 +274,7 @@ impl Producer {
 
 		loop {
 			let rest = match state.rows.get(1) {
-				Some(second) => state.rows.back().unwrap().end.saturating_sub(second.pts.into()),
+				Some(second) => state.rows.back().unwrap().end.saturating_sub(super::span(second.pts)),
 				None => Duration::ZERO,
 			};
 			if !evicts(window, state.rows.len(), rest) {
@@ -386,7 +386,7 @@ impl Producer {
 		state
 			.rows
 			.iter()
-			.find(|row| !row.stop && row.pts.as_millis() == time as u128 && &*row.tag == tag)
+			.find(|row| !row.stop && row.pts.as_millis() == Ok(time as u128) && &*row.tag == tag)
 			.map(|row| row.segment)
 	}
 
@@ -712,7 +712,7 @@ mod tests {
 			groups: super::super::grid::Groups::one(group),
 			duration: Duration::from_millis(duration_ms),
 			pts,
-			end: Duration::from(pts) + Duration::from_millis(duration_ms),
+			end: Duration::try_from(pts).unwrap() + Duration::from_millis(duration_ms),
 			discontinuity: 0,
 			stop: false,
 			complete: true,

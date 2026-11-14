@@ -127,7 +127,9 @@ async fn read(reader: &mut group::Consumer) -> Result<Option<Vec<u8>>, Error> {
 /// Write `payload` as one message of a `track` session: one group.
 fn send(track: &track::Producer, payload: &'static [u8]) {
 	let mut group = track.append_next().unwrap();
-	group.write_frame(moq_net::Timestamp::unscaled(group.start), payload).unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+		.unwrap();
 	group.close().unwrap();
 }
 
@@ -158,7 +160,10 @@ async fn tcp_sessions_carry_writes_both_ways() {
 		assert_eq!(dialed.session(), accepted.session());
 
 		for write in [b"one", b"two", b"six"] {
-			dialed.producer.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &write[..]).unwrap();
+			dialed
+				.producer
+				.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &write[..])
+				.unwrap();
 		}
 		for write in [b"one", b"two", b"six"] {
 			assert_eq!(
@@ -167,7 +172,10 @@ async fn tcp_sessions_carry_writes_both_ways() {
 				"{dialer} to {acceptor}"
 			);
 		}
-		accepted.producer.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"pong"[..]).unwrap();
+		accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"pong"[..])
+			.unwrap();
 		assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), b"pong");
 
 		// FIN, each way.
@@ -205,7 +213,10 @@ async fn a_long_tcp_session_stays_in_order() {
 					timestamp: moq_net::Timestamp::unscaled(0),
 				})
 				.await;
-			dialed.producer.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), payload).unwrap();
+			dialed
+				.producer
+				.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), payload)
+				.unwrap();
 		}
 		dialed.producer.close().unwrap();
 	};
@@ -227,7 +238,9 @@ async fn a_reset_tcp_half_fails_the_read() {
 		let bob = fixture.endpoint(version, "bob").await;
 		let (dialed, mut accepted) = connect_tcp(&alice, &bob).await;
 		let mut producer = dialed.producer;
-		producer.write_frame(moq_net::Timestamp::unscaled(producer.start), &b"partial"[..]).unwrap();
+		producer
+			.write_frame(moq_net::Timestamp::unscaled(producer.start), &b"partial"[..])
+			.unwrap();
 		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"partial");
 		producer.abort(Error::Cancel).unwrap();
 		assert!(
@@ -259,7 +272,10 @@ async fn a_slow_tcp_reader_paces_the_writer() {
 					timestamp: moq_net::Timestamp::unscaled(0),
 				};
 				dialed.producer.ready(&info).await;
-				dialed.producer.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), payload).unwrap();
+				dialed
+					.producer
+					.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), payload)
+					.unwrap();
 				written.fetch_add(1, Ordering::SeqCst);
 			}
 			dialed.producer.close().unwrap();
@@ -335,7 +351,9 @@ async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 /// Write `key` as a finished group of one write.
 fn write_group(half: &track::Producer, key: u64) {
 	let mut group = half.create_group(group::Info { start: key }).unwrap();
-	group.write_frame(moq_net::Timestamp::unscaled(group.start), &b"data"[..]).unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), &b"data"[..])
+		.unwrap();
 	group.close().unwrap();
 }
 
@@ -363,7 +381,12 @@ async fn a_second_tcp_group_resets_the_session() {
 	}
 	// And bob's own half was reset with it.
 	kio::clock::sleep(SETTLE).await;
-	assert!(accepted.producer.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..]).is_err());
+	assert!(
+		accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..])
+			.is_err()
+	);
 }
 
 /// A second group after the first one finished, and was read to its end, still resets
@@ -379,11 +402,22 @@ async fn a_second_tcp_group_after_fin_resets_the_session() {
 	write_group(half, 0);
 	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"data");
 	assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-	accepted.producer.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"still open"[..]).unwrap();
+	accepted
+		.producer
+		.write_frame(
+			moq_net::Timestamp::unscaled(accepted.producer.start),
+			&b"still open"[..],
+		)
+		.unwrap();
 
 	write_group(half, 1);
 	kio::clock::sleep(SETTLE).await;
-	assert!(accepted.producer.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..]).is_err());
+	assert!(
+		accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..])
+			.is_err()
+	);
 }
 
 /// The peer resetting its half after its group finished, and was read to its end, resets
@@ -401,7 +435,13 @@ async fn a_peer_reset_after_fin_resets_the_session() {
 		write_group(&half, 0);
 		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"data");
 		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-		accepted.producer.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"still open"[..]).unwrap();
+		accepted
+			.producer
+			.write_frame(
+				moq_net::Timestamp::unscaled(accepted.producer.start),
+				&b"still open"[..],
+			)
+			.unwrap();
 
 		if reset {
 			half.abort(Error::Cancel).unwrap();
@@ -409,7 +449,9 @@ async fn a_peer_reset_after_fin_resets_the_session() {
 			let _half = half.finish().unwrap();
 		}
 		kio::clock::sleep(SETTLE).await;
-		let late = accepted.producer.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..]);
+		let late = accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..]);
 		assert_eq!(late.is_err(), reset, "reset: {reset}");
 	}
 }
@@ -458,7 +500,9 @@ async fn track_messages_are_read_in_key() {
 
 	let write = |key: u64, payload: &'static [u8]| {
 		let mut group = dialed.producer.create_group(group::Info { start: key }).unwrap();
-		group.write_frame(moq_net::Timestamp::unscaled(group.start), payload).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.unwrap();
 		group.close().unwrap();
 	};
 	write(1, b"second");
@@ -486,7 +530,9 @@ async fn a_lost_track_message_does_not_block_later_ones() {
 
 	let write = |key: u64, payload: &'static [u8]| {
 		let mut group = dialed.producer.create_group(group::Info { start: key }).unwrap();
-		group.write_frame(moq_net::Timestamp::unscaled(group.start), payload).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.unwrap();
 		group.close().unwrap();
 	};
 	// Message 0 is never written: message 1 waits out the budget, then is read.
@@ -509,8 +555,14 @@ async fn several_sessions_share_a_pair() {
 	let (third, third_accepted) = connect_track(&bob, &alice).await;
 	assert_ne!(first.session(), second.session());
 
-	second.producer.write_frame(moq_net::Timestamp::unscaled(second.producer.start), &b"second"[..]).unwrap();
-	first.producer.write_frame(moq_net::Timestamp::unscaled(first.producer.start), &b"first"[..]).unwrap();
+	second
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(second.producer.start), &b"second"[..])
+		.unwrap();
+	first
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(first.producer.start), &b"first"[..])
+		.unwrap();
 	send(&third_accepted.producer, b"third");
 	assert_eq!(read(&mut first_accepted.consumer).await.unwrap().unwrap(), b"first");
 	assert_eq!(read(&mut second_accepted.consumer).await.unwrap().unwrap(), b"second");
@@ -716,7 +768,10 @@ async fn a_replayed_session_never_connects() {
 	assert!(renamed.is_err(), "the replayer read carol's half");
 
 	// The real session is untouched.
-	dialed.producer.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &b"still here"[..]).unwrap();
+	dialed
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &b"still here"[..])
+		.unwrap();
 	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"still here");
 }
 
@@ -817,7 +872,12 @@ async fn closing_an_endpoint_ends_its_sessions() {
 	);
 	// Both halves of bob's own tcp session end.
 	assert!(read(&mut tcp_accepted.consumer).await.is_err());
-	assert!(tcp_accepted.producer.write_frame(moq_net::Timestamp::unscaled(tcp_accepted.producer.start), &b"late"[..]).is_err());
+	assert!(
+		tcp_accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(tcp_accepted.producer.start), &b"late"[..])
+			.is_err()
+	);
 	assert!(
 		recv(&mut track_dialed.consumer.ordered()).await.is_err(),
 		"bob's track half outlived his endpoint"
@@ -840,7 +900,10 @@ async fn session_tracks_are_never_listed() {
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
 	let (track_dialed, track_accepted) = connect_track(&alice, &bob).await;
-	dialed.producer.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &b"secret"[..]).unwrap();
+	dialed
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &b"secret"[..])
+		.unwrap();
 	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"secret");
 	send(&track_dialed.producer, b"secret");
 	assert_eq!(
@@ -946,7 +1009,10 @@ async fn the_first_tcp_writes_survive_a_late_subscribe_answer() {
 		let accept = async {
 			let mut stream = bob.accept_tcp().await.unwrap().accept().await.unwrap();
 			for payload in [b"first".as_slice(), b"", b"last"] {
-				stream.producer.write_frame(moq_net::Timestamp::unscaled(stream.producer.start), payload).unwrap();
+				stream
+					.producer
+					.write_frame(moq_net::Timestamp::unscaled(stream.producer.start), payload)
+					.unwrap();
 			}
 			(stream.producer.close().unwrap(), stream.consumer)
 		};

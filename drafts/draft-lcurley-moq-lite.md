@@ -2436,7 +2436,7 @@ An application-specific payload.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME carries an `Inflated Size` when it is not none.
-- An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages omit the timestamp.
+- An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages omit the timestamp. The published moq-lite-05 and moq-lite-06 treat a `Timescale` of 0 as invalid, so an untimed Track served over them is forced to declare milliseconds, and each FRAME carries its Group sequence as the timestamp.
 - A publisher must not start a timed Group's frame 0 at or before a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
 - A Group's sequence is its start: frame 0's timestamp on a timed Track, and a growing number on an untimed one. A Time Anchor names the Group with the highest sequence at or below it, on an untimed Track too.
 - Bounded every timestamp below 2^61. A larger one is a malformed Track.

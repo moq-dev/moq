@@ -128,7 +128,8 @@ impl Estimator {
 	}
 
 	/// Observe a frame of `bytes` encoded bytes at presentation time `timestamp`, as written by
-	/// [`container::Producer::write`](crate::container::Producer::write).
+	/// [`container::Producer::write`](crate::container::Producer::write). An
+	/// [unscaled](Timestamp::unscaled) timestamp has no time, so it measures nothing.
 	pub fn write(&mut self, timestamp: Timestamp, bytes: usize) {
 		self.rate(timestamp, bytes);
 		self.order(timestamp);
@@ -136,7 +137,7 @@ impl Estimator {
 
 	/// Count a write toward the bitrate and framerate only.
 	pub(crate) fn rate(&mut self, timestamp: Timestamp, bytes: usize) {
-		let timestamp = nanos(timestamp);
+		let Some(timestamp) = nanos(timestamp) else { return };
 		self.bitrate.write(timestamp, bytes);
 		self.window.write(timestamp);
 	}
@@ -152,7 +153,8 @@ impl Estimator {
 	/// A frame with no other track to trail trails nothing, so a window holding frames from before
 	/// another track joined never reports the trail of the few after it.
 	pub(crate) fn order(&mut self, timestamp: Timestamp) {
-		let behind = self.seat.write(nanos(timestamp)).unwrap_or_default();
+		let Some(timestamp) = nanos(timestamp) else { return };
+		let behind = self.seat.write(timestamp).unwrap_or_default();
 		self.window.trail(behind);
 	}
 
@@ -167,7 +169,7 @@ impl Estimator {
 	/// at the first cut once the highest timestamp has advanced a second past where it opened.
 	/// Nothing is reported for either before then.
 	pub fn cut(&mut self, end: Option<Timestamp>) {
-		self.bitrate.cut(end.map(nanos));
+		self.bitrate.cut(end.and_then(nanos));
 		self.window.cut();
 	}
 
@@ -185,9 +187,11 @@ impl Estimator {
 
 	/// Observe a frame's reorder delay (`PTS - DTS`), which raises the jitter to the decode buffer a
 	/// B-frame stream needs. Only a container knows this; the elementary stream carries no decode
-	/// time.
+	/// time. An [unscaled](Timestamp::unscaled) delay has no time, so it raises nothing.
 	pub fn reorder(&mut self, delay: Timestamp) {
-		self.burst(Duration::from(delay));
+		if let Ok(delay) = Duration::try_from(delay) {
+			self.burst(delay);
+		}
 	}
 
 	/// Record the media duration emitted together by a container importer.
@@ -218,7 +222,7 @@ impl Estimator {
 
 	/// Note that written content reaches `end`, as a fragment or a frame with a duration says.
 	pub(crate) fn reach(&mut self, end: Timestamp) {
-		let end = nanos(end);
+		let Some(end) = nanos(end) else { return };
 		self.window.reach = Some(self.window.reach.map_or(end, |reach| reach.max(end)));
 	}
 
@@ -273,8 +277,11 @@ impl From<Estimate> for Reading {
 /// a span anchored on one scale could never be timed against a frame on another. Since a span now
 /// survives a boundary it can't time, that would block the bitrate for the life of the track rather
 /// than for one group. Normalizing on the way in is what makes the carry-forward safe.
-fn nanos(timestamp: Timestamp) -> u128 {
-	timestamp.as_nanos()
+///
+/// `None` for a scale-less track's [unscaled](Timestamp::unscaled) key, which has no time to
+/// measure, so every observation of one is skipped.
+fn nanos(timestamp: Timestamp) -> Option<u128> {
+	timestamp.as_nanos().ok()
 }
 
 /// The time from `start` to `end`, or `None` if it didn't advance (a B-frame presenting earlier, a

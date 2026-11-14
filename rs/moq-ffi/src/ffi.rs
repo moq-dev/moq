@@ -14,6 +14,12 @@ pub(crate) fn duration(duration: std::time::Duration) -> std::time::Duration {
 	duration.min(std::time::Duration::from_nanos(i64::MAX as u64))
 }
 
+/// A gap's length, as [`duration`]. Decoders report gaps only on scaled media, refusing a
+/// scale-less track first, so the zero an unscaled length would take never shows.
+pub(crate) fn gap(length: moq_net::Timestamp) -> std::time::Duration {
+	duration(std::time::Duration::try_from(length).unwrap_or_default())
+}
+
 /// A worker runtime driving I/O, timers, and background work beside host-polled calls.
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 

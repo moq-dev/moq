@@ -235,8 +235,8 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub.timestamp.expect("timed frame");
-		assert_eq!(ts.scale(), Timescale::MICRO);
+		let ts = frame_sub.timestamp;
+		assert_eq!(ts.scale(), Some(Timescale::MICRO));
 		assert_eq!(ts.value(), expected_us);
 
 		let payload = frame_sub.read_all().await.expect("failed to read frame");
@@ -348,8 +348,8 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub.timestamp.expect("timed frame");
-		assert_eq!(ts.scale(), Timescale::MICRO);
+		let ts = frame_sub.timestamp;
+		assert_eq!(ts.scale(), Some(Timescale::MICRO));
 		assert_eq!(ts.value(), expected_us);
 
 		let payload = frame_sub.read_all().await.expect("failed to read frame");
@@ -638,7 +638,9 @@ async fn broadcast_moq_lite_05_untimed_track() {
 	let mut group = track
 		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
 		.expect("append group");
-	group.write_frame(None, b"hello".as_ref()).expect("write frame");
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), b"hello".as_ref())
+		.expect("write frame");
 	group.close().expect("finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -703,11 +705,12 @@ async fn broadcast_moq_lite_05_untimed_track() {
 		.expect("next_frame failed")
 		.expect("group closed");
 
-	let ts = frame_sub.timestamp.expect("timed frame");
+	// lite-05 can't declare a scale-less track, so it declares milliseconds and stamps each
+	// frame with its group key.
 	assert_eq!(
-		ts.scale(),
-		Timescale::MILLI,
-		"an untimed track's send times are milliseconds"
+		frame_sub.timestamp,
+		moq_net::Timestamp::from_millis(group_sub.start).unwrap(),
+		"a scale-less track's frames carry their group key"
 	);
 	assert_eq!(track_sub.info().timescale, Some(Timescale::MILLI));
 

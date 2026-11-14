@@ -33,6 +33,13 @@ fn next_frame(cb: &Callback) -> Vec<u8> {
 	payload
 }
 
+/// Write `payload` into a raw group of a scale-less track, stamped with the group's key.
+fn write_unscaled(group: u32, payload: &[u8]) -> i32 {
+	let mut key = 0;
+	assert_eq!(unsafe { moq_publish_group_sequence(group, &mut key) }, 0);
+	unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), &moq_timestamp::unscaled(key)) }
+}
+
 /// Dial `b` from `a` and accept it, returning (dialed, accepted) stream handles plus the
 /// callbacks that must outlive them.
 fn connect(a: u32, b: u32, track: bool) -> (u32, u32, [Callback; 3]) {
@@ -125,10 +132,7 @@ fn socket_tcp_round_trip() {
 	assert_eq!(moq_socket_stream_free(server), 0);
 
 	for part in [b"one".as_slice(), b"two"] {
-		assert_eq!(
-			unsafe { moq_publish_group_frame(writer, part.as_ptr(), part.len(), std::ptr::null()) },
-			0
-		);
+		assert_eq!(write_unscaled(writer, part), 0);
 	}
 	assert_eq!(moq_publish_group_finish(writer), 0);
 	assert_eq!(next_frame(&frames), b"one");
@@ -155,10 +159,7 @@ fn socket_track_round_trip_and_endpoint_close() {
 	let _reader = id(unsafe { moq_socket_stream_reader(server, Some(channel_callback), frames.ptr) });
 	for part in [b"first".as_slice(), b"later"] {
 		let group = id(moq_publish_track_group(track));
-		assert_eq!(
-			unsafe { moq_publish_group_frame(group, part.as_ptr(), part.len(), std::ptr::null()) },
-			0
-		);
+		assert_eq!(write_unscaled(group, part), 0);
 		assert_eq!(moq_publish_group_finish(group), 0);
 	}
 	assert_eq!(next_frame(&frames), b"first");
@@ -211,10 +212,7 @@ fn socket_finished_tracks_are_not_kept_by_the_endpoint() {
 		let frames = Callback::new();
 		let _reader = id(unsafe { moq_socket_stream_reader(server, Some(channel_callback), frames.ptr) });
 		let group = id(moq_publish_track_group(track));
-		assert_eq!(
-			unsafe { moq_publish_group_frame(group, &round, 1, std::ptr::null()) },
-			0
-		);
+		assert_eq!(write_unscaled(group, &[round]), 0);
 		assert_eq!(moq_publish_group_finish(group), 0);
 		assert_eq!(moq_publish_track_finish(track), 0);
 		assert_eq!(next_frame(&frames), [round]);
@@ -595,7 +593,7 @@ fn audio_encoder_without_a_broadcast() {
 
 	// Stereo by default, so a frame is twice the frame size in interleaved samples.
 	let pcm = vec![0.0f32; frame_size as usize * 2];
-	let mut packet: moq_frame = unsafe { std::mem::zeroed() };
+	let mut packet: moq_audio_packet = unsafe { std::mem::zeroed() };
 	let mut packets = 0;
 	for _ in 0..3 {
 		assert_eq!(unsafe { moq_audio_encoder_encode(encoder, pcm.as_ptr(), pcm.len()) }, 0);

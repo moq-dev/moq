@@ -7,7 +7,7 @@ use kio::clock::Instant;
 use moq_net::Timestamp;
 use moq_net::track::Delay;
 
-use super::{Container, Frame, Read, TimestampRewind};
+use super::{Container, Frame, Read, TimestampRewind, time};
 
 /// Media and group boundaries in delivery order.
 pub(crate) enum Event {
@@ -285,9 +285,10 @@ fn pts_contiguous(end: Option<std::time::Duration>, next_start: std::time::Durat
 	end.is_some_and(|end| next_start <= end.saturating_add(CONTIGUITY_TOLERANCE))
 }
 
-/// A gap from the delivered `edge` to `resume`, in the resume's scale.
-fn gap(edge: std::time::Duration, resume: Timestamp) -> Item {
-	let scale = resume.scale();
+/// A gap from the delivered `edge` to `resume`, in the resume's scale. Refused for an unscaled
+/// `resume`, which has no time to resume at.
+fn gap(edge: std::time::Duration, resume: Timestamp) -> Result<Item, moq_net::Error> {
+	let scale = resume.scale().ok_or(moq_net::Error::TimestampMismatch)?;
 	// A next group may start before the edge (an overlapping endpoint), so the span bottoms out at zero.
 	let start = edge
 		.as_nanos()
@@ -298,7 +299,7 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Item {
 	let duration = resume
 		.checked_sub(timestamp)
 		.expect("at or below the resume, in its scale");
-	Item::Gap { timestamp, duration }
+	Ok(Item::Gap { timestamp, duration })
 }
 
 /// A [`Consumer`]'s [`Delay`] and the catalog rendition's warmup, applied together.
@@ -509,7 +510,7 @@ impl<F: Container> Consumer<F> {
 			&& let Some(edge) = edge
 		{
 			self.next = Some(item);
-			return Poll::Ready(Ok(Some(gap(edge, resume))));
+			return Poll::Ready(Ok(Some(gap(edge, resume)?)));
 		}
 		Poll::Ready(Ok(Some(item)))
 	}
@@ -629,8 +630,9 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => {
 						let seq = group.group.start;
 						let ts = frame.timestamp;
+						let first = time(ts).ok_or(moq_net::Error::TimestampMismatch)?;
 						if let Some(floor) = self.floor
-							&& ts.as_micros() < floor.as_micros()
+							&& time(floor).is_some_and(|floor| first.as_micros() < floor.as_micros())
 						{
 							return Poll::Ready(Err(TimestampRewind { timestamp: ts, floor }.into()));
 						}
@@ -638,18 +640,16 @@ impl<F: Container> Consumer<F> {
 							self.start = Some((seq, ts));
 						}
 						// A group covering the target began before it, so the reader warms until the target too.
-						let first = std::time::Duration::from(ts);
 						self.warmed
 							.get_or_insert_with(|| first.max(self.target.unwrap_or(first)).saturating_add(self.warmup));
-						let end = std::time::Duration::from(ts)
-							+ frame.duration.map(std::time::Duration::from).unwrap_or_default();
+						let end = first + frame.duration.and_then(time).unwrap_or_default();
 						self.advance(end);
 						self.group = seq;
 						return Poll::Ready(Ok(Some(Event::Frame { frame, arrived })));
 					}
 					Poll::Ready(Ok(Some(Event::FrameEnd { end, opens }))) => {
 						self.group = group.group.start;
-						self.advance(end.into());
+						self.advance(time(end).ok_or(moq_net::Error::TimestampMismatch)?);
 						return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens })));
 					}
 					Poll::Ready(Ok(Some(event))) => return Poll::Ready(Ok(Some(event))),
@@ -711,7 +711,7 @@ impl<F: Container> Consumer<F> {
 							.end()
 							.zip(group.group.timescale())
 							.and_then(|(end, scale)| Timestamp::new(end, scale).ok())
-							.map(std::time::Duration::from);
+							.and_then(time);
 						if let Some(end) = group.max_end.max(whole) {
 							self.presented_end = Some(end);
 						}
@@ -800,7 +800,7 @@ impl<F: Container> Consumer<F> {
 				let skipped = self.is_skipped(self.current..sequence);
 				let front = self.pending.front_mut().unwrap();
 				let first = front.poll_min_timestamp(waiter, &self.format, false);
-				let start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
+				let start = front.min_timestamp.and_then(time).or(front.max_end);
 				let continues = skipped || start.is_some_and(|start| pts_contiguous(self.presented_end, start));
 				// A run nothing will fill, such as one dropped over a wire that can't say it was
 				// skipped, still waits for the group past it to show where it starts: stepping
@@ -811,7 +811,7 @@ impl<F: Container> Consumer<F> {
 					let front = self.pending.front_mut().unwrap();
 					let empty = front.is_empty() && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
 					let front = self.pending.front().unwrap();
-					let next_start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
+					let next_start = front.min_timestamp.and_then(time).or(front.max_end);
 					// A data marker has no timestamp to prove continuity across the hole.
 					if !empty && !continues && next_start.is_none_or(|start| !pts_contiguous(self.presented_end, start))
 					{
@@ -866,7 +866,7 @@ impl<F: Container> Consumer<F> {
 					.pending
 					.iter()
 					.position(|group| group.start > self.current)
-					.map(|i| (i, self.pending[i].min_timestamp.map(std::time::Duration::from))),
+					.map(|i| (i, self.pending[i].min_timestamp.and_then(time))),
 				false => None,
 			};
 
@@ -904,10 +904,9 @@ impl<F: Container> Consumer<F> {
 				break;
 			}
 			let _ = group.poll_min_timestamp(waiter, &self.format, true);
-			let Some((frame, ..)) = group.buffered.front() else {
+			let Some(first) = group.buffered.front().and_then(|(frame, ..)| time(frame.timestamp)) else {
 				break;
 			};
-			let first = std::time::Duration::from(frame.timestamp);
 			let current_end = group.max_end;
 			// The next group that arrived, even one whose first frame is still in flight: that frame
 			// may land within the budget, so skipping on to a later group could drop the one the start
@@ -920,7 +919,9 @@ impl<F: Container> Consumer<F> {
 			else {
 				break;
 			};
-			let next_start = std::time::Duration::from(next_start);
+			let Some(next_start) = time(next_start) else {
+				break;
+			};
 			let newest = *newest.get_or_insert_with(|| self.poll_newest(waiter));
 			// Nothing has been read, so the reader still warms.
 			if newest.saturating_sub(first) <= self.max_delay.saturating_add(self.warmup) {
@@ -944,8 +945,10 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 
-			if let Poll::Ready(Some(ts)) = group.poll_min_timestamp(waiter, &self.format, false) {
-				return Some((i, ts.into()));
+			if let Poll::Ready(Some(ts)) = group.poll_min_timestamp(waiter, &self.format, false)
+				&& let Some(ts) = time(ts)
+			{
+				return Some((i, ts));
 			}
 		}
 		None
@@ -959,8 +962,10 @@ impl<F: Container> Consumer<F> {
 			}
 
 			// Older groups won't be newer than this.
-			if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format) {
-				return ts.into();
+			if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format)
+				&& let Some(ts) = time(ts)
+			{
+				return ts;
 			}
 		}
 		std::time::Duration::ZERO
@@ -1013,7 +1018,7 @@ impl<F: Container> Consumer<F> {
 		let mut edge = None;
 		for group in self.pending.iter_mut().rev() {
 			if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format) {
-				edge = Some(std::time::Duration::from(ts));
+				edge = time(ts);
 				break;
 			}
 		}
@@ -1023,11 +1028,10 @@ impl<F: Container> Consumer<F> {
 		};
 		let target = edge.saturating_sub(reach);
 		self.target = Some(target);
-		let covered = self.pending.iter().any(|group| {
-			group
-				.min_timestamp
-				.is_some_and(|start| std::time::Duration::from(start) <= target)
-		});
+		let covered = self
+			.pending
+			.iter()
+			.any(|group| group.min_timestamp.and_then(time).is_some_and(|start| start <= target));
 		if covered {
 			return Some(lowest);
 		}
@@ -1221,7 +1225,12 @@ impl<F: Container> Consumer<F> {
 	// The fault a discarded group would hide: its own, or frames below the latest delivered start.
 	fn discard_fault(start: Option<(u64, Timestamp)>, group: &mut GroupBuffer<F>) -> Option<F::Error> {
 		match (start, group.min_timestamp) {
-			(Some((prev, floor)), Some(min)) if group.start > prev && min.as_micros() < floor.as_micros() => {
+			(Some((prev, floor)), Some(min))
+				if group.start > prev
+					&& time(min)
+						.zip(time(floor))
+						.is_some_and(|(min, floor)| min.as_micros() < floor.as_micros()) =>
+			{
 				Some(TimestampRewind { timestamp: min, floor }.into())
 			}
 			_ => group.fault.take(),
@@ -1448,31 +1457,39 @@ impl<F: Container> GroupBuffer<F> {
 		// held, so the last one read also holds whatever of it the views leave out, such as a header.
 		let mut views = 0;
 		let first = self.buffered.len();
+		// Media is timed: a scale-less track's unscaled keys carry no time to present at.
+		let unscaled = || Failure::Decode(moq_net::Error::TimestampMismatch.into());
 		for mut frame in frames {
 			if let Some(bound) = format.end(&frame) {
-				self.note_end(bound);
+				let end = time(bound).ok_or_else(unscaled)?;
+				self.note_end(end);
 				self.markers.push_back((self.index, bound));
 				self.charge(MARKER_COST);
 				continue;
 			}
+			let at = time(frame.timestamp).ok_or_else(unscaled)?;
+			let duration = frame
+				.duration
+				.map(|duration| time(duration).ok_or_else(unscaled))
+				.transpose()?;
 
+			// Every buffered timestamp has a time, so any two of them compare.
 			self.min_timestamp = Some(match self.min_timestamp {
-				Some(existing) => existing.min(frame.timestamp),
-				None => frame.timestamp,
+				Some(existing) if existing <= frame.timestamp => existing,
+				_ => frame.timestamp,
 			});
 
 			self.max_timestamp = Some(match self.max_timestamp {
-				Some(existing) => existing.max(frame.timestamp),
-				None => frame.timestamp,
+				Some(existing) if existing > frame.timestamp => existing,
+				_ => frame.timestamp,
 			});
 
 			// Furthest presentation point, in wall-clock terms so timestamp and
 			// duration can be at different scales without extra conversions. A frame
 			// with no duration contributes only its timestamp.
-			self.note_end(frame.timestamp);
-			if let Some(duration) = frame.duration {
-				let end = std::time::Duration::from(frame.timestamp) + std::time::Duration::from(duration);
-				self.max_end = Some(self.max_end.map_or(end, |existing| existing.max(end)));
+			self.note_end(at);
+			if let Some(duration) = duration {
+				self.note_end(at + duration);
 			}
 
 			// First frame of a group is always a keyframe by protocol invariant; trust
@@ -1584,8 +1601,7 @@ impl<F: Container> GroupBuffer<F> {
 		matches!(self.group.poll_finished(waiter), Poll::Ready(Err(_)))
 	}
 
-	fn note_end(&mut self, timestamp: Timestamp) {
-		let end = std::time::Duration::from(timestamp);
+	fn note_end(&mut self, end: std::time::Duration) {
 		self.max_end = Some(self.max_end.map_or(end, |existing| existing.max(end)));
 	}
 
@@ -1680,8 +1696,8 @@ mod tests {
 	/// Encode a `[timestamp][duration][payload]` DurationWire frame.
 	fn encode_duration_frame(timestamp: Timestamp, duration: Timestamp) -> Vec<u8> {
 		let mut buf = Vec::with_capacity(18);
-		buf.extend_from_slice(&(timestamp.as_micros() as u64).to_le_bytes());
-		buf.extend_from_slice(&(duration.as_micros() as u64).to_le_bytes());
+		buf.extend_from_slice(&(timestamp.as_micros().unwrap() as u64).to_le_bytes());
+		buf.extend_from_slice(&(duration.as_micros().unwrap() as u64).to_le_bytes());
 		buf.extend_from_slice(&[0xDE, 0xAD]);
 		buf
 	}
@@ -1840,9 +1856,13 @@ mod tests {
 		let mut items = Vec::new();
 		while let Some(read) = consumer.read().await.unwrap() {
 			items.push(match read {
-				Read::Frame { frame, .. } => frame.timestamp.as_micros().to_string(),
-				Read::Gap { timestamp, duration } => format!("gap {}+{}", timestamp.as_micros(), duration.as_micros()),
-				Read::End { end, .. } => format!("end {}", end.as_micros()),
+				Read::Frame { frame, .. } => frame.timestamp.as_micros().unwrap().to_string(),
+				Read::Gap { timestamp, duration } => format!(
+					"gap {}+{}",
+					timestamp.as_micros().unwrap(),
+					duration.as_micros().unwrap()
+				),
+				Read::End { end, .. } => format!("end {}", end.as_micros().unwrap()),
 			});
 		}
 		items
@@ -2276,14 +2296,14 @@ mod tests {
 	fn a_gap_spans_the_edge_to_the_resume_in_its_scale() {
 		let scale = moq_net::Timescale::new(90_000).unwrap();
 		let resume = Timestamp::new(90_000, scale).unwrap();
-		let Item::Gap { timestamp, duration } = gap(Duration::from_millis(500), resume) else {
+		let Item::Gap { timestamp, duration } = gap(Duration::from_millis(500), resume).unwrap() else {
 			unreachable!()
 		};
 		assert_eq!(timestamp, Timestamp::new(45_000, scale).unwrap());
 		assert_eq!(duration, Timestamp::new(45_000, scale).unwrap());
 
 		// A next group overlapping the edge leaves an empty span at the resume point.
-		let Item::Gap { timestamp, duration } = gap(Duration::from_secs(2), resume) else {
+		let Item::Gap { timestamp, duration } = gap(Duration::from_secs(2), resume).unwrap() else {
 			unreachable!()
 		};
 		assert_eq!(timestamp, resume);
@@ -2956,7 +2976,10 @@ mod tests {
 		let _track = track.finish().unwrap();
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(
-			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>(),
+			frames
+				.iter()
+				.map(|f| f.timestamp.as_micros().unwrap())
+				.collect::<Vec<_>>(),
 			vec![50_000, 83_000]
 		);
 	}
@@ -2975,7 +2998,10 @@ mod tests {
 		let _track = track.finish().unwrap();
 		let frames = continuous_frames(&mut consumer).await;
 		assert_eq!(
-			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>(),
+			frames
+				.iter()
+				.map(|f| f.timestamp.as_micros().unwrap())
+				.collect::<Vec<_>>(),
 			vec![66_000, 50_000]
 		);
 	}
@@ -3215,7 +3241,7 @@ mod tests {
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(micros, vec![0, 100_000], "markers skipped, next group reached");
 	}
 
@@ -3620,7 +3646,7 @@ mod tests {
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(micros, vec![100_000, 200_000], "the late group is delivered in order");
 	}
 
@@ -3662,7 +3688,7 @@ mod tests {
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(micros, vec![0, 100_000], "the slow stream's frames are delivered");
 	}
 
@@ -3710,7 +3736,7 @@ mod tests {
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(
 			micros,
 			vec![4_800_000, 5_000_000],
@@ -3768,7 +3794,7 @@ mod tests {
 
 			let frames = first.ok().map(|frame| frame.unwrap().unwrap());
 			let frames = frames.into_iter().chain(read_all(&mut consumer).await.unwrap());
-			let micros: Vec<u128> = frames.map(|f| f.timestamp.as_micros()).collect();
+			let micros: Vec<u128> = frames.map(|f| f.timestamp.as_micros().unwrap()).collect();
 			assert_eq!(micros, expected, "warmup {warmup:?}");
 		}
 	}
@@ -3843,7 +3869,7 @@ mod tests {
 			.await
 			.unwrap()
 			.iter()
-			.map(|f| f.timestamp.as_micros())
+			.map(|f| f.timestamp.as_micros().unwrap())
 			.collect();
 		assert_eq!(micros, vec![4_950_000, 5_000_000], "the warmup is not skipped as stale");
 	}
@@ -4117,7 +4143,7 @@ mod tests {
 		write_group(&mut track, 4, &[ts(4_500_000)]);
 		let _track = track.finish().unwrap();
 		let frames = read_all(&mut consumer).await.unwrap();
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(micros, vec![4_500_000, 5_000_000]);
 	}
 
@@ -4613,7 +4639,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(one_hour));
-		assert_eq!(frames[0].timestamp.as_micros(), one_hour as u128);
+		assert_eq!(frames[0].timestamp.as_micros().unwrap(), one_hour as u128);
 	}
 
 	#[tokio::test]
@@ -4777,7 +4803,7 @@ mod tests {
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(micros, vec![210_000, 710_000], "the expired frameless group is skipped");
 	}
 
@@ -4853,7 +4879,7 @@ mod tests {
 		group0.close().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(micros, vec![0, 100_000], "the open group's late frames are delivered");
 	}
 
@@ -4890,7 +4916,7 @@ mod tests {
 				.expect("the open track still delivers the later range")
 				.unwrap()
 				.expect("a frame");
-			micros.push(frame.timestamp.as_micros());
+			micros.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(micros, vec![0, 1_000_000]);
 	}
@@ -4916,7 +4942,7 @@ mod tests {
 		let _track = track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(micros, vec![700_000, 800_000, 900_000]);
 	}
 
@@ -5812,7 +5838,7 @@ mod tests {
 		let mut reads = Vec::new();
 		while let Poll::Ready(read) = consumer.poll_read(&waiter) {
 			reads.push(match read.unwrap() {
-				Some(Read::Frame { group, frame }) => format!("frame {group} {}", frame.timestamp.as_micros()),
+				Some(Read::Frame { group, frame }) => format!("frame {group} {}", frame.timestamp.as_micros().unwrap()),
 				Some(Read::Gap { .. }) => "gap".to_string(),
 				Some(Read::End { group, .. }) => format!("end {group}"),
 				None => break,
@@ -5854,7 +5880,7 @@ mod tests {
 		let mut reads = Vec::new();
 		while let Poll::Ready(read) = consumer.poll_read(&waiter) {
 			reads.push(match read.unwrap() {
-				Some(Read::Frame { group, frame }) => format!("frame {group} {}", frame.timestamp.as_micros()),
+				Some(Read::Frame { group, frame }) => format!("frame {group} {}", frame.timestamp.as_micros().unwrap()),
 				Some(Read::Gap { .. }) => "gap".to_string(),
 				Some(Read::End { group, .. }) => format!("end {group}"),
 				None => break,

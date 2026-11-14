@@ -844,7 +844,9 @@ test("a refused timestamp does not burn the frame", async () => {
 	const p = await pair("video");
 	await p.net.info();
 	const group = p.producer.appendGroup();
-	await expect(group.writeFrame(undefined, text("untimed"))).rejects.toThrow("timestamp");
+	await expect(group.writeFrame(Time.Timestamp.unscaled(group.sequence), text("untimed"))).rejects.toThrow(
+		"timestamp",
+	);
 	await group.writeFrame(ms(1), text("ok"));
 	group.finish();
 	expect(await readText(await recvGroup(p.consumer))).toBe("ok");
@@ -860,7 +862,9 @@ test("produce waits for an unaccepted track's timescale", async () => {
 
 	// The timescale is known from the start, so mismatches spend neither a sequence nor a frame.
 	const group = producer.createGroup(1n);
-	await expect(group.writeFrame(undefined, text("untimed"))).rejects.toThrow("timestamp");
+	await expect(group.writeFrame(Time.Timestamp.unscaled(group.sequence), text("untimed"))).rejects.toThrow(
+		"timestamp",
+	);
 	await group.writeFrame(ms(2), text("frame"));
 	group.finish();
 	expect(await readText(await recvGroup(consumer))).toBe("frame");

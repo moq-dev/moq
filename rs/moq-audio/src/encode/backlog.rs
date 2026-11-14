@@ -64,7 +64,7 @@ impl Backlog {
 		while self
 			.frames
 			.front()
-			.is_some_and(|first| Duration::from(first.end).saturating_add(age) <= Duration::from(now))
+			.is_some_and(|first| time(first.end).saturating_add(age) <= time(now))
 		{
 			self.evict();
 		}
@@ -73,12 +73,12 @@ impl Backlog {
 	/// Whether audio ending at `end` is past retention at `now`.
 	#[cfg(any(feature = "capture", test))]
 	pub fn expired(&self, end: Timestamp, now: Timestamp) -> bool {
-		Duration::from(end).saturating_add(self.retention) <= Duration::from(now)
+		time(end).saturating_add(self.retention) <= time(now)
 	}
 
 	#[cfg(any(feature = "capture", test))]
 	pub fn deadline(&self) -> Option<Duration> {
-		Some(Duration::from(self.frames.front()?.end).saturating_add(self.retention))
+		Some(time(self.frames.front()?.end).saturating_add(self.retention))
 	}
 
 	fn evict(&mut self) {
@@ -104,6 +104,11 @@ impl Backlog {
 	pub fn is_empty(&self) -> bool {
 		self.frames.is_empty()
 	}
+}
+
+/// A stamp the producer made itself, always in microseconds, or its broadcast clock's now.
+fn time(timestamp: Timestamp) -> Duration {
+	Duration::try_from(timestamp).expect("the producer stamps at a scale")
 }
 
 #[cfg(test)]

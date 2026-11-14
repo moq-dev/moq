@@ -1880,7 +1880,7 @@ pub(crate) mod tests {
 				"{version}: byte-identical from the first group"
 			);
 			let media: Vec<_> = recording.iter().filter(|(_, frames)| !frames.is_empty()).collect();
-			let first = |frames: &[hang::container::Frame]| frames[0].timestamp.as_micros();
+			let first = |frames: &[hang::container::Frame]| frames[0].timestamp.as_micros().unwrap();
 			let jump = media
 				.windows(2)
 				.find(|pair| first(&pair[1].1) > first(&pair[0].1) + 10_000_000)
@@ -1972,7 +1972,7 @@ pub(crate) mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 		let first = next_frame(&mut Consumer::new(track, container)).await.timestamp;
 		assert!(
-			first.as_micros() < Duration::from_secs(5).as_micros(),
+			first.as_micros().unwrap() < Duration::from_secs(5).as_micros(),
 			"the feed's own PTS: {first:?}"
 		);
 		// The PES that anchors the mapping need not be this frame: the mux spaces them apart.
