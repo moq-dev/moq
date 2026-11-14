@@ -27,7 +27,3 @@ CLI never repeats a member or pads a field.
   nonzero trailing bits, whitespace, standard alphabet); both languages replay the corpus.
 
 Public API: none. Wire: none. Behavior: such keys stop loading in `@moq/auth`.
-
-## Related
-
-- [Peer-reachable unsafe](/quest/m1/wire-fuzz-coverage.md) - the other m1 fuzz work

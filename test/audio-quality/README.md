@@ -97,7 +97,8 @@ in what the native player does:
 - Its ring stretches received PCM onto the shared clock by the page's rule. A ring that still runs
   dry emits silence until a cushion of received PCM arrives; `silence` counts that padding.
   Native `stalled` is only a sink with nothing written yet.
-- The playhead is projected from the player's last write at the wall rate and held at its end.
+- The playhead is projected from the player's last write at the wall rate and held at its end; the
+  write sounds after what the sink holds and the device's own delay.
 - `device` is the host's reported output latency, with no `baseLatency`, and `render_load` is
   unmeasured.
 
@@ -318,8 +319,9 @@ player's own count, which its stats panel shows, is read alongside:
   that starts within 60 ms of a stall is that stall, and is not an underrun.
 - `silence`: the share of rendered quanta under -60 dBFS at the output, whatever the cause.
 - `target_ms`: the resolved playout delay (`sync.out.delay`).
-- `av_lag_ms`: how far the audio playhead trails the shared clock video plays from (`sync.now()`),
-  sampled while playing. Audio and video keep separate clocks that align once the delay covers the
+- `av_lag_ms`: how far the audio sounding at the speaker trails the shared clock video plays from
+  (`sync.now()`), sampled while playing. The browser's playhead (`audio.out.timestamp`) is the one
+  sounding as of its last report, projected at the wall rate to the sample. Audio and video keep separate clocks that align once the delay covers the
   arrivals, so this is the latency audio adds beyond the target: positive is audio late, negative
   early. Its `p50` is where audio rests, so latency spent to buy fewer underruns shows there; its
   `p95` includes audio trailing through a stall. Natively, the presentation clock `moq play` paces

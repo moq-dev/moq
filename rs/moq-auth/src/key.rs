@@ -111,17 +111,6 @@ pub enum EllipticCurve {
 	Ed25519,
 }
 
-impl EllipticCurve {
-	/// The curve's JWK name.
-	fn name(&self) -> &'static str {
-		match self {
-			Self::P256 => "P-256",
-			Self::P384 => "P-384",
-			Self::Ed25519 => "Ed25519",
-		}
-	}
-}
-
 /// RSA public key parameters.
 ///
 /// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.1>
@@ -287,13 +276,7 @@ impl Jwk {
 			scope.validate()?;
 		}
 
-		self.check_algorithm()?;
-
-		if let KeyMaterial::OCT { secret } = &self.material
-			&& secret.len() < MIN_OCT_SECRET_BYTES
-		{
-			return Err(KeyError::SecretTooShort(MIN_OCT_SECRET_BYTES).into());
-		}
+		self.validate_material()?;
 
 		if let KeyMaterial::RSA {
 			private: Some(private), ..
@@ -310,35 +293,50 @@ impl Jwk {
 		})
 	}
 
-	/// Refuse an algorithm the key type or curve cannot use, as `@moq/auth` does, rather than
-	/// fail at the first token.
-	fn check_algorithm(&self) -> crate::Result<()> {
+}
+
+impl Jwk {
+	/// Refuse a key whose algorithm, curve, or material can never sign or verify, so a bad key fails
+	/// at parse rather than at first use.
+	fn validate_material(&self) -> crate::Result<()> {
 		use Algorithm::*;
-		let fits = match &self.material {
-			KeyMaterial::OCT { .. } => matches!(self.algorithm, HS256 | HS384 | HS512),
-			KeyMaterial::RSA { .. } => matches!(self.algorithm, RS256 | RS384 | RS512 | PS256 | PS384 | PS512),
-			KeyMaterial::EC { curve, .. } => {
-				let expected = match curve {
-					EllipticCurve::P256 => ES256,
-					EllipticCurve::P384 => ES384,
-					EllipticCurve::Ed25519 => return Err(KeyError::InvalidCurve("EC").into()),
-				};
-				if self.algorithm != expected {
-					return Err(KeyError::InvalidAlgorithmForCurve(curve.name()).into());
+		match &self.material {
+			KeyMaterial::OCT { secret } => {
+				if !matches!(self.algorithm, HS256 | HS384 | HS512) {
+					return Err(KeyError::InvalidAlgorithm.into());
 				}
-				true
+				if secret.len() < MIN_OCT_SECRET_BYTES {
+					return Err(KeyError::SecretTooShort(MIN_OCT_SECRET_BYTES).into());
+				}
+			}
+			KeyMaterial::RSA { .. } => {
+				if !matches!(self.algorithm, RS256 | RS384 | RS512 | PS256 | PS384 | PS512) {
+					return Err(KeyError::InvalidAlgorithm.into());
+				}
+			}
+			KeyMaterial::EC { curve, x, y, .. } => {
+				let (name, alg, len) = match curve {
+					EllipticCurve::P256 => ("P-256", ES256, 32),
+					EllipticCurve::P384 => ("P-384", ES384, 48),
+					_ => return Err(KeyError::InvalidCurve("EC").into()),
+				};
+				if self.algorithm != alg {
+					return Err(KeyError::InvalidAlgorithmForCurve(name).into());
+				}
+				if x.len() != len || y.len() != len {
+					return Err(KeyError::InvalidCoordinateLength(name).into());
+				}
 			}
 			KeyMaterial::OKP { curve, .. } => {
 				if *curve != EllipticCurve::Ed25519 {
 					return Err(KeyError::InvalidCurve("OKP").into());
 				}
-				self.algorithm == EdDSA
+				if self.algorithm != EdDSA {
+					return Err(KeyError::InvalidAlgorithmForCurve("Ed25519").into());
+				}
 			}
-		};
-		match fits {
-			true => Ok(()),
-			false => Err(KeyError::InvalidAlgorithm.into()),
 		}
+		Ok(())
 	}
 }
 
@@ -523,43 +521,16 @@ impl Key {
 			return Ok(key);
 		}
 
+		// `Jwk::import` already matched the algorithm, curve, and coordinates to the material.
 		let decoding_key = match self.material {
-			// `Jwk::import` checked the algorithm fits the material.
 			KeyMaterial::OCT { ref secret } => DecodingKey::from_secret(secret),
-			KeyMaterial::EC {
-				ref curve,
-				ref x,
-				ref y,
-				..
-			} => match curve {
-				EllipticCurve::P256 => {
-					if x.len() != 32 || y.len() != 32 {
-						return Err(KeyError::InvalidCoordinateLength("P-256").into());
-					}
-
-					DecodingKey::from_ec_components(
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
-					)?
-				}
-				EllipticCurve::P384 => {
-					if x.len() != 48 || y.len() != 48 {
-						return Err(KeyError::InvalidCoordinateLength("P-384").into());
-					}
-
-					DecodingKey::from_ec_components(
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
-					)?
-				}
-				_ => return Err(KeyError::InvalidCurve("EC").into()),
-			},
-			KeyMaterial::OKP { ref curve, ref x, .. } => match curve {
-				EllipticCurve::Ed25519 => DecodingKey::from_ed_components(
-					base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
-				)?,
-				_ => return Err(KeyError::InvalidCurve("OKP").into()),
-			},
+			KeyMaterial::EC { ref x, ref y, .. } => DecodingKey::from_ec_components(
+				base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
+				base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
+			)?,
+			KeyMaterial::OKP { ref x, .. } => {
+				DecodingKey::from_ed_components(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref())?
+			}
 			KeyMaterial::RSA { ref public, .. } => {
 				DecodingKey::from_rsa_raw_components(public.n.as_ref(), public.e.as_ref())
 			}
@@ -594,15 +565,8 @@ impl Key {
 					EcdsaKeyPair::from_scalar_and_public_key(algorithm, d, &point).map_err(crate::Error::crypto)?;
 				EncodingKey::from_ec_der(pair.to_pkcs8().as_ref())
 			}
-			KeyMaterial::OKP {
-				ref curve,
-				ref d,
-				ref x,
-			} => {
+			KeyMaterial::OKP { ref d, ref x, .. } => {
 				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
-				if *curve != EllipticCurve::Ed25519 {
-					return Err(KeyError::InvalidCurve("OKP").into());
-				}
 
 				let pair = Ed25519KeyPair::from_seed_and_public_key(d, x).map_err(crate::Error::crypto)?;
 				EncodingKey::from_ed_der(pair.to_pkcs8().as_ref())
@@ -1516,6 +1480,31 @@ mod tests {
 		} else {
 			panic!("Expected both keys to be OCT variant");
 		}
+	}
+
+	#[test]
+	fn test_import_refuses_mismatched_algorithm() {
+		let mismatched = |alg: Algorithm, other: Algorithm| {
+			let mut jwk = Key::generate(alg, None).unwrap().export();
+			jwk.algorithm = other;
+			jwk.import().is_err()
+		};
+		// Each key type with an algorithm from another type, and each curve with the other's.
+		assert!(mismatched(Algorithm::HS256, Algorithm::ES256));
+		assert!(mismatched(Algorithm::RS256, Algorithm::HS256));
+		assert!(mismatched(Algorithm::ES256, Algorithm::ES384));
+		assert!(mismatched(Algorithm::ES384, Algorithm::RS384));
+		assert!(mismatched(Algorithm::EdDSA, Algorithm::ES256));
+		// Within its own family, a key may switch algorithm.
+		assert!(!mismatched(Algorithm::RS256, Algorithm::PS512));
+		assert!(!mismatched(Algorithm::HS256, Algorithm::HS512));
+
+		// The same check runs when parsing, alone or in a set.
+		let mut jwk = Key::generate(Algorithm::HS256, None).unwrap().export();
+		jwk.algorithm = Algorithm::ES256;
+		let json = serde_json::to_string(&jwk).unwrap();
+		assert!(json.parse::<Key>().is_err());
+		assert!(serde_json::from_str::<crate::KeySet>(&format!("{{\"keys\":[{json}]}}")).is_err());
 	}
 
 	#[test]

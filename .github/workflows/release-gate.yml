@@ -196,6 +196,7 @@ jobs:
               - "go/ffi/**"
               - "sh/go/package-ffi.sh"
               - "sh/go/publish-ffi.sh"
+              - "sh/go/modzip/**"
               - "rs/moq-ffi/build.sh"
               - ".cargo/config.toml"
               # release-ffi.yml installs the Go generator through this action.

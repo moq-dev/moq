@@ -1,4 +1,4 @@
-# [L] Go module proxy
+# [S] Go module proxy
 
 ## Goal
 
@@ -15,44 +15,49 @@ in KiB), so it passes GitHub's 1 GB guidance in about three more releases.
 
 ## Plan
 
-Decided 2026-10-17 in the [Go mirror delivery](https://github.com/moq-dev/moq/pull/5853)
-evaluation: our own proxy at `go.moq.dev`, run from `infra/go`. It rejected
-the alternatives:
+The proxy is built: the `infra/go` Worker serves `go.moq.dev` out of the
+`go-moq-dev` bucket, `sh/go/publish-ffi.sh` publishes each release there, and
+`just infra go backfill` and `just infra go verify` copy and check every
+earlier version. Until moq.dev's go-import tag says `mod https://go.moq.dev`,
+the release job reads that tag (`sh/go/ffi-origin.sh`) and keeps publishing
+to the git mirror, so releases keep working while the maintainer bootstraps.
 
-- Orphan or squashed mirror history still stores every tagged release, unless
-  old tags are deleted, and deleting them breaks `GOPROXY=direct`.
-- Per-platform git mirrors split the growth without stopping it.
-- Release assets fetched by a build step break plain `go get`.
+Once the mirror is archived, delete the transition:
 
-The go command follows a `go-import` tag whose VCS is `mod` to any
-GOPROXY-protocol URL. `riverqueue.com/riverui` ships built assets this way,
-and proxy.golang.org caches it like any other module.
+- `sh/go/publish-ffi-mirror.sh`, `sh/go/ffi-origin.sh`, and their
+  `publish-ffi-mirror` and `ffi-origin` recipes in `go/justfile`.
+- The `git` steps of the `publish` job in `release-go-ffi.yml`, which then
+  needs no moq-bot token, and the `git` case of the wrapper gate in
+  `release-go.yml`, which then queries `go.moq.dev` alone.
+- `sh/go/package-ffi.sh`'s GitHub 100 MiB size check and its
+  `--skip-size-check` flag, which `sh/go/stage.sh` passes. `sh/go/modzip`
+  enforces the module zip's own limits.
+- The "until the cutover" text in `go/ffi/README.md` and `infra/README.md`.
 
-- A Worker in `infra/go` serves `go.moq.dev` read-only out of a `go-moq-dev`
-  R2 bucket, like `infra/apt`: `<module>/@v/list`, `<version>.info`, `.mod`,
-  and `.zip`. A 404 is final: nothing falls back past this proxy, even with
-  `GOPROXY=direct`. Versioned files are immutable, so cache them forever and
-  keep `list` short-lived.
-- Build module zips with `golang.org/x/mod/zip` from a small in-tree Go tool,
-  not a hand-rolled `zip`, since the go command validates the layout.
-- `publish-ffi.sh` uploads with rclone and the existing R2 secrets. It refuses
-  to overwrite an existing version, because sum.golang.org pins the first
-  hash it sees. It uploads `list` last, so a version is listed only once its
-  `.info`, `.mod`, and `.zip` are served.
-- Backfill every version in proxy.golang.org's `list` by copying
-  `go mod download`'s `cache/download` files, which are already the GOPROXY
-  layout. Identical contents keep the h1 hashes. Check each version against
-  sum.golang.org with `GOPROXY=https://go.moq.dev` before cutover.
-- Cutover is one table entry in `moq-dev/moq.dev`'s `worker/vanity.ts`: emit
-  `mod https://go.moq.dev` for `/moq-ffi` and drop its `go-source` tag, since
-  the generated `moq.go` lives in no repo.
-- Retarget the wrapper gate in `release-go.yml` before archiving: it looks
-  for the FFI tag and `go.mod` on the `moq-go-ffi` mirror, so a wrapper-only
-  release would defer forever. Query `moq.dev/moq-ffi/@v/<version>.mod` on
-  `go.moq.dev` instead, failing loudly on anything but a 200 or 404.
-- Verify from a clean module cache with both `GOPROXY=direct` and the default
-  proxy, then archive `moq-dev/moq-go-ffi` without deleting it.
-- Decided: the `moq.dev/moq` wrapper is pure Go and stays on its git mirror.
-- Update `go/ffi/README.md`, `doc/lib/go`, and the `infra/README.md` table.
-- Keep the per-platform split out of this quest; it lands in
-  [Go per-platform lib modules](/quest/m3/go-ffi-platform-modules.md).
+## Waiting
+
+- Maintainer: create the `go-moq-dev` bucket and deploy the Worker
+  (`just infra go create`, `just infra go deploy`), and give the `publish`
+  Environment's R2 token Object Read & Write on the bucket; steps 1 and 2 of
+  "Bootstrapping the Go module proxy" in `infra/README.md`. An agent holds no
+  Cloudflare login or R2 write key. Done when `curl -fsS https://go.moq.dev/`
+  prints the banner.
+- Maintainer: backfill and verify with that token
+  (`just infra go backfill`, then `just infra go verify`), step 3. Done when
+  `verify` prints a go.sum line for each of the 45 or more versions.
+- Maintainer: cut moq.dev over, step 4: in moq-dev/moq.dev, `worker/vanity.ts`
+  serves `mod https://go.moq.dev` for `/moq-ffi` without a `go-source` tag
+  (that repository's quest tree owns the change; a tested patch is in
+  [moq-dev/moq#8743](https://github.com/moq-dev/moq/pull/8743)'s Follow-ups),
+  and its deploy needs the maintainer's permission. Then run step 5 (`just infra go backfill`,
+  `just infra go verify --proxy direct`,
+  `just infra go verify --proxy https://proxy.golang.org`). Done when
+  `just go ffi-origin` prints `mod` and both verifies pass.
+- Maintainer: once the next `moq-ffi` release publishes through go.moq.dev
+  (its `Publish to go.moq.dev` step succeeds), archive the mirror with
+  `gh repo archive moq-dev/moq-go-ffi --yes`, step 6. Done when
+  `gh api repos/moq-dev/moq-go-ffi --jq .archived` prints `true`.
+
+## Related
+
+- [Go per-platform lib modules](/quest/m3/go-ffi-platform-modules.md) - splits the staticlibs per platform, out of this quest
