@@ -94,6 +94,102 @@ function filterCatalog(catalog: Catalog.Root, usable: Usable): Catalog.Root {
 	};
 }
 
+// An include whose catalog has been read: its ID, its broadcast's path, and the stream it names.
+type Included = { id: string; path: Moq.Path.Valid; instance?: Catalog.ReferenceInstance; catalog: Catalog.Root };
+
+type Rendition = Catalog.VideoConfig | Catalog.AudioConfig;
+
+// The broadcast and track a rendition reads, as one key: two entries with the same key are the
+// same media, whatever their IDs.
+function identity(path: Moq.Path.Valid, track: string): string {
+	return JSON.stringify([path, track]);
+}
+
+// Merge each include's renditions of one kind into `own`, keyed `<include>/<id>` and rebased so
+// their `broadcast` reference resolves from `base`. Skips one that reads media already listed, such
+// as the source an include relists, and one whose ID is taken, so the root's IDs are never shadowed.
+function mergeRenditions<T extends Rendition>(
+	own: Record<string, T> | undefined,
+	includes: { include: Included; renditions: Record<string, T> | undefined }[],
+	base: Moq.Path.Valid,
+	taken: Set<string>,
+	seen: Set<string>,
+): Record<string, T> {
+	const merged: [string, T][] = Object.entries(own ?? {});
+	for (const { include, renditions } of includes) {
+		for (const [id, config] of Object.entries(renditions ?? {})) {
+			// The include's catalog was checked against its own path, so this always resolves.
+			const target =
+				config.broadcast === undefined ? include.path : Path.tryResolve(include.path, config.broadcast);
+			const name = `${include.id}/${id}`;
+			if (target === undefined || taken.has(name)) continue;
+			const track = Catalog.track(id, config);
+			const key = identity(target, track);
+			if (seen.has(key)) continue;
+			const broadcast = target === base ? undefined : Path.relative(target, base);
+			if (target !== base && broadcast === undefined) continue;
+
+			// One reading the include's own broadcast inherits the stream its entry names.
+			const instance = target === include.path ? (config.instance ?? include.instance) : config.instance;
+			const { broadcast: _broadcast, instance: _instance, ...rest } = config;
+			const rebased = { ...rest, track } as T;
+			if (broadcast !== undefined) rebased.broadcast = broadcast;
+			if (instance !== undefined) rebased.instance = instance;
+
+			merged.push([name, rebased]);
+			taken.add(name);
+			seen.add(key);
+		}
+	}
+	// fromEntries defines each ID as its own key, so `__proto__` stays a rendition.
+	return Object.fromEntries(merged);
+}
+
+// The root catalog with each read include's video and audio renditions beside its own, as one set
+// to select from. The root's settings govern them all, since an include shares its timeline.
+function withIncludes(root: Catalog.Root, base: Moq.Path.Valid, includes: Included[]): Catalog.Root {
+	if (includes.length === 0) return root;
+
+	const taken = new Set<string>();
+	const seen = new Set<string>();
+	for (const renditions of [root.video?.renditions, root.audio?.renditions]) {
+		for (const [id, config] of Object.entries(renditions ?? {})) {
+			taken.add(id);
+			const path = config.broadcast === undefined ? base : Path.tryResolve(base, config.broadcast);
+			if (path !== undefined) seen.add(identity(path, Catalog.track(id, config)));
+		}
+	}
+
+	const video = mergeRenditions(
+		root.video?.renditions,
+		includes.map((include) => ({ include, renditions: include.catalog.video?.renditions })),
+		base,
+		taken,
+		seen,
+	);
+	const audio = mergeRenditions(
+		root.audio?.renditions,
+		includes.map((include) => ({ include, renditions: include.catalog.audio?.renditions })),
+		base,
+		taken,
+		seen,
+	);
+
+	// A root without a section of its own takes the display settings of the first include with one,
+	// once any of its renditions made it in.
+	const videoSection =
+		root.video ??
+		(Object.keys(video).length > 0 ? includes.find((i) => i.catalog.video)?.catalog.video : undefined);
+	const audioSection =
+		root.audio ??
+		(Object.keys(audio).length > 0 ? includes.find((i) => i.catalog.audio)?.catalog.audio : undefined);
+	return {
+		...root,
+		video: videoSection && { ...videoSection, renditions: video },
+		audio: audioSection && { ...audioSection, renditions: audio },
+	};
+}
+
 /**
  * Watch supports the on-the-wire catalog formats from `@moq/hang`, plus a "manual" mode where the
  * user supplies the catalog directly without fetching.
@@ -151,6 +247,12 @@ export type BroadcastOutput = {
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode, minus
 	// any rendition this consumer can't use (see `#runFiltered`). A rendition referencing another
 	// broadcast appears once that broadcast is announced, so this can change without a new catalog.
+	//
+	// It selects every include the catalog lists, as an HLS master does: it reads each include's
+	// catalog and lists its video and audio renditions beside its own as `<include>/<id>`, with a
+	// `broadcast` reference to where the media lives, so one selection spans them all. Only the
+	// selected rendition subscribes to media. One reading media already listed, such as the source
+	// an include relists, is left out, and an include's own `include` is never expanded.
 	catalog: Signal<Catalog.Root | undefined>;
 };
 
@@ -209,6 +311,14 @@ export class Broadcast {
 	// strands the filtered copy on the previous contents.
 	readonly #raw = new Signal<Catalog.Root | undefined>(undefined);
 
+	// The include IDs the published catalog lists, notifying only when the set changes.
+	readonly #includeIds: Getter<string[] | undefined>;
+
+	// The include this root selects for each ID, kept across catalog updates so a new entry opens
+	// only its own catalog. Its owner closes it once the entry is gone.
+	readonly #children = new Map<string, { owner: Effect; child: Broadcast }>();
+	readonly #included = new Signal<[string, Broadcast][]>([]);
+
 	// Set only on an include: its broadcast resolves through the parent catalog's references,
 	// so the two never resolve one path independently.
 	readonly #resolve = new Signal<((effect: Effect) => Moq.Broadcast.Consumer | undefined) | undefined>(undefined);
@@ -229,8 +339,11 @@ export class Broadcast {
 			catalog: getter(props?.catalog),
 		};
 
+		this.#includeIds = this.#signals.computed((effect) => Object.keys(effect.get(this.#raw)?.include ?? {}));
+
 		this.#signals.run(this.#runBroadcast.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runIncludes.bind(this));
 		this.#signals.run(this.#runFiltered.bind(this));
 		this.#signals.run(this.#runStatus.bind(this));
 	}
@@ -269,10 +382,37 @@ export class Broadcast {
 	// request playback uses.
 	#runFiltered(effect: Effect): void {
 		const raw = effect.get(this.#raw);
+		if (!raw) return;
+
+		const included: Included[] = [];
+		for (const [id, child] of effect.get(this.#included)) {
+			const entry = raw.include && Object.hasOwn(raw.include, id) ? raw.include[id] : undefined;
+			const catalog = effect.get(child.out.catalog);
+			if (entry && catalog)
+				included.push({ id, path: effect.get(child.in.name), instance: entry.instance, catalog });
+		}
+
 		const usable: Usable = (rel, instance) =>
 			this.#relativeTarget(effect, rel) !== undefined &&
 			(instance === undefined || !provesOther(this.#relativeActive(effect, rel), instance));
-		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
+		effect.set(this.#out.catalog, filterCatalog(withIncludes(raw, effect.get(this.in.name), included), usable));
+	}
+
+	// Select every include the catalog lists, opening each one's catalog but none of its media. An
+	// include never expands its own includes: each needs a selection of its own.
+	#runIncludes(effect: Effect): void {
+		const ids = new Set(effect.get(this.#resolve) ? [] : effect.get(this.#includeIds));
+		for (const [id, { owner }] of this.#children) {
+			if (ids.has(id)) continue;
+			owner.close();
+			this.#children.delete(id);
+		}
+		for (const id of ids) {
+			if (this.#children.has(id)) continue;
+			const owner = new Effect();
+			this.#children.set(id, { owner, child: this.include(owner, id) });
+		}
+		this.#included.set([...this.#children].map(([id, { child }]) => [id, child]));
 	}
 
 	// Watch the announcements covering exactly `path`, shared by every caller asking about it
@@ -579,15 +719,16 @@ export class Broadcast {
 	}
 
 	/**
-	 * Select a whole include, opening its catalog only while the caller owns this effect.
+	 * Read a whole include on its own, opening its catalog only while the caller owns this effect.
 	 *
-	 * Listing an include in the catalog opens nothing; this is the demand. The child tracks
+	 * `out.catalog` already lists every include's renditions; this reads one include's catalog
+	 * as its own broadcast, such as to play it apart from the root. The child tracks
 	 * the catalog entry and resolves through this broadcast's `relativeBroadcast`, sharing
 	 * its request: while following announcements it follows the include's restarts, and
 	 * otherwise it requests the first instance once. With an `instance` it is offline while its
 	 * broadcast resolves another stream. An absent entry leaves the child disabled, and an
-	 * unavailable include reads as offline. Its rendition IDs stay local to the child, so
-	 * they never shadow this catalog's IDs.
+	 * unavailable include reads as offline. Its rendition IDs are its own catalog's, and it never
+	 * expands its own includes.
 	 *
 	 * ```ts
 	 * effects.run((effect) => {
@@ -602,7 +743,8 @@ export class Broadcast {
 		// Each computed notifies only on a real change, so an update that leaves the child's path
 		// alone (such as a new `instance`) never restarts its catalog.
 		const entry = effect.computed((run) => {
-			const include = run.get(this.out.catalog)?.include;
+			// The published catalog, since the effective one is derived from this include's own.
+			const include = run.get(this.#raw)?.include;
 			return include && Object.hasOwn(include, id) ? include[id] : undefined;
 		});
 		const name = effect.computed((run) => {
@@ -632,5 +774,7 @@ export class Broadcast {
 		this.#references.clear();
 		for (const entry of this.#watches.values()) entry.close();
 		this.#watches.clear();
+		for (const { owner } of this.#children.values()) owner.close();
+		this.#children.clear();
 	}
 }
