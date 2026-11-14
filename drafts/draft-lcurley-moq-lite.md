@@ -213,6 +213,7 @@ A subscriber that has received frames 0 through `N-1` of group `G` and wants the
 
 This is what lets a subscriber move a Track to a different publisher partway through a Group instead of waiting for the next Group to start, which matters for Tracks whose current Group may stay open indefinitely.
 A Group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
+A subscriber that has received the first `B` bytes of frame `N` FETCHes `G` from frame `N` with a `Start Byte` of `B`, so a frame read partway on one publisher continues on another without sending its first bytes again.
 
 A partial Group is only ever delivered to a subscriber that asked for one with FETCH, or as the [continuation](#yield) of a paused Group.
 A publisher that holds only part of a Group a subscription covers names it in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
@@ -2134,6 +2135,7 @@ FETCH Message {
   Subscriber Max Age (i)
   Group Sequence (i)
   Frame Start (i)
+  Start Byte (i)
   Frame End (i)
 }
 ~~~
@@ -2161,6 +2163,11 @@ The sequence number of the group to fetch.
 **Frame Start**:
 The index of the first frame to return within the group (see [Positions](#positions)).
 A plain absolute index; 0 means the start of the group (default).
+
+**Start Byte**:
+The offset of the first payload byte to return within the frame at `Frame Start`; 0 means the whole frame (default).
+The first FRAME of the response still states that frame's full size, and carries only its payload from `Start Byte` on; later frames are whole.
+A non-zero `Start Byte` at or past the frame's size is a protocol violation, since the rest of a frame is never empty, and so is a non-zero `Start Byte` on a Track whose `Compression` is not none, since a compressed frame inflates only from its first byte, or on a Track carrying a MoqTransport Version under the `ietf` extension, whose object records name whole objects.
 
 **Frame End**:
 The last frame to return (inclusive), encoded as the absolute frame index + 1.
@@ -2459,6 +2466,7 @@ An application-specific payload.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A relay forwards the smallest stated value.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups: a read starting partway through a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
+- Added `Start Byte` to FETCH, after `Frame Start`: the response's first frame states its full size and carries only its payload from that byte, so a frame read partway on one publisher continues on another from where it stopped.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.
