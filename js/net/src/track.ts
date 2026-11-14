@@ -2714,6 +2714,8 @@ export class Subscriber {
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
 	// default, an omitted one is unbounded, leaving the publisher's maxAge as the only bound.
 	#fetchBudget?: number;
+	// The first frame a fetch asks of its group: a copy starting past it lacks its head.
+	#fetchFrom = 0;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
 	// it to sequence order; whichever wins is the only one allowed from here on.
@@ -3905,10 +3907,10 @@ export class Subscriber {
 	}
 
 	// Whether `group` is one this reader hands out only from its first frame, which it lacks: the
-	// window is bounded, so it reads whole groups as a fetch would. Mirrors the Rust
-	// `Cursor::lacks_head`.
+	// window is bounded, so it reads whole groups as a fetch would, from the frame a fetch asks.
+	// Mirrors the Rust `Cursor::lacks_head`, and a fetch's `poll_fetch_cached` frame bounds.
 	#lacksHead(group: GroupConsumer): boolean {
-		return this.#window.end() !== undefined && hooks.groupLacksHead(group);
+		return this.#window.end() !== undefined && hooks.groupFirstFrame(group) > this.#fetchFrom;
 	}
 
 	// Ask a fill for the head of group `sequence`, as a fetch from frame 0 would, unless one is
@@ -4208,8 +4210,9 @@ export class Subscriber {
 		};
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.askFetch = (subscriber, sequence) => subscriber.#askFetch(sequence);
-		hooks.fetchBudget = (subscriber, maxDelay) => {
+		hooks.fetchBudget = (subscriber, maxDelay, frameStart = 0) => {
 			subscriber.#fetchBudget = maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY;
+			subscriber.#fetchFrom = frameStart;
 			subscriber.#state.fetch = true;
 			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
 			if (subscriber.#state.producer) resubscribe(subscriber.#state.producer);

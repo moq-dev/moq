@@ -1117,7 +1117,7 @@ export class Consumer {
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
 		hooks.groupIndex = (group) => group.#index();
-		hooks.groupLacksHead = (group) => group.#state.offset > 0;
+		hooks.groupFirstFrame = (group) => group.#state.offset;
 		hooks.groupStarted = (group) =>
 			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
 		hooks.groupFate = (group) => {

@@ -856,8 +856,8 @@ export const hooks: {
 	) => Subscriber;
 	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
-	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined) => void;
+	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default, and the frame it asks from. */
+	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined, frameStart?: number) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
@@ -938,8 +938,8 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
-	/** Whether this copy begins past frame 0, missing its head. */
-	groupLacksHead: (group: GroupConsumer) => boolean;
+	/** The first frame this copy begins at: past 0 for one missing its head. */
+	groupFirstFrame: (group: GroupConsumer) => number;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -1316,7 +1316,7 @@ export const hooks: {
 	groupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
-	groupLacksHead: () => {
+	groupFirstFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFate: () => {
