@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::Path;
 
 use super::view::ancestors;
-use super::{Event, Id, Kind, Shown, within};
+use super::{Event, Id, Kind, Shown};
 
 /// How the reader sees each claim, and the events not yet taken.
 pub(crate) struct Reader<A> {
@@ -90,13 +90,13 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 		}
 	}
 
-	/// The reader now sees each claim of `id` in `now` as it says, inside `watch`. Log
+	/// The reader now sees each claim of `id` in `now` as it says, where `watched`. Log
 	/// each change. A claim no longer shown ended if `ended` says the origin withdrew it
 	/// as far as this node knows, and went offline if the node let go of it instead.
 	pub fn apply(
 		&mut self,
 		id: Id,
-		watch: &Path,
+		watched: impl Fn(&Path) -> bool,
 		now: BTreeMap<Path, Option<Shown<A>>>,
 		ended: impl Fn(&Path) -> bool,
 	) {
@@ -129,7 +129,7 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 					let moved = ancestors(claim)
 						.filter(|above| above != claim)
 						.any(|above| shown(&above).is_some_and(|now| was.presented || now.item == was.item));
-					let kind = if !within(claim, watch) {
+					let kind = if !watched(claim) {
 						Kind::Unwatched
 					} else if !moved && ended(claim) {
 						Kind::End

@@ -110,7 +110,10 @@ fn trailing_announcements_report_no_false_absence(rule: Rule) {
 	sim.connect(node, b);
 	assert!(sim.run());
 	assert!(sim.queued(b, node) >= 2, "a ROUTE then its announcements");
-	assert!(sim.deliver(b, node), "only the ROUTE");
+	// Under the path rule the stream opens with b's own ask and the marker answering node's.
+	for _ in 0..1 + 2 * usize::from(sim.paths()) {
+		assert!(sim.deliver(b, node), "only the ROUTE");
+	}
 	sim.disconnect(node, a);
 	assert!(sim.run());
 	assert_eq!(sim.next_hop(node, 7), Some(b));
@@ -821,9 +824,9 @@ fn stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it(rule:
 		if collect {
 			sim.collect(b, 7);
 		}
-		// The held ROUTE, then the snapshot carrying `live/x`: after SYNCED under the
-		// path rule, whose stream opens with it.
-		for _ in 0..2 + usize::from(sim.paths()) {
+		// The held ROUTE, then the snapshot carrying `live/x`: under the path rule after
+		// a's own ask, the marker answering b's, and SYNCED, which open its stream.
+		for _ in 0..2 + 3 * usize::from(sim.paths()) {
 			assert!(sim.deliver(a, b));
 		}
 		let forgot = collect || sim.paths();
