@@ -11,9 +11,10 @@ so it only needs to stay green.
 ## Waiting
 
 - moq-dev/moq: the next scheduled Interop run on `main` passes, once the
-  [resumed-audio fix](https://github.com/moq-dev/moq/pull/8635) lands
-  ([moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572), the max-age
-  fix, merged 2026-11-12). Check
+  [END_OF_TRACK race fix](https://github.com/moq-dev/moq/pull/8754) lands
+  (the [resumed-audio fix](https://github.com/moq-dev/moq/pull/8635) merged
+  2026-11-14, and [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572),
+  the max-age fix, 2026-11-12). Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
@@ -189,6 +190,16 @@ Scheduled run
   stretch the lag back.
 
 The 11-11 run, before #8507, passed all three steps.
+
+Scheduled run
+[43606836954](https://github.com/moq-dev/moq/actions/runs/43606836954)
+(2026-11-14, at bd617cc1e, after #8635) passed the pause case and failed only
+Media output and lifecycle, on chromium's `replacement` case: the
+`moq-transport-22` incumbent fallback stalled audio. The pause case had masked
+it since 11-12. The JS subscriber closed its session when an END_OF_TRACK
+crossed the viewer's release of the track;
+[moq-dev/moq#8754](https://github.com/moq-dev/moq/pull/8754) ignores that late
+end.
 
 Public API: none. Wire: none.
 
