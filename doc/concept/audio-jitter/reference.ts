@@ -75,6 +75,21 @@ export class Estimator {
 	#peak = 0;
 	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
 	#ended = false;
+	/** The earliest a frame stalled in this interval was due. */
+	#due = Number.POSITIVE_INFINITY;
+	/** The latest a frame stalled in this interval arrived. */
+	#late = Number.NEGATIVE_INFINITY;
+
+	/** The bucket of the open stall's largest delay, folded once the stall ends. */
+	#stall?: number;
+	/** When the open stall's latest stalled frame arrived. */
+	#stallLate = 0;
+	/** The earliest the open stall's frames were due. */
+	#stallDue = 0;
+	/** Intervals the open stall spanned besides the one it folds as. */
+	#span = 0;
+	/** Empty intervals before this one, held until it shows whether they belong to a stall. */
+	#pending = 0;
 
 	#histogram = prior();
 	/** How much of the histogram is still the prior's rather than evidence. */
@@ -117,6 +132,7 @@ export class Estimator {
 		if (this.#origin === undefined) {
 			this.#origin = arrival;
 			this.#peak = delay;
+			this.#note(arrival, delay);
 			return;
 		}
 
@@ -125,24 +141,76 @@ export class Estimator {
 		this.#ended = false;
 		if (interval <= this.#interval) {
 			this.#peak = Math.max(this.#peak, delay);
+			this.#note(arrival, delay);
 			return;
 		}
 
-		this.#fold(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
+		this.#close(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
 
 		if (resumed) {
 			// The publisher declared the silence, so it is not evidence of anything: the
 			// estimate keeps what it had and a fresh interval starts at this arrival.
+			this.#settle();
 			this.#origin = arrival;
 			this.#interval = 0;
 		} else {
-			const idle = Math.min(interval - this.#interval - 1, IDLE_MAX);
-			for (let i = 0; i < idle; i++) {
-				this.#fold(undefined);
-			}
+			// Held until this interval closes: a stall it holds owns them.
+			this.#pending = interval - this.#interval - 1;
 			this.#interval = interval;
 		}
 		this.#peak = delay;
+		this.#due = Number.POSITIVE_INFINITY;
+		this.#late = Number.NEGATIVE_INFINITY;
+		this.#note(arrival, delay);
+	}
+
+	// A frame later than a whole interval was due in an earlier one, so it is stalled.
+	#note(arrival: number, delay: number): void {
+		if (delay > RESAMPLE) {
+			this.#due = Math.min(this.#due, arrival - delay);
+			this.#late = Math.max(this.#late, arrival);
+		}
+	}
+
+	// An interval whose stalled frames were due before the open stall's last one arrived is
+	// still behind that stall, so it joins it rather than counting again, for up to a
+	// window of due time: back-to-back flushes are a recurring stall, not one.
+	#close(bucket: number): void {
+		const stalled = this.#late !== Number.NEGATIVE_INFINITY;
+		const pending = this.#pending;
+		this.#pending = 0;
+		if (
+			stalled &&
+			this.#stall !== undefined &&
+			this.#due < this.#stallLate &&
+			this.#due - this.#stallDue < WINDOW
+		) {
+			this.#stall = Math.max(this.#stall, bucket);
+			this.#span += pending + 1;
+			this.#stallLate = this.#late;
+			return;
+		}
+
+		this.#settle();
+		if (stalled) {
+			this.#stall = bucket;
+			this.#span = pending;
+			this.#stallLate = this.#late;
+			this.#stallDue = this.#due;
+		} else {
+			for (let i = 0; i < Math.min(pending, IDLE_MAX); i++) this.#fold(undefined);
+			this.#fold(bucket);
+		}
+	}
+
+	// A stall is one observation, its largest delay, and every other interval it spanned is idle.
+	#settle(): void {
+		if (this.#stall === undefined) return;
+		this.#fold(this.#stall);
+		for (let i = 0; i < Math.min(this.#span, IDLE_MAX); i++) {
+			this.#fold(undefined);
+		}
+		this.#stall = undefined;
 	}
 
 	/** A declared end lies between the previous observation and the next. */

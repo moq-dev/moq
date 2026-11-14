@@ -32,4 +32,4 @@ static GOPROXY layout:
 
 ## Required
 
-- [Go module proxy](/quest/m3/go-module-proxy.md) - only our proxy can add modules under `moq.dev/moq-ffi` without another git mirror
+- [Go module proxy](/quest/m1/go-module-proxy.md) - only our proxy can add modules under `moq.dev/moq-ffi` without another git mirror

@@ -74,7 +74,7 @@ The simplest way to watch a stream:
 | `follow`         | boolean                    | true          | Follow the broadcast's announcements: wait for one before subscribing, and move to each restart. Ignored when the relay does not support broadcast discovery. |
 | `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |
 | `lookahead`      | duration                   | `0ms`         | How far future-dated media may run ahead of the live edge. Not a jitter buffer: live streams tune `delay`. |
-| `stretch`        | duration                   | `2000ms`      | How far audio may trail the clock after a stall before it skips ahead. `0` turns the time stretch off, so received audio plays unaltered. |
+| `stretch`        | duration                   | `200ms`       | How far audio may trail the clock after a stall before it skips onto it. `0` turns the time stretch off, so received audio plays unaltered. |
 | `captions`       | string                     | off           | Text rendition to render. |
 | `catalog-format` | hang, msf, manual          | auto-detected | The catalog format; detected from the name suffix unless set. |
 | `echo`           | path segment               | -             | The viewer's feedback name: once the catalog solicits feedback, publish `<echo path>/<name>.echo` reporting what each rendition received and played. |

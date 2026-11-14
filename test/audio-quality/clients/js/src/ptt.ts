@@ -138,7 +138,6 @@ const capture = new Capture({
 	config: audio.source.out.config,
 	delay: watch.sync.out.delay,
 	maxDelay: watch.sync.out.maxDelay,
-	stretch: watch.sync.in.stretch,
 });
 const arrivals: Arrival[] = [];
 let attached: AudioNode | undefined;

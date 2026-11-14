@@ -33,7 +33,9 @@ The driver plays every other part:
   limit is far above 300, so the browser's cap is the only one in play. Each
   track keeps one group open at a time, as a live video track keeps its GOP
   open: a frame at its start, one halfway through, and its end as the next
-  group starts, 40 groups at 200 ms.
+  group starts, 40 groups at 200 ms. The high tier starts its groups half an
+  interval after the others, while their streams hold every credit the browser
+  gave, so the relay must pause a lower group (YIELDED) to make room.
 - **The reader** is a page built from `src/` with Vite, in Playwright's
   Chromium or Firefox. It dials the relay over WebTransport only and subscribes
   to every track in three tiers of subscriber priority:
@@ -59,3 +61,11 @@ A cell passes when:
 
 With every tier at one priority, the high tier misses groups past its budget
 and the relay continues no paused group, so the run fails.
+
+Both browsers mishandle a reset that lands just after its stream's data,
+before the page read it, which a YIELDED reset of a freshly opened stream
+does: Chromium loses the reset, leaving the stream open forever, and Firefox
+reports it as a bare `TypeError` without its code. The `@moq/net` reader
+copes, since a lite-07 publisher follows every reset with a continuation or a
+drop, so a failure here that names a stream left open or an uncoded
+`TypeError` is worth checking against those first.

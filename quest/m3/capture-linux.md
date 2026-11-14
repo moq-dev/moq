@@ -19,13 +19,15 @@ unimplemented, because xdg-desktop-portal owns source selection:
 - Portal-picked windows reach the CLI: #5089 added
   `capture::Source::Portal(portal::Selection)`, and #5566 sends a bare
   `--window` to the portal (`doc/bin/cli.md`).
-- **Display selection stays picker-driven.** On Wayland a bare `--display`
-  goes to the portal and a non-X11 id is refused. Decided 2026-10-26
-  (maintainer): the token becomes persistable (API plus CLI), so a
-  previously-approved source is reused without the picker. #8562 added the API
-  (`Selection::restore_token` watches it, `with_restore_token` seeds it), but
-  the CLI does not persist it yet, so a new `moq` run still shows the picker.
-  [Wayland studio sources](https://github.com/moq-dev/studio/blob/main/quest/m0/wayland-sources.md) in moq-dev/studio consume it.
+- **Display selection stays picker-driven in the CLI.** On Wayland a bare
+  `--display` goes to the portal and a non-X11 id is refused. Decided
+  2026-10-26 (maintainer): the token becomes persistable (API plus CLI), so a
+  previously-approved source is reused without the picker. The API half is
+  done: [moq-dev/moq#8562](https://github.com/moq-dev/moq/pull/8562) added
+  `Selection::restore_token` and `with_restore_token`
+  (`rs/moq-video/src/capture/portal.rs`), which a downstream application
+  consumes. What remains is the CLI: nothing in `rs/moq-cli` persists or
+  seeds the token, so a new `moq` run still shows the picker.
 - **System audio** needs a PipeWire monitor node.
   `moq_audio::capture::Source::System` exists but is macOS-only and returns
   `Unsupported` elsewhere. This is independent of the screencast portal.
@@ -40,6 +42,10 @@ unimplemented, because xdg-desktop-portal owns source selection:
   capture follows nodes as the app opens and closes them, matching the
   Windows process tree and the macOS application. The Windows and macOS halves
   share the same `moq_audio::capture` source.
+
+## Waiting
+
+- Maintainer: whether app capture exists off macOS, here and in [Windows capture parity](/quest/m3/capture-windows.md). (A) Linux and Windows offer window capture only: `Source::App` stays macOS-only and fails with its reason elsewhere, and a listing off macOS uses apps only to group windows. (B) Build app capture by composing an app's windows. I recommend A, since no consumer asks for B and it matches the capture listing's rule that a listed app must not hand out a source that fails at open.
 
 ## Related
 
