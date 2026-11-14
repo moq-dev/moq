@@ -7,3 +7,42 @@ additional_cargo_args = ["--locked"]
 # The unit tests, and the integration binary, which drives the route driver
 # (`route/node.rs`) through real sessions.
 additional_cargo_test_args = ["--lib", "--test", "integration"]
+
+# Mutants no test can catch, because the result is the same either way. Each
+# pattern names its function and replacement, not its line. A column pins it
+# only where the same function has another such mutant that tests do catch.
+exclude_re = [
+	# Debug output only feeds logs.
+	'<impl (std::)?fmt::Debug for ',
+	# The rotation's xorshift step only picks which fresh identity comes next,
+	# and the guard after it enforces freshness and range.
+	'replace (\^= with \|=|<< with >>|>> with <<) in Router<N, A>::rotate',
+	# Only counts forgets for the tests.
+	'in Router<N, A>::forgot_outside$',
+	# An index of a neighbor's interest: `carries()` filters each entry again.
+	'replace Router<N, A>::asked -> Path with Default::default\(\)',
+	# `full(old) == full(new)` is the same with both sides negated.
+	'replace >= with < in Router<N, A>::route$',
+	# A larger `differs` set only costs work: it is compared again before use.
+	'replace && with \|\| in Heard<A>::compare$',
+	# The test-only `Proof::LEN`.
+	'proof\.rs:\d+:\d+: replace \+ with \*$',
+	# At equal revisions both views hold the same claims, so the full merge the
+	# shortcut skips changes nothing.
+	'replace > with (==|>=) in View<A>::outdates$',
+	# Dropping the cached context more often makes the next pass full, which
+	# reaches the same result.
+	':\d+:(25|38): replace && with \|\| in Router<N, A>::recompute$',
+	# A claim an answering certifier certifies is always in the merged view.
+	':\d+:35: replace && with \|\| in Router<N, A>::meets$',
+	# At an equal metric both arms assign the same distance.
+	'replace < with <= in Router<N, A>::record$',
+	# The full presentation of a stream the interest misses is empty, and a full
+	# presentation equals the incremental one.
+	'replace match guard (!self\.meets\(id, ctx, watch\)|!dirty\.all) with false in Router<N, A>::advertise$',
+	# `advertised` is read only for qualified identities.
+	'replace & with (\^|\|) in Router<N, A>::advertise$',
+	# For its own identity, the node's own view answers every claim, `current`
+	# never holds it, and nothing serves it.
+	':\d+:31: replace && with \|\| in Router<N, A>::shown_now$',
+]

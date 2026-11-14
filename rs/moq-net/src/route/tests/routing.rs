@@ -1631,8 +1631,7 @@ fn an_uncertified_claim_comes_from_the_selected_next_hop() {
 			_ => None,
 		})
 		.flatten()
-		.filter(|(claim, _)| *claim == p("live/x"))
-		.last();
+		.rfind(|(claim, _)| *claim == p("live/x"));
 	assert_eq!(last, Some((p("live/x"), Some(item(2)))));
 }
 

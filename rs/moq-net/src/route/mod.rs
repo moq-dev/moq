@@ -1949,6 +1949,26 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		}
 	}
 
+	/// Assert an incremental reader view, `now` over the dirty claims, matches a full recompute.
+	#[cfg(test)]
+	fn check_shown(&self, id: Id, ctx: &Ctx<N>, now: &BTreeMap<Path, Option<Shown<A>>>) {
+		let route = self.selected(id);
+		let mut all: BTreeSet<Path> = (self.shown.range((id, Path::empty())..))
+			.take_while(|((key, _), _)| *key == id)
+			.map(|((_, claim), _)| claim.clone())
+			.collect();
+		if let Some(view) = self.adopted(id, route) {
+			all.extend(view.items.keys().cloned());
+		}
+		for (claim, full) in self.shown_now(id, ctx, all.iter()) {
+			let got = match now.get(&claim) {
+				Some(got) => got.as_ref(),
+				None => self.shown.get(&(id, claim.clone())),
+			};
+			assert_eq!(got, full.as_ref(), "incremental reader view of {claim:?}");
+		}
+	}
+
 	/// Recompute what this node's reader sees of `id` in `ctx` and log each change:
 	/// only the `dirty` claims, unless any could have changed.
 	fn show(&mut self, id: Id, ctx: &Ctx<N>, dirty: &Dirty) {
@@ -1968,21 +1988,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		let now = self.shown_now(id, ctx, claims.iter());
 		#[cfg(test)]
 		if !dirty.all {
-			let route = self.selected(id);
-			let mut all: BTreeSet<Path> = (self.shown.range((id, Path::empty())..))
-				.take_while(|((key, _), _)| *key == id)
-				.map(|((_, claim), _)| claim.clone())
-				.collect();
-			if let Some(view) = self.adopted(id, route) {
-				all.extend(view.items.keys().cloned());
-			}
-			for (claim, full) in self.shown_now(id, ctx, all.iter()) {
-				let got = match now.get(&claim) {
-					Some(got) => got.as_ref(),
-					None => self.shown.get(&(id, claim.clone())),
-				};
-				assert_eq!(got, full.as_ref(), "incremental reader view of {claim:?}");
-			}
+			self.check_shown(id, ctx, &now);
 		}
 
 		// A claim no routed neighbor's region covers was let go, not ended, and so
