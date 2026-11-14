@@ -2150,13 +2150,15 @@ impl Recover {
 			|| (self.reader.is_none() && matches!(StreamError::from(err), StreamError::Old | StreamError::Evicted))
 	}
 
-	/// Poll for the serving route's copy of the group, positioned at frame `index`.
+	/// Poll for the serving route's copy of the group, positioned at frame `index` to read
+	/// it from byte `byte` on: a frame read partway asks only for the rest of it.
 	///
 	/// `failed` is the error the current copy ended with, if it did; a stall is `None`.
 	/// Returns the copy's error when nothing can continue the group.
 	pub(super) fn poll(
 		&mut self,
 		index: u64,
+		byte: u64,
 		failed: Option<&Error>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Replacement>> {
@@ -2196,7 +2198,7 @@ impl Recover {
 			// fixes its content. A stall only moves to the serving copy, so two stalled copies
 			// never trade the group back and forth.
 			if failed.is_some()
-				&& let Some(replacement) = self.held(index)
+				&& let Some(replacement) = self.held(index, byte)
 			{
 				return Poll::Ready(Ok(replacement));
 			}
@@ -2226,7 +2228,7 @@ impl Recover {
 			if generation == self.generation && failed.is_none() {
 				return Poll::Pending;
 			}
-			let res = self.poll_serving(generation, &serving, index, failed, withdrawn.is_none(), waiter);
+			let res = self.poll_serving(generation, &serving, (index, byte), failed, withdrawn.is_none(), waiter);
 			// The serving route failed too, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
 				&& terminal && copy_failed(&serving)
@@ -2247,8 +2249,8 @@ impl Recover {
 	}
 
 	/// The group from the newest of the reader's other copies that still holds it unfailed,
-	/// positioned at frame `index`.
-	fn held(&self, index: u64) -> Option<Replacement> {
+	/// positioned at frame `index` to read from byte `byte`.
+	fn held(&self, index: u64, byte: u64) -> Option<Replacement> {
 		let reader = self.reader.as_ref()?.upgrade()?;
 		let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 		reader.copies.iter().rev().find_map(|copy| {
@@ -2257,8 +2259,7 @@ impl Recover {
 			}
 			let group = copy.track.peek_group(self.sequence)?;
 			lend_head(&self.handoff, self.sequence, &copy.track, &group);
-			let group = group.with_range(index..);
-			(group.index() == index).then(|| Replacement {
+			group.at(index, byte).map(|group| Replacement {
 				group,
 				generation: copy.generation,
 				copy: copy.track.clone(),
@@ -2272,7 +2273,7 @@ impl Recover {
 		&mut self,
 		generation: u64,
 		serving: &track::Consumer,
-		index: u64,
+		(index, byte): (u64, u64),
 		failed: Option<&Error>,
 		ask: bool,
 		waiter: &kio::Waiter,
@@ -2283,8 +2284,7 @@ impl Recover {
 		match serving.poll_group(self.sequence, waiter) {
 			Poll::Ready(Ok(Some(group))) if !same => {
 				lend_head(&self.handoff, self.sequence, serving, &group);
-				let group = group.with_range(index..);
-				if group.index() == index {
+				if let Some(group) = group.at(index, byte) {
 					return Poll::Ready(Ok(Replacement {
 						group,
 						generation,
@@ -2314,19 +2314,27 @@ impl Recover {
 		{
 			verdict = Some(err);
 		}
-		match self.poll_fetch(generation, serving, index, failed, ask && verdict.is_none(), waiter) {
+		match self.poll_fetch(
+			generation,
+			serving,
+			(index, byte),
+			failed,
+			ask && verdict.is_none(),
+			waiter,
+		) {
 			Poll::Ready(Ok(replacement)) => Poll::Ready(Ok(replacement)),
 			res => verdict.map_or(res, |err| Poll::Ready(Err(err))),
 		}
 	}
 
-	/// Ask `serving` for the rest of the group from frame `index`, unless told not to `ask`, and
-	/// poll the answer: the group, a refusal that ends a copy that failed, or nothing yet.
+	/// Ask `serving` for the rest of the group from byte `byte` of frame `index`, unless told
+	/// not to `ask`, and poll the answer: the group, a refusal that ends a copy that failed,
+	/// or nothing yet.
 	fn poll_fetch(
 		&mut self,
 		generation: u64,
 		serving: &track::Consumer,
-		index: u64,
+		(index, byte): (u64, u64),
 		failed: Option<&Error>,
 		ask: bool,
 		waiter: &kio::Waiter,
@@ -2339,6 +2347,7 @@ impl Recover {
 			let options = group::Fetch {
 				max_delay: self.max_delay,
 				frame_start: index,
+				byte_start: byte,
 				..Default::default()
 			};
 			self.fetch = Some((
@@ -2356,8 +2365,7 @@ impl Recover {
 			Fetch::Pending(pending) => match ready!(kio::Task::poll(&mut **pending, waiter)) {
 				Ok(group) => {
 					lend_head(&self.handoff, self.sequence, serving, &group);
-					let group = group.with_range(index..);
-					if group.index() == index {
+					if let Some(group) = group.at(index, byte) {
 						return Poll::Ready(Ok(Replacement {
 							group,
 							generation,

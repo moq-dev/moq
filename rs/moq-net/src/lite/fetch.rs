@@ -26,6 +26,9 @@ pub struct Fetch<'a> {
 	pub group: u64,
 	/// Index of the first frame to return; 0 is the start of the group. Lite06+ only.
 	pub start_frame: u64,
+	/// Offset of the first byte to return within frame `start_frame`; 0 is the whole
+	/// frame. The response still states that frame's full size. Lite07+ only.
+	pub start_byte: u64,
 	/// Index of the last frame to return (inclusive), or `None` for through the end of
 	/// the group. Lite06+ only.
 	pub end_frame: Option<u64>,
@@ -43,6 +46,7 @@ impl Fetch<'_> {
 			max_delay: self.max_delay,
 			group: self.group,
 			start_frame: self.start_frame,
+			start_byte: self.start_byte,
 			end_frame: self.end_frame,
 		}
 	}
@@ -69,9 +73,17 @@ impl<'a> Message<'a> for Fetch<'a> {
 		};
 		let group = r.varint()?;
 
-		let (start_frame, end_frame) = match version.has_frame_bounds() {
-			true => (r.varint()?, r.varint_opt()?),
-			false => (0, None),
+		let start_frame = match version.has_frame_bounds() {
+			true => r.varint()?,
+			false => 0,
+		};
+		let start_byte = match version.has_byte_start() {
+			true => r.varint()?,
+			false => 0,
+		};
+		let end_frame = match version.has_frame_bounds() {
+			true => r.varint_opt()?,
+			false => None,
 		};
 		// A range that ends before it starts can never be served.
 		if end_frame.is_some_and(|end| end < start_frame) {
@@ -87,6 +99,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 			max_delay,
 			group,
 			start_frame,
+			start_byte,
 			end_frame,
 		})
 	}
@@ -116,12 +129,22 @@ impl<'a> Message<'a> for Fetch<'a> {
 		}
 		w.varint(self.group)?;
 
-		if version.has_frame_bounds() {
-			w.varint(self.start_frame)?;
-			w.varint_opt(self.end_frame)?;
-		} else if self.start_frame != 0 || self.end_frame.is_some() {
+		if !version.has_frame_bounds() && (self.start_frame != 0 || self.end_frame.is_some()) {
 			// The peer would serve the whole group, including frames the caller excluded.
 			return Err(EncodeError::Version);
+		}
+		if !version.has_byte_start() && self.start_byte != 0 {
+			// The peer would resend the frame from its start, misaligning the reader.
+			return Err(EncodeError::Version);
+		}
+		if version.has_frame_bounds() {
+			w.varint(self.start_frame)?;
+		}
+		if version.has_byte_start() {
+			w.varint(self.start_byte)?;
+		}
+		if version.has_frame_bounds() {
+			w.varint_opt(self.end_frame)?;
 		}
 
 		Ok(())
@@ -142,8 +165,28 @@ mod test {
 			max_delay: None,
 			group: 7,
 			start_frame: 0,
+			start_byte: 0,
 			end_frame: None,
 		}
+	}
+
+	/// Lite-07 asks for the rest of a frame; an older peer cannot, so encoding refuses.
+	#[test]
+	fn fetch_start_byte_roundtrips_only_on_lite07() {
+		let mut msg = fetch_sample();
+		msg.start_frame = 2;
+		msg.start_byte = 1 << 20;
+		let got = fetch_roundtrip(Version::Lite07, &msg);
+		assert_eq!((got.start_frame, got.start_byte), (2, 1 << 20));
+		assert!(
+			msg.encode_msg(
+				&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()),
+				Version::Lite06
+			)
+			.is_err()
+		);
+		msg.start_byte = 0;
+		assert_eq!(fetch_roundtrip(Version::Lite06, &msg).start_byte, 0);
 	}
 
 	#[test]

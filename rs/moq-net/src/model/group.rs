@@ -211,7 +211,24 @@ impl Entry {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Bounds {
 	pub start: u64,
+	/// The first byte held of frame `start`: non-zero when the copy starts partway into
+	/// it, which only a read continuing that frame from a later byte can use (see [`Lead`]).
+	pub byte: u64,
 	pub end: Option<u64>,
+}
+
+/// The frame a copy holds only the rest of, from byte `byte` on: a transport started the copy
+/// partway into frame `index`, the one before [`GroupState::offset`].
+///
+/// Kept beside the frame log rather than in it, so every whole-frame read of the copy finds
+/// frame `index` missing ([`Error::Lagged`]), as it would on a copy starting at the next
+/// frame. Only a read continuing the frame from `byte` or later reaches it, through
+/// [`Consumer::at`].
+pub(super) struct Lead {
+	index: usize,
+	byte: usize,
+	// Opened by the first frame the copy's ingest writes, with the frame's full size.
+	open: Option<(frame::Info, FrameBuf)>,
 }
 
 /// Shared group state. Model-visible so [`frame`] handles can observe its outcome
@@ -233,6 +250,10 @@ pub(super) struct GroupState {
 
 	// The single in-flight frame, if one is open.
 	pub(super) partial: Option<Partial>,
+
+	// The frame before `offset` this copy holds only a suffix of, if it started partway into
+	// it. Boxed: it is the rare case.
+	lead: Option<Box<Lead>>,
 
 	// Index of the first frame this handle holds: any the group deliberately started
 	// past (see [`Producer::start_at`]). Reading below it is [`Error::Lagged`]; the
@@ -1447,6 +1468,7 @@ impl GroupState {
 		self.front = VecDeque::new();
 		self.evict_log(self.log.end());
 		self.partial = None;
+		self.lead = None;
 		if let Some(content) = self.content.take() {
 			content.detach(self.outcome.error().cloned().unwrap_or(Error::Dropped));
 		}
@@ -1820,8 +1842,26 @@ impl Producer {
 	}
 
 	/// Apply transport bounds before this copy is published to the cache.
+	///
+	/// A copy starting partway into frame `start` starts at the next frame, holding the
+	/// rest of `start` aside as its [`Lead`], which the first frame written opens.
 	pub(crate) fn bound(&mut self, frames: Bounds) -> Result<()> {
-		self.start_at(frames.start)?;
+		match frames.byte {
+			0 => self.start_at(frames.start)?,
+			byte => {
+				let next = frames
+					.start
+					.checked_add(1)
+					.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				self.start_at(next)?;
+				let byte = usize::try_from(byte).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				modify(&self.handle.state)?.lead = Some(Box::new(Lead {
+					index: frames.start as usize,
+					byte,
+					open: None,
+				}));
+			}
+		}
 		if let Some(end) = frames.end {
 			let end = usize::try_from(end).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 			let mut state = modify(&self.handle.state)?;
@@ -2079,6 +2119,54 @@ impl Producer {
 			}
 		};
 		Ok(frame::Producer::new(self, buf, info, admission).with_meter(meter))
+	}
+
+	/// Open the rest of the frame this copy starts partway into (see [`Bounds::byte`]):
+	/// `frame` declares the frame's full size, and the producer takes only the bytes past
+	/// the copy's start.
+	///
+	/// [`Error::ProtocolViolation`] unless the copy starts partway into a frame it has not
+	/// opened yet, or when the frame is no larger than that start: a transport answering
+	/// from a byte always has more of the frame to send. A compressed frame never starts
+	/// partway, since its bytes inflate only from its first.
+	pub(crate) fn create_lead(mut self, frame: frame::Header) -> Result<frame::Producer> {
+		let res = self.open_lead(frame);
+		match res {
+			Ok((info, buf, admission)) => Ok(frame::Producer::new(self, buf, info, admission).lead()),
+			Err(err) => {
+				let _ = self.handle.abort(err.clone());
+				Err(err)
+			}
+		}
+	}
+
+	fn open_lead(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf, Option<frame::Admission>)> {
+		let frame = header.info;
+		let timestamp = self.handle.track.rescale(frame.timestamp)?;
+		if frame.size > MAX_CACHE_BYTES {
+			return Err(Error::FrameTooLarge);
+		}
+		if header.inflated.is_some() || header.fields.is_some() {
+			return Err(Error::ProtocolViolation);
+		}
+		let mut state = modify(&self.handle.state)?;
+		let Some(lead) = state.lead.as_deref().filter(|lead| lead.open.is_none()) else {
+			return Err(Error::ProtocolViolation);
+		};
+		let rest = usize::try_from(frame.size)
+			.ok()
+			.and_then(|size| size.checked_sub(lead.byte))
+			.filter(|rest| *rest > 0)
+			.ok_or(Error::ProtocolViolation)?;
+		let (buf, admission) = FrameBuf::admitted(rest, self.handle.cache.frames());
+		// Charged as its bytes arrive, and freed with the last reader holding them.
+		buf.shared().bill_content(state.charge.extra());
+		let info = frame::Info {
+			size: frame.size,
+			timestamp,
+		};
+		state.lead.as_deref_mut().expect("checked above").open = Some((info, buf.clone()));
+		Ok((info, buf, admission))
 	}
 
 	/// The meter a streamed frame's chunks bump: none for a plain frame a compressed group
@@ -2912,12 +3000,24 @@ impl Handle {
 	pub(super) fn covers(&self, frames: Bounds) -> bool {
 		let state = self.state.read();
 		state.outcome.error().is_none()
-			&& state.offset as u64 <= frames.start
+			&& (state.offset as u64 <= frames.start
+				|| state
+					.lead
+					.as_ref()
+					.is_some_and(|lead| lead.index as u64 == frames.start && lead.byte as u64 <= frames.byte))
 			&& match (state.range_end, frames.end) {
 				(None, _) => true,
 				(Some(cap), Some(end)) => end <= cap as u64,
 				(Some(_), None) => false,
 			}
+	}
+
+	/// The byte this copy starts frame `index` at, if it holds only the rest of it and
+	/// has not opened it yet (see [`Producer::create_lead`]).
+	pub(crate) fn lead_at(&self, index: u64) -> Option<u64> {
+		let state = self.state.read();
+		let lead = state.lead.as_deref()?;
+		(lead.index as u64 == index && lead.open.is_none()).then_some(lead.byte as u64)
 	}
 
 	/// Whether this copy was cut short at the back by its transport request.
@@ -4033,7 +4133,7 @@ impl Consumer {
 		}
 		let index = self.cursor.index as u64;
 		let recover = self.recover_mut().expect("only a recovering group needs a replacement");
-		let replacement = ready!(recover.poll(index, failed.as_ref(), waiter))?;
+		let replacement = ready!(recover.poll(index, 0, failed.as_ref(), waiter))?;
 		// A plain read inflates from frame 0, which a replacement starting later lacks
 		// when the failed route's head was not lent to it.
 		if !self.cursor.raw
@@ -4175,6 +4275,83 @@ impl Consumer {
 		self.cursor.start_at(start);
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 		self
+	}
+
+	/// This reader positioned at frame `index`, to continue that frame from byte `byte`
+	/// with [`Self::poll_next_frame_at`], or `None` when this copy does not hold it from
+	/// there: it starts past the frame, or partway into it past `byte`.
+	pub(crate) fn at(self, index: u64, byte: u64) -> Option<Self> {
+		let mut group = self.with_range(index..);
+		if group.index() == index {
+			return Some(group);
+		}
+		let starts = {
+			let state = group.cursor.state.read();
+			state
+				.lead
+				.as_deref()
+				.is_some_and(|lead| lead.index as u64 == index && lead.byte as u64 <= byte)
+		};
+		if !starts || group.index() != index + 1 {
+			return None;
+		}
+		// Below the copy's start: only `poll_next_frame_at` reads the frame there.
+		group.cursor.index = index as usize;
+		group.cursor.prefetch = Prefetch::default();
+		group.cursor.partial = false;
+		Some(group)
+	}
+
+	/// Whether the group's track compresses its frames.
+	pub(crate) fn is_compressed(&self) -> bool {
+		self.cursor.compressed
+	}
+
+	/// The next frame, to stream from byte `from` on, which a copy starting partway into
+	/// it (see [`Bounds::byte`]) serves if it starts at or before `from`.
+	///
+	/// [`Error::WrongSize`] when the frame is shorter than `from`.
+	pub(crate) fn poll_next_frame_at(
+		&mut self,
+		from: usize,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<frame::Consumer>>> {
+		let index = self.cursor.index;
+		let lead = ready!(self.cursor.poll(waiter, |state| {
+			let Some(lead) = state.lead.as_deref().filter(|lead| lead.index == index) else {
+				return Poll::Ready(Ok(None));
+			};
+			if from < lead.byte {
+				return Poll::Ready(Err(Error::Lagged));
+			}
+			match &lead.open {
+				Some((info, buf)) => Poll::Ready(Ok(Some((*info, buf.clone(), lead.byte)))),
+				None if state.outcome.error().is_some() || state.outcome.frames().is_some() => {
+					Poll::Ready(Err(state.outcome.error().cloned().unwrap_or(Error::Lagged)))
+				}
+				None => Poll::Pending,
+			}
+		}))?;
+		let frame = match lead {
+			Some((info, buf, base)) => {
+				self.cursor.index += 1;
+				self.stats.frames(1);
+				let header = frame::Header {
+					info,
+					fields: None,
+					inflated: None,
+				};
+				frame::Consumer::new(self.cursor.state.clone(), header, frame::Source::Partial(buf))
+					.with_meter(self.stats.clone())
+					.starting_at(base, from)
+			}
+			None => match ready!(self.poll_next_frame(waiter))? {
+				Some(frame) if from as u64 > frame.size => return Poll::Ready(Err(Error::WrongSize)),
+				Some(frame) => frame.starting_at(0, from),
+				None => return Poll::Ready(Ok(None)),
+			},
+		};
+		Poll::Ready(Ok(Some(frame)))
 	}
 
 	/// Cap reads before frame `end`, or remove the cap with `None`, without moving the
@@ -4555,6 +4732,7 @@ impl Consumer {
 	pub(super) fn unread(&self, index: usize) -> Bounds {
 		Bounds {
 			start: index as u64,
+			byte: 0,
 			end: self.cursor.end.map(|end| end as u64),
 		}
 	}
@@ -5041,6 +5219,10 @@ pub struct Fetch {
 	/// There is no public matching end. Private transport caps retain incomplete cache
 	/// provenance, so a bounded reply never answers a later whole-group fetch.
 	pub(crate) frame_start: u64,
+
+	/// The first byte to fetch of frame `frame_start`. Like that start, only a route change
+	/// sets it: a frame read partway when its route failed asks for the rest of it.
+	pub(crate) byte_start: u64,
 }
 
 impl Fetch {
@@ -7252,7 +7434,13 @@ mod test {
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let info = track::Info::default().with_compression(crate::track::Compression::Deflate);
 		let mut released = Producer::new(Info::from(0u64), info.clone(), cache.clone());
-		released.bound(Bounds { start: 0, end: Some(2) }).unwrap();
+		released
+			.bound(Bounds {
+				byte: 0,
+				start: 0,
+				end: Some(2),
+			})
+			.unwrap();
 		for index in 0..2 {
 			released.write_frame(None, verbose(index)).unwrap();
 		}
@@ -7623,7 +7811,13 @@ mod test {
 	#[test]
 	fn a_bounded_copy_finished_short_of_its_bound_ends_cleanly() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.bound(Bounds { start: 0, end: Some(4) }).unwrap();
+		producer
+			.bound(Bounds {
+				byte: 0,
+				start: 0,
+				end: Some(4),
+			})
+			.unwrap();
 		let mut reader = producer.consume();
 		for payload in [b"a", b"b"] {
 			producer

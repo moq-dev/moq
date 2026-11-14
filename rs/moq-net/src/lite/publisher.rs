@@ -3176,6 +3176,9 @@ enum FetchServe {
 		batch_pos: usize,
 		/// The `ietf` extension's object records, when negotiated.
 		records: Option<lite::ietf::Records>,
+		/// The byte the first frame is served from, until it is: the response states that
+		/// frame's full size and carries only its bytes from here.
+		lead: Option<usize>,
 	},
 }
 
@@ -3226,6 +3229,7 @@ impl Request for FetchServe {
 						priority: msg.priority,
 						max_delay: msg.max_delay,
 						frame_start: msg.start_frame,
+						byte_start: msg.start_byte,
 					},
 					end: msg.end_frame.and_then(|end| end.checked_add(1)),
 				},
@@ -3249,15 +3253,21 @@ impl Request for FetchServe {
 				Self::Fetch { msg, fetching } => {
 					// Before the group: a fetched group polled while this waited would be lost.
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let group = ready!(kio::Task::poll(fetching, waiter))?.with_range(msg.start_frame..);
-
 					// The response carries no header, so a short run is indistinguishable
 					// from one that started elsewhere: only serve a range we can cover
 					// exactly. `fetch_group` already positions the consumer, so this is a
 					// belt-and-braces check on a promise the wire can't restate.
-					if group.index() != msg.start_frame {
+					let Some(group) = ready!(kio::Task::poll(fetching, waiter))?.at(msg.start_frame, msg.start_byte)
+					else {
 						return Poll::Ready(Err(Error::Lagged));
-					}
+					};
+					// A compressed frame inflates only from its first byte, so none is served
+					// from a later one; this side never asks for it.
+					let lead = match msg.start_byte {
+						0 => None,
+						_ if group.is_compressed() => return Poll::Ready(Err(Error::ProtocolViolation)),
+						byte => Some(usize::try_from(byte).map_err(|_| Error::WrongSize)?),
+					};
 					// The end is a serving cap only: the cached group runs to the end of
 					// the group so it stays usable for anyone else (see
 					// `group::Fetch::frame_start`). Only the end, so the start stays where
@@ -3284,6 +3294,7 @@ impl Request for FetchServe {
 						batch: Box::default(),
 						batch_pos: 0,
 						records,
+						lead,
 					};
 				}
 				Self::Serve {
@@ -3295,10 +3306,35 @@ impl Request for FetchServe {
 					batch,
 					batch_pos,
 					records,
+					lead,
 				} => loop {
 					ready!(writer.poll_flush(waiter))?;
 					if let Some(records) = records {
 						ready!(records.poll_state(writer, group, waiter))?;
+					}
+					if let Some(byte) = *lead {
+						let Some(next) = ready!(group.poll_next_frame_at(byte, waiter))? else {
+							// The group ends before the frame the request starts in.
+							return Poll::Ready(Err(Error::WrongSize));
+						};
+						*lead = None;
+						if let Some(records) = records {
+							records.frame(writer, group.index() - 1, next.fields.as_deref())?;
+						}
+						// The frame's full size: the subscriber knows it asked for the rest.
+						buffer_frame_info(
+							writer,
+							shared.version,
+							next.timestamp,
+							next.inflated,
+							next.size,
+							*stamp,
+							prev_ts,
+							&shared.runtime,
+							next.size - byte as u64,
+						)?;
+						*frame = Some(next);
+						continue;
 					}
 					if let Some(pending) = chunk {
 						ready!(writer.poll_write(waiter, pending))?;
@@ -3325,6 +3361,7 @@ impl Request for FetchServe {
 							*stamp,
 							prev_ts,
 							&shared.runtime,
+							batched.frame.payload.len() as u64,
 						)?;
 						let payload = std::mem::take(&mut batched.frame.payload);
 						if !payload.is_empty() {
@@ -3361,6 +3398,7 @@ impl Request for FetchServe {
 									*stamp,
 									prev_ts,
 									&shared.runtime,
+									next.size,
 								)?;
 								*frame = Some(next);
 								return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -4623,6 +4661,8 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	stamp: Option<Stamp>,
 	prev_ts: &mut u64,
 	runtime: &crate::time::Deadlines,
+	// Payload bytes that follow: fewer than `size` only for a frame served from a byte.
+	sent: u64,
 ) -> Result<(), Error> {
 	// Lite-07 leads with the size plus one, leaving 0 for GROUP_END.
 	let length_first = version.has_length_first();
@@ -4642,7 +4682,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if !length_first {
 		writer.buffer_varint(size)?;
 	}
-	writer.frame(size);
+	writer.frame(sent);
 	Ok(())
 }
 
@@ -6739,6 +6779,7 @@ impl GroupServe {
 											self.ctx.stamp,
 											&mut self.prev_ts,
 											&self.ctx.runtime,
+											batched.frame.payload.len() as u64,
 										)
 									});
 								if let Err(err) = buffered {
@@ -6794,6 +6835,7 @@ impl GroupServe {
 													self.ctx.stamp,
 													&mut self.prev_ts,
 													&self.ctx.runtime,
+													next.size,
 												)
 											});
 										if let Err(err) = buffered {
@@ -11078,6 +11120,7 @@ mod tests {
 						max_delay: None,
 						group: 0,
 						start_frame: 0,
+						start_byte: 0,
 						end_frame: None,
 					};
 					leave_request::<FetchServe>(version, &fetch, wait, close).await;
@@ -12136,6 +12179,7 @@ mod tests {
 				max_delay: None,
 				group: 0,
 				start_frame: 2,
+				start_byte: 0,
 				end_frame: Some(3),
 			},
 			"video",
@@ -12206,6 +12250,7 @@ mod tests {
 			max_delay: None,
 			group: 0,
 			start_frame: 0,
+			start_byte: 0,
 			end_frame: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
@@ -12282,6 +12327,7 @@ mod tests {
 			max_delay: Some(Duration::from_millis(500)),
 			group: 0,
 			start_frame: 0,
+			start_byte: 0,
 			end_frame: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)

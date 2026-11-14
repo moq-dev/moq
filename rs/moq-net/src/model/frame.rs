@@ -1299,6 +1299,9 @@ pub struct Producer {
 	stats: stats::Meter,
 	// The frame's share of the origin's [`Budget`], if it got one, held until it ends.
 	admission: Option<Admission>,
+	// Writes the rest of the frame its copy starts partway into (see
+	// [`group::Producer::create_lead`]), which stays out of the frame log.
+	lead: bool,
 }
 
 impl std::ops::Deref for Producer {
@@ -1319,7 +1322,14 @@ impl Producer {
 			cancel_on_drop: false,
 			stats: stats::Meter::default(),
 			admission,
+			lead: false,
 		}
+	}
+
+	/// Write the rest of the frame a copy starts partway into.
+	pub(super) fn lead(mut self) -> Self {
+		self.lead = true;
+		self
 	}
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
@@ -1405,8 +1415,14 @@ impl Producer {
 		if self.buf.written(Ordering::Acquire) != self.buf.size() {
 			return Err(Error::WrongSize);
 		}
-		let payload = self.buf.freeze();
 		let mut group = self.group.take().expect("frame owns its group");
+		if self.lead {
+			self.done = true;
+			// Its readers already hold its buffer, so only the wake is left.
+			group.frame_notify();
+			return Ok(group);
+		}
+		let payload = self.buf.freeze();
 		let committed = group.frame_commit(Cached {
 			timestamp: self.info.timestamp,
 			payload,
@@ -1516,7 +1532,10 @@ pub struct Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) inflated: Option<u64>,
 	source: Source,
-	// Byte offset consumed so far.
+	// The frame offset `source` starts at: non-zero only for the rest of a frame a copy
+	// started partway into (see [`group::Consumer::at`]).
+	base: usize,
+	// Byte offset consumed so far, from the frame's start.
 	read_idx: usize,
 	// Egress payload meter, so chunks bump `bytes` exactly once as they're read out.
 	// Empty (no-op) for an untagged group.
@@ -1546,12 +1565,22 @@ impl Consumer {
 			fields: header.fields,
 			inflated: header.inflated,
 			source,
+			base: 0,
 			read_idx: 0,
 			stats: stats::Meter::default(),
 			expiry: None,
 			expired: false,
 			recover: None,
 		}
+	}
+
+	/// Read from frame offset `from`, with `source` holding the frame from `base`, which
+	/// is at most `from`.
+	pub(super) fn starting_at(mut self, base: usize, from: usize) -> Self {
+		debug_assert!(base <= from);
+		self.base = base;
+		self.read_idx = from;
+		self
 	}
 
 	/// Carry this frame across a front's route changes; see [`super::resume`].
@@ -1592,7 +1621,9 @@ impl Consumer {
 			if self.state.read().sparse() {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
-			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
+			// Only the rest of the frame is asked for: the bytes already read are not sent again.
+			let byte = self.read_idx as u64;
+			let mut replacement = match recover.poll(*index, byte, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,
@@ -1607,7 +1638,7 @@ impl Consumer {
 			if self.inflated.is_some() {
 				replacement.group = replacement.group.compressed();
 			}
-			let frame = match replacement.group.poll_next_frame(waiter) {
+			let frame = match replacement.group.poll_next_frame_at(self.read_idx, waiter) {
 				Poll::Ready(Ok(Some(frame))) => frame,
 				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -1627,9 +1658,14 @@ impl Consumer {
 			if frame.info.size != self.info.size || frame.inflated != self.inflated {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
+			// Positioned at this read's byte, so the replacement holds every byte from it.
+			if frame.base > self.read_idx {
+				return Poll::Ready(Err(Error::Lagged));
+			}
 			recover.adopt(&replacement);
 			self.state = frame.state;
 			self.source = frame.source;
+			self.base = frame.base;
 		}
 	}
 
@@ -1647,7 +1683,7 @@ impl Consumer {
 
 	fn size(&self) -> usize {
 		match &self.source {
-			Source::Complete(payload) => payload.len(),
+			Source::Complete(payload) => self.base + payload.len(),
 			Source::Partial(_) => self.info.size as usize,
 		}
 	}
@@ -1695,15 +1731,17 @@ impl Consumer {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
-		let size = self.info.size as usize;
+		// The source's own offsets: it holds the frame from `base`.
+		let size = self.info.size as usize - self.base;
 		loop {
+			let at = self.read_idx - self.base;
 			// Borrowed rather than cloned: every reader of the frame shares its count.
 			let buf = match &self.source {
 				Source::Complete(payload) => {
-					if self.read_idx >= payload.len() {
+					if at >= payload.len() {
 						return Poll::Ready(Ok(None));
 					}
-					let out = payload.chunk_at(self.read_idx);
+					let out = payload.chunk_at(at);
 					self.read_idx += out.len();
 					self.stats.bytes(out.len() as u64);
 					return Poll::Ready(Ok(Some(out)));
@@ -1711,8 +1749,8 @@ impl Consumer {
 				Source::Partial(buf) => buf,
 			};
 			let written = buf.written(Ordering::Acquire);
-			if written > self.read_idx {
-				let out = buf.slice(self.read_idx, written);
+			if written > at {
+				let out = buf.slice(at, written);
 				self.read_idx += out.len();
 				self.stats.bytes(out.len() as u64);
 				return Poll::Ready(Ok(Some(out)));
@@ -1728,7 +1766,7 @@ impl Consumer {
 			let Source::Partial(buf) = &self.source else {
 				unreachable!("only a partial frame waits for its bytes");
 			};
-			let read_idx = self.read_idx;
+			let read_idx = at;
 			// Park on the group's channel; the producer notifies it on each write and
 			// on abort. Re-check the atomic on wake.
 			ready!(poll_state(&self.state, waiter, |state| {
@@ -1758,18 +1796,18 @@ impl Consumer {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
+		let read_idx = self.read_idx - self.base;
 		let buf = match &self.source {
 			Source::Complete(payload) => {
-				let out = payload.contiguous(self.read_idx);
-				self.read_idx = payload.len();
+				let out = payload.contiguous(read_idx);
+				self.read_idx = self.base + payload.len();
 				self.stats.bytes(out.len() as u64);
 				return Poll::Ready(Ok(out));
 			}
 			Source::Partial(buf) => buf.clone(),
 		};
 
-		let size = self.info.size as usize;
-		let read_idx = self.read_idx;
+		let size = self.info.size as usize - self.base;
 		// Waiting on the rest of the payload is a stall; see `poll_read_chunk`.
 		if buf.written(Ordering::Acquire) < size && self.poll_expired(waiter) {
 			return Poll::Ready(Err(Error::Old));
@@ -1785,7 +1823,7 @@ impl Consumer {
 			}
 		})?);
 		let out = buf.freeze().contiguous(read_idx);
-		self.read_idx = size;
+		self.read_idx = self.base + size;
 		self.stats.bytes(out.len() as u64);
 		Poll::Ready(Ok(out))
 	}
