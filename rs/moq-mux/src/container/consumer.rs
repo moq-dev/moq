@@ -202,6 +202,9 @@ pub struct Consumer<F: Container> {
 
 	// The group the last event came from.
 	group: u64,
+
+	// When the wire frame behind the last frame read landed in this node's cache.
+	arrived: Option<Instant>,
 }
 
 /// Whether a [`Consumer`] still reads its subscription.
@@ -415,6 +418,7 @@ impl<F: Container> Consumer<F> {
 			gap: false,
 			next: None,
 			group: 0,
+			arrived: None,
 		}
 	}
 
@@ -425,6 +429,16 @@ impl<F: Container> Consumer<F> {
 	pub(crate) fn live(mut self) -> Self {
 		self.startup = Startup::Newest;
 		self
+	}
+
+	/// When the wire frame behind the latest frame read landed in this node's cache
+	/// ([`moq_net::frame::Frame::arrived`]), or `None` before the first frame.
+	///
+	/// A gap or an end leaves it at the frame before. A frame from cache, such as a join on a
+	/// track that already holds groups, reports when it landed, not when it was read. Frames
+	/// packed into one wire frame, as a CMAF fragment packs its samples, share its arrival.
+	pub fn arrival(&self) -> Option<Instant> {
+		self.arrived
 	}
 
 	/// The group sequence of the last event read.
@@ -449,7 +463,10 @@ impl<F: Container> Consumer<F> {
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Read>, F::Error>> {
 		loop {
 			let read = match ready!(self.poll_item(waiter))? {
-				Some(Item::Frame { group, frame, .. }) => Read::Frame { group, frame },
+				Some(Item::Frame { group, frame, arrived }) => {
+					self.arrived = Some(arrived);
+					Read::Frame { group, frame }
+				}
 				Some(Item::Gap { timestamp, duration }) => Read::Gap { timestamp, duration },
 				Some(Item::End { group, end }) => Read::End { group, end },
 				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut { .. }) => continue,
@@ -1940,6 +1957,41 @@ mod tests {
 		));
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::End { group: 4, .. })));
 		let _track = track.finish().unwrap();
+	}
+
+	/// The arrival is when a frame landed, not when it was read, and a break keeps the last one.
+	#[tokio::test(start_paused = true)]
+	async fn arrival_is_when_the_frame_landed() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		assert_eq!(reader.arrival(), None, "nothing read yet");
+
+		let first = kio::clock::now();
+		write_group(&mut track, 0, &[ts(0)]);
+		tokio::time::advance(Duration::from_millis(30)).await;
+		let second = kio::clock::now();
+		write_group(&mut track, 1, &[ts(33_000)]);
+		tokio::time::advance(Duration::from_millis(30)).await;
+
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
+		assert_eq!(reader.arrival(), Some(first));
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 1, .. })
+		));
+		assert_eq!(reader.arrival(), Some(second));
+
+		let mut marker = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
+		marker.write_frame(ts(66_000), Bytes::new()).unwrap();
+		marker.finish().unwrap();
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::End { group: 2, .. })));
+		assert_eq!(reader.arrival(), Some(second), "an end carries no arrival of its own");
 	}
 
 	/// The holes a source left behind when it stopped expire together, a budget after the groups

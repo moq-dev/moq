@@ -47,8 +47,8 @@ no frame, is waited for only the playout delay plus any lookahead, since past th
 it would play late: a reordered backlog's holes waited out to the whole budget
 would delay the frames behind them, which the estimator would measure as
 jitter. A caller that estimates keeps the budget past the target, which is why
-`moq play` waits on a stalled group for the delay plus its `--stretch`, 2 s by
-default. The observation is also only as honest as
+`moq play` waits on a stalled audio group for the delay plus the estimate's 2 s
+ceiling. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
 as packets come and lets the playback buffer hold the target, rather than
 pacing reads to the speaker.
@@ -59,15 +59,12 @@ before any container sees them, at the relay and in the receiver's own transport
 subscriber, so a subscription cut to the target hides every frame later than
 the target: the estimate creeps up one bucket at a time while the frames it
 should have measured go unplayed. Both implementations subscribe with the delay
-plus the player's `stretch` setting: `moq play` through its age budget, and the
-browser through the audio subscription alone, since its container consumer
-observes each frame before applying the local budget. The 2 s default reaches
-the estimate's own ceiling, so any lateness the estimator can measure is
-observed at once. A smaller stretch hides frames later than the target plus the
-stretch, so a jump in lateness larger than the stretch is learned in steps of
-about the stretch; a zero stretch cuts a live subscription to the target and
-accepts the one-bucket creep. A buffered browser player keeps its subscription
-at least the delay plus its lookahead, whatever the stretch.
+plus the estimate's own 2 s ceiling, whatever the player's `stretch` setting:
+`moq play` through its age budget, and the browser through the audio
+subscription alone, since its container consumer observes each frame before
+applying the local budget. So any lateness the estimator can measure is
+observed at once. A buffered browser player keeps its subscription at least the
+delay plus its lookahead.
 Browser video keeps the shared budget, because a longer one fetches whole stale
 groups, so a broadcast with no audio measures only the lateness that budget
 lets through.
@@ -681,10 +678,10 @@ At each window boundary a player decides on five inputs:
   clock from speeding into it.
 - `lag`: how far the playhead trails the shared clock, negative when it plays
   ahead of it.
-- `bound`: how far audio may trail the clock, which is the subscription's max
-  delay less the playout delay: the player's `stretch` setting (2 s by
-  default), or for a buffered player the larger of it and the lookahead. A zero
-  stretch turns the stretch off; see [below](#skips-underruns-and-silence).
+- `bound`: how far audio may trail the clock: the player's `stretch` setting
+  (200 ms by default), or for a buffered player the larger of it and the
+  lookahead. It sizes nothing else. A zero stretch turns the stretch off; see
+  [below](#skips-underruns-and-silence).
 
 `level` passes through NetEq's `BufferLevelFilter` once per window: three of its
 10 ms steps at the factor the target selects, 251, 252, 253, or 254 in 256ths
@@ -724,8 +721,8 @@ playhead ahead of the clock back onto it. These are NetEq's thresholds and
 rates, untuned. A moved target moves the clock, so a rise leaves audio ahead of
 it and a fall leaves audio behind, and both become ordinary slowing down and
 speeding up: nothing parks in silence on a rise, and nothing skips buffered
-audio on a fall shorter than the bound and one window. A fall past that skips
-to the bound, as any lag past it does.
+audio on a fall, within the bound. Past it, a fall skips onto the clock and a
+rise pads silence until the clock arrives, as any lag past it does.
 
 Without a clock reading the target is where the playhead belongs, so
 `lag = level - target`. The browser then never skips; native playback bounds
@@ -733,9 +730,12 @@ the lag at three quarters of its ring's capacity above the target.
 
 ### Skips, underruns, and silence
 
-A playhead that trails the clock by more than `bound` and one window skips
-ahead to `bound` behind it, dropping the staged window and the audio it passes.
-Less than that is the stretch's to catch up. A join is the exception: until
+A playhead that trails the clock by more than `bound`, or one window when that
+is larger, skips onto the clock, dropping the staged window and the audio it
+passes, as video skips the frames a stall made late. One that leads the clock
+by as much, as a target rise past the bound leaves it, plays silence until the
+clock reaches it, dropping nothing. Less than that either way is the stretch's
+to catch up. A join is the exception: until
 the player has read once on the clock, its bound is zero, so the backlog a
 subscription opens on is skipped rather than played out at the stretch's pace,
 and playback starts on the clock. A shared clock whose reference moves earlier,
