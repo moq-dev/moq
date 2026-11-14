@@ -158,18 +158,13 @@ Tests, sized to what each runner has:
   a packaged app, a picture of each kind of source, and every change in the
   Goal.
 
-Public API: breaking for `capture::{Camera, Display, Window, App}` and the
-listing calls. Wire: none.
+Public API: additive for `capture::{Camera, Display, Window, App}`, which are
+fenced, and breaking for the listing calls. Wire: none.
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ this quest
-stays after the cut, and
-[capture listings and selections can grow](/quest/m2/api-capture-fences.md)
-fences the listing structs it adds fields to in m2 (rejected: pulling this quest into m2; a second moq-video
-break). What this adds is then additive.
-
-## Required
-
-- [Capture listings and selections can grow](/quest/m2/api-capture-fences.md) - the fenced structs this adds fields to
+stays after the cut, and the m2 fence made the listing structs `#[non_exhaustive]` (rejected: pulling
+this quest into m2; a second moq-video break). The fields this adds are then
+additive.
 
 ## Related
 
