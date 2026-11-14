@@ -103,7 +103,7 @@ pub(crate) struct Nvenc {
 	ready: VecDeque<Encoded>,
 }
 
-/// The session's CUDA input: one buffer every CUDA frame is scaled into,
+/// The session's CUDA input: one buffer every CUDA frame is copied or scaled into,
 /// registered with the session once and mapped for each encode.
 struct Target {
 	buffer: cuda::Target,
@@ -293,7 +293,7 @@ impl Backend for Nvenc {
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		// The published image shares its full-size conversion across renditions,
 		// so capture converts only once for each declared color space and never
-		// downloads its pixels; each encoder then scales it into its own target.
+		// downloads its pixels; each encoder then copies or scales it into its own target.
 		let converted;
 		let gpu = match &frame.surface {
 			Surface::Vulkan(image) => {

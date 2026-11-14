@@ -15,7 +15,7 @@
 //!
 //! NVENC reads a registered `cuMemAlloc` NV12 buffer
 //! (`NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR`): each session's own `Target`,
-//! which every frame is scaled into, an exact copy at the session size. The
+//! which every frame is copied into, or scaled into when its size differs. The
 //! one copy is what lets a session register once rather than per frame, and
 //! costs microseconds of GPU time. The SDK 12.1 bindings could also register
 //! the imported Vulkan image itself as a CUDA array in an RGB session, but NVENC
@@ -35,7 +35,7 @@
 //! `cuMemFree` also waits for the whole device. Paid per frame, those calls
 //! serialize every transcode on the GPU while its engines sit idle. So every
 //! frame's buffer comes from a `Pool` and goes back to it, and each NVENC
-//! session scales its input into one `Target` it registered once. Scaling
+//! session copies or scales its input into one `Target` it registered once. Scaling
 //! and copies run on their owner's own stream, never the legacy default
 //! stream, which would wait for every other thread's work in the process.
 
@@ -316,9 +316,6 @@ impl Frame {
 		Ok(dst)
 	}
 
-	/// Scale this frame into `dst` with the box-filter kernels on `stream`, a
-	/// stream of this frame's device, and wait for them. At the same size the
-	/// box filter is an exact copy.
 	/// Copy into `dst`, the same size, on `stream` and wait for it. The copy
 	/// engine needs no PTX, unlike [`scale_into`](Self::scale_into).
 	fn copy_into(&self, dst: &Self, stream: &Arc<CudaStream>) -> Result<(), Error> {
@@ -357,6 +354,8 @@ impl Frame {
 			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA copy sync: {e:?}")))
 	}
 
+	/// Scale this frame into `dst` with the box-filter kernels on `stream`, a
+	/// stream of this frame's device, and wait for them.
 	fn scale_into(&self, dst: &Self, stream: &Arc<CudaStream>) -> Result<(), Error> {
 		let kernels = kernels(&self.buf.ctx)?;
 		let (width, height) = (dst.width, dst.height);
@@ -591,7 +590,7 @@ impl Slot {
 	}
 }
 
-/// One NV12 buffer that frames are scaled into, for a consumer that reads it
+/// One NV12 buffer that frames are copied or scaled into, for a consumer that reads it
 /// in place: an NVENC session registers it once and encodes every frame from
 /// it. Scaling runs on the target's own stream, so it never waits on other
 /// work in the process.
