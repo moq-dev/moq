@@ -582,6 +582,24 @@ describe("declared end", () => {
 		expect(buffer.underruns).toBe(0);
 	});
 
+	// A finished track shorter than the floor has nothing more coming to fill it.
+	for (const declared of ["before", "after"] as const) {
+		it(`plays audio short of its floor up to an end declared ${declared} it`, () => {
+			const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 });
+			if (declared === "before") buffer.end(40_000);
+			write(buffer, 0, 40, { channels: 1 });
+			if (declared === "after") {
+				expect(read(buffer, 20, 1)[0].length).toBe(0);
+				buffer.end(40_000);
+			}
+			expect(buffer.stalled).toBe(false);
+			expect(read(buffer, 20, 1)[0].length).toBe(20);
+			expect(read(buffer, 30, 1)[0].length).toBe(20);
+			expect(buffer.silent).toBe(true);
+			expect(buffer.underruns).toBe(0);
+		});
+	}
+
 	it("counts running dry short of the end as an underrun", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 });
 		write(buffer, 0, 20, { channels: 1 });

@@ -87,8 +87,12 @@ export type SyncOutput = {
 	maxDelay: Signal<Duration>;
 };
 
-/** A decoded span from the opening of a track's timeline. @internal */
-export type Span = { start: Duration; end: Duration };
+/**
+ * A decoded span from the opening of a track's timeline. `complete` once the publisher finished the
+ * track, so nothing extends it and it is ready however short.
+ * @internal
+ */
+export type Span = { start: Duration; end: Duration; complete?: boolean };
 
 /** What a track holds in the shared clock. @internal */
 export type TrackProps = {
@@ -446,7 +450,7 @@ export class Sync {
 		if (
 			reference === undefined ||
 			ready.length !== spans.length ||
-			ready.some(({ span }) => span.end.saturatingSub(span.start).lt(delay))
+			ready.some(({ span }) => !span.complete && span.end.saturatingSub(span.start).lt(delay))
 		) {
 			clock.phase.set("starting");
 			return;

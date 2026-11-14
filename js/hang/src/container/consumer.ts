@@ -240,6 +240,16 @@ export class Consumer {
 	/** The time ranges currently buffered and ready to play. */
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	// The transport delivered every group up to the publisher's declared end.
+	#delivered = false;
+	#finished = new Signal(false);
+	/**
+	 * Whether the publisher finished the track and every group up to its end has arrived and ended,
+	 * so {@link buffered} holds all the media left to read. Unlike {@link next} returning undefined,
+	 * it does not wait for the reader to drain what is buffered. Never set by {@link close}.
+	 */
+	readonly finished: Getter<boolean> = this.#finished;
+
 	#jitter: Jitter;
 	#spread: Signal<Duration>;
 	/**
@@ -352,6 +362,10 @@ export class Consumer {
 
 				this.#signals.spawn(this.#watch.bind(this, group));
 			}
+			if (!this.#signals.abort.aborted) {
+				this.#delivered = true;
+				this.#settle();
+			}
 			this.#finish(null);
 		} catch (err) {
 			this.#finish(err instanceof Error ? err : new Error(String(err)));
@@ -379,7 +393,15 @@ export class Consumer {
 			// However the watch ends, the reader looks at the group again: it may have ended or failed.
 			this.#notify?.();
 			this.#notify = undefined;
+			this.#settle();
 		}
+	}
+
+	// Mark the track finished once the transport delivered its last group and every buffered group ended.
+	#settle(): void {
+		// A closed consumer abandoned whatever was still arriving.
+		if (!this.#delivered || this.#finished.peek() || this.#signals.abort.aborted) return;
+		if (this.#groups.every((group) => group.fault !== undefined || group.consumer.done)) this.#finished.set(true);
 	}
 
 	// Take and decode every wire frame the transport already holds, oldest group first, each only while

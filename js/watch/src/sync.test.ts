@@ -7,7 +7,7 @@ const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));
 
 import { Signal } from "@moq/signals";
 import { target } from "./audio/latency";
-import { type Delay, Sync } from "./sync";
+import { type Delay, type Span, Sync } from "./sync";
 
 // Effects in @moq/signals flush on a microtask, so let pending updates drain before asserting.
 const flush = () => yieldNow();
@@ -372,14 +372,19 @@ describe("skip floor", () => {
 });
 
 describe("buffered startup", () => {
-	for (const first of ["audio", "video"] as const) {
-		it(`waits for both spans when ${first} fills first`, async () => {
+	// The second span either fills the floor, or stays short because the publisher finished its track.
+	for (const [first, finished] of [
+		["audio", false],
+		["video", false],
+		["audio", true],
+	] as const) {
+		it(`waits for both spans when ${first} fills first${finished ? ", or the other finished" : ""}`, async () => {
 			const clock = new Manual();
 			const installed = clock.install();
 			const sync = new Sync({ delay: Duration.millis(100), lookahead: Duration.millis(1000) });
 			const spans = {
-				audio: new Signal<{ start: Duration; end: Duration } | null>(null),
-				video: new Signal<{ start: Duration; end: Duration } | null>(null),
+				audio: new Signal<Span | null>(null),
+				video: new Signal<Span | null>(null),
 			};
 			const tracks = Object.values(spans).map((startup) =>
 				sync.track({ target: new Signal(Duration.millis(100)), startup }),
@@ -405,7 +410,8 @@ describe("buffered startup", () => {
 				expect(delivered).toBe(false);
 				spans[first === "audio" ? "video" : "audio"].set({
 					start: Duration.millis(500),
-					end: Duration.millis(600),
+					end: Duration.millis(finished ? 599 : 600),
+					complete: finished,
 				});
 				await clock.advance(Duration.ZERO);
 				await waiting;

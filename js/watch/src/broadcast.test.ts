@@ -144,38 +144,60 @@ describe("unsupported catalog", () => {
 });
 
 // Regression: a finished catalog track dropped the catalog at once, so a publisher finishing its
-// broadcast cut every viewer off before it drained the tail the broadcast still served.
-it("keeps playing a finished catalog until the broadcast ends", async () => {
-	const owner = new Origin.Producer();
-	// A session that could announce the broadcast, so its absence reads offline.
-	wireOf(owner).attach(true);
-	const name = Path.from("room/live.hang");
-	const published = publish(owner, name);
-	const producer = new Json.Snapshot.Producer<Catalog.Root>({
-		track: published.createTrack(Catalog.TRACK),
-		deltas: false,
+// broadcast cut every viewer off before it drained the tail the broadcast still served. Once nothing
+// is left to play it reads offline, though the broadcast still serves the tail to late subscribers.
+// Without a `tail` to say so, as for a broadcast no player drives, it stays live until it closes.
+for (const driven of [true, false]) {
+	it(`keeps playing a finished catalog until the broadcast ends${driven ? ", and reads offline once the tail played" : " without a tail input"}`, async () => {
+		const owner = new Origin.Producer();
+		// A session that could announce the broadcast, so its absence reads offline.
+		wireOf(owner).attach(true);
+		const name = Path.from("room/live.hang");
+		const published = publish(owner, name);
+		const producer = new Json.Snapshot.Producer<Catalog.Root>({
+			track: published.createTrack(Catalog.TRACK),
+			deltas: false,
+		});
+		const tail = new Signal(true);
+		const source = new Broadcast({
+			origin: owner,
+			name,
+			catalogFormat: "hang",
+			enabled: true,
+			...(driven ? { tail } : {}),
+		});
+		try {
+			const ready = source.out.catalog.changed();
+			producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } } });
+			await ready;
+			expect(source.out.status.peek()).toBe("live");
+
+			// A live broadcast stays live whatever the tail says.
+			tail.set(false);
+			await settle();
+			expect(source.out.status.peek()).toBe("live");
+			tail.set(true);
+
+			producer.finish();
+			await settle();
+			expect(source.out.status.peek()).toBe("live");
+			expect(videoRenditions(source)).toEqual(["hd"]);
+
+			tail.set(false);
+			await settle();
+			expect(source.out.status.peek()).toBe(driven ? "offline" : "live");
+			expect(videoRenditions(source)).toEqual(["hd"]);
+
+			published.close();
+			await settle();
+			expect(source.out.status.peek()).toBe("offline");
+			expect(source.out.catalog.peek()).toBeUndefined();
+		} finally {
+			source.close();
+			owner.close();
+		}
 	});
-	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
-	try {
-		const ready = source.out.catalog.changed();
-		producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } } });
-		await ready;
-		expect(source.out.status.peek()).toBe("live");
-
-		producer.finish();
-		await settle();
-		expect(source.out.status.peek()).toBe("live");
-		expect(videoRenditions(source)).toEqual(["hd"]);
-
-		published.close();
-		await settle();
-		expect(source.out.status.peek()).toBe("offline");
-		expect(source.out.catalog.peek()).toBeUndefined();
-	} finally {
-		source.close();
-		owner.close();
-	}
-});
+}
 
 // A catalog track that ends before its first snapshot has nothing to play, so it reads as offline.
 it("reports a catalog that ends empty as offline", async () => {

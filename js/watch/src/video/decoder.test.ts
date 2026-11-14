@@ -208,13 +208,13 @@ function sample(group: bigint, timestamp: number, keyframe = true, payload: Uint
 const gap: Read = { kind: "gap", timestamp: Duration.micros(0), duration: Duration.micros(0) };
 
 // One read queue per container consumer, in the order each first reads. An empty queue waits for
-// `push` rather than ending the track.
+// `push` rather than ending the track; pushing `undefined` finishes it cleanly.
 class Feeds {
-	readonly #queues: Read[][] = [];
+	readonly #queues: (Read | undefined)[][] = [];
 	readonly #owners = new Map<Container.Consumer, number>();
 	#wake: (() => void)[] = [];
 
-	push(index: number, ...reads: Read[]) {
+	push(index: number, ...reads: (Read | undefined)[]) {
 		while (this.#queues.length <= index) this.#queues.push([]);
 		this.#queues[index].push(...reads);
 		for (const wake of this.#wake.splice(0)) wake();
@@ -227,8 +227,8 @@ class Feeds {
 			this.#owners.set(consumer, index);
 		}
 		for (;;) {
-			const read = this.#queues[index]?.shift();
-			if (read) return read;
+			const queue = this.#queues[index];
+			if (queue?.length) return queue.shift();
 			await new Promise<void>((resolve) => this.#wake.push(resolve));
 		}
 	}
@@ -267,13 +267,15 @@ async function guardedPlayback(
 	const errors: VideoDecoderInit["error"][] = [];
 	const frames: VideoDecoderInit["output"][] = [];
 	const configures: VideoDecoderConfig[] = [];
-	// A read that is an Error stands in for a malformed container read.
+	// A read that is an Error stands in for a malformed container read. Running out resets the
+	// subscription rather than finishing the track, which would flush the pictures a test holds.
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async function (
 		this: Container.Consumer,
 	) {
 		if (feeds) return feeds.next(this);
 		const read = reads.shift() as Read | Error | undefined;
 		if (read instanceof Error) throw read;
+		if (read === undefined) throw new Moq.Error.Stream(Moq.StreamCode.Cancel);
 		return read;
 	});
 	if (live) next.mockRestore();
@@ -321,6 +323,10 @@ async function guardedPlayback(
 			for (const earlier of pending) earlier();
 			pending.length = 0;
 			emit();
+		}
+		// Like WebCodecs, a flush emits every picture still inside the decoder.
+		async flush() {
+			for (const earlier of pending.splice(0)) earlier();
 		}
 		reset() {
 			resets++;
@@ -1283,6 +1289,36 @@ describe("Decoder stalls", () => {
 		}
 	});
 
+	// A publisher that stops cleanly finishes the track instead of writing an end marker.
+	it("a finished track holds its last picture without a stall, and ends once that picture is due", async () => {
+		const { clock, feeds, playback, stalls, close } = await cold();
+		try {
+			feeds.push(0, sample(0n, 0));
+			for (let ms = 100; ms <= 2000; ms += 100) {
+				await clock.advance(100);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+			}
+			feeds.push(0, undefined);
+			await microtasks();
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+
+			// The tail still plays out a second behind.
+			await clock.advance(900);
+			expect(playback.decoder.out.ended.peek()).toBe(false);
+			await clock.advance(100);
+			await microtasks();
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(2_000_000);
+			expect(playback.decoder.out.ended.peek()).toBe(true);
+
+			for (let i = 0; i < 30; i++) await clock.advance(100);
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			expect(stalls()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
 	it("a declared end clears a stall already raised and stops its stalled time", async () => {
 		const { clock, feeds, playback, stalls, feedback, close } = await cold();
 		const stalled = () => playback.decoder.out.stats.peek()?.stalled.asMillis() ?? 0;
@@ -1360,6 +1396,31 @@ it("buffered video holds its poster until its own span reaches the floor", async
 		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(40_000);
 	} finally {
 		group.finish();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+// A buffered player joining a finished track shorter than its floor plays what exists.
+it("buffered video starts on a finished track shorter than its floor, and ends", async () => {
+	const clock = manualAt(1000);
+	const feeds = new Feeds();
+	const playback = await guardedPlayback("legacy", [], [], false, 1000, { feeds, initial: Duration.millis(1000) });
+	try {
+		feeds.push(0, sample(0n, 0), sample(0n, 100_000, false));
+		await microtasks();
+		await clock.advance(100);
+		expect(playback.sync.playing.peek()).toBe(false);
+
+		feeds.push(0, undefined);
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.sync.playing.peek()).toBe(true);
+		for (let i = 0; i < 15; i++) await clock.advance(100);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(100_000);
+		expect(playback.decoder.out.ended.peek()).toBe(true);
+	} finally {
 		playback.close();
 		await microtasks();
 		clock.installed.close();

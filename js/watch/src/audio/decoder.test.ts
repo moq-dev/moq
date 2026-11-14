@@ -209,6 +209,10 @@ beforeEach(() => {
 			this.needsKey = true;
 			pendingAudio = [];
 		}
+		// Like WebCodecs, a flush emits every frame still inside the decoder.
+		async flush() {
+			for (const emit of pendingAudio.splice(0)) emit();
+		}
 		decode(chunk: { timestamp: number; type: EncodedAudioChunkType }) {
 			if (decodeThrows) throw decodeThrows;
 			if (this.needsKey && chunk.type !== "key") throw new DOMException("key chunk required", "DataError");
@@ -253,12 +257,13 @@ afterEach(() => {
 	mock.restore();
 });
 
-// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close. An
-// Error stands in for a malformed read.
+// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close or
+// once the publisher finishes the track. An Error stands in for a malformed read.
 function feed() {
 	let currentConsumer: Container.Consumer | undefined;
 	const closed = new WeakSet<Container.Consumer>();
 	const queue: (Read | Error)[] = [];
+	const finished = new WeakSet<Container.Consumer>();
 	let waiter:
 		| { consumer: Container.Consumer; resolve: (read: Read | undefined) => void; reject: (err: Error) => void }
 		| undefined;
@@ -268,7 +273,7 @@ function feed() {
 		if (closed.has(this)) return Promise.resolve(undefined);
 		const read = queue.shift();
 		if (read instanceof Error) return Promise.reject(read);
-		if (read) return Promise.resolve(read);
+		if (read || finished.has(this)) return Promise.resolve(read);
 		return new Promise<Read | undefined>((resolve, reject) => {
 			waiter = { consumer: this, resolve, reject };
 		});
@@ -291,8 +296,15 @@ function feed() {
 		else if (read instanceof Error) current.reject(read);
 		else current.resolve(read);
 	};
+	// Finish the track the current consumer reads.
+	const finish = () => {
+		if (currentConsumer) finished.add(currentConsumer);
+		waiter?.resolve(undefined);
+		waiter = undefined;
+	};
 	return {
 		push,
+		finish,
 		// Network arrivals can advance while next() is held behind decoder backpressure.
 		buffered: (ranges: Container.BufferedRanges) => {
 			if (!currentConsumer) throw new Error("consumer has not started");
@@ -304,7 +316,7 @@ function feed() {
 async function play(initial: Delay, buffered = false, cmaf = false) {
 	// These cases test timeline handover after the optional decoder has loaded.
 	if (cmaf) await import("@moq/hang/cmaf");
-	const { push, buffered: queued } = feed();
+	const { push, finish, buffered: queued } = feed();
 	const truncate = spyOn(AudioRingBuffer.prototype, "truncate");
 	const reset = spyOn(AudioRingBuffer.prototype, "reset");
 	const insert = spyOn(AudioRingBuffer.prototype, "write");
@@ -312,6 +324,11 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	let producer = new Moq.Broadcast.Producer();
 	let consumer = producer.consume();
 	const relativeBroadcast = mock(() => consumer);
+	// Published, so finishing it declares the subscription's end as a publisher's FIN does. The
+	// reads themselves come from `feed`.
+	const publish = () =>
+		producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
+	let track = publish();
 	let audio = Catalog.AudioConfigSchema.parse({
 		codec: "opus",
 		container: { kind: "legacy" },
@@ -369,11 +386,20 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		stretch,
 		sync,
 		push,
+		// Finish the track the decoder reads, still serving its cache, and publish a fresh one for the
+		// next subscription.
+		finish: () => {
+			finish();
+			track.finish();
+			producer.removeTrack("audio");
+			track = publish();
+		},
 		queued,
 		enabled,
 		decoding,
 		context: decoder.out.context,
 		stalled: () => decoder.out.stalled.peek(),
+		ended: () => decoder.out.ended.peek(),
 		stats: () => decoder.out.stats.peek(),
 		timestamp: () => decoder.out.timestamp.peek(),
 		feedback: () => decoder.feedback(Moq.Path.from("watched")),
@@ -401,6 +427,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			producer.close();
 			producer = new Moq.Broadcast.Producer();
 			consumer = producer.consume();
+			track = publish();
 			frameTimestamp = 0;
 		},
 		// The resolved playout target.
@@ -892,6 +919,74 @@ describe("Decoder across a rendition's absence", () => {
 			expect(playback.stats()).toMatchObject({ underruns: 0, stalls: 0 });
 		} finally {
 			playback.close();
+		}
+	});
+
+	// A publisher that stops cleanly finishes the track instead of declaring an end.
+	it("runs dry into silence at a finished track's end, and ends once the clock reaches it", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		deferAudioOutput = true;
+		const playback = await play(Duration.millis(100));
+		try {
+			await playback.play(12);
+			// The codec still holds the last frame when the track finishes.
+			for (const emit of pendingAudio.splice(0, pendingAudio.length - 1)) emit();
+			const [ring] = playback.rings();
+			playback.finish();
+			await microtasks();
+			expect(drain(ring)).toBeGreaterThan(0);
+			await microtasks();
+			expect(ring.ring?.silent).toBe(true);
+			expect(playback.stalled()).toBe(false);
+			expect(playback.ended()).toBe(false);
+
+			await clock.advance(Duration.millis(1000));
+			await microtasks();
+			expect(playback.ended()).toBe(true);
+			expect(playback.stats()).toMatchObject({ underruns: 0, stalls: 0 });
+
+			// A replacement on the same broadcast keeps the ring, but not the finished rendition's end:
+			// running dry is a stall again.
+			playback.restore({ container: { kind: "loc" } });
+			await microtasks();
+			expect(playback.ended()).toBe(false);
+			await playback.play(12);
+			for (const emit of pendingAudio.splice(0)) emit();
+			await microtasks();
+			expect(playback.rings()).toEqual([ring]);
+			expect(drain(ring)).toBeGreaterThan(0);
+			await microtasks();
+			expect(ring.ring?.silent).toBe(false);
+			expect(playback.stalled()).toBe(true);
+		} finally {
+			playback.close();
+			await microtasks();
+			installed.close();
+		}
+	});
+
+	// A finished track past the decoded floor yet short of the delay: decoding stops at the floor, so
+	// startup has to learn of the finish from the subscription, not from the decode loop reaching it.
+	it("starts buffered audio on a finished track past its floor and short of its delay, and ends", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const playback = await play(Duration.millis(1000), true);
+		try {
+			await playback.play(30);
+			playback.finish();
+			await microtasks();
+			const [ring] = playback.rings();
+			expect(await playOut(ring)).toBe(30 * 960);
+			expect(playback.stalled()).toBe(false);
+
+			await clock.advance(Duration.millis(2000));
+			await microtasks();
+			expect(playback.ended()).toBe(true);
+		} finally {
+			playback.close();
+			await microtasks();
+			installed.close();
 		}
 	});
 
