@@ -1,16 +1,15 @@
-# [S] The WebRTC ports have every upstream fix they need
+# [S] The WebRTC GoogCC port has every upstream fix it needs
 
 ## Goal
 
-moq-congestion's `gcc` module (GoogCC) and moq-audio's NetEq time stretch
-(`rs/moq-audio/src/stretch.rs`) carry every fix WebRTC has landed in their
-source files since the last check, each ported with its test or recorded as
-not applying, and each module doc names the newest WebRTC revision checked.
+moq-congestion's `gcc` module (GoogCC) carries every fix WebRTC has landed in
+its source files since the last check, each ported with its test or recorded
+as not applying, and its module doc names the newest WebRTC revision checked.
 
 ## Plan
 
 Recurring child of the [vendor sync](/quest/m3/vendor-sync/README.md), which
-says how each run works and recurs. New in the 2026-11-05 scan: both ports
+says how each run works and recurs. New in the 2026-11-05 scan: the port
 landed after the first run started.
 
 GoogCC: `rs/moq-congestion/src/gcc/mod.rs` records WebRTC
@@ -26,17 +25,9 @@ unless upstream fixes what they work around. GoogCC is a candidate in the
 [realtime uplink bake-off](/quest/m4/quic-realtime.md); if the bake-off
 deletes it, drop that half.
 
-NetEq: [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856) ported
-`time_stretch`, `accelerate`, `preemptive_expand`, `dsp_helper`,
-`audio_vector`, and `decision_logic` under
-`modules/audio_coding/neteq/`, reading `main` on 2026-11-04 without recording
-a revision. Start from the last WebRTC `main` commit on 2026-11-04, and record
-the revision checked in `stretch.rs`'s module doc. The port is a deliberate
-floating-point adaptation (maintainer, 2026-11-04), so an upstream change to
-Q15 arithmetic alone does not apply; `doc/concept/audio-jitter.md` and its PCM
-corpus define the algorithm, so update both with any ported change. The
-[lag rule](/quest/m2/audio-playout/lag-rule.md) replaces the port with a
-continuous time stretch before the cut; once it lands, drop that half.
+The NetEq time stretch port this quest also covered was replaced by a
+continuous time stretch written from its published description, so nothing of
+WebRTC's audio coding remains to sync.
 
 WebRTC's gitiles history pages need a Google sign-in; clone
 `https://webrtc.googlesource.com/src` instead.
