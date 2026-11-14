@@ -3,9 +3,8 @@
 ## Goal
 
 Every change that would need a semver-breaking release if it landed right
-after the next cut of `main` into `release`, plus the cut
-gate, which the [release cut](/quest/m3/release/cut.md) re-creates here each
-cycle. The cut waits on this milestone alone;
+after the next cut of `main` into `release`. The
+[release cut](/quest/m3/release/cut.md) waits on this milestone alone;
 complete it before cutting main into release.
 
 ## Plan
@@ -43,8 +42,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   `moq_auth::mesh` left moq for Kixel);
   [auth key validation](/quest/m2/auth-key-validation.md); the
   [RTMPS connect](/quest/m2/rtmp-rtmps-tcurl.md) signature;
-  [usage's derived settings](/quest/m2/usage-derive-settings.md);
-  [first-publish versions](/quest/m2/first-publish-versions.md); and three
+  [usage's derived settings](/quest/m2/usage-derive-settings.md); and three
   API fences: mesh enrollment (dropped with it),
   [the capture selections](/quest/m2/api-capture-fences.md), and
   [the acknowledgment hook's trait](/quest/m2/api-ack-hook-trait.md). None
