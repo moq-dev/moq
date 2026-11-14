@@ -38,4 +38,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [HLS and DASH browser playback](/quest/m4/hls-player-test.md) - dash.js survives reconfiguration nightly
+- [HLS and DASH browser playback](/quest/m3/hls-player-test.md) - dash.js survives reconfiguration nightly

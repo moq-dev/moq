@@ -19,6 +19,8 @@ from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
 fails, and `workspace:^` would resolve `@moq/net`'s dependency to
 web-transport's 0.3.4, a different API. `js/qmux` must publish above 0.3.4;
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
+Recommended 2026-11-12 (/quest-audit): 0.4.0, so a consumer of
+web-transport's `^0.3` never resolves to the new API.
 Before publishing, confirm moq-dev/web-transport's release config no longer
 publishes `@moq/qmux` or `qmux` (the freeze step of
 [qmux-js-retire](/quest/m3/release/qmux-js-retire.md) and
@@ -101,16 +103,24 @@ From the 2026-10-25 pre-cut run:
 
 - Write the moq-cli and moq-gst `MIGRATE.md` entries from the Impact section of
   [moq-dev/moq#6522](https://github.com/moq-dev/moq/pull/6522); that rename list exists nowhere else.
-- Raise each wrapper's moq-ffi version floor (for example Kotlin's
-  `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
-  [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
 
 From [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702), which
 merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
 
-- Nothing to publish for moq-e2ee: its final code-free release, 0.0.22,
-  already points at moq-crypto, and `rs/moq-e2ee` is gone. Don't merge a
-  `release` branch release-plz proposal that bumps it.
+- `rs/moq-e2ee` is gone from `main`, but crates.io's newest moq-e2ee is a
+  full 0.0.25 crate published 2026-11-11 from `release`, not the code-free
+  0.0.22 pointer (corrected 2026-11-12, /quest-audit). Don't merge a
+  `release` branch release-plz proposal that bumps it again;
+  [retired names](/quest/m3/release/retired-names.md) publishes the pointer
+  above 0.0.25, with the other names this cut stops publishing.
+
+Open as of 2026-11-13 (maintainer, /quest-plan): where the next cycle's cuts
+live. The steps above place them in m0's release epic and have the wire cut
+require m2 and m3, but no quest may require one in a later milestone, and
+[m4](/quest/m4/README.md) and [m5](/quest/m5/README.md) now require this cut
+until it lands, a gate each cycle should re-create. [Cut
+placement](/quest/m0/cut-placement.md) settles both before this cut
+re-creates its successor.
 
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
 decision below). The gate is an epic in m3 for the checks the cut needs that
@@ -163,9 +173,12 @@ with the suites above.
 
 ## Required
 
+- [Cut placement](/quest/m0/cut-placement.md) - where this cut re-creates its successor, and the gate it re-creates
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
+- [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
+- [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

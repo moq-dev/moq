@@ -59,15 +59,17 @@ skipping inside the Nix shell.
   guest, and keep the runner registered only to this repository with
   approval required for every external contributor's workflow, as the
   README requires.
-- Open (2026-10-25): the [CI epic](/quest/m0/ci/README.md) dropped the VM
-  for the CI host in favor of kernel sandboxing, which conflicts with VFIO
-  passthrough. Recommendation: a container runner with the NVIDIA device
-  nodes and the host driver's libraries bound in. Confirm with the
-  maintainer before starting.
+- Open since 2026-10-25: the [CI epic](/quest/m0/ci/README.md) dropped the
+  VM for the CI host in favor of kernel sandboxing, which conflicts with the
+  VFIO passthrough above. See `## Waiting`.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: pick the GPU runner's shape, since the 2026-10-20 VM decision conflicts with the CI epic's later no-VM decision. Options: (a) a sandboxed runner container on the CI host with the NVIDIA device nodes and the host driver's libraries bound in, as [GPU runners](/quest/m9/video-quality/gpu-runners.md) already plans for the quality job; (b) a VFIO-passthrough VM from `github-runner-vm`. Recommended: (a), then drop the VFIO text above.
 
 ## Related
 
 - [Video hardware validation](/quest/m5/video-hardware.md) - hardware paths nothing runs yet
-- [Video quality hardware rows](/quest/m3/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU
+- [Video quality hardware rows](/quest/m9/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU

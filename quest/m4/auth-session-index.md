@@ -8,12 +8,12 @@ With `--limit-token` or `--limit-remote` set, the auth server's `connect`, `end`
 
 Found by [moq-dev/moq#7512](https://github.com/moq-dev/moq/pull/7512), which attributed JWT verification cost and runs it nightly: one `connect` plus `end` costs 66.5k instructions (9.1 µs) at 0 live sessions, 147k (18.6 µs) at 1024, and 1.27M (158 µs) at 16,384, about 73 instructions per live session. The cost is `Sessions::sweep` plus the per-token and per-remote count scans in `Sessions::connect` (`rs/moq-auth/src/serve.rs`, about line 375); `Revalidate` pays the sweep too. Its `verify/sessions/{0,1024,16384}` bench is the baseline.
 
-Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2. This waits on [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211) landing, which rewrites `Sessions`' token bookkeeping (shared request-token grants and attachment leases); indexing the table first would conflict with it, as #7512 noted.
+[moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211), which rewrote `Sessions`' token bookkeeping and which this waited on, has merged, so nothing blocks it. The count scans are now around `rs/moq-auth/src/serve.rs` lines 587 to 660.
 
 - Keep `HashMap<token, count>` and `HashMap<remote, count>` beside the slots, updated on connect, end, a new token attaching to a known session, and expiry. `Sessions::revalidate` updates them too, since it re-inserts an aged-out or restart-lost slot and appends a token the slot hadn't seen, and it keeps today's rule of enforcing no cap.
 - Age slots from a queue ordered by `seen`, refreshed on each sighting (a re-push with a generation, or an ordered map keyed by `(seen, id)`), so a sweep pops only expired entries. Keep today's rule: a session that missed two cadences is dropped.
 - Keep the semantics the doc comment on the limits describes, including a known id attaching another credential counting only against the new JWT's cap.
-- Key the per-token count on the token's signing input (header and payload) or its decoded claims, not the whole compact JWS: an ECDSA signature can be malleated to a second valid string, which today doubles `limits.token` for an ES256 or ES384 holder (found by the 2026-11-07 invariant audit, auth-6).
+- The per-token count's key is [its own fix](/quest/m1/token-count-signing-input.md), split out 2026-11-12 (maintainer, /quest-audit) because it corrects shipped behavior; index whatever key that leaves.
 - Measure with #7512's `verify/sessions` bench before and after; the slope should be flat.
 
 Public API: none. Wire: none.

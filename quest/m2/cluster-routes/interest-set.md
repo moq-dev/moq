@@ -21,7 +21,7 @@ and every earlier routing bug was an ordering nobody had enumerated.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): ✅ this edits the path router, after
-[the route per scope](/quest/m2/cluster-routes/scope.md) builds it,
+[the route per scope](https://github.com/moq-dev/moq/pull/8622) builds it,
 and the model as it has a route per prefix
 (`rs/moq-net/verify/route/RouteHandoff.tla`)
 (rejected: landing first on Babel's router, which
@@ -80,6 +80,13 @@ The edit rule those three imply, to prove rather than assume:
 
 Work:
 
+- Extend the current single-prefix-per-neighbour interface to all the disjoint
+  regions of one permit. `peer_interest` currently replaces its one answer and
+  SYNCED names only the neighbour; several calls under that key cannot serve
+  several regions. Update `watch`/`synced`'s contract and cover a permit with
+  `fleet/r2` and `fleet/r7` together, including an edit that absorbs both into
+  `fleet`. The router and switch preceding this quest claim only one region
+  per neighbour.
 - Start from the model and the router with the path rule. Everything a side
   says to a neighbour shares one FIFO per direction, the hold answer
   included: with one stream per side nothing overtakes anything.
@@ -113,10 +120,6 @@ one key, which `Sim` and the tests use, so this changes no behaviour on its
 own.
 
 Public API: none (the router is crate-private). Wire: none.
-
-## Required
-
-- [The router runs the path rule with a route per scope](/quest/m2/cluster-routes/scope.md) - the router this edits, with a floor per route
 
 ## Related
 
