@@ -49,6 +49,8 @@ CONSTANTS
     Exempt        \* which routes doubt does not keep a relay off (`Exempted`):
                   \* "none", the router's rule, or a comparison rule
 
+ASSUME Exempt \in {"none", "fresh", "own", "session"}
+
 Relays == Nodes \ {Origin}
 
 Cost == [l \in Links |-> IF l \in Dear THEN 2 ELSE 1]
