@@ -190,7 +190,7 @@ impl Consumer {
 		options: Options,
 	) -> Result<Self, Error> {
 		let name = name.into();
-		let min = Reader::open(broadcast, catalog, &name, &options, options.delay, 0).await?;
+		let (min, edge) = Reader::open(broadcast, catalog, &name, &options, options.delay, None).await?;
 
 		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
 		let max = if warmup.is_zero() {
@@ -203,7 +203,8 @@ impl Consumer {
 				min: Some(options.delay.min.unwrap_or_default().saturating_add(warmup)),
 				max: options.delay.max.map(|max| max.saturating_add(warmup)),
 			};
-			Some(Reader::open(broadcast, catalog, &name, &options, delay, 1).await?)
+			let (max, _) = Reader::open(broadcast, catalog, &name, &options, delay, edge).await?;
+			Some(max)
 		};
 
 		// The catalog's rate when it has one, else whatever the pictures show.
@@ -334,16 +335,17 @@ impl Consumer {
 }
 
 impl Reader {
-	/// Subscribe with `delay`, starting `lookback` groups before the live edge
-	/// when the caller asked for [`Start::Latest`].
+	/// Subscribe with `delay`, starting at the live edge when the caller asked for
+	/// [`Start::Latest`], or at the group before `edge`, a live edge another reader found.
+	/// Returns the reader and the live edge it waited for.
 	async fn open(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
 		name: &str,
 		options: &Options,
 		delay: Delay,
-		lookback: u64,
-	) -> Result<Self, Error> {
+		edge: Option<u64>,
+	) -> Result<(Self, Option<u64>), Error> {
 		let decoder = Sink::open(catalog, &options.decoder).await.map_err(|err| match err {
 			// Only a codec or description this build cannot decode is a refusal of the
 			// rendition. Backend and worker faults keep their own variants.
@@ -368,23 +370,25 @@ impl Reader {
 		// speed before reaching live media: on a thirty-second retention, half a minute of pictures
 		// raced through.
 		//
-		// A relative start counts back through the groups each hop holds from its live feed's
-		// latest, never from what an ended feed left cached, so it names no stale group that would
-		// ask the publisher to rewind for everyone reading. Group starts are sparse, so only a
-		// count, not arithmetic on the live edge's start, reaches the group before it.
+		// A live start counts from the latest group each hop holds from its live feed, never from
+		// what an ended feed left cached, so it names no stale group that would ask the publisher
+		// to rewind for everyone reading. The group before a live edge is the one containing the
+		// key just below it, since starts are sparse. Every wire carries a time start, where a
+		// relative one past the edge is refused before lite-07; there it reaches the edge alone.
 		if options.start == Start::Latest {
-			subscription = subscription.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Relative(lookback),
-				end: None,
-			}]);
+			let start = edge.map_or(moq_net::track::Anchor::Relative(0), |edge| {
+				moq_net::track::Anchor::Time(edge.saturating_sub(1))
+			});
+			subscription = subscription.with_ranges([moq_net::track::Range { start, end: None }]);
 		}
 		let mut subscriber = track.subscribe(subscription).await?;
 		// The live edge is known only once the feed is live: a warm copy still waiting on its
 		// source reports nothing yet. Opening waits for it, or the track's end, as `Start::Latest`
 		// promises.
-		if options.start == Start::Latest {
-			subscriber.largest().await;
-		}
+		let edge = match options.start {
+			Start::Latest => subscriber.largest().await.map(|largest| largest.group),
+			_ => None,
+		};
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
@@ -396,7 +400,7 @@ impl Reader {
 		// needs.
 		let track = playout.consumer(track, container);
 
-		Ok(Self {
+		let reader = Self {
 			decoder,
 			track,
 			pending: VecDeque::new(),
@@ -404,7 +408,8 @@ impl Reader {
 			drained: false,
 			recover: true,
 			leading_floor: None,
-		})
+		};
+		Ok((reader, edge))
 	}
 
 	/// The next item this decoder alone produces, with its access unit's arrival
