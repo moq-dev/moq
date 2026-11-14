@@ -554,11 +554,12 @@ struct MeshServe {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	state: Option<PathBuf>,
 
-	/// How long a mesh token lasts; devices refresh it two thirds of the way through.
+	/// How long a mesh token lasts, which bounds how long a revoked device keeps access;
+	/// devices refresh it two thirds of the way through.
 	#[usage(
 		name = "mesh-token-ttl",
 		long = "mesh-token-ttl",
-		default = "1h",
+		default = "15m",
 		setting = "mesh.token_ttl"
 	)]
 	token_ttl: moq_tokio::cli::Duration,
@@ -572,7 +573,7 @@ impl Default for MeshServe {
 			key: None,
 			relay: Vec::new(),
 			state: None,
-			token_ttl: std::time::Duration::from_secs(3600).into(),
+			token_ttl: std::time::Duration::from_secs(900).into(),
 		}
 	}
 }
@@ -1002,9 +1003,9 @@ enum MeshCommand {
 		#[usage(long)]
 		expires: Option<moq_tokio::cli::Duration>,
 
-		/// Enroll any number of devices, instead of one.
-		#[usage(long)]
-		reusable: bool,
+		/// How many devices it may enroll.
+		#[usage(long, default = "1")]
+		uses: std::num::NonZeroU32,
 	},
 
 	/// List enrollment keys, without their secrets.
@@ -1039,11 +1040,11 @@ impl Mesh {
 			url
 		};
 		let request = match &self.command {
-			MeshCommand::CreateKey { tag, expires, reusable } => {
+			MeshCommand::CreateKey { tag, expires, uses } => {
 				let mut new = moq_auth::mesh::NewKey::default();
 				new.tags = tag.clone();
 				new.expires_in = expires.map(std::time::Duration::from);
-				new.reusable = *reusable;
+				new.uses = *uses;
 				client.post(url("/mesh/keys", &[])).json(&new)
 			}
 			MeshCommand::Keys => client.get(url("/mesh/keys", &[])),
@@ -1374,7 +1375,8 @@ mod tests {
 				"create-key",
 				"--tag",
 				"robot",
-				"--reusable",
+				"--uses",
+				"20",
 				"--expires",
 				"1d",
 			][..],

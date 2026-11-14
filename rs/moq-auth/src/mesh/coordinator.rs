@@ -11,6 +11,7 @@
 //! replay state is one number per enrolled device, so no caller can spend another's room.
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -52,12 +53,13 @@ pub struct Config {
 	pub relays: Vec<url::Url>,
 	/// The JSON file enrollment keys and devices persist to; `None` keeps them in memory.
 	pub state: Option<PathBuf>,
-	/// How long an issued token lasts.
+	/// How long an issued token lasts. Relays verify a token on their own, so this is also
+	/// the longest a revoked device keeps its access.
 	pub token_ttl: Duration,
 }
 
 impl Config {
-	/// A coordinator at `url` signing with `key`, with hour-long tokens, no relays, and no
+	/// A coordinator at `url` signing with `key`, with 15-minute tokens, no relays, and no
 	/// state file.
 	pub fn new(url: url::Url, key: Key) -> Self {
 		Self {
@@ -65,7 +67,7 @@ impl Config {
 			key,
 			relays: Vec::new(),
 			state: None,
-			token_ttl: Duration::from_secs(3600),
+			token_ttl: Duration::from_secs(900),
 		}
 	}
 }
@@ -91,9 +93,9 @@ struct StoredKey {
 	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	expires: Option<kio::clock::Wall>,
-	reusable: bool,
+	uses: NonZeroU32,
 	#[serde(default)]
-	used: bool,
+	used: u32,
 	#[serde(default)]
 	revoked: bool,
 }
@@ -132,10 +134,10 @@ pub struct KeyInfo {
 	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub expires: Option<kio::clock::Wall>,
-	/// Whether it enrolls more than one device.
-	pub reusable: bool,
-	/// Whether a single-use key has enrolled its device.
-	pub used: bool,
+	/// How many devices it may enroll.
+	pub uses: NonZeroU32,
+	/// How many devices it has enrolled.
+	pub used: u32,
 	/// Whether the owner revoked it.
 	pub revoked: bool,
 	/// The key itself, returned only when it is created.
@@ -149,7 +151,7 @@ impl From<&StoredKey> for KeyInfo {
 			id: key.id.clone(),
 			tags: key.tags.clone(),
 			expires: key.expires,
-			reusable: key.reusable,
+			uses: key.uses,
 			used: key.used,
 			revoked: key.revoked,
 			key: None,
@@ -159,7 +161,7 @@ impl From<&StoredKey> for KeyInfo {
 
 /// `POST /mesh/keys` on the admin API: what the new enrollment key allows.
 #[serde_as]
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct NewKey {
@@ -168,8 +170,20 @@ pub struct NewKey {
 	/// How long until it stops enrolling; `None` never expires. Whole seconds on the wire.
 	#[serde_as(as = "Option<serde_with::DurationSeconds<u64>>")]
 	pub expires_in: Option<Duration>,
-	/// Whether it enrolls more than one device.
-	pub reusable: bool,
+	/// How many devices it may enroll, so a leaked key admits at most this many. A device
+	/// it already enrolled may enroll again without spending one.
+	pub uses: NonZeroU32,
+}
+
+impl Default for NewKey {
+	/// A key that enrolls one device and never expires.
+	fn default() -> Self {
+		Self {
+			tags: Vec::new(),
+			expires_in: None,
+			uses: NonZeroU32::MIN,
+		}
+	}
 }
 
 #[derive(Default)]
@@ -268,21 +282,21 @@ impl Coordinator {
 				"the enrollment key has expired",
 			));
 		}
-		if !key.reusable && key.used {
+		let endpoint = request.proof.endpoint;
+		let known = inner.store.devices.iter().any(|device| device.endpoint == endpoint);
+		if !known && key.used >= key.uses.get() {
 			return Err(ErrorReply::new(
 				ErrorCode::InvalidGrant,
-				"the enrollment key was already used",
+				"the enrollment key has no uses left",
 			));
 		}
 		let tags = key.tags.clone();
-		let reusable = key.reusable;
 		let id = id.to_string();
 
-		let endpoint = request.proof.endpoint;
 		let enrollment = self.commit(&mut inner, |store| {
 			self.admit(store, endpoint, request.name.as_deref(), tags)?;
-			if !reusable && let Some(key) = store.keys.iter_mut().find(|key| key.id == id) {
-				key.used = true;
+			if !known && let Some(key) = store.keys.iter_mut().find(|key| key.id == id) {
+				key.used += 1;
 			}
 			self.issue(store, endpoint)
 		})?;
@@ -318,8 +332,8 @@ impl Coordinator {
 			hash: hex(&sha256(secret.as_bytes())),
 			tags: new.tags.clone(),
 			expires: new.expires_in.map(|ttl| kio::clock::wall().saturating_add(ttl)),
-			reusable: new.reusable,
-			used: false,
+			uses: new.uses,
+			used: 0,
 			revoked: false,
 		};
 		let mut info = KeyInfo::from(&stored);
@@ -726,7 +740,7 @@ mod tests {
 		let coordinator = Coordinator::new(Config::new(base.clone(), key)).unwrap();
 		let secret = coordinator
 			.create_key(&NewKey {
-				reusable: true,
+				uses: NonZeroU32::new(2).unwrap(),
 				..Default::default()
 			})
 			.unwrap()
