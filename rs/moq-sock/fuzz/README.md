@@ -54,6 +54,7 @@ libFuzzer writes the input to `artifacts/sock_cmsg/crash-<hash>` and prints the 
 command to reproduce it. Fix the bug, then commit the input:
 
 ```bash
+mkdir -p rs/moq-sock/fuzz/regressions/sock_cmsg
 cp rs/moq-sock/fuzz/artifacts/sock_cmsg/crash-<hash> rs/moq-sock/fuzz/regressions/sock_cmsg/
 ```
 

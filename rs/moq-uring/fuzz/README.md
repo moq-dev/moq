@@ -40,6 +40,7 @@ libFuzzer writes the input to `artifacts/uring_cmsg/crash-<hash>` and prints the
 `cargo fuzz` command to reproduce it. Fix the bug, then commit the input:
 
 ```bash
+mkdir -p rs/moq-uring/fuzz/regressions/uring_cmsg
 cp rs/moq-uring/fuzz/artifacts/uring_cmsg/crash-<hash> rs/moq-uring/fuzz/regressions/uring_cmsg/
 ```
 
