@@ -184,7 +184,9 @@ impl Routed {
 			node: peer_setup.node().map_or(0, |node| node.get()),
 		};
 		let key = peer_setup.route_key().unwrap_or(session_key);
-		let stream = node.receive(peer, scoped(&link, &root, permit, key)).map_err(refused)?;
+		let stream = (node.receive(peer, scoped(&link, &root, permit, key)))
+			.map_err(refused)?
+			.with_clock(subscriber.runtime.clone());
 		Ok(Self {
 			node,
 			stream,
@@ -643,7 +645,8 @@ impl Routed {
 		let stream = self
 			.node
 			.receive(self.peer, scoped(&self.link, &self.root, permit, key))
-			.map_err(refused)?;
+			.map_err(refused)?
+			.with_clock(subscriber.runtime.clone());
 		stream.rtt(self.rtt.reported());
 		// What the old stream served stays in the origin until the new one serves it
 		// again, or lets go after.

@@ -278,6 +278,36 @@ fn nothing_moves_across_a_dead() {
 	assert_eq!(read, [route(1), Output::Dead(Dead::Draining { node: 1 }), route(2)]);
 }
 
+/// A route the reader read ends even when its ROUTE_END is queued alone, with no batch
+/// withdrawing its claims ahead of it, as when a hold ends.
+#[test]
+fn a_read_route_ends_alone() {
+	let offer = Offer {
+		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
+		draining: false,
+		priority: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+	};
+	let mut outbox = Outbox::default();
+	let mut waiting = Waiting::default();
+	let key = (1, Path::empty());
+	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut waiting);
+	outbox.dead(Dead::Draining { node: 1 });
+	assert_eq!(std::iter::from_fn(|| outbox.pop()).count(), 2);
+	outbox.route(7, key, None, &mut waiting);
+	let read: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();
+	assert_eq!(
+		read,
+		[Output::Route {
+			id: 1,
+			prefix: Path::empty(),
+			reach: None
+		}]
+	);
+}
+
 /// A relay sends a claim on only once a stream serving it confirmed its instance, so a
 /// peer never names an instance this relay's origin cannot route yet.
 #[test]

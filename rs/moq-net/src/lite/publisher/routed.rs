@@ -269,7 +269,11 @@ impl Answer {
 				.map(|prefix| (prefix.clone(), None))
 				.chain(mounts.into_iter().map(|mount| (mount.interest.clone(), Some(mount))));
 			for (interest, mount) in interests {
-				let stream = (node.answer(peer, self.link.clone(), interest)).map_err(|_| Error::ProtocolViolation)?;
+				let mut stream =
+					(node.answer(peer, self.link.clone(), interest)).map_err(|_| Error::ProtocolViolation)?;
+				if let Some(stall) = &self.stall {
+					stream = stream.with_clock(stall.runtime.clone());
+				}
 				self.sources.push(Source { stream, mount });
 			}
 			for index in 0..self.sources.len() {

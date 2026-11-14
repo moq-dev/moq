@@ -333,7 +333,8 @@ impl Outbox {
 						unwait(waiting, key.0, path, stream, &key.1);
 					}
 				}
-				self.known.remove(&key);
+				// Whether the reader holds the route is read before it is forgotten: an end
+				// queued alone, with no batch ahead of it, opens the entry.
 				let entry = self.entry(&key);
 				match entry.was && !entry.ended {
 					// The reader holds the route: it ends, after the floor of its last batch.
@@ -350,6 +351,7 @@ impl Outbox {
 						entry.batch = None;
 					}
 				}
+				self.known.remove(&key);
 				self.prune(&key);
 			}
 		}
@@ -802,6 +804,7 @@ impl Node {
 			node: self.clone(),
 			key,
 			queue: state.queues[&key].clone(),
+			clock: None,
 		}
 	}
 
@@ -873,6 +876,10 @@ pub(crate) struct Stream {
 	node: Node,
 	key: Key,
 	queue: kio::Shared<Outbox>,
+	/// The clock of the session the stream belongs to. The origin's clock moves only as
+	/// its driver polls, so an idle origin reads an old instant: what a session hands the
+	/// node is dated by the later of the two, a closed session's doubt included.
+	clock: Option<Deadlines>,
 }
 
 impl std::fmt::Debug for Stream {
@@ -905,9 +912,21 @@ impl Stream {
 		self.queue.lock().pop()
 	}
 
+	/// Date what the stream hands the node by its session's clock too.
+	pub fn with_clock(mut self, clock: Deadlines) -> Self {
+		self.clock = Some(clock);
+		self
+	}
+
+	/// The later of the origin's clock and the session's.
+	fn now(&self, state: &State) -> Instant {
+		let origin = state.clock.now();
+		self.clock.as_ref().map_or(origin, |clock| origin.max(clock.now()))
+	}
+
 	fn with<R>(&self, f: impl FnOnce(&mut Router<Key, Claim>, Key, Instant) -> R) -> R {
 		let mut state = self.node.lock();
-		let now = state.clock.now();
+		let now = self.now(&state);
 		state.router.clock(now);
 		let out = f(&mut state.router, self.key, now);
 		state.flush();
@@ -982,6 +1001,8 @@ impl Drop for Stream {
 		let Some(&tag) = state.streams.get(&self.key) else {
 			return;
 		};
+		let now = self.now(&state);
+		state.router.clock(now);
 		let session = state.sessions.get_mut(&tag).expect("a registered stream's session");
 		match session.closing {
 			0 => state.close(vec![self.key], false),
@@ -1077,7 +1098,8 @@ impl State {
 		}
 		match closed {
 			true => {
-				let now = self.clock.now();
+				// The streams dropping dated the router by their sessions' clocks.
+				let now = self.clock.now().max(self.router.now());
 				self.router.disconnect(keys.iter().copied(), now);
 			}
 			false => {

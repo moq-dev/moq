@@ -636,6 +636,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.now = self.now.max(now);
 	}
 
+	/// The latest instant this router was handed.
+	pub fn now(&self) -> Instant {
+		self.now
+	}
+
 	// --- Sessions ---
 
 	/// A session to `neighbor`, which names itself `hop` in a path, opened. A `hop` of 0

@@ -153,7 +153,12 @@ impl Topology {
 	async fn trigger(&mut self, trigger: Trigger) {
 		match trigger {
 			Trigger::Disconnect => abort(self.a_to_r.take().unwrap()),
-			Trigger::Unannounce => abort(self.p_to_a.take().unwrap()),
+			Trigger::Unannounce => {
+				abort(self.p_to_a.take().unwrap());
+				// `P` is the far end of `A`'s closed session, and `B`'s route crosses it too:
+				// on lite-07 `R` holds the claim until the doubt lifts, then moves to `B`.
+				kio::clock::sleep(DOUBT).await;
+			}
 			Trigger::BetterRoute => {
 				let direct = link(self.version, &self.publisher, &self.subscriber, None).await;
 				self.links.push(direct);
