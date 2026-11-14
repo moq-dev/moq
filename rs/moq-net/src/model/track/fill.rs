@@ -1281,8 +1281,15 @@ impl Inner {
 		}
 	}
 
+	/// A writer that never says it answers from a byte writes whole frames, so its copy
+	/// starts at a frame boundary even when the fill asked from a byte: only
+	/// [`GroupFill::accept_from`] starts one partway into a frame.
 	fn accept(&self, sequence: u64, info: Option<Info>) -> Result<group::Producer> {
-		self.accept_from(sequence, info, self.bounds(sequence))
+		let frames = group::Bounds {
+			byte: 0,
+			..self.bounds(sequence)
+		};
+		self.accept_from(sequence, info, frames)
 	}
 
 	fn accept_from(&self, sequence: u64, info: Option<Info>, frames: group::Bounds) -> Result<group::Producer> {

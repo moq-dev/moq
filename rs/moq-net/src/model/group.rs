@@ -4350,6 +4350,7 @@ impl Consumer {
 			}
 		}))?;
 		let frame = match lead {
+			Some((info, _, _)) if from as u64 > info.size => return Poll::Ready(Err(Error::WrongSize)),
 			Some((info, buf, base)) => {
 				self.cursor.index += 1;
 				self.stats.frames(1);
@@ -6877,6 +6878,7 @@ mod test {
 		assert!(plain.clone().at(1, 2).is_none(), "the copy starts past byte 2");
 		let mut rest = plain.clone().at(1, 4).unwrap();
 		let mut early = plain.clone().at(1, 3).unwrap();
+		let mut past = plain.clone().at(1, 10).unwrap();
 		assert!(next_at(&mut rest, 4).is_none(), "waits for the frame to open");
 
 		let before = handle.cache_size();
@@ -6884,6 +6886,10 @@ mod test {
 		assert_eq!(handle.lead_at(1), None, "opened");
 		assert_eq!(lead.remaining(), 3, "only the rest is written");
 		lead.write(b"de".as_ref()).unwrap();
+		assert!(
+			matches!(next_at(&mut past, 10), Some(Err(Error::WrongSize))),
+			"a byte past the frame's end"
+		);
 		let mut frame = next_at(&mut rest, 4).unwrap().unwrap().unwrap();
 		assert_eq!(frame.size, 6, "it states the frame's full size");
 		assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"e");
