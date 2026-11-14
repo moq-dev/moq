@@ -10,14 +10,15 @@ description: Logical time and timers with a manual clock for deterministic tests
 
 Use `@moq/clock` when a deadline and the elapsed time beside it must come from
 one clock. Its default backend reads the host's monotonic and wall clocks;
-a test installs a `Manual` clock without patching the host's timers.
+a test installs a `Manual` clock from `@moq/clock/test` without patching the host's timers.
 
 ```sh
 bun add @moq/clock
 ```
 
 ```ts
-import { Duration, Manual, now, sleep } from "@moq/clock";
+import { Duration, now, sleep } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 
 const clock = new Manual();
 const installed = clock.install();

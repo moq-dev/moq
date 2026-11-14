@@ -13,6 +13,7 @@ use crate::{
 	coding::{Decode as _, Reader, Stream},
 	lite,
 	track::{Anchor, Position, Subscription},
+	util::SendCell,
 };
 
 use super::Version;
@@ -178,10 +179,13 @@ struct TrackEntry {
 	/// Where the subscription's groups go, once its TRACK_INFO says how to read them. A
 	/// SUBSCRIBE sent alongside its TRACK registers before.
 	copy: Option<Accepted>,
+	// Parked and paused groups hold group and frame writers, which reach the whole track
+	// model: the cells prove `Send` once here, so the session driver's proof stays within
+	// the default recursion limit.
 	/// The group streams that arrived before the copy, while any wait.
-	parked: Option<kio::Producer<Parked>>,
+	parked: Option<SendCell<kio::Producer<Parked>>>,
 	/// Lite-07: the groups a YIELDED reset paused, once one did or a stream waits on one.
-	paused: Option<kio::Producer<Paused>>,
+	paused: Option<SendCell<kio::Producer<Paused>>>,
 	/// Lite-07: the groups a stream that a YIELDED reset would pause is reading, one per
 	/// stream, so stream credit bounds them.
 	yielding: BTreeMap<u64, Yielding>,
@@ -6387,6 +6391,59 @@ mod tests {
 			stale: RangeSet::new(),
 		});
 		(serve, serving, tail, broadcast)
+	}
+
+	/// A stale drop of part of a fill's run recovers that part on its own subscription, which
+	/// takes it out of the copy's ranges at once, though the rest of the run stays asked: left
+	/// in, any later update would reopen the stale drop and the publisher would serve the
+	/// recovered groups on both.
+	#[kio::test]
+	#[expect(clippy::single_range_in_vec_init, reason = "the asked runs are a list, here one")]
+	async fn a_recovered_run_leaves_the_subscription() {
+		let (serve, _serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		for sequence in 0..6 {
+			let mut group = copy.create_group(group::Info { sequence }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		for sequence in 1..5 {
+			copy.evict(sequence);
+		}
+		let mut reader = copy
+			.subscribe(
+				crate::track::Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(None))
+					.with_range(1..5),
+			)
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 1..5 are owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("groups 1..5 are a miss");
+		};
+		let mut fills = fills::RangeFills::default();
+		fills.push(fill);
+		assert!(fills.poll(&serve, &copy, None, true, &waiter).unwrap());
+		assert_eq!(fills.ask.groups.iter().cloned().collect::<Vec<_>>(), [1..5]);
+
+		fills.refuse(1..3, crate::StreamError::Old);
+		assert!(fills.poll(&serve, &copy, None, true, &waiter).unwrap());
+		assert!(fills.recovering(), "1..3 recovered on its own subscription");
+		assert_eq!(
+			fills.ask.groups.iter().cloned().collect::<Vec<_>>(),
+			[3..5],
+			"the recovered run is no longer asked"
+		);
 	}
 
 	/// A SUBSCRIBE_DROP can only echo an update the subscriber sent: one naming a later update

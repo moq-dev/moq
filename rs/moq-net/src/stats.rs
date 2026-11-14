@@ -51,9 +51,14 @@
 //!   and the viewer refcount; fetched payload still flows into `bytes` /
 //!   `frames` / `groups`.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
-//!   groups/frames are read (egress) or written (ingress) in the model.
+//!   groups/frames are read (egress) or written (ingress) in the model. A
+//!   session's egress `bytes` / `frames` count only payload the transport
+//!   delivered (see [`SendStream::delivered`](crate::transport::poll::SendStream::delivered)),
+//!   never what a reset or a lost session discarded: a frame's bytes as they
+//!   land, and the frame with its last byte. An in-process reader counts on read.
 //! * `datagrams`: cumulative datagrams of datagram tracks. A datagram belongs to
-//!   no group, so it bumps `bytes` but not `groups` or `frames`.
+//!   no group, so it bumps `bytes` but not `groups` or `frames`. A session counts
+//!   an egress datagram once the transport accepts it.
 //! * `inflated`: cumulative bytes inflated from compressed groups for plain
 //!   readers (in-process consumers, and egress that cannot carry compression).
 //!   Every plain reader of a group shares one inflated copy, so each byte counts
@@ -1273,6 +1278,7 @@ impl Registry {
 			counters: self.entry(path).map(|entry| entry.tier(tier)),
 			traffic: None,
 			side: Side::Publisher,
+			delegated: false,
 		}
 	}
 
@@ -1994,11 +2000,33 @@ pub(crate) struct Meter {
 	counters: Option<Arc<TierCounters>>,
 	traffic: Option<Arc<SessionTraffic>>,
 	side: Side,
+	/// Set once a wire writer took over the payload counts, see [`Self::delegate`].
+	delegated: bool,
 }
 
 impl Meter {
 	fn counters(&self) -> Option<&Counters> {
 		self.counters.as_ref().map(|c| self.side.counters(c))
+	}
+
+	/// The counters `frames` and `bytes` bump, none once the payload is [delegated](Self::delegate).
+	fn payload(&self) -> Option<&Counters> {
+		match self.delegated {
+			true => None,
+			false => self.counters(),
+		}
+	}
+
+	/// Hand the payload counts to the caller: this meter stops counting `frames` and `bytes`,
+	/// and the returned one counts them for a wire writer as the transport delivers them.
+	/// The rest (`groups`, `inflated`, `stale`) stays here.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn delegate(&mut self) -> Meter {
+		self.delegated = true;
+		Meter {
+			delegated: false,
+			..self.clone()
+		}
 	}
 
 	/// Bump `groups` once (a group delivered/consumed on this side).
@@ -2013,13 +2041,16 @@ impl Meter {
 		if n == 0 {
 			return;
 		}
-		if let Some(counters) = self.counters() {
+		if let Some(counters) = self.payload() {
 			counters.frames.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
 	/// Record one datagram of `n` payload bytes, which belongs to no group.
 	pub(crate) fn datagram(&self, n: u64) {
+		if self.delegated {
+			return;
+		}
 		if let Some(counters) = self.counters() {
 			counters.datagrams.fetch_add(1, Ordering::Relaxed);
 			counters.bytes.fetch_add(n, Ordering::Relaxed);
@@ -2050,7 +2081,7 @@ impl Meter {
 
 	/// Bump `bytes` by `n`.
 	pub(crate) fn bytes(&self, n: u64) {
-		if n == 0 {
+		if n == 0 || self.delegated {
 			return;
 		}
 		if let Some(counters) = self.counters() {
@@ -2067,6 +2098,60 @@ impl Meter {
 			}
 			.fetch_add(n, Ordering::Relaxed);
 		}
+	}
+}
+
+/// The payload a wire stream carries, billed to a delegated [`Meter`] as the transport delivers
+/// it, so egress never counts bytes a reset or a lost session discarded.
+///
+/// Offsets are the stream's. A frame's bytes count as they are delivered, and the frame once
+/// its last byte is.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+pub(crate) struct Delivery {
+	meter: Meter,
+	/// Each frame not yet wholly delivered, oldest first: where its payload starts and ends.
+	frames: std::collections::VecDeque<(u64, u64)>,
+	/// The stream offset billed through.
+	through: u64,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl Delivery {
+	pub(crate) fn new(meter: Meter) -> Self {
+		Self {
+			meter,
+			frames: Default::default(),
+			through: 0,
+		}
+	}
+
+	/// A frame whose payload is the stream's `start..start + size`, after every earlier one.
+	pub(crate) fn frame(&mut self, start: u64, size: u64) {
+		self.frames.push_back((start, start + size));
+	}
+
+	/// Whether a frame's payload the stream took before offset `written` waits on delivery.
+	pub(crate) fn waiting(&self, written: u64) -> bool {
+		!self.frames.is_empty() && self.through < written
+	}
+
+	/// Bill the payload before stream offset `through`, which never goes back.
+	pub(crate) fn deliver(&mut self, through: u64) {
+		if through <= self.through {
+			return;
+		}
+		let (mut bytes, mut frames) = (0, 0);
+		while let Some(&(start, end)) = self.frames.front() {
+			bytes += end.min(through).saturating_sub(start.max(self.through));
+			if end > through {
+				break;
+			}
+			frames += 1;
+			self.frames.pop_front();
+		}
+		self.through = through;
+		self.meter.frames(frames);
+		self.meter.bytes(bytes);
 	}
 }
 
@@ -2143,6 +2228,7 @@ impl Scope {
 			counters,
 			traffic,
 			side: self.side,
+			delegated: false,
 		}
 	}
 

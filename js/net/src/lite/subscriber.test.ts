@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, Elapsed, Manual, timeout, yieldNow } from "@moq/clock";
+import { Duration, Elapsed, timeout, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { type Getter, Signal } from "@moq/signals";
 import type { RouteOptions } from "../announced.ts";
 import type { Grant } from "../auth.ts";

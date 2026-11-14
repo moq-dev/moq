@@ -38,3 +38,11 @@ Keep random loss for recovery correctness. Any acceptance or performance
 consumer uses a rate below its media bitrate behind a deep but finite queue,
 and checks that the queue overflowed. A stalled sender that never filled the
 queue is not evidence about congestion loss.
+
+Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): ✅ m1
+(rejected: staying in m4). It is the base for [fault schedules](/quest/m4/cluster-fault-schedules.md).
+
+Check first: `moq_tokio::Client::with_network` and the relay's
+`cluster::Config::network` already exist under `sim`, so say which of "What
+remains" has landed, and whether that `Network` carries QUIC or the in-memory
+transport, before picking the server's hook.

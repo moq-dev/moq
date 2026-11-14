@@ -324,10 +324,10 @@ player's own count, which its stats panel shows, is read alongside:
   early. Its `p50` is where audio rests, so latency spent to buy fewer underruns shows there; its
   `p95` includes audio trailing through a stall. Natively, the presentation clock `moq play` paces
   video from (`sync::Consumer::position`).
-- `recover_ms`: the longest audio spent off its resting point, from the ring stalling, or audio
-  trailing the shared clock by more than one 20 ms bucket past the window's `av_lag_ms` p50, to
-  audio back within it. Reported, not budgeted: it is how long a stall costs, which a player may
-  trade against the audio it keeps.
+- `recover_ms`: the longest audio took to return after a disturbance: from the ring stalling, or
+  audio more than one codec frame off where it rested (its median lag over the 5 s before), either
+  way, to audio back within a frame of that rest. Reported, not budgeted: it is how long a stall
+  costs, which a player may trade against the audio it keeps.
 - `converge_ms`: from first audio to the last time the target moved more than one 20 ms bucket from
   its final value.
 - `render_load`: Chromium's render capacity, the share of each quantum's budget the graph used.
