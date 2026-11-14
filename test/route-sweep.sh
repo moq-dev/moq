@@ -14,3 +14,5 @@ just rs test -p moq-net --release --features async --test integration -E 'test(=
 MOQ_ROUTE_SCENARIOS=${MOQ_ROUTE_SCENARIOS:-20000} just rs test -P sweep -p moq-net --release -E 'test(/^route::tests::handoff::(distance|path)::sweep_/) | test(/^route::tests::scope::sweep_scoped_meshes_show_what_the_rule_says$/)'
 # Every delivery order of the small meshes the gate's triangle leaves out.
 just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::search::/)'
+# Cache-aware routing's long sweep, from the same seed, settles every churned mesh of copies: 3000 scenarios each with and without held links, about 3 minutes.
+MOQ_ROUTE_CASES=3000 just rs test -P sweep -p moq-net --release --run-ignored only -E 'test(=route::tests::cache::sweep_cache_routing_long)'

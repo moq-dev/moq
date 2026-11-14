@@ -103,7 +103,7 @@ fn qmux_default() -> qmux::Config {
 fn spawn_qmux<T: qmux::transport::Transport + Send + 'static>(
 	(session, driver): (qmux::Session, qmux::Driver<T>),
 ) -> qmux::Session {
-	runtime::spawn(driver);
+	runtime::Spawner::current().spawn(driver);
 	session
 }
 
