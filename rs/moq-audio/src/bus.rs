@@ -2500,7 +2500,11 @@ mod tests {
 			let next = driver.position();
 			channel.write(next + gap, &tone(0, 480)).unwrap();
 			let left = mixed(&mut driver, &mut reader, &[BLOCK], 9_600);
-			assert_eq!(left.iter().position(|sample| *sample != 0.0), Some(gap as usize), "gap {gap}");
+			assert_eq!(
+				left.iter().position(|sample| *sample != 0.0),
+				Some(gap as usize),
+				"gap {gap}"
+			);
 		}
 	}
 

@@ -998,9 +998,7 @@ impl Consumer {
 			self.staged_prime = primed;
 		}
 		let want = if stretching { stretch.window } else { need };
-		let mut frames = occupied
-			.min(want.saturating_sub(stretch.queued()))
-			.min(stretch.room());
+		let mut frames = occupied.min(want.saturating_sub(stretch.queued())).min(stretch.room());
 		if primed {
 			frames = frames.min(self.prime);
 		}
