@@ -35,10 +35,13 @@ Agent's choices, for the implementer to revisit:
   such patch does not land.
 - List the rules considered and left out, with the reason.
 - The 64-case gate run must not slow measurably; say by how much it did.
+- The relay and moq-tokio's `Client` and `Server` already run over moq-tokio's
+  `quic::driver::sim::Network` (`rs/moq-relay/tests/integration/quic_sim.rs`,
+  `rs/moq-tokio/tests/integration/sim_client.rs`), whose paths cross the
+  shared `Link`, so a checker there judges those runs too.
 
 Public API: none. Wire: none.
 
 ## Related
 
 - [QUIC Interop Runner](/quest/m1/quic-interop.md) - the same rules judged by other stacks
-- [The relay over QUIC on the sim](/quest/m1/quic-sim.md) - its runs gain the checker through the shared `Link`

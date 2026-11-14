@@ -175,7 +175,3 @@ through `bandwidth_estimate` → `estimated_send_rate` → `set_bitrate`.
 the upstream encoder, so a GStreamer pipeline at a fixed bitrate still queues
 when capacity drops; [its own quest](/quest/m3/quic-realtime/moqsink-feedback.md)
 owns that feedback.
-
-## Related
-
-- [QUIC on the sim](/quest/m1/quic-sim.md) - deterministic successor to the moq-shaper harness once it lands

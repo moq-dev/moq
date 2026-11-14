@@ -24,4 +24,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Benchmark sources](/quest/m4/bench-sources.md) - feeds these series into the regression table
-- [QUIC on the sim](/quest/m1/quic-sim.md) - an in-memory QUIC link the sweep could reuse
