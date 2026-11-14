@@ -23,6 +23,16 @@ nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
 
+Decided 2026-11-13 (maintainer, /quest-complete): ✅ after the first
+scheduled Nightly past [#8631](https://github.com/moq-dev/moq/pull/8631),
+add the Windows numbers to
+[jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950)
+only if they add something, and file a new issue only if Windows still misses
+most looked-up keys with no download-budget refusals (Waiting). #950 already
+covers budget refusals and names the 10 GiB Windows budget, and jdx replied
+there on 11-13 that prefetch and restores share one counter. Rejected:
+filing the drafted issue now; posting nothing upstream.
+
 Decided 2026-11-12 (maintainer, coordinator session): ✅ bump mbx to 1.30.0
 first, then file the Windows misses upstream with 1.30.0 evidence (rejected:
 file now on 1.29.2). 1.30.0 adds `mbx analyze` and `mbx stats` explanations
@@ -302,8 +312,8 @@ the [failed-puts quest](/quest/m0/ci/mbx-failed-puts.md) already collects for
 its own after-measurement:
 
 - Windows: whether its workspace build hits most looked-up keys once its
-  download stays under 20 GiB with no budget refusals. That decides the
-  upstream report below.
+  download stays under 20 GiB with no budget refusals. The first such
+  night settles the upstream report (Waiting).
 - Linux: whether full history now raises each job's hits above its depth-1
   range. If the jobs still sit inside it once restores stop failing, plan a
   quest that returns them to `fetch-depth: 1`, since full history then costs
@@ -314,8 +324,8 @@ its own after-measurement:
   take it from two scheduled runs on one `main` commit if a quiet day gives
   them, else say none occurred.
 
-Draft upstream issue for jdx/mr-boxington, to file only on the maintainer's
-approval (Waiting). Its CONTRIBUTING.md accepts bug reports in Issues or
+Draft upstream issue for jdx/mr-boxington, the fallback the Waiting item
+files only if Windows still misses most keys without budget refusals. Its CONTRIBUTING.md accepts bug reports in Issues or
 Discussions only from real use, and requires AI disclosure. Its AGENTS.md
 gives the disclosure line, which the poster appends verbatim with its own
 runtime identifiers, followed by the `(Written by <model> with <effort>)`
@@ -340,18 +350,23 @@ placeholder with the first night after #8631.
 
 ## Waiting
 
-- Maintainer: approve filing the drafted Windows issue (Plan) on
-  jdx/mr-boxington, which is outside the maintainer's orgs, so an agent may
-  not post there unasked. Recommended: approve filing only if the first
-  scheduled Nightly after #8631 still shows Windows missing most looked-up
-  keys with no `download budget exceeded` warnings; if hits recover, the
-  Windows before and after goes to
-  [jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950)
-  with the failed-puts numbers instead, and no issue is filed. Not
-  recommended: filing now, since the budget explains the same pattern on
-  Linux and upstream would chase our configuration; never filing, since the
-  draft is ready if the misses outlast the budget. Done when the answer is
-  recorded in the Plan.
+- GitHub Actions: the first scheduled Nightly after #8631 (expected
+  2026-11-14) settles the Windows upstream report, by its Windows workspace
+  build's `mbx[cache]: object cache` line and any `download budget exceeded`
+  warnings. Record that night's numbers in the Plan, then:
+  - If Windows hits most looked-up keys, or still misses with budget
+    refusals, comment on
+    [jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950)
+    only if the numbers add something it lacks, such as Windows hits
+    recovering once the budget stops binding, or refusals at 20 GiB. Skip it
+    otherwise, and file no issue.
+  - If Windows still misses most looked-up keys with no budget refusals, file
+    the drafted issue (Plan), its placeholder filled from that night.
+
+  The maintainer approved both posts. Each follows mr-boxington's
+  CONTRIBUTING.md and AGENTS.md AI-disclosure rules and ends with the
+  `(Written by <model> with <effort>)` line. Link what was posted, or say
+  nothing was, in the Plan, then drop this item.
 - moq-dev/moq: no earlier than 2026-11-26, an agent on the maintainer's
   desktop collects `mbx-moq-dev`'s size and request counts for the first
   month and checks that the six old oversized manifests expired. Size comes
