@@ -73,6 +73,12 @@ export class Estimator {
 	#interval = 0;
 	/** The largest delay seen in that interval. */
 	#peak = 0;
+	/** The oldest media timestamp measured in that interval. */
+	#oldest = 0;
+	/** The first arrival, when the subscription began. */
+	#start?: number;
+	/** The latest a frame produced before the subscription arrived, starting at `#start`. */
+	#joined = 0;
 	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
 	#ended = false;
 	/** The earliest a frame stalled in this interval was due. */
@@ -115,6 +121,16 @@ export class Estimator {
 			this.#history.push({ arrival, media });
 		}
 
+		// A frame due before the first arrival by the window's fastest path was produced before
+		// the subscription began: it is the backlog a join delivers, and the join lasts until it
+		// has all arrived.
+		if (this.#start === undefined) {
+			this.#start = arrival;
+			this.#joined = arrival;
+		} else if (media + this.#fastest() < this.#start) {
+			this.#joined = Math.max(this.#joined, arrival);
+		}
+
 		// The fastest frame in the window at or before this one, so delay is measured
 		// against the best-case path instead of against the previous frame. A frame
 		// older than the whole window has nothing to be measured against.
@@ -132,6 +148,7 @@ export class Estimator {
 		if (this.#origin === undefined) {
 			this.#origin = arrival;
 			this.#peak = delay;
+			this.#oldest = media;
 			this.#note(arrival, delay);
 			return;
 		}
@@ -141,11 +158,16 @@ export class Estimator {
 		this.#ended = false;
 		if (interval <= this.#interval) {
 			this.#peak = Math.max(this.#peak, delay);
+			this.#oldest = Math.min(this.#oldest, media);
 			this.#note(arrival, delay);
 			return;
 		}
 
-		this.#close(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
+		// An interval holding a frame due before the join's backlog finished arriving measured the
+		// join, not the path: those frames queued behind the backlog, and the player skipped onto
+		// the clock past all of it. It folds nothing, like an interval with no arrival.
+		if (this.#oldest + this.#fastest() < this.#joined) this.#pending += 1;
+		else this.#close(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
 
 		if (resumed) {
 			// The publisher declared the silence, so it is not evidence of anything: the
@@ -155,13 +177,22 @@ export class Estimator {
 			this.#interval = 0;
 		} else {
 			// Held until this interval closes: a stall it holds owns them.
-			this.#pending = interval - this.#interval - 1;
+			this.#pending += interval - this.#interval - 1;
 			this.#interval = interval;
 		}
 		this.#peak = delay;
+		this.#oldest = media;
 		this.#due = Number.POSITIVE_INFINITY;
 		this.#late = Number.NEGATIVE_INFINITY;
 		this.#note(arrival, delay);
+	}
+
+	// The window's smallest `arrival - media`: the fastest path seen, which a frame's due time is
+	// read from.
+	#fastest(): number {
+		let fastest = Number.POSITIVE_INFINITY;
+		for (const entry of this.#history) fastest = Math.min(fastest, entry.arrival - entry.media);
+		return fastest;
 	}
 
 	// A frame later than a whole interval was due in an earlier one, so it is stalled.

@@ -64,6 +64,12 @@ export class Jitter {
 	#interval = 0;
 	/** The largest delay seen in that interval. */
 	#peak = 0;
+	/** The oldest media timestamp measured in that interval. */
+	#oldest = 0;
+	/** The first arrival, when the subscription began, unset until the first observation. */
+	#start?: number;
+	/** The latest a frame produced before the subscription arrived, starting at `#start`. */
+	#joined = 0;
 	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
 	#ended = false;
 	/** The earliest a frame stalled in this interval was due. */
@@ -95,11 +101,20 @@ export class Jitter {
 			this.#history.push(arrival, media);
 		}
 
+		// A frame due before the first arrival by the window's fastest path was produced before the
+		// subscription began: it is the backlog a join delivers, and the join lasts until it has all
+		// arrived.
+		if (this.#start === undefined) {
+			this.#start = arrival;
+			this.#joined = arrival;
+		} else if (media + this.#history.fastest() < this.#start) {
+			this.#joined = Math.max(this.#joined, arrival);
+		}
+
 		// Delay against the fastest frame in the window at or before this one, not the previous one,
 		// so a queue that fills a little per frame reads as the build-up it is, and an older frame
 		// held behind newer ones reads as the wait playing it in order costs. A frame older than the
-		// whole window, such as the backlog a subscription delivers after its live edge, has no
-		// reference and is not measured.
+		// whole window has no reference and is not measured.
 		const reference = this.#history.reference(media);
 		if (reference === undefined) return;
 		// Written in this order on purpose: the document requires bit-identical arithmetic,
@@ -109,6 +124,7 @@ export class Jitter {
 		if (this.#origin === undefined) {
 			this.#origin = arrival;
 			this.#peak = delay;
+			this.#oldest = media;
 			this.#note(arrival, delay);
 			return;
 		}
@@ -118,11 +134,13 @@ export class Jitter {
 		this.#ended = false;
 		if (interval <= this.#interval) {
 			this.#peak = Math.max(this.#peak, delay);
+			this.#oldest = Math.min(this.#oldest, media);
 			this.#note(arrival, delay);
 			return;
 		}
 
-		this.#close(bucket(this.#peak));
+		if (this.#joining()) this.#pending += 1;
+		else this.#close(bucket(this.#peak));
 
 		if (resumed) {
 			// A silence the publisher declared says nothing about the path, so the estimate keeps
@@ -132,13 +150,21 @@ export class Jitter {
 			this.#interval = 0;
 		} else {
 			// Held until this interval closes: a stall it holds owns them.
-			this.#pending = interval - this.#interval - 1;
+			this.#pending += interval - this.#interval - 1;
 			this.#interval = interval;
 		}
 		this.#peak = delay;
+		this.#oldest = media;
 		this.#due = Number.POSITIVE_INFINITY;
 		this.#late = Number.NEGATIVE_INFINITY;
 		this.#note(arrival, delay);
+	}
+
+	// An interval holding a frame due before the join's backlog finished arriving measured the join,
+	// not the path: its frames queued behind the backlog, and the player skipped onto the clock past
+	// all of it. It folds nothing, like an interval with no arrival.
+	#joining(): boolean {
+		return this.#oldest + this.#history.fastest() < this.#joined;
 	}
 
 	// A frame later than a whole interval was due in an earlier one, so it is stalled.
@@ -220,7 +246,9 @@ export class Jitter {
 			fork.#pending = this.#pending;
 			fork.#due = this.#due;
 			fork.#late = this.#late;
-			fork.#close(bucket(this.#peak));
+			// Judged by this track's join, which the interval belongs to.
+			if (this.#joining()) fork.#pending += 1;
+			else fork.#close(bucket(this.#peak));
 			fork.#settle();
 			fork.#due = Number.POSITIVE_INFINITY;
 			fork.#late = Number.NEGATIVE_INFINITY;
@@ -315,6 +343,12 @@ export class History {
 		for (let node = (capacity + slot) >> 1; node > 0; node >>= 1) {
 			this.#tree[node] = this.#faster(this.#tree[2 * node], this.#tree[2 * node + 1]);
 		}
+	}
+
+	/** The smallest `arrival - media` held, the fastest path seen. Must not be empty. */
+	fastest(): number {
+		const entry = this.reference(Number.POSITIVE_INFINITY) as Entry;
+		return entry.arrival - entry.media;
 	}
 
 	/** The fastest entry with `entry.media <= media`, the oldest on a tie. */
