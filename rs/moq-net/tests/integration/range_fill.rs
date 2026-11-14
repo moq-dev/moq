@@ -186,6 +186,44 @@ async fn a_recovery_outlives_the_track_finishing() {
 	.expect("timed out");
 }
 
+/// A recovery's publisher may skip a sequence inside it, which the copy records as the live
+/// subscription's skip is: the reader gets the groups around it, and the session goes on.
+#[kio::test]
+async fn a_recovery_takes_a_skip_inside_it() {
+	kio::clock::timeout(TIMEOUT + cache::DEFAULT_EXPIRY * 3, async {
+		let fixture = Fixture::new(2).await;
+		fixture.track.skip_groups(2..3);
+		for sequence in 3..6 {
+			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let mut first = fixture.subscribe([Range::oldest()]).await;
+		assert_eq!(receive(&mut first, 5).await, [0, 1, 3, 4, 5].into());
+
+		// Superseded, the copy expires them, skip and all, while the reader keeps the
+		// subscription live.
+		kio::clock::sleep(cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+		let mut second = fixture.subscribe([Range::groups(1..5)]).await;
+		assert_eq!(receive(&mut second, 3).await, [1, 3, 4].into());
+
+		// The live subscription goes on.
+		let mut group = fixture
+			.track
+			.create_group(moq_net::group::Info { sequence: 6 })
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		assert_eq!(receive(&mut first, 1).await, [6].into());
+	})
+	.await
+	.expect("timed out");
+}
+
 /// One group, or a slice of one, is what lite-07 FETCH carries, so a miss of one group still
 /// fetches it.
 #[kio::test]

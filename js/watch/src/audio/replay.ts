@@ -16,7 +16,8 @@
  * @internal Test support, not part of the player.
  */
 
-import { Duration, Instant, Manual } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";

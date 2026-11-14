@@ -22,7 +22,7 @@ import {
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
-import { fillChanged, type Judged, rejectGroups, wantedRuns } from "../fill.ts";
+import { fillChanged, type Judged, rejectGroups } from "../fill.ts";
 import type { Producer as FrameProducer } from "../frame.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
@@ -39,6 +39,7 @@ import {
 	minDelayOf,
 	type Run,
 	removeRun,
+	runGaps,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
@@ -55,7 +56,7 @@ import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { Deadline } from "../util/deadline.ts";
-import { isUnrequested, unrequested, unwanted } from "../util/demand.ts";
+import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { max, min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
@@ -74,6 +75,7 @@ import {
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
+import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
 import { LinkRtt } from "./link_rtt.ts";
@@ -235,8 +237,17 @@ interface SubscribeEntry {
 	sent: number;
 	// The ranges the SUBSCRIBE asked for, as `wireRanges` gives them.
 	asked: track.Range[];
-	// A fill's own subscription, whose groups are cancelled once nobody wants them, as a FETCH's.
+	// A recovery's own subscription, whose groups are cancelled once nobody wants them, as a FETCH's.
 	filling?: boolean;
+	// Lite-07: the copy's fills of more than one group, which ask through this subscription.
+	fills?: RangeFills;
+	// The Range IDs of the fills' live ranges; the rest are the demand's, which alone say where the
+	// live feed starts.
+	fillIds: Set<bigint>;
+	// The groups the fills' ranges ask for, as last sent.
+	fillGroups: Run[];
+	// Bumped as what the fills ask changes, for the update loop.
+	fillsChanged: Signal<number>;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
 	unanswered?: Unanswered;
 	// Lite-07: the groups a YIELDED reset paused, once one did or a stream waits on one.
@@ -370,6 +381,17 @@ function judged(ranges: readonly track.Range[]): Run[] {
 		if (start < end) insertRun(runs, start, end);
 	}
 	return runs;
+}
+
+/** The groups a fill's range asks for: absolute at both ends, as `RangeFills` asks them. */
+function fillRun(range: WireRange): Run | undefined {
+	const start = range.start?.absolute;
+	const end = range.end?.absolute;
+	return start === undefined || end === undefined ? undefined : { start, end };
+}
+
+function sameRuns(a: readonly Run[], b: readonly Run[]): boolean {
+	return a.length === b.length && a.every((run, i) => run.start === b[i].start && run.end === b[i].end);
 }
 
 /** Subscribe to the peer and own its receive-side protocol tasks.
@@ -2122,6 +2144,9 @@ export class Subscriber {
 			update: 0n,
 			sent: 0,
 			stream: { kind: "setup" },
+			fillIds: new Set(),
+			fillGroups: [],
+			fillsChanged: new Signal(0),
 		};
 		if (hasDatagrams(this.version) && !hasDatagramTracks(this.version) && state.consumer && state.legacyKey) {
 			const info = { priority: producer.priority, timescale: framing.scale };
@@ -2473,26 +2498,52 @@ export class Subscriber {
 		}
 	}
 
-	// Serve the received copy's misses as its request handler, until the copy closes: each fill
-	// FETCHes its groups upstream one at a time, newest first for a descending reader, as the
-	// Rust `FillServeRun` does.
+	// Serve the received copy's misses as its request handler, until the copy closes. A lite-07 miss
+	// of more than one group joins the copy's subscription (see `RangeFills`); any other FETCHes its
+	// groups upstream one at a time, newest first for a descending reader, as the Rust
+	// `FillServeRun` does.
 	async #runFills(broadcast: Path.Valid, consumed: Consumed, entry: SubscribeEntry): Promise<void> {
 		const producer = entry.track;
 		const requests = producer.requests();
 		const jobs = new Set<Promise<void>>();
+		const fills = hasRanges(this.version)
+			? new RangeFills(producer, (groups, priority) =>
+					this.#recover(broadcast, consumed, entry, groups, priority),
+				)
+			: undefined;
+		entry.fills = fills;
+		const driving = fills ? this.#driveFills(entry, fills) : undefined;
 		try {
 			// Accepted before its fills run, so this only reads what TRACK_INFO said.
 			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
 			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				// One group is what FETCH carries; more go through the subscription.
+				if (fills && fill.end - fill.start > 1n) {
+					fills.push(fill);
+					continue;
+				}
 				const job = this.#serveFill(broadcast, consumed, producer, framing, fill);
 				jobs.add(job);
 				void job.then(() => jobs.delete(job));
 			}
 		} finally {
 			requests.close();
-			await Promise.all(jobs);
+			fills?.close();
+			await Promise.all([driving, ...jobs]);
 		}
+	}
+
+	// Settle `fills` as their inputs change, until the copy closes, asking what they owe through
+	// `entry`'s subscription. Mirrors the Rust serve loop's `RangeFills::poll`.
+	async #driveFills(entry: SubscribeEntry, fills: RangeFills): Promise<void> {
+		const demand = entry.track.demand();
+		while (!fills.closed) {
+			// A stream still arriving on a recovery is kept only for someone reading it.
+			if (fills.poll(entry.tail, !isAbandoned(demand))) entry.fillsChanged.update((revision) => revision + 1);
+			await fills.changed(entry.tail);
+		}
+		entry.fillsChanged.update((revision) => revision + 1);
 	}
 
 	// Serve `fill` until nobody waits on it, then close it, naming what is left dropped.
@@ -2513,21 +2564,6 @@ export class Subscriber {
 					await race([fillChanged(fill), reoffers.changed()]);
 					continue;
 				}
-				// Lite-07 asks a fill with no budget for the whole owed run around it at once, up to a
-				// re-offered group, so the publisher answers each run it gave up with one verdict
-				// however many groups it spans. A budget is judged against the whole track, which a
-				// FETCH does and a bounded range does not, so a bounded fill FETCHes a group at a time.
-				if (hasRanges(this.version) && fill.maxDelay === null) {
-					let { start, end } = wantedRuns(fill).find(
-						(run) => run.start <= sequence && sequence < run.end,
-					) ?? { start: sequence, end: sequence + 1n };
-					for (const run of reoffered) {
-						if (run.end <= sequence) start = max(start, run.end);
-						else end = min(end, run.start);
-					}
-					await this.#fillRun(broadcast, consumed, producer, framing, fill, { start, end });
-					continue;
-				}
 				// Every fetch answers its group, so the same one coming back is a bug: closing the
 				// fill names it dropped rather than fetching it forever.
 				if (sequence === last) break;
@@ -2539,28 +2575,28 @@ export class Subscriber {
 		}
 	}
 
-	// Ask `run` of `fill`, which has no budget, on a lite-07 SUBSCRIBE of its own bounded to the
-	// run, until the fill owes none of it, as the Rust `Recovery` asks: its groups land in the copy
-	// as a subscription's do, and the publisher names what it gives up by run. Whatever the
-	// subscription leaves owed when it ends is refused, so the next run is asked, not this one.
-	async #fillRun(
+	// Ask `groups` of `copy` again on a lite-07 SUBSCRIBE of their own with no max delay, as the Rust
+	// `Recovery` does: `copy`'s subscription dropped them as stale, or delivered them before and they
+	// were since evicted, so it never sends them again. Its groups land in the copy as a
+	// subscription's do. It FINs once every group is accounted for and read, and is over at the
+	// publisher's FIN in reply, refusing whatever it did not deliver.
+	#recover(
 		broadcast: Path.Valid,
 		consumed: Consumed,
-		producer: track.Producer,
-		framing: Framing,
-		fill: track.Fill,
-		run: Run,
-	): Promise<void> {
-		const owes = () => wantedRuns(fill).some((owed) => owed.start < run.end && run.start < owed.end);
+		copy: SubscribeEntry,
+		groups: Run,
+		priority: number,
+	): RecoveryHandle {
+		const producer = copy.track;
 		const id = this.#subscribeNext++;
-		const ranges: track.Range[] = [{ start: { absolute: run.start }, end: { absolute: run.end } }];
+		const ranges: track.Range[] = [{ start: { absolute: groups.start }, end: { absolute: groups.end } }];
 		const msg = this.#withRanges(
 			this.#subscribeMessage(
 				id,
 				broadcast,
 				consumed,
 				producer.name,
-				{ priority: fill.priority, order: fill.order, delay: { max: null } },
+				{ priority, order: "ascending", delay: { max: null } },
 				ranges,
 			),
 			ranges,
@@ -2568,8 +2604,8 @@ export class Subscriber {
 		);
 		const entry: SubscribeEntry = {
 			track: producer,
-			compress: framing.compress,
-			timescale: framing.timescale,
+			compress: copy.compress,
+			timescale: copy.timescale,
 			tail: new Tail({ grace: () => hooks.tailGrace(producer), bill: hooks.billTrack(producer) }),
 			requested: msg.startGroup,
 			floor: msg.startGroup,
@@ -2578,117 +2614,164 @@ export class Subscriber {
 			starts: new Map(),
 			update: 0n,
 			sent: 0,
-			// Its responses are read by the fill itself, which owns this stream's end.
+			// Its responses are read here, which owns this stream's end.
 			stream: { kind: "setup" },
 			filling: true,
+			fillIds: new Set(),
+			fillGroups: [],
+			fillsChanged: new Signal(0),
 		};
 		const left = new AbortController();
 		const signal = consumed.valid ? AbortSignal.any([consumed.valid, left.signal]) : left.signal;
-		// Setup stops once nobody wants the run, as a FETCH's does: a stalled exchange (no stream
-		// credit, or a blocked write) never sends a subscription nobody asked for anymore.
 		const leaving = new Promise<void>((resolve) =>
 			left.signal.addEventListener("abort", () => resolve(), { once: true }),
 		);
-		void (async () => {
-			while (!left.signal.aborted && owes()) await race([fillChanged(fill), leaving]);
-			left.abort();
-		})();
-		let failed: Error = new StreamError(StreamCode.Cancel, { message: "fill subscription ended" });
-		let draining = Promise.resolve();
+		let refused: Refused[] = [];
+		// Those the fills have yet to take: each refusal is handed over once.
+		let fresh: Refused[] = [];
+		const changed = new Signal(0);
+		// What the publisher gives up of the groups, accounted for in the tail. The latest verdict on a
+		// group replaces any earlier one, so a peer repeating its drops grows nothing.
+		const giveUp = (start: bigint, end: bigint, refusal: Refusal) => {
+			entry.tail.account(start, end);
+			refused = refuseRun(refused, max(start, groups.start), min(end, groups.end), refusal);
+			fresh = refuseRun(fresh, max(start, groups.start), min(end, groups.end), refusal);
+			changed.update((revision) => revision + 1);
+		};
 		this.#subscribes.set(id, entry);
-		try {
-			while (
-				(await this.#auth?.ready(broadcast, "subscribe", {
-					signal: consumed.valid,
-					until: () => fillChanged(fill),
-				})) === false
-			) {
-				if (!owes()) return;
-			}
-			if (this.#denied(broadcast)) throw unauthorized(broadcast);
-			const stream = await this.#exchange(
-				{ sendOrder: sendOrder({ priority: fill.priority }), version: this.version },
-				async (stream) => {
-					await stream.writer.u53(StreamId.Subscribe);
-					await msg.encode(stream.writer, this.version);
-					return stream;
-				},
-				signal,
-				new Deadline(),
-			);
-			let ended = false;
-			const responses = this.#fillResponses(stream, entry, fill, run).then(
-				() => {
-					ended = true;
-				},
-				// A reset says why the rest is refused.
-				(err: unknown) => {
-					ended = true;
-					failed = error(err);
-				},
-			);
+		const done = (async () => {
+			let failed: Error = new StreamError(StreamCode.Cancel, { message: "recovery ended" });
+			let stream: Stream | undefined;
 			try {
-				while (owes() && !ended) await race([fillChanged(fill), responses]);
-			} catch (err) {
-				stream.abort(error(err));
-				throw err;
-			}
-			if (ended) {
-				stream.close();
-			} else {
-				// Done asking. Its streams are read to their end, or until nobody wants their group,
-				// as a FETCH's is, and only then FINned, which ends whatever the publisher still serves.
-				draining = (async () => {
-					await race([entry.tail.settle(() => true, hooks.trackReleased(producer)), responses]);
-					stream.writer.close();
+				while ((await this.#auth?.ready(broadcast, "subscribe", { signal, until: () => leaving })) === false) {
+					if (left.signal.aborted) return fresh;
+				}
+				if (this.#denied(broadcast)) throw unauthorized(broadcast);
+				const opened = await this.#exchange(
+					{ sendOrder: sendOrder({ priority }), version: this.version },
+					async (stream) => {
+						await stream.writer.u53(StreamId.Subscribe);
+						await msg.encode(stream.writer, this.version);
+						return stream;
+					},
+					signal,
+					new Deadline(),
+				);
+				stream = opened;
+				let fin = false;
+				const responses = this.#recoveryResponses(opened, entry, groups, giveUp, () => fin);
+				// FIN once every group is accounted for and read, as a subscriber does once its tail
+				// settles, and the publisher FINs in reply.
+				let ended = false;
+				const over = responses.then(
+					() => {
+						ended = true;
+					},
+					() => {
+						ended = true;
+					},
+				);
+				while (!ended && !left.signal.aborted) {
+					if (entry.tail.covers(groups.start, groups.end) && !entry.tail.reading) {
+						fin = true;
+						opened.writer.close();
+						break;
+					}
+					await race([Signal.race(entry.tail.changed), over, leaving]);
+				}
+				// After our FIN, a cancel still stops the wait for the publisher's.
+				if (!ended) await race([over, leaving]);
+				// Cancelled: nothing more is read, and our own reset ends the reads above.
+				if (!ended) {
+					opened.abort(failed);
+					await over;
+				} else {
 					await responses;
-					stream.close();
-				})();
-			}
-		} catch (err) {
-			failed = error(err);
-		} finally {
-			left.abort();
-			if (owes()) fill.refuseGroups(run.start, run.end, failed);
-			void draining.then(() => {
+					opened.close();
+				}
+			} catch (err) {
+				closeViolation(this.#quic, err);
+				failed = error(err);
+				// The publisher reset its side, or reading failed: give back our side too.
+				stream?.abort(failed);
+			} finally {
+				left.abort();
 				this.#subscribes.delete(id);
 				this.#endPaused(entry);
 				entry.tail.close();
-			});
-		}
+			}
+			// What nothing accounted for is refused, as nothing more arrives on it.
+			let unanswered: Run[] = [{ ...groups }];
+			for (const run of [...entry.tail.accounted(groups.start, groups.end), ...refused])
+				unanswered = removeRun(unanswered, run.start, run.end);
+			for (const gap of unanswered) fresh.push({ ...gap, refusal: passing(failed) });
+			// Only what was not handed over while it was out.
+			return fresh;
+		})();
+		const takeRefused = () => {
+			const taken = fresh;
+			fresh = [];
+			return taken;
+		};
+		return {
+			done,
+			takeRefused,
+			changed,
+			readingChanged: entry.tail.changed,
+			reading: () => entry.tail.reading,
+			cancel: () => left.abort(),
+		};
 	}
 
-	// Read a fill subscription's responses to its FIN: answer the fill with what the publisher
-	// names given up, judged as the Rust `RangeFills::refuse` does.
-	async #fillResponses(stream: Stream, entry: SubscribeEntry, fill: track.Fill, run: Run): Promise<void> {
+	// Read a recovery's responses to the publisher's FIN, giving up what it names it will not
+	// deliver. `fin` says whether our FIN went out, which the publisher's answers.
+	async #recoveryResponses(
+		stream: Stream,
+		entry: SubscribeEntry,
+		groups: Run,
+		giveUp: (start: bigint, end: bigint, refusal: Refusal) => void,
+		fin: () => boolean,
+	): Promise<void> {
+		let started = false;
+		let finished = false;
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
-			if (!resp) return;
+			if (!resp) {
+				// The publisher FINs in reply to ours, or once it finished the track.
+				if (fin() || finished) return;
+				throw new ProtocolViolation("recovery subscribe ended without SUBSCRIBE_FINISH");
+			}
 			if ("start" in resp) {
-				// The range starts past what it skips, which it will not deliver: refused for this fill
-				// alone, since another request may still get them.
-				const start = resp.start.starts[0] ?? run.end;
-				if (run.start < start)
-					fill.refuseGroups(run.start, min(start, run.end), new NotFound(`group ${run.start}`));
+				// One start, for its one range.
+				if (started || resp.start.starts.length !== 1)
+					throw new ProtocolViolation("unexpected recovery SUBSCRIBE_OK");
+				started = true;
+				// Below its start the publisher, asked with no max delay, lacks them.
+				const from = resp.start.starts[0] ?? groups.end;
+				giveUp(
+					groups.start,
+					max(groups.start, min(from, groups.end)),
+					passing(new NotFound(`group ${groups.start}`)),
+				);
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
-				entry.tail.account(start, end);
 				const cause = resp.drop.cause(this.version);
 				// A paused group the drop names ends there: no continuation follows.
 				this.#dropPaused(entry, start, end, cause);
-				// Only a group its publisher never had is lost for every reader; anything else,
-				// OLD included, is refused for now, as the Rust `Refusal::answer` does.
-				if (toStreamCode(cause) === StreamCode.NotFound) fill.dropGroups(start, end);
-				else fill.refuseGroups(start, end, cause);
+				giveUp(start, end, dropped(cause));
 			} else if ("skip" in resp) {
 				// Never produced: final, as the subscription feeding the copy records it.
 				const { start, end } = resp.skip;
 				entry.tail.account(start, end);
 				hooks.skipTrackGroups(entry.track, start, end);
 			} else if ("finish" in resp) {
-				// Nothing is delivered at or past the track's end.
-				const end = max(resp.finish.group, run.start);
-				if (end < run.end) fill.refuseGroups(end, run.end, new NotFound(`group ${end}`));
+				if (finished) throw new ProtocolViolation("duplicate SUBSCRIBE_FINISH");
+				finished = true;
+				// Nothing at or past the track's end will be produced.
+				const end = max(resp.finish.group, groups.start);
+				giveUp(end, groups.end, dropped(new NotFound(`group ${end}`)));
+			} else {
+				throw new ProtocolViolation("unexpected recovery subscribe response");
 			}
 		}
 	}
@@ -2929,8 +3012,16 @@ export class Subscriber {
 				)
 					throw new ProtocolViolation(`unexpected SUBSCRIBE_STARTED: ${id}`);
 				// One retired since is owed nothing.
-				if (entry.live.get(id)) {
+				const range = entry.live.get(id);
+				if (range) {
 					entry.starts.set(id, start);
+					// A fill's range starting past where it asked skips groups it will not deliver.
+					const asked = entry.fillIds.has(id) ? fillRun(range) : undefined;
+					if (asked) {
+						const skipped = max(asked.start, min(start ?? asked.end, asked.end));
+						entry.tail.account(asked.start, skipped);
+						entry.fills?.skip(asked, asked.start, skipped);
+					}
 					// The tail judges what is owed again.
 					entry.tail.touch();
 					this.#declare(entry);
@@ -2972,6 +3063,7 @@ export class Subscriber {
 				entry.stale = stale
 					? owed.reduce((runs, run) => insertDrop(runs, run.start, run.end, hole), entry.stale ?? [])
 					: removeRun(entry.stale ?? [], start, end);
+				entry.fills?.refuse(start, end, error);
 			} else if ("skip" in resp) {
 				// Never produced, so nothing is waited for and no reader ends. A skip is final and
 				// replaces any drop of the same groups, stale or final, so no update reopens them; a
@@ -2980,6 +3072,8 @@ export class Subscriber {
 				this.#reoffered(entry.track, start, end);
 				entry.tail.account(start, end);
 				entry.stale = removeRun(entry.stale ?? [], start, end);
+				// A fill owing them is answered: the source never had them.
+				entry.fills?.refuse(start, end, new NotFound(`group ${start}`));
 				// A group that arrived was produced after all, so the skip contradicts it: it keeps
 				// the group, and the session goes on, since the draft requires no more.
 				const [cached] = hooks.skipTrackGroups(entry.track, start, end);
@@ -2998,7 +3092,10 @@ export class Subscriber {
 		for (;;) {
 			const sent = entry.sent;
 			await this.#settleTail(entry);
-			if (entry.sent === sent) break;
+			if (entry.sent !== sent) continue;
+			// Fills still ask through this subscription, which a FIN would leave no way to update.
+			if (!entry.fills || entry.fills.isEmpty() || hooks.trackReleased(entry.track).peek() !== undefined) break;
+			await race([Signal.race(entry.fillsChanged), hooks.trackReleased(entry.track)]);
 		}
 		this.#fin(stream, entry);
 	}
@@ -3092,6 +3189,9 @@ export class Subscriber {
 		// largest, and every later update restates it. Joins asking for the same group
 		// coalesce into that one update.
 		let sentWanted: bigint | undefined;
+		// What the fills asked with the last update, and the priority it carried.
+		let sentFills: Run[] = [];
+		let sentPriority = msg.priority;
 		const demand = track.demand();
 		const edge = hooks.producerLargest(track);
 		for (;;) {
@@ -3106,9 +3206,23 @@ export class Subscriber {
 					? wanted
 					: undefined;
 			const current = hooks.requested(track).peek();
-			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
+			// Lite-07 asks the held fills' groups through the same subscription, under the demand's
+			// terms but the more urgent priority.
+			const fills = entry.fills?.ask;
+			const fillGroups = fills?.groups ?? [];
+			const priority = Math.max(current?.priority ?? 0, fills?.priority ?? -128);
+			if (
+				current === undefined ||
+				(refresh === undefined &&
+					priority === sentPriority &&
+					sameRuns(fillGroups, sentFills) &&
+					this.#sameSubscription(current, lastSent))
+			) {
 				// Each wake releases the quiet signals too, including when termination wins.
-				const next = await race([Signal.race(hooks.requested(track), demand.wanted, edge), stopped]);
+				const next = await race([
+					Signal.race(hooks.requested(track), demand.wanted, edge, entry.fillsChanged),
+					stopped,
+				]);
 				if (next === null) return;
 				continue;
 			}
@@ -3129,9 +3243,26 @@ export class Subscriber {
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
 			// started. The retired ones owe nothing more.
 			let edit: { remove: bigint[]; add: WireRange[] } | undefined;
+			const fillRanges: track.Range[] = fillGroups.map((run) => ({
+				start: { absolute: run.start },
+				end: { absolute: run.end },
+			}));
 			if (hasRanges(this.version)) {
-				edit = entry.live.edit(toWireRanges(ranges, entry.scale));
+				// The demand's ranges, then the fills'.
+				const edited = entry.live.edit(
+					[...toWireRanges(ranges, entry.scale), ...toWireRanges(fillRanges, undefined)],
+					fillRanges.length,
+					(id) => entry.fillIds.has(id),
+				);
+				edit = edited;
 				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
+				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
+				for (const id of edited.fillIds) entry.fillIds.add(id);
+				// The groups a fill newly asks for wait a fresh grace too.
+				for (const run of fillGroups)
+					for (const gap of runGaps(entry.fillGroups, run.start, run.end))
+						entry.tail.demand(gap.start, gap.end);
+				entry.fillGroups = fillGroups;
 				entry.floor = span.start;
 				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.
 				this.#declare(entry);
@@ -3140,7 +3271,7 @@ export class Subscriber {
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/delay/etc.
 			const update = new SubscribeUpdate({
 				wantedGroup: refresh ?? sentWanted,
-				priority: current.priority ?? 0,
+				priority,
 				order: current.order,
 				maxDelay: maxDelayOf(current),
 				minDelay: minDelayOf(current),
@@ -3156,7 +3287,7 @@ export class Subscriber {
 			entry.update = update.update;
 			entry.maxDelay = update.maxDelay;
 			entry.tail.updated();
-			const held = hooks.supersedeStale(entry.track, judged(ranges));
+			const held = hooks.supersedeStale(entry.track, judged([...ranges, ...fillRanges]));
 			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 			// again under the new number what is still stale, so the tail owes every stale run again.
 			// A group that arrived since its stale drop won over it: the publisher served it, so it
@@ -3192,6 +3323,8 @@ export class Subscriber {
 			// A tail settling past SUBSCRIBE_FINISH re-judges what the update now asks for.
 			entry.tail.touch();
 			lastSent = { ...current };
+			sentFills = fillGroups;
+			sentPriority = priority;
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
 	}
@@ -3204,6 +3337,8 @@ export class Subscriber {
 		let pending = entry.start === undefined;
 
 		for (const id of entry.live.ids()) {
+			// Only the demand's ranges say where the live feed starts.
+			if (entry.fillIds.has(id)) continue;
 			if (!entry.starts.has(id)) {
 				pending = true;
 				break;

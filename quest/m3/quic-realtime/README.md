@@ -178,4 +178,4 @@ owns that feedback.
 
 ## Related
 
-- [QUIC on the sim](/quest/m4/quic-sim.md) - deterministic successor to the moq-shaper harness once it lands
+- [QUIC on the sim](/quest/m1/quic-sim.md) - deterministic successor to the moq-shaper harness once it lands

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
-import { Duration, Manual, now } from "@moq/clock";
+import { Duration, now } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
@@ -610,6 +611,27 @@ for (const cmaf of [false, true]) {
 		}
 	});
 }
+
+it("rejoins the clock after decoding returns from absence", async () => {
+	const playback = await play(Duration.millis(100));
+	const reanchor = spyOn(playback.sync, "reset");
+	try {
+		await playback.play(12);
+		const [ring] = playback.rings();
+		expect(ring.read([new Float32Array(128), new Float32Array(128)])).toBe(128);
+		playback.decoding.set(false);
+		await microtasks();
+		playback.decoding.set(true);
+		await microtasks();
+		expect(playback.resets()).toBe(1);
+		expect(ring.length).toBe(0);
+		expect(reanchor).not.toHaveBeenCalled();
+		await playback.play();
+		expect(playback.rings()).toEqual([ring]);
+	} finally {
+		playback.close();
+	}
+});
 
 describe("Decoder across a broadcast disable", () => {
 	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {

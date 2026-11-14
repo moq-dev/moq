@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Instant, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, Instant, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { pace, type Sample, SEEK_BEHIND, type Sink } from "./pace";
 import { Timeline } from "./timeline";
 

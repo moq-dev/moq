@@ -59,4 +59,4 @@ native in the PR.
 
 ## Related
 
-- [Resume sync](/quest/m0/interop-green/resume-sync.md) - snaps resumed audio to the clock, the same rule for a return from absence
+- [moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635) - snaps resumed audio to the clock, the same rule for a return from absence
