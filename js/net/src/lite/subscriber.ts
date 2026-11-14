@@ -317,6 +317,17 @@ function excused(verdict: YieldVerdict, update: bigint): boolean {
 	}
 }
 
+// The verdict a header starts with: owed, or accounted by a final drop (`dropped`), a stale drop
+// under `staleUnder`, or a gap the grace gave up on. A stale drop over a final one falls back to it.
+function headerVerdict(owed: boolean, dropped: boolean, staleUnder: bigint | undefined): YieldVerdict {
+	if (owed) return { kind: "owed" };
+	if (staleUnder === undefined) return { kind: "accounted", dropped };
+	const error = new StreamError(StreamCode.Old);
+	return dropped
+		? { kind: "accounted-stale", dropped, under: staleUnder, error }
+		: { kind: "stale", under: staleUnder, error };
+}
+
 // Excuse the stream's hold on the end, or restore it, as its verdict now says.
 function judge(yielding: Yielding, update: bigint): void {
 	if (excused(yielding.verdict, update)) yielding.counted.excuse();
@@ -3530,11 +3541,7 @@ export class Subscriber {
 					supersede = resolve;
 				});
 				yielding = {
-					verdict: owed
-						? { kind: "owed" }
-						: unowedUnder !== undefined
-							? { kind: "stale", under: unowedUnder, error: new StreamError(StreamCode.Old) }
-							: { kind: "accounted", dropped },
+					verdict: headerVerdict(owed, dropped, unowedUnder),
 					counted,
 					supersede,
 				};

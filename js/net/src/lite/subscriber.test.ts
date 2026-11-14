@@ -1709,12 +1709,13 @@ test.each(["continued", "dropped"] as const)("a reset without its code pauses th
 // Lite-07: Chromium can lose the reset of a Group Stream it has not handed to the page yet, which
 // leaves the stream open forever. A drop accounts for its group, so the subscription's end waits
 // for that stream at most the grace: a stale drop before or after its header, or a final one before
-// it, even once a later stale drop of the group expires. A final drop after it ends the read at once.
+// it, even once a later stale drop of the group expires, whether it came before or after the header. A final drop after it ends the read at once.
 test.each([
 	["stale", "before"],
 	["stale", "after"],
 	["final", "before"],
 	["final then stale", "before"],
+	["final then stale", "both before"],
 ] as const)("a drop lets the end give up on a stream that never ends (%s drop %s its header)", async (kind, order) => {
 	const clock = new Manual();
 	const installed = clock.install();
@@ -1731,8 +1732,9 @@ test.each([
 
 		const error = kind === "stale" ? StreamCode.Old : StreamCode.NotFound;
 		const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error }) };
-		if (order === "before") {
-			await respond(request, version, [drop]);
+		const stale = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) };
+		if (order !== "after") {
+			await respond(request, version, order === "both before" ? [drop, stale] : [drop]);
 			await drainReactions();
 		}
 		const lost = handStream(version);
@@ -1741,10 +1743,7 @@ test.each([
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		if (order === "after") await respond(request, version, [drop]);
-		if (kind === "final then stale")
-			await respond(request, version, [
-				{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) },
-			]);
+		if (kind === "final then stale" && order === "before") await respond(request, version, [stale]);
 		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 		await drainReactions();
 		// The update expires the stale drop, but not the final one beneath it.
