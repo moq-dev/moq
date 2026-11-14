@@ -513,7 +513,7 @@ impl Track {
 			// exporter that kept it.
 			return match &mut self.declared {
 				Some(clock) => {
-					clock.push(None, to_ticks(pending.frame.timestamp))?;
+					clock.push(None, to_ticks(pending.frame.timestamp), pending.frame.timestamp)?;
 					self.release(name, jitter, false)
 				}
 				None => Ok(()),
@@ -533,11 +533,12 @@ impl Track {
 			}
 			self.declared = depth.map(DeclaredClock::new);
 		}
-		let pts = to_ticks(pending.frame.timestamp);
+		let source = pending.frame.timestamp;
+		let pts = to_ticks(source);
 		let (arrived, bytes) = (pending.arrived, pending.frame.payload.len());
 		let item = (pending, self.source.description().cloned());
 		match &mut self.declared {
-			Some(clock) => clock.push(Some(item), pts)?,
+			Some(clock) => clock.push(Some(item), pts, source)?,
 			None => self.clock.push(item, pts, arrived, bytes),
 		}
 		self.release(name, jitter, false)
@@ -808,10 +809,16 @@ impl Track {
 	) -> anyhow::Result<()> {
 		if let Some(mut clock) = self.declared.take() {
 			let released = (|| {
-				while let Some((item, dts)) = clock.pop(flush)? {
+				while let Some((item, dts, pts)) = clock.pop(flush)? {
 					let Some((mut pending, description)) = item else {
 						continue;
 					};
+					// A tie the clock moved presents on the tick it moved to: the least microsecond
+					// that `to_ticks` reads back as that tick.
+					if to_ticks(pending.frame.timestamp) != pts {
+						let micros = u64::try_from((u128::from(pts) * 100).div_ceil(9))?;
+						pending.frame.timestamp = Timestamp::from_micros(micros)?;
+					}
 					if self.read == Read::Live {
 						pending.arrived = pending.arrived.max(self.latest);
 					}
@@ -5233,7 +5240,7 @@ mod tests {
 			let pts = super::to_ticks(ms(at));
 			match &mut track.declared {
 				Some(clock) => {
-					clock.push(Some((pending, None)), pts).unwrap();
+					clock.push(Some((pending, None)), pts, ms(at)).unwrap();
 					while clock.pop(false).unwrap().is_some() {}
 				}
 				None => track.clock.push((pending, None), pts, arrived, 0),
