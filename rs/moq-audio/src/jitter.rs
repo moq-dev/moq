@@ -191,6 +191,11 @@ impl History {
 		}
 	}
 
+	/// The smallest `arrival - media` held, the fastest path seen. Must not be empty.
+	fn fastest(&self) -> f64 {
+		self.reference(f64::INFINITY).expect("a non-empty history").key()
+	}
+
 	/// The fastest entry with `entry.media <= media`, the oldest on a tie.
 	fn reference(&self, media: f64) -> Option<Entry> {
 		// Media timestamps increase along the ring, so the prefix ends at a binary search.
@@ -279,6 +284,12 @@ pub(crate) struct Estimator {
 	interval: f64,
 	/// The largest delay seen in that interval.
 	peak: f64,
+	/// The oldest media timestamp measured in that interval.
+	oldest: f64,
+	/// The first arrival, when the subscription began, once one has been seen.
+	start: Option<f64>,
+	/// The latest a frame produced before the subscription arrived, starting at `start`.
+	joined: f64,
 	/// A declared end precedes the next measured observation, so the silence before it is not idle.
 	ended: bool,
 	/// The earliest a frame stalled in this interval was due.
@@ -306,6 +317,9 @@ impl Estimator {
 			origin: None,
 			interval: 0.0,
 			peak: 0.0,
+			oldest: 0.0,
+			start: None,
+			joined: 0.0,
 			ended: false,
 			due: f64::INFINITY,
 			late: f64::NEG_INFINITY,
@@ -324,11 +338,25 @@ impl Estimator {
 			self.history.push(arrival, media);
 		}
 
+		// A frame due before the first arrival by the window's fastest path was produced
+		// before the subscription began: it is the backlog a join delivers, and the join
+		// lasts until it has all arrived.
+		match self.start {
+			None => {
+				self.start = Some(arrival);
+				self.joined = arrival;
+			}
+			Some(start) => {
+				if media + self.history.fastest() < start {
+					self.joined = self.joined.max(arrival);
+				}
+			}
+		}
+
 		// The fastest frame in the window at or before this one, so delay is measured
 		// against the best-case path instead of against the previous frame, and an older
 		// frame held behind newer ones reads as the wait playing it in order costs. A
-		// frame older than the whole window, such as a subscription's backlog behind its
-		// live edge, has nothing to be measured against.
+		// frame older than the whole window has nothing to be measured against.
 		let Some(reference) = self.history.reference(media) else {
 			return;
 		};
@@ -340,6 +368,7 @@ impl Estimator {
 		let Some(origin) = self.origin else {
 			self.origin = Some(arrival);
 			self.peak = delay;
+			self.oldest = media;
 			self.note(arrival, delay);
 			return;
 		};
@@ -348,11 +377,16 @@ impl Estimator {
 		let resumed = std::mem::take(&mut self.ended);
 		if interval <= self.interval {
 			self.peak = self.peak.max(delay);
+			self.oldest = self.oldest.min(media);
 			self.note(arrival, delay);
 			return;
 		}
 
-		self.close(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1));
+		if self.joining() {
+			self.pending += 1.0;
+		} else {
+			self.close(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1));
+		}
 
 		if resumed {
 			// A silence the publisher declared says nothing about the path, so the
@@ -362,13 +396,22 @@ impl Estimator {
 			self.interval = 0.0;
 		} else {
 			// Held until this interval closes: a stall it holds owns them.
-			self.pending = interval - self.interval - 1.0;
+			self.pending += interval - self.interval - 1.0;
 			self.interval = interval;
 		}
 		self.peak = delay;
+		self.oldest = media;
 		self.due = f64::INFINITY;
 		self.late = f64::NEG_INFINITY;
 		self.note(arrival, delay);
+	}
+
+	/// An interval holding a frame due before the join's backlog finished arriving
+	/// measured the join, not the path: its frames queued behind the backlog, and the
+	/// player skipped onto the clock past all of it. It folds nothing, like an interval
+	/// with no arrival.
+	fn joining(&self) -> bool {
+		self.oldest + self.history.fastest() < self.joined
 	}
 
 	/// A frame later than a whole interval was due in an earlier one, so it is stalled.
@@ -530,7 +573,7 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 14] = [
+	const CORPUS: [&str; 15] = [
 		"advertised",
 		"backlog",
 		"batches",
@@ -538,6 +581,7 @@ pub(crate) mod tests {
 		"fixed",
 		"flush",
 		"idle",
+		"join",
 		"outage",
 		"paced",
 		"reorder",
