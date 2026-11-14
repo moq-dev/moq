@@ -170,6 +170,8 @@ pub(super) struct Mixer {
 	scratch: Vec<f32>,
 	/// Counts what the mix played, for an [`Observer`](super::Observer).
 	ledger: Ledger,
+	/// Frames the device delays a read by before it sounds, as last reported.
+	heard: usize,
 	/// Where echo cancellation reads what was played. Fed the clipped mix, since
 	/// that is the signal the speaker gets and therefore the one the microphone
 	/// hears back.
@@ -212,6 +214,7 @@ impl Mixer {
 			bus: vec![0.0; CHUNK * channels],
 			scratch: vec![0.0; CHUNK * channels],
 			ledger: Ledger::new(observe, rate),
+			heard: 0,
 			#[cfg(feature = "aec")]
 			reference: None,
 			#[cfg(feature = "aec")]
@@ -245,9 +248,11 @@ impl Mixer {
 		}
 	}
 
-	/// Report the host's latency for the buffer about to be filled.
-	pub(super) fn latency(&self, latency: Option<Duration>) {
-		self.ledger.latency(latency);
+	/// Report the host's latency for the buffer of `frames` about to be filled:
+	/// how long after its read its first frame sounds.
+	pub(super) fn latency(&mut self, latency: Option<Duration>, frames: usize) {
+		self.ledger.latency(latency, frames);
+		self.heard = latency.map_or(0, |latency| (latency.as_secs_f64() * self.rate as f64).round() as usize);
 	}
 
 	/// Fill one device buffer, interleaved at the device's channel count and in
@@ -323,6 +328,7 @@ impl Mixer {
 			bus,
 			scratch,
 			ledger,
+			heard,
 			#[cfg(feature = "aec")]
 			reference,
 			#[cfg(feature = "aec")]
@@ -363,6 +369,7 @@ impl Mixer {
 				// stays on the timeline instead of queueing up and jumping when
 				// it unmutes. The status only reports under/overflow, which the
 				// channel has already corrected for.
+				entry.cons.heard(*heard);
 				let status = entry.cons.read_at(&mut scratch[..samples], now, total - done);
 				if !matches!(status, Read::NotReady | Read::Underflow { frames: 0 }) {
 					entry.played_at = played_at;

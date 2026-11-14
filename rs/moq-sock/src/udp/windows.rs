@@ -236,7 +236,11 @@ impl UdpSocketState {
 				(WinSock::IPPROTO_UDP, UDP_COALESCED_INFO) => {
 					// Has type u32 (aka DWORD) per
 					// https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-udp-socket-options
-					if let Some(segment) = unsafe { cmsg.decode::<u32>() } {
+					// A zero stride would split the payload into empty datagrams forever, so it keeps
+					// the datagram's own length.
+					if let Some(segment) = unsafe { cmsg.decode::<u32>() }
+						&& segment > 0
+					{
 						stride = segment;
 					}
 				}

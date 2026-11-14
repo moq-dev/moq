@@ -26,7 +26,7 @@ public:
 	void Stop(bool signal = true);
 	void Data(struct encoder_packet *packet);
 
-	inline size_t GetTotalBytes() { return total_bytes_sent; }
+	inline uint64_t GetTotalBytes() { return total_bytes_sent.load(std::memory_order_relaxed); }
 
 	inline int GetConnectTime() { return connect_time_ms; }
 
@@ -219,7 +219,9 @@ private:
 
 	std::string path;
 
-	size_t total_bytes_sent;
+	// Bytes handed to MoQ since the last Start. Written by the encoder thread,
+	// read by OBS's stats.
+	std::atomic<uint64_t> total_bytes_sent;
 };
 
 void register_moq_output();

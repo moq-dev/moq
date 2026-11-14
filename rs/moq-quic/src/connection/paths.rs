@@ -18,11 +18,18 @@ pub(super) struct Challenge {
 	/// A packet of its own is still due for it; after that, it only rides along with the path's
 	/// other frames
 	pub(super) pending: bool,
+	/// A datagram carrying it was shorter than `min_mtu`, so its response validates the address
+	/// but not the path's MTU
+	pub(super) short: bool,
 }
 
 impl Challenge {
 	pub(super) fn new(token: u64) -> Self {
-		Self { token, pending: true }
+		Self {
+			token,
+			pending: true,
+			short: false,
+		}
 	}
 }
 
@@ -149,7 +156,13 @@ impl PathData {
 	/// Indicates whether we're a server that hasn't validated the peer's address and hasn't
 	/// received enough data from the peer to permit sending `bytes_to_send` additional bytes
 	pub(super) fn anti_amplification_blocked(&self, bytes_to_send: u64) -> bool {
-		!self.validated && self.total_recvd * 3 < self.total_sent + bytes_to_send
+		self.anti_amplification_budget()
+			.is_some_and(|budget| budget < bytes_to_send)
+	}
+
+	/// What the anti-amplification limit still lets this path send, or `None` once it is validated
+	pub(super) fn anti_amplification_budget(&self) -> Option<u64> {
+		(!self.validated).then(|| (self.total_recvd * 3).saturating_sub(self.total_sent))
 	}
 
 	/// Returns the path's current MTU
