@@ -1715,65 +1715,62 @@ test.each([
 	["stale", "after"],
 	["final", "before"],
 	["final then stale", "before"],
-] as const)(
-	"a drop lets the end give up on a stream that never ends (%s drop %s its header)",
-	async (kind, order) => {
-		const clock = new Manual();
-		const installed = clock.install();
-		const version = Version.DRAFT_07;
-		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-		try {
-			await opened(0);
-			await answerTrackInfo(streams[0], version, 1000);
-			const request = await opened(1);
-			await request.reading;
-			await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+] as const)("a drop lets the end give up on a stream that never ends (%s drop %s its header)", async (kind, order) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
 
-			const error = kind === "stale" ? StreamCode.Old : StreamCode.NotFound;
-			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error }) };
-			if (order === "before") {
-				await respond(request, version, [drop]);
-				await drainReactions();
-			}
-			const lost = handStream(version);
-			lost.write(await liteFrame(0, new Uint8Array([1])));
-			void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), lost.reader);
-			const group = await track.recvGroup();
-			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-			if (order === "after") await respond(request, version, [drop]);
-			if (kind === "final then stale")
-				await respond(request, version, [
-					{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) },
-				]);
-			await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
+		const error = kind === "stale" ? StreamCode.Old : StreamCode.NotFound;
+		const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error }) };
+		if (order === "before") {
+			await respond(request, version, [drop]);
 			await drainReactions();
-			// The update expires the stale drop, but not the final one beneath it.
-			if (kind === "final then stale") {
-				track.update({ priority: 1 });
-				await drainReactions();
-			}
-
-			let fin = false;
-			void request.finished.then(() => {
-				fin = true;
-			});
-			await clock.advance(GRACE.div(2));
-			expect(fin).toBe(false);
-			await clock.advance(GRACE);
-			expect(fin).toBe(true);
-			// The publisher's FIN in reply ends the track at once, without another grace.
-			request.inbound.close();
-			expect(await track.recvGroup()).toBeUndefined();
-			expect(await track.closed).toBeNull();
-		} finally {
-			track.close();
-			subscriber.close();
-			installed.close();
 		}
-	},
-);
+		const lost = handStream(version);
+		lost.write(await liteFrame(0, new Uint8Array([1])));
+		void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), lost.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		if (order === "after") await respond(request, version, [drop]);
+		if (kind === "final then stale")
+			await respond(request, version, [
+				{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) },
+			]);
+		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
+		await drainReactions();
+		// The update expires the stale drop, but not the final one beneath it.
+		if (kind === "final then stale") {
+			track.update({ priority: 1 });
+			await drainReactions();
+		}
+
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
+		await clock.advance(GRACE.div(2));
+		expect(fin).toBe(false);
+		await clock.advance(GRACE);
+		expect(fin).toBe(true);
+		// The publisher's FIN in reply ends the track at once, without another grace.
+		request.inbound.close();
+		expect(await track.recvGroup()).toBeUndefined();
+		expect(await track.closed).toBeNull();
+	} finally {
+		track.close();
+		subscriber.close();
+		installed.close();
+	}
+});
 
 // Lite-07: an update reopens a stale drop, so a stream that drop excused holds the end again
 // until it finishes, even once the grace the end started before the update has passed.
