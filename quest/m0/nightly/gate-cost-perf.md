@@ -28,11 +28,13 @@ Decided 2026-11-13 (maintainer, /quest-plan):
   keep -1, which lets those containers see CPU-wide and kernel events).
   Profiling on `nixos` then needs sudo.
 
-Open the dotfiles PR, noting that open dotfiles PR #125 also edits that file.
+[kixel-ai/dotfiles#169](https://github.com/kixel-ai/dotfiles/pull/169)
+makes both changes and adds an isolation-test probe; it overlaps
+kixel-ai/dotfiles#125 in the same file without conflicting hunks.
 Check with `perf stat -e instructions:u true` as the runner user inside a
 queue container, then the next scheduled Nightly's Gate cost job; never
 dispatch Nightly.
 
 ## Waiting
 
-- Maintainer: merge the dotfiles PR and rebuild `nixos`, which restarts the CI runner containers; an agent does not deploy host config. Check with the `perf stat` command above.
+- Maintainer: merge [kixel-ai/dotfiles#169](https://github.com/kixel-ai/dotfiles/pull/169) and rebuild `nixos`, which restarts the CI runner containers; an agent does not deploy host config. Check with the `perf stat` command above.
