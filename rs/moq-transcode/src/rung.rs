@@ -90,8 +90,8 @@ pub(crate) struct Rung {
 }
 
 impl Rung {
-	async fn pipeline(&self) -> Result<Pipeline, Error> {
-		Pipeline::new(self).await
+	async fn pipeline(&self, session: Option<tokio::sync::OwnedSemaphorePermit>) -> Result<Pipeline, Error> {
+		Pipeline::new(self, session).await
 	}
 
 	fn container(&self) -> Result<moq_mux::catalog::hang::Container, Error> {
@@ -272,6 +272,27 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 			}
 		}
 
+		// The session's encoder holds its place in the budget for as long as it serves,
+		// so wait for one before attaching to the feed. Demand that leaves, a retirement or
+		// a closing broadcast gives up the wait.
+		let session = tokio::select! {
+			session = rung.transcode.sessions.acquire() => session,
+			unused = until_wanted(&demand, false) => {
+				if unused.is_err() {
+					return Ok(Ended::Unfinished);
+				}
+				continue;
+			}
+			() = rung.broadcast.closed() => {
+				producer.clone().abort(moq_net::Error::Cancel)?;
+				return Ok(Ended::Unfinished);
+			}
+			() = retire.fired() => {
+				retiring = true;
+				continue;
+			}
+		};
+
 		// Attach the meter here rather than at the first frame: it counts nothing
 		// until this pipeline encodes one, so a subscriber waiting on a stalled
 		// source is not billed for a session that produced nothing.
@@ -282,7 +303,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		// Dropping them once demand is gone releases the shared decode (if last)
 		// and the encoder session until someone asks again.
 		let mut listener = rung.feed.listen();
-		let mut encoder = Encoder::default();
+		let mut encoder = Encoder::new(session);
 
 		// The output group currently being written, if the feed is mid-group.
 		let mut current: Option<Writing> = None;
@@ -622,7 +643,14 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	// the future drops, so cancelling it would free this fetch's slot while
 	// that session still exists. The check before accept covers a caller who
 	// leaves meanwhile.
-	let pipeline = match rung.pipeline().await {
+	// Its encoder takes a session of its own. A reader who leaves while it waits for one
+	// gets the group left unanswered, encoding nothing.
+	let session = tokio::select! {
+		biased;
+		_ = fill.unwanted(sequence) => return abandon(sequence),
+		session = rung.transcode.sessions.acquire() => session,
+	};
+	let pipeline = match rung.pipeline(session).await {
 		Ok(pipeline) => pipeline,
 		Err(err) => {
 			failed();
@@ -767,7 +795,7 @@ struct Pipeline {
 }
 
 impl Pipeline {
-	async fn new(rung: &Rung) -> Result<Self, Error> {
+	async fn new(rung: &Rung, session: Option<tokio::sync::OwnedSemaphorePermit>) -> Result<Self, Error> {
 		let mut decode = rung.transcode.decoder();
 		decode.scale_hint = scale_hint(rung.info.size, rung.transcode.resize.output);
 		// A `Sink` for the same reason as the encoder above: a fetch task holds this
@@ -776,7 +804,7 @@ impl Pipeline {
 
 		Ok(Self {
 			decoder,
-			encoder: Encoder::default(),
+			encoder: Encoder::new(session),
 			rung: rung.clone(),
 		})
 	}
@@ -826,9 +854,21 @@ struct Encoder {
 	tail: VecDeque<moq_video::encode::Encoded>,
 	/// A cut asked for while no encoder was open, applied when one opens.
 	pending_cut: bool,
+	/// This encoder's place in the session budget, taken by its owner before the first open
+	/// and kept across a reopen, which closes first. Declared last, so it is released only
+	/// once the encoder has dropped.
+	_session: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Encoder {
+	/// An encoder holding `session`, its place in the budget.
+	fn new(session: Option<tokio::sync::OwnedSemaphorePermit>) -> Self {
+		Self {
+			_session: session,
+			..Self::default()
+		}
+	}
+
 	/// Start the next frame with an IDR.
 	async fn cut(&mut self) -> Result<(), Error> {
 		match &mut self.open {

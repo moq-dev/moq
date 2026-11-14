@@ -1,6 +1,10 @@
 //! Transcoder configuration: the rung ladder and catalog wiring.
 
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+
 use moq_net::path::Relative;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::Ladder;
 
@@ -44,6 +48,13 @@ pub struct Config {
 	/// frames on the GPU from decode through encode; CPU output downloads at
 	/// the decoder and scales on the CPU.
 	pub resize: moq_video::resize::Config,
+
+	/// How many encoder sessions may be open at once, shared by every transcoder whose
+	/// config holds a clone: each rung's live encoder, each fetched group's, and each catalog
+	/// probe. A hardware encoder refuses sessions past a device limit, which a device shared
+	/// with other work reaches sooner, so past the budget an encoder waits for one to close
+	/// instead. The default sets no budget.
+	pub sessions: Sessions,
 
 	/// The VA-API render node the decoder and encoders open; see
 	/// [`encode::Config::vaapi`](moq_video::encode::Config::vaapi).
@@ -92,5 +103,30 @@ impl Config {
 			encoder.v4l2 = self.v4l2_encoder.clone();
 		}
 		encoder
+	}
+}
+
+/// A budget of open encoder sessions, shared by its clones.
+#[derive(Clone, Debug, Default)]
+pub struct Sessions(Option<Arc<Semaphore>>);
+
+impl Sessions {
+	/// At most `limit` encoder sessions open at once across every clone.
+	pub fn new(limit: NonZeroUsize) -> Self {
+		Self(Some(Arc::new(Semaphore::new(limit.get()))))
+	}
+
+	/// Wait for a session, held until the permit drops; `None` without a budget.
+	pub(crate) async fn acquire(&self) -> Option<OwnedSemaphorePermit> {
+		let semaphore = self.0.clone()?;
+		Some(semaphore.acquire_owned().await.expect("the budget is never closed"))
+	}
+
+	/// The sessions still free, for tests.
+	#[cfg(test)]
+	pub(crate) fn available(&self) -> usize {
+		self.0
+			.as_ref()
+			.map_or(usize::MAX, |semaphore| semaphore.available_permits())
 	}
 }

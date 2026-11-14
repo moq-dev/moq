@@ -38,7 +38,7 @@ mod feed;
 mod pipeline;
 mod rung;
 
-pub use config::Config;
+pub use config::{Config, Sessions};
 pub use ladder::{Ladder, Rung};
 
 pub use error::Error;
@@ -715,6 +715,61 @@ mod tests {
 		while fetched.read_frame().await.unwrap().is_some() {}
 		assert_eq!(fetched.frame_count(), 5, "hardware transcode dropped frames");
 
+		transcoder.abort();
+	}
+
+	/// Every encoder takes its place in the shared session budget: the catalog probes give
+	/// theirs back, a rung's live encoder holds one while it serves, and a second rung waits
+	/// for it rather than opening a session past the budget.
+	#[tokio::test]
+	async fn encoders_share_the_session_budget() {
+		let source = source_broadcast(2, 5);
+		let sessions = Sessions::new(std::num::NonZeroUsize::MIN);
+		let config = Config {
+			ladder: Ladder::new([
+				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
+				Rung::new(60, moq_net::bandwidth::Rate::from_bps(50_000)),
+			])
+			.unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			sessions: sessions.clone(),
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p") && snapshot.video.renditions.contains_key("video/60p")
+		})
+		.await;
+		assert_eq!(sessions.available(), 1, "a catalog probe kept its session");
+
+		let mut first = subscribe(&consumer, "video/120p").await;
+		let mut group = first.recv_group().await.unwrap().unwrap();
+		assert!(group.read_frame().await.unwrap().is_some());
+		assert_eq!(sessions.available(), 0, "the serving encoder holds no session");
+
+		// The second rung's viewer waits for the session the first one's encoder holds.
+		let mut second = subscribe(&consumer, "video/60p").await;
+		drop(group);
+		drop(first);
+		let mut group = second.recv_group().await.unwrap().unwrap();
+		assert!(group.read_frame().await.unwrap().is_some());
+		assert_eq!(sessions.available(), 0);
+
+		drop(group);
+		drop(second);
 		transcoder.abort();
 	}
 
