@@ -634,10 +634,18 @@ impl<A: Clone> Carried<A> for Sent<A> {
 	}
 }
 
+/// What [`rekey`] leaves of a stream's routes.
+struct Rekeyed<T> {
+	routes: BTreeMap<RouteId, T>,
+	/// The keys it no longer carries a route under.
+	gone: Vec<RouteId>,
+	/// Each route that moved, with its offer, to another key: from, to.
+	moved: Vec<(RouteId, RouteId)>,
+}
+
 /// The routes one stream carries once an edit of its prefixes from `old` to `new`
-/// takes effect at its marker, and the keys it no longer carries. Both sides apply
-/// it alike to what was sent and what was heard, so they stay in step and nothing
-/// both sets cover is sent again.
+/// takes effect at its marker. Both sides apply it alike to what was sent and what
+/// was heard, so they stay in step and nothing both sets cover is sent again.
 ///
 /// A route inside a prefix the new set covers stays. A route at a removed prefix
 /// that an added prefix widens moves to the wider prefix: the first by key keeps
@@ -646,13 +654,10 @@ impl<A: Clone> Carried<A> for Sent<A> {
 /// claim and the floors certified only the narrower prefix. A route at a removed
 /// prefix is carried, as presented there, to each added prefix inside it that no
 /// route keys, so its floor carries too. The rest go.
-fn rekey<A: Clone + Eq, T: Carried<A>>(
-	old: &BTreeSet<Path>,
-	new: &BTreeSet<Path>,
-	routes: BTreeMap<RouteId, T>,
-) -> (BTreeMap<RouteId, T>, Vec<RouteId>) {
+fn rekey<A: Clone + Eq, T: Carried<A>>(old: &BTreeSet<Path>, new: &BTreeSet<Path>, routes: BTreeMap<RouteId, T>) -> Rekeyed<T> {
 	let mut kept: BTreeMap<RouteId, T> = BTreeMap::new();
 	let mut gone = Vec::new();
+	let mut moved = Vec::new();
 	for (key, mut route) in routes.iter().map(|(key, route)| (key.clone(), route.clone())) {
 		let (id, prefix) = &key;
 		let Some(region) = ancestors(prefix).find(|above| old.contains(above)) else {
@@ -676,6 +681,7 @@ fn rekey<A: Clone + Eq, T: Carried<A>>(
 				Some(first) => first.view().expect("a carried route").items.extend(items),
 				None => {
 					route.view().expect("a carried route").items = items;
+					moved.push((key.clone(), (*id, wider.clone())));
 					kept.insert((*id, wider), route);
 				}
 			}
@@ -695,10 +701,15 @@ fn rekey<A: Clone + Eq, T: Carried<A>>(
 			}
 			let mut copy = route.clone();
 			*copy.view().expect("a carried route") = view.present(inside);
+			moved.push(((*id, region.clone()), key.clone()));
 			kept.insert(key, copy);
 		}
 	}
-	(kept, gone)
+	Rekeyed {
+		routes: kept,
+		gone,
+		moved,
+	}
 }
 
 /// The entries of `map` under identity `id`.
@@ -848,16 +859,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 				self.unreflect(neighbor, key, &sent.src);
 			}
-			let (rekeyed, gone) = rekey(&old, &new, tx.clone());
+			let rekeyed = rekey(&old, &new, tx.clone());
 			// A child that learned a route this stream no longer carries under its key
 			// may still owe an answer to the route it reflected.
-			for key in gone {
+			for key in rekeyed.gone {
 				if self.child_pending(key.0, neighbor, &key.1) {
 					let src = (key.0, tx[&key].src.clone());
 					self.waiting.entry(src).or_default().insert((neighbor, key.1));
 				}
 			}
-			let tx = rekeyed;
+			let tx = rekeyed.routes;
 			for (key, sent) in &tx {
 				if let Some(offer) = sent.offer() {
 					self.index_sent(neighbor, key, &offer.path);
@@ -1250,16 +1261,29 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		for key in &keys {
 			self.forget_heard(key, from);
 		}
-		let (heard, _) = rekey(&old, &new, heard);
-		for (key, heard) in heard {
+		let rekeyed = rekey(&old, &new, heard);
+		for (key, heard) in rekeyed.routes {
 			self.hear(key, from, heard);
+		}
+		// A route this node used or held through `from` moves with the route it heard,
+		// so a hold or a doubt carries over rather than letting go of its claims.
+		for (was, now) in rekeyed.moved {
+			let Some(route) = self.routes.get(&was).filter(|route| route.next() == Some(from)) else {
+				continue;
+			};
+			if !self.routes.contains_key(&now) {
+				let route = route.clone();
+				self.scopes.entry(now.0).or_default().insert(now.1.clone());
+				self.routes.insert(now, route);
+			}
 		}
 		for (id, named) in filed {
 			if of(&self.rx, id).any(|(_, routes)| routes.contains_key(&from)) {
 				self.filed.insert((id, from), named);
 			}
 		}
-		self.update(ids, Vec::new(), None);
+		// A carried route may already have changed what the reader sees.
+		self.refresh(ids);
 	}
 
 	/// `from` sent the initial set of `prefix`, which this node asks it for.
@@ -1946,13 +1970,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				Some((prefix.clone(), view.floors.get(prefix).copied()))
 			})
 			.collect();
+		// A view no route covers goes only once the narrower views a route still covers
+		// have learned what it knew.
+		let mut lost = Vec::new();
 		for prefix in keys {
 			let key = (id, prefix.clone());
 			if !self.presence(id, prefix) {
-				if self.views.remove(&key).is_some() {
-					self.forget(id, prefix, &[]);
-					dirty.regions.insert(prefix.clone());
-				}
+				lost.push(key);
 				continue;
 			}
 			// Taken out while it is brought up to date, and always put back.
@@ -2017,6 +2041,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				dirty.regions.insert(prefix.clone());
 			}
 			self.views.insert(key, view);
+		}
+		for key in lost {
+			if self.views.remove(&key).is_some() {
+				self.forget(id, &key.1, &[]);
+				dirty.regions.insert(key.1);
+			}
 		}
 		// Which view the reader sees a claim at a view's own prefix from turns on floors.
 		let floors: Vec<(Path, Option<Rev>)> = keys

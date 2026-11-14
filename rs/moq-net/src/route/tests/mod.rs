@@ -12,6 +12,7 @@
 mod cache;
 mod compare;
 mod handoff;
+mod interest;
 mod paths;
 mod residual;
 mod routing;
