@@ -280,8 +280,11 @@ ordinary jitter, shorter flushes, reordering, and a step in the path's delay fol
 observation per interval.
 
 The open stall is four numbers, so a publisher that chains stalls on purpose
-costs nothing, and one fold per window of due time bounds how long the estimate
-goes without evidence.
+costs nothing. While due times advance, one fold per window of due time bounds
+how long the estimate goes without evidence. Only a publisher repeating an old
+timestamp holds them still, since a frame more than `WINDOW` behind the newest
+is not measured, and that holds its own stall open: it freezes its own
+broadcast's estimate, at no cost beyond the four numbers.
 
 ### The histogram
 
@@ -494,7 +497,8 @@ can hear, so the target should rise readily and fall grudgingly, and it does:
   down, and nothing can make it decay faster. What keeps a one-off from holding
   the target is that it puts little mass there: an outage is
   [one observation](#one-observation-per-stall), however many intervals its
-  backlog spans.
+  backlog spans, while its stalled frames fall within `WINDOW` of due time;
+  a longer one is an observation per window.
 - **A single bad observation does not move the target on its own.** Once the
   prior is spent it adds `1 - FORGET` weight, 1.7%, well under the 5% the 95th
   percentile needs. It takes a few intervals of genuine lateness before the
