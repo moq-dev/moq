@@ -183,7 +183,10 @@ impl MkvTrack {
 	) -> Result<()> {
 		let pts = (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
 		match &mut self.declared {
-			Some(clock) => clock.push(arrival, pts)?,
+			Some(clock) => {
+				let source = arrival.item.timestamp;
+				clock.push(arrival, pts, source)?
+			}
 			None => {
 				let (arrived, bytes) = (arrival.arrived, arrival.bytes);
 				self.clock.push(arrival, pts, arrived, bytes)
@@ -194,7 +197,11 @@ impl MkvTrack {
 
 	fn release(&mut self, name: &str, jitter: &mut crate::jitter::Buffer<String, Frame>, flush: bool) -> Result<()> {
 		if let Some(clock) = &mut self.declared {
-			while let Some((mut arrival, dts)) = clock.pop(flush)? {
+			while let Some((mut arrival, dts, pts)) = clock.pop(flush)? {
+				// A tie the clock moved presents on the tick it moved to.
+				if (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64 != pts {
+					arrival.item.timestamp = moq_net::Timestamp::from_scale(pts, 90_000)?;
+				}
 				if !self.finished && !flush {
 					arrival.arrived = arrival.arrived.max(self.latest);
 				}

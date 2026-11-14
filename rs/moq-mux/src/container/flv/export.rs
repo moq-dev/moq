@@ -253,7 +253,11 @@ impl FlvTrack {
 			return Ok(());
 		};
 		let released = (|| {
-			while let Some(((mut arrival, record), dts)) = clock.pop(flush)? {
+			while let Some(((mut arrival, record), dts, pts)) = clock.pop(flush)? {
+				// A tie the clock moved presents on the tick it moved to.
+				if arrival.item.timestamp.as_millis() != u128::from(pts) {
+					arrival.item.timestamp = moq_net::Timestamp::from_millis(pts)?;
+				}
 				if let Some(settled) = settled {
 					arrival.arrived = arrival.arrived.max(settled);
 				}
@@ -527,9 +531,9 @@ impl<S: Stream> Export<S> {
 					match &mut track.declared {
 						Some(clock) => {
 							// Clocked in FLV's milliseconds, so the leading frames step a tag tick apart.
-							let pts = arrival.item.timestamp.as_millis() as u64;
+							let source = arrival.item.timestamp;
 							let arrived = arrival.arrived;
-							clock.push((arrival, record), pts)?;
+							clock.push((arrival, record), source.as_millis() as u64, source)?;
 							track.release(key, Some(arrived), self.shift, false, &mut self.jitter)?;
 						}
 						None => {

@@ -1350,7 +1350,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 }
 
 /// The `(DTS, PTS)` of every AVC frame tag, and the audio tag timestamps, an export renders of
-/// a broadcast that declares `reorder` and carries a group of `stamps` (ms, decode order) for
+/// a broadcast that declares `reorder` and carries a group of `stamps` (µs, decode order) for
 /// each entry, plus one audio frame at 20 ms. With `open`, the last group is cut but the video
 /// track stays open.
 async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::Result<(Vec<(u32, i64)>, Vec<u32>)> {
@@ -1385,8 +1385,8 @@ async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::
 			.renditions
 			.insert(audio_track.name().to_string(), audio_config);
 	}
-	let frame = |ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
-		timestamp: Timestamp::from_millis(ms).unwrap(),
+	let frame = |micros: u64, payload: &'static [u8], keyframe| crate::container::Frame {
+		timestamp: Timestamp::from_micros(micros).unwrap(),
 		duration: None,
 		payload: Bytes::from_static(payload),
 		keyframe,
@@ -1396,13 +1396,13 @@ async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	for stamps in groups {
-		for (index, &ms) in stamps.iter().enumerate() {
+		for (index, &micros) in stamps.iter().enumerate() {
 			let payload: &'static [u8] = if index == 0 {
 				&[0, 0, 0, 1, 0x65]
 			} else {
 				&[0, 0, 0, 1, 0x41]
 			};
-			video.write(frame(ms, payload, index == 0)).unwrap();
+			video.write(frame(micros, payload, index == 0)).unwrap();
 		}
 	}
 	match open {
@@ -1413,7 +1413,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::
 		audio_track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	audio.write(frame(20, &[0xde, 0xad], true)).unwrap();
+	audio.write(frame(20_000, &[0xde, 0xad], true)).unwrap();
 	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 
@@ -1452,7 +1452,10 @@ async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::
 /// presentation slots. The whole stream shifts by the depth, so those fit FLV's unsigned clock.
 #[tokio::test(start_paused = true)]
 async fn export_declared_reorder_decodes_each_group_from_its_frames() {
-	let groups: [&[u64]; 2] = [&[0, 160, 80, 40, 120], &[400, 560, 480, 440, 520]];
+	let groups: [&[u64]; 2] = [
+		&[0, 160_000, 80_000, 40_000, 120_000],
+		&[400_000, 560_000, 480_000, 440_000, 520_000],
+	];
 	let (video, audio) = export_declared(2, &groups, false).await.unwrap();
 	assert_eq!(
 		video,
@@ -1472,19 +1475,27 @@ async fn export_declared_reorder_decodes_each_group_from_its_frames() {
 	assert_eq!(audio, [22]);
 
 	// A first group cut short leaves the next decoding where it would have.
-	let cut: [&[u64]; 2] = [&[0, 160, 80], &[400, 560, 480, 440, 520]];
+	let cut: [&[u64]; 2] = [&[0, 160_000, 80_000], groups[1]];
 	let (cut, _) = export_declared(2, &cut, false).await.unwrap();
 	assert_eq!(cut[3..], video[5..]);
 
 	// A depth of zero decodes at presentation, and refuses a frame that reorders.
-	let (video, _) = export_declared(0, &[&[0, 40, 80]], false).await.unwrap();
+	let (video, _) = export_declared(0, &[&[0, 40_000, 80_000]], false).await.unwrap();
 	assert_eq!(video, [(0, 0), (40, 40), (80, 80)]);
-	let err = export_declared(0, &[&[0, 80, 40]], false).await.unwrap_err();
+	let err = export_declared(0, &[&[0, 80_000, 40_000]], false).await.unwrap_err();
 	assert!(err.to_string().contains("declared depth"), "{err}");
+
+	// Distinct timestamps within one millisecond present a tick apart; identical ones fail.
+	let (video, _) = export_declared(0, &[&[0, 40_000, 40_011, 80_000]], false)
+		.await
+		.unwrap();
+	assert_eq!(video, [(0, 0), (40, 40), (41, 41), (80, 80)]);
+	let err = export_declared(0, &[&[0, 40_000, 40_000]], false).await.unwrap_err();
+	assert!(err.to_string().contains("one timestamp"), "{err}");
 
 	// A group that ends goes out whole while the track stays open, though fewer frames than the
 	// depth settle nothing.
-	let (video, _) = export_declared(2, &[&[0, 80]], true).await.unwrap();
+	let (video, _) = export_declared(2, &[&[0, 80_000]], true).await.unwrap();
 	assert_eq!(video, [(0, 2), (1, 82)]);
 }
 
