@@ -461,10 +461,47 @@ them. The cost is over-buffering by the smallest subscribed `delay` when the
 broadcast's earliest rendition is not subscribed.
 
 The playout is recomputed when a rendition is subscribed, unsubscribed, or its
-catalog entry rises, so dropping a slow rendition lowers latency. Each track's
-own arrivals only ever move its part of the shared reference earlier. A track
+catalog entry rises, so dropping a slow rendition lowers latency. A track's
+arrivals move its part of the shared reference earlier at once, and later only
+after [a lasting step](#a-lasting-step). A track
 that leaves, or whose timeline restarts, releases its part: the earliest
 remaining track's anchor takes over, or the next frame re-anchors.
+
+### A lasting step
+
+The estimator forgets a lasting increase in path delay within `WINDOW`, since
+it measures each frame against the fastest of the last two seconds. An anchor
+that only moved earlier would not: every frame after the step would be late for
+it by the step, and once the target fell back, audio would underrun on it and
+video would show each frame late.
+
+So each track's anchor follows its arrivals later on sustained evidence. A
+track's arrivals fall into back-to-back windows of `WINDOW` of arrival time, the
+arrival that closes one counting in it and opening the next. When a window
+closes and every arrival in it trailed the track's anchor by more than **half
+the delay**, the anchor moves later to the window's earliest arrival. The
+reference is still the earliest anchor, so it moves fully once every arriving
+track has followed; a track that stops arriving keeps its anchor and holds the
+reference where it was.
+
+Half the delay is the deadband because a smaller trail is not worth a move: it
+spends at most half the buffer, and a noisy path's fastest frame per window
+wanders by far less than the target that same spread sizes. Replayed through the
+Nightly's captured arrivals, a 10 or 20 ms deadband moved the reference two to
+seven times a minute on `wide`, and a deadband of the whole delay never moved it
+on the Opus `step` row, whose 55 ms step matched its 60 ms target. An outage and
+its backlog span no whole window, so they never move it; a congestion that
+holds every frame past half the delay for a whole window is a step for as long
+as it lasts, and the first frame through after it moves the anchor back.
+
+A move is lag like any other: audio slows down within its stretch threshold or
+pads past it, and video holds a frame. No latency is added to absorb a step
+before it is evidence, so the frames between the step and the move are late.
+
+The `clock/corpus.json` cases hold `js/watch` `Sync` and `moq_mux::sync` to the
+same reference series. Each case fixes the delay and plays runs of arrivals,
+`frames` of them `every` milliseconds from `start`, cycling through `tracks` and
+the arrival-minus-media `offsets`, and gives the `reference` offset after each run.
 
 A track that replaces another in the same slot and on the same broadcast path,
 such as the new name a codec change publishes under, continues the outgoing

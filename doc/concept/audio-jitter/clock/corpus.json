@@ -1,0 +1,52 @@
+[
+	{
+		"name": "step",
+		"about": "A lasting step later moves the reference once a whole window trails it by more than half the delay, and a faster frame moves it back at once",
+		"delay": 60,
+		"runs": [
+			{ "tracks": ["audio"], "start": 0, "every": 20, "frames": 150, "offsets": [5], "reference": 5 },
+			{ "tracks": ["audio"], "start": 3000, "every": 20, "frames": 150, "offsets": [60], "reference": 5 },
+			{ "tracks": ["audio"], "start": 6000, "every": 20, "frames": 1, "offsets": [60], "reference": 60 },
+			{ "tracks": ["audio"], "start": 6020, "every": 20, "frames": 50, "offsets": [60], "reference": 60 },
+			{ "tracks": ["audio"], "start": 7020, "every": 20, "frames": 1, "offsets": [40], "reference": 40 }
+		]
+	},
+	{
+		"name": "shallow",
+		"about": "A trail within half the delay leaves the reference where it is",
+		"delay": 60,
+		"runs": [
+			{ "tracks": ["audio"], "start": 0, "every": 20, "frames": 100, "offsets": [5], "reference": 5 },
+			{ "tracks": ["audio"], "start": 2000, "every": 20, "frames": 400, "offsets": [35, 30, 50], "reference": 5 }
+		]
+	},
+	{
+		"name": "spike",
+		"about": "An outage and the backlog behind it span no whole window, so the reference stays",
+		"delay": 60,
+		"runs": [
+			{ "tracks": ["audio"], "start": 0, "every": 20, "frames": 150, "offsets": [5], "reference": 5 },
+			{ "tracks": ["audio"], "start": 4500, "every": 5, "frames": 300, "offsets": [600], "reference": 5 },
+			{ "tracks": ["audio"], "start": 6000, "every": 20, "frames": 150, "offsets": [5], "reference": 5 }
+		]
+	},
+	{
+		"name": "tracks",
+		"about": "Each track's anchor follows its own window, and the reference is the earliest anchor, so it moves fully only once every track has followed",
+		"delay": 60,
+		"runs": [
+			{ "tracks": ["video", "audio"], "start": 0, "every": 10, "frames": 300, "offsets": [0, 10], "reference": 0 },
+			{ "tracks": ["video", "audio"], "start": 3000, "every": 10, "frames": 300, "offsets": [60, 70], "reference": 0 },
+			{ "tracks": ["video", "audio"], "start": 6000, "every": 10, "frames": 100, "offsets": [60, 70], "reference": 60 }
+		]
+	},
+	{
+		"name": "silent",
+		"about": "A track that stops arriving keeps its anchor, and the reference with it",
+		"delay": 60,
+		"runs": [
+			{ "tracks": ["video", "audio"], "start": 0, "every": 10, "frames": 300, "offsets": [0, 10], "reference": 0 },
+			{ "tracks": ["audio"], "start": 3000, "every": 20, "frames": 300, "offsets": [70], "reference": 0 }
+		]
+	}
+]
