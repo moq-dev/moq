@@ -1,14 +1,29 @@
-# [L] Media consumers address groups by start
+# [M] Media consumers address groups by start
 
 ## Goal
 
-Every first-party consumer that numbered groups works by start timestamp,
-in Rust and JS, and hang stops writing duration and discontinuity markers
-that group ends and gaps now carry. The HLS/DASH export places each group on
-the declared `media.join.interval` grid by its start instead of its first
-frame's pts.
+hang stops writing the duration and discontinuity markers that group ends
+and gaps now carry, and the hang draft says so. Every first-party consumer
+that numbered groups works by start timestamp, in Rust and JS, and the
+HLS/DASH export places each group on the declared `media.join.interval` grid
+by its start.
 
 ## Plan
+
+Moved from m2 to m3 2026-11-14 (the m2 triage before the cut, under
+/quest-afk, for the maintainer's review): ✅ m3, since what remains breaks
+nothing (rejected: m2; splitting a breaking part out, since none is left).
+[The model](/quest/m2/time-addressing/model.md)
+([moq-dev/moq#8638](https://github.com/moq-dev/moq/pull/8638)) converts the
+Rust consumers whose API named group numbers: `moq fetch --group` and the
+relay's `/fetch?group=` take a start, moq-mux `seek` and reads carry starts,
+and moq-hls, moq-archive, and moq-transcode key by start. `@moq/hang`'s
+`Read.group` keeps its name and carries whatever `@moq/net` keys by. Dropping
+the markers is no break either: readers already tolerate their absence
+(2026-10-25, below). What remains: the markers, the JS consumers'
+continuity checks once [@moq/net by start](/quest/m2/time-addressing/js.md)
+lands, the hang draft, and a pass over the list below for anything the model
+left numbering groups. Resized from L to M with it.
 
 Decided 2026-10-25 (maintainer), from the spike:
 
@@ -36,11 +51,12 @@ relay and CLI `fetch --group`, and player continuity checks in the Rust and
 JS container consumers and `js/watch`. Update the hang draft and the docs
 each one makes stale; rename CLI flags per the repo's CLI rule.
 
-Public API: breaking where a consumer exposes group numbers (CLI
-`--group`, archive keys). Wire: hang drops empty duration frames and
-discontinuity marker groups.
+Public API: none left; the model renamed the CLI flag and archive keys.
+Wire: hang drops empty duration frames and discontinuity marker groups, which
+readers already tolerate.
 
 ## Required
 
 - [Rust groups by start](/quest/m2/time-addressing/model.md) - the Rust API these consume
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - the JS API these consume
+- [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - GROUP_END carries the end the duration marker did

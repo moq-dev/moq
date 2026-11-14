@@ -12,6 +12,18 @@ replace are retired.
 
 ## Plan
 
+Moved from m2 to m3 2026-11-14 (the m2 triage before the cut, under
+/quest-afk, for the maintainer's review): ✅ m3, under the cluster-routing
+epic, which waits for [Routes and announces](/quest/m2/cluster-routes/README.md)
+(rejected: m2, where lite-07's freeze waits on an L of tests; m4 with other
+tests, since the moq.pro lite-07 rollout waits on this proof). It is tests and
+retired mitigations, with no wire or API change, so it can land after the cut
+without a breaking release. It ranks right after m2, so it may still land
+before the freeze. A flaw it finds in lite-07's route rules (item 30's
+keep-alive, dispute-wheel, and return tests included) is fixed in lite-08, or
+in the doubt timer and keep-alives, which are local. This reverses
+lite07-finalize's 2026-10-13 rule that these tests run before the cut.
+
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): acceptance is of the path rule
 ([epic](/quest/m2/cluster-routes/README.md) Plan item 27), on the

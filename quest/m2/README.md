@@ -217,3 +217,34 @@ rule here). Its lag rule reshapes `main`-only API the cut would publish (the
 `stretch` setting, moq-audio's `Sink::due` and `bus::Positioned`), and the
 cut should not ship the 2026-11-09 stretch model, which lets audio trail
 video by up to 2 s.
+
+Decided 2026-11-14 (m2 triage before the cut, under /quest-afk, for the
+maintainer's review; the maintainer asked that what remains be unblocked or
+punted). m2 keeps only what would need a breaking release had it landed right
+after the cut:
+
+- ✅ Left m2: [route acceptance](/quest/m3/cluster-routing/acceptance.md)
+  and [the request loop](/quest/m3/cluster-routing/request-loop.md) to m3's
+  cluster-routing epic (tests and fixes, no wire);
+  [media consumers](/quest/m3/time-addressing-consumers.md) to m3 (its API
+  breaks ride the model; dropping hang's markers is tolerated by readers);
+  [moq-transport time addressing](/quest/m4/ietf-time-addressing.md) to m4
+  (low-priority compatibility, no named consumer); and the
+  [Playwright bump](/quest/m1/playwright-pin.md) to m1, with
+  lite07-finalize checking Chromium 158 once by hand instead. The E2EE nonce
+  quest was removed: the nonce already binds the wire ID, which becomes the
+  start, and lite-07 by start rewords the draft. Rejected for each: staying
+  in m2.
+- ✅ Stayed in m2 though not breaking itself:
+  [the interest set](/quest/m2/cluster-routes/interest-set.md), because
+  [the route stream](/quest/m2/cluster-routes/route-stream.md) needs it.
+  The route stream stays because lite-07 would otherwise freeze with one
+  router key per announce stream, which the route model doesn't check, and
+  keep the reopen-and-hand-over machinery for its lifetime (rejected: moving
+  both to lite-08).
+- ✅ [Group drops](/quest/m2/group-drops.md) split: its lite-07 wire question
+  is [its own quest](/quest/m2/group-drops-wire.md), which starts now and
+  gates the freeze; the public `Ordered` API waits for the model.
+  [Catalog at timestamp](/quest/m2/catalog-at-timestamp.md) no longer waits
+  for `@moq/net` by start, and [the bindings](/quest/m2/time-addressing/bindings.md)
+  shrink to a rename, since the model already fills each field with the start.

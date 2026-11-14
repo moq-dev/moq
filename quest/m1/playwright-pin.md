@@ -21,6 +21,14 @@ nixpkgs still carries 1.64.1.
 
 ## Plan
 
+Moved from m2 to m1 2026-11-14 (the m2 triage before the cut, under
+/quest-afk, for the maintainer's review): ✅ m1, since a toolchain bump breaks
+nothing and builds on no m2 work (rejected: m2, where the cut waited on
+nixpkgs; m4 or m5, which hold it behind the cut or the next wire cut once
+nixpkgs lands). This replaces the 2026-11-06 decision below that the lite-07
+cut waits for the bump: [lite07-finalize](/quest/m2/lite07-finalize.md)
+instead runs the lane once with npm's Playwright 1.65.0 before the rename.
+
 Decided 2026-11-06 (maintainer, /quest-complete, on Pullfrog's review of
 [moq-dev/moq#8037](https://github.com/moq-dev/moq/pull/8037)): ✅ bump
 Playwright, and the lite-07 cut waits for it. Not chosen: running installed

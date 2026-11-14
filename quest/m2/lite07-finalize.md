@@ -33,7 +33,9 @@ Chain, negotiated by its Setup Parameter, rides announcements until the lite-07
 to lite-08 migration. Only
 [Routes and announces](/quest/m2/cluster-routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
-owns the tier/partition correctness tests, so they run before the cut. Peer
+owns the tier/partition correctness tests, so they run before the cut.
+Reversed 2026-11-14 (the m2 triage, below): they moved to m3 with
+[acceptance](/quest/m3/cluster-routing/acceptance.md). Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land. Decided 2026-10-25: no routing identity proof
@@ -123,12 +125,36 @@ moq-net): ✅ the cut waits for the symbolic model of the Route Key Parameter
 routing invariant gating too, which sits behind the mesh model). The signed
 transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 
+Decided 2026-11-14 (the m2 triage before the cut, under /quest-afk, for the
+maintainer's review), applying the maintainer's rule that m2 keeps only what
+would need a breaking release had it landed right after the cut:
+
+- ✅ [Route layer acceptance](/quest/m3/cluster-routing/acceptance.md) and
+  [the request loop](/quest/m3/cluster-routing/request-loop.md) moved to m3
+  and no longer gate this: both are tests and fixes with no wire change.
+  Accepted risk: a flaw they find in lite-07's route rules is fixed in
+  lite-08 or in local timers and configuration. Rejected: keeping them, so
+  the freeze waits on an L of tests.
+- ✅ [The Playwright bump](/quest/m1/playwright-pin.md) moved to m1, so the
+  freeze no longer waits on nixpkgs. In its place, before the rename, run the
+  route key lane (`test/interop/clients/js/route-key.ts`) once with
+  Playwright 1.65.0 or later from npm, which bundles Chromium 158, and put
+  the result in the PR: the freeze still waits for Chromium to prove the
+  exporter the Route Key Parameter signs, as decided 2026-11-06, without
+  waiting for the pinned toolchain. If the tab fails, stop and report it,
+  since only the wire can fix the signed transcript. Rejected: dropping the
+  check; keeping the pin in m2.
+- ✅ The wire half of group drops split out as
+  [its own quest](/quest/m2/group-drops-wire.md), which this waits on in
+  place of [the public drop signal](/quest/m2/group-drops.md), an API change
+  that doesn't touch the wire.
+
 ## Required
 
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
+- [A moq-lite subscriber always learns which group it abandoned](/quest/m2/group-drops-wire.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 
 ## Related
 

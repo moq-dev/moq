@@ -60,7 +60,7 @@ the same PR; the combined concept/setup guide follows separately.
 Decided 2026-11-06 (maintainer; the agent picked the children): require
 only the route children federation builds on,
 session integration (landed in [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023) and [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)) and
-[acceptance](/quest/m2/cluster-routes/acceptance.md), not the whole
+[acceptance](/quest/m3/cluster-routing/acceptance.md), not the whole
 [route epic](/quest/m2/cluster-routes/README.md). Federation is
 relay-to-relay, so browser route-key proofs, the Playwright pin they wait on,
 and the mixed-version follow-up (mount takeover) gates the
@@ -75,7 +75,7 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Required
 
-- [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
+- [Route layer acceptance](/quest/m3/cluster-routing/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
 
 ## Related
 
