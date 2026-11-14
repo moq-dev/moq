@@ -99,6 +99,9 @@ impl fmt::Display for Failure {
 /// What one node's reader shows.
 type Showing = BTreeMap<(Id, Path), Shown<Item>>;
 
+/// The newest floor one node's kept views hold over each claim its reader shows.
+type Floors = BTreeMap<(Id, Path), Option<Rev>>;
+
 /// A claim's life on one node's reader: the node, its restarts and forgets, the
 /// identity, the claim, and the revision its life began at.
 type Life = (Node, (u32, u32), Id, String, Rev);
@@ -315,7 +318,7 @@ impl Search<'_> {
 		let before = world.sim.shown_all();
 		let quiet = world.quiet();
 		let queued = world.queued();
-		let stable = self.stable(&world.sim, step);
+		let stable = (self.stable(&world.sim, step)).then(|| world.sim.shown_floors(&before));
 		let taken = catch_unwind(AssertUnwindSafe(|| self.take(world, step)));
 		if let Err(panic) = taken {
 			let message = (panic.downcast_ref::<String>().cloned())
@@ -360,7 +363,7 @@ impl Search<'_> {
 				_ => {}
 			}
 		}
-		self.check(world, stable.then_some(before.as_slice()), &before)
+		self.check(world, stable.as_deref(), &before)
 	}
 
 	fn take(&self, world: &mut World, step: &Step) {
@@ -423,14 +426,13 @@ impl Search<'_> {
 		}
 	}
 
-	/// Check every rule in `world`. `stable` holds what the readers showed before a
-	/// step that only changed a path or lifted a doubt; `before` what they showed
-	/// before any step.
-	fn check(&self, world: &World, stable: Option<&[Showing]>, before: &[Showing]) -> Result<(), String> {
+	/// Check every rule in `world`. `before` holds what the readers showed before the
+	/// step; `stable` the floors they showed it at, when the step only changed a path
+	/// or lifted a doubt.
+	fn check(&self, world: &World, stable: Option<&[Floors]>, before: &[Showing]) -> Result<(), String> {
 		let sim = &world.sim;
 		sim.check().map_err(|err| format!("Truthful: {err}"))?;
 		self.offered(sim).map_err(|err| format!("Truthful: {err}"))?;
-		let rev = sim.revision(self.id);
 		let now = sim.shown_all();
 		for (node, (was, now)) in before.iter().zip(&now).enumerate() {
 			for (key, shown) in now {
@@ -440,14 +442,14 @@ impl Search<'_> {
 				}
 			}
 			let Some(stable) = stable else { continue };
-			for (key, old) in &stable[node] {
-				let gone = match now.get(key) {
-					Some(shown) => shown.item != old.item && shown.item.seed <= old.item.seed,
-					// Letting go of a claim held unavailable ends a hold, not a path,
-					// and a newer floor may withdraw one.
-					None => old.available && sim.covering(self.id, &key.1, rev) == Some(old.item),
-				};
-				if gone {
+			for (key, old) in was {
+				let changed = now.get(key).map(|shown| shown.item) != Some(old.item);
+				// Only a floor the node itself learned may change a claim, as the
+				// model's `newer`: not one the publisher sent that is still in flight.
+				let newer = sim.floor(node, key) > stable[node][key];
+				// Letting go of a claim held unavailable ends a hold, not a path.
+				let release = !old.available && !now.contains_key(key);
+				if changed && !newer && !release {
 					return Err(format!("Stable: node {node}'s {key:?} changed with only a path"));
 				}
 			}
@@ -631,6 +633,24 @@ impl Sim {
 	/// What every node's reader shows.
 	fn shown_all(&self) -> Vec<Showing> {
 		(0..self.nodes.len()).map(|node| self.shown(node).clone()).collect()
+	}
+
+	/// The floor each node shows each claim in `shown` at.
+	fn shown_floors(&self, shown: &[Showing]) -> Vec<Floors> {
+		(shown.iter().enumerate())
+			.map(|(node, shown)| shown.keys().map(|key| (key.clone(), self.floor(node, key))).collect())
+			.collect()
+	}
+
+	/// The newest floor `node`'s kept views of the publisher hold over a region
+	/// that covers the claim or lies within it.
+	fn floor(&self, node: Node, (id, claim): &(Id, Path)) -> Option<Rev> {
+		(self.nodes[node].views().into_iter())
+			.filter(|(view_id, _)| view_id == id)
+			.flat_map(|(_, view)| &view.floors)
+			.filter(|(region, _)| within(claim, region) || within(region, claim))
+			.map(|(_, &rev)| rev)
+			.max()
 	}
 }
 
