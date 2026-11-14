@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 	match args[4].as_str() {
 		"tcp" => {
 			let mut stream = if dial {
-				endpoint.dial_tcp("python")?.await?
+				endpoint.dial_tcp("python", 0)?.await?
 			} else {
 				let mut incoming = Box::pin(endpoint.accept_tcp());
 				std::future::poll_fn(|cx| {
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 				})
 				.await;
 				println!("listening");
-				incoming.await?.accept().await?
+				incoming.await?.accept(0).await?
 			};
 			ensure!(stream.peer() == "python", "wrong peer");
 			for payload in PAYLOADS {

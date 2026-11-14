@@ -440,8 +440,8 @@ impl Invocation {
 		}
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
-		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
-		// and `announced` open their own session, and `auth` / `repair` / `devices` never touch the network at all.
+		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`,
+		// `announced`, and `tcp` open their own session, and `auth` / `repair` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -676,6 +676,8 @@ pub enum Command {
 	Announced(crate::announced::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
+	/// Forward TCP connections through a relay, from a local listener to a socket server.
+	Tcp(crate::tcp::Args),
 	/// Finish a recording that a crash or second signal left unfinished.
 	Repair(crate::repair::Args),
 	/// Play a broadcast in a native window and speaker.
@@ -737,6 +739,7 @@ impl Command {
 			Self::Export(_) | Self::Subscribe(_) => "export",
 			Self::Announced(_) => "announced",
 			Self::Fetch(_) => "fetch",
+			Self::Tcp(_) => "tcp",
 			Self::Repair(_) => "repair",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",

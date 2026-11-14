@@ -4216,7 +4216,8 @@ impl Consumer {
 		kio::wait(|waiter| self.poll_next_frame(waiter)).await
 	}
 
-	pub(crate) fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+	/// The next frame, as a consumer for chunked reading; see [`Self::next_frame`].
+	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		let res = match self.recover().is_none() {
 			true => {
 				let res = self.poll_next_frame_once(waiter);

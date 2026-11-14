@@ -147,7 +147,7 @@ impl Socket {
 		let watch = driver.clone();
 		let pending: std::pin::Pin<Box<dyn Future<Output = Result<StreamEntry, Error>> + Send>> = match track {
 			None => {
-				let dialing = inner.dial_tcp(peer)?;
+				let dialing = inner.dial_tcp(peer, 0)?;
 				Box::pin(async move { Ok(StreamEntry::tcp(dialing.await?, driver, children)) })
 			}
 			Some(info) => {
@@ -245,7 +245,7 @@ impl Socket {
 		let watch = driver.clone();
 		let pending: std::pin::Pin<Box<dyn Future<Output = Result<StreamEntry, Error>> + Send>> = match inner {
 			IncomingKind::Tcp(incoming) => {
-				let accepting = incoming.accept();
+				let accepting = incoming.accept(0);
 				Box::pin(async move { Ok(StreamEntry::tcp(accepting.await?, driver, children)) })
 			}
 			IncomingKind::Track(incoming) => {

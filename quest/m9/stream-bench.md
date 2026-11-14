@@ -15,4 +15,4 @@ gate here; the result informs the docs and the mesh guide.
 
 ## Required
 
-- [Rust byte streams](/quest/m1/stream/rust.md) - the stream under test
+- [Lossless relay hops](/quest/m1/stream/relay-eviction.md) - a bulk transfer through a relay otherwise ends evicted
