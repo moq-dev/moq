@@ -119,6 +119,22 @@ enum Phase {
 /// Whether a stream on `link` carries `claim` at all: never an upstream-learned claim
 /// to an upstream, nor one learned from another node to a peer this node does not
 /// proxy for.
+/// Buffer `dead`. When its moved routes outgrow one message, each goes ahead of it as a
+/// ROUTE_UPDATE instead: it moves while the peer still uses it, so a DEAD naming none of
+/// them leaves the peer as the whole one would.
+pub(super) fn buffer_dead(stream: &mut Stream<Transport, Version>, mut dead: lite::Dead) -> Result<(), Error> {
+	if !dead.fits()
+		&& let lite::Dead::Closed { moved, .. } = &mut dead
+	{
+		for (id, offer) in moved.drain(..) {
+			let offer = offer.expect("this node forwards only usable offers");
+			stream.writer.buffer(&Msg::RouteUpdate { id, offer })?;
+		}
+	}
+	stream.writer.buffer(&Msg::Dead(dead))?;
+	Ok(())
+}
+
 fn sends(link: &route::Link, claim: &node::Claim) -> bool {
 	!(link.upstream && claim.upstream) && (link.proxy || !claim.learned)
 }
@@ -140,11 +156,13 @@ impl Stall {
 		}
 		let (deadline, _) = self.armed.as_mut().expect("armed above");
 		ready!(deadline.poll(waiter));
-		self.session.close(
-			lite::error::to_session_code(&SessionError::Timeout),
-			"announce stream stalled",
-		);
+		self.close("announce stream stalled");
 		Poll::Ready(())
+	}
+
+	fn close(&self, reason: &str) {
+		self.session
+			.close(lite::error::to_session_code(&SessionError::Timeout), reason);
 	}
 }
 
@@ -310,6 +328,12 @@ impl Answer {
 				}
 			} else {
 				if let Some(stall) = &mut self.stall {
+					// A reader that keeps reading a trickle while its routes fail faster
+					// is cut off too, before the node holds every failure for it.
+					if (self.sources.iter()).any(|source| source.stream.poll_overrun(waiter).is_ready()) {
+						stall.close("announce stream fell behind");
+						return Poll::Ready(Err(Error::Timeout));
+					}
 					ready!(stall.poll(stream.writer.written(), waiter));
 					return Poll::Ready(Err(Error::Timeout));
 				}
@@ -556,12 +580,15 @@ impl Answer {
 				true => (told.iter().filter_map(wired).collect(), gone),
 				false => (Vec::new(), false),
 			};
-			stream.writer.buffer(&Msg::Dead(lite::Dead::Closed {
-				hop,
-				far,
-				gone: ends,
-				moved,
-			}))?;
+			buffer_dead(
+				stream,
+				lite::Dead::Closed {
+					hop,
+					far,
+					gone: ends,
+					moved,
+				},
+			)?;
 			for key in &told {
 				let sent = self.routes.get_mut(key).expect("listed above");
 				let moved = moves.get(key).filter(|_| single);

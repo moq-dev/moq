@@ -34,7 +34,7 @@ use crate::{Instance, Path};
 use rand::RngExt;
 
 use super::{
-	Error, GENERATED, Id, Link, Metric, QUALIFIED, Rev,
+	Error, GENERATED, Id, Link, MAX_HOPS, Metric, QUALIFIED, Rev,
 	path::{Dead, Doubt, Forward, Offer, Reach, RouteId, Router},
 	view::{ancestors, below},
 };
@@ -179,6 +179,9 @@ struct Outbox {
 	/// is held. Bounded like the segments: one per claim. The node's `waiting` indexes
 	/// them.
 	withheld: HashMap<RouteId, (Held, Option<Rev>)>,
+	/// What the segments a DEAD closed hold unread: each DEAD, its moved routes, and the
+	/// routes with changes queued ahead of it. See [`Self::overrun`].
+	sealed: usize,
 }
 
 /// Route changes queued before the next DEAD.
@@ -212,6 +215,14 @@ struct Pending {
 impl Pending {
 	fn is_empty(&self) -> bool {
 		!self.ended && self.finite.is_none() && !self.held && self.batch.is_none()
+	}
+}
+
+/// How many routes a DEAD moves.
+fn moved(dead: &Dead) -> usize {
+	match dead {
+		Dead::Closed { moved, .. } => moved.len(),
+		Dead::Draining { .. } => 0,
 	}
 }
 
@@ -408,7 +419,19 @@ impl Outbox {
 
 	/// Queue a DEAD, read once every route change queued before it is.
 	fn dead(&mut self, dead: Dead) {
-		self.segment().dead = Some(dead);
+		let segment = self.segment();
+		let sealed = 1 + segment.pending.len() + moved(&dead);
+		segment.dead = Some(dead);
+		self.sealed += sealed;
+	}
+
+	/// Whether the reader fell behind repeated failures of the routes it holds. Each
+	/// crosses at most [`MAX_HOPS`] hops, and each failed hop costs it at most a DEAD, a
+	/// moved entry, and a change queued after, so a reader holding more than that unread
+	/// for every route it holds is slower than the routes fail: a peer that reads a
+	/// trickle while its routes churn would otherwise hold a DEAD per failure forever.
+	fn overrun(&self) -> bool {
+		self.sealed > 3 * MAX_HOPS * (self.known.len() + 1)
 	}
 
 	fn pop(&mut self) -> Option<Output> {
@@ -423,11 +446,15 @@ impl Outbox {
 			match segment.order.pop_first() {
 				Some((_, key)) => {
 					let (_, pending) = segment.pending.remove(&key).expect("every queued route is pending");
+					if segment.dead.is_some() {
+						self.sealed -= 1;
+					}
 					self.take(key, pending);
 				}
 				None => {
 					let segment = self.segments.pop_front().expect("matched above");
 					if let Some(dead) = segment.dead {
+						self.sealed -= 1 + moved(&dead);
 						self.ready.push_back(Output::Dead(dead));
 					}
 				}
@@ -893,6 +920,16 @@ impl Stream {
 				return Poll::Ready(output);
 			}
 		}
+	}
+
+	/// Ready once the reader fell behind repeated failures of its routes
+	/// (`Outbox::overrun`): the session cuts it off, as it does a reader that stops.
+	pub fn poll_overrun(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let overrun = |outbox: &kio::Ref<'_, Outbox>| match outbox.overrun() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		};
+		self.queue.poll(waiter, overrun).map(|_| ())
 	}
 
 	/// The next output already queued, without waiting.

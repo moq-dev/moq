@@ -563,6 +563,7 @@ A minted Instance is new for every announcement, so a publisher reconnecting or 
 A node that loses a session names the hop it lost: its own Hop ID and that session's Session Number, with the Hop ID of the node at the far end.
 It sends one [DEAD](#dead) for it to each neighbour it sent a route whose Path holds the hop, covering every origin node, and each neighbour passes the hop on in the same way, once per neighbour while it has sent that neighbour a route through it.
 The DEAD lists the routes on the stream that moved to another Path, each with its new Route Offer.
+A sender whose moved routes do not fit one message instead sends each as a ROUTE_UPDATE right before a DEAD that lists none: each moves while the receiver still uses it, so the receiver ends as the whole DEAD would leave it.
 The sender's other routes on the stream through the hop end if `Gone` is set.
 Otherwise each is held, except one the sender ends with a ROUTE_END after the DEAD, and one the sender learned from the receiver itself, which the sender holds only by a ROUTE_HOLD after the DEAD: until then the receiver waits for its answer (see [Holds](#holds)).
 
@@ -596,6 +597,7 @@ A held route's claims stay shown but unavailable until a ROUTE_UPDATE makes it u
 Otherwise the node lets go, sending ROUTE_END wherever it sent the route, and its claims go offline.
 Neither proves that the origin withdrew its claims.
 A node closes the session when an Announce Stream it answers has made no progress for 10 seconds with messages left to send, so a peer that stops reading never holds a route.
+It MAY also close it when the stream falls behind repeated failures of the routes it carries, such as when DEADs it has yet to send outnumber the hops on those routes, so a peer that reads too slowly never holds every failure.
 
 #### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request naming no origin node names a path, and the receiver resolves it against the claims covering that path whose route it selected and is usable.

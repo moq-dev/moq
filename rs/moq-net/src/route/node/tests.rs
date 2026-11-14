@@ -282,6 +282,49 @@ fn nothing_moves_across_a_dead() {
 	assert_eq!(read, [route(1), Output::Dead(Dead::Draining { node: 1 }), route(2)]);
 }
 
+/// A reader that falls behind repeated failures of the route it holds overruns its
+/// stream, while one behind a failure of every hop a path can cross does not, and
+/// reading what was queued clears it.
+#[test]
+fn a_reader_behind_repeated_failures_overruns() {
+	let offer = |session| Offer {
+		path: [
+			super::super::path::Hop { node: 1, session: 0 },
+			super::super::path::Hop { node: 2, session },
+		]
+		.into(),
+		draining: false,
+		priority: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+	};
+	let mut outbox = Outbox::default();
+	let mut waiting = Waiting::default();
+	let key = (1, Path::empty());
+	outbox.route(7, key.clone(), Some(Reach::Finite(offer(0))), &mut waiting);
+	// Each failure of the route's hop is a DEAD, and the route moves on after it.
+	let mut failures = 0;
+	while !outbox.overrun() {
+		failures += 1;
+		outbox.dead(Dead::Closed {
+			hop: super::super::path::Hop {
+				node: 2,
+				session: failures,
+			},
+			far: 3,
+			moved: Vec::new(),
+			gone: false,
+		});
+		outbox.route(7, key.clone(), Some(Reach::Finite(offer(failures))), &mut waiting);
+	}
+	assert!(failures > MAX_HOPS as u64, "overran {failures} failures behind");
+
+	assert_eq!(std::iter::from_fn(|| outbox.pop()).count() as u64, 2 * failures + 1);
+	assert!(!outbox.overrun());
+	assert_eq!(outbox.sealed, 0, "everything read");
+}
+
 /// A route the reader read ends even when its ROUTE_END is queued alone, with no batch
 /// withdrawing its claims ahead of it, as when a hold ends.
 #[test]

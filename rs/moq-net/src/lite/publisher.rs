@@ -3924,6 +3924,67 @@ mod announce_test {
 		);
 	}
 
+	/// A DEAD whose moved routes outgrow one message moves each first with a ROUTE_UPDATE
+	/// and then names none, so failing over many routes at once never fails the stream;
+	/// one that fits goes whole.
+	#[test]
+	fn a_lite07_dead_past_one_message_moves_each_route_first() {
+		use crate::route::path::{Hop, Offer};
+		let offer = Offer {
+			// The longest path, of the widest Hop IDs.
+			path: (0..crate::route::MAX_HOPS as u64)
+				.map(|session| Hop {
+					node: crate::route::GENERATED - session,
+					session,
+				})
+				.collect(),
+			draining: false,
+			priority: 0,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+		};
+		let dead = |routes: u64, moved: bool| lite::Dead::Closed {
+			hop: Hop { node: 7, session: 1 },
+			far: 8,
+			gone: true,
+			moved: match moved {
+				true => (0..routes).map(|id| (id, Ok(offer.clone()))).collect(),
+				false => Vec::new(),
+			},
+		};
+		// Past 65,535 bytes at about 300 a route.
+		let many = 300;
+		assert!(dead(2, true).fits() && !dead(many, true).fits());
+
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut stream = Stream::<Transport, Version> {
+			writer: Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			),
+			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
+		};
+		let waiter = kio::Waiter::noop();
+		super::routed::buffer_dead(&mut stream, dead(2, true)).unwrap();
+		assert!(stream.writer.poll_flush(&waiter).is_ready());
+		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Dead(dead(2, true))]);
+
+		super::routed::buffer_dead(&mut stream, dead(many, true)).unwrap();
+		assert!(stream.writer.poll_flush(&waiter).is_ready());
+		let updates = (0..many).map(|id| lite::AnnounceBroadcast::RouteUpdate {
+			id,
+			offer: offer.clone(),
+		});
+		let expected: Vec<_> = updates.chain([lite::AnnounceBroadcast::Dead(dead(0, false))]).collect();
+		assert_eq!(wire.take_announces(), expected);
+	}
+
 	#[test]
 	fn synced_survives_a_removed_initial_route_and_live_churn() {
 		let origin = Hop::new(1).unwrap().produce();

@@ -432,6 +432,16 @@ fn encode_dead(w: &mut Encoder<'_>, dead: &Dead) -> Result<(), EncodeError> {
 	Ok(())
 }
 
+impl Dead {
+	/// Whether it fits one message. A DEAD whose moved routes outgrow that is sent with
+	/// none, each moved route going ahead of it as a ROUTE_UPDATE instead.
+	pub(crate) fn fits(&self) -> bool {
+		let mut body = Vec::new();
+		encode_dead(&mut Encoder::new(&mut body, Version::Lite07.into()), self).is_ok()
+			&& body.len() <= MAX_MESSAGE_SIZE
+	}
+}
+
 fn decode_dead(r: &mut Decoder<'_>) -> Result<Dead, DecodeError> {
 	let nonzero = |id: u64| match id {
 		0 => Err(DecodeError::InvalidValue),
