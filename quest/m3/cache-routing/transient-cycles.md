@@ -23,6 +23,14 @@ carriers exclude the neighbours they serve (2.9 to 3.1%) explained neither the
 gap. Start by finding which of the sweep's churn or the per-neighbour offers
 causes it, then propose fixes with their join-latency cost.
 
+A second baseline to account for: [moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734)
+(the path rule for a flapping publisher) re-pinned
+`route::tests::cache::a_ring_of_stale_offers_settles_on_the_link_left`'s cap
+on cycle steps from 40 to 204 across 20 seeds, 4 to 22 per seed, each cycle
+cleared within 20 deliveries; the rule it replaced gave 2 per seed, each
+cleared within 2. Explain that rise along with #8732's rate, and measure any
+fix against both the sweep and this fixture.
+
 If [warm routes on the wire](/quest/m2/warm-routes-wire.md) moves the epic
 downstream, this moves with it.
 
