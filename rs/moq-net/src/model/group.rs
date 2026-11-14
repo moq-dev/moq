@@ -2131,9 +2131,16 @@ impl Producer {
 	/// partway, since its bytes inflate only from its first.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn create_lead(mut self, frame: frame::Header) -> Result<frame::Producer> {
+		let meter = self.chunk_meter(None);
 		let res = self.open_lead(frame);
 		match res {
-			Ok((info, buf, admission)) => Ok(frame::Producer::new(self, buf, info, admission).lead()),
+			Ok((info, buf, admission)) => {
+				// Ingress: one frame opened, its bytes counted per chunk, as `create_object` does.
+				self.stats.frames(1);
+				Ok(frame::Producer::new(self, buf, info, admission)
+					.lead()
+					.with_meter(meter))
+			}
 			Err(err) => {
 				let _ = self.handle.abort(err.clone());
 				Err(err)
@@ -3181,6 +3188,12 @@ impl Handle {
 				|| state.flate.as_ref().map_or(0, |flate| flate.plain.bill.size()),
 				|content| content.size(),
 			) + state.partial.as_ref().map_or(0, |partial| partial.buf.view_size())
+			// The rest of a frame the copy started partway into, billed apart from its charge.
+			+ state
+				.lead
+				.as_deref()
+				.and_then(|lead| lead.open.as_ref())
+				.map_or(0, |(_, buf)| buf.content_size())
 	}
 
 	/// Whether the payload cached after the first frame exceeds `ratio` times the first
@@ -6866,6 +6879,7 @@ mod test {
 		let mut early = plain.clone().at(1, 3).unwrap();
 		assert!(next_at(&mut rest, 4).is_none(), "waits for the frame to open");
 
+		let before = handle.cache_size();
 		let mut lead = producer.create_lead(sized(6).into()).unwrap();
 		assert_eq!(handle.lead_at(1), None, "opened");
 		assert_eq!(lead.remaining(), 3, "only the rest is written");
@@ -6874,6 +6888,10 @@ mod test {
 		assert_eq!(frame.size, 6, "it states the frame's full size");
 		assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"e");
 		lead.write(b"f".as_ref()).unwrap();
+		assert!(
+			handle.cache_size() >= before + 3,
+			"the rest counts toward the group's eviction size"
+		);
 		let mut producer = lead.finish().unwrap();
 		producer.write_frame(Timestamp::ZERO, b"g".as_ref()).unwrap();
 		producer.finish().unwrap();

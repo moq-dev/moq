@@ -1001,7 +1001,6 @@ impl FrameBuf {
 	}
 
 	/// The canonical allocation's charge, counted once by its cache owner.
-	#[cfg(test)]
 	pub(super) fn content_size(&self) -> u64 {
 		self.content.bill.get().map_or(0, cache::Extra::size)
 	}
