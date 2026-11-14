@@ -1051,6 +1051,14 @@ impl Consumer {
 		self.playhead()
 	}
 
+	/// Drop the stretch's history, so no splice reaches back across a gap
+	/// before what is pushed next.
+	pub(crate) fn forget(&mut self) {
+		if let Some(stretch) = &mut self.stretch {
+			stretch.forget();
+		}
+	}
+
 	/// Frames ready to read, or zero before the writer's first push.
 	pub(crate) fn available(&self) -> usize {
 		if !self.shared.pushed.load(Ordering::Relaxed) {

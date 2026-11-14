@@ -1168,6 +1168,10 @@ impl Positioned {
 			// there exactly rather than playing early and slowing down. With
 			// nothing queued, the ring's clock restarts on the bus's there.
 			if stretching.ring.available() == 0 {
+				// Past a gap, no splice reaches back to the audio before it.
+				if position > next {
+					stretching.ring.forget();
+				}
 				stretching.start = position.max(next);
 				stretching.origin = stretching.start.wrapping_sub(stretching.ring.consumed() as u64);
 			}
