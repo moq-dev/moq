@@ -21,7 +21,7 @@ Decided 2026-11-10 (maintainer, a later /quest-plan the same day):
 
 - ✅ m1 (rejected: staying in m4; superseded 2026-11-13: m3, above). The mesh configs beside it, the
   inductive invariant (dropped 2026-11-13: no checker can step the model), and the
-  [cache-aware routing proof](/quest/m2/cache-routing-proof.md) all build on
+  cache-aware routing proof all build on
   `RouteHandoff.tla`, so drift there costs the most.
 - ✅ The other three models get trace validation too, each its own m4 quest
   behind this one (rejected: "route only for now; judge the other models
