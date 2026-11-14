@@ -30,9 +30,10 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    cache-dependent route prices. (rejected: per-broadcast forwarding with a
    cache-only subscribe and no advertisement; keeping routing cache-agnostic)
 2. ✅ **A warm route is per neighbor and travels one hop.** Reopened by
-   item 13; replaced by item 14. It goes only to
-   direct neighbors and is never forwarded. B is warm toward N only while B
-   has demand besides N's (a local reader or another downstream session),
+   item 13; replaced by item 14, where a warm route propagates and a relay
+   offers each neighbor the best copy whose Hops name neither. It went only to
+   direct neighbors and was never forwarded. B was warm toward N only while B
+   had demand besides N's (a local reader or another downstream session),
    and withdraws once that demand has been gone for the copy's existing
    linger, with no new timer. B sends it only to neighbors whose cold metric
    for the origin is at least its own, since no other neighbor may use it
@@ -40,7 +41,9 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    warm because it still feeds N, and N never skips it again. (rejected:
    broadcast-wide warmth, as the pre-#3225 design had; forwarding warmth k
    hops, which floods every warm transition)
-3. ✅ **One cost per link, priced marginally.** Replaced by item 14. Pulling through a warm
+3. ✅ **One cost per link, priced marginally.** Replaced by item 14: a copy
+   ranks as a route does, drain then priority then cost, and its carrier offers
+   it at no cost, so joining a copy costs only the links it crosses. Pulling through a warm
    neighbor costs the link alone, since that neighbor's cold metric is
    already paid; a cold neighbor costs the link plus its cold metric. A tie
    goes to the warm route, then to item 4's hash. A topology that wants both
@@ -94,8 +97,9 @@ Decided 2026-11-10 (maintainer, /quest-iterate on
 [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457)), from the
 proof's proposals:
 
-9. ✅ **Each pull names whom it serves**, amending item 2; replaced by item 14: a trailing
-   `Serves` field on SUBSCRIBE and SUBSCRIBE_UPDATE. (rejected: no field)
+9. ✅ **Each pull names whom it serves**, amending item 2; replaced by item 14,
+   whose SUBSCRIBE says only whether it joins a copy, and lite-07 no longer
+   carries `Serves`: a trailing `Serves` field on SUBSCRIBE and SUBSCRIBE_UPDATE. (rejected: no field)
    "Demand besides N's" can't be told from one hop: if B's only demand is a
    relay pulling on N's behalf, B counts warm toward N, N joins B, B's demand
    vanishes, and the cycle repeats every linger. `Serves` is alone (a local
@@ -105,7 +109,9 @@ proof's proposals:
    narrowed warm route stands until the copy's linger runs out, as the
    withdrawal already does.
 10. ✅ **Price a dependent copy at its cost, and move only on strict
-    improvement**, amending item 3; replaced by item 14; the Goal's "cheapest cold route" became
+    improvement**, amending item 3; replaced by item 14, whose offers do not
+    depend on who pulls what, and whose sweep settles every scenario with no
+    `UNSETTLED` list; the Goal's "cheapest cold route" became
     "cheapest route given the copies the others hold". (rejected: dropping
     mutual warmth so only a relay with a local reader advertises, which
     converges trivially but loses the LAN sharing that feeding two sessions
@@ -119,9 +125,10 @@ proof's proposals:
     Under the sweep's churn, with the draft's Rendezvous Hash, 2999 of 3000
     scenarios settle; scenario 2251 never does, as two carriers keep a
     narrowed route standing while two relays swap between them. The sweep names them in
-    `UNSETTLED` and checks each still never settles, and the
-    [proof's rewrite](/quest/m2/cache-routing-proof.md) settles them first.
-11. ✅ **The wire is in moq-lite-07 itself** (its warm fields replaced by item 14), overturning the proof's choice
+    `UNSETTLED` and checks each still never settles; item 14's rule settles
+    them.
+11. ✅ **The wire is in moq-lite-07 itself** (its warm fields and `Serves`
+    replaced by item 14's), overturning the proof's choice
     of a SETUP extension. (rejected: an additive Warm Routes SETUP
     extension) Lite-07 is unpublished, so its shape can still change until
     the cut, and a later change goes to the next version. The draft's
@@ -180,19 +187,54 @@ Measured by the proof:
     [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) proves items
     2 and 4 as first decided.
 
-14. **The proven rule** ([proof](/quest/m2/cache-routing-proof.md),
-    [moq-dev/moq#8615](https://github.com/moq-dev/moq/pull/8615)), on the
-    path prototype with item 27's routes. A warm route offers a copy's Hops,
-    its Warm Cost (0 at its carrier, the relay with a reader where it left the
-    route; else the cost of the sender's own pull), and its carrier. A relay
-    pulls through the cheapest of its next hop and the copies whose Hops name
-    neither it nor a neighbor it serves, offers its copy to every neighbor
-    even one the Hops name, moves between copies only toward a carrier with a
-    lower Rendezvous Hash, and, pulling along its route, is bound by the
-    carriers of the neighbors behind it. `Serves` is gone. The pulls are free
-    of loops once the copies offered are delivered, which the maintainer
-    accepted on 2026-11-13. The proof's remaining work is a few scenarios
-    under fresh seeds that never settle.
+14. **The proven rule** ([moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732)),
+    proven in `rs/moq-net/src/route/tests/cache.rs` over `route::path::Router`
+    ([moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622)), in three
+    layers that each settle before the next depends on them:
+    - **Routes** are item 27's, which copies never change.
+    - **Offers.** A relay with a local reader is its copy's carrier and offers
+      every neighbor its copy, its own Hop ID the only hop, at no cost. A relay
+      with no reader offers each neighbor the best of its route and the copies
+      offered to it whose Hops name neither relay, when that best is a copy.
+      Copies rank as routes do, drain then priority then cost, so an offer
+      depends only on readers, routes, and other offers, and settles as a
+      monotone path vector does.
+    - **Pulls.** A carrier pulls through its best source among its route and
+      the copies of carriers ranked below it by the Rendezvous Hash. A relay
+      with no reader pulls through its best source whose Hops name no
+      neighbor it serves, so long as that is, for each such neighbor, the copy
+      it offered it or a lower-ranked carrier's; otherwise it follows its
+      route. SUBSCRIBE's `Warm` says whether a pull joins the copy offered or
+      follows the route, and a relay pulled along its route follows its own.
+
+    Each join gets a copy whose carrier, then whose rank, is strictly better
+    than what it gives the relays joined to it, so once the offers and
+    subscriptions in flight are delivered the pulls are free of loops, as the
+    maintainer accepted on 2026-11-13. Unranked, two carriers join each other
+    and neither is fed. This replaces the rules of
+    [moq-dev/moq#8615](https://github.com/moq-dev/moq/pull/8615) (monotone
+    copy costs, carrier rank on every move, a relay bound by the carriers
+    behind it), which failed a few scenarios per seed because what a relay
+    offered depended on who pulled through it.
+
+    Measured by `sweep_cache_routing_long` (3000 scenarios each with and
+    without held links, 6 relays, 2 publishers, priorities and drains), under
+    12 seeds (72,000 scenarios): every scenario settles on the offers computed
+    centrally, an idle broadcast sends no warm message, and about 3.1 warm
+    messages go out per reader change. A pull lingering with no demand can hold
+    a copy its parent promised another neighbour, so the pulls around it may
+    move until the linger (30 s) runs out; settling counts from there. During
+    churn a broadcast's pulls form a cycle after 3.3% of steps, in about half
+    the scenarios, each gone within 142 deliveries. The sweep runs nightly
+    from `test/route-sweep.sh`.
+
+    The wire: WARM_START and WARM_UPDATE carry a copy's Warm Cost, a Flags
+    byte whose low bit marks a draining copy, its priority, and its Hops,
+    carrier first and the sender last. SUBSCRIBE and SUBSCRIBE_UPDATE end with
+    a `Warm` byte. Rust's codec reads and writes both, and `js/net` the `Warm`
+    byte, which both send as 0 (follow the route) and ignore when read, as
+    `js/net` skips the warm messages; [the implementation](/quest/m3/cache-routing/select.md)
+    acts on them.
 
 Prior art: warm/cold route prices
 ([moq-dev/moq#2925](https://github.com/moq-dev/moq/pull/2925)) were deleted

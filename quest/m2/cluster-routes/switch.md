@@ -116,10 +116,10 @@ Work:
   Test it with the two-stream, two-instance case from #8443's review.
 - [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457)'s warm-route
   sweep (`route/tests/cache.rs`) and `Router::eligible` rest on the
-  feasibility distance. The reopened
-  [cache-aware routing proof](/quest/m2/cache-routing-proof.md) rewrites them
-  for the path; if it has not landed, move the sweep onto the new router's
-  query here and say what it no longer checks.
+  feasibility distance.
+  [moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732) rewrites the
+  sweep on `route::path::Router`; if it has not landed, move the sweep onto the
+  new router's query here and say what it no longer checks.
 - Draft: Routing states the path rule, the withdrawal, holds, and the doubt.
   Floors says a floor certifies its route's prefix, and the condition "every
   peer whose last advertised route to it is feasible here has answered the

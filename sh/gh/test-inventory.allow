@@ -40,4 +40,3 @@ ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_expo
 recipe test::stream-credit /quest/m1/stream-credit/browser-resets.md
 
 # Too slow for the merge gate; the quest runs it nightly once every scenario settles.
-ignore moq-net::route::tests::cache::sweep_cache_routing_long /quest/m2/cache-routing-proof.md

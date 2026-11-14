@@ -12,14 +12,14 @@ and how many moves warm routes caused.
 
 ## Plan
 
-- Implement what [Prove cache-aware routing](/quest/m2/cache-routing-proof.md)
-  settles for routes that propagate (the epic's item 13) and pass its
-  fixtures and sweep: the warm message as the proof shapes it, warm state
-  derived from each front's demand, and eligibility. Lite-07 today carries the
-  one-hop warm routes and `Serves` that `rs/moq-net/src/route/tests/cache.rs`
-  models, and `rs/moq-net/src/lite/` reads and ignores them; the proof
-  rewrites both first. Once every scenario settles, run the long sweep
-  nightly, which the merge gate skips as slow.
+- Implement the rule the [epic](/quest/m3/cache-routing/README.md)'s item 14
+  records ([moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732)) and
+  pass the fixtures and sweep in `rs/moq-net/src/route/tests/cache.rs`: the
+  warm messages lite-07 carries, which `rs/moq-net/src/lite/` reads and
+  ignores today, and SUBSCRIBE's `Warm` byte, which it and `js/net` send as 0
+  (follow the route) and ignore when read, warm state derived
+  from each front's demand, and the choice of what to pull. The long sweep
+  already runs nightly from `test/route-sweep.sh`.
 - Extend today's selection rather than adding a second selector.
   `route_order` in `rs/moq-net/src/model/origin.rs` already hashes equal
   routes per path, and a front already moves to a better route of its own
@@ -43,10 +43,6 @@ Public API: report any relay configuration added for warm routes. Wire: a
 change the implementation needs updates the draft's Warm Routes section in
 the same PR, in lite-07 while it is unpublished and in the next version
 after.
-
-## Required
-
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - the rule for routes that propagate, its fixtures, and the wire this implements
 
 ## Related
 

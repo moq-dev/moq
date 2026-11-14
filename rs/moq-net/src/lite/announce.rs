@@ -30,7 +30,7 @@ const ROUTE_END: u64 = 8;
 const ANNOUNCE_FLOOR: u64 = 9;
 const ROUTE_REQUEST: u64 = 10;
 const ROUTE_HOLD: u64 = 11;
-// lite-07: warm routes, one hop toward the subscriber.
+// lite-07: warm routes, copies of one broadcast offered toward the subscriber.
 const WARM_START: u64 = 12;
 const WARM_UPDATE: u64 = 13;
 const WARM_END: u64 = 14;
@@ -118,9 +118,9 @@ pub enum AnnounceBroadcast {
 	/// with this id, certifying them across the whole requested prefix at the origin's
 	/// revision, or certifying nothing (`None`).
 	Floor { id: u64, revision: Option<route::Rev> },
-	/// WARM_START (lite-07+): under the route with Route ID `route`, the sender keeps its
-	/// copy of the broadcast at `suffix` whether or not the receiver pulls through it, and
-	/// assigns it the next Warm ID. See [`Warm`] for what the copy carries.
+	/// WARM_START (lite-07+): under the route with Route ID `route`, the sender offers the
+	/// copy of the broadcast at `suffix` that the receiver gets by joining it, and assigns
+	/// it the next Warm ID. See [`Warm`] for what the copy carries.
 	WarmStart {
 		route: u64,
 		suffix: Path,
@@ -136,24 +136,30 @@ pub enum AnnounceBroadcast {
 /// A copy of a broadcast a warm route offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Warm {
-	/// What pulling the copy through the sender costs it: 0 at the copy's carrier, else
-	/// its own pull's cost, in the units of the route's metric.
+	/// What pulling the copy through the sender costs, in the units of the route's
+	/// metric: 0 at its carrier, the relay with a local reader that offers it.
 	pub cost: u64,
-	/// The position in `hops` of the carrier, the relay with a reader where the copy left
-	/// its origin's route.
-	pub carrier: u64,
-	/// Every node the copy crossed, the origin node first and the sender last.
+	/// A node on `hops` sent GOAWAY, which ranks the copy below every source that avoids one.
+	pub draining: bool,
+	/// The lowest local priority of a link on `hops`, ranked before cost; the carrier's
+	/// own copy has no link to lower it, so `i8::MAX`.
+	pub priority: i8,
+	/// Every relay the copy crossed, the carrier first and the sender last.
 	pub hops: Arc<[route::Id]>,
 }
 
-/// Encode a warm route's cost, carrier, and hops. No relay offers a copy that crossed too
-/// many hops, or whose carrier is not among them.
+/// WARM_START and WARM_UPDATE flag: a node on the copy's hops drains.
+const WARM_DRAINING: u8 = 0x1;
+
+/// Encode a warm route's cost, drain, priority, and hops. No relay offers a copy with no
+/// carrier, or that crossed too many hops.
 fn encode_warm(w: &mut Encoder<'_>, warm: &Warm) -> Result<(), EncodeError> {
-	if warm.hops.len() > route::MAX_HOPS || warm.carrier >= warm.hops.len() as u64 {
+	if warm.hops.is_empty() || warm.hops.len() > route::MAX_HOPS {
 		return Err(EncodeError::InvalidState);
 	}
 	w.varint(warm.cost)?;
-	w.varint(warm.carrier)?;
+	w.u8(if warm.draining { WARM_DRAINING } else { 0 });
+	w.u8(warm.priority as u8);
 	w.varint(warm.hops.len() as u64)?;
 	for hop in warm.hops.iter() {
 		w.varint(*hop)?;
@@ -163,16 +169,26 @@ fn encode_warm(w: &mut Encoder<'_>, warm: &Warm) -> Result<(), EncodeError> {
 
 fn decode_warm(r: &mut Decoder<'_>) -> Result<Warm, DecodeError> {
 	let cost = r.varint()?;
-	let carrier = r.varint()?;
+	let draining = match r.u8()? {
+		0 => false,
+		WARM_DRAINING => true,
+		_ => return Err(DecodeError::InvalidValue),
+	};
+	let priority = r.u8()? as i8;
 	let count = r.varint()?;
 	if count > route::MAX_HOPS as u64 {
 		return Err(DecodeError::TooMany);
 	}
-	if carrier >= count {
+	if count == 0 {
 		return Err(DecodeError::InvalidValue);
 	}
 	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
-	Ok(Warm { cost, carrier, hops })
+	Ok(Warm {
+		cost,
+		draining,
+		priority,
+		hops,
+	})
 }
 
 /// ROUTE_START and ROUTE_UPDATE flag: the route is down-only.
@@ -1279,8 +1295,8 @@ mod tests {
 	}
 
 	/// The draft's warm route layouts, byte for byte: WARM_START is the Route ID, the path
-	/// suffix, the instance and its minted flag, then the copy's cost, its carrier's
-	/// position in its hops, and the hops; WARM_UPDATE the Warm ID and the same three;
+	/// suffix, the instance and its minted flag, then the copy's cost, its flags, its
+	/// priority as a signed byte, and its hops; WARM_UPDATE the Warm ID and the same four;
 	/// WARM_END the Warm ID. Lite-06 skips the types as unknown.
 	#[test]
 	fn lite07_warm_route_layout() {
@@ -1291,7 +1307,8 @@ mod tests {
 		};
 		let warm = Warm {
 			cost: 4,
-			carrier: 1,
+			draining: true,
+			priority: -1,
 			hops: Arc::from([5, 9, 6]),
 		};
 		let start = AnnounceBroadcast::WarmStart {
@@ -1303,8 +1320,8 @@ mod tests {
 		let update = AnnounceBroadcast::WarmUpdate { id: 7, warm };
 		let end = AnnounceBroadcast::WarmEnd { id: 7 };
 		let layouts: [(&AnnounceBroadcast, &[u8]); 3] = [
-			(&start, &[12, 12, 3, 1, b'c', 1, b'a', 0, 4, 1, 3, 5, 9, 6]),
-			(&update, &[13, 7, 7, 4, 1, 3, 5, 9, 6]),
+			(&start, &[12, 13, 3, 1, b'c', 1, b'a', 0, 4, 1, 0xff, 3, 5, 9, 6]),
+			(&update, &[13, 8, 7, 4, 1, 0xff, 3, 5, 9, 6]),
 			(&end, &[14, 1, 7]),
 		];
 		for (msg, wire) in layouts {
@@ -1317,35 +1334,35 @@ mod tests {
 		}
 	}
 
-	/// A warm route's carrier is one of its hops, of which there are at most 32.
+	/// A warm route starts at its carrier, so it has at least one hop and at most 32, and
+	/// sets no flag but drain.
 	#[test]
-	fn lite07_warm_route_names_its_carrier_among_its_hops() {
-		let outside = AnnounceBroadcast::WarmUpdate {
+	fn lite07_warm_route_hops_and_flags_are_bounded() {
+		let empty = AnnounceBroadcast::WarmUpdate {
 			id: 7,
 			warm: Warm {
 				cost: 4,
-				carrier: 3,
-				hops: Arc::from([5, 9, 6]),
+				draining: false,
+				priority: 0,
+				hops: Arc::from([]),
 			},
 		};
 		let mut buf = Vec::new();
 		assert!(matches!(
-			outside.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07),
+			empty.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07),
 			Err(EncodeError::InvalidState)
 		));
 		let decode = |wire: &[u8]| {
 			crate::coding::decode_buf(&mut &wire[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v))
 		};
-		assert!(decode(&[13, 4, 7, 4, 0, 0]).is_err(), "no hops, so no carrier");
-		assert!(
-			decode(&[13, 7, 7, 4, 3, 3, 5, 9, 6]).is_err(),
-			"a carrier past the hops"
-		);
-		let mut long = vec![13, 37, 7, 4, 0, 33];
+		assert!(decode(&[13, 5, 7, 4, 0, 0, 0]).is_err(), "no hops, so no carrier");
+		assert!(decode(&[13, 6, 7, 4, 2, 0, 1, 5]).is_err(), "an unknown flag");
+		decode(&[13, 6, 7, 4, 0, 0, 1, 5]).unwrap();
+		let mut long = vec![13, 38, 7, 4, 0, 0, 33];
 		long.extend([1; 33]);
 		assert!(decode(&long).is_err(), "33 hops");
-		long[1] = 36;
-		long[5] = 32;
+		long[1] = 37;
+		long[6] = 32;
 		long.pop();
 		decode(&long).unwrap();
 	}
