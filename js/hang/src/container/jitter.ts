@@ -39,6 +39,11 @@ const MAX_HISTORY = 8192;
 /** The cold-start distribution, which is also what an idle interval relaxes back to. */
 const PRIOR = Float64Array.from({ length: BUCKETS }, (_, i) => 0.5 ** (i + 1));
 
+// The histogram bucket a delay in milliseconds lands in, the last holding everything past it.
+function bucket(delay: number): number {
+	return Math.min(BUCKETS - 1, Math.floor(delay / BUCKET));
+}
+
 /**
  * How much buffer late arrivals need, measured from arrival timing alone.
  *
@@ -117,7 +122,7 @@ export class Jitter {
 			return;
 		}
 
-		this.#close(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
+		this.#close(bucket(this.#peak));
 
 		if (resumed) {
 			// A silence the publisher declared says nothing about the path, so the estimate keeps
@@ -204,6 +209,22 @@ export class Jitter {
 		const fork = new Jitter();
 		fork.#histogram = Float64Array.from(this.#histogram);
 		fork.#prior = this.#prior;
+		// What this one gathered but has not folded, the interval in progress and an open stall,
+		// folds as if that interval closed here: a switch right after an outage is the likeliest,
+		// and would otherwise lose the outage's one observation. This one is left as it was.
+		if (this.#origin !== undefined) {
+			fork.#stall = this.#stall;
+			fork.#span = this.#span;
+			fork.#stallLate = this.#stallLate;
+			fork.#stallDue = this.#stallDue;
+			fork.#pending = this.#pending;
+			fork.#due = this.#due;
+			fork.#late = this.#late;
+			fork.#close(bucket(this.#peak));
+			fork.#settle();
+			fork.#due = Number.POSITIVE_INFINITY;
+			fork.#late = Number.NEGATIVE_INFINITY;
+		}
 		return fork;
 	}
 

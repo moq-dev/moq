@@ -474,7 +474,10 @@ Restarting would drop the target to the cold-start 100 ms at the switch, then
 raise it as the lateness is relearned, and the playout follows both moves. Only the
 reference window restarts, so the new track's frames are measured against its
 own fastest. Its opening backlog would read as seconds late against the old
-track's arrivals.
+track's arrivals. What the outgoing track measured but has not folded, its
+interval in progress and any open stall, folds into the continued histogram as
+if that interval closed at the switch: a switch most often follows an outage,
+and would otherwise drop the outage's one observation.
 
 ## Rise, fall, startup, and the ceiling
 

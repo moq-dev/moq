@@ -131,6 +131,30 @@ describe("Jitter", () => {
 		expect(fork.measured).toBeLessThanOrEqual(learned);
 		expect(warm.measured).toBe(learned);
 	});
+
+	it("forks an outage still open as its one observation", () => {
+		// A second of steady arrivals, then 3 s of media flushed in two halves, the second still behind
+		// the first: one stall, open in the interval in progress when the switch forks.
+		const feed = (jitter: Jitter) => {
+			for (let i = 0; i < 50; i++) jitter.observe(i * 20 + 50, i * 20);
+			for (let i = 50; i < 125; i++) jitter.observe(4_050, i * 20);
+			for (let i = 125; i < 200; i++) jitter.observe(4_600, i * 20);
+		};
+		const warm = new Jitter();
+		feed(warm);
+		const learned = warm.measured;
+		expect(learned).toBe(100);
+
+		// The 3 s delay folds once, as when a declared end settles the same stall.
+		const fork = warm.fork();
+		const ended = new Jitter();
+		feed(ended);
+		ended.end();
+		ended.observe(5_050, 5_000);
+		expect(fork.measured).toBe(2000);
+		expect(fork.measured).toBe(ended.measured);
+		expect(warm.measured).toBe(learned);
+	});
 });
 
 // The documented scan: the first entry with the smallest key at or before `media`.
