@@ -15,6 +15,31 @@ fn offered(via: Id, session: u64) -> path::Reach {
 	})
 }
 
+/// An offer along `hops`, the publisher first and the sender last.
+fn along(hops: &[(Id, u64)]) -> path::Reach {
+	path::Reach::Finite(path::Offer {
+		path: hops
+			.iter()
+			.map(|&(node, session)| path::Hop { node, session })
+			.collect(),
+		draining: false,
+		priority: i8::MAX,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+	})
+}
+
+/// Whether `router` uses a live route for publisher 7 through `via`.
+fn live(router: &path::Router<usize, u8>, via: usize) -> bool {
+	matches!(router.route_for(7, &p("")), Some(path::Route::Live { next, .. }) if *next == via)
+}
+
+/// Whether `router` uses no live route for publisher 7.
+fn unrouted(router: &path::Router<usize, u8>) -> bool {
+	router.routes(7).all(|(_, route)| route.offer().is_none())
+}
+
 /// An interest edit keeps the newer withdrawal a narrow view already learned,
 /// even while a wider neighbour has not heard it and the new streams have not arrived.
 #[test]
@@ -591,6 +616,21 @@ fn an_unwatched_grant_retires_its_previous_stream() {
 	assert_eq!(sim.reaches(1, key, &p("b/x")), Some(0));
 }
 
+/// A newer stream's hold or end for a route it never offered leaves the route an
+/// older stream offered: only the newer stream's own offer, or its SYNCED, replaces it.
+#[test]
+fn a_newer_stream_cannot_hold_or_end_a_route_it_never_offered() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.route(1, 7, p(""), Some(path::Reach::Held), 1);
+	assert!(live(&router, 1), "held");
+	router.route(1, 7, p(""), None, 1);
+	assert!(live(&router, 1), "ended");
+	router.synced(1, 1);
+	assert!(router.routes(7).next().is_none());
+}
+
 /// A snapshot already in flight must not restore a cancelled grant's routes.
 #[test]
 fn a_cancelled_stream_cannot_restore_a_route() {
@@ -918,6 +958,92 @@ fn holds_never_close_a_cycle() {
 	}
 }
 
+/// An offer through a closed session is dead until its sender says what became of
+/// it, even once the doubt lifts, and a stale repeat of it stays dead: the hop is
+/// remembered while any heard route names it.
+#[test]
+fn an_offer_through_a_dead_hop_stays_dead() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	let through = |peer: usize| along(&[(7, 0), (6, 1), (4, 1), (peer as Id, 1)]);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.route(peer, 7, p(""), Some(through(peer)), 0);
+	}
+	assert!(live(&router, 1));
+	let dead = path::Dead::Closed {
+		hop: path::Hop { node: 4, session: 1 },
+		far: 6,
+		moved: Vec::new(),
+		gone: true,
+	};
+	router.dead(1, dead, Instant::ZERO);
+	router.timeout(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
+	assert!(unrouted(&router), "the second peer has not answered");
+	router.route(2, 7, p(""), Some(through(2)), 0);
+	assert!(unrouted(&router), "a stale repeat revived the dead hop");
+}
+
+/// A closed session casts doubt on the node at its far end: no route moves onto a
+/// path through that node until the timer lifts the doubt.
+#[test]
+fn a_closed_sessions_far_node_is_doubted_until_its_timer() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	router.disconnect([3], Instant::ZERO);
+	router.route(2, 7, p(""), Some(along(&[(7, 0), (3, 4), (2, 1)])), 0);
+	assert!(unrouted(&router), "moved onto the doubted node");
+	router.timeout(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
+	assert!(live(&router, 2));
+}
+
+/// A neighbour's GOAWAY casts doubt on it, so no route moves onto a path through it
+/// until the timer. Then such a path is used, ranked as draining though its sender
+/// never said so, and the drain is forgotten once no heard path names the node.
+#[test]
+fn a_draining_node_is_doubted_then_ranked_then_forgotten() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	router.goaway(1, Instant::ZERO);
+	router.route(2, 7, p(""), Some(along(&[(7, 0), (1, 5), (2, 1)])), 0);
+	assert!(unrouted(&router), "moved onto a stale offer through the draining node");
+	router.timeout(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
+	assert!(live(&router, 2));
+	let route = router.route_for(7, &p("")).and_then(path::Route::offer);
+	assert!(route.is_some_and(|offer| offer.draining), "{route:?}");
+	router.route(2, 7, p(""), None, 0);
+	assert_eq!(router.retained().draining, 0);
+}
+
+/// A drain from a peer none of whose routes crosses the node, or naming this node,
+/// is ignored: it allocates no drain or doubt.
+#[test]
+fn an_unrelated_drain_is_ignored() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	// A path naming this node, so the drain would be credited if it named another.
+	router.route(1, 7, p("a"), Some(along(&[(7, 0), (99, 1), (1, 1)])), 0);
+	for node in [5, 99] {
+		router.dead(1, path::Dead::Draining { node }, Instant::ZERO);
+	}
+	assert_eq!((router.retained().draining, router.retained().doubt), (0, 0));
+	assert!(live(&router, 1));
+}
+
+/// A route heard but unusable, such as one whose path names this node, is still held.
+#[test]
+fn an_unusable_heard_route_is_still_held() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.route(1, 7, p(""), Some(along(&[(7, 0), (99, 1), (1, 1)])), 0);
+	assert!(router.routes(7).next().is_none());
+	assert!(router.holds(7));
+}
+
 /// A DEAD needs a path from this peer naming both the hop and its far end.
 #[test]
 fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
@@ -980,6 +1106,20 @@ fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 	);
 	assert_eq!(router.retained().dead, 1);
 	assert!(router.routes(7).next().is_none());
+}
+
+/// A route path with no room for this node's hop is refused, and ends the route it
+/// replaces, as a replacement path in a DEAD does.
+#[test]
+fn route_paths_obey_the_hop_limit() {
+	for length in [0, MAX_HOPS - 1, MAX_HOPS] {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		router.connect(1, 1, Link::default()).unwrap();
+		router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+		let hops: Vec<(Id, u64)> = (0..length).map(|i| (100 + i as Id, 1)).collect();
+		router.route(1, 7, p(""), Some(along(&hops)), 0);
+		assert_eq!(!unrouted(&router), length == MAX_HOPS - 1, "path length {length}");
+	}
 }
 
 #[test]

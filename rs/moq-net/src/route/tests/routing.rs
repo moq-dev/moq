@@ -1529,18 +1529,33 @@ fn rotated_identities_are_fresh_and_in_range() {
 		epoch: None,
 		since: 0,
 	};
+	// Eight rotations, each from aging the declared identity to its last revision.
+	fn check(rule: &str, mut rotate: impl FnMut() -> Id) {
+		let mut seen = BTreeSet::from([7]);
+		for _ in 0..8 {
+			let fresh = rotate();
+			assert_ne!(fresh, 0, "{rule}");
+			assert!(fresh <= GENERATED, "{rule}: {fresh:#x} is beyond a generated hop id");
+			assert!(seen.insert(fresh), "{rule}: {fresh:#x} was drawn before");
+		}
+	}
+
 	let mut router: Router<Node, Item> = Router::new(hop(0, 0), seed);
 	router.originate(7, 0);
 	router.announce(p("live/x"), item).unwrap();
-	let mut seen = BTreeSet::from([7]);
-	for _ in 0..8 {
+	check("distance", || {
 		router.age(MAX - 1);
 		router.announce(p("live/x"), item).unwrap();
-		let fresh = router.declared().expect("declared");
-		assert_ne!(fresh, 0);
-		assert!(fresh <= GENERATED, "{fresh:#x} is beyond a generated hop id");
-		assert!(seen.insert(fresh), "{fresh:#x} was drawn before");
-	}
+		router.declared().expect("declared")
+	});
+	let mut router = path::Router::<Node, Item>::new(hop(0, 0), seed, Doubt::DEFAULT);
+	router.originate(7);
+	router.announce(p("live/x"), item).unwrap();
+	check("path", || {
+		router.age(MAX - 1);
+		router.announce(p("live/x"), item).unwrap();
+		router.declared().expect("declared")
+	});
 }
 
 /// One batch may withdraw a stream's only claim and start another: the stream
