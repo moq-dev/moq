@@ -85,4 +85,10 @@ exclude_re = [
     # Walking again before anything the read parked on fires returns the same
     # `Pending`, so the idle shortcut only saves work.
     'replace Subscriber::parked -> bool with false$',
+    # path.rs: `step` only counts visits for the tests' work budgets, which
+    # read the count as an upper bound.
+    'path\.rs:\d+:\d+: replace Router<N, A>::step with \(\)$',
+    # A path-rule identity nothing holds has no route left, and the update that
+    # removed its last one already dropped its views, so `collect` changes nothing.
+    'path\.rs:\d+:\d+: replace Router<N, A>::collect with \(\)$',
 ]

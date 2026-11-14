@@ -848,7 +848,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			None => view.items.remove(&claim),
 		};
 		let dirty = Dirty {
-			all: false,
 			claims: BTreeSet::from([claim]),
 			..Default::default()
 		};
