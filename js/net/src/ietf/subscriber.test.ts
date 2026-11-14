@@ -729,7 +729,11 @@ async function subscribeTrack({
 	version?: IetfVersion;
 	properties?: Properties;
 	subscription?: track.Subscription;
-} = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+} = {}): Promise<{
+	subscriber: Subscriber;
+	track: track.Subscriber;
+	pair: ReturnType<typeof createMockTransportPair>;
+}> {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
@@ -748,7 +752,7 @@ async function subscribeTrack({
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({ trackAlias: ALIAS, properties }).encode(peer.writer, version);
 
-	return { subscriber, track: consumer };
+	return { subscriber, track: consumer, pair };
 }
 
 // A refusal already ended the request: a reset back would tell the publisher we failed. The
@@ -1518,6 +1522,49 @@ for (const [name, firstObject, bytes] of [
 		await tail.settle(() => true, new Once<null>());
 	});
 }
+
+// The relay forwards a withdrawn route's END_OF_TRACK just as the viewer's own unsubscribe
+// closes the track, so the marker lands on a track that already ended. The track is gone, not
+// the publisher wrong, so the session stays up for the route that replaces it.
+test("an END_OF_TRACK after the track closed locally leaves the session open", async () => {
+	const { subscriber, track, pair } = await subscribeTrack();
+	const close = spyOn(pair.server, "close");
+	const opened = Promise.withResolvers<void>();
+	const open = Tail.prototype.open;
+	const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, sequence) {
+		opened.resolve();
+		return open.call(this, sequence);
+	});
+	let controller: ReadableStreamDefaultController<Uint8Array>;
+	const readable = new ReadableStream<Uint8Array>({
+		start(value) {
+			controller = value;
+		},
+	});
+	// A standalone END_OF_TRACK at object 0, whose stream has not ended yet.
+	const reader = new Reader(readable, undefined, VERSION);
+	controller.enqueue(new Uint8Array([0, 0, 4]));
+	const handled = subscriber.handleGroup(
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 3n,
+			subGroupId: 0n,
+			publisherPriority: 0,
+			flags: groupFlags(true),
+		}),
+		reader,
+	);
+	await opened.promise;
+	// Let the handler decode the marker and wait for its stream to end.
+	for (let i = 0; i < 10; i++) await yieldNow();
+	track.close();
+	await handled;
+	controller.close();
+
+	expect(close).not.toHaveBeenCalled();
+	close.mockRestore();
+	opening.mockRestore();
+});
 
 test("every object in a chunk reaches the reader before it wakes", async () => {
 	const { subscriber, track } = await subscribeTrack();

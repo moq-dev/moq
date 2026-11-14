@@ -10,10 +10,10 @@ so it only needs to stay green.
 
 ## Waiting
 
-- moq-dev/moq: the next scheduled Interop run on `main` passes, once the
-  [resumed-audio fix](https://github.com/moq-dev/moq/pull/8635) lands
-  ([moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572), the max-age
-  fix, merged 2026-11-12). Check
+- moq-dev/moq: the next scheduled Interop run on `main` passes, now that
+  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) (max age,
+  2026-11-12) and [moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)
+  (resumed audio, 2026-11-14) have landed. Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
@@ -189,6 +189,30 @@ Scheduled run
   stretch the lag back.
 
 The 11-11 run, before #8507, passed all three steps.
+
+Scheduled runs
+[43457651679](https://github.com/moq-dev/moq/actions/runs/43457651679)
+(2026-11-13, at c748c0d47) and
+[43606836954](https://github.com/moq-dev/moq/actions/runs/43606836954)
+(2026-11-14, at bd617cc1e) show the media step moving on, and the matrix going green:
+
+- 11-13 Media: the pause case's audio after resume, fixed by
+  [moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635), merged
+  2026-11-14 after that run.
+- 11-13 Interop (full matrix) and Interop (moq-transport): `js -> cpp`,
+  `js -> python`, and `js -> rust` each failed once with `audio gap`, a
+  different cell per matrix, with no repeat on 11-14, where both steps passed.
+  This is the intermittent audio gap
+  [moq-dev/moq#8633](https://github.com/moq-dev/moq/pull/8633) and
+  [moq-dev/moq#8611](https://github.com/moq-dev/moq/pull/8611) track, not a
+  new cause.
+- 11-14 Media: only `live incumbent fallback plays` on `moq-transport-22`
+  failed. The viewer's session closed with `invalid END_OF_TRACK: track is
+  closed` and reconnected, so the fallback took more than its 1039 ms bound.
+  The JS subscriber refused the END_OF_TRACK of a withdrawn route after its own
+  unsubscribe had released the track, and a protocol violation closes the whole
+  session. It passed on a rerun at `ce616b52c`.
+  [moq-dev/moq#8758](https://github.com/moq-dev/moq/pull/8758) tolerates the marker on a released track.
 
 Public API: none. Wire: none.
 
