@@ -9,6 +9,11 @@ libraries.
 
 ## Plan
 
+Moved from m5 to m3 2026-11-13 (maintainer, /quest-plan):
+[cli-packaging](/quest/m3/cli-packaging.md) in m3 requires it, and no quest
+requires one in a later milestone. ✅ m3 (rejected: moving cli-packaging and
+nixpkgs-cli to m5, which waits for the cut).
+
 Nix already covers the dev-time side (alsa-lib, alsa-plugins, and pipewire
 are in the dev shell). What remains is the runtime linkage: cpal 0.18's
 `alsa` dependency is non-optional on Linux, so libasound becomes a load-time
@@ -23,6 +28,8 @@ release offers it, and the in-tree routes are hacks), so this waits on
 [the cpal release](/quest/m3/cpal-alsa-runtime.md). Once it ships, bump cpal,
 enable whatever it needs, and update the moq-audio and moq-cli feature
 comments that call libasound a build-time link.
+
+Moved to m5 2026-11-12 (maintainer, /quest-audit): it waits only on an upstream cpal release. Superseded 2026-11-13: it is back in m3, per the decision above.
 
 Verify by building in the Nix shell, then running the shipped binary on a
 host without libasound: it starts, lists devices, and captures where a

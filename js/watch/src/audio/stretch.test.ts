@@ -2,62 +2,77 @@ import { expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type Decision, decide, Level, Stretch } from "./stretch";
+import { type Decision, decide, HOLD, type Inputs, Stretch } from "./stretch";
 
-interface Pcm {
+interface Rule extends Inputs {
+	name: string;
+	rate: number;
+	decision: Decision;
+}
+
+interface Case {
 	name: string;
 	rate: number;
 	channels: number;
 	input: number[];
-	decision: Decision;
-	allowance: number;
-	lag: number;
+	decisions: Decision[];
+	shifts: number[];
 	output: number[];
-}
-
-interface Vectors {
-	decisions: {
-		name: string;
-		rate: number;
-		target: number;
-		level: number;
-		raw: number;
-		lag: number;
-		bound: number;
-		cooldown: number;
-		decision: Decision;
-		allowance: number;
-	}[];
-	filter: {
-		name: string;
-		rate: number;
-		target: number;
-		steps: [number, number][];
-		filtered: number[];
-	}[];
 }
 
 // Shared with moq-audio, so neither implementation is graded against the other.
 const shared = join(dirname(fileURLToPath(import.meta.url)), "../../../../doc/concept/audio-jitter/stretch");
-const pcm = JSON.parse(readFileSync(join(shared, "corpus.json"), "utf8")) as Pcm[];
-const vectors = JSON.parse(readFileSync(join(shared, "decisions.json"), "utf8")) as Vectors;
+const rules = JSON.parse(readFileSync(join(shared, "decisions.json"), "utf8")) as Rule[];
+const cases = JSON.parse(readFileSync(join(shared, "corpus.json"), "utf8")) as Case[];
 
 // The corpus is interleaved; the ring is planar.
 const planar = (samples: number[], channels: number) =>
-	Array.from({ length: channels }, (_, channel) => samples.filter((_, i) => i % channels === channel));
+	Array.from({ length: channels }, (_, channel) =>
+		Float32Array.from(samples.filter((_, i) => i % channels === channel)),
+	);
 
-for (const vector of pcm) {
+// Play `input` the way the ring does: topped up to a window before each hop boundary decides.
+function play(
+	stretch: Stretch,
+	input: Float32Array[],
+	decisions: Decision[],
+): { output: number[][]; shifts: number[] } {
+	const frames = input[0].length;
+	const output: number[][] = input.map(() => []);
+	const chunk = input.map(() => new Float32Array(stretch.hop));
+	const shifts: number[] = [];
+	let fed = 0;
+	for (;;) {
+		const count = Math.min(frames - fed, stretch.window - stretch.queued, stretch.room());
+		if (count > 0) {
+			stretch.push(input, fed, count);
+			fed += count;
+		}
+		if (stretch.due) {
+			if (stretch.queued === 0) break;
+			shifts.push(stretch.next(decisions[Math.min(shifts.length, decisions.length - 1)]));
+		}
+		const played = stretch.read(chunk, 0, stretch.hop);
+		if (played === 0) break;
+		chunk.forEach((samples, channel) => {
+			output[channel].push(...samples.subarray(0, played));
+		});
+	}
+	return { output, shifts };
+}
+
+for (const rule of rules) {
+	it(`decides the corpus inputs: ${rule.name}`, () => {
+		const { rate, lag, depth, bound, read } = rule;
+		expect(decide(rate, { lag, depth, bound, read })).toEqual(rule.decision);
+	});
+}
+
+for (const vector of cases) {
 	it(`stretches the corpus PCM: ${vector.name}`, () => {
 		const stretch = new Stretch(vector.rate, vector.channels);
-		const input = planar(vector.input, vector.channels);
-		input.forEach((samples, channel) => {
-			stretch.input[channel].set(samples);
-		});
-		stretch.stage(stretch.window, { decision: vector.decision, allowance: vector.allowance });
-		expect(Math.abs(stretch.window - stretch.available)).toBe(vector.lag);
-
-		const output = Array.from({ length: vector.channels }, () => new Float32Array(stretch.available));
-		expect(stretch.read(output, 0)).toBe(output[0].length);
+		const { output, shifts } = play(stretch, planar(vector.input, vector.channels), vector.decisions);
+		expect(shifts).toEqual(vector.shifts);
 		const expected = planar(vector.output, vector.channels);
 		for (let channel = 0; channel < vector.channels; channel++) {
 			expect(output[channel].length).toBe(expected[channel].length);
@@ -68,79 +83,63 @@ for (const vector of pcm) {
 	});
 }
 
-for (const vector of vectors.decisions) {
-	it(`decides the corpus inputs: ${vector.name}`, () => {
-		const { rate, cooldown, decision, allowance, ...inputs } = vector;
-		expect(decide(rate, inputs, cooldown)).toEqual({ decision, allowance });
-	});
-}
+// A 100 Hz tone at 8 kHz, whose 80-frame period is exactly one hop.
+const tone = (frames: number) => [
+	Float32Array.from({ length: frames }, (_, i) => 0.25 * Math.sin((2 * Math.PI * i) / 80)),
+];
+const bridge = (rate: number): Decision => decide(rate, { lag: 0, depth: 0, bound: rate, read: 128 });
 
-for (const vector of vectors.filter) {
-	it(`filters the corpus levels: ${vector.name}`, () => {
-		const level = new Level();
-		vector.steps.forEach(([value, stretched], step) => {
-			const actual = level.update(vector.rate, vector.target, value, stretched);
-			expect(Math.abs(actual - vector.filtered[step])).toBeLessThanOrEqual(1e-9);
-		});
-	});
-}
+it("maps a crossfade's played share onto the input it shifts to", () => {
+	const stretch = new Stretch(8000, 1);
+	stretch.push(tone(stretch.window), 0, stretch.window);
+	// A hop of history, so the bridge can reach back one period.
+	stretch.next(HOLD);
+	stretch.read([new Float32Array(stretch.hop)], 0, stretch.hop);
+	stretch.push(tone(stretch.window + stretch.hop), stretch.window, stretch.hop);
+	expect(stretch.ahead).toBe(stretch.window);
 
-it("takes what the stretch changed out of the next filter update", () => {
-	// 48 kHz at a 100 ms target: a constant signal accelerates by its shortest period, 120 frames,
-	// from a buffer at the high limit.
-	const inputs = { target: 4800, level: 4800, raw: 4800, lag: 120, bound: 0 };
-	const stretch = new Stretch(48000, 1);
-	stretch.input[0].fill(0.25);
-	stretch.cooldown = 0;
-	expect(stretch.process(stretch.window, inputs)).toBe("Accelerate");
-	expect(stretch.available).toBe(stretch.window - 120);
-	// The first update takes the level as it is, the next takes out the period removed.
-	expect(stretch.level.filtered).toBe(4800);
-	stretch.process(stretch.window, inputs);
-	expect(stretch.level.filtered).toBe(4680);
-	// A reset starts again from the level.
-	stretch.level.reset();
-	stretch.process(stretch.window, inputs);
-	expect(stretch.level.filtered).toBe(4800);
+	expect(stretch.next(bridge(8000))).toBe(-80);
+	// Half the crossfade moves the playhead half of a hop less the period it repeats: nowhere.
+	stretch.read([new Float32Array(40)], 0, 40);
+	expect(stretch.ahead).toBe(stretch.window);
+	expect(stretch.available).toBe(stretch.window + 40);
+	stretch.read([new Float32Array(40)], 0, 40);
+	expect(stretch.due).toBe(true);
+	expect(stretch.ahead).toBe(stretch.window);
 });
 
-it("passes a short, input-less, or exhausted window through unchanged", () => {
-	for (const rate of [8000, 44100, 48000, 96000]) {
-		const stretch = new Stretch(rate, 2);
-		for (const channel of stretch.input) channel.fill(0.25);
-		stretch.cooldown = 0;
+it("never reaches back across a boundary it forgot", () => {
+	const stretch = new Stretch(8000, 1);
+	const input = tone(2 * stretch.window);
+	stretch.push(input, 0, stretch.window);
+	stretch.next(HOLD);
+	stretch.read([new Float32Array(stretch.hop)], 0, stretch.hop);
+	stretch.push(input, stretch.window, stretch.hop);
+	stretch.forget();
+	// Without history the bridge has nowhere to repeat from.
+	expect(stretch.next(bridge(8000))).toBe(0);
+});
 
-		// Ahead of the clock by a second: expand back onto it.
-		const target = Math.floor(rate / 10);
-		const inputs = { target, level: target, raw: target, lag: -rate, bound: 0 };
-		expect(stretch.process(stretch.window, inputs)).toBe("Expand");
-		expect(stretch.available).toBeGreaterThan(stretch.window);
-		const output = [new Float32Array(rate), new Float32Array(rate)];
-		expect(stretch.read(output, 0)).toBe(stretch.length);
-		expect(stretch.read(output, 0)).toBe(0);
-
-		stretch.cooldown = 0;
-		stretch.process(stretch.window);
-		expect(stretch.available).toBe(stretch.window);
-		stretch.process(stretch.window >> 1, inputs);
-		expect(stretch.available).toBe(stretch.window >> 1);
+it("splices no faster than the cap refills its allowance", () => {
+	// A bridge asks to splice every hop: past a burst of one span, any run of hops repeats at most
+	// a tenth of what it plays.
+	const stretch = new Stretch(8000, 1);
+	const { shifts } = play(stretch, tone(8000), [bridge(8000)]);
+	expect(shifts.filter((shift) => shift !== 0).length).toBeGreaterThan(10);
+	for (let from = 0; from < shifts.length; from++) {
+		let repeated = 0;
+		for (let to = from; to < shifts.length; to++) {
+			repeated -= shifts[to];
+			expect(repeated).toBeLessThanOrEqual(stretch.span + 0.1 * (to - from + 1) * stretch.hop);
+		}
 	}
 });
 
-it("never moves a seam past its allowance", () => {
-	// A constant signal's shortest period is 2.5 ms: 120 frames at 48 kHz.
-	const cases: [Decision, number, number][] = [
-		["Accelerate", 119, 1440],
-		["Accelerate", 120, 1320],
-		["Accelerate", 239, 1320],
-		["Fast", 360, 1080],
-		["Expand", 119, 1440],
-		["Expand", 120, 1560],
-	];
-	for (const [decision, allowance, length] of cases) {
-		const stretch = new Stretch(48000, 1);
-		stretch.input[0].fill(0.25);
-		stretch.stage(stretch.window, { decision, allowance });
-		expect(stretch.length).toBe(length);
-	}
+it("turns off without a bound, and plays a tail shorter than a hop as received", () => {
+	expect(decide(48000, { lag: 4800, depth: 0, bound: 0, read: 128 })).toEqual(HOLD);
+	const stretch = new Stretch(8000, 1);
+	const input = tone(50);
+	const { output, shifts } = play(stretch, input, [decide(8000, { lag: 800, depth: 8000, bound: 1600, read: 128 })]);
+	expect(shifts).toEqual([0]);
+	expect(output[0]).toEqual(Array.from(input[0]));
 });

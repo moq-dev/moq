@@ -211,7 +211,24 @@ impl Entry {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Bounds {
 	pub start: u64,
+	/// The first byte held of frame `start`: non-zero when the copy starts partway into
+	/// it, which only a read continuing that frame from a later byte can use (see [`Lead`]).
+	pub byte: u64,
 	pub end: Option<u64>,
+}
+
+/// The frame a copy holds only the rest of, from byte `byte` on: a transport started the copy
+/// partway into frame `index`, the one before [`GroupState::offset`].
+///
+/// Kept beside the frame log rather than in it, so every whole-frame read of the copy finds
+/// frame `index` missing ([`Error::Lagged`]), as it would on a copy starting at the next
+/// frame. Only a read continuing the frame from `byte` or later reaches it, through
+/// [`Consumer::at`].
+pub(super) struct Lead {
+	index: usize,
+	byte: usize,
+	// Opened by the first frame the copy's ingest writes, with the frame's full size.
+	open: Option<(frame::Info, FrameBuf)>,
 }
 
 /// Shared group state. Model-visible so [`frame`] handles can observe its outcome
@@ -233,6 +250,10 @@ pub(super) struct GroupState {
 
 	// The single in-flight frame, if one is open.
 	pub(super) partial: Option<Partial>,
+
+	// The frame before `offset` this copy holds only a suffix of, if it started partway into
+	// it. Boxed: it is the rare case.
+	lead: Option<Box<Lead>>,
 
 	// Index of the first frame this handle holds: any the group deliberately started
 	// past (see [`Producer::start_at`]). Reading below it is [`Error::Lagged`]; the
@@ -903,10 +924,19 @@ impl GroupState {
 		payload + fields
 	}
 
-	/// The bytes the live tail holds: every committed frame, their fields, and the
-	/// in-flight frame at its declared size.
+	/// The bytes the live tail holds: every committed frame, their fields, the rest of a
+	/// frame the copy started partway into, and the in-flight frame at its declared size.
 	fn tail(&self) -> u64 {
-		self.cache + self.relay.as_ref().map_or(0, |relay| relay.bytes) + self.unwritten()
+		self.cache + self.relay.as_ref().map_or(0, |relay| relay.bytes) + self.lead_bytes() + self.unwritten()
+	}
+
+	/// The rest of the frame the copy started partway into, at its declared size like the
+	/// in-flight frame, since its later writes trim nothing.
+	fn lead_bytes(&self) -> u64 {
+		self.lead
+			.as_deref()
+			.and_then(|lead| lead.open.as_ref())
+			.map_or(0, |(_, buf)| buf.size() as u64)
 	}
 
 	/// The frame slots the tail holds beyond the log's first segment, so a group of empty
@@ -998,6 +1028,12 @@ impl GroupState {
 		let mut slots = self.slots();
 		if tail.saturating_add(slots) <= MAX_CACHE_BYTES {
 			return true;
+		}
+		// The lead is the oldest frame, so it goes first. Only a later frame trims, once the
+		// lead is written; its readers keep the bytes they hold.
+		if self.lead.as_deref().is_some_and(|lead| lead.open.is_some()) {
+			tail -= self.lead_bytes();
+			self.lead = None;
 		}
 		let mut end = self.held();
 		while tail.saturating_add(slots) > MAX_CACHE_BYTES
@@ -1447,6 +1483,7 @@ impl GroupState {
 		self.front = VecDeque::new();
 		self.evict_log(self.log.end());
 		self.partial = None;
+		self.lead = None;
 		if let Some(content) = self.content.take() {
 			content.detach(self.outcome.error().cloned().unwrap_or(Error::Dropped));
 		}
@@ -1820,8 +1857,26 @@ impl Producer {
 	}
 
 	/// Apply transport bounds before this copy is published to the cache.
+	///
+	/// A copy starting partway into frame `start` starts at the next frame, holding the
+	/// rest of `start` aside as its [`Lead`], which the first frame written opens.
 	pub(crate) fn bound(&mut self, frames: Bounds) -> Result<()> {
-		self.start_at(frames.start)?;
+		match frames.byte {
+			0 => self.start_at(frames.start)?,
+			byte => {
+				let next = frames
+					.start
+					.checked_add(1)
+					.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				self.start_at(next)?;
+				let byte = usize::try_from(byte).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				modify(&self.handle.state)?.lead = Some(Box::new(Lead {
+					index: frames.start as usize,
+					byte,
+					open: None,
+				}));
+			}
+		}
 		if let Some(end) = frames.end {
 			let end = usize::try_from(end).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 			let mut state = modify(&self.handle.state)?;
@@ -2079,6 +2134,65 @@ impl Producer {
 			}
 		};
 		Ok(frame::Producer::new(self, buf, info, admission).with_meter(meter))
+	}
+
+	/// Open the rest of the frame this copy starts partway into (see [`Bounds::byte`]):
+	/// `frame` declares the frame's full size, and the producer takes only the bytes past
+	/// the copy's start.
+	///
+	/// [`Error::ProtocolViolation`] unless the copy starts partway into a frame it has not
+	/// opened yet, or when the frame is no larger than that start: a transport answering
+	/// from a byte always has more of the frame to send. A compressed frame never starts
+	/// partway, since its bytes inflate only from its first.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn create_lead(mut self, frame: frame::Header) -> Result<frame::Producer> {
+		let meter = self.chunk_meter(None);
+		let res = self.open_lead(frame);
+		match res {
+			Ok((info, buf, admission)) => {
+				// Ingress: one frame opened, its bytes counted per chunk, as `create_object` does.
+				self.stats.frames(1);
+				Ok(frame::Producer::new(self, buf, info, admission)
+					.lead()
+					.with_meter(meter))
+			}
+			Err(err) => {
+				let _ = self.handle.abort(err.clone());
+				Err(err)
+			}
+		}
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn open_lead(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf, Option<frame::Admission>)> {
+		let frame = header.info;
+		let timestamp = self.handle.track.rescale(frame.timestamp)?;
+		if frame.size > MAX_CACHE_BYTES {
+			return Err(Error::FrameTooLarge);
+		}
+		if header.inflated.is_some() || header.fields.is_some() {
+			return Err(Error::ProtocolViolation);
+		}
+		let mut state = modify(&self.handle.state)?;
+		let Some(lead) = state.lead.as_deref().filter(|lead| lead.open.is_none()) else {
+			return Err(Error::ProtocolViolation);
+		};
+		let rest = usize::try_from(frame.size)
+			.ok()
+			.and_then(|size| size.checked_sub(lead.byte))
+			.filter(|rest| *rest > 0)
+			.ok_or(Error::ProtocolViolation)?;
+		let (buf, admission) = FrameBuf::admitted(rest, self.handle.cache.frames());
+		// Charged as its bytes arrive, and freed with the last reader holding them.
+		buf.shared().bill_content(state.charge.extra());
+		let info = frame::Info {
+			size: frame.size,
+			timestamp,
+		};
+		state.lead.as_deref_mut().expect("checked above").open = Some((info, buf.clone()));
+		// The ingest settled the relay state before writing the lead, as before any frame.
+		state.wrote = true;
+		Ok((info, buf, admission))
 	}
 
 	/// The meter a streamed frame's chunks bump: none for a plain frame a compressed group
@@ -2677,7 +2791,15 @@ impl Handle {
 		let same_form = head.compressed == state.flate.is_some();
 		// A copy that shed its front holds no run from `offset` for the head to precede.
 		let shed = state.held() != offset;
-		if state.outcome.error().is_some() || state.sparse() || !same_form || shed || head.start >= offset || !reaches {
+		// Nor does one holding only the rest of the frame below `offset` (see [`Lead`]).
+		let lead = state.lead.is_some();
+		if state.outcome.error().is_some()
+			|| state.sparse()
+			|| !same_form
+			|| shed || lead
+			|| head.start >= offset
+			|| !reaches
+		{
 			return;
 		}
 		let count = offset - head.start;
@@ -2912,12 +3034,25 @@ impl Handle {
 	pub(super) fn covers(&self, frames: Bounds) -> bool {
 		let state = self.state.read();
 		state.outcome.error().is_none()
-			&& state.offset as u64 <= frames.start
+			&& (state.offset as u64 <= frames.start
+				|| state
+					.lead
+					.as_ref()
+					.is_some_and(|lead| lead.index as u64 == frames.start && lead.byte as u64 <= frames.byte))
 			&& match (state.range_end, frames.end) {
 				(None, _) => true,
 				(Some(cap), Some(end)) => end <= cap as u64,
 				(Some(_), None) => false,
 			}
+	}
+
+	/// The byte this copy starts frame `index` at, if it holds only the rest of it and
+	/// has not opened it yet (see [`Producer::create_lead`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn lead_at(&self, index: u64) -> Option<u64> {
+		let state = self.state.read();
+		let lead = state.lead.as_deref()?;
+		(lead.index as u64 == index && lead.open.is_none()).then_some(lead.byte as u64)
 	}
 
 	/// Whether this copy was cut short at the back by its transport request.
@@ -3078,6 +3213,12 @@ impl Handle {
 				|| state.flate.as_ref().map_or(0, |flate| flate.plain.bill.size()),
 				|content| content.size(),
 			) + state.partial.as_ref().map_or(0, |partial| partial.buf.view_size())
+			// The rest of a frame the copy started partway into, billed apart from its charge.
+			+ state
+				.lead
+				.as_deref()
+				.and_then(|lead| lead.open.as_ref())
+				.map_or(0, |(_, buf)| buf.content_size())
 	}
 
 	/// Whether the payload cached after the first frame exceeds `ratio` times the first
@@ -4033,7 +4174,7 @@ impl Consumer {
 		}
 		let index = self.cursor.index as u64;
 		let recover = self.recover_mut().expect("only a recovering group needs a replacement");
-		let replacement = ready!(recover.poll(index, failed.as_ref(), waiter))?;
+		let replacement = ready!(recover.poll(index, 0, failed.as_ref(), waiter))?;
 		// A plain read inflates from frame 0, which a replacement starting later lacks
 		// when the failed route's head was not lent to it.
 		if !self.cursor.raw
@@ -4175,6 +4316,99 @@ impl Consumer {
 		self.cursor.start_at(start);
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 		self
+	}
+
+	/// This reader positioned at frame `index`, to continue that frame from byte `byte`
+	/// with [`Self::poll_next_frame_at`], or `None` when this copy does not hold it from
+	/// there: it starts past the frame, or partway into it past `byte`.
+	pub(crate) fn at(self, index: u64, byte: u64) -> Option<Self> {
+		let mut group = self.with_range(index..);
+		if group.index() == index {
+			return Some(group);
+		}
+		let starts = {
+			let state = group.cursor.state.read();
+			state
+				.lead
+				.as_deref()
+				.is_some_and(|lead| lead.index as u64 == index && lead.byte as u64 <= byte)
+		};
+		if !starts || group.index() != index + 1 {
+			return None;
+		}
+		// Below the copy's start: only `poll_next_frame_at` reads the frame there.
+		group.cursor.index = index as usize;
+		group.cursor.prefetch = Prefetch::default();
+		group.cursor.partial = false;
+		Some(group)
+	}
+
+	/// Whether the group's track compresses its frames.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_compressed(&self) -> bool {
+		self.cursor.compressed
+	}
+
+	/// The next frame, to stream from byte `from` on, which a copy starting partway into
+	/// it (see [`Bounds::byte`]) serves if it starts at or before `from`.
+	///
+	/// [`Error::WrongSize`] when a non-zero `from` is not within the frame.
+	pub(crate) fn poll_next_frame_at(
+		&mut self,
+		from: usize,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<frame::Consumer>>> {
+		if self.expired {
+			return Poll::Ready(Err(Error::Old));
+		}
+		let index = self.cursor.index;
+		let res = self.cursor.poll(waiter, |state| {
+			let Some(lead) = state.lead.as_deref().filter(|lead| lead.index == index) else {
+				return Poll::Ready(Ok(None));
+			};
+			if from < lead.byte {
+				return Poll::Ready(Err(Error::Lagged));
+			}
+			match &lead.open {
+				Some((info, buf)) => Poll::Ready(Ok(Some((*info, buf.clone(), lead.byte)))),
+				None if state.outcome.error().is_some() || state.outcome.frames().is_some() => {
+					Poll::Ready(Err(state.outcome.error().cloned().unwrap_or(Error::Lagged)))
+				}
+				None => Poll::Pending,
+			}
+		});
+		// A lead that stops arriving is judged by the read's budget, as a whole frame is.
+		let lead = ready!(self.poll_expired_if_blocked(waiter, res))?;
+		let frame = match lead {
+			Some((info, _, _)) if from as u64 >= info.size => return Poll::Ready(Err(Error::WrongSize)),
+			Some((info, buf, base)) => {
+				self.cursor.index += 1;
+				self.stats.frames(1);
+				let header = frame::Header {
+					info,
+					fields: None,
+					inflated: None,
+				};
+				let frame = frame::Consumer::new(self.cursor.state.clone(), header, frame::Source::Partial(buf))
+					.with_meter(self.stats.clone())
+					.starting_at(base, from);
+				let end = self.cursor.end.unwrap_or(usize::MAX);
+				match &self.expiry {
+					Some(policy) => frame.with_expiry(
+						frame::Expiry::new(policy.clone(), self.stats.clone(), self.delivery.clone())
+							.for_frame(self.cursor.index..end, true),
+					),
+					None => frame,
+				}
+			}
+			None => match ready!(self.poll_next_frame(waiter))? {
+				// A non-zero start names a byte of the frame, so the rest is never empty.
+				Some(frame) if from > 0 && from as u64 >= frame.size => return Poll::Ready(Err(Error::WrongSize)),
+				Some(frame) => frame.starting_at(0, from),
+				None => return Poll::Ready(Ok(None)),
+			},
+		};
+		Poll::Ready(Ok(Some(frame)))
 	}
 
 	/// Cap reads before frame `end`, or remove the cap with `None`, without moving the
@@ -4555,6 +4789,7 @@ impl Consumer {
 	pub(super) fn unread(&self, index: usize) -> Bounds {
 		Bounds {
 			start: index as u64,
+			byte: 0,
 			end: self.cursor.end.map(|end| end as u64),
 		}
 	}
@@ -5041,6 +5276,10 @@ pub struct Fetch {
 	/// There is no public matching end. Private transport caps retain incomplete cache
 	/// provenance, so a bounded reply never answers a later whole-group fetch.
 	pub(crate) frame_start: u64,
+
+	/// The first byte to fetch of frame `frame_start`. Like that start, only a route change
+	/// sets it: a frame read partway when its route failed asks for the rest of it.
+	pub(crate) byte_start: u64,
 }
 
 impl Fetch {
@@ -5718,6 +5957,30 @@ mod test {
 			1,
 			"the head does not fit beside the open frame"
 		);
+	}
+
+	/// A copy holding only the rest of a frame adopts no head over it: the head would hold
+	/// that frame whole beside its rest, outside the live tail's admission.
+	#[test]
+	fn a_copy_with_a_lead_adopts_no_head() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.bound(Bounds {
+				start: 1,
+				byte: 1,
+				end: None,
+			})
+			.unwrap();
+		let adopter = producer.handle();
+		let head = Head {
+			content: None,
+			start: 0,
+			first_object: true,
+			entries: vec![Entry::plain(Frame::new(None, Bytes::from_static(b"ab")).into(), 0); 2],
+			compressed: false,
+		};
+		adopter.adopt_head(&head);
+		assert_eq!(adopter.state.read().offset, 2, "the head was adopted over the lead");
 	}
 
 	/// A head's slots count against the live tail, so a head of empty frames that would
@@ -6635,6 +6898,140 @@ mod test {
 		}
 	}
 
+	/// A copy started partway into frame 1 holds its rest aside: whole reads find the frame
+	/// missing, a read from at or past the copy's start byte streams the rest, and the frames
+	/// after it read as usual.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_copy_started_partway_into_a_frame_serves_only_its_rest() {
+		let bounded = || {
+			let mut producer = Info { sequence: 0 }.produce();
+			producer
+				.bound(Bounds {
+					start: 1,
+					byte: 3,
+					end: None,
+				})
+				.unwrap();
+			producer
+		};
+		let next_at = |group: &mut Consumer, from| match group.poll_next_frame_at(from, &kio::Waiter::noop()) {
+			Poll::Ready(res) => Some(res),
+			Poll::Pending => None,
+		};
+
+		// The rest of a frame no larger than the start is no frame at all.
+		assert!(matches!(
+			bounded().create_lead(sized(3).into()),
+			Err(Error::ProtocolViolation)
+		));
+
+		let producer = bounded();
+		let handle = producer.handle();
+		assert_eq!(handle.lead_at(1), Some(3));
+		let covers = |start, byte| handle.covers(Bounds { start, byte, end: None });
+		assert!(covers(1, 3) && covers(1, 4) && covers(2, 0));
+		assert!(!covers(1, 2) && !covers(1, 0) && !covers(0, 0));
+
+		let mut lagged = producer.consume();
+		lagged.skip_to(1);
+		assert!(matches!(lagged.read_frame().now_or_never(), Some(Err(Error::Lagged))));
+		let mut plain = producer.consume().with_range(0..);
+		assert_eq!(plain.index(), 2, "a whole read starts past the frame");
+		assert!(plain.clone().at(1, 2).is_none(), "the copy starts past byte 2");
+		let mut rest = plain.clone().at(1, 4).unwrap();
+		let mut early = plain.clone().at(1, 3).unwrap();
+		let mut past = plain.clone().at(1, 10).unwrap();
+		let mut edge = plain.clone().at(1, 6).unwrap();
+		assert!(next_at(&mut rest, 4).is_none(), "waits for the frame to open");
+
+		let before = handle.cache_size();
+		let mut lead = producer.create_lead(sized(6).into()).unwrap();
+		assert_eq!(handle.lead_at(1), None, "opened");
+		assert!(
+			plain.clone().poll_wire(&kio::Waiter::noop()).is_ready(),
+			"the lead settles the relay state"
+		);
+		assert_eq!(lead.remaining(), 3, "only the rest is written");
+		lead.write(b"de".as_ref()).unwrap();
+		assert!(
+			matches!(next_at(&mut past, 10), Some(Err(Error::WrongSize))),
+			"a byte past the frame's end"
+		);
+		assert!(
+			matches!(next_at(&mut edge, 6), Some(Err(Error::WrongSize))),
+			"the frame's end leaves no rest"
+		);
+		let mut frame = next_at(&mut rest, 4).unwrap().unwrap().unwrap();
+		assert_eq!(frame.size, 6, "it states the frame's full size");
+		assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"e");
+		lead.write(b"f".as_ref()).unwrap();
+		assert!(
+			handle.cache_size() >= before + 3,
+			"the rest counts toward the group's eviction size"
+		);
+		let mut producer = lead.finish().unwrap();
+		producer.write_frame(Timestamp::ZERO, b"g".as_ref()).unwrap();
+		producer.finish().unwrap();
+		assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"f");
+		assert!(frame.read_chunk().now_or_never().unwrap().unwrap().is_none());
+		assert_eq!(
+			rest.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+			b"g"[..]
+		);
+
+		let mut frame = next_at(&mut early, 3).unwrap().unwrap().unwrap();
+		assert_eq!(frame.read_all().now_or_never().unwrap().unwrap(), b"def"[..]);
+
+		let read = plain.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read.payload, b"g"[..], "whole reads skip the frame held in part");
+	}
+
+	/// The rest of a frame the copy started partway into counts toward the live tail, and
+	/// is the first frame a later one sheds past it; a reader already holding it keeps it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_lead_is_shed_first_past_the_live_tail() {
+		let half = MAX_CACHE_BYTES / 2;
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.bound(Bounds {
+				start: 0,
+				byte: 1,
+				end: None,
+			})
+			.unwrap();
+		let handle = producer.handle();
+		let mut holding = producer.consume().at(0, 1).unwrap();
+		let mut late = producer.consume().at(0, 1).unwrap();
+
+		let mut lead = producer.create_lead(sized(half + 1).into()).unwrap();
+		lead.write(Bytes::from(vec![1u8; half as usize])).unwrap();
+		let mut producer = lead.finish().unwrap();
+		let mut frame = match holding.poll_next_frame_at(1, &kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(frame))) => frame,
+			_ => panic!("the lead is readable"),
+		};
+		assert!(handle.cache_size() >= half);
+
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from(vec![2u8; (half + half / 2) as usize]))
+			.unwrap();
+		assert!(handle.cache_size() < MAX_CACHE_BYTES, "the lead was not shed");
+		assert!(
+			matches!(
+				late.poll_next_frame_at(1, &kio::Waiter::noop()),
+				Poll::Ready(Err(Error::Lagged))
+			),
+			"a reader that had not taken the lead finds it gone"
+		);
+		assert_eq!(
+			frame.read_all().now_or_never().unwrap().unwrap().len() as u64,
+			half,
+			"a reader holding the lead keeps it"
+		);
+	}
+
 	/// A declared size costs the peer nothing, so the pool is charged as the bytes
 	/// arrive. Charging the declaration would let a peer evict the cache without
 	/// sending anything.
@@ -7252,7 +7649,13 @@ mod test {
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let info = track::Info::default().with_compression(crate::track::Compression::Deflate);
 		let mut released = Producer::new(Info::from(0u64), info.clone(), cache.clone());
-		released.bound(Bounds { start: 0, end: Some(2) }).unwrap();
+		released
+			.bound(Bounds {
+				byte: 0,
+				start: 0,
+				end: Some(2),
+			})
+			.unwrap();
 		for index in 0..2 {
 			released.write_frame(None, verbose(index)).unwrap();
 		}
@@ -7509,6 +7912,57 @@ mod test {
 		assert!(matches!(finished.poll_finished(&waiter), Poll::Ready(Err(Error::Old))));
 	}
 
+	/// A read continuing a frame from a byte gives up with the read's budget, whether the
+	/// rest of the frame never opens or stops arriving partway.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_lead_read_expires_as_old() {
+		let bounded = || {
+			let mut producer = Info { sequence: 0 }.produce();
+			producer
+				.bound(Bounds {
+					start: 0,
+					byte: 1,
+					end: None,
+				})
+				.unwrap();
+			producer
+		};
+		let waiter = kio::Waiter::noop();
+
+		let producer = bounded();
+		let expired = Switch::default();
+		let mut group = producer
+			.consume()
+			.with_expiry(Arc::new(expired.clone()))
+			.at(0, 1)
+			.unwrap();
+		assert!(group.poll_next_frame_at(1, &waiter).is_pending(), "waits for the lead");
+		expired.set(true);
+		assert!(matches!(
+			group.poll_next_frame_at(1, &waiter),
+			Poll::Ready(Err(Error::Old))
+		));
+
+		let producer = bounded();
+		let expired = Switch::default();
+		let mut group = producer
+			.consume()
+			.with_expiry(Arc::new(expired.clone()))
+			.at(0, 1)
+			.unwrap();
+		let mut lead = producer.create_lead(sized(4).into()).unwrap();
+		lead.write(b"b".as_ref()).unwrap();
+		let mut frame = match group.poll_next_frame_at(1, &waiter) {
+			Poll::Ready(Ok(Some(frame))) => frame,
+			_ => panic!("the lead is readable"),
+		};
+		assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"b");
+		assert!(frame.read_chunk().now_or_never().is_none(), "waits for the rest");
+		expired.set(true);
+		assert!(matches!(frame.read_chunk().now_or_never(), Some(Err(Error::Old))));
+	}
+
 	/// Records a wake.
 	#[derive(Default)]
 	struct Woken(AtomicBool);
@@ -7623,7 +8077,13 @@ mod test {
 	#[test]
 	fn a_bounded_copy_finished_short_of_its_bound_ends_cleanly() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.bound(Bounds { start: 0, end: Some(4) }).unwrap();
+		producer
+			.bound(Bounds {
+				byte: 0,
+				start: 0,
+				end: Some(4),
+			})
+			.unwrap();
 		let mut reader = producer.consume();
 		for payload in [b"a", b"b"] {
 			producer

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- NVIDIA transcodes no longer serialize the whole GPU: NVDEC skips the multi-millisecond decoder-caps query when a flush's new parser keeps the decoder, decoded frames reuse pooled device memory instead of a `cuMemAlloc` and `cuMemFree` each, and each NVENC session scales CUDA frames into one input it registers once and reuses one output bitstream, where it used to allocate, register, and free all of them per frame.
 - A V4L2 camera that opens and never delivers a frame no longer blocks its capture thread forever: reads time out after a second, so dropping the `capture::Stream` stops the thread and closes the device promptly.
 - The PipeWire camera listing hides nodes that offer no format the backend converts, such as an IR camera with only GREY, as the V4L2 listing already does.
 - `capture::cameras()` lists a webcam once with the `pipewire` feature: the dedupe read `api.v4l2.path`, which a PipeWire registry global lacks, and now reads `object.path`.

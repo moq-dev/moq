@@ -76,5 +76,5 @@ version.
 
 ## Related
 
-- [Stream credit by priority](/quest/m1/stream-credit/README.md) - the reset-based priority scheduling this would shave a round trip off
+- [YIELDED reset](https://github.com/moq-dev/moq/pull/8545) - the reset-based priority scheduling this would shave a round trip off
 - [Finalize lite-07](/quest/m2/lite07-finalize.md) - freezes lite-07 without takeover

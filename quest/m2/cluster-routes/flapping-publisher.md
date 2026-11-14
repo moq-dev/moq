@@ -50,7 +50,7 @@ Work:
   of sessions that never closed to the publisher routes to it once that path
   is known. Run the existing configs under the new rule.
 - The path router (`route::path`, from
-  [the router](/quest/m2/cluster-routes/scope.md)) applies the rule, with the
+  [the router](https://github.com/moq-dev/moq/pull/8622)) applies the rule, with the
   model's counterexamples reproduced there first.
 - A fixture on real sessions with mocked time: the dual-homed publisher with
   one link flapping at half the timer, where a subscriber at a far relay
@@ -62,11 +62,6 @@ Work:
   [the switch](/quest/m2/cluster-routes/switch.md) has landed, and the
   `verify-route` skill.
 
-## Required
-
-- [The router runs the path rule with a route per scope](/quest/m2/cluster-routes/scope.md) - the doubt this changes
-
 ## Related
 
-- [A relay that refuses a forwarded route drops the route, not the session](/quest/m1/refuse-route.md) - another failure mode from the same BGP comparison
 - [A request loop heals once routes settle](/quest/m2/cluster-routes/request-loop.md) - another failure mode from the same BGP comparison

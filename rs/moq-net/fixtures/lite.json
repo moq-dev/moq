@@ -63,18 +63,18 @@
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_START flag no version defines is refused",
+		"name": "a ROUTE_START flag no version defines is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "06059234030504",
-		"expect": "refused"
+		"expect": "withdrawn"
 	},
 	{
-		"name": "a ROUTE_START with more than 32 hops is refused",
+		"name": "a ROUTE_START with more than 32 hops is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "0606923403050121",
-		"expect": "refused"
+		"expect": "withdrawn"
 	},
 	{
 		"name": "a ROUTE_START missing a hop it counts is refused",
@@ -84,18 +84,18 @@
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_START naming Node ID 0 is refused",
+		"name": "a ROUTE_START naming Node ID 0 is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "06050003050100",
-		"expect": "refused"
+		"expect": "withdrawn"
 	},
 	{
-		"name": "a ROUTE_START advertising the last seqno is refused",
+		"name": "a ROUTE_START advertising the last seqno is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "060d01ffffffffffffffffff000000",
-		"expect": "refused"
+		"expect": "withdrawn"
 	},
 	{
 		"name": "a ROUTE_UPDATE references its Route ID",
@@ -138,6 +138,34 @@
 		"message": "announce",
 		"hex": "000a00000178020161000100",
 		"expect": "decoded"
+	},
+	{
+		"name": "a ROUTE_UPDATE flag no version defines is withdrawn",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0705010305802a",
+		"expect": "withdrawn"
+	},
+	{
+		"name": "a lite-07 ANNOUNCE_START with an invalid path is withdrawn",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000c0000032f2f78020161000100",
+		"expect": "withdrawn"
+	},
+	{
+		"name": "a lite-07 ANNOUNCE_START with an invalid instance is withdrawn",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0009000001780200000100",
+		"expect": "withdrawn"
+	},
+	{
+		"name": "a lite-07 ANNOUNCE_START cut short is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0003000003",
+		"expect": "refused"
 	},
 	{
 		"name": "a ROUTE_REQUEST names an origin node and seqno",
