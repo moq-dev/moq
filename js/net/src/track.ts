@@ -2790,6 +2790,10 @@ export class Subscriber {
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
+	// The heads this reader asked a fill for, each once: one met again with no fill bringing it
+	// is given up, as the Rust `Heads` gives up a head whose fetch ended without one. Clipped to
+	// what it still reads, so a widening back over one asks it afresh.
+	#heads: Run[] = [];
 	// The sequences the fill probe has yet to judge, and the terms it last judged under: each is
 	// judged once, then again only once a change reopens it (see #reopen), as the Rust `Misses`
 	// keeps `judged`. A run the live feed still owes stays unjudged until the feed gives it up.
@@ -3069,6 +3073,7 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (!asker || !producer) return;
 		this.#reclip(this.#givenUp, start, end, (run) => this.#reads(run.start, run.end));
+		this.#reclip(this.#heads, start, end, (run) => this.#reads(run.start, run.end));
 		this.#reclip(this.#asked, start, end, (run) => this.#wants(run.start, run.end));
 		this.#reclip(this.#refilled, start, end, (run) => this.#wants(run.start, run.end));
 		fillsOf(producer).moved(asker, start, end);
@@ -3107,6 +3112,7 @@ export class Subscriber {
 	// clipped group asks it once more, as in Rust.
 	#clipAsked(): void {
 		if (this.#givenUp.length > 0) this.#givenUp = this.#givenUp.flatMap((run) => this.#reads(run.start, run.end));
+		if (this.#heads.length > 0) this.#heads = this.#heads.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
 		if (this.#refilled.length > 0) {
 			this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
@@ -3296,6 +3302,7 @@ export class Subscriber {
 			this.#reported = new Runs<Reported>(sameReport);
 			this.#skipped.clear();
 			this.#givenUp = [];
+			this.#heads = [];
 			return new TooFarBehind();
 		}
 		return undefined;
@@ -3343,6 +3350,7 @@ export class Subscriber {
 		this.#pending = this.#pending.flatMap((run) => removeRun([run], 0n, floor));
 		this.#reported.set(0n, floor);
 		this.#givenUp = removeRun(this.#givenUp, 0n, floor);
+		this.#heads = removeRun(this.#heads, 0n, floor);
 		// The fills it refused, as the Rust `Misses::given_up` is forgotten below the floor.
 		if (this.#state.refused.peek().some((run) => run.start < floor))
 			this.#state.refused.update((runs) => removeRun(runs, 0n, floor));
@@ -3443,6 +3451,7 @@ export class Subscriber {
 		const fills = fillsOf(producer);
 		if (!fills.serving && !fills.active) return false;
 		this.#givenUp = removeRun(this.#givenUp, run.start, run.end);
+		this.#heads = removeRun(this.#heads, run.start, run.end);
 		this.#asked = removeRun(this.#asked, run.start, run.end);
 		this.#refilled = removeRun(this.#refilled, run.start, run.end);
 		insertRun(this.#unjudged, run.start, run.end);
@@ -3701,7 +3710,7 @@ export class Subscriber {
 			const asker = this.#askerOf();
 			// A moving read floor retires only its prefix: what lies above it stays asked.
 			const read = max(this.#cursor.peek().start, this.#nextSequence);
-			for (const runs of [this.#asked, this.#refilled, this.#givenUp]) cutRun(runs, 0n, read);
+			for (const runs of [this.#asked, this.#refilled, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
 			this.#reopen(producer, fills, budget, coverage);
@@ -3948,10 +3957,11 @@ export class Subscriber {
 		return this.#window.end() !== undefined && hooks.groupFirstFrame(group) > this.#fetchFrom;
 	}
 
-	// Ask a fill for the head of group `sequence`, as a fetch from frame 0 would, unless one is
-	// already out. Returns whether one still owes it; false once it is given up, as with no handler
-	// to ask, which refuses it to this reader as a miss no fill can serve. Mirrors the Rust
-	// `Cursor::ask_head`.
+	// Ask a fill for the head of group `sequence` once, as a fetch from frame 0 would, unless one
+	// is already out. Returns whether one still owes it; false once it is given up, as with no
+	// handler to ask, or a fill that ended without a copy from frame 0 (dropped, or closed
+	// unanswered), which refuses it to this reader as a miss no fill can serve. Mirrors the Rust
+	// `Cursor::ask_head` and `give_up_heads`.
 	#askHead(sequence: bigint): boolean {
 		const end = sequence + 1n;
 		if (dropAt(this.#state.refused.peek(), sequence) || runGaps(this.#givenUp, sequence, end).length === 0)
@@ -3961,7 +3971,10 @@ export class Subscriber {
 		const fills = fillsOf(producer);
 		const asker = this.#askerOf();
 		if (!fills.covered(sequence, end, asker).next().done) return true;
-		if (fills.ask(sequence, end, asker).length > 0) return true;
+		if (runGaps(this.#heads, sequence, end).length > 0 && fills.ask(sequence, end, asker).length > 0) {
+			insertRun(this.#heads, sequence, end);
+			return true;
+		}
 		// A head the reader found missing belonged to a group that existed.
 		asker.refuse(sequence, end, new StreamError(StreamCode.NotFound, { message: `group ${sequence} has no head` }));
 		return false;

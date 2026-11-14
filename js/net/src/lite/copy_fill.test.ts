@@ -452,6 +452,19 @@ test("copy fill: a yielded group its subscription's drop names ends", async () =
 	}
 });
 
+// Settles once `reader` reports a drop.
+function dropped(reader: Subscriber): Promise<void> {
+	return new Promise((resolve) => {
+		const check = () => hooks.tryDrop(reader) !== undefined;
+		if (check()) return resolve();
+		const dispose = hooks.groupChanged(reader, () => {
+			if (!check()) return;
+			dispose();
+			resolve();
+		});
+	});
+}
+
 // A copy holding group 2 from frame 3 only, as one whose subscription started mid-group does, asks
 // its publisher for the head over FETCH once a bounded reader wants the group whole. The publisher
 // refused group 2 to the subscription and has it only once the FETCH asks.
@@ -516,6 +529,9 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			// Reads from the oldest group, so a bounded reader widens nothing.
 			const open = remote.track("video").subscribe({ delay: { max: null } });
 			expect((await open.recvGroup())?.sequence).toBe(3n);
+			// Lite-07 names the groups below 3 the publisher refused. Taken first, so that verdict,
+			// which predates the archive holding group 2, cannot end the head's fill.
+			if (alpn === Lite.ALPN_07_WIP) await dropped(open);
 			if (!copy) throw new Error("no copy");
 			const tail = hooks.receiveGroup(copy, { sequence: 2n, start: 3 });
 			for (const frame of [3, 4])

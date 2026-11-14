@@ -1540,6 +1540,36 @@ test("fill: a refused head gives its group up, and the bounded reader moves past
 	broadcast.close();
 });
 
+test.each([
+	["arrival", "drop"],
+	["arrival", "close"],
+	["sequence", "drop"],
+	["sequence", "close"],
+])("fill: a %s reader asks a head once and gives it up when its fill ends in a %s", async (mode, end) => {
+	const { broadcast, track } = headless();
+	const requests = track.requests();
+	let asked = 0;
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			// A reader asking again would loop forever: refuse past a few, so the test still ends.
+			if (++asked > 3) fill.refuseGroups(fill.start, fill.end, new NotFound("asked again"));
+			else if (end === "drop") fill.dropGroups(fill.start, fill.end);
+			fill.close();
+		}
+	})();
+
+	const reader = track.subscribe(twoAndThree);
+	const ordered = mode === "sequence" ? reader.ordered() : undefined;
+	const next = () => (ordered ? ordered.nextGroup() : reader.recvGroup());
+	const got: bigint[] = [];
+	for (let group = await next(); group; group = await next()) got.push(group.sequence);
+	expect(got).toEqual([3n]);
+	expect(asked).toBe(1);
+
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: with no handler, a bounded reader gives a headless group up while an open one reads it", async () => {
 	const { broadcast, track } = headless();
 
