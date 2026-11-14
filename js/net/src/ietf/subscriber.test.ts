@@ -729,7 +729,7 @@ async function subscribeTrack({
 	version?: IetfVersion;
 	properties?: Properties;
 	subscription?: track.Subscription;
-} = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+} = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber; transport: WebTransport }> {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
@@ -748,7 +748,7 @@ async function subscribeTrack({
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({ trackAlias: ALIAS, properties }).encode(peer.writer, version);
 
-	return { subscriber, track: consumer };
+	return { subscriber, track: consumer, transport: pair.server };
 }
 
 // A refusal already ended the request: a reset back would tell the publisher we failed. The
@@ -1385,6 +1385,37 @@ test.each([
 	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
 	expect(track.closed.peek()).toBe(err as StreamError);
 	stop.mockRestore();
+});
+
+/**
+ * A viewer can release a track while the publisher's END_OF_TRACK is already in flight: the
+ * stream waits for its FIN after the marker, and the release lands first. The marker then has
+ * nothing left to end, which is no violation of the peer's, so the session stays open.
+ */
+test("an END_OF_TRACK that lands after the track's release keeps the session", async () => {
+	const { subscriber, track, transport } = await subscribeTrack();
+
+	// Object 0, then END_OF_TRACK at object 1, with the stream's FIN still to come.
+	const readable = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(new Uint8Array([...encodeObjects([0]), 0, 0, 0x4]));
+		},
+	});
+	const header = new GroupMessage({
+		trackAlias: ALIAS,
+		groupId: 3n,
+		subGroupId: 0n,
+		publisherPriority: 0,
+		flags: groupFlags(true),
+	});
+	const handled = subscriber.handleGroup(header, new Reader(readable, undefined, VERSION));
+	await yieldNow();
+
+	track.close();
+	await handled;
+
+	using clock = manual();
+	expect(await settlesWithin(transport.closed, clock)).toBe(false);
 });
 
 /**

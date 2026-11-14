@@ -57,4 +57,8 @@ report's output ([moq-dev/moq#8654](https://github.com/moq-dev/moq/pull/8654)),
 the firefox resume ([moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)),
 and the chromium `av_lag` rows
 ([output latency](/quest/m2/audio-playout/output-latency.md)).
+After #8635 landed, run
+[43601796176](https://github.com/moq-dev/moq/actions/runs/43601796176) still
+failed the firefox resume, now on audio arriving late rather than trailing:
+[Firefox resume audio](/quest/m0/nightly/firefox-resume-audio.md) owns it.
 
