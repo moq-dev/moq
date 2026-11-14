@@ -355,6 +355,8 @@ test("rejects invalid settings before touching OBS", async () => {
 	const layers = (layers: number) => ({ destination: { ...MOQ.destination, layers } }) as Publish;
 	await expect(client.configure(layers(0))).rejects.toThrow(RangeError);
 	await expect(client.configure(layers(1.5))).rejects.toThrow(RangeError);
+	// libobs holds 10 video encoders per output.
+	await expect(client.configure(layers(11))).rejects.toThrow(RangeError);
 	await expect(client.configure({ ...MOQ, video: { fps: 29.97 } })).rejects.toThrow(RangeError);
 	await expect(client.configure({ ...MOQ, audio: { bitrate: -1 } })).rejects.toThrow(RangeError);
 	await expect(client.configure({ ...MOQ, video: { size: { width: 8192, height: 4320 } } })).rejects.toThrow(
@@ -427,6 +429,14 @@ test("polls stats only while live", async () => {
 	fake.skipped = 7;
 	await clock.advance(Duration.secs(1));
 	expect(client.stats.peek()).toMatchObject({ bytes: 2000, bitrate: 8000, frames: { skipped: 2 } });
+
+	// Skipped frames still count from going live through a reconnect.
+	fake.stream("RECONNECTING", true);
+	await clock.advance(Duration.secs(1));
+	expect(client.stats.peek()?.frames.skipped).toBe(2);
+	fake.stream("RECONNECTED", true);
+	await clock.advance(Duration.secs(1));
+	expect(client.stats.peek()?.frames.skipped).toBe(2);
 
 	// The count restarts when OBS reconnects the output; that sample has no rate.
 	fake.bytes = 100;

@@ -29,6 +29,9 @@ const INHERITED = { realm: "OBS_WEBSOCKET_DATA_REALM_GLOBAL", slotName: "moq.inh
 // before connecting shows an error dialog and emits neither, so this is the only sign of it.
 const START_TIMEOUT = Duration.secs(30);
 
+// libobs holds at most this many video encoders per output (MAX_OUTPUT_VIDEO_ENCODERS), one per layer.
+const MAX_LAYERS = 10;
+
 /** How to reach OBS. */
 export interface ConnectProps {
 	/** The password set in OBS under Tools > WebSocket Server Settings. */
@@ -55,7 +58,7 @@ export type Destination =
 			broadcast: string;
 			/** A token presented to the relay, kept out of the URL so a reconnect presents the current one. */
 			token?: string;
-			/** Video renditions to publish, each at `i/N` of the output size and bitrate. Defaults to 1. */
+			/** Video renditions to publish, 1 to 10, each at `i/N` of the output size and bitrate. Defaults to 1. */
 			layers?: number;
 	  }
 	| {
@@ -200,6 +203,8 @@ export class Obs {
 	#effect = new Effect();
 	#stream: Signal<StreamState>;
 	#stats = new Signal<Stats | undefined>(undefined);
+	// OBS's skipped-frame count when the stream went live; kept through reconnects.
+	#skippedBase: number | undefined;
 	// Each configure runs whole: they all write to whichever profile is current.
 	#configuring: Promise<unknown> = Promise.resolve();
 
@@ -256,7 +261,9 @@ export class Obs {
 	async #configure(publish: Publish): Promise<Configured> {
 		const destination = publish.destination;
 		const layers = destination.kind === "moq" ? (destination.layers ?? 1) : 1;
-		if (!Number.isInteger(layers) || layers < 1) throw new RangeError(`invalid layer count: ${layers}`);
+		if (!Number.isInteger(layers) || layers < 1 || layers > MAX_LAYERS) {
+			throw new RangeError(`invalid layer count: ${layers}, must be 1 to ${MAX_LAYERS}`);
+		}
 		if (destination.kind === "moq") this.#requirePlugin();
 		const fps = publish.video?.fps;
 		if (fps !== undefined && (!Number.isInteger(fps) || fps < 1)) throw new RangeError(`invalid fps: ${fps}`);
@@ -520,12 +527,12 @@ export class Obs {
 		const state = effect.get(this.#stream);
 		if (state !== "live" && state !== "reconnecting") {
 			this.#stats.set(undefined);
+			this.#skippedBase = undefined;
 			return;
 		}
 
 		const abort = effect.abort;
 		effect.spawn(async () => {
-			let skippedBase: number | undefined;
 			let previous: { bytes: number; at: ReturnType<typeof now> } | undefined;
 			while (!abort.aborted) {
 				const [status, obs] = await Promise.all([
@@ -535,7 +542,7 @@ export class Obs {
 				if (!status || !obs || abort.aborted) return;
 
 				const at = now();
-				skippedBase ??= obs.outputSkippedFrames;
+				this.#skippedBase ??= obs.outputSkippedFrames;
 				// The byte count restarts when OBS reconnects the output.
 				const sent =
 					previous && status.outputBytes >= previous.bytes ? status.outputBytes - previous.bytes : undefined;
@@ -547,7 +554,7 @@ export class Obs {
 					frames: {
 						total: status.outputTotalFrames,
 						dropped: status.outputSkippedFrames,
-						skipped: obs.outputSkippedFrames - skippedBase,
+						skipped: obs.outputSkippedFrames - this.#skippedBase,
 					},
 				});
 				previous = { bytes: status.outputBytes, at };
