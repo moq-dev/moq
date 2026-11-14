@@ -100,7 +100,7 @@ struct StoredKey {
 	revoked: bool,
 }
 
-/// An enrolled device. A revoked one stays recorded so a reusable key cannot re-enroll it.
+/// An enrolled device. A revoked one stays recorded so no key can re-enroll it.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -173,7 +173,7 @@ pub struct NewKey {
 	#[serde_as(as = "Option<serde_with::DurationSeconds<u64>>")]
 	pub expires_in: Option<Duration>,
 	/// How many devices it may enroll, so a leaked key admits at most this many. A device
-	/// it already enrolled may enroll again without spending one.
+	/// whose last enrollment used this key may enroll again without spending one.
 	pub uses: NonZeroU32,
 }
 

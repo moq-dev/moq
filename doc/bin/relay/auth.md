@@ -470,8 +470,8 @@ Every request proves the endpoint key by signing a fresh, single-use
 challenge bound to `--mesh-url`, so no token is issued for a key the caller
 does not hold. A device joins with an enrollment key, with no human in the
 loop. Each key enrolls at most `--uses` devices (default 1), so a leaked key
-admits no more than its owner allowed; a device it already enrolled may
-enroll again for free, and revoked or expired keys enroll nothing. It refreshes its token
+admits no more than its owner allowed; a device whose last enrollment used
+that key may enroll again for free, and revoked or expired keys enroll nothing. It refreshes its token
 two thirds of the way through `--mesh-token-ttl` (default 15m) by proving
 the key again, so a revoked device is cut off within one token lifetime. A
 revoked device cannot enroll again. Each enrollment and refresh also returns
