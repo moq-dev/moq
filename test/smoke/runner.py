@@ -57,25 +57,32 @@ def matrices(registry, missing=frozenset()):
     return (to_relay, from_clients), inventory
 
 
-def expected_pairs(registry):
+def modes(docker):
+    """The runner's modes for a docker relay: one per declared endpoint, else plain docker."""
+    return [f"docker-{endpoint['transport']}" for endpoint in docker.get("endpoints", [])] or ["docker"]
+
+
+def expected_runs(registry):
+    """Every (client, relay, mode) run the runner should report for this registry."""
     implementations = registry["implementations"]
     return {
-        (client, relay)
+        (client, relay, mode)
         for client, client_info in implementations.items()
         if client_info.get("roles", {}).get("client", {}).get("docker")
         for relay, relay_info in implementations.items()
         if relay_info.get("roles", {}).get("relay", {}).get("docker")
         and set(client_info["draft_versions"]) & set(relay_info["draft_versions"])
+        for mode in modes(relay_info["roles"]["relay"]["docker"])
     }
 
 
 def validate_summary(summary, expected):
     runs = summary["runs"]
-    actual = {(run["client"], run["relay"]) for run in runs}
+    actual = {(run["client"], run["relay"], run["mode"]) for run in runs}
     if actual != expected or len(runs) != len(expected):
         raise ValueError(f"incomplete runner coverage: expected {sorted(expected)}, got {sorted(actual)}")
-    if any(run["mode"] != "docker" or run["status"] not in ("pass", "fail", "timeout") for run in runs):
-        raise ValueError("unexpected mode, skipped image, or unknown verdict in runner summary")
+    if any(run["status"] not in ("pass", "fail", "timeout") for run in runs):
+        raise ValueError("skipped image or unknown verdict in runner summary")
 
 
 def run(upstream, output):
@@ -115,7 +122,7 @@ def run(upstream, output):
     try:
         for index, plan in enumerate(plans):
             registry_file.write_text(json.dumps(plan))
-            expected = expected_pairs(plan)
+            expected = expected_runs(plan)
             if not expected:
                 # Unpublished images can empty the optional matrix; the registry alone must not.
                 if missing:
@@ -161,12 +168,13 @@ def run(upstream, output):
         )
     # Fail only after the report shows every pair. A required pair the registry
     # no longer pairs fails too, rather than passing unchecked.
-    status = {(run["client"], run["relay"]): run["status"] for run in combined["runs"]}
-    optional = sorted(pair for pair, verdict in status.items() if verdict != "pass" and pair not in REQUIRED)
+    red = {(run["client"], run["relay"], run["mode"]) for run in combined["runs"] if run["status"] != "pass"}
+    optional = sorted(run for run in red if run[:2] not in REQUIRED)
     if optional:
         # A workflow annotation, so a green job still shows them.
-        print(f"::warning::optional pairs not passing (reported only): {optional}")
-    failed = sorted(pair for pair in REQUIRED if status.get(pair) != "pass")
+        print(f"::warning::optional runs not passing (reported only): {optional}")
+    ran = {(run["client"], run["relay"]) for run in combined["runs"]}
+    failed = sorted(pair for pair in REQUIRED if pair not in ran or any(run[:2] == pair for run in red))
     if failed:
         raise SystemExit(f"required pairs failed: {failed}; see the report")
 
