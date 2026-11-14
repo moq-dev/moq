@@ -717,7 +717,7 @@ pub mod poll {
 
 		/// A position in the stream, minted only by [`offset`](Self::offset), for
 		/// [`poll_acked`](Self::poll_acked). `()` for a transport that cannot see acknowledgments.
-		type Offset: Clone + 'static;
+		type Offset: 'static;
 
 		/// The position just past every byte written so far.
 		fn offset(&self) -> Self::Offset;
@@ -728,7 +728,7 @@ pub mod poll {
 		/// side or the session closed. A transport that cannot see acknowledgments is ready
 		/// with [`Acked::Unsupported`] immediately, the default, on every stream, so a caller
 		/// can decide once per session. An offset minted by another stream may panic.
-		fn poll_acked(&self, waiter: &kio::Waiter, offset: Self::Offset) -> Poll<Result<Acked, Self::Error>> {
+		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<Acked, Self::Error>> {
 			let _ = (waiter, offset);
 			Poll::Ready(Ok(Acked::Unsupported))
 		}

@@ -259,8 +259,7 @@ impl poll::SendGroup for Group {
 }
 
 /// A boxed stream's offset, holding the transport's own behind the boundary.
-#[derive(Clone)]
-pub(crate) struct Offset(Arc<dyn Any + Send + Sync>);
+pub(crate) struct Offset(Box<dyn Any + Send + Sync>);
 
 /// A boxed outgoing stream.
 pub(crate) struct SendStream(Sender);
@@ -799,15 +798,14 @@ impl<T: poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync>
 	}
 
 	fn offset(&self) -> Offset {
-		Offset(Arc::new(poll::SendStream::offset(self)))
+		Offset(Box::new(poll::SendStream::offset(self)))
 	}
 
 	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<poll::Acked, Error>> {
 		let offset = offset
 			.0
 			.downcast_ref::<T::Offset>()
-			.expect("offset belongs to another transport")
-			.clone();
+			.expect("offset belongs to another transport");
 		poll::SendStream::poll_acked(self, waiter, offset).map_err(Error::new)
 	}
 }
@@ -972,8 +970,8 @@ impl poll::SendStream for SendStream {
 		self.get().offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<poll::Acked, Error>> {
-		self.get().poll_acked(waiter, &offset)
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<poll::Acked, Error>> {
+		self.get().poll_acked(waiter, offset)
 	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
@@ -1221,8 +1219,8 @@ mod test {
 			self.written
 		}
 
-		fn poll_acked(&self, _: &kio::Waiter, offset: u64) -> Poll<Result<poll::Acked, Self::Error>> {
-			match offset <= self.acked {
+		fn poll_acked(&self, _: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+			match *offset <= self.acked {
 				true => Poll::Ready(Ok(poll::Acked::Delivered)),
 				false => Poll::Pending,
 			}
@@ -1267,17 +1265,17 @@ mod test {
 		));
 		let five = poll::SendStream::offset(&stream);
 		assert!(matches!(
-			poll::SendStream::poll_acked(&stream, &waiter, three),
+			poll::SendStream::poll_acked(&stream, &waiter, &three),
 			Poll::Ready(Ok(poll::Acked::Delivered))
 		));
-		assert!(poll::SendStream::poll_acked(&stream, &waiter, five).is_pending());
+		assert!(poll::SendStream::poll_acked(&stream, &waiter, &five).is_pending());
 
 		let (a, _b) = super::super::memory::pair(Default::default());
 		let session = Session::new(a);
 		let listed = open_group(&session, ungrouped(0));
 		let offset = poll::SendStream::offset(&listed);
 		assert!(matches!(
-			poll::SendStream::poll_acked(&listed, &waiter, offset),
+			poll::SendStream::poll_acked(&listed, &waiter, &offset),
 			Poll::Ready(Ok(poll::Acked::Unsupported))
 		));
 	}

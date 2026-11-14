@@ -25,9 +25,9 @@ layers. Add an offset type and two methods to `SendStream`, in the trait's
 poll style:
 
 ```rust
-type Offset: Clone;
+type Offset: 'static;
 fn offset(&self) -> Self::Offset;
-fn poll_acked(&self, waiter: &kio::Waiter, offset: Self::Offset) -> Poll<Result<Acked, Self::Error>>;
+fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<Acked, Self::Error>>;
 
 #[non_exhaustive]
 pub enum Acked { Delivered, Unsupported }
@@ -115,11 +115,13 @@ delivery-delay histogram, whose plan was deleted on 2026-11-09.
 Split 2026-11-12 (maintainer, /quest-audit before the cut): the trait shape
 (`Offset`, `offset()`, `Acked`, and a defaulted `poll_acked`) landed in m2,
 because `poll::SendStream` is public and unsealed and the cut would freeze it.
-As landed, `Offset` is `Clone` rather than `Copy`, since moq-net's boxed
-stream erases it behind an `Arc`, and a backend without acknowledgments uses
+As landed, `Offset` has no `Clone` or `Copy` bound and `poll_acked` takes it
+by reference, since a caller retries the poll with the same offset anyway and
+moq-net's boxed stream erases it behind a `Box<dyn Any>` it only borrows from
+(decided 2026-11-14, maintainer); a backend without acknowledgments uses
 `type Offset = ()` rather than a byte count. Every in-tree backend, including
 moq-tokio's and moq-uring's `quic::web`, is on `()` with the default. This
 quest keeps the driver half: moq-quic's `poll_acked` leaves `#[cfg(test)]`,
 and the moq-tokio and moq-uring adapters switch `Offset` to the driver's
-`send::Offset` and implement the hook.
+`send::Offset` (which is `Copy`, so they pass `*offset`) and implement the hook.
 

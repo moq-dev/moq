@@ -7339,7 +7339,7 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 	fn poll_acked(
 		&self,
 		waiter: &kio::Waiter,
-		offset: Self::Offset,
+		offset: &Self::Offset,
 	) -> Poll<Result<crate::transport::poll::Acked, Self::Error>> {
 		self.inner.lock().unwrap().stream.poll_acked(waiter, offset)
 	}
