@@ -6,11 +6,13 @@
 
 use crate::support;
 use moq_net::track::Delay;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use moq_net::track::{Position, Subscription};
-use moq_net::{Error, StreamError, Timestamp, Version};
+use moq_net::{Error, StreamError, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,11 +26,11 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer.with_proxy(true)
 }
 
-/// Read every group from the first, frame by frame, returning each group's sequence and
+/// Read every group from the first, frame by frame, returning each group's key and
 /// payloads, and how the read ended.
 async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8>>)>, Option<Error>) {
 	let subscription = Subscription::default()
-		.with_range(0..)
+		.with_ranges([support::keys(0..)])
 		.with_delay(Delay::default().with_max(Duration::from_secs(30)));
 	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
@@ -45,11 +47,11 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8
 				while let Some(frame) = kio::clock::timeout(TIMEOUT, group.read_frame())
 					.await
 					.expect("frame timeout")
-					.unwrap_or_else(|err| panic!("group {} cut short: {err:?}", group.sequence))
+					.unwrap_or_else(|err| panic!("group {} cut short: {err:?}", group.start))
 				{
 					frames.push(frame.payload.to_vec());
 				}
-				got.push((group.sequence, frames));
+				got.push((group.start, frames));
 			}
 			Ok(None) => return (got, None),
 			Err(err) => return (got, Some(err)),
@@ -60,7 +62,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8
 /// What [`read`] returns for the whole history.
 fn history() -> Vec<(u64, Vec<Vec<u8>>)> {
 	(0..GROUPS)
-		.map(|sequence| (sequence, FRAMES.iter().map(|frame| frame.to_vec()).collect()))
+		.map(|key| (key, FRAMES.iter().map(|frame| frame.to_vec()).collect()))
 		.collect()
 }
 
@@ -88,11 +90,11 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for frame in FRAMES {
-				group.write_frame(Timestamp::ZERO, frame).unwrap();
+				group.write_frame(group.at_start(), frame).unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		track.finish_at(Position::group(GROUPS), Some(Error::App(7))).unwrap();
 

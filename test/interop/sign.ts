@@ -36,7 +36,10 @@ for (const { track, group, timescale, frames } of input.rust) {
 	const consumer = Track.Consumer.make(net.subscribe(), key.public, new Scope(path, instance, track));
 	const writer = net.createGroup(BigInt(group));
 	for (const { body, timestamp } of frames) {
-		const at = scale === undefined || timestamp == null ? undefined : new Time.Timestamp(timestamp, scale);
+		const at =
+			scale === undefined || timestamp == null
+				? Time.Timestamp.unscaled(writer.sequence)
+				: new Time.Timestamp(timestamp, scale);
 		writer.writeFrame({ payload: unhex(body), timestamp: at });
 	}
 	writer.finish();
@@ -70,7 +73,10 @@ for (const { track, timescale, frames } of input.js) {
 	}
 	const group = producer.appendGroup();
 	for (const { payload, micros } of frames) {
-		await group.writeFrame(micros == null ? undefined : Time.Timestamp.fromMicros(micros), unhex(payload));
+		await group.writeFrame(
+			micros == null ? Time.Timestamp.unscaled(group.sequence) : Time.Timestamp.fromMicros(micros),
+			unhex(payload),
+		);
 	}
 	group.finish();
 	const raw = await taps.get(track)?.recvGroup();

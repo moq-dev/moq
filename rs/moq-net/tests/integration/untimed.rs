@@ -4,10 +4,11 @@
 //! that can say so, and a timed track keeps its timestamps.
 //!
 //! No receiver fills in arrival time. Lite-05 and lite-06 cannot encode absence, so their
-//! encoder writes its send time instead, which their receivers pass through as the track's
-//! time.
+//! encoder writes each frame's group key instead, which their receivers pass through as the
+//! track's time.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -28,8 +29,8 @@ enum Arrives {
 	/// Both keep what the publisher wrote.
 	Faithful,
 	/// The timed track keeps its timestamps, but the untimed one arrives timed in
-	/// milliseconds with its send times.
-	SendTimes,
+	/// milliseconds with its group keys.
+	Keys,
 	/// The wire carries no timescale, so even the timed track arrives untimed.
 	Untimed,
 }
@@ -37,7 +38,7 @@ enum Arrives {
 fn expected(version: &str) -> Arrives {
 	match version {
 		"moq-lite-03" | "moq-lite-04" => Arrives::Untimed,
-		"moq-lite-05" | "moq-lite-06" => Arrives::SendTimes,
+		"moq-lite-05" | "moq-lite-06" => Arrives::Keys,
 		_ => Arrives::Faithful,
 	}
 }
@@ -97,7 +98,7 @@ impl Chain {
 }
 
 /// The first frame's timestamp of the next group.
-async fn next_frame(subscriber: &mut track::Subscriber) -> Option<Timestamp> {
+async fn next_frame(subscriber: &mut track::Subscriber) -> Timestamp {
 	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("group timeout")
@@ -106,10 +107,10 @@ async fn next_frame(subscriber: &mut track::Subscriber) -> Option<Timestamp> {
 	group.read_frame().await.unwrap().expect("a frame").timestamp
 }
 
-/// Publish a single-frame group on a track with `info` through `hops`, returning what the
-/// last node reads for it and the track info it received.
-async fn frame_through(hops: &[&str], info: track::Info) -> (Option<Timestamp>, track::Info) {
-	let timestamp = info.timescale.map(|_| millis(7));
+/// Publish a single-frame group at key 7 on a track with `info` through `hops`, returning
+/// what the last node reads for it and the track info it received.
+async fn frame_through(hops: &[&str], info: track::Info) -> (Timestamp, track::Info) {
+	let timed = info.timescale.is_some();
 	let chain = Chain::new(hops).await;
 	let broadcast = chain.nodes[0]
 		.route("room", moq_net::origin::RouteOptions::hidden())
@@ -119,11 +120,26 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Option<Timestamp>, 
 	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let mut subscriber = chain.subscribe("data").await;
-	producer.write_frame(timestamp, &b"frame"[..]).unwrap();
+	match timed {
+		true => producer.write_frame(millis(7), &b"frame"[..]).unwrap(),
+		false => {
+			let mut group = producer.append_group(7).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"frame"[..])
+				.unwrap();
+			group.close().unwrap();
+		}
+	}
 	let received = next_frame(&mut subscriber).await;
-	let received = received.map(|timestamp| timestamp.convert(Timescale::MILLI).unwrap());
+	let received = match received.scale() {
+		Some(_) => received.convert(Timescale::MILLI).unwrap(),
+		None => received,
+	};
 	(received, subscriber.info().clone())
 }
+
+/// The key [`frame_through`] publishes its group at, which a frame with no time carries.
+const KEY: moq_net::Timestamp = moq_net::Timestamp::unscaled(7);
 
 #[kio::test]
 async fn frames_arrive_as_published() {
@@ -132,19 +148,19 @@ async fn frames_arrive_as_published() {
 		let (untimed, untimed_info) = frame_through(&[version], untimed()).await;
 		match expected(version) {
 			Arrives::Faithful => {
-				assert_eq!(timed, Some(millis(7)), "{version}: the timestamp survives");
-				assert_eq!(untimed, None, "{version}: absence survives");
+				assert_eq!(timed, millis(7), "{version}: the timestamp survives");
+				assert_eq!(untimed, KEY, "{version}: absence survives");
 				assert_eq!(untimed_info.timescale, None, "{version}: no timeline is declared");
 			}
-			Arrives::SendTimes => {
-				assert_eq!(timed, Some(millis(7)), "{version}: the timestamp survives");
-				assert!(untimed.is_some(), "{version}: the send time arrives");
+			Arrives::Keys => {
+				assert_eq!(timed, millis(7), "{version}: the timestamp survives");
+				assert_eq!(untimed, millis(7), "{version}: the group key arrives");
 				assert_eq!(untimed_info.timescale, Some(Timescale::MILLI), "{version}");
 			}
 			Arrives::Untimed => {
-				assert_eq!(timed, None, "{version}: no units, so no timestamp");
+				assert_eq!(timed, KEY, "{version}: no units, so no timestamp");
 				assert_eq!(timed_info.timescale, None, "{version}: no timeline is declared");
-				assert_eq!(untimed, None, "{version}: absence survives");
+				assert_eq!(untimed, KEY, "{version}: absence survives");
 			}
 		}
 	}
@@ -159,13 +175,13 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 		&["moq-lite-07-wip", "moq-lite-07-wip"][..],
 	] {
 		let (frame, info) = frame_through(hops, untimed()).await;
-		assert_eq!(frame, None, "{hops:?}: the relay did not stamp it");
+		assert_eq!(frame, KEY, "{hops:?}: the relay did not stamp it");
 		assert_eq!(info.timescale, None, "{hops:?}: the relay must not claim a timeline");
 	}
 
 	let hops = ["moq-lite-03", "moq-transport-18"];
 	let (frame, info) = frame_through(&hops, timed()).await;
-	assert_eq!(frame, None, "{hops:?}: the first hop has no timestamps to forward");
+	assert_eq!(frame, KEY, "{hops:?}: the first hop has no timestamps to forward");
 	assert_eq!(info.timescale, None, "{hops:?}: the relay must not claim a timeline");
 }
 
@@ -182,16 +198,20 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 		let broadcast = chain.nodes[0]
 			.route("room", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let mut producer = broadcast.broadcast().create_track("data", untimed()).unwrap();
+		let producer = broadcast.broadcast().create_track("data", untimed()).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..5 {
-			producer.write_frame(None, &b"untimed"[..]).unwrap();
+			let mut group = producer.append_next().unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"untimed"[..])
+				.unwrap();
+			group.close().unwrap();
 		}
 		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		let consumer = chain.nodes[1].consume().request("room", None).await.unwrap();
 		let subscription = track::Subscription::default()
-			.with_range(2..)
+			.with_ranges([support::keys(2..)])
 			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
 		let mut subscriber = kio::clock::timeout(TIMEOUT, consumer.track("data").unwrap().subscribe(subscription))
 			.await
@@ -203,7 +223,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 			let Ok(next) = kio::clock::timeout(TIMEOUT, subscriber.recv_group()).await else {
 				break;
 			};
-			got.push(next.unwrap().expect("a group").sequence);
+			got.push(next.unwrap().expect("a group").start);
 		}
 		got.sort();
 		assert_eq!(got, vec![2, 3, 4], "{version}");
@@ -211,7 +231,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 }
 
 /// An untimed datagram track's datagram arrives untimed, except that lite-05 and lite-06
-/// carry its send time on a millisecond track.
+/// carry its sequence on a millisecond track.
 #[kio::test]
 async fn datagrams_arrive_as_published() {
 	for version in ["moq-lite-05", "moq-lite-07-wip"] {
@@ -238,20 +258,27 @@ async fn datagrams_arrive_as_published() {
 		// Datagrams count once the answer is back.
 		let timescale = consumer.info().await.unwrap().timescale;
 
-		producer.append(None, &b"untimed"[..]).unwrap();
+		producer
+			.append(moq_net::Timestamp::unscaled(0), &b"untimed"[..])
+			.unwrap();
 		let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
 			.await
 			.expect("datagram timeout")
 			.unwrap()
 			.expect("a datagram");
-		let sent = expected(version) == Arrives::SendTimes;
-		assert_eq!(datagram.timestamp.is_some(), sent, "{version}");
-		assert_eq!(timescale, sent.then_some(Timescale::MILLI), "{version}");
+		let keyed = expected(version) == Arrives::Keys;
+		// A scale-less datagram's time is its sequence; lite-05/06 declare milliseconds.
+		let expected = match keyed {
+			true => millis(datagram.sequence),
+			false => moq_net::Timestamp::unscaled(datagram.sequence),
+		};
+		assert_eq!(datagram.timestamp, expected, "{version}");
+		assert_eq!(timescale, keyed.then_some(Timescale::MILLI), "{version}");
 	}
 }
 
 /// A standalone FETCH of an untimed track answers with untimed objects, except that lite-05
-/// and lite-06 carry each one's send time.
+/// and lite-06 carry each one's group key.
 #[kio::test]
 async fn a_fetched_untimed_frame_arrives_untimed() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18"] {
@@ -264,7 +291,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		let consumer = chain.nodes[1].consume().request("room", None).await.unwrap();
-		let mut waiting = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
+		let mut waiting = Box::pin(consumer.track("video").unwrap().fetch_group(3, None));
 		let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut waiting).await {
 			futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the track"),
@@ -275,13 +302,22 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(0, timed()).unwrap();
-		group.write_frame(None, Bytes::from_static(b"segment")).unwrap();
-		group.finish().unwrap();
+		let mut group = request.accept(3, timed()).unwrap();
+		group
+			.write_frame(
+				moq_net::Timestamp::unscaled(group.start),
+				Bytes::from_static(b"segment"),
+			)
+			.unwrap();
+		group.close().unwrap();
 
 		let mut fetched = waiting.await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().unwrap();
-		let sent = expected(version) == Arrives::SendTimes;
-		assert_eq!(frame.timestamp.is_some(), sent, "{version}");
+		let keyed = expected(version) == Arrives::Keys;
+		let expected = match keyed {
+			true => millis(3),
+			false => moq_net::Timestamp::unscaled(3),
+		};
+		assert_eq!(frame.timestamp, expected, "{version}");
 	}
 }

@@ -475,20 +475,21 @@ impl Bystander {
 	}
 
 	/// Write the next group: two frames of the same size every time, so groups charge the
-	/// cache alike, holding the sequence so a misplaced one shows.
+	/// cache alike, holding the key so a misplaced one shows.
 	fn publish(&self) {
 		let mut sent = self.sent.borrow_mut();
-		let sequence = sent.len() as u64;
-		let mut group = self.track.append_group().expect("the bystander's group");
+		let key = sent.len() as u64;
+		let mut group = self.track.append_next().expect("the bystander's group");
 		let mut frames = Vec::new();
 		for frame in 0..2u8 {
-			let mut payload = sequence.to_be_bytes().repeat(8);
+			let mut payload = key.to_be_bytes().repeat(8);
 			payload.push(frame);
 			let payload = Bytes::from(payload);
-			group.write_frame(None, payload.clone()).expect("the bystander's frame");
+			let key = crate::Timestamp::unscaled(group.start);
+			group.write_frame(key, payload.clone()).expect("the bystander's frame");
 			frames.push(payload);
 		}
-		group.finish().expect("the bystander's group finish");
+		group.close().expect("the bystander's group finish");
 		sent.push(frames);
 	}
 
@@ -777,9 +778,10 @@ fn record(version: Version, scenario: Scenario) -> Vec<Action> {
 					route.announce().expect("the client's announce");
 					let subscribed = async { while let Ok(None) = track.subscription_changed().await {} };
 					let _ = kio::clock::timeout(timeout, subscribed).await;
-					let mut group = track.append_group().expect("the client's group");
-					group.write_frame(None, Bytes::from_static(b"frame")).expect("a frame");
-					group.finish().expect("the client's group finish");
+					let mut group = track.append_next().expect("the client's group");
+					let key = crate::Timestamp::unscaled(group.start);
+					group.write_frame(key, Bytes::from_static(b"frame")).expect("a frame");
+					group.close().expect("the client's group finish");
 					kio::clock::sleep(timeout).await;
 				}
 				Scenario::Subscribe => {

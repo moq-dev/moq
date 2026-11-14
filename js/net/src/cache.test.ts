@@ -6,6 +6,7 @@ import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
 import { RUN_OVERHEAD as ARRIVAL_OVERHEAD } from "./ledger.ts";
 import { Tail } from "./tail.ts";
+import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 // A reader continued on a held re-offer keeps the frames the failed copy wrote that it has yet to
@@ -18,7 +19,7 @@ test("a re-offer bills the failed copy's frames its readers still hold", async (
 		const track = producer.accept({ maxAge: null });
 		hooks.receiveTrack(track);
 		const first = hooks.receiveGroup(track, { sequence: 0n, start: 0 });
-		first.writeFrame({ payload: new Uint8Array(10_000) });
+		first.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(first.sequence) });
 		const reader = first.consume();
 		const arriving = hooks.arrivingGroup(track, 0n);
 		first.abort(new Error("reset"));
@@ -52,7 +53,7 @@ function pooled(pool: cache.Pool, name = "test"): TrackProducer {
 
 function finished(producer: TrackProducer, size: number): bigint {
 	const group = producer.appendGroup();
-	group.writeFrame({ payload: new Uint8Array(size) });
+	group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	return group.sequence;
 }
@@ -131,7 +132,8 @@ test("carried debt keeps the live group", async () => {
 
 		const group = producer.appendGroup();
 		const reader = group.consume();
-		for (let i = 0; i < 3; i++) group.writeFrame({ payload: new Uint8Array(unit) });
+		for (let i = 0; i < 3; i++)
+			group.writeFrame({ payload: new Uint8Array(unit), timestamp: Timestamp.unscaled(group.sequence) });
 		group.finish();
 		for (let i = 0; i < 3; i++) expect((await reader.readFrame())?.payload.length).toBe(unit);
 		expect(await reader.readFrame()).toBeUndefined();
@@ -200,7 +202,7 @@ test("a shared capacity spares a fresher track and evicts a staler one's oldest"
 		const pool = new cache.Pool({ capacity: 6 * billed(10_000) });
 		const open = (producer: TrackProducer) => {
 			const group = producer.appendGroup();
-			group.writeFrame({ payload: new Uint8Array(10_000) });
+			group.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(group.sequence) });
 			return group;
 		};
 		const staler = pooled(pool, "staler");
@@ -235,7 +237,7 @@ test("the sweep expires idle groups across tracks without a write", async () => 
 		const tracks = [pooled(pool, "a"), pooled(pool, "b")];
 		const stalled = tracks.map((track) => {
 			const group = track.appendGroup(); // left open
-			group.writeFrame({ payload: new Uint8Array(1) });
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.sequence) });
 			finished(track, 1); // the live edge
 			return group;
 		});
@@ -275,7 +277,8 @@ test("a group's tail limit releases what it sheds from the pool", async () => {
 		const producer = pooled(pool);
 		const group = producer.appendGroup();
 		const frame = new Uint8Array(1024 * 1024);
-		for (let i = 0; i < 40; i++) group.writeFrame({ payload: frame });
+		for (let i = 0; i < 40; i++)
+			group.writeFrame({ payload: frame, timestamp: Timestamp.unscaled(group.sequence) });
 		expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(32 * 1024 * 1024);
 		expect(pool.used).toBe(hooks.groupCacheBytes(group) + cache.ENTRY_OVERHEAD);
 	});
@@ -292,7 +295,8 @@ test("the debt sheds the front of an open live edge", async () => {
 		const group = producer.appendGroup();
 		const behind = reader.tryRecvGroup();
 		const frame = new Uint8Array(64 * 1024);
-		for (let i = 0; i < 64; i++) group.writeFrame({ payload: frame });
+		for (let i = 0; i < 64; i++)
+			group.writeFrame({ payload: frame, timestamp: Timestamp.unscaled(group.sequence) });
 
 		expect(group.closed.peek()).toBeUndefined();
 		// What a frame write may add before it settles, on top of the capacity.
@@ -385,7 +389,7 @@ for (const stale of [false, true]) {
 		let error: unknown;
 		for (let sequence = 2n * runs; sequence < 2n * runs + 64n && error === undefined; sequence++) {
 			const group = producer.createGroup(sequence);
-			group.writeFrame({ payload: new Uint8Array(16 * 1024) });
+			group.writeFrame({ payload: new Uint8Array(16 * 1024), timestamp: Timestamp.unscaled(group.sequence) });
 			group.finish();
 			try {
 				expect(reader.tryRecvGroup()?.sequence).toBe(sequence);
@@ -517,14 +521,14 @@ test("folding an arrival gap wakes the reader parked on it", async () => {
 	// gap below it is the first thing a payment takes: no other signal moves.
 	hooks.dropTrackGroups(producer, 0n, 1n, old());
 	const live = producer.createGroup(2n);
-	live.writeFrame({ payload: new Uint8Array(8) });
+	live.writeFrame({ payload: new Uint8Array(8), timestamp: Timestamp.unscaled(live.sequence) });
 	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup());
 	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader));
 	let woken = 0;
 	const dispose = hooks.groupChanged(reader, () => woken++);
 	expect(hooks.arrivalRuns(producer)).toBe(2);
 	// Past the write threshold that settles debt.
-	live.writeFrame({ payload: new Uint8Array(512 * 1024) });
+	live.writeFrame({ payload: new Uint8Array(512 * 1024), timestamp: Timestamp.unscaled(live.sequence) });
 	expect(hooks.arrivalRuns(producer)).toBe(1);
 	await yieldNow();
 	expect(woken).toBeGreaterThan(0);
@@ -688,7 +692,7 @@ test("a held failed fill answer stays billed", async () => {
 	hooks.receiveTrack(producer);
 	const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
 	const answer = hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true });
-	answer.writeFrame({ payload: new Uint8Array(10_000) });
+	answer.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(answer.sequence) });
 	const group = await reader.recvGroup();
 	expect(group?.sequence).toBe(1n);
 	answer.abort(new Error("archive failed"));

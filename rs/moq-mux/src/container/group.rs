@@ -8,7 +8,7 @@ use super::{Container, Frame};
 /// This is the group-scoped counterpart to [`Consumer`](super::Consumer). Where that one
 /// subscribes to a track and juggles group ordering, age skipping, and rewinds, this one
 /// reads exactly the group it was handed, in arrival order, and ends. That is what a caller
-/// wants after a FETCH, a group already chosen by sequence, or for a live group taken from
+/// wants after a FETCH, a group already chosen by start, or for a live group taken from
 /// [`recv_group`](moq_net::track::Subscriber::recv_group), whose frames return as they land.
 ///
 /// A batch of frames decoded from one wire frame (a CMAF fragment carrying several samples) is
@@ -35,9 +35,9 @@ impl<F: Container> GroupConsumer<F> {
 		}
 	}
 
-	/// The sequence number of this group within its track.
-	pub fn sequence(&self) -> u64 {
-		self.group.sequence
+	/// Where this group starts within its track, in the track's timescale.
+	pub fn start(&self) -> u64 {
+		self.group.start
 	}
 
 	/// Read the next frame, or `None` once the group ends.
@@ -88,9 +88,12 @@ mod tests {
 	use super::*;
 	use crate::catalog::hang::Container as Hang;
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no max age, so a
+	/// group finished whole stays readable after its span has passed.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	fn frame(timestamp_us: u64, payload: &'static [u8], keyframe: bool) -> Frame {
@@ -114,9 +117,10 @@ mod tests {
 		media.write(frame(1_020_000, b"delta", false)).unwrap();
 		let _finished = media.finish().unwrap();
 
-		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
+		// The group starts at its keyframe, a second in, in the track's milliseconds.
+		let group = consumer.track("media").unwrap().fetch_group(1_000, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::Legacy(crate::container::Kind::Data));
-		assert_eq!(group.sequence(), 0);
+		assert_eq!(group.start(), 1_000);
 
 		let first = group.read().await.unwrap().unwrap();
 		assert_eq!(first.payload, b"keyframe".as_slice());
@@ -173,7 +177,7 @@ mod tests {
 			.unwrap();
 		let _finished = media.finish().unwrap();
 
-		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
+		let group = consumer.track("media").unwrap().fetch_group(1_000, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::Legacy(crate::container::Kind::Video));
 
 		let first = group.read().await.unwrap().unwrap();
@@ -196,7 +200,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("media", timed()).unwrap();
 		let format = Hang::Legacy(crate::container::Kind::Video);
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
 
 		format
@@ -211,7 +215,7 @@ mod tests {
 		assert_eq!(second.payload, b"delta".as_slice());
 		assert!(live.read().now_or_never().is_none(), "the open group has nothing more");
 
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert!(live.read().await.unwrap().is_none());
 	}
 
@@ -230,6 +234,12 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		// A CMAF track counts in its init's ticks.
 		let info = moq_net::track::Info::default().with_timescale(muxer.timescale());
+		// The group starts at its keyframe, two seconds in.
+		let start = moq_net::Timestamp::from_secs(2)
+			.unwrap()
+			.convert(muxer.timescale())
+			.unwrap()
+			.value();
 		let track = broadcast.create_track("video", info).unwrap();
 		let consumer = broadcast.consume();
 
@@ -250,7 +260,7 @@ mod tests {
 		}
 		let _finished = media.finish().unwrap();
 
-		let group = consumer.track("video").unwrap().fetch_group(0, None).await.unwrap();
+		let group = consumer.track("video").unwrap().fetch_group(start, None).await.unwrap();
 		let mut group = GroupConsumer::new(group, Hang::new(&cmaf, crate::container::Kind::Video).unwrap());
 
 		let first = group.read().await.unwrap().unwrap();

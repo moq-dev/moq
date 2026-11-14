@@ -1234,7 +1234,7 @@ impl From<moq_video::decode::Read> for MoqVideoRead {
 			},
 			moq_video::decode::Read::Gap { timestamp, duration } => Self::Gap {
 				timestamp: timestamp.into(),
-				duration: crate::ffi::duration(duration.into()),
+				duration: crate::ffi::gap(duration),
 			},
 			moq_video::decode::Read::End { end } => Self::End { end: end.into() },
 		}
@@ -1518,7 +1518,7 @@ mod finish_tests {
 		// NTSC frame times, which no microsecond count holds exactly.
 		let ntsc = |i: u64| MoqTimestamp {
 			value: i * 1001,
-			scale: 30_000,
+			scale: Some(30_000),
 		};
 		let picture = |i: u64| MoqVideoFrame {
 			timestamp: ntsc(i),
@@ -1652,7 +1652,7 @@ mod finish_tests {
 			let picture = |width: usize, height: usize, micros: u64| MoqVideoFrame {
 				timestamp: MoqTimestamp {
 					value: micros,
-					scale: 1_000_000,
+					scale: Some(1_000_000),
 				},
 				data: vec![0x80; width * height * 4],
 			};
@@ -1713,7 +1713,7 @@ mod finish_tests {
 				.write(MoqVideoFrame {
 					timestamp: MoqTimestamp {
 						value: 0,
-						scale: 1_000_000,
+						scale: Some(1_000_000),
 					},
 					data: vec![0x80; 320 * 240 * 3 / 2],
 				})
@@ -1896,7 +1896,7 @@ mod rung_tests {
 		MoqVideoFrame {
 			timestamp: MoqTimestamp {
 				value: i * 33_333,
-				scale: 1_000_000,
+				scale: Some(1_000_000),
 			},
 			data: vec![(i * 40) as u8; 320 * 240 * 3 / 2],
 		}

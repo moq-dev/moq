@@ -8,7 +8,7 @@ import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./gro
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks, skipHole, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
-import { rescale } from "./rescale.ts";
+import { rescale, rescaleIn } from "./rescale.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { authoredInfo, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
@@ -25,7 +25,7 @@ test("a cached transport tail covers only positions it actually holds", async ()
 	const producer = new TrackProducer("test");
 	const subscriber = producer.subscribe();
 	const tail = hooks.receiveGroup(producer, { sequence: 0n, start: 5 });
-	tail.writeFrame({ payload: new Uint8Array([7]) });
+	tail.writeFrame({ payload: new Uint8Array([7]), timestamp: Timestamp.unscaled(tail.sequence) });
 	tail.finish();
 	expect(hooks.cachedGroup(subscriber, 0n)).toBeUndefined();
 	const covered = hooks.cachedGroup(subscriber, 0n, 5);
@@ -334,8 +334,8 @@ test("wanted stays set across churn while at least one subscriber remains", asyn
 // Append a group of a 3 byte first frame and a `delta` byte delta to an untimed track.
 function refreshGroup(producer: TrackProducer, delta: number): void {
 	const group = producer.appendGroup();
-	group.writeFrame({ payload: enc.encode("key") });
-	if (delta > 0) group.writeFrame({ payload: new Uint8Array(delta) });
+	group.writeFrame({ payload: enc.encode("key"), timestamp: Timestamp.unscaled(group.sequence) });
+	if (delta > 0) group.writeFrame({ payload: new Uint8Array(delta), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 }
 
@@ -422,13 +422,18 @@ test("rescale matches the track's timeline, rounded down as Rust's convert does"
 	// The same binary value at two scales floors alike, below 0.117 s: 116 ms, as Rust converts it.
 	expect(rescale(timed, new Timestamp(0.11699999999999999, Timescale.SECOND))?.value).toBe(116);
 	expect(rescale(timed, new Timestamp(131730289100587, Timescale(1125899906842624)))?.value).toBe(116);
-	expect(() => rescale(timed, undefined)).toThrow(TimestampMismatch);
+	expect(() => rescale(timed, Timestamp.unscaled(2n))).toThrow(TimestampMismatch);
 	const huge = new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MILLI);
 	expect(() => rescale({ timescale: Timescale.NANO }, huge)).toThrow(TimestampMismatch);
 
-	expect(rescale({}, undefined)).toBeUndefined();
-	expect(rescale({ timescale: null }, undefined)).toBeUndefined();
+	const key = Timestamp.unscaled(2n);
+	expect(rescale({}, key)).toBe(key);
+	expect(rescale({ timescale: null }, key)).toBe(key);
 	expect(() => rescale({}, Timestamp.fromMillis(1))).toThrow(TimestampMismatch);
+	// A scale-less frame carries its group's key, so another key is a mismatch.
+	expect(rescaleIn({ timescale: null }, key, 2n)).toBe(key);
+	expect(() => rescaleIn({ timescale: null }, key, 3n)).toThrow(TimestampMismatch);
+	expect(rescaleIn(timed, Timestamp.fromMillis(1), 3n).value).toBe(1);
 });
 
 // The in-range datagrams, sent between the dropped ones, show the reader is live, so the
@@ -1653,7 +1658,10 @@ test("a parked read wakes at its wall deadline", async () => {
 		try {
 			const track = producer.subscribe({ delay: { max: Duration.millis(1000) } });
 			const held = producer.appendGroup();
-			held.writeFrame({ payload: enc.encode("x"), timestamp: timescale && Timestamp.fromMillis(0) });
+			held.writeFrame({
+				payload: enc.encode("x"),
+				timestamp: timescale ? Timestamp.fromMillis(0) : Timestamp.unscaled(held.sequence),
+			});
 			const group = track.tryRecvGroup();
 			if (!group) throw new Error("missing group");
 			expect(await group.readString()).toBe("x");
@@ -2639,7 +2647,8 @@ test("a recreated largest group is reported before the end", async () => {
 /** Write untimed group `sequence` with `frames` frames, left open. */
 function framedGroup(producer: TrackProducer, sequence: bigint, frames: number): GroupProducer {
 	const group = producer.createGroup(sequence);
-	for (let i = 0; i < frames; i++) group.writeFrame({ payload: enc.encode("x") });
+	for (let i = 0; i < frames; i++)
+		group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.unscaled(group.sequence) });
 	return group;
 }
 
@@ -3246,17 +3255,20 @@ function drain(track: { tryRecvGroup(): GroupConsumer | undefined }): bigint[] {
 	return sequences;
 }
 
-/** An untimed track holding `count` single-frame groups. */
+/** A scale-less track holding `count` single-frame groups. */
 function untimedTrack(count: number): TrackProducer {
 	const producer = new TrackProducer("test").accept({ maxAge: null });
-	for (let i = 0; i < count; i++) producer.writeFrame({ payload: enc.encode(`${i}`) });
+	for (let i = 0; i < count; i++)
+		producer.writeFrame({ payload: enc.encode(`${i}`), timestamp: Timestamp.unscaled(i) });
 	return producer;
 }
 
 test("a frame whose timedness disagrees with its track is refused", async () => {
 	const timed = new TrackProducer("timed").accept({ timescale: Timescale.MILLI });
 	const group = timed.appendGroup();
-	expect(() => group.writeFrame({ payload: enc.encode("x") })).toThrow(TimestampMismatch);
+	expect(() => group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.unscaled(group.sequence) })).toThrow(
+		TimestampMismatch,
+	);
 	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) });
 
 	const untimed = new TrackProducer("untimed").accept({});
@@ -3265,13 +3277,13 @@ test("a frame whose timedness disagrees with its track is refused", async () => 
 	expect(() => other.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) })).toThrow(
 		TimestampMismatch,
 	);
-	other.writeFrame({ payload: enc.encode("y") });
+	other.writeFrame({ payload: enc.encode("y"), timestamp: Timestamp.unscaled(other.sequence) });
 	other.finish();
 
-	// The untimed frame reaches the subscriber as it was written: no time filled in.
+	// The scale-less frame reaches the subscriber as it was written: its key, no time filled in.
 	const frame = await (await subscriber.recvGroup())?.readFrame();
 	expect(frame && dec.decode(frame.payload)).toBe("y");
-	expect(frame?.timestamp).toBeUndefined();
+	expect(frame?.timestamp).toEqual(Timestamp.unscaled(other.sequence));
 });
 
 test("unknown track metadata keeps presentation-time expiry until accepted", () => {
@@ -3302,7 +3314,7 @@ test("an untimed subscriber starts at the oldest fresh group", () => {
 	try {
 		// Group N's successor arrives N + 1 seconds in.
 		for (let i = 0; i < 5; i++) {
-			producer.writeFrame({ payload: enc.encode(`${i}`) });
+			producer.writeFrame({ payload: enc.encode(`${i}`), timestamp: Timestamp.unscaled(i) });
 			clock.set(10_000 + (i + 1) * 1000);
 		}
 
@@ -3314,7 +3326,7 @@ test("an untimed subscriber starts at the oldest fresh group", () => {
 		expect(drain(live)).toEqual([4n]);
 		expect(drain(producer.subscribe({ delay: { max: Duration.millis(60_000) } }))).toEqual([0n, 1n, 2n, 3n, 4n]);
 
-		producer.writeFrame({ payload: enc.encode("5") });
+		producer.writeFrame({ payload: enc.encode("5"), timestamp: Timestamp.unscaled(5n) });
 		expect(drain(live)).toEqual([5n]);
 	} finally {
 		producer.finish();
@@ -3332,19 +3344,40 @@ test("an untimed subscriber without a start begins at the latest group under its
 });
 
 test("a single-frame write that throws aborts its group", () => {
-	const producer = new TrackProducer("test").accept({ maxAge: null });
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	const subscriber = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
-	// A timestamped frame is refused by an untimed track.
-	expect(() => producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) })).toThrow(
+	// A mismatched timestamp is refused before any group exists.
+	expect(() => producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.unscaled(0n) })).toThrow(
 		TimestampMismatch,
 	);
-	producer.writeFrame({ payload: enc.encode("y") });
-
+	expect(producer.largest()).toBeUndefined();
+	producer.writeFrame({ payload: enc.encode("y"), timestamp: Timestamp.fromMillis(10) });
+	// A rewind is only known once the group exists, so the write ends it.
+	expect(() => producer.writeFrame({ payload: enc.encode("z"), timestamp: Timestamp.fromMillis(5) })).toThrow(
+		TimestampMismatch,
+	);
 	// The failed group ends in that error instead of leaving a reader waiting on it.
+	expect(subscriber.tryRecvGroup()?.sequence).toBe(0n);
 	const failed = subscriber.tryRecvGroup();
-	expect(failed?.sequence).toBe(0n);
+	expect(failed?.sequence).toBe(1n);
 	expect(failed?.closed.peek()).toBeInstanceOf(TimestampMismatch);
-	expect(drain(subscriber)).toEqual([1n]);
+});
+
+test("a scale-less single-frame write lands at its key", () => {
+	const producer = new TrackProducer("test").accept({ maxAge: null });
+	const subscriber = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+	producer.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(3n) });
+	// A key at or below one held is a rewind, refused before any group exists.
+	expect(() => producer.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(3n) })).toThrow(
+		TimestampMismatch,
+	);
+	expect(() => producer.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(1n) })).toThrow(
+		TimestampMismatch,
+	);
+	producer.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.unscaled(5n) });
+	expect(drain(subscriber)).toEqual([3n, 5n]);
+	// The keys below each write are skipped, so creating one is refused.
+	expect(() => producer.createGroup(4n)).toThrow(Skipped);
 });
 
 // An explicit start is a floor, not a request: the budget still skips what it finds stale
@@ -3407,9 +3440,9 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 	const producer = new TrackProducer("video").accept({ maxAge: null });
 	const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
 	const arriving = producer.createGroup(3n);
-	arriving.writeFrame({ payload: enc.encode("3") });
+	arriving.writeFrame({ payload: enc.encode("3"), timestamp: Timestamp.unscaled(arriving.sequence) });
 	const finished = producer.createGroup(4n);
-	finished.writeFrame({ payload: enc.encode("4") });
+	finished.writeFrame({ payload: enc.encode("4"), timestamp: Timestamp.unscaled(finished.sequence) });
 	finished.finish();
 
 	const group = await reader.recvGroup();
@@ -3450,7 +3483,7 @@ test.each([
 	const producer = new TrackProducer("video").accept({ maxAge: null });
 	hooks.receiveTrack(producer);
 	const first = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
-	first.writeFrame({ payload: enc.encode("a") });
+	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(first.sequence) });
 	const reader = first.consume();
 	expect(await reader.readString()).toBe("a");
 
@@ -3459,7 +3492,7 @@ test.each([
 	const failed = new Error("reset");
 	if (kind === "closed") {
 		// A frame still buffered when the copy fails stays readable after a close.
-		first.writeFrame({ payload: enc.encode("c") });
+		first.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.unscaled(first.sequence) });
 		first.abort(failed);
 		reader.close();
 		expect(await reader.readString()).toBe("c");
@@ -3481,8 +3514,8 @@ test.each([
 		expect(closed).toBe(failed);
 		// The failure it reported stands: a re-offer arriving later does not take over.
 		const late = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
-		late.writeFrame({ payload: enc.encode("a") });
-		late.writeFrame({ payload: enc.encode("b") });
+		late.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(late.sequence) });
+		late.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(late.sequence) });
 		await expect(reader.readString()).rejects.toBe(failed);
 		producer.close();
 		return;
@@ -3497,8 +3530,8 @@ test.each([
 		expect(reader.closed.peek()).toBeUndefined();
 		const third = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
 		held?.release();
-		third.writeFrame({ payload: enc.encode("a") });
-		third.writeFrame({ payload: enc.encode("b") });
+		third.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(third.sequence) });
+		third.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(third.sequence) });
 		third.finish();
 		expect(await reader.readString()).toBe("b");
 		expect(await reader.readString()).toBeUndefined();
@@ -3510,7 +3543,8 @@ test.each([
 		// A re-offer that took over and then shed the reader's frame settles `closed` then.
 		const again = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
 		arriving?.release();
-		for (const payload of ["a", "b", "c"]) again.writeFrame({ payload: enc.encode(payload) });
+		for (const payload of ["a", "b", "c"])
+			again.writeFrame({ payload: enc.encode(payload), timestamp: Timestamp.unscaled(again.sequence) });
 		let closed: Error | null | undefined;
 		reader.closed.then((value) => {
 			closed = value;
@@ -3572,9 +3606,9 @@ test.each([
 	arriving?.release();
 	if (kind === "shed") {
 		// The re-offer drops frames 0 and 1 to cache pressure before the reader reaches it.
-		again.writeFrame({ payload: enc.encode("a") });
-		again.writeFrame({ payload: enc.encode("b") });
-		again.writeFrame({ payload: enc.encode("c") });
+		again.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(again.sequence) });
+		again.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(again.sequence) });
+		again.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.unscaled(again.sequence) });
 		hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
 		await reading;
 		expect(read).toMatchObject({ code: StreamCode.Evicted });
@@ -3589,8 +3623,8 @@ test.each([
 	}
 	await settle();
 	expect(read).toBeUndefined();
-	again.writeFrame({ payload: enc.encode("a") });
-	again.writeFrame({ payload: enc.encode("b") });
+	again.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(again.sequence) });
+	again.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(again.sequence) });
 	again.finish();
 	await reading;
 	expect(read).toEqual(kind === "readable" ? enc.encode("b") : "b");
@@ -3609,7 +3643,7 @@ test("a chain of takeovers keeps a stalled reader within the tail", async () => 
 	let copy = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
 	const reader = copy.consume();
 	for (let index = 0; index < 8; index++) {
-		copy.writeFrame({ payload });
+		copy.writeFrame({ payload, timestamp: Timestamp.unscaled(copy.sequence) });
 		const held = hooks.arrivingGroup(producer, 3n);
 		copy.abort(failed);
 		copy = hooks.receiveGroup(producer, { sequence: 3n, start: index + 1 });
@@ -3631,13 +3665,14 @@ test.each(["buffered", "handed", "partial", "replay", "positions", "once"])(
 		hooks.receiveTrack(producer);
 		const track = producer.subscribe();
 		const first = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
-		first.writeFrame({ payload: enc.encode("a") });
+		first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(first.sequence) });
 		const arriving = hooks.arrivingGroup(producer, 3n);
 		const failed = new Error("reset");
 		const takeover = () => {
 			const again = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
 			arriving?.release();
-			for (const payload of ["a", "b", "c"]) again.writeFrame({ payload: enc.encode(payload) });
+			for (const payload of ["a", "b", "c"])
+				again.writeFrame({ payload: enc.encode(payload), timestamp: Timestamp.unscaled(again.sequence) });
 			again.finish();
 		};
 
@@ -3658,7 +3693,7 @@ test.each(["buffered", "handed", "partial", "replay", "positions", "once"])(
 			const ahead = first.consume();
 			const behind = first.consume();
 			expect(await ahead.readString()).toBe("a");
-			const cut = first.createFrame({ size: 2 });
+			const cut = first.createFrame({ size: 2, timestamp: Timestamp.unscaled(first.sequence) });
 			cut.write(enc.encode("b"));
 			// `ahead` joins the frame as it arrives; `behind` has yet to reach it.
 			const joining = ahead.readString();
@@ -3677,18 +3712,19 @@ test.each(["buffered", "handed", "partial", "replay", "positions", "once"])(
 			const second = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
 			arriving?.release();
 			const held = hooks.arrivingGroup(producer, 3n);
-			second.createFrame({ size: 2 }).write(enc.encode("a"));
+			second.createFrame({ size: 2, timestamp: Timestamp.unscaled(second.sequence) }).write(enc.encode("a"));
 			second.abort(failed);
 			await settle();
 			expect(reader.closed.peek()).toBeUndefined();
 			const third = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
 			held?.release();
-			for (const payload of ["a", "b"]) third.writeFrame({ payload: enc.encode(payload) });
+			for (const payload of ["a", "b"])
+				third.writeFrame({ payload: enc.encode(payload), timestamp: Timestamp.unscaled(third.sequence) });
 			third.finish();
 			expect(await reader.readString()).toBe("b");
 			expect(await reader.readString()).toBeUndefined();
 		} else if (kind === "positions") {
-			first.writeFrame({ payload: enc.encode("b") });
+			first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(first.sequence) });
 			const readers = [first.consume(), first.consume(), first.consume()];
 			expect(await readers[1].readString()).toBe("a");
 			expect(await readers[2].readString()).toBe("a");
@@ -3704,7 +3740,7 @@ test.each(["buffered", "handed", "partial", "replay", "positions", "once"])(
 		} else {
 			const group = await track.recvGroup();
 			const reader = first.consume();
-			first.writeFrame({ payload: enc.encode("b") });
+			first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(first.sequence) });
 			first.abort(failed);
 			await settle();
 			expect(group?.closed.peek()).toBeUndefined();
@@ -3720,7 +3756,7 @@ test.each(["buffered", "handed", "partial", "replay", "positions", "once"])(
 			}
 			// A re-offer arriving later serves new readers only.
 			const late = hooks.receiveGroup(producer, { sequence: 3n, start: 0 });
-			late.writeFrame({ payload: enc.encode("a") });
+			late.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(late.sequence) });
 			await expect(reader.readString()).rejects.toBe(failed);
 			expect(await late.consume().readString()).toBe("a");
 		}
@@ -4029,7 +4065,8 @@ test("a mid-group end survives eviction and a filtered late reader", async () =>
 	try {
 		producer.finishAt({ group: 5n, frame: 5 });
 		const group = producer.createGroup(5n);
-		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		for (let i = 0; i < 5; i++)
+			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.sequence) });
 		group.finish();
 		producer.finish();
 		producer.close();
@@ -4070,7 +4107,8 @@ test("a wire end repeats or refines but never moves", () => {
 test("a mid-group end refuses to cut existing frames", () => {
 	const producer = new TrackProducer("video").accept({});
 	const group = producer.createGroup(5n);
-	for (let i = 0; i < 6; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+	for (let i = 0; i < 6; i++)
+		group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.sequence) });
 	expect(() => producer.finishAt({ group: 5n, frame: 5 })).toThrow(ProtocolViolation);
 	expect(hooks.subscriberEnd(producer.subscribe())).toBeUndefined();
 	producer.finishAt({ group: 5n, frame: 6 });
@@ -4085,10 +4123,12 @@ test.each([true, false])("a mid-group end caps later writes (declared first: %s)
 
 	if (early) producer.finishAt(end);
 	const group = producer.createGroup(5n);
-	group.writeFrame({ payload: new Uint8Array([0]) });
+	group.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(group.sequence) });
 	if (!early) producer.finishAt(end);
-	group.writeFrame({ payload: new Uint8Array([1]) });
-	expect(() => group.writeFrame({ payload: new Uint8Array([2]) })).toThrow("past the track's end");
+	group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(group.sequence) });
+	expect(() =>
+		group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.unscaled(group.sequence) }),
+	).toThrow("past the track's end");
 	expect(group.consume().frameCount).toBe(2);
 	expect(() => producer.createGroup(6n)).toThrow();
 	producer.finish();
@@ -4318,7 +4358,7 @@ test("an untimed track takes groups in any order", () => {
 	const producer = new TrackProducer("test").accept({});
 	for (const sequence of [5n, 3n, 4n]) {
 		const group = producer.createGroup(sequence);
-		group.writeFrame({ payload: enc.encode(`${sequence}`) });
+		group.writeFrame({ payload: enc.encode(`${sequence}`), timestamp: Timestamp.unscaled(group.sequence) });
 		group.finish();
 	}
 });
@@ -4328,7 +4368,7 @@ test("replay and backlogs deliver sparse out-of-order arrivals ascending without
 	const all = { ranges: [{ start: { absolute: 0n } }], delay: { max: null } };
 	const write = (sequence: bigint) => {
 		const group = producer.createGroup(sequence);
-		group.writeFrame({ payload: enc.encode(`${sequence}`) });
+		group.writeFrame({ payload: enc.encode(`${sequence}`), timestamp: Timestamp.unscaled(group.sequence) });
 		group.finish();
 	};
 	const drain = (reader: ReturnType<typeof producer.subscribe>) => {
@@ -4472,7 +4512,7 @@ test("an end refined after the subscription ended owes no tail", async () => {
 		delay: { max: Duration.millis(60_000) },
 	});
 	const group = producer.createGroup(2n);
-	group.writeFrame({ payload: new Uint8Array([1]) });
+	group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	hooks.endTrack(producer, { group: 3n, frame: 0 });
 	hooks.cacheTrack(producer);
@@ -4871,7 +4911,8 @@ for (const refresh of [undefined, 0]) {
 		const group = producer.appendGroup();
 		const consumer = await ordered.nextGroup();
 		if (!consumer) throw new Error("missing group");
-		for (let index = 0; index < 40; index++) group.writeFrame({ payload: new Uint8Array(1024 * 1024) });
+		for (let index = 0; index < 40; index++)
+			group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.unscaled(group.sequence) });
 		await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
 		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0n : 1n);
 		const joiner = producer.subscribe();
@@ -4893,7 +4934,7 @@ test("reading a shed frame head requests refresh", async () => {
 	const consumer = await ordered.nextGroup();
 	if (!consumer) throw new Error("missing group");
 	const MiB = 1024 * 1024;
-	const frame = group.createFrame({ size: 40 * MiB });
+	const frame = group.createFrame({ size: 40 * MiB, timestamp: Timestamp.unscaled(group.sequence) });
 	for (let index = 0; index < 40; index++) frame.write(new Uint8Array(MiB));
 	frame.finish();
 	await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });

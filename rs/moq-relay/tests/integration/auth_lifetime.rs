@@ -312,11 +312,13 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.finish().expect("finish group");
+	group.close().expect("finish group");
 
 	let pub_session = kio::clock::timeout(
 		TIMEOUT,
@@ -761,11 +763,13 @@ async fn a_moved_tier_retags_the_live_session() {
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 	let mut round_trip = async |payload: &'static [u8]| {
-		let mut group = track.append_group().expect("append group");
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.expect("append group");
 		group
-			.write_frame(moq_net::Timestamp::ZERO, payload)
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 			.expect("write frame");
-		group.finish().expect("finish group");
+		group.close().expect("finish group");
 		let mut group = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 			.await
 			.expect("recv_group timeout")
@@ -903,12 +907,15 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			);
 		}
 		let send = |index: usize, sequence: u64| {
-			let mut group = tracks[index].1.append_group().expect("append group");
+			let mut group = tracks[index]
+				.1
+				.append_group(tracks[index].1.largest().map_or(0, |largest| largest.group + 1))
+				.expect("append group");
 			group
-				.write_frame(moq_net::Timestamp::ZERO, b"media".as_ref())
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"media".as_ref())
 				.expect("write frame");
-			let group = group.finish().expect("finish group");
-			assert_eq!(group.sequence, sequence);
+			let group = group.close().expect("finish group");
+			assert_eq!(group.start, sequence);
 		};
 		for (index, sub) in subs.iter_mut().enumerate() {
 			send(index, 0);
@@ -949,7 +956,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			.expect("recv_group timeout")
 			.expect("recv_group failed")
 			.expect("the sibling track closed");
-		assert_eq!(group.sequence, 1, "{scheme}");
+		assert_eq!(group.start, 1, "{scheme}");
 
 		// Undeafen: the path is announced again and a new subscription flows.
 		script.on_revalidate(Answer::Grant(grant(Duration::from_secs(3600))));
@@ -973,7 +980,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 				.expect("recv_group timeout")
 				.expect("recv_group failed")
 				.expect("the undeafened track closed");
-			if group.sequence >= 1 {
+			if group.start >= 1 {
 				break;
 			}
 		}
@@ -1055,9 +1062,11 @@ async fn http_routes_hold_a_lease() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	let pub_session = kio::clock::timeout(
 		TIMEOUT,
@@ -1967,11 +1976,16 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap()
 			.unwrap();
 		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = b_track.append_group().unwrap();
-		group
-			.write_frame(moq_net::Timestamp::ZERO, b"new prefix".as_ref())
+		let mut group = b_track
+			.append_group(b_track.largest().map_or(0, |largest| largest.group + 1))
 			.unwrap();
-		group.finish().unwrap();
+		group
+			.write_frame(
+				moq_net::Timestamp::from_millis(group.start).unwrap(),
+				b"new prefix".as_ref(),
+			)
+			.unwrap();
+		group.close().unwrap();
 		assert!(
 			kio::clock::timeout(TIMEOUT, b_sub.recv_group())
 				.await
@@ -1991,11 +2005,16 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			"{scheme}: {:?}",
 			ended.as_ref().err()
 		);
-		let mut group = a_track.append_group().unwrap();
-		group
-			.write_frame(moq_net::Timestamp::ZERO, b"original prefix".as_ref())
+		let mut group = a_track
+			.append_group(a_track.largest().map_or(0, |largest| largest.group + 1))
 			.unwrap();
-		group.finish().unwrap();
+		group
+			.write_frame(
+				moq_net::Timestamp::from_millis(group.start).unwrap(),
+				b"original prefix".as_ref(),
+			)
+			.unwrap();
+		group.close().unwrap();
 		assert!(
 			kio::clock::timeout(TIMEOUT, a_sub.recv_group())
 				.await

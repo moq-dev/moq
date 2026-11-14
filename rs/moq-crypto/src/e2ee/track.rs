@@ -12,10 +12,10 @@ use crate::e2ee::terminal::Terminal;
 
 /// Exclusive producer for one physical stream track.
 ///
-/// Uses the grouped-frame key and the group sequences of its semantic name, shared with every
-/// producer of that name under the generation. Sequences are allocated monotonically, so a
-/// re-created or re-served name resumes above every sequence allocated before; reuse and
-/// exhaustion are refused before encryption.
+/// Uses the grouped-frame key and the group starts of its semantic name, shared with every
+/// producer of that name under the generation. Starts only rise, so a re-created or re-served
+/// name resumes above every start allocated before; reuse and exhaustion are refused before
+/// encryption.
 pub struct Producer {
 	inner: moq_net::track::Producer,
 	claim: Claim,
@@ -31,37 +31,41 @@ impl Producer {
 		self.inner.name()
 	}
 
-	/// Allocate the next sequence and start a group there.
+	/// Start the next group at `start`, in the track's timescale, as
+	/// [`moq_net::track::Producer::append_group`] does. `start` must be above every start this
+	/// name allocated under the generation.
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`](crate::e2ee::Error::Identity) if the next sequence exceeds `2^53-1`, or a net error.
-	pub fn append_group(&mut self) -> Result<group::Producer> {
-		self.start_group(None)
-	}
-
-	/// Start a group at an explicit sequence, which must be above every sequence this name
-	/// allocated under the generation.
-	///
-	/// # Errors
-	///
-	/// [`Error::Reuse`](crate::e2ee::Error::Reuse) if `sequence` was already allocated, [`Error::Identity`](crate::e2ee::Error::Identity) if
+	/// [`Error::Reuse`](crate::e2ee::Error::Reuse) if `start` was already allocated, [`Error::Identity`](crate::e2ee::Error::Identity) if
 	/// it exceeds `2^53-1`, or a net error.
-	pub fn create_group(&mut self, sequence: u64) -> Result<group::Producer> {
-		self.start_group(Some(sequence))
+	pub fn append_group(&mut self, start: u64) -> Result<group::Producer> {
+		let (_, inner) = self
+			.claim
+			.allocate(Some(start), |start| Ok(self.inner.append_group(start)?))?;
+		Ok(self.group(inner))
 	}
 
-	fn start_group(&mut self, sequence: Option<u64>) -> Result<group::Producer> {
-		let (sequence, ()) = self.claim.allocate(sequence, |_| Ok(()))?;
-		let inner = self.inner.create_group(moq_net::group::Info { sequence })?;
-		Ok(group::Producer::new(
-			inner,
-			self.inner.info().clone(),
-			Arc::clone(&self.claim.key),
-		))
+	/// Start a group at `start`, in the track's timescale, as
+	/// [`moq_net::track::Producer::create_group`] does. `start` must be above every start this
+	/// name allocated under the generation.
+	///
+	/// # Errors
+	///
+	/// [`Error::Reuse`](crate::e2ee::Error::Reuse) if `start` was already allocated, [`Error::Identity`](crate::e2ee::Error::Identity) if
+	/// it exceeds `2^53-1`, or a net error.
+	pub fn create_group(&mut self, start: u64) -> Result<group::Producer> {
+		let (_, inner) = self.claim.allocate(Some(start), |start| {
+			Ok(self.inner.create_group(moq_net::group::Info { start })?)
+		})?;
+		Ok(self.group(inner))
 	}
 
-	/// Finish the track after the last allocated sequence.
+	fn group(&self, inner: moq_net::group::Producer) -> group::Producer {
+		group::Producer::new(inner, self.inner.info().clone(), Arc::clone(&self.claim.key))
+	}
+
+	/// Finish the track after the last allocated start.
 	///
 	/// # Errors
 	///

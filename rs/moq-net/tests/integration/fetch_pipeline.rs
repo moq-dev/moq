@@ -6,10 +6,12 @@
 //! `model::resume`'s staged copies.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Error, Timestamp, Version};
+use moq_net::{Error, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -100,8 +102,8 @@ async fn the_first_fetch_goes_out_with_the_info_request() {
 			let (request, fill, fetching, _held) = fetch_ahead(version, relays).await;
 			let _track = request.accept(timed());
 			let mut group = fill.accept(0, timed()).unwrap();
-			group.write_frame(Timestamp::ZERO, b"early".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.write_frame(group.at_start(), b"early".as_ref()).unwrap();
+			group.close().unwrap();
 			let mut fetched = kio::clock::timeout(TIMEOUT, fetching)
 				.await
 				.expect("the fetch resolves")
@@ -144,9 +146,9 @@ async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
-	group.finish().unwrap();
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), b"frame".as_ref()).unwrap();
+	group.close().unwrap();
 
 	let mut links = Vec::new();
 	let mut upstream = publisher.clone();

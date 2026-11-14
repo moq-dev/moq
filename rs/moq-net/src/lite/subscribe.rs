@@ -425,7 +425,7 @@ fn encode_order(w: &mut Encoder<'_>, version: Version, order: Order) -> Result<(
 /// Decode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
 ///
 /// Lite-06 carries the raw floor, so every value names a concrete group and 0 decodes as
-/// `Some(0)`. Pre-06 wires encode the sequence + 1, with 0 meaning the latest group
+/// `Some(0)`. Pre-06 wires encode the key + 1, with 0 meaning the latest group
 /// (`None`). Callers canonicalize with [`canonical_start_group`] once the frame bounds
 /// are known.
 fn decode_start_group(r: &mut Decoder<'_>, version: Version) -> Result<Option<u64>, DecodeError> {
@@ -449,7 +449,7 @@ fn canonical_start_group(version: Version, start_group: Option<u64>, start_frame
 /// Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
 ///
 /// The inverse of [`decode_start_group`]. Lite-06 writes the raw floor, so `None` and
-/// `Some(0)` are the same group 0. A pre-06 wire encodes the sequence + 1: `None` is 0
+/// `Some(0)` are the same group 0. A pre-06 wire encodes the key + 1: `None` is 0
 /// (the latest group, where the publisher starts) and `Some(0)` is 1, replay from the
 /// beginning.
 fn encode_start_group(w: &mut Encoder<'_>, version: Version, start_group: Option<u64>) -> Result<(), EncodeError> {
@@ -1037,11 +1037,11 @@ impl<'a> Message<'a> for SubscribeStarted {
 /// Names groups that existed but will not be delivered: aborted or reset, evicted or
 /// expired with no copy left, or stale.
 ///
-/// Lite03+; publishers send it on Lite05 and later. Before lite-07 it also names sequences
+/// Lite03+; publishers send it on Lite05 and later. Before lite-07 it also names keys
 /// declared skipped, which lite-07 names in [`SubscribeSkip`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscribeDrop {
-	/// The dropped group sequences.
+	/// The dropped group keys.
 	pub groups: std::ops::Range<u64>,
 
 	/// Why the groups were given up: a stream error code on lite-07 and later, or an
@@ -1085,7 +1085,7 @@ impl SubscribeDrop {
 
 /// A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: `Group Start` and `Group Count` on lite-07, an
 /// inclusive `Group Start` and `Group End` before. Either way it ends by the reserved
-/// sequence `u64::MAX`, so it never names that group.
+/// key `u64::MAX`, so it never names that group.
 fn decode_groups(r: &mut Decoder<'_>, version: Version) -> Result<std::ops::Range<u64>, DecodeError> {
 	let start = r.varint()?;
 	let end = match version.has_group_count() {
@@ -1139,13 +1139,13 @@ impl<'a> Message<'a> for SubscribeDrop {
 	}
 }
 
-/// Names sequences the publisher declared it will never produce (see
+/// Names keys the publisher declared it will never produce (see
 /// `track::Producer::skip_groups`): final, with no error, ending no reader.
 ///
 /// Lite07+ only; earlier versions name them in a [`SubscribeDrop`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscribeSkip {
-	/// The skipped group sequences.
+	/// The skipped group keys.
 	pub groups: std::ops::Range<u64>,
 }
 
@@ -1631,8 +1631,8 @@ mod test {
 		assert_eq!(got.ranges, msg.ranges);
 	}
 
-	/// Lite06 carries the raw floor; pre-06 wires encode the sequence + 1 with 0 meaning
-	/// the latest group. An explicit group 0 is that sequence, so it round-trips as group 0
+	/// Lite06 carries the raw floor; pre-06 wires encode the key + 1 with 0 meaning
+	/// the latest group. An explicit group 0 is that key, so it round-trips as group 0
 	/// rather than as the latest group.
 	#[test]
 	fn group_start_is_absolute_on_lite06() {
@@ -1662,7 +1662,7 @@ mod test {
 		.unwrap();
 		assert_eq!(got.ranges, [Range::OLDEST]);
 
-		// On the pre-06 wire an explicit group 0 is sequence + 1, distinct from an
+		// On the pre-06 wire an explicit group 0 is key + 1, distinct from an
 		// absent start (the latest group).
 		let explicit = encode(&msg, Version::Lite05).unwrap();
 		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, msg.ranges);

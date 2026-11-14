@@ -597,14 +597,13 @@ pub unsafe fn parse_slice<'a, T>(data: *const T, size: usize) -> Result<&'a [T],
 	Ok(data)
 }
 
-/// Parse an optional timestamp, NULL meaning untimed.
+/// Parse a required timestamp, refusing NULL with [Error::InvalidPointer].
 ///
 /// # Safety
 /// `timestamp` must be NULL or a valid pointer to a [crate::moq_timestamp].
-pub unsafe fn parse_timestamp(timestamp: *const crate::moq_timestamp) -> Result<Option<moq_net::Timestamp>, Error> {
-	Ok(unsafe { timestamp.as_ref() }
-		.map(|&timestamp| timestamp.try_into())
-		.transpose()?)
+pub unsafe fn parse_timestamp(timestamp: *const crate::moq_timestamp) -> Result<moq_net::Timestamp, Error> {
+	let timestamp = *unsafe { timestamp.as_ref() }.ok_or(Error::InvalidPointer)?;
+	Ok(timestamp.try_into()?)
 }
 
 #[cfg(test)]

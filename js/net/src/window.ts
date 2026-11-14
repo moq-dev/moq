@@ -9,7 +9,7 @@
  * @module
  */
 
-import { Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type { Anchor, Range } from "./track.ts";
 import { max, min, saturatingSub, UNBOUNDED } from "./util/sequence.ts";
 
@@ -29,11 +29,12 @@ export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0n }
 function anchorOf(field: string, anchor: Anchor): Anchor {
 	const keys = typeof anchor === "object" && anchor !== null ? Object.keys(anchor) : [];
 	const value = keys.length === 1 ? (anchor as Record<string, unknown>)[keys[0]] : undefined;
-	if (keys[0] === "time" && value instanceof Timestamp) return { time: value };
+	// A time anchor names a presentation time, which an unscaled timestamp lacks.
+	if (keys[0] === "time" && value instanceof Timestamp && value.scale !== undefined) return { time: value };
 	if (keys[0] === "absolute" && typeof value === "bigint" && value >= 0n) return { absolute: value };
 	if (keys[0] === "relative" && typeof value === "bigint" && value >= 0n) return { relative: value };
 	throw new TypeError(
-		`${field} must be {absolute}, a non-negative bigint, {relative}, a non-negative bigint, or {time}, a Timestamp`,
+		`${field} must be {absolute}, a non-negative bigint, {relative}, a non-negative bigint, or {time}, a scaled Timestamp`,
 	);
 }
 
@@ -90,7 +91,8 @@ function anchorKey(anchor: Anchor | undefined, none: [number, number]): [number,
 	if (anchor === undefined) return none;
 	if (anchor.absolute !== undefined) return [0, anchor.absolute];
 	if (anchor.relative !== undefined) return [1, anchor.relative];
-	return [2, anchor.time.value / anchor.time.scale];
+	// `rangesOf` refuses an unscaled time anchor, so this has a scale.
+	return [2, anchor.time.as(Timescale.SECOND)];
 }
 
 /**

@@ -39,7 +39,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 /// Publish a finished group 5 (three frames) then an open group 6 (two frames), optionally
 /// through a relay and with their streams delivered newest first, and return each group's
-/// sequence and the frames one subscriber read from it.
+/// key and the frames one subscriber read from it.
 async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usize)> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -85,7 +85,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	let reader = kio::clock::sim::spawn(async move {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(FOREVER))
-			.with_range(0..);
+			.with_ranges([support::keys(0..)]);
 		let mut sub = remote
 			.track("history")
 			.unwrap()
@@ -109,7 +109,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 					None => break,
 				}
 			}
-			got.push((group.sequence, frames));
+			got.push((group.start, frames));
 		}
 		got.sort();
 		got
@@ -131,14 +131,16 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		first_hop.hold_unis();
 	}
 
-	let mut old = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
+	let mut old = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 	for _ in 0..3 {
-		old.write_frame(Timestamp::now(), &b"old"[..]).unwrap();
+		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..])
+			.unwrap();
 	}
-	old.finish().unwrap();
-	let mut live = track.create_group(moq_net::group::Info { sequence: 6 }).unwrap();
+	old.close().unwrap();
+	let mut live = track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 	for _ in 0..2 {
-		live.write_frame(Timestamp::now(), &b"live"[..]).unwrap();
+		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..])
+			.unwrap();
 	}
 
 	if newest_first {
@@ -183,21 +185,21 @@ async fn a_fresh_subscriber_receives_the_finished_older_group() {
 /// Read known frame counts so the open live group never advances paused time to
 /// the relay's linger deadline while waiting for a FIN that will not arrive.
 async fn read_history(sub: &mut moq_net::track::Subscriber) {
-	let mut sequences = Vec::new();
+	let mut keys = Vec::new();
 	for _ in 0..2 {
 		let mut group = sub.recv_group().await.unwrap().unwrap();
-		let frames = match group.sequence {
+		let frames = match group.start {
 			5 => 3,
 			6 => 2,
-			sequence => panic!("unexpected group {sequence}"),
+			key => panic!("unexpected group {key}"),
 		};
 		for _ in 0..frames {
 			assert!(group.read_frame().await.unwrap().is_some());
 		}
-		sequences.push(group.sequence);
+		keys.push(group.start);
 	}
-	sequences.sort();
-	assert_eq!(sequences, [5, 6]);
+	keys.sort();
+	assert_eq!(keys, [5, 6]);
 }
 
 #[kio::test]
@@ -236,7 +238,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 		.unwrap();
 	let subscription = Subscription::default()
 		.with_delay(Delay::default().with_max(FOREVER))
-		.with_range(0..);
+		.with_ranges([support::keys(0..)]);
 	let first_subscription = subscription.clone();
 	let first_reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
@@ -250,14 +252,16 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	});
 	crate::support::wanted(track.demand()).await.unwrap();
 	upstream.server_transport.hold_unis();
-	let mut old = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
+	let mut old = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 	for _ in 0..3 {
-		old.write_frame(Timestamp::now(), &b"old"[..]).unwrap();
+		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..])
+			.unwrap();
 	}
-	old.finish().unwrap();
-	let mut live = track.create_group(moq_net::group::Info { sequence: 6 }).unwrap();
+	old.close().unwrap();
+	let mut live = track.create_group(moq_net::group::Info { start: 6 }).unwrap();
 	for _ in 0..2 {
-		live.write_frame(Timestamp::now(), &b"live"[..]).unwrap();
+		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..])
+			.unwrap();
 	}
 	// Both streams open before paused time advances; 10ms stays below linger.
 	kio::clock::sleep(Duration::from_millis(10)).await;

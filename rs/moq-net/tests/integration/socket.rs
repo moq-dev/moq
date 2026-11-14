@@ -13,6 +13,7 @@ use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TcpStream, TrackStream};
 use moq_net::{Error, StreamError, Version, frame, group, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -125,9 +126,11 @@ async fn read(reader: &mut group::Consumer) -> Result<Option<Vec<u8>>, Error> {
 
 /// Write `payload` as one message of a `track` session: one group.
 fn send(track: &track::Producer, payload: &'static [u8]) {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(None, payload).unwrap();
-	group.finish().unwrap();
+	let mut group = track.append_next().unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+		.unwrap();
+	group.close().unwrap();
 }
 
 /// Read the next message from a `track` session, or `None` once the peer finished.
@@ -157,7 +160,10 @@ async fn tcp_sessions_carry_writes_both_ways() {
 		assert_eq!(dialed.session(), accepted.session());
 
 		for write in [b"one", b"two", b"six"] {
-			dialed.producer.write_frame(None, &write[..]).unwrap();
+			dialed
+				.producer
+				.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &write[..])
+				.unwrap();
 		}
 		for write in [b"one", b"two", b"six"] {
 			assert_eq!(
@@ -166,17 +172,20 @@ async fn tcp_sessions_carry_writes_both_ways() {
 				"{dialer} to {acceptor}"
 			);
 		}
-		accepted.producer.write_frame(None, &b"pong"[..]).unwrap();
+		accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"pong"[..])
+			.unwrap();
 		assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), b"pong");
 
 		// FIN, each way.
-		dialed.producer.finish().unwrap();
+		dialed.producer.close().unwrap();
 		assert_eq!(
 			read(&mut accepted.consumer).await.unwrap(),
 			None,
 			"{dialer} to {acceptor}"
 		);
-		accepted.producer.finish().unwrap();
+		accepted.producer.close().unwrap();
 		assert_eq!(
 			read(&mut dialed.consumer).await.unwrap(),
 			None,
@@ -201,12 +210,15 @@ async fn a_long_tcp_session_stays_in_order() {
 				.producer
 				.ready(&frame::Info {
 					size: 4,
-					timestamp: None,
+					timestamp: moq_net::Timestamp::unscaled(0),
 				})
 				.await;
-			dialed.producer.write_frame(None, payload).unwrap();
+			dialed
+				.producer
+				.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), payload)
+				.unwrap();
 		}
-		dialed.producer.finish().unwrap();
+		dialed.producer.close().unwrap();
 	};
 	let read_all = async {
 		for i in 0..WRITES {
@@ -226,7 +238,9 @@ async fn a_reset_tcp_half_fails_the_read() {
 		let bob = fixture.endpoint(version, "bob").await;
 		let (dialed, mut accepted) = connect_tcp(&alice, &bob).await;
 		let mut producer = dialed.producer;
-		producer.write_frame(None, &b"partial"[..]).unwrap();
+		producer
+			.write_frame(moq_net::Timestamp::unscaled(producer.start), &b"partial"[..])
+			.unwrap();
 		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"partial");
 		producer.abort(Error::Cancel).unwrap();
 		assert!(
@@ -255,13 +269,16 @@ async fn a_slow_tcp_reader_paces_the_writer() {
 				let payload = Bytes::from(vec![i as u8; MB]);
 				let info = frame::Info {
 					size: MB as u64,
-					timestamp: None,
+					timestamp: moq_net::Timestamp::unscaled(0),
 				};
 				dialed.producer.ready(&info).await;
-				dialed.producer.write_frame(None, payload).unwrap();
+				dialed
+					.producer
+					.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), payload)
+					.unwrap();
 				written.fetch_add(1, Ordering::SeqCst);
 			}
-			dialed.producer.finish().unwrap();
+			dialed.producer.close().unwrap();
 		}
 	};
 	let read_all = async {
@@ -331,11 +348,13 @@ async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 	}
 }
 
-/// Write `sequence` as a finished group of one write.
-fn write_group(half: &track::Producer, sequence: u64) {
-	let mut group = half.create_group(group::Info { sequence }).unwrap();
-	group.write_frame(None, &b"data"[..]).unwrap();
-	group.finish().unwrap();
+/// Write `key` as a finished group of one write.
+fn write_group(half: &track::Producer, key: u64) {
+	let mut group = half.create_group(group::Info { start: key }).unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), &b"data"[..])
+		.unwrap();
+	group.close().unwrap();
 }
 
 /// A peer that writes a second group in a `tcp` session breaks the protocol: the session
@@ -362,7 +381,12 @@ async fn a_second_tcp_group_resets_the_session() {
 	}
 	// And bob's own half was reset with it.
 	kio::clock::sleep(SETTLE).await;
-	assert!(accepted.producer.write_frame(None, &b"late"[..]).is_err());
+	assert!(
+		accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..])
+			.is_err()
+	);
 }
 
 /// A second group after the first one finished, and was read to its end, still resets
@@ -378,11 +402,22 @@ async fn a_second_tcp_group_after_fin_resets_the_session() {
 	write_group(half, 0);
 	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"data");
 	assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-	accepted.producer.write_frame(None, &b"still open"[..]).unwrap();
+	accepted
+		.producer
+		.write_frame(
+			moq_net::Timestamp::unscaled(accepted.producer.start),
+			&b"still open"[..],
+		)
+		.unwrap();
 
 	write_group(half, 1);
 	kio::clock::sleep(SETTLE).await;
-	assert!(accepted.producer.write_frame(None, &b"late"[..]).is_err());
+	assert!(
+		accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..])
+			.is_err()
+	);
 }
 
 /// The peer resetting its half after its group finished, and was read to its end, resets
@@ -400,7 +435,13 @@ async fn a_peer_reset_after_fin_resets_the_session() {
 		write_group(&half, 0);
 		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"data");
 		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-		accepted.producer.write_frame(None, &b"still open"[..]).unwrap();
+		accepted
+			.producer
+			.write_frame(
+				moq_net::Timestamp::unscaled(accepted.producer.start),
+				&b"still open"[..],
+			)
+			.unwrap();
 
 		if reset {
 			half.abort(Error::Cancel).unwrap();
@@ -408,7 +449,9 @@ async fn a_peer_reset_after_fin_resets_the_session() {
 			let _half = half.finish().unwrap();
 		}
 		kio::clock::sleep(SETTLE).await;
-		let late = accepted.producer.write_frame(None, &b"late"[..]);
+		let late = accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"late"[..]);
 		assert_eq!(late.is_err(), reset, "reset: {reset}");
 	}
 }
@@ -446,19 +489,21 @@ async fn track_sessions_carry_messages_both_ways() {
 	}
 }
 
-/// Messages are read in sequence even when they are written, and so arrive, out of order.
+/// Messages are read in key even when they are written, and so arrive, out of order.
 #[kio::test]
-async fn track_messages_are_read_in_sequence() {
+async fn track_messages_are_read_in_key() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let (dialed, accepted) = connect_track(&alice, &bob).await;
 	let mut reader = accepted.consumer.ordered();
 
-	let write = |sequence: u64, payload: &'static [u8]| {
-		let mut group = dialed.producer.create_group(group::Info { sequence }).unwrap();
-		group.write_frame(None, payload).unwrap();
-		group.finish().unwrap();
+	let write = |key: u64, payload: &'static [u8]| {
+		let mut group = dialed.producer.create_group(group::Info { start: key }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.unwrap();
+		group.close().unwrap();
 	};
 	write(1, b"second");
 	// Let the later message arrive first.
@@ -483,10 +528,12 @@ async fn a_lost_track_message_does_not_block_later_ones() {
 	accepted.consumer.control().update(lossy).unwrap();
 	let mut reader = accepted.consumer.ordered();
 
-	let write = |sequence: u64, payload: &'static [u8]| {
-		let mut group = dialed.producer.create_group(group::Info { sequence }).unwrap();
-		group.write_frame(None, payload).unwrap();
-		group.finish().unwrap();
+	let write = |key: u64, payload: &'static [u8]| {
+		let mut group = dialed.producer.create_group(group::Info { start: key }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.unwrap();
+		group.close().unwrap();
 	};
 	// Message 0 is never written: message 1 waits out the budget, then is read.
 	write(1, b"one");
@@ -508,14 +555,20 @@ async fn several_sessions_share_a_pair() {
 	let (third, third_accepted) = connect_track(&bob, &alice).await;
 	assert_ne!(first.session(), second.session());
 
-	second.producer.write_frame(None, &b"second"[..]).unwrap();
-	first.producer.write_frame(None, &b"first"[..]).unwrap();
+	second
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(second.producer.start), &b"second"[..])
+		.unwrap();
+	first
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(first.producer.start), &b"first"[..])
+		.unwrap();
 	send(&third_accepted.producer, b"third");
 	assert_eq!(read(&mut first_accepted.consumer).await.unwrap().unwrap(), b"first");
 	assert_eq!(read(&mut second_accepted.consumer).await.unwrap().unwrap(), b"second");
 	assert_eq!(recv(&mut third.consumer.ordered()).await.unwrap().unwrap(), b"third");
-	first.producer.finish().unwrap();
-	second.producer.finish().unwrap();
+	first.producer.close().unwrap();
+	second.producer.close().unwrap();
 }
 
 /// Rejecting a dial resets it.
@@ -585,7 +638,7 @@ async fn a_dial_waits_for_its_peer() {
 		.expect("connect timeout");
 	let (dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
 	assert_eq!(dialed.session(), accepted.session());
-	dialed.producer.finish().unwrap();
+	dialed.producer.close().unwrap();
 }
 
 /// An accept waits for the dialer's endpoint while the dial stays open, since a relay can
@@ -715,7 +768,10 @@ async fn a_replayed_session_never_connects() {
 	assert!(renamed.is_err(), "the replayer read carol's half");
 
 	// The real session is untouched.
-	dialed.producer.write_frame(None, &b"still here"[..]).unwrap();
+	dialed
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &b"still here"[..])
+		.unwrap();
 	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"still here");
 }
 
@@ -816,17 +872,22 @@ async fn closing_an_endpoint_ends_its_sessions() {
 	);
 	// Both halves of bob's own tcp session end.
 	assert!(read(&mut tcp_accepted.consumer).await.is_err());
-	assert!(tcp_accepted.producer.write_frame(None, &b"late"[..]).is_err());
+	assert!(
+		tcp_accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(tcp_accepted.producer.start), &b"late"[..])
+			.is_err()
+	);
 	assert!(
 		recv(&mut track_dialed.consumer.ordered()).await.is_err(),
 		"bob's track half outlived his endpoint"
 	);
-	assert!(track_accepted.producer.append_group().is_err());
+	assert!(track_accepted.producer.append_next().is_err());
 	assert!(matches!(bob.accept_tcp().await, Err(Error::Closed)));
 	assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
 	assert!(matches!(bob.dial_tcp("alice"), Err(Error::Closed)));
 	// Alice saw bob's half reset, so she reset hers: the session is gone both ways.
-	assert!(tcp_dialed.producer.finish().is_err());
+	assert!(tcp_dialed.producer.close().is_err());
 }
 
 /// Session tracks are the secret that keeps third parties out, so no listing names them:
@@ -839,7 +900,10 @@ async fn session_tracks_are_never_listed() {
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
 	let (track_dialed, track_accepted) = connect_track(&alice, &bob).await;
-	dialed.producer.write_frame(None, &b"secret"[..]).unwrap();
+	dialed
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &b"secret"[..])
+		.unwrap();
 	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"secret");
 	send(&track_dialed.producer, b"secret");
 	assert_eq!(
@@ -864,7 +928,7 @@ async fn session_tracks_are_never_listed() {
 			"{id} listed a track"
 		);
 	}
-	dialed.producer.finish().unwrap();
+	dialed.producer.close().unwrap();
 }
 
 /// An endpoint announces only the roles it takes: its first dial its client broadcast,
@@ -899,7 +963,7 @@ async fn an_endpoint_announces_only_its_roles() {
 		.expect("connect timeout");
 	let (dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
 	assert_eq!(dialed.session(), accepted.session());
-	dialed.producer.finish().unwrap();
+	dialed.producer.close().unwrap();
 	let found = kio::clock::timeout(TIMEOUT, eve.consume().request("room/.server/bob", None)).await;
 	assert!(matches!(found, Ok(Ok(_))), "bob's server broadcast");
 }
@@ -945,9 +1009,12 @@ async fn the_first_tcp_writes_survive_a_late_subscribe_answer() {
 		let accept = async {
 			let mut stream = bob.accept_tcp().await.unwrap().accept().await.unwrap();
 			for payload in [b"first".as_slice(), b"", b"last"] {
-				stream.producer.write_frame(None, payload).unwrap();
+				stream
+					.producer
+					.write_frame(moq_net::Timestamp::unscaled(stream.producer.start), payload)
+					.unwrap();
 			}
-			(stream.producer.finish().unwrap(), stream.consumer)
+			(stream.producer.close().unwrap(), stream.consumer)
 		};
 		let (dialed, accepted) = futures::join!(dial, accept);
 		let mut dialed = dialed.unwrap();
@@ -956,7 +1023,7 @@ async fn the_first_tcp_writes_survive_a_late_subscribe_answer() {
 			assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), payload, "{version}");
 		}
 		assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
-		dialed.producer.finish().unwrap();
+		dialed.producer.close().unwrap();
 		assert_eq!(read(&mut accepted).await.unwrap(), None);
 	}
 }
@@ -1040,5 +1107,5 @@ async fn an_older_hop_opted_into_hidden_connects() {
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let (dialed, accepted) = connect_tcp(&alice, &bob).await;
 	assert_eq!(dialed.session(), accepted.session());
-	dialed.producer.finish().unwrap();
+	dialed.producer.close().unwrap();
 }

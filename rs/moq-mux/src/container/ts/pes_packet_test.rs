@@ -196,7 +196,7 @@ fn start(captured: bool) -> Imported {
 	.unwrap();
 	// Paused, the clock reads the same until the first PTS anchors on it.
 	let offset = match captured {
-		true => catalog.clock().now().as_micros() as i128,
+		true => catalog.clock().now().as_micros().unwrap() as i128,
 		false => 0,
 	};
 	let import = super::Import::new(broadcast, catalog.reserve());
@@ -299,7 +299,7 @@ async fn async_klv_takes_the_program_clock_at_its_first_byte() {
 		.collect();
 	let got: Vec<_> = frames
 		.iter()
-		.map(|frame| (frame.timestamp.as_micros() as u64, frame.payload.to_vec()))
+		.map(|frame| (frame.timestamp.as_micros().unwrap() as u64, frame.payload.to_vec()))
 		.collect();
 	assert_eq!(got.len(), expected.len());
 	for (k, (got, expected)) in got.iter().zip(&expected).enumerate() {
@@ -366,7 +366,7 @@ async fn sync_klv_rebases_its_pts_and_dts_onto_the_catalog_clock() {
 	assert_eq!(frames.len(), feed.pes.len());
 	for (k, (frame, (at, pes))) in frames.iter().zip(&feed.pes).enumerate() {
 		assert_eq!(
-			frame.timestamp.as_micros() as u64,
+			frame.timestamp.as_micros().unwrap() as u64,
 			placed(feed.clock(*at).unwrap(), offset),
 			"PES {k} timestamp"
 		);
@@ -654,7 +654,7 @@ async fn a_data_only_program_preserves_placements_across_the_pcr_wrap() {
 	for (frame, (at, pes)) in frames.iter().zip(&feed.pes) {
 		assert_eq!(frame.payload.as_ref(), pes);
 		assert_eq!(
-			frame.timestamp.as_micros(),
+			frame.timestamp.as_micros().unwrap(),
 			u128::from(placed(feed.clock(*at).unwrap(), 0))
 		);
 	}
@@ -695,7 +695,7 @@ async fn a_clock_break_places_each_side_on_its_own_timebase() {
 	let (frames, err) = read(&imported.consumer, &name).await;
 	assert!(err.is_none(), "{err:?}");
 	assert_eq!(frames.len(), 2);
-	assert_eq!(frames[0].timestamp.as_micros() as u64, placed(before, 0));
+	assert_eq!(frames[0].timestamp.as_micros().unwrap() as u64, placed(before, 0));
 	assert!(frames[1].timestamp > frames[0].timestamp);
 	assert_eq!(&frames[1].payload[..], &feed.pes[1].1[..]);
 }
@@ -733,7 +733,10 @@ async fn a_pcr_pid_switch_places_each_side_on_its_own_timebase() {
 	let (name, _) = imported.entry().unwrap();
 	let (frames, err) = read(&imported.consumer, &name).await;
 	assert!(err.is_none(), "{err:?}");
-	let got: Vec<_> = frames.iter().map(|frame| frame.timestamp.as_micros() as u64).collect();
+	let got: Vec<_> = frames
+		.iter()
+		.map(|frame| frame.timestamp.as_micros().unwrap() as u64)
+		.collect();
 	assert_eq!(got, [placed(before, 0), placed(after, 0)]);
 	assert_eq!(imported.stats().unplaced, 0);
 }
@@ -777,7 +780,7 @@ async fn a_pes_header_split_by_a_pcr_is_placed_from_its_start_code() {
 	let (frames, err) = read(&imported.consumer, &name).await;
 	assert!(err.is_none(), "{err:?}");
 	assert_eq!(frames.len(), 1);
-	assert_eq!(frames[0].timestamp.as_micros() as u64, expected);
+	assert_eq!(frames[0].timestamp.as_micros().unwrap() as u64, expected);
 	assert_eq!(&frames[0].payload[..], &feed.pes[1].1[..]);
 	assert_eq!(imported.stats().unplaced, 1, "the PES begun before the first PCR");
 }
@@ -806,7 +809,7 @@ async fn a_pes_header_held_past_several_pcrs_takes_the_first_after_it() {
 	let (frames, err) = read(&imported.consumer, &name).await;
 	assert!(err.is_none(), "{err:?}");
 	assert_eq!(frames.len(), 1);
-	assert_eq!(frames[0].timestamp.as_micros() as u64, expected);
+	assert_eq!(frames[0].timestamp.as_micros().unwrap() as u64, expected);
 }
 
 /// A later PMT that names a PCR carries the private PES stream refused for want of one, and one
@@ -913,7 +916,7 @@ async fn a_revised_private_stream_publishes_under_a_fresh_name() {
 		let (frames, end) = old_reader.await.unwrap();
 		assert_eq!(end, Ok(true), "the old track finishes");
 		assert_eq!(frames.len(), 2);
-		assert_eq!(frames[1].timestamp.as_micros() as u64, held);
+		assert_eq!(frames[1].timestamp.as_micros().unwrap() as u64, held);
 		let tracks = imported.catalog.snapshot().ext.mpegts.tracks;
 		let listed: Vec<_> = tracks.iter().filter(|(_, track)| track.pid == DATA_PID).collect();
 		assert_eq!(listed.len(), 1, "one entry for the PID: {tracks:?}");

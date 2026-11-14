@@ -206,16 +206,17 @@ impl MoqJsonSnapshotProducer {
 pub struct MoqJsonValue {
 	/// The JSON document.
 	pub value: String,
-	/// The frame's timestamp on the broadcast clock, or null when untimed.
-	pub timestamp: Option<MoqTimestamp>,
+	/// The frame's timestamp on the broadcast clock, or its [unscaled](MoqTimestamp::unscaled)
+	/// group key on a scale-less track.
+	pub timestamp: MoqTimestamp,
 }
 
 impl MoqJsonValue {
-	fn new(timed: Option<moq_net::Timed<Value>>) -> Result<Option<Self>, MoqError> {
+	fn new(timed: Option<moq_json::Timed<Value>>) -> Result<Option<Self>, MoqError> {
 		let Some(timed) = timed else { return Ok(None) };
 		Ok(Some(Self {
 			value: serde_json::to_string(&timed.value)?,
-			timestamp: timed.at.map(Into::into),
+			timestamp: timed.at.into(),
 		}))
 	}
 }
@@ -501,7 +502,7 @@ impl MoqJsonWindowProducer {
 	pub fn push(&self, value: String, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let value: Value = serde_json::from_str(&value)?;
 		let at = timestamp.try_into()?;
-		self.edit(|producer| producer.push(moq_net::Timed::from(&value).at(at)))
+		self.edit(|producer| producer.push(moq_json::Timed::new(&value, at)))
 	}
 
 	/// Drop `count` records from the front of the window, clamped to what it holds.
@@ -509,7 +510,7 @@ impl MoqJsonWindowProducer {
 	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
 	pub fn pop(&self, count: u64, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let at = timestamp.try_into()?;
-		self.edit(|producer| producer.pop(moq_net::Timed::from(count).at(at)))
+		self.edit(|producer| producer.pop(moq_json::Timed::new(count, at)))
 	}
 
 	/// Close the open group, so the next push or pop opens a new one whose header restates the
@@ -571,14 +572,15 @@ pub enum MoqJsonWindowEvent {
 pub struct MoqJsonWindowTimed {
 	/// The change to the window.
 	pub event: MoqJsonWindowEvent,
-	/// The frame's timestamp on the broadcast clock, or null when untimed.
+	/// The frame's timestamp on the broadcast clock, or its [unscaled](MoqTimestamp::unscaled)
+	/// group key on a scale-less track.
 	/// A record first learned of from a group's restatement (after a join, or while behind)
 	/// carries that frame's time, not its original push time.
-	pub timestamp: Option<MoqTimestamp>,
+	pub timestamp: MoqTimestamp,
 }
 
 impl MoqJsonWindowTimed {
-	fn new(timed: Option<moq_net::Timed<moq_json::window::Event<Value>>>) -> Result<Option<Self>, MoqError> {
+	fn new(timed: Option<moq_json::Timed<moq_json::window::Event<Value>>>) -> Result<Option<Self>, MoqError> {
 		use moq_json::window::Event;
 
 		let Some(timed) = timed else { return Ok(None) };
@@ -603,7 +605,7 @@ impl MoqJsonWindowTimed {
 		};
 		Ok(Some(Self {
 			event,
-			timestamp: timed.at.map(Into::into),
+			timestamp: timed.at.into(),
 		}))
 	}
 }

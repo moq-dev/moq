@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { StreamCode } from "../error.ts";
 import { Producer as Group } from "../group.ts";
 import { hooks } from "../internal.ts";
+import { Timestamp } from "../time.ts";
 import { Producer as Track } from "../track.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
@@ -15,8 +16,8 @@ test("synchronous writers store slices; plain readers share one charged inflated
 	const first = group.mirror();
 	const second = group.mirror();
 	const raw = group.mirror();
-	group.writeFrame({ payload });
-	group.writeFrame({ payload });
+	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	const stored = hooks.groupCacheBytes(group);
 	expect(stored).toBeLessThan(payload.length);
@@ -45,7 +46,7 @@ test("received slices are forwarded byte-for-byte and exact declarations fail al
 	const group = new Group(0n);
 	hooks.bindGroupCompression(group, true);
 	const slice = new Encoder().frame(payload);
-	hooks.writeGroupFrame(group, { payload: slice }, payload.length + 1);
+	hooks.writeGroupFrame(group, { payload: slice, timestamp: Timestamp.unscaled(0n) }, payload.length + 1);
 	group.finish();
 	const raw = await hooks.readGroupFrame(group.mirror(), true);
 	expect(raw?.frame.payload).toBe(slice);
@@ -60,10 +61,12 @@ test("a slice that fails to decode fails its open group, which takes no more fra
 	hooks.bindGroupCompression(group, true);
 	const raw = group.consume();
 	const slice = new Encoder().frame(payload);
-	hooks.writeGroupFrame(group, { payload: slice }, payload.length + 1);
+	hooks.writeGroupFrame(group, { payload: slice, timestamp: Timestamp.unscaled(0n) }, payload.length + 1);
 	await expect(group.consume().readFrame()).rejects.toThrow(/declared size/);
 	expect(group.closed.peek()).toBeInstanceOf(Error);
-	expect(() => hooks.writeGroupFrame(group, { payload: slice }, payload.length)).toThrow();
+	expect(() =>
+		hooks.writeGroupFrame(group, { payload: slice, timestamp: Timestamp.unscaled(0n) }, payload.length),
+	).toThrow();
 	await expect(raw.readFrame()).rejects.toThrow(/declared size/);
 });
 
@@ -82,7 +85,7 @@ for (const readPlain of [false, true]) {
 		const budget = 32 * 1024 * 1024;
 		for (let index = 0; index < budget / bytes.length + 4; index++) {
 			const slice = encoder.frame(bytes);
-			hooks.writeGroupFrame(group, { payload: slice }, bytes.length);
+			hooks.writeGroupFrame(group, { payload: slice, timestamp: Timestamp.unscaled(0n) }, bytes.length);
 			const frame = await hooks.readGroupFrame(raw, true);
 			expect(frame?.frame.payload).toBe(slice);
 			expect(decoder.frame(slice, bytes.length)).toEqual(bytes);
@@ -97,10 +100,10 @@ for (const readPlain of [false, true]) {
 test("empty frames preserve the window", async () => {
 	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.createGroup(0n);
-	group.writeFrame({ payload });
-	group.writeFrame({ payload: new Uint8Array() });
+	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+	group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.sequence) });
 	const reader = group.mirror();
-	group.writeFrame({ payload });
+	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	for (const expected of [payload, new Uint8Array(), payload])
 		expect((await reader.readFrame())?.payload).toEqual(expected);
@@ -112,7 +115,7 @@ test("a cut compressed group preserves its committed frames before returning its
 	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const reader = group.mirror();
-	group.writeFrame({ payload });
+	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 	const cut = new Error("cut");
 	group.abort(cut);
 	expect((await reader.readFrame())?.payload).toEqual(payload);
@@ -128,10 +131,12 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 	// The largest local frame whose worst-case slice fits the frame cap.
 	let size = 32 * 1024 * 1024;
 	while (!encodable(size)) size--;
-	group.writeFrame({ payload: new Uint8Array(size) });
+	group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.unscaled(group.sequence) });
 	expect((await reader.readFrame())?.payload.length).toBe(size);
 	// The plain-byte budget is full, but another empty frame still fits, regardless of readers.
-	expect(() => group.writeFrame({ payload: new Uint8Array() })).not.toThrow();
+	expect(() =>
+		group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.sequence) }),
+	).not.toThrow();
 	group.finish();
 	expect((await reader.readFrame())?.payload.length).toBe(0);
 	track.finish();
@@ -142,7 +147,8 @@ test("refresh measures stored slices without inflating a compressed group", () =
 	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = track.appendGroup();
 	const payload = Uint8Array.from({ length: 1024 }, (_, index) => index % 251);
-	for (let index = 0; index < 3; index++) group.writeFrame({ payload });
+	for (let index = 0; index < 3; index++)
+		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 	const inflating = spyOn(Decoder.prototype, "frame");
 	try {
 		expect(hooks.overRefresh(group, 1)).toBe(false);

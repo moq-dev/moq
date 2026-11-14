@@ -53,6 +53,17 @@ use std::time::Duration;
 use moq_mux::catalog::{self, Stream};
 use rand::RngExt;
 
+/// `pts` in nanoseconds. Every timestamp the export places is scaled: a group whose first frame
+/// is [unscaled](moq_net::Timestamp::unscaled) is skipped before it reaches the grid.
+pub(crate) fn nanos(pts: moq_net::Timestamp) -> u128 {
+	pts.as_nanos().expect("the export places only scaled timestamps")
+}
+
+/// `pts` as the time since the track's zero; see [`nanos`].
+pub(crate) fn span(pts: moq_net::Timestamp) -> Duration {
+	Duration::try_from(pts).expect("the export places only scaled timestamps")
+}
+
 pub use driver::Driver;
 pub(crate) use playlist::render_media;
 #[cfg(feature = "server")]
@@ -1510,7 +1521,7 @@ mod tests {
 		for group in 2..5 {
 			let mut writing = media.create_group(group.into()).unwrap();
 			write_keyframe(&mut writing, group);
-			writing.finish().unwrap();
+			writing.close().unwrap();
 		}
 		until_listed(&rendition, 4).await;
 		let segment = rendition
@@ -1586,7 +1597,7 @@ mod tests {
 		write_keyframe(&mut open, sequence);
 		let mut next = media.create_group((sequence + 1).into()).unwrap();
 		write_keyframe(&mut next, sequence + 1);
-		next.finish().unwrap();
+		next.close().unwrap();
 		(media, open)
 	}
 
@@ -1635,7 +1646,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
@@ -1670,7 +1681,7 @@ mod tests {
 		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 
-		open.finish().unwrap();
+		open.close().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
 	}
@@ -1710,7 +1721,7 @@ mod tests {
 		failed(&broken).await;
 		assert!(broadcaster.manifest(None).unwrap().is_none());
 
-		open.finish().unwrap();
+		open.close().unwrap();
 		let manifest = kio::clock::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(manifest) = broadcaster.manifest(None).unwrap() {
@@ -1818,7 +1829,7 @@ mod tests {
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 		assert!(!manifest.contains("type=\"static\""), "{manifest}");
 
-		open.finish().unwrap();
+		open.close().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("type=\"static\""), "{manifest}");
 	}
@@ -1846,7 +1857,7 @@ mod tests {
 				.is_err(),
 			"resolved without a listable video"
 		);
-		open.finish().unwrap();
+		open.close().unwrap();
 		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
 			.expect("video0 is listable once its init is built");
@@ -1874,7 +1885,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
@@ -1892,7 +1903,7 @@ mod tests {
 		for sequence in 0..4 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
@@ -2482,7 +2493,7 @@ mod tests {
 			json,
 		);
 		catalog
-			.update(moq_net::Timed::from(&snapshot).at(moq_net::Timestamp::now()))
+			.update(moq_json::Timed::new(&snapshot, moq_net::Timestamp::ZERO))
 			.unwrap();
 		let mut media = Gops {
 			track: broadcast.broadcast().create_track("video0", timed()).unwrap(),
@@ -3631,7 +3642,10 @@ mod tests {
 		/// Write group `sequence` with a keyframe at `pts_ms` and, when `frames` is more than one,
 		/// that many frames a tenth of the interval apart.
 		fn group(&mut self, sequence: u64, pts_ms: u64, frames: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			for index in 0..frames.max(1) {
 				let micros = (pts_ms + index * INTERVAL.as_millis() as u64 / 10) * 1_000;
 				let frame = vp8_frame(micros, index == 0);
@@ -3642,7 +3656,7 @@ mod tests {
 				.write_to(&mut group)
 				.unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		/// Write group `sequence` at `pts_ms` with a single keyframe.
@@ -3653,7 +3667,10 @@ mod tests {
 		/// Write group `sequence` at `pts_ms` with a single keyframe declaring a `width`x`height`
 		/// picture in band.
 		fn sized(&mut self, sequence: u64, pts_ms: u64, (width, height): (u16, u16)) {
-			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			let mut payload = KEYFRAME.to_vec();
 			payload[6..8].copy_from_slice(&width.to_le_bytes());
 			payload[8..10].copy_from_slice(&height.to_le_bytes());
@@ -3663,7 +3680,7 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		/// Write group `sequence` at `2 * sequence` seconds: one GOP per grid line.
@@ -3673,7 +3690,10 @@ mod tests {
 
 		/// Start group `sequence` at `pts_ms` with a keyframe, leaving it open for more frames.
 		fn open(&mut self, sequence: u64, pts_ms: u64) -> moq_net::group::Producer {
-			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			let frame = vp8_frame(pts_ms * 1_000, true);
 			hang::container::Frame {
 				timestamp: frame.timestamp,
@@ -4015,9 +4035,9 @@ mod tests {
 		let test = Groups::new();
 		let mut video0 = test.publish("video0");
 		let mut video1 = test.publish("video1");
-		// Group 2 never lands, so segment 1, from groups 1 to 3, can't be served whole.
 		video0.at(0, 0);
 		video0.at(1, 2_000);
+		let lost = video0.open(2, 2_500);
 		video0.at(3, 3_000);
 		video0.at(4, 4_000);
 		video0.finish();
@@ -4026,6 +4046,8 @@ mod tests {
 		video1.at(1, 7_000);
 		video1.finish();
 		test.finished("video0").await;
+		// Group 2 fails once listed, so segment 1, from groups 1 to 3, can't be served whole.
+		lost.abort(moq_net::Error::Cancel).unwrap();
 
 		let rendition = test.rendition("video0");
 		let mut cursor = rendition.segments();
@@ -4555,7 +4577,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_segment_too_many_groups_long_is_a_gap() {
 		let test = Groups::with(&["video0"], &[]);
-		let mut media = test.publish("video0");
+		// Groups a microsecond apart: millisecond ones can't outnumber the cap in one segment.
+		let mut media = Gops {
+			track: test
+				.broadcast
+				.create_track("video0", timed().with_timescale(moq_net::Timescale::MICRO))
+				.unwrap(),
+		};
 		let cap = test.rendition("video0").max_groups();
 		assert_eq!(
 			cap,
@@ -4563,7 +4591,15 @@ mod tests {
 			"one group per millisecond of the interval"
 		);
 		for sequence in 0..=cap {
-			media.at(sequence, 0);
+			let mut group = media.track.create_group(sequence.into()).unwrap();
+			let frame = vp8_frame(sequence, true);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(&mut group)
+			.unwrap();
+			group.close().unwrap();
 		}
 		media.at(cap + 1, 2_000);
 		media.at(cap + 2, 4_000);

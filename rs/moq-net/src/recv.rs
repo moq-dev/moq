@@ -10,7 +10,7 @@ use crate::{Error, frame, group};
 /// A received group that aborts if its handler is cancelled before finishing or handing it off.
 pub(crate) struct Group {
 	writer: Option<group::Producer>,
-	pub sequence: u64,
+	pub key: u64,
 	handle: group::Handle,
 	armed: bool,
 }
@@ -60,7 +60,7 @@ impl Group {
 	/// Own a group for the lifetime of its receive handler.
 	pub fn new(producer: group::Producer) -> Self {
 		Self {
-			sequence: producer.sequence,
+			key: producer.start,
 			handle: producer.handle(),
 			writer: Some(producer),
 			armed: true,
@@ -75,7 +75,7 @@ impl Group {
 
 	/// Finish receiving without running cancellation cleanup.
 	pub fn finish(mut self) -> Result<(), Error> {
-		self.writer.take().expect("group owned until consumed").finish()?;
+		self.writer.take().expect("group owned until consumed").close()?;
 		self.armed = false;
 		Ok(())
 	}
@@ -115,14 +115,14 @@ mod tests {
 
 	#[test]
 	fn receive_frame_cancellation_keeps_a_terminal() {
-		let producer = group::Info { sequence: 0 }.produce();
+		let producer = group::Info { start: 0 }.produce();
 		let mut consumer = producer.consume();
 		let mut receiving = Group::new(producer);
 		let frame = receiving
 			.create_object(
 				crate::frame::Info {
 					size: 2,
-					timestamp: Some(crate::Timestamp::ZERO),
+					timestamp: crate::Timestamp::ZERO,
 				}
 				.into(),
 			)
@@ -136,14 +136,14 @@ mod tests {
 	}
 	#[test]
 	fn receive_frame_cancellation_preserves_an_explicit_abort() {
-		let producer = group::Info { sequence: 0 }.produce();
+		let producer = group::Info { start: 0 }.produce();
 		let mut consumer = producer.consume();
 		let mut receiving = Group::new(producer);
 		let frame = receiving
 			.create_object(
 				crate::frame::Info {
 					size: 2,
-					timestamp: Some(crate::Timestamp::ZERO),
+					timestamp: crate::Timestamp::ZERO,
 				}
 				.into(),
 			)

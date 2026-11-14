@@ -10,10 +10,12 @@
 //! the path now, rather than the drained worker.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Timestamp, Version, goaway::Goaway, origin, track};
+use moq_net::{Version, goaway::Goaway, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -62,9 +64,9 @@ impl Worker {
 			while let Some(request) = handler.requested().await {
 				let prepared = request.route(moq_net::origin::RouteOptions::hidden()).unwrap();
 				let track = prepared.broadcast().create_track("video", timed()).unwrap();
-				let mut group = track.append_group().unwrap();
-				group.write_frame(Timestamp::ZERO, name.as_bytes().to_vec()).unwrap();
-				group.finish().unwrap();
+				let mut group = track.append_next().unwrap();
+				group.write_frame(group.at_start(), name.as_bytes().to_vec()).unwrap();
+				group.close().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
 			}

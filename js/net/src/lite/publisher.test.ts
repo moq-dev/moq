@@ -3812,10 +3812,10 @@ test("lite-06: a datagram request failing behind the shared writer resets rather
 	const a = await subscribe(0n, "a");
 	const b = await subscribe(1n, "b");
 	try {
-		first.append(undefined, Uint8Array.of(0xaa));
+		first.append(Timestamp.unscaled(0n), Uint8Array.of(0xaa));
 		while (writes === 0) await settle();
 		// The second request now waits on the writer the first one holds.
-		second.append(undefined, Uint8Array.of(0xbb));
+		second.append(Timestamp.unscaled(0n), Uint8Array.of(0xbb));
 		await settle();
 		// A SUBSCRIBE_UPDATE holding only its priority fails decoding, while the stream stays open.
 		await b.writer.u53(1);
@@ -3894,7 +3894,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 				const datagrams = legacy.broadcast.createDatagrams("events");
 				if (stream) legacy.broadcast.createTrack("events", { timescale: Timescale.MILLI });
 				await legacy.track();
-				datagrams.append(undefined, Uint8Array.of(0xaa));
+				datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(0xaa));
 				await legacy.subscribe(-5);
 				expect(legacy.sent.length).toBe(1);
 				// Beside a stream track, only the SUBSCRIBE asks for the datagrams.
@@ -3912,7 +3912,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		try {
 			const datagrams = legacy.broadcast.createDatagrams("events");
 			await legacy.track();
-			datagrams.append(undefined, Uint8Array.of(0xaa));
+			datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(0xaa));
 			await legacy.track();
 			await legacy.subscribe(0);
 			expect(legacy.sent.length).toBe(1);
@@ -3928,11 +3928,11 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		try {
 			const first = legacy.broadcast.createDatagrams("events");
 			await legacy.track();
-			first.append(undefined, Uint8Array.of(0xaa));
+			first.append(Timestamp.unscaled(0n), Uint8Array.of(0xaa));
 			first.finish();
 			const current = legacy.broadcast.createDatagrams("events");
 			await legacy.track();
-			current.append(undefined, Uint8Array.of(0xbb));
+			current.append(Timestamp.unscaled(0n), Uint8Array.of(0xbb));
 			await legacy.subscribe(0);
 			expect(legacy.sent.length).toBe(1);
 			expect(legacy.sent[0]?.at(-1)).toBe(0xbb);

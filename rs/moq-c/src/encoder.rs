@@ -24,33 +24,49 @@ pub struct Encoders {
 	video: NonZeroSlab<Shared<VideoEncoder>>,
 }
 
-/// One packet the last call produced, owning what [moq_frame] borrows.
-struct Packet {
+/// One packet emitted by a codec-only audio encoder.
+///
+/// The codec stamps nothing, so unlike a [moq_frame] it carries no timestamp or keyframe.
+#[repr(C)]
+pub struct moq_audio_packet {
+	/// The encoded codec payload, borrowed from the encoder until its next call or
+	/// [moq_audio_encoder_free].
+	pub payload: *const u8,
+	/// The length in bytes of `payload`.
+	pub payload_size: usize,
+}
+
+/// Read packet `index` of the last call into `dst`.
+fn packet(packets: &[Bytes], index: u32, dst: &mut moq_audio_packet) -> Result<(), Error> {
+	let payload = packets.get(index as usize).ok_or(Error::NoIndex)?;
+	*dst = moq_audio_packet {
+		payload: payload.as_ptr(),
+		payload_size: payload.len(),
+	};
+	Ok(())
+}
+
+/// One access unit the last call produced, owning what [moq_frame] borrows.
+struct VideoPacket {
 	payload: Bytes,
-	/// Boxed so the pointer handed to C survives the packet list moving.
-	timestamp: Option<Box<moq_timestamp>>,
+	/// Boxed so the pointer handed to C stays put while the encoder moves.
+	timestamp: Box<moq_timestamp>,
 	keyframe: bool,
 }
 
-impl Packet {
+impl VideoPacket {
 	fn info(&self) -> moq_frame {
 		moq_frame {
 			payload: self.payload.as_ptr(),
 			payload_size: self.payload.len(),
-			timestamp: self.timestamp.as_deref().map_or(std::ptr::null(), std::ptr::from_ref),
+			timestamp: std::ptr::from_ref(&*self.timestamp),
 			keyframe: self.keyframe,
 		}
 	}
 }
 
-/// Read packet `index` of the last call into `dst`.
-fn packet(packets: &[Packet], index: u32, dst: &mut moq_frame) -> Result<(), Error> {
-	*dst = packets.get(index as usize).ok_or(Error::NoIndex)?.info();
-	Ok(())
-}
-
 /// The packet count a call returns.
-fn count(packets: &[Packet]) -> Result<i32, Error> {
+fn count(packets: &[Bytes]) -> Result<i32, Error> {
 	i32::try_from(packets.len()).map_err(|_| Error::OutOfRange("too many packets".into()))
 }
 
@@ -59,7 +75,7 @@ struct AudioEncoder {
 	encoder: Option<moq_audio::encode::Encoder>,
 	/// The init that publishes the packets, read once at creation.
 	init: Option<(crate::moq_audio_format, Bytes)>,
-	packets: Vec<Packet>,
+	packets: Vec<Bytes>,
 }
 
 impl AudioEncoder {
@@ -72,11 +88,7 @@ impl AudioEncoder {
 	fn keep(&mut self, packets: impl IntoIterator<Item = moq_audio::encode::Encoded>) -> Result<i32, Error> {
 		// Reuses the buffer, since every received packet passes through it.
 		self.packets.clear();
-		self.packets.extend(packets.into_iter().map(|packet| Packet {
-			payload: packet.payload,
-			timestamp: None,
-			keyframe: false,
-		}));
+		self.packets.extend(packets.into_iter().map(|packet| packet.payload));
 		count(&self.packets)
 	}
 }
@@ -86,7 +98,7 @@ struct VideoEncoder {
 	format: moq_video_pixel_format,
 	size: moq_video::Size,
 	/// The last received access unit, owning what [moq_video_encoder_receive] lent out.
-	packet: Option<Packet>,
+	packet: Option<VideoPacket>,
 }
 
 /// Run `f` on an encoder resolved under the global lock, then locked on its own.
@@ -226,13 +238,12 @@ pub unsafe extern "C" fn moq_audio_encoder_encode(encoder: u32, pcm: *const f32,
 /// [moq_audio_encoder_encode] or [moq_audio_encoder_flush].
 ///
 /// Returns one when it wrote a packet, zero while the codec holds the rest, or a negative code.
-/// `payload` borrows the encoder until its next call or [moq_audio_encoder_free]; `timestamp`
-/// is NULL and `keyframe` false, since the codec stamps nothing.
+/// `payload` borrows the encoder until its next call or [moq_audio_encoder_free].
 ///
 /// # Safety
-/// - `dst` must point at a writable [moq_frame].
+/// - `dst` must point at a writable [moq_audio_packet].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_audio_encoder_receive(encoder: u32, dst: *mut moq_frame) -> i32 {
+pub unsafe extern "C" fn moq_audio_encoder_receive(encoder: u32, dst: *mut moq_audio_packet) -> i32 {
 	ffi::enter(move || {
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		with(encoder, audio, |audio| {
@@ -294,14 +305,13 @@ pub unsafe extern "C" fn moq_audio_encoder_finish(
 
 /// Read packet `index` from the last [moq_audio_encoder_finish].
 ///
-/// `payload` borrows the encoder until its next call or [moq_audio_encoder_free]; `timestamp`
-/// is NULL and `keyframe` false, since the codec stamps nothing. Returns zero, or a negative
-/// code, `MOQ_ERROR_NO_INDEX` past the last packet.
+/// `payload` borrows the encoder until its next call or [moq_audio_encoder_free]. Returns zero,
+/// or a negative code, `MOQ_ERROR_NO_INDEX` past the last packet.
 ///
 /// # Safety
-/// - `dst` must point at a writable [moq_frame].
+/// - `dst` must point at a writable [moq_audio_packet].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_audio_encoder_packet(encoder: u32, index: u32, dst: *mut moq_frame) -> i32 {
+pub unsafe extern "C" fn moq_audio_encoder_packet(encoder: u32, index: u32, dst: *mut moq_audio_packet) -> i32 {
 	ffi::enter(move || {
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		with(encoder, audio, |audio| packet(&audio.packets, index, dst))
@@ -414,9 +424,9 @@ pub unsafe extern "C" fn moq_video_encoder_receive(encoder: u32, dst: *mut moq_f
 			let Some(ready) = video.encoder.receive()? else {
 				return Ok(0);
 			};
-			let packet = video.packet.insert(Packet {
+			let packet = video.packet.insert(VideoPacket {
 				payload: ready.payload,
-				timestamp: Some(Box::new(ready.timestamp.into())),
+				timestamp: Box::new(ready.timestamp.into()),
 				keyframe: ready.keyframe,
 			});
 			*dst = packet.info();

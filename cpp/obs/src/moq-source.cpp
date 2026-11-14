@@ -79,10 +79,13 @@ namespace {
 struct moq_source;
 
 // A track timestamp in the nanoseconds OBS stamps media with, floored when the scale does not
-// divide a second evenly into nanoseconds.
+// divide a second evenly into nanoseconds. Decoded media is always scaled; an unscaled group
+// key has no time, so it maps to zero rather than dividing by a missing scale.
 static uint64_t moq_source_nanoseconds(const moq::Timestamp &timestamp)
 {
-	return util_mul_div64(timestamp.value, 1'000'000'000, timestamp.scale);
+	if (!timestamp.scale)
+		return 0;
+	return util_mul_div64(timestamp.value, 1'000'000'000, *timestamp.scale);
 }
 
 enum class Decoded { Pending, Ready, Failed };

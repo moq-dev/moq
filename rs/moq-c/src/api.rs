@@ -551,25 +551,44 @@ pub struct moq_json_snapshot_config {
 	pub deltas: bool,
 }
 
-/// An exact media timestamp: `value` units at `scale` units per second.
+/// An exact timestamp: `value` units at `scale` units per second.
 ///
 /// Reads carry the scale the publisher wrote, so a tick such as 90 kHz survives a read and
 /// republish exactly. A write with a zero scale, a scale above `2^62 - 1`, or a value above
 /// `2^61 - 1` fails with `MOQ_ERROR_TIMESTAMP_OVERFLOW`.
+///
+/// A scale-less track has no time, so there `has_scale` is false and `value` is the frame's
+/// group key, or a datagram's sequence. Zero-initialized, it is the unscaled key 0.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct moq_timestamp {
-	/// The time in `scale` units, at most `2^61 - 1`.
+	/// The time in `scale` units, at most `2^61 - 1`, or the group key when unscaled.
 	pub value: u64,
-	/// Units per second, non-zero and at most `2^62 - 1`.
+	/// Units per second, non-zero and at most `2^62 - 1`. Ignored unless `has_scale`.
 	pub scale: u64,
+	/// Whether `scale` is set; false on a scale-less track.
+	pub has_scale: bool,
+}
+
+impl moq_timestamp {
+	/// The scale-less timestamp at group key (or datagram sequence) `key`.
+	#[cfg(test)]
+	pub(crate) const fn unscaled(key: u64) -> Self {
+		Self {
+			value: key,
+			scale: 0,
+			has_scale: false,
+		}
+	}
 }
 
 impl From<moq_net::Timestamp> for moq_timestamp {
 	fn from(timestamp: moq_net::Timestamp) -> Self {
+		let scale = timestamp.scale();
 		Self {
 			value: timestamp.value(),
-			scale: timestamp.scale().as_u64(),
+			scale: scale.map_or(0, moq_net::Timescale::as_u64),
+			has_scale: scale.is_some(),
 		}
 	}
 }
@@ -578,7 +597,10 @@ impl TryFrom<moq_timestamp> for moq_net::Timestamp {
 	type Error = moq_net::TimeOverflow;
 
 	fn try_from(timestamp: moq_timestamp) -> Result<Self, Self::Error> {
-		Self::from_scale(timestamp.value, timestamp.scale)
+		match timestamp.has_scale {
+			true => Self::from_scale(timestamp.value, timestamp.scale),
+			false => Ok(Self::unscaled(timestamp.value)),
+		}
 	}
 }
 
@@ -599,8 +621,7 @@ pub struct moq_json_value {
 	/// The length in bytes of `json`.
 	pub json_len: usize,
 
-	/// The timestamp of the frame that carried the value, or NULL on an untimed track.
-	/// Valid as long as `json`.
+	/// The timestamp of the frame that carried the value, never NULL. Valid as long as `json`.
 	pub timestamp: *const moq_timestamp,
 }
 
@@ -637,8 +658,8 @@ pub struct moq_json_window_event {
 	/// The length in bytes of `json`.
 	pub json_len: usize,
 
-	/// The timestamp of the frame that carried the change, or NULL on an untimed track. Valid
-	/// until the event is freed. A record first learned of from a group's restatement (after a
+	/// The timestamp of the frame that carried the change, never NULL. Valid until the event
+	/// is freed. A record first learned of from a group's restatement (after a
 	/// join, or while behind) carries that frame's time, not its original push time.
 	pub timestamp: *const moq_timestamp,
 }
@@ -651,8 +672,8 @@ pub struct moq_frame {
 	/// The length in bytes of `payload`.
 	pub payload_size: usize,
 
-	/// The presentation timestamp of the frame, or NULL on an untimed track. Media frames
-	/// always have one. Valid as long as `payload`.
+	/// The presentation timestamp of the frame, or on a scale-less track its group's unscaled
+	/// key (`has_scale` false). Never NULL on a frame; valid as long as `payload`.
 	pub timestamp: *const moq_timestamp,
 
 	/// Whether this frame opens a group or is a video keyframe; audio is true only at a group start.
@@ -681,8 +702,9 @@ pub struct moq_datagram {
 	/// The length in bytes of `payload`.
 	pub payload_size: usize,
 
-	/// The presentation timestamp of the datagram, or NULL on an untimed track. Valid as
-	/// long as `payload`.
+	/// The presentation timestamp of the datagram, or on a scale-less track its unscaled
+	/// sequence (`has_scale` false). Never NULL; valid as long as `payload`. A write requires
+	/// one too.
 	pub timestamp: *const moq_timestamp,
 
 	/// The datagram track's own sequence number.
@@ -875,10 +897,12 @@ pub struct moq_range {
 pub struct moq_anchor {
 	/// `moq_anchor_kind` discriminant.
 	pub kind: u32,
-	/// The group, or with `MOQ_ANCHOR_RELATIVE` how many groups before the latest one
-	/// (0 is the latest, and an offset past the first group clamps to it).
+	/// The group's start, in its track's timescale, or with `MOQ_ANCHOR_RELATIVE` how many
+	/// groups before the latest one (0 is the latest, and an offset past every group held
+	/// reaches back to the oldest).
 	pub group: u64,
-	/// The presentation time, read only with `MOQ_ANCHOR_TIME`.
+	/// The time, read only with `MOQ_ANCHOR_TIME`, whose `value` is taken in the track's
+	/// timescale.
 	pub timestamp: moq_timestamp,
 }
 
@@ -887,11 +911,11 @@ pub struct moq_anchor {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_anchor_kind {
-	/// A fixed group, delivered from its first frame.
+	/// The group starting at `group`, delivered from its first frame.
 	MOQ_ANCHOR_ABSOLUTE = 0,
 	/// A count of groups back from the latest one.
 	MOQ_ANCHOR_RELATIVE = 1,
-	/// The group containing a presentation time. An untimed track refuses it.
+	/// The group containing a time: the newest one starting at or before it.
 	MOQ_ANCHOR_TIME = 2,
 	/// The oldest group still around, as far back as `delay.max_us` allows. A start only.
 	MOQ_ANCHOR_OLDEST = 3,
@@ -908,14 +932,31 @@ pub enum moq_order {
 	MOQ_ORDER_ASCENDING = 1,
 }
 
+/// `anchor` as a start. A group is named by its start, so an absolute group names that time.
+/// A time is taken in the track's timescale, whatever its scale says, though an invalid
+/// timestamp is still refused.
 fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Absolute(anchor.group),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Time(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
-		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => moq_net::track::Anchor::Time(anchor.timestamp.try_into()?),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => {
+			moq_net::Timestamp::try_from(anchor.timestamp)?;
+			moq_net::track::Anchor::Time(anchor.timestamp.value)
+		}
 		v if v == moq_anchor_kind::MOQ_ANCHOR_OLDEST as u32 => moq_net::track::Anchor::Oldest,
 		_ => return Err(Error::InvalidCode),
 	})
+}
+
+/// `anchor` as an end, or `None` for an absolute end at group 0, which holds nothing. An
+/// absolute end is exclusive, so it ends with the group before it.
+fn parse_end(anchor: &moq_anchor) -> Result<Option<moq_net::track::Anchor>, Error> {
+	match anchor.kind {
+		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => {
+			Ok(anchor.group.checked_sub(1).map(moq_net::track::Anchor::Time))
+		}
+		_ => parse_anchor(anchor).map(Some),
+	}
 }
 
 /// # Safety
@@ -937,13 +978,19 @@ pub(crate) unsafe fn parse_subscription(
 		let ranges = ranges
 			.iter()
 			.map(|range| {
-				Ok(moq_net::track::Range {
-					start: parse_anchor(&range.start)?,
-					end: range.end_present.then(|| parse_anchor(&range.end)).transpose()?,
-				})
+				let start = parse_anchor(&range.start)?;
+				let end = match range.end_present {
+					// One ending before group 0 holds nothing, so it is dropped.
+					true => match parse_end(&range.end)? {
+						Some(end) => Some(end),
+						None => return Ok(None),
+					},
+					false => None,
+				};
+				Ok(Some(moq_net::track::Range { start, end }))
 			})
 			.collect::<Result<Vec<_>, Error>>()?;
-		out = out.with_ranges(ranges);
+		out = out.with_ranges(ranges.into_iter().flatten());
 	}
 	Ok(out)
 }
@@ -3098,11 +3145,11 @@ pub extern "C" fn moq_publish_media_cut(media: u32) -> i32 {
 	})
 }
 
-/// Draw a group boundary and number the next group `sequence`.
+/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
 ///
-/// [moq_publish_media_cut] with an explicit sequence, for a caller whose group numbers have to be
-/// deterministic: two encoders publishing the same content align per GOP so a consumer can fail
-/// over between them.
+/// [moq_publish_media_cut] keyed explicitly rather than at the next frame's time, which has to come
+/// after every group the track holds. Groups are keyed by their first frame's time, so two encoders
+/// of the same content align without it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -3233,7 +3280,8 @@ pub extern "C" fn moq_publish_container_cut(container: u32) -> i32 {
 	})
 }
 
-/// Start a new segment and number its groups `sequence`.
+/// Start a new segment whose first group starts at `sequence`, in its track's timescale, after
+/// every group the track holds.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -3620,7 +3668,8 @@ unsafe fn parse_track_info(info: *const moq_track_info) -> Result<moq_net::track
 /// Append a new group to a raw track, returning a group producer.
 ///
 /// Groups are delivered independently and each may contain any number of frames
-/// written via [moq_publish_group_frame]. Sequence numbers auto-increment.
+/// written via [moq_publish_group_frame]. Sequence numbers auto-increment; read the
+/// group's with [moq_publish_group_sequence].
 ///
 /// Returns a non-zero handle to the group on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -3660,14 +3709,15 @@ pub extern "C" fn moq_publish_track_skip(track: u32, start: u64, end: u64) -> i3
 ///
 /// Convenience for the common one-frame-per-group pattern. Equivalent to
 /// appending a group, writing one frame, and finishing it. The timestamp is
-/// converted to the track's timescale; NULL writes an untimed frame, which only
-/// an untimed track accepts.
+/// converted to the track's timescale and starts the group. A scale-less track has
+/// no time, so there it is the unscaled key of the group to write (`has_scale`
+/// false). NULL fails with `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
+/// - `timestamp` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_track_frame(
 	track: u32,
@@ -3685,10 +3735,13 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 
 /// Append a datagram to a producer from [crate::moq_publish_datagrams], returning its sequence.
 ///
-/// Keep the payload well below the path MTU. No stream fallback is available.
+/// Keep the payload well below the path MTU. No stream fallback is available. The
+/// timestamp must match the track; a scale-less track has no time, so there it is the
+/// unscaled sequence to write (`has_scale` false). NULL fails with
+/// `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// # Safety
-/// `payload` must point to `payload_size` bytes, `timestamp` must be NULL or valid,
+/// `payload` must point to `payload_size` bytes, `timestamp` must be valid,
 /// and `out_sequence` must be NULL or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_datagrams_append(
@@ -4075,14 +4128,15 @@ pub extern "C" fn moq_group_request_free(request: u32) -> i32 {
 
 /// Write a frame into a raw group created by [moq_publish_track_group].
 ///
-/// The timestamp is converted to the track's timescale; NULL writes an untimed
-/// frame, which only an untimed track accepts.
+/// The timestamp is converted to the track's timescale. A scale-less track has no
+/// time, so there it is the group's unscaled key (`has_scale` false). NULL fails with
+/// `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
+/// - `timestamp` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_group_frame(
 	group: u32,
@@ -4095,6 +4149,25 @@ pub unsafe extern "C" fn moq_publish_group_frame(
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
 		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
 		State::lock().publish.group_frame(group, timestamp, payload)
+	})
+}
+
+/// Read the sequence of a raw group, which names it within its track.
+///
+/// On a scale-less track this is the key every [moq_publish_group_frame] timestamp carries
+/// (unscaled, `has_scale` false), including for a group [moq_publish_track_group] numbered.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must be a valid pointer to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_group_sequence(group: u32, dst: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let group = ffi::parse_id(group)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*dst = State::lock().publish.group_sequence(group)?;
+		Ok(())
 	})
 }
 
@@ -4152,10 +4225,13 @@ pub unsafe extern "C" fn moq_publish_group_ready(
 /// `size` bytes, or its handle ends.
 pub(crate) fn group_ready(group: crate::Id, size: u64) -> Result<impl Future<Output = ()> + Send + 'static, Error> {
 	let (group, mut ended) = State::lock().publish.group(group)?;
-	let frame = moq_net::frame::Info { size, timestamp: None };
 	Ok(async move {
 		let ready = kio::wait(|waiter| match group.lock().as_ref() {
-			Some(group) => group.poll_ready(waiter, &frame),
+			Some(group) => {
+				// Only the size paces the write; the timestamp is a placeholder at the group's key.
+				let timestamp = moq_net::Timestamp::unscaled(group.start);
+				group.poll_ready(waiter, &moq_net::frame::Info { size, timestamp })
+			}
 			// Finished or aborted: the next write reports why.
 			None => std::task::Poll::Ready(()),
 		});
@@ -4217,7 +4293,7 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 ///
 /// # Safety
 /// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
+/// - `timestamp` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_json_snapshot_update(
 	json: u32,
@@ -4229,7 +4305,7 @@ pub unsafe extern "C" fn moq_publish_json_snapshot_update(
 		let json = ffi::parse_id(json)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
 		State::lock().publish.json_snapshot_update(json, value, timestamp)
 	})
 }
@@ -4278,7 +4354,7 @@ pub unsafe extern "C" fn moq_publish_json_stream(broadcast: u32, name: *const c_
 ///
 /// # Safety
 /// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
+/// - `timestamp` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_json_stream_append(
 	stream: u32,
@@ -4290,7 +4366,7 @@ pub unsafe extern "C" fn moq_publish_json_stream_append(
 		let stream = ffi::parse_id(stream)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
 		State::lock().publish.json_stream_append(stream, value, timestamp)
 	})
 }
@@ -4353,7 +4429,7 @@ pub unsafe extern "C" fn moq_publish_json_window(
 ///
 /// # Safety
 /// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
+/// - `timestamp` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_json_window_push(
 	window: u32,
@@ -4365,7 +4441,7 @@ pub unsafe extern "C" fn moq_publish_json_window_push(
 		let window = ffi::parse_id(window)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
 		State::lock().publish.json_window_push(window, value, timestamp)
 	})
 }
@@ -4379,12 +4455,12 @@ pub unsafe extern "C" fn moq_publish_json_window_push(
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
+/// - `timestamp` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_json_window_pop(window: u32, count: u64, timestamp: *const moq_timestamp) -> i32 {
 	ffi::enter(move || {
 		let window = ffi::parse_id(window)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
 		State::lock().publish.json_window_pop(window, count, timestamp)
 	})
 }
@@ -4881,7 +4957,7 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 ///
 /// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
 /// frame is released with [moq_consume_track_frame_free], and so is `dst.timestamp`,
-/// NULL on an untimed track. `dst.keyframe` is reported as false because raw tracks
+/// the group's unscaled key on a scale-less track. `dst.keyframe` is reported as false because raw tracks
 /// do not parse codec metadata.
 ///
 /// Returns a zero on success, or a negative code on failure.
@@ -4962,8 +5038,8 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 /// Read a datagram delivered via the [moq_consume_datagrams] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size` (valid until the datagram is released with
-/// [moq_consume_datagram_free]), plus `dst.timestamp` (NULL on an untimed track, and valid
-/// as long as the payload) and `dst.sequence`.
+/// [moq_consume_datagram_free]), plus `dst.timestamp` (the unscaled sequence on a scale-less
+/// track, and valid as long as the payload) and `dst.sequence`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

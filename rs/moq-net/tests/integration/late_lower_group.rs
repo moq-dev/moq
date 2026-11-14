@@ -31,7 +31,7 @@ const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
 /// From `start`, or the oldest group still around when there is none.
 fn floored(start: Option<u64>) -> Range {
 	Range {
-		start: start.map_or(Range::oldest().start, Anchor::Absolute),
+		start: start.map_or(Range::oldest().start, Anchor::Time),
 		end: None,
 	}
 }
@@ -43,15 +43,15 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer.with_proxy(true)
 }
 
-/// Four frames starting at `sequence` seconds, so a group created late still starts
+/// Four frames starting at `key` seconds, so a group created late still starts
 /// below the one after it.
-fn write_group(track: &moq_net::track::Producer, sequence: u64) {
-	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+fn write_group(track: &moq_net::track::Producer, key: u64) {
+	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 	for frame in 0..4 {
-		let timestamp = Timestamp::from_millis(sequence * 1000 + frame).unwrap();
+		let timestamp = Timestamp::from_millis(key * 1000 + frame).unwrap();
 		group.write_frame(timestamp, &b"x"[..]).unwrap();
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 }
 
 async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
@@ -74,7 +74,7 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 				None => break,
 			}
 		}
-		got.push((group.sequence, frames));
+		got.push((group.start, frames));
 	}
 	got
 }
@@ -274,7 +274,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 		.expect("recv_group timed out")
 		.expect("recv_group")
 		.expect("group 1");
-	assert_eq!(first.sequence, 1, "{version}: the live reader starts at group 1");
+	assert_eq!(first.start, 1, "{version}: the live reader starts at group 1");
 	let mut oldest = subscribe(floored(Some(0))).await;
 
 	// Idle time lets the merged demand reach the publisher before the lower group exists.

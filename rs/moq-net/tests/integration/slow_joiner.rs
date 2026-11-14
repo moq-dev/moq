@@ -68,12 +68,12 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	kio::clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
 
 	*gate.write().ok().unwrap() = false;
-	for sequence in 0..GROUPS {
-		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+	for key in 0..GROUPS {
+		let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
 		group
-			.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}
 	let _source = source.finish().unwrap();
@@ -86,13 +86,13 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 		.unwrap_or_else(|_| panic!("{version}: the track never finished"))
 		.unwrap()
 	{
-		let sequence = group.sequence;
+		let key = group.start;
 		let frame = group.read_frame().await;
 		assert!(
 			frame.is_ok_and(|frame| frame.is_some()),
-			"{version}: group {sequence} was cut short"
+			"{version}: group {key} was cut short"
 		);
-		assert!(got.insert(sequence), "{version}: group {sequence} delivered twice");
+		assert!(got.insert(key), "{version}: group {key} delivered twice");
 	}
 	got
 }

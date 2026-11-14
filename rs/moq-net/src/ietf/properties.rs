@@ -1,7 +1,7 @@
 /// Track Properties: relay-visible metadata attached to tracks.
 ///
 /// SUBSCRIBE_OK, PUBLISH, and FETCH_OK carry Track Properties.
-/// They appear after the message parameters as a sequence of Key-Value-Pairs
+/// They appear after the message parameters as a key of Key-Value-Pairs
 /// (same delta-encoded format) until the end of the message.
 ///
 /// Unlike Message Parameters which have a count prefix, Track Properties

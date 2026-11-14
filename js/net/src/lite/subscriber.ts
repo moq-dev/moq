@@ -3743,9 +3743,10 @@ export class Subscriber {
 		if (!dg) return undefined;
 		if (!entry || this.#datagrams.get(dg.subscribe) !== entry) return dg.subscribe;
 		if (behindHeld && this.#isHeld(dg.subscribe)) return dg.subscribe;
+		// A scale-less datagram's timestamp is its sequence.
 		const timestamp =
 			dg.timestamp === undefined || entry.timescale === undefined
-				? undefined
+				? Time.Timestamp.unscaled(dg.sequence)
 				: new Time.Timestamp(dg.timestamp, entry.timescale);
 		entry.producer.insert({ sequence: dg.sequence, timestamp, payload: dg.payload });
 		return undefined;

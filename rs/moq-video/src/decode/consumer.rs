@@ -356,36 +356,34 @@ impl Reader {
 		// count it twice, on the subscription and in the start's reach.
 		let playout = moq_mux::container::Playout::new(delay, std::time::Duration::ZERO);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
-		let mut subscriber = track
-			.subscribe(
-				// The whole delay from the first request, as the container keeps it, so the
-				// publisher never sees a stated zero min before the container's update.
-				playout
-					.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video)),
-			)
-			.await?;
-		// A decoder often opens on a track that is already cached: a replacement
-		// decoder subscribes while its predecessor still holds groups, and a
-		// rendition switched away from and back to stays warm on the origin for
-		// `moq_net::model::track::IDLE_LINGER` (cached groups, not an upstream subscription). A
-		// caller that asked for `Start::Latest` wants none of that backlog,
-		// because a cursor starting at sequence zero replays every cached group
-		// at decode speed before reaching live media, which on a thirty-second
-		// retention is half a minute of pictures raced through.
+		// The whole delay from the first request, as the container keeps it, so the publisher
+		// never sees a stated zero min before the container's update.
+		let mut subscription =
+			playout.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video));
+		// A decoder often opens on a track that is already cached: a replacement decoder
+		// subscribes while its predecessor still holds groups, and a rendition switched away from
+		// and back to stays warm on the origin for `moq_net::model::track::IDLE_LINGER` (cached
+		// groups, not an upstream subscription). A caller that asked for `Start::Latest` wants none
+		// of that backlog, which a cursor starting at the oldest group would replay at decode
+		// speed before reaching live media: on a thirty-second retention, half a minute of pictures
+		// raced through.
 		//
-		// This moves the local read cursor and deliberately not
-		// `Subscription::group_start`. That field is a request to the publisher,
-		// aggregated across every live subscriber, so naming a stale cached
-		// sequence there asks the publisher to rewind the track for everyone
-		// reading it. What a player wants is to skip what it already has.
-		//
-		// The live edge is known only once the feed is live: a warm copy still waiting on
-		// its source reports nothing yet, so wait for it rather than read the backlog. The
-		// wait ends with the track.
-		if options.start == Start::Latest
-			&& let Some(live_edge) = subscriber.largest().await
-		{
-			subscriber = subscriber.with_range(live_edge.group.saturating_sub(lookback)..);
+		// A relative start counts back through the groups each hop holds from its live feed's
+		// latest, never from what an ended feed left cached, so it names no stale group that would
+		// ask the publisher to rewind for everyone reading. Group starts are sparse, so only a
+		// count, not arithmetic on the live edge's start, reaches the group before it.
+		if options.start == Start::Latest {
+			subscription = subscription.with_ranges([moq_net::track::Range {
+				start: moq_net::track::Anchor::Relative(lookback),
+				end: None,
+			}]);
+		}
+		let mut subscriber = track.subscribe(subscription).await?;
+		// The live edge is known only once the feed is live: a warm copy still waiting on its
+		// source reports nothing yet. Opening waits for it, or the track's end, as `Start::Latest`
+		// promises.
+		if options.start == Start::Latest {
+			subscriber.largest().await;
 		}
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy
@@ -471,11 +469,12 @@ impl Reader {
 				continue;
 			}
 
-			if let Some(arrived) = self.track.arrival() {
+			// A frame with no time has no picture to match an arrival to.
+			if let (Some(arrived), Ok(micros)) = (self.track.arrival(), mux_frame.timestamp.as_micros()) {
 				if self.arrivals.len() == ARRIVALS {
 					self.arrivals.pop_front();
 				}
-				self.arrivals.push_back((mux_frame.timestamp.as_micros(), arrived));
+				self.arrivals.push_back((micros, arrived));
 			}
 			self.decoder
 				.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
@@ -487,9 +486,8 @@ impl Reader {
 	/// Queue every picture the decoder has ready, each with its access unit's arrival.
 	fn receive(&mut self) -> Result<(), Error> {
 		while let Some(picture) = self.decoder.receive()? {
-			let at = picture.timestamp.as_micros();
-			let found = self.arrivals.iter().position(|(timestamp, _)| *timestamp == at);
-			let arrival = found.and_then(|index| {
+			let arrival = picture.timestamp.as_micros().ok().and_then(|at| {
+				let index = self.arrivals.iter().position(|(timestamp, _)| *timestamp == at)?;
 				let (_, arrived) = self.arrivals.remove(index)?;
 				// An access unit fed before this one at an earlier time is a picture the
 				// decoder already returned or dropped, whichever order it returns them in.
@@ -689,16 +687,14 @@ mod tests {
 			"a fresh consumer replayed the groups an earlier reader still holds",
 		);
 
-		// The skip is the local read cursor and nothing else. Asking for it
-		// through `Subscription::ranges` would look equivalent and is not: the
-		// floor is aggregated across every live subscriber and tells the
-		// publisher what to send, so naming a cached sequence there rewinds the
-		// track for everyone reading it. A rendition switched away from and back
-		// to is the case that bites, because its cached sequence is stale by
-		// then and the publisher resends the broadcast from it.
+		// The skip names no cached group. The ranges are aggregated across every live
+		// subscriber and tell the publisher what to send, so a start at a cached group would
+		// rewind the track for everyone reading it. A rendition switched away from and back to
+		// is the case that bites, because its cached groups are stale by then and the publisher
+		// resends the broadcast from them. The live start counts from each hop's live feed.
 		assert_eq!(
 			published.subscription().map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::oldest()]),
+			Some(vec![moq_net::track::Range::live()]),
 			"the publisher was asked to rewind the track",
 		);
 	}
@@ -887,7 +883,7 @@ mod tests {
 		.unwrap();
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: &[u64]| {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let frames: Vec<_> = stamps
 				.iter()
 				.enumerate()
@@ -899,13 +895,22 @@ mod tests {
 				})
 				.collect();
 			wire.write(&mut group, &frames).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		write(10, &[1000, 800, 900, 1100]);
 		write(11, &[2000, 1800, 1900, 2100]);
 		let mut got = Vec::new();
 		for _ in 0..5 {
-			got.push(consumer.next_frame().await.unwrap().unwrap().timestamp.as_micros());
+			got.push(
+				consumer
+					.next_frame()
+					.await
+					.unwrap()
+					.unwrap()
+					.timestamp
+					.as_micros()
+					.unwrap(),
+			);
 		}
 		assert_eq!(
 			got,
@@ -918,7 +923,7 @@ mod tests {
 		let _track = track.finish().unwrap();
 		got.clear();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			got.push(frame.timestamp.as_micros());
+			got.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(
 			got,
@@ -982,7 +987,7 @@ mod tests {
 		let mut timestamps = Vec::new();
 		let mut arrivals = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 			arrivals.push(consumer.arrival());
 		}
 		assert_eq!(timestamps, vec![0, 33_333]);
@@ -1037,7 +1042,7 @@ mod tests {
 		.unwrap();
 
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		let mut landed = std::collections::BTreeMap::new();
 		for (index, frame) in [0u64, 3, 1, 2].into_iter().enumerate() {
 			landed.insert(frame, Instant::now());
@@ -1053,12 +1058,12 @@ mod tests {
 			.unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut shown = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			let index = u64::try_from(frame.timestamp.as_micros()).unwrap() / 33_333;
+			let index = u64::try_from(frame.timestamp.as_micros().unwrap()).unwrap() / 33_333;
 			shown.push((index, consumer.arrival()));
 		}
 		(shown, landed)
@@ -1090,7 +1095,7 @@ mod tests {
 		.unwrap();
 
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		let frames: Vec<_> = (0..FRAMES)
 			.map(|index| moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
@@ -1100,7 +1105,7 @@ mod tests {
 			})
 			.collect();
 		wire.write(&mut group, &frames).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut sourced = Vec::new();
@@ -1165,11 +1170,15 @@ mod tests {
 		let mut reads = Vec::new();
 		let mut read = async |consumer: &mut Consumer| {
 			reads.push(match consumer.read().await.unwrap() {
-				Some(Read::Frame(frame)) => format!("frame {}", frame.timestamp.as_micros()),
+				Some(Read::Frame(frame)) => format!("frame {}", frame.timestamp.as_micros().unwrap()),
 				Some(Read::Gap { timestamp, duration }) => {
-					format!("gap {}+{}", timestamp.as_micros(), duration.as_micros())
+					format!(
+						"gap {}+{}",
+						timestamp.as_micros().unwrap(),
+						duration.as_micros().unwrap()
+					)
 				}
-				Some(Read::End { end }) => format!("end {}", end.as_micros()),
+				Some(Read::End { end }) => format!("end {}", end.as_micros().unwrap()),
 				None => "none".to_string(),
 			});
 		};
@@ -1181,7 +1190,9 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		read(&mut consumer).await;
 		read(&mut consumer).await;
-		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
+		// The discontinuity marker starts a microsecond before the content's end, so content
+		// resuming there still starts a later group.
+		assert_eq!(reads, ["frame 100000", "end 133332", "frame 200000", "none"]);
 	}
 
 	/// A read dropped while a threaded flush is in flight loses nothing: the
@@ -1309,7 +1320,7 @@ mod tests {
 		let mut timestamps = Vec::new();
 		let mut arrivals = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 			arrivals.push(consumer.arrival().expect("the picture kept its arrival"));
 		}
 		let expected: Vec<u128> = (0..FRAMES as u128).map(|index| index * 33_333).collect();
@@ -1368,7 +1379,7 @@ mod tests {
 	}
 
 	fn group(track: &mut moq_net::track::Producer, sequence: u64, seconds: &[u64]) -> moq_net::group::Producer {
-		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 		write(&mut group, seconds);
 		group
 	}
@@ -1406,7 +1417,7 @@ mod tests {
 			.expect("a frame within ten seconds")
 			.unwrap()
 			.expect("the track is live");
-		let seconds = u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND;
+		let seconds = u64::try_from(frame.timestamp.as_micros().unwrap()).unwrap() / SECOND;
 		assert!(consumer.arrival().is_some(), "picture {seconds} lost its arrival");
 		(seconds, consumer.selector.source())
 	}
@@ -1446,7 +1457,7 @@ mod tests {
 	async fn a_cold_join_hands_over_to_the_max_delay_decoder() {
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
-		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
 		let mut live = group(&mut track, 1, &[4, 5]);
 
 		let mut consumer = dual(
@@ -1477,7 +1488,7 @@ mod tests {
 	async fn a_huge_warmup_reaches_back_by_the_cap() {
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
-		group(&mut track, 0, &[0]).finish().unwrap();
+		group(&mut track, 0, &[0]).close().unwrap();
 		let _consumer = Consumer::new(
 			&broadcast.consume(),
 			&warmup_catalog(Some(std::time::Duration::from_secs(3600))),
@@ -1529,7 +1540,7 @@ mod tests {
 			"the max-delay decoder started at the live edge"
 		);
 		tokio::time::resume();
-		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
 		let Ok(Some((Read::Frame(first), _))) = max.read().await else {
 			panic!("the max-delay decoder produced no picture");
 		};
@@ -1544,6 +1555,36 @@ mod tests {
 		catch_up(&mut consumer).await;
 		write(&mut live, &[6]);
 		assert_eq!(read(&mut consumer).await, (6, Lane::Max));
+	}
+
+	/// Groups are keyed by their start, so the one before the live edge lies a whole group's
+	/// span below it: the max-delay decoder reaches it by counting groups back, not by stepping
+	/// one below the live edge's start.
+	#[tokio::test]
+	async fn the_max_delay_decoder_counts_back_a_group_across_sparse_starts() {
+		let (broadcast, mut track) = live_track();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
+		let _live = group(&mut track, 4 * SECOND, &[4, 5]);
+
+		let mut consumer = dual(
+			&broadcast,
+			Start::Latest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+		let Ok(Some((Read::Frame(first), _))) = consumer.reader(Lane::Max).read().await else {
+			panic!("the max-delay decoder produced no picture");
+		};
+		assert_eq!(
+			first.timestamp,
+			Timestamp::from_micros(0).unwrap(),
+			"it starts a group earlier"
+		);
+		let Ok(Some((Read::Frame(first), _))) = consumer.reader(Lane::Min).read().await else {
+			panic!("the min-delay decoder produced no picture");
+		};
+		assert_eq!(first.timestamp, Timestamp::from_micros(4 * SECOND).unwrap());
 	}
 
 	/// A stall shorter than a sweep makes the min-delay decoder skip, while the
@@ -1570,7 +1611,7 @@ mod tests {
 			write(&mut first, &[second]);
 			shown.push(read(&mut consumer).await);
 		}
-		first.finish().unwrap();
+		first.close().unwrap();
 		let mut stalled = group(&mut track, 1, &[4]);
 		shown.push(read(&mut consumer).await);
 
@@ -1594,7 +1635,7 @@ mod tests {
 		);
 
 		write(&mut stalled, &[5, 6, 7]);
-		stalled.finish().unwrap();
+		stalled.close().unwrap();
 		catch_up(&mut consumer).await;
 		for second in 9..12 {
 			write(&mut live, &[second]);
@@ -1630,7 +1671,7 @@ mod tests {
 		.await;
 
 		// Written as it is read: a zero budget would skip a backlog.
-		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
 		let mut shown = Vec::new();
 		for _ in 0..4 {
 			shown.push(read(&mut consumer).await.0);
@@ -1644,7 +1685,7 @@ mod tests {
 		catch_up(&mut consumer).await;
 
 		write(&mut stalled, &[5, 6, 7]);
-		stalled.finish().unwrap();
+		stalled.close().unwrap();
 		write(&mut live, &[13]);
 		shown.push(read(&mut consumer).await.0);
 		assert_eq!(shown, [0, 1, 2, 3, 4, 8, 9, 10, 11, 12, 13]);
@@ -1655,8 +1696,8 @@ mod tests {
 	#[tokio::test]
 	async fn the_tail_drains_from_both_decoders() {
 		let (broadcast, mut track) = live_track();
-		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
-		group(&mut track, 1, &[4, 5]).finish().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
+		group(&mut track, 1, &[4, 5]).close().unwrap();
 		let _track = track.finish().unwrap();
 
 		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
@@ -1664,7 +1705,7 @@ mod tests {
 		let mut consumer = dual(&broadcast, Start::Oldest, 2 * WARMUP, probe::BUFFERED_NAME).await;
 		let mut shown = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
-			shown.push(u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND);
+			shown.push(u64::try_from(frame.timestamp.as_micros().unwrap()).unwrap() / SECOND);
 		}
 		assert_eq!(shown, [0, 1, 2, 3, 4, 5]);
 		assert!(consumer.next_frame().await.unwrap().is_none());
@@ -1790,7 +1831,7 @@ mod tests {
 	async fn a_max_delay_decode_error_fails_the_read() {
 		let (broadcast, mut track) = live_track();
 		// Only the max-delay decoder reads group 0, a group before the live edge.
-		let mut earlier = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut earlier = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video)
 			.write(
 				&mut earlier,
@@ -1803,7 +1844,7 @@ mod tests {
 			)
 			.unwrap();
 		write(&mut earlier, &[1, 2, 3]);
-		earlier.finish().unwrap();
+		earlier.close().unwrap();
 		let _live = group(&mut track, 1, &[4, 5]);
 
 		let mut consumer = dual(

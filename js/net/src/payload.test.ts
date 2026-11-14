@@ -2,12 +2,13 @@ import { expect, spyOn, test } from "bun:test";
 import { type Dispose, Signal, type Subscriber } from "@moq/signals";
 import { Producer } from "./group.ts";
 import { sendPayload } from "./payload.ts";
+import { Timestamp } from "./time.ts";
 
 // A stopped sender must release its wait even when the source frame stays open forever.
 // Otherwise each cancelled FETCH leaves a reader and its listeners on the shared frame.
 test("stopping a payload releases its pending chunk wait", async () => {
 	const producer = new Producer(0n);
-	producer.createFrame({ size: 2 });
+	producer.createFrame({ size: 2, timestamp: Timestamp.unscaled(producer.sequence) });
 	const group = producer.consume();
 	const frame = await group.nextFrame();
 	if (!frame) throw new Error("missing frame");

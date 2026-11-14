@@ -30,7 +30,7 @@ import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Timescale, type Timestamp } from "../time.ts";
+import { received, Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -2028,7 +2028,11 @@ export class Subscriber {
 						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
 					});
 				}
-				if (frame.payload) open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				if (frame.payload)
+					open().writeFrame({
+						payload: frame.payload,
+						timestamp: received(frame.timestamp, open().sequence),
+					});
 				else if (
 					!(await receiveFrame(stream, open(), { size: frame.streamed ?? 0, timestamp: frame.timestamp }))
 				)
@@ -2186,7 +2190,11 @@ export class Subscriber {
 						continue;
 					}
 				}
-				if (object.payload) producer?.writeFrame({ payload: object.payload, timestamp: object.timestamp });
+				if (object.payload)
+					producer?.writeFrame({
+						payload: object.payload,
+						timestamp: received(object.timestamp, join.sequence),
+					});
 				else if (producer && !(await receiveFrame(stream, producer, object))) break;
 				join.wrote();
 				next += 1;
@@ -2312,7 +2320,7 @@ export class Subscriber {
 		try {
 			binding.producer.insert({
 				sequence: datagram.groupId,
-				timestamp,
+				timestamp: received(timestamp, datagram.groupId),
 				payload: datagram.body.payload,
 			});
 		} catch (err) {

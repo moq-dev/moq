@@ -1,4 +1,4 @@
-//! Sets of group sequences held as sorted runs, and the layered set a [`Window`](super::Window)
+//! Sets of group keys held as sorted runs, and the layered set a [`Window`](super::Window)
 //! reads: fixed runs shared across its moves, with the few runs its time ends walk on top.
 //!
 //! A subscription may name thousands of ranges, yet an unsettled time end moves its cap on
@@ -25,13 +25,9 @@ impl Runs {
 		Self(set.into_iter().collect())
 	}
 
-	pub fn iter(&self) -> std::slice::Iter<'_, RangeInclusive<u64>> {
-		self.0.iter()
-	}
-
-	pub fn contains(&self, sequence: u64) -> bool {
-		let index = self.0.partition_point(|run| *run.end() < sequence);
-		self.0.get(index).is_some_and(|run| *run.start() <= sequence)
+	pub fn contains(&self, key: u64) -> bool {
+		let index = self.0.partition_point(|run| *run.end() < key);
+		self.0.get(index).is_some_and(|run| *run.start() <= key)
 	}
 
 	/// The lowest run reaching into `lo..=hi`.
@@ -53,25 +49,6 @@ impl Runs {
 		self.0[from..to]
 			.iter()
 			.map(move |run| (*run.start()).max(lo)..=(*run.end()).min(hi))
-	}
-
-	/// Add `run`, merging the runs it overlaps or touches. Costs a search and a shift.
-	pub fn insert(&mut self, run: RangeInclusive<u64>) {
-		if run.is_empty() {
-			return;
-		}
-		let (mut start, mut end) = run.into_inner();
-		// The first run reaching `start - 1` or later, and the first starting past `end + 1`.
-		let from = self.0.partition_point(|run| run.end().saturating_add(1) < start);
-		let to = self
-			.0
-			.partition_point(|run| *run.start() <= end.saturating_add(1))
-			.max(from);
-		if let (Some(first), Some(last)) = (self.0[from..to].first(), self.0[from..to].last()) {
-			start = start.min(*first.start());
-			end = end.max(*last.end());
-		}
-		self.0.splice(from..to, std::iter::once(start..=end));
 	}
 }
 
@@ -112,25 +89,13 @@ impl Layered {
 		&self.layer
 	}
 
-	/// Hold `fixed` under the layer from now on. The runs already held stay shared when they
-	/// are the same, so what shares them still differs from this only in the layer.
-	pub fn set_fixed(&mut self, fixed: Runs) {
-		if *self.fixed != fixed {
-			self.fixed = Arc::new(fixed);
-		}
-	}
-
-	pub fn set_layer(&mut self, layer: Runs) {
-		self.layer = Arc::new(layer);
-	}
-
 	/// Whether both hold the same fixed runs, so they differ only in their layers.
 	pub fn shares_fixed(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.fixed, &other.fixed)
 	}
 
-	pub fn contains(&self, sequence: u64) -> bool {
-		self.fixed.contains(sequence) || self.layer.contains(sequence)
+	pub fn contains(&self, key: u64) -> bool {
+		self.fixed.contains(key) || self.layer.contains(key)
 	}
 
 	/// The one set holding runs, when the other holds none: its runs are the union's, each
@@ -286,7 +251,7 @@ mod tests {
 		(0..next(count + 1))
 			.map(|_| {
 				let start = next(span);
-				// Now and then a run reaching the last sequence.
+				// Now and then a run reaching the last key.
 				let end = match next(8) {
 					0 => u64::MAX,
 					_ => start + next(4),
@@ -354,27 +319,13 @@ mod tests {
 			let (lo, hi) = (next(30), 20 + next(30));
 			let gained: RangeInclusiveSet<u64> = new.gained(&old, lo, hi).unwrap().into_iter().collect();
 			let expected: Vec<u64> = (lo..=hi)
-				.filter(|sequence| new.contains(*sequence) && !old.contains(*sequence))
+				.filter(|key| new.contains(*key) && !old.contains(*key))
 				.collect();
-			let found: Vec<u64> = (lo..=hi).filter(|sequence| gained.contains(sequence)).collect();
+			let found: Vec<u64> = (lo..=hi).filter(|key| gained.contains(key)).collect();
 			assert_eq!(found, expected, "round {round}: {old:?} to {new:?} in {lo}..={hi}");
 		}
 		let unshared = Layered::new(Arc::new(Runs::default()), Runs::default());
 		assert!(unshared.gained(&Layered::default(), 0, 9).is_none());
-	}
-
-	/// Inserting a run merges what it overlaps or touches, as a set of the runs would.
-	#[test]
-	fn inserted_runs_merge_as_a_set() {
-		let mut next = generator();
-		for _ in 0..2000 {
-			let runs = random_runs(&mut next, 8, 40);
-			let mut inserted = Runs::default();
-			for run in &runs {
-				inserted.insert(run.clone());
-			}
-			assert_eq!(inserted, Runs::new(runs.clone()), "{runs:?}");
-		}
 	}
 
 	/// A run minus a set is the parts of it the set doesn't hold.
@@ -385,7 +336,7 @@ mod tests {
 			let runs = Runs::new(random_runs(&mut next, 6, 40));
 			let start = next(40);
 			let run = start..=start + next(10);
-			let expected: Vec<u64> = run.clone().filter(|sequence| !runs.contains(*sequence)).collect();
+			let expected: Vec<u64> = run.clone().filter(|key| !runs.contains(*key)).collect();
 			let found: Vec<u64> = minus(run.clone(), &runs).flatten().collect();
 			assert_eq!(found, expected, "{run:?} minus {runs:?}");
 		}

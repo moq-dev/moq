@@ -206,23 +206,36 @@ pub struct MoqAudio {
 	pub warmup: Option<std::time::Duration>,
 }
 
-/// An exact media timestamp, `value` units at `scale` units per second, mirroring [`moq_net::Timestamp`].
+/// An exact timestamp, `value` units at `scale` units per second, mirroring [`moq_net::Timestamp`].
 ///
 /// Reads carry the scale the publisher wrote, so a tick such as 90 kHz survives a read and
 /// republish exactly. Writing one past the bounds below is refused with [`MoqError::TimeOverflow`].
+///
+/// A scale-less track has no time, so there `scale` is null and `value` is the frame's group
+/// key (a datagram's sequence), as [`moq_net::Timestamp::unscaled`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct MoqTimestamp {
-	/// The time in `scale` units, at most `2^61 - 1`.
+	/// The time in `scale` units, at most `2^61 - 1`, or the group key when unscaled.
 	pub value: u64,
-	/// Units per second, non-zero and at most `2^62 - 1`.
-	pub scale: u64,
+	/// Units per second, non-zero and at most `2^62 - 1`, or null on a scale-less track.
+	pub scale: Option<u64>,
+}
+
+impl MoqTimestamp {
+	/// The scale-less timestamp at group key `key`.
+	pub fn unscaled(key: u64) -> Self {
+		Self {
+			value: key,
+			scale: None,
+		}
+	}
 }
 
 impl From<moq_net::Timestamp> for MoqTimestamp {
 	fn from(timestamp: moq_net::Timestamp) -> Self {
 		Self {
 			value: timestamp.value(),
-			scale: timestamp.scale().as_u64(),
+			scale: timestamp.scale().map(moq_net::Timescale::as_u64),
 		}
 	}
 }
@@ -231,7 +244,10 @@ impl TryFrom<MoqTimestamp> for moq_net::Timestamp {
 	type Error = moq_net::TimeOverflow;
 
 	fn try_from(timestamp: MoqTimestamp) -> Result<Self, Self::Error> {
-		Self::from_scale(timestamp.value, timestamp.scale)
+		match timestamp.scale {
+			Some(scale) => Self::from_scale(timestamp.value, scale),
+			None => Ok(Self::unscaled(timestamp.value)),
+		}
 	}
 }
 
@@ -244,9 +260,9 @@ impl TryFrom<MoqTimestamp> for moq_net::Timestamp {
 pub struct MoqFrame {
 	/// The frame payload.
 	pub payload: Vec<u8>,
-	/// Presentation timestamp, or null on an untimed track, on both publish and receive.
-	#[uniffi(default = None)]
-	pub timestamp: Option<MoqTimestamp>,
+	/// Presentation timestamp, or the [unscaled](MoqTimestamp::unscaled) group key on a
+	/// scale-less track, on both publish and receive.
+	pub timestamp: MoqTimestamp,
 }
 
 /// A [`MoqFrame`] plus the codec metadata a media track carries.
@@ -260,15 +276,15 @@ pub struct MoqMediaFrame {
 	pub keyframe: bool,
 }
 
-/// A datagram payload with its own sequence and optional timestamp.
+/// A datagram payload with its own sequence and timestamp.
 #[derive(uniffi::Record)]
 pub struct MoqDatagram {
 	/// The datagram track's own sequence number.
 	#[uniffi(default = 0)]
 	pub sequence: u64,
-	/// Presentation timestamp, or null on an untimed track, on both publish and receive.
-	#[uniffi(default = None)]
-	pub timestamp: Option<MoqTimestamp>,
+	/// Presentation timestamp, or the [unscaled](MoqTimestamp::unscaled) sequence on a
+	/// scale-less track, on both publish and receive.
+	pub timestamp: MoqTimestamp,
 	/// Datagram payload; keep it well below the path MTU so each hop can carry it.
 	pub payload: Vec<u8>,
 }
@@ -1142,18 +1158,18 @@ impl MoqMediaTrackProducer {
 	/// Write `frame` to this track.
 	///
 	/// The importer derives keyframe status from the bitstream, so a [`MoqFrame`] carries only the
-	/// payload and its caller-supplied timestamp. A missing timestamp is refused.
+	/// payload and its caller-supplied timestamp, which must be scaled.
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
 
-		let timestamp = frame
-			.timestamp
-			.ok_or_else(|| MoqError::Codec {
-				reason: "whole media frames require a timestamp".into(),
-			})?
-			.try_into()?;
+		if frame.timestamp.scale.is_none() {
+			return Err(MoqError::Codec {
+				reason: "whole media frames require a scaled timestamp".into(),
+			});
+		}
+		let timestamp = frame.timestamp.try_into()?;
 		media
 			.import
 			.decode(&frame.payload, Some(timestamp))
@@ -1210,10 +1226,11 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Draw a group boundary and number the next group `sequence`.
+	/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
 	///
-	/// [`cut`](Self::cut) with an explicit sequence, for a publisher whose group numbers have to
-	/// be deterministic: two encoders aligning per GOP so a consumer can fail over between them.
+	/// [`cut`](Self::cut) keyed explicitly rather than at the next keyframe's time, which has to
+	/// come after every group the track holds. Groups are keyed by their first frame's time, so
+	/// two encoders of the same content align without it.
 	pub fn seek(&self, sequence: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
@@ -1286,7 +1303,8 @@ impl MoqMediaContainerProducer {
 		result
 	}
 
-	/// Start a new segment and number its groups `sequence`.
+	/// Start a new segment whose first group starts at `sequence`, in its track's timescale, after
+	/// every group the track holds.
 	pub fn seek(&self, sequence: u64) -> Result<(), MoqError> {
 		self.driver.check()?;
 		let result = (|| {
@@ -1526,7 +1544,7 @@ impl From<moq_mux::container::Read> for MoqMediaRead {
 			},
 			moq_mux::container::Read::Gap { timestamp, duration } => Self::Gap {
 				timestamp: timestamp.into(),
-				duration: crate::ffi::duration(duration.into()),
+				duration: crate::ffi::gap(duration),
 			},
 			moq_mux::container::Read::End { end, .. } => Self::End { end: end.into() },
 		}
@@ -1638,7 +1656,7 @@ mod read_tests {
 						}],
 					)
 					.unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 			};
 			// Newest first, all before the first read. Group 4 covers the min delay alone, so
 			// without the warmup the start would skip group 3; only the warmup's reach keeps it.
@@ -1649,7 +1667,7 @@ mod read_tests {
 			let mut micros = Vec::new();
 			while let Some(read) = media.read().await.unwrap() {
 				if let moq_mux::container::Read::Frame { frame, .. } = read {
-					micros.push(frame.timestamp.as_micros());
+					micros.push(frame.timestamp.as_micros().unwrap());
 				}
 			}
 			assert_eq!(micros, [4_400_000, 4_700_000, 5_000_000], "video={video}");
@@ -1692,7 +1710,7 @@ mod read_tests {
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
 		let micros = |value| MoqTimestamp {
 			value,
-			scale: 1_000_000,
+			scale: Some(1_000_000),
 		};
 		let mut first = track.create_group(0u64.into()).unwrap();
 		format()
@@ -1706,7 +1724,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		first.finish().unwrap();
+		first.close().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("expected frame")
 		};
@@ -1725,7 +1743,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		marker.finish().unwrap();
+		marker.close().unwrap();
 		assert!(
 			matches!(reader.next().await.unwrap(), Some(MoqMediaRead::Gap { timestamp, duration }) if timestamp == micros(10_000) && duration == Duration::from_millis(10))
 		);
@@ -1738,14 +1756,14 @@ mod read_tests {
 			.write(
 				&mut resumed,
 				&[moq_mux::container::Frame {
-					timestamp: timestamp(20_000),
+					timestamp: timestamp(20_001),
 					payload: bytes::Bytes::from_static(b"resumed"),
 					keyframe: true,
 					duration: None,
 				}],
 			)
 			.unwrap();
-		resumed.finish().unwrap();
+		resumed.close().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("end is not EOF")
 		};
@@ -1772,7 +1790,7 @@ impl MoqMediaGroupConsumer {
 	) -> Self {
 		let inner = moq_mux::container::GroupConsumer::new(group, container);
 		Self {
-			sequence: inner.sequence(),
+			sequence: inner.start(),
 			reads: Polled::new(inner).supervised(driver),
 		}
 	}
@@ -1780,7 +1798,7 @@ impl MoqMediaGroupConsumer {
 
 #[uniffi::export]
 impl MoqMediaGroupConsumer {
-	/// The sequence number of this group within the track.
+	/// The start of this group, in its track's timescale, which names it within the track.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}
@@ -2078,7 +2096,7 @@ mod timebase_tests {
 			)
 			.unwrap();
 			tokio::time::advance(Duration::from_secs(1)).await;
-			let first = clock.now().as_micros();
+			let first = clock.now().as_micros().unwrap();
 			// Each write enters the unpaused FFI worker, whose ambient clock is the host's. The
 			// broadcast still stamps on the paused clock it was built under.
 			chunks.write(fragment(&source, 3600, 1).to_vec()).unwrap();
@@ -2115,7 +2133,7 @@ mod timebase_tests {
 			for mut media in readers {
 				while let Some(read) = media.read().await.unwrap() {
 					if let moq_mux::container::Read::Frame { frame, .. } = read {
-						times.insert(frame.payload[0], frame.timestamp.as_micros());
+						times.insert(frame.payload[0], frame.timestamp.as_micros().unwrap());
 					}
 				}
 			}
@@ -2135,8 +2153,14 @@ mod timebase_tests {
 				.unwrap()
 				.ordered();
 			let mut group = catalogs.next_group().await.unwrap().unwrap();
-			let stamp = group.read_frame().await.unwrap().unwrap().timestamp.unwrap();
-			assert_eq!(stamp.as_micros(), first + 5_000_000, "shared={shared}");
+			let stamp = group.read_frame().await.unwrap().unwrap().timestamp;
+			// Catalogs published in the same millisecond, such as a rendition and its first estimate,
+			// start a unit apart, since each starts its own group.
+			let second = first + 5_000_000;
+			assert!(
+				(second..=second + 1_000).contains(&stamp.as_micros().unwrap()),
+				"shared={shared}"
+			);
 		}
 	}
 

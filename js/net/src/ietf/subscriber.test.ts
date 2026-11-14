@@ -10,7 +10,7 @@ import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Timescale } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import * as track from "../track.ts";
 import * as demandUtil from "../util/demand.ts";
 import type * as Cluster from "./cluster.ts";
@@ -807,7 +807,8 @@ test("a track without TIMESCALE arrives untimed, even if an object carries a Tim
 	const group = await track.ordered().nextGroup();
 	const frame = await group?.readFrame();
 	expect(frame?.payload).toEqual(new Uint8Array([42]));
-	expect(frame?.timestamp).toBeUndefined();
+	// Its group's key, not the object's Timestamp.
+	expect(frame?.timestamp).toEqual(Timestamp.unscaled(0n));
 	track.close();
 });
 

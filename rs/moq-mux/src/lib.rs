@@ -60,6 +60,7 @@ mod pace;
 pub mod rate;
 pub mod select;
 mod source;
+mod start;
 mod stats;
 pub mod sync;
 

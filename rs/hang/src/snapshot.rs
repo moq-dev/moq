@@ -39,7 +39,8 @@ impl<'de> DeserializeAs<'de, Duration> for Millis {
 }
 impl SerializeAs<moq_net::Timestamp> for Millis {
 	fn serialize_as<S: serde::Serializer>(value: &moq_net::Timestamp, serializer: S) -> Result<S::Ok, S::Error> {
-		let value = u64::try_from(value.as_millis()).map_err(serde::ser::Error::custom)?;
+		let millis = value.as_millis().map_err(serde::ser::Error::custom)?;
+		let value = u64::try_from(millis).map_err(serde::ser::Error::custom)?;
 		Number::serialize_as(&value, serializer)
 	}
 }

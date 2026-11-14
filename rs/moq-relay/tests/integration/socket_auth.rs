@@ -186,9 +186,13 @@ async fn read(reader: &mut moq_net::group::Consumer) -> Vec<u8> {
 
 /// Write `payload` as one message of a `track` session: one group.
 fn send(track: &moq_net::track::Producer, payload: &'static [u8]) {
-	let mut group = track.append_group().expect("group");
-	group.write_frame(None, payload).expect("frame");
-	group.finish().expect("finish");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("group");
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+		.expect("frame");
+	group.close().expect("finish");
 }
 
 /// Read the next message of a `track` session.
@@ -230,12 +234,18 @@ async fn prefix_grants_admit_a_session() {
 		let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", dialer).await;
 		let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", acceptor).await;
 		let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-		dialed.producer.write_frame(None, &b"ping"[..]).expect("write");
+		dialed
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &b"ping"[..])
+			.expect("write");
 		assert_eq!(read(&mut accepted.consumer).await, b"ping", "{dialer} to {acceptor}");
-		accepted.producer.write_frame(None, &b"pong"[..]).expect("write");
+		accepted
+			.producer
+			.write_frame(moq_net::Timestamp::unscaled(accepted.producer.start), &b"pong"[..])
+			.expect("write");
 		assert_eq!(read(&mut dialed.consumer).await, b"pong", "{dialer} to {acceptor}");
-		dialed.producer.finish().expect("finish");
-		accepted.producer.finish().expect("finish");
+		dialed.producer.close().expect("finish");
+		accepted.producer.close().expect("finish");
 
 		let (dialed, accepted) = connect_track(&alice, &bob).await;
 		send(&dialed.producer, b"ping");
@@ -345,7 +355,10 @@ async fn a_reader_of_everything_lists_no_session() {
 	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
 	let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
 	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-	dialed.producer.write_frame(None, &b"secret"[..]).expect("write");
+	dialed
+		.producer
+		.write_frame(moq_net::Timestamp::unscaled(dialed.producer.start), &b"secret"[..])
+		.expect("write");
 	assert_eq!(read(&mut accepted.consumer).await, b"secret");
 	let (track_dialed, track_accepted) = connect_track(&alice, &bob).await;
 	send(&track_dialed.producer, b"secret");

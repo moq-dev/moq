@@ -5,8 +5,10 @@
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version, origin, track};
+use moq_net::{Version, origin, track};
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
@@ -62,9 +64,9 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 
 		for _ in 0..4 {
 			for track in &tracks {
-				let mut group = track.append_group().unwrap();
-				group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
-				group.finish().unwrap();
+				let mut group = track.append_next().unwrap();
+				group.write_frame(group.at_start(), b"x".as_slice()).unwrap();
+				group.close().unwrap();
 			}
 		}
 		for subscriber in &mut subscribers {
@@ -76,7 +78,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 					.unwrap_or_else(|_| panic!("{version}: only {received:?} arrived"))
 					.unwrap()
 					.unwrap();
-				received.push(group.sequence);
+				received.push(group.start);
 			}
 			received.sort();
 			assert_eq!(received, [0, 1, 2, 3], "{version}");
@@ -122,24 +124,24 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
 		// Never finished, so its stream holds the only credit.
-		let mut older = track.append_group().unwrap();
-		older.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		let mut older = track.append_next().unwrap();
+		older.write_frame(older.at_start(), b"old".as_slice()).unwrap();
 		let first = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the older group arrives"))
 			.unwrap()
 			.unwrap();
-		assert_eq!(first.sequence, 0, "{version}");
+		assert_eq!(first.start, 0, "{version}");
 
-		let mut newer = track.append_group().unwrap();
-		newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
-		newer.finish().unwrap();
+		let mut newer = track.append_next().unwrap();
+		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
+		newer.close().unwrap();
 		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the newer group waits behind the older one"))
 			.unwrap()
 			.unwrap();
-		assert_eq!(group.sequence, 1, "{version}");
+		assert_eq!(group.start, 1, "{version}");
 		drop(older);
 	}
 }
@@ -180,34 +182,34 @@ async fn a_reset_group_resumes_without_loss() {
 	let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
 	// Unfinished, so its stream holds the only credit until the newer group resets it.
-	let mut older = track.append_group().unwrap();
-	older.write_frame(Timestamp::ZERO, b"a".as_slice()).unwrap();
+	let mut older = track.append_next().unwrap();
+	older.write_frame(older.at_start(), b"a".as_slice()).unwrap();
 	let mut paused = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 		.await
 		.expect("the older group arrives")
 		.unwrap()
 		.unwrap();
-	assert_eq!(paused.sequence, 0);
+	assert_eq!(paused.start, 0);
 	let first = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
 		.await
 		.expect("its first frame arrives")
 		.unwrap();
 	assert_eq!(first.map(|frame| frame.payload), Some(bytes::Bytes::from_static(b"a")));
 
-	let mut newer = track.append_group().unwrap();
-	newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
-	newer.finish().unwrap();
+	let mut newer = track.append_next().unwrap();
+	newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
+	newer.close().unwrap();
 	let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 		.await
 		.expect("the newer group takes the older one's credit")
 		.unwrap()
 		.unwrap();
-	assert_eq!(group.sequence, 1);
+	assert_eq!(group.start, 1);
 
 	// Written after the reset: a continuation carries them, behind the frame already held.
-	older.write_frame(Timestamp::ZERO, b"b".as_slice()).unwrap();
-	older.write_frame(Timestamp::ZERO, b"c".as_slice()).unwrap();
-	older.finish().unwrap();
+	older.write_frame(older.at_start(), b"b".as_slice()).unwrap();
+	older.write_frame(older.at_start(), b"c".as_slice()).unwrap();
+	older.close().unwrap();
 	let mut rest = Vec::new();
 	while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
 		.await
@@ -255,8 +257,8 @@ async fn a_reset_group_finishing_without_more_frames_ends_cleanly() {
 		.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
 	let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
-	let mut older = track.append_group().unwrap();
-	older.write_frame(Timestamp::ZERO, b"a".as_slice()).unwrap();
+	let mut older = track.append_next().unwrap();
+	older.write_frame(older.at_start(), b"a".as_slice()).unwrap();
 	let mut paused = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 		.await
 		.expect("the older group arrives")
@@ -268,18 +270,18 @@ async fn a_reset_group_finishing_without_more_frames_ends_cleanly() {
 		.unwrap();
 	assert_eq!(first.map(|frame| frame.payload), Some(bytes::Bytes::from_static(b"a")));
 
-	let mut newer = track.append_group().unwrap();
-	newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
-	newer.finish().unwrap();
+	let mut newer = track.append_next().unwrap();
+	newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
+	newer.close().unwrap();
 	let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 		.await
 		.expect("the newer group takes the older one's credit")
 		.unwrap()
 		.unwrap();
-	assert_eq!(group.sequence, 1);
+	assert_eq!(group.start, 1);
 
 	// No frame follows the reset: the group just ends.
-	older.finish().unwrap();
+	older.close().unwrap();
 	let end = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
 		.await
 		.expect("the paused group continues");
@@ -334,25 +336,25 @@ async fn a_waiting_continuation_lets_a_newer_group_through() {
 	// Groups 0 and 1 stay unfinished: 1 resets 0, whose continuation then waits for credit.
 	let mut groups = Vec::new();
 	let mut readers = Vec::new();
-	for sequence in 0..2 {
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"a".as_slice()).unwrap();
+	for key in 0..2 {
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"a".as_slice()).unwrap();
 		let reader = next!();
-		assert_eq!(reader.sequence, sequence);
+		assert_eq!(reader.start, key);
 		groups.push(group);
 		readers.push(reader);
 	}
 
 	// The newest outranks group 1's stream, so it resets that one too.
-	let mut newest = track.append_group().unwrap();
-	newest.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
-	newest.finish().unwrap();
-	assert_eq!(next!().sequence, 2, "the newest group waits behind a continuation");
+	let mut newest = track.append_next().unwrap();
+	newest.write_frame(newest.at_start(), b"new".as_slice()).unwrap();
+	newest.close().unwrap();
+	assert_eq!(next!().start, 2, "the newest group waits behind a continuation");
 
 	// The paused groups continue highest-ranked first: newest first in descending order.
 	for (mut group, mut reader) in groups.into_iter().zip(readers).rev() {
-		group.write_frame(Timestamp::ZERO, b"b".as_slice()).unwrap();
-		group.finish().unwrap();
+		group.write_frame(group.at_start(), b"b".as_slice()).unwrap();
+		group.close().unwrap();
 		let mut frames = Vec::new();
 		while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), reader.read_frame())
 			.await
@@ -361,7 +363,7 @@ async fn a_waiting_continuation_lets_a_newer_group_through() {
 		{
 			frames.push(frame.payload);
 		}
-		assert_eq!(frames, [b"a".as_slice(), b"b".as_slice()], "group {}", reader.sequence);
+		assert_eq!(frames, [b"a".as_slice(), b"b".as_slice()], "group {}", reader.start);
 	}
 }
 
@@ -417,15 +419,15 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the waiting subscription never got credit"))
 			.unwrap_or_else(|err| panic!("{version}: the waiting subscription failed: {err}"));
-		let mut group = second.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
-		group.finish().unwrap();
+		let mut group = second.append_next().unwrap();
+		group.write_frame(group.at_start(), b"x".as_slice()).unwrap();
+		group.close().unwrap();
 		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: no group after credit returned"))
 			.unwrap()
 			.unwrap();
-		assert_eq!(group.sequence, 0, "{version}");
+		assert_eq!(group.start, 0, "{version}");
 	}
 }
 
@@ -480,27 +482,27 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the waiting subscription never got credit"))
 			.unwrap_or_else(|err| panic!("{version}: the waiting subscription failed: {err}"));
-		let mut group = third.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
-		group.finish().unwrap();
+		let mut group = third.append_next().unwrap();
+		group.write_frame(group.at_start(), b"x".as_slice()).unwrap();
+		group.close().unwrap();
 		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: no group after credit returned"))
 			.unwrap()
 			.unwrap();
-		assert_eq!(group.sequence, 0, "{version}");
+		assert_eq!(group.start, 0, "{version}");
 		drop(group);
 		drop(subscriber);
 		let mut resumed = remote.track("second").unwrap().subscribe(None).await.unwrap();
-		let mut group = second.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"still live".as_slice()).unwrap();
-		group.finish().unwrap();
+		let mut group = second.append_next().unwrap();
+		group.write_frame(group.at_start(), b"still live".as_slice()).unwrap();
+		group.close().unwrap();
 		let group = kio::clock::timeout(Duration::from_secs(5), resumed.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(group.sequence, 0);
+		assert_eq!(group.start, 0);
 		// Keep the first publisher alive through the resumed wire request too.
 		drop(first);
 	}
@@ -553,23 +555,19 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 		}
 
 		// Unfinished, so its stream holds the only credit.
-		let mut held = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
-		held.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
-		assert_eq!(next!("the held group arrives").sequence, 2, "{version}");
+		let mut held = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
+		held.write_frame(held.at_start(), b"held".as_slice()).unwrap();
+		assert_eq!(next!("the held group arrives").start, 2, "{version}");
 
 		// Late and below the held stream: it waits for credit it cannot make room for.
-		let mut late = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		late.write_frame(Timestamp::ZERO, b"late".as_slice()).unwrap();
-		late.finish().unwrap();
+		let mut late = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
+		late.close().unwrap();
 
-		let mut newer = track.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
-		newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
-		newer.finish().unwrap();
-		assert_eq!(
-			next!("the newer group waits behind the late one").sequence,
-			3,
-			"{version}"
-		);
+		let mut newer = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
+		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
+		newer.close().unwrap();
+		assert_eq!(next!("the newer group waits behind the late one").start, 3, "{version}");
 		drop(held);
 	}
 }
@@ -621,22 +619,22 @@ async fn a_shed_late_group_lets_a_newer_group_through() {
 		}
 
 		// Unfinished, so its stream holds the only credit.
-		let mut held = track.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
-		held.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
-		assert_eq!(next!("the held group arrives").sequence, 3, "{version}");
+		let mut held = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
+		held.write_frame(held.at_start(), b"held".as_slice()).unwrap();
+		assert_eq!(next!("the held group arrives").start, 3, "{version}");
 
 		// Group 1 waits for credit it cannot make room for, and group 0 ranks below it.
-		for sequence in [1, 0] {
-			let mut late = track.create_group(moq_net::group::Info { sequence }).unwrap();
-			late.write_frame(Timestamp::ZERO, b"late".as_slice()).unwrap();
-			late.finish().unwrap();
+		for key in [1, 0] {
+			let mut late = track.create_group(moq_net::group::Info { start: key }).unwrap();
+			late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
+			late.close().unwrap();
 		}
 
-		let mut newer = track.create_group(moq_net::group::Info { sequence: 4 }).unwrap();
-		newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
-		newer.finish().unwrap();
+		let mut newer = track.create_group(moq_net::group::Info { start: 4 }).unwrap();
+		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
+		newer.close().unwrap();
 		assert_eq!(
-			next!("the newer group waits behind the late ones").sequence,
+			next!("the newer group waits behind the late ones").start,
 			4,
 			"{version}"
 		);
@@ -691,22 +689,22 @@ async fn an_ascending_backlog_waits_behind_a_waiting_group() {
 		}
 
 		// Unfinished, so its stream holds the only credit, and outranks every newer group.
-		let mut held = track.append_group().unwrap();
-		held.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
-		assert_eq!(next!("the held group arrives").sequence, 0, "{version}");
+		let mut held = track.append_next().unwrap();
+		held.write_frame(held.at_start(), b"held".as_slice()).unwrap();
+		assert_eq!(next!("the held group arrives").start, 0, "{version}");
 
 		for _ in 0..3 {
-			let mut group = track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
-			group.finish().unwrap();
+			let mut group = track.append_next().unwrap();
+			group.write_frame(group.at_start(), b"x".as_slice()).unwrap();
+			group.close().unwrap();
 		}
 		// Let the publisher take what it would before credit returns.
 		kio::clock::sleep(Duration::from_millis(100)).await;
-		held.finish().unwrap();
+		held.close().unwrap();
 
 		let mut received = Vec::new();
 		while received.len() < 3 {
-			received.push(next!("the backlog arrives").sequence);
+			received.push(next!("the backlog arrives").start);
 		}
 		assert_eq!(received, [1, 2, 3], "{version}");
 	}
@@ -752,15 +750,15 @@ async fn a_paused_group_given_up_while_it_waits_is_dropped() {
 	// 1's continuation waits for it, and group 0 waits among the paused behind that.
 	let mut groups = Vec::new();
 	let mut readers = Vec::new();
-	for sequence in 0..3 {
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"a".as_slice()).unwrap();
+	for start in 0..3 {
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"a".as_slice()).unwrap();
 		let mut reader = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 			.await
 			.expect("a group arrives")
 			.unwrap()
 			.unwrap();
-		assert_eq!(reader.sequence, sequence);
+		assert_eq!(reader.start, start);
 		let first = kio::clock::timeout(Duration::from_secs(5), reader.read_frame())
 			.await
 			.expect("its first frame arrives")
@@ -820,22 +818,22 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
 		// Group 7 finishes, so its stream waits for the acknowledgement; group 10 holds the other.
-		let mut closing = track.create_group(moq_net::group::Info { sequence: 7 }).unwrap();
-		closing.write_frame(Timestamp::ZERO, b"closing".as_slice()).unwrap();
-		closing.finish().unwrap();
-		let mut held = track.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
-		held.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
+		let mut closing = track.create_group(moq_net::group::Info { start: 7 }).unwrap();
+		closing.write_frame(closing.at_start(), b"closing".as_slice()).unwrap();
+		closing.close().unwrap();
+		let mut held = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
+		held.write_frame(held.at_start(), b"held".as_slice()).unwrap();
 		kio::clock::sleep(SETTLE).await;
 
 		// Ranked above group 7 but below group 10: it can only wait for group 7's credit.
-		let mut late = track.create_group(moq_net::group::Info { sequence: 8 }).unwrap();
-		late.write_frame(Timestamp::ZERO, b"late".as_slice()).unwrap();
-		late.finish().unwrap();
+		let mut late = track.create_group(moq_net::group::Info { start: 8 }).unwrap();
+		late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
+		late.close().unwrap();
 		kio::clock::sleep(SETTLE).await;
 
-		let mut newer = track.create_group(moq_net::group::Info { sequence: 11 }).unwrap();
-		newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
-		newer.finish().unwrap();
+		let mut newer = track.create_group(moq_net::group::Info { start: 11 }).unwrap();
+		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
+		newer.close().unwrap();
 
 		loop {
 			let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
@@ -843,11 +841,8 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 				.unwrap_or_else(|_| panic!("{version}: the newer group never arrives"))
 				.unwrap()
 				.unwrap();
-			assert_ne!(
-				group.sequence, 8,
-				"{version}: the newer group waits behind the late one"
-			);
-			if group.sequence == 11 {
+			assert_ne!(group.start, 8, "{version}: the newer group waits behind the late one");
+			if group.start == 11 {
 				break;
 			}
 		}

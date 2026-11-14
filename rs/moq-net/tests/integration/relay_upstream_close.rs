@@ -15,6 +15,7 @@
 
 use crate::support;
 use moq_net::track::Delay;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -80,7 +81,7 @@ async fn read(mut sub: moq_net::track::Subscriber) -> Outcome {
 			match group.read_frame().await {
 				Ok(Some(frame)) => {
 					let index: u64 = std::str::from_utf8(&frame.payload).unwrap().parse().unwrap();
-					got.push((group.sequence, index));
+					got.push((group.start, index));
 				}
 				Ok(None) => break,
 				Err(err) => return (got, Err(err)),
@@ -131,7 +132,7 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	for (index, track) in tracks.iter().enumerate() {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(MAX_DELAY))
-			.with_range(0..);
+			.with_ranges([support::keys(0..)]);
 		let sub = remote.track(&format!("track{index}")).unwrap().subscribe(subscription);
 		let sub = kio::clock::timeout(TIMEOUT, sub)
 			.await
@@ -147,13 +148,13 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	// The subscriber now reads nothing until the upstream session is gone.
 	downstream.server_transport.hold_unis();
 	for track in &tracks {
-		for sequence in 0..GROUPS {
-			let mut group = track.append_group().unwrap();
+		for key in 0..GROUPS {
+			let mut group = track.append_next().unwrap();
 			for index in 0..FRAMES {
-				let at = Timestamp::from_millis(sequence * FRAMES + index).unwrap();
+				let at = Timestamp::from_millis(key * FRAMES + index).unwrap();
 				group.write_frame(at, index.to_string().into_bytes()).unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let _finished = track.clone().finish().unwrap();
 	}

@@ -6,6 +6,7 @@ import * as Msf from "@moq/msf";
 import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { key } from "../../json/src/key.test-util.ts";
 import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
@@ -116,13 +117,13 @@ describe("unsupported catalog", () => {
 			const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled });
 			try {
 				const ready = source.out.catalog.changed();
-				producer.update({ value: {} });
+				producer.update({ value: {}, at: key() });
 				await ready;
 				expect(source.out.status.peek()).toBe("live");
 
 				const rejected = source.out.status.changed();
 				const cleared = source.out.catalog.changed();
-				producer.update({ value: { version: Catalog.VERSION + 1 } });
+				producer.update({ value: { version: Catalog.VERSION + 1 }, at: key() });
 				await rejected;
 				await cleared;
 				expect(source.out.status.peek()).toBe("unsupported");
@@ -158,7 +159,7 @@ it("keeps playing a finished catalog until the broadcast ends", async () => {
 	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
 	try {
 		const ready = source.out.catalog.changed();
-		producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } } });
+		producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } }, at: key() });
 		await ready;
 		expect(source.out.status.peek()).toBe("live");
 
@@ -1148,8 +1149,12 @@ it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
 	const owner = new Origin.Producer();
 	const catalogBroadcast = publish(owner, Path.from("room/catalog.msf"));
 	const referenced = publish(owner, Path.from("room/left"));
-	catalogBroadcast.createTrack("video").writeFrame({ payload: new Uint8Array([1]) });
-	referenced.createTrack("video").writeFrame({ payload: new Uint8Array([2]) });
+	catalogBroadcast
+		.createTrack("video")
+		.writeFrame({ payload: new Uint8Array([1]), timestamp: Moq.Time.Timestamp.unscaled(0n) });
+	referenced
+		.createTrack("video")
+		.writeFrame({ payload: new Uint8Array([2]), timestamp: Moq.Time.Timestamp.unscaled(0n) });
 	catalogBroadcast.createTrack("catalog").writeFrame({
 		payload: Msf.encode({
 			tracks: [
@@ -1162,6 +1167,7 @@ it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
 				},
 			],
 		}),
+		timestamp: Moq.Time.Timestamp.unscaled(0n),
 	});
 	const source = new Broadcast({
 		origin: owner,

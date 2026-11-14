@@ -65,7 +65,8 @@ impl Buffer {
 
 	pub fn push(&mut self, frame: Frame, max_delay: Duration) {
 		let edge = *self.edge.get_or_insert(frame.timestamp);
-		self.edge = Some(edge.max(frame.timestamp));
+		// Timestamp has no `Ord`; one that doesn't compare keeps the edge.
+		self.edge = Some(if frame.timestamp > edge { frame.timestamp } else { edge });
 		if frame.keyframe {
 			if self.waiting_keyframe {
 				self.floor = Some(frame.timestamp);
@@ -77,8 +78,11 @@ impl Buffer {
 		}
 		self.index(frame);
 		let edge = self.edge.unwrap();
-		let stale =
-			|oldest: &moq_net::Timestamp| edge.as_micros().saturating_sub(oldest.as_micros()) > max_delay.as_micros();
+		// An unscaled timestamp has no age, so it never goes stale.
+		let stale = |oldest: &moq_net::Timestamp| match (edge.as_micros(), oldest.as_micros()) {
+			(Ok(edge), Ok(oldest)) => edge.saturating_sub(oldest) > max_delay.as_micros(),
+			_ => false,
+		};
 		if self.oldest.front().is_some_and(stale) {
 			// Dropping a reference picture invalidates the rest of its GOP. Resume
 			// only at a retained keyframe, never feed a broken chain to the codec.
@@ -136,7 +140,7 @@ mod tests {
 		buffer.push(frame(50, false), age);
 		buffer.push(frame(100, true), age);
 		buffer.push(frame(150, false), age);
-		assert_eq!(buffer.frames.front().unwrap().timestamp.as_millis(), 100);
+		assert_eq!(buffer.frames.front().unwrap().timestamp.as_millis().unwrap(), 100);
 		assert_eq!(buffer.bytes, 14);
 		buffer.pop();
 		assert_eq!(buffer.bytes, 7);
@@ -164,10 +168,10 @@ mod tests {
 			buffer.push(frame(ms, keyframe), age);
 		}
 		buffer.push(frame(95, false), age);
-		let kept: Vec<_> = buffer.frames.iter().map(|f| f.timestamp.as_millis()).collect();
+		let kept: Vec<_> = buffer.frames.iter().map(|f| f.timestamp.as_millis().unwrap()).collect();
 		assert_eq!(kept, [100, 110], "80, 90 and 95 reference the evicted group");
 		assert_eq!(buffer.bytes, 14);
-		assert_eq!(buffer.oldest().unwrap().as_millis(), 100);
+		assert_eq!(buffer.oldest().unwrap().as_millis().unwrap(), 100);
 		buffer.push(frame(200, true), age);
 		buffer.push(frame(180, false), age);
 		assert_eq!(buffer.frames.len(), 4, "a continuous group keeps its leading pictures");
@@ -183,16 +187,16 @@ mod tests {
 			buffer
 				.frames
 				.iter()
-				.map(|f| f.timestamp.as_millis())
+				.map(|f| f.timestamp.as_millis().unwrap())
 				.collect::<Vec<_>>(),
 			[0, 99, 33, 66]
 		);
-		assert_eq!(buffer.edge.unwrap().as_millis(), 99);
+		assert_eq!(buffer.edge.unwrap().as_millis().unwrap(), 99);
 		buffer.clear();
 		assert_eq!(buffer.bytes, 0);
 		assert!(buffer.frames.is_empty());
 		buffer.push(frame(1, true), Duration::ZERO);
-		assert_eq!(buffer.edge.unwrap().as_millis(), 1);
+		assert_eq!(buffer.edge.unwrap().as_millis().unwrap(), 1);
 	}
 	#[test]
 	fn age_expiry_finds_a_reordered_picture_behind_the_front() {

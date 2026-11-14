@@ -8,6 +8,7 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
 
 // The first group ID a `number` cannot hold, and the largest a QUIC varint carries.
@@ -109,8 +110,14 @@ for (const wire of WIRES) {
 
 		for (const sequence of [PAST_SAFE, MAX_QUIC]) {
 			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: enc.encode(`first ${sequence}`) });
-			group.writeFrame({ payload: enc.encode(`second ${sequence}`) });
+			group.writeFrame({
+				payload: enc.encode(`first ${sequence}`),
+				timestamp: Timestamp.unscaled(group.sequence),
+			});
+			group.writeFrame({
+				payload: enc.encode(`second ${sequence}`),
+				timestamp: Timestamp.unscaled(group.sequence),
+			});
 			group.finish();
 
 			const received = await reader.recvGroup();
@@ -124,7 +131,11 @@ for (const wire of WIRES) {
 		if (datagrams) {
 			const unreliable = remote.datagrams("video");
 			await unreliable.info();
-			datagrams.insert({ sequence: PAST_SAFE + 1n, payload: enc.encode("datagram") });
+			datagrams.insert({
+				sequence: PAST_SAFE + 1n,
+				timestamp: Timestamp.unscaled(PAST_SAFE + 1n),
+				payload: enc.encode("datagram"),
+			});
 			const received = await unreliable.recv();
 			expect(received?.sequence).toBe(PAST_SAFE + 1n);
 			expect(dec.decode(received?.payload)).toBe("datagram");

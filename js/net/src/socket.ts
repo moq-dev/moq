@@ -603,7 +603,7 @@ class Session {
 			for (;;) {
 				const frame = await group.readFrame();
 				if (!frame) break;
-				this.#local?.writeFrame({ payload: frame.payload });
+				this.#local?.writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
 			}
 		} finally {
 			group.close();

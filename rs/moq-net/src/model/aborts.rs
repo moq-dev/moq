@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// One registration per wire publisher, with pending sequences bounded by the cuts
+/// One registration per wire publisher, with pending keys bounded by the cuts
 /// between two polls.
 #[derive(Default)]
 pub(super) struct Aborts {
@@ -32,14 +32,14 @@ impl Aborts {
 		}
 	}
 
-	/// Tell every watcher that the publisher cut group `sequence`.
-	pub(super) fn notify(&self, sequence: u64) {
+	/// Tell every watcher that the publisher cut group `key`.
+	pub(super) fn notify(&self, key: u64) {
 		let mut wakes = Vec::new();
 		{
 			let readers = self.readers.lock();
 			for reader in readers.values() {
 				let mut state = reader.lock();
-				if state.pending.insert(sequence) {
+				if state.pending.insert(key) {
 					wakes.push(state.waiters.take());
 				}
 			}

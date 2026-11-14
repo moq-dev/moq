@@ -6,6 +6,7 @@ import { connect } from "../connection/connect.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Timestamp } from "../time.ts";
 import { ALPN_06, ALPN_07_WIP } from "./version.ts";
 
 for (const downstream of [ALPN_06, ALPN_07_WIP]) {
@@ -47,7 +48,8 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			const reader = remote.subscribe({ delay: { max: Duration.millis(1000) } });
 			const group = track.appendGroup();
 			const payloads = [new Uint8Array(4096).fill(7), new Uint8Array(), new Uint8Array(4096).fill(7)];
-			for (const payload of payloads) group.writeFrame({ payload });
+			for (const payload of payloads)
+				group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 			group.finish();
 			const received = await reader.recvGroup();
 			if (!received) throw new Error("missing group");
@@ -61,8 +63,8 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			const unreliable = active.datagrams("data");
 			await unreliable.info();
 			while (datagrams.priority.peek() === undefined) await datagrams.priority.changed();
-			for (const payload of [new Uint8Array(100).fill(4), new Uint8Array(100).fill(8)]) {
-				datagrams.append(undefined, payload);
+			for (const [i, payload] of [new Uint8Array(100).fill(4), new Uint8Array(100).fill(8)].entries()) {
+				datagrams.append(Timestamp.unscaled(i), payload);
 				expect((await unreliable.recv())?.payload).toEqual(payload);
 			}
 			unreliable.close();

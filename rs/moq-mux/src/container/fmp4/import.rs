@@ -166,8 +166,8 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	// `container::Producer`), so it reports what its estimator measured itself.
 	member: Option<crate::catalog::interval::Member>,
 
-	// Sequence to use for the next group, set by `Import::seek`.
-	pending_sequence: Option<u64>,
+	// Start to key the next group with instead of its fragment's timestamp, set by `Import::seek`.
+	pending_start: Option<u64>,
 
 	// Measures the track's catalog jitter and bitrate from the fragments; the descriptor's own
 	// bitrate, when it declares one, still wins over what this measures.
@@ -192,12 +192,12 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.rendition.estimate(reading)
 	}
 
-	/// Close the open group, so the next fragment opens one at `pending_sequence` or the next.
+	/// Close the open group, so the next fragment opens one at `pending_start` or its own timestamp.
 	fn close(&mut self) -> crate::Result<()> {
 		self.estimator.cut(None);
 		self.publish_estimate()?;
 		if let Some(group) = self.group.take() {
-			group.finish()?;
+			group.close()?;
 		}
 		Ok(())
 	}
@@ -639,7 +639,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			group: None,
 			start: None,
 			member,
-			pending_sequence: None,
+			pending_start: None,
 			estimator: self.catalog.estimator(),
 			claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
 		})
@@ -1262,7 +1262,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								};
 								producer.commit(sample)?;
 								if last {
-									producer.burst(pending.run.end.checked_sub(pending.run.earliest)?.into())?;
+									let span = pending.run.end.checked_sub(pending.run.earliest)?;
+									producer.burst(span.try_into()?)?;
 								}
 							}, _ => unreachable!()),
 						}
@@ -1414,7 +1415,10 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 				.map(|duration| Timestamp::new(duration as u64, timescale))
 				.transpose()?;
 			if let Some(duration) = duration_ts {
-				self.sample_duration = Some(self.sample_duration.map_or(duration, |min| min.min(duration)));
+				self.sample_duration = Some(
+					self.sample_duration
+						.map_or(duration, |min| crate::container::earlier(min, duration)),
+				);
 			}
 
 			let presented = self.edit.present(pts)?;
@@ -1427,8 +1431,8 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 					Some(duration) => timestamp.checked_add(duration)?,
 					None => timestamp,
 				};
-				end = Some(end.map_or(sample_end, |max: Timestamp| max.max(sample_end)));
-				earliest = Some(earliest.map_or(timestamp, |min: Timestamp| min.min(timestamp)));
+				end = Some(end.map_or(sample_end, |max| crate::container::later(max, sample_end)));
+				earliest = Some(earliest.map_or(timestamp, |min| crate::container::earlier(min, timestamp)));
 
 				samples.push(Sample {
 					dts,
@@ -1593,7 +1597,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// Audio follows segment boundaries; video also waits for a sync first sample so a new
 		// group's first fragment can be decoded independently.
 		let keyframe = placement.keyframe(kind, run.samples.first().ok_or(Error::MissingTrun)?);
-		let start_group = self.group.is_none() || (placement.new_segment && keyframe);
+		let mut start_group = self.group.is_none() || (placement.new_segment && keyframe);
 		// A group may not start below the one before it. Refused before the open group closes or
 		// a new one opens, so a rewound fragment publishes nothing, as an unwrapped track does.
 		if start_group
@@ -1602,13 +1606,28 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		{
 			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
 		}
+		// A group is keyed by its first fragment's timestamp, which has to start after every group
+		// the track holds. A segment that doesn't continues the open group instead; with none open
+		// it is refused.
+		let start = match start_group && self.pending_start.is_none() {
+			true => match (crate::start::opens(&self.track, timestamp)?, &self.group) {
+				(Some(start), _) => Some(start),
+				(None, Some(_)) => {
+					start_group = false;
+					None
+				}
+				(None, None) => Some(crate::start::after(&self.track, timestamp)?),
+			},
+			false => None,
+		};
 		let group = if start_group {
 			if let Some(prev) = self.group.take() {
-				prev.finish()?;
+				prev.close()?;
 			}
-			match self.pending_sequence.take() {
-				Some(sequence) => self.track.create_group(moq_net::group::Info { sequence })?,
-				None => self.track.append_group()?,
+			match (self.pending_start.take(), start) {
+				(Some(start), _) => self.track.create_group(moq_net::group::Info { start })?,
+				(None, Some(start)) => self.track.append_group(start)?,
+				(None, None) => unreachable!("a new group without a pending start has one"),
 			}
 		} else {
 			self.group.take().ok_or(Error::NoKeyframe)?
@@ -1624,7 +1643,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			.checked_add(run.samples.iter().map(|sample| sample.range.len()).sum())
 			.ok_or(Error::InvalidDataOffset)?;
 		let mut writer = group.create_frame(moq_net::frame::Info {
-			timestamp: Some(timestamp),
+			timestamp,
 			size: size as u64,
 		})?;
 		writer.write(prefix)?;
@@ -1650,7 +1669,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.estimator.write(timestamp, pending.size);
 		let bytes = run.samples.iter().map(|sample| sample.range.len()).sum();
 		self.sent.add(run.samples.len() as u64, bytes, keyframes);
-		self.estimator.burst(end.checked_sub(timestamp)?.into());
+		self.estimator.burst(end.checked_sub(timestamp)?.try_into()?);
 		self.estimator.reach(end);
 		self.publish_estimate()?;
 		Ok(())
@@ -1764,39 +1783,39 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 	}
 
-	/// Close the current group on every track and open the next one at `sequence`.
+	/// Close the current group on every track and open the next one at `start`, in each track's timescale.
 	///
 	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
-	/// control is intentionally not exposed. Skipping sequences is not a new timeline, so the
+	/// control is intentionally not exposed. Skipping ahead is not a new timeline, so the
 	/// next fragment must still advance past the last decode time; see
 	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
-	/// is already past `sequence` continues from its own next group instead. Video resumes at its
+	/// is already past `start` continues from its own next start instead. Video resumes at its
 	/// next sync sample, dropping the samples before it.
 	///
 	/// A fragment whose samples are still arriving owns its groups until its last sample, so the
 	/// seek waits for it to finish publishing.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+	pub fn seek(&mut self, start: u64) -> Result<()> {
 		self.input.check()?;
 		if self.publishing() {
-			self.deferred.seek = Some(sequence);
+			self.deferred.seek = Some(start);
 			return Ok(());
 		}
-		self.apply_seek(sequence)
+		self.apply_seek(start)
 	}
 
-	fn apply_seek(&mut self, sequence: u64) -> Result<()> {
+	fn apply_seek(&mut self, start: u64) -> Result<()> {
 		for track in self.text.values_mut() {
-			let next = track.producer.next_sequence();
-			track.producer.seek(sequence.max(next))?;
+			let next = track.producer.next_start();
+			track.producer.seek(start.max(next))?;
 		}
 		for track in self.tracks.values_mut() {
 			// The next group opens on a sync sample, so video drops the samples before one.
 			if track.kind == Kind::Video {
 				track.orphaned = true;
 			}
-			media!(&mut track.output, producer => producer.seek(sequence)?, passthrough => {
+			media!(&mut track.output, producer => producer.seek(start)?, passthrough => {
 				passthrough.close()?;
-				passthrough.pending_sequence = Some(sequence);
+				passthrough.pending_start = Some(start);
 			});
 		}
 		Ok(())
@@ -2361,7 +2380,17 @@ mod tests {
 		}
 	}
 
-	/// Each closed group's sequence and frame count, or `None` for a group that failed.
+	/// Where a group at `ticks` of the source's 44.1 kHz audio starts on `consumer`'s track.
+	fn start(consumer: &moq_net::track::Subscriber, ticks: u64) -> u64 {
+		let timescale = consumer.info().timescale.expect("a timed track");
+		Timestamp::from_scale(ticks, 44_100)
+			.unwrap()
+			.convert(timescale)
+			.unwrap()
+			.value()
+	}
+
+	/// Each closed group's start and frame count, or `None` for a group that failed.
 	fn groups(consumer: &mut moq_net::track::Subscriber) -> Vec<(u64, Option<usize>)> {
 		use futures::FutureExt;
 		let mut groups = Vec::new();
@@ -2375,10 +2404,10 @@ mod tests {
 						frames = None;
 						break;
 					}
-					None => panic!("group {} left open", group.sequence),
+					None => panic!("group {} left open", group.start),
 				}
 			}
-			groups.push((group.sequence, frames));
+			groups.push((group.start, frames));
 		}
 		groups
 	}
@@ -2399,9 +2428,10 @@ mod tests {
 			import.seek(100).unwrap();
 			import.decode(&sample[SIZE / 2..]).unwrap();
 			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
-			// The discontinuity lets the next fragment restate the decode time.
+			// The discontinuity lets the next fragment restate a decode time inside the last
+			// fragment, past its start: group starts strictly increase.
 			import
-				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
+				.decode(&media_header(id, 512, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&sample).unwrap();
 			let _finished = import.finish().unwrap();
@@ -2426,9 +2456,10 @@ mod tests {
 			// In place, so the tracks can be inspected after the failure.
 			let err = import.finish_in_place().unwrap_err();
 			assert!(matches!(err, crate::Error::Mp4(_)), "{err:?}");
+			let second = start(&consumer, 1024);
 			assert_eq!(
 				groups(&mut consumer),
-				[(0, Some(1)), (1, None)],
+				[(0, Some(1)), (second, None)],
 				"passthrough: {passthrough}"
 			);
 			let finished = match &import.tracks[&id].output {
@@ -2461,7 +2492,8 @@ mod tests {
 				err.to_string()
 			);
 			let _finished = import.finish().unwrap();
-			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
+			let first = start(&consumer, 48_000);
+			assert_eq!(groups(&mut consumer), [(first, Some(1))], "passthrough: {passthrough}");
 		}
 	}
 }

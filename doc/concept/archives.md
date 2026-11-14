@@ -43,9 +43,11 @@ each relay by listing it in [`listen.version`](/bin/relay/config#listen), plus
 `connect.version` for its cluster links. A relay left at its default versions
 cannot negotiate moq-lite 07.
 
-Recording starts with content the subscription can still receive. A missing
-group is given up after the publisher's max age capped by the producer's max
-delay, so a gap cannot stall later groups. Only stream tracks are recorded: a
+Recording starts with content the subscription can still receive. Groups are
+stored in start order. A group the track still owes is given up once newer
+content runs the publisher's max age, capped by the producer's max delay, ahead
+of it, so a gap cannot stall later groups; one the publisher skipped or dropped
+is never waited for. Only stream tracks are recorded: a
 datagram track is live-only, so an archive's playback never includes it. An
 archive cannot recover content already lost or evicted before it subscribed. The same max delay
 (`producer::Config::max_delay`, 10 s by default and in `moq export archive`)
@@ -57,7 +59,7 @@ path and [instance](/concept/identity). Restarting a recorder on the same instan
 and prefix resumes after each track's last stored frame, within that max delay:
 an interruption longer than it leaves a gap. A prefix already marked complete
 records nothing. Never append a new publisher run that restarts its
-group numbers to an old prefix. `moq export archive` makes this choice for you.
+group starts to an old prefix. `moq export archive` makes this choice for you.
 
 ## What the store holds
 
@@ -65,8 +67,8 @@ Tracks have separate directories, with each track name percent-encoded as one
 segment. Within one broadcast prefix:
 
 - Each track's `.info` stores its timescale, when timed, and priority.
-- Data objects are keyed by their first group, frame index, and presentation
-  timestamp; untimed tracks omit the timestamp. The sorted key listing is the
+- Data objects are keyed by their first group's start, frame index, and
+  presentation timestamp; untimed tracks omit the timestamp. The sorted key listing is the
   index, with no manifest or timeline object.
 - Each track's `end` records its final position or stream error. The broadcast's
   `.end` marks the recording complete, after its track markers are written.
@@ -94,8 +96,8 @@ The host chooses the output path and a fresh instance, as
 [`moq import archive`](/bin/cli#archive) does. A relay routes that publication
 like any other broadcast; it does not look in object storage on a cache miss.
 
-Each track starts live at its newest stored sequence and serves older groups
-from storage when requested by group position. It advertises no max age, so the
+Each track starts live at its newest stored group and serves older groups
+from storage when requested by their start. It advertises no max age, so the
 source's live max age cannot make archived history stale. A growing recording is
 periodically listed for new tracks and objects. Once `.end` appears, refreshing
 stops and tracks end as recorded; without it, including when a recorder stopped

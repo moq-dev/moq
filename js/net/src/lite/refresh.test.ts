@@ -6,6 +6,7 @@ import { connect } from "../connection/connect.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Timestamp } from "../time.ts";
 import { SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_06, ALPN_07_WIP } from "./version.ts";
 
@@ -47,8 +48,8 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : null);
 		const baseline = remote.subscribe();
 		const group = producer.appendGroup();
-		group.writeFrame({ payload: new Uint8Array(3) });
-		group.writeFrame({ payload: new Uint8Array(3) });
+		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.sequence) });
+		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.sequence) });
 		const received = await baseline.recvGroup();
 		if (!received) throw new Error("group missing");
 		expect((await received.readFrame())?.payload.length).toBe(3);
@@ -57,7 +58,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		await clock.advance(Duration.nanos(0));
 		expect(producer.demand().wanted.peek()).toBe(0n);
 		updates.length = 0;
-		group.writeFrame({ payload: new Uint8Array(1) });
+		group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.sequence) });
 		expect((await received.readFrame())?.payload.length).toBe(1);
 		for (let i = 0; i < 8; i++) joins.push(remote.subscribe());
 		await clock.advance(Duration.nanos(0));

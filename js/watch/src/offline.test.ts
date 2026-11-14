@@ -6,6 +6,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { key } from "../../json/src/key.test-util.ts";
 import { accept, connect } from "../../net/src/connection/index.ts";
 import * as Lite from "../../net/src/lite/index.ts";
 import { createMockTransportPair, waitFor } from "../../net/src/mock.ts";
@@ -25,7 +26,7 @@ test("a live broadcast reads connecting until connected and again once the conne
 		track: route.broadcast.createTrack(Catalog.TRACK),
 		deltas: false,
 	});
-	producer.update({ value: {} });
+	producer.update({ value: {}, at: key() });
 
 	const viewer = new Origin.Producer();
 	const source = new Broadcast({ origin: viewer, name, catalogFormat: "hang", enabled: true });

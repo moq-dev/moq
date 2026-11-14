@@ -6,25 +6,31 @@
 import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks } from "./internal.ts";
-import { rescale } from "./rescale.ts";
-import { Timescale, type Timestamp } from "./time.ts";
+import { rescaleIn } from "./rescale.ts";
+import { keyOf, Timescale, type Timestamp } from "./time.ts";
 import { checkSequence, max } from "./util/sequence.ts";
 
-export { rescale } from "./rescale.ts";
+export { rescale, rescaleIn } from "./rescale.ts";
 
 /** A single unreliable payload, addressed within its datagram track. */
 export interface Datagram {
 	/** The datagram track's own sequence number. */
 	sequence: bigint;
-	/** Presentation timestamp, present exactly when the track has a timescale. */
-	timestamp?: Timestamp;
+	/**
+	 * Presentation timestamp in the track's timescale, or on a scale-less track
+	 * {@link Timestamp.unscaled} at its sequence.
+	 */
+	timestamp: Timestamp;
 	/** The datagram payload. */
 	payload: Uint8Array;
 }
 
 /** Publisher properties fixed for the lifetime of a datagram track. */
 export interface Info {
-	/** Timestamp units per second, or `null` for an untimed track. */
+	/**
+	 * Timestamp units per second, or `null` for a scale-less (untimed) track, whose datagrams'
+	 * timestamps are {@link Timestamp.unscaled} at their sequence.
+	 */
 	timescale: Timescale | null;
 	/** Publisher priority, higher first, breaking ties between subscriber priorities. */
 	priority: number;
@@ -145,9 +151,15 @@ export class Producer {
 		return consume(this.name, this.#state);
 	}
 
-	/** Append a payload with the next sequence, returning that sequence. */
-	append(timestamp: Timestamp | undefined, payload: Uint8Array): bigint {
-		const sequence = this.#state.next;
+	/**
+	 * Append a payload with the next sequence, returning that sequence.
+	 *
+	 * A scale-less track has no time, so its datagram's {@link Timestamp.unscaled} names the
+	 * sequence instead, as its key names a group. A timestamp that doesn't match the track
+	 * throws a `TimestampMismatch`.
+	 */
+	append(timestamp: Timestamp, payload: Uint8Array): bigint {
+		const sequence = keyOf(timestamp) ?? this.#state.next;
 		this.insert({ sequence, timestamp, payload });
 		return sequence;
 	}
@@ -161,7 +173,8 @@ export class Producer {
 		if (!properties) throw new Error("datagram track has not been accepted");
 		const sequence = checkSequence(datagram.sequence);
 		if (datagram.payload.byteLength > MAX_PAYLOAD) throw new Error("datagram payload too large");
-		const timestamp = rescale(properties, datagram.timestamp);
+		// A scale-less datagram's timestamp is its sequence.
+		const timestamp = rescaleIn(properties, datagram.timestamp, sequence);
 		// A small view must not pin a peer's larger receive buffer.
 		const payload = new Uint8Array(datagram.payload);
 		state.next = max(state.next, sequence + 1n);

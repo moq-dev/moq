@@ -203,7 +203,10 @@ impl Protocol {
 			// plus a joining FETCH or fill for that group's head.
 			Self::Tcp => reliable,
 			// Starts at group 0, so a burst written before the answer is kept.
-			Self::Track => reliable.with_range(0..),
+			Self::Track => reliable.with_ranges([crate::track::Range {
+				start: crate::track::Anchor::Time(0),
+				end: None,
+			}]),
 		}
 	}
 }
@@ -262,7 +265,7 @@ impl sealed::Open for TcpStream {
 			peer,
 			session,
 		} = parts;
-		let (producer, ours) = match track.create_group(group::Info { sequence: 0 }) {
+		let (producer, ours) = match track.create_group(group::Info { start: 0 }) {
 			Ok(group) => {
 				let demand = group.demand();
 				(group, Some(demand))
@@ -270,15 +273,14 @@ impl sealed::Open for TcpStream {
 			// The track already ended, such as by the endpoint closing: hand out a half
 			// that reports it.
 			Err(err) => {
-				let group =
-					group::Producer::new(group::Info { sequence: 0 }, track::Info::default(), Default::default());
+				let group = group::Producer::new(group::Info { start: 0 }, track::Info::default(), Default::default());
 				let _ = group.handle().abort(err);
 				(group, None)
 			}
 		};
 		// The application reads a copy of the peer's half that the pump fills, so the
 		// session can end it: the peer's own copy is the session's, not this side's.
-		let local = group::Producer::new(group::Info { sequence: 0 }, track::Info::default(), Default::default());
+		let local = group::Producer::new(group::Info { start: 0 }, track::Info::default(), Default::default());
 		let consumer = local.consume();
 		let pump = Pump {
 			shared: shared.clone(),
@@ -1261,8 +1263,8 @@ impl Pump {
 			match subscriber.poll_recv_group(waiter) {
 				Poll::Pending => {}
 				Poll::Ready(Ok(Some(group))) => {
-					if group.sequence != 0 {
-						tracing::debug!(sequence = group.sequence, "a second group on a tcp session");
+					if group.start != 0 {
+						tracing::debug!(key = group.start, "a second group on a tcp session");
 						return Err(Error::ProtocolViolation);
 					}
 					self.received = true;
@@ -1281,7 +1283,7 @@ impl Pump {
 			while let Poll::Ready(largest) = subscriber.poll_largest(waiter) {
 				match largest {
 					Some(largest) if largest.group > 0 => {
-						tracing::debug!(sequence = largest.group, "a second group on a tcp session");
+						tracing::debug!(key = largest.group, "a second group on a tcp session");
 						return Err(Error::ProtocolViolation);
 					}
 					Some(_) => {}
@@ -1313,7 +1315,7 @@ impl Pump {
 				&& self.subscriber.is_none()
 				&& let Some(local) = self.local.take()
 			{
-				let _ = local.finish();
+				let _ = local.close();
 			}
 			return Ok(());
 		};
@@ -1322,19 +1324,19 @@ impl Pump {
 			if let Some(frame) = &self.pending {
 				let info = frame::Info {
 					size: frame.payload.len() as u64,
-					timestamp: None,
+					timestamp: frame.timestamp,
 				};
 				if local.poll_ready(waiter, &info).is_pending() {
 					return Ok(());
 				}
 				let frame = self.pending.take().expect("checked above");
-				local.write_frame(None, frame.payload)?;
+				local.write_frame(frame.timestamp, frame.payload)?;
 			}
 			match remote.poll_read_frame(waiter) {
 				Poll::Pending => return Ok(()),
 				Poll::Ready(Ok(Some(frame))) => self.pending = Some(frame),
 				Poll::Ready(Ok(None)) => {
-					self.local.take().expect("checked above").finish()?;
+					self.local.take().expect("checked above").close()?;
 					self.remote = None;
 					return Ok(());
 				}

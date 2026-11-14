@@ -20,7 +20,10 @@ try {
 		// One group per track, never finished, so every group the reader receives stays live.
 		for (let i = 0; i < count; i++) {
 			const group = publication.broadcast.createTrack(String(i)).appendGroup();
-			group.writeFrame({ payload: new TextEncoder().encode(String(i)) });
+			group.writeFrame({
+				payload: new TextEncoder().encode(String(i)),
+				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+			});
 		}
 		publication.announce();
 		const session = await Moq.Connection.connect({ url, publish: origin.consume() });

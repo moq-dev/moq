@@ -51,7 +51,7 @@ static void on_catalog(void *data, int32_t id) {
 }
 
 static void check_frame(Context *c, const moq_audio_frame *frame) {
-    CHECK(frame->timestamp.scale == 1000000);
+    CHECK(frame->timestamp.has_scale && frame->timestamp.scale == 1000000);
     CHECK(frame->timestamp.value == 123000 + c->frames * 1000000 / 48000);
     size_t bytes = c->format == MOQ_AUDIO_SAMPLE_FORMAT_S16 ? 2 : 4;
     CHECK(frame->data_size % (bytes * c->channels) == 0);
@@ -115,7 +115,7 @@ int main(void) {
     CHECK(producer > 0);
     float pcm[960 * 2];
     for (size_t sample = 0; sample < 960; sample++) { pcm[sample * 2] = 0.25f; pcm[sample * 2 + 1] = -0.5f; }
-    moq_audio_frame frame = {{123000, 1000000}, (const uint8_t *)pcm, sizeof(pcm)};
+    moq_audio_frame frame = {{123000, 1000000, true}, (const uint8_t *)pcm, sizeof(pcm)};
     CHECK(moq_encode_audio_frame((uint32_t)producer, &frame) == 0);
     CHECK(moq_encode_audio_finish((uint32_t)producer) == 0);
 

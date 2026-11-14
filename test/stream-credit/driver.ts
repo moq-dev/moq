@@ -157,7 +157,10 @@ try {
 	let open: Moq.Group.Producer[] = [];
 	const write = (sequence: number, frame: number) => {
 		for (const [i, group] of open.entries())
-			group.writeFrame({ payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, frame)) });
+			group.writeFrame({
+				payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, frame)),
+				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+			});
 	};
 	for (let sequence = 0; sequence < GROUPS; sequence++) {
 		for (const group of open) group.finish();

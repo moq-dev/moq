@@ -6,8 +6,10 @@
 //! consumer that has not read them yet still gets them, then the clean end.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
-use moq_net::{Error, Timestamp};
+use moq_net::Error;
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
 /// and superseded groups stay readable.
@@ -27,8 +29,8 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 const GROUPS: u64 = 2;
 
 /// Publish `GROUPS` finished groups, declare the end at `GROUPS`, then abort the track.
-/// Returns the sequences a consumer that starts reading only now receives, in arrival
-/// or in sequence order, and how the read ended.
+/// Returns the keys a consumer that starts reading only now receives, in arrival
+/// or in key order, and how the read ended.
 async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	let origin = produce_origin(1);
 	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
@@ -36,14 +38,14 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	// From the first group with a replay window: a late reader is owed the whole track,
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
-		.with_range(0..)
+		.with_ranges([support::keys(0..)])
 		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 	let mut consumer = track.subscribe(subscription);
 
 	for _ in 0..GROUPS {
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"frame".as_slice()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"frame".as_slice()).unwrap();
+		group.close().unwrap();
 	}
 	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
 	// Every group below the end is finished: the end has settled and the track is
@@ -57,7 +59,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 		let mut consumer = consumer.ordered();
 		loop {
 			match consumer.next_group().await {
-				Ok(Some(group)) => got.push(group.sequence),
+				Ok(Some(group)) => got.push(group.start),
 				Ok(None) => return (got, None),
 				Err(err) => return (got, Some(err)),
 			}
@@ -65,7 +67,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	}
 	loop {
 		match consumer.recv_group().await {
-			Ok(Some(group)) => got.push(group.sequence),
+			Ok(Some(group)) => got.push(group.start),
 			Ok(None) => return (got, None),
 			Err(err) => return (got, Some(err)),
 		}
@@ -86,15 +88,15 @@ async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_reader() {
 	assert_whole(round(true, false).await, "arrival order, aborted after the end settled");
 }
 
-/// The same in sequence order: the ordered cursor ends clean too, not with the abort.
+/// The same in key order: the ordered cursor ends clean too, not with the abort.
 #[kio::test]
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_ordered_reader() {
-	assert_whole(round(true, true).await, "sequence order, aborted after the end settled");
+	assert_whole(round(true, true).await, "key order, aborted after the end settled");
 }
 
 /// Control: with no abort the same late reader gets every group, then the clean end.
 #[kio::test]
 async fn a_settled_track_delivers_every_group_to_a_late_reader() {
 	assert_whole(round(false, false).await, "arrival order, no abort");
-	assert_whole(round(false, true).await, "sequence order, no abort");
+	assert_whole(round(false, true).await, "key order, no abort");
 }

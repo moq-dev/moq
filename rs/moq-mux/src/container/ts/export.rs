@@ -577,7 +577,9 @@ impl Track {
 			pending.restart += 1;
 			pending.skip += 1;
 		}
-		let high = high.filter(|_| !stepped).map_or(pts, |high| high.max(pts));
+		let high = high
+			.filter(|_| !stepped)
+			.map_or(pts, |high| crate::container::later(high, pts));
 		self.high = Some((pending.restart, high));
 	}
 
@@ -612,6 +614,11 @@ impl Track {
 					if (input.waiting_for_header || !self.listed) && !self.source.header_ready() {
 						*input.trimmed += 1;
 						continue;
+					}
+					// Media is timed: a scale-less track's unscaled key has no time to mux at. Refused
+					// here, so every frame the exporter holds has one (see [`nanos`]).
+					if frame.timestamp.scale().is_none() {
+						return Err(moq_net::Error::TimestampMismatch.into());
 					}
 					let mut pending = Pending {
 						frame,
@@ -774,7 +781,7 @@ impl Track {
 		frame: &Frame,
 	) -> anyhow::Result<(Timestamp, Option<PesStart>)> {
 		let lead = delay.saturating_sub(self.ahead(delay));
-		let key = Duration::from(decode)
+		let key = Duration::try_from(decode)?
 			.checked_add(lead)
 			.context("MPEG-TS decode time past the end of the timeline")?;
 		let mut key = Timestamp::try_from(key)?;
@@ -784,7 +791,7 @@ impl Track {
 		{
 			key = match start.is_some() && shared == start {
 				true => previous,
-				false => key.max(previous),
+				false => crate::container::later(key, previous),
 			};
 		}
 		self.released = Some((decode, key, start));
@@ -889,7 +896,7 @@ impl Track {
 		// sent ahead by its send-ahead: judged as arriving that much earlier, as a live source
 		// sends it, every track's first frames are on the clock whichever anchors it.
 		let ahead = match jitter.replaying() {
-			true => (Duration::from(decode) + jitter.delay()).saturating_sub(Duration::from(key)),
+			true => (Duration::try_from(decode)? + jitter.delay()).saturating_sub(Duration::try_from(key)?),
 			false => Duration::ZERO,
 		};
 		// Logical clocks can begin at zero. Shift both readings by the same representable amount so
@@ -899,7 +906,7 @@ impl Track {
 		let arrival = Arrival {
 			arrived: arrived.saturating_sub(ahead),
 			read: read.saturating_sub(ahead),
-			decode: key.into(),
+			decode: key.try_into()?,
 			restart,
 			sync,
 			leading,
@@ -1272,7 +1279,7 @@ impl Pack {
 	/// When the frame after the last presents, in microseconds, if the frames run on without
 	/// a gap.
 	fn end(&self) -> u128 {
-		self.unit.timestamp.as_micros() + u128::from(self.samples) * 1_000_000 / u128::from(self.rate)
+		nanos(self.unit.timestamp) / 1_000 + u128::from(self.samples) * 1_000_000 / u128::from(self.rate)
 	}
 }
 
@@ -1479,7 +1486,10 @@ impl SiTrack {
 			let (promote, drop_pending) = match group.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
 					snapshot.apply(&frame.payload);
-					*timestamp = (*timestamp).max(frame.timestamp.unwrap_or(Timestamp::ZERO));
+					// A scale-less track's frames carry no time, so its revision stays at zero.
+					if frame.timestamp.scale().is_some() {
+						*timestamp = crate::container::later(*timestamp, frame.timestamp);
+					}
 					(false, false)
 				}
 				Poll::Ready(Ok(None)) => (true, false),
@@ -1521,9 +1531,7 @@ impl SiTrack {
 			self.poll(&kio::Waiter::noop());
 			let Some(revision) = &self.future else { break };
 			if !interval.is_zero() {
-				let stamped = Duration::from(revision.timestamp)
-					.as_nanos()
-					.div_ceil(interval.as_nanos());
+				let stamped = nanos(revision.timestamp).div_ceil(interval.as_nanos());
 				let at = revision
 					.after
 					.map_or(stamped, |after| stamped.max(slot(after, interval) + 1));
@@ -1537,7 +1545,10 @@ impl SiTrack {
 			self.dirty |= snapshot != self.active;
 			self.active = snapshot;
 		}
-		self.position = Some(self.position.map_or(timestamp, |position| position.max(timestamp)));
+		self.position = Some(
+			self.position
+				.map_or(timestamp, |position| crate::container::later(position, timestamp)),
+		);
 	}
 
 	/// Take a due snapshot, keeping revisions and repeats on their respective cadence.
@@ -1558,7 +1569,10 @@ impl SiTrack {
 		self.dirty = false;
 		// A zero interval can emit on a reordered PTS. Keep the anchor ahead of it,
 		// or raising the interval later could credit that reorder span as elapsed time.
-		self.last_emit = Some(self.last_emit.map_or(timestamp, |last| last.max(timestamp)));
+		self.last_emit = Some(
+			self.last_emit
+				.map_or(timestamp, |last| crate::container::later(last, timestamp)),
+		);
 		Some(self.active.sections().cloned().collect())
 	}
 }
@@ -1882,8 +1896,8 @@ where
 				self.jitter.discard(&ready);
 			} else {
 				self.program.last_timestamp = Some(ready.item.frame.timestamp);
-				let decode = ready.item.decode.as_nanos();
-				self.lay_before(ready.item.key.as_nanos())?;
+				let decode = nanos(ready.item.decode);
+				self.lay_before(nanos(ready.item.key))?;
 				match self.list(&name)? {
 					true => self.mux(&name, ready.item)?,
 					false => self
@@ -3007,7 +3021,7 @@ where
 		if matches!(kind, Kind::Video(_)) {
 			if self.program.video_out.is_none() {
 				self.program.video_out = Some(queued.key);
-				self.program.video_start = Some(start.max(queued.frame.timestamp));
+				self.program.video_start = Some(crate::container::later(start, queued.frame.timestamp));
 			}
 			return false;
 		}
@@ -3026,9 +3040,9 @@ where
 			.filter_map(|(_, track)| self.jitter.peek(&track.key))
 			.map(|next| match placed {
 				true => next.key,
-				false => next.frame.timestamp.max(start),
+				false => crate::container::later(next.frame.timestamp, start),
 			})
-			.min();
+			.reduce(crate::container::earlier);
 		let at = match placed {
 			true => queued.key,
 			false => queued.frame.timestamp,
@@ -3097,7 +3111,7 @@ where
 			.values()
 			.filter(|t| matches!(t.kind, Kind::Video(_)))
 			.filter_map(|t| t.pending.as_ref().map(|p| p.frame.timestamp))
-			.min()
+			.reduce(crate::container::earlier)
 	}
 
 	/// Whether `pid`'s next packet is its first since a switch to another instance, so it has
@@ -3440,7 +3454,9 @@ where
 			.iter()
 			.filter_map(|(name, track)| Some((track.parked.front()?.key, name, track.pid)))
 			.collect();
-		waiting.sort();
+		waiting.sort_by(|a, b| {
+			(a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)).then_with(|| (a.1, a.2).cmp(&(b.1, b.2)))
+		});
 		let mut claimed: Vec<u16> = self
 			.program
 			.tracks
@@ -3657,7 +3673,7 @@ where
 			_ => unreachable!("a placed track"),
 		};
 		let pid = track.pid;
-		let place = frame.timestamp.as_nanos();
+		let place = nanos(frame.timestamp);
 		// Its first access unit decodes at the DTS, which a reordered picture carries ahead of its PTS.
 		let decode = pes
 			.as_ref()
@@ -3728,8 +3744,8 @@ where
 				pack.start == start
 					&& pack.rate == rate
 					&& pack.payload.len() + payload.len() <= size
-					&& decode.as_nanos().saturating_sub(pack.decode.as_nanos()) <= budget
-					&& pack.end().abs_diff(unit.timestamp.as_micros()) <= 12
+					&& nanos(decode).saturating_sub(nanos(pack.decode)) <= budget
+					&& pack.end().abs_diff(nanos(unit.timestamp) / 1_000) <= 12
 			});
 		if !joins {
 			self.flush(name)?;
@@ -3746,7 +3762,7 @@ where
 			samples: 0,
 			rate,
 		});
-		pack.frames.push((decode.as_nanos(), payload.len()));
+		pack.frames.push((nanos(decode), payload.len()));
 		pack.payload.extend_from_slice(&payload);
 		pack.samples += samples;
 		// The next frame starts a PES of its own anyway.
@@ -3782,11 +3798,11 @@ where
 			.iter()
 			.filter_map(|(name, track)| {
 				let pack = track.pack.as_ref()?;
-				let by = pack.decode.as_nanos().saturating_sub(track.drain().as_nanos());
+				let by = nanos(pack.decode).saturating_sub(track.drain().as_nanos());
 				done(track, schedule::slot(by)).then(|| (pack.decode, name.clone()))
 			})
 			.collect();
-		due.sort();
+		due.sort_by(|a, b| (a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)).then_with(|| a.1.cmp(&b.1)));
 		for (_, name) in due {
 			self.flush(&name)?;
 		}
@@ -3830,13 +3846,13 @@ where
 				PCR_INTERVAL * u32::try_from(slots).unwrap_or(u32::MAX),
 			);
 		}
-		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
+		let by = nanos(decode).saturating_sub(track.drain().as_nanos());
 		self.lead_tables()?;
 		self.program.schedule.push_frames(
 			pid,
 			super::schedule::Timing {
 				by,
-				decode: decode.as_nanos(),
+				decode: nanos(decode),
 			},
 			out,
 			keyframe,
@@ -3859,6 +3875,7 @@ where
 		let (known, settled) = self.slot_settled()?;
 		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
 		// The tail of the generation still going out keeps its own clock after the next is acquired.
+		let settled = jitter::Decode::try_from(settled).ok()?;
 		Some((known, self.jitter.at(self.program.generation, settled)?))
 	}
 
@@ -4404,7 +4421,7 @@ fn si_due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> 
 	};
 	// Reordered (B-frame) timestamps step backwards; saturate rather than wrap so a
 	// dip never counts as elapsed time (a zero interval still means "every frame").
-	Duration::from(timestamp).saturating_sub(Duration::from(last)) >= interval
+	nanos(timestamp).saturating_sub(nanos(last)) >= interval.as_nanos()
 }
 
 /// DVB's TDT and TOT: tables whose content is the current time, so a repeat of an
@@ -4419,7 +4436,7 @@ fn is_clock_table(table_id: u8) -> bool {
 /// takes before it gets here. Coarser units would floor a sub-unit interval to zero and
 /// divide by it.
 fn slot(timestamp: Timestamp, interval: Duration) -> u128 {
-	Duration::from(timestamp).as_nanos() / interval.as_nanos()
+	nanos(timestamp) / interval.as_nanos()
 }
 
 /// A repetition slot's boundary as a media timestamp.
@@ -4459,7 +4476,7 @@ fn adaptation_size(af: &AdaptationField) -> usize {
 /// AAC's 1,024 samples at 48 kHz.
 fn place(timestamp: Timestamp, samples: u64, rate: u32) -> u128 {
 	let frame = 1_000_000 * u128::from(samples);
-	(timestamp.as_micros() * u128::from(rate) + frame / 2) / frame
+	(nanos(timestamp) / 1_000 * u128::from(rate) + frame / 2) / frame
 }
 
 /// The 33-bit wire timestamp field (90 kHz). DTS and PTS both wrap into it.
@@ -4469,7 +4486,16 @@ const TS_TIMESTAMP_MASK: u64 = (1 << 33) - 1;
 /// this domain so it never wraps mid-stream (the source timestamps are already unwrapped);
 /// [`to_ts_timestamp`] masks to the 33-bit wire field only at emission.
 fn to_ticks(timestamp: Timestamp) -> u64 {
-	(timestamp.as_micros() * 90_000 / 1_000_000) as u64
+	(nanos(timestamp) / 1_000 * 90_000 / 1_000_000) as u64
+}
+
+/// A media timestamp in nanoseconds.
+///
+/// Every timestamp the exporter holds has a scale: a track refuses an unscaled frame as it reads
+/// one ([`Track::fill`]), an SI revision keeps none, and the rest are stamped here. Zero stands in
+/// for one that can't reach here rather than a panic.
+fn nanos(timestamp: Timestamp) -> u128 {
+	timestamp.as_nanos().unwrap_or_default()
 }
 
 fn to_ts_timestamp(timestamp: Timestamp) -> anyhow::Result<TsTimestamp> {
@@ -5390,9 +5416,9 @@ mod tests {
 			assert!(jitter.poll_next(&waiter).is_pending());
 			// The last available audio frame, including its scheduling lead, anchors both orders.
 			let (decode, key, _) = tracks[1].released.unwrap();
-			assert_eq!(decode.as_micros(), 800_000);
+			assert_eq!(decode.as_micros().unwrap(), 800_000);
 			assert_eq!(
-				jitter.at(0, key),
+				jitter.at(0, key.try_into().unwrap()),
 				Some(start.saturating_add(Duration::from_millis(500))),
 				"{order:?}"
 			);
@@ -5403,7 +5429,7 @@ mod tests {
 			})
 			.find(|ready| ready.track.name == "video")
 			.expect("a video start");
-			assert_eq!(video.item.frame.timestamp.as_micros(), 600_000, "{order:?}");
+			assert_eq!(video.item.frame.timestamp.as_micros().unwrap(), 600_000, "{order:?}");
 		}
 	}
 
@@ -5819,7 +5845,10 @@ mod tests {
 
 		// One table per slot the stream covers, however often the reorder revisits a boundary.
 		let first = slot(stamps[0], PSI_INTERVAL);
-		let last = slot(*stamps.iter().max().unwrap(), PSI_INTERVAL);
+		let last = slot(
+			stamps.iter().copied().reduce(crate::container::later).unwrap(),
+			PSI_INTERVAL,
+		);
 		assert_eq!(run_cadence(&stamps, PSI_INTERVAL), (last - first + 1) as usize);
 	}
 

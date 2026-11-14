@@ -15,20 +15,20 @@ use crate::e2ee::terminal::Terminal;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
 	/// Presentation timestamp, or `None` when untimed.
-	pub timestamp: Option<moq_net::Timestamp>,
+	pub timestamp: moq_net::Timestamp,
 	/// Decrypted application bytes.
 	pub plaintext: Bytes,
 }
 
 /// Exclusive writer for one group; frames are numbered from 0 in write order.
 ///
-/// Dropping without [`Self::finish`] or [`Self::abort`] lets the net group close uncleanly.
+/// Dropping without [`Self::close`] or [`Self::abort`] lets the net group close uncleanly.
 pub struct Producer {
 	// The error that aborted the group once a write failed after encryption.
 	inner: std::result::Result<moq_net::group::Producer, Error>,
 	// The parent track's info, which rescales each timestamp before it is encrypted.
 	track: moq_net::track::Info,
-	sequence: u64,
+	start: u64,
 	key: Arc<Mutex<TrackKey>>,
 	next_frame: u32,
 }
@@ -36,7 +36,7 @@ pub struct Producer {
 impl Producer {
 	pub(crate) fn new(inner: moq_net::group::Producer, track: moq_net::track::Info, key: Arc<Mutex<TrackKey>>) -> Self {
 		Self {
-			sequence: inner.sequence,
+			start: inner.start,
 			inner: Ok(inner),
 			track,
 			key,
@@ -44,9 +44,9 @@ impl Producer {
 		}
 	}
 
-	/// The group's sequence number.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+	/// Where the group starts, in the track's timescale: its key on the track.
+	pub fn start(&self) -> u64 {
+		self.start
 	}
 
 	/// Next frame index that will be written.
@@ -66,16 +66,16 @@ impl Producer {
 	///
 	/// [`Error::Identity`] if the next frame exceeds 32 bits, [`Error::Exhausted`],
 	/// [`Error::Oversize`], or a net write error.
-	pub fn write_frame(&mut self, timestamp: impl Into<Option<moq_net::Timestamp>>, plaintext: &[u8]) -> Result<()> {
+	pub fn write_frame(&mut self, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<()> {
 		let inner = self.inner.as_mut().map_err(|err| err.clone())?;
 		let frame = self.next_frame;
 		if frame == u32::MAX {
 			return Err(Error::Identity);
 		}
 		// Checked before the frame identity is spent.
-		let timestamp = self.track.rescale(timestamp.into())?;
+		let timestamp = self.track.rescale_in(timestamp, self.start)?;
 		let payload = self.key.lock().expect("track key").protect(
-			self.sequence,
+			self.start,
 			u64::from(frame),
 			plaintext,
 			MAX_GROUPED_PAYLOAD,
@@ -91,13 +91,13 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Finish the group. No more frames will be written.
+	/// Close the group without a known end. No more frames will be written.
 	///
 	/// # Errors
 	///
 	/// A net error if the group is already closed, or the error a failed write aborted it with.
-	pub fn finish(self) -> Result<()> {
-		self.inner?.finish()?;
+	pub fn close(self) -> Result<()> {
+		self.inner?.close()?;
 		Ok(())
 	}
 
@@ -120,7 +120,7 @@ impl Producer {
 impl fmt::Debug for Producer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("group::Producer")
-			.field("sequence", &self.sequence())
+			.field("start", &self.start())
 			.field("next_frame", &self.next_frame)
 			.finish()
 	}
@@ -132,17 +132,17 @@ impl fmt::Debug for Producer {
 /// [`Error::Authentication`] and the underlying subscription is released.
 pub struct Consumer {
 	inner: Option<moq_net::group::Consumer>,
-	sequence: u64,
+	start: u64,
 	key: Arc<Mutex<TrackKey>>,
 	terminal: Arc<Terminal>,
 }
 
 impl Consumer {
 	pub(crate) fn new(inner: moq_net::group::Consumer, key: Arc<Mutex<TrackKey>>, terminal: Arc<Terminal>) -> Self {
-		let sequence = inner.sequence;
+		let start = inner.start;
 		Self {
 			inner: Some(inner),
-			sequence,
+			start,
 			key,
 			terminal,
 		}
@@ -153,9 +153,9 @@ impl Consumer {
 		self.inner.take();
 	}
 
-	/// The group's sequence number.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+	/// Where the group starts, in the track's timescale: its key on the track.
+	pub fn start(&self) -> u64 {
+		self.start
 	}
 
 	/// The next decrypted frame, or `None` once the group finished.
@@ -183,7 +183,7 @@ impl Consumer {
 				self.key
 					.lock()
 					.expect("track key")
-					.open(self.sequence, index, &frame.payload, MAX_GROUPED_PAYLOAD)
+					.open(self.start, index, &frame.payload, MAX_GROUPED_PAYLOAD)
 			});
 			(frame.timestamp, result)
 		};
@@ -203,7 +203,7 @@ impl Consumer {
 impl fmt::Debug for Consumer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("group::Consumer")
-			.field("sequence", &self.sequence())
+			.field("start", &self.start())
 			.field("index", &self.inner.as_ref().map(|inner| inner.index()))
 			.finish()
 	}

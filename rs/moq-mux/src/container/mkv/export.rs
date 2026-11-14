@@ -181,7 +181,7 @@ impl MkvTrack {
 		arrival: crate::jitter::Arrival<Frame>,
 		jitter: &mut crate::jitter::Buffer<String, Frame>,
 	) -> Result<()> {
-		let pts = (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
+		let pts = (arrival.item.timestamp.as_nanos()? * 90_000 / 1_000_000_000) as u64;
 		match &mut self.declared {
 			Some(clock) => clock.push(arrival, pts)?,
 			None => {
@@ -237,7 +237,7 @@ impl MkvTrack {
 			if !self.finished && !flush {
 				arrival.arrived = arrival.arrived.max(self.latest);
 			}
-			arrival.decode = moq_net::Timestamp::from_scale(dts, 90_000)?.into();
+			arrival.decode = moq_net::Timestamp::from_scale(dts, 90_000)?.try_into()?;
 			jitter.push(name.to_owned(), arrival)?;
 		}
 		Ok(())
@@ -534,7 +534,7 @@ impl<S: Stream> Export<S> {
 					crate::jitter::Arrival {
 						arrived,
 						read: kio::clock::now(),
-						decode: frame.timestamp.into(),
+						decode: frame.timestamp.try_into()?,
 						restart: track.source.markers(),
 						sync: track.kind == TrackKind::Audio || frame.keyframe,
 						leading: false,
@@ -761,7 +761,7 @@ impl<S: Stream> Export<S> {
 		// frame's timestamp directly at MILLI rather than going through micros.
 		let frame_ticks: u64 = frame
 			.timestamp
-			.as_millis()
+			.as_millis()?
 			.try_into()
 			.map_err(|_| Error::TimestampU64)?;
 

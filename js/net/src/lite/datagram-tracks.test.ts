@@ -135,10 +135,10 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 		while (datagrams.priority.peek() !== 19) await datagrams.priority.changed();
 		// The publisher opens a track's queue after writing its DATAGRAMS_INFO, so the reader can
 		// see the info first: a datagram through each queue is what proves both are open.
-		datagrams.append(undefined, new Uint8Array([0]));
+		datagrams.append(Timestamp.unscaled(0n), new Uint8Array([0]));
 		expect((await reader.recv())?.sequence).toBe(0n);
 		await second.info();
-		other.append(undefined, new Uint8Array([1]));
+		other.append(Timestamp.unscaled(0n), new Uint8Array([1]));
 		await second.recv();
 		expect(pair.server.sendStreams.datagrams).toHaveLength(2);
 		const queue = pair.server.sendStreams.datagrams.find(
@@ -152,8 +152,8 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 			sendOrder({ priority: 31, publisher: 7 }),
 		);
 		// Type, Subscribe ID, and Sequence each occupy one byte on this untimed track.
-		datagrams.append(undefined, new Uint8Array(898));
-		datagrams.append(undefined, new Uint8Array(897));
+		datagrams.append(Timestamp.unscaled(1n), new Uint8Array(898));
+		datagrams.append(Timestamp.unscaled(2n), new Uint8Array(897));
 		expect((await reader.recv())?.sequence).toBe(2n);
 	} finally {
 		second.close();
@@ -183,7 +183,7 @@ for (const alpn of [ALPN_05, ALPN_06])
 			const grouped = remote.track("audio").subscribe();
 			try {
 				await grouped.info();
-				track.writeFrame({ payload: new Uint8Array([1]) });
+				track.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(0n) });
 				(await grouped.recvGroup())?.close();
 				reader ??= remote.datagrams("audio");
 				await reader.info();
@@ -196,7 +196,7 @@ for (const alpn of [ALPN_05, ALPN_06])
 				reader.setPriority(37);
 				while (datagrams.priority.peek() !== 37) await datagrams.priority.changed();
 				grouped.close();
-				datagrams.append(undefined, new Uint8Array([2]));
+				datagrams.append(Timestamp.unscaled(0n), new Uint8Array([2]));
 				expect((await reader.recv())?.payload).toEqual(new Uint8Array([2]));
 				datagrams.finish();
 				track.finish();
@@ -275,10 +275,10 @@ test("lite-06: a request cancelled behind the shared datagram writer sends nothi
 		await Promise.all([a.info(), b.info()]);
 		while (first.priority.peek() === undefined || second.priority.peek() === undefined)
 			await Promise.race([first.priority.changed(), second.priority.changed()]);
-		first.append(undefined, Uint8Array.of(0xaa));
+		first.append(Timestamp.unscaled(0n), Uint8Array.of(0xaa));
 		while (sent.length === 0) await settle();
 		// The second request now waits on the writer the first one holds.
-		second.append(undefined, Uint8Array.of(0xbb));
+		second.append(Timestamp.unscaled(0n), Uint8Array.of(0xbb));
 		await settle();
 		b.close();
 		while (second.priority.peek() !== undefined) await second.priority.changed();
@@ -364,10 +364,10 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			reader.setPriority(5);
 			try {
 				while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
-				datagrams.append(undefined, Uint8Array.of(1));
+				datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(1));
 				if (finish) datagrams.finish();
 				await reader.info();
-				if (!finish) datagrams.append(undefined, Uint8Array.of(2));
+				if (!finish) datagrams.append(Timestamp.unscaled(1n), Uint8Array.of(2));
 				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
 				if (finish) {
 					// The end waits out the grace a late datagram gets.
@@ -407,7 +407,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		try {
 			await reader.info();
 			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
-			datagrams.append(undefined, Uint8Array.of(1));
+			datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(1));
 			datagrams.finish();
 			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
 			// The end waits out the grace a late datagram gets.
@@ -450,7 +450,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		try {
 			await reader.info();
 			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
-			for (let i = 0; i < BURST; i++) datagrams.append(undefined, Uint8Array.of(i));
+			for (let i = 0; i < BURST; i++) datagrams.append(Timestamp.unscaled(i), Uint8Array.of(i));
 			datagrams.finish();
 			const counted = (async () => {
 				let count = 0;
@@ -669,10 +669,10 @@ test("lite-07: an unanswered track's datagrams don't delay another track's last"
 		const request = await requested;
 		if (!request) throw new Error("the request never reached the handler");
 		const a = request.accept({});
-		for (let i = 0; i < 40; i++) a.append(undefined, Uint8Array.of(i));
+		for (let i = 0; i < 40; i++) a.append(Timestamp.unscaled(i), Uint8Array.of(i));
 		// "a"'s datagrams reach the subscriber ahead of "b"'s.
 		while (sends.peek() < 40) await sends.changed();
-		b.append(undefined, Uint8Array.of(9));
+		b.append(Timestamp.unscaled(0n), Uint8Array.of(9));
 		b.finish();
 		expect((await readerB.recv())?.payload).toEqual(Uint8Array.of(9));
 		expect(await readerB.recv()).toBeUndefined();

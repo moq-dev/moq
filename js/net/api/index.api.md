@@ -273,7 +273,7 @@ export namespace Datagram {
 	export interface Datagram {
 		payload: Uint8Array;
 		sequence: bigint;
-		timestamp?: Time.Timestamp;
+		timestamp: Time.Timestamp;
 	}
 	export interface Info {
 		priority: number;
@@ -283,7 +283,7 @@ export namespace Datagram {
 		constructor(name: string);
 		abort(error: Error): void;
 		accept(properties?: Partial<Datagram.Info>): this;
-		append(timestamp: Time.Timestamp | undefined, payload: Uint8Array): bigint;
+		append(timestamp: Time.Timestamp, payload: Uint8Array): bigint;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Datagram.Consumer;
 		finish(): void;
@@ -294,7 +294,10 @@ export namespace Datagram {
 	}
 	export function rescale(info: {
 		timescale?: Time.Timescale | null;
-	}, timestamp: Time.Timestamp | undefined): Time.Timestamp | undefined;
+	}, timestamp: Time.Timestamp): Time.Timestamp;
+	export function rescaleIn(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp, key: bigint): Time.Timestamp;
 }
 
 export namespace Error {
@@ -366,18 +369,18 @@ export namespace Frame {
 		readChunk(): Promise<Uint8Array | undefined>;
 		readonly sequence: number;
 		readonly size: number;
-		readonly timestamp: Time.Timestamp | undefined;
+		readonly timestamp: Time.Timestamp;
 	}
 	export interface Info {
 		size: number;
-		timestamp?: Time.Timestamp;
+		timestamp: Time.Timestamp;
 	}
 	export class Producer {
 		abort(error: Error): void;
 		finish(): void;
 		get remaining(): number;
 		readonly size: number;
-		readonly timestamp: Time.Timestamp | undefined;
+		readonly timestamp: Time.Timestamp;
 		write(chunk: Uint8Array): void;
 	}
 }
@@ -412,7 +415,7 @@ export namespace Group {
 	export interface Frame {
 		arrived?: Clock.Instant;
 		payload: Uint8Array;
-		timestamp?: Time.Timestamp;
+		timestamp: Time.Timestamp;
 	}
 	export interface Info {
 		sequence: bigint;
@@ -678,13 +681,14 @@ export namespace Time {
 		static fromMillis(ms: number): Time.Timestamp;
 		isBefore(other: Time.Timestamp): boolean;
 		static now(): Time.Timestamp;
-		readonly scale: Time.Timescale;
+		readonly scale: Time.Timescale | undefined;
+		static unscaled(key: bigint | number): Time.Timestamp;
 		readonly value: number;
 	}
 }
 
 export interface Timed<T> {
-	at?: Time.Timestamp;
+	at: Time.Timestamp;
 	value: T;
 }
 

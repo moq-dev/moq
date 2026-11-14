@@ -7,6 +7,10 @@ import { handle, SOCKET } from "./paths.ts";
 import type { TruckStatus } from "./schemas.ts";
 import { shiftGear, Truck } from "./truck.ts";
 
+// The status track is scale-less, so each write names a group key; keys only have to increase.
+let keys = 0n;
+const key = () => Moq.Time.Timestamp.unscaled(keys++);
+
 describe("Truck video demand", () => {
 	test("only hovered or focused cameras subscribe, and focus suppresses other previews", async () => {
 		const connection = new Moq.Connection({ enabled: false });
@@ -89,7 +93,7 @@ describe("Truck status", () => {
 			(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(
 				broadcast.consume(),
 			);
-			producer.update({ value: status(0.5) });
+			producer.update({ value: status(0.5), at: key() });
 			expect(await available).toBe("available");
 			expect(truck.status.peek()?.accepted.throttle).toBe(0.5);
 
@@ -121,7 +125,7 @@ describe("Truck status", () => {
 		const { broadcast, producer } = statusBroadcast();
 		const next = async (update: TruckStatus) => {
 			const changed = truck.status.changed();
-			producer.update({ value: update });
+			producer.update({ value: update, at: key() });
 			await changed;
 		};
 
@@ -164,7 +168,7 @@ describe("Truck status", () => {
 
 		try {
 			active.set(broadcast.consume());
-			producer.update({ value: status(0.5) });
+			producer.update({ value: status(0.5), at: key() });
 			while (truck.statusState.peek() !== "available") await truck.statusState.changed();
 
 			const unavailable = truck.statusState.changed();
@@ -198,14 +202,14 @@ describe("Truck status", () => {
 
 		try {
 			active.set(first.broadcast.consume());
-			first.producer.update({ value: status(0.25) });
+			first.producer.update({ value: status(0.25), at: key() });
 			while (truck.statusState.peek() !== "available") await truck.statusState.changed();
 
 			const transitions: string[] = [];
 			const unsubscribe = truck.statusState.subscribe((state) => transitions.push(state));
 			try {
 				active.set(second.broadcast.consume());
-				second.producer.update({ value: status(0.75) });
+				second.producer.update({ value: status(0.75), at: key() });
 				while (truck.status.peek()?.accepted.throttle !== 0.75) await truck.status.changed();
 				await Promise.resolve();
 				await Promise.resolve();
@@ -466,7 +470,12 @@ describe("Truck sessions", () => {
 			const measured = truck.roundTripMs.changed();
 			const pipeline = [{ label: "received→decoded", ms: 4 }];
 			const reply = { sequence: command.sequence, media_pipeline: pipeline };
-			stream.producer.writeFrame({ payload: encoder.encode(JSON.stringify(reply)) });
+			const group = stream.producer.appendGroup();
+			group.writeFrame({
+				payload: encoder.encode(JSON.stringify(reply)),
+				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+			});
+			group.finish();
 			expect(await measured).toBeGreaterThanOrEqual(0);
 			expect(truck.pipeline.peek()).toEqual(pipeline);
 		} finally {
@@ -538,6 +547,7 @@ describe("Truck sessions", () => {
 						estopped: true,
 						estop_by: await handle(dial.session),
 					},
+					at: key(),
 				});
 				expect(await read(stream, reader)).toBeUndefined();
 			} finally {

@@ -50,8 +50,8 @@ async def test_tcp_halves_fin_and_peer_identity():
     # Releasing the stream cannot release either half kept by the application.
     del client
     gc.collect()
-    producer.write_frame(b"one")
-    producer.write_frame(b"")
+    producer.write_frame(b"one", moq.Timestamp.unscaled(producer.sequence))
+    producer.write_frame(b"", moq.Timestamp.unscaled(producer.sequence))
     producer.finish()
     del producer
     gc.collect()
@@ -126,7 +126,7 @@ async def test_track_default_retains_ascending_messages_and_subscription():
     assert consumer.info().max_age is None
     for sequence, payload in ((1, b"later"), (0, b"first")):
         group = producer.create_group(sequence)
-        group.write_frame(payload)
+        group.write_frame(payload, moq.Timestamp.unscaled(sequence))
         group.finish()
     producer.finish()
     assert [(group.sequence, [frame.payload async for frame in group]) async for group in consumer] == [
@@ -230,7 +230,7 @@ async def test_tcp_ready_paces_a_writer_behind_a_slow_reader():
             # Paced, the writer stays a window ahead of the reader, well short of the 32 MiB
             # cache. Unpaced, it would shed frames the reader has not taken and evict it.
             assert written - read < 32
-            client.producer.write_frame(bytes(mib))
+            client.producer.write_frame(bytes(mib), moq.Timestamp.unscaled(client.producer.sequence))
             written += 1
             if written == 2:
                 ahead.set()

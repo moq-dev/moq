@@ -61,7 +61,7 @@ async fn import(data: &[u8]) -> Imported {
 			if frame.payload.is_empty() {
 				let micros = objects.last().map_or(0, |object: &Object| object.micros);
 				objects.push(Object {
-					group: group.sequence,
+					group: group.start,
 					micros,
 					payload: Bytes::new(),
 				});
@@ -69,11 +69,15 @@ async fn import(data: &[u8]) -> Imported {
 			}
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
 			objects.push(Object {
-				group: group.sequence,
-				micros: frame.timestamp.as_micros() as u64,
+				group: group.start,
+				micros: frame.timestamp.as_micros().unwrap() as u64,
 				payload: frame.payload,
 			});
 		}
+	}
+	// The importer appends each group, so nothing lies below its first or between two.
+	for run in skips(&objects) {
+		assert!(track.is_skipped(run.clone()), "the importer skips {run:?}");
 	}
 	Imported {
 		_passthrough: passthrough,
@@ -84,17 +88,33 @@ async fn import(data: &[u8]) -> Imported {
 	}
 }
 
-/// Republish `objects` on a new broadcast's `m2ts` track, in the groups they were published in,
-/// each once `at` says it is due after the start and not before the one ahead of it, as a relay
-/// delivering them would.
-fn republish(objects: Vec<Object>, at: impl Fn(usize, &Object) -> Duration + Send + 'static) -> Republished {
-	republish_cut(objects, &[], at)
+/// The group starts the importer skipped: those below its first group's and between each two,
+/// which no group holds.
+fn skips(objects: &[Object]) -> Vec<std::ops::Range<u64>> {
+	let mut starts: Vec<u64> = objects.iter().map(|object| object.group).collect();
+	starts.dedup();
+	let first = starts.first().map(|first| 0..*first);
+	first
+		.into_iter()
+		.chain(starts.windows(2).map(|pair| pair[0] + 1..pair[1]))
+		.collect()
 }
 
-/// [`republish`], aborting each group in `cut` once its last object in `objects` is out, as a
-/// relay that evicts a group partway does.
+/// Republish `objects` on a new broadcast's `m2ts` track, in the groups they were published in,
+/// each once `at` says it is due after the start and not before the one ahead of it, as a relay
+/// delivering them would, skipping the starts between them as the importer did.
+fn republish(objects: Vec<Object>, at: impl Fn(usize, &Object) -> Duration + Send + 'static) -> Republished {
+	let skips = skips(&objects);
+	republish_cut(objects, skips, &[], at)
+}
+
+/// [`republish`], skipping `skips`, and aborting each group in `cut` once its last object in
+/// `objects` is out, as a relay that evicts a group partway does. Each run of `skips` goes out
+/// with the first group past it, as a relay forwarding the publisher's skips would: a group the
+/// relay never delivers is not skipped, so a reader sees it missing.
 fn republish_cut(
 	objects: Vec<Object>,
+	skips: Vec<std::ops::Range<u64>>,
 	cut: &[u64],
 	at: impl Fn(usize, &Object) -> Duration + Send + 'static,
 ) -> Republished {
@@ -113,6 +133,7 @@ fn republish_cut(
 	let task = tokio::spawn(async move {
 		let _keep = (&broadcast, &catalog);
 		let mut group: Option<(u64, moq_net::group::Producer)> = None;
+		let mut skips = skips.into_iter().peekable();
 		let mut due = Duration::ZERO;
 		for (i, object) in objects.into_iter().enumerate() {
 			due = due.max(at(i, &object));
@@ -121,7 +142,10 @@ fn republish_cut(
 				if let Some((sequence, group)) = group.take() {
 					end(sequence, group, &cut);
 				}
-				let info = moq_net::group::Info { sequence: object.group };
+				while let Some(run) = skips.next_if(|run| run.end <= object.group) {
+					track.skip_groups(run);
+				}
+				let info = moq_net::group::Info { start: object.group };
 				group = Some((object.group, track.create_group(info).unwrap()));
 			}
 			let timestamp = moq_net::Timestamp::from_micros(object.micros).unwrap();
@@ -150,7 +174,7 @@ fn end(sequence: u64, group: moq_net::group::Producer, cut: &[u64]) {
 	match cut.contains(&sequence) {
 		true => group.abort(moq_net::Error::Old).unwrap(),
 		false => {
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 	}
 }
@@ -271,7 +295,7 @@ async fn a_flagged_jump_crosses_without_holding_the_output() {
 		.map(|(i, pair)| {
 			(
 				i,
-				pair[1].1.timestamp.as_micros() as i128 - pair[0].1.timestamp.as_micros() as i128,
+				pair[1].1.timestamp.as_micros().unwrap() as i128 - pair[0].1.timestamp.as_micros().unwrap() as i128,
 			)
 		})
 		.max_by_key(|(_, step)| *step)
@@ -355,13 +379,14 @@ async fn an_object_past_its_deadline_is_a_gap_in_that_release_only() {
 async fn release_omitting(cut: &[u64], omit: impl Fn(usize, &Object) -> bool) -> (Loss, Release) {
 	let objects = import(KYRION).await.objects;
 	let first = objects[0].micros;
+	let skips = skips(&objects);
 	let delivered = objects
 		.iter()
 		.enumerate()
 		.filter(|(i, object)| !omit(*i, object))
 		.map(|(_, object)| object.clone())
 		.collect();
-	let republished = republish_cut(delivered, cut, move |_, object| {
+	let republished = republish_cut(delivered, skips, cut, move |_, object| {
 		Duration::from_micros(object.micros - first) + Duration::from_millis(40)
 	});
 	let (released, release) = spawn_release(&republished).await.unwrap();
@@ -423,7 +448,9 @@ async fn fixtures_are_released_at_their_exact_positions() {
 	];
 	for (name, data) in fixtures {
 		let objects = import(&data).await.objects;
-		let groups = objects.last().unwrap().group - objects[0].group + 1;
+		let mut groups: Vec<u64> = objects.iter().map(|object| object.group).collect();
+		groups.dedup();
+		let groups = groups.len();
 		assert!(
 			groups >= 5,
 			"{name}: {groups} groups, one per random access point of program 1"
@@ -452,7 +479,7 @@ async fn fixtures_are_released_at_their_exact_positions() {
 				pids.contains(&0x0011) && pids.contains(&0x1abc),
 				"{name}: the SDT and the unlisted PID"
 			);
-			let last = released.last().unwrap().1.timestamp.as_micros() as u64;
+			let last = released.last().unwrap().1.timestamp.as_micros().unwrap() as u64;
 			assert!(last > fixture::WRAP / 27, "{name}: the release crosses the wrap");
 		}
 	}

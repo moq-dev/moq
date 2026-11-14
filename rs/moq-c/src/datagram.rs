@@ -54,7 +54,8 @@ pub unsafe extern "C" fn moq_publish_datagrams(
 /// Insert a datagram at its explicit sequence; later appends continue past the highest one.
 ///
 /// # Safety
-/// `datagram` must point to a record whose payload and optional timestamp are valid.
+/// `datagram` must point to a record whose payload and timestamp are valid. A NULL timestamp
+/// fails with `MOQ_ERROR_INVALID_POINTER`; on a scale-less track it is the unscaled sequence.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_datagrams_insert(producer: u32, datagram: *const moq_datagram) -> i32 {
 	ffi::enter(|| {

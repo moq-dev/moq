@@ -51,7 +51,8 @@ import {
 	type TrackRequestOptions,
 } from "./internal.ts";
 import { RUN_OVERHEAD as ARRIVAL_OVERHEAD, grace, Ledger } from "./ledger.ts";
-import { Timescale, type Timestamp } from "./time.ts";
+import { rescale } from "./rescale.ts";
+import { keyOf, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
 	bounded,
@@ -142,8 +143,9 @@ export interface Info {
 	/** How frame payloads are compressed per group on lite-07; other sessions receive plain frames. */
 	compression: Compression;
 	/**
-	 * Units per second for this track's frame timestamps, or `null` for an untimed track, whose
-	 * frames carry no timestamp.
+	 * Units per second for this track's frame timestamps, or `null` for a scale-less (untimed)
+	 * track, whose frames carry no time: each one's timestamp is {@link Timestamp.unscaled} at
+	 * its group's sequence.
 	 *
 	 * A timed track declares its scale, such as {@link Timescale | Timescale.MILLI}, or
 	 * {@link Timescale | Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
@@ -2106,12 +2108,17 @@ export class Producer {
 	 * or instance. Reusing a sequence only corrupts this broadcast for its readers. Datagram
 	 * sequences name no cached content and are exempt.
 	 *
-	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
-	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
+	 * Its frames must match the track's {@link Info.timescale}: a scaled timestamp on every frame
+	 * of a timed track, and on a scale-less one {@link Timestamp.unscaled} at the group's
+	 * sequence, or the write throws {@link TimestampMismatch}.
 	 * So does a first frame that starts before the group below it or after the one above it.
 	 */
 	appendGroup(): GroupProducer {
-		const sequence = this.#nextSequence();
+		return this.#appendAt(this.#nextSequence());
+	}
+
+	// Append a group at `sequence`, at or past the next sequence, skipping what it leaves below.
+	#appendAt(sequence: bigint): GroupProducer {
 		this.#refuseSkipped(sequence);
 		const group = new GroupProducer(sequence);
 		this.#bind(group);
@@ -2520,9 +2527,21 @@ export class Producer {
 		return true;
 	}
 
-	/** Append a frame as its own single-frame group. */
+	/**
+	 * Append a frame as its own single-frame group.
+	 *
+	 * On a timed track the group takes the next sequence, as {@link appendGroup}. A scale-less
+	 * track has no time, so its frame's {@link Timestamp.unscaled} names the group instead: the
+	 * key must pass every group this track holds, and the sequences it leaves below are skipped,
+	 * as {@link appendGroup} skips them. A key at or below one held, or a timestamp that doesn't
+	 * match the track, throws {@link TimestampMismatch} before any group exists.
+	 */
 	writeFrame(frame: Frame) {
-		const group = this.appendGroup();
+		const info = this.#state.info.peek();
+		const key = keyOf(info ? rescale(info, frame.timestamp) : frame.timestamp);
+		if (key !== undefined && key < this.#received) throw new TimestampMismatch();
+		if (key !== undefined) this.#writable(key);
+		const group = key === undefined ? this.appendGroup() : this.#appendAt(key);
 		try {
 			group.writeFrame(frame);
 		} catch (err) {

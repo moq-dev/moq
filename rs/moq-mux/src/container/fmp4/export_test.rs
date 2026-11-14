@@ -645,7 +645,10 @@ async fn zero_fragment_duration_uses_the_successor_then_the_cut() {
 /// `reorder: 0` says it presents in decode order, so the 50 ms gap is a real duration.
 #[tokio::test(start_paused = true)]
 async fn zero_fragment_duration_trusts_a_long_gap_only_without_reordering() {
-	let cadence = moq_net::Timestamp::from_scale(1_000, 30_000).unwrap().into();
+	let cadence = moq_net::Timestamp::from_scale(1_000, 30_000)
+		.unwrap()
+		.try_into()
+		.unwrap();
 	for (reorder, expected) in [(None, cadence), (Some(0), std::time::Duration::from_millis(50))] {
 		let mut live = Live::avc3();
 		for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
@@ -720,7 +723,7 @@ async fn unusable_framerate_uses_the_standard_fallback_rate() {
 		super::Track::new(timescale, crate::container::fmp4::Kind::Video),
 	)
 	.unwrap();
-	assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
+	assert_eq!(decoded[0].duration.unwrap().as_scale(timescale).unwrap(), 3_000);
 }
 
 /// A one-packet audio group is a one-sample fragment, timed by the catalog cadence
@@ -2208,11 +2211,11 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	};
 	let fragment = super::encode_fragment(info, &samples).unwrap();
 
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_group(10_000).unwrap();
 	group
 		.write_frame(moq_net::Timestamp::from_secs(10).unwrap(), fragment)
 		.unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	let _track = track.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
@@ -2227,7 +2230,7 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	let presented: Vec<u128> = fragments
 		.into_iter()
 		.flat_map(|fragment| super::decode(fragment.data, None, super::Track::new(scale, super::Kind::Video)).unwrap())
-		.map(|sample| sample.timestamp.as_micros())
+		.map(|sample| sample.timestamp.as_micros().unwrap())
 		.collect();
 	assert_eq!(presented, [10_000_000, 10_066_000, 10_033_000]);
 }
@@ -2672,7 +2675,7 @@ fn presentation_times(
 		times
 			.entry(id)
 			.or_default()
-			.extend(samples.iter().map(|sample| sample.timestamp.as_micros()));
+			.extend(samples.iter().map(|sample| sample.timestamp.as_micros().unwrap()));
 	}
 	times
 }

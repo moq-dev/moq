@@ -60,10 +60,21 @@ impl Replies {
 	/// Send the viewer its latency breakdown.
 	pub fn latency(&mut self, latency: &[LatencyEntry]) {
 		let reply = serde_json::to_vec(&Reply { latency }).expect("a reply always serializes");
-		if let Err(err) = self.0.write_frame(None, reply) {
+		if let Err(err) = send(&self.0, reply) {
 			tracing::debug!(%err, "viewer reply dropped");
 		}
 	}
+}
+
+/// Send `message` on a session track as a group of its own.
+///
+/// A session track carries no timescale, so its groups have no time to start at: each starts one
+/// past the newest the track holds.
+fn send(track: &moq_net::track::Producer, message: Vec<u8>) -> moq_net::Result<()> {
+	let mut group = track.append_group(track.largest().map_or(0, |largest| largest.group + 1))?;
+	group.write_frame(moq_net::Timestamp::unscaled(group.start), message)?;
+	group.close()?;
+	Ok(())
 }
 
 /// A viewer's session event, in the order the emulator applies them.
@@ -236,7 +247,7 @@ mod tests {
 	}
 
 	fn send(session: &mut TrackStream, command: &str) {
-		session.producer.write_frame(None, command.as_bytes().to_vec()).unwrap();
+		super::send(&session.producer, command.as_bytes().to_vec()).unwrap();
 	}
 
 	async fn recv(rx: &mut tokio::sync::mpsc::Receiver<Command>) -> Command {
@@ -288,12 +299,12 @@ mod tests {
 		};
 
 		// The reader parks on this group's first frame, which never arrives.
-		let _stalled = session.producer.append_group().unwrap();
-		tokio::task::yield_now().await;
-		session
+		let _stalled = session
 			.producer
-			.write_frame(None, br#"{"type":"buttons","buttons":["a"]}"#.to_vec())
+			.append_group(session.producer.largest().map_or(0, |largest| largest.group + 1))
 			.unwrap();
+		tokio::task::yield_now().await;
+		send(&mut session, r#"{"type":"buttons","buttons":["a"]}"#);
 
 		let Command::Buttons {
 			viewer: from, buttons, ..

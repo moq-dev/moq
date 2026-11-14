@@ -1,8 +1,8 @@
 // Exact timestamps across the installed C ABI: a 90 kHz tick and a present zero
 // read back unchanged from raw frames and datagrams, a JSON value carries its
-// frame's timestamp, and a write refuses an out-of-range timestamp or an
-// untimed frame on a timed track. Stream tracks default to timed;
-// the untimed frame read path is covered by the Rust tests.
+// frame's timestamp, and a write refuses an out-of-range timestamp, a NULL one,
+// or an unscaled one on a timed track. Stream tracks default to timed; the
+// scale-less read path is covered by the Rust tests.
 #include <moq.h>
 
 #include <pthread.h>
@@ -70,7 +70,8 @@ static void on_value(void *data, int32_t id) {
 }
 
 static bool same(const moq_timestamp *got, moq_timestamp want) {
-    return got != NULL && got->value == want.value && got->scale == want.scale;
+    return got != NULL && got->has_scale == want.has_scale && got->value == want.value &&
+           (!want.has_scale || got->scale == want.scale);
 }
 
 int main(void) {
@@ -96,14 +97,19 @@ int main(void) {
 
     const uint8_t payload[] = {1, 2, 3};
     const char *doc = "{\"n\":1}";
-    const moq_timestamp invalid[] = {{0, 0}, {0, 1ull << 62}, {1ull << 61, 1000000}};
+    const moq_timestamp invalid[] = {{0, 0, true}, {0, 1ull << 62, true}, {1ull << 61, 1000000, true}};
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
         CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), &invalid[i]) ==
               MOQ_ERROR_TIMESTAMP_OVERFLOW);
         CHECK(moq_publish_json_stream_append((uint32_t)json, doc, strlen(doc), &invalid[i]) ==
               MOQ_ERROR_TIMESTAMP_OVERFLOW);
     }
-    CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), NULL) == MOQ_ERROR_MOQ);
+    CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), NULL) == MOQ_ERROR_INVALID_POINTER);
+    CHECK(moq_publish_datagrams_append((uint32_t)datagram_track, payload, sizeof(payload), NULL, NULL) ==
+          MOQ_ERROR_INVALID_POINTER);
+    // Zeroed, a timestamp is the unscaled key 0, which only a scale-less track takes.
+    const moq_timestamp unscaled = {0};
+    CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), &unscaled) == MOQ_ERROR_MOQ);
     // A JSON write is never stamped for you.
     CHECK(moq_publish_json_stream_append((uint32_t)json, doc, strlen(doc), NULL) == MOQ_ERROR_INVALID_POINTER);
 
@@ -118,7 +124,7 @@ int main(void) {
 
     // One group at a time, so the default subscription never skips the older one, and in
     // time order, since a group may not start before the one preceding it.
-    const moq_timestamp zero = {0, 90000}, tick = {1, 90000};
+    const moq_timestamp zero = {0, 90000, true}, tick = {1, 90000, true};
     CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), &zero) == 0);
     WAIT_FOR(&c, c.frame_count == 1);
     CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), &tick) == 0);
@@ -127,7 +133,7 @@ int main(void) {
     CHECK(moq_publish_datagrams_append((uint32_t)datagram_track, payload, sizeof(payload), &tick, NULL) == 0);
     WAIT_FOR(&c, c.datagram);
     // JSON tracks moq-c creates count milliseconds.
-    const moq_timestamp stamped = {1500, 1000};
+    const moq_timestamp stamped = {1500, 1000, true};
     CHECK(moq_publish_json_stream_append((uint32_t)json, doc, strlen(doc), &stamped) == 0);
     WAIT_FOR(&c, c.value);
 

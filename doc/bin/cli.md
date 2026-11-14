@@ -311,12 +311,12 @@ starting with `.` stays hidden unless `prefix` names it.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang fetch catalog.json | jq
-moq ... fetch video/hd --group 42 --json
+moq ... fetch video/hd --group 42000 --json
 ```
 
-Writes one group of a track (the newest unless `--group` says otherwise) to
-stdout over MoQ: the counterpart of the relay's HTTP `/fetch`. It exits
-non-zero when the broadcast or group is not found. [Inspect a
+Writes one group of a track to stdout over MoQ, the counterpart of the relay's
+HTTP `/fetch`: the newest, or the one that starts at `--group` in the track's
+timescale. It exits non-zero when the broadcast or group is not found. [Inspect a
 relay](/bin/inspect) walks through `announced` and `fetch` next to their `curl`
 equivalents.
 
@@ -389,9 +389,9 @@ Each run of `moq` announces under a fresh random
 [instance](/concept/moq-lite#publisher-instances), kept across reconnects.
 The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
 rtsp` one per RTSP session, and `import ts --program all` one per program.
-No importer continues its group sequences across a restart, so `moq` has no
+No importer continues its timeline across a restart, so `moq` has no
 flag to set a stable instance and refuses one. A publisher that does continue
-them sets it on its route in a library, such as `RouteOptions::with_instance` in Rust
+its timeline sets one on its route in a library, such as `RouteOptions::with_instance` in Rust
 or `origin.route(path, { instance: { id, epoch } })` in JavaScript; see
 [identity and recovery](/concept/identity).
 

@@ -171,11 +171,13 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.finish().expect("finish group");
+	group.close().expect("finish group");
 
 	let publisher = connect(client().with_publisher(&origin), wt_url.clone()).await;
 
@@ -267,11 +269,13 @@ async fn uring_workers_serve_every_configured_version() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.finish().expect("finish group");
+	group.close().expect("finish group");
 
 	let raw = format!("moql://127.0.0.1:{port}/versions");
 	let (version, client) = pinned("moq-transport-22");
@@ -697,11 +701,13 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.finish().expect("finish group");
+	group.close().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 
 	let subscriber_origin = moq_tokio::origin::spawn();
@@ -782,11 +788,13 @@ async fn uring_workers_write_qlog_traces() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.finish().expect("finish group");
+	group.close().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 
 	let subscriber_origin = moq_tokio::origin::spawn();

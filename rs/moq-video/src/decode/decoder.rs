@@ -552,7 +552,7 @@ mod tests {
 		// The timestamp rides through the codec and comes back on each picture,
 		// including any tail released by the drain. It returns in presentation order:
 		// strictly increasing and drawn from the values we fed.
-		let micros: Vec<u128> = decoded.iter().map(|d| d.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = decoded.iter().map(|d| d.timestamp.as_micros().unwrap()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
 			"decoded timestamps not strictly increasing: {micros:?}"

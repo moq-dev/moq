@@ -50,7 +50,7 @@ pub struct DropSet {
 }
 
 impl DropSet {
-	/// `runs` disjoint dropped runs of `span` sequences each, read by `readers` wire cursors
+	/// `runs` disjoint dropped runs of `span` keys each, read by `readers` wire cursors
 	/// whose ranges hold the newest `reported` of them, each already reported.
 	pub fn new(readers: usize, runs: u64, reported: u64, span: u64) -> Self {
 		let broadcast = broadcast::Producer::new(broadcast::Info::default());
@@ -132,7 +132,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		..Default::default()
 	};
 	let track = broadcast.create_track("objects", info).unwrap();
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	let payload = Bytes::from_static(&[0; 64]);
 	for id in 0..frames {
 		let fields = properties.then(|| {
@@ -154,7 +154,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		let header = frame::Header {
 			info: frame::Info {
 				size: payload.len() as u64,
-				timestamp: None,
+				timestamp: crate::Timestamp::unscaled(group.start),
 			},
 			fields,
 			inflated: None,
@@ -163,7 +163,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		frame.write(payload.clone()).unwrap();
 		group = frame.finish().unwrap();
 	}
-	(broadcast, track, group.finish().unwrap())
+	(broadcast, track, group.close().unwrap())
 }
 
 /// A private frame batch for the model's batch read and write benchmarks.
@@ -1065,7 +1065,7 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group {
 				subscribe: 3,
-				sequence: 1_234,
+				key: 1_234,
 				frame_start: 0,
 			}
 			.encode(w, version)
@@ -1215,7 +1215,7 @@ where
 ///
 /// Byte 0 picks the version, which is the whole point: lite-01 to lite-06 use the QUIC
 /// two-bit length tag, while lite-07 and the moq-transport drafts count leading ones, and
-/// the two disagree about which byte sequences are even legal.
+/// the two disagree about which byte keys are even legal.
 ///
 /// The leading-ones form spans the full `u64`, while the QUIC form stops at
 /// `2^62 - 1`; a value always re-encodes in the form it was read in.
@@ -1312,7 +1312,7 @@ impl Default for Messages {
 			},
 			lite_group: lite::Group {
 				subscribe: 7,
-				sequence: 123_456,
+				key: 123_456,
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
@@ -2084,10 +2084,11 @@ impl FrameRecv {
 
 		let streams = (0..streams)
 			.map(|_| {
-				let group = track.append_group().unwrap();
+				let group = track.append_next().unwrap();
+				// Each group starts at its own key, so the starts increase.
 				let info = frame::Info {
 					size: size as u64,
-					timestamp: Some(crate::Timestamp::ZERO),
+					timestamp: crate::Timestamp::from_millis(group.start).unwrap(),
 				};
 				let frame = group.create_frame(info).unwrap();
 				let stream = Chunks {
@@ -2146,7 +2147,7 @@ impl FrameRecv {
 					res.unwrap();
 					let stream = slot.take().unwrap();
 					let group = stream.frame.finish().unwrap();
-					group.finish().unwrap();
+					group.close().unwrap();
 					open -= 1;
 				}
 			}
@@ -2228,11 +2229,7 @@ impl GroupRecv {
 	}
 
 	/// Receive one frame whose payload is `chunks`, in order, and commit it.
-	pub fn frame(
-		&mut self,
-		timestamp: Option<crate::Timestamp>,
-		chunks: impl IntoIterator<Item = Bytes>,
-	) -> crate::Result<()> {
+	pub fn frame(&mut self, timestamp: crate::Timestamp, chunks: impl IntoIterator<Item = Bytes>) -> crate::Result<()> {
 		let mut size = 0;
 		self.queue
 			.borrow_mut()
@@ -2253,7 +2250,7 @@ impl GroupRecv {
 
 	/// Finish the group, which stays cached until dropped or aborted.
 	pub fn finish(mut self) -> crate::Result<group::Finished> {
-		self.group.take().ok_or(crate::Error::Closed)?.finish()
+		self.group.take().ok_or(crate::Error::Closed)?.close()
 	}
 }
 

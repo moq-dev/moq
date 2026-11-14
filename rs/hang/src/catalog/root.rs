@@ -1221,7 +1221,7 @@ mod test {
 		let catalog = Catalog::<()>::from_str(json).expect("the packaged fixture must decode");
 
 		let clock = catalog.media.clock.expect("the fixture carries a clock");
-		assert_eq!(clock.wall.scale().as_u64(), 1_000_000);
+		assert_eq!(clock.wall.scale().map(moq_net::Timescale::as_u64), Some(1_000_000));
 		assert_eq!(catalog.media.interval(), Some(std::time::Duration::from_secs(2)));
 
 		// PTS 2000 ms lands 2s after the wall epoch, whatever the track timescale.

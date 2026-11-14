@@ -33,11 +33,26 @@ void main() {
     expect(producer.priority(), 12);
     expect(stream.demand().wanted(), isNull);
     producer.insert(
-      datagram: Datagram(sequence: 7, payload: utf8.encode('seven')),
+      datagram: Datagram(
+        sequence: 7,
+        timestamp: Timestamp.unscaled(7),
+        payload: utf8.encode('seven'),
+      ),
     );
     final datagram = await consumer.recv().timeout(timeout);
     expect(datagram?.sequence, 7);
+    expect(datagram?.timestamp.scale, isNull);
+    expect(datagram?.timestamp.value, 7);
     expect(datagram?.payload, utf8.encode('seven'));
+    // An unscaled timestamp names the sequence an append writes at.
+    expect(
+      producer.append(
+        timestamp: Timestamp.unscaled(9),
+        payload: utf8.encode('nine'),
+      ),
+      9,
+    );
+    expect((await consumer.recv().timeout(timeout))?.sequence, 9);
     consumer.cancel();
     expect(await producer.priorityChanged(last: 12).timeout(timeout), isNull);
     producer.finish();
@@ -81,14 +96,36 @@ void main() {
     expect(() => catalog.now(), throwsA(isA<ClosedMoqException>()));
   });
 
-  test('raw writes without timestamps stay untimed', () async {
+  test('raw writes on a scale-less track carry their group key', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(name: 'untimed', info: null);
     final consumer = track.consume(subscription: null);
-    track.writeFrame(frame: Frame(payload: utf8.encode('payload')));
+    track.writeFrame(
+      frame: Frame(
+        payload: utf8.encode('payload'),
+        timestamp: Timestamp.unscaled(0),
+      ),
+    );
     final frame = await consumer.readFrame().timeout(timeout);
-    expect(frame?.timestamp, isNull);
+    expect(frame?.timestamp.scale, isNull);
+    expect(frame?.timestamp.value, 0);
     expect(consumer.info().timescale, isNull);
+    // A scaled timestamp disagrees with the scale-less track.
+    expect(
+      () => track.writeFrame(
+        frame: Frame(
+          payload: utf8.encode('payload'),
+          timestamp: Duration.zero.toTimestamp(),
+        ),
+      ),
+      throwsA(
+        isA<ProtocolMoqException>().having(
+          (error) => error.details.kind,
+          'kind',
+          MoqProtocolKind.timestampMismatch,
+        ),
+      ),
+    );
     track.finish();
     broadcast.close();
   });
@@ -617,8 +654,8 @@ void main() {
         ),
       );
       final frame = await consumer.readFrame().timeout(timeout);
-      expect(frame?.timestamp?.value, value);
-      expect(frame?.timestamp?.scale, 90000);
+      expect(frame?.timestamp.value, value);
+      expect(frame?.timestamp.scale, 90000);
     }
 
     for (final invalid in [
@@ -655,6 +692,10 @@ void main() {
       () => const Duration(microseconds: -1).toTimestamp(),
       throwsArgumentError,
     );
+    // A scale-less track's key is no time.
+    final unscaled = Timestamp.unscaled(3);
+    expect([unscaled.value, unscaled.scale], [3, null]);
+    expect(unscaled.toDuration, throwsStateError);
   });
 
   test('a broadcast is reachable only while announced', () async {
@@ -865,12 +906,12 @@ void main() {
     // next() yields every state in order; latest() skips the buffered third.
     moq_json.Value? value = await consumer.next().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 1});
-    expect(value.timestamp?.toDuration(), const Duration(milliseconds: 1));
+    expect(value.timestamp.toDuration(), const Duration(milliseconds: 1));
     value = await consumer.next().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 2});
     value = await consumer.latest().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 4});
-    expect(value.timestamp?.toDuration(), const Duration(milliseconds: 4));
+    expect(value.timestamp.toDuration(), const Duration(milliseconds: 4));
 
     consumer.cancel();
     producer.finish();
@@ -911,12 +952,12 @@ void main() {
       final push = timed!.event as moq_json.WindowEventPush;
       expect(push.index, n);
       expect(jsonDecode(push.value), {'n': n});
-      expect(timed.timestamp?.toDuration(), Duration(milliseconds: n));
+      expect(timed.timestamp.toDuration(), Duration(milliseconds: n));
     }
     final timed = await consumer.next().timeout(timeout);
     final pop = timed!.event as moq_json.WindowEventPop;
     expect([pop.start, pop.end], [0, 2]);
-    expect(timed.timestamp?.toDuration(), const Duration(milliseconds: 3));
+    expect(timed.timestamp.toDuration(), const Duration(milliseconds: 3));
 
     // The cut's new group restates record 2, which this reader already has.
     producer.cut();
@@ -927,7 +968,7 @@ void main() {
     final pushed = await consumer.next().timeout(timeout);
     final push = pushed!.event as moq_json.WindowEventPush;
     expect(push.index, 3);
-    expect(pushed.timestamp?.toDuration(), const Duration(milliseconds: 4));
+    expect(pushed.timestamp.toDuration(), const Duration(milliseconds: 4));
 
     producer.finish();
     expect(await consumer.next().timeout(timeout), isNull);

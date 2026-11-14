@@ -143,7 +143,10 @@ export function finish(
 		const health = healthRoute.broadcast;
 		const healthTrack = health.createTrack("live");
 		const group = healthTrack.appendGroup();
-		group.writeFrame({ payload: new TextEncoder().encode("session-alive") });
+		group.writeFrame({
+			payload: new TextEncoder().encode("session-alive"),
+			timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+		});
 		group.finish();
 		healthTrack.finish();
 		healthTrack.close();

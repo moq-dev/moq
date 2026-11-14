@@ -25,7 +25,7 @@ import {
 } from "./frame.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
-import { rescale } from "./rescale.ts";
+import { rescaleIn } from "./rescale.ts";
 import type { Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
 import { MAX_FRAME_BYTES } from "./util/limits.ts";
@@ -42,7 +42,7 @@ function frameBytes(frame: Frame): number {
 }
 
 /**
- * A frame buffered in a group: its presentation {@link Timestamp}, if any, and payload bytes.
+ * A frame buffered in a group: its presentation {@link Timestamp} and payload bytes.
  *
  * The timestamp carries its own scale, so a track can pick its units; the wire layer
  * converts it into the track's negotiated timescale.
@@ -51,11 +51,12 @@ export interface Frame {
 	/** The plain payload, shared across readers even when the track stores compressed bytes. */
 	payload: Uint8Array;
 	/**
-	 * Presentation timestamp, present exactly when the track has a timescale. A frame on a
-	 * track without one is untimed and omits it; a write that disagrees with its track is
-	 * refused with {@link TimestampMismatch}.
+	 * Presentation timestamp at the track's timescale. A scale-less track has no time, so its
+	 * frame carries {@link Timestamp.unscaled} at its group's key instead. A write that
+	 * disagrees with its track, or names another group's key, is refused with
+	 * {@link TimestampMismatch}.
 	 */
-	timestamp?: Timestamp;
+	timestamp: Timestamp;
 	/**
 	 * When the frame landed in this node's group, on the installed clock.
 	 *
@@ -107,11 +108,11 @@ class GroupState {
 	charge?: Charge;
 	compressed?: boolean;
 	flate?: Compression;
-	// The owning track's info, which every frame's timestamp must `rescale` to: a timed track's frames
-	// carry a timestamp its scale holds, an untimed track's carry none. Undefined for a group
-	// no track has claimed yet, which takes either.
+	// The owning track's info, which every frame's timestamp must `rescaleIn` to: a timed track's
+	// frames carry a timestamp its scale holds, a scale-less track's the unscaled group key.
+	// Undefined for a group no track has claimed yet, which takes either.
 	track?: TrackInfo;
-	// The first frame's timestamp, retained after reads. Media time only: an untimed group
+	// The first frame's timestamp, retained after reads. Media time only: a scale-less group
 	// never has one, so it says nothing about whether a frame was written.
 	timestamp?: Timestamp;
 	// The highest frame PTS, including when the decode-order tail presents earlier.
@@ -153,22 +154,24 @@ class Landed implements Frame {
 	get payload(): Uint8Array {
 		return this.#frame.payload;
 	}
-	get timestamp(): Timestamp | undefined {
+	get timestamp(): Timestamp {
 		return this.#frame.timestamp;
 	}
 }
 
-// Refuse a frame whose timestamp the track's timeline refuses.
-function checkTimed(track: TrackInfo | undefined, frame: Frame) {
-	if (track) rescale(track, frame.timestamp);
+// Refuse a frame whose timestamp the track's timeline refuses, or that names another group's key.
+function checkTimed(track: TrackInfo | undefined, sequence: bigint, frame: Frame) {
+	if (track) rescaleIn(track, frame.timestamp, sequence);
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
 	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
-	state.timestamp ??= frame.timestamp;
-	if (frame.timestamp === undefined) state.latest = undefined;
-	else if (state.latest === undefined || state.latest.isBefore(frame.timestamp)) state.latest = frame.timestamp;
+	// Media time only: a scale-less frame's key says nothing about when it presents.
+	const timed = frame.timestamp.scale === undefined ? undefined : frame.timestamp;
+	state.timestamp ??= timed;
+	if (timed === undefined) state.latest = undefined;
+	else if (state.latest === undefined || state.latest.isBefore(timed)) state.latest = timed;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
 	});
@@ -382,7 +385,7 @@ export class Producer {
 			if (state.track !== undefined && (state.track.timescale != null) === timed) return;
 			// Another track already holds it to the opposite timedness, empty or not.
 			if (state.track !== undefined) throw new TimestampMismatch();
-			for (const frame of state.frames.peek()) checkTimed(track, frame);
+			for (const frame of state.frames.peek()) checkTimed(track, state.sequence, frame);
 			state.track = track;
 		};
 		hooks.admitGroupStart = (group, admit) => {
@@ -614,13 +617,13 @@ export class Producer {
 		if (this.#open) throw new Error("a frame is still being written");
 		if (this.#state.total.peek() === Number.MAX_SAFE_INTEGER)
 			throw new ProtocolViolation("group frame index exceeds the safe integer range");
-		checkTimed(this.#state.track, frame);
+		checkTimed(this.#state.track, this.#state.sequence, frame);
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
 		}
 		// Frame 0 must fit between its neighbors in every track it joined, checked before
 		// any of them records it, so a refusal leaves the group and its tracks as they were.
-		if (this.#admits && frame.timestamp !== undefined && this.#state.total.peek() === 0) {
+		if (this.#admits && frame.timestamp.scale !== undefined && this.#state.total.peek() === 0) {
 			const start = frame.timestamp;
 			return this.#admits.map((admit) => admit(start));
 		}

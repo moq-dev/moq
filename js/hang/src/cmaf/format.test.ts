@@ -105,7 +105,7 @@ test("CmafFormat times an untimed fragment from its tfdt", () => {
 		[3000, 0],
 	]);
 
-	const frames = new Format(INIT).decode(segment, undefined);
+	const frames = new Format(INIT).decode(segment, Time.Timestamp.unscaled(0n));
 	expect(frames.map((f) => f.timestamp.asMicros())).toEqual([1_033_333, 1_100_000, 1_066_667]);
 });
 
@@ -117,7 +117,7 @@ test("CmafFormat refuses a run that doesn't start at the next sample", () => {
 	const trun = segment.findLastIndex((_, i) => new TextDecoder().decode(segment.subarray(i, i + 4)) === "trun");
 	view.setInt32(trun + 12, view.getInt32(trun + 12) + 1);
 
-	expect(() => new Format(INIT).decode(segment, undefined)).toThrow(/data_offset/);
+	expect(() => new Format(INIT).decode(segment, Time.Timestamp.unscaled(0n))).toThrow(/data_offset/);
 });
 
 function at(ticks: number): Time.Timestamp {

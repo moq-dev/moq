@@ -25,7 +25,7 @@ const markerRoute = origin.route(Moq.Path.from("replacement"), { hidden: true })
 const marker = markerRoute.broadcast;
 const ready = marker.createTrack("ready");
 const markerGroup = ready.appendGroup();
-markerGroup.writeFrame({ payload: new Uint8Array([42]) });
+markerGroup.writeFrame({ payload: new Uint8Array([42]), timestamp: Moq.Time.Timestamp.unscaled(markerGroup.sequence) });
 markerGroup.finish();
 markerRoute.announce();
 
@@ -128,7 +128,7 @@ try {
 	const demand = video.demand();
 	while (demand.wanted.peek() === undefined) await demand.wanted.changed();
 	const group = video.appendGroup();
-	group.writeFrame({ payload: new Uint8Array(32) });
+	group.writeFrame({ payload: new Uint8Array(32), timestamp: Moq.Time.Timestamp.unscaled(group.sequence) });
 	group.finish();
 	assert.equal((await commands.next()).value, "first group");
 	await initial.control.writer.u53(GoAway.id);
@@ -140,7 +140,7 @@ try {
 	assert.equal((await commands.next()).value, "replacement ready");
 	initial.connection.abort();
 	const next = video.appendGroup();
-	next.writeFrame({ payload: new Uint8Array(32).fill(1) });
+	next.writeFrame({ payload: new Uint8Array(32).fill(1), timestamp: Moq.Time.Timestamp.unscaled(next.sequence) });
 	next.finish();
 	assert.equal((await commands.next()).value, "done");
 	console.error("js goaway redirect restarted");

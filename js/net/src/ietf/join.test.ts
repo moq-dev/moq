@@ -10,7 +10,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Timescale } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import * as track from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
@@ -563,7 +563,7 @@ test("a clean end finishes a head nothing claimed", () => {
 	const j = new Join(0n, t);
 	const producer = new track.Producer("catalog").createGroup(0n);
 	expect(j.open(() => producer)).toBe(producer);
-	producer.writeFrame({ payload: text("c") });
+	producer.writeFrame({ payload: text("c"), timestamp: Timestamp.unscaled(producer.sequence) });
 	j.wrote();
 	j.finish(producer);
 	expect(j.outstanding).toBe(true);
@@ -683,7 +683,7 @@ test("a second fetch stream after the track ended leaves the first head to its o
 	// The second stream, discarding, ends first: the head is still the first stream's.
 	j.finish(undefined);
 	expect(first.closed.peek()).toBeUndefined();
-	first.writeFrame({ payload: text("c") });
+	first.writeFrame({ payload: text("c"), timestamp: Timestamp.unscaled(first.sequence) });
 	j.finish(first);
 	expect(first.closed.peek()).toBeNull();
 });

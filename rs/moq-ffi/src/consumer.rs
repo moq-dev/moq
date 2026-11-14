@@ -12,7 +12,7 @@ use crate::producer::MoqTrackInfo;
 fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 	MoqFrame {
 		payload: frame.payload.to_vec(),
-		timestamp: frame.timestamp.map(Into::into),
+		timestamp: frame.timestamp.into(),
 	}
 }
 
@@ -111,19 +111,20 @@ pub struct MoqRange {
 /// Where one end of a [`MoqRange`] falls, mirroring [`moq_net::track::Anchor`].
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAnchor {
-	/// This group, delivered from its first frame.
+	/// The group starting here, delivered from its first frame.
 	Absolute {
-		/// The absolute group sequence number.
+		/// The group's start, in its track's timescale, which names it.
 		group: u64,
 	},
-	/// The group this many before the latest, clamped to group 0: `0` is the latest group.
+	/// The group this many before the latest, counting the groups held: `0` is the latest
+	/// group, and one counting back past every group held reaches back to the oldest.
 	Relative {
 		/// The number of groups back from the live edge.
 		groups: u64,
 	},
-	/// The group containing this presentation time. An untimed track refuses it.
+	/// The group containing this time: the newest one starting at or before it.
 	Time {
-		/// The presentation time.
+		/// The time, whose `value` is taken in the track's timescale.
 		timestamp: MoqTimestamp,
 	},
 	/// The oldest group still around, as far back as the max delay allows. A start only.
@@ -140,27 +141,45 @@ pub enum MoqOrder {
 	Descending,
 }
 
-impl TryFrom<MoqAnchor> for moq_net::track::Anchor {
-	type Error = MoqError;
-
-	fn try_from(anchor: MoqAnchor) -> Result<Self, MoqError> {
-		Ok(match anchor {
-			MoqAnchor::Oldest => Self::Oldest,
-			MoqAnchor::Absolute { group } => Self::Absolute(group),
-			MoqAnchor::Relative { groups } => Self::Relative(groups),
-			MoqAnchor::Time { timestamp } => Self::Time(timestamp.try_into()?),
+impl MoqAnchor {
+	/// This anchor as a start. A group is named by its start, so an absolute group names
+	/// that time. A time is taken in the track's timescale, whatever `scale` says, though an
+	/// invalid timestamp is still refused.
+	fn start(self) -> Result<moq_net::track::Anchor, MoqError> {
+		use moq_net::track::Anchor;
+		Ok(match self {
+			Self::Oldest => Anchor::Oldest,
+			Self::Absolute { group } => Anchor::Time(group),
+			Self::Relative { groups } => Anchor::Relative(groups),
+			Self::Time { timestamp } => {
+				moq_net::Timestamp::try_from(timestamp)?;
+				Anchor::Time(timestamp.value)
+			}
 		})
+	}
+
+	/// This anchor as an end, or `None` for an absolute end at group 0, which holds nothing.
+	/// An absolute end is exclusive, so it ends with the group before it.
+	fn end(self) -> Result<Option<moq_net::track::Anchor>, MoqError> {
+		match self {
+			Self::Absolute { group } => Ok(group.checked_sub(1).map(moq_net::track::Anchor::Time)),
+			anchor => anchor.start().map(Some),
+		}
 	}
 }
 
-impl TryFrom<MoqRange> for moq_net::track::Range {
-	type Error = MoqError;
-
-	fn try_from(range: MoqRange) -> Result<Self, MoqError> {
-		Ok(Self {
-			start: range.start.try_into()?,
-			end: range.end.map(TryInto::try_into).transpose()?,
-		})
+impl MoqRange {
+	/// This range as moq-net reads it, or `None` when it holds nothing.
+	pub(crate) fn resolve(self) -> Result<Option<moq_net::track::Range>, MoqError> {
+		let start = self.start.start()?;
+		let end = match self.end {
+			Some(end) => match end.end()? {
+				Some(end) => Some(end),
+				None => return Ok(None),
+			},
+			None => None,
+		};
+		Ok(Some(moq_net::track::Range { start, end }))
 	}
 }
 
@@ -212,12 +231,11 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 			.with_priority(s.priority)
 			.with_delay(s.delay.into());
 		if let Some(ranges) = s.ranges {
-			subscription = subscription.with_ranges(
-				ranges
-					.into_iter()
-					.map(TryInto::try_into)
-					.collect::<Result<Vec<_>, _>>()?,
-			);
+			let ranges = ranges
+				.into_iter()
+				.map(MoqRange::resolve)
+				.collect::<Result<Vec<_>, _>>()?;
+			subscription = subscription.with_ranges(ranges.into_iter().flatten());
 		}
 		if let Some(order) = s.order {
 			subscription = subscription.with_order(order.into());
@@ -664,7 +682,7 @@ pub struct MoqGroupConsumer {
 impl MoqGroupConsumer {
 	pub(crate) fn new(group: moq_net::group::Consumer, driver: Background) -> Self {
 		Self {
-			sequence: group.sequence,
+			sequence: group.start,
 			reads: Polled::new(group).supervised(driver.clone()),
 			driver,
 		}
@@ -688,7 +706,7 @@ impl MoqGroupConsumer {
 
 #[uniffi::export]
 impl MoqGroupConsumer {
-	/// The sequence number of this group within the track.
+	/// The start of this group, in its track's timescale, which names it within the track.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}

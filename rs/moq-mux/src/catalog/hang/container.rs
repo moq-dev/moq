@@ -4,8 +4,12 @@ use crate::container::{Container as ContainerTrait, Frame, Kind, fmp4, legacy, l
 ///
 /// Built from a track's audio or video configuration, including its container.
 pub enum Container {
-	/// varint timestamp + raw codec bitstream. The original hang wire format.
+	/// varint timestamp + raw codec bitstream. The original hang wire format. Its frames carry no
+	/// duration, so audio built from [`Kind`] alone reads none.
 	Legacy(Kind),
+	/// [`Legacy`](Self::Legacy) audio whose codec states each packet's duration, which its reads
+	/// carry. Built from an [`AudioConfig`](hang::catalog::AudioConfig) whose codec does.
+	LegacyAudio(legacy::Audio),
 	/// ISO-BMFF moof+mdat fragments. The wrapped [`fmp4::Wire`] holds
 	/// the track's `trak` box so per-frame writes and reads have the
 	/// timescale and track id available.
@@ -36,7 +40,10 @@ impl TryFrom<&hang::catalog::VideoConfig> for Container {
 impl TryFrom<&hang::catalog::AudioConfig> for Container {
 	type Error = crate::Error;
 	fn try_from(config: &hang::catalog::AudioConfig) -> crate::Result<Self> {
-		Self::new(&config.container, Kind::Audio)
+		match (&config.container, legacy::Audio::new(config)) {
+			(hang::catalog::Container::Legacy, Some(audio)) => Ok(Self::LegacyAudio(audio)),
+			(container, _) => Self::new(container, Kind::Audio),
+		}
 	}
 }
 
@@ -53,6 +60,7 @@ impl Container {
 	pub(crate) fn prefix(&self, timestamp: moq_net::Timestamp) -> crate::Result<Option<bytes::Bytes>> {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).prefix(timestamp).map(Some),
+			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).prefix(timestamp).map(Some),
 			Self::Loc(kind) => loc::Wire(*kind).prefix(timestamp).map(Some),
 			Self::Cmaf(_) => Ok(None),
 		}
@@ -79,6 +87,7 @@ impl ContainerTrait for Container {
 	fn end(&self, frame: &Frame) -> Option<moq_net::Timestamp> {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).end(frame),
+			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).end(frame),
 			Self::Cmaf(cmaf) => cmaf.end(frame),
 			Self::Loc(kind) => loc::Wire(*kind).end(frame),
 		}
@@ -87,6 +96,7 @@ impl ContainerTrait for Container {
 	fn kind(&self) -> Kind {
 		match self {
 			Self::Legacy(kind) | Self::Loc(kind) => *kind,
+			Self::LegacyAudio(_) => Kind::Audio,
 			Self::Cmaf(wire) => <fmp4::Wire as ContainerTrait>::kind(wire),
 		}
 	}
@@ -98,6 +108,7 @@ impl ContainerTrait for Container {
 	) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).finish_group(group, end),
+			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).finish_group(group, end),
 			Self::Cmaf(wire) => wire.finish_group(group, end).map_err(Into::into),
 			Self::Loc(kind) => loc::Wire(*kind).finish_group(group, end),
 		}
@@ -106,6 +117,7 @@ impl ContainerTrait for Container {
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).write(group, frames),
+			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).write(group, frames),
 			Self::Cmaf(cmaf) => cmaf.write(group, frames).map_err(Into::into),
 			Self::Loc(kind) => loc::Wire(*kind).write(group, frames),
 		}
@@ -114,6 +126,7 @@ impl ContainerTrait for Container {
 	fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).decode(frame),
+			Self::LegacyAudio(audio) => audio.decode(frame),
 			Self::Cmaf(cmaf) => Ok(cmaf.decode(frame)?),
 			Self::Loc(kind) => loc::Wire(*kind).decode(frame),
 		}

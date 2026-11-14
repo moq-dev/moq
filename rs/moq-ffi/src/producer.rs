@@ -100,6 +100,12 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	}
 }
 
+/// One past the newest group's start, or 0 on an empty track: where a group the caller gave
+/// no start for begins.
+fn next_start(track: &moq_net::track::Producer) -> u64 {
+	track.largest().map_or(0, |largest| largest.group.saturating_add(1))
+}
+
 fn raw_track_info(info: Option<MoqTrackInfo>) -> Result<moq_net::track::Info, MoqError> {
 	info.map(moq_net::track::Info::try_from)
 		.transpose()
@@ -474,10 +480,21 @@ impl MoqTrackRequests {
 	/// history a subscription reads that the cache no longer holds.
 	///
 	/// Cached groups are served without reaching this method.
+	///
+	/// A reader's time start that no cached group places is looked up rather than filled; a
+	/// fill names groups, so the lookup is dropped unanswered here, and the reader falls back
+	/// to the groups held.
 	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
 		let fill = self
 			.reads
-			.wait(|requests, waiter| Poll::Ready(Ok(ready!(requests.poll_requested_fill(waiter))?)))
+			.wait(|requests, waiter| {
+				loop {
+					let fill = ready!(requests.poll_requested_fill(waiter))?;
+					if fill.time().is_none() {
+						return Poll::Ready(Ok(fill));
+					}
+				}
+			})
 			.await?;
 		Ok(Arc::new(MoqFill::new(fill)))
 	}
@@ -825,16 +842,17 @@ impl MoqTrackProducer {
 		Ok(Arc::new(MoqTrackConsumer::new(track, Background::default())))
 	}
 
-	/// Append a new group to the track, returning a producer for writing frames into it.
+	/// Append a new group to the track, one past the newest group's start, returning a
+	/// producer for writing frames into it.
 	pub fn append_group(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.append_group()?;
+		let group = raw.append_group(next_start(raw))?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
-	/// Create a group with an explicit sequence number.
+	/// Create a group starting at `sequence`, in the track's timescale, which names it.
 	///
 	/// Use this for sparse or replayed tracks. [`append_group`](Self::append_group)
 	/// remains the convenient live-stream path.
@@ -842,7 +860,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.create_group(moq_net::group::Info { sequence })?;
+		let group = raw.create_group(moq_net::group::Info { start: sequence })?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -866,10 +884,10 @@ impl MoqTrackProducer {
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
+		let timestamp: moq_net::Timestamp = frame.timestamp.try_into()?;
 		let mut phase = self.phase.lock().unwrap();
-		let raw = phase.raw()?;
-		raw.write_frame(timestamp, frame.payload)?;
+		// The group starts at its frame's time, or its unscaled key on a scale-less track.
+		phase.raw()?.write_frame(timestamp, frame.payload)?;
 		Ok(())
 	}
 
@@ -972,7 +990,7 @@ impl MoqGroupProducer {
 	/// Wrap `group`, for a track's writer or a socket's write half.
 	pub(crate) fn from_inner(group: moq_net::group::Producer) -> Self {
 		Self {
-			sequence: group.sequence,
+			sequence: group.start,
 			inner: kio::Bridge::new(GroupPhase::Writing(group)),
 		}
 	}
@@ -980,7 +998,7 @@ impl MoqGroupProducer {
 
 #[uniffi::export]
 impl MoqGroupProducer {
-	/// The sequence number of this group within the track.
+	/// The start of this group, in its track's timescale, which names it within the track.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}
@@ -1003,7 +1021,7 @@ impl MoqGroupProducer {
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
+		let timestamp = frame.timestamp.try_into()?;
 		let mut guard = self.inner.lock();
 		let GroupPhase::Writing(group) = &mut *guard else {
 			return Err(MoqError::Closed);
@@ -1022,11 +1040,17 @@ impl MoqGroupProducer {
 	/// once while a reader has taken every frame, and once the group is closed, so the next
 	/// write reports why. Fails with `Closed` after [`abort`](Self::abort).
 	pub async fn ready(&self, size: u64) -> Result<(), MoqError> {
-		let frame = moq_net::frame::Info { size, timestamp: None };
 		let mut park = kio::Park::default();
 		crate::ffi::run(kio::wait(|waiter| {
 			self.inner.poll(waiter, |group, cx| match group {
-				GroupPhase::Writing(group) => group.poll_ready(park.hold(cx), &frame).map(Ok),
+				GroupPhase::Writing(group) => {
+					// Only the size paces; the timestamp is checked by the write.
+					let frame = moq_net::frame::Info {
+						size,
+						timestamp: moq_net::Timestamp::unscaled(group.start),
+					};
+					group.poll_ready(park.hold(cx), &frame).map(Ok)
+				}
 				// The next write reports why.
 				GroupPhase::Finished(_) => Poll::Ready(Ok(())),
 				GroupPhase::Closed => Poll::Ready(Err(MoqError::Closed)),
@@ -1042,7 +1066,7 @@ impl MoqGroupProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock();
 		match std::mem::take(&mut *guard) {
-			GroupPhase::Writing(group) => *guard = GroupPhase::Finished(group.finish()?),
+			GroupPhase::Writing(group) => *guard = GroupPhase::Finished(group.close()?),
 			GroupPhase::Finished(group) => *guard = GroupPhase::Finished(group),
 			GroupPhase::Closed => return Err(MoqError::Closed),
 		}
@@ -1083,7 +1107,7 @@ mod metadata_tests {
 	fn dropping_a_group_binding_ends_its_unfinished_group() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
-		let group = track.append_group().unwrap();
+		let group = track.append_group(0).unwrap();
 		let mut consumer = group.consume();
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);

@@ -105,6 +105,8 @@ struct Link {
 	tracks: Vec<track::Producer>,
 	subscribers: Vec<track::Subscriber>,
 	payload: Bytes,
+	/// The next group's start on every track, in milliseconds.
+	next: u64,
 	_broadcast: origin::Route,
 	_sessions: (moq_net::Session, moq_net::Session),
 	_origins: (origin::Producer, origin::Producer),
@@ -185,6 +187,7 @@ impl Link {
 			tracks,
 			subscribers,
 			payload: Bytes::from(vec![0; size]),
+			next: 0,
 			_broadcast: broadcast,
 			_sessions: sessions,
 			_origins: (publisher, subscriber),
@@ -200,12 +203,15 @@ impl Link {
 	/// Write a group on every track, then read each back, returning the payload bytes
 	/// read so skipped work can't look like a speedup.
 	async fn round(&mut self) -> usize {
+		let key = self.next;
+		self.next += 1;
+		let timestamp = Timestamp::from_millis(key).unwrap();
 		for track in &self.tracks {
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_group(key).unwrap();
 			for _ in 0..FRAMES {
-				group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
+				group.write_frame(timestamp, self.payload.clone()).unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		let mut bytes = 0;

@@ -98,9 +98,12 @@ mod tests {
 		let info = moq_net::track::Info::default().with_max_age(hang::container::MAX_AGE);
 		let track = route.broadcast().create_track("video", info).unwrap();
 		for _ in 0..3 {
-			let mut group = track.append_group().unwrap();
-			group.write_frame(None, bytes::Bytes::from_static(b"frame")).unwrap();
-			group.finish().unwrap();
+			let key = track.largest().map_or(0, |largest| largest.group + 1);
+			let mut group = track.append_group(key).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::unscaled(key), bytes::Bytes::from_static(b"frame"))
+				.unwrap();
+			group.close().unwrap();
 		}
 		let track = track.finish().unwrap();
 		(route.broadcast().clone(), (route, track))

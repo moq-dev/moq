@@ -52,7 +52,7 @@ vars == <<trk, front, rd, reading>>
 
 Landed(t) == {trk[t].arr[i] : i \in 1 .. Len(trk[t].arr)}
 Live(t) == trk[t].made /\ ~trk[t].failed
-\* `latest_sequence`: the newest group the track holds.
+\* `max_key`: the newest group the track holds.
 Latest(t) == IF Landed(t) = {} THEN None ELSE Max(Landed(t))
 
 \* `TrackState::is_complete`: the end is declared and the tail holds every group

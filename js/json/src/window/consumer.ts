@@ -25,9 +25,10 @@ const GAPS: Moq.StreamCode[] = [
  * window yields nothing for records already delivered, so this reads as one continuous stream of
  * {@link Event}s regardless of how the publisher framed them.
  *
- * Each event carries the timestamp of the frame that produced it, absent on an untimed track. The
- * wire has no per-record time, so a record a reader first learns of from a group header (one it
- * joined after, or missed while behind) gets the header frame's time, not its original push time.
+ * Each event carries the timestamp of the frame that produced it, which on a scale-less track is
+ * its group's key. The wire has no per-record time, so a record a reader first learns of from a
+ * group header (one it joined after, or missed while behind) gets the header frame's time, not
+ * its original push time.
  *
  * @public
  */
@@ -65,7 +66,8 @@ export class Consumer<T> {
 			// Drain what the last frame produced before reading more, so every queued event is that
 			// frame's and shares its timestamp.
 			const event = this.#decoder.next();
-			if (event) return { value: event, at: this.#at };
+			// An event follows the frame that produced it, so that frame's timestamp is set.
+			if (event && this.#at) return { value: event, at: this.#at };
 
 			if (!this.#group) {
 				this.#group = await this.#track.nextGroup();

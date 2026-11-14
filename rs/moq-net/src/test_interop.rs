@@ -270,7 +270,7 @@ fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i
 	let w = &mut Encoder::new(&mut buf, version.into());
 	let header = lite::Group {
 		subscribe: 5,
-		sequence: 1 << 20,
+		key: 1 << 20,
 		frame_start: 200,
 	};
 	header.encode(w, version).unwrap();
@@ -517,7 +517,11 @@ fn ietf_datagram_interop() {
 		};
 		let mut r = Decoder::new(properties, version.into());
 		let timestamp = ietf::decode_object_time(&mut r, Timescale::MILLI, version).unwrap();
-		assert_eq!(timestamp.map(|t| t.as_millis()), Some(1234), "{version}: Timestamp");
+		assert_eq!(
+			timestamp.map(|t| t.as_millis().unwrap()),
+			Some(1234),
+			"{version}: Timestamp"
+		);
 	}
 }
 

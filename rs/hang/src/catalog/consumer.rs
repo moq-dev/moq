@@ -136,9 +136,9 @@ mod test {
 				.unwrap();
 			let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
 			let published = serde_json::json!({ "echo": { "path": reference } }).to_string();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_group(0).unwrap();
 			group.write_frame(moq_net::Timestamp::ZERO, published).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let result = consumer.next().await;
 			if accepted {
 				assert!(result.unwrap().unwrap().echo.is_some());
@@ -160,11 +160,11 @@ mod test {
 			"audio".into(),
 			crate::catalog::AudioConfig::new(crate::catalog::AudioCodec::Opus, 48_000, 2),
 		);
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::ZERO, published.to_json().unwrap())
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert_eq!(consumer.next().await.unwrap(), Some(published));
 	}
 
@@ -189,11 +189,11 @@ mod test {
 			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
 			.unwrap();
 		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5,"video":[]}"#)
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		assert!(matches!(
 			consumer.next().await,
 			Err(crate::Error::UnsupportedVersion(5))

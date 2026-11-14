@@ -4895,7 +4895,8 @@ fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow
 	// `pts` is a 90 kHz PES PTS; rescale the sample-rate advance to match before adding
 	// (the scale-aware Timestamp rejects mixed scales).
 	let advance = Timestamp::from_scale(samples, sample_rate as u64)?;
-	Ok(Some(pts.checked_add(advance.convert(pts.scale())?)?))
+	let scale = pts.scale().ok_or(moq_net::TimeOverflow)?;
+	Ok(Some(pts.checked_add(advance.convert(scale)?)?))
 }
 
 /// Tracks the wrap-around of the 33-bit, 90 kHz PTS field so timestamps stay
@@ -5777,7 +5778,7 @@ pub(super) mod test {
 			.decode(pes_packet(VIDEO_PID, PTS_SECS * 90_000).as_slice())
 			.unwrap();
 
-		let now = catalog.clock().now().as_micros() / 1_000_000;
+		let now = catalog.clock().now().as_micros().unwrap() / 1_000_000;
 		assert!(
 			(PTS_SECS as u128..PTS_SECS as u128 + 5).contains(&now),
 			"catalog clock reads {now}s, not the first video PTS"
@@ -6711,7 +6712,7 @@ pub(super) mod test {
 		assert_eq!(
 			frames
 				.iter()
-				.map(|frame| frame.timestamp.as_micros())
+				.map(|frame| frame.timestamp.as_micros().unwrap())
 				.collect::<Vec<_>>(),
 			(0..10).map(|i| 1_000_000 + i * 72_000).collect::<Vec<_>>()
 		);
@@ -6752,7 +6753,7 @@ pub(super) mod test {
 			assert_eq!(
 				frames
 					.iter()
-					.map(|frame| frame.timestamp.as_micros())
+					.map(|frame| frame.timestamp.as_micros().unwrap())
 					.collect::<Vec<_>>(),
 				[1_000_000, 1_000_000 + step, 2_000_000],
 				"{stream_type:?}"
@@ -6789,7 +6790,7 @@ pub(super) mod test {
 			assert_eq!(
 				frames
 					.iter()
-					.map(|frame| frame.timestamp.as_micros())
+					.map(|frame| frame.timestamp.as_micros().unwrap())
 					.collect::<Vec<_>>(),
 				[1_000_000, 1_000_000 + step, 2_000_000, 3_000_000],
 				"{stream_type:?}"
@@ -6840,7 +6841,7 @@ pub(super) mod test {
 			assert_eq!(
 				frames
 					.iter()
-					.map(|frame| frame.timestamp.as_micros())
+					.map(|frame| frame.timestamp.as_micros().unwrap())
 					.collect::<Vec<_>>(),
 				[1_000_000, 1_000_000 + step, 1_500_000, 1_500_000 + step],
 				"{stream_type:?}"
@@ -6889,7 +6890,7 @@ pub(super) mod test {
 				assert_eq!(
 					frames
 						.iter()
-						.map(|frame| frame.timestamp.as_micros())
+						.map(|frame| frame.timestamp.as_micros().unwrap())
 						.collect::<Vec<_>>(),
 					[1_000_000, 1_000_000 + step],
 					"{stream_type:?} carry={carry}"
@@ -7404,7 +7405,8 @@ pub(super) mod test {
 			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &opening).as_slice())
 			.unwrap();
 
-		import.seek(10).unwrap();
+		// Two seconds in, in the track's microseconds: past the group already published.
+		import.seek(2_000_000).unwrap();
 
 		// Landing mid-frame after the seek, on a fragment that parses as a header but whose
 		// declared frame ends inside a real one.
@@ -7924,7 +7926,7 @@ pub(super) mod test {
 		assert_ne!(frame.timestamp, Timestamp::ZERO, "cue must not stamp zero");
 		// Placement is normalized to microseconds, independently of the video PTS.
 		assert_eq!(
-			Duration::from(frame.timestamp),
+			Duration::try_from(frame.timestamp).unwrap(),
 			Duration::from_micros(expected),
 			"cue stamped at its first section byte on the PCR clock"
 		);
@@ -7963,7 +7965,10 @@ pub(super) mod test {
 			let (consumer, catalog, _import) = import_all(&data).unwrap();
 			let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 			let frames = read_track(&consumer, &name, crate::container::Kind::Data).await;
-			let times: Vec<_> = frames.iter().map(|frame| frame.timestamp.as_micros() as u64).collect();
+			let times: Vec<_> = frames
+				.iter()
+				.map(|frame| frame.timestamp.as_micros().unwrap() as u64)
+				.collect();
 			let clock = |at: u64, before: u64, ticks: u64, after: u64| {
 				(ticks + (at - before) * 1_350_000 / (after - before)) / 27
 			};
@@ -8193,8 +8198,9 @@ pub(super) mod test {
 		audio_pes_packet(pid, cc, pts, &payload)
 	}
 
-	/// Read every retained frame of `name`, with the count of timeline breaks the consumer
-	/// crossed reading them.
+	/// Read every retained frame of `name`, with the count of declared timeline breaks the consumer
+	/// crossed reading them. Gaps are not counted: these streams carry a PES of two frames a second
+	/// apart, and the hole after each reads as a gap.
 	async fn read_breaks(
 		consumer: &moq_net::broadcast::Consumer,
 		name: &str,
@@ -8212,7 +8218,8 @@ pub(super) mod test {
 		while let Ok(Ok(Some(read))) = kio::clock::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 			match read {
 				crate::container::Read::Frame { frame, .. } => frames.push(frame),
-				crate::container::Read::Gap { .. } | crate::container::Read::End { .. } => breaks += 1,
+				crate::container::Read::End { .. } => breaks += 1,
+				crate::container::Read::Gap { .. } => {}
 			}
 		}
 		(frames, breaks)
@@ -8301,7 +8308,11 @@ pub(super) mod test {
 				.all(|frame| frame.payload[4] == 0xCC || frame.payload[4] == 0xDD),
 			"no program 1 frame leaks in"
 		);
-		assert_eq!(frames[0].timestamp.as_micros(), 3_601_000_000, "program 2's own PTS");
+		assert_eq!(
+			frames[0].timestamp.as_micros().unwrap(),
+			3_601_000_000,
+			"program 2's own PTS"
+		);
 	}
 
 	#[test]
@@ -8608,20 +8619,21 @@ pub(super) mod test {
 				.as_slice(),
 			)
 			.unwrap();
+		// Each era resumes a second on, since a track's group starts only move forward.
 		import.decode(pcr_packet(PCR_PID, 24_300_000).as_slice()).unwrap();
 		import.decode(packet(true, 0, 0, &CUE).as_slice()).unwrap();
 		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
 		import.decode(pcr_packet(PCR_PID, 27_000_000).as_slice()).unwrap();
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
-		import.decode(pcr_packet(PCR_PID, 24_300_000).as_slice()).unwrap();
+		import.decode(pcr_packet(PCR_PID, 51_300_000).as_slice()).unwrap();
 		import.decode(packet(true, 1, 0, &CUE).as_slice()).unwrap();
-		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
-		import.decode(pcr_packet(PCR_PID, 27_000_000).as_slice()).unwrap();
+		import.decode(pes_packet(PCR_PID, 180_000).as_slice()).unwrap();
+		import.decode(pcr_packet(PCR_PID, 54_000_000).as_slice()).unwrap();
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
-		import.decode(pcr_packet(PCR_PID, 24_300_000).as_slice()).unwrap();
+		import.decode(pcr_packet(PCR_PID, 78_300_000).as_slice()).unwrap();
 		import.decode(packet(true, 2, 0, &CUE).as_slice()).unwrap();
-		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
-		import.decode(pcr_packet(PCR_PID, 27_000_000).as_slice()).unwrap();
+		import.decode(pes_packet(PCR_PID, 270_000).as_slice()).unwrap();
+		import.decode(pcr_packet(PCR_PID, 81_000_000).as_slice()).unwrap();
 		let _finished = import.finish().unwrap();
 		let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 		let (frames, breaks) = read_breaks(&consumer, &name, crate::container::Kind::Data).await;
@@ -8852,7 +8864,7 @@ pub(super) mod test {
 			assert_eq!(breaks, 1, "the timebase break did not reach this track");
 			let fills: Vec<u8> = frames.iter().map(|f| f.payload[4]).collect();
 			assert_eq!(fills, [0xAA, 0xBB, 0xCC, 0xDD], "media either side of the break");
-			assert_eq!(frames[2].timestamp.as_micros(), 21_000_000, "the new timeline");
+			assert_eq!(frames[2].timestamp.as_micros().unwrap(), 21_000_000, "the new timeline");
 		}
 	}
 
@@ -9086,7 +9098,7 @@ pub(super) mod test {
 		let mut frames = BTreeMap::new();
 		for name in catalog.snapshot().audio.renditions.keys() {
 			for frame in read_track(consumer, name, crate::container::Kind::Audio).await {
-				frames.insert(frame.payload[4], frame.timestamp.as_micros() as i64);
+				frames.insert(frame.payload[4], frame.timestamp.as_micros().unwrap() as i64);
 			}
 		}
 		frames
@@ -9558,7 +9570,7 @@ pub(super) mod test {
 	fn assert_forward(frames: &[crate::container::Frame]) {
 		let (mut start, mut floor) = (None, None);
 		for frame in frames {
-			let ts = frame.timestamp.as_micros();
+			let ts = frame.timestamp.as_micros().unwrap();
 			if frame.keyframe {
 				assert!(
 					start.is_none_or(|start| ts >= start),
@@ -9590,7 +9602,10 @@ pub(super) mod test {
 		let frames = video_frames(&data).await;
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].payload.as_ref(), au);
-		assert_eq!(frames[0].timestamp.as_micros(), u128::from(FRAME) * 1_000_000 / 90_000);
+		assert_eq!(
+			frames[0].timestamp.as_micros().unwrap(),
+			u128::from(FRAME) * 1_000_000 / 90_000
+		);
 	}
 
 	#[test]
@@ -9700,11 +9715,14 @@ pub(super) mod test {
 				let frames = read_track(&consumer, &name, crate::container::Kind::Video).await;
 				let observed: Vec<_> = frames
 					.iter()
-					.map(|f| (f.timestamp.as_micros(), f.keyframe, f.payload.clone()))
+					.map(|f| (f.timestamp.as_micros().unwrap(), f.keyframe, f.payload.clone()))
 					.collect();
 				assert_eq!(frames.len(), pictures.len(), "{kind:?} {layout}");
 				assert_eq!(
-					frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>(),
+					frames
+						.iter()
+						.map(|f| f.timestamp.as_micros().unwrap())
+						.collect::<Vec<_>>(),
 					pictures
 						.iter()
 						.map(|(pts, _)| u128::from(*pts) * 1_000_000 / 90_000)
@@ -9733,7 +9751,7 @@ pub(super) mod test {
 				assert_eq!(
 					roundtrip
 						.iter()
-						.map(|f| (f.timestamp.as_micros(), f.keyframe, f.payload.clone()))
+						.map(|f| (f.timestamp.as_micros().unwrap(), f.keyframe, f.payload.clone()))
 						.collect::<Vec<_>>(),
 					observed,
 					"export {kind:?} {layout}"
@@ -9912,7 +9930,7 @@ pub(super) mod test {
 				}
 				assert!(frames[recovery].keyframe, "recovery starts at a keyframe");
 				assert_eq!(
-					frames[recovery].timestamp.as_micros(),
+					frames[recovery].timestamp.as_micros().unwrap(),
 					u128::from(90_000 + 9 * FRAME) * 1_000_000 / 90_000
 				);
 			}
@@ -10337,7 +10355,7 @@ pub(super) mod test {
 			let mut frames = Vec::new();
 			while let Some(mut frame) = group.next_frame().await.unwrap() {
 				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
-				frames.push((frame.timestamp.as_micros(), frame.payload.is_empty()));
+				frames.push((frame.timestamp.as_micros().unwrap(), frame.payload.is_empty()));
 			}
 			groups.push(frames);
 		}
@@ -10636,9 +10654,12 @@ pub(super) mod test {
 		assert_forward(&frames);
 		// The next GOP's cues follow the video rather than piling up on the edge.
 		assert!(
-			frames[3].timestamp.as_micros() > frames[2].timestamp.as_micros(),
+			frames[3].timestamp.as_micros().unwrap() > frames[2].timestamp.as_micros().unwrap(),
 			"the cues did not move with the video: {:?}",
-			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>()
+			frames
+				.iter()
+				.map(|f| f.timestamp.as_micros().unwrap())
+				.collect::<Vec<_>>()
 		);
 	}
 
@@ -11024,7 +11045,7 @@ pub(super) mod test {
 
 		for (frames, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 0, "a rollover is not a break");
-			let stamps: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+			let stamps: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 			assert!(
 				stamps.windows(2).all(|pair| pair[0] < pair[1]),
 				"the rollover broke the timeline: {stamps:?}"

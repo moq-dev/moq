@@ -70,14 +70,22 @@ try {
 			partial = low.appendGroup();
 			// A whole frame can return credit at each sealed segment and finish before `high`
 			// reaches stdin. Keep this prefix unsealed until the receiver evicts its stream.
-			partial.createFrame({ size: 2 * window }).write(new Uint8Array((window * 3) / 4).fill(1));
+			partial
+				.createFrame({ size: 2 * window, timestamp: Moq.Time.Timestamp.unscaled(partial.sequence) })
+				.write(new Uint8Array((window * 3) / 4).fill(1));
 		} else if (command === "high") {
 			const group = high.appendGroup();
-			group.writeFrame({ payload: new Uint8Array(window / 2).fill(2) });
+			group.writeFrame({
+				payload: new Uint8Array(window / 2).fill(2),
+				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+			});
 			group.finish();
 		} else if (command === "after") {
 			const group = low.appendGroup();
-			group.writeFrame({ payload: new TextEncoder().encode("after") });
+			group.writeFrame({
+				payload: new TextEncoder().encode("after"),
+				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+			});
 			group.finish();
 		} else {
 			throw new Error(`unknown command: ${command}`);

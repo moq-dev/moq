@@ -387,9 +387,9 @@ pub enum Error {
 	#[error("duplicate")]
 	Duplicate,
 
-	/// A group was created at a sequence its track declared skipped: a skip says the
-	/// sequence will never be produced, so it is final. See `track::Producer::skip_groups`.
-	#[error("sequence was skipped")]
+	/// A group was created at a key its track declared skipped: a skip says the
+	/// key will never be produced, so it is final. See `track::Producer::skip_groups`.
+	#[error("key was skipped")]
 	Skipped,
 
 	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,

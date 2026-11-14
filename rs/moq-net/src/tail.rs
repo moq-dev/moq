@@ -95,7 +95,7 @@ impl Tail {
 	/// Fold all but the newest finished run into `folded`, returning whether any was: a stale
 	/// drop under this update then stands as the publisher judged it, but the update owes none
 	/// of what it names that [`Self::overtaken`] reports. The newest run stays, so streams
-	/// finishing in sequence grow nothing to charge again.
+	/// finishing in key grow nothing to charge again.
 	pub fn fold(&mut self) -> bool {
 		let (Some(first), Some(older), Some(newest)) = (
 			self.finished.iter().next().cloned(),

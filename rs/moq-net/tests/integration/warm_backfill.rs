@@ -49,7 +49,7 @@ async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
 		.subscribe(
 			Subscription::default()
 				.with_delay(Delay::default().with_max(BUDGET))
-				.with_range(0..),
+				.with_ranges([crate::support::keys(0..)]),
 		)
 		.await
 		.unwrap()
@@ -60,7 +60,7 @@ async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 	let mut got = BTreeSet::new();
 	while let Ok(group) = kio::clock::timeout(Duration::from_secs(1), subscriber.recv_group()).await {
 		let group = group.unwrap().expect("the track is live");
-		assert!(got.insert(group.sequence), "group {} delivered twice", group.sequence);
+		assert!(got.insert(group.start), "group {} delivered twice", group.start);
 	}
 	got
 }
@@ -81,12 +81,12 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 				Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
 			)
 			.unwrap();
-		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+		for key in 0..GROUPS {
+			let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		broadcast.announce().unwrap();
 
@@ -115,12 +115,12 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 			.broadcast()
 			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
-		for sequence in 0..GROUPS {
-			let mut group = source.create_group(sequence.into()).unwrap();
+		for key in 0..GROUPS {
+			let mut group = source.create_group(key.into()).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		broadcast.announce().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, subscribe(&relay)).await.unwrap();
@@ -130,12 +130,12 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 		group
 			.write_frame(Timestamp::from_millis(GROUPS * 1000).unwrap(), &b"live"[..])
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let got = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(got.sequence, GROUPS, "{version}: still live after the refused backfill");
+		assert_eq!(got.start, GROUPS, "{version}: still live after the refused backfill");
 	}
 }

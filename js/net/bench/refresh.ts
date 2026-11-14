@@ -7,6 +7,7 @@ import { ALPN_07_WIP } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
+import { Timestamp } from "../src/time.ts";
 
 console.debug = () => {};
 console.log("retained,tracks,joined,refresh_us");
@@ -39,7 +40,7 @@ for (const retained of [1, 64, 1024])
 				const baseline = consumers.map((track) => track.subscribe());
 				for (let i = 0; i < tracks; i++) {
 					const group = producers[i].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3) });
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.sequence) });
 					group.finish();
 					const received = await baseline[i].recvGroup();
 					if (!received) throw new Error("baseline group missing");
@@ -50,7 +51,7 @@ for (const retained of [1, 64, 1024])
 				// track grows, so scanning that cache appears independently of fanout.
 				for (let old = 1; old < retained; old++) {
 					const group = producers[0].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3) });
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.sequence) });
 					group.finish();
 					const received = await baseline[0].recvGroup();
 					if (!received) throw new Error("historical group missing");
@@ -61,8 +62,8 @@ for (const retained of [1, 64, 1024])
 				const samples: number[] = [];
 				for (let round = 0; round < 9; round++) {
 					const group = producers[0].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3) });
-					group.writeFrame({ payload: new Uint8Array(4) });
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.sequence) });
+					group.writeFrame({ payload: new Uint8Array(4), timestamp: Timestamp.unscaled(group.sequence) });
 					group.finish();
 					const received = await baseline[0].recvGroup();
 					if (!received) throw new Error("measured group missing");

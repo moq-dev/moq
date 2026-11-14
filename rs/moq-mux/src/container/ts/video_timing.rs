@@ -88,7 +88,11 @@ impl Clock {
 			.ok_or_else(|| anyhow::anyhow!("TS video access unit has no timestamp anchor for its POC clock"))?;
 		// Always measure from the explicit anchor, retaining fractional ticks rather
 		// than accumulating the rounding error of a frame-by-frame increment.
-		let scale = i128::from(anchor.pts.scale().as_u64());
+		let scale = anchor
+			.pts
+			.scale()
+			.ok_or_else(|| anyhow::anyhow!("TS video timestamp anchor has no timescale"))?;
+		let scale = i128::from(scale.as_u64());
 		let denominator = scale
 			.checked_mul(rate.denominator.into())
 			.ok_or_else(|| anyhow::anyhow!("TS video timestamp overflow"))?;
@@ -586,7 +590,7 @@ mod tests {
 		for poc in [2, 7, 12, 60_006] {
 			let got = clock.stamp(None, poc, rate, false).unwrap();
 			let expected = (123_123i128 * 2 + (i128::from(poc) - 6) * 3003) * 1_000_000 / 180_000;
-			assert_eq!(got.as_micros(), expected as u128);
+			assert_eq!(got.as_micros().unwrap(), expected as u128);
 		}
 		assert!(
 			clock.stamp(None, 0, rate, true).is_err(),

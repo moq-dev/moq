@@ -676,7 +676,7 @@ mod tests {
 		assert_eq!(video.len(), 2, "the slice before the keyframe never publishes");
 		assert!(video[0].keyframe);
 		assert_eq!(
-			video[0].timestamp.as_micros(),
+			video[0].timestamp.as_micros().unwrap(),
 			33_333,
 			"one frame past the session start"
 		);
@@ -691,7 +691,7 @@ mod tests {
 		assert_eq!(audio.len(), 1, "audio before the keyframe never publishes");
 		assert_eq!(audio[0].payload.as_ref(), b"audio");
 		assert_eq!(
-			audio[0].timestamp.as_micros(),
+			audio[0].timestamp.as_micros().unwrap(),
 			42_666,
 			"two AAC frames past the session start"
 		);
@@ -1128,7 +1128,7 @@ mod tests {
 		let frames = frames(reader).await;
 		assert_eq!(frames.len(), 1, "the lossy keyframe never publishes");
 		assert_eq!(
-			frames[0].timestamp.as_micros(),
+			frames[0].timestamp.as_micros().unwrap(),
 			100_000,
 			"the track opens on the clean keyframe"
 		);

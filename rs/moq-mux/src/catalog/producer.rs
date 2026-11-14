@@ -290,6 +290,10 @@ struct Outputs<E: CatalogExt> {
 	/// Keeps the broadcast open while the catalog is, so a publisher may hand its own handle to a
 	/// media producer and drop it.
 	broadcast: moq_net::broadcast::Producer,
+	/// How many groups the hang and MSF tracks each took, for tests to count publishes by: group
+	/// starts are timestamps.
+	#[cfg(test)]
+	published: Arc<[std::sync::atomic::AtomicU64; 2]>,
 }
 
 impl<E: CatalogExt> Clone for Outputs<E> {
@@ -299,6 +303,8 @@ impl<E: CatalogExt> Clone for Outputs<E> {
 			hang_track: self.hang_track.clone(),
 			msf_track: self.msf_track.clone(),
 			broadcast: self.broadcast.clone(),
+			#[cfg(test)]
+			published: self.published.clone(),
 		}
 	}
 }
@@ -310,19 +316,30 @@ impl<E: CatalogExt> Outputs<E> {
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
 		// The media timeline, so the catalog in effect at a media timestamp is the one stamped at or
-		// before it, whichever thread or runtime publishes.
-		let at = clock.now();
+		// before it, whichever thread or runtime publishes. Each catalog starts a group on both
+		// tracks, so one landing in the same millisecond as the last is stamped a unit later
+		// instead of refused.
+		let (_, at) = crate::start::next(&self.hang_track, clock.now())?;
+		let (start, at) = crate::start::next(&self.msf_track, at)?;
 		// One snapshot per group while deltas are disabled.
-		self.hang.update(moq_net::Timed::from(catalog).at(at))?;
+		#[cfg(test)]
+		let before = self.hang_track.largest();
+		self.hang.update(moq_json::Timed::new(catalog, at))?;
+		#[cfg(test)]
+		if self.hang_track.largest() != before {
+			self.published[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		}
 
 		// `abort` below is what keeps the tracks consistent if this fails after the hang track was
 		// updated.
 		let Some(msf) = msf.render(catalog, &self.msf_track.broadcast().path)? else {
 			return Ok(());
 		};
-		let mut group = self.msf_track.append_group()?;
+		let mut group = self.msf_track.append_group(start)?;
+		#[cfg(test)]
+		self.published[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		group.write_frame(at, msf)?;
-		group.finish()?;
+		group.close()?;
 
 		Ok(())
 	}
@@ -514,6 +531,8 @@ impl<E: CatalogExt> Producer<E> {
 				hang_track,
 				msf_track,
 				broadcast: broadcast.clone(),
+				#[cfg(test)]
+				published: Arc::default(),
 			},
 			current: Arc::new(Mutex::new(State {
 				catalog,
@@ -660,11 +679,11 @@ impl<E: CatalogExt> Producer<E> {
 			let clock = &guard.state.clock;
 			let at = match wall {
 				Some(wall) => clock.reading(wall)?,
-				None => clock.now().as_micros() as i128,
+				None => clock.now().as_micros().expect("the broadcast clock is scaled") as i128,
 			};
-			super::Offset::from_micros(at - pts.as_micros() as i128)?
+			super::Offset::from_micros(at - pts.as_micros()? as i128)?
 		} else {
-			let since = std::time::Duration::from_micros(u64::try_from(pts.as_micros()).unwrap_or(u64::MAX));
+			let since = std::time::Duration::from_micros(u64::try_from(pts.as_micros()?).unwrap_or(u64::MAX));
 			// Moved, not replaced: it keeps reading the clock the broadcast was created under.
 			let clock = match wall {
 				Some(wall) => guard.state.clock.placed(since, wall)?,
@@ -1977,10 +1996,7 @@ mod test {
 		// The caller got the error, so the tracks stay usable once the catalog fits again.
 		catalog.modify().unwrap().remove_section("big").unwrap();
 		catalog.finish().unwrap();
-		assert_eq!(
-			catalog.outputs.hang_track.largest(),
-			Some(moq_net::track::Position::group(0))
-		);
+		assert_eq!(sent(&catalog), Some(0));
 	}
 
 	/// Every consumer refuses an ID naming both a video and an audio rendition, so the producer
@@ -2024,10 +2040,7 @@ mod test {
 
 		// The drop that follows `commit` must not publish a second snapshot.
 		catalog.finish().unwrap();
-		assert_eq!(
-			catalog.outputs.hang_track.largest(),
-			Some(moq_net::track::Position::group(0))
-		);
+		assert_eq!(sent(&catalog), Some(0));
 	}
 
 	/// A video rendition `video0` on `catalog`, with a keyframe group at each of `starts` (ms).
@@ -2237,7 +2250,7 @@ mod test {
 			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 				panic!("captured frame is published");
 			};
-			let timestamp = frame.timestamp.expect("captured frame is timed");
+			let timestamp = frame.timestamp;
 			assert_eq!(catalog.clock().wall_clock(timestamp).unwrap(), wall);
 			assert_eq!(
 				catalog.snapshot().media.clock.unwrap().wall_clock(timestamp).unwrap(),
@@ -2323,7 +2336,7 @@ mod test {
 				while let Some(mut group) = track.next_group().await.unwrap() {
 					let first = stamps.len();
 					while let Some(frame) = group.read_frame().await.unwrap() {
-						stamps.push(frame.timestamp.unwrap().as_micros());
+						stamps.push(frame.timestamp.as_micros().unwrap());
 					}
 					starts.extend(stamps.get(first).copied());
 				}
@@ -2343,8 +2356,8 @@ mod test {
 
 	/// How far `pts` lands from `clock`'s reading now, which is zero for a frame live on arrival.
 	fn lateness(clock: &crate::Clock, pts: moq_net::Timestamp) -> std::time::Duration {
-		let now = clock.now().as_micros();
-		std::time::Duration::from_micros(now.abs_diff(pts.as_micros()) as u64)
+		let now = clock.now().as_micros().unwrap();
+		std::time::Duration::from_micros(now.abs_diff(pts.as_micros().unwrap()) as u64)
 	}
 
 	/// A `with_clock` catalog is fixed from the start: even the first importer shifts onto it,
@@ -2452,7 +2465,7 @@ mod test {
 			.unwrap();
 		assert_eq!(catalog.snapshot().media.clock, published);
 		assert!(
-			shifted.as_micros() >= 10_000_000,
+			shifted.as_micros().unwrap() >= 10_000_000,
 			"{shifted:?} lands at the clock's reading"
 		);
 	}
@@ -2477,7 +2490,7 @@ mod test {
 			"it placed the clock, so it stays verbatim"
 		);
 		let placed = catalog.clock();
-		assert_eq!(placed.reading(wall).unwrap(), pts.as_micros() as i128);
+		assert_eq!(placed.reading(wall).unwrap(), pts.as_micros().unwrap() as i128);
 
 		// Placed again on the now fixed clock, the same mapping shifts by nothing.
 		let again = catalog.timebase();
@@ -2576,7 +2589,7 @@ mod test {
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
 		// clock, which may be unset.
-		let zero = kio::clock::Wall::MOQ_EPOCH + Duration::from_micros(input.wall.as_micros() as u64);
+		let zero = kio::clock::Wall::MOQ_EPOCH + Duration::from_micros(input.wall.as_micros().unwrap() as u64);
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
 		seed.media.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
@@ -2701,7 +2714,7 @@ mod test {
 		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("the frame is published");
 		};
-		assert_eq!(frame.timestamp, Some(timestamp));
+		assert_eq!(frame.timestamp, timestamp);
 
 		// The catalog clock is fixed now, and has no wall to offset a placement onto.
 		assert!(matches!(
@@ -3329,8 +3342,11 @@ mod test {
 	}
 
 	/// How many catalogs have gone out on the wire.
-	fn sent(catalog: &Producer) -> Option<u64> {
-		catalog.outputs.hang_track.largest().map(|position| position.group)
+	/// How many hang catalogs went out before the newest, or `None` before the first.
+	fn sent<E: CatalogExt>(catalog: &Producer<E>) -> Option<u64> {
+		catalog.outputs.published[0]
+			.load(std::sync::atomic::Ordering::Relaxed)
+			.checked_sub(1)
 	}
 
 	/// The catalog a viewer joining now receives.
@@ -3589,8 +3605,11 @@ mod test {
 	}
 
 	/// How many MSF catalogs have gone out on the wire.
-	fn msf_sent(catalog: &Producer) -> Option<u64> {
-		catalog.outputs.msf_track.largest().map(|position| position.group)
+	/// How many MSF catalogs went out before the newest, or `None` before the first.
+	fn msf_sent<E: CatalogExt>(catalog: &Producer<E>) -> Option<u64> {
+		catalog.outputs.published[1]
+			.load(std::sync::atomic::Ordering::Relaxed)
+			.checked_sub(1)
 	}
 
 	/// The last MSF catalog on the wire.

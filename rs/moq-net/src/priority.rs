@@ -18,10 +18,10 @@ use crate::track::Order;
 // - On remove from overflow: remove its priority-and-id key in O(log n)
 //
 // Priority ordering: higher track value = higher priority, then the publisher's priority,
-// then subscription, then group sequence in that subscription's own direction.
+// then subscription, then group key in that subscription's own direction.
 
 /// A group stream's rank: its subscription's track priority, the publisher's priority for
-/// the track, the subscription it belongs to, its group sequence in that subscription's
+/// the track, the subscription it belongs to, its group key in that subscription's
 /// [`Order`], and the first object it carries.
 ///
 /// Higher `track` always wins, and a higher `publisher` breaks a tie between two
@@ -30,7 +30,7 @@ use crate::track::Order;
 /// newest first by default, so a congested track sheds its backlog rather than its live
 /// edge, or oldest first for an ascending subscription draining one.
 ///
-/// Scoping the tie-break to a subscription is what keeps group sequence from deciding
+/// Scoping the tie-break to a subscription is what keeps group key from deciding
 /// between tracks. The draft gives that job to `Priority` alone, so a session carrying
 /// two tracks at equal priority interleaves them rather than draining one first.
 ///
@@ -112,11 +112,11 @@ impl PartialOrd for Priority {
 
 /// A stream's send order within its subscription's send group, where higher goes first.
 ///
-/// The [`Priority`] ranking minus the parts the group itself carries: the group sequence in
+/// The [`Priority`] ranking minus the parts the group itself carries: the group key in
 /// the subscription's `order`, then a group's first stream ahead of a later `start` in the
 /// same group. The low bit only splits a stream from the start of its group (`start == 0`)
 /// from the rest, which is the joining prefix beside the live stream; any other two streams
-/// of one group share. Sequences are wire varints below 2^62, so doubling one fits.
+/// of one group share. Keys are wire varints below 2^62, so doubling one fits.
 pub fn in_group(group: u64, start: u64, order: Order) -> i64 {
 	let group = i64::try_from(group).unwrap_or(i64::MAX).saturating_mul(2);
 	let group = match order {
@@ -535,17 +535,20 @@ pub const RECV_PARKED: i64 = i64::MIN;
 /// unidentified one, ranked by its subscription's `priority` and then its `order`, like the
 /// sender ranks it. A [`Order::Descending`] subscription gives up its oldest group first,
 /// since a live track that falls behind skips to its newest anyway; an [`Order::Ascending`]
-/// one drains a backlog in sequence, so its newest group goes first.
-pub fn recv_group(priority: i8, sequence: u64, order: Order) -> i64 {
-	// Saturating the sequence at 2^48 keeps the band negative; no track gets that far.
-	const SEQUENCE: u32 = 48;
-	const MAX: i64 = (1 << SEQUENCE) - 1;
-	let sequence = (sequence.min(MAX as u64)) as i64;
+/// one drains a backlog in key, so its newest group goes first.
+pub fn recv_group(priority: i8, key: u64, order: Order) -> i64 {
+	// Keys are starts, which pass 2^48 on a fine timescale (nanoseconds since an epoch), so
+	// only their low 48 bits rank, keeping the band negative: groups in flight together
+	// start close together, so they keep their order except across one wrap every 2^48
+	// units, where saturating would tie every later group instead.
+	const KEY: u32 = 48;
+	const MAX: i64 = (1 << KEY) - 1;
+	let key = (key & MAX as u64) as i64;
 	let kept = match order {
-		Order::Descending => sequence,
-		Order::Ascending => MAX - sequence,
+		Order::Descending => key,
+		Order::Ascending => MAX - key,
 	};
-	i64::MIN / 2 + (i64::from(priority) << SEQUENCE) + kept
+	i64::MIN / 2 + (i64::from(priority) << KEY) + kept
 }
 
 #[cfg(test)]

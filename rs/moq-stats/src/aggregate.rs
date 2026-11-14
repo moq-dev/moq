@@ -1300,9 +1300,9 @@ mod tests {
 		let consumer = egress.request(path, None).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group.write_frame(Timestamp::ZERO, vec![0u8; bytes]).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		while group.read_frame().await.unwrap().is_some() {}
 
@@ -1346,6 +1346,11 @@ mod tests {
 				return frame;
 			}
 		}
+	}
+
+	/// A millisecond past every group on `track`, so each publish opens the next group.
+	fn next_stamp(track: &track::Producer) -> Timestamp {
+		Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap()
 	}
 
 	/// A hand-published node broadcast at `.stats/node/<node>` with one plain
@@ -1402,18 +1407,17 @@ mod tests {
 				tiers: BTreeMap::from([(String::new(), bucket)]),
 			};
 			self.bucket
-				.update(moq_net::Timed::from(&frame).at(moq_net::Timestamp::now()))
+				.update(moq_json::Timed::new(&frame, next_stamp(&self.track)))
 				.expect("publish");
 		}
 
 		/// Fail the node's reader: append a frame the snapshot decoder can't
 		/// parse, so the subscription errors while the broadcast stays announced.
 		fn fail_traffic(&mut self) {
-			let mut group = self.track.append_group().expect("append group");
-			group
-				.write_frame(Timestamp::now(), b"not json".to_vec())
-				.expect("write frame");
-			group.finish().expect("finish group");
+			let at = next_stamp(&self.track);
+			let mut group = self.track.append_group(at.value()).expect("append group");
+			group.write_frame(at, b"not json".to_vec()).expect("write frame");
+			group.close().expect("close group");
 		}
 	}
 
@@ -1985,6 +1989,7 @@ mod tests {
 	struct TotalsNode {
 		_source: origin::Route,
 		totals: moq_json::snapshot::Producer<TotalsFrame>,
+		track: track::Producer,
 	}
 
 	impl TotalsNode {
@@ -2002,7 +2007,8 @@ mod tests {
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,
-				totals: moq_json::snapshot::Producer::new(track, config),
+				totals: moq_json::snapshot::Producer::new(track.clone(), config),
+				track,
 			}
 		}
 
@@ -2011,9 +2017,10 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(
-					moq_net::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(moq_net::Timestamp::now()),
-				)
+				.update(moq_json::Timed::new(
+					&TotalsFrame::from([(String::new(), totals)]),
+					next_stamp(&self.track),
+				))
 				.expect("publish");
 		}
 	}

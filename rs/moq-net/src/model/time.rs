@@ -16,7 +16,8 @@ const fn bounded(value: u128, max: u64) -> Option<u64> {
 
 /// Returned when a [`Timestamp`] operation would exceed its range (`2^61 - 1`), a
 /// [`Timescale`] would exceed the QUIC varint range (`2^62 - 1`), scale conversion or
-/// arithmetic would overflow, or arithmetic mixes timestamps with mismatched scales.
+/// arithmetic would overflow, arithmetic mixes timestamps with mismatched scales, or a
+/// conversion needs the scale an unscaled [`Timestamp`] lacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("time overflow")]
 pub struct TimeOverflow;
@@ -125,16 +126,16 @@ impl std::fmt::Display for Timescale {
 	}
 }
 
-/// A timestamp in a track's timescale (units per second).
+/// A timestamp in a track's timescale (units per second), or a scale-less track's group key.
 ///
 /// All timestamps within a track are relative, so zero for one track is not zero for another.
-/// The underlying value is at most `2^61 - 1`, the most every moq-lite version can encode as
-/// a group's first frame; the scale is carried alongside so frames from different
+/// A scaled value is at most `2^61 - 1`, the most every moq-lite version can encode as a
+/// group's first frame, while an unscaled key spans every group key; the scale is carried alongside so frames from different
 /// sources can be compared and converted without lossy detours through a single fixed scale.
 ///
-/// The scale is a [`Timescale`] (always non-zero), so unit conversions (`as_secs`, `as_millis`,
-/// etc.) are infallible. Use [`Option<Timestamp>`] at call sites that need a "missing" sentinel
-/// instead of relying on a magic value.
+/// A scale-less track has no time: each frame's timestamp is [`Self::unscaled`], whose value
+/// is its group's key. Anything that needs a scale ([`Self::convert`], `as_secs`, `as_millis`,
+/// and so on) is [`TimeOverflow`] on one, and it orders against no scaled timestamp.
 ///
 /// # An instant, not a number
 ///
@@ -151,16 +152,19 @@ impl std::fmt::Display for Timescale {
 /// - [`Eq`] / [`Hash`] are **structural** (field-wise): `from_secs(1) != from_millis(1000)`,
 ///   because they encode as different `(value, scale)` pairs on the wire. Two timestamps are
 ///   equal only when both their value and scale match.
-/// - [`Ord`] is **temporal**: it cross-multiplies scales, so `from_millis(1000)` orders after
-///   `from_millis(999)` and `from_secs(1)` slots in between. When a cross-scale comparison is
-///   otherwise a tie, it breaks by `(scale, value)` to stay consistent with `Eq`.
+/// - [`PartialOrd`] is **temporal**: it cross-multiplies scales, so `from_millis(1000)` orders
+///   after `from_millis(999)` and `from_secs(1)` slots in between. When a cross-scale comparison
+///   is otherwise a tie, it breaks by `(scale, value)` to stay consistent with `Eq`. A scaled
+///   and an unscaled timestamp don't compare: `partial_cmp` is `None`, so `<` and `>` are both
+///   false. There is no [`Ord`].
 ///
-/// So `from_secs(1).cmp(&from_millis(1000))` is *not* `Equal`, and neither is `==` true. If you
-/// want "same instant regardless of encoding", compare after a [`Self::convert`] to a common scale.
+/// So `from_secs(1).partial_cmp(&from_millis(1000))` is *not* `Equal`, and neither is `==` true.
+/// If you want "same instant regardless of encoding", compare after a [`Self::convert`] to a
+/// common scale.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Timestamp {
 	value: u64,
-	scale: Timescale,
+	scale: Option<Timescale>,
 }
 
 impl Timestamp {
@@ -176,9 +180,23 @@ impl Timestamp {
 	/// Construct a timestamp directly from a raw value at the given scale.
 	/// Returns [`TimeOverflow`] if `value` exceeds `2^61 - 1`.
 	pub const fn new(value: u64, scale: Timescale) -> Result<Self, TimeOverflow> {
-		match bounded(value as u128, MAX_TIMESTAMP) {
-			Some(value) => Ok(Self { value, scale }),
-			None => Err(TimeOverflow),
+		Self::bounded(value, Some(scale))
+	}
+
+	/// A scale-less track's timestamp: `key` is its group's key, with no time.
+	pub const fn unscaled(key: u64) -> Self {
+		Self {
+			value: key,
+			scale: None,
+		}
+	}
+
+	/// `value` at `scale`, bounded to `2^61 - 1` when it carries a time.
+	const fn bounded(value: u64, scale: Option<Timescale>) -> Result<Self, TimeOverflow> {
+		match (scale, bounded(value as u128, MAX_TIMESTAMP)) {
+			(None, _) => Ok(Self { value, scale }),
+			(Some(_), Some(value)) => Ok(Self { value, scale }),
+			(Some(_), None) => Err(TimeOverflow),
 		}
 	}
 
@@ -216,13 +234,13 @@ impl Timestamp {
 		Self::new(nanos, Timescale::NANO)
 	}
 
-	/// The raw value in the timestamp's own scale.
+	/// The raw value in the timestamp's own scale, or the group key when unscaled.
 	pub const fn value(self) -> u64 {
 		self.value
 	}
 
-	/// The scale (units per second) attached to this timestamp.
-	pub const fn scale(self) -> Timescale {
+	/// The scale (units per second) attached to this timestamp, or `None` when unscaled.
+	pub const fn scale(self) -> Option<Timescale> {
 		self.scale
 	}
 
@@ -231,17 +249,29 @@ impl Timestamp {
 		self.value == 0
 	}
 
-	/// Re-express this timestamp at a new scale. Returns [`TimeOverflow`] if the new
-	/// value would exceed `2^61 - 1`.
+	/// The scale, or [`TimeOverflow`] when unscaled: a group key has no time to convert.
+	const fn scaled(self) -> Result<NonZero<u64>, TimeOverflow> {
+		match self.scale {
+			Some(scale) => Ok(scale.0),
+			None => Err(TimeOverflow),
+		}
+	}
+
+	/// Re-express this timestamp at a new scale. Returns [`TimeOverflow`] if it is unscaled,
+	/// or if the new value would exceed `2^61 - 1`.
 	pub const fn convert(self, new_scale: Timescale) -> Result<Self, TimeOverflow> {
-		if self.scale.0.get() == new_scale.0.get() {
+		let scale = match self.scaled() {
+			Ok(scale) => scale.get(),
+			Err(err) => return Err(err),
+		};
+		if scale == new_scale.0.get() {
 			return Ok(self);
 		}
 		match (self.value as u128).checked_mul(new_scale.0.get() as u128) {
-			Some(scaled) => match bounded(scaled / self.scale.0.get() as u128, MAX_TIMESTAMP) {
+			Some(scaled) => match bounded(scaled / scale as u128, MAX_TIMESTAMP) {
 				Some(value) => Ok(Self {
 					value,
-					scale: new_scale,
+					scale: Some(new_scale),
 				}),
 				None => Err(TimeOverflow),
 			},
@@ -249,39 +279,54 @@ impl Timestamp {
 		}
 	}
 
-	/// The value re-expressed at `target` as a `u128`.
-	pub const fn as_scale(self, target: Timescale) -> u128 {
-		self.value as u128 * target.0.get() as u128 / self.scale.0.get() as u128
+	/// The value re-expressed at `target` as a `u128`, or [`TimeOverflow`] when unscaled.
+	pub const fn as_scale(self, target: Timescale) -> Result<u128, TimeOverflow> {
+		match self.scaled() {
+			Ok(scale) => Ok(self.value as u128 * target.0.get() as u128 / scale.get() as u128),
+			Err(err) => Err(err),
+		}
 	}
 
-	/// The value re-expressed in seconds.
-	pub const fn as_secs(self) -> u64 {
-		self.value / self.scale.0.get()
+	/// The value re-expressed in seconds, or [`TimeOverflow`] when unscaled.
+	pub const fn as_secs(self) -> Result<u64, TimeOverflow> {
+		match self.scaled() {
+			Ok(scale) => Ok(self.value / scale.get()),
+			Err(err) => Err(err),
+		}
 	}
 
-	/// The value re-expressed in milliseconds.
-	pub const fn as_millis(self) -> u128 {
+	/// The value re-expressed in milliseconds, or [`TimeOverflow`] when unscaled.
+	pub const fn as_millis(self) -> Result<u128, TimeOverflow> {
 		self.as_scale(Timescale::MILLI)
 	}
 
-	/// The value re-expressed in microseconds.
-	pub const fn as_micros(self) -> u128 {
+	/// The value re-expressed in microseconds, or [`TimeOverflow`] when unscaled.
+	pub const fn as_micros(self) -> Result<u128, TimeOverflow> {
 		self.as_scale(Timescale::MICRO)
 	}
 
-	/// The value re-expressed in nanoseconds.
-	pub const fn as_nanos(self) -> u128 {
+	/// The value re-expressed in nanoseconds, or [`TimeOverflow`] when unscaled.
+	pub const fn as_nanos(self) -> Result<u128, TimeOverflow> {
 		self.as_scale(Timescale::NANO)
+	}
+
+	/// Whether both carry the same scale, or both none.
+	const fn same_scale(self, rhs: Self) -> bool {
+		match (self.scale, rhs.scale) {
+			(Some(a), Some(b)) => a.0.get() == b.0.get(),
+			(None, None) => true,
+			_ => false,
+		}
 	}
 
 	/// Add two timestamps. Returns [`TimeOverflow`] if the sum exceeds `2^61 - 1` or
 	/// if the scales differ.
 	pub const fn checked_add(self, rhs: Self) -> Result<Self, TimeOverflow> {
-		if self.scale.0.get() != rhs.scale.0.get() {
+		if !self.same_scale(rhs) {
 			return Err(TimeOverflow);
 		}
 		match self.value.checked_add(rhs.value) {
-			Some(result) => Self::new(result, self.scale),
+			Some(result) => Self::bounded(result, self.scale),
 			None => Err(TimeOverflow),
 		}
 	}
@@ -289,23 +334,45 @@ impl Timestamp {
 	/// Subtract `rhs` from `self`. Returns [`TimeOverflow`] if `rhs > self` or if the
 	/// scales differ.
 	pub const fn checked_sub(self, rhs: Self) -> Result<Self, TimeOverflow> {
-		if self.scale.0.get() != rhs.scale.0.get() {
+		if !self.same_scale(rhs) {
 			return Err(TimeOverflow);
 		}
 		match self.value.checked_sub(rhs.value) {
-			Some(result) => Self::new(result, self.scale),
+			Some(result) => Self::bounded(result, self.scale),
 			None => Err(TimeOverflow),
 		}
 	}
+}
 
-	/// Current point on the local monotonic clock, in milliseconds ([`Timescale::MILLI`]).
-	///
-	/// A convenience for publishers stamping their own frames, and the only model API
-	/// that reads the local clock; drivers stamp frames from the instant they are
-	/// polled with instead. There is deliberately no inverse (a [`Timestamp`] is
-	/// relative and jittered, never a clock).
-	pub fn now() -> Self {
-		crate::model::clock::now().into()
+impl Timestamp {
+	/// This timestamp when it carries a time, or `None` for a scale-less track's key.
+	pub(crate) const fn timed(self) -> Option<Self> {
+		match self.scale {
+			Some(_) => Some(self),
+			None => None,
+		}
+	}
+
+	/// A received frame's time: the `timestamp` its wire carried, or on a scale-less track,
+	/// which carries none, its group's `key`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn received(timestamp: Option<Self>, key: u64) -> Self {
+		match timestamp {
+			Some(timestamp) => timestamp,
+			None => Self::unscaled(key),
+		}
+	}
+
+	/// The later of two timestamps of one track, which share a scale; `self` when they
+	/// don't compare.
+	pub(crate) fn later(self, other: Self) -> Self {
+		if other > self { other } else { self }
+	}
+
+	/// The earlier of two timestamps of one track, which share a scale; `self` when they
+	/// don't compare.
+	pub(crate) fn earlier(self, other: Self) -> Self {
+		if other < self { other } else { self }
 	}
 }
 
@@ -317,23 +384,31 @@ impl TryFrom<std::time::Duration> for Timestamp {
 		match bounded(duration.as_nanos(), MAX_TIMESTAMP) {
 			Some(value) => Ok(Self {
 				value,
-				scale: Timescale::NANO,
+				scale: Some(Timescale::NANO),
 			}),
 			None => Err(TimeOverflow),
 		}
 	}
 }
 
-impl From<Timestamp> for std::time::Duration {
-	fn from(time: Timestamp) -> Self {
-		let nanos = time.as_nanos();
-		std::time::Duration::new(time.as_secs(), (nanos % 1_000_000_000) as u32)
+impl TryFrom<Timestamp> for std::time::Duration {
+	type Error = TimeOverflow;
+
+	/// The time since the track's zero, or [`TimeOverflow`] when unscaled.
+	fn try_from(time: Timestamp) -> Result<Self, Self::Error> {
+		let nanos = time.as_nanos()?;
+		Ok(std::time::Duration::new(
+			time.as_secs()?,
+			(nanos % 1_000_000_000) as u32,
+		))
 	}
 }
 
 impl std::fmt::Debug for Timestamp {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		let nanos = self.as_nanos();
+		let Ok(nanos) = self.as_nanos() else {
+			return write!(f, "#{}", self.value);
+		};
 
 		// Choose the largest unit where we don't need decimal places.
 		if nanos.is_multiple_of(1_000_000_000) {
@@ -349,28 +424,30 @@ impl std::fmt::Debug for Timestamp {
 }
 
 impl PartialOrd for Timestamp {
-	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-		Some(self.cmp(other))
-	}
-}
-
-impl Ord for Timestamp {
 	/// Temporal comparison, normalizing across scales (see the type-level docs for how
 	/// this relates to structural `Eq`).
 	///
-	/// - Equal scales compare raw values directly.
+	/// - Equal scales, or two unscaled keys, compare raw values directly.
 	/// - Otherwise cross-multiplies in 128-bit so e.g. `1s > 2ms` orders correctly.
 	/// - A would-be cross-scale tie (e.g. `from_secs(1)` vs `from_millis(1000)`) breaks by
-	///   `(scale, value)`, keeping `Ord` consistent with the field-wise `Eq`/`Hash`.
-	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-		if self.scale.0.get() == other.scale.0.get() {
-			return self.value.cmp(&other.value);
+	///   `(scale, value)`, keeping the order consistent with the field-wise `Eq`/`Hash`.
+	/// - A scaled and an unscaled timestamp are `None`.
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		let (lhs_scale, rhs_scale) = match (self.scale, other.scale) {
+			(None, None) => return Some(self.value.cmp(&other.value)),
+			(Some(lhs), Some(rhs)) => (lhs.0.get(), rhs.0.get()),
+			_ => return None,
+		};
+		if lhs_scale == rhs_scale {
+			return Some(self.value.cmp(&other.value));
 		}
-		let lhs = self.value as u128 * other.scale.0.get() as u128;
-		let rhs = other.value as u128 * self.scale.0.get() as u128;
-		lhs.cmp(&rhs)
-			.then_with(|| self.scale.0.get().cmp(&other.scale.0.get()))
-			.then_with(|| self.value.cmp(&other.value))
+		let lhs = self.value as u128 * rhs_scale as u128;
+		let rhs = other.value as u128 * lhs_scale as u128;
+		Some(
+			lhs.cmp(&rhs)
+				.then_with(|| lhs_scale.cmp(&rhs_scale))
+				.then_with(|| self.value.cmp(&other.value)),
+		)
 	}
 }
 
@@ -397,35 +474,35 @@ mod tests {
 	#[test]
 	fn test_from_secs() {
 		let time = Timestamp::from_secs(5).unwrap();
-		assert_eq!(time.scale(), Timescale::SECOND);
-		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_millis(), 5000);
-		assert_eq!(time.as_micros(), 5_000_000);
-		assert_eq!(time.as_nanos(), 5_000_000_000);
+		assert_eq!(time.scale(), Some(Timescale::SECOND));
+		assert_eq!(time.as_secs().unwrap(), 5);
+		assert_eq!(time.as_millis().unwrap(), 5000);
+		assert_eq!(time.as_micros().unwrap(), 5_000_000);
+		assert_eq!(time.as_nanos().unwrap(), 5_000_000_000);
 	}
 
 	#[test]
 	fn test_from_millis() {
 		let time = Timestamp::from_millis(5000).unwrap();
-		assert_eq!(time.scale(), Timescale::MILLI);
-		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_millis(), 5000);
+		assert_eq!(time.scale(), Some(Timescale::MILLI));
+		assert_eq!(time.as_secs().unwrap(), 5);
+		assert_eq!(time.as_millis().unwrap(), 5000);
 	}
 
 	#[test]
 	fn test_from_micros() {
 		let time = Timestamp::from_micros(5_000_000).unwrap();
-		assert_eq!(time.scale(), Timescale::MICRO);
-		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_micros(), 5_000_000);
+		assert_eq!(time.scale(), Some(Timescale::MICRO));
+		assert_eq!(time.as_secs().unwrap(), 5);
+		assert_eq!(time.as_micros().unwrap(), 5_000_000);
 	}
 
 	#[test]
 	fn test_from_nanos() {
 		let time = Timestamp::from_nanos(5_000_000_000).unwrap();
-		assert_eq!(time.scale(), Timescale::NANO);
-		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_nanos(), 5_000_000_000);
+		assert_eq!(time.scale(), Some(Timescale::NANO));
+		assert_eq!(time.as_secs().unwrap(), 5);
+		assert_eq!(time.as_nanos().unwrap(), 5_000_000_000);
 	}
 
 	#[test]
@@ -478,16 +555,16 @@ mod tests {
 	fn test_convert_to_finer() {
 		let time_ms = Timestamp::from_millis(5000).unwrap();
 		let time_us = time_ms.convert(Timescale::MICRO).unwrap();
-		assert_eq!(time_us.scale(), Timescale::MICRO);
-		assert_eq!(time_us.as_micros(), 5_000_000);
+		assert_eq!(time_us.scale(), Some(Timescale::MICRO));
+		assert_eq!(time_us.as_micros().unwrap(), 5_000_000);
 	}
 
 	#[test]
 	fn test_convert_to_coarser() {
 		let time_ms = Timestamp::from_millis(5000).unwrap();
 		let time_s = time_ms.convert(Timescale::SECOND).unwrap();
-		assert_eq!(time_s.scale(), Timescale::SECOND);
-		assert_eq!(time_s.as_secs(), 5);
+		assert_eq!(time_s.scale(), Some(Timescale::SECOND));
+		assert_eq!(time_s.as_secs().unwrap(), 5);
 	}
 
 	#[test]
@@ -495,7 +572,7 @@ mod tests {
 		// 1234 ms = 1.234 s, rounds down to 1 s
 		let time_ms = Timestamp::from_millis(1234).unwrap();
 		let time_s = time_ms.convert(Timescale::SECOND).unwrap();
-		assert_eq!(time_s.as_secs(), 1);
+		assert_eq!(time_s.as_secs().unwrap(), 1);
 	}
 
 	#[test]
@@ -519,8 +596,8 @@ mod tests {
 		let a = Timestamp::from_millis(1000).unwrap();
 		let b = Timestamp::from_millis(2000).unwrap();
 		let c = a.checked_add(b).unwrap();
-		assert_eq!(c.as_millis(), 3000);
-		assert_eq!(c.scale(), Timescale::MILLI);
+		assert_eq!(c.as_millis().unwrap(), 3000);
+		assert_eq!(c.scale(), Some(Timescale::MILLI));
 	}
 
 	#[test]
@@ -544,7 +621,7 @@ mod tests {
 		let zero_ms = Timestamp::from_millis(0).unwrap();
 		assert!(zero_ms.is_zero());
 		assert_ne!(Timestamp::ZERO, zero_ms);
-		assert_ne!(Timestamp::ZERO.cmp(&zero_ms), std::cmp::Ordering::Equal);
+		assert_ne!(Timestamp::ZERO.partial_cmp(&zero_ms), Some(std::cmp::Ordering::Equal));
 	}
 
 	#[test]
@@ -573,9 +650,9 @@ mod tests {
 		// Temporally-equivalent timestamps with different representations are NOT
 		// Equal under cmp: derived Eq compares fields, and Ord must agree.
 		let one_sec_b = Timestamp::from_millis(1000).unwrap();
-		assert_ne!(one_sec.cmp(&one_sec_b), std::cmp::Ordering::Equal);
+		assert_ne!(one_sec.partial_cmp(&one_sec_b), Some(std::cmp::Ordering::Equal));
 		assert_ne!(one_sec, one_sec_b);
-		assert_eq!(one_sec.cmp(&one_sec), std::cmp::Ordering::Equal);
+		assert_eq!(one_sec.partial_cmp(&one_sec), Some(std::cmp::Ordering::Equal));
 
 		// Mixed-scale sort lands in correct temporal order.
 		let mut items = [
@@ -583,7 +660,7 @@ mod tests {
 			Timestamp::from_millis(500).unwrap(),
 			Timestamp::from_micros(1_500_000).unwrap(),
 		];
-		items.sort();
+		items.sort_by(|a, b| a.partial_cmp(b).unwrap());
 		assert_eq!(items[0], Timestamp::from_millis(500).unwrap());
 		assert_eq!(items[1], Timestamp::from_micros(1_500_000).unwrap());
 		assert_eq!(items[2], Timestamp::from_secs(2).unwrap());
@@ -593,10 +670,10 @@ mod tests {
 	fn test_duration_conversion() {
 		let duration = std::time::Duration::from_secs(5);
 		let time: Timestamp = duration.try_into().unwrap();
-		assert_eq!(time.scale(), Timescale::NANO);
-		assert_eq!(time.as_secs(), 5);
+		assert_eq!(time.scale(), Some(Timescale::NANO));
+		assert_eq!(time.as_secs().unwrap(), 5);
 
-		let duration_back: std::time::Duration = time.into();
+		let duration_back: std::time::Duration = time.try_into().unwrap();
 		assert_eq!(duration_back.as_secs(), 5);
 	}
 
@@ -615,6 +692,36 @@ mod tests {
 		assert_eq!(format!("{:?}", t), "1ms");
 	}
 
+	/// A scale-less key carries no time: anything needing a scale fails, it orders only
+	/// against other keys, and arithmetic stays among keys.
+	#[test]
+	fn test_unscaled_has_no_time() {
+		let key = Timestamp::unscaled(7);
+		assert_eq!((key.value(), key.scale()), (7, None));
+		assert!(key.convert(Timescale::MILLI).is_err());
+		assert!(key.as_millis().is_err());
+		assert!(key.as_secs().is_err());
+		assert!(std::time::Duration::try_from(key).is_err());
+		// A key spans every group key, past where a time stops.
+		assert_eq!(Timestamp::unscaled(u64::MAX - 1).value(), u64::MAX - 1);
+		assert!(
+			Timestamp::unscaled(u64::MAX)
+				.checked_add(Timestamp::unscaled(1))
+				.is_err()
+		);
+
+		let millis = Timestamp::from_millis(7).unwrap();
+		assert_ne!(key, millis);
+		assert_eq!(key.partial_cmp(&millis), None);
+		assert_eq!(millis.partial_cmp(&key), None, "incomparable either way");
+		assert!(key.checked_add(millis).is_err());
+
+		let next = Timestamp::unscaled(8);
+		assert!(key < next);
+		assert_eq!(key.checked_add(Timestamp::unscaled(1)).unwrap(), next);
+		assert_eq!(format!("{key:?}"), "#7");
+	}
+
 	#[test]
 	fn test_custom_scale_convert() {
 		// 120 units at 60Hz = 2 seconds, expressed at 1000Hz = 2000 ms.
@@ -623,7 +730,7 @@ mod tests {
 			.unwrap()
 			.convert(Timescale::MILLI)
 			.unwrap();
-		assert_eq!(t.scale(), Timescale::MILLI);
-		assert_eq!(t.as_millis(), 2000);
+		assert_eq!(t.scale(), Some(Timescale::MILLI));
+		assert_eq!(t.as_millis().unwrap(), 2000);
 	}
 }

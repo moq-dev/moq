@@ -12,7 +12,7 @@ import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { readsFrom } from "./resume.test-util";
-import { Timescale } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 function publish(origin: Producer, path: Path.Valid) {
@@ -64,11 +64,11 @@ for (const via of ["direct", "request", "follow"] as const) {
 			if (!consumed) throw new Error("expected a broadcast");
 			const sub = consumed.track("video").subscribe();
 			const history = track.createGroup(0n);
-			history.writeFrame({ payload: new Uint8Array([1]) });
+			history.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(history.sequence) });
 			history.finish();
 			const finished = await sub.recvGroup();
 			const live = track.createGroup(1n);
-			live.writeFrame({ payload: new Uint8Array([2]) });
+			live.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.unscaled(live.sequence) });
 			const group = await sub.recvGroup();
 			if (!finished || !group) throw new Error("expected both groups");
 			try {

@@ -94,7 +94,7 @@ impl<'a> Admitted<'a> {
 		let mut matched = Vec::with_capacity(released.len());
 		let mut next = 0;
 		for (i, (_, frame)) in released.iter().enumerate() {
-			let micros = frame.timestamp.as_micros() as u64;
+			let micros = frame.timestamp.as_micros().unwrap() as u64;
 			let Some(found) = (next..self.objects.len()).find(|&j| self.objects[j].micros == micros) else {
 				panic!("released object {i} at {micros} us is no published object after the one before it");
 			};
@@ -115,10 +115,10 @@ impl<'a> Admitted<'a> {
 			self.objects[first].group
 		);
 
-		let origin = opened.timestamp.as_micros() as i128;
+		let origin = opened.timestamp.as_micros().unwrap() as i128;
 		for ((at, frame), j) in released.iter().zip(&matched) {
 			let out = at.duration_since(*start).as_micros() as i128;
-			let lag = out - (frame.timestamp.as_micros() as i128 - origin);
+			let lag = out - (frame.timestamp.as_micros().unwrap() as i128 - origin);
 			assert!(
 				lag.unsigned_abs() <= tolerance.as_micros(),
 				"object {j} goes out {lag} us off its PCR time"

@@ -1570,11 +1570,11 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
-		let _open = track.append_group().unwrap();
+		let _open = track.append_next().unwrap();
 		let handle = consumer.track("a").unwrap();
-		assert_eq!(handle.latest_sequence(), Some(0));
+		assert_eq!(handle.latest_key(), Some(0));
 		drop(track);
-		assert_eq!(handle.latest_sequence(), None);
+		assert_eq!(handle.latest_key(), None);
 	}
 
 	/// A handle's largest reads the instance its open broadcast serves now, without asking
@@ -1584,8 +1584,10 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::default()).unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(None, &b"a"[..]).unwrap();
+		let mut group = track.append_next().unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), &b"a"[..])
+			.unwrap();
 		let mut handle = consumer.track("a").unwrap();
 		let waiter = kio::Waiter::noop();
 		assert_eq!(
@@ -1604,11 +1606,11 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
-		let _open = track.append_group().unwrap();
+		let _open = track.append_next().unwrap();
 		let handle = consumer.track("a").unwrap();
 		producer.close();
 		drop(track);
-		assert_eq!(handle.latest_sequence(), Some(0));
+		assert_eq!(handle.latest_key(), Some(0));
 	}
 
 	#[test]
@@ -1798,7 +1800,7 @@ mod test {
 		let mut demand = producer.demand();
 		let waiter = kio::Waiter::noop();
 		let mut subscriber = video.subscribe(None);
-		let mut writing = video.append_group().unwrap();
+		let mut writing = video.append_next().unwrap();
 		writing.write_frame(crate::Timestamp::ZERO, &b"key"[..]).unwrap();
 		assert_eq!(wanted_changed(&mut demand, &waiter), Some(true));
 
@@ -1840,7 +1842,7 @@ mod test {
 
 		// Create the track before any consumer exists.
 		let track1 = producer.assert_create_track("track1", crate::track::Info::timed());
-		track1.append_group().unwrap().finish().unwrap();
+		track1.append_next().unwrap().close().unwrap();
 
 		let consumer = producer.consume();
 
@@ -1854,7 +1856,7 @@ mod test {
 		let mut track2_consumer = consumer2.track("track2").unwrap().subscribe(None).await.unwrap();
 		track2_consumer.assert_no_group();
 
-		track2.append_group().unwrap().finish().unwrap();
+		track2.append_next().unwrap().close().unwrap();
 
 		track2_consumer.assert_group();
 	}
@@ -1942,7 +1944,7 @@ mod test {
 		track3.subscribe(None).assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
-		track3.append_group().unwrap().finish().unwrap();
+		track3.append_next().unwrap().close().unwrap();
 		track1.assert_group();
 		track2.assert_group();
 
@@ -1968,7 +1970,7 @@ mod test {
 		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
-		producer1.append_group().unwrap().finish().unwrap();
+		producer1.append_next().unwrap().close().unwrap();
 		let producer1 = producer1.finish().unwrap();
 		drop(producer1);
 
@@ -1984,9 +1986,9 @@ mod test {
 
 		// The new consumer should receive the new group, which continues past the first's.
 		producer2
-			.create_group(crate::group::Info { sequence: 1 })
+			.create_group(crate::group::Info { start: 1 })
 			.unwrap()
-			.finish()
+			.close()
 			.unwrap();
 		track2.assert_group();
 	}
@@ -2003,16 +2005,16 @@ mod test {
 
 		let track = consumer.track("media").unwrap().subscribe(None);
 		let first = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut group = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
+		let mut group = first.create_group(crate::group::Info { start: 8 }).unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let first = first.finish().unwrap();
 		drop((first, track));
 
 		let track = consumer.track("media").unwrap().subscribe(None);
 		let second = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut group = second.append_group().unwrap();
-		assert_eq!(group.sequence, 0);
+		let mut group = second.append_next().unwrap();
+		assert_eq!(group.start, 0);
 		group.write_frame(at(500), b"b".as_slice()).unwrap();
 		drop((group, second, track));
 
@@ -2030,7 +2032,7 @@ mod test {
 		for i in 0..1000 {
 			let track = consumer.track(&format!("requested/{i}")).unwrap().subscribe(None);
 			let served = dynamic.assert_request().accept(crate::track::Info::timed());
-			served.append_group().unwrap().finish().unwrap();
+			served.append_next().unwrap().close().unwrap();
 			drop((served, track));
 
 			let track = consumer.track(&format!("refused/{i}")).unwrap().subscribe(None);
@@ -2039,7 +2041,7 @@ mod test {
 			let created = producer
 				.create_track(format!("created/{i}"), crate::track::Info::timed())
 				.unwrap();
-			created.append_group().unwrap().finish().unwrap();
+			created.append_next().unwrap().close().unwrap();
 		}
 		let state = producer.state.lock();
 		assert!(state.tracks.len() < 16, "{} names retained", state.tracks.len());
@@ -2114,7 +2116,7 @@ mod test {
 		let mut sub = subscribing.await.expect("fulfilled by create_track");
 
 		// The fulfilled subscription is live against this very producer.
-		track.append_group().unwrap().finish().unwrap();
+		track.append_next().unwrap().close().unwrap();
 		sub.recv_group().await.expect("recv").expect("group");
 
 		// The handler never sees the request; a fresh subscribe reuses the track.
@@ -2239,7 +2241,7 @@ mod test {
 		assert!(matches!(queued.await, Err(Error::Unroutable)));
 		assert!(matches!(consumer.track("later"), Err(Error::Unroutable)));
 
-		served.append_group().unwrap().finish().unwrap();
+		served.append_next().unwrap().close().unwrap();
 		accepted.assert_group();
 	}
 
@@ -2307,7 +2309,7 @@ mod test {
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();
 		let group = fetch.accept(crate::track::Info::timed()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		pending_fetch.await.unwrap();
 
 		let mut subscriber = track.subscribe(None).await.unwrap();
@@ -2315,7 +2317,7 @@ mod test {
 		assert!(matches!(subscriber.recv_group().await, Err(Error::Unroutable)));
 
 		let stale = request.accept(crate::track::Info::timed());
-		assert!(stale.append_group().is_err());
+		assert!(stale.append_next().is_err());
 	}
 
 	/// A staged track resolves no subscriber until it commits, and then with what was
@@ -2336,7 +2338,7 @@ mod test {
 
 		let _track = staged.commit();
 		let mut subscriber = subscribing.await.unwrap();
-		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().sequence, 0);
+		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().start, 0);
 	}
 
 	/// Dropping a staged track uncommitted rejects the request, so its subscribers fail
@@ -2363,7 +2365,7 @@ mod test {
 		let producer = Info::new().produce();
 		let request = producer.reserve_track("track1").unwrap();
 		let staged = request.stage(crate::track::Info::timed());
-		let mut group = staged.append_group().unwrap();
+		let mut group = staged.append_next().unwrap();
 		drop(staged);
 		let write = group.write_frame(crate::Timestamp::ZERO, b"x".as_slice());
 		assert!(matches!(write, Err(Error::Dropped)), "{write:?}");
@@ -2383,7 +2385,7 @@ mod test {
 		producer.close();
 		assert!(matches!(consumer.track("track1"), Err(Error::Unroutable)));
 
-		track.append_group().unwrap().finish().unwrap();
+		track.append_next().unwrap().close().unwrap();
 		subscriber.assert_group();
 		let _track = track.finish().unwrap();
 	}
@@ -2404,7 +2406,7 @@ mod test {
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
 
 		let track = request.accept(crate::track::Info::timed());
-		assert!(track.append_group().is_err());
+		assert!(track.append_next().is_err());
 		let mut subscriber = track.subscribe(None);
 		assert!(matches!(subscriber.recv_group().await, Err(Error::Unroutable)));
 		assert!(consumer.track("track1").is_err());
@@ -2468,7 +2470,7 @@ mod test {
 		assert!(!track.is_closed());
 		let mut subscriber = viewer.await.unwrap();
 		subscriber.assert_no_group();
-		track.append_group().unwrap().finish().unwrap();
+		track.append_next().unwrap().close().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
 
 		// Once the viewer really leaves, the same teardown commits, and the lookup
@@ -2517,7 +2519,7 @@ mod test {
 		));
 
 		let mut reader = consumer.datagrams("audio").unwrap();
-		datagrams.append(None, "x").unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut reader), 0);
 
 		// Once it ends, the name is free again, and a reader no longer joins it.
@@ -2549,7 +2551,7 @@ mod test {
 		let info = datagram::Info::default().with_priority(2);
 		let mut served = request.accept(info);
 		assert!(matches!(second.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
-		served.append(None, "x").unwrap();
+		served.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut first), 0);
 		assert_eq!(received(&mut second), 0);
 
@@ -2572,7 +2574,7 @@ mod test {
 		let info = datagram::Info::default().with_priority(2);
 		let mut datagrams = producer.create_datagrams("audio", info).unwrap();
 		assert!(matches!(reader.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
-		datagrams.append(None, "x").unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut reader), 0);
 		assert!(handler.poll_requested(&kio::Waiter::noop()).is_pending());
 	}

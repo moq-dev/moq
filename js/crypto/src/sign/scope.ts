@@ -32,23 +32,21 @@ export class Scope {
 	 * The message signed for `payload` at frame `frame` of group `group`, presented at `timestamp`.
 	 *
 	 * The timestamp is its integer value at the track's timescale, so a frame keeps its signature
-	 * only on a hop that carries both unchanged. An untimed frame binds zero for both, which no
-	 * timescale can be. A fractional value, which no hop carries, never verifies.
+	 * only on a hop that carries both unchanged. A scale-less frame's timestamp is its group key,
+	 * which `group` already binds, so it binds zero for both, which no timescale can be. A
+	 * fractional value, which no hop carries, never verifies.
 	 */
-	message(
-		group: bigint,
-		frame: number,
-		timestamp: Time.Timestamp | undefined,
-		payload: Uint8Array,
-	): Uint8Array<ArrayBuffer> {
-		if (timestamp && !Number.isSafeInteger(timestamp.value)) throw new Failure("signature");
+	message(group: bigint, frame: number, timestamp: Time.Timestamp, payload: Uint8Array): Uint8Array<ArrayBuffer> {
+		// Never reads a scale-less key, which may be past what a number holds.
+		const [scale, value] = timestamp.scale === undefined ? [0, 0] : [timestamp.scale, timestamp.value];
+		if (!Number.isSafeInteger(value)) throw new Failure("signature");
 		const out = new Uint8Array(this.#prefix.byteLength + 32 + payload.byteLength);
 		const view = new DataView(out.buffer);
 		out.set(this.#prefix);
 		let offset = this.#prefix.byteLength;
 		view.setBigUint64(offset, group);
 		offset += 8;
-		for (const field of [frame, timestamp?.scale ?? 0, timestamp?.value ?? 0]) {
+		for (const field of [frame, scale, value]) {
 			view.setBigUint64(offset, BigInt(field));
 			offset += 8;
 		}
@@ -61,7 +59,7 @@ export class Scope {
 		key: SecretKey,
 		group: bigint,
 		frame: number,
-		timestamp: Time.Timestamp | undefined,
+		timestamp: Time.Timestamp,
 		payload: Uint8Array,
 	): Promise<Uint8Array<ArrayBuffer>> {
 		const signature = await key.sign(this.message(group, frame, timestamp, payload));
@@ -76,7 +74,7 @@ export class Scope {
 		key: PublicKey,
 		group: bigint,
 		frame: number,
-		timestamp: Time.Timestamp | undefined,
+		timestamp: Time.Timestamp,
 		body: Uint8Array,
 	): Promise<Uint8Array> {
 		const split = body.byteLength - SIGNATURE_LEN;

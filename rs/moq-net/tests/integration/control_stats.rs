@@ -2,12 +2,14 @@
 
 //! Control counters cross real protocol drivers, including legacy multiplexing.
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use crate::support::{
 	harness::{MockConnectOptions, connect_mock, now, spawn, subscribed},
 	mock::create_mock_session_pair,
 };
 use moq_net::{
-	Timescale, Timestamp, origin,
+	Timescale, origin,
 	stats::{Message, Registry, Tier},
 };
 
@@ -52,11 +54,11 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 			.unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 		subscribed(&track).await;
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group
-			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![7; 64 * 1024]))
+			.write_frame(group.at_start(), bytes::Bytes::from(vec![7; 64 * 1024]))
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 64 * 1024);
 		let rows = registry.snapshot().control();

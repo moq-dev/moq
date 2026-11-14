@@ -7,7 +7,7 @@ import { Net } from "@moq/hang";
 
 export class Format implements Format_1 {
 	constructor(init: InitSegment);
-	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
+	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp): Frame[];
 }
 
 export interface InitSegment {
@@ -27,7 +27,7 @@ export interface Sample {
 	timestamp: number;
 }
 
-export function decodeDataSegment(segment: Uint8Array, init: InitSegment, timestamp: Net.Time.Timestamp | undefined): Sample[];
+export function decodeDataSegment(segment: Uint8Array, init: InitSegment, timestamp: Net.Time.Timestamp): Sample[];
 
 export function decodeInitSegment(init: Uint8Array): InitSegment;
 ```

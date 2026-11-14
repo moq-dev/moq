@@ -288,7 +288,7 @@ fn pictures(name: &str, vector: &Vector) -> Vec<I420> {
 			// IPPP with no reordering, so pictures come back in the order they were
 			// fed, each carrying the timestamp its access unit went in with.
 			assert_eq!(
-				frame.timestamp.as_micros(),
+				frame.timestamp.as_micros().unwrap(),
 				i as u128 * FRAME_MICROS as u128,
 				"{name}: {} picture {i} lost its timestamp",
 				vector.name

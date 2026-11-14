@@ -77,7 +77,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Skips every group a newer one has superseded. Finish the current group's buffered frames
 	/// before taking the next. Lost groups resynchronize from a later snapshot.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		self.poll_read(waiter, false)
 	}
 
@@ -86,11 +86,11 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		self.poll_read(waiter, true)
 	}
 
-	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<crate::Timed<T>>>> {
 		if skip {
 			// Jump to the newest group the reader already has; a newer one supersedes the rest.
 			while let Poll::Ready(Some(group)) = self.track.poll_next_group(waiter)? {
@@ -121,7 +121,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 				Poll::Ready(Ok(Some(frame))) => {
 					self.apply(&frame.payload)?;
 					if !skip {
-						return Poll::Ready(Ok(self.decoder.decode()?.map(|value| moq_net::Timed {
+						return Poll::Ready(Ok(self.decoder.decode()?.map(|value| crate::Timed {
 							value,
 							at: frame.timestamp,
 						})));
@@ -141,7 +141,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 					) =>
 				{
 					// A later group starts a fresh snapshot.
-					tracing::warn!(track = self.name, group = group.sequence, error = ?err,
+					tracing::warn!(track = self.name, group = group.start, error = ?err,
 						"snapshot group lost; waiting for a newer one");
 					self.group = None;
 				}
@@ -150,7 +150,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 			}
 		}
 		if let Some(at) = advanced {
-			Poll::Ready(Ok(self.decoder.decode()?.map(|value| moq_net::Timed { value, at })))
+			Poll::Ready(Ok(self.decoder.decode()?.map(|value| crate::Timed { value, at })))
 		} else if finished {
 			Poll::Ready(Ok(None))
 		} else {
@@ -242,9 +242,9 @@ mod timestamps {
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
 				producer
-					.update(moq_net::Timed {
+					.update(crate::Timed {
 						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
-						at: Some(at),
+						at,
 					})
 					.unwrap();
 				if n == 1 {
@@ -254,9 +254,9 @@ mod timestamps {
 					panic!("missing state {n}")
 				};
 				assert_eq!(value.value["n"].as_u64().unwrap(), n as u64);
-				let at = value.at.unwrap();
+				let at = value.at;
 				assert_eq!(at.value(), ticks);
-				assert_eq!(at.scale(), scale);
+				assert_eq!(at.scale(), Some(scale));
 			}
 			let _finished = producer.finish().unwrap();
 			assert!(matches!(
@@ -267,8 +267,8 @@ mod timestamps {
 				panic!("missing latest state")
 			};
 			assert_eq!(value.value["n"].as_u64().unwrap(), 2);
-			assert_eq!(value.at.unwrap().value(), 990_007);
-			assert_eq!(value.at.unwrap().scale(), scale);
+			assert_eq!(value.at.value(), 990_007);
+			assert_eq!(value.at.scale(), Some(scale));
 		}
 	}
 
@@ -286,25 +286,31 @@ mod timestamps {
 		let waiter = kio::Waiter::noop();
 		for n in 0..3 {
 			producer
-				.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}))
+				.update(crate::Timed::new(
+					&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
+					moq_net::Timestamp::unscaled(n),
+				))
 				.unwrap();
 			if n == 0 {
 				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
 					panic!("missing first state")
 				};
 				assert_eq!(value.value["n"].as_u64().unwrap(), 0);
-				assert_eq!(value.at, None);
+				assert_eq!(value.at.scale(), None);
 			}
 		}
 		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
 			panic!("missing latest state")
 		};
 		assert_eq!(value.value["n"].as_u64().unwrap(), 2);
-		assert_eq!(value.at, None);
+		assert_eq!(value.at.scale(), None);
 		assert!(consumer.poll_next(&waiter).is_pending());
 		let n = 3;
 		producer
-			.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}))
+			.update(crate::Timed::new(
+				&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
+				moq_net::Timestamp::unscaled(n),
+			))
 			.unwrap();
 		let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
 			panic!("missing new state")

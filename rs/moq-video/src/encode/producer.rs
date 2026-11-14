@@ -904,7 +904,7 @@ async fn capture_loop<S: CaptureSource>(
 		// once at open so every queued frame maps to the shared broadcast epoch
 		// without mistaking dequeue time for acquisition time.
 		let mut capture_epoch =
-			u64::try_from(clock.now().as_micros().saturating_sub(camera.now().as_micros())).unwrap_or(u64::MAX);
+			u64::try_from(clock.now().as_micros()?.saturating_sub(camera.now().as_micros()?)).unwrap_or(u64::MAX);
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
 		let framerate = capture
@@ -1005,7 +1005,7 @@ async fn capture_loop<S: CaptureSource>(
 			if let Some(last) = last
 				&& mapped <= last
 			{
-				let behind = u64::try_from(last.as_micros() - mapped.as_micros()).unwrap_or(u64::MAX);
+				let behind = u64::try_from(last.as_micros()? - mapped.as_micros()?).unwrap_or(u64::MAX);
 				capture_epoch = capture_epoch.saturating_add(behind).saturating_add(1);
 				mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
 			}
@@ -1058,7 +1058,7 @@ async fn capture_loop<S: CaptureSource>(
 
 #[cfg(feature = "capture")]
 fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Timestamp, Error> {
-	let capture_micros = u64::try_from(timestamp.as_micros()).unwrap_or(u64::MAX);
+	let capture_micros = u64::try_from(timestamp.as_micros()?).unwrap_or(u64::MAX);
 	Ok(Timestamp::from_micros(epoch_micros.saturating_add(capture_micros))?)
 }
 
@@ -1566,7 +1566,7 @@ mod tests {
 			loop {
 				let read = track.read().await.unwrap().expect("a published frame");
 				if let moq_mux::container::Read::Frame { frame, .. } = read {
-					return u64::try_from(frame.timestamp.as_micros()).unwrap();
+					return u64::try_from(frame.timestamp.as_micros().unwrap()).unwrap();
 				}
 			}
 		}
@@ -1977,7 +1977,7 @@ mod tests {
 							for frame in format.decode(wire).unwrap() {
 								// A duration marker closes the group but is not an encoded picture.
 								if format.end(&frame).is_none() {
-									published.send((group.sequence, frame.payload.len())).unwrap();
+									published.send((group.start, frame.payload.len())).unwrap();
 								}
 							}
 						}
@@ -2118,10 +2118,11 @@ mod tests {
 
 				let name = rendition_name(&consumer).await;
 				let mut track = consumer.track(&name).unwrap();
-				for group in 0..2 {
-					camera.push_native(surface(), us(group * 2_000_000));
-					while track.largest().await.expect("the track is live").group < group {}
-				}
+				// Each frame opens a group of its own, starting at the frame's pts.
+				camera.push_native(surface(), us(0));
+				let first = track.largest().await.expect("the track is live").group;
+				camera.push_native(surface(), us(2_000_000));
+				while track.largest().await.expect("the track is live").group < first + 2_000_000 {}
 				assert_eq!(
 					opens.load(Ordering::SeqCst),
 					1,
@@ -2138,10 +2139,10 @@ mod tests {
 					)
 					.await
 					.unwrap();
-				for sequence in 0..2 {
-					let group = subscriber.recv_group().await.unwrap().expect("a cached group");
-					assert_eq!(group.sequence, sequence);
-				}
+				// The groups start their frames' pts apart, wherever the capture's timeline begins.
+				let first = subscriber.recv_group().await.unwrap().expect("a cached group").start;
+				let second = subscriber.recv_group().await.unwrap().expect("a cached group").start;
+				assert_eq!(second - first, 2_000_000);
 
 				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
 				run.abort();

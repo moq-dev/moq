@@ -13,11 +13,11 @@ func TestTimestampFromDuration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (Timestamp{Value: 1_500_000_000, Scale: 1_000_000_000}); got != want {
+	if want := TimestampFromScale(1_500_000_000, 1_000_000_000); !reflect.DeepEqual(got, want) {
 		t.Fatalf("TimestampFromDuration(1.5s) = %+v, want %+v", got, want)
 	}
-	if got := TimestampToDuration(got); got != 1500*time.Millisecond {
-		t.Fatalf("round trip = %v, want 1.5s", got)
+	if got, err := TimestampToDuration(got); err != nil || got != 1500*time.Millisecond {
+		t.Fatalf("round trip = %v, %v, want 1.5s", got, err)
 	}
 	if _, err := TimestampFromDuration(-time.Nanosecond); err == nil {
 		t.Fatal("negative duration converted")
@@ -31,33 +31,35 @@ func TestTimestampToDuration(t *testing.T) {
 		in   Timestamp
 		want time.Duration
 	}{
-		{Timestamp{Value: 0, Scale: 90_000}, 0},
+		{TimestampFromScale(0, 90_000), 0},
 		// 11111.1 ns, 666666666.6 ns, and half a nanosecond all round down.
-		{Timestamp{Value: 1, Scale: 90_000}, 11_111},
-		{Timestamp{Value: 2, Scale: 3}, 666_666_666},
-		{Timestamp{Value: 1, Scale: 2_000_000_000}, 0},
-		{Timestamp{Value: 1001, Scale: 30_000}, 33_366_666},
-		{Timestamp{Value: math.MaxInt64, Scale: 1_000_000_000}, math.MaxInt64},
-		{Timestamp{Value: math.MaxInt64/1000 + 1, Scale: 1_000_000}, math.MaxInt64},
-		{Timestamp{Value: 1<<61 - 1, Scale: 1}, math.MaxInt64},
-		{Timestamp{Value: math.MaxUint64, Scale: math.MaxUint64}, time.Second},
+		{TimestampFromScale(1, 90_000), 11_111},
+		{TimestampFromScale(2, 3), 666_666_666},
+		{TimestampFromScale(1, 2_000_000_000), 0},
+		{TimestampFromScale(1001, 30_000), 33_366_666},
+		{TimestampFromScale(math.MaxInt64, 1_000_000_000), math.MaxInt64},
+		{TimestampFromScale(math.MaxInt64/1000+1, 1_000_000), math.MaxInt64},
+		{TimestampFromScale(1<<61-1, 1), math.MaxInt64},
+		{TimestampFromScale(math.MaxUint64, math.MaxUint64), time.Second},
 	}
 	for _, c := range cases {
-		if got := TimestampToDuration(c.in); got != c.want {
-			t.Errorf("TimestampToDuration(%+v) = %d, want %d", c.in, got, c.want)
+		if got, err := TimestampToDuration(c.in); err != nil || got != c.want {
+			t.Errorf("TimestampToDuration(%+v) = %d, %v, want %d", c.in, got, err, c.want)
 		}
 	}
 }
 
-// A zero scale, such as an unset Timestamp{}, panics rather than reading as the
-// longest duration.
-func TestTimestampToDurationZeroScale(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("TimestampToDuration(Timestamp{}) did not panic")
+// An unscaled timestamp has no time, and a zero scale no duration, so both fail rather
+// than reading as some duration.
+func TestTimestampToDurationRefused(t *testing.T) {
+	for _, in := range []Timestamp{Unscaled(7), Unscaled(0), TimestampFromScale(1, 0)} {
+		if got, err := TimestampToDuration(in); err == nil {
+			t.Errorf("TimestampToDuration(%+v) = %v, want an error", in, got)
 		}
-	}()
-	TimestampToDuration(Timestamp{})
+	}
+	if got := Unscaled(7); got.Scale != nil || got.Value != 7 {
+		t.Fatalf("Unscaled(7) = %+v", got)
+	}
 }
 
 // The zero Subscription is moq-net's defaults, a stated zero Delay, and the flags reach the

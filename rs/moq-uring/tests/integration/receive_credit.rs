@@ -166,12 +166,13 @@ fn partial_frame_gives_way() {
 			let mut high_sub = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
 			// Three quarters of the window, held by a frame that never finishes.
+			let start = low.largest().map_or(0, |largest| largest.group + 1);
 			let mut low_frame = low
-				.append_group()
+				.append_group(start)
 				.expect("low group")
 				.create_frame(frame::Info {
 					size: WINDOW as u64,
-					timestamp: Some(Timestamp::ZERO),
+					timestamp: Timestamp::from_millis(start).unwrap(),
 				})
 				.expect("low frame");
 			low_frame.write(vec![1u8; WINDOW * 3 / 4]).expect("partial payload");
@@ -196,18 +197,27 @@ fn partial_frame_gives_way() {
 
 			// Half the window, which only fits once the low frame lets go.
 			let payload = Bytes::from(vec![2u8; WINDOW / 2]);
-			let mut high_group = high.append_group().expect("high group");
+			let mut high_group = high
+				.append_group(high.largest().map_or(0, |largest| largest.group + 1))
+				.expect("high group");
 			high_group
-				.write_frame(Timestamp::ZERO, payload.clone())
+				.write_frame(
+					moq_net::Timestamp::from_millis(high_group.start).unwrap(),
+					payload.clone(),
+				)
 				.expect("high frame");
-			high_group.finish().expect("finish high");
+			high_group.close().expect("finish high");
 			assert_eq!(next_frame(&handle, &mut high_sub).await, payload);
 
 			// The session survives, and the low track keeps delivering what fits.
 			drop(low_frame);
-			let mut group = low.append_group().expect("after group");
-			group.write_frame(Timestamp::ZERO, &b"after"[..]).expect("after frame");
-			group.finish().expect("finish after");
+			let mut group = low
+				.append_group(low.largest().map_or(0, |largest| largest.group + 1))
+				.expect("after group");
+			group
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), &b"after"[..])
+				.expect("after frame");
+			group.close().expect("finish after");
 			assert_eq!(next_frame(&handle, &mut low_sub).await, &b"after"[..]);
 
 			session.abort(moq_net::Error::Cancel);

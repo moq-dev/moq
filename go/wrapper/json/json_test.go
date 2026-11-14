@@ -72,7 +72,7 @@ func TestTracks(t *testing.T) {
 	}
 	defer snapshotConsumer.Cancel()
 	for viewers := 1; viewers <= 4; viewers++ {
-		at := moq.Timestamp{Value: uint64(viewers) * 1000, Scale: scale}
+		at := moq.TimestampFromScale(uint64(viewers)*1000, scale)
 		if err := snapshot.Update(map[string]any{"viewers": viewers}, at); err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +91,7 @@ func TestTracks(t *testing.T) {
 		if decoded["viewers"] != float64(viewers) {
 			t.Fatalf("snapshot = %s, want viewers %d", value.Value, viewers)
 		}
-		if want := (moq.Timestamp{Value: uint64(viewers) * 1000, Scale: scale}); value.Timestamp == nil || *value.Timestamp != want {
+		if want := moq.TimestampFromScale(uint64(viewers)*1000, scale); !reflect.DeepEqual(value.Timestamp, want) {
 			t.Fatalf("timestamp = %v, want %v", value.Timestamp, want)
 		}
 	}
@@ -111,7 +111,7 @@ func TestTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer streamConsumer.Cancel()
-	at := moq.Timestamp{Value: 5, Scale: 1_000}
+	at := moq.TimestampFromScale(5, 1_000)
 	if err := stream.Append(map[string]any{"n": 1}, at); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(record.Value) != `{"n":1}` || record.Timestamp == nil || *record.Timestamp != at {
+	if string(record.Value) != `{"n":1}` || !reflect.DeepEqual(record.Timestamp, at) {
 		t.Fatalf("record = %s at %v, want %v", record.Value, record.Timestamp, at)
 	}
 
@@ -153,15 +153,15 @@ func TestWindow(t *testing.T) {
 	}
 	defer windowConsumer.Cancel()
 
-	ms := func(n int) *moq.Timestamp {
-		return &moq.Timestamp{Value: uint64(n) * 1000, Scale: scale}
+	ms := func(n int) moq.Timestamp {
+		return moq.TimestampFromScale(uint64(n)*1000, scale)
 	}
 	for n := range 3 {
-		if err := window.Push(map[string]any{"n": n}, *ms(n)); err != nil {
+		if err := window.Push(map[string]any{"n": n}, ms(n)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := window.Pop(2, *ms(3)); err != nil {
+	if err := window.Pop(2, ms(3)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +185,7 @@ func TestWindow(t *testing.T) {
 	if err := window.Cut(); err != nil {
 		t.Fatal(err)
 	}
-	if err := window.Push(map[string]any{"n": 3}, *ms(4)); err != nil {
+	if err := window.Push(map[string]any{"n": 3}, ms(4)); err != nil {
 		t.Fatal(err)
 	}
 	if err := window.Finish(); err != nil {

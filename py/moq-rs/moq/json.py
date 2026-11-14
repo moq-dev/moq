@@ -36,7 +36,7 @@ from moq_ffi import (
 )
 
 from . import publish, subscribe
-from ._records import Timestamp, _opt_from_ts
+from ._records import Timestamp
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand
 
@@ -59,17 +59,18 @@ __all__ = [
 class Timed:
     """A parsed JSON value and the timestamp of the frame that carried it.
 
-    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track.
+    ``timestamp`` is on the broadcast clock, or :meth:`moq.Timestamp.unscaled` at the
+    frame's group key on a scale-less track.
     """
 
     value: Any
-    timestamp: Timestamp | None
+    timestamp: Timestamp
 
     @staticmethod
     def _from_ffi(value: MoqJsonValue | None) -> Timed | None:
         if value is None:
             return None
-        return Timed(value=json.loads(value.value), timestamp=_opt_from_ts(value.timestamp))
+        return Timed(value=json.loads(value.value), timestamp=Timestamp._from_ffi(value.timestamp))
 
 
 class SnapshotProducer:
@@ -265,7 +266,7 @@ def _window_event(timed: MoqJsonWindowTimed | None) -> Timed | None:
         value = WindowEventSkip(range(event.start, event.end))
     else:
         raise TypeError(f"unknown window event: {event!r}")
-    return Timed(value=value, timestamp=_opt_from_ts(timed.timestamp))
+    return Timed(value=value, timestamp=Timestamp._from_ffi(timed.timestamp))
 
 
 class WindowConsumer(_Stream[Timed]):

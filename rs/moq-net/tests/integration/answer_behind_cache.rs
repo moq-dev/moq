@@ -20,9 +20,11 @@ fn produce_origin(hop: u64) -> origin::Producer {
 }
 
 fn write_group(track: &track::Producer, payload: &'static [u8]) {
-	let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-	group.write_frame(None, payload).unwrap();
-	group.finish().unwrap();
+	let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+		.unwrap();
+	group.close().unwrap();
 }
 
 /// The next group `subscriber` receives, with its first frame.
@@ -35,7 +37,7 @@ async fn next_group(subscriber: &mut track::Subscriber) -> moq_net::Result<(u64,
 		.await
 		.unwrap()?
 		.unwrap();
-	Ok((group.sequence, frame.payload.to_vec()))
+	Ok((group.start, frame.payload.to_vec()))
 }
 
 /// The publisher replaces its track with an empty one of the same name, so the lingering
@@ -131,8 +133,9 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 		.create_track("audio", track::Info::default().with_timescale(None))
 		.unwrap();
 	route.announce().unwrap();
-	let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-	g0.write_frame(None, &b"0a"[..]).unwrap();
+	let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+	g0.write_frame(moq_net::Timestamp::unscaled(g0.start), &b"0a"[..])
+		.unwrap();
 
 	// A reader on the upper relay keeps its copy live after the lower relay leaves.
 	let local = kio::clock::timeout(TIMEOUT, upper.consume().follow("room", None).unwrap().available())
@@ -157,16 +160,17 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 			.unwrap()
 			.unwrap();
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (0, b"0a".to_vec()));
-		g0.finish().unwrap();
-		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
-		g1.write_frame(None, &b"1a"[..]).unwrap();
+		g0.close().unwrap();
+		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
+		g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1a"[..])
+			.unwrap();
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (1, b"1a".to_vec()));
 		let mut kept = kio::clock::timeout(TIMEOUT, keeper.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(kept.sequence, 1);
+		assert_eq!(kept.start, 1);
 		g1.abort(Error::Cancel).unwrap();
 		// The upper relay's copy stays live with group 1 reset and group 0 held.
 		loop {
@@ -187,11 +191,12 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 		.unwrap();
 	// The upper relay answers the resubscription before the feed moves on.
 	kio::clock::sleep(Duration::from_secs(1)).await;
-	let mut g2 = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
-	g2.write_frame(None, &b"2a"[..]).unwrap();
+	let mut g2 = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
+	g2.write_frame(moq_net::Timestamp::unscaled(g2.start), &b"2a"[..])
+		.unwrap();
 	loop {
-		let (sequence, payload) = next_group(&mut subscriber).await.unwrap();
-		if sequence == 2 {
+		let (key, payload) = next_group(&mut subscriber).await.unwrap();
+		if key == 2 {
 			assert_eq!(payload, b"2a".to_vec(), "{version}");
 			break;
 		}

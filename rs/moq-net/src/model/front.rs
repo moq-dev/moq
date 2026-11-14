@@ -11,7 +11,7 @@
 //!
 //! The driver only offers a front routes that serve its broadcast: those of the
 //! instance it first resolved, at its newest epoch, whose tracks resume where they
-//! stopped since the instance promises one continuous sequence space. An instance a
+//! stopped since the instance promises one continuous key space. An instance a
 //! session minted, for a wire that carries none, promises nothing past its route:
 //! that route can answer a re-request with another stream, so a track whose copy
 //! fails there ends with the error instead of re-splicing. Another
@@ -1798,10 +1798,10 @@ mod tests {
 		}
 	}
 
-	/// Every sequence of events up to a small depth, over a small alphabet,
+	/// Every key of events up to a small depth, over a small alphabet,
 	/// checked against the invariants the driver relies on.
 	#[test]
-	fn bounded_sequences_hold_the_invariants() {
+	fn bounded_keys_hold_the_invariants() {
 		let t0 = Instant::now();
 		let alphabet: Vec<Event> = vec![
 			Event::Selected {
@@ -1870,7 +1870,7 @@ mod tests {
 			Event::Held,
 		];
 
-		fn walk(front: &Front, alphabet: &[Event], depth: usize, sequences: &mut usize) {
+		fn walk(front: &Front, alphabet: &[Event], depth: usize, keys: &mut usize) {
 			// Rendered only when an event needs it: formatting dominates the walk.
 			let mut before = None;
 			for event in alphabet {
@@ -1883,7 +1883,7 @@ mod tests {
 				}
 				let mut next = front.clone();
 				let actions = next.step(event.clone());
-				*sequences += 1;
+				*keys += 1;
 
 				// Route-wide events skip the index update, so they must leave parked tracks alone.
 				assert_index_matches_scan(&next);
@@ -1944,14 +1944,14 @@ mod tests {
 					assert!(next.idle() && !front.retiring, "retired a front in use: {next:?}");
 				}
 				if depth > 1 {
-					walk(&next, alphabet, depth - 1, sequences);
+					walk(&next, alphabet, depth - 1, keys);
 				}
 			}
 		}
 
-		let mut sequences = 0;
-		walk(&Front::new(LINGER), &alphabet, 5, &mut sequences);
-		assert!(sequences > 100_000);
+		let mut keys = 0;
+		walk(&Front::new(LINGER), &alphabet, 5, &mut keys);
+		assert!(keys > 100_000);
 	}
 
 	/// The newcomer refused the track, so it stays on the source the newcomer replaced.

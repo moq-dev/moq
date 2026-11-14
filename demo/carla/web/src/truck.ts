@@ -54,7 +54,13 @@ function write(stream: Moq.Socket.TrackStream, command: Command) {
 	// A session that already ended has nothing to send to; its reply reader reports the end.
 	if (stream.producer.closed.peek() !== undefined) return;
 	const message = { ...command.cmd, sequence: command.sequence, timestamps: command.timestamps };
-	stream.producer.writeFrame({ payload: encoder.encode(JSON.stringify(message)) });
+	// The socket track is scale-less, so the frame carries its group's key.
+	const group = stream.producer.appendGroup();
+	group.writeFrame({
+		payload: encoder.encode(JSON.stringify(message)),
+		timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+	});
+	group.finish();
 }
 
 /**

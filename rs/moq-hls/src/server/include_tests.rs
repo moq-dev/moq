@@ -42,7 +42,7 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, 
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 		.unwrap();
 	let mut catalog = moq_json::snapshot::Producer::new(track, Default::default());
-	catalog.update(moq_net::Timed::from(value).at(Timestamp::ZERO)).unwrap();
+	catalog.update(moq_json::Timed::new(value, Timestamp::ZERO)).unwrap();
 	let video = publication
 		.create_track("same", hang::container::track_info(1))
 		.unwrap();
@@ -61,7 +61,8 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, 
 
 fn frames(track: &track::Producer, first: u64) {
 	for sequence in first..first + 3 {
-		let mut group = track.create_group(sequence.into()).unwrap();
+		// Keyed by its first frame's pts, in the track's microseconds.
+		let mut group = track.create_group((sequence * 2_000_000).into()).unwrap();
 		hang::container::Frame {
 			timestamp: Timestamp::from_secs(sequence * 2).unwrap(),
 			payload: bytes::Bytes::from_static(if track.name() == "audio" {
@@ -72,7 +73,7 @@ fn frames(track: &track::Producer, first: u64) {
 		}
 		.write_to(&mut group)
 		.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 	}
 }
 
@@ -166,7 +167,7 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	video.coded_width = Some(640);
 	include
 		.catalog
-		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
+		.update(moq_json::Timed::new(&value, Timestamp::ZERO))
 		.unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
 	// The new response lists the predecessor's retained rows while waiting for its
@@ -292,7 +293,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	video.coded_width = Some(640);
 	include
 		.catalog
-		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
+		.update(moq_json::Timed::new(&value, Timestamp::ZERO))
 		.unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
 	let _video = include.video.finish().unwrap();

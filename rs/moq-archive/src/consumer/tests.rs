@@ -96,9 +96,9 @@ fn describe(frame: &Frame) -> String {
 	}
 }
 
-fn read(timestamp: Option<Timestamp>, payload: Bytes) -> String {
+fn read(timestamp: Timestamp, payload: Bytes) -> String {
 	describe(&Frame {
-		timestamp: timestamp.map(Timestamp::value),
+		timestamp: timestamp.scale().map(|_| timestamp.value()),
 		payload,
 	})
 }
@@ -130,19 +130,27 @@ async fn fetch(broadcast: &broadcast::Producer, track: &str, sequence: u64) -> m
 async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Ordered {
 	let track = broadcast.consume().track(track).unwrap();
 	let subscription = Subscription::default()
-		.with_range(0..)
+		.with_ranges([from(0)])
 		.with_order(Order::Ascending)
 		.with_delay(Delay::default().with_max(None));
 	track.subscribe(subscription).await.unwrap().ordered()
 }
 
-/// The next group's sequence, without waiting for it to end.
+/// Every group from the one starting at `start` on.
+fn from(start: u64) -> track::Range {
+	track::Range {
+		start: track::Anchor::Time(start),
+		end: None,
+	}
+}
+
+/// The next group's start, without waiting for it to end.
 async fn sequence(reader: &mut track::Ordered) -> Option<u64> {
 	timeout(Duration::from_secs(10), reader.next_group())
 		.await
 		.expect("a group arrives")
 		.unwrap()
-		.map(|group| group.sequence)
+		.map(|group| group.start)
 }
 
 /// The next group and every frame in it, once the group ends.
@@ -159,7 +167,7 @@ async fn next(reader: &mut track::Ordered) -> Option<(u64, Vec<String>)> {
 	{
 		frames.push(read(frame.timestamp, frame.payload));
 	}
-	Some((group.sequence, frames))
+	Some((group.start, frames))
 }
 
 fn not_found(result: moq_net::Result<Vec<String>>) {
@@ -189,19 +197,19 @@ async fn a_recording_round_trips() {
 		sleep(Duration::from_millis(1)).await;
 	}
 	for sequence in 0..6 {
-		let mut group = video.create_group(group::Info { sequence }).unwrap();
+		let mut group = video.create_group(group::Info { start: sequence }).unwrap();
 		for index in 0..3 {
 			let pts = Timestamp::from_millis(sequence * 10_000 + index).unwrap();
 			group
 				.write_frame(pts, Bytes::from(vec![sequence as u8, index as u8, 0xff]))
 				.unwrap();
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		sleep(Duration::from_millis(10)).await;
 	}
-	let mut group = log.create_group(group::Info { sequence: 0 }).unwrap();
-	group.write_frame(None, "a").unwrap();
-	group.finish().unwrap();
+	let mut group = log.create_group(group::Info { start: 0 }).unwrap();
+	group.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
+	group.close().unwrap();
 	sleep(Duration::from_millis(10)).await;
 	let _video = video.finish().unwrap();
 	let _log = log.finish().unwrap();
@@ -219,10 +227,10 @@ async fn a_recording_round_trips() {
 	let mut reader = subscribe(&broadcast, "video").await;
 	for sequence in 0..6 {
 		let mut group = reader.next_group().await.unwrap().unwrap();
-		assert_eq!(group.sequence, sequence);
+		assert_eq!(group.start, sequence);
 		for index in 0..3 {
 			let frame = group.read_frame().await.unwrap().unwrap();
-			assert_eq!(frame.timestamp.unwrap().value(), sequence * 10_000 + index);
+			assert_eq!(frame.timestamp.value(), sequence * 10_000 + index);
 			assert_eq!(&frame.payload[..], &[sequence as u8, index as u8, 0xff]);
 		}
 		assert!(group.read_frame().await.unwrap().is_none());
@@ -282,35 +290,35 @@ async fn a_narrowed_read_skips_the_group_it_left() {
 	let archive = Archive::new();
 	archive.track("video", 0, true).await;
 	for sequence in 0..4 {
-		archive.object("video", 0, vec![frames(true, sequence, 0..1)]).await;
+		archive.object("video", 0, vec![timed(sequence, 0..1)]).await;
 	}
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let mock = archive.store.inner().clone();
 	mock.take();
 	let gate = mock.stall_gets("rec/video/");
-	let ascending = |groups| {
+	let ascending = |start| {
 		Subscription::default()
 			.with_delay(Delay::default().with_max(None))
-			.with_range(groups)
+			.with_ranges([from(start)])
 			.with_order(Order::Ascending)
 	};
 	let mut subscriber = broadcast
 		.consume()
 		.track("video")
 		.unwrap()
-		.subscribe(ascending(0..))
+		.subscribe(ascending(0))
 		.await
 		.unwrap();
 	let waiter = kio::Waiter::noop();
 	let _ = subscriber.poll_recv_group(&waiter);
 	assert!(object_read(&mock, 0).await, "group 0 is read from its object");
 
-	subscriber.update(ascending(1..)).unwrap();
+	subscriber.update(ascending(1_000)).unwrap();
 	let _ = subscriber.poll_recv_group(&waiter);
 	assert!(
-		object_read(&mock, 1).await,
-		"group 1 waited behind group 0, which nobody reads"
+		object_read(&mock, 1_000).await,
+		"group 1000 waited behind group 0, which nobody reads"
 	);
 	gate.add_permits(16);
 }
@@ -541,10 +549,7 @@ async fn a_completed_archive_ends_as_recorded() {
 	archive.complete().await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
-	for (track, end) in [
-		("video", Position::group(2)),
-		("audio", Position { group: 1, frame: 2 }),
-	] {
+	for (track, end) in [("video", Position::group(2)), ("audio", Position::new(1, 2))] {
 		let mut reader = subscribe(&broadcast, track).await;
 		assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..2)));
 		assert_eq!(next(&mut reader).await.unwrap(), (1, expected(true, 1, 0..2)));
@@ -559,7 +564,7 @@ async fn a_completed_archive_ends_as_recorded() {
 	let end = timeout(Duration::from_secs(10), reader.next_group())
 		.await
 		.expect("the track ends");
-	let end = end.map(|group| group.map(|group| group.sequence));
+	let end = end.map(|group| group.map(|group| group.start));
 	assert!(
 		matches!(end, Err(moq_net::Error::Stream(moq_net::StreamError::App(7)))),
 		"{end:?}"
@@ -607,10 +612,10 @@ async fn a_re_added_track_replays_both_runs() {
 			sleep(Duration::from_millis(1)).await;
 		}
 		for sequence in sequences {
-			let mut group = track.create_group(group::Info { sequence }).unwrap();
+			let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 			group.write_frame(pts, format!("run{run}/{sequence}")).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let track = track.finish().unwrap();
 		sleep(Duration::from_secs(2)).await;
@@ -679,7 +684,7 @@ async fn an_unordered_listing_is_sorted() {
 	assert_eq!(super::tests::sequence(&mut reader).await, Some(3));
 }
 
-/// Read `range` in order with no age limit: the sequences of the groups it delivers before
+/// Read `range` in order with no age limit: the starts of the groups it delivers before
 /// it stops delivering. A range ending before the live edge parks once read, as on any live
 /// track.
 async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::Range) -> Vec<u64> {
@@ -692,15 +697,25 @@ async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::
 	let mut read = Vec::new();
 	while let Ok(group) = timeout(5 * REFRESH, reader.next_group()).await {
 		match group.unwrap() {
-			Some(group) => read.push(group.sequence),
+			Some(group) => read.push(group.start),
 			None => break,
 		}
 	}
 	read
 }
 
+/// A time on a millisecond track.
 fn at(millis: u64) -> track::Anchor {
-	track::Anchor::Time(Timestamp::from_millis(millis).unwrap())
+	track::Anchor::Time(millis)
+}
+
+/// Group `sequence`'s frames `frames` on a timed track, keyed by its first frame's time:
+/// `sequence` seconds.
+fn timed(sequence: u64, frames: std::ops::Range<u64>) -> Entry {
+	Entry {
+		sequence: sequence * 1000,
+		..self::frames(true, sequence, frames)
+	}
 }
 
 /// Groups `sequences` of a timed track, two to an object, each group starting at its
@@ -708,7 +723,7 @@ fn at(millis: u64) -> track::Anchor {
 async fn stored(archive: &Archive, sequences: impl IntoIterator<Item = u64>) {
 	let sequences: Vec<u64> = sequences.into_iter().collect();
 	for pair in sequences.chunks(2) {
-		let entries = pair.iter().map(|sequence| frames(true, *sequence, 0..3)).collect();
+		let entries = pair.iter().map(|sequence| timed(*sequence, 0..3)).collect();
 		archive.object("video", 0, entries).await;
 	}
 }
@@ -726,22 +741,22 @@ async fn a_time_range_resolves_from_the_archive() {
 	let range = |start, end| track::Range { start, end };
 	assert_eq!(
 		read_range(&broadcast, "video", range(at(4_500), Some(at(6_500)))).await,
-		[4, 5, 6]
+		[4_000, 5_000, 6_000]
 	);
 	// A start on the first frame of its group, in the second object of a pair.
 	assert_eq!(
 		read_range(&broadcast, "video", range(at(3_000), Some(at(3_001)))).await,
-		[3]
+		[3_000]
 	);
 	// An end alone, from the oldest group.
 	assert_eq!(
-		read_range(&broadcast, "video", range(track::Anchor::Absolute(0), Some(at(1_200)))).await,
-		[0, 1]
+		read_range(&broadcast, "video", range(at(0), Some(at(1_200)))).await,
+		[0, 1_000]
 	);
 	// The cache now holds groups 6 and 9, but not what lies between: still looked up.
 	assert_eq!(
 		read_range(&broadcast, "video", range(at(8_500), Some(at(8_600)))).await,
-		[8]
+		[8_000]
 	);
 
 	// A start alone reads on through the live edge.
@@ -752,7 +767,7 @@ async fn a_time_range_resolves_from_the_archive() {
 		.with_delay(moq_net::track::Delay::default().with_max(None));
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	for expected in 7..10 {
-		assert_eq!(sequence(&mut reader).await, Some(expected));
+		assert_eq!(sequence(&mut reader).await, Some(expected * 1000));
 	}
 }
 
@@ -763,7 +778,7 @@ async fn a_completed_archive_reads_a_time_range() {
 	let archive = Archive::new();
 	archive.track("video", 0, true).await;
 	stored(&archive, 0..6).await;
-	archive.end("video", End::Finish(At { group: 6, frame: 0 })).await;
+	archive.end("video", End::Finish(At { group: 6_000, frame: 0 })).await;
 	archive.complete().await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
@@ -771,7 +786,10 @@ async fn a_completed_archive_reads_a_time_range() {
 		start: at(2_500),
 		end: None,
 	};
-	assert_eq!(read_range(&broadcast, "video", range).await, [2, 3, 4, 5]);
+	assert_eq!(
+		read_range(&broadcast, "video", range).await,
+		[2_000, 3_000, 4_000, 5_000]
+	);
 }
 
 /// A time older than every stored object reaches back to the oldest stored group.
@@ -787,7 +805,7 @@ async fn a_time_before_the_archive_starts_at_its_oldest_group() {
 		start: at(500),
 		end: Some(at(4_500)),
 	};
-	assert_eq!(read_range(&broadcast, "video", range).await, [3, 4]);
+	assert_eq!(read_range(&broadcast, "video", range).await, [3_000, 4_000]);
 }
 
 /// A time older than an archive whose oldest object continues a pruned group reaches back to
@@ -796,18 +814,16 @@ async fn a_time_before_the_archive_starts_at_its_oldest_group() {
 async fn a_time_before_a_pruned_head_starts_at_the_oldest_whole_group() {
 	let archive = Archive::new();
 	archive.track("video", 0, true).await;
-	archive
-		.object("video", 2, vec![frames(true, 5, 2..4), frames(true, 6, 0..2)])
-		.await;
-	archive.object("video", 0, vec![frames(true, 7, 0..2)]).await;
-	archive.object("video", 0, vec![frames(true, 8, 0..1)]).await;
+	archive.object("video", 2, vec![timed(5, 2..4), timed(6, 0..2)]).await;
+	archive.object("video", 0, vec![timed(7, 0..2)]).await;
+	archive.object("video", 0, vec![timed(8, 0..1)]).await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
 		start: at(500),
 		end: Some(at(7_500)),
 	};
-	assert_eq!(read_range(&broadcast, "video", range).await, [6, 7]);
+	assert_eq!(read_range(&broadcast, "video", range).await, [6_000, 7_000]);
 }
 
 /// A time in a gap the archive never stored starts at the group before the gap, the newest
@@ -823,12 +839,12 @@ async fn a_time_in_a_gap_starts_before_it() {
 		start: at(4_500),
 		end: Some(at(6_500)),
 	};
-	assert_eq!(read_range(&broadcast, "video", range).await, [3, 6]);
+	assert_eq!(read_range(&broadcast, "video", range).await, [3_000, 6_000]);
 }
 
 /// A continuation's first frame bounds no group start: an object continuing group 0 at a
-/// later timestamp than the group 1 it then starts still holds the group containing a time
-/// between the two.
+/// later timestamp than the group at 500 it then starts still holds the group containing a
+/// time between the two.
 #[tokio::test(start_paused = true)]
 async fn a_continuation_does_not_bound_a_group_start() {
 	let archive = Archive::new();
@@ -857,7 +873,7 @@ async fn a_continuation_does_not_bound_a_group_start() {
 					frames: vec![frame(0, 1, 1_000)],
 				},
 				Entry {
-					sequence: 1,
+					sequence: 500,
 					frames: vec![frame(1, 0, 500)],
 				},
 			],
@@ -870,32 +886,22 @@ async fn a_continuation_does_not_bound_a_group_start() {
 		start: at(600),
 		end: Some(at(700)),
 	};
-	assert_eq!(read_range(&broadcast, "video", range).await, [1]);
+	assert_eq!(read_range(&broadcast, "video", range).await, [500]);
 }
 
-/// An untimed track refuses a time range rather than looking it up.
+/// A scale-less track's times are bare starts, which the archive looks up by key.
 #[tokio::test(start_paused = true)]
-async fn an_untimed_track_refuses_a_time_range() {
+async fn a_scale_less_track_looks_up_a_time_by_key() {
 	let archive = Archive::new();
 	archive.track("log", 0, false).await;
-	for sequence in 0..4 {
+	for sequence in [0, 2, 5, 7] {
 		archive.object("log", 0, vec![frames(false, sequence, 0..1)]).await;
 	}
 
 	let (broadcast, _run) = serve(&archive.store).await;
-	let track = broadcast.consume().track("log").unwrap();
-	let subscription = Subscription::default()
-		.with_ranges([track::Range {
-			start: at(1_000),
-			end: None,
-		}])
-		.with_delay(moq_net::track::Delay::default().with_max(None));
-	let result = match track.subscribe(subscription).await {
-		Ok(subscriber) => timeout(Duration::from_secs(10), subscriber.ordered().next_group())
-			.await
-			.expect("the read is refused")
-			.map(|group| group.map(|group| group.sequence)),
-		Err(err) => Err(err),
+	let range = track::Range {
+		start: at(3),
+		end: Some(at(5)),
 	};
-	assert!(matches!(result, Err(moq_net::Error::TimestampMismatch)), "{result:?}");
+	assert_eq!(read_range(&broadcast, "log", range).await, [2, 5]);
 }

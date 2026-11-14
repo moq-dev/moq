@@ -297,7 +297,7 @@ impl Records {
 				if fields
 					.properties
 					.sealed_time
-					.is_some_and(|sealed| self.timescale != Some(sealed.scale()))
+					.is_some_and(|sealed| self.timescale != sealed.scale())
 				{
 					return Err(Error::Unsupported);
 				}
@@ -827,7 +827,7 @@ mod hop_tests {
 			.create_object(frame::Header {
 				info: frame::Info {
 					size: payload.len() as u64,
-					timestamp: Some(ts(millis)),
+					timestamp: ts(millis),
 				},
 				fields: fields.map(Arc::new),
 				inflated: None,
@@ -891,7 +891,7 @@ mod hop_tests {
 			info.properties = track_properties.clone();
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
 
-			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 			group
 				.set_wire(group::Wire {
 					sparse: false,
@@ -920,7 +920,7 @@ mod hop_tests {
 			// The upstream group is still open.
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload.contiguous(0)[..], b"a");
-			assert_eq!(frame.timestamp, Some(ts(0)));
+			assert_eq!(frame.timestamp, ts(0));
 			match negotiated {
 				true => {
 					assert_eq!(fields(&frame), Some((first.id, first.properties.clone())), "{offer:?}");
@@ -951,7 +951,7 @@ mod hop_tests {
 					properties: Properties::default(),
 				})
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload.contiguous(0)[..], b"b");
@@ -1108,21 +1108,21 @@ mod hop_tests {
 		let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 		assert!(info.properties.is_none());
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(ts(5), b"key".to_vec()).unwrap();
 		let mut received = recv(&mut subscriber).await;
 		let frame = next(&mut received).await.unwrap();
 		assert_eq!(
 			(frame.timestamp, &frame.payload.contiguous(0)[..]),
-			(Some(ts(5)), &b"key"[..])
+			(ts(5), &b"key"[..])
 		);
 		assert!(frame.fields.is_none() && received.wire().is_none());
 		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let frame = next(&mut received).await.unwrap();
 		assert_eq!(
 			(frame.timestamp, &frame.payload.contiguous(0)[..]),
-			(Some(ts(6)), &b"delta"[..])
+			(ts(6), &b"delta"[..])
 		);
 		assert!(frame.fields.is_none());
 		assert!(next(&mut received).await.is_none());
@@ -1146,7 +1146,7 @@ mod hop_tests {
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
 			let mut head = track.create_group(0u64.into()).unwrap();
 			head.write_frame(ts(100), b"frame".to_vec()).unwrap();
-			head.finish().unwrap();
+			head.close().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
 			let broadcast = downstream.consume().request("room", None).await.unwrap();
 			// A listing carries no provenance, so it lists the track as native lite.
@@ -1177,7 +1177,7 @@ mod hop_tests {
 				.await
 				.unwrap()
 				.unwrap();
-			assert_eq!(next(&mut fetched).await.unwrap().timestamp, Some(ts(100)));
+			assert_eq!(next(&mut fetched).await.unwrap().timestamp, ts(100));
 			assert!(next(&mut fetched).await.is_none());
 			let mut subscriber =
 				kio::clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
@@ -1190,11 +1190,11 @@ mod hop_tests {
 			let start = if negotiated { ts(50) } else { ts(150) };
 			let mut group = track.create_group(1u64.into()).unwrap();
 			group.write_frame(start, b"frame".to_vec()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut received = recv(&mut subscriber).await;
-			assert_eq!(received.sequence, 1);
+			assert_eq!(received.start, 1);
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(frame.timestamp, Some(start), "{offer:?}");
+			assert_eq!(frame.timestamp, start, "{offer:?}");
 			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
 			drop(sessions);
@@ -1216,16 +1216,16 @@ mod hop_tests {
 		assert_eq!(subscriber.info().compression, crate::track::Compression::Deflate);
 
 		let payload = |n: u8| vec![n; 300];
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(ts(5), payload(1)).unwrap();
 		group.write_frame(ts(6), payload(2)).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let mut received = recv(&mut subscriber).await;
 		for (millis, n) in [(5, 1), (6, 2)] {
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(
 				(frame.timestamp, &frame.payload.contiguous(0)[..]),
-				(Some(ts(millis)), &payload(n)[..])
+				(ts(millis), &payload(n)[..])
 			);
 			assert!(frame.fields.is_none());
 		}

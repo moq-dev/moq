@@ -29,7 +29,8 @@ const CAPACITY: usize = 16;
 /// One item of the shared live feed, in stream order.
 #[derive(Clone)]
 pub(crate) enum Item {
-	/// A new source group started; the frames that follow belong to it.
+	/// A new source group started; the frames that follow belong to it. Carries the start of the
+	/// output group mirroring it (see [`crate::rung::output_start`]).
 	Group(u64),
 	/// A decoded frame of the current group. Cloning is cheap (`Arc`), and a GPU
 	/// frame stays on the GPU for every receiving rung.
@@ -195,9 +196,16 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
 	while let Some(mut group) = subscriber.recv_group().await? {
+		let Some(start) = crate::rung::output_start(group.start, group.timescale()) else {
+			tracing::debug!(
+				group = group.start,
+				"skipping a source group past the output's timescale"
+			);
+			continue;
+		};
 		// Sends only fail with zero receivers, which is fine: teardown aborts
 		// this task at the next await anyway.
-		let _ = sender.send(Item::Group(group.sequence));
+		let _ = sender.send(Item::Group(start));
 
 		let mut first = true;
 		let complete = loop {
@@ -207,7 +215,7 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 				// A failed group read loses that group alone, such as one its
 				// publisher gave up; a failed track ends `recv_group` above instead.
 				Err(err) => {
-					tracing::debug!(%err, group = group.sequence, "lost a source group");
+					tracing::debug!(%err, group = group.start, "lost a source group");
 					break false;
 				}
 			};

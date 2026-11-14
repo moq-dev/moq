@@ -285,22 +285,23 @@ impl<O: Output> Media<O> {
 						}
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
-						let mut subscriber = track
+						let subscriber = track
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(hang::catalog::PRIORITY.video)
 									// The whole delay from the first request, so a cold join never
 									// states a zero minimum before the container's update.
-									.with_delay(delay),
+									.with_delay(delay)
+									// Counted back through the groups each hop holds from its live
+									// feed, never from a warm copy's backlog, so it names no cached
+									// group for the shared publisher subscription to rewind to.
+									// Starts are sparse, so only a count reaches the group before.
+									.with_ranges([moq_net::track::Range {
+										start: moq_net::track::Anchor::Relative(lookback),
+										end: None,
+									}]),
 							)
 							.await?;
-						// Start at the live edge without asking the shared publisher
-						// subscription to rewind to a cached sequence. The edge is known only
-						// once the feed is live, so wait for it rather than read the backlog of
-						// a warm copy still waiting on its source; the wait ends with the track.
-						if let Some(largest) = subscriber.largest().await {
-							subscriber = subscriber.with_range(largest.group.saturating_sub(lookback)..);
-						}
 						let format = catalog::hang::Container::try_from(config)?;
 						// The playout delay is the target latency, and the max how late a group may be.
 						let track =
@@ -688,7 +689,7 @@ async fn play_audio<O: Output>(
 		};
 		if let Some(at) = presentation.due(timestamp) {
 			// The end as the clock placed it, so rounding never reads as a jump.
-			let end = Duration::from(timestamp);
+			let end = Duration::try_from(timestamp).expect("built from a Duration");
 			let delay = schedule.delay();
 			let nanos = |duration: Duration| duration.as_nanos() as i128;
 			let jumped = anchored.replace((at, end, delay)).map_or(0, |(was, from, before)| {
@@ -775,7 +776,7 @@ async fn play_audio<O: Output>(
 			let delay = consumer.delay();
 			let crossing = match &event {
 				Ok(Some(moq_audio::decode::Read::End { end })) => {
-					ends.push_back((Duration::from(*end), role.declare()));
+					ends.push_back((Duration::try_from(*end)?, role.declare()));
 					None
 				}
 				// Playback restarts at the frame after it, so that is what carries it.
@@ -788,9 +789,10 @@ async fn play_audio<O: Output>(
 					// A frame at or past an end comes from the encoder that replaced it; one
 					// before it is the stopped encoder's drain. Only the last end crossed has
 					// replacement media; the ones before it ended empty timelines.
+					let at = Duration::try_from(frame.timestamp)?;
 					let mut crossed = None;
 					while let Some(&(end, transition)) = ends.front()
-						&& Duration::from(frame.timestamp) >= end
+						&& at >= end
 					{
 						ends.pop_front();
 						if let Some(skipped) = crossed.replace(transition) {
@@ -913,7 +915,7 @@ async fn play_audio<O: Output>(
 							ended = false;
 							// An end this frame did not cross ends the timeline it resumes.
 							if let Some(end) = deferred.take()
-								&& Duration::from(frame.timestamp) < Duration::from(end)
+								&& Duration::try_from(frame.timestamp)? < Duration::try_from(end)?
 							{
 								role.end(end)?;
 								ended = true;
@@ -965,7 +967,7 @@ async fn play_audio<O: Output>(
 
 			let length = frame.data.len() / stride;
 			let mapped = role.map(frame.timestamp)?;
-			let start = Duration::from(mapped);
+			let start = Duration::try_from(mapped)?;
 			let timing = timeline.push(start, length, sample_rate, fill_max);
 
 			// A rewind or a hole too large to fill starts a new playback sink. The old
@@ -1066,7 +1068,7 @@ async fn play_audio<O: Output>(
 			// A dropped write leaves the utterance to start on the next frame the sink accepts.
 			if utterance && written.accepted_sample_frames > 0 {
 				utterance = false;
-				output.send(Event::Utterance(Duration::from(frame.timestamp)));
+				output.send(Event::Utterance(Duration::try_from(frame.timestamp)?));
 			}
 			if std::mem::take(&mut declare) {
 				sink.end();
@@ -1076,7 +1078,8 @@ async fn play_audio<O: Output>(
 			if written.accepted_sample_frames > 0 {
 				fresh = false;
 			}
-			let end = Duration::from(frame.timestamp) + Duration::from_secs_f64(length as f64 / sample_rate as f64);
+			let end =
+				Duration::try_from(frame.timestamp)? + Duration::from_secs_f64(length as f64 / sample_rate as f64);
 			wrote = moq_net::Timestamp::try_from(end).ok().map(|end| (end, timing.end));
 			steer(wrote);
 			playhead.wrote(timing.end, sink.buffered(), Instant::now());
@@ -1191,7 +1194,8 @@ mod tests {
 		producer.write(packet(0, 0.25)).unwrap();
 		tokio::task::yield_now().await;
 		producer.discontinuity().unwrap();
-		producer.write(packet(0, 0.5)).unwrap();
+		// The resume starts after the marker: group starts only move forward.
+		producer.write(packet(1, 0.5)).unwrap();
 		let _finished = producer.finish().unwrap();
 		task.await.unwrap();
 		// The resume keeps the sink, which fills the declared silence with comfort noise.
@@ -1472,9 +1476,12 @@ mod tests {
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		producer.discontinuity().unwrap();
-		// One group per packet and one for the marker, so the next press would be group 11.
+		// A seek creates the press's first group without appending it, so nothing declares the
+		// starts between it and the marker skipped: a group there may have been lost.
 		if lost {
-			producer.seek(12).unwrap();
+			producer
+				.seek(packet(110, 0.5).timestamp.as_micros().unwrap() as u64)
+				.unwrap();
 		}
 		// Two seconds muted, with the timeline running on through it.
 		kio::clock::sleep(Duration::from_secs(2)).await;
@@ -1662,7 +1669,9 @@ mod tests {
 		assert_eq!(recorder.latencies().len(), 1, "the late burst replaced the sink");
 		assert!(shown.len() > 50, "video stalled: {} pictures", shown.len());
 		for (timestamp, at) in shown {
-			let due = start.saturating_add(delay).saturating_add(Duration::from(timestamp));
+			let due = start
+				.saturating_add(delay)
+				.saturating_add(Duration::try_from(timestamp).unwrap());
 			assert!(
 				at.saturating_duration_since(due) <= Duration::from_millis(1)
 					&& due.saturating_duration_since(at) <= Duration::from_millis(1),
@@ -1679,7 +1688,7 @@ mod tests {
 					moq_video::Surface::rgba(&[128; 16 * 16 * 4], moq_video::Size::new(16, 16))?,
 					frame.timestamp,
 				));
-				self.0.sort_by_key(|frame| frame.timestamp);
+				self.0.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
 				let ready = self.0.len().saturating_sub(2);
 				self.1.extend(self.0.drain(..ready));
 				Ok(())
@@ -1819,7 +1828,7 @@ mod tests {
 		assert_eq!(
 			shown[..3]
 				.iter()
-				.map(|(timestamp, _)| timestamp.as_millis())
+				.map(|(timestamp, _)| timestamp.as_millis().unwrap())
 				.collect::<Vec<_>>(),
 			[0, 20, 40]
 		);
@@ -1844,14 +1853,17 @@ mod tests {
 			let shown = shown
 				.iter()
 				.find(|(shown, _)| {
-					let start = Duration::from(*shown);
+					let start = Duration::try_from(*shown).unwrap();
 					start <= timestamp && timestamp < start + PACKET_DURATION
 				})
 				.expect("continuous video reaches resumed audio");
-			(shown.1.saturating_add(timestamp - Duration::from(shown.0)), new[0].from)
+			(
+				shown.1.saturating_add(timestamp - Duration::try_from(shown.0).unwrap()),
+				new[0].from,
+			)
 		} else {
-			let timestamp = Duration::from(shown[3].0);
-			let index = (shown[3].0.as_millis() / 20) as usize;
+			let timestamp = Duration::try_from(shown[3].0).unwrap();
+			let index = (shown[3].0.as_millis().unwrap() / 20) as usize;
 			let offset = timestamp - PACKET_DURATION * index as u32;
 			(shown[3].1, new[index - 3].from.saturating_add(offset))
 		};
@@ -2148,7 +2160,7 @@ mod tests {
 		for _ in 0..2_000 {
 			tokio::task::yield_now().await;
 			if let Some(timestamp) = recorder.present(&media) {
-				shown.push(timestamp.as_millis());
+				shown.push(timestamp.as_millis().unwrap());
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}

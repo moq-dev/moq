@@ -6,12 +6,23 @@ import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
 
 /**
+ * The scale-less timestamp at group key [key] (a datagram's sequence).
+ *
+ * A scale-less track has no time, so each frame carries its group's key instead; any other key is
+ * refused at the write with a `TimestampMismatch`.
+ */
+fun uniffi.moq.MoqTimestamp.Companion.unscaled(key: ULong): Timestamp =
+    Timestamp(value = key, scale = null)
+
+/**
  * This timestamp as a [Duration], rounded down to a whole nanosecond.
  *
  * The [Timestamp] itself is exact; keep it, not the duration, to republish a tick such as 90 kHz.
- * Throws [IllegalArgumentException] past [Duration]'s range, about 146 million years.
+ * Throws [IllegalArgumentException] when [unscaled], since a group key has no time, or past
+ * [Duration]'s range, about 146 million years.
  */
 fun Timestamp.toDuration(): Duration {
+    val scale = requireNotNull(scale) { "unscaled timestamp #$value has no duration" }
     // The sub-second remainder times a billion can exceed 64 bits.
     val remainder = (value % scale).toString().toBigInteger()
     val divisor = scale.toString().toBigInteger()

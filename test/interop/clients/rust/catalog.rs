@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 	);
 	let mut catalog = moq_json::snapshot::Producer::<hang::Catalog>::new(track, Default::default());
 	let value = hang::Catalog::from_slice(CATALOG.as_bytes())?;
-	catalog.update(moq_net::Timed::from(&value).at(moq_net::Timestamp::ZERO))?;
+	catalog.update(moq_json::Timed::new(&value, moq_net::Timestamp::ZERO))?;
 	route.announce()?;
 
 	// A local reader sees the inflated snapshot, as a plain peer of the relay does. The group

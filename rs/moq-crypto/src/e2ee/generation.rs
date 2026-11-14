@@ -16,8 +16,8 @@ use rind::{aead, hmac};
 /// Grouped-frame versus datagram key domain.
 ///
 /// A stream track and a datagram track of one semantic name share a physical name but allocate
-/// sequences independently, so the domain alone keeps a group's frame 0 and the datagram at
-/// that sequence from sharing a key and nonce.
+/// group starts and datagram sequences independently, so the domain alone keeps a group's frame 0
+/// and the datagram at the same number from sharing a key and nonce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Domain {
 	Group = 0x00,
@@ -177,9 +177,10 @@ fn scope(info: &mut Vec<u8>, credential: &Credential, epoch: &Epoch) {
 
 /// A publisher-minted generation whose clones share permanent track claims.
 ///
-/// A claim holds a semantic name's key for stream or datagram tracks and that kind's sequence
-/// high-water mark, so a track created, reserved, or served again under the name resumes above
-/// every sequence its kind allocated before, on any broadcast of the generation.
+/// A claim holds a semantic name's key for stream or datagram tracks and that kind's high-water
+/// mark (a group start or a datagram sequence), so a track created, reserved, or served again
+/// under the name resumes above every one its kind allocated before, on any broadcast of the
+/// generation.
 #[derive(Clone, Debug)]
 pub struct Producer {
 	// Its keys are the claims: never released, since reopening a track would restart its nonce counters.

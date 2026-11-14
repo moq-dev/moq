@@ -8,8 +8,8 @@ use crate::e2ee::error::{Error, Result};
 use crate::e2ee::limits::{MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, TAG_LEN, check_u53};
 use crate::e2ee::protect::{nonce, open, protect};
 
-/// A semantic name's key in one domain and its next unallocated sequence; clones share their
-/// accounting.
+/// A semantic name's key in one domain and its next unallocated group start or datagram sequence;
+/// clones share their accounting.
 #[derive(Clone, Debug)]
 pub(crate) struct Claim {
 	pub key: Arc<Mutex<TrackKey>>,

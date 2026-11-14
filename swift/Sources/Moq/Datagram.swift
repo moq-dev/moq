@@ -28,7 +28,10 @@ public final class DatagramProducer: Sendable {
     public func info() throws -> DatagramInfo { try ffi.info() }
 
     /// Send a datagram and return its sequence; keep the payload below the path MTU.
-    public func append(_ payload: Data, timestamp: Timestamp? = nil) throws -> UInt64 {
+    ///
+    /// `timestamp` must match the track: a scale-less track has no time, so there it is
+    /// `Timestamp.unscaled(sequence)`, naming the sequence to write.
+    public func append(_ payload: Data, timestamp: Timestamp) throws -> UInt64 {
         try ffi.append(timestamp: timestamp, payload: payload)
     }
 

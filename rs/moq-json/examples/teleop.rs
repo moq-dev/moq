@@ -4,8 +4,9 @@
 //! framing; attach the same broadcast to a moq-tokio origin to carry it over a session.
 use std::task::Poll;
 
+use moq_json::Timed;
 use moq_json::{snapshot, stream};
-use moq_net::{Timed, Timescale, Timestamp, broadcast, track};
+use moq_net::{Timescale, Timestamp, broadcast, track};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,14 +41,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	.iter()
 	.enumerate()
 	{
-		state.update(Timed::from(control).at(Timestamp::from_millis(tick as u64)?))?;
+		state.update(Timed::new(control, Timestamp::from_millis(tick as u64)?))?;
 	}
 	let _state = state.finish()?;
 
 	// Every discrete command is meaningful, including Stop between Arm and Disarm.
 	let expected = [Command::Arm, Command::Stop, Command::Disarm];
 	for (tick, command) in expected.iter().enumerate() {
-		commands.append(Timed::from(command).at(Timestamp::from_millis(tick as u64)?))?;
+		commands.append(Timed::new(command, Timestamp::from_millis(tick as u64)?))?;
 	}
 	let _commands = commands.finish()?;
 
@@ -57,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		return Err("finished control track did not yield its latest state".into());
 	};
 	assert_eq!(latest.value, Control { speed: 0, turn: 0 });
-	assert_eq!(latest.at, Some(Timestamp::from_millis(2)?));
+	assert_eq!(latest.at, Timestamp::from_millis(2)?);
 	println!("Current control: {:?} at {:?}", latest.value, latest.at);
 	assert!(matches!(state_reader.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	for (tick, expected) in expected.into_iter().enumerate() {
@@ -65,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			return Err("finished command track lost an ordered command".into());
 		};
 		assert_eq!(command.value, expected);
-		assert_eq!(command.at, Some(Timestamp::from_millis(tick as u64)?));
+		assert_eq!(command.at, Timestamp::from_millis(tick as u64)?);
 		println!("Command: {:?} at {:?}", command.value, command.at);
 	}
 	assert!(matches!(command_reader.poll_next(&waiter), Poll::Ready(Ok(None))));

@@ -6,7 +6,7 @@ use std::time::Duration;
 use rangemap::RangeInclusiveMap;
 
 /// The groups a reader skipped as stale and never handed out, with the budget each was
-/// judged under, as runs of consecutive sequences.
+/// judged under, as runs of consecutive keys.
 ///
 /// Only a widening reverses a stale verdict, so a run comes back once the budget grows
 /// past the one it was judged under. A run is kept only while one of its groups is cached:
@@ -25,21 +25,21 @@ struct Runs {
 }
 
 impl Skipped {
-	/// Record `sequence` as skipped under `budget`.
-	pub fn insert(&mut self, sequence: u64, budget: Duration) {
+	/// Record `key` as skipped under `budget`.
+	pub fn insert(&mut self, key: u64, budget: Duration) {
 		let skipped = self.0.get_or_insert_default();
 		if skipped.runs.is_empty() || budget < skipped.narrowest {
 			skipped.narrowest = budget;
 		}
-		skipped.runs.insert(sequence..=sequence, budget);
+		skipped.runs.insert(key..=key, budget);
 	}
 
-	/// Forget `sequence`, now handed out.
-	pub fn remove(&mut self, sequence: u64) {
+	/// Forget `key`, now handed out.
+	pub fn remove(&mut self, key: u64) {
 		if let Some(skipped) = &mut self.0
 			&& !skipped.runs.is_empty()
 		{
-			skipped.runs.remove(sequence..=sequence);
+			skipped.runs.remove(key..=key);
 		}
 	}
 
@@ -93,7 +93,7 @@ impl Skipped {
 		}
 	}
 
-	/// The lowest sequence skipped.
+	/// The lowest key skipped.
 	pub fn lowest(&self) -> Option<u64> {
 		let skipped = self.0.as_ref()?;
 		skipped.runs.first_range_value().map(|(run, _)| *run.start())
@@ -126,12 +126,12 @@ impl Skipped {
 		}
 	}
 
-	/// One past the last sequence of the run holding `sequence`, if it was skipped.
-	pub fn run_end(&self, sequence: u64) -> Option<u64> {
+	/// One past the last key of the run holding `key`, if it was skipped.
+	pub fn run_end(&self, key: u64) -> Option<u64> {
 		let skipped = self.0.as_ref()?;
 		skipped
 			.runs
-			.get_key_value(&sequence)
+			.get_key_value(&key)
 			.map(|(run, _)| run.end().saturating_add(1))
 	}
 
@@ -181,8 +181,8 @@ mod test {
 	#[test]
 	fn a_hand_out_splits_a_run() {
 		let mut skipped = Skipped::default();
-		for sequence in 3..=5 {
-			skipped.insert(sequence, NARROW);
+		for key in 3..=5 {
+			skipped.insert(key, NARROW);
 		}
 		skipped.remove(4);
 		assert_eq!(skipped.widened(WIDE), vec![3..=3, 5..=5]);
@@ -191,8 +191,8 @@ mod test {
 	#[test]
 	fn prune_drops_runs_with_nothing_cached() {
 		let mut skipped = Skipped::default();
-		for sequence in [1, 3, 5, 7] {
-			skipped.insert(sequence, NARROW);
+		for key in [1, 3, 5, 7] {
+			skipped.insert(key, NARROW);
 		}
 		// The lowest runs go until one still holds a group.
 		skipped.prune(4, |run| *run.start() < 3);

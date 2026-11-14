@@ -1,4 +1,4 @@
-"""Publishers preserve the caller's exact capture time, including absence."""
+"""Publishers preserve the caller's exact capture time, and a scale-less track's group key."""
 
 import asyncio
 import json
@@ -9,7 +9,7 @@ import moq
 import moq_ffi
 import pytest
 
-TIMESTAMPS = [None, moq.Timestamp(0, 90_000), moq.Timestamp(1, 90_000)]
+TIMESTAMPS = [moq.Timestamp(0, 90_000), moq.Timestamp(1, 90_000)]
 
 
 async def test_raw_timestamps_are_exact():
@@ -23,12 +23,19 @@ async def test_raw_timestamps_are_exact():
         assert frame is not None
         assert frame.timestamp == moq.Timestamp(value, 90_000)
 
-    untimed = broadcast.publish_track("events", moq.TrackInfo(timescale=None))
-    untimed_consumer = untimed.consume()
-    untimed.write_frame(b"event")
-    frame = await asyncio.wait_for(untimed_consumer.read_frame(), timeout=5.0)
+    unscaled = broadcast.publish_track("events", moq.TrackInfo(timescale=None))
+    unscaled_consumer = unscaled.consume()
+    # A scale-less track's frame carries its group key, and refuses time.
+    with pytest.raises(moq.Error.Protocol):
+        unscaled.write_frame(b"event", moq.Timestamp(0, 90_000))
+    unscaled.write_frame(b"event", moq.Timestamp.unscaled(0))
+    frame = await asyncio.wait_for(unscaled_consumer.read_frame(), timeout=5.0)
     assert frame is not None
-    assert frame.timestamp is None
+    assert frame.timestamp == moq.Timestamp.unscaled(0)
+    assert frame.timestamp.scale is None
+    # A timed track refuses a group key.
+    with pytest.raises(moq.Error.Protocol):
+        track.write_frame(b"frame", moq.Timestamp.unscaled(2))
 
     for invalid in [moq.Timestamp(0, 0), moq.Timestamp(0, 1 << 62), moq.Timestamp(1 << 61, 90_000)]:
         with pytest.raises(moq.Error.TimeOverflow):
@@ -44,10 +51,14 @@ def test_timedelta_conversions():
     assert moq.Timestamp(1, 2_000_000).to_timedelta() == timedelta(0)
     assert moq.Timestamp(2, 3_000_000).to_timedelta() == timedelta(0)
     assert moq.Timestamp(1, 90_000).to_timedelta() == timedelta(microseconds=11)
+    # A group key has no time.
+    assert moq.Timestamp.unscaled(3) == moq.Timestamp(3, None)
+    with pytest.raises(ValueError):
+        moq.Timestamp.unscaled(3).to_timedelta()
 
 
 @pytest.mark.parametrize("mode", ["snapshot", "stream"])
-@pytest.mark.parametrize("timestamp", [timestamp for timestamp in TIMESTAMPS if timestamp is not None])
+@pytest.mark.parametrize("timestamp", TIMESTAMPS)
 async def test_json_timestamp_round_trip(mode: str, timestamp: moq.Timestamp):
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("value", moq.TrackInfo(timescale=timestamp.scale))
@@ -91,7 +102,9 @@ def test_whole_media_frames_require_the_callers_timestamp():
         broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=head)
     )
     with pytest.raises(moq.Error.Codec, match="timestamp"):
-        producer._inner.write_frame(moq_ffi.MoqFrame(payload=b"opus frame", timestamp=None))
+        producer._inner.write_frame(
+            moq_ffi.MoqFrame(payload=b"opus frame", timestamp=moq_ffi.MoqTimestamp(value=0, scale=None))
+        )
     # Exercise the runtime refusal when a caller omits the required timestamp.
     with pytest.raises(TypeError):
         producer.write_frame(b"opus frame")  # type: ignore[call-arg]

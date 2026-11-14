@@ -68,7 +68,10 @@ test("status skips values that fail the schema and ends when the track errors", 
 	// One finished group per status, so between statuses the loop waits on the next group.
 	const publish = (value: unknown) => {
 		const group = track.appendGroup();
-		group.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
+		group.writeFrame({
+			payload: new TextEncoder().encode(JSON.stringify(value)),
+			timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+		});
 		group.finish();
 	};
 
@@ -143,7 +146,12 @@ test("input opens a session that carries commands up and latency down until deac
 		expect(command).toEqual({ type: "buttons", buttons: ["a"], timestamps: [] });
 
 		const latency = [{ label: "input", ms: 42 }];
-		session.producer.writeFrame({ payload: new TextEncoder().encode(JSON.stringify({ latency })) });
+		const reply = session.producer.appendGroup();
+		reply.writeFrame({
+			payload: new TextEncoder().encode(JSON.stringify({ latency })),
+			timestamp: Moq.Time.Timestamp.unscaled(reply.sequence),
+		});
+		reply.finish();
 		await settle(30);
 		expect(game.latency.peek()).toEqual(latency);
 

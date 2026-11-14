@@ -35,7 +35,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
             # group 1 has been out for delay.max: a native timer is pending.
             _stalled = track.append_group()
             later = track.append_group()
-            later.write_frame(b"later")
+            later.write_frame(b"later", moq.Timestamp.unscaled(later.sequence))
             later.finish()
             pending = asyncio.ensure_future(consumer.read_frame())
 

@@ -1,8 +1,11 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
+import { key, next, resetKeys } from "../key.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
+
+beforeEach(resetKeys);
 
 type Rec = { n: number };
 
@@ -27,12 +30,12 @@ class Live {
 	}
 
 	async push(n: number): Promise<void> {
-		this.producer.push({ value: { n } });
+		this.producer.push(next({ n }));
 		await this.read();
 	}
 
 	async pop(count: number): Promise<void> {
-		this.producer.pop(count);
+		this.producer.pop(count, key());
 		await this.read();
 	}
 
@@ -110,11 +113,11 @@ test("concurrent consumer reads are rejected", async () => {
 test("writes after finish are rejected before encoding", () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<number>({ track });
-	producer.push({ value: 1 });
+	producer.push(next(1));
 	producer.finish();
 
-	expect(() => producer.push({ value: 2 })).toThrow("track is closed");
-	expect(() => producer.pop(1)).toThrow("track is closed");
+	expect(() => producer.push(next(2))).toThrow("track is closed");
+	expect(() => producer.pop(1, key())).toThrow("track is closed");
 	expect(producer.window).toEqual([1]);
 });
 
@@ -210,7 +213,7 @@ test("compressed round-trip across rolls", async () => {
 	expect(pushed(await live.finish())).toEqual(Array.from({ length: 40 }, (_, n) => n));
 });
 
-// The frame count and first-frame timestamp of each group in a finished track.
+// The frame count and first-frame time of each group in a finished track, undefined when scale-less.
 async function groups(track: Track.Producer): Promise<[number, number | undefined][]> {
 	const ordered = track.subscribe({ delay: { max: Duration.millis(30_000) } }).ordered();
 	const out: [number, number | undefined][] = [];
@@ -218,7 +221,7 @@ async function groups(track: Track.Producer): Promise<[number, number | undefine
 		const first = await group.readFrame();
 		let frames = first ? 1 : 0;
 		while ((await group.readFrame()) !== undefined) frames++;
-		out.push([frames, first?.timestamp?.asMillis()]);
+		out.push([frames, first?.timestamp.scale === undefined ? undefined : first.timestamp.asMillis()]);
 	}
 	return out;
 }
@@ -236,8 +239,8 @@ test("a joiner over the ratio gets a fresh header", async () => {
 	] as const) {
 		const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
 		const producer = new Producer<Rec>({ track });
-		producer.push({ value: { n: 1000 } });
-		for (let n = 0; n < pushes; n++) producer.push({ value: { n } });
+		producer.push(next({ n: 1000 }));
+		for (let n = 0; n < pushes; n++) producer.push(next({ n }));
 
 		const joiner = track.subscribe();
 		await settle();
@@ -293,7 +296,7 @@ test("a window refresh after an older edit starts at the newest timestamp", asyn
 test("a window refresh needs a ratio", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track });
-	for (let n = 0; n < 4; n++) producer.push({ value: { n } });
+	for (let n = 0; n < 4; n++) producer.push(next({ n }));
 
 	const joiner = track.subscribe();
 	await settle();
@@ -322,8 +325,8 @@ test("the window slides", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track });
 	for (let n = 0; n < 5; n++) {
-		producer.push({ value: { n } });
-		if (n >= 2) producer.pop(1);
+		producer.push(next({ n }));
+		if (n >= 2) producer.pop(1, key());
 	}
 
 	expect(producer.offset).toBe(3);
@@ -346,7 +349,7 @@ test("a pop is clamped to the window", async () => {
 test("an empty pop writes nothing", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track });
-	producer.pop(5);
+	producer.pop(5, key());
 	producer.finish();
 
 	// Nothing was ever pushed, so there is nothing to drop and no group to publish.
@@ -367,8 +370,8 @@ test("a lagging consumer is told what it missed", async () => {
 
 	// The consumer stops reading while the window slides past everything it holds.
 	for (let n = 2; n < 8; n++) {
-		producer.push({ value: { n } });
-		producer.pop(1);
+		producer.push(next({ n }));
+		producer.pop(1, key());
 	}
 	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0n } });
 	const events = await live.finish();
@@ -420,8 +423,8 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 test("a fresh consumer adopts the current offset", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track, ops: false });
-	for (let n = 0; n < 5; n++) producer.push({ value: { n } });
-	producer.pop(3);
+	for (let n = 0; n < 5; n++) producer.push(next({ n }));
+	producer.pop(3, key());
 
 	const subscriber = track.subscribe();
 	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0n } });
@@ -551,18 +554,17 @@ test("an uncommitted edit leaves the window unchanged", () => {
 	expect(encoder.window).toEqual([2, 3]);
 });
 
-test("edits keep their timestamps, and an edit without one goes out untimed", async () => {
-	for (const at of [undefined, Time.Timestamp.fromMillis(1_000)]) {
-		const track = new Track.Producer("test").accept(at ? { timescale: Time.Timescale.MILLI } : {});
+test("edits keep their timestamps, and a scale-less edit its group's key", async () => {
+	for (const at of [Time.Timestamp.unscaled(3n), Time.Timestamp.fromMillis(1_000)]) {
+		const track = new Track.Producer("test").accept(at.scale ? { timescale: Time.Timescale.MILLI } : {});
 		const producer = new Producer<Rec>({ track });
 		producer.push({ value: { n: 0 }, at });
-		producer.pop(1, at);
+		producer.pop(1, at.scale ? at : Time.Timestamp.unscaled(4n));
 		producer.finish();
 
+		// A scale-less header opens its group at its key, and an op carries that key.
 		const group = await track.subscribe().ordered().nextGroup();
-		for (let i = 0; i < 2; i++) {
-			expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(at?.as(Time.Timescale.MILLI));
-		}
+		for (let i = 0; i < 2; i++) expect((await group?.readFrame())?.timestamp).toEqual(at);
 	}
 });
 
@@ -601,28 +603,28 @@ test("events carry their frame's timestamp, and a header's restated records get 
 	expect(events.map(millis)).toEqual([400, 400]);
 });
 
-test("events on an untimed track have no timestamp", async () => {
+test("events on a scale-less track carry their keys", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer<Rec>({ track: track.subscribe() });
 	const producer = new Producer<Rec>({ track });
-	producer.push({ value: { n: 0 } });
-	producer.pop(1);
+	producer.push(next({ n: 0 }));
+	producer.pop(1, key());
 	producer.finish();
 
 	const events: Timed<Event<Rec>>[] = [];
 	for await (const event of consumer) events.push(event);
 	expect(events.length).toBe(2);
-	expect(events.every((event) => event.at === undefined)).toBeTrue();
+	expect(events.every((event) => event.at.scale === undefined)).toBeTrue();
 });
 
 // Mirrors the Rust `window::Finished` doctest: the window `finish` returns still reads, but takes
 // no edit, at compile time and at run time.
 test("finishing returns a window that reads but takes no edit", () => {
 	const producer = new Producer<Rec>({ track: new Track.Producer("test") });
-	producer.push({ value: { n: 1 } });
+	producer.push(next({ n: 1 }));
 	const finished = producer.finish();
 	expect(finished.window).toEqual([{ n: 1 }]);
 	expect(finished.offset).toBe(0);
 	// @ts-expect-error a finished window takes no record
-	expect(() => finished.push({ value: { n: 2 } })).toThrow("track is closed");
+	expect(() => finished.push(next({ n: 2 }))).toThrow("track is closed");
 });

@@ -5,10 +5,12 @@
 //! itself, and a reader there reaches the target.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Pattern, Patterns, Timestamp, Version, origin, track};
+use moq_net::{Pattern, Patterns, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -29,9 +31,9 @@ fn publish(origin: &origin::Producer, path: &str) -> (origin::Route, track::Prod
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, path.as_bytes().to_vec()).unwrap();
-	group.finish().unwrap();
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), path.as_bytes().to_vec()).unwrap();
+	group.close().unwrap();
 	(route, track)
 }
 

@@ -7,7 +7,8 @@ import MoqFFI
 // instead (see Client.swift, Broadcast.swift, etc.), so MoqFFI's `Moq`-prefixed
 // classes never appear in the public API.
 
-/// An exact media timestamp: `value` units at `scale` units per second.
+/// An exact media timestamp: `value` units at `scale` units per second, or on a scale-less track
+/// `Timestamp.unscaled(key)`, whose `value` is the group key (a datagram's sequence) and `scale` nil.
 public typealias Timestamp = MoqFFI.MoqTimestamp
 /// A payload plus the presentation timestamp it should play at. The unit of
 /// every raw write and raw read.
@@ -49,7 +50,7 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 /// Which encoder implementation to use: automatic, hardware, software, or one
 /// named backend.
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
-/// A datagram payload with its own sequence and optional timestamp.
+/// A datagram payload with its own sequence and timestamp.
 public typealias Datagram = MoqFFI.MoqDatagram
 /// Names one continuous stream at a path: `Instance.parse(text:)` names one, only a session mints
 /// one, and `==` also compares `isMinted()`, so pin a reported stream with the instance, not its text.

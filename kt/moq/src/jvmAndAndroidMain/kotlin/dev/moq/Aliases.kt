@@ -172,13 +172,22 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Data types.
-/** A datagram payload with its own sequence and optional timestamp. */
+/**
+ * A datagram payload with its own sequence and timestamp, the [unscaled] sequence on a scale-less
+ * track.
+ */
 typealias Datagram = uniffi.moq.MoqDatagram
 
-/** A payload plus the timestamp it should be presented at. */
+/**
+ * A payload plus the timestamp it should be presented at, or its group's [unscaled] key on a
+ * scale-less track.
+ */
 typealias Frame = uniffi.moq.MoqFrame
 
-/** An exact media timestamp: `value` units at `scale` units per second. */
+/**
+ * An exact timestamp: `value` units at `scale` units per second, or on a scale-less track a null
+ * `scale` and the group key (a datagram's sequence) as `value`; see [unscaled].
+ */
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**

@@ -4,7 +4,7 @@
  */
 
 import * as Json from "@moq/json";
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import type * as z from "zod/mini";
 
 /** How often a reporter writes, in milliseconds: about once a second, as the hang draft asks. */
@@ -29,6 +29,9 @@ export class Writer<T, I = T> {
 	#producer: Json.Snapshot.Producer<T>;
 	#schema: z.ZodMiniType<T, I>;
 	#closed = false;
+	// The report track is scale-less, so each write names the next group key: past every group a
+	// snapshot opened, while a delta carries its open group's key whatever this names.
+	#key = 0n;
 
 	/**
 	 * Create `name` on `broadcast`, parsing each report with `schema` before it is written, so a
@@ -48,7 +51,7 @@ export class Writer<T, I = T> {
 	update(value: I): void {
 		if (this.#closed || this.track.demand().wanted.peek() === undefined) return;
 		try {
-			this.#producer.update({ value: this.#schema.parse(value) });
+			this.#producer.update({ value: this.#schema.parse(value), at: Moq.Time.Timestamp.unscaled(this.#key++) });
 		} catch (err) {
 			console.warn("a report track failed; closing it", err);
 			this.#closed = true;

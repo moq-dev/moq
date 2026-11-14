@@ -1,9 +1,12 @@
-import { expect, spyOn, test } from "bun:test";
+import { beforeEach, expect, spyOn, test } from "bun:test";
 import { Group, Track } from "@moq/net";
 import * as z from "zod/mini";
+import { next, resetKeys } from "../key.test-util.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
+
+beforeEach(resetKeys);
 
 type Rec = { n: number };
 
@@ -44,7 +47,7 @@ test("a rejected record ends the track without opening a group", async () => {
 	const subscriber = track.subscribe().ordered();
 	const producer = new Producer<unknown>({ track });
 
-	expect(() => producer.append({ value: undefined })).toThrow("not representable as JSON");
+	expect(() => producer.append(next(undefined))).toThrow("not representable as JSON");
 
 	// Nothing was appended, so the log has no group for a consumer to enter and wait in.
 
@@ -68,7 +71,7 @@ test("a failed write on the very first record still ends the track", async () =>
 		throw failure;
 	});
 	try {
-		expect(() => producer.append({ value: "x" })).toThrow(failure);
+		expect(() => producer.append(next("x"))).toThrow(failure);
 	} finally {
 		write.mockRestore();
 	}

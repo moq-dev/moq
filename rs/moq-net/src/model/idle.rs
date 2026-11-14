@@ -16,19 +16,19 @@
 
 pub(super) use crate::util::Idle;
 
-/// Which group read parked: a track reader parks the arrival and sequence walks
+/// Which group read parked: a track reader parks the arrival and key walks
 /// separately, since one finding nothing says nothing about the other.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Walk {
 	Arrival,
-	Sequence,
+	Key,
 }
 
 impl Walk {
-	/// The walk a read in sequence order for `ordered`, or arrival order otherwise, takes.
+	/// The walk a read in key order for `ordered`, or arrival order otherwise, takes.
 	pub(super) fn new(ordered: bool) -> Self {
 		match ordered {
-			true => Self::Sequence,
+			true => Self::Key,
 			false => Self::Arrival,
 		}
 	}
