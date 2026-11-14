@@ -186,6 +186,21 @@ pub(super) fn p(path: &str) -> Path {
 	Path::new(path.strip_suffix('/').unwrap_or(path)).expect("a valid path")
 }
 
+/// A path rule offer crossing `hops`, each a node and the session it learned the
+/// route on, the publisher first and the sender last.
+pub(super) fn along(hops: &[(Id, u64)], metric: Metric) -> path::Offer {
+	path::Offer {
+		path: (hops.iter())
+			.map(|&(node, session)| path::Hop { node, session })
+			.collect(),
+		draining: false,
+		priority: i8::MAX,
+		metric,
+		down_only: false,
+		rtt: None,
+	}
+}
+
 /// A scoped publish grant: the credential subject that qualifies identities,
 /// and the prefix standing in for the grant's pattern union.
 #[derive(Clone, Copy, Debug)]

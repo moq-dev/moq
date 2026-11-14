@@ -1,0 +1,114 @@
+# cargo-mutants: Nightly fails on any mutant of these files the tests miss.
+examine_globs = ["rs/moq-net/src/route/**/*.rs", "rs/moq-net/src/model/resume.rs"]
+exclude_globs = ["rs/moq-net/src/route/tests/**"]
+test_tool = "nextest"
+all_features = true
+additional_cargo_args = ["--locked"]
+# The unit tests, and the integration binary, which drives the route driver
+# (`route/node.rs`) through real sessions.
+additional_cargo_test_args = ["--lib", "--test", "integration"]
+
+# Mutants no test can catch, because the result is the same either way. Each
+# pattern names its function and replacement, not its line. A column pins it
+# only where the same function has another such mutant that tests do catch.
+exclude_re = [
+    # Debug output only feeds logs.
+    '<impl (std::)?fmt::Debug for (Scope|Node|Stream|RouteKey|Proof)>::fmt',
+    # The rotation's xorshift step only picks which fresh identity comes next,
+    # and the guard after it enforces freshness and range.
+    'replace (\^= with \|=|<< with >>|>> with <<) in Router<N, A>::rotate',
+    # An index of a neighbor's interest: `carries()` filters each entry again.
+    'replace Router<N, A>::asked -> Path with Default::default\(\)',
+    # `full(old) == full(new)` is the same with both sides negated.
+    'replace >= with < in Router<N, A>::route$',
+    # A larger `differs` set only costs work: it is compared again before use.
+    'replace && with \|\| in Heard<A>::compare$',
+    # The test-only `Proof::LEN`.
+    'proof\.rs:\d+:\d+: replace \+ with \*$',
+    # The stale-view shortcut only saves work: without it, or at equal revisions,
+    # where both views hold the same claims, the full merge changes nothing.
+    'replace (> with (==|>=) in View<A>::outdates|View<A>::outdates -> bool with false)$',
+    # Dropping the cached context more often makes the next pass full, which
+    # reaches the same result.
+    ':\d+:(25|38): replace && with \|\| in Router<N, A>::recompute$',
+    # A claim an answering certifier certifies is always in the merged view.
+    ':\d+:35: replace && with \|\| in Router<N, A>::meets$',
+    # A new stream's first batch either flips its certifier's answer, which marks
+    # every claim, or reaches the reader only through the merge, which marks its own
+    # changes; marking all only reorders independent changes in a forwarded batch.
+    ':\d+:32: replace != with == in Router<N, A>::batch$',
+    # At an equal metric both arms assign the same distance.
+    'replace < with <= in Router<N, A>::record$',
+    # The full presentation of a stream the interest misses is empty, and a full
+    # presentation equals the incremental one.
+    'replace match guard (!self\.meets\(id, ctx, watch\)|!dirty\.all) with false in Router<N, A>::advertise$',
+    # `advertised` is read only for qualified identities.
+    'replace & with (\^|\|) in Router<N, A>::advertise$',
+    # For its own identity, the node's own view answers every claim, `current`
+    # never holds it, and nothing serves it.
+    ':\d+:31: replace && with \|\| in Router<N, A>::shown_now$',
+    # The nearest home with a slot at or above a presented claim always serves
+    # that claim's instance and epoch, so a looser match picks the same home.
+    'node\.rs:\d+:57: replace && with \|\| in awaits$',
+    # resume.rs: the sweep of handed-out groups only bounds memory, since
+    # `let_go` drops dead entries itself before anything reads `out`.
+    'replace (== with !=|> with >=) in Reader::hand_out$',
+    # Polling a covered or finished copy hands out nothing, so polling it anyway
+    # only costs work.
+    ':\d+:36: replace \|\| with && in Reader::poll_lowest$',
+    # A run starting at `until` clips to an empty range, which has no gaps.
+    ':\d+:36: replace < with <= in Reader::exhausted$',
+    # `learn_end` just polled the same copy and returned on an `Ok` end.
+    'delete match arm Poll::Ready\(Ok\(fin\)\) in Reader::poll_finished$',
+    # The one extra copy searched is the route's own, which never has an end.
+    ':\d+:32: replace - with / in Reader::backfill$',
+    # At the same generation the serving copy is the one that just failed the
+    # group, so it never answers at that index.
+    'replace match guard !same with true in Recover::poll_serving$',
+    # A replacement starting at frame 0 already holds the head.
+    'replace > with >= in lend_head$',
+    # Each call follows a read of the route in the same poll, so only a write
+    # between the two could tell these apart; the arm guards against that lost wake.
+    'replace \|\| with && in Fetching::poll_moved$',
+    ':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
+    # The reader list's sweep only bounds memory: a dead entry fails every
+    # `Weak::upgrade`, and `subscribe` sweeps the list again.
+    'replace > with >= in Producer::serve_from$',
+    'replace == with != in Consumer::subscribe$',
+    # Dead: every write of `until` also writes `since`, so the superseded check
+    # never runs. `ResumeReader.tla` models it, so it goes with the model.
+    'replace >= with < in Copy::retains$',
+    # A run starting at the end clips to an empty range, on which nothing lands
+    # and nothing is missing.
+    'replace < with <= in Copy::retains$',
+    'replace < with <= in Retain<.*>::holds_window$',
+    # Walking again before anything the read parked on fires returns the same
+    # `Pending`, so the idle shortcut only saves work.
+    'replace Subscriber::parked -> bool with false$',
+    # path.rs: `step` only counts visits for the tests' work budgets, which
+    # read the count as an upper bound.
+    'path\.rs:\d+:\d+: replace Router<N, A>::step with \(\)$',
+    # A path-rule identity nothing holds has no route left, and the update that
+    # removed its last one already dropped its views, so `collect` changes nothing.
+    'path\.rs:\d+:\d+: replace Router<N, A>::collect with \(\)$',
+    # Tied candidates share a floor, so by the identity rule they present the
+    # same content at the prefix.
+    'path\.rs:\d+:\d+: replace > with >= in Router<N, A>::know$',
+    # A route's change updates every view it covers, so a batch's only newer
+    # candidate is its own route and peer: these only turn off the incremental
+    # presentation, which the test build asserts equals the full one.
+    'path\.rs:\d+:(51|74): replace == with != in Router<N, A>::know$',
+    # An ended stream's final batch always has a floor and withdraws claims: an
+    # offer is sent only while a claim meets it.
+    'path\.rs:\d+:\d+: (replace \|\| with &&|delete !) in Router<N, A>::end_sent$',
+    # The full diff it skips holds the same changes in another order, and a source
+    # switch has already marked every claim that differs.
+    'path\.rs:\d+:80: replace != with == in Router<N, A>::present$',
+    # Something is held only after a route selects none, which also marks the
+    # routes changed, so the forced source refresh only repeats current sources.
+    'path\.rs:\d+:76: delete ! in Router<N, A>::run$',
+    # NOT equivalent: Rust lets an ended stream's child wait go where
+    # RouteHandoff.tla keeps it. quest/m2/cluster-routes/ended-child-wait.md
+    # aligns the two and replaces this with a test.
+    'path\.rs:\d+:55: replace && with \|\| in Router<N, A>::advertise$',
+]

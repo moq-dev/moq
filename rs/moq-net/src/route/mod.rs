@@ -1173,6 +1173,30 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	}
 
 	#[cfg(test)]
+	/// Whether this node keeps no state at all for `id`, beyond the changes
+	/// [`Self::changed`] has yet to take.
+	pub fn keeps_nothing(&self, id: Id) -> bool {
+		fn none<K: Ord + Copy, V, N: Ord>(map: &BTreeMap<(K, N), V>, id: K) -> bool {
+			!map.keys().any(|(key, _)| *key == id)
+		}
+		!self.origins.contains_key(&id)
+			&& !self.rx.contains_key(&id)
+			&& !self.fd.contains_key(&id)
+			&& !self.advertised.contains_key(&id)
+			&& !self.pending.contains_key(&id)
+			&& !self.views.contains_key(&id)
+			&& !self.current.contains_key(&id)
+			&& !self.dirty.contains_key(&id)
+			&& !self.ctxs.contains_key(&id)
+			&& none(&self.filed, id)
+			&& none(&self.sent, id)
+			&& none(&self.unacked, id)
+			&& none(&self.heard, id)
+			&& none(&self.sent_views, id)
+			&& self.reader.claims(id).next().is_none()
+	}
+
+	#[cfg(test)]
 	/// How many identities this node holds routes to.
 	pub fn identities(&self) -> usize {
 		self.rx.len()
@@ -1557,9 +1581,6 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		{
 			self.touched += ids.len();
 		}
-		for &id in &ids {
-			self.reader.touch(id);
-		}
 		for id in ids {
 			if prune {
 				self.prune(id);
@@ -1911,6 +1932,20 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		}
 	}
 
+	/// Assert an incremental reader view, `now` over the dirty claims, matches a full recompute.
+	#[cfg(test)]
+	fn check_shown(&self, id: Id, ctx: &Ctx<N>, dirty: &Dirty, now: &BTreeMap<Path, Option<Shown<A>>>) {
+		if dirty.all {
+			return;
+		}
+		let route = self.selected(id);
+		let mut all: BTreeSet<Path> = self.reader.claims(id).cloned().collect();
+		if let Some(view) = self.adopted(id, route) {
+			all.extend(view.items.keys().cloned());
+		}
+		self.reader.check(id, now, self.shown_now(id, ctx, all.iter()));
+	}
+
 	/// Recompute what this node's reader sees of `id` in `ctx` and log each change:
 	/// only the `dirty` claims, unless any could have changed.
 	fn show(&mut self, id: Id, ctx: &Ctx<N>, dirty: &Dirty) {
@@ -1926,14 +1961,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		};
 		let now = self.shown_now(id, ctx, claims.iter());
 		#[cfg(test)]
-		if !dirty.all {
-			let route = self.selected(id);
-			let mut all: BTreeSet<Path> = self.reader.claims(id).cloned().collect();
-			if let Some(view) = self.adopted(id, route) {
-				all.extend(view.items.keys().cloned());
-			}
-			self.reader.check(id, &now, self.shown_now(id, ctx, all.iter()));
-		}
+		self.check_shown(id, ctx, dirty, &now);
 
 		// A claim no routed neighbor's region covers was let go, not ended, and so
 		// was one the view never certified: only its stream left.

@@ -28,12 +28,7 @@ if [[ -n ${BENCH_BASE:-} ]]; then
         exit 2
     fi
     if [[ $BENCH_BASE == previous-nightly ]]; then
-        BENCH_BASE=$(gh run list --workflow nightly.yml --branch main --event schedule --limit 2 \
-            --json databaseId,headSha --jq "map(select(.databaseId != ${GITHUB_RUN_ID:-0}))[0].headSha // empty")
-        if [[ -z $BENCH_BASE ]]; then
-            echo "nightly: no previous scheduled Nightly on main" >&2
-            exit 1
-        fi
+        BENCH_BASE=$(bash "$(dirname "${BASH_SOURCE[0]}")/previous-nightly.sh")
     fi
     # A shallow CI checkout has only its own commit. Fetching a branch name only updates
     # FETCH_HEAD, so the base is exported as the commit it resolved to.

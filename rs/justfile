@@ -503,6 +503,11 @@ fuzz target *args:
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
 
+# Mutate the route and resume code (`.cargo/mutants.toml`), failing on any mutant the tests miss.
+[positional-arguments]
+mutants *args:
+    bash sh/local.sh bash sh/rs/mutants.sh "$@"
+
 # Build the default workspace members.
 build:
     bash sh/local.sh cargo build --locked

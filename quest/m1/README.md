@@ -57,7 +57,7 @@ m4 default, so changes are proven before they ship: the
 [sim rule checks](/quest/m1/quic-sim-rules.md),
 [relay parser fuzz targets](/quest/m1/fuzz-relay-parsers.md), and from m4
 [the relay on the sim](/quest/m1/quic-sim.md),
-[mutation testing](/quest/m1/mutants.md), and
+mutation testing (#8712), and
 [peer-reachable unsafe](/quest/m1/wire-fuzz-coverage.md). OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on
 google/oss-fuzz.
 Left in m4 without a pick: Kani, Miri seeds and TSan, the JS corpus, and
