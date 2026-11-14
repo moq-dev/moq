@@ -2,12 +2,10 @@
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::slice::Iter;
 use tracing::{debug, warn};
 
 use crate::vendor::str0m::Rtc;
 use crate::vendor::str0m::RtcError;
-use crate::vendor::str0m::channel::ChannelId;
 use crate::vendor::str0m::crypto::Fingerprint;
 use crate::vendor::str0m::format::CodecConfig;
 use crate::vendor::str0m::format::PayloadParams;
@@ -17,8 +15,6 @@ use crate::vendor::str0m::poll::RtcMut;
 use crate::vendor::str0m::rtp_::MidRid;
 use crate::vendor::str0m::rtp_::Rid;
 use crate::vendor::str0m::rtp_::{Direction, Extension, ExtensionMap, Mid, Pt, Ssrc};
-use crate::vendor::str0m::sctp::ChannelConfig;
-use crate::vendor::str0m::sctp::RtcSctp;
 use crate::vendor::str0m::sdp::{self, MediaAttribute, MediaLine, MediaType, Msid, Sdp};
 use crate::vendor::str0m::sdp::{Proto, SessionAttribute, Setup, SimulcastGroups};
 use crate::vendor::str0m::session::Session;
@@ -118,29 +114,8 @@ impl<'a> SdpApi<'a> {
 		// Ensure setup=active/passive is corresponding remote and init dtls.
 		init_dtls(&mut self.rtc, &offer)?;
 
-		let remote_max_message_size = extract_max_message_size(offer.media_lines.iter());
-
-		// Extract a=sctp-init from remote offer before apply_offer consumes it.
-		let remote_sctp_init = offer.sctp_init().map(|v| v.to_owned());
-
-		let has_snap = process_remote_sctp_init(&mut self.rtc.sctp, remote_sctp_init.as_deref())?;
-
-		// Modify session with offer.
+		// Modify session with offer. An m=application line is answered rejected.
 		apply_offer(&mut self.rtc.session, offer)?;
-
-		// Handle potentially new m=application line.
-		let client = self.rtc.dtls.is_active().expect("DTLS active to be set");
-
-		// Generate local sctp-init for the answer:
-		// When the remote included a=sctp-init, we reciprocate (§5.4).
-		if has_snap && !self.rtc.sctp.is_inited() && !self.rtc.sctp.ensure_local_snap_init() {
-			warn!("Failed to generate SNAP INIT chunk, degrading to non-SNAP");
-		}
-
-		if self.rtc.session.app().is_some() {
-			let init_data = self.rtc.sctp.build_snap_init_data();
-			self.rtc.try_init_sctp(client, init_data, remote_max_message_size)?;
-		}
 
 		let params = AsSdpParams::new(&self.rtc, None);
 		let sdp = as_sdp(&self.rtc.session, params);
@@ -171,7 +146,7 @@ impl<'a> SdpApi<'a> {
 	///
 	/// rtc.sdp_api().accept_answer(pending, answer).unwrap();
 	/// ```
-	pub fn accept_answer(mut self, mut pending: SdpPendingOffer, answer: SdpAnswer) -> Result<(), RtcError> {
+	pub fn accept_answer(mut self, pending: SdpPendingOffer, answer: SdpAnswer) -> Result<(), RtcError> {
 		debug!("Accept answer");
 
 		// Ensure we don't use the wrong changes below. We must use that of pending.
@@ -199,39 +174,8 @@ impl<'a> SdpApi<'a> {
 			}
 		}
 
-		// Extract a=sctp-init from remote answer before apply_answer consumes it.
-		let remote_sctp_init = answer.sctp_init().map(|v| v.to_owned());
-
-		let expected_snap_answer = !self.rtc.sctp.is_inited() && self.rtc.sctp.local_sctp_init_for_sdp().is_some();
-
-		// Validate or cache the remote value before mutating the session. This
-		// keeps a bad re-offer/re-answer from partially applying local state.
-		let has_snap = process_remote_sctp_init(&mut self.rtc.sctp, remote_sctp_init.as_deref())?;
-
-		// Split out new channels, since that is not handled by the Session.
-		let new_channels = pending.changes.take_new_channels();
-
-		let remote_max_message_size = extract_max_message_size(answer.media_lines.iter());
-
 		// Modify session with answer
 		apply_answer(&mut self.rtc.session, pending.changes, answer)?;
-
-		// Handle potentially new m=application line.
-		let client = self.rtc.dtls.is_active().expect("DTLS to be inited");
-
-		if expected_snap_answer && !has_snap {
-			debug!("Remote answer did not accept SNAP, falling back to regular SCTP handshake");
-			self.rtc.sctp.disable_pending_snap();
-		}
-
-		if self.rtc.session.app().is_some() {
-			let init_data = self.rtc.sctp.build_snap_init_data();
-			self.rtc.try_init_sctp(client, init_data, remote_max_message_size)?;
-		}
-
-		for (id, config) in new_channels {
-			self.rtc.chan.confirm(id, config);
-		}
 
 		Ok(())
 	}
@@ -392,74 +336,6 @@ impl<'a> SdpApi<'a> {
 		}
 	}
 
-	/// Add a new reliable ordered data channel and get the `id` that will be used.
-	///
-	/// Use `add_channel_with_config` when unreliable or unordered data channels are preferred.
-	///
-	/// The first ever data channel added to a WebRTC session results in a media
-	/// of a special "application" type in the SDP. The m-line is for a SCTP association over
-	/// DTLS, and all data channels are multiplexed over this single association.
-	///
-	/// That means only the first ever `add_channel` will result in an [`SdpOffer`].
-	/// Consecutive channels will be opened without needing a negotiation.
-	///
-	/// The label is used to identify the data channel to the remote peer. This is mostly
-	/// useful when multiple channels are in use at the same time.
-	///
-	/// ```ignore
-	/// # #[cfg(any())] {
-	/// # use std::time::Instant;
-	/// # use crate::vendor::str0m::Rtc;
-	/// let mut rtc = Rtc::new(Instant::now());
-	///
-	/// let mut changes = rtc.sdp_api();
-	///
-	/// let cid = changes.add_channel("my special channel".to_string());
-	/// # }
-	/// ```
-	pub fn add_channel(&mut self, label: String) -> ChannelId {
-		self.add_channel_with_config(ChannelConfig {
-			label,
-			..Default::default()
-		})
-	}
-
-	/// Add a new data channel with a given configuration and get the `id` that will be used.
-	///
-	/// Refer to `add_channel` for more details.
-	///
-	/// ```ignore
-	/// # #[cfg(any())] {
-	/// # use std::time::Instant;
-	/// # use crate::vendor::str0m::{channel::{ChannelConfig, Reliability}, Rtc};
-	/// let mut rtc = Rtc::new(Instant::now());
-	///
-	/// let mut changes = rtc.sdp_api();
-	///
-	/// let cid = changes.add_channel_with_config(ChannelConfig {
-	///     label: "my special channel".to_string(),
-	///     reliability: Reliability::MaxRetransmits{ retransmits: 0 },
-	///     ordered: false,
-	///     ..Default::default()
-	/// });
-	/// # }
-	/// ```
-	pub fn add_channel_with_config(&mut self, config: ChannelConfig) -> ChannelId {
-		let has_media = self.rtc.session.app().is_some();
-		let changes_contains_add_app = self.changes.contains_add_app();
-
-		if !has_media && !changes_contains_add_app {
-			let mid = self.new_mid();
-			self.changes.0.push(Change::AddApp(mid));
-		}
-
-		let id = self.rtc.chan.new_channel(&config);
-
-		self.changes.0.push(Change::AddChannel((id, config)));
-
-		id
-	}
-
 	/// Perform an ICE restart.
 	///
 	/// Only one ICE restart can be pending at the time. Calling this repeatedly removes any other
@@ -486,9 +362,7 @@ impl<'a> SdpApi<'a> {
 	/// not happening straight away, and the caller is expected to do a negotiation with the remote
 	/// peer and apply the answer using [`SdpPendingOffer`].
 	///
-	/// In case this returns `None`, there either were no changes, or the changes could be applied
-	/// without doing a negotiation. Specifically for additional [`SdpApi::add_channel()`]
-	/// after the first, there is no negotiation needed.
+	/// In case this returns `None`, there were no changes.
 	///
 	/// The [`SdpPendingOffer`] is valid until the next time we call this function, at which
 	/// point using it will raise an error. Using [`SdpApi::accept_offer()`] will also invalidate
@@ -511,27 +385,19 @@ impl<'a> SdpApi<'a> {
 
 		let change_id = self.rtc.next_change_id();
 
-		let requires_negotiation = self.changes.0.iter().any(requires_negotiation);
-
-		if requires_negotiation {
-			let offer = create_offer(&mut self.rtc, &self.changes);
-			let pending = SdpPendingOffer {
-				change_id,
-				changes: self.changes,
-			};
-			debug!("Create offer");
-			Some((offer, pending))
-		} else {
-			debug!("Apply direct changes");
-			apply_direct_changes(&mut self.rtc, self.changes);
-			None
-		}
+		let offer = create_offer(&mut self.rtc, &self.changes);
+		let pending = SdpPendingOffer {
+			change_id,
+			changes: self.changes,
+		};
+		debug!("Create offer");
+		Some((offer, pending))
 	}
 }
 
 /// Pending offer from a previous [`Rtc::sdp_api()`] call.
 ///
-/// Represents one local negotiation change set, which can contain multiple media or channel
+/// Represents one local negotiation change set, which can contain multiple media
 /// changes, and allows accepting its remote answer. It is not a queue of pending negotiations.
 /// Creating another offer with [`SdpApi::apply()`] invalidates it, as does calling
 /// [`SdpApi::accept_offer()`]. Invalidated changes cannot be reapplied through this token.
@@ -583,8 +449,6 @@ impl Changes {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Change {
 	AddMedia(AddMedia),
-	AddApp(Mid),
-	AddChannel((ChannelId, ChannelConfig)),
 	Direction(Mid, Direction),
 	IceRestart(IceCreds, bool),
 }
@@ -621,39 +485,11 @@ impl DerefMut for Changes {
 	}
 }
 
-fn requires_negotiation(c: &Change) -> bool {
-	match c {
-		Change::IceRestart(_, _) => true,
-		Change::AddMedia(_) => true,
-		Change::AddApp(_) => true,
-		Change::AddChannel(_) => false,
-		Change::Direction(_, _) => true,
-	}
-}
-
-fn apply_direct_changes(rtc: &mut Rtc, mut changes: Changes) {
-	// Split out new channels, since that is not handled by the Session.
-	let new_channels = changes.take_new_channels();
-
-	for (id, config) in new_channels {
-		rtc.chan.confirm(id, config);
-	}
-}
-
 fn create_offer(rtc: &mut Rtc, changes: &Changes) -> SdpOffer {
 	if !rtc.dtls.is_inited() {
 		// The side that makes the first offer is the controlling side, unless they
 		// are ICE Lite, in which case the roles are reversed (see RFC 5245).
 		rtc.ice.set_controlling(!rtc.ice.ice_lite());
-	}
-
-	// Generate local sctp-init for SNAP if enabled and we have/will have an app m-line.
-	if rtc.sctp.snap_enabled()
-		&& (rtc.session.app().is_some() || changes.contains_add_app())
-		&& !rtc.sctp.is_inited()
-		&& !rtc.sctp.ensure_local_snap_init()
-	{
-		warn!("Failed to generate SNAP INIT chunk, degrading to non-SNAP");
 	}
 
 	let params = AsSdpParams::new(rtc, Some(changes));
@@ -724,57 +560,6 @@ fn init_dtls(rtc: &mut Rtc, remote_sdp: &Sdp) -> Result<(), RtcError> {
 	Ok(())
 }
 
-/// Shared logic for processing a remote `a=sctp-init` attribute from an offer or answer.
-///
-/// Returns `true` if this is a new SNAP negotiation (remote init was accepted),
-/// `false` otherwise.
-///
-/// The remote init bytes are stored in `RtcSctp.snap_init` for §5.6
-/// re-offer validation.
-///
-/// When the remote includes `a=sctp-init`, we always accept and reciprocate -
-/// Section 5.4 of draft-hancke-tsvwg-snap says the answerer MAY include the
-/// attribute, and doing so is beneficial.
-///
-/// When an initial answer omits or rejects `a=sctp-init`, callers are expected
-/// to fall back to a regular SCTP handshake.
-fn process_remote_sctp_init(sctp: &mut RtcSctp, remote_init: Option<&str>) -> Result<bool, RtcError> {
-	if let Some(remote_init_str) = remote_init {
-		if sctp.is_inited() {
-			// §5.6: SCTP already established - remote MUST re-send the
-			// same sctp-init value on subsequent offers/answers.
-			match sctp.snap_remote_init_string() {
-				Some(cached) if cached == remote_init_str => {
-					debug!("Remote re-sent expected a=sctp-init for established association");
-				}
-				Some(_) => {
-					return Err(RtcError::RemoteSdp(
-						"Changed a=sctp-init for existing SCTP association".into(),
-					));
-				}
-				None => {
-					// SCTP was established without SNAP but the remote is now
-					// sending a=sctp-init. We can't transition to SNAP
-					// mid-session, so just ignore it.
-					debug!("Ignoring a=sctp-init for non-SNAP established SCTP association");
-				}
-			}
-			Ok(false)
-		} else if sctp.set_remote_snap_init_string(remote_init_str) {
-			Ok(true)
-		} else {
-			debug!("Ignoring malformed a=sctp-init");
-			Ok(false)
-		}
-	} else if sctp.is_snap_established() {
-		Err(RtcError::RemoteSdp(
-			"Missing a=sctp-init for established SNAP SCTP association".into(),
-		))
-	} else {
-		Ok(false)
-	}
-}
-
 fn as_sdp(session: &Session, params: AsSdpParams) -> Sdp {
 	let (media_lines, mids, stream_ids) = {
 		let mut v = as_media_lines(session);
@@ -816,17 +601,6 @@ fn as_sdp(session: &Session, params: AsSdpParams) -> Sdp {
 				m.as_media_line(attrs, &ssrcs, &session.exts, &params)
 			})
 			.collect::<Vec<_>>();
-
-		for line in &mut lines {
-			if line.typ.is_channel() {
-				line.attrs
-					.push(MediaAttribute::MaxMessageSize(params.local_max_message_size as usize));
-				// Add a=sctp-init to the application m-line if SNAP is configured.
-				if let Some(sctp_init) = &params.local_sctp_init {
-					line.attrs.push(sdp::MediaAttribute::SctpInit(sctp_init.clone()));
-				}
-			}
-		}
 
 		if let Some(pending) = params.pending {
 			pending.apply_to(&mut lines);
@@ -1311,23 +1085,6 @@ fn update_media(
 	}
 }
 
-fn extract_max_message_size(mut media_lines: Iter<MediaLine>) -> Option<u32> {
-	if let Some(app_line) = media_lines.find(|m| m.typ.is_channel()) {
-		if let Some(max_size) = app_line.max_message_size() {
-			// RFC 8841 §6.1: a value of 0 means the peer can receive a message of
-			// any size, subject to local capacity. Represent that as the maximum.
-			let max_size = if max_size == 0 {
-				u32::MAX
-			} else {
-				u32::try_from(max_size).unwrap_or(u32::MAX)
-			};
-			return Some(max_size);
-		}
-	}
-
-	None
-}
-
 trait AsSdpMediaLine {
 	fn mid(&self) -> Mid;
 	fn msid(&self) -> Option<&Msid>;
@@ -1363,11 +1120,11 @@ impl AsSdpMediaLine for (Mid, usize) {
 		_params: &[PayloadParams],
 	) -> MediaLine {
 		attrs.push(MediaAttribute::Mid(self.0));
-		attrs.push(MediaAttribute::SctpPort(5000));
 
+		// No SCTP runs here, so a remote data channel line is always rejected.
 		MediaLine {
 			typ: sdp::MediaType::Application,
-			disabled: false,
+			disabled: true,
 			proto: Proto::Sctp,
 			pts: vec![],
 			bw: None,
@@ -1396,11 +1153,6 @@ impl AsSdpMediaLine for Media {
 		exts: &ExtensionMap,
 		params: &[PayloadParams],
 	) -> MediaLine {
-		if self.app_tmp {
-			let app = (self.mid(), self.index());
-			return app.as_media_line(attrs, ssrcs_tx, exts, params);
-		}
-
 		attrs.push(MediaAttribute::Mid(self.mid()));
 
 		let audio = self.kind() == MediaKind::Audio;
@@ -1512,8 +1264,6 @@ struct AsSdpParams<'a, 'b> {
 	pub fingerprint: &'a Fingerprint,
 	pub setup: Setup,
 	pub pending: Option<&'b Changes>,
-	pub local_sctp_init: Option<String>,
-	pub local_max_message_size: u32,
 }
 
 impl<'a, 'b> AsSdpParams<'a, 'b> {
@@ -1561,8 +1311,6 @@ impl<'a, 'b> AsSdpParams<'a, 'b> {
 			fingerprint: rtc.dtls.local_fingerprint(),
 			setup,
 			pending,
-			local_sctp_init: rtc.sctp.local_sctp_init_for_sdp(),
-			local_max_message_size: rtc.sctp.local_max_message_size(),
 		}
 	}
 
@@ -1595,36 +1343,8 @@ impl Changes {
 	fn has_mid(&self, mid: Mid) -> bool {
 		self.0.iter().any(|c| match c {
 			Change::AddMedia(v) => v.mid == mid,
-			Change::AddApp(v) => *v == mid,
-			Change::AddChannel(_) | Change::Direction(_, _) | Change::IceRestart(_, _) => false,
+			Change::Direction(_, _) | Change::IceRestart(_, _) => false,
 		})
-	}
-
-	pub fn contains_add_app(&self) -> bool {
-		for i in 0..self.0.len() {
-			if matches!(&self.0[i], Change::AddApp(_)) {
-				return true;
-			}
-		}
-		false
-	}
-
-	pub fn take_new_channels(&mut self) -> Vec<(ChannelId, ChannelConfig)> {
-		let mut v = vec![];
-
-		if self.0.is_empty() {
-			return v;
-		}
-
-		for i in (0..self.0.len()).rev() {
-			if matches!(&self.0[i], Change::AddChannel(_)) {
-				if let Change::AddChannel(id) = self.0.remove(i) {
-					v.push(id);
-				}
-			}
-		}
-
-		v
 	}
 
 	/// Tests the given lines (from answer) corresponds to changes.
@@ -1652,15 +1372,6 @@ impl Changes {
 						}
 						continue 'next;
 					}
-					AddApp(v) if *v == mid => {
-						if !l.typ.is_channel() {
-							return Some(format!(
-								"Answer m-line for mid ({}) is not a data channel: {:?}",
-								mid, l.typ
-							));
-						}
-						continue 'next;
-					}
 					_ => {}
 				}
 			}
@@ -1672,10 +1383,7 @@ impl Changes {
 	}
 
 	fn count_new_medias(&self) -> usize {
-		self.0
-			.iter()
-			.filter(|c| matches!(c, Change::AddMedia(_) | Change::AddApp(_)))
-			.count()
+		self.0.iter().filter(|c| matches!(c, Change::AddMedia(_))).count()
 	}
 
 	pub fn as_new_medias<'a, 'b: 'a>(
@@ -1685,8 +1393,8 @@ impl Changes {
 		exts: &'b ExtensionMap,
 	) -> impl Iterator<Item = Media> + 'a {
 		// Use a separate counter that only advances for entries that actually produce
-		// an m-line (AddMedia / AddApp).  Non-media entries (Direction, IceRestart,
-		// AddChannel) must not consume an index slot, otherwise the resulting m-line
+		// an m-line (AddMedia).  Non-media entries (Direction, IceRestart)
+		// must not consume an index slot, otherwise the resulting m-line
 		// indices would be non-contiguous and out of sync with their array positions.
 		let mut media_idx = 0usize;
 		self.0.iter().filter_map(move |c| {
@@ -1738,7 +1446,6 @@ impl Change {
 
 				Some(Media::from_add_media(add))
 			}
-			AddApp(mid) => Some(Media::from_app_tmp(*mid, index)),
 			_ => None,
 		}
 	}
@@ -1857,11 +1564,11 @@ mod test {
 		let mut rtc2 = Rtc::new(now);
 
 		let mut change1 = rtc1.sdp_api();
-		change1.add_channel("ch1".into());
+		change1.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		let (offer1, pending1) = change1.apply().unwrap();
 
 		let mut change2 = rtc2.sdp_api();
-		change2.add_channel("ch2".into());
+		change2.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		let (offer2, _) = change2.apply().unwrap();
 
 		// invalidates pending1
@@ -1874,9 +1581,8 @@ mod test {
 	}
 
 	// The indices assigned to Media objects by as_new_medias() must be contiguous starting
-	// from index_start.  Only entries that produce m-lines (AddMedia / AddApp) should
-	// consume an index slot – non-media entries (AddChannel, Direction, IceRestart) must
-	// not advance the counter.
+	// from index_start.  Only entries that produce m-lines (AddMedia) should consume an
+	// index slot – non-media entries (Direction, IceRestart) must not advance the counter.
 	//
 	// We test this by building a Changes vector directly and inspecting the indices
 	// returned by as_new_medias().
@@ -1885,65 +1591,79 @@ mod test {
 		crate::vendor::str0m::init_crypto_default();
 
 		let now = Instant::now();
-		let mut rtc = Rtc::new(now);
+		let rtc = Rtc::new(now);
 
-		// Build a Changes vector that interleaves non-media entries with media entries.
-		// The non-media AddChannel entry must not consume an index slot.
-		//
-		// Changes = [AddApp(mid0), AddChannel(id, cfg), AddMedia(audio)]
-		//
-		// index_start = 0 (fresh session)
-		// Expected indices: AddApp → 0, AddMedia(audio) → 1
-		// Buggy indices:    AddApp → 0, AddMedia(audio) → 2
+		let add = |mid: Mid, kind: MediaKind| {
+			Change::AddMedia(AddMedia {
+				mid,
+				cname: "test".into(),
+				msid: Msid {
+					stream_id: "stream".into(),
+					track_id: "track".into(),
+				},
+				kind,
+				dir: Direction::SendOnly,
+				ssrcs: vec![],
+				simulcast: None,
+				pts: vec![],
+				exts: ExtensionMap::empty(),
+				index: 0, // will be overwritten by as_new_media()
+			})
+		};
+
+		// Changes = [AddMedia(audio), IceRestart, AddMedia(video)]
 		let mut changes = Changes::default();
-		let mid_app = rtc.new_mid();
-		changes.0.push(Change::AddApp(mid_app));
-		let mid_audio = rtc.new_mid();
-		let chan_id = rtc.chan.new_channel(&ChannelConfig {
-			label: "ch".into(),
-			..Default::default()
-		});
-		changes.0.push(Change::AddChannel((
-			chan_id,
-			ChannelConfig {
-				label: "ch".into(),
-				..Default::default()
-			},
-		)));
-		changes.0.push(Change::AddMedia(AddMedia {
-			mid: mid_audio,
-			cname: "test".into(),
-			msid: Msid {
-				stream_id: "stream".into(),
-				track_id: "track".into(),
-			},
-			kind: MediaKind::Audio,
-			dir: Direction::SendOnly,
-			ssrcs: vec![],
-			simulcast: None,
-			pts: vec![],
-			exts: ExtensionMap::empty(),
-			index: 0, // will be overwritten by as_new_media()
-		}));
+		changes.0.push(add(rtc.new_mid(), MediaKind::Audio));
+		changes.0.push(Change::IceRestart(IceCreds::new(), true));
+		changes.0.push(add(rtc.new_mid(), MediaKind::Video));
 
 		let config = CodecConfig::new_with_defaults();
 		let exts = ExtensionMap::standard();
 
 		let medias: Vec<Media> = changes.as_new_medias(0, &config, &exts).collect();
 
-		// Should produce two Media objects: one for AddApp, one for AddMedia(audio).
 		assert_eq!(medias.len(), 2, "Expected 2 media-producing entries");
-
-		// The first m-line is AddApp at index 0.
-		assert_eq!(medias[0].index(), 0, "AddApp should have index 0");
-
-		// The second m-line is Audio.  It must get the contiguous index 1, not 2 (which
-		// would result from counting the non-media AddChannel entry as a slot).
+		assert_eq!(medias[0].index(), 0, "AddMedia(audio) should have index 0");
+		// Index 2 would result from counting the non-media IceRestart entry as a slot.
 		assert_eq!(
 			medias[1].index(),
 			1,
-			"AddMedia(audio) should have contiguous index 1, not 2"
+			"AddMedia(video) should have contiguous index 1, not 2"
 		);
+	}
+
+	/// No SCTP runs here, so an offered data channel is answered rejected and left out of
+	/// the BUNDLE group, while the media beside it is accepted.
+	#[test]
+	fn an_offered_data_channel_is_answered_rejected() {
+		crate::vendor::str0m::init_crypto_default();
+
+		let now = Instant::now();
+		let mut offerer = Rtc::new(now);
+		let mut change = offerer.sdp_api();
+		let audio = change.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+		let (offer, _) = change.apply().unwrap();
+		let offer = offer.to_sdp_string().replace(
+			&format!("a=group:BUNDLE {audio}\r\n"),
+			&format!("a=group:BUNDLE {audio} dc\r\n"),
+		) + "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+			c=IN IP4 0.0.0.0\r\n\
+			a=mid:dc\r\n\
+			a=sctp-port:5000\r\n";
+		let offer = SdpOffer::from_sdp_string(&offer).expect("offer with a data channel");
+
+		let answer = Rtc::new(now).sdp_api().accept_offer(offer).unwrap();
+
+		let app = answer.media_lines.iter().find(|m| m.typ.is_channel()).unwrap();
+		assert!(app.disabled, "the data channel was accepted");
+		let media = answer.media_lines.iter().find(|m| m.mid() == audio).unwrap();
+		assert!(!media.disabled, "the audio was rejected");
+		let answer = answer.to_sdp_string();
+		assert!(
+			answer.contains("m=application 0 UDP/DTLS/SCTP webrtc-datachannel\r\n"),
+			"{answer}"
+		);
+		assert!(answer.contains(&format!("a=group:BUNDLE {audio}\r\n")), "{answer}");
 	}
 
 	#[test]
@@ -2293,215 +2013,5 @@ mod test {
 		assert_eq!(count_lines(&line_string, "a=rid:custom send foo=bar"), 1);
 		// No space at the end
 		assert_eq!(count_lines(&line_string, "a=rid:no_attrs send"), 1);
-	}
-
-	#[test]
-	fn test_local_max_message_size_advertised() {
-		crate::vendor::str0m::init_crypto_default();
-
-		let now = Instant::now();
-		let mut rtc = Rtc::new(now);
-
-		// Create an offer with a data channel
-		let mut change = rtc.sdp_api();
-		change.add_channel("test-channel".into());
-		let (offer, _) = change.apply().unwrap();
-
-		// Find the application m-line in the offer
-		let app_line = offer
-			.media_lines
-			.iter()
-			.find(|m| m.typ.is_channel())
-			.expect("should have application m-line");
-
-		// Verify that max-message-size attribute is present and matches LOCAL_MAX_MESSAGE_SIZE
-		let max_size = app_line
-			.max_message_size()
-			.expect("max-message-size attribute should be present");
-
-		assert_eq!(
-			max_size,
-			crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE as usize,
-			"max-message-size should match LOCAL_MAX_MESSAGE_SIZE constant"
-		);
-
-		// Also verify it's in the SDP string output
-		let sdp_string = offer.to_sdp_string();
-		let expected_line = format!(
-			"a=max-message-size:{}",
-			crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE
-		);
-		assert!(
-			sdp_string.contains(&expected_line),
-			"SDP should contain max-message-size attribute with LOCAL_MAX_MESSAGE_SIZE value"
-		);
-	}
-
-	#[test]
-	fn test_remote_max_message_size_parsing() {
-		// Parse SDP with max-message-size attribute and verify value is extracted correctly
-		let sdp = "v=0\r\n\
-            o=- 0 0 IN IP4 172.17.0.1\r\n\
-            s=-\r\n\
-            c=IN IP4 172.17.0.1\r\n\
-            t=0 0\r\n\
-            a=group:BUNDLE 0\r\n\
-            a=fingerprint:sha-256 B4:12:1C:7C:7D:ED:F1:FA:61:07:57:9C:29:BE:58:E3:BC:41:E7:13:8E:7D\
-            :D3:9D:1F:94:6E:A5:23:46:94:23\r\n\
-            m=application 9999 UDP/DTLS/SCTP webrtc-datachannel\r\n\
-            a=mid:0\r\n\
-            a=ice-ufrag:test\r\n\
-            a=ice-pwd:testpassword1234\r\n\
-            a=setup:actpass\r\n\
-            a=sctp-port:5000\r\n\
-            a=max-message-size:131072\r\n\
-            ";
-
-		let offer = SdpOffer::from_sdp_string(sdp).expect("should parse");
-
-		// Find the application m-line
-		let app_line = offer
-			.media_lines
-			.iter()
-			.find(|m| m.typ.is_channel())
-			.expect("should have application m-line");
-
-		assert_eq!(
-			app_line.max_message_size(),
-			Some(131072),
-			"max-message-size should be parsed as 131072"
-		);
-	}
-
-	#[test]
-	fn test_remote_max_message_size_applied() {
-		crate::vendor::str0m::init_crypto_default();
-
-		let now = Instant::now();
-		let custom_max_size1 = 98304u32;
-		let custom_max_size2 = 131072u32;
-		let mut rtc1 = Rtc::builder().set_sctp_max_message_size(custom_max_size1).build(now);
-		let mut rtc2 = Rtc::builder().set_sctp_max_message_size(custom_max_size2).build(now);
-
-		// Create an offer from rtc1 with a channel
-		let mut change1 = rtc1.sdp_api();
-		change1.add_channel("test-channel".into());
-		let (offer1, pending1) = change1.apply().unwrap();
-
-		let offer_sdp = offer1.to_sdp_string();
-		assert!(offer_sdp.contains(&format!("a=max-message-size:{custom_max_size1}\r\n")));
-		let offer = SdpOffer::from_sdp_string(&offer_sdp).unwrap();
-		let answer = rtc2.sdp_api().accept_offer(offer).unwrap();
-
-		// Verify that rtc2's SCTP send limit is set to the custom value from rtc1's offer
-		assert_eq!(
-			rtc2.sctp.remote_max_message_size(),
-			custom_max_size1,
-			"rtc2 should have remote max message size set to rtc1's advertised value"
-		);
-
-		// Now verify the reverse: rtc1 accepts rtc2's answer and applies its max-message-size
-		let answer_sdp = answer.to_sdp_string();
-		assert!(answer_sdp.contains(&format!("a=max-message-size:{custom_max_size2}\r\n")));
-		let answer = SdpAnswer::from_sdp_string(&answer_sdp).unwrap();
-
-		rtc1.sdp_api().accept_answer(pending1, answer).unwrap();
-
-		assert_eq!(
-			rtc1.sctp.remote_max_message_size(),
-			custom_max_size2,
-			"rtc1 should have remote max message size set to rtc2's advertised value"
-		);
-
-		let mut change = rtc1.sdp_api();
-		change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-		let (offer, pending) = change.apply().unwrap();
-		assert_eq!(
-			offer
-				.media_lines
-				.iter()
-				.find(|m| m.typ.is_channel())
-				.unwrap()
-				.max_message_size(),
-			Some(custom_max_size1 as usize)
-		);
-		let answer = rtc2.sdp_api().accept_offer(offer).unwrap();
-		assert_eq!(
-			answer
-				.media_lines
-				.iter()
-				.find(|m| m.typ.is_channel())
-				.unwrap()
-				.max_message_size(),
-			Some(custom_max_size2 as usize)
-		);
-		rtc1.sdp_api().accept_answer(pending, answer).unwrap();
-	}
-
-	#[test]
-	fn test_remote_max_message_size_zero_means_unbounded() {
-		// RFC 8841 §6.1: a=max-message-size:0 means the peer can receive a message
-		// of any size, so we represent it as u32::MAX rather than passing 0 through
-		// (which would reject every non-empty outbound message in sctp-proto).
-		crate::vendor::str0m::init_crypto_default();
-
-		let now = Instant::now();
-		let mut rtc1 = Rtc::new(now);
-		let mut rtc2 = Rtc::new(now);
-
-		let mut change1 = rtc1.sdp_api();
-		change1.add_channel("test-channel".into());
-		let (offer1, _pending1) = change1.apply().unwrap();
-
-		let sdp_string = offer1.to_sdp_string();
-		let modified_sdp = sdp_string.replace(
-			&format!(
-				"a=max-message-size:{}",
-				crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE
-			),
-			"a=max-message-size:0",
-		);
-
-		let modified_offer = SdpOffer::from_sdp_string(&modified_sdp).expect("modified SDP should parse");
-
-		rtc2.sdp_api().accept_offer(modified_offer).unwrap();
-
-		assert_eq!(
-			rtc2.sctp.remote_max_message_size(),
-			u32::MAX,
-			"a=max-message-size:0 should be treated as unbounded (u32::MAX)"
-		);
-	}
-
-	#[test]
-	fn test_remote_max_message_size_too_large_clamps_to_unbounded() {
-		crate::vendor::str0m::init_crypto_default();
-
-		let now = Instant::now();
-		let mut rtc1 = Rtc::new(now);
-		let mut rtc2 = Rtc::new(now);
-
-		let mut change1 = rtc1.sdp_api();
-		change1.add_channel("test-channel".into());
-		let (offer1, _pending1) = change1.apply().unwrap();
-
-		let sdp_string = offer1.to_sdp_string();
-		let modified_sdp = sdp_string.replace(
-			&format!(
-				"a=max-message-size:{}",
-				crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE
-			),
-			"a=max-message-size:4294967296",
-		);
-
-		let modified_offer = SdpOffer::from_sdp_string(&modified_sdp).expect("modified SDP should parse");
-
-		rtc2.sdp_api().accept_offer(modified_offer).unwrap();
-
-		assert_eq!(
-			rtc2.sctp.remote_max_message_size(),
-			u32::MAX,
-			"a=max-message-size larger than u32::MAX should be treated as unbounded"
-		);
 	}
 }

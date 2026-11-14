@@ -41,10 +41,6 @@ pub struct Settings {
 	#[usage(flatten)]
 	stats: Stats,
 
-	#[cfg(feature = "stun")]
-	#[usage(flatten)]
-	stun: Stun,
-
 	#[usage(flatten)]
 	cache: Cache,
 
@@ -268,12 +264,4 @@ struct PeerQuic {
 	receive_window: Option<u64>,
 	#[usage(env = "MOQ_LIMITS_PEER_QUIC_SEND_WINDOW", cli("--limits-peer-quic-send-window"))]
 	send_window: Option<u64>,
-}
-
-#[cfg(feature = "stun")]
-#[derive(usage_rs::Config)]
-#[usage(prefix = "stun")]
-struct Stun {
-	#[usage(env = "MOQ_STUN_BIND", cli("--stun-bind"))]
-	bind: Option<String>,
 }

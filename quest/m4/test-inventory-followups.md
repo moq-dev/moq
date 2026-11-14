@@ -25,10 +25,9 @@ for the `#[ignore]` check. Left over:
 - Modules nested in a `#[path]`-loaded file resolve against that file's
   directory, but the walker places them under `<dir>/<stem>/` unless the file
   is `mod.rs` (`sh/gh/test-inventory.py:663` and `:694-696`). So the vendored
-  crates `rs/moq-webrtc/src/vendor/mod.rs:44-57` loads go unseen, with their 3
-  `#[ignore]` tests, such as `sctp_proto/queue/queue_test.rs:1207`. Walk a
-  `#[path]` child as owning its directory, and give the 3 tests callers or
-  allowlist entries (added 2026-11-12 by /quest-plan, from moq's trimmed
+  crates `rs/moq-webrtc/src/vendor/mod.rs:43-55` loads go unseen, with their
+  `#[ignore]` test `str0m/tests/poll-scaling.rs:50`. Walk a `#[path]` child as
+  owning its directory, and give the test a caller or an allowlist entry (added 2026-11-12 by /quest-plan, from moq's trimmed
   Pullfrog learnings).
 - The failure output lists `benchmark_stream_import` twice. Deduplicate
   orphans by name and location.

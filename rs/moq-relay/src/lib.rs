@@ -33,8 +33,6 @@ pub mod session;
 mod settings;
 pub mod shutdown;
 pub mod stats;
-#[cfg(any(feature = "stun", test))]
-pub mod stun;
 #[cfg(feature = "test-support")]
 mod test_support;
 #[cfg(all(target_os = "linux", feature = "_uring"))]

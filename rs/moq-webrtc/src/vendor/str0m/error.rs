@@ -9,8 +9,6 @@ pub use crate::vendor::str0m::crypto::DtlsError;
 pub use crate::vendor::str0m::io::NetError;
 pub use crate::vendor::str0m::packet::{PacketError, Vp8DescriptorError, Vp8PatchError};
 pub use crate::vendor::str0m::rtp_::RtpError;
-pub use crate::vendor::str0m::sctp::ProtoError;
-pub use crate::vendor::str0m::sctp::SctpError;
 pub use crate::vendor::str0m::sdp::SdpError;
 
 use crate::vendor::str0m::{Direction, KeyframeRequestKind, Mid, Pt, Rid};
@@ -68,9 +66,6 @@ pub enum RtcError {
 	/// ICE agent errors.
 	Ice(IceError),
 
-	/// SCTP (data channel engine) errors.
-	Sctp(SctpError),
-
 	/// [`crate::vendor::str0m::change::SdpApi`] was not done in a correct order.
 	///
 	/// For [`crate::vendor::str0m::change::SdpApi`]:
@@ -112,7 +107,6 @@ impl fmt::Display for RtcError {
 			}
 			RtcError::Net(err) => write!(f, "{}", err),
 			RtcError::Ice(err) => write!(f, "{}", err),
-			RtcError::Sctp(err) => write!(f, "{}", err),
 			RtcError::ChangesOutOfOrder => write!(f, "Changes made out of order"),
 			RtcError::WriteWithoutPoll => write!(f, "Consecutive calls to write() without poll_output() in between"),
 		}
@@ -129,7 +123,6 @@ impl Error for RtcError {
 			RtcError::Packet(_, _, err) => Some(err),
 			RtcError::Net(err) => Some(err),
 			RtcError::Ice(err) => Some(err),
-			RtcError::Sctp(err) => Some(err),
 			_ => None,
 		}
 	}
@@ -169,11 +162,5 @@ impl From<NetError> for RtcError {
 impl From<IceError> for RtcError {
 	fn from(err: IceError) -> Self {
 		RtcError::Ice(err)
-	}
-}
-
-impl From<SctpError> for RtcError {
-	fn from(err: SctpError) -> Self {
-		RtcError::Sctp(err)
 	}
 }

@@ -10,7 +10,7 @@ cluster with two uplinks, partition, and healing. No bespoke federation router.
 ## Plan
 
 Decided 2026-10-13: this is a required use case, independently shippable from
-browser P2P. Existing cluster sessions are bidirectional and scoped peer
+peer-to-peer routing. Existing cluster sessions are bidirectional and scoped peer
 admission exists; extend and prove those paths rather than creating a reverse
 connection protocol. Do not require an inbound connection to the local relay.
 

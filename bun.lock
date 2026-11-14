@@ -270,19 +270,6 @@
         "zod": "^4.5.0",
       },
     },
-    "js/p2p": {
-      "name": "@moq/p2p",
-      "version": "0.1.0",
-      "dependencies": {
-        "@moq/qmux": "workspace:^",
-      },
-      "devDependencies": {
-        "@moq/clock": "workspace:^",
-        "@types/bun": "^1.4.4",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
-        "typescript": "7.0.2",
-      },
-    },
     "js/pattern": {
       "name": "@moq/pattern",
       "version": "0.2.1",
@@ -488,20 +475,6 @@
       },
       "devDependencies": {
         "tsx": "^4.23.15",
-      },
-    },
-    "test/p2p": {
-      "name": "@moq/p2p-test",
-      "dependencies": {
-        "@moq/net": "workspace:*",
-        "@moq/p2p": "workspace:*",
-      },
-      "devDependencies": {
-        "@types/bun": "^1.4.4",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
-        "playwright": "1.64.1",
-        "typescript": "7.0.2",
-        "vite": "^8.3.6",
       },
     },
     "test/qmux": {
@@ -877,10 +850,6 @@
     "@moq/msf": ["@moq/msf@workspace:js/msf"],
 
     "@moq/net": ["@moq/net@workspace:js/net"],
-
-    "@moq/p2p": ["@moq/p2p@workspace:js/p2p"],
-
-    "@moq/p2p-test": ["@moq/p2p-test@workspace:test/p2p"],
 
     "@moq/pattern": ["@moq/pattern@workspace:js/pattern"],
 
