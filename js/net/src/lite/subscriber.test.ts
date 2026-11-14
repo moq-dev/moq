@@ -421,8 +421,7 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	await send(async (w) => {
 		await encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, v);
-		// Certified, the claim's origin withdrew it: it ends rather than going offline.
-		await encodeAnnounceBroadcast(w, { status: "floor", id: 0n, revision: 0n }, v);
+		await encodeAnnounceBroadcast(w, { status: "floor", id: 0n }, v);
 	});
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "end" });
 

@@ -1178,9 +1178,13 @@ export class Subscriber {
 					ids.add(wire.id);
 				}
 				serve(wire, path, restart ?? false);
-				// A claim gone unless the newest floor certifying it says so was let go, not withdrawn by
-				// its origin.
-				refresh(path, !now && !this.#floors.withdrawn(wire.node, wire.view, path));
+				// A claim gone was let go, not withdrawn by its origin, where the newest floor certifying it
+				// still presents it, or where this node refuses one of the route's claims and no floor
+				// certifies it gone. An uncertified withdrawal otherwise still ends: a relay certifies
+				// nothing to a request wider than its scope's region, as this one may be.
+				const said = now ? undefined : this.#floors.certified(wire.node, wire.view, path);
+				const refusing = wire.unnamed.size > 0 || wire.withheld.size > 0;
+				refresh(path, !now && (said === "present" || (refusing && said === undefined)));
 			}
 		};
 		const refreshRoute = (wire: Route, lost: boolean) => {

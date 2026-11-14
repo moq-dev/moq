@@ -167,11 +167,11 @@ export class Floors {
 	}
 
 	/**
-	 * Whether the newest of `view` and the live views of `node` certifying `path` presents no
-	 * claim there, so a claim gone from `view` was withdrawn by its origin rather than let go, as
-	 * rs/moq-net's router tells an end from going offline.
+	 * What the newest of `view` and the live views of `node` certifying `path` says of a claim
+	 * there: "absent" when it presents none, "present" when it does, or undefined when none
+	 * certifies the path.
 	 */
-	withdrawn(node: bigint, view: View, path: Path.Valid): boolean {
+	certified(node: bigint, view: View, path: Path.Valid): "absent" | "present" | undefined {
 		// The view itself wins a tie, as in shows().
 		let best: View | undefined = certifies(view, path) ? view : undefined;
 		for (const carrier of this.#nodes.get(node)?.carriers ?? []) {
@@ -179,7 +179,8 @@ export class Floors {
 			// biome-ignore lint/style/noNonNullAssertion: certifies() checked both revisions.
 			if (certifies(other, path) && (best === undefined || other.revision! > best.revision!)) best = other;
 		}
-		return best !== undefined && presented(best, path, path === view.prefix) === undefined;
+		if (best === undefined) return undefined;
+		return presented(best, path, path === view.prefix) === undefined ? "absent" : "present";
 	}
 
 	/**
