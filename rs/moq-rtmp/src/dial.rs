@@ -133,7 +133,7 @@ impl Target {
 			)
 			.into());
 		}
-		let app = url.path().trim_start_matches('/');
+		let app = url.path().trim_matches('/');
 		if app.is_empty() || app.contains('/') {
 			return Err(anyhow::anyhow!(
 				"rtmp url path must be the app alone, without the stream key: scheme://host[:port]/<app>"
@@ -741,6 +741,8 @@ mod tests {
 		assert_eq!(t.port, 1936);
 		assert_eq!(t.tc_url, "rtmp://[::1]:1936/live");
 		assert_eq!(parse("rtmp://h/live").unwrap().port, 1935);
+		// Ingests often display their server URL with a trailing slash.
+		assert_eq!(parse("rtmps://h/rtmp/").unwrap().tc_url, "rtmps://h/rtmp");
 		for bad in [
 			"rtmp://h/live/key",
 			"rtmp://h/",
