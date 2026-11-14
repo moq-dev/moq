@@ -174,7 +174,7 @@ impl Capture {
 			factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| error("WGC item factory", e))?;
 		let (item, window): (GraphicsCaptureItem, _) = match &config.source {
 			Source::Display(selector) => {
-				let index = display_index(selector.as_deref())?;
+				let index = display_index(selector.id.as_deref())?;
 				let monitors = monitors()?;
 				let monitor = monitors
 					.get(index)

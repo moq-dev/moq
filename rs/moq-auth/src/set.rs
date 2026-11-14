@@ -84,7 +84,7 @@ impl KeySet {
 		Ok(())
 	}
 
-	/// Copy the set with each key's private parts removed, failing on a symmetric key, which has no public half.
+	/// Copy the set with each key's private parts removed, failing on a symmetric key, which has no public half, and on a key that cannot verify.
 	pub fn to_public_set(&self) -> crate::Result<KeySet> {
 		Ok(KeySet {
 			keys: self

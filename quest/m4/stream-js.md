@@ -8,7 +8,8 @@ side in both directions.
 
 ## Plan
 
-Mirror the [Rust surface](/quest/m1/stream/rust.md) on `@moq/net`'s socket. Add
+Mirror the Rust surface, `moq_tokio::socket::TcpStream`, on `@moq/net`'s socket. `dialTcp` and `accept` already take the
+`priority` option Rust's `dial_tcp` and `accept` do. Add
 the Rust/JS pair to `just test interop`.
 
 `@moq/net`'s socket `TcpStream` already exists and the socket interop test
@@ -22,5 +23,4 @@ waits on JS byte streams, and they are lossless only after JS pacing lands.
 
 ## Required
 
-- [Rust byte streams](/quest/m1/stream/rust.md) - the reference surface
 - [JS fastest-reader pacing](/quest/m4/js-fastest-reader.md) - a JS reader that falls behind would otherwise end evicted, not lossless
