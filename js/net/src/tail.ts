@@ -230,9 +230,9 @@ export class Tail {
 		return runGaps(this.#ledger.gaps(start, end), start, end);
 	}
 
-	/** Whether a group stream is still being read. */
+	/** Whether a group stream is still being read, an excused one included until a settle gives up on it. */
 	get reading(): boolean {
-		return this.#active > 0;
+		return this.#active > 0 || this.#excused.size > 0;
 	}
 
 	/** Bumped on every change {@link settle} watches. */

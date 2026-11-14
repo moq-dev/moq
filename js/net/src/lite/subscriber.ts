@@ -1,5 +1,5 @@
 import { Duration, sleep, yieldNow } from "@moq/clock";
-import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
+import { type Dispose, Effect, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
@@ -2697,13 +2697,23 @@ export class Subscriber {
 						ended = true;
 					},
 				);
-				while (!ended && !left.signal.aborted) {
-					if (entry.tail.covers(groups.start, groups.end) && !entry.tail.reading) {
-						fin = true;
-						opened.writer.close();
-						break;
+				// An excused stream is waited for at most the grace, as at a subscription's end: a browser
+				// can lose its reset, while a group it paused waits on the continuation still owed.
+				const stopped = new Once<null>();
+				const covered = () => entry.tail.covers(groups.start, groups.end);
+				try {
+					while (!ended && !left.signal.aborted) {
+						if (covered()) {
+							await race([entry.tail.settle(covered, stopped), over, leaving]);
+							if (ended || left.signal.aborted) break;
+							fin = true;
+							opened.writer.close();
+							break;
+						}
+						await race([Signal.race(entry.tail.changed), over, leaving]);
 					}
-					await race([Signal.race(entry.tail.changed), over, leaving]);
+				} finally {
+					stopped.set(null);
 				}
 				// After our FIN, a cancel still stops the wait for the publisher's.
 				if (!ended) await race([over, leaving]);
