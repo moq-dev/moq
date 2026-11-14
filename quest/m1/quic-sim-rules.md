@@ -40,5 +40,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [QUIC Interop Runner](/quest/m1/quic-interop.md) - the same rules judged by other stacks
 - [The relay over QUIC on the sim](/quest/m1/quic-sim.md) - its runs gain the checker through the shared `Link`
