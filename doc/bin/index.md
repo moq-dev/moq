@@ -17,7 +17,7 @@ Once connected, [Inspect a relay](/bin/inspect) shows what it is receiving.
 | [moq-relay](/bin/relay/) | Route, cache, and fan out broadcasts. Authenticate with JWTs, cluster across regions, publish stats. |
 | [moq-cli](/bin/cli) | Move media in and out of MoQ: pipe FFmpeg in, play natively, capture a camera or screen, transcode, mint tokens. |
 | [moq-studio](/bin/studio) | Compose cameras, screens, images, and other broadcasts into scenes on the GPU and go live. |
-| [moq-bench](https://github.com/moq-dev/moq/tree/main/rs/moq-bench) | Load-test your relay with synthetic publishers and subscribers, and record what the load costs on its host with `moq-bench host` (Linux only). Install with `cargo install moq-bench`. |
+| [moq-bench](https://github.com/moq-dev/moq/tree/main/rs/moq-bench) | Load-test your relay with synthetic publishers and subscribers, and record what the load costs on its host with `moq-bench host` (Linux only). Not published to crates.io: install with `cargo install --git https://github.com/moq-dev/moq moq-bench`. |
 
 ## Gateways
 

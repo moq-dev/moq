@@ -7,9 +7,8 @@ for `moq-dev/moq`, workflow `release-rs.yml`, and environment `publish`, so
 [Rust releases publish through OIDC](/quest/m3/release-rs-oidc.md) can start.
 Delete this quest once every crate has one.
 
-Corrected 2026-11-12 (/quest-audit): moq-bench leaves the list, since
-[first-publish versions](/quest/m2/first-publish-versions.md) sets it
-`publish = false`; seven crates remain.
+Corrected 2026-11-12 (/quest-audit): moq-bench leaves the list, since it
+sets `publish = false`; seven crates remain.
 
 ## Waiting
 
