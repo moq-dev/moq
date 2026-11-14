@@ -222,14 +222,35 @@ pub fn jwk(data: &[u8]) -> bool {
 	}
 }
 
-/// The key material that decides what verifies: the public half, or an `oct` key's secret.
+/// The key material that decides what verifies: the public half, or an `oct` key's secret as
+/// HMAC uses it.
 fn material(key: &Key) -> Value {
-	let jwk = encode(key);
+	let mut jwk = encode(key);
+	if let Some(secret) = jwk.get("k").and_then(Value::as_str) {
+		jwk["k"] = hmac_key(secret).into();
+	}
 	let fields = ["kty", "crv", "x", "y", "n", "e", "k"];
 	fields
 		.iter()
 		.map(|&field| jwk.get(field).cloned().unwrap_or(Value::Null))
 		.collect()
+}
+
+/// An HMAC secret as HMAC pads it: a secret within the hash's block is zero-filled to it, so
+/// trailing zero bytes name the same key. (The fixed keys only sign HS256, whose block is 64
+/// bytes; a longer secret is hashed first, which no fuzzed secret can match.)
+fn hmac_key(secret: &str) -> String {
+	use base64::Engine as _;
+	let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+	let Ok(mut bytes) = engine.decode(secret) else {
+		return secret.to_string();
+	};
+	if bytes.len() <= 64 {
+		while bytes.last() == Some(&0) {
+			bytes.pop();
+		}
+	}
+	engine.encode(bytes)
 }
 
 /// A key as JSON, with `key_ops` sorted: it is a set, so its order varies.
@@ -262,7 +283,12 @@ fn check_key(key: &Key) {
 	if !key.operations.contains(&KeyOperation::Sign) {
 		return;
 	}
-	let verifier = key.to_public().unwrap_or_else(|_| key.clone());
+	// The same key allowed only to verify, by its public half where it has one: a sign-only
+	// key refuses to verify its own tokens.
+	let mut jwk = key.export();
+	jwk.operations = [KeyOperation::Verify].into();
+	let verifier = jwk.import().expect("a parsed key imports");
+	let verifier = verifier.to_public().unwrap_or(verifier);
 	for claims in claims() {
 		let Ok(token) = key.sign(&claims) else { continue };
 		let verified = verifier
