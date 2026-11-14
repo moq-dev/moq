@@ -62,6 +62,8 @@ select_packages() {
         sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
         # moq-relay's tests read its NixOS module.
         sed -n 's|^nix/modules/moq-relay\.nix$|moq-relay|p' "$list"
+        # The gate's Send-depth proof of moq-net's session driver is this script.
+        sed -n 's|^sh/rs/send-depth\.sh$|moq-net|p' "$list"
         jq -r --rawfile list "$list" '
             def resolve: gsub("\\\\"; "/") | reduce split("/")[] as $s ([];
                 if $s == ".." then .[:-1] elif $s == "." then . else . + [$s] end) | join("/");
@@ -142,7 +144,7 @@ fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz)
+    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz)
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206
@@ -156,8 +158,6 @@ case "$action" in
     check | check-test | lint)
         # The isolated feature builds (`just rs features`) stay out of the
         # gate; the Features workflow runs them nightly and on release PRs.
-        # Nightly runs the Send-depth proof (`just rs send-depth`) on its
-        # pinned toolchain.
         just rs "$action" "${flags[@]}"
         # The test build enables device features, which can hide unused items
         # in the default-feature test cfg. Keep this compile isolated from the
@@ -172,6 +172,8 @@ case "$action" in
         fi
         # moq-net without `async`, which every other build unifies back in.
         if wants moq-net; then just rs no-async; fi
+        # The session driver's Send proof, which a deeper session state breaks.
+        if [[ "$action" == lint ]] && wants moq-net; then just rs send-depth; fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         ;;
@@ -222,7 +224,7 @@ case "$action" in
                 | .targets[]
                 | select((.kind // [] | any(. == "bench" or . == "example")) or .test)
                 | (.["required-features"] // [])[]
-                | "\($name)/\(.)"' | sort -u | tr '\n' ' '
+                | "\($name)/\(.)"' | LC_ALL=C sort -u | tr '\n' ' '
         )
         for feature in $required; do
             [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")

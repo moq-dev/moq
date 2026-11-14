@@ -151,6 +151,12 @@ pub enum Error {
 	#[error("{0}:// can't present the client certificate; dial https://, wss://, moqt://, moql://, or tls:// instead")]
 	ClientCertScheme(String),
 
+	/// A client on a simulated host dials only QUIC, since every other transport opens a real
+	/// socket. The payload is the scheme.
+	#[cfg(feature = "sim")]
+	#[error("{0}:// can't be dialed from a simulated host; dial https://, moqt://, or moql:// instead")]
+	SimScheme(String),
+
 	/// The server rejected the connection with an auth status. See [`crate::ConnectError`].
 	#[cfg(feature = "net")]
 	#[error(transparent)]

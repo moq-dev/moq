@@ -8,7 +8,6 @@
  * @module
  */
 import type { Duration } from "@moq/clock";
-import * as z from "zod/mini";
 import type { Credential } from "./auth.ts";
 import type * as Instance from "./instance.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
@@ -20,17 +19,19 @@ import { isLeadingOnes, type StreamVersion } from "./stream.ts";
  * stamps into a chain as an announcement passes through, so a receiver can spot its own
  * id and reject a loop. The SETUP parameter that carries it session-wide is `Hop` too.
  *
- * The {@link HopSchema} validates any incoming value and brands it so the type system
+ * {@link toHop} validates any incoming value and brands it so the type system
  * enforces "only validated ids flow into hop chains." Internal code that synthesizes one
- * (e.g. `randomHop`) uses `HopSchema.parse(...)` to brand a raw bigint.
+ * (e.g. `randomHop`) brands a raw bigint the same way.
  */
-export const HopSchema = z
-	.bigint()
-	.check(z.refine((value) => value >= 0n && value < 1n << 64n, "Hop must be a non-negative 64-bit integer"))
-	.brand("Hop");
+export type Hop = bigint & { readonly [hopBrand]: true };
 
-/** A relay's hop id, validated by {@link HopSchema}. */
-export type Hop = z.infer<typeof HopSchema>;
+declare const hopBrand: unique symbol;
+
+/** Brand `value` as a {@link Hop}, refusing anything outside the unsigned 64-bit range. */
+export function toHop(value: bigint): Hop {
+	if (value < 0n || value >= 1n << 64n) throw new RangeError("Hop must be a non-negative 64-bit integer");
+	return value as Hop;
+}
 
 /**
  * The reserved id 0, meaning "no identity".
@@ -40,7 +41,7 @@ export type Hop = z.infer<typeof HopSchema>;
  * in common, and never excluded from an advertisement. A chain that holds a 0 anywhere
  * is anonymous for route selection.
  */
-export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
+export const UNKNOWN_HOP: Hop = toHop(0n);
 
 /**
  * The id `hop` carries on a wire in `version`'s varint form.
@@ -77,7 +78,7 @@ export function randomHop(): Hop {
 	// Mask to 53 bits.
 	const raw = buf[0] & 0x1f_ffff_ffff_ffffn;
 	// Guard against the (astronomically unlikely) zero draw.
-	return HopSchema.parse(raw === 0n ? 1n : raw);
+	return toHop(raw === 0n ? 1n : raw);
 }
 
 /** The static cost of pulling content through a route; lower wins. */

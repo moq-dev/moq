@@ -13,7 +13,7 @@ set working-directory := '..'
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, as does
 # sh/rs/select.sh, since it cannot read this.
-no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz"
+no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz"
 
 default:
     just check
@@ -410,7 +410,7 @@ doctest *args:
 miri *args:
     bash sh/rs/miri.sh "$@"
 
-# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
+# Run the moq-quic simulation's random workloads from a fresh seed, each datagram checked against QUIC's rules, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
 quic-sim:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -435,8 +435,8 @@ quic-sim:
 rung-disable:
     just rs test -p moq-ffi --lib --run-ignored only --no-capture -E 'test(/^test::rung::/)'
 
-# Prove downstream futures are Send at the default recursion limit on the
-# flake's pinned nightly. Nightly runs it; the land gate does not.
+# Prove the session driver and downstream futures are Send at the default recursion limit on the
+# flake's pinned nightly. The gate's rs lint phase runs it when moq-net is selected; Nightly runs it too.
 send-depth:
     bash sh/rs/send-depth.sh
 
