@@ -393,6 +393,18 @@ mod tests {
 	}
 
 	#[test]
+	fn retire_keeps_an_outside_floor_only_while_it_is_newer_than_every_floor_inside() {
+		let v = view(
+			&[("live", 3), ("other/a", 5), ("other/b", 3), ("other/c", 2)],
+			&[("live/x", 1), ("other/a/x", 2), ("other/b/x", 3), ("other/c/x", 4)],
+		);
+		assert_eq!(
+			v.retire(&p("live")),
+			view(&[("live", 3), ("other/a", 5)], &[("live/x", 1), ("other/a/x", 2)])
+		);
+	}
+
+	#[test]
 	fn a_floor_certifies_only_what_lies_within_it() {
 		let v = view(&[("live/a", 5)], &[("live/a", 1), ("live/a/x", 2), ("live", 3)]);
 		assert_eq!(v.as_of(&p("live/a")), Some(5));
