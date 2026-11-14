@@ -30,7 +30,6 @@ mod refusals;
 mod relay;
 pub mod runtime;
 pub mod session;
-mod settings;
 pub mod shutdown;
 pub mod stats;
 #[cfg(feature = "test-support")]
@@ -70,5 +69,5 @@ pub use test_support::*;
 
 /// The relay settings registry for composing a binary's CLI and TOML merge.
 pub fn settings() -> usage_rs::config::Registry {
-	settings::Settings::SETTINGS_REGISTRY
+	config::registry()
 }
