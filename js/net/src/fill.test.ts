@@ -1462,3 +1462,217 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 	requests.close();
 	broadcast.close();
 });
+
+// A track holding group 2 from frame 3 only, as a copy that joined it mid-group does, and group 3
+// whole.
+function headless(): { broadcast: BroadcastProducer; track: Producer } {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	const tail = hooks.receiveGroup(track, { sequence: 2n, start: 3 });
+	for (const frame of ["c3", "c4"]) tail.writeFrame({ payload: enc.encode(frame) });
+	tail.finish();
+	const next = track.createGroup(3n);
+	next.writeFrame({ payload: enc.encode("d0") });
+	next.finish();
+	return { broadcast, track };
+}
+
+const whole: Archive = new Map([[2n, ["c0", "c1", "c2", "c3", "c4"]]]);
+const twoAndThree: Subscription = {
+	ranges: [{ start: { absolute: 2n }, end: { absolute: 4n } }],
+	delay: { max: null },
+	order: "ascending",
+};
+
+test.each(["arrival", "sequence"])(
+	"fill: a bounded %s reader hands out a headless group once a fill answers it from frame 0",
+	async (mode) => {
+		const { broadcast, track } = headless();
+		const requests = track.requests();
+		const fills = respond(requests, whole);
+
+		const reader = track.subscribe(twoAndThree);
+		const next =
+			mode === "arrival"
+				? () => reader.recvGroup()
+				: (() => {
+						const ordered = reader.ordered();
+						return () => ordered.nextGroup();
+					})();
+		const got: [bigint, string[]][] = [];
+		for (let group = await next(); group; group = await next()) got.push([group.sequence, await frames(group)]);
+		got.sort(([a], [b]) => (a < b ? -1 : 1));
+		expect(got).toEqual([
+			[2n, ["c0", "c1", "c2", "c3", "c4"]],
+			[3n, ["d0"]],
+		]);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[2n, 3n]]);
+
+		// An open reader takes the whole copy that replaced the headless one in the cache.
+		const open = track.subscribe(history);
+		const first = await open.ordered().nextGroup();
+		expect([first?.sequence, first && (await frames(first))]).toEqual([2n, ["c0", "c1", "c2", "c3", "c4"]]);
+
+		open.close();
+		requests.close();
+		broadcast.close();
+	},
+);
+
+test("fill: a refused head gives its group up, and the bounded reader moves past it", async () => {
+	const { broadcast, track } = headless();
+	const requests = track.requests();
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			fill.refuseGroups(fill.start, fill.end, new NotFound("no head"));
+			fill.close();
+		}
+	})();
+
+	const reader = track.subscribe(twoAndThree);
+	const ordered = reader.ordered();
+	const got: bigint[] = [];
+	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) got.push(group.sequence);
+	expect(got).toEqual([3n]);
+
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: with no handler, a bounded reader gives a headless group up while an open one reads it", async () => {
+	const { broadcast, track } = headless();
+
+	const bounded = track.subscribe(twoAndThree);
+	const got: bigint[] = [];
+	for (let group = await bounded.recvGroup(); group; group = await bounded.recvGroup()) got.push(group.sequence);
+	expect(got).toEqual([3n]);
+
+	// A bounded fetch from frame 0 fails as a miss no handler serves.
+	const fetched = await wireOf(broadcast)
+		.fetchGroup("video", 2n)
+		.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+	expect(toStreamCode(fetched)).toBe(StreamCode.NotFound);
+
+	const open = track.subscribe(history);
+	const first = await open.ordered().nextGroup();
+	expect([first?.sequence, first && (await frames(first))]).toEqual([2n, ["c3", "c4"]]);
+
+	open.close();
+	broadcast.close();
+});
+
+test("fill: a fetch of a headless group asks its head, as a fetch from frame 0 does", async () => {
+	const { broadcast, track } = headless();
+	const requests = track.requests();
+	const fills = respond(requests, whole);
+
+	const group = await wireOf(broadcast).fetchGroup("video", 2n);
+	expect(await frames(group)).toEqual(["c0", "c1", "c2", "c3", "c4"]);
+	expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[2n, 3n]]);
+
+	requests.close();
+	broadcast.close();
+});
+
+// A timed track that cached only group 5, starting at 5s; its archive holds groups 0 to 4, group
+// `n` starting at `n` seconds.
+function timed(): { broadcast: BroadcastProducer; track: Producer } {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const group = track.createGroup(5n);
+	group.writeFrame({ payload: enc.encode("g5"), timestamp: Timestamp.fromMillis(5000) });
+	group.finish();
+	return { broadcast, track };
+}
+
+// Answer each lookup with `lookup(time)`, closing it unanswered when that is undefined, and serve
+// every fill of groups from the archive. Returns the lookups' times, in seconds.
+function lookups(requests: Requests, lookup: (time: number) => bigint | undefined): number[] {
+	const times: number[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			if (fill.time !== undefined) {
+				const ms = fill.time.asMillis();
+				times.push(ms / 1000);
+				const answer = lookup(ms);
+				if (answer !== undefined) {
+					const group = fill.accept(answer);
+					group.writeFrame({
+						payload: enc.encode(`g${answer}`),
+						timestamp: Timestamp.fromMillis(Number(answer) * 1000),
+					});
+					group.finish();
+				}
+				// A lookup owes no group.
+				expect(fill.wanted()).toBeUndefined();
+				fill.close();
+				continue;
+			}
+			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
+				const group = fill.accept(sequence);
+				group.writeFrame({
+					payload: enc.encode(`g${sequence}`),
+					timestamp: Timestamp.fromMillis(Number(sequence) * 1000),
+				});
+				group.finish();
+			}
+			fill.close();
+		}
+	})();
+	return times;
+}
+
+const fromTime = (ms: number): Subscription => ({
+	ranges: [{ start: { time: Timestamp.fromMillis(ms) } }],
+	delay: { max: null },
+	order: "ascending",
+});
+
+test("fill: a time start no held group resolves is looked up, and the range starts at the answer", async () => {
+	const { broadcast, track } = timed();
+	const requests = track.requests();
+	const times = lookups(requests, (ms) => BigInt(Math.floor(ms / 1000)));
+
+	const reader = track.subscribe(fromTime(2500));
+	const ordered = reader.ordered();
+	const got: bigint[] = [];
+	for (let i = 0; i < 4; i++) got.push((await ordered.nextGroup())?.sequence ?? -1n);
+	expect(got).toEqual([2n, 3n, 4n, 5n]);
+	expect(times).toEqual([2.5]);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a lookup closed unanswered leaves the range reaching back to the oldest group held", async () => {
+	const { broadcast, track } = timed();
+	const requests = track.requests();
+	const times = lookups(requests, () => undefined);
+
+	const reader = track.subscribe(fromTime(2500));
+	const ordered = reader.ordered();
+	expect((await ordered.nextGroup())?.sequence).toBe(5n);
+	expect(times).toEqual([2.5]);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a time start the held groups place asks no lookup", async () => {
+	const { broadcast, track } = timed();
+	const requests = track.requests();
+	const times = lookups(requests, () => 0n);
+
+	const reader = track.subscribe(fromTime(5500));
+	expect((await reader.ordered().nextGroup())?.sequence).toBe(5n);
+	expect(times).toEqual([]);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});

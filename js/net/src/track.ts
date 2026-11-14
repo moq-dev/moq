@@ -3705,7 +3705,10 @@ export class Subscriber {
 					const span = { ...dropped, start: max(dropped.start, over), end: min(dropped.end, to) };
 					if (span.start < span.end && !settles(span, budget, coverage, this.#state.judged)) spans.push(span);
 				}
-				for (const run of spans.flatMap((span) => this.#wants(span.start, span.end))) {
+				// Only what the window lets a miss ask for: none below the oldest group held for a time
+				// start reaching back past it.
+				const missable = spans.flatMap((span) => this.#window.missable(span.start, span.end));
+				for (const run of missable.flatMap((span) => this.#wants(span.start, span.end))) {
 					const gone = [...accounted];
 					for (const dropped of givenUp(drops, refused.peek(), run.start, run.end, (run) =>
 						settles(run, budget, coverage, this.#state.judged),

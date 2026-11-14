@@ -519,6 +519,11 @@ type Span = {
 	 * nothing until the lookup answers.
 	 */
 	looking?: Lookup;
+	/**
+	 * The lowest group a miss asks for, for a time start reaching back past every group held: which
+	 * of the groups below the oldest held it reaches is unknown until they start.
+	 */
+	reach?: bigint;
 };
 
 /**
@@ -553,6 +558,8 @@ export class Window {
 	#spans: Span[] = [];
 	/** The groups the spans cover, an unsettled time end through its cap: merged, sorted, and disjoint. */
 	#runs: Run[] = [];
+	/** The part of {@link #runs} a miss may ask for: see {@link missable}. */
+	#missable: Run[] = [];
 	/** A relative anchor waits on a first group, so nothing is filtered yet. */
 	#pending = false;
 	/**
@@ -658,13 +665,7 @@ export class Window {
 	runs(from = 0n, end = UNBOUNDED): Run[] {
 		if (from >= end) return [];
 		if (this.#pending) return [{ start: from, end }];
-		const out: Run[] = [];
-		for (const run of this.#runs) {
-			if (run.end <= from) continue;
-			if (run.start >= end) break;
-			out.push({ start: max(run.start, from), end: min(run.end, end) });
-		}
-		return out;
+		return intersect(this.#runs, from, end);
 	}
 
 	/**
@@ -720,9 +721,11 @@ export class Window {
 		const start =
 			started ?? (containing !== "before" && containing !== "unknown" ? containing.group : undefined);
 		for (const span of found) {
+			const below = span.looking?.below ?? 0n;
 			span.looking = undefined;
 			span.start = start ?? 0n;
 			span.floored = start !== undefined;
+			span.reach = start === undefined ? (holdings.nextStart(0n)?.sequence ?? below) : undefined;
 			if (span.end !== "open" && "time" in span.end) {
 				const time = new TimeEnd(span.end.time.pts, span.start);
 				const end = time.advance(span.start, holdings);
@@ -736,6 +739,16 @@ export class Window {
 	// Whether a time start is still looked up.
 	#looking(): boolean {
 		return this.#spans.some((span) => span.looking);
+	}
+
+	/**
+	 * The part of {@link runs} a miss may ask a fill for: a time start reaching back past every group
+	 * held asks none below the oldest of them. Mirrors the Rust `Window::missable`.
+	 */
+	missable(from = 0n, end = UNBOUNDED): Run[] {
+		if (from >= end) return [];
+		if (this.#pending) return [{ start: from, end }];
+		return intersect(this.#missable, from, end);
 	}
 
 	// The first run ending past `sequence`.
@@ -785,11 +798,13 @@ export class Window {
 			this.#spans.push({ index, start: start.group, end, floored: start.floored, looking: { pts, below } });
 			return true;
 		}
+		// A time start reaching back past every group held asks no miss below the oldest of them.
+		const reach = pts !== undefined && !start.floored ? holdings.nextStart(0n)?.sequence : undefined;
 		if (end !== "open" && "time" in end) {
 			const settled = end.time.advance(start.group, holdings);
 			if (settled !== undefined) end = { before: settled };
 		}
-		this.#spans.push({ index, start: start.group, end, floored: start.floored });
+		this.#spans.push({ index, start: start.group, end, floored: start.floored, reach });
 		return true;
 	}
 
@@ -798,18 +813,32 @@ export class Window {
 			!this.#pending &&
 			this.#waiting.length === 0 &&
 			this.#spans.every((span) => !span.looking && (span.end === "open" || !("time" in span.end)));
-		const spans = this.#spans
-			.filter((span) => !span.looking)
-			.map((span) => ({ start: span.start, end: limitOf(span) }))
-			.filter((span) => span.end > span.start)
-			.sort((a, b) => order(a.start, b.start));
-		this.#runs = [];
-		for (const span of spans) {
-			const last = this.#runs.at(-1);
-			if (last && span.start <= last.end) last.end = max(last.end, span.end);
-			else this.#runs.push({ start: span.start, end: span.end });
-		}
+		const read = this.#spans.filter((span) => !span.looking);
+		this.#runs = merge(read.map((span) => ({ start: span.start, end: limitOf(span) })));
+		this.#missable = merge(read.map((span) => ({ start: max(span.start, span.reach ?? 0n), end: limitOf(span) })));
 	}
+}
+
+// `runs` merged into sorted, disjoint runs, the empty ones dropped.
+function merge(runs: Run[]): Run[] {
+	const merged: Run[] = [];
+	for (const run of runs.filter((run) => run.end > run.start).sort((a, b) => order(a.start, b.start))) {
+		const last = merged.at(-1);
+		if (last && run.start <= last.end) last.end = max(last.end, run.end);
+		else merged.push({ ...run });
+	}
+	return merged;
+}
+
+// The parts of sorted, disjoint `runs` inside `[from, end)`.
+function intersect(runs: readonly Run[], from: bigint, end: bigint): Run[] {
+	const out: Run[] = [];
+	for (const run of runs) {
+		if (run.end <= from) continue;
+		if (run.start >= end) break;
+		out.push({ start: max(run.start, from), end: min(run.end, end) });
+	}
+	return out;
 }
 
 /**
