@@ -1205,8 +1205,6 @@ mod test {
 		assert!(session.open_streams().is_empty());
 	}
 
-	/// A listed stream reports the peer acknowledging what was written to it, and a reset one
-	/// never is.
 	/// A stream that counts written bytes as its offset and reports them acknowledged up to
 	/// a mark, to check the boxed layer carries its offset through and back.
 	struct Acking {
@@ -1284,6 +1282,8 @@ mod test {
 		));
 	}
 
+	/// A listed stream reports the peer acknowledging what was written to it, and a reset one
+	/// never is.
 	#[test]
 	fn a_listed_stream_reports_its_acknowledgement() {
 		let (a, b) = super::super::memory::pair(Default::default());
