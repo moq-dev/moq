@@ -95,6 +95,11 @@ first night after #8631 and the first under the 7-day expiry, over the same
   [its own quest](/quest/m0/ci/mbx-prefetch-cap.md); raising the budget past
   20 GiB first was not tried, since no job records its free disk.
 
+Decided 2026-11-14 (maintainer, on #8763): ✅ keep the hosted budget at
+20 GiB until #951 ships (rejected: raise it now). ✅ Keep
+[mbx-prefetch-cap](/quest/m0/ci/mbx-prefetch-cap.md) in m0 (rejected: move it
+to m4, drop it).
+
 If 412s stay high once restores succeed, size the remaining sources (repeat
 stores of units mbx did not look up, and blobs every job's session sends once)
 and judge again whether cutting writers is worth the hits it would cost. Plan

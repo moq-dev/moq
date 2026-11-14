@@ -13,7 +13,8 @@ the first scheduled Nightly after the bump, no hosted Rust-cache job logs
 
 Bump `version:` in `.github/actions/rust-cache/action.yml` (and the action's
 pin if the release needs one), keeping `MBX_GC_MAX_SIZE=20GiB`, which upstream
-recommends until then. On 2026-11-14, 20 Linux jobs still spent the full
+recommends until then (maintainer, 2026-11-14 on #8763: keep it at
+20 GiB, rejected raising it now; keep this quest in m0, rejected m4 or dropping it). On 2026-11-14, 20 Linux jobs still spent the full
 20 GiB, almost all on prefetch, so a half-budget cap leaves 10 GiB for their
 restores; check that budget refusals, now named as such, are gone.
 
