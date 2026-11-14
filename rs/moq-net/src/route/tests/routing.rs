@@ -1474,3 +1474,47 @@ fn a_relay_restart_keeps_the_claim_unavailable() {
 		assert_eq!(seen, [Kind::Unavailable, Kind::Available], "node {node}");
 	}
 }
+
+/// Every identity a rotation draws is fresh: never zero, never one still
+/// declared or just retired, and within the 53 bits a lite-06 hop carries as
+/// itself. The seed makes the first draw zero, and the high bits of every draw
+/// set, which a small seed never reaches.
+#[test]
+fn rotated_identities_are_fresh_and_in_range() {
+	// One xorshift64 draw, and its inverse to pick the seed before a chosen draw.
+	fn draw(mut x: u64) -> u64 {
+		x ^= x << 13;
+		x ^= x >> 7;
+		x ^ x << 17
+	}
+	fn undraw(y: u64) -> u64 {
+		let unshift = |y: u64, shift: &dyn Fn(u64) -> u64| (0..64).fold(y, |x, _| y ^ shift(x));
+		let x = unshift(y, &|x| x << 17);
+		let x = unshift(x, &|x| x >> 7);
+		unshift(x, &|x| x << 13)
+	}
+	// The router forces its seed odd, so take the first zero draw an odd seed reaches.
+	let seed = (1..)
+		.map(|high: u64| undraw(high << 53))
+		.find(|seed| seed & 1 == 1)
+		.expect("an odd seed");
+	assert_eq!(draw(seed) & GENERATED, 0);
+
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 0,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(0, 0), seed);
+	router.originate(7, 0);
+	router.announce(p("live/x"), item).unwrap();
+	let mut seen = BTreeSet::from([7]);
+	for _ in 0..8 {
+		router.age(MAX - 1);
+		router.announce(p("live/x"), item).unwrap();
+		let fresh = router.declared().expect("declared");
+		assert_ne!(fresh, 0);
+		assert!(fresh <= GENERATED, "{fresh:#x} is beyond a generated hop id");
+		assert!(seen.insert(fresh), "{fresh:#x} was drawn before");
+	}
+}
