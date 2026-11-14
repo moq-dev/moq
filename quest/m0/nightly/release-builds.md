@@ -17,8 +17,9 @@ GStreamer headers. Nix can't stand in for either.
 Decided 2026-11-13 (maintainer, /quest-complete): ✅ the Linux jobs take the
 distro GStreamer from a weekly-published ghcr.io image with the packages
 preinstalled (rejected: accepting a mirror outage as a real failure).
-[The GStreamer CI image](/quest/m0/nightly/gst-image.md) publishes it and the
-digest pin, `.github/docker/gstreamer/image`.
+`gstreamer-ci.yml` publishes it as `ghcr.io/moq-dev/gstreamer-ci` and has
+moq-bot propose the digest pin, `.github/docker/gstreamer/image`, from the
+`gstreamer-ci/pin` branch.
 
 - Tarball job: on Linux, run `just rs gst-smoke` over the extracted tarball
   inside the pinned image with `docker run`, instead of apt-installing
@@ -40,6 +41,6 @@ The other release-build failures from 11-11 to 11-12 are fixed: armv7 by
 cross toolchain by
 [moq-dev/moq#8668](https://github.com/moq-dev/moq/pull/8668).
 
-## Required
+## Waiting
 
-- [GStreamer CI image](/quest/m0/nightly/gst-image.md) - publishes the image and the pin file this reads
+- moq-dev/moq: the pin file `.github/docker/gstreamer/image` is on `main`, from moq-bot's `chore(ci): pin the newest GStreamer CI image` PR, which the first `gstreamer-ci.yml` run on `main` opens; check that run published both amd64 and arm64
