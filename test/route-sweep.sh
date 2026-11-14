@@ -13,4 +13,4 @@ just rs test -p moq-net --release --features async --test integration -E 'test(=
 # The router's handoff sweeps replay their fixed scenarios past the gate's 150.
 MOQ_ROUTE_SCENARIOS=${MOQ_ROUTE_SCENARIOS:-20000} just rs test -P sweep -p moq-net --release -E 'test(/^route::tests::handoff::(distance|path)::sweep_/) | test(/^route::tests::scope::sweep_scoped_meshes_show_what_the_rule_says$/)'
 # Every delivery order of the small meshes the gate's triangle leaves out.
-just rs test -P sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::search::/)'
+just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::search::/)'
