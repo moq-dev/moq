@@ -64,6 +64,7 @@
 		"test/interop/clients/js-native",
 		"test/drain",
 		"test/receive-credit",
+		"test/stream-credit",
 		"test/video",
 		"test/p2p",
 		"test/qmux",

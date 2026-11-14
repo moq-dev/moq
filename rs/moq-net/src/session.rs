@@ -207,6 +207,9 @@ pub struct Session {
 	viewers: bandwidth::Viewers,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
+	/// This session's side of `auth`, kept so a close the driver records before the
+	/// reconnect loop reads it still answers the connection credential.
+	link: auth::Link,
 	credential: Option<auth::Credential>,
 	/// The subscriptions and fetches the protocol tasks carry.
 	work: Work,
@@ -457,6 +460,11 @@ impl Session {
 	pub(crate) fn credential(&self) -> Option<&auth::Credential> {
 		self.credential.as_ref()
 	}
+
+	/// This session's side of its [`auth`](Self::auth) handle.
+	pub(crate) fn link(&self) -> &auth::Link {
+		&self.link
+	}
 }
 
 /// The handles a protocol driver shares with its [`Session`].
@@ -573,6 +581,7 @@ impl Session {
 			viewers,
 			goaway,
 			auth: auth.handle().clone(),
+			link: auth.clone(),
 			credential,
 			work,
 			datagrams_unrouted,

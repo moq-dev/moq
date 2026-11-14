@@ -975,6 +975,10 @@ Each run's evidence directory keeps both builds' estimates (`criterion` and
 `paired.json`. The base build streams its diagnostics and retains them in
 `base-build.log`, including when it fails.
 
+A target that prints nothing for ten minutes (`BENCH_CRITERION_IDLE_SECONDS`) is killed and
+named as hung. A hung base only marks its target unavailable, so one hang in the revision
+being compared cannot hold the leg to its hour and lose the current results.
+
 Each revision builds in its own Cargo target directory (`base` and `current`
 under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use
 `run.sh`'s `BENCH_BASE` mode or a target directory per source tree: two trees

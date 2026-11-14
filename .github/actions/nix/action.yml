@@ -12,5 +12,8 @@ runs:
     - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
       with:
         determinate: false
+        # Packages build one derivation per crate, which leaves all but one
+        # core idle at Nix's default of one job.
         extra-conf: |
           accept-flake-config = true
+          max-jobs = auto

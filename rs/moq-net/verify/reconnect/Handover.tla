@@ -287,9 +287,9 @@ EndGoaway(s, uri) ==
          /\ Emit(<<"Migrating">>, s)
          /\ UNCHANGED watch
 
-\* `Reconnect::closed` for a close a retry may repair. A predecessor that is
-\* not closing gracefully serves again, so the policy migrates back onto it;
-\* the `Retrying` that follows changes no status, so it is left out.
+\* `Reconnect::closed`: every close retries, whatever its error. A predecessor
+\* that is not closing gracefully serves again, so the policy migrates back
+\* onto it; the `Retrying` that follows changes no status, so it is left out.
 EndClosed ==
     /\ live' = None
     /\ phase' = "backoff"
@@ -383,23 +383,24 @@ Connected ==
           ELSE UNCHANGED <<phase, live, watch, queue, probe>>
     /\ UNCHANGED <<pred, target, timer, dialTo, probing, misdials>>
 
-\* A dial failed, with a verdict a retry may repair or one it cannot. Until a
-\* session has been established, any failure ends the policy.
+\* A dial failed. Once a session has been established, every failure retries
+\* whatever its error (an unusable address is out of scope); until then, any
+\* failure ends the policy.
 Failed ==
     /\ dial # "none"
     /\ dial' = "none"
     /\ IF phase # "dialing"
        THEN UNCHANGED <<phase, live, pred, queue, timer, target, callerVars>>
-       ELSE \/ /\ Established
-               /\ phase' = "backoff"
-               /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
-               \* A redirect target that failed its walk is dropped: the next walk
-               \* dials the configured target (`Reconnect::configured`).
-               /\ target' = Start
-               /\ UNCHANGED <<live, pred, queue, callerVars>>
-            \/ /\ Done
-               /\ Emit(Append(queue, "Done"), None)
-               /\ UNCHANGED <<timer, target>>
+       ELSE IF Established
+            THEN /\ phase' = "backoff"
+                 /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+                 \* A redirect target that failed its walk is dropped: the next walk
+                 \* dials the configured target (`Reconnect::configured`).
+                 /\ target' = Start
+                 /\ UNCHANGED <<live, pred, queue, callerVars>>
+            ELSE /\ Done
+                 /\ Emit(Append(queue, "Done"), None)
+                 /\ UNCHANGED <<timer, target>>
     /\ UNCHANGED <<watch, probe, sess, used, dialTo, misdials>>
 
 \* `Reconnect::probed`, and the dial `run` makes of a probe that got through.
