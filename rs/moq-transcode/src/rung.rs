@@ -265,9 +265,16 @@ impl Want {
 		let Some(track) = &self.subscribers else {
 			return until_wanted(&self.demand, wanted).await;
 		};
+		// Read through the change cursor alone, so a change after any read is reported. A clone
+		// copies it, and nothing polls the accepted track's, so it starts at no subscriber.
 		let mut track = track.clone();
-		while track.subscription().is_some() != wanted {
-			track.subscription_changed().await?;
+		let mut subscribed = false;
+		let noop = kio::Waiter::noop();
+		while let std::task::Poll::Ready(changed) = track.poll_subscription_changed(&noop) {
+			subscribed = changed?.is_some();
+		}
+		while subscribed != wanted {
+			subscribed = track.subscription_changed().await?.is_some();
 		}
 		Ok(())
 	}
