@@ -87,5 +87,5 @@ Recommended:
 
 - [OBS simulcast check](/quest/m3/obs-multitrack-check.md) - keeps the dock's
   Go Live layers; this quest runs the obs-websocket recipe
-- [MoQ in obs-studio](/quest/m3/obs-studio/README.md) - a native output keeps
+- [MoQ in obs-studio](/quest/m5/obs-studio/README.md) - a native output keeps
   the same obs-websocket surface

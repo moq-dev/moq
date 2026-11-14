@@ -236,8 +236,8 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 		.validate(available.bits())
 		.map_err(|e| Error::Unsupported(e.into()))?;
 	let requested = match selection.kind() {
-		portal::Kind::Screen => SourceType::Monitor,
-		portal::Kind::Window => SourceType::Window,
+		portal::Kind::Screen => SourceType::MONITOR,
+		portal::Kind::Window => SourceType::WINDOW,
 	};
 	let session = proxy
 		.create_session(Default::default())
@@ -252,11 +252,11 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 			&session,
 			SelectSourcesOptions::default()
 				.set_cursor_mode(if cursor {
-					CursorMode::Embedded
+					CursorMode::EMBEDDED
 				} else {
-					CursorMode::Hidden
+					CursorMode::HIDDEN
 				})
-				.set_sources(ashpd::enumflags2::BitFlags::from(requested))
+				.set_sources(requested)
 				.set_multiple(false)
 				// A grant that ends with the process would make a token persisted
 				// through `Selection::restore_token` useless to the next one.
@@ -285,7 +285,7 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 					.streams()
 					.first()
 					.and_then(|stream| stream.source_type())
-					.map(|kind| kind as u32),
+					.map(|kind| kind.bits()),
 				token: response.restore_token(),
 			},
 		)

@@ -276,21 +276,18 @@ impl Sink {
 	/// Anchor the audio written so far to the caller's clock: its end is due to
 	/// sound at `at`.
 	///
-	/// The sink then plays onto that clock rather than at its latency alone.
-	/// Behind it, it speeds up once it holds more than its latency; ahead of
-	/// it, it slows down. Its buffer running low slows it down too, falling
-	/// behind the clock by at most `stretch`. Audio trailing the clock by more
-	/// than `stretch` skips onto it, and audio leading it by as much waits in
-	/// silence for it. A zero `stretch`
-	/// turns the time stretch off: written audio plays unaltered, and a sink
-	/// more than a window off the clock skips onto it or pads silence until
-	/// the clock reaches it. `jumped` is how far the
-	/// clock's reference moved earlier since the last call, which skips as much
-	/// audio as trails the clock, where a lower latency moves the clock ahead
-	/// by speeding up. Call it after each write and whenever the clock moves;
-	/// until the first call, or after the device changes, the latency alone is
-	/// the clock.
-	pub fn due(&mut self, at: Instant, stretch: Duration, jumped: Duration) {
+	/// The sink then plays onto that clock rather than at its latency alone:
+	/// behind it, it speeds up, and ahead of it, it slows down, at a rate
+	/// proportional to how far it is off, up to 10%. Audio about to run out
+	/// slows down too, falling behind the clock by at most `stretch`. Audio
+	/// trailing the clock by more than `stretch` skips onto it, and audio
+	/// leading it by as much waits in silence for it, however the clock moved.
+	/// A zero `stretch` turns the time stretch off: written audio plays
+	/// unaltered, and a sink more than a window off the clock skips onto it or
+	/// pads silence until the clock reaches it. Call it after each write and
+	/// whenever the clock moves; until the first call, or after the device
+	/// changes, the latency alone is the clock.
+	pub fn due(&mut self, at: Instant, stretch: Duration) {
 		// The device thread reads std's clock, so carry the distance from now
 		// over to it rather than the instant.
 		let (now, host) = (Instant::now(), crate::ring::host());
@@ -298,7 +295,7 @@ impl Sink {
 			Some(ahead) => host + ahead,
 			None => host.checked_sub(now.duration_since(at)).unwrap_or(host),
 		};
-		self.channel.lock().unwrap().prod.due(at, stretch, jumped);
+		self.channel.lock().unwrap().prod.due(at, stretch);
 	}
 
 	/// The PCM layout this sink was built with.
@@ -532,21 +529,17 @@ fn channel(input: &Input, rate: u32, bus: Layout) -> (Channel, ring::Consumer) {
 	let remix =
 		(input.layout != bus).then(|| Remix::new(input.layout, bus).expect("sink and bus layouts name their speakers"));
 
-	let (prod, mut cons) = ring::channel(
+	let (prod, cons) = ring::channel(
 		bus.channels() as usize,
 		input.sample_rate,
 		rate,
 		ring::Config {
 			latency: input.latency,
 			capacity: input.latency + HEADROOM,
-			// Stretch handles ordinary drift; only a dry or nearly full ring
-			// pays for emergency silence or trimming.
-			pad: true,
-			trim: true,
+			correction: ring::Correction::Stretch,
 			comfort: true,
 		},
 	);
-	cons.stretch(rate);
 	(Channel { prod, remix }, cons)
 }
 

@@ -36,5 +36,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Wire fuzz coverage](/quest/m1/wire-fuzz-coverage.md) - adds moq-c, moq-uring, and moq-sock to the same Miri recipe
-- [Drop kio's epoch fence](/quest/m4/crossbeam-pin-fence.md) - the ordering in kio's log these runs watch
+- [Wire fuzz coverage](/quest/m1/wire-fuzz-coverage.md) - adds moq-uring and moq-sock to the same Miri recipe
+- [Drop kio's epoch fence](/quest/m5/crossbeam-pin-fence.md) - the ordering in kio's log these runs watch
