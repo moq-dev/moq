@@ -1659,7 +1659,7 @@ test("a yielded group pauses once an update supersedes a stale drop before its h
 test.each(["continued", "dropped"] as const)("a reset without its code pauses the group (%s)", async (then) => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
@@ -1721,7 +1721,7 @@ test.each([
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
@@ -1778,7 +1778,7 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
@@ -1825,7 +1825,7 @@ test("a recovery waits for the continuation of a group a reset without its code 
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const consumed = subscriber.consume(Path.from("room"));
 	const live = consumed.track("video").subscribe({ delay: { max: null } });
 	let history: ReturnType<ReturnType<typeof consumed.track>["subscribe"]> | undefined;
@@ -1902,7 +1902,7 @@ test("an update restores the hold a stale drop excused", async () => {
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
@@ -1949,7 +1949,7 @@ test("an update while a continuation waits keeps its hold on the end", async () 
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
