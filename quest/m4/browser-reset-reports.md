@@ -36,6 +36,9 @@ both bugs within a few milliseconds of the stream's data.
 - Once a browser fix ships, the matching workaround in `js/net/src/lite/subscriber.ts`
   stays: the draft allows it, and older browsers keep the bug.
 
+Decided 2026-11-13 (maintainer, `/quest-complete`): ✅ keep this follow-up
+(rejected: drop it and live with the workaround alone).
+
 ## Waiting
 
 - Maintainer: approve filing at crbug.com and bugzilla.mozilla.org, outside the
