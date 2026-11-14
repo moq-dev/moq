@@ -142,7 +142,7 @@ fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz)
+    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz)
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206
@@ -222,7 +222,7 @@ case "$action" in
                 | .targets[]
                 | select((.kind // [] | any(. == "bench" or . == "example")) or .test)
                 | (.["required-features"] // [])[]
-                | "\($name)/\(.)"' | sort -u | tr '\n' ' '
+                | "\($name)/\(.)"' | LC_ALL=C sort -u | tr '\n' ' '
         )
         for feature in $required; do
             [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")

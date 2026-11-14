@@ -34,5 +34,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Peer-reachable unsafe](/quest/m1/wire-fuzz-coverage.md) - the moq-sock, moq-uring, and moq-c targets
 - [OSS-Fuzz](/quest/m4/oss-fuzz.md) - runs these around the clock once it lands

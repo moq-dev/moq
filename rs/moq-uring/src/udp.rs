@@ -55,6 +55,11 @@ use crate::metrics::Counters;
 use crate::shared::{Cqe, Op, Shared};
 use crate::worker::Owner;
 
+// The control-message walk's fuzz target, on 64-bit, which the reference model's struct layouts
+// assume.
+#[cfg(all(any(test, feature = "fuzz"), target_pointer_width = "64"))]
+pub mod fuzz;
+
 /// `CMSG_SPACE` of a `len`-byte payload.
 const fn cmsg_space(len: usize) -> usize {
 	// SAFETY: a pure size computation.
