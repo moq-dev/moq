@@ -1344,9 +1344,11 @@ export class Subscriber {
 			sample();
 			const named_ = key(wire.node, wire.prefix);
 			if (named_ !== undefined && named.get(named_) === wire.id) named.delete(named_);
+			// Unindexed first: leaving its floors reshows another carrier at once, which
+			// refreshes these paths and so looks up every route indexed there.
+			for (const path of wire.view.claims.keys()) byPath.get(path)?.delete(wire.id);
 			// What its last floor certified stays, so no other stream's lagging claim revives.
 			this.#floors.leave(wire.node, wire.carrier);
-			for (const path of wire.view.claims.keys()) byPath.get(path)?.delete(wire.id);
 			wire.shown.clear();
 			refreshRoute(wire, true);
 			this.#consumes.revalidate();

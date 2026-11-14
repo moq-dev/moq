@@ -4999,6 +4999,37 @@ test("a lite-07 consume names the node now serving its instance", async () => {
 	await Promise.all([first.info, second.info]);
 });
 
+// A route that ends unindexes itself before its floors reshow another route to the node, which
+// refreshes every route at the paths it shows: the ended one must not be among them.
+test("a lite-07 certified route ending shows another route's copy of its claim", async () => {
+	const { subscriber, announced, send } = await routedStream();
+	const x = Path.from("live/x");
+	const next = async () => {
+		const event = await announced.next();
+		return `${event?.kind} ${event?.prefix} ${String(event?.route.instance)}`;
+	};
+
+	// A narrow route's floor certifies nothing, so it shows x at b while it carries it.
+	await send({ status: "routeStart", node: NODE_A, suffix: Path.from("live"), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 0n, instance: Instance.parse("b") });
+	await send({ status: "floor", id: 0n });
+	expect(await next()).toBe("start live/x b");
+
+	// A wide route's floor certifies x at a, which then decides it.
+	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 1n, instance: Instance.parse("a") });
+	await send({ status: "floor", id: 1n, revision: 1n });
+	let seen = await next();
+	while (seen !== "start live/x a") seen = await next();
+
+	// With no live floor left, the narrow route's copy shows again.
+	await send({ status: "routeEnd", id: 1n });
+	expect(await next()).toBe("restart live/x b");
+
+	announced.close();
+	subscriber.close();
+});
+
 test("a lite-07 path ranks only an instance's newest epoch", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const room = Path.from("room");
