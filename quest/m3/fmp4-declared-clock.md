@@ -14,4 +14,14 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 - A rendition that declares no depth keeps today's inference, including #7491's rule.
 - Keep #7491's tests (`tfdt` never steps back across sub-GOP fragments, ffprobe reads every fragment) and add a variable-rate B-frame case with a stall longer than the cadence, whose decode times follow the presentation slots across the stall. `DeclaredClock` derives DTS from PTS and depth alone, so a gap that only the encoder's own decode times would show is out of reach and not a goal.
 
+Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
+the exporters break exact timestamp ties four ways. fMP4 gives a frame the
+cadence ([moq-dev/moq#8470](https://github.com/moq-dev/moq/pull/8470)),
+`DecodeClock` nudges the DTS, FLV bumps it, and `DeclaredClock` refuses an
+exact repeat, so an MP4 with one repeated timestamp exports to fMP4 but fails
+to FLV. [moq-dev/moq#8716](https://github.com/moq-dev/moq/pull/8716) retimed
+the demo's source, so no test exercises an exact repeat any more. Since this
+quest makes `DeclaredClock` the one decode-time rule, settle one tie rule with
+it and add an exact-repeat case to each exporter's tests.
+
 Public API: none. Wire: none.

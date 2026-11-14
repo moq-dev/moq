@@ -31,6 +31,16 @@ Decided 2026-11-10 (maintainer, a later /quest-plan the same day):
   [reconnect](/quest/m4/reconnect-trace-validation.md), and
   [subscribe](/quest/m4/subscribe-trace-validation.md) to reuse.
 
+Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
+[moq-dev/moq#8729](https://github.com/moq-dev/moq/pull/8729) (the
+[exhaustive route search](/quest/m2/cluster-routes/route-exhaustive-sim.md))
+searches every delivery order on the compiled `path::Router`, faster than TLC
+on the same bounds (0.44 s against 2 s on the triangle) and on meshes TLC
+cannot reach. Once it lands, `RouteHandoff.tla` mostly duplicates it: only
+`Seen`, `StaleIsChased`, and `NoStaleReturn` stay outside it. A search over
+the compiled code cannot drift from it, which is this quest's whole purpose
+for route, so revisit this quest once #8729 merges.
+
 This is TLA+ trace validation (Cirstea, Kuppe, Loillier, Merz, 2024, used on
 CCF and etcd's raft): `route::tests::Sim` records each step as the model
 action it corresponds to, with the variables the model keeps, and TLC checks
@@ -48,3 +58,7 @@ Run it on the sweeps' existing seeds in CI only if it stays fast; otherwise in
 Nightly with the sweeps' fresh seeds.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: once the exhaustive route search lands, (a) fold `Seen`, `StaleIsChased`, and `NoStaleReturn` into it delete `RouteHandoff.tla` and this quest, and hand its trace recorder and TLC recipe to the [resume](/quest/m4/resume-trace-validation.md) quest (recommended: the search runs the compiled code); (b) keep the model and this quest, and drop the search; (c) keep both

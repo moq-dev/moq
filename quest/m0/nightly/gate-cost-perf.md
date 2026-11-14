@@ -36,3 +36,4 @@ dispatch Nightly.
 ## Waiting
 
 - Maintainer: merge the dotfiles PR and rebuild `nixos`, which restarts the CI runner containers; an agent does not deploy host config. Check with the `perf stat` command above.
+- Maintainer: once perf counts, where gate cost runs (found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md): it is set to run for hours, timeout 330 min, on a `moq-queue` runner, and scheduled Nightlies start 5 to 9 h late, around 15:00 UTC when the queue takes 47 to 90 entries an hour, adding noise to its own series and slowing the queue): (a) its own schedule at the queue's quietest hour (recommended); (b) keep it in Nightly and trust only its instruction counts

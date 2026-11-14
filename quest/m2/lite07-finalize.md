@@ -129,6 +129,12 @@ transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
+- [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - settles whether lite-07 carries WARM_* and SUBSCRIBE's `Warm` byte
+- [ROUTE's RTT](/quest/m2/route-rtt.md) - settles whether ROUTE carries its informational RTT
+- [FETCH Start Byte](/quest/m2/fetch-start-byte.md) - settles whether FETCH keeps a byte offset into a half-read frame
+- [Yield on relay links](/quest/m2/yield-relay-links.md) - narrows YIELDED from `ietf` sessions to tracks carrying moq-transport records
+- [Subscriber Min Age](/quest/m2/subscriber-min-age.md) - settles whether SUBSCRIBE carries a minimum age nothing reads
+- [AUTH_ERROR retries](/quest/m2/auth-retry-codes.md) - writes down which refusal codes a presenter retries
 
 ## Related
 

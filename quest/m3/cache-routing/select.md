@@ -13,8 +13,13 @@ and how many moves warm routes caused.
 ## Plan
 
 - Implement the rule the [epic](/quest/m3/cache-routing/README.md)'s item 14
-  records ([moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732)) and
-  pass the fixtures and sweep in `rs/moq-net/src/route/tests/cache.rs`: the
+  records ([moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732)) by
+  moving `decide` and `offer_from` out of `rs/moq-net/src/route/tests/cache.rs`
+  into production code that the fixtures and sweep then drive, the way `Sim`
+  drives `path::Router`: today they test the rule against itself and pass
+  without touching the session. Add a check of the Goal's efficiency to
+  `steady()`, copies held against a cold-routing baseline, since a rule that
+  never offered a copy passes the sweep now. The rule covers the
   warm messages lite-07 carries, which `rs/moq-net/src/lite/` reads and
   ignores today, and SUBSCRIBE's `Warm` byte, which it and `js/net` send as 0
   (follow the route) and ignore when read, warm state derived
@@ -28,10 +33,10 @@ and how many moves warm routes caused.
   only to a copy of its own instance.
 - Bound the warm state a peer can make a relay hold by design, as
   announcements are bounded.
-- Each pull states whom it serves, where Rust says unknown today: alone for
-  a local reader or a client session, which forwards nothing. `js/net`
-  already says alone and skips the warm types as unknown, so it needs
-  nothing.
+- Each pull sets SUBSCRIBE's `Warm` byte, which #8732 put in place of the
+  `Serves` field; Rust and `js/net` send 0 (follow the route) today, and
+  `js/net`, which forwards nothing, keeps doing so and skips the warm types as
+  unknown.
 - Export upstream copies held, warm routes sent and received, and moves by
   cause through the relay's existing metrics.
 - `rs/moq-net/AGENTS.md` says a relay behaves the same warm or cold. That
@@ -46,4 +51,6 @@ after.
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer driving lite-07 sessions since [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023), whose feasibility distances eligibility reads
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer driving lite-07 sessions since [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023); its switch to path routes deletes the feasibility distances this rule once read
+- [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - may strip the warm wire from lite-07 or move this epic downstream before this starts
+- [Transient cycles](/quest/m3/cache-routing/transient-cycles.md) - lowers the churn-time pull cycles the rule allows
