@@ -8,4 +8,5 @@ if [[ "$ROLE" == client ]]; then
     # The simulator starts with the client; dialing before it forwards loses the handshake.
     /wait-for-it.sh sim:57832 -s -t 30
 fi
-exec /usr/local/bin/quic-interop
+# The runner keeps /logs beside a failed case's pcaps.
+exec /usr/local/bin/quic-interop 2>/logs/log.txt

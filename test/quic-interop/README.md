@@ -20,9 +20,11 @@ peer image by digest, so a peer's release cannot change a result. It also says
 what each cell must read: every case passes in both roles, except the ones its
 `unsupported` tables list with the reason (the endpoint exits 127 for each,
 which the runner reports as unsupported), and the cells its `known` entries
-list with the quest or upstream issue that owns them. Any other result fails
-the run, and so does a known failure that starts passing, so the expectation
-is updated in the same change.
+list with why: a peer's own `unsupported`, a moq-quic failure with the quest
+that owns it, or a peer's failure that interop.seemann.io shows against other
+stacks too. Any other result fails the run. A known failure may also pass,
+since loss and timing make those cases probabilistic; the run prints each
+such pass, and the owning quest deletes the entry once its fix lands.
 
 The runner marks a client that fails against every server as unsupported;
 the harness turns that off, since it would hide a moq-quic regression that
@@ -35,8 +37,8 @@ Podman: no interface names, no memlock limit, and no SELinux labels on the
 bind mounts.
 
 Nightly runs one job per peer (`.github/workflows/quic-interop.yml`). A failed
-cell keeps the runner's logs, pcaps, and TLS key logs in the job's artifact;
-cells that read as expected drop theirs.
+cell keeps the runner's logs, pcaps, TLS key logs, and moq-quic's own log in
+the job's artifact; cells that read as expected drop theirs.
 
 To bump a pin, change it in `cases.toml` (or the endpoint base image in the
 `Dockerfile`), run the full matrix, and update `known` to match.

@@ -46,3 +46,120 @@ zerortt = "moq-quic never accepts 0-RTT (rs/moq-quic/README.md, No early data)."
 http3 = "The endpoint speaks only hq-interop; see the client's reason."
 v2 = "moq-quic speaks QUIC v1 only (rs/moq-quic/README.md, QUIC v1 only)."
 connectionmigration = "A preferred address needs a second socket on the same endpoint, which moq-tokio's driver does not take."
+
+# Cells that do not pass, with why. A peer's own `unsupported` (its endpoint
+# exits 127) must read exactly that. A known failure may read failed or
+# succeeded, since loss and timing make these cases probabilistic; its quest
+# deletes the entry when it lands.
+
+[[known]]
+client = "quic-go"
+server = "moq-quic"
+case = "ecn"
+result = "unsupported"
+why = "quic-go's interop client exits 127 for ecn."
+
+[[known]]
+client = "moq-quic"
+server = "quic-go"
+case = "ecn"
+result = "unsupported"
+why = "quic-go's interop server exits 127 for ecn."
+
+[[known]]
+client = "quiche"
+server = "moq-quic"
+case = "ecn"
+result = "unsupported"
+why = "quiche's interop client exits 127 for ecn."
+
+[[known]]
+client = "moq-quic"
+server = "quiche"
+case = "ecn"
+result = "unsupported"
+why = "quiche's interop server exits 127 for ecn."
+
+[[known]]
+client = "quiche"
+server = "moq-quic"
+case = "chacha20"
+result = "unsupported"
+why = "quiche's interop client exits 127 for chacha20."
+
+[[known]]
+client = "quiche"
+server = "moq-quic"
+case = "keyupdate"
+result = "unsupported"
+why = "quiche's interop client exits 127 for keyupdate."
+
+[[known]]
+client = "moq-quic"
+server = "quic-go"
+case = "connectionmigration"
+result = "unsupported"
+why = "quic-go's interop server exits 127 for connectionmigration."
+
+[[known]]
+client = "moq-quic"
+server = "quiche"
+case = "connectionmigration"
+result = "unsupported"
+why = "quiche's interop server exits 127 for connectionmigration."
+
+[[known]]
+client = "moq-quic"
+server = "quinn"
+case = "connectionmigration"
+result = "unsupported"
+why = "quinn's interop server exits 127 for connectionmigration."
+
+[[known]]
+client = "moq-quic"
+server = "ngtcp2"
+case = "connectionmigration"
+result = "failed"
+why = "moq-quic's client never moves to a server's preferred address (quest/m4/quic-preferred-address.md), and ngtcp2's server fails this against every client on interop.seemann.io."
+
+[[known]]
+client = "quinn"
+server = "moq-quic"
+case = "handshakeloss"
+result = "failed"
+why = "moq-quic's server abandons a handshake after 10 s without hearing from the client, shorter than quinn's retransmission gaps under 30% loss (quest/m1/quic-handshake-loss.md)."
+
+[[known]]
+client = "quinn"
+server = "moq-quic"
+case = "handshakecorruption"
+result = "failed"
+why = "As handshakeloss (quest/m1/quic-handshake-loss.md)."
+
+[[known]]
+client = "quiche"
+server = "moq-quic"
+case = "handshakeloss"
+result = "failed"
+why = "quiche's client fails with InvalidState after moq-quic's server retires the connection IDs it skipped (quest/m1/quic-handshake-loss.md)."
+
+[[known]]
+client = "quiche"
+server = "moq-quic"
+case = "handshakecorruption"
+result = "failed"
+why = "As handshakeloss (quest/m1/quic-handshake-loss.md)."
+
+[[known]]
+client = "moq-quic"
+server = "quiche"
+case = "rebind-port"
+result = "failed"
+why = "quiche's server never retransmits what it sent to the old address, and fails this against every client on interop.seemann.io."
+
+[[known]]
+client = "moq-quic"
+server = "quiche"
+case = "rebind-addr"
+result = "failed"
+why = "As rebind-port."

@@ -7,8 +7,7 @@ validates the address once the handshake is confirmed and moves the
 connection to it, as RFC 9000 section 9.6 recommends, so a relay that
 handshakes on an anycast address and advertises its unicast one
 (`--listen-preferred-v4`/`-v6`) gets native clients to follow, not only
-browsers. The QUIC Interop Runner's `connectionmigration` case passes with
-moq-quic as the client against every peer in `test/quic-interop/cases.toml`.
+browsers.
 
 ## Plan
 
@@ -24,8 +23,11 @@ them, while the `listen.rs` docs claimed this crate migrates.
   fails, and never migrate a connection the application already closed.
 - Cover it on the seeded sim: the switch, a validation that times out, a
   peer that disabled migration, and a preferred address of the other family.
-- Drop the `known` entries for client `connectionmigration` in
-  `test/quic-interop/cases.toml` and rerun its matrix.
+- The QUIC Interop Runner cannot show it yet: of the pinned peers, only
+  ngtcp2's server serves `connectionmigration`, and it fails the case
+  against every client on <https://interop.seemann.io>. Leave the `known`
+  entry in `test/quic-interop/cases.toml` until a pinned peer's server
+  passes it with other clients, then drop it.
 
 Not here: serving the runner's server-role `connectionmigration`, which needs
 a second socket on one driver endpoint; nothing in MoQ needs that yet.

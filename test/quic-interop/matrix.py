@@ -6,8 +6,8 @@
 
 `prepare` points the runner at moq-quic's image and the pinned peers and
 simulator, and `peers` lists the peers. `check` fails on every cell whose
-result differs from the one cases.toml expects, including a known failure that
-now passes, and deletes the runner's logs of every other cell.
+result differs from what cases.toml expects, and deletes the runner's logs of
+every other cell.
 """
 
 import argparse
@@ -33,6 +33,8 @@ def load(path=CONFIG):
         missing = {"client", "server", "case", "result", "why"} - known.keys()
         if missing:
             sys.exit(f"cases.toml: known entry {known} lacks {sorted(missing)}")
+        if known["result"] not in ("unsupported", "failed"):
+            sys.exit(f"cases.toml: known entry {known} must expect unsupported or failed")
         if SELF not in (known["client"], known["server"]):
             sys.exit(f"cases.toml: known entry {known} does not involve {SELF}")
     return config
@@ -70,15 +72,20 @@ def prepare(args):
 
 
 def expected(config, client, server, case):
-    """The result a cell must read, and why it is not a pass."""
+    """The results a cell may read, and why it is not just a pass.
+
+    A known failure may also pass: loss makes those cases probabilistic.
+    """
     for known in config.get("known", []):
         if (known["client"], known["server"], known["case"]) == (client, server, case):
-            return known["result"], known["why"]
+            if known["result"] == "failed":
+                return {"failed", "succeeded"}, known["why"]
+            return {known["result"]}, known["why"]
     unsupported = config.get("unsupported", {})
     for role, name in (("client", client), ("server", server)):
         if name == SELF and case in unsupported.get(role, {}):
-            return "unsupported", unsupported[role][case]
-    return "succeeded", ""
+            return {"unsupported"}, unsupported[role][case]
+    return {"succeeded"}, ""
 
 
 def cells(results):
@@ -101,9 +108,11 @@ def check(args):
         for client, server, case, result in cells(results):
             seen += 1
             want, why = expected(config, client, server, case)
-            if result != want:
-                mismatches.append((client, server, case, result, want, why))
+            if result not in want:
+                mismatches.append((client, server, case, result, "/".join(sorted(want)), why))
             else:
+                if why and result == "succeeded":
+                    print(f"PASSED client={client} server={server} {case}, a known failure ({why})")
                 # Keep the logs and pcaps of a mismatch only: every cell keeps them, and a
                 # full matrix's would bury the one that matters.
                 shutil.rmtree(Path(results["log_dir"]) / f"{server}_{client}" / case, ignore_errors=True)
