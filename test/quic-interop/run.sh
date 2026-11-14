@@ -112,9 +112,31 @@ if docker --version | grep -qi podman; then
 fi
 python3 -I "$DIR/matrix.py" prepare "$runner" "$image" ${podman[@]+"${podman[@]}"}
 
+# A cancelled run leaves the containers and networks of the cell in progress, since run.py
+# dies before stopping them. Compose names the project after the runner's directory, and the
+# lock means no other run on this daemon holds it; `down` by name needs no compose file.
+# shellcheck disable=SC2329 # called by the traps below
+stop_runner() {
+    harness_reap_all
+    (cd "$HARNESS_RUN" && PATH="$tools/bin:$PATH" docker compose -p "$(basename "$runner")" down --timeout 0) >/dev/null 2>&1 || true
+}
+trap 'stop_runner; harness_finish 130; exit 130' INT
+trap 'stop_runner; harness_finish 143; exit 143' TERM
+
 uv venv --quiet --python 3.12 "$HARNESS_RUN/venv"
 uv pip install --quiet --python "$HARNESS_RUN/venv" -r "$DIR/requirements.txt"
 cp "$DIR/sitecustomize.py" "$("$HARNESS_RUN/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/"
+
+# run_runner ROLE ARGS...: the runner's run.py in its own directory. The runner calls a
+# client that fails every server unsupported unless told not to (-m), which would hide a
+# moq-quic regression that breaks against every peer.
+# shellcheck disable=SC2329 # called by harness_spawn
+run_runner() {
+    local role="$1"
+    shift
+    cd "$runner" && exec env -u PYTHONPATH PATH="$tools/bin:$PATH" "$HARNESS_RUN/venv/bin/python" run.py \
+        "$@" -n "moq-quic${others:+,$others}" -l "$HARNESS_RUN/logs/$role" -j "$HARNESS_RUN/$role.json" -m
+}
 
 tests=()
 [[ -z "$cases" ]] || tests=(-t "$cases")
@@ -127,11 +149,10 @@ for role in "${passes[@]}"; do
         pair=(-s "$others" -c moq-quic)
     fi
     echo "moq-quic as $role: run.py ${pair[*]}"
-    # The runner calls a client that fails every server unsupported unless told not
-    # to, which would hide a moq-quic regression that breaks against every peer.
-    (cd "$runner" && env -u PYTHONPATH PATH="$tools/bin:$PATH" "$HARNESS_RUN/venv/bin/python" run.py \
-        "${pair[@]}" ${tests[@]+"${tests[@]}"} -n "moq-quic${others:+,$others}" \
-        -l "$HARNESS_RUN/logs/$role" -j "$HARNESS_RUN/$role.json" -m) || true
+    # Spawned, not run in the foreground, so a signal interrupts the wait instead of
+    # waiting out the matrix.
+    harness_spawn "run.py as $role" - run_runner "$role" "${pair[@]}" ${tests[@]+"${tests[@]}"}
+    harness_wait "$HARNESS_PID" || true
     if [[ ! -s "$HARNESS_RUN/$role.json" ]]; then
         echo "the runner wrote no results for moq-quic as $role" >&2
         status=1

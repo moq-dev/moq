@@ -380,11 +380,21 @@ impl PathResponses {
 		}
 	}
 
-	/// Take the oldest queued answer to a challenge from an address other than `remote`
+	/// Take the newest queued answer to a challenge from the first address other than `remote`,
+	/// dropping that address's other answers
+	///
+	/// Challenges queued while that address was the current path were all kept, so a migration
+	/// before we transmit would otherwise send each as its own padded datagram.
 	pub(crate) fn pop_off_path(&mut self, remote: SocketAddr) -> Option<(u64, SocketAddr)> {
-		let index = self.pending.iter().position(|x| x.remote != remote)?;
-		let response = self.pending.remove(index);
-		Some((response.token, response.remote))
+		let off = self.pending.iter().find(|x| x.remote != remote)?.remote;
+		let newest = self
+			.pending
+			.iter()
+			.filter(|x| x.remote == off)
+			.max_by_key(|x| x.packet)?
+			.token;
+		self.pending.retain(|x| x.remote != off);
+		Some((newest, off))
 	}
 
 	/// Take the oldest queued answer to a challenge from `remote`
@@ -472,6 +482,19 @@ mod tests {
 		responses.push(3, 0xc, OTHER, PATH);
 		assert_eq!(responses.pop_on_path(PATH), None);
 		assert_eq!(responses.pop_off_path(PATH), Some((0xc, OTHER)));
+		assert!(responses.is_empty());
+	}
+
+	/// Challenges queued on a path that is no longer current go out as one answer, the newest.
+	#[test]
+	fn answers_once_after_migrating() {
+		let mut responses = PathResponses::default();
+		responses.push(1, 0xa, PATH, PATH);
+		responses.push(2, 0xb, PATH, PATH);
+		responses.push(3, 0xc, OTHER, OTHER);
+		assert_eq!(responses.pop_off_path(OTHER), Some((0xb, PATH)));
+		assert_eq!(responses.pop_off_path(OTHER), None);
+		assert_eq!(responses.pop_on_path(OTHER), Some(0xc));
 		assert!(responses.is_empty());
 	}
 

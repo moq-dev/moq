@@ -17,12 +17,15 @@ moq-quic stores the preferred address's connection ID and reset token
 them, while the `listen.rs` docs claimed this crate migrates.
 
 - After handshake confirmation, if the peer sent a preferred address of the
-  local socket's family and active migration is not disabled, probe it with
+  local socket's family, probe it with
   PATH_CHALLENGE on the preferred address's connection ID (sequence 1), and
   switch the path on PATH_RESPONSE. Keep the original path if validation
   fails, and never migrate a connection the application already closed.
+  `disable_active_migration` does not stop this (RFC 9000 section 18.2): it
+  only bars moving off the handshake address.
 - Cover it on the seeded sim: the switch, a validation that times out, a
-  peer that disabled migration, and a preferred address of the other family.
+  switch when the peer also disabled active migration, and a preferred
+  address of the other family.
 - The QUIC Interop Runner cannot show it yet: of the pinned peers, only
   ngtcp2's server serves `connectionmigration`, and it fails the case
   against every client on <https://interop.seemann.io>. Leave the `known`

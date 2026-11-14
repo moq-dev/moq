@@ -71,6 +71,19 @@ def prepare(args):
         )
     compose.write_text(text)
 
+    # The runner keeps logs only for cells that failed or passed, so an unexpected
+    # unsupported cell would reach `check` with nothing to diagnose it by.
+    interop = runner / "interop.py"
+    text, n = re.subn(
+        r"^(\s+)if status == TestResult\.FAILED or status == TestResult\.SUCCEEDED:\n(\s+log_dir = )",
+        r"\1if True:\n\2",
+        interop.read_text(),
+        flags=re.M,
+    )
+    if n != 1:
+        sys.exit("interop.py no longer saves logs where expected; update the patch")
+    interop.write_text(text)
+
 
 def expected(config, client, server, case):
     """The results a cell may read, and why it is not just a pass.
