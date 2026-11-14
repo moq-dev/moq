@@ -50,6 +50,8 @@ exclude = [
     { path = "**/target/**", format = "sdist" },
     # Media fixtures are only read by Rust tests, not source installs.
     { path = "**/test_data/**", format = "sdist" },
+    # The vendored WebRTC stack's RTP captures, which its crate also excludes.
+    { path = "**/tests/data/**", format = "sdist" },
 ]
 
 # Listed explicitly (not `py/*`) so build output like py/dist isn't mistaken

@@ -1329,6 +1329,7 @@ impl Misses {
 		for run in runs {
 			let ask = Ask {
 				start: Position::group(run.start),
+				byte: 0,
 				end: run.end,
 				frame_end: None,
 				asking: *asking,

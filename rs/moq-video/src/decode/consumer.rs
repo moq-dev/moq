@@ -126,6 +126,16 @@ pub struct Consumer {
 	selector: Selector,
 }
 
+/// Access units a [`Reader`] remembers the arrival of while its decoder holds them.
+///
+/// An entry goes once the decoder returns its picture, or a picture fed after it
+/// at a later timestamp, so the queue holds only what the decoder has in flight:
+/// one entry without reordering, a few with B-frames. H.264 and H.265 hold at
+/// most 16 pictures, and this leaves room for a hardware pipeline beyond that.
+/// The cap bounds what a malformed stream strands, such as timestamps that run
+/// backwards within a group; the oldest go first.
+const ARRIVALS: usize = 32;
+
 /// A decoder that is idle, decoding, or gone.
 ///
 /// A decode in flight is kept across [`Consumer::read`] calls rather than
@@ -138,7 +148,10 @@ enum Slot {
 }
 
 /// A [`Reader::read`] in flight, handing the reader back with its result.
-type Step = Pin<Box<dyn Future<Output = (Box<Reader>, Result<Option<Read>, Error>)> + Send>>;
+type Step = Pin<Box<dyn Future<Output = (Box<Reader>, Result<Option<Item>, Error>)> + Send>>;
+
+/// A read, with when the access unit behind a picture arrived.
+type Item = (Read, Option<Instant>);
 
 /// One subscription and the decoder it feeds.
 struct Reader {
@@ -152,7 +165,13 @@ struct Reader {
 	/// them, that `read` hasn't returned yet. One AU yields one picture in the
 	/// low-delay path, but a backend may hand back more, so we buffer to keep
 	/// `read` one-item-per-call.
-	pending: VecDeque<Read>,
+	pending: VecDeque<Item>,
+	/// The presentation time, in microseconds, and arrival of each access unit
+	/// fed to the decoder that no picture has come back for, in decode order.
+	/// Keyed by timestamp, because a decoder may return pictures in presentation
+	/// or decode order. Microseconds, because a backend may hand a picture back
+	/// at another scale than its access unit's.
+	arrivals: VecDeque<(u128, Instant)>,
 	/// Whether the ended track's decoder has already been drained.
 	drained: bool,
 	/// The first recovery group lacks the preceding GOP's references.
@@ -208,6 +227,20 @@ impl Consumer {
 		&self.name
 	}
 
+	/// When the access unit behind the latest picture [`read`](Self::read) returned
+	/// landed in this node's cache ([`moq_mux::container::Consumer::arrival`]).
+	///
+	/// Pair it with when the picture was read to tell network delay from decode
+	/// delay: it excludes the time the decoder held or reordered the picture.
+	/// A gap or an end leaves it unchanged, as `moq_audio::decode::Consumer::arrival`
+	/// does. `None` before the first picture, and for a picture that no access unit,
+	/// or more than one, matches by timestamp: one a backend returned at a timestamp
+	/// it was never handed, or a stream that repeats a timestamp while the decoder
+	/// holds both.
+	pub fn arrival(&self) -> Option<Instant> {
+		self.selector.arrival()
+	}
+
 	/// Read the next decoded picture or boundary, or `None` after the track ends and
 	/// the decoder's buffered tail has been drained.
 	///
@@ -255,7 +288,7 @@ impl Consumer {
 				progress = true;
 				*slot = Slot::Idle(reader);
 				match result {
-					Ok(Some(read)) => self.selector.push(lane, read, Instant::now()),
+					Ok(Some((read, arrival))) => self.selector.push_arrived(lane, read, arrival, Instant::now()),
 					Ok(None) => {
 						*slot = Slot::Closed;
 						self.selector.finish(lane);
@@ -370,17 +403,19 @@ impl Reader {
 			decoder,
 			track,
 			pending: VecDeque::new(),
+			arrivals: VecDeque::new(),
 			drained: false,
 			recover: true,
 			leading_floor: None,
 		})
 	}
 
-	/// The next item this decoder alone produces; see [`Consumer::read`].
-	async fn read(&mut self) -> Result<Option<Read>, Error> {
+	/// The next item this decoder alone produces, with its access unit's arrival
+	/// for a picture; see [`Consumer::read`].
+	async fn read(&mut self) -> Result<Option<Item>, Error> {
 		loop {
-			if let Some(read) = self.pending.pop_front() {
-				return Ok(Some(read));
+			if let Some(item) = self.pending.pop_front() {
+				return Ok(Some(item));
 			}
 			if self.drained {
 				return Ok(None);
@@ -393,14 +428,14 @@ impl Reader {
 				// stays usable and restarts on the next group's keyframe.
 				Some(Encoded::Gap { timestamp, duration }) => {
 					self.drain().await?;
-					self.pending.push_back(Read::Gap { timestamp, duration });
+					self.pending.push_back((Read::Gap { timestamp, duration }, None));
 					self.recover = true;
 					continue;
 				}
 				// A fresh encoder has no preceding GOP to reference, so no recovery.
 				Some(Encoded::End { end, .. }) => {
 					self.drain().await?;
-					self.pending.push_back(Read::End { end });
+					self.pending.push_back((Read::End { end }, None));
 					continue;
 				}
 				None => None,
@@ -422,6 +457,8 @@ impl Reader {
 				// Queue what the flush readied before reporting its error, so a
 				// later read still hands those pictures over.
 				let received = self.receive();
+				// Whatever the flush did not return never comes back.
+				self.arrivals.clear();
 				tail?;
 				received?;
 				continue;
@@ -435,25 +472,67 @@ impl Reader {
 				continue;
 			}
 
-			self.decoder
+			let arrived = self.track.arrival();
+			if let Some(arrived) = arrived {
+				if self.arrivals.len() == ARRIVALS {
+					self.arrivals.pop_front();
+				}
+				self.arrivals.push_back((mux_frame.timestamp.as_micros(), arrived));
+			}
+			let decoded = self
+				.decoder
 				.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
-				.await?;
+				.await;
+			if decoded.is_err() && arrived.is_some() {
+				// No picture will come back for a refused access unit, and left queued its
+				// arrival would be reported for a later one at the same timestamp.
+				self.arrivals.pop_back();
+			}
+			decoded?;
 			self.receive()?;
 		}
 	}
 
-	/// Queue every picture the decoder has ready.
+	/// Queue every picture the decoder has ready, each with its access unit's arrival.
 	fn receive(&mut self) -> Result<(), Error> {
 		while let Some(picture) = self.decoder.receive()? {
-			self.pending.push_back(Read::Frame(picture));
+			let at = picture.timestamp.as_micros();
+			// A timestamp queued twice is ambiguous: the picture may belong to either access
+			// unit, so it reports none rather than a guess.
+			let mut matches = self
+				.arrivals
+				.iter()
+				.enumerate()
+				.filter(|(_, (timestamp, _))| *timestamp == at);
+			let found = matches
+				.next()
+				.filter(|_| matches.next().is_none())
+				.map(|(index, _)| index);
+			let arrival = found.and_then(|index| {
+				let (_, arrived) = self.arrivals.remove(index)?;
+				// An access unit fed before this one at an earlier time is a picture the
+				// decoder already returned or dropped, whichever order it returns them in.
+				let mut position = 0;
+				self.arrivals.retain(|(timestamp, _)| {
+					position += 1;
+					position > index || *timestamp > at
+				});
+				Some(arrived)
+			});
+			self.pending.push_back((Read::Frame(picture), arrival));
 		}
 		Ok(())
 	}
 
 	/// Queue every picture the decoder still holds.
 	async fn drain(&mut self) -> Result<(), Error> {
-		self.decoder.flush().await?;
-		self.receive()
+		let drained = match self.decoder.flush().await {
+			Ok(()) => self.receive(),
+			Err(err) => Err(err),
+		};
+		// Whatever the flush did not return never comes back.
+		self.arrivals.clear();
+		drained
 	}
 }
 
@@ -868,8 +947,10 @@ mod tests {
 	}
 
 	/// A track ends before a decoder that reorders pictures does. The consumer
-	/// drains the backend once and returns its tail before reporting the end.
-	#[tokio::test]
+	/// drains the backend once and returns its tail before reporting the end,
+	/// each picture with the arrival of its own access unit rather than of the
+	/// access unit that pushed it out.
+	#[tokio::test(start_paused = true)]
 	async fn track_end_drains_buffered_decoder() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -880,7 +961,9 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 		);
+		let mut written = Vec::new();
 		for index in 0..2u64 {
+			written.push(Instant::now());
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
@@ -889,6 +972,7 @@ mod tests {
 					keyframe: index == 0,
 				})
 				.unwrap();
+			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
 		let _finished = producer.finish().unwrap();
 
@@ -913,15 +997,139 @@ mod tests {
 		.await
 		.unwrap();
 
+		assert_eq!(consumer.arrival(), None, "nothing read yet");
 		let mut timestamps = Vec::new();
+		let mut arrivals = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			timestamps.push(frame.timestamp.as_micros());
+			arrivals.push(consumer.arrival());
 		}
 		assert_eq!(timestamps, vec![0, 33_333]);
+		assert_eq!(arrivals, written.into_iter().map(Some).collect::<Vec<_>>());
 		assert!(
 			consumer.next_frame().await.unwrap().is_none(),
 			"the decoder was drained twice"
 		);
+	}
+
+	/// A decoder that reorders returns pictures in presentation order, so each one's
+	/// arrival is looked up by its timestamp rather than taken in decode order.
+	#[tokio::test(start_paused = true)]
+	async fn arrival_follows_a_reordered_picture() {
+		let (shown, landed) = decode_bframes(probe::REORDER_NAME).await;
+		let expected: Vec<_> = [0, 1, 2, 3].map(|index| (index, Some(landed[&index]))).into();
+		assert_eq!(shown, expected);
+	}
+
+	/// A pipelined decoder that returns pictures in decode order, so a B-frame's access
+	/// unit is fed before the P-frame ahead of it comes out, still maps each picture
+	/// to its own access unit.
+	#[tokio::test(start_paused = true)]
+	async fn arrival_follows_a_picture_in_decode_order() {
+		let (shown, landed) = decode_bframes(probe::BUFFERED_NAME).await;
+		let expected: Vec<_> = [0, 3, 1, 2].map(|index| (index, Some(landed[&index]))).into();
+		assert_eq!(shown, expected);
+	}
+
+	/// Decode I0 P3 B1 B2 with the decoder named `decoder`, each access unit landing
+	/// 10 ms after the last. Returns each picture shown, by frame index, with its
+	/// reported arrival, and when each access unit landed.
+	async fn decode_bframes(decoder: &str) -> (Vec<(u64, Option<Instant>)>, std::collections::BTreeMap<u64, Instant>) {
+		let (broadcast, track) = live_track();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(None),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(decoder.into()),
+					..Config::new()
+				},
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut landed = std::collections::BTreeMap::new();
+		for (index, frame) in [0u64, 3, 1, 2].into_iter().enumerate() {
+			landed.insert(frame, Instant::now());
+			wire.write(
+				&mut group,
+				&[moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(frame * 33_333).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"access unit"),
+					keyframe: index == 0,
+				}],
+			)
+			.unwrap();
+			tokio::time::advance(std::time::Duration::from_millis(10)).await;
+		}
+		group.finish().unwrap();
+		let _track = track.finish().unwrap();
+
+		let mut shown = Vec::new();
+		while let Some(frame) = consumer.next_frame().await.unwrap() {
+			let index = u64::try_from(frame.timestamp.as_micros()).unwrap() / 33_333;
+			shown.push((index, consumer.arrival()));
+		}
+		(shown, landed)
+	}
+
+	/// A decoder holding more access units than the queue keeps drops the oldest
+	/// arrivals, so their pictures report none rather than a guess.
+	#[tokio::test(start_paused = true)]
+	async fn arrivals_are_bounded() {
+		const FRAMES: u64 = ARRIVALS as u64 + 8;
+		let (broadcast, track) = live_track();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(None),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::HOLDING_NAME.into()),
+					..Config::new()
+				},
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let frames: Vec<_> = (0..FRAMES)
+			.map(|index| moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(b"access unit"),
+				keyframe: index == 0,
+			})
+			.collect();
+		wire.write(&mut group, &frames).unwrap();
+		group.finish().unwrap();
+		let _track = track.finish().unwrap();
+
+		let mut sourced = Vec::new();
+		while consumer.next_frame().await.unwrap().is_some() {
+			assert!(consumer.reader(Lane::Min).arrivals.len() <= ARRIVALS);
+			sourced.push(consumer.arrival().is_some());
+		}
+		let mut expected = vec![false; FRAMES as usize - ARRIVALS];
+		expected.extend(vec![true; ARRIVALS]);
+		assert_eq!(sourced, expected);
 	}
 
 	/// A declared end drains the decoder, so the stopped encoder's last picture
@@ -1081,6 +1289,8 @@ mod tests {
 
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
+		// When each access unit was written, bracketing when it landed.
+		let mut written = Vec::new();
 		for index in 0..FRAMES {
 			if index == 0 {
 				encoder.cut().unwrap();
@@ -1088,6 +1298,7 @@ mod tests {
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
 			for encoded in encoder.encode_all(&frame).unwrap() {
+				let before = Instant::now();
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: encoded.timestamp,
@@ -1096,6 +1307,7 @@ mod tests {
 						keyframe: index == 0,
 					})
 					.unwrap();
+				written.push((before, Instant::now()));
 			}
 		}
 		let _finished = producer.finish().unwrap();
@@ -1114,11 +1326,19 @@ mod tests {
 		};
 
 		let mut timestamps = Vec::new();
+		let mut arrivals = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			timestamps.push(frame.timestamp.as_micros());
+			arrivals.push(consumer.arrival().expect("the picture kept its arrival"));
 		}
 		let expected: Vec<u128> = (0..FRAMES as u128).map(|index| index * 33_333).collect();
 		assert_eq!(timestamps, expected, "the track ended before the stream did");
+		for (index, (arrived, (before, after))) in arrivals.iter().zip(&written).enumerate() {
+			assert!(
+				before <= arrived && arrived <= after,
+				"picture {index} reports another access unit's arrival"
+			);
+		}
 
 		// The end stays the end: the drain runs once, so a caller that keeps
 		// reading past it does not get the tail a second time.
@@ -1206,6 +1426,7 @@ mod tests {
 			.unwrap()
 			.expect("the track is live");
 		let seconds = u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND;
+		assert!(consumer.arrival().is_some(), "picture {seconds} lost its arrival");
 		(seconds, consumer.selector.source())
 	}
 
@@ -1328,7 +1549,7 @@ mod tests {
 		);
 		tokio::time::resume();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
-		let Ok(Some(Read::Frame(first))) = max.read().await else {
+		let Ok(Some((Read::Frame(first), _))) = max.read().await else {
 			panic!("the max-delay decoder produced no picture");
 		};
 		assert_eq!(
@@ -1623,5 +1844,118 @@ mod tests {
 			}
 		}
 		panic!("the max-delay decoder's error was swallowed");
+	}
+
+	/// A decoder that refuses an access unit never returns its picture, so a later
+	/// access unit at the same timestamp reports its own arrival, not the refused one's.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_access_unit_does_not_lend_its_arrival() {
+		let (broadcast, track) = live_track();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(None),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
+					..Config::new()
+				},
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		// A group's first frame is its keyframe, and a decoder that refused one drops the
+		// deltas behind it, so each access unit opens a group of its own.
+		let mut landed = Vec::new();
+		for (sequence, payload) in [probe::CORRUPT, b"access unit".as_slice()].into_iter().enumerate() {
+			landed.push(Instant::now());
+			let mut group = track
+				.create_group(moq_net::group::Info {
+					sequence: sequence as u64,
+				})
+				.unwrap();
+			wire.write(
+				&mut group,
+				&[moq_mux::container::Frame {
+					timestamp: Timestamp::ZERO,
+					duration: None,
+					payload: Bytes::from_static(payload),
+					keyframe: true,
+				}],
+			)
+			.unwrap();
+			group.finish().unwrap();
+			tokio::time::advance(std::time::Duration::from_millis(10)).await;
+		}
+		let _track = track.finish().unwrap();
+
+		let Err(err) = consumer.next_frame().await else {
+			panic!("the refused access unit did not fail the read");
+		};
+		assert!(err.to_string().contains("corrupt"), "unexpected error: {err}");
+		consumer
+			.next_frame()
+			.await
+			.unwrap()
+			.expect("the next access unit decodes");
+		assert_eq!(consumer.arrival(), Some(landed[1]));
+		assert_eq!(consumer.reader(Lane::Min).arrivals.len(), 0, "nothing stays queued");
+	}
+
+	/// A timestamp two access units share, both still held by the decoder, matches either
+	/// of them, so the picture reports none rather than a guess.
+	#[tokio::test(start_paused = true)]
+	async fn a_repeated_timestamp_reports_no_arrival() {
+		let (broadcast, track) = live_track();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(None),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::HOLDING_NAME.into()),
+					..Config::new()
+				},
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		for keyframe in [true, false] {
+			wire.write(
+				&mut group,
+				&[moq_mux::container::Frame {
+					timestamp: Timestamp::ZERO,
+					duration: None,
+					payload: Bytes::from_static(b"access unit"),
+					keyframe,
+				}],
+			)
+			.unwrap();
+			tokio::time::advance(std::time::Duration::from_millis(10)).await;
+		}
+		group.finish().unwrap();
+		let _track = track.finish().unwrap();
+
+		let mut shown = 0;
+		while consumer.next_frame().await.unwrap().is_some() {
+			assert_eq!(consumer.arrival(), None, "picture {shown} guessed an arrival");
+			shown += 1;
+		}
+		assert!(shown > 0, "the decoder returned no picture");
 	}
 }

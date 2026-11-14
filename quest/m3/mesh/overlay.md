@@ -81,7 +81,7 @@ first.
   unset by default; the ring alone decides when it is unset. Over the cap,
   drop the longest fingers first. Small meshes come out close to full mesh on
   their own.
-- Forwarding and route choice are [cluster routing](/quest/m2/cluster-routing/README.md)'s:
+- Forwarding and route choice are [cluster routing](/quest/m3/cluster-routing/README.md)'s:
   overlay links join relay nodes as LAN-cost links, and relay
   uplinks stay `upstream` links costed above them. Nothing routes outside the
   shared priority/cost rules.
@@ -94,7 +94,7 @@ follows the ring (and never exceeds the cap when set); every pair connects
 without crossing the relay; killing a node heals the overlay; splitting the
 segment sends cross-half traffic through the relay and healing restores the
 direct path. Report the link counts and hop counts the test measures.
-Update `doc/bin/relay/cluster.md` and the [guide](/quest/m3/mesh/guide.md) if it exists.
+Update `doc/bin/relay/cluster.md` and the [guide](/quest/m5/mesh-guide.md) if it exists.
 
 ## Required
 

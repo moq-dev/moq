@@ -149,7 +149,7 @@ mod tests {
 			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
-			stretch: std::time::Duration::from_secs(2).into(),
+			stretch: std::time::Duration::from_millis(200).into(),
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
@@ -177,7 +177,7 @@ mod tests {
 			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
-			stretch: std::time::Duration::from_secs(2).into(),
+			stretch: std::time::Duration::from_millis(200).into(),
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
@@ -208,7 +208,7 @@ mod tests {
 			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
-			stretch: std::time::Duration::from_secs(2).into(),
+			stretch: std::time::Duration::from_millis(200).into(),
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()

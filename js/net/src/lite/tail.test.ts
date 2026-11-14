@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { ProtocolViolation, StreamCode, StreamError, toTransport } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -51,7 +51,8 @@ function groupStream(subscriber: Subscriber, sequence: bigint) {
 	return {
 		write: (payload: string) => controller.enqueue(frame(payload, subscriber.version)),
 		finish: () => controller.close(),
-		reset: () => controller.error(new Error("reset")),
+		// With a code, as a publisher resets: lite-07 pauses a group whose reset lost its code.
+		reset: () => controller.error(toTransport(StreamCode.Cancel, "reset")),
 		handled,
 	};
 }

@@ -37,4 +37,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Relay allocations](/quest/m4/perf/relay-allocs.md) - steady-state allocation cost, where this measures growth
+- [Relay allocations](/quest/m9/perf/relay-allocs.md) - steady-state allocation cost, where this measures growth
