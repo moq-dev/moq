@@ -2,7 +2,7 @@
 
 ## Goal
 
-The vendored str0m, dimpl, `is`, and sctp-proto drop every feature no
+The vendored str0m, dimpl, and `is` drop every feature no
 browser's WebRTC negotiates today, starting with dimpl's PSK cipher suites
 and the `ccm` dependency they pull in, so nothing MoQ can't reach from a
 browser peer stays compiled.
@@ -18,7 +18,7 @@ suites, extensions, SDP attributes, codecs' packetizers) against what the
 vendored code still carries, cite the evidence for each removal in the PR,
 and keep what a browser negotiates even if MoQ doesn't call it yet. The
 [WebRTC epic](/quest/m3/webrtc/README.md)'s settled removals (its "What goes" list, such as G.7xx, DTMF, and
-comfort noise) and non-goals (TURN, DTLS 1.3) stay as decided: this trim
+comfort noise) and non-goals (TURN, DTLS 1.3, data channels) stay as decided: this trim
 only removes more, never restores. API
 that moq-webrtc never calls but a browser could need stays for
 [the dead-API trim](/quest/m4/webrtc-dead-api.md).

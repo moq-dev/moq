@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::vendor::str0m::Rtc;
 use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::media::{Direction, MediaKind};
 
 use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
@@ -92,7 +93,7 @@ fn dtls_with_ice_lite() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 
@@ -138,7 +139,7 @@ fn dtls_pregenerated_certificate() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 

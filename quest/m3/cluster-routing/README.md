@@ -3,13 +3,14 @@
 ## Goal
 
 One routing model serves CDN tiers, outbound-connected local clusters, and
-application-selected P2P connections. Topology changes update reachability
+application-selected peer connections. Topology changes update reachability
 per affected origin rather than replaying every advertisement behind it.
 Known advertisements remain distinct from current reachability, and stale
 copies cannot revive a claim after its withdrawal is known.
 
-Reliability, federation, and P2P are independently shippable milestones of
-this architecture. Active/passive delivery health is out of scope; its
+Reliability and federation are independently shippable milestones of this
+architecture. Peer-to-peer routing left the repository 2026-11-14
+(maintainer); this model stays what it builds on. Active/passive delivery health is out of scope; its
 plan was deleted 2026-11-09 for want of a consumer.
 
 ## Plan
@@ -98,16 +99,16 @@ Decided with the maintainer, 2026-10-13:
   the two-view export plan.)
 - A local per-connection `proxy` preference decides whether a connection is
   sent routes learned from other connections. Relays default on;
-  applications choose per P2P connection (on for redundancy, off for
+  applications choose per peer connection (on for redundancy, off for
   conference offload). Browser tabs stay off until the
   [Rust model runs in the browser](/quest/m5/rs2ts-js.md). Applications
-  explicitly select P2P connections; discovery does not dial everyone.
+  explicitly select peer connections; discovery does not dial everyone.
 - Each CDN broadcast enters a local network once by configuration: local
   peers outrank a backup uplink, and origin aggregation joins the rest.
-- The deferred P2P consumer owns proving that its CDN session and discovery
-  stay connected and unused CDN media demand is released after a handoff.
-  m1 provides and tests the shared routing primitives without requiring an
-  actual P2P integration.
+- A peer-to-peer consumer, outside this repository, owns proving that its CDN
+  session and discovery stay connected and unused CDN media demand is released
+  after a handoff. m1 provides and tests the shared routing primitives without
+  requiring an actual peer-to-peer integration.
 
 The handoff proof showed a complete neighbor snapshot does not prove its
 claims are current; receivers merge origin-versioned views by floor instead.
@@ -157,8 +158,7 @@ setup after the capabilities land.
 
 ## Related
 
-- [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions feed the shared routing model
-- [Routing guide](/quest/m3/routing-guide.md) - concept page and federation setup; P2P extends it in m4
+- [Routing guide](/quest/m3/routing-guide.md) - concept page and federation setup
 - [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m5/link-quality.md) - optional measured link cost, distinct from delivery-health failover
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - per-broadcast warm routes ranked against these node routes

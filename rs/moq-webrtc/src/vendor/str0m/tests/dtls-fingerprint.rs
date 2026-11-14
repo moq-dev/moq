@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::vendor::str0m::crypto::{CryptoProvider, Fingerprint, Sha1Provider};
+use crate::vendor::str0m::media::{Direction, MediaKind};
 use crate::vendor::str0m::{Candidate, RtcConfig, RtcError};
 use tracing::info_span;
 
@@ -166,7 +167,7 @@ fn stronger_fingerprint_mismatch_must_be_rejected() {
 	r.add_local_candidate(Candidate::host((Ipv4Addr::new(2, 2, 2, 2), 2000).into(), "udp").unwrap())
 		.unwrap();
 	let mut change = l.sdp_api();
-	change.add_channel("test".into());
+	change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 	let (offer, pending) = change.apply().unwrap();
 	let answer = r.sdp_api().accept_offer(offer).unwrap();
 	let sdp = answer.to_sdp_string();

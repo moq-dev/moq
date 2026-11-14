@@ -45,8 +45,6 @@
 #![warn(missing_docs)]
 
 pub mod client;
-#[cfg(feature = "p2p")]
-pub mod p2p;
 mod rate;
 pub mod server;
 
@@ -61,7 +59,7 @@ mod ice;
 mod ingest;
 mod sdp;
 mod session;
-// str0m, dimpl, `is`, and sctp-proto, vendored and trimmed; see the module docs.
+// str0m, dimpl, and `is`, vendored and trimmed; see the module docs.
 mod vendor;
 
 pub use client::Client;

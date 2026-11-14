@@ -19,8 +19,7 @@ where upstream flattened it into `CryptoError::Other(String)`.
 - Classify it once at the str0m boundary in moq-webrtc's ICE module, the only place that sees
   str0m's error, by matching that variant; add no text match.
 - Add the variant to moq-webrtc's `ice::Error` and `moq_webrtc::Error`, named by role (for
-  example `DtlsTimeout`), and map it in `moq-webrtc`'s session loop and its
-  `p2p` transport, which also matches moq-webrtc's `ice::Error`.
+  example `DtlsTimeout`), and map it in `moq-webrtc`'s session loop.
 - Decide in the PR whether the variant stays distinct from `IceTimeout` or
   folds into one establishment-timeout variant, and record why. Distinct is
   recommended: an ICE timeout means no path, a DTLS timeout means a path that

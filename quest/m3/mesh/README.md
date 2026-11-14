@@ -48,7 +48,7 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   service implements the same contract with its own accounts and billing.
 - Direct paths only to addresses a node can already dial: `[cluster.lan]`
   mDNS, plus [address hints](/quest/m3/mesh/addr.md) published on mesh
-  tracks. No ICE, STUN, or hole punching; the [P2P](/quest/m4/p2p/README.md)
+  tracks. No ICE, STUN, or hole punching; the P2P
   line is separate.
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not
   the [routing identity](/quest/m2/cluster-routes/README.md), which each
@@ -131,6 +131,5 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 ## Related
 
 - [Outbound federation](/quest/m3/cluster-routing/federation.md) - the relay node requires it; the other children do not
-- [P2P](/quest/m4/p2p/README.md) - internet peer sessions, which the m3 mesh does not use
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - deferred direct paths between mesh nodes on different networks
 - [End-to-end encryption](/quest/m5/e2ee/README.md) - the AEAD the encryption level will reuse

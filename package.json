@@ -38,7 +38,6 @@
 		"doc",
 		"doc/.vitepress/api",
 		"js/net",
-		"js/p2p",
 		"js/qmux",
 		"js/clock",
 		"js/pattern",
@@ -67,7 +66,6 @@
 		"test/receive-credit",
 		"test/stream-credit",
 		"test/video",
-		"test/p2p",
 		"test/qmux",
 		"test/worklet"
 	],

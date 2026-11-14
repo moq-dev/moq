@@ -4686,7 +4686,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "socket2 0.6.5",
- "stun-types",
  "sysinfo",
  "tempfile",
  "test-env",
@@ -5062,17 +5061,13 @@ dependencies = [
  "aes 0.9.4",
  "arrayvec",
  "axum",
- "base64ct",
  "bytes",
  "ccm",
  "combine",
  "crc",
  "fastrand",
- "futures",
  "hang",
- "if-addrs",
  "kio",
- "mdns-sd",
  "moq-crypto",
  "moq-mux",
  "moq-net",
@@ -5080,18 +5075,14 @@ dependencies = [
  "nom 8.0.0",
  "once_cell",
  "pcap-file",
- "qmux 0.7.0",
  "rand 0.10.3",
  "rcgen",
  "reqwest",
  "rind",
  "rind-rcgen",
- "rustc-hash 2.1.3",
  "serde",
  "serde_json",
- "slab",
  "spki 0.8.1",
- "stun-types",
  "subtle",
  "thiserror 2.0.21",
  "time",
@@ -6767,18 +6758,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
- "rand_chacha 0.3.1",
+ "rand_chacha",
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "rand"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
-dependencies = [
- "rand_chacha 0.9.0",
- "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -6803,31 +6784,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "rand_chacha"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
-dependencies = [
- "ppv-lite86",
- "rand_core 0.9.5",
-]
-
-[[package]]
 name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
-]
-
-[[package]]
-name = "rand_core"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
-dependencies = [
- "getrandom 0.3.4",
 ]
 
 [[package]]
@@ -7403,7 +7365,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "sha1 0.11.0",
+ "sha1",
  "sha2 0.11.1",
  "smallvec",
  "std-next",
@@ -7485,7 +7447,7 @@ dependencies = [
  "base64-simd",
  "hmac 0.13.0",
  "jiff",
- "sha1 0.11.0",
+ "sha1",
  "smallvec",
  "thiserror 2.0.21",
 ]
@@ -7869,17 +7831,6 @@ name = "sha-1"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5058ada175748e33390e40e872bd0fe59a19f265d0158daa551c5a88a76009c"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha1"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
@@ -8310,25 +8261,6 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
-
-[[package]]
-name = "stun-types"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "034e7be5ad5d62256b8df9b7344ef58b1cfee797cc7dabfacdc28efb3d3a192d"
-dependencies = [
- "byteorder",
- "crc",
- "hmac 0.12.1",
- "md-5 0.10.6",
- "rand 0.9.5",
- "sha1 0.10.7",
- "sha2 0.10.9",
- "smallvec",
- "subtle",
- "thiserror 2.0.21",
- "tracing",
-]
 
 [[package]]
 name = "subtle"
@@ -9141,7 +9073,7 @@ dependencies = [
  "rand 0.10.3",
  "rustls",
  "rustls-pki-types",
- "sha1 0.11.0",
+ "sha1",
  "thiserror 2.0.21",
 ]
 
@@ -10420,7 +10352,6 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
  "bytemuck",
- "byteorder",
  "bytes",
  "camino",
  "cc",
@@ -10458,7 +10389,6 @@ dependencies = [
  "half",
  "hashbrown 0.17.1",
  "hex",
- "hmac 0.12.1",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -10467,7 +10397,6 @@ dependencies = [
  "libc",
  "linux-raw-sys 0.12.1",
  "log",
- "md-5 0.10.6",
  "md-5 0.11.0",
  "memchr",
  "mio",
@@ -10509,7 +10438,6 @@ dependencies = [
  "serde_json",
  "serde_spanned 1.1.3",
  "serde_with",
- "sha2 0.10.9",
  "siphasher",
  "slab",
  "smallvec",
