@@ -126,6 +126,15 @@ impl<S: poll::Session> poll::Session for Local<S> {
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
 	type Error = T::Error;
 	type Group = Local<T::Group>;
+	type Offset = T::Offset;
+
+	fn offset(&self) -> Self::Offset {
+		self.0.offset()
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: Self::Offset) -> Poll<Result<poll::Acked, Self::Error>> {
+		self.0.poll_acked(waiter, offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		self.0.poll_write(waiter, buf)

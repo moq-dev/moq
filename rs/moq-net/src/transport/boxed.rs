@@ -258,6 +258,10 @@ impl poll::SendGroup for Group {
 	}
 }
 
+/// A boxed stream's offset, holding the transport's own behind the boundary.
+#[derive(Clone)]
+pub(crate) struct Offset(Arc<dyn Any + Send + Sync>);
+
 /// A boxed outgoing stream.
 pub(crate) struct SendStream(Sender);
 
@@ -270,11 +274,11 @@ enum Sender {
 impl SendStream {
 	/// Box a stream, keeping its own send-group type behind the boundary.
 	#[cfg(test)]
-	pub(crate) fn new(stream: impl poll::SendStream<Group: Send + Sync> + Send + Sync) -> Self {
+	pub(crate) fn new(stream: impl poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync) -> Self {
 		Self(Sender::Own(Box::new(stream)))
 	}
 
-	fn own(stream: impl poll::SendStream<Group: Send + Sync> + Send + Sync + 'static) -> Self {
+	fn own(stream: impl poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync + 'static) -> Self {
 		Self(Sender::Own(Box::new(stream)))
 	}
 
@@ -603,6 +607,8 @@ trait ErasedSend: Send + Sync {
 	fn acknowledged(&self) -> Option<bool>;
 	fn delivered(&self) -> Option<u64>;
 	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()>;
+	fn offset(&self) -> Offset;
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<poll::Acked, Error>>;
 }
 
 trait ErasedRecv: Send + Sync {
@@ -745,7 +751,7 @@ impl<G: poll::SendGroup + Send + Sync> ErasedGroup for G {
 	}
 }
 
-impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
+impl<T: poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync> ErasedSend for T {
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		poll::SendStream::poll_write(self, waiter, buf).map_err(Error::new)
 	}
@@ -790,6 +796,19 @@ impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
 
 	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
 		poll::SendStream::poll_delivered(self, waiter)
+	}
+
+	fn offset(&self) -> Offset {
+		Offset(Arc::new(poll::SendStream::offset(self)))
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<poll::Acked, Error>> {
+		let offset = offset
+			.0
+			.downcast_ref::<T::Offset>()
+			.expect("offset belongs to another transport")
+			.clone();
+		poll::SendStream::poll_acked(self, waiter, offset).map_err(Error::new)
 	}
 }
 
@@ -947,6 +966,15 @@ impl poll::Session for Session {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = Group;
+	type Offset = Offset;
+
+	fn offset(&self) -> Offset {
+		self.get().offset()
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<poll::Acked, Error>> {
+		self.get().poll_acked(waiter, &offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		self.poll_writing(waiter, |stream| stream.poll_write(waiter, buf))
@@ -1179,6 +1207,83 @@ mod test {
 
 	/// A listed stream reports the peer acknowledging what was written to it, and a reset one
 	/// never is.
+	/// A stream that counts written bytes as its offset and reports them acknowledged up to
+	/// a mark, to check the boxed layer carries its offset through and back.
+	struct Acking {
+		written: u64,
+		acked: u64,
+	}
+
+	impl poll::SendStream for Acking {
+		type Error = super::super::memory::Error;
+		type Group = poll::Ungrouped;
+		type Offset = u64;
+
+		fn offset(&self) -> u64 {
+			self.written
+		}
+
+		fn poll_acked(&self, _: &kio::Waiter, offset: u64) -> Poll<Result<poll::Acked, Self::Error>> {
+			match offset <= self.acked {
+				true => Poll::Ready(Ok(poll::Acked::Delivered)),
+				false => Poll::Pending,
+			}
+		}
+
+		fn poll_write(&mut self, _: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+			self.written += buf.len() as u64;
+			Poll::Ready(Ok(buf.len()))
+		}
+
+		fn set_priority(&mut self, _: i64) {}
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		fn reset(&mut self, _: u32) {}
+
+		fn poll_closed(&self, _: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+			Poll::Pending
+		}
+	}
+
+	/// A boxed stream hands back the transport's own offset, and reports a transport
+	/// without acknowledgments as unsupported, listed or not.
+	#[test]
+	fn a_boxed_stream_forwards_acknowledgment() {
+		let waiter = kio::Waiter::noop();
+		let mut stream = SendStream::new(Acking { written: 0, acked: 3 });
+		assert!(matches!(
+			poll::SendStream::poll_write(&mut stream, &waiter, b"abc"),
+			Poll::Ready(Ok(3))
+		));
+		let three = poll::SendStream::offset(&stream);
+		assert!(matches!(
+			poll::SendStream::poll_write(&mut stream, &waiter, b"de"),
+			Poll::Ready(Ok(2))
+		));
+		let five = poll::SendStream::offset(&stream);
+		assert!(matches!(
+			poll::SendStream::poll_acked(&stream, &waiter, three),
+			Poll::Ready(Ok(poll::Acked::Delivered))
+		));
+		assert!(poll::SendStream::poll_acked(&stream, &waiter, five).is_pending());
+
+		let (a, _b) = super::super::memory::pair(Default::default());
+		let session = Session::new(a);
+		let listed = open_group(&session, ungrouped(0));
+		let offset = poll::SendStream::offset(&listed);
+		assert!(matches!(
+			poll::SendStream::poll_acked(&listed, &waiter, offset),
+			Poll::Ready(Ok(poll::Acked::Unsupported))
+		));
+	}
+
 	#[test]
 	fn a_listed_stream_reports_its_acknowledgement() {
 		let (a, b) = super::super::memory::pair(Default::default());

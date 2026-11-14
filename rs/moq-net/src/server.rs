@@ -1662,6 +1662,9 @@ mod tests {
 	impl crate::transport::poll::SendStream for FakeSend {
 		type Error = FakeError;
 		type Group = crate::transport::poll::Ungrouped;
+		type Offset = ();
+
+		fn offset(&self) -> Self::Offset {}
 		fn poll_write(&mut self, _waiter: &kio::Waiter, buf: &[u8]) -> std::task::Poll<Result<usize, Self::Error>> {
 			match self.withheld {
 				true => std::task::Poll::Pending,

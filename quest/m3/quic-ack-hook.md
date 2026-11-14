@@ -25,7 +25,7 @@ layers. Add an offset type and two methods to `SendStream`, in the trait's
 poll style:
 
 ```rust
-type Offset: Copy;
+type Offset: Clone;
 fn offset(&self) -> Self::Offset;
 fn poll_acked(&self, waiter: &kio::Waiter, offset: Self::Offset) -> Poll<Result<Acked, Self::Error>>;
 
@@ -82,7 +82,7 @@ lives:
   counting the bytes it writes. A layer that writes its own prefix mints
   offsets that already include it, so `quic::web` forwards the driver's
   `Offset` and its WebTransport header needs no adjustment. A backend that
-  cannot see acknowledgments mints a `u64` byte count and keeps the default
+  cannot see acknowledgments uses `type Offset = ()` and keeps the default
   `poll_acked`.
 
 The moq-tokio and moq-uring adapters implement the trait method over the
@@ -113,12 +113,13 @@ Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
 delivery-delay histogram, whose plan was deleted on 2026-11-09.
 
 Split 2026-11-12 (maintainer, /quest-audit before the cut): the trait shape
-(`Offset`, `offset()`, and a defaulted `poll_acked`) lands in m2 as
-[its own quest](/quest/m2/api-ack-hook-trait.md), because
-`poll::SendStream` is public and unsealed and the cut would freeze it. This
+(`Offset`, `offset()`, `Acked`, and a defaulted `poll_acked`) landed in m2,
+because `poll::SendStream` is public and unsealed and the cut would freeze it.
+As landed, `Offset` is `Clone` rather than `Copy`, since moq-net's boxed
+stream erases it behind an `Arc`, and a backend without acknowledgments uses
+`type Offset = ()` rather than a byte count. Every in-tree backend, including
+moq-tokio's and moq-uring's `quic::web`, is on `()` with the default. This
 quest keeps the driver half: moq-quic's `poll_acked` leaves `#[cfg(test)]`,
-and the moq-tokio and moq-uring adapters implement the hook.
+and the moq-tokio and moq-uring adapters switch `Offset` to the driver's
+`send::Offset` and implement the hook.
 
-## Required
-
-- [The send-stream trait has its acknowledgment hook](/quest/m2/api-ack-hook-trait.md) - the trait methods the drivers implement

@@ -7330,6 +7330,19 @@ impl<T: crate::transport::poll::SendStream> RankedInner<T> {
 impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream for Ranked<T> {
 	type Error = T::Error;
 	type Group = T::Group;
+	type Offset = T::Offset;
+
+	fn offset(&self) -> Self::Offset {
+		self.inner.lock().unwrap().stream.offset()
+	}
+
+	fn poll_acked(
+		&self,
+		waiter: &kio::Waiter,
+		offset: Self::Offset,
+	) -> Poll<Result<crate::transport::poll::Acked, Self::Error>> {
+		self.inner.lock().unwrap().stream.poll_acked(waiter, offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let inner = self.get_mut();

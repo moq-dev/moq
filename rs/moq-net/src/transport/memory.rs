@@ -571,6 +571,9 @@ pub struct SendStream {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = crate::transport::poll::Ungrouped;
+	type Offset = ();
+
+	fn offset(&self) -> Self::Offset {}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		let mut buf = buf;
