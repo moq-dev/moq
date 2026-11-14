@@ -15,6 +15,11 @@ use moq_mux::container::DELAY_MAX;
 /// estimate, as when there is none: video has no estimator of its own.
 const AUTO_VIDEO_DELAY: Duration = Duration::from_millis(100);
 
+/// How far past the shared delay audio is still waited on and observed: the
+/// arrival estimate's 2 s ceiling, so every frame late enough to move the
+/// target is measured. `--stretch` does not size it.
+pub(super) const REACH: Duration = Duration::from_secs(2);
+
 /// How far playback trails the live edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delay {
@@ -64,15 +69,14 @@ pub struct Args {
 	#[usage(long, default = "auto")]
 	pub delay: Delay,
 
-	/// How far audio may trail the clock before it skips ahead, or `0` to turn the time stretch off.
+	/// How far audio may trail the clock before it skips onto it, or `0` to turn the time stretch off.
 	///
 	/// After a stall, audio slows down and falls behind the clock rather than dropping what
-	/// arrives late, then speeds up until it is back on it; only what trails by more than this
-	/// is skipped. Every subscription waits on a stalled group for the delay plus this, so the
-	/// late audio still arrives. Zero plays received audio unaltered: late audio is skipped, an
-	/// underrun is silence, and drift against the publisher's clock is corrected by a small
-	/// skip or pad. Video stays on the clock either way.
-	#[usage(long, default = "2s")]
+	/// arrives late, then speeds up until it is back on it; audio that trails by more than this
+	/// skips onto the clock, as video does. Zero plays received audio unaltered: late audio is
+	/// skipped, an underrun is silence, and drift against the publisher's clock is corrected by
+	/// a small skip or pad. Video stays on the clock either way.
+	#[usage(long, default = "200ms")]
 	pub stretch: moq_tokio::cli::Duration,
 
 	/// Rendition selection by track name or codec.
@@ -119,13 +123,13 @@ impl Args {
 	}
 
 	/// How long a stalled audio group is waited on before it is skipped, while
-	/// the shared delay is still the configured one: the delay plus the stretch.
+	/// the shared delay is still the configured one: the delay plus [`REACH`].
 	/// A shared delay past it grows the budget by the excess.
 	pub(super) fn max_delay(&self) -> Duration {
-		self.fixed_delay().unwrap_or_default() + self.stretch()
+		self.fixed_delay().unwrap_or_default() + REACH
 	}
 
-	/// How far audio may trail the clock before it skips ahead; zero turns the time stretch off.
+	/// How far audio may trail the clock before it skips onto it; zero turns the time stretch off.
 	pub(super) fn stretch(&self) -> Duration {
 		self.stretch.into()
 	}
@@ -133,18 +137,6 @@ impl Args {
 	/// How far playback trails the live edge while no audio estimate sets it.
 	pub(super) fn video_delay(&self) -> Duration {
 		self.fixed_delay().unwrap_or(AUTO_VIDEO_DELAY)
-	}
-
-	/// How long a stalled video group is waited on, given the catalog's audio:
-	/// video's delay plus the stretch, as audio's.
-	///
-	/// With no enabled speaker to follow, the playhead is video's own, so waiting
-	/// on audio's budget would only freeze the picture.
-	pub(super) fn video_max_delay(&self, audio: &hang::catalog::Audio) -> Duration {
-		match audio.enabled().next() {
-			Some(_) => self.video_delay() + self.stretch(),
-			None => self.video_delay(),
-		}
 	}
 
 	/// Reject a codec the local decoders can't open.
@@ -242,7 +234,8 @@ mod tests {
 		}
 	}
 
-	/// A fixed delay is the playout offset, and with the stretch the staleness budget.
+	/// A fixed delay is the playout offset, and audio's staleness budget reaches
+	/// the estimator's ceiling past it, whatever the stretch.
 	#[test]
 	fn a_fixed_delay_sets_the_staleness_budget() {
 		let args = parse(&["--delay", "500ms"]);
@@ -250,38 +243,24 @@ mod tests {
 		assert_eq!(args.max_delay(), Duration::from_millis(2500));
 		assert_eq!(args.video_delay(), Duration::from_millis(500));
 
-		let args = parse(&["--delay", "500ms", "--stretch", "0"]);
-		assert_eq!(args.max_delay(), Duration::from_millis(500));
-		let args = parse(&["--delay", "500ms", "--stretch", "200ms"]);
-		assert_eq!(args.max_delay(), Duration::from_millis(700));
+		for stretch in ["0", "200ms", "5s"] {
+			let args = parse(&["--delay", "500ms", "--stretch", stretch]);
+			assert_eq!(args.max_delay(), Duration::from_millis(2500), "{stretch}");
+		}
 	}
 
-	/// The default measures the delay, and waits on a stalled group for the stretch past it.
+	/// The default measures the delay, skips audio past 200 ms onto the clock,
+	/// and waits on a stalled audio group for the estimator's ceiling.
 	#[test]
 	fn the_delay_defaults_to_the_estimate() {
 		let args = parse(&[]);
 		assert_eq!(args.delay, Delay::Auto);
 		assert_eq!(args.fixed_delay(), None);
-		assert_eq!(args.stretch(), Duration::from_secs(2));
+		assert_eq!(args.stretch(), Duration::from_millis(200));
 		assert_eq!(args.max_delay(), Duration::from_secs(2));
 		assert_eq!(parse(&["--delay", "auto"]).delay, Delay::Auto);
 		assert_eq!(Delay::Auto.to_string(), "auto");
 		assert_eq!(Delay::Fixed(Duration::from_millis(250)).to_string(), "250ms");
-	}
-
-	/// Disabled audio sends nothing to follow, so video keeps its own budget.
-	#[test]
-	fn disabled_audio_leaves_video_its_own_budget() {
-		let args = parse(&[]);
-		let mut audio = hang::catalog::Audio::default();
-		assert_eq!(args.video_max_delay(&audio), AUTO_VIDEO_DELAY);
-
-		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		audio.renditions.insert("audio".into(), config);
-		assert_eq!(args.video_max_delay(&audio), AUTO_VIDEO_DELAY + args.stretch());
-
-		audio.renditions.get_mut("audio").unwrap().enabled = false;
-		assert_eq!(args.video_max_delay(&audio), AUTO_VIDEO_DELAY);
 	}
 
 	/// The playout budget has one spelling because it always controls both

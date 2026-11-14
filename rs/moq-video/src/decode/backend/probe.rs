@@ -24,6 +24,14 @@ pub(crate) const NAME: &str = "probe";
 /// A test decoder that holds one picture until the next call or a flush.
 pub(crate) const BUFFERED_NAME: &str = "probe-buffered";
 
+/// A test decoder that reorders like B-frames do: it holds two pictures and
+/// returns the earliest once it has a third. It hands pictures back at
+/// nanosecond scale, as MediaCodec does, whatever scale the access unit came in.
+pub(crate) const REORDER_NAME: &str = "probe-reorder";
+
+/// A test decoder that holds every picture until a flush.
+pub(crate) const HOLDING_NAME: &str = "probe-holding";
+
 /// A test decoder that hands each picture straight back and records nothing,
 /// for tests that run more than one decoder at a time. It refuses [`CORRUPT`].
 pub(crate) const IMMEDIATE_NAME: &str = "probe-immediate";
@@ -151,6 +159,15 @@ pub(crate) struct Buffered {
 
 pub(crate) struct Immediate(VecDeque<Frame>);
 
+pub(crate) struct Reorder {
+	name: &'static str,
+	/// How many pictures it holds back.
+	depth: usize,
+	/// Held pictures, in presentation order.
+	held: Vec<Frame>,
+	ready: VecDeque<Frame>,
+}
+
 pub(crate) struct Single(VecDeque<Frame>);
 
 pub(crate) struct Native(VecDeque<Frame>);
@@ -173,6 +190,51 @@ impl Buffered {
 			held: None,
 			ready: VecDeque::new(),
 		}))
+	}
+}
+
+impl Reorder {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self {
+			name: REORDER_NAME,
+			depth: 2,
+			held: Vec::new(),
+			ready: VecDeque::new(),
+		}))
+	}
+
+	pub(crate) fn open_holding(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self {
+			name: HOLDING_NAME,
+			depth: usize::MAX,
+			held: Vec::new(),
+			ready: VecDeque::new(),
+		}))
+	}
+}
+
+impl Backend for Reorder {
+	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
+		let nanos = u64::try_from(timestamp.as_nanos()?).map_err(|err| anyhow::anyhow!("probe: {err}"))?;
+		let frame = frame(Timestamp::from_nanos(nanos)?)?;
+		let index = self.held.partition_point(|held| held.timestamp < frame.timestamp);
+		self.held.insert(index, frame);
+		let bumped = self.held.len().saturating_sub(self.depth);
+		self.ready.extend(self.held.drain(..bumped));
+		Ok(())
+	}
+
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		self.ready.extend(self.held.drain(..));
+		Ok(())
+	}
+
+	fn name(&self) -> &str {
+		self.name
 	}
 }
 

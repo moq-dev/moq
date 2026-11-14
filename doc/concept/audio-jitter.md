@@ -47,8 +47,8 @@ no frame, is waited for only the playout delay plus any lookahead, since past th
 it would play late: a reordered backlog's holes waited out to the whole budget
 would delay the frames behind them, which the estimator would measure as
 jitter. A caller that estimates keeps the budget past the target, which is why
-`moq play` waits on a stalled group for the delay plus its `--stretch`, 2 s by
-default. The observation is also only as honest as
+`moq play` waits on a stalled audio group for the delay plus the estimate's 2 s
+ceiling. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
 as packets come and lets the playback buffer hold the target, rather than
 pacing reads to the speaker.
@@ -59,15 +59,12 @@ before any container sees them, at the relay and in the receiver's own transport
 subscriber, so a subscription cut to the target hides every frame later than
 the target: the estimate creeps up one bucket at a time while the frames it
 should have measured go unplayed. Both implementations subscribe with the delay
-plus the player's `stretch` setting: `moq play` through its age budget, and the
-browser through the audio subscription alone, since its container consumer
-observes each frame before applying the local budget. The 2 s default reaches
-the estimate's own ceiling, so any lateness the estimator can measure is
-observed at once. A smaller stretch hides frames later than the target plus the
-stretch, so a jump in lateness larger than the stretch is learned in steps of
-about the stretch; a zero stretch cuts a live subscription to the target and
-accepts the one-bucket creep. A buffered browser player keeps its subscription
-at least the delay plus its lookahead, whatever the stretch.
+plus the estimate's own 2 s ceiling, whatever the player's `stretch` setting:
+`moq play` through its age budget, and the browser through the audio
+subscription alone, since its container consumer observes each frame before
+applying the local budget. So any lateness the estimator can measure is
+observed at once. A buffered browser player keeps its subscription at least the
+delay plus its lookahead.
 Browser video keeps the shared budget, because a longer one fetches whole stale
 groups, so a broadcast with no audio measures only the lateness that budget
 lets through.
@@ -110,19 +107,39 @@ observe(arrival, media):
     delay = max(0, (arrival - ref.arrival) - (media - ref.media))
 
     if first observation:
-        origin = arrival; interval = 0; peak = delay; return
+        origin = arrival; interval = 0; peak = delay; note(arrival, delay); return
 
     index = floor((arrival - origin) / RESAMPLE)
     resumed = ended; ended = false
     if index <= interval:
-        peak = max(peak, delay); return
+        peak = max(peak, delay); note(arrival, delay); return
 
-    fold(bucket of peak)
+    close(bucket of peak)
     if resumed:                         # a declared silence folds nothing
-        origin = arrival; index = 0
-    else:
-        fold(nothing) for each elapsed empty interval, at most IDLE_MAX
-    interval = index; peak = delay
+        settle(); origin = arrival; index = 0
+    else:                               # held until this interval closes
+        pending = index - interval - 1
+    interval = index; peak = delay; due = +inf; late = -inf
+    note(arrival, delay)
+
+note(arrival, delay):                   # due and late start at +inf and -inf
+    if delay > RESAMPLE:                # stalled: due in an earlier interval
+        due = min(due, arrival - delay); late = max(late, arrival)
+
+close(bucket):                          # pending starts at 0 and is spent here
+    if late > -inf and a stall is open
+            and due < stall.late and due - stall.due < WINDOW:
+        stall.bucket = max(stall.bucket, bucket); stall.late = late
+        stall.span += pending + 1; pending = 0
+        return                          # still behind the same stall
+    settle()
+    if late > -inf: open a stall with bucket, late, due, span = pending
+    else: fold(nothing) min(pending, IDLE_MAX) times; fold(bucket)
+    pending = 0
+
+settle():                               # a stall is one observation
+    if a stall is open:
+        fold(stall.bucket); fold(nothing) min(stall.span, IDLE_MAX) times; close it
 
 end():                                  # a declared end precedes the next observation
     if not first observation: ended = true
@@ -224,6 +241,50 @@ form worth stating: the histogram halves a sample's weight after
 about **135 s**. The forget factor decays **once per resampled observation, not
 once per arrival**. Applying a per-observation factor per arrival is the mistake
 the #3517 branch makes, and the resulting number reads plausible either way.
+
+### One observation per stall
+
+An outage spans intervals, and the max per interval alone would count it once
+per interval. A link that stops for 1.5 s and then delivers its backlog would
+fold four or five peaks of a second or more, far past the 5% the quantile
+needs, and a one-off would hold the target, and video with it, a second behind
+live for 10 to 25 s after the link recovered. Those intervals are one event for
+the same reason a queue's hundred frames are.
+
+A frame whose delay exceeds `RESAMPLE` was due in an earlier interval than the
+one it arrived in, so it is **stalled**, and `arrival - delay` is when it was
+due. An interval holding a stalled frame due before the open stall's latest
+stalled frame arrived is still behind that stall: it joins it instead of
+folding. The empty intervals before a stalled interval belong to its stall as
+well, since a link that stops outright delivers nothing until its backlog
+arrives, so empty intervals fold only once the interval after them closes and
+shows whether it is stalled: a recovery that delivers the live edge before its
+backlog is still a stall. The stall ends at the
+first interval that does not continue it, and only then folds, once, its
+largest delay, then one idle fold for each other interval it spanned. So the
+estimate keeps its wall-clock time constant, and the stall's single observation
+does not take the weight the idle folds return to the prior, which an
+observation after them would reclaim up to `FRESH_MAX`.
+
+The test is on due time, not on adjacency, so a publisher that flushes a second
+or more of media at once still counts each flush: the first frame of the next
+flush was due only after the previous one arrived. Flushes back to back and
+newest first do chain, since each is due before the previous one finished
+arriving, and locally they look like outages one after another. So a stall
+covers at most `WINDOW` of due time, the span the delay itself is measured
+over, and longer lateness folds once per window as the recurring stall it is.
+Recurring outages still
+raise the target, a few of them within a half-life, which is the evidence a
+recurring stall deserves. A lateness under one interval never stalls, so
+ordinary jitter, shorter flushes, reordering, and a step in the path's delay fold one
+observation per interval.
+
+The open stall is four numbers, so a publisher that chains stalls on purpose
+costs nothing. While due times advance, one fold per window of due time bounds
+how long the estimate goes without evidence. Only a publisher repeating an old
+timestamp holds them still, since a frame more than `WINDOW` behind the newest
+is not measured, and that holds its own stall open: it freezes its own
+broadcast's estimate, at no cost beyond the four numbers.
 
 ### The histogram
 
@@ -413,7 +474,10 @@ Restarting would drop the target to the cold-start 100 ms at the switch, then
 raise it as the lateness is relearned, and the playout follows both moves. Only the
 reference window restarts, so the new track's frames are measured against its
 own fastest. Its opening backlog would read as seconds late against the old
-track's arrivals.
+track's arrivals. What the outgoing track measured but has not folded, its
+interval in progress and any open stall, folds into the continued histogram as
+if that interval closed at the switch: a switch most often follows an outage,
+and would otherwise drop the outage's one observation.
 
 ## Rise, fall, startup, and the ceiling
 
@@ -430,7 +494,11 @@ can hear, so the target should rise readily and fall grudgingly, and it does:
   hundreds of punctual frames around it.
 - **Falling** is driven by the forget factor alone, over the 20 s half-life
   above. Old mass in the tail has to decay out before the quantile can move
-  down, and nothing can make it decay faster.
+  down, and nothing can make it decay faster. What keeps a one-off from holding
+  the target is that it puts little mass there: an outage is
+  [one observation](#one-observation-per-stall), however many intervals its
+  backlog spans, while its stalled frames fall within `WINDOW` of due time;
+  a longer one is an observation per window.
 - **A single bad observation does not move the target on its own.** Once the
   prior is spent it adds `1 - FORGET` weight, 1.7%, well under the 5% the 95th
   percentile needs. It takes a few intervals of genuine lateness before the
@@ -480,6 +548,9 @@ ceiling. Seeding with the prior relaxes the estimate back toward cold start at
 the same time constant as everything else, which is what an evidence-free
 interval should do, and it raises the target rather than lowering it, so the
 error is on the safe side.
+
+Idle intervals fold when the interval after them closes, before it, unless
+that interval is [stalled](#one-observation-per-stall), whose stall owns them.
 
 `IDLE_MAX` caps how many intervals are folded at once. It exists only to bound
 the work: after 1024 folds the retained weight is about 2e-8, so the cap changes
@@ -606,6 +677,8 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
 | `spike` | A recurring stall raises the target, and it decays once the stalls stop |
 | `straggler` | One late interval after the prior is spent leaves the target where it was |
+| `batches` | Back-to-back 1 s flushes delivered newest first chain their stalls, which still fold once per window of due time and raise the target |
+| `outage` | A one-off 1.5 s outage whose backlog arrives over several intervals is one stall and leaves the target where it was, while three more 3 s apart raise it |
 | `fixed` | An explicit delay ignores the arrivals entirely |
 
 `reference.ts` beside them generated the numbers. It is **not normative and not
@@ -681,10 +754,10 @@ At each window boundary a player decides on five inputs:
   clock from speeding into it.
 - `lag`: how far the playhead trails the shared clock, negative when it plays
   ahead of it.
-- `bound`: how far audio may trail the clock, which is the subscription's max
-  delay less the playout delay: the player's `stretch` setting (2 s by
-  default), or for a buffered player the larger of it and the lookahead. A zero
-  stretch turns the stretch off; see [below](#skips-underruns-and-silence).
+- `bound`: how far audio may trail the clock: the player's `stretch` setting
+  (200 ms by default), or for a buffered player the larger of it and the
+  lookahead. It sizes nothing else. A zero stretch turns the stretch off; see
+  [below](#skips-underruns-and-silence).
 
 `level` passes through NetEq's `BufferLevelFilter` once per window: three of its
 10 ms steps at the factor the target selects, 251, 252, 253, or 254 in 256ths
@@ -724,8 +797,8 @@ playhead ahead of the clock back onto it. These are NetEq's thresholds and
 rates, untuned. A moved target moves the clock, so a rise leaves audio ahead of
 it and a fall leaves audio behind, and both become ordinary slowing down and
 speeding up: nothing parks in silence on a rise, and nothing skips buffered
-audio on a fall shorter than the bound and one window. A fall past that skips
-to the bound, as any lag past it does.
+audio on a fall, within the bound. Past it, a fall skips onto the clock and a
+rise pads silence until the clock arrives, as any lag past it does.
 
 Without a clock reading the target is where the playhead belongs, so
 `lag = level - target`. The browser then never skips; native playback bounds
@@ -733,9 +806,12 @@ the lag at three quarters of its ring's capacity above the target.
 
 ### Skips, underruns, and silence
 
-A playhead that trails the clock by more than `bound` and one window skips
-ahead to `bound` behind it, dropping the staged window and the audio it passes.
-Less than that is the stretch's to catch up. A join is the exception: until
+A playhead that trails the clock by more than `bound`, or one window when that
+is larger, skips onto the clock, dropping the staged window and the audio it
+passes, as video skips the frames a stall made late. One that leads the clock
+by as much, as a target rise past the bound leaves it, plays silence until the
+clock reaches it, dropping nothing. Less than that either way is the stretch's
+to catch up. A join is the exception: until
 the player has read once on the clock, its bound is zero, so the backlog a
 subscription opens on is skipped rather than played out at the stretch's pace,
 and playback starts on the clock. A shared clock whose reference moves earlier,

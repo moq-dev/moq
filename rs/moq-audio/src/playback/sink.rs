@@ -279,8 +279,9 @@ impl Sink {
 	/// The sink then plays onto that clock rather than at its latency alone.
 	/// Behind it, it speeds up once it holds more than its latency; ahead of
 	/// it, it slows down. Its buffer running low slows it down too, falling
-	/// behind the clock by at most `stretch`, and audio trailing the clock by
-	/// more than `stretch` plus one 30 ms window is skipped. A zero `stretch`
+	/// behind the clock by at most `stretch`. Audio trailing the clock by more
+	/// than `stretch` skips onto it, and audio leading it by as much waits in
+	/// silence for it. A zero `stretch`
 	/// turns the time stretch off: written audio plays unaltered, and a sink
 	/// more than a window off the clock skips onto it or pads silence until
 	/// the clock reaches it. `jumped` is how far the

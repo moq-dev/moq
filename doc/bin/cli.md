@@ -174,7 +174,7 @@ MPEG-TS export is covered in the [MPEG-TS guide](/bin/ts#export).
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
-moq ... play --stretch 200ms        # let audio trail the clock by at most 200 ms
+moq ... play --stretch 500ms        # let audio trail the clock by up to 500 ms before it skips
 moq ... play --video off            # audio only, without a window
 moq ... play --video off --metrics play.ndjson   # log what the speaker played
 ```
@@ -192,9 +192,9 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 delay instead. Audio and video play from one clock and stay in sync while both
 arrive on time. After a stall, video shows each late frame as it arrives, while
 audio slows down and falls behind the clock rather than dropping what arrives
-late, then speeds up until it is back on it. `--stretch` (default 2 s) bounds
-how far audio may trail before it skips ahead, and a stalled group is waited on
-for the delay plus the stretch before it is skipped. `--stretch 0` plays
+late, then speeds up until it is back on it. Audio that trails by more than
+`--stretch` (default 200 ms) skips onto the clock, as video does, and audio
+that leads it by as much waits in silence. `--stretch 0` plays
 received audio unaltered: late audio is skipped, an underrun is silence, and
 drift against the publisher's clock is corrected by a small skip or pad.
 Each role follows the catalog, switching rendition when the publisher retires

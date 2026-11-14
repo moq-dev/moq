@@ -55,9 +55,17 @@ pub enum Next {
 	Done,
 }
 
+/// A queued read, with when the access unit behind a picture arrived and when the picture was
+/// decoded.
+struct Queued {
+	read: Read,
+	arrival: Option<Instant>,
+	at: Instant,
+}
+
 #[derive(Default)]
 struct State {
-	queue: VecDeque<(Read, Instant)>,
+	queue: VecDeque<Queued>,
 	/// Pictures in the queue.
 	pictures: usize,
 	/// The newest timestamp this lane has decoded, shown or not.
@@ -74,8 +82,8 @@ impl State {
 
 	/// The first queued picture's timestamp, and when it was decoded; `None` when it has no time.
 	fn held(&self) -> Option<(Duration, Instant)> {
-		let (frame, at) = self.queue.iter().find_map(|(read, at)| match read {
-			Read::Frame(frame) => Some((frame, *at)),
+		let (frame, at) = self.queue.iter().find_map(|queued| match &queued.read {
+			Read::Frame(frame) => Some((frame, queued.at)),
 			_ => None,
 		})?;
 		Some((time(frame.timestamp)?, at))
@@ -95,6 +103,8 @@ pub struct Selector {
 	/// The last picture timestamp returned with two lanes, which output strictly
 	/// increases past. A lone decoder's pictures pass through as they come.
 	last: Option<Duration>,
+	/// When the access unit behind the last picture returned arrived.
+	arrival: Option<Instant>,
 	/// The furthest a gap returned with two lanes resumed at.
 	resumed: Option<Duration>,
 	/// The newest end returned with two lanes.
@@ -119,6 +129,7 @@ impl Selector {
 			source: Lane::Min,
 			dual,
 			last: None,
+			arrival: None,
 			resumed: None,
 			ended: None,
 			measured: interval.is_none(),
@@ -130,6 +141,12 @@ impl Selector {
 	#[cfg(test)]
 	pub(super) fn source(&self) -> Lane {
 		self.source
+	}
+
+	/// When the access unit behind the last picture [`next`](Self::next) returned arrived, as
+	/// [`push_arrived`](Self::push_arrived) gave it.
+	pub(super) fn arrival(&self) -> Option<Instant> {
+		self.arrival
 	}
 
 	/// Whether `lane` can take another decoded picture.
@@ -144,12 +161,18 @@ impl Selector {
 	/// first end, where the pictures before it stop. Marker-only groups read while this
 	/// lane waits behind the source then cost a bounded queue, not an entry each.
 	pub fn push(&mut self, lane: Lane, read: Read, now: Instant) {
+		self.push_arrived(lane, read, None, now);
+	}
+
+	/// [`push`](Self::push), with when the access unit behind a picture arrived, which
+	/// [`arrival`](Self::arrival) reports once the picture is returned.
+	pub(super) fn push_arrived(&mut self, lane: Lane, read: Read, arrival: Option<Instant>, now: Instant) {
 		let state = &mut self.lanes[lane as usize];
 		let mut run = state
 			.queue
 			.iter_mut()
 			.rev()
-			.map(|(queued, _)| queued)
+			.map(|queued| &mut queued.read)
 			.take_while(|queued| !matches!(queued, Read::Frame(_)));
 		match &read {
 			Read::Frame(frame) => {
@@ -181,7 +204,7 @@ impl Selector {
 				}
 			}
 		}
-		state.queue.push_back((read, now));
+		state.queue.push_back(Queued { read, arrival, at: now });
 	}
 
 	/// Forget every queued picture and what each lane has decoded, as after a
@@ -233,10 +256,11 @@ impl Selector {
 		}
 
 		let source = &mut self.lanes[self.source as usize];
-		if let Some((read, _)) = source.queue.pop_front() {
+		if let Some(Queued { read, arrival, .. }) = source.queue.pop_front() {
 			match &read {
 				Read::Frame(frame) => {
 					source.pictures -= 1;
+					self.arrival = arrival;
 					if self.dual
 						&& let Some(timestamp) = time(frame.timestamp)
 					{
@@ -278,7 +302,7 @@ impl Selector {
 	fn prune(&mut self) {
 		let (last, resumed, ended) = (self.last, self.resumed, self.ended);
 		for state in &mut self.lanes {
-			state.queue.retain(|(read, _)| match read {
+			state.queue.retain(|queued| match &queued.read {
 				Read::Frame(frame) => time(frame.timestamp).is_none_or(|at| last.is_none_or(|last| at > last)),
 				// Lost by this lane, but the output already reached where it resumes.
 				Read::Gap { timestamp, duration } => resumes(*timestamp, *duration)
@@ -290,7 +314,7 @@ impl Selector {
 			state.pictures = state
 				.queue
 				.iter()
-				.filter(|(read, _)| matches!(read, Read::Frame(_)))
+				.filter(|queued| matches!(queued.read, Read::Frame(_)))
 				.count();
 		}
 	}
@@ -454,6 +478,36 @@ mod tests {
 			});
 		}
 		assert_eq!(out, ["frame #7", "gap #7+#1", "end #8"]);
+	}
+
+	/// The arrival handed out is the one pushed with the picture returned, from
+	/// whichever lane, and a picture pushed without one has none.
+	#[tokio::test]
+	async fn the_arrival_rides_with_its_picture() {
+		tokio::time::pause();
+		let now = Instant::now();
+		// Distinct for every picture and lane, so it says which one was shown.
+		let arrival = |lane: Lane, millis: u64| now.checked_add(Duration::from_millis(millis * 2 + lane as u64));
+		let mut selector = selector();
+		let push = |selector: &mut Selector, lane, millis| {
+			selector.push_arrived(lane, picture(millis), arrival(lane, millis), now);
+		};
+		push(&mut selector, Lane::Min, 1000);
+		push(&mut selector, Lane::Max, 0);
+		assert_eq!(drain(&mut selector, now), [1000]);
+		assert_eq!(selector.arrival(), arrival(Lane::Min, 1000));
+
+		push(&mut selector, Lane::Max, 500);
+		push(&mut selector, Lane::Min, 1033);
+		push(&mut selector, Lane::Max, 1033);
+		push(&mut selector, Lane::Max, 1066);
+		assert_eq!(drain(&mut selector, now), [1033, 1066]);
+		assert_eq!(selector.source, Lane::Max);
+		assert_eq!(selector.arrival(), arrival(Lane::Max, 1066));
+
+		selector.push(Lane::Max, picture(1100), now);
+		assert_eq!(drain(&mut selector, now), [1100]);
+		assert_eq!(selector.arrival(), None);
 	}
 
 	/// The max-delay decoder finishing its first picture before the min-delay

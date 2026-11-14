@@ -13,7 +13,9 @@
 //! ([`Track::set_target`]), or by the delay passed to [`Producer::new`] while
 //! none holds one. Give a [`Consumer`] to a presenter: [`Consumer::present`]
 //! selects the newest due picture without waiting, so a canvas can repeat its
-//! previous picture.
+//! previous picture. A presenter that sleeps until its next picture is due
+//! reads the [`Schedule`] it sleeps on and wakes when
+//! [`Consumer::poll_changed`] reports that it moved.
 //!
 //! A track also maps encoder segments onto the clock across declared ends.
 //! Keep one active track per [`Kind`]; retire it before
@@ -261,8 +263,46 @@ impl State {
 	/// anchored the clock. `None` means as soon as possible: there is nothing
 	/// left to wait for, as for an unscaled timestamp, which has no media time.
 	fn due(&self, timestamp: Timestamp) -> Option<Instant> {
-		let at = self.reference()?.at(Duration::try_from(timestamp).ok()?)?;
-		Some(at.checked_add(self.delay()).unwrap_or(at))
+		self.schedule().due(timestamp)
+	}
+
+	/// The reference and delay every due time derives from.
+	fn schedule(&self) -> Schedule {
+		Schedule {
+			reference: self.reference(),
+			delay: self.delay(),
+		}
+	}
+}
+
+/// The playout schedule at one moment: where the reference sits and how far
+/// playback trails it.
+///
+/// Two schedules are equal when they place every timestamp at the same
+/// instant, so a reference re-pinned onto the same line compares equal.
+#[derive(Clone, Copy, Debug)]
+pub struct Schedule {
+	reference: Option<Anchor>,
+	delay: Duration,
+}
+
+impl Schedule {
+	/// How far behind the reference playback runs.
+	pub fn delay(&self) -> Duration {
+		self.delay
+	}
+
+	/// When `timestamp` is due on this schedule, or `None` before the first anchor or for an
+	/// unscaled timestamp, which has no media time.
+	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
+		let at = self.reference?.at(Duration::try_from(timestamp).ok()?)?;
+		Some(at.checked_add(self.delay).unwrap_or(at))
+	}
+}
+
+impl PartialEq for Schedule {
+	fn eq(&self, other: &Self) -> bool {
+		self.delay == other.delay && !moved(self.reference, other.reference)
 	}
 }
 
@@ -719,7 +759,10 @@ impl Producer {
 	#[must_use = "use the returned producer for the replacement broadcast"]
 	pub fn reset(self, delay: Duration) -> Self {
 		let clock = Arc::new(Clock::new(delay));
-		*self.current.lock().unwrap() = clock.clone();
+		// Wake the clock readers followed, which is not this handle's own when a
+		// stale clone resets, and only after the swap so they find the new one.
+		let replaced = std::mem::replace(&mut *self.current.lock().unwrap(), clock.clone());
+		replaced.wake();
 		Self {
 			clock,
 			current: self.current,
@@ -762,12 +805,50 @@ impl Consumer {
 		self.current.lock().unwrap().state.lock().unwrap().position(at)
 	}
 
+	/// The current schedule, to read due times from or to pass to
+	/// [`poll_changed`](Self::poll_changed).
+	pub fn schedule(&self) -> Schedule {
+		self.current.lock().unwrap().state.lock().unwrap().schedule()
+	}
+
+	/// Wait until the schedule differs from `seen`, returning the new one.
+	///
+	/// Resolves once any due time moved: a track re-pinned the reference, the
+	/// delay changed, the last anchor went away, or the producer reset onto a
+	/// clock that schedules differently. A change made before the call, even
+	/// while no wait was pending, resolves it at once; changes that cancel out
+	/// before the call do not.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_changed(&self, waiter: &kio::Waiter, seen: Schedule) -> Poll<Schedule> {
+		loop {
+			let clock = self.current.lock().unwrap().clone();
+			let mut changed = None;
+			// A reset swaps readers before waking the old clock, so checking the
+			// swap under the old clock's signal never misses one.
+			let _ = std::task::ready!(clock.changed.poll(waiter, |_| {
+				if !Arc::ptr_eq(&self.current.lock().unwrap(), &clock) {
+					return Poll::Ready(());
+				}
+				let schedule = clock.state.lock().unwrap().schedule();
+				if schedule == seen {
+					return Poll::Pending;
+				}
+				changed = Some(schedule);
+				Poll::Ready(())
+			}));
+			if let Some(schedule) = changed {
+				return Poll::Ready(schedule);
+			}
+		}
+	}
+
 	/// The newest due picture's index in presentation order, or `None` to repeat the previous one.
 	///
 	/// Pass queued timestamps in ascending order and discard entries through the
 	/// returned index after showing that picture. This stores no frames and leaves
 	/// their retention and backpressure to the caller. Query again after every
-	/// schedule move; a cached deadline can become stale.
+	/// schedule move, which [`poll_changed`](Self::poll_changed) reports; a cached
+	/// deadline can become stale.
 	pub fn present(&self, timestamps: impl IntoIterator<Item = Timestamp>, now: Instant) -> Option<usize> {
 		let clock = self.current.lock().unwrap();
 		let state = clock.state.lock().unwrap();
@@ -996,14 +1077,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn ordinary_arrivals_leave_a_parked_resume_asleep() {
-		use std::sync::atomic::{AtomicUsize, Ordering};
-		use std::task::{Wake, Waker};
-		struct Wakes(AtomicUsize);
-		impl Wake for Wakes {
-			fn wake(self: Arc<Self>) {
-				self.0.fetch_add(1, Ordering::Relaxed);
-			}
-		}
 		tokio::time::pause();
 		let clock = Producer::new(DELAY);
 		let now = kio::clock::now();
@@ -1013,19 +1086,15 @@ mod tests {
 		let video = clock.track(Kind::Video);
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
-		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
-		let waiter = kio::Waiter::new(Waker::from(wakes.clone()));
+		let (wakes, waiter) = Wakes::waiter();
 		let mut resume = video.resume(transition, ms(0), None);
 		assert!(resume.poll_ready(&waiter).is_pending());
 		let later = now.saturating_add(Duration::from_millis(20));
 		video.received(ms(20), later);
 		audio.received(ms(20), later);
-		assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+		assert_eq!(wakes.count(), 0);
 		audio.received(ms(40), later);
-		assert!(
-			wakes.0.load(Ordering::Relaxed) > 0,
-			"a moved schedule must wake the resume"
-		);
+		assert!(wakes.count() > 0, "a moved schedule must wake the resume");
 	}
 
 	#[test]
@@ -1472,5 +1541,243 @@ mod tests {
 			// The pair arrived before the tail ended, so it continues as the tail ends.
 			Some(now.saturating_add(Duration::from_millis(120) + TICK))
 		);
+	}
+
+	/// Counts the wakes a parked poll receives.
+	struct Wakes(std::sync::atomic::AtomicUsize);
+
+	impl std::task::Wake for Wakes {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		}
+	}
+
+	impl Wakes {
+		fn waiter() -> (Arc<Self>, kio::Waiter) {
+			let wakes = Arc::new(Self(Default::default()));
+			let waiter = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
+			(wakes, waiter)
+		}
+
+		fn count(&self) -> usize {
+			self.0.load(std::sync::atomic::Ordering::Relaxed)
+		}
+	}
+
+	/// Parks a waiter on the current schedule, applies `change`, and checks that
+	/// the waiter woke and resolved to the schedule the change left behind.
+	fn wakes_on(reader: &Consumer, change: impl FnOnce()) -> Schedule {
+		let seen = reader.schedule();
+		let (wakes, waiter) = Wakes::waiter();
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+		change();
+		assert!(wakes.count() > 0, "the change left the waiter asleep");
+		let Poll::Ready(moved) = reader.poll_changed(&waiter, seen) else {
+			panic!("the change did not resolve the wait");
+		};
+		assert_ne!(moved, seen);
+		assert_eq!(moved, reader.schedule());
+		moved
+	}
+
+	/// Every way a due time can move wakes a parked reader.
+	#[test]
+	fn the_change_waiter_wakes_on_every_schedule_move() {
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
+		let clock = Producer::new(DELAY);
+		let reader = clock.consume();
+		let audio = clock.track(Kind::Audio);
+		let video = clock.track(Kind::Video);
+
+		let anchored = wakes_on(&reader, || assert!(video.received(ms(0), start)));
+		assert_eq!(anchored.due(ms(0)), Some(start.saturating_add(DELAY)));
+
+		// Audio arrives 20ms ahead of video's schedule and re-pins it.
+		let pinned = wakes_on(&reader, || {
+			assert!(audio.received(ms(40), start.saturating_add(Duration::from_millis(20))))
+		});
+		assert_eq!(
+			pinned.due(ms(40)),
+			Some(start.saturating_add(Duration::from_millis(20) + DELAY))
+		);
+
+		let deeper = wakes_on(&reader, || assert!(video.set_target(Duration::from_millis(300))));
+		assert_eq!(deeper.delay(), Duration::from_millis(300));
+
+		// Releasing the deepest target falls back to the default delay.
+		let shallower = wakes_on(&reader, || drop(video));
+		assert_eq!(shallower.delay(), DELAY);
+
+		// The only anchored track breaks its timeline: nothing is scheduled.
+		let reset = wakes_on(&reader, || audio.reset());
+		assert_eq!(reset.due(ms(0)), None);
+
+		// A producer reset onto a clock with another delay moves readers onto it.
+		let replaced = wakes_on(&reader, || drop(clock.reset(Duration::from_millis(250))));
+		assert_eq!(replaced.delay(), Duration::from_millis(250));
+	}
+
+	/// A wait resolves only when a due time moves, not on every signal the
+	/// clock raises for its transitions.
+	#[test]
+	fn the_change_waiter_ignores_what_leaves_the_schedule_alone() {
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
+		let clock = Producer::new(DELAY);
+		let reader = clock.consume();
+		let audio = clock.track(Kind::Audio);
+		let video = clock.track(Kind::Video);
+		video.received(ms(0), start);
+		assert!(audio.set_target(Duration::from_millis(200)));
+
+		let seen = reader.schedule();
+		let (wakes, waiter) = Wakes::waiter();
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+
+		// A late arrival and a shallower target raise no signal at all.
+		assert!(!video.received(ms(40), start.saturating_add(Duration::from_millis(60))));
+		assert!(!video.set_target(Duration::from_millis(150)));
+		assert_eq!(wakes.count(), 0, "an unmoved schedule woke the waiter");
+
+		// Declaring a restart and its end signals the transition's resume, but
+		// the schedule stays put, so the reader parks again.
+		let transition = video.declare();
+		video.end(ms(1_000)).unwrap();
+		video.plan(transition, ms(0), None);
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+
+		// A target that moves and moves back before the reader looks is no change.
+		assert!(audio.set_target(Duration::from_millis(400)));
+		assert!(audio.set_target(Duration::from_millis(200)));
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+
+		// The reference passing to another anchor on the same line, as the track
+		// holding it goes and then as the last one leaves its schedule behind,
+		// moves no due time.
+		let data = clock.track(Kind::Data);
+		assert!(!data.received(ms(40), start.saturating_add(Duration::from_millis(40))));
+		drop(video);
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+		drop(data);
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+	}
+
+	/// A producer reset onto a clock that schedules the same way leaves the
+	/// reader waiting, now on the new clock.
+	#[test]
+	fn the_change_waiter_follows_a_producer_reset() {
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
+		let clock = Producer::new(DELAY);
+		let reader = clock.consume();
+		let seen = reader.schedule();
+		let (wakes, waiter) = Wakes::waiter();
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+
+		let clock = clock.reset(DELAY);
+		assert!(wakes.count() > 0, "the reset left the reader on the old clock");
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+
+		let woken = wakes.count();
+		let video = clock.track(Kind::Video);
+		assert!(video.received(ms(0), start));
+		assert!(wakes.count() > woken, "the reader still waits on the old clock");
+		assert_eq!(reader.poll_changed(&waiter, seen), Poll::Ready(reader.schedule()));
+	}
+
+	/// A stale clone's reset replaces the clock readers follow, not its own, and
+	/// wakes them on that one.
+	#[test]
+	fn the_change_waiter_follows_a_stale_clone_reset() {
+		let clock = Producer::new(DELAY);
+		let stale = clock.clone();
+		let reader = clock.consume();
+		let _current = clock.reset(DELAY);
+		let seen = reader.schedule();
+		let (wakes, waiter) = Wakes::waiter();
+		assert!(reader.poll_changed(&waiter, seen).is_pending());
+
+		let replaced = stale.reset(Duration::from_millis(300));
+		assert!(wakes.count() > 0, "the reset left the reader on the clock it replaced");
+		let Poll::Ready(moved) = reader.poll_changed(&waiter, seen) else {
+			panic!("the reset did not resolve the wait");
+		};
+		assert_eq!(moved.delay(), Duration::from_millis(300));
+		drop(replaced);
+	}
+
+	/// One move wakes every reader of the clock, clones and separate consumers alike.
+	#[test]
+	fn the_change_waiter_wakes_every_reader() {
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
+		let clock = Producer::new(DELAY);
+		let first = clock.consume();
+		let readers = [first.clone(), first, clock.consume()];
+		let video = clock.track(Kind::Video);
+		let seen = readers[0].schedule();
+		let waiters: Vec<_> = readers
+			.iter()
+			.map(|reader| {
+				let (wakes, waiter) = Wakes::waiter();
+				assert!(reader.poll_changed(&waiter, seen).is_pending());
+				(wakes, waiter)
+			})
+			.collect();
+
+		video.received(ms(0), start);
+		for (reader, (wakes, waiter)) in readers.iter().zip(&waiters) {
+			assert!(wakes.count() > 0, "a reader slept through the move");
+			assert_eq!(reader.poll_changed(waiter, seen), Poll::Ready(reader.schedule()));
+		}
+	}
+
+	/// Dropping a wait loses nothing: a move made while no wait is pending
+	/// resolves the next one at once.
+	#[kio::test]
+	async fn a_dropped_change_wait_keeps_the_move() {
+		let clock = Producer::new(DELAY);
+		let reader = clock.consume();
+		let video = clock.track(Kind::Video);
+		video.received(ms(0), kio::clock::now());
+		let seen = reader.schedule();
+		{
+			let mut wait = std::pin::pin!(reader.changed(seen));
+			assert!(futures::poll!(wait.as_mut()).is_pending());
+		}
+
+		assert!(video.set_target(Duration::from_millis(300)));
+		let moved = reader.changed(seen).await;
+		assert_eq!(moved.delay(), Duration::from_millis(300));
+		assert_eq!(moved, reader.schedule());
+	}
+
+	/// A presenter asleep on a picture's due time wakes when the delay drops,
+	/// and presents at the new due time instead of the one it slept on.
+	#[kio::test]
+	async fn a_presenter_reschedules_when_the_delay_moves() {
+		use futures::future::{Either, select};
+
+		let clock = Producer::new(Duration::from_millis(500));
+		let reader = clock.consume();
+		let video = clock.track(Kind::Video);
+		let start = kio::clock::now();
+		video.received(ms(0), start);
+
+		let present = async {
+			let mut schedule = reader.schedule();
+			loop {
+				let due = schedule.due(ms(0)).expect("anchored");
+				let sleep = std::pin::pin!(kio::clock::sleep_until(due));
+				let moved = std::pin::pin!(reader.changed(schedule));
+				match select(sleep, moved).await {
+					Either::Left(_) => return kio::clock::now(),
+					Either::Right((moved, _)) => schedule = moved,
+				}
+			}
+		};
+		let lower = async {
+			kio::clock::sleep(Duration::from_millis(100)).await;
+			assert!(video.set_target(Duration::from_millis(200)));
+		};
+		let (presented, ()) = futures::join!(present, lower);
+		assert_eq!(presented, start.saturating_add(Duration::from_millis(200)));
 	}
 }

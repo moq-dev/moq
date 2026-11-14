@@ -69,7 +69,12 @@ Decisions, with the prompts as asked:
   about to run out, never trailing past the threshold (rejected: lag only,
   an underrun being silence).
 - Target fall: ✅ the implementer measures and picks (rejected: a shorter
-  half-life now; one observation per outage now).
+  half-life now; one observation per outage now). Picked 2026-11-13 by
+  replaying three Nightlies' arrivals: one outage, the intervals its frames
+  more than one interval late span and the empty ones before them, folds as
+  one observation (`doc/concept/audio-jitter.md`, "One observation per
+  stall"). A shorter half-life or a faster-decaying tail cost underruns on
+  `wide` and `bursty` for less of the fall.
 - Setting: ✅ `stretch` stays a duration and is the threshold, zero turning
   the stretch off; it sizes nothing else (rejected: an on/off switch;
   removing it).
@@ -87,12 +92,12 @@ zero underruns (2026-11-08); the target formula and the playout as the
 largest `delay + target` among subscribed renditions; one algorithm with
 shared vectors for both players.
 
-Order: [congestion catch-up](/quest/m2/audio-playout/congestion-catch-up.md)
-gives the stall its snap on today's splices, the
+Order: the 200 ms snap both ways is on `main` on today's splices (the
+congestion catch-up), the
 [lag rule](/quest/m2/audio-playout/lag-rule.md) replaces the controller
 under it, and the [clock step](/quest/m2/audio-playout/clock-step.md) builds
-on the lag rule. [Target fall](/quest/m2/audio-playout/target-fall.md) and
-[output latency](/quest/m2/audio-playout/output-latency.md) are independent.
+on the lag rule. [Output latency](/quest/m2/audio-playout/output-latency.md)
+and the [join's hold](/quest/m2/audio-playout/join-hold.md) are independent.
 The [calibration](/quest/m3/audio-calibrate.md) re-measures every ceiling
 after this epic.
 
