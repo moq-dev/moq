@@ -289,7 +289,13 @@ async fn serve(mode: Mode, io: DuplexStream, book: Rc<Book>) {
 	}
 	let _ = session.closed().await;
 	drop(session);
-	let _ = driver.await;
+	// An awaited handle hands back a panic instead of re-raising it, so re-raise it here
+	// or a crashing input would pass the stable regression replay.
+	if let Err(err) = driver.await
+		&& err.is_panic()
+	{
+		panic!("server driver: {err}");
+	}
 }
 
 async fn accept_uni(session: Session, mode: Mode, book: Rc<Book>) {
