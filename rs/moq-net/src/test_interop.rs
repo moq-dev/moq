@@ -566,6 +566,7 @@ fn lite_tracks_interop() {
 		broadcast: crate::Path::from_static("room"),
 		instance: None,
 		node: 0,
+		depth: 0,
 	}
 	.encode_bytes(version)
 	.unwrap();

@@ -24,6 +24,9 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long any one read may take, in virtual time.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a lite-07 relay doubts the far end of a closed session.
+const DOUBT: Duration = Duration::from_secs(1);
+
 /// Short readers in each burst, re-reading the catalog and leaving.
 const BURST: usize = 4;
 
@@ -160,6 +163,9 @@ impl Topology {
 				settle().await;
 				let a_to_r = link(self.version, &self.relay_a, &self.subscriber, None).await;
 				self.a_to_r = Some(a_to_r);
+				// `R` doubts `A` for a second after its session closed, so the routes the
+				// new session carries count only once that lifts.
+				kio::clock::sleep(DOUBT).await;
 			}
 		}
 		settle().await;

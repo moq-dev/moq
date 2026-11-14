@@ -29,9 +29,6 @@ struct Case {
 enum Message {
 	/// One announcement on the announce stream, type and length prefix included.
 	Announce,
-	/// One lite-07 reply on the announce stream, subscriber to publisher, type and length
-	/// prefix included.
-	AnnounceReply,
 	/// A lite-01/02 ANNOUNCE_INIT, length prefix included.
 	AnnounceInit,
 	/// A group stream header, length prefix included.
@@ -73,7 +70,6 @@ fn run(case: &Case, data: &[u8]) -> String {
 	let decoder = || Decoder::new(data, version.into());
 	match case.message {
 		Message::Announce => outcome(data, version, super::AnnounceBroadcast::decode_slice(data, version)),
-		Message::AnnounceReply => outcome(data, version, super::AnnounceReply::decode_slice(data, version)),
 		Message::AnnounceInit => {
 			let mut r = decoder();
 			let decoded = super::AnnounceInit::decode_within(&mut r, version, case.budget.unwrap_or(usize::MAX));

@@ -6,7 +6,7 @@ use crate::{
 	Hop, Hops, Instance, Path,
 	coding::*,
 	origin::Cost,
-	route::{self, Advert},
+	route::{self, path::Offer},
 };
 
 use super::{
@@ -23,17 +23,23 @@ const ANNOUNCE_UPDATE: u64 = 2;
 // lite-07: the advertisement serves another instance, or a newer epoch of its own.
 const ANNOUNCE_RESTART: u64 = 3;
 const SYNCED: u64 = 4;
-// lite-07: the route layer. ROUTE_END also travels back as the echo.
+// lite-07: the route layer. 10 was ROUTE_REQUEST, which the path rule retired.
 const ROUTE_START: u64 = 6;
 const ROUTE_UPDATE: u64 = 7;
 const ROUTE_END: u64 = 8;
 const ANNOUNCE_FLOOR: u64 = 9;
-const ROUTE_REQUEST: u64 = 10;
 const ROUTE_HOLD: u64 = 11;
 // lite-07: warm routes, one hop toward the subscriber.
 const WARM_START: u64 = 12;
 const WARM_UPDATE: u64 = 13;
 const WARM_END: u64 = 14;
+// lite-07: news of a closed session or a draining node on the routes the sender offered.
+const DEAD: u64 = 15;
+
+/// DEAD kind: a session on the routes' paths closed.
+const DEAD_CLOSED: u64 = 0;
+/// DEAD kind: a node on the routes' paths sent GOAWAY.
+const DEAD_DRAIN: u64 = 1;
 
 /// Whether the negotiated version can update a live advertisement's metadata. On lite-05 an
 /// update travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on
@@ -103,17 +109,20 @@ pub enum AnnounceBroadcast {
 	Skipped,
 	/// The initial set has been delivered (lite-07+).
 	Synced,
-	/// ROUTE_START (lite-07+): the sender has a route to the origin node `node`, and
-	/// assigns it the next Route ID.
-	RouteStart { node: route::Id, advert: Advert },
+	/// ROUTE_START (lite-07+): the sender has a route to the publisher `node` covering
+	/// the requested prefix joined with `suffix`, and assigns it the next Route ID.
+	RouteStart { node: route::Id, suffix: Path, offer: Offer },
 	/// ROUTE_UPDATE (lite-07+): the route with this id changed, and is usable.
-	RouteUpdate { id: u64, advert: Advert },
+	RouteUpdate { id: u64, offer: Offer },
 	/// ROUTE_HOLD (lite-07+): the sender has no usable route with this id, but still
 	/// holds its advertisements while it recovers.
 	RouteHold { id: u64 },
 	/// ROUTE_END (lite-07+): the sender let go of the route with this id, and of every
-	/// advertisement under it. The receiver echoes it back.
+	/// advertisement under it.
 	RouteEnd { id: u64 },
+	/// DEAD (lite-07+): a session or node on the routes the sender offered is gone or
+	/// going.
+	Dead(Dead),
 	/// ANNOUNCE_FLOOR (lite-07+): closes the batch of advertisements under the route
 	/// with this id, certifying them across the whole requested prefix at the origin's
 	/// revision, or certifying nothing (`None`).
@@ -175,65 +184,161 @@ fn decode_warm(r: &mut Decoder<'_>) -> Result<Warm, DecodeError> {
 	Ok(Warm { cost, carrier, hops })
 }
 
-/// ROUTE_START and ROUTE_UPDATE flag: the route is down-only.
+/// Route Offer flag: an upstream link is on the path, so the route is down-only.
 const DOWN_ONLY: u8 = 0x1;
-/// ROUTE_START and ROUTE_UPDATE flag: an RTT follows.
+/// Route Offer flag: an RTT follows.
 const RTT: u8 = 0x2;
+/// Route Offer flag: a node on the path sent GOAWAY.
+const DRAINING: u8 = 0x4;
 
-/// Encode a seqno, metric, flags, RTT in milliseconds, and the hops the route
-/// crossed. No origin advertises the last seqno, which would leave no room for the
-/// successor a ROUTE_REQUEST names, and no relay forwards a route that crossed too many.
-fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError> {
-	if advert.seqno == route::MAX || advert.hops.len() > route::MAX_HOPS {
+/// News on DEAD about the routes the sender offered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Dead {
+	/// CLOSED: the session `hop` names closed, at the node `far` at its other end, which
+	/// the receiver doubts. Each route on the stream through that hop that `moved` names
+	/// by Route ID continues on its offer there; the rest end if `gone`, and are held if
+	/// not, unless the receiver is the node just before the sender on the route's path.
+	Closed {
+		hop: route::path::Hop,
+		far: route::Id,
+		gone: bool,
+		moved: Vec<(u64, Offer)>,
+	},
+	/// DRAIN: `node` sent GOAWAY, so every path through it ranks as draining.
+	Drain { node: route::Id },
+}
+
+/// Encode a Route Offer: flags, priority, metric, RTT in milliseconds, and the path. No
+/// node offers an empty path or one past the hop limit, nor names Node ID 0 in one.
+fn encode_offer(w: &mut Encoder<'_>, offer: &Offer) -> Result<(), EncodeError> {
+	if offer.path.is_empty() || offer.path.len() > route::MAX_HOPS || offer.path.iter().any(|hop| hop.node == 0) {
 		return Err(EncodeError::InvalidState);
 	}
-	w.varint(advert.seqno)?;
-	w.varint(advert.metric)?;
 	// A sum past the field's range, which only a peer's absurd value reaches, is unknown.
-	let rtt = advert.rtt.and_then(|rtt| u64::try_from(rtt.as_millis()).ok());
+	let rtt = offer.rtt.and_then(|rtt| u64::try_from(rtt.as_millis()).ok());
 	let mut flags = 0;
-	if advert.down_only {
+	if offer.down_only {
 		flags |= DOWN_ONLY;
 	}
 	if rtt.is_some() {
 		flags |= RTT;
 	}
+	if offer.draining {
+		flags |= DRAINING;
+	}
 	w.u8(flags);
+	w.u8(super::priority::to_wire(offer.priority));
+	w.varint(offer.metric)?;
 	if let Some(rtt) = rtt {
 		w.varint(rtt)?;
 	}
-	w.varint(advert.hops.len() as u64)?;
-	for hop in advert.hops.iter() {
-		w.varint(*hop)?;
+	w.varint(offer.path.len() as u64)?;
+	for hop in offer.path.iter() {
+		w.varint(hop.node)?;
+		w.varint(hop.session)?;
 	}
 	Ok(())
 }
 
-fn decode_advert(r: &mut Decoder<'_>) -> Result<Advert, DecodeError> {
-	let seqno = r.varint()?;
-	if seqno == route::MAX {
-		return Err(DecodeError::InvalidValue);
-	}
-	let metric = r.varint()?;
+fn decode_offer(r: &mut Decoder<'_>) -> Result<Offer, DecodeError> {
 	let flags = r.u8()?;
-	if flags & !(DOWN_ONLY | RTT) != 0 {
+	if flags & !(DOWN_ONLY | RTT | DRAINING) != 0 {
 		return Err(DecodeError::InvalidValue);
 	}
+	let priority = super::priority::from_wire(r.u8()?);
+	let metric = r.varint()?;
 	let rtt = match flags & RTT {
 		0 => None,
 		_ => Some(std::time::Duration::from_millis(r.varint()?)),
 	};
 	let count = r.varint()?;
+	if count == 0 {
+		return Err(DecodeError::InvalidValue);
+	}
 	if count > route::MAX_HOPS as u64 {
 		return Err(DecodeError::TooMany);
 	}
-	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
-	Ok(Advert {
-		seqno,
+	let path = (0..count)
+		.map(|_| {
+			let node = r.varint()?;
+			if node == 0 {
+				return Err(DecodeError::InvalidValue);
+			}
+			Ok(route::path::Hop {
+				node,
+				session: r.varint()?,
+			})
+		})
+		.collect::<Result<_, DecodeError>>()?;
+	Ok(Offer {
+		path,
+		draining: flags & DRAINING != 0,
+		priority,
 		metric,
 		down_only: flags & DOWN_ONLY != 0,
 		rtt,
-		hops,
+	})
+}
+
+fn encode_dead(w: &mut Encoder<'_>, dead: &Dead) -> Result<(), EncodeError> {
+	match dead {
+		Dead::Closed { hop, far, gone, moved } => {
+			if hop.node == 0 || *far == 0 {
+				return Err(EncodeError::InvalidState);
+			}
+			w.varint(DEAD_CLOSED)?;
+			w.varint(hop.node)?;
+			w.varint(hop.session)?;
+			w.varint(*far)?;
+			w.u8(u8::from(*gone));
+			w.varint(moved.len() as u64)?;
+			for (id, offer) in moved {
+				w.varint(*id)?;
+				encode_offer(w, offer)?;
+			}
+		}
+		Dead::Drain { node } => {
+			if *node == 0 {
+				return Err(EncodeError::InvalidState);
+			}
+			w.varint(DEAD_DRAIN)?;
+			w.varint(*node)?;
+		}
+	}
+	Ok(())
+}
+
+fn decode_dead(r: &mut Decoder<'_>) -> Result<Dead, DecodeError> {
+	let nonzero = |id: u64| match id {
+		0 => Err(DecodeError::InvalidValue),
+		id => Ok(id),
+	};
+	Ok(match r.varint()? {
+		DEAD_CLOSED => {
+			let hop = route::path::Hop {
+				node: nonzero(r.varint()?)?,
+				session: r.varint()?,
+			};
+			let far = nonzero(r.varint()?)?;
+			let gone = match r.u8()? {
+				0 => false,
+				1 => true,
+				_ => return Err(DecodeError::InvalidValue),
+			};
+			let count = r.varint()?;
+			// Each entry takes at least a byte per field, so the body bounds the count.
+			if count > r.remaining() as u64 {
+				return Err(DecodeError::TooMany);
+			}
+			let moved = (0..count)
+				.map(|_| Ok((r.varint()?, decode_offer(r)?)))
+				.collect::<Result<_, DecodeError>>()?;
+			Dead::Closed { hop, far, gone, moved }
+		}
+		DEAD_DRAIN => Dead::Drain {
+			node: nonzero(r.varint()?)?,
+		},
+		_ => return Err(DecodeError::InvalidValue),
 	})
 }
 
@@ -405,6 +510,7 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::RouteUpdate { .. } if version.has_routes() => ROUTE_UPDATE,
 				Self::RouteHold { .. } if version.has_routes() => ROUTE_HOLD,
 				Self::RouteEnd { .. } if version.has_routes() => ROUTE_END,
+				Self::Dead(_) if version.has_routes() => DEAD,
 				Self::Floor { .. } if version.has_routes() => ANNOUNCE_FLOOR,
 				Self::WarmStart { .. } if version.has_warm() => WARM_START,
 				Self::WarmUpdate { .. } if version.has_warm() => WARM_UPDATE,
@@ -413,6 +519,7 @@ impl Encode<Version> for AnnounceBroadcast {
 				| Self::RouteUpdate { .. }
 				| Self::RouteHold { .. }
 				| Self::RouteEnd { .. }
+				| Self::Dead(_)
 				| Self::Floor { .. }
 				| Self::WarmStart { .. }
 				| Self::WarmUpdate { .. }
@@ -461,18 +568,20 @@ impl Encode<Version> for AnnounceBroadcast {
 					encode_lite06_chain(w, version, hops)?;
 				}
 				Self::Synced => {}
-				Self::RouteStart { node, advert } => {
+				Self::RouteStart { node, suffix, offer } => {
 					if *node == 0 {
 						return Err(EncodeError::InvalidState);
 					}
 					w.varint(*node)?;
-					encode_advert(w, advert)?;
+					suffix.encode(w, version)?;
+					encode_offer(w, offer)?;
 				}
-				Self::RouteUpdate { id, advert } => {
+				Self::RouteUpdate { id, offer } => {
 					w.varint(*id)?;
-					encode_advert(w, advert)?;
+					encode_offer(w, offer)?;
 				}
 				Self::RouteHold { id } | Self::RouteEnd { id } => w.varint(*id)?,
+				Self::Dead(dead) => encode_dead(w, dead)?,
 				Self::Floor { id, revision } => encode_floor(w, *id, *revision)?,
 				Self::WarmStart {
 					route,
@@ -533,6 +642,7 @@ impl Encode<Version> for AnnounceBroadcast {
 			| Self::RouteUpdate { .. }
 			| Self::RouteHold { .. }
 			| Self::RouteEnd { .. }
+			| Self::Dead(_)
 			| Self::Floor { .. }
 			| Self::WarmStart { .. }
 			| Self::WarmUpdate { .. }
@@ -604,16 +714,18 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 					}
 					ROUTE_START if version.has_routes() => {
 						let node = body.varint()?;
-						let advert = decode_advert(&mut body)?;
 						if node == 0 {
 							return Err(DecodeError::InvalidValue);
 						}
-						Self::RouteStart { node, advert }
+						let suffix = Path::decode(&mut body, version)?;
+						let offer = decode_offer(&mut body)?;
+						Self::RouteStart { node, suffix, offer }
 					}
 					ROUTE_UPDATE if version.has_routes() => Self::RouteUpdate {
 						id: body.varint()?,
-						advert: decode_advert(&mut body)?,
+						offer: decode_offer(&mut body)?,
 					},
+					DEAD if version.has_routes() => Self::Dead(decode_dead(&mut body)?),
 					ROUTE_HOLD if version.has_routes() => Self::RouteHold { id: body.varint()? },
 					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
 					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body)?,
@@ -763,70 +875,6 @@ impl<'a> Message<'a> for AnnounceRequest {
 	}
 }
 
-/// A message the subscriber sends on the Announce Stream after its ANNOUNCE_REQUEST
-/// (lite-07+), toward the publisher that sent the routes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AnnounceReply {
-	/// ROUTE_REQUEST: asks for a route to `node`, as the publisher named it, at least
-	/// as new as `seqno`.
-	RouteRequest { node: route::Id, seqno: route::Seqno },
-	/// The echo of the ROUTE_END that retired this Route ID, sent once the subscriber
-	/// dropped the route.
-	RouteEnd { id: u64 },
-}
-
-impl Encode<Version> for AnnounceReply {
-	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		w.control = Some(crate::stats::Message::Announce);
-		if !version.has_routes() {
-			return Err(EncodeError::Version);
-		}
-		w.varint(match self {
-			Self::RouteRequest { .. } => ROUTE_REQUEST,
-			Self::RouteEnd { .. } => ROUTE_END,
-		})?;
-		let prefix = w.prefix_varint();
-		match self {
-			Self::RouteRequest { node: 0, .. } => return Err(EncodeError::InvalidState),
-			Self::RouteRequest { node, seqno } => {
-				w.varint(*node)?;
-				w.varint(*seqno)?;
-			}
-			Self::RouteEnd { id } => w.varint(*id)?,
-		}
-		w.fill(prefix)
-	}
-}
-
-impl<'a> Decode<'a, Version> for AnnounceReply {
-	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
-		buf.control = Some(crate::stats::Message::Announce);
-		if !version.has_routes() {
-			return Err(DecodeError::Version);
-		}
-		let typ = buf.varint()?;
-		let size = decode_size(buf, MAX_MESSAGE_SIZE)?;
-		let mut body = buf.sub(size)?;
-		let msg = (|| {
-			Ok(match typ {
-				ROUTE_REQUEST => match body.varint()? {
-					0 => return Err(DecodeError::InvalidValue),
-					node => Self::RouteRequest {
-						node,
-						seqno: body.varint()?,
-					},
-				},
-				ROUTE_END => Self::RouteEnd { id: body.varint()? },
-				typ => return Err(DecodeError::InvalidMessage(typ)),
-			})
-		})()
-		.map_err(DecodeError::complete)?;
-		if !body.is_empty() {
-			return Err(DecodeError::Long);
-		}
-		Ok(msg)
-	}
-}
 
 /// Send by the publisher, used to determine the message that follows.
 #[derive(Clone, Copy, Debug, IntoPrimitive, TryFromPrimitive)]
@@ -1743,13 +1791,18 @@ mod tests {
 		}
 	}
 
-	fn advert(seqno: u64, metric: u64, down_only: bool) -> Advert {
-		Advert {
-			seqno,
+	/// An offer over `path`, each hop `(node, session)`, the publisher first.
+	fn offer(path: &[(u64, u64)], metric: u64, down_only: bool) -> Offer {
+		Offer {
+			path: path
+				.iter()
+				.map(|&(node, session)| route::path::Hop { node, session })
+				.collect(),
+			draining: false,
+			priority: 0,
 			metric,
 			down_only,
 			rtt: None,
-			hops: [].into(),
 		}
 	}
 
@@ -1771,44 +1824,59 @@ mod tests {
 		crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceBroadcast::decode(r, v))
 	}
 
-	fn decode_reply(buf: &[u8], version: Version) -> Result<AnnounceReply, DecodeError> {
-		let mut slice = buf;
-		crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceReply::decode(r, v))
-	}
-
 	#[test]
 	fn route_messages_round_trip_on_lite07() {
+		let long: Vec<(u64, u64)> = (1..=route::MAX_HOPS as u64).map(|node| (node, node * 3)).collect();
 		for msg in [
 			AnnounceBroadcast::RouteStart {
 				node: 0x7a3f,
-				advert: advert(41, 12, false),
+				suffix: Path::empty(),
+				offer: offer(&[(0x7a3f, 0)], 0, false),
 			},
 			AnnounceBroadcast::RouteStart {
 				node: route::QUALIFIED | 9,
-				advert: advert(route::MAX - 1, route::MAX, true),
+				suffix: Path::from_static("room/a"),
+				offer: offer(&[(9, 0), (4, u64::MAX >> 2)], route::MAX, true),
 			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 0,
-				advert: advert(42, 0, true),
+				offer: Offer {
+					draining: true,
+					priority: i8::MIN,
+					..offer(&[(5, 0), (6, 1)], 2, false)
+				},
 			},
 			AnnounceBroadcast::RouteStart {
 				node: 0x7a40,
-				advert: Advert {
+				suffix: Path::empty(),
+				offer: Offer {
 					rtt: Some(std::time::Duration::ZERO),
-					hops: [5, route::MAX, 9].into(),
-					..advert(1, 0, false)
+					priority: i8::MAX,
+					..offer(&[(5, 0), (route::MAX, 7), (9, 2)], 0, false)
 				},
 			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 1,
-				advert: Advert {
+				offer: Offer {
 					rtt: Some(std::time::Duration::from_millis(u64::MAX)),
-					hops: (1..=route::MAX_HOPS as u64).collect(),
-					..advert(2, 3, true)
+					..offer(&long, 3, true)
 				},
 			},
 			AnnounceBroadcast::RouteHold { id: 3 },
 			AnnounceBroadcast::RouteEnd { id: 0 },
+			AnnounceBroadcast::Dead(Dead::Closed {
+				hop: route::path::Hop { node: 4, session: 2 },
+				far: 9,
+				gone: false,
+				moved: Vec::new(),
+			}),
+			AnnounceBroadcast::Dead(Dead::Closed {
+				hop: route::path::Hop { node: 4, session: 0 },
+				far: route::MAX,
+				gone: true,
+				moved: vec![(0, offer(&[(1, 0), (5, 1)], 3, false)), (7, offer(&[(1, 0)], 0, true))],
+			}),
+			AnnounceBroadcast::Dead(Dead::Drain { node: 4 }),
 			AnnounceBroadcast::Floor {
 				id: 0,
 				revision: Some(0),
@@ -1823,15 +1891,32 @@ mod tests {
 		}
 	}
 
+	/// The priority travels as the moq-lite priority byte, ordered as the model's i8.
+	#[test]
+	fn an_offer_carries_the_priority_byte() {
+		let mut buf = Vec::new();
+		let msg = AnnounceBroadcast::RouteUpdate {
+			id: 0,
+			offer: Offer {
+				priority: -1,
+				..offer(&[(1, 0)], 0, false)
+			},
+		};
+		msg.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+			.unwrap();
+		// Type, length, Route ID, flags, then the priority byte.
+		assert_eq!(buf[4], 0x7f);
+	}
+
 	/// A peer's largest RTT plus a link goes past the field: it is forwarded as
 	/// unknown, never an error that would end the stream.
 	#[test]
 	fn an_rtt_past_the_field_is_unknown() {
 		let msg = |rtt| AnnounceBroadcast::RouteUpdate {
 			id: 1,
-			advert: Advert {
+			offer: Offer {
 				rtt,
-				..advert(2, 3, false)
+				..offer(&[(1, 0)], 3, false)
 			},
 		};
 		let past = std::time::Duration::from_millis(u64::MAX).checked_add(std::time::Duration::from_millis(1));
@@ -1860,14 +1945,16 @@ mod tests {
 		for msg in [
 			AnnounceBroadcast::RouteStart {
 				node: 1,
-				advert: advert(0, 1, false),
+				suffix: Path::empty(),
+				offer: offer(&[(1, 0)], 0, false),
 			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 0,
-				advert: advert(0, 1, false),
+				offer: offer(&[(1, 0)], 0, false),
 			},
 			AnnounceBroadcast::RouteHold { id: 0 },
 			AnnounceBroadcast::RouteEnd { id: 0 },
+			AnnounceBroadcast::Dead(Dead::Drain { node: 1 }),
 			AnnounceBroadcast::Floor { id: 0, revision: None },
 		] {
 			for version in [Version::Lite05, Version::Lite06] {
@@ -1882,45 +1969,39 @@ mod tests {
 			decode_broadcast(&wire, Version::Lite06).unwrap(),
 			AnnounceBroadcast::Skipped
 		);
-
-		for reply in [
-			AnnounceReply::RouteRequest { node: 1, seqno: 0 },
-			AnnounceReply::RouteEnd { id: 0 },
-		] {
-			let mut buf = Vec::new();
-			let res = reply.encode(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06);
-			assert!(matches!(res, Err(EncodeError::Version)));
-		}
-		assert!(matches!(
-			decode_reply(&wire, Version::Lite06),
-			Err(DecodeError::Version)
-		));
 	}
 
-	/// What no node advertises is refused on both ends: node 0, and the last seqno or
-	/// revision.
+	/// What no node offers is refused on both ends: node 0, an empty path or one past the
+	/// hop limit, and the last revision.
 	#[test]
-	fn route_messages_refuse_what_no_node_advertises() {
+	fn route_messages_refuse_what_no_node_offers() {
+		let over: Vec<(u64, u64)> = (1..=route::MAX_HOPS as u64 + 1).map(|node| (node, 0)).collect();
 		let refused = [
 			AnnounceBroadcast::RouteStart {
 				node: 0,
-				advert: advert(0, 1, false),
+				suffix: Path::empty(),
+				offer: offer(&[(1, 0)], 1, false),
 			},
 			AnnounceBroadcast::RouteStart {
 				node: 1,
-				advert: advert(route::MAX, 1, false),
+				suffix: Path::empty(),
+				offer: offer(&[], 1, false),
 			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 0,
-				advert: advert(route::MAX, 1, false),
+				offer: offer(&over, 1, false),
 			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 0,
-				advert: Advert {
-					hops: (0..=route::MAX_HOPS as u64).collect(),
-					..advert(0, 1, false)
-				},
+				offer: offer(&[(1, 0), (0, 1)], 1, false),
 			},
+			AnnounceBroadcast::Dead(Dead::Drain { node: 0 }),
+			AnnounceBroadcast::Dead(Dead::Closed {
+				hop: route::path::Hop { node: 1, session: 1 },
+				far: 0,
+				gone: false,
+				moved: Vec::new(),
+			}),
 			// The last revision has no room for the offset.
 			AnnounceBroadcast::Floor {
 				id: 0,
@@ -1933,45 +2014,79 @@ mod tests {
 			assert!(matches!(res, Err(EncodeError::InvalidState)), "{msg:?}");
 		}
 
-		let advert = |node: u64, seqno: u64, metric: u64, down_only: u8| {
+		// An offer with these flags, and `count` hops naming `named` of them, each on session 0.
+		let path = |flags: u8, count: u64, named: u64, first: u64| {
 			move |w: &mut Encoder<'_>| {
-				w.varint(node).unwrap();
-				w.varint(seqno).unwrap();
-				w.varint(metric).unwrap();
-				w.u8(down_only);
-				w.varint(0u64).unwrap();
-			}
-		};
-		// A route with `count` hops, naming `named` of them.
-		let hops = |count: u64, named: u64| {
-			move |w: &mut Encoder<'_>| {
-				for field in [1, 0, 1] {
-					w.varint(field as u64).unwrap();
-				}
-				w.u8(0);
+				w.u8(flags);
+				w.u8(0x80);
+				w.varint(1u64).unwrap();
 				w.varint(count).unwrap();
 				for hop in 0..named {
-					w.varint(hop + 1).unwrap();
+					w.varint(first + hop).unwrap();
+					w.varint(0u64).unwrap();
 				}
 			}
+		};
+		let start = |node: u64, offer: Box<dyn FnOnce(&mut Encoder<'_>)>| {
+			forge(ROUTE_START, move |w| {
+				w.varint(node).unwrap();
+				w.varint(0u64).unwrap();
+				offer(w);
+			})
 		};
 		let over = route::MAX_HOPS as u64 + 1;
 		let malformed = [
-			// More hops than a route may cross, hops missing, and one too many.
-			forge(ROUTE_START, hops(over, over)),
-			forge(ROUTE_START, hops(2, 1)),
-			forge(ROUTE_START, hops(1, 2)),
-			forge(ROUTE_START, advert(0, 0, 1, 0)),
-			forge(ROUTE_START, advert(1, route::MAX, 1, 0)),
+			// More hops than a route may cross, none at all, hops missing, and one too many.
+			start(1, Box::new(path(0, over, over, 1))),
+			start(1, Box::new(path(0, 0, 0, 1))),
+			start(1, Box::new(path(0, 2, 1, 1))),
+			start(1, Box::new(path(0, 1, 2, 1))),
+			// A hop naming Node ID 0, and a route to Node ID 0.
+			start(1, Box::new(path(0, 1, 1, 0))),
+			start(0, Box::new(path(0, 1, 1, 1))),
 			// A flag no version defines, and an RTT flag without its field.
-			forge(ROUTE_START, advert(1, 0, 1, 4)),
-			forge(ROUTE_START, advert(1, 0, 1, 2)),
-			// ROUTE_UPDATE's leading field is the Route ID, so 0 is a valid id here.
-			forge(ROUTE_UPDATE, advert(0, route::MAX, 1, 0)),
+			start(1, Box::new(path(8, 1, 1, 1))),
+			forge(ROUTE_UPDATE, |w| {
+				w.varint(0u64).unwrap();
+				w.u8(RTT);
+				w.u8(0x80);
+				w.varint(1u64).unwrap();
+			}),
 			// A hold carries only its Route ID.
 			forge(ROUTE_HOLD, |w| {
 				w.varint(0u64).unwrap();
 				w.varint(0u64).unwrap();
+			}),
+			// A DEAD of a kind no version defines, naming Node ID 0, or Gone past 1.
+			forge(DEAD, |w| {
+				w.varint(2u64).unwrap();
+				w.varint(1u64).unwrap();
+			}),
+			forge(DEAD, |w| {
+				w.varint(DEAD_DRAIN).unwrap();
+				w.varint(0u64).unwrap();
+			}),
+			forge(DEAD, |w| {
+				for field in [DEAD_CLOSED, 1, 1, 0] {
+					w.varint(field).unwrap();
+				}
+				w.u8(0);
+				w.varint(0u64).unwrap();
+			}),
+			forge(DEAD, |w| {
+				for field in [DEAD_CLOSED, 1, 1, 2] {
+					w.varint(field).unwrap();
+				}
+				w.u8(2);
+				w.varint(0u64).unwrap();
+			}),
+			// More moved entries than the body could hold.
+			forge(DEAD, |w| {
+				for field in [DEAD_CLOSED, 1, 1, 2] {
+					w.varint(field).unwrap();
+				}
+				w.u8(1);
+				w.varint(1u64 << 40).unwrap();
 			}),
 			// A floor without its revision, and one with trailing bytes.
 			forge(ANNOUNCE_FLOOR, |w| w.varint(0u64).unwrap()),
@@ -1989,50 +2104,5 @@ mod tests {
 		for wire in malformed {
 			assert!(decode_broadcast(&wire, Version::Lite07).is_err(), "{wire:?}");
 		}
-	}
-
-	#[test]
-	fn announce_reply_round_trips_on_lite07() {
-		for reply in [
-			AnnounceReply::RouteRequest {
-				node: 0x7a3f,
-				seqno: 42,
-			},
-			// A request may name the last seqno: only a rotation answers it.
-			AnnounceReply::RouteRequest {
-				node: route::QUALIFIED | 1,
-				seqno: route::MAX,
-			},
-			AnnounceReply::RouteEnd { id: 0 },
-		] {
-			let mut buf = Vec::new();
-			reply
-				.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
-				.unwrap();
-			assert_eq!(decode_reply(&buf, Version::Lite07).unwrap(), reply);
-		}
-	}
-
-	#[test]
-	fn announce_reply_refuses_node_zero_and_unknown_types() {
-		let mut buf = Vec::new();
-		let res = AnnounceReply::RouteRequest { node: 0, seqno: 1 }
-			.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07);
-		assert!(matches!(res, Err(EncodeError::InvalidState)));
-
-		let zero = forge(ROUTE_REQUEST, |w| {
-			w.varint(0u64).unwrap();
-			w.varint(1u64).unwrap();
-		});
-		assert!(matches!(
-			decode_reply(&zero, Version::Lite07),
-			Err(DecodeError::InvalidValue)
-		));
-		// Only routes travel back: an announcement type is not a reply.
-		let start = forge(ROUTE_START, |w| w.varint(1u64).unwrap());
-		assert!(matches!(
-			decode_reply(&start, Version::Lite07),
-			Err(DecodeError::InvalidMessage(ROUTE_START))
-		));
 	}
 }

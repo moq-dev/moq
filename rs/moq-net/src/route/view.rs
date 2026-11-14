@@ -57,14 +57,6 @@ impl<A: Clone + Eq> View<A> {
 		}
 	}
 
-	/// The view presented to the union of `regions`.
-	#[cfg(test)]
-	pub fn present_all(&self, regions: &[Path]) -> Self {
-		let mut out = Self::default();
-		out.represent(self, regions, self.items.keys());
-		out
-	}
-
 	/// Bring this view of `raw`, presented to the union of `regions`, up to date once
 	/// `claims` of `raw` changed and its floors were replaced.
 	///
@@ -99,122 +91,10 @@ impl<A: Clone + Eq> View<A> {
 		}
 	}
 
-	/// What the view certifies within `prefix`: the view as presented there, less
-	/// the claims no kept floor certifies.
-	pub fn restrict(&self, prefix: &Path) -> Self {
-		let mut out = self.present(prefix);
-		let floors = &out.floors;
-		out.items.retain(|claim, _| above(floors, claim).next().is_some());
-		out
-	}
-
-	/// The view restricted to the union of `regions`, as merging each region's
-	/// restriction would leave it, in one pass.
-	///
-	/// A region within another adds nothing the wider one's restriction lacks: the
-	/// floors over it narrow to the wider region, where they certify the claim at the
-	/// region itself at its own path. So only the widest regions count, and those are
-	/// disjoint, so their restrictions merge as a union. A floor a wider one at least
-	/// as new covers then goes, as [`Self::merge`] drops it.
-	pub fn restrict_all(&self, regions: &BTreeSet<Path>) -> Self {
-		let mut out = Self::default();
-		for region in regions {
-			let wider = heads(region).filter(|&head| head != region.as_str());
-			if wider.into_iter().any(|head| regions.contains(head)) {
-				continue;
-			}
-			let Self { floors, items } = self.restrict(region);
-			out.floors.extend(floors);
-			out.items.extend(items);
-		}
-		settle(&mut out.floors);
-		out
-	}
-
 	/// The newest revision this view knows `claim` at, if a region certifies it.
+	#[cfg(test)]
 	pub fn as_of(&self, claim: &Path) -> Option<Rev> {
 		above(&self.floors, claim).map(|(_, &floor)| floor).max()
-	}
-
-	/// The claims no floor certifies.
-	pub fn uncertified(&self) -> impl Iterator<Item = (&Path, &A)> {
-		self.items.iter().filter(|(claim, _)| self.as_of(claim).is_none())
-	}
-
-	/// The single revision the view certifies all of `prefix` at, if one floor
-	/// covers it and nothing within it is known at another revision.
-	pub fn floor(&self, prefix: &Path) -> Option<Rev> {
-		match self.floors.iter().next() {
-			Some((region, &rev)) if self.floors.len() == 1 && region == prefix => Some(rev),
-			_ => None,
-		}
-	}
-
-	/// Take `other`'s state for every claim it knows at a newer revision, then
-	/// raise the floors and drop any region a wider one at least as new covers.
-	/// An uncertified claim of `other` is known at no revision, so it is not taken.
-	/// Returns the claims whose state changed.
-	pub fn merge(&mut self, other: &Self) -> Vec<Path> {
-		let claims: BTreeSet<Path> = self.items.keys().chain(other.items.keys()).cloned().collect();
-		self.merge_claims(other, &claims)
-	}
-
-	/// [`Self::merge`], considering only `claims`: the same once they include every
-	/// claim whose state differs between the two views, since a claim held alike is
-	/// never taken.
-	pub fn merge_claims<'a>(&mut self, other: &Self, claims: impl IntoIterator<Item = &'a Path>) -> Vec<Path> {
-		// Every floor of `other` lies within a newer one here, so it knows no claim at a
-		// newer revision and changes nothing: a lagging view costs nothing to merge,
-		// however far it lags.
-		let stale =
-			(other.floors.iter()).all(|(region, &floor)| above(&self.floors, region).any(|(_, &newer)| newer > floor));
-		if stale {
-			return Vec::new();
-		}
-		let mut changed = Vec::new();
-		for claim in claims {
-			let (theirs, ours) = (other.as_of(claim), self.as_of(claim));
-			// At one revision, a claim exactly on a wider region outranks the claim
-			// above it that a floor on this path presented here.
-			let exact = theirs == ours && self.floors.contains_key(claim) && !other.floors.contains_key(claim);
-			if (theirs > ours || exact) && self.items.get(claim) != other.items.get(claim) {
-				changed.push(claim.clone());
-			}
-		}
-		for claim in &changed {
-			match other.items.get(claim) {
-				Some(item) => self.items.insert(claim.clone(), item.clone()),
-				None => self.items.remove(claim),
-			};
-		}
-		for (region, &floor) in &other.floors {
-			let entry = self.floors.entry(region.clone()).or_insert(floor);
-			*entry = (*entry).max(floor);
-		}
-		settle(&mut self.floors);
-		changed
-	}
-
-	/// What a node keeps of its view once its interest is `watch`.
-	///
-	/// A floor outside the interest may certify a claim above both at a newer
-	/// revision than any floor inside, so it stays, with what it certifies,
-	/// until a floor inside catches up; dropping it would leave that claim
-	/// known only at an older revision than the item it holds. Once no
-	/// neighbor certifies it, pruning lets it go.
-	pub fn retire(&self, watch: &Path) -> Self {
-		let mut kept = self.restrict(watch);
-		let newest = kept.floors.values().max().copied();
-		for (region, &floor) in &self.floors {
-			if Some(floor) > newest && !kept.floors.contains_key(region) {
-				kept.floors.insert(region.clone(), floor);
-				let exact = self.items.get_key_value(region);
-				for (claim, item) in exact.into_iter().chain(below(&self.items, region)) {
-					kept.items.insert(claim.clone(), item.clone());
-				}
-			}
-		}
-		kept
 	}
 
 	/// The changes that move a receiver from `old` to `self`: every changed or
@@ -349,29 +229,12 @@ pub(crate) fn above<'a, V>(map: &'a BTreeMap<Path, V>, path: &'a Path) -> impl I
 	heads(path).filter_map(|head| map.get_key_value(head))
 }
 
-/// Whether `path` lies within any of `regions`: one lookup per segment.
-pub(crate) fn within_any(path: &Path, regions: &BTreeSet<Path>) -> bool {
-	heads(path).any(|head| regions.contains(head))
-}
-
 /// `path` and every prefix above it, the root first, as the strings a `Path`-keyed
 /// map is looked up by.
 fn heads(path: &Path) -> impl Iterator<Item = &str> {
 	let s = path.as_str();
 	let ends = s.match_indices('/').map(|(end, _)| end);
 	(std::iter::once(0).chain(ends).chain((!s.is_empty()).then_some(s.len()))).map(move |end| &s[..end])
-}
-
-/// Drop each region a wider one at least as new covers: what it certifies, the
-/// wider one already does.
-fn settle(floors: &mut BTreeMap<Path, Rev>) {
-	let covered: Vec<Path> = (floors.iter())
-		.filter(|&(region, &floor)| above(floors, region).any(|(wider, &newer)| wider != region && newer >= floor))
-		.map(|(region, _)| region.clone())
-		.collect();
-	for region in covered {
-		floors.remove(&region);
-	}
 }
 
 #[cfg(test)]
@@ -394,7 +257,6 @@ mod tests {
 		let v = view(&[("", 5)], &[("live/a/x", 1), ("live", 2), ("other/x", 3)]);
 		let r = v.present(&p("live/a"));
 		assert_eq!(r, view(&[("live/a", 5)], &[("live/a/x", 1), ("live/a", 2)]));
-		assert_eq!(r.floor(&p("live/a")), Some(5));
 	}
 
 	#[test]
@@ -407,57 +269,11 @@ mod tests {
 	}
 
 	#[test]
-	fn restrict_moves_a_certified_covering_claim_and_drops_an_uncertified_one() {
-		let v = view(&[("", 5)], &[("live/a/x", 1), ("live", 2)]);
-		assert_eq!(
-			v.restrict(&p("live/a")),
-			view(&[("live/a", 5)], &[("live/a", 2), ("live/a/x", 1)])
-		);
-		// The floor proves no claim covers its region, so the claim above is stale.
-		let v = view(&[("live/a", 5)], &[("live/a/x", 1), ("live", 2)]);
-		assert_eq!(v.restrict(&p("live/a/y")), view(&[("live/a/y", 5)], &[]));
-	}
-
-	#[test]
-	fn a_wider_floor_at_one_revision_replaces_a_claim_moved_onto_a_narrower_one() {
-		let mut a = view(&[("live/b/z", 5)], &[("live/b/z", 1)]);
-		a.merge(&view(&[("live/b", 5)], &[("live/b", 1)]));
-		assert_eq!(a, view(&[("live/b", 5)], &[("live/b", 1)]));
-	}
-
-	#[test]
 	fn a_floor_certifies_only_what_lies_within_it() {
 		let v = view(&[("live/a", 5)], &[("live/a", 1), ("live/a/x", 2), ("live", 3)]);
 		assert_eq!(v.as_of(&p("live/a")), Some(5));
 		assert_eq!(v.as_of(&p("live/a/x")), Some(5));
 		assert_eq!(v.as_of(&p("live")), None);
-		assert_eq!(
-			v.uncertified().map(|(claim, _)| claim.as_str()).collect::<Vec<_>>(),
-			["live"]
-		);
-		// Two floors certify no single revision.
-		let v = view(&[("live", 5), ("live/a", 6)], &[]);
-		assert_eq!(v.floor(&p("live")), None);
-	}
-
-	#[test]
-	fn merge_keeps_the_newer_knowledge_per_claim() {
-		let mut a = view(&[("live", 3)], &[("live/x", 1)]);
-		let b = view(&[("live", 4)], &[]);
-		a.merge(&b);
-		assert_eq!(a, view(&[("live", 4)], &[]));
-
-		// An older view revives nothing.
-		let c = view(&[("live", 2)], &[("live/x", 1)]);
-		a.merge(&c);
-		assert_eq!(a, view(&[("live", 4)], &[]));
-	}
-
-	#[test]
-	fn merge_drops_a_region_a_wider_newer_floor_covers() {
-		let mut a = view(&[("live/a", 3)], &[]);
-		a.merge(&view(&[("", 4)], &[]));
-		assert_eq!(a.floors, view(&[("", 4)], &[]).floors);
 	}
 
 	#[test]
@@ -471,16 +287,6 @@ mod tests {
 		let gone = view(&[("", 3)], &[("c", 4)]);
 		got.apply(gone.diff(&new), gone.floors.clone());
 		assert_eq!(got, gone);
-	}
-
-	#[test]
-	fn restrict_all_ignores_a_region_within_another() {
-		// A newer floor over `live` but not `live/a`, and an older one exactly there:
-		// restricting to `live/a` alone presents `live`'s claim at `live/a`, which the
-		// wider region knows is no claim of its own.
-		let v = view(&[("live", 5), ("live/a", 3)], &[("live", 1)]);
-		let wide = view(&[("live", 5)], &[("live", 1)]);
-		assert_eq!(v.restrict_all(&BTreeSet::from([p("live/a"), p("live")])), wide);
 	}
 
 	/// Random views over paths that share segments and string prefixes (`a` and `ab`).
@@ -519,15 +325,6 @@ mod tests {
 				}
 				assert_eq!(narrow(&v.floors, &path), narrowed);
 			}
-			let regions: BTreeSet<Path> = PATHS.iter().filter(|_| next(3) == 0).map(|path| p(path)).collect();
-			let widest: Vec<&Path> = (regions.iter())
-				.filter(|&region| !regions.iter().any(|wider| wider != region && within(region, wider)))
-				.collect();
-			let mut folded = View::default();
-			for region in widest.iter().rev() {
-				folded.merge(&v.restrict(region));
-			}
-			assert_eq!(v.restrict_all(&regions), folded);
 		}
 	}
 }

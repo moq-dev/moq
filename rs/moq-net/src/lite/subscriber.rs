@@ -914,6 +914,7 @@ impl Subscriber {
 			| lite::AnnounceBroadcast::RouteUpdate { .. }
 			| lite::AnnounceBroadcast::RouteHold { .. }
 			| lite::AnnounceBroadcast::RouteEnd { .. }
+			| lite::AnnounceBroadcast::Dead(_)
 			| lite::AnnounceBroadcast::Floor { .. }
 			| lite::AnnounceBroadcast::WarmStart { .. }
 			| lite::AnnounceBroadcast::WarmUpdate { .. }
@@ -1460,7 +1461,7 @@ impl Drop for SubscriberDriver {
 		// dropped without that still has to name an end before its setup machines drop.
 		self.subscriber.note_end(&Error::Cancel);
 		// Every announce stream closes with the session: disconnect them together.
-		let _closing = self.subscriber.origin.route_closing();
+		let _closing = self.subscriber.origin.route_closing(self.subscriber.peer_setup.tag());
 		self.announces = kio::Tasks::new();
 	}
 }
@@ -2785,15 +2786,18 @@ impl AnnouncePrefix {
 
 		// Waiting for the link cost (may block on the peer's SETUP).
 		let link_cost: u64 = wait!(Cost => self.subscriber.poll_link_cost(waiter));
-		// Lite-07: a scoped peer's routes file under the route key its SETUP proved, so
-		// that waits for the SETUP. An unscoped peer's identities file as they are.
+		// Lite-07: the route layer files a scoped peer's routes under the route key it
+		// proved, so that waits for the SETUP. It names the peer by the Node ID the SETUP
+		// declared, or else by the last hop of the first route the peer sends.
 		let scoped: bool = version.has_routes()
-			&& (self.subscriber.auth)
+			&& self
+				.subscriber
+				.auth
 				.permit(crate::auth::Direction::Subscribe)
 				.regions()
 				.is_some();
 		wait!(RouteKey => match scoped {
-			true => self.subscriber.peer_setup.poll_route_key(waiter).map(|_| ()),
+			true => self.subscriber.peer_setup.poll_node(waiter).map(|_| ()),
 			false => Poll::Ready(()),
 		});
 		let mut run: PrefixRun = PrefixRun {
@@ -2932,7 +2936,7 @@ impl AnnouncePrefix {
 			// above. Each route parks on its own waker, so the rest cost nothing.
 			run.announced.poll_serve(&self.subscriber, waiter);
 			if let Some(routed) = &mut run.routed {
-				routed.poll(&self.subscriber, &mut stream.writer, waiter)?;
+				routed.poll(&self.subscriber, waiter)?;
 			}
 			Poll::Pending
 		}))
@@ -2946,6 +2950,8 @@ struct MintedSource {
 	instance: Option<crate::Instance>,
 	/// The origin node every request names (lite-07), or 0.
 	node: u64,
+	/// How many leading segments of the path make up the route's prefix (lite-07).
+	depth: u64,
 	source: crate::model::broadcast::SourceGuard,
 	/// The source's track handler, registered before its requester could ask for a track.
 	dynamic: crate::broadcast::Requests,
@@ -2964,6 +2970,8 @@ struct SourceServe {
 	path: Path,
 	instance: Option<crate::Instance>,
 	node: u64,
+	/// How many leading segments of the path make up the route's prefix (lite-07).
+	depth: u64,
 	source: crate::model::broadcast::SourceGuard,
 	dynamic: crate::broadcast::Requests,
 	route: kio::Consumer<()>,
@@ -3042,6 +3050,7 @@ impl TracksRecv {
 					broadcast: source.path.clone(),
 					instance: source.instance.clone(),
 					node: source.node,
+					depth: source.depth,
 				})?;
 				self.stream.insert(stream)
 			}
@@ -3108,6 +3117,7 @@ impl SourceServe {
 			path: minted.path,
 			instance: minted.instance,
 			node: minted.node,
+			depth: minted.depth,
 			source: minted.source,
 			datagram_requests: minted.dynamic.datagrams(),
 			dynamic: minted.dynamic,
@@ -3202,7 +3212,7 @@ impl kio::Task for SourceServe {
 				let serve = DatagramServe::new(
 					self.subscriber.clone(),
 					self.path.clone(),
-					(self.instance.clone(), self.node),
+					(self.instance.clone(), self.node, self.depth),
 					self.dynamic.validity().clone(),
 					self.source.consume(),
 					request,
@@ -3221,6 +3231,7 @@ impl kio::Task for SourceServe {
 						path: self.path.clone(),
 						instance: self.instance.clone(),
 						node: self.node,
+						depth: self.depth,
 						name: request.name().to_string(),
 					};
 					// One machine per track serves its lone subscription and any number
@@ -3273,6 +3284,8 @@ struct DatagramServe {
 	path: Path,
 	instance: Option<crate::Instance>,
 	node: u64,
+	/// How many leading segments of the path make up the route's prefix (lite-07).
+	depth: u64,
 	validity: crate::model::broadcast::RequestValidity,
 	// A dedicated close-watch handle.
 	closed: Transport,
@@ -3335,7 +3348,7 @@ impl DatagramServe {
 	fn new(
 		subscriber: Subscriber,
 		path: Path,
-		(instance, node): (Option<crate::Instance>, u64),
+		(instance, node, depth): (Option<crate::Instance>, u64, u64),
 		validity: crate::model::broadcast::RequestValidity,
 		source: crate::broadcast::Consumer,
 		request: datagram::Request,
@@ -3350,6 +3363,7 @@ impl DatagramServe {
 			path,
 			instance,
 			node,
+			depth,
 			validity,
 			id,
 			source: Some(source),
@@ -3450,6 +3464,7 @@ impl DatagramServe {
 						broadcast: self.path.clone(),
 						instance: self.instance.clone(),
 						node: self.node,
+						depth: self.depth,
 						track: request.name().to_string().into(),
 						priority,
 					})?;
@@ -6129,6 +6144,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -6194,6 +6210,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6301,6 +6318,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6354,6 +6372,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6864,6 +6883,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -6939,6 +6959,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -7056,6 +7077,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -7129,6 +7151,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -7307,6 +7330,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -7380,6 +7404,7 @@ mod tests {
 					path: Path::from_static("room"),
 					instance: None,
 					node: 0,
+					depth: 0,
 					name: "video".into(),
 				};
 				let info = track::Info::default().with_timescale(None);
@@ -7455,6 +7480,7 @@ mod tests {
 					path: Path::from_static("room"),
 					instance: None,
 					node: 0,
+					depth: 0,
 					name: "video".to_string(),
 				},
 				request,
@@ -7509,6 +7535,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		(waiting, TrackServeRun::new(serve, request))
@@ -7847,6 +7874,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -7896,6 +7924,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				source: crate::model::broadcast::SourceGuard::new(broadcast),
 				dynamic,
 				route: route.consume(),
@@ -8042,6 +8071,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -8095,6 +8125,7 @@ mod tests {
 			path: Path::from_static("room/host"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "catalog.json".to_string(),
 		};
 
@@ -8164,6 +8195,7 @@ mod tests {
 			path: Path::from_static("room/host"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "audio".to_string(),
 		};
 
@@ -8229,6 +8261,7 @@ mod tests {
 				path: Path::from_static("room/host"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "audio".to_string(),
 			};
 
@@ -8327,6 +8360,7 @@ mod tests {
 			path: Path::from_static("room/host"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "audio".to_string(),
 		};
 
@@ -8390,6 +8424,7 @@ mod tests {
 				path: Path::from_static("room/host"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "audio".to_string(),
 			};
 
@@ -8509,6 +8544,7 @@ mod tests {
 					path: Path::from_static("room/host"),
 					instance: None,
 					node: 0,
+					depth: 0,
 					name: "catalog.json".to_string(),
 				},
 				session,
@@ -8585,6 +8621,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -8659,6 +8696,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -10043,19 +10081,24 @@ mod tests {
 		}
 	}
 
-	/// A lite-07 ROUTE_START to the origin node `node`.
+	/// A lite-07 ROUTE_START to the publisher `node`, which the peer sends itself.
 	fn route_start(node: crate::route::Id) -> impl Fn(&mut crate::coding::Encoder<'_>) {
 		move |w| {
-			let advert = crate::route::Advert {
-				seqno: 0,
+			let offer = crate::route::path::Offer {
+				path: [crate::route::path::Hop { node, session: 0 }].into(),
+				draining: false,
+				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
 				rtt: None,
-				hops: [].into(),
 			};
-			lite::AnnounceBroadcast::RouteStart { node, advert }
-				.encode(w, Version::Lite07)
-				.unwrap()
+			lite::AnnounceBroadcast::RouteStart {
+				node,
+				suffix: Path::empty(),
+				offer,
+			}
+			.encode(w, Version::Lite07)
+			.unwrap()
 		}
 	}
 
@@ -10995,7 +11038,7 @@ impl Announced {
 				continue;
 			};
 			// No origin node to name before lite-07.
-			mint_sources(subscriber, entry, 0);
+			mint_sources(subscriber, entry, (0, 0));
 		}
 	}
 
@@ -11041,9 +11084,13 @@ impl Announced {
 
 /// Serve the queued requests on a route whose queue woke: mint a source per requested
 /// path, answer the requester with its consumer, and hand the source to the driver's
-/// serve machines. Every request through it names the origin node `node` (lite-07; 0
-/// lets the peer select).
-fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry: &mut AnnouncedRoute<K>, node: u64) {
+/// serve machines. Every request through it names the publisher `node` and the depth of
+/// the route it follows (lite-07; 0 lets the peer select).
+fn mint_sources<K: Clone + Send + Sync + 'static>(
+	subscriber: &Subscriber,
+	entry: &mut AnnouncedRoute<K>,
+	(node, depth): (u64, u64),
+) {
 	let root = subscriber.origin.root();
 	// Cleared before polling, so a request landing mid-pass queues the route again.
 	entry.wake.popped();
@@ -11076,6 +11123,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
 			path,
 			instance: entry.route.instance.clone(),
 			node,
+			depth,
 			source: crate::model::broadcast::SourceGuard::new(source),
 			dynamic,
 			route: entry.live.consume(),
@@ -11164,6 +11212,8 @@ struct TrackServe {
 	instance: Option<crate::Instance>,
 	/// The origin node to ask for (lite-07), or 0 to let the peer select.
 	node: u64,
+	/// How many leading segments of the path make up the route's prefix (lite-07).
+	depth: u64,
 	name: String,
 }
 
@@ -11692,6 +11742,7 @@ impl Establish {
 		let msg = lite::Subscribe {
 			instance: self.serve.instance.clone(),
 			node: self.serve.node,
+			depth: self.serve.depth,
 			id: self.id,
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
@@ -12357,6 +12408,7 @@ impl TrackInfoFetch {
 		stream.writer.buffer(&lite::Track {
 			instance: serve.instance.clone(),
 			node: serve.node,
+			depth: serve.depth,
 			broadcast: serve.path.clone(),
 			track: serve.name.as_str().into(),
 		})?;
@@ -13768,6 +13820,7 @@ impl kio::Task for FetchServeRun {
 					let msg = lite::Fetch {
 						instance: self.serve.instance.clone(),
 						node: self.serve.node,
+						depth: self.serve.depth,
 						broadcast: self.serve.path.clone(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),

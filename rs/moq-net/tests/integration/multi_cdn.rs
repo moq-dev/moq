@@ -3,9 +3,10 @@
 //! An endpoint linked to two CDNs uses its preferred one and fails over to the next.
 //!
 //! A publisher `P` pushes one broadcast, under one instance, to CDN relays `A` and `B`. A
-//! subscriber `S` links to both, ranking `A` first with
+//! subscriber `S` links to both, ranking `A` first by demoting `B` with
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
-//! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
+//! preference puts `A` ahead. A lite-07 route ranks by the lowest preference on its path,
+//! and `P`'s links to both CDNs are neutral, so promoting `A` instead would gain nothing. Losing `A` moves `S` to `B`, and `A` returning moves it
 //! back. Between lite-07 routes, which carry the instance, each move resumes the
 //! subscription. A moq-transport `B` carries none, so `S` mints one for it, and the move
 //! onto it is a restart that ends the subscription rather than stitching onto it.
@@ -178,8 +179,8 @@ impl Topology {
 			push(lite, &publisher, &cdn_a).await,
 			push(secondary, &publisher, &cdn_b).await,
 		];
-		let s_to_a = dial(lite, &cdn_a, &subscriber, 1, A_COST).await;
-		let s_to_b = dial(secondary, &cdn_b, &subscriber, 0, 1).await;
+		let s_to_a = dial(lite, &cdn_a, &subscriber, 0, A_COST).await;
+		let s_to_b = dial(secondary, &cdn_b, &subscriber, -1, 1).await;
 		settle().await;
 
 		Self {
@@ -257,7 +258,7 @@ impl Topology {
 
 	async fn restore_a(&mut self) {
 		let lite: Version = "moq-lite-07-wip".parse().unwrap();
-		self.s_to_a = Some(dial(lite, &self.cdn_a, &self.subscriber, 1, A_COST).await);
+		self.s_to_a = Some(dial(lite, &self.cdn_a, &self.subscriber, 0, A_COST).await);
 		settle().await;
 	}
 }

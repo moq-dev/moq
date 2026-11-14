@@ -225,7 +225,7 @@ fn follower(prefixes: usize) -> (Sim, Node) {
 		sim.link(2 + spoke, hub, SimLink::cost(1).grant(grant), SimLink::cost(1));
 		sim.join(2 + spoke, follower, 1);
 	}
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	for spoke in 0..prefixes {
 		sim.announce(origin, &format!("live/{spoke}/x"), 0, None);
 	}
@@ -403,7 +403,7 @@ fn another_grant_does_not_turn_a_raw_route_into_a_qualified_child() {
 	}
 	sim.join(origin, relay, 2);
 	sim.join(origin, second, 1);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "b/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);
@@ -425,7 +425,7 @@ fn widening_past_a_childs_narrower_interest_releases_the_old_scope() {
 	sim.join(relay, child, 1);
 	sim.watch(relay, "a");
 	sim.watch(child, "a/x");
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	sim.announce(origin, "a/y", 0, None);
 	assert!(sim.run());
@@ -457,7 +457,7 @@ fn overlapping_scopes_do_not_oscillate_between_covering_paths() {
 	for node in [2, 3, 4] {
 		sim.watch(node, "b");
 	}
-	sim.originate(5, 7, 0);
+	sim.originate(5, 7);
 	sim.announce(5, "b/x", 0, None);
 	assert!(sim.run(), "{}", mesh(&sim));
 	for node in 0..5 {
@@ -480,7 +480,7 @@ fn widening_a_relay_does_not_oscillate_its_former_prefix() {
 	sim.join(4, 1, 1);
 	sim.watch(0, "a");
 	sim.watch(2, "a");
-	sim.originate(4, 7, 0);
+	sim.originate(4, 7);
 	sim.announce(4, "a/x", 0, None);
 	assert!(sim.run());
 
@@ -509,7 +509,7 @@ fn a_repathed_scoped_route_keeps_its_original_key() {
 		}),
 		SimLink::cost(1),
 	);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);
@@ -535,7 +535,7 @@ fn qualification_does_not_turn_another_key_into_a_child() {
 	sim.link(relay, raw, SimLink::cost(4).grant(grant), SimLink::cost(1));
 	sim.link(alternate, origin, SimLink::cost(1).grant(grant), SimLink::cost(1));
 	sim.join(alternate, relay, 1);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);
@@ -561,7 +561,7 @@ fn an_unwatched_grant_retires_its_previous_stream() {
 		}),
 		SimLink::cost(1),
 	);
-	sim.originate(0, 7, 0);
+	sim.originate(0, 7);
 	sim.announce(0, "b/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);
@@ -588,7 +588,7 @@ fn a_cancelled_stream_cannot_restore_a_route() {
 		}),
 		SimLink::cost(1),
 	);
-	sim.originate(0, 7, 0);
+	sim.originate(0, 7);
 	sim.announce(0, "b/x", 0, None);
 	// The original snapshot is still in flight when the grant is cancelled.
 	sim.watch(1, "a");
@@ -797,7 +797,7 @@ fn sweep_scoped_meshes_show_what_the_rule_says() {
 				}
 			}
 		}
-		sim.originate(origin, 7, 0);
+		sim.originate(origin, 7);
 		for claim in CLAIMS {
 			if rng.chance(40) {
 				sim.announce(origin, claim, rng.next(3), None);
@@ -886,7 +886,7 @@ fn holds_never_close_a_cycle() {
 	sim.join(origin, hub, 1);
 	sim.watch(0, "a/");
 	sim.watch(1, "a/");
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	assert!(sim.run());
 	quiet(&sim, origin, "connected");

@@ -1,6 +1,5 @@
-//! The routing contract's fixtures, run in a simulated network against either
-//! rule: [`Router`], which sessions run today, or [`path::Router`], the rule the
-//! routes epic's Plan item 27 picked.
+//! The routing contract's fixtures, run in a simulated network against
+//! [`path::Router`], the rule the routes epic's Plan item 27 picked.
 //!
 //! [`Sim`] wires one router per node through ordered, holdable message queues,
 //! so a fixture can deliver messages out of step and replay them late. Each round
@@ -34,12 +33,9 @@ pub(super) type Node = usize;
 /// How long one round of deliveries takes on the mocked clock.
 pub(super) const HOP: Duration = Duration::from_millis(25);
 
-/// Which route rule every node of a [`Sim`] runs.
+/// Which route rule every node of a [`Sim`] runs: [`path::Router`], with its doubt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Rule {
-	/// [`Router`]: Babel's distance and seqno, which sessions run today.
-	Distance,
-	/// [`path::Router`], with its doubt.
 	Path(Doubt),
 }
 
@@ -54,7 +50,6 @@ impl Rule {
 
 	pub fn as_str(self) -> &'static str {
 		match self {
-			Self::Distance => "distance",
 			Self::Path(Doubt {
 				lift: Lift::Unnamed, ..
 			}) => "path+early",
@@ -63,113 +58,22 @@ impl Rule {
 	}
 }
 
-/// Run each fixture named once per rule, as a test per rule: the rule sessions run
-/// today, and the one that replaces it.
-macro_rules! both {
+/// Run each fixture named under the path rule, as a test each.
+macro_rules! fixtures {
 	($($name:ident),* $(,)?) => {
-		mod distance {
-			$(#[test] fn $name() { super::$name(super::Rule::Distance) })*
-		}
 		mod path {
 			$(#[test] fn $name() { super::$name(super::Rule::PATH) })*
 		}
 	};
 }
-pub(super) use both;
+pub(super) use fixtures;
 
-/// One node's router, under either rule.
-enum Relay {
-	Distance(Router<Node, Item>),
-	Path(path::Router<Node, Item>),
-}
+/// A node's router.
+type Relay = path::Router<Node, Item>;
 
-impl Relay {
-	fn new(rule: Rule, hop: Id, seed: u64) -> Self {
-		match rule {
-			Rule::Distance => Self::Distance(Router::new(hop, seed)),
-			Rule::Path(doubt) => Self::Path(path::Router::new(hop, seed, doubt)),
-		}
-	}
-
-	fn interest(&self) -> u32 {
-		match self {
-			Self::Distance(router) => router.interest(),
-			Self::Path(router) => router.interest(),
-		}
-	}
-
-	fn declared(&self) -> Option<Id> {
-		match self {
-			Self::Distance(router) => router.declared(),
-			Self::Path(router) => router.declared(),
-		}
-	}
-
-	fn revision(&self) -> Option<Rev> {
-		match self {
-			Self::Distance(router) => router.revision(),
-			Self::Path(router) => router.revision(),
-		}
-	}
-
-	/// The declared identity's own claims.
-	fn own(&self, id: Id) -> Option<&View<Item>> {
-		match self {
-			Self::Distance(router) => router.view(id),
-			Self::Path(router) => router.view(id, &Path::empty()),
-		}
-	}
-
-	fn events(&mut self) -> Vec<Event<Item>> {
-		// The simulator reads full views directly. Consume change notifications
-		// alongside events, as a driver does, so they retain no script history.
-		match self {
-			Self::Distance(router) => {
-				drop(router.changed());
-				router.events()
-			}
-			Self::Path(router) => {
-				drop(router.changed());
-				router.events()
-			}
-		}
-	}
-
-	fn holds(&self, id: Id) -> bool {
-		match self {
-			Self::Distance(router) => router.holds(id),
-			Self::Path(router) => router.holds(id),
-		}
-	}
-
-	fn shown(&self) -> &BTreeMap<(Id, Path), Shown<Item>> {
-		match self {
-			Self::Distance(router) => router.shown(),
-			Self::Path(router) => router.shown(),
-		}
-	}
-
-	fn touched(&self) -> usize {
-		match self {
-			Self::Distance(router) => router.touched(),
-			Self::Path(router) => router.touched(),
-		}
-	}
-
-	fn deadline(&self) -> Option<Instant> {
-		match self {
-			Self::Distance(_) => None,
-			Self::Path(router) => router.deadline(),
-		}
-	}
-
-	/// Every view of another publisher's claims, by the identity it files them under.
-	fn views(&self) -> Vec<(Id, &View<Item>)> {
-		match self {
-			Self::Distance(router) => router.views().collect(),
-			Self::Path(router) => router.views().map(|((id, _), view)| (*id, view)).collect(),
-		}
-	}
+fn relay(rule: Rule, hop: Id, seed: u64) -> Relay {
+	let Rule::Path(doubt) = rule;
+	path::Router::new(hop, seed, doubt)
 }
 
 /// A claim's attributes, plus the revision its life began at so fixtures can
@@ -250,29 +154,14 @@ impl SimLink {
 
 #[derive(Clone, Debug)]
 enum Msg {
-	/// A [`Router`] route.
-	Route {
-		id: Id,
-		reach: Option<Reach>,
-	},
-	Batch {
-		id: Id,
-		changes: Vec<(Path, Option<Item>)>,
-		floor: Option<Rev>,
-		interest: u32,
-	},
-	Request {
-		id: Id,
-		seqno: Seqno,
-	},
-	/// A [`path::Router`] route, on the stream answering interest generation `interest`.
+	/// A route, on the stream answering interest generation `interest`.
 	Path {
 		id: Id,
 		prefix: Path,
 		reach: Option<path::Reach>,
 		interest: u32,
 	},
-	/// A [`path::Router`] route's claims.
+	/// A route's claims.
 	Claims {
 		id: Id,
 		prefix: Path,
@@ -299,7 +188,7 @@ pub(super) struct SimEvent {
 	pub withdrawn: bool,
 }
 
-/// What either rule retains, summed over every node.
+/// What the routers retain, summed over every node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct State {
 	/// Claims in views of other publishers.
@@ -310,14 +199,14 @@ pub(super) struct State {
 	pub heard: usize,
 	/// Claims on routes sent.
 	pub sent: usize,
-	/// What waits on another node: requests and echoes, or dead hops and doubts.
+	/// What waits on another node: dead hops and doubts.
 	pub pending: usize,
 }
 
 /// Messages sent, as protocol counts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Stats {
-	/// Route messages: ROUTE, DEAD, and echoed ROUTE_ENDs.
+	/// Route messages: ROUTE and DEAD.
 	pub route_msgs: usize,
 	/// Routes those messages name: a DEAD counts itself and each route it moved.
 	pub route_items: usize,
@@ -325,10 +214,7 @@ pub(super) struct Stats {
 	pub hop_updates: usize,
 	pub claim_msgs: usize,
 	pub claim_items: usize,
-	pub requests: usize,
-	/// Requests a node sent the same neighbor again for the same seqno.
-	pub repeated_requests: usize,
-	/// Messages and echoes delivered.
+	/// Messages delivered.
 	pub delivered: usize,
 }
 
@@ -351,15 +237,10 @@ pub(super) struct Sim {
 	grants: BTreeSet<&'static str>,
 	up: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
-	/// Echoed ROUTE_ENDs: unordered against the echoing node's own routes.
-	acks: BTreeMap<(Node, Node), VecDeque<Id>>,
 	held: BTreeSet<(Node, Node)>,
 	history: BTreeMap<Id, Vec<Change>>,
-	/// Every request sent, to spot a repeat.
-	requested: BTreeSet<(Node, Node, Id, Seqno)>,
-	/// The last finite route each node sent each neighbor, to spot a change of hops alone.
-	routed: BTreeMap<(Node, Node, Id), Advert>,
-	/// The same for [`path::Router`], by prefix.
+	/// The last finite route each node sent each neighbor, by prefix, to spot a change
+	/// of hops alone.
 	offered: BTreeMap<(Node, Node, Id, Path), path::Offer>,
 	pub stats: Stats,
 	/// The work of routers a restart replaced.
@@ -368,9 +249,9 @@ pub(super) struct Sim {
 }
 
 impl Sim {
-	/// `nodes` nodes running the rule sessions run today.
+	/// `nodes` nodes running the path rule.
 	pub fn new(nodes: usize) -> Self {
-		Self::with(Rule::Distance, nodes)
+		Self::with(Rule::PATH, nodes)
 	}
 
 	/// `nodes` nodes running `rule`.
@@ -378,7 +259,7 @@ impl Sim {
 		Self {
 			rule,
 			nodes: (0..nodes)
-				.map(|node| Relay::new(rule, hop(node, 0), node as u64 + 1))
+				.map(|node| relay(rule, hop(node, 0), node as u64 + 1))
 				.collect(),
 			now: Instant::ZERO,
 			leaf: vec![false; nodes],
@@ -389,11 +270,8 @@ impl Sim {
 			grants: BTreeSet::new(),
 			up: BTreeSet::new(),
 			queues: BTreeMap::new(),
-			acks: BTreeMap::new(),
 			held: BTreeSet::new(),
 			history: BTreeMap::new(),
-			requested: BTreeSet::new(),
-			routed: BTreeMap::new(),
 			offered: BTreeMap::new(),
 			stats: Stats::default(),
 			spent: 0,
@@ -401,36 +279,9 @@ impl Sim {
 		}
 	}
 
-	pub fn rule(&self) -> Rule {
-		self.rule
-	}
-
-	/// Whether the nodes run [`path::Router`].
-	pub fn paths(&self) -> bool {
-		matches!(self.rule, Rule::Path(_))
-	}
-
-	/// `node`'s [`Router`].
-	pub fn babel(&self, node: Node) -> &Router<Node, Item> {
-		match &self.nodes[node] {
-			Relay::Distance(router) => router,
-			Relay::Path(_) => panic!("node {node} runs the path rule"),
-		}
-	}
-
-	fn babel_mut(&mut self, node: Node) -> &mut Router<Node, Item> {
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router,
-			Relay::Path(_) => panic!("node {node} runs the path rule"),
-		}
-	}
-
-	/// `node`'s [`path::Router`].
+	/// `node`'s router.
 	pub fn path(&self, node: Node) -> &path::Router<Node, Item> {
-		match &self.nodes[node] {
-			Relay::Path(router) => router,
-			Relay::Distance(_) => panic!("node {node} runs the distance rule"),
-		}
+		&self.nodes[node]
 	}
 
 	/// A node that sends only identities it serves, like a browser.
@@ -478,11 +329,7 @@ impl Sim {
 		for (x, y) in [(a, b), (b, a)] {
 			let link = self.config(x, y);
 			let named = hop(y, self.restarts[y]);
-			match &mut self.nodes[x] {
-				Relay::Distance(router) => router.connect(y, link),
-				Relay::Path(router) => router.connect(y, named, link),
-			}
-			.expect("a positive cost");
+			self.nodes[x].connect(y, named, link).expect("a positive cost");
 		}
 		for (x, y) in [(a, b), (b, a)] {
 			self.ask(y, x);
@@ -490,9 +337,9 @@ impl Sim {
 		self.flush();
 	}
 
-	/// `node` asks `peer` for announcements under its interest. Under the path rule a
-	/// node asks a neighbour publishing under a scoped grant for only what the scope
-	/// covers of it, and for nothing where they are disjoint.
+	/// `node` asks `peer` for announcements under its interest. A node asks a neighbour
+	/// publishing under a scoped grant for only what the scope covers of it, and for
+	/// nothing where they are disjoint.
 	fn ask(&mut self, node: Node, peer: Node) {
 		let watch = self.watch[node].clone();
 		let scope = self.links[node][peer]
@@ -505,14 +352,11 @@ impl Sim {
 			Some(_) => None,
 		};
 		let absent = ask.is_none();
-		match &mut self.nodes[peer] {
-			Relay::Distance(router) => router.peer_interest(node, watch),
-			Relay::Path(router) => router.peer_interest(node, ask),
-		}
-		.unwrap();
+		self.nodes[peer].peer_interest(node, ask).unwrap();
 		// No replacement stream will send SYNCED when the grant is disjoint.
 		// The receiver already knows it cancelled this part of its interest.
-		if absent && let Relay::Path(router) = &mut self.nodes[node] {
+		if absent {
+			let router = &mut self.nodes[node];
 			router.synced(peer, router.interest());
 		}
 	}
@@ -526,12 +370,8 @@ impl Sim {
 		self.up.remove(&Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
-			self.acks.remove(&(x, y));
 			self.held.remove(&(x, y));
-			match &mut self.nodes[y] {
-				Relay::Distance(router) => router.disconnect([x]),
-				Relay::Path(router) => router.disconnect([x], self.now),
-			}
+			self.nodes[y].disconnect([x], self.now);
 		}
 		self.flush();
 	}
@@ -543,18 +383,11 @@ impl Sim {
 			self.up.remove(&Self::pair(node, peer));
 			for key in [(node, peer), (peer, node)] {
 				self.queues.remove(&key);
-				self.acks.remove(&key);
 				self.held.remove(&key);
 			}
-			match &mut self.nodes[peer] {
-				Relay::Distance(router) => router.disconnect([node]),
-				Relay::Path(router) => router.disconnect([node], self.now),
-			}
+			self.nodes[peer].disconnect([node], self.now);
 		}
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.disconnect(peers),
-			Relay::Path(router) => router.disconnect(peers, self.now),
-		}
+		self.nodes[node].disconnect(peers, self.now);
 		self.flush();
 	}
 
@@ -568,15 +401,10 @@ impl Sim {
 		self.declared[node] = None;
 		let restarts = self.restarts[node];
 		let seed = fnv("restart", &[node as u64, u64::from(restarts)]);
-		if let Relay::Path(router) = &self.nodes[node] {
-			self.spent += router.work();
-		}
-		self.nodes[node] = Relay::new(self.rule, hop(node, restarts), seed);
+		self.spent += self.nodes[node].work();
+		self.nodes[node] = relay(self.rule, hop(node, restarts), seed);
 		let watch = self.watch[node].clone();
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.watch(watch),
-			Relay::Path(router) => router.watch(watch),
-		};
+		self.nodes[node].watch(watch);
 		self.flush();
 	}
 
@@ -594,38 +422,16 @@ impl Sim {
 		(0..self.nodes.len()).filter(move |&peer| self.links[node][peer].is_some() && self.connected(node, peer))
 	}
 
-	/// `node` starts originating `id`, at `seqno` under the distance rule.
-	pub fn originate(&mut self, node: Node, id: Id, seqno: Seqno) {
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.originate(id, seqno),
-			Relay::Path(router) => router.originate(id),
-		}
+	/// `node` starts originating `id`.
+	pub fn originate(&mut self, node: Node, id: Id) {
+		self.nodes[node].originate(id);
 		self.declared[node] = Some(id);
 		self.history.entry(id).or_default();
 		self.flush();
 	}
 
-	/// `node` advertises `id` as if serving it, claiming the root.
-	pub fn forge(&mut self, node: Node, id: Id, seqno: Seqno) {
-		let item = Item {
-			seed: 0,
-			epoch: None,
-			since: 0,
-		};
-		self.babel_mut(node).forge(id, seqno, Path::empty(), item);
-		self.flush();
-	}
-
-	pub fn bump(&mut self, node: Node) {
-		self.babel_mut(node).bump().unwrap();
-		self.flush();
-	}
-
 	pub fn age(&mut self, node: Node, rev: Rev) {
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.age(rev),
-			Relay::Path(router) => router.age(rev),
-		}
+		self.nodes[node].age(rev);
 		self.flush();
 	}
 
@@ -634,35 +440,22 @@ impl Sim {
 		self.nodes[node].declared().expect("not an origin")
 	}
 
-	pub fn seqno(&self, node: Node) -> Seqno {
-		self.babel(node).seqno().expect("not an origin")
-	}
-
 	pub fn announce(&mut self, node: Node, claim: &str, seed: Metric, epoch: Option<u32>) {
 		let claim = p(claim);
 		let router = &self.nodes[node];
 		let id = router.declared().expect("not an origin");
 		let rev = router.revision().unwrap() + 1;
-		let since = router
-			.own(id)
+		let since = (router.view(id, &Path::empty()))
 			.and_then(|view| view.items.get(&claim))
 			.map_or(rev, |item| item.since);
 		let item = Item { seed, epoch, since };
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.announce(claim.clone(), item),
-			Relay::Path(router) => router.announce(claim.clone(), item),
-		}
-		.unwrap();
+		self.nodes[node].announce(claim.clone(), item).unwrap();
 		self.record(node, claim, Some(item));
 	}
 
 	pub fn unannounce(&mut self, node: Node, claim: &str) {
 		let claim = p(claim);
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.unannounce(claim.clone()),
-			Relay::Path(router) => router.unannounce(claim.clone()),
-		}
-		.unwrap();
+		self.nodes[node].unannounce(claim.clone()).unwrap();
 		self.record(node, claim, None);
 	}
 
@@ -681,10 +474,7 @@ impl Sim {
 	pub fn watch(&mut self, node: Node, prefix: &str) {
 		let prefix = p(prefix);
 		self.watch[node] = prefix.clone();
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.watch(prefix),
-			Relay::Path(router) => router.watch(prefix),
-		};
+		self.nodes[node].watch(prefix);
 		let peers: Vec<Node> = self.peers(node).collect();
 		for peer in peers {
 			self.ask(node, peer);
@@ -700,40 +490,34 @@ impl Sim {
 		let now = self.now;
 		let peers: Vec<Node> = self.peers(node).collect();
 		for peer in peers {
-			match &mut self.nodes[peer] {
-				Relay::Distance(router) => router.goaway(node),
-				Relay::Path(router) => router.goaway(node, now),
-			}
+			self.nodes[peer].goaway(node, now);
 		}
 		self.flush();
 	}
 
 	pub fn collect(&mut self, node: Node, id: Id) {
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.collect(id),
-			Relay::Path(router) => router.collect(id),
-		}
+		self.nodes[node].collect(id);
 		self.flush();
 	}
 
 	/// `node` measures its link to `peer` at `ms`, or nothing.
 	pub fn rtt(&mut self, node: Node, peer: Node, ms: Option<u64>) {
 		let rtt = ms.map(Duration::from_millis);
-		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.rtt(peer, rtt),
-			Relay::Path(router) => router.rtt(peer, rtt),
-		}
+		self.nodes[node].rtt(peer, rtt);
 		self.flush();
 	}
 
-	/// What `node` last sent `peer` for `id`.
-	pub fn sent(&self, node: Node, peer: Node, id: Id) -> Option<Reach> {
-		self.babel(node).sent.get(&(id, peer)).cloned()
+	/// The last finite route `node` sent `peer` for `id` covering `prefix`, while it
+	/// stands.
+	pub fn offer(&self, node: Node, peer: Node, id: Id, prefix: &Path) -> Option<&path::Offer> {
+		self.offered.get(&(node, peer, id, prefix.clone()))
 	}
 
-	/// The streams `node` sends a route for `id` on.
+	/// The streams `node` sends a finite route for `id` on.
 	pub fn sending(&self, node: Node, id: Id) -> usize {
-		Router::<Node, Item>::of(&self.babel(node).sent, id).count()
+		(self.offered.keys())
+			.filter(|(from, _, key, _)| *from == node && *key == id)
+			.count()
 	}
 
 	pub fn hold(&mut self, from: Node, to: Node) {
@@ -750,55 +534,25 @@ impl Sim {
 			return false;
 		};
 		let now = self.now;
-		if let Relay::Path(router) = &mut self.nodes[to] {
-			router.clock(now);
+		let router = &mut self.nodes[to];
+		router.clock(now);
+		match msg {
+			Msg::Path {
+				id,
+				prefix,
+				reach,
+				interest,
+			} => router.route(from, id, prefix, reach, interest),
+			Msg::Claims {
+				id,
+				prefix,
+				changes,
+				floor,
+				interest,
+			} => router.batch(from, id, prefix, changes, floor, interest),
+			Msg::Dead(dead) => router.dead(from, dead, now),
+			Msg::Synced { interest } => router.synced(from, interest),
 		}
-		match (&mut self.nodes[to], msg) {
-			(Relay::Distance(router), Msg::Route { id, reach }) => router.route(from, id, reach),
-			(
-				Relay::Distance(router),
-				Msg::Batch {
-					id,
-					changes,
-					floor,
-					interest,
-				},
-			) => router.batch(from, id, changes, floor, interest),
-			(Relay::Distance(router), Msg::Request { id, seqno }) => router.request(from, id, seqno),
-			(
-				Relay::Path(router),
-				Msg::Path {
-					id,
-					prefix,
-					reach,
-					interest,
-				},
-			) => router.route(from, id, prefix, reach, interest),
-			(
-				Relay::Path(router),
-				Msg::Claims {
-					id,
-					prefix,
-					changes,
-					floor,
-					interest,
-				},
-			) => router.batch(from, id, prefix, changes, floor, interest),
-			(Relay::Path(router), Msg::Dead(dead)) => router.dead(from, dead, now),
-			(Relay::Path(router), Msg::Synced { interest }) => router.synced(from, interest),
-			(_, msg) => panic!("node {to} cannot read {msg:?}"),
-		}
-		self.stats.delivered += 1;
-		self.flush();
-		true
-	}
-
-	/// Deliver one echoed ROUTE_END from `from` to `to`, even if held.
-	pub fn deliver_ack(&mut self, from: Node, to: Node) -> bool {
-		let Some(id) = self.acks.get_mut(&(from, to)).and_then(VecDeque::pop_front) else {
-			return false;
-		};
-		self.babel_mut(to).echo(from, id);
 		self.stats.delivered += 1;
 		self.flush();
 		true
@@ -808,16 +562,8 @@ impl Sim {
 		self.queues.get(&(from, to)).map_or(0, VecDeque::len)
 	}
 
-	pub fn queued_acks(&self, from: Node, to: Node) -> usize {
-		self.acks.get(&(from, to)).map_or(0, VecDeque::len)
-	}
-
 	pub fn busy(&self) -> Vec<(Node, Node)> {
 		Self::nonempty(&self.queues)
-	}
-
-	pub fn busy_acks(&self) -> Vec<(Node, Node)> {
-		Self::nonempty(&self.acks)
 	}
 
 	fn nonempty<T>(queues: &BTreeMap<(Node, Node), VecDeque<T>>) -> Vec<(Node, Node)> {
@@ -851,12 +597,7 @@ impl Sim {
 	fn rounds(&mut self, rounds: usize, wait: bool) -> bool {
 		for _ in 0..rounds {
 			let ready: Vec<(Node, Node)> = self.busy().into_iter().filter(|key| !self.held.contains(key)).collect();
-			let acks: Vec<(Node, Node)> = self
-				.busy_acks()
-				.into_iter()
-				.filter(|key| !self.held.contains(key))
-				.collect();
-			if ready.is_empty() && acks.is_empty() {
+			if ready.is_empty() {
 				match self.deadline().filter(|_| wait) {
 					Some(at) => {
 						self.now = self.now.max(at);
@@ -869,9 +610,6 @@ impl Sim {
 			for (from, to) in ready {
 				self.deliver(from, to);
 			}
-			for (from, to) in acks {
-				self.deliver_ack(from, to);
-			}
 			self.now = self.now.saturating_add(HOP);
 			self.tick();
 		}
@@ -880,7 +618,7 @@ impl Sim {
 
 	/// The next doubt timer on any node.
 	pub fn deadline(&self) -> Option<Instant> {
-		self.nodes.iter().filter_map(Relay::deadline).min()
+		self.nodes.iter().filter_map(|router| router.deadline()).min()
 	}
 
 	/// Let `elapsed` pass, firing each doubt timer due by then.
@@ -892,10 +630,8 @@ impl Sim {
 	/// Fire every doubt timer due by now.
 	fn tick(&mut self) {
 		let now = self.now;
-		for relay in &mut self.nodes {
-			if let Relay::Path(router) = relay
-				&& router.deadline().is_some_and(|at| at <= now)
-			{
+		for router in &mut self.nodes {
+			if router.deadline().is_some_and(|at| at <= now) {
 				router.timeout(now);
 			}
 		}
@@ -905,83 +641,13 @@ impl Sim {
 	/// Move every router's output onto the queues and log its reader events.
 	fn flush(&mut self) {
 		for node in 0..self.nodes.len() {
-			if self.paths() {
-				self.flush_paths(node);
-			} else {
-				self.flush_routes(node);
-			}
+			self.flush_paths(node);
 			self.flush_events(node);
 		}
 	}
 
-	fn flush_routes(&mut self, node: Node) {
-		{
-			let outs = match &mut self.nodes[node] {
-				Relay::Distance(router) => router.drain(),
-				Relay::Path(_) => unreachable!(),
-			};
-			for out in outs {
-				let (to, msg) = match out {
-					Out::Route { to, id, reach } => {
-						// A route names every node it crossed once, the sender last.
-						if let Some(Reach::Finite(advert)) = &reach {
-							let me = hop(node, self.restarts[node]);
-							assert_eq!(advert.hops.last(), Some(&me), "node {node}'s hops for {id}");
-							let named: BTreeSet<Id> = advert.hops.iter().copied().collect();
-							assert_eq!(named.len(), advert.hops.len(), "node {node} sent {id} round a loop");
-							let was = self.routed.insert((node, to, id), advert.clone());
-							let same = |was: Advert| {
-								Advert {
-									hops: advert.hops.clone(),
-									..was
-								} == *advert
-							};
-							self.stats.hop_updates += usize::from(was.is_some_and(same));
-						} else {
-							self.routed.remove(&(node, to, id));
-						}
-						self.stats.route_msgs += 1;
-						self.stats.route_items += 1;
-						(to, Msg::Route { id, reach })
-					}
-					Out::Batch { to, id, changes, floor } => {
-						self.stats.claim_msgs += 1;
-						self.stats.claim_items += changes.len();
-						let interest = self.nodes[to].interest();
-						(
-							to,
-							Msg::Batch {
-								id,
-								changes,
-								floor,
-								interest,
-							},
-						)
-					}
-					Out::Request { to, id, seqno } => {
-						self.stats.requests += 1;
-						if !self.requested.insert((node, to, id, seqno)) {
-							self.stats.repeated_requests += 1;
-						}
-						(to, Msg::Request { id, seqno })
-					}
-					Out::Echo { to, id } => {
-						self.stats.route_msgs += 1;
-						self.stats.route_items += 1;
-						self.acks.entry((node, to)).or_default().push_back(id);
-						continue;
-					}
-				};
-				self.queues.entry((node, to)).or_default().push_back(msg);
-			}
-		}
-	}
-
 	fn flush_paths(&mut self, node: Node) {
-		let outs = match &mut self.nodes[node] {
-			Relay::Path(router) => router.drain(),
-			Relay::Distance(_) => unreachable!(),
-		};
+		let outs = self.nodes[node].drain();
 		for out in outs {
 			let (to, msg) = match out {
 				path::Out::Route { to, id, prefix, reach } => {
@@ -1066,8 +732,7 @@ impl Sim {
 				let id = declared.expect("rotated");
 				let router = &self.nodes[node];
 				let rev = router.revision().unwrap();
-				let changes = router
-					.own(id)
+				let changes = (router.view(id, &Path::empty()))
 					.unwrap()
 					.items
 					.iter()
@@ -1080,6 +745,9 @@ impl Sim {
 				self.history.insert(id, changes);
 				self.declared[node] = declared;
 			}
+			// The simulator reads full views directly. Consume change notifications
+			// alongside events, as a driver does, so they retain no script history.
+			drop(self.nodes[node].changed());
 			for event in self.nodes[node].events() {
 				let origin = self.source(event.id).unwrap_or(event.id);
 				let since = event.item.since;
@@ -1099,42 +767,25 @@ impl Sim {
 		}
 	}
 
-	/// Routes, prefixes, and streams visited across every node, under the path rule.
+	/// Routes, prefixes, and streams visited across every node.
 	pub fn work(&self) -> usize {
 		self.spent + (0..self.nodes.len()).map(|node| self.path(node).work()).sum::<usize>()
 	}
 
 	/// Identities recomputed across every node.
 	pub fn touched(&self) -> usize {
-		self.nodes.iter().map(Relay::touched).sum()
+		self.nodes.iter().map(|router| router.touched()).sum()
 	}
 
-	pub fn route(&self, node: Node, id: Id) -> Option<Selected<Node>> {
-		self.babel(node).selected(id)
-	}
-
-	pub fn export_route(&self, node: Node, id: Id) -> Option<Selected<Node>> {
-		self.babel(node).export(id)
-	}
-
-	/// The neighbour `node` routes `id` through: under the path rule, the widest
-	/// live route's.
+	/// The neighbour `node` routes `id` through: the widest live route's.
 	pub fn next_hop(&self, node: Node, id: Id) -> Option<Node> {
-		match &self.nodes[node] {
-			Relay::Distance(router) => router.selected(id)?.next,
-			Relay::Path(router) => (router.routes(id).find(|(_, route)| route.offer().is_some()))?.1.next(),
-		}
+		(self.nodes[node].routes(id).find(|(_, route)| route.offer().is_some()))?.1.next()
 	}
 
 	/// The neighbour `node` routes `id` through, `Some(None)` at its publisher, or
-	/// `None` with no route: under the path rule, no live one.
+	/// `None` with no live route.
 	pub fn toward(&self, node: Node, id: Id) -> Option<Option<Node>> {
-		match &self.nodes[node] {
-			Relay::Distance(router) => router.selected(id).map(|route| route.next),
-			Relay::Path(router) => {
-				(router.routes(id).find(|(_, route)| route.offer().is_some())).map(|(_, route)| route.next())
-			}
-		}
+		(self.nodes[node].routes(id).find(|(_, route)| route.offer().is_some())).map(|(_, route)| route.next())
 	}
 
 	/// `peer` notices its session to `node` closed, which `node` has yet to.
@@ -1142,22 +793,15 @@ impl Sim {
 		self.up.remove(&Self::pair(node, peer));
 		for key in [(node, peer), (peer, node)] {
 			self.queues.remove(&key);
-			self.acks.remove(&key);
 			self.held.remove(&key);
 		}
-		match &mut self.nodes[peer] {
-			Relay::Distance(router) => router.disconnect([node]),
-			Relay::Path(router) => router.disconnect([node], self.now),
-		}
+		self.nodes[peer].disconnect([node], self.now);
 		self.flush();
 	}
 
-	/// Whether `node` has a route for `id`: under the path rule, a live one.
+	/// Whether `node` has a live route for `id`.
 	pub fn routed(&self, node: Node, id: Id) -> bool {
-		match &self.nodes[node] {
-			Relay::Distance(router) => router.selected(id).is_some(),
-			Relay::Path(router) => router.routes(id).any(|(_, route)| route.offer().is_some()),
-		}
+		self.nodes[node].routes(id).any(|(_, route)| route.offer().is_some())
 	}
 
 	/// The node a request from `node`'s reader for `claim` of `id` ends at, following
@@ -1176,36 +820,13 @@ impl Sim {
 		panic!("a request for {id} {claim:?} from node {node} loops");
 	}
 
-	pub fn starved(&self, node: Node, id: Id) -> bool {
-		self.babel(node).starved(id)
-	}
-
-	pub fn grounded(&self, node: Node, id: Id) -> bool {
-		self.babel(node).grounded(id)
-	}
-
 	pub fn holds(&self, node: Node, id: Id) -> bool {
 		self.nodes[node].holds(id)
 	}
 
-	pub fn remembers(&self, node: Node, id: Id) -> bool {
-		self.babel(node).remembers(id)
-	}
-
-	/// The floors `node` keeps for `id`: one per view under the path rule.
+	/// The floors `node` keeps for `id`: one per view.
 	pub fn floors(&self, node: Node, id: Id) -> usize {
-		match &self.nodes[node] {
-			Relay::Distance(router) => router.floors(id),
-			Relay::Path(router) => router.views().filter(|((key, _), _)| *key == id).count(),
-		}
-	}
-
-	pub fn identities(&self, node: Node) -> usize {
-		self.babel(node).identities()
-	}
-
-	pub fn aliases(&self, node: Node) -> usize {
-		self.babel(node).aliases()
+		self.nodes[node].views().filter(|((key, _), _)| *key == id).count()
 	}
 
 	pub fn shown(&self, node: Node) -> &BTreeMap<(Id, Path), Shown<Item>> {
@@ -1217,34 +838,19 @@ impl Sim {
 		self.shown(node).get(&(id, claim)).map(|shown| shown.available)
 	}
 
-	/// What either rule retains, summed over every node, in the terms they share.
+	/// What the routers retain, summed over every node.
 	pub fn state(&self) -> State {
-		match self.rule {
-			Rule::Distance => {
-				let r = self.retained();
-				State {
-					items: r.items,
-					floors: r.floors,
-					heard: r.heard,
-					sent: r.sent,
-					pending: r.echoes + r.pending,
-				}
-			}
-			Rule::Path(_) => {
-				let r = self.kept();
-				State {
-					items: r.items,
-					floors: r.views,
-					heard: r.heard,
-					sent: r.sent,
-					pending: r.dead + r.doubt,
-				}
-			}
+		let r = self.kept();
+		State {
+			items: r.items,
+			floors: r.views,
+			heard: r.heard,
+			sent: r.sent,
+			pending: r.dead + r.doubt,
 		}
 	}
 
-	/// What waits on another node: requests and echoes under the distance rule, dead
-	/// hops and doubts under the path rule.
+	/// What waits on another node: dead hops and doubts.
 	pub fn pending(&self) -> usize {
 		self.state().pending
 	}
@@ -1262,23 +868,6 @@ impl Sim {
 			out.dead += r.dead;
 			out.doubt += r.doubt;
 			out.draining += r.draining;
-		}
-		out
-	}
-
-	/// Retained state summed over every node.
-	pub fn retained(&self) -> Retained {
-		let mut out = Retained::default();
-		for node in 0..self.nodes.len() {
-			let r = self.babel(node).retained();
-			out.items += r.items;
-			out.floors += r.floors;
-			out.heard += r.heard;
-			out.sent += r.sent;
-			out.echoes += r.echoes;
-			out.pending += r.pending;
-			out.distances += r.distances;
-			out.certified += r.certified;
 		}
 		out
 	}
@@ -1339,7 +928,8 @@ impl Sim {
 	pub fn check(&self) -> Result<BTreeSet<(Node, Id)>, String> {
 		let mut checked = BTreeSet::new();
 		for (node, router) in self.nodes.iter().enumerate() {
-			for (key, view) in router.views() {
+			for ((key, _), view) in router.views() {
+				let key = *key;
 				let Some(id) = self.source(key) else {
 					continue;
 				};
@@ -1453,36 +1043,23 @@ pub(super) fn false_ends(events: &[SimEvent]) -> usize {
 		.count()
 }
 
-/// Every node's next-hop chain toward `id` ends without revisiting a node. Under the
-/// path rule a chain may come round only through a stale route, one whose next hop
-/// has moved since offering it: the model's `LoopsAreStale`.
+/// Every node's next-hop chain toward `id` ends without revisiting a node. A chain may
+/// come round only through a stale route, one whose next hop has moved since offering
+/// it: the model's `LoopsAreStale`.
 pub(super) fn assert_loop_free(sim: &Sim, nodes: usize, id: Id) {
-	if sim.paths() {
-		let claims: BTreeSet<Path> = (0..nodes)
-			.flat_map(|node| {
-				sim.path(node).routes(id).map(|(prefix, _)| prefix.clone()).chain(
-					sim.path(node)
-						.shown()
-						.keys()
-						.filter_map(move |(key, claim)| (*key == id).then_some(claim.clone())),
-				)
-			})
-			.collect();
-		for node in 0..nodes {
-			for claim in &claims {
-				assert_scoped_chain(sim, node, id, claim);
-			}
-		}
-		return;
-	}
+	let claims: BTreeSet<Path> = (0..nodes)
+		.flat_map(|node| {
+			sim.path(node).routes(id).map(|(prefix, _)| prefix.clone()).chain(
+				sim.path(node)
+					.shown()
+					.keys()
+					.filter_map(move |(key, claim)| (*key == id).then_some(claim.clone())),
+			)
+		})
+		.collect();
 	for node in 0..nodes {
-		let mut chain = vec![node];
-		while let Some(next) = sim.next_hop(*chain.last().expect("a node"), id) {
-			if let Some(start) = chain.iter().position(|&seen| seen == next) {
-				let cycle = &chain[start..];
-				panic!("{id} loops from node {node} round {cycle:?}");
-			}
-			chain.push(next);
+		for claim in &claims {
+			assert_scoped_chain(sim, node, id, claim);
 		}
 	}
 }

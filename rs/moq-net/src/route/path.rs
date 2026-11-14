@@ -31,11 +31,8 @@
 //! shows each claim from the narrowest view above it, available while a live
 //! route covers it.
 //!
-//! `rs/moq-net/verify/route/RouteHandoff.tla` model-checks the rule. Nothing drives
-//! this router on the wire yet: sessions run [`super::Router`] until the switch
-//! (`quest/m2/cluster-routes/switch.md`).
-
-#![cfg_attr(not(test), allow(dead_code, reason = "only the fixtures drive it until the switch"))]
+//! `rs/moq-net/verify/route/RouteHandoff.tla` model-checks the rule. Every lite-07
+//! session drives it through [`super::node::Node`].
 
 use std::{
 	cmp::Reverse,
@@ -557,7 +554,7 @@ fn names(path: &[Hop], node: Id) -> bool {
 }
 
 /// Whether the node that offered `path` learned it from `node`.
-fn child(path: &[Hop], node: Id) -> bool {
+pub(crate) fn child(path: &[Hop], node: Id) -> bool {
 	path.len() >= 2 && path[path.len() - 2].node == node
 }
 
@@ -639,7 +636,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	// --- Sessions ---
 
-	/// A session to `neighbor`, which names itself `hop` in a path, opened.
+	/// A session to `neighbor`, which names itself `hop` in a path, opened. A `hop` of 0
+	/// is learned from the last hop of the first route the neighbour sends.
 	pub fn connect(&mut self, neighbor: N, hop: Id, link: Link) -> Result<(), Error> {
 		if link.cost == 0 {
 			return Err(Error::ZeroCost);
@@ -670,6 +668,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 	}
 
+	/// How `neighbor` names itself in a path: as it declared, else as the stream its
+	/// session's routes arrive on learned.
+	/// How `neighbor`'s peer names itself in a path, or 0 while this node has not learned it.
+	pub fn hop_of(&self, neighbor: N) -> Id {
+		match self.sessions.get(&neighbor).map_or(0, |session| session.hop) {
+			0 => self.sessions.get(&self.listen(neighbor)).map_or(0, |session| session.hop),
+			hop => hop,
+		}
+	}
+
 	/// The key whose heard routes answer what `neighbor` was sent.
 	fn listen(&self, neighbor: N) -> N {
 		self.sessions
@@ -678,31 +686,22 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.unwrap_or(neighbor)
 	}
 
-	/// This node asked `neighbor` for announcements again, on a stream that replaces the
-	/// last: returns its interest generation. The routes heard on older streams stay until
-	/// the new one is synced, but only the new one's claims are believed.
-	pub fn ask(&mut self, neighbor: N) -> u32 {
-		self.interest += 1;
-		if let Some(session) = self.sessions.get_mut(&neighbor) {
-			session.interest = self.interest;
-		}
-		self.interest
-	}
-
-	/// Drop `neighbor`, a key that answered a stream its session's peer has since ended,
-	/// or one that heard routes on a stream since replaced, while the session stays up.
-	/// Nothing it heard remains, so no route names its hop and nothing is reported dead.
+	/// Drop `neighbor`, a stream that ended while its session stays up: what it heard
+	/// goes as ROUTE_ENDs would take it, and what it was sent as a cancelled interest.
+	/// No hop is reported dead and no node doubted, since no session closed.
 	pub fn retire(&mut self, neighbor: N) {
-		let Some(session) = self.sessions.get(&neighbor) else {
+		let rx = self.listen(neighbor);
+		let Some(session) = self.sessions.remove(&neighbor) else {
 			return;
 		};
-		if !session.heard.is_empty() {
-			// Only a key with nothing heard retires quietly: what it heard must be ended first.
-			return;
+		let mut ids = BTreeSet::new();
+		for route in &session.heard {
+			ids.insert(route.0);
+			self.forget_heard(route, neighbor);
+			self.filed.remove(&(route.0, neighbor));
+			self.unwait(neighbor, route);
 		}
-		let rx = self.listen(neighbor);
 		if let Some(answer) = self.answering.remove(&neighbor) {
-			let mut ids = BTreeSet::new();
 			for (key, sent) in answer.tx {
 				ids.insert(key.0);
 				if let Some(offer) = sent.offer() {
@@ -716,11 +715,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 				self.unreflect(neighbor, &key, &sent.src);
 			}
-			self.sessions.remove(&neighbor);
-			self.update(ids, Vec::new(), None);
-			return;
 		}
-		self.sessions.remove(&neighbor);
+		self.update(ids, Vec::new(), None);
 	}
 
 	/// The sessions to `neighbors` closed at `now`: everything learned or sent on them
@@ -845,6 +841,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// believed. With no intersection, the driver cancels the old streams and
 	/// calls `synced` locally for this generation: no replacement can answer.
 	/// What this node knows outside `prefix` is forgotten.
+	#[cfg(test)]
 	pub fn watch(&mut self, prefix: Path) -> u32 {
 		self.interest += 1;
 		for session in self.sessions.values_mut() {
@@ -906,12 +903,18 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.scopes.entry(id).or_default().insert(Path::empty());
 	}
 
+	/// How this node names itself in a path.
+	pub fn hop(&self) -> Id {
+		self.hop
+	}
+
 	/// The identity this node declares.
 	pub fn declared(&self) -> Option<Id> {
 		self.origins.keys().next().copied()
 	}
 
 	/// The declared identity's claim revision.
+	#[cfg(test)]
 	pub fn revision(&self) -> Option<Rev> {
 		let origin = self.origins.values().next()?;
 		origin.view.floors.get(&Path::empty()).copied()
@@ -987,9 +990,24 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if self.sessions.get(&from).is_none_or(|session| interest < session.synced) {
 			return;
 		}
-		let Some(id) = self.admit(from, named, &prefix) else {
+		let Some((id, prefixes)) = self.admit(from, named, &prefix) else {
 			return;
 		};
+		for prefix in prefixes {
+			self.route_at(from, (named, id), prefix, reach.clone(), interest);
+		}
+	}
+
+	/// [`Router::route`] for the route filed as `id` at `prefix`.
+	fn route_at(&mut self, from: N, (named, id): (Id, Id), prefix: Path, reach: Option<Reach>, interest: u32) {
+		if let Some(Reach::Finite(offer)) = &reach
+			&& let Some(last) = offer.path.last()
+		{
+			let session = self.sessions.get_mut(&from).expect("checked above");
+			if session.hop == 0 {
+				session.hop = last.node;
+			}
+		}
 		let key = (id, prefix);
 		let entry = self.rx.get(&key).and_then(|routes| routes.get(&from));
 		// A message from a stream older than the route it names.
@@ -1050,9 +1068,34 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		floor: Option<Rev>,
 		interest: u32,
 	) {
-		let Some(id) = self.admit(from, named, &prefix) else {
+		let Some((id, prefixes)) = self.admit(from, named, &prefix) else {
 			return;
 		};
+		if let [only] = prefixes.as_slice()
+			&& *only == prefix
+		{
+			return self.batch_at(from, id, prefix, changes, floor, interest);
+		}
+		// Narrowed to regions: each sees only the changes within it.
+		for prefix in prefixes {
+			let changes = (changes.iter())
+				.filter(|(claim, _)| within(claim, &prefix))
+				.cloned()
+				.collect();
+			self.batch_at(from, id, prefix, changes, floor, interest);
+		}
+	}
+
+	/// [`Router::batch`] for the route filed as `id` at `prefix`.
+	fn batch_at(
+		&mut self,
+		from: N,
+		id: Id,
+		prefix: Path,
+		changes: Vec<(Path, Option<A>)>,
+		floor: Option<Rev>,
+		interest: u32,
+	) {
 		let key = (id, prefix.clone());
 		let Some(heard) = self.rx.get_mut(&key).and_then(|routes| routes.get_mut(&from)) else {
 			return;
@@ -1134,8 +1177,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 		let mut filed = Vec::new();
 		for moved in moved {
-			if let Some(id) = self.admit(from, moved.id, &moved.prefix) {
-				filed.push(((id, moved.prefix), moved.offer));
+			if let Some((id, prefixes)) = self.admit(from, moved.id, &moved.prefix) {
+				filed.extend(prefixes.into_iter().map(|prefix| ((id, prefix), moved.offer.clone())));
 			}
 		}
 		if scoped {
@@ -1150,6 +1193,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// `from`'s stream answering interest generation `interest` sent its initial set:
 	/// what an older stream left is gone. The driver also calls this after cancelling
 	/// every stream to a scoped peer whose scope no longer intersects the interest.
+	#[cfg(test)]
 	pub fn synced(&mut self, from: N, interest: u32) {
 		let Some(session) = self.sessions.get_mut(&from) else {
 			return;
@@ -1224,6 +1268,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	// --- Queries ---
 
 	/// The route this node uses for `id` under `prefix`.
+	#[cfg(test)]
 	pub fn route_for(&self, id: Id, prefix: &Path) -> Option<&Route<N>> {
 		self.routes.get(&(id, prefix.clone()))
 	}
@@ -1300,7 +1345,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let route = self.routes.get(&(id, prefix.clone()))?;
 		let offer = route.offer()?;
 		if let Some(prev) = prev
-			&& names(&offer.path, self.sessions[&prev].hop)
+			&& names(&offer.path, self.hop_of(prev))
 		{
 			return None;
 		}
@@ -1310,6 +1355,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			named: self.name(next, id),
 			prefix,
 		})
+	}
+
+	/// Whether this node sent `to` a live route for `id` covering `prefix`.
+	pub fn sent(&self, to: N, id: Id, prefix: &Path) -> bool {
+		(self.answering.get(&to))
+			.and_then(|answer| answer.tx.get(&(id, prefix.clone())))
+			.is_some_and(|sent| sent.offer().is_some())
 	}
 
 	/// The identity this node names for `id` to `next`: the one `next` sent, if this
@@ -1392,21 +1444,38 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	// --- Internals: what is heard ---
 
 	/// The key this node files `named` under when `from` sends it a route covering
-	/// `prefix`, or `None` when refused: a scoped neighbour's identities are all
-	/// qualified, one already qualified is refused, and so is a route outside its scope.
-	/// A node also ignores routes to its own identities.
-	fn admit(&self, from: N, named: Id, prefix: &Path) -> Option<Id> {
+	/// `prefix`, and the prefixes it files the route at, or `None` when refused: a scoped
+	/// neighbour's identities are all qualified, one already qualified is refused, and
+	/// its route counts only within its regions, so one covering a region is filed at
+	/// that region and one outside them all is refused. A node also ignores routes to
+	/// its own identities.
+	fn admit(&self, from: N, named: Id, prefix: &Path) -> Option<(Id, Vec<Path>)> {
 		let session = self.sessions.get(&from)?;
-		let id = match &session.link.scope {
+		let (id, prefixes) = match &session.link.scope {
 			Some(scope) => {
-				if named & QUALIFIED != 0 || !scope.regions.iter().any(|region| within(prefix, region)) {
+				if named & QUALIFIED != 0 {
 					return None;
 				}
-				(scope.qualify)(named) | QUALIFIED
+				let prefixes: Vec<Path> = match scope.regions.iter().any(|region| within(prefix, region)) {
+					true => vec![prefix.clone()],
+					false => {
+						let inside: BTreeSet<&Path> =
+							(scope.regions.iter()).filter(|region| within(region, prefix)).collect();
+						// A region inside another is already covered by it.
+						(inside.iter())
+							.filter(|region| !inside.iter().any(|above| above != *region && within(region, above)))
+							.map(|region| (*region).clone())
+							.collect()
+					}
+				};
+				if prefixes.is_empty() {
+					return None;
+				}
+				((scope.qualify)(named) | QUALIFIED, prefixes)
 			}
-			None => named,
+			None => (named, vec![prefix.clone()]),
 		};
-		(!self.origins.contains_key(&id)).then_some(id)
+		(!self.origins.contains_key(&id)).then_some((id, prefixes))
 	}
 
 	/// Whether `path` holds a hop this node knows is dead.
@@ -1654,40 +1723,65 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let mut best: Option<(Rank<N>, Offer)> = None;
 		for (&peer, heard) in self.rx.get(key).into_iter().flatten() {
 			self.step();
-			if heard.state != State::Live || names(&heard.offer.path, self.hop) {
-				continue;
-			}
-			let session = &self.sessions[&peer];
-			let Some(metric) = heard.offer.metric.checked_add(session.link.cost) else {
+			let Some(offer) = self.usable_offer(peer, heard, using) else {
 				continue;
 			};
-			if Some(peer) != using && self.doubts_path(&heard.offer.path) {
-				// It may come back once the doubt lifts.
-				continue;
-			}
-			let draining = session.draining || heard.offer.draining || self.drains_path(&heard.offer.path);
-			let priority = session.link.priority.min(heard.offer.priority);
-			let rank = ((draining, Reverse(priority), metric), Some(peer) != current, peer);
+			let rank = (offer.rank(), Some(peer) != current, peer);
 			if best.as_ref().is_some_and(|(best, _)| *best <= rank) {
 				continue;
 			}
-			let path: Arc<[Hop]> = (heard.offer.path.iter().copied())
-				.chain([Hop {
-					node: self.hop,
-					session: session.number,
-				}])
-				.collect();
-			let offer = Offer {
-				path,
-				draining,
-				priority,
-				metric,
-				down_only: session.link.upstream || heard.offer.down_only,
-				rtt: heard.offer.rtt.zip(session.rtt).and_then(|(a, b)| a.checked_add(b)),
-			};
 			best = Some((rank, offer));
 		}
 		best.map(|((.., next), offer)| Route::Live { next, offer })
+	}
+
+	/// The route `heard` from `peer` gives this node, extended by its hop, or `None` when
+	/// it is not usable: not live, naming this node, unreachable, or through a node in
+	/// doubt that this node is not already using it through (`using`).
+	fn usable_offer(&self, peer: N, heard: &Heard<A>, using: Option<N>) -> Option<Offer> {
+		if heard.state != State::Live || names(&heard.offer.path, self.hop) {
+			return None;
+		}
+		let session = &self.sessions[&peer];
+		let metric = heard.offer.metric.checked_add(session.link.cost)?;
+		if Some(peer) != using && self.doubts_path(&heard.offer.path) {
+			// It may come back once the doubt lifts.
+			return None;
+		}
+		let draining = session.draining || heard.offer.draining || self.drains_path(&heard.offer.path);
+		let path: Arc<[Hop]> = (heard.offer.path.iter().copied())
+			.chain([Hop {
+				node: self.hop,
+				session: session.number,
+			}])
+			.collect();
+		Some(Offer {
+			path,
+			draining,
+			priority: session.link.priority.min(heard.offer.priority),
+			metric,
+			down_only: session.link.upstream || heard.offer.down_only,
+			rtt: heard.offer.rtt.zip(session.rtt).and_then(|(a, b)| a.checked_add(b)),
+		})
+	}
+
+	/// Every usable route for `key` while this node has a live one, each as this node
+	/// would take it, the selected one first: a reader here fails over among them at
+	/// once when the selected one goes.
+	pub fn usable(&self, key: &RouteId) -> Vec<(N, Offer)> {
+		let Some(Route::Live { next, offer }) = self.routes.get(key) else {
+			return Vec::new();
+		};
+		let mut out = vec![(*next, offer.clone())];
+		for (&peer, heard) in self.rx.get(key).into_iter().flatten() {
+			if peer == *next {
+				continue;
+			}
+			if let Some(offer) = self.usable_offer(peer, heard, Some(*next)) {
+				out.push((peer, offer));
+			}
+		}
+		out
 	}
 
 	/// With no live route, keep what an upstream or a child has yet to answer.
@@ -1796,7 +1890,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			return prefix.clone();
 		}
 		let covering = || ancestors(prefix).rev().map(|above| (id, above));
-		let hop = self.sessions[&peer].hop;
+		let hop = self.hop_of(peer);
 		let best = |usable| {
 			covering()
 				.filter_map(|key| {
@@ -1834,6 +1928,22 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				(self.views.get_key_value(&(id, above))).filter(|((_, above), view)| view.floors.contains_key(above))
 			})
 			.map(|((_, prefix), view)| (prefix, view))
+	}
+
+	/// What the live route this node selected covering `prefix` carries there, with
+	/// nothing certified, or `None` while it has none or does not believe it.
+	fn carried(&self, id: Id, prefix: &Path) -> Option<View<A>> {
+		let (above, next) = ancestors(prefix).rev().find_map(|above| match self.routes.get(&(id, above.clone()))? {
+			Route::Live { next, .. } => Some((above, *next)),
+			_ => None,
+		})?;
+		let heard = self.rx.get(&(id, above))?.get(&next)?;
+		if !self.believed(next, heard) {
+			return None;
+		}
+		let mut view = heard.view.present(prefix);
+		view.floors.clear();
+		Some(view)
 	}
 
 	/// The narrowest view of `id` covering `prefix`, or the publisher's own.
@@ -1909,7 +2019,23 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 			}
 			let Some((_, route, peer)) = best else {
-				self.views.insert(key, base);
+				// A view no floor ever certified shows what the live route this node
+				// selected for the prefix carries: a sender that cannot vouch for its
+				// whole interest still shows its claims, uncertified.
+				let view = match floor {
+					Some(_) => None,
+					None => self.carried(id, prefix),
+				};
+				let view = match view {
+					Some(view) => {
+						for (claim, _) in view.diff(&base) {
+							dirty.claims.insert(claim);
+						}
+						view
+					}
+					None => base,
+				};
+				self.views.insert(key, view);
 				continue;
 			};
 			let heard = &self.rx[&route][&peer].view;
@@ -2001,7 +2127,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			&& (route.next() == Some(self.listen(peer))
 				|| route
 					.offer()
-					.is_some_and(|offer| names(&offer.path, self.sessions[&peer].hop)))
+					.is_some_and(|offer| names(&offer.path, self.hop_of(peer))))
 		{
 			return Want::End;
 		}
@@ -2009,10 +2135,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			// A route goes to the node that published it no more than to an upstream link
 			// when down-only: neither would use it.
 			Some(offer) if session.link.upstream && offer.down_only => Want::End,
-			Some(offer) if offer.path[0].node == session.hop => Want::End,
+			Some(offer) if offer.path[0].node == self.hop_of(peer) => Want::End,
 			Some(offer) => Want::Path(offer.clone(), src.clone()),
 			// The next hop it holds under hears nothing until those behind this node answered.
-			None if route.next() == Some(peer) => {
+			None if route.next() == Some(self.listen(peer)) => {
 				let key = (id, src.clone());
 				match self.pending(&key) || self.hopes(&key) {
 					true => return Want::Keep,
@@ -2135,7 +2261,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 						if !sent.held() {
 							// The neighbour it learned the route from takes silence to mean
 							// this node holds under it, so it is told outright.
-							let parent = child(&sent.offer().expect("sent").path, self.sessions[&peer].hop);
+							let parent = child(&sent.offer().expect("sent").path, self.hop_of(peer));
 							holds.push(key.clone());
 							if parent {
 								parents.push(key.clone());
@@ -2861,7 +2987,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				Some((claim.clone(), at))
 			}
 			(Some((above, wider)), _) => Some((above.clone(), wider)),
-			(None, at) => Some((claim.clone(), at.or_else(|| self.views.get(&(id, claim.clone())))?)),
+			(None, Some(at)) => Some((claim.clone(), at)),
+			// Nothing certified: the narrowest view covering the claim shows what it carries.
+			(None, None) => self.covering_view(id, claim),
 		}
 	}
 
@@ -2912,9 +3040,14 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				.collect();
 			self.reader.check(id, &now, full);
 		}
-		// A claim no longer shown under a route that still covers it was withdrawn.
-		let routes = &self.routes;
-		let ended = |claim: &Path| ancestors(claim).any(|above| routes.contains_key(&(id, above)));
+		// A claim no longer shown under a route that still covers it was withdrawn, if a
+		// floor certified that; one that only stopped being carried goes offline.
+		let (routes, views, origin) = (&self.routes, &self.views, self.origins.contains_key(&id));
+		let ended = |claim: &Path| {
+			ancestors(claim).any(|above| routes.contains_key(&(id, above)))
+				&& (origin
+					|| of(views, id).any(|((_, prefix), view)| within(claim, prefix) && view.floors.contains_key(prefix)))
+		};
 		for (claim, shown) in &now {
 			match shown {
 				Some(_) => {
