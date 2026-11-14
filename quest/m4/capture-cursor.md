@@ -39,7 +39,15 @@ What each system offers, to confirm in the PR:
   works, and say what does not.
 
 Recommendations: a stream beside the frames, in the capture's own coordinate
-space and clock, with each shape sent once and named by id after.
+space and clock, with each shape sent once and named by id after. The report
+is the current state (shape and position) plus change notifications, not an
+event log, so a viewer that joins or reconnects reads the current shape before
+any position that names it. Whatever carries it should start each shape's group
+with that shape, so a late reader at the newest group needs no replay.
+On a Wayland session the caller opened, the metadata cursor mode must have
+been selected before the session started
+([the portal session](/quest/m4/capture-portal-session.md)); another mode is
+`Unsupported`.
 
 Public API: additive. Wire: none.
 

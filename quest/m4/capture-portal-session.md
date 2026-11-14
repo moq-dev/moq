@@ -25,9 +25,26 @@ restore token itself.
 
 Recommendations for the PR:
 
-- Take the fd and node (and the stream's size and position from the portal)
+- Take the stream the portal describes (node id and the stream's properties)
   rather than an ashpd session type, so moq-video does not choose the
-  caller's portal library and the input side stays out of moq.
+  caller's portal library and the input side stays out of moq. Forward the
+  stream's `mapping_id` unchanged, since it is what matches the stream to the
+  caller's libei region, and take `position` and `size` as optional: the
+  portal sends `position` only for monitor streams and `size` is optional, so
+  a window stream has no position. Frame pixel size comes from the negotiated
+  PipeWire format, never from the portal's compositor-space `size`, and a
+  missing value is reported to the caller as absent, not guessed.
+- Take a handle that yields a fresh PipeWire remote fd for each open (the
+  caller's `OpenPipeWireRemote` on its session), not one fd. The PipeWire
+  connection consumes its fd, and capture reopens after a format change and
+  for each on-demand viewer, so a single fd serves only the first open. A
+  one-method trait the caller implements fits better than a callback
+  parameter; settle its shape in the PR.
+- The caller selects the metadata cursor mode in `SelectSources` before it
+  starts the session, because the portal fixes the cursor mode there. The
+  stream description carries the mode the caller chose, and a
+  [cursor](/quest/m4/capture-cursor.md) request on a session with another
+  mode is `Unsupported` at setup, naming the mode.
 - The caller owns the session's lifetime and restore token. A capture on a
   session that ends reports the end like any other stopped capture.
 - Test against a headless compositor in CI if one runs the RemoteDesktop
@@ -41,4 +58,5 @@ Public API: additive. Wire: none.
 
 ## Related
 
+- [The cursor apart from the frame](/quest/m4/capture-cursor.md) - needs the metadata cursor mode this session carries
 - [Linux capture parity](/quest/m3/capture-linux.md) - the rest of Wayland capture

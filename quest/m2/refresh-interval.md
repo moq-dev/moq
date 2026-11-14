@@ -3,16 +3,26 @@
 ## Goal
 
 A publisher can declare in TRACK_INFO a refresh interval: a live join asks
-for a new group only once the newest group started at least that long ago.
+for a new group only once the newest group arrived at least that long ago.
 A reader can also ask for one with a public `refresh()` on the track
 subscriber, in Rust and `@moq/net`, judged by the same interval. Every hop
 coalesces requests and judges them against its own cache, so the
 publisher's interval caps how often new groups are made, by design rather
 than by a per-hop rate limiter.
 
+The interval is a duration, encoded and read like `max_age`, so it means the
+same on a timed and a scale-less track. A group's age is measured on the
+judging node's own monotonic clock from when that node first received (or, at
+the publisher, created) the group, as arrival-age expiry already measures it.
+It never compares media timestamps, which carry no wall-clock meaning and, on
+a scale-less track, no unit, and it adds no local clock to the model.
+
 A track of one-frame groups, such as a [thumbnail](/quest/m4/hang-thumbnail.md),
 then produces a fresh group when a reader arrives or asks, and never more
 often than its interval, however many readers fan out behind the relays.
+A track with no group yet needs no interval: its first reader asks for the
+first group at once, as the first consumer of an empty track does today
+(`wanted()` is `Some(0)`), and the interval applies from that group on.
 
 ## Plan
 
@@ -41,7 +51,8 @@ Facts found while planning:
 - SUBSCRIBE_UPDATE's `Wanted Group` already carries a relay's coalesced
   demand upstream, and [time addressing](/quest/m2/time-addressing/lite07.md)
   turns it into a start time. Build on that rather than adding a second
-  field.
+  field. The request barrier above rides the request's arrival at each hop,
+  not that start time, so it needs no clock shared between hops.
 - `rs/moq-video/src/encode/producer.rs` forces a keyframe on a join; it
   keeps working on the byte ratio.
 
@@ -51,9 +62,13 @@ Recommendations for the PR:
   a typed choice. A track may want both (video wants a keyframe when the GOP
   is long, and not more than once a second), so recommend both, either one
   firing within the interval.
-- `refresh()` asks for a group starting after the newest one the reader
-  holds, and resolves when one arrives, which the interval may delay. It
-  never resolves with a group no newer than the one the reader held.
+- `refresh()` has a request barrier: it resolves only with a group that
+  reached the answering node after that node received the request, so a
+  group made before an action settled never answers a request made after it.
+  A relay answers from its cache only with such a group, else it passes the
+  request upstream, and the publisher makes one. The interval may delay the
+  new group, never substitute an older one. Rust and `@moq/net` share this
+  contract.
 - Update the lite draft (TRACK_INFO, SUBSCRIBE_UPDATE, and the changelog),
   `doc/concept/moq-lite.md`, and the matching JS. Run `just test interop
   --all`.

@@ -10,7 +10,8 @@ A moq-video producer scales and encodes the newest captured or decoded
 frame into each rendition whenever its track
 [refreshes](/quest/m2/refresh-interval.md), so a reader that arrives or asks
 gets a current still, and the publisher encodes no more than one per
-interval.
+interval. Before any reader has asked there is no still: the first reader's
+join asks for the first one at once, and the interval applies from then on.
 
 ## Plan
 
@@ -43,6 +44,13 @@ Recommendations for the PR:
 
 - Timestamps follow the root's `media.clock`, so a still lines up with the
   video frame it came from.
+- Each still is encoded after the request that asks for it, from the newest
+  frame the capture has delivered by then, and never reuses an earlier
+  encode, so it meets the `refresh()` request barrier. A capture that
+  delivers frames only on change (PipeWire does) has its last frame as the
+  current screen, so the producer must not wait for a newer one. A caller
+  that needs the result of an action calls `refresh()` once the action has
+  settled.
 - The producer refuses, at setup, a mime it cannot encode, rather than
   publishing a rendition it never fills. PNG and JPEG first. Take a
   dependency for encoding only at its newest stable version, and only if it
