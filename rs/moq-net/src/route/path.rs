@@ -494,6 +494,9 @@ pub(crate) struct Router<N, A> {
 	rx_hops: BTreeMap<Hop, BTreeMap<N, BTreeSet<RouteId>>>,
 	/// The sent routes whose path holds each hop.
 	tx_hops: BTreeMap<Hop, BTreeSet<(N, RouteId)>>,
+	/// For each node, the neighbours sent a route naming it, with how many of the
+	/// sent paths' hops name it: what DRAIN news is owed, without a scan of its hops.
+	tx_nodes: BTreeMap<Id, BTreeMap<N, usize>>,
 	/// For each of this node's own routes, the streams and prefixes it was sent under.
 	reflects: BTreeMap<RouteId, BTreeSet<(N, Path)>>,
 	/// Child replies still owed to a stream that the peer cancelled or replaced.
@@ -572,6 +575,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			rx: BTreeMap::new(),
 			rx_hops: BTreeMap::new(),
 			tx_hops: BTreeMap::new(),
+			tx_nodes: BTreeMap::new(),
 			reflects: BTreeMap::new(),
 			waiting: BTreeMap::new(),
 			routes: BTreeMap::new(),
@@ -2052,14 +2056,17 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// such a route stays sent. It goes before the routes that re-rank, so the
 	/// neighbour doubts the node before it hears them.
 	fn report_draining(&mut self, node: Id) {
-		let tx_hops = &self.tx_hops;
-		for (&peer, answer) in &mut self.answering {
-			let sent = (tx_hops.range(hop_range(node))).any(|(_, set)| {
-				set.range((peer, (0, Path::empty()))..)
-					.next()
-					.is_some_and(|(to, _)| *to == peer)
-			});
-			if sent && answer.told_draining.insert(node) {
+		let peers: Vec<N> = self
+			.tx_nodes
+			.get(&node)
+			.into_iter()
+			.flatten()
+			.map(|(peer, _)| *peer)
+			.collect();
+		for peer in peers {
+			self.step();
+			let answer = self.answering.get_mut(&peer).expect("answering");
+			if answer.told_draining.insert(node) {
 				self.out.push(Out::Dead {
 					to: peer,
 					dead: Dead::Draining { node },
@@ -2087,6 +2094,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	fn index_sent(&mut self, peer: N, key: &RouteId, path: &[Hop]) {
 		for hop in path {
 			self.tx_hops.entry(*hop).or_default().insert((peer, key.clone()));
+			*self.tx_nodes.entry(hop.node).or_default().entry(peer).or_default() += 1;
 		}
 	}
 
@@ -2096,6 +2104,17 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				set.remove(&(peer, key.clone()));
 				if set.is_empty() {
 					self.tx_hops.remove(hop);
+				}
+			}
+			if let Some(peers) = self.tx_nodes.get_mut(&hop.node) {
+				if let Some(count) = peers.get_mut(&peer) {
+					*count -= 1;
+					if *count == 0 {
+						peers.remove(&peer);
+					}
+				}
+				if peers.is_empty() {
+					self.tx_nodes.remove(&hop.node);
 				}
 			}
 		}
@@ -2594,11 +2613,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					.is_some_and(|(to, _)| to == peer)
 			})
 		};
+		let tx_nodes = &self.tx_nodes;
+		#[cfg(test)]
+		let work = &self.work;
 		for (peer, answer) in &mut self.answering {
 			answer.told.retain(|hop| sent(peer, hop));
-			answer
-				.told_draining
-				.retain(|node| (tx_hops.range(hop_range(*node))).any(|(hop, _)| sent(peer, hop)));
+			answer.told_draining.retain(|node| {
+				#[cfg(test)]
+				work.set(work.get() + 1);
+				tx_nodes.get(node).is_some_and(|peers| peers.contains_key(peer))
+			});
 		}
 	}
 
@@ -2643,6 +2667,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			}
 		}
 		assert_eq!(tx_hops, self.tx_hops, "tx hop index");
+		let mut tx_nodes: BTreeMap<Id, BTreeMap<N, usize>> = BTreeMap::new();
+		for (peer, answer) in &self.answering {
+			for sent in answer.tx.values() {
+				for hop in sent.offer().into_iter().flat_map(|offer| offer.path.iter()) {
+					*tx_nodes.entry(hop.node).or_default().entry(*peer).or_default() += 1;
+				}
+			}
+		}
+		assert_eq!(tx_nodes, self.tx_nodes, "tx node index");
 		let mut reflects: BTreeMap<RouteId, BTreeSet<(N, Path)>> = BTreeMap::new();
 		for (peer, answer) in &self.answering {
 			for (key, sent) in &answer.tx {

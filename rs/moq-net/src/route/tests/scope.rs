@@ -271,6 +271,74 @@ fn teardown_is_linear_in_prefixes_held() {
 	}
 }
 
+/// A relay sends each of its downstream neighbours one route through a leaving
+/// node, each over its own session of that node. Hearing the node drain, and any
+/// later update that changes no route, costs work linear in the neighbours: a scan
+/// of the node's sessions for each neighbour would be quadratic. The `cost`s
+/// sweep both axes at once, since there is a session per neighbour.
+#[test]
+fn drain_news_is_linear_in_neighbours() {
+	let cost = |peers: usize| {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		let leaving: Id = 500;
+		let idle = 2 * peers;
+		router.connect(idle, 3000, Link::default()).unwrap();
+		for i in 0..peers {
+			let (up, down) = (i, peers + i);
+			router.connect(up, 1000 + i as Id, Link::default()).unwrap();
+			router.connect(down, 2000 + i as Id, Link::default()).unwrap();
+			let prefix = p(&format!("live/{i}"));
+			router.peer_interest(down, Some(prefix.clone())).unwrap();
+			let path = [
+				path::Hop { node: 7, session: 0 },
+				path::Hop {
+					node: leaving,
+					session: i as u64 + 1,
+				},
+				path::Hop {
+					node: 1000 + i as Id,
+					session: 1,
+				},
+			];
+			let offer = path::Offer {
+				path: path.into(),
+				draining: false,
+				priority: i8::MAX,
+				metric: 1,
+				down_only: false,
+				rtt: None,
+			};
+			router.route(up, 7, prefix.clone(), Some(path::Reach::Finite(offer)), 0);
+			router.batch(up, 7, prefix, vec![(p(&format!("live/{i}/x")), Some(1))], Some(1), 0);
+		}
+		router.drain();
+		let before = router.work();
+		router.dead(0, path::Dead::Draining { node: leaving }, Instant::ZERO);
+		let drained = router.work() - before;
+		let told = (router.drain().iter())
+			.filter(|out| {
+				matches!(
+					out,
+					path::Out::Dead {
+						dead: path::Dead::Draining { .. },
+						..
+					}
+				)
+			})
+			.count();
+		assert_eq!(told, peers, "each neighbour hears the drain once");
+		let before = router.work();
+		router.rtt(idle, Some(Duration::from_millis(5)));
+		(drained, router.work() - before)
+	};
+	let costs: Vec<(usize, usize)> = [8, 16, 32].into_iter().map(cost).collect();
+	for pair in costs.windows(2) {
+		// Quadratic work would quadruple.
+		assert!(pair[1].0 <= 5 * pair[0].0 / 2, "hearing the drain: {costs:?}");
+		assert!(pair[1].1 <= 5 * pair[0].1 / 2, "an idle update: {costs:?}");
+	}
+}
+
 /// Adding an unrelated scope visits the same number of routes and reader claims,
 /// regardless of how many sibling scopes this publisher already has.
 #[test]
