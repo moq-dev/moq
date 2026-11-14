@@ -2543,6 +2543,8 @@ impl Connection {
 		space.crypto = None;
 		space.time_of_last_ack_eliciting_packet = None;
 		space.loss_time = None;
+		// Its probes can never be sent, and one left owed would read as a probe in flight
+		space.loss_probes = 0;
 		let sent_packets = mem::take(&mut space.sent_packets);
 		for packet in sent_packets.into_values() {
 			self.remove_in_flight(&packet);
