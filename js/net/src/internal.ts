@@ -637,6 +637,8 @@ export const hooks: {
 	 * group that arrived contradicts. Mirrors the Rust `skip_received`; assigned by `track.ts`.
 	 */
 	skipTrackGroups: (producer: Producer, start: bigint, end: bigint) => Run[];
+	/** Whether a final drop, not a skip or a stale one, gave up `sequence`; assigned by `track.ts`. */
+	trackDropped: (producer: Producer, sequence: bigint) => boolean;
 	/**
 	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
 	 * were replaced, so they are unknown again. `judged` is every group the new terms' ranges name,
@@ -1046,6 +1048,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	skipTrackGroups: () => {
+		throw new Error("track.ts not loaded");
+	},
+	trackDropped: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {

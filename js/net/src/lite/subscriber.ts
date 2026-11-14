@@ -289,24 +289,30 @@ interface Yielding {
 	supersede: () => void;
 }
 
-// Stale drops expire on the next update. An already accounted header stays accounted.
+// Stale drops expire on the next update. An already accounted header stays accounted, and
+// `dropped` says whether a final drop overtook it, rather than a gap the grace gave up on.
 type YieldVerdict =
 	| { kind: "owed" }
-	| { kind: "accounted" }
+	| { kind: "accounted"; dropped: boolean }
 	| { kind: "stale"; under: bigint; error: Error }
-	| { kind: "accounted-stale"; under: bigint; error: Error }
+	| { kind: "accounted-stale"; dropped: boolean; under: bigint; error: Error }
 	| { kind: "dropped"; error: Error };
 
-// Whether the group is accounted for under `update`, so the subscription's end waits for its
-// stream at most the grace: a browser can lose that stream's reset. Only a stale drop that overtook
-// nothing final expires; one over an accounted header falls back to it, as `yieldError` does.
+// Whether a drop accounts for the group under `update`, so the subscription's end waits for its
+// stream at most the grace: a browser can lose that stream's reset. Only a drop excuses it: a stream
+// whose header came after the grace gave up on its gap is still delivering, and no reset is owed.
+// A stale drop expires; one over a final drop falls back to it, as `yieldError` does.
 function excused(verdict: YieldVerdict, update: bigint): boolean {
 	switch (verdict.kind) {
 		case "owed":
 			return false;
+		case "accounted":
+			return verdict.dropped;
 		case "stale":
 			return verdict.under >= update;
-		default:
+		case "accounted-stale":
+			return verdict.dropped || verdict.under >= update;
+		case "dropped":
 			return true;
 	}
 }
@@ -3443,6 +3449,9 @@ export class Subscriber {
 		const yields = hasYield(this.version);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.sequence, group.sequence + 1n);
+		// Asked before this stream takes the group, which forgets the drop: a final drop that
+		// overtook this stream, rather than a gap the grace gave up on.
+		const dropped = !owed && yields && hooks.trackDropped(track, group.sequence);
 		// A stale drop that overtook this stream: the next update supersedes that verdict, so a
 		// YIELDED reset after it pauses the group.
 		const unowedUnder =
@@ -3522,7 +3531,7 @@ export class Subscriber {
 						? { kind: "owed" }
 						: unowedUnder !== undefined
 							? { kind: "stale", under: unowedUnder, error: new StreamError(StreamCode.Old) }
-							: { kind: "accounted" },
+							: { kind: "accounted", dropped },
 					counted,
 					supersede,
 				};
@@ -3647,14 +3656,10 @@ export class Subscriber {
 			const verdict = yielding.verdict;
 			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
 			else if (verdict.kind !== "dropped")
-				yielding.verdict = {
-					kind:
-						verdict.kind === "accounted" || verdict.kind === "accounted-stale"
-							? "accounted-stale"
-							: "stale",
-					under: staleUnder,
-					error,
-				};
+				yielding.verdict =
+					verdict.kind === "accounted" || verdict.kind === "accounted-stale"
+						? { kind: "accounted-stale", dropped: verdict.dropped, under: staleUnder, error }
+						: { kind: "stale", under: staleUnder, error };
 			// A drop that stands accounts for the group, so the end no longer waits on its stream
 			// past the grace: a browser that lost the stream's reset would otherwise hold it forever.
 			judge(yielding, entry.update);

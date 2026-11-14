@@ -1772,6 +1772,53 @@ test.each([
 	}
 });
 
+// Lite-07: a header that arrives after the grace gave up on its gap is covered by the tail, but
+// no drop accounts for it, so its stream is still delivering and holds the end until it is read.
+test("a stream whose gap the grace gave up on still holds the end", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		// Group 2 opens a gap at 1, which the grace gives up on by the time group 3 arrives.
+		for (const sequence of [0n, 2n, 3n]) {
+			const stream = handStream(version);
+			stream.finish();
+			await subscriber.runGroup(new Group({ subscribe: 0n, sequence }), stream.reader);
+			await clock.advance(GRACE.mul(2));
+		}
+
+		const late = handStream(version);
+		late.write(await liteFrame(0, new Uint8Array([1])));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 1n }), late.reader);
+		await drainReactions();
+		await respond(request, version, [{ finish: new SubscribeFinish(4n) }]);
+		await drainReactions();
+
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
+		await clock.advance(GRACE.mul(3));
+		expect(fin).toBe(false);
+		late.finish();
+		await running;
+		await drainReactions();
+		expect(fin).toBe(true);
+	} finally {
+		track.close();
+		subscriber.close();
+		installed.close();
+	}
+});
+
 // Lite-07: a recovery holds its FIN for a group a reset without its code paused, as a subscription's
 // end does, rather than end the continuation the publisher still owes it.
 test("a recovery waits for the continuation of a group a reset without its code paused", async () => {
