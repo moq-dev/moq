@@ -880,7 +880,9 @@ impl Consumer {
 		};
 		let (lag, bound) = self.lag(0);
 		let lead = -lag;
-		let eligible = self.shared.clocked.load(Ordering::Acquire) && !self.refill && self.available() > 0;
+		// A finished queue never refills, so a refill an earlier underrun left pending holds nothing back.
+		let refilling = self.refill && !self.shared.finished.load(Ordering::Relaxed);
+		let eligible = self.shared.clocked.load(Ordering::Acquire) && !refilling && self.available() > 0;
 		let threshold = if joined { bound.max(window as i64) } else { hop as i64 };
 		self.padding = eligible && lead > if self.padding { 0 } else { threshold };
 		if !self.padding {
@@ -1705,6 +1707,52 @@ mod tests {
 			assert!(padded <= 32, "never caught up");
 		}
 		assert!(padded >= 29, "padded {padded} reads");
+		assert_eq!(cons.skips(), 0);
+	}
+
+	/// An underrun leaves a refill pending that a finished queue never runs, so
+	/// its final burst must still wait for the clock.
+	#[test]
+	fn a_finished_tail_after_an_underrun_pads_onto_the_clock() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
+		let base = prod.base;
+		let mut out = vec![0.0; 480 * 2];
+		// 20 ms pushes: 600 ms due from 10 ms on.
+		for _ in 0..30 {
+			assert_eq!(prod.push(&pcm), Push::Ok);
+		}
+		let bound = Duration::from_millis(200);
+		prod.due(base + Duration::from_millis(610), bound);
+		let mut now = base;
+		let mut underran = false;
+		for _ in 0..90 {
+			let read = pull(&mut cons, &mut out, now);
+			now += Duration::from_millis(10);
+			if matches!(read, Read::Underflow { .. }) {
+				underran = true;
+				break;
+			}
+		}
+		assert!(underran, "never ran dry");
+
+		// The final 600 ms burst starts 300 ms past the reader.
+		for _ in 0..30 {
+			assert_eq!(prod.push(&pcm), Push::Ok);
+		}
+		prod.flush();
+		prod.due(now + Duration::from_millis(900), bound);
+		let mut padded = 0;
+		loop {
+			pull(&mut cons, &mut out, now);
+			now += Duration::from_millis(10);
+			if out.iter().any(|sample| *sample != 0.0) {
+				break;
+			}
+			padded += 1;
+			assert!(padded <= 40, "never caught up");
+		}
+		assert!(padded >= 25, "padded {padded} reads");
 		assert_eq!(cons.skips(), 0);
 	}
 
