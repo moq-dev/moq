@@ -1440,7 +1440,7 @@ fn sweep_no_route_outgrows_a_loop_free_path() {
 		}
 		cut += usize::from(reached.len() <= relays);
 		for node in 0..relays {
-			for &id in sim.nodes[node].rx.keys() {
+			for &id in sim.babel(node).rx.keys() {
 				assert!(!sim.starved(node, id), "case {case}: node {node} waits on {id}");
 			}
 			// A scoped link files the origin under another key past it.

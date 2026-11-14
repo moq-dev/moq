@@ -41,8 +41,8 @@ selection.
   means what it says, rather than editing expectations to match.
 - How a route is selected is being replaced
   ([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27).
-  Apply this to the rule that stands when this starts. The prototype in
-  `route/tests/paths.rs` already stays on its next hop among equals.
+  Apply this to the rule that stands when this starts. The scoped path router in
+  `rs/moq-net/src/route/path.rs` already stays on its next hop among equals.
 - Measure with `Sim`'s `hop_updates` count and, if it has landed,
   `mesh_sweep.rs`'s benchmark, before and after.
 

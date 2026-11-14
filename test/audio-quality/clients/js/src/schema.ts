@@ -150,7 +150,7 @@ export const METRICS = {
 		clock: "viewer",
 		aggregations: ["max"],
 		description:
-			"The longest audio spent off its resting point: from the ring stalling, or audio trailing the shared clock by more than one bucket past the window's median lag, to audio back within it.",
+			"The longest audio took to return after a disturbance: from the ring stalling, or audio more than one codec frame off the median lag of the 5 s before, to audio back within a frame of it.",
 	},
 	target_ms: {
 		unit: "ms",

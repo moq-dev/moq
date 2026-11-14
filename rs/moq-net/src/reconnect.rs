@@ -10,8 +10,7 @@
 //!
 //! The first walk of the peer's addresses fails fast: if no address establishes a
 //! session, the policy ends with [`Action::Done`] carrying that walk's error rather than
-//! retrying, so a setup mistake surfaces at once instead of looping. The one exception is
-//! a refused credential the tokens have replaced since, which earns another dial. A client started
+//! retrying, so a setup mistake surfaces at once instead of looping. A client started
 //! before its peer is reachable therefore exits, for its supervisor or app to restart.
 //! Once a session has been established, a later failure backs off and retries under
 //! [`Backoff`], so restarts and redeploys still recover.
@@ -55,8 +54,7 @@ const PROBE_MAX: Duration = Duration::from_secs(300);
 
 /// When to redial after a failure, and when to give up, once a session has been established.
 ///
-/// Before then nothing retries: the first walk ending without a session ends the policy,
-/// unless the peer refused credentials the tokens have replaced since.
+/// Before then nothing retries: the first walk ending without a session ends the policy.
 ///
 /// `initial` and `multiplier` set the wait before each retry, `max` caps it, and
 /// `healthy` decides which sessions count as failed attempts. The delays carry jitter,
@@ -509,8 +507,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 	/// Present `tokens` on every dial, through [`Attempt::client`].
 	///
-	/// A refused credential then earns another dial once the tokens change, and an ended
-	/// tokens handle ends the policy at its next walk.
+	/// An ended tokens handle ends the policy at its next walk.
 	pub fn with_tokens(mut self, tokens: auth::Tokens) -> Self {
 		self.tokens = Some(tokens);
 		self

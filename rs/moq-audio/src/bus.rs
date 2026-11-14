@@ -88,10 +88,10 @@ pub const MAX_DELAY: Duration = Duration::from_secs(2);
 pub const REACH: Duration = LATENCY.saturating_add(HEADROOM);
 
 /// The longest stretch bound [`Bus::positioned`] accepts, which bounds how
-/// much audio a positioned channel holds. Matches the players' default.
+/// much audio a positioned channel holds.
 pub const MAX_STRETCH: Duration = Duration::from_secs(2);
 
-/// The time stretch's window, past which audio trailing the bound is skipped.
+/// The time stretch's window, which a ring may hold past its bound.
 const WINDOW: Duration = Duration::from_millis(30);
 
 /// What every mix is mixed to.
@@ -1098,7 +1098,7 @@ impl Positioned {
 	/// With one, a write plays right after the audio the channel holds, and the
 	/// channel speeds up or slows down onto its position, as the playback sink
 	/// does onto its clock. Audio trailing its positions by more than the bound
-	/// plus one 30 ms window is skipped back to the bound. Only a write to a
+	/// skips onto them. Only a write to a
 	/// channel that has run dry is placed exactly, behind silence, since
 	/// nothing audible plays before it. A write fails whole if the channel has
 	/// no room for it.
@@ -2415,7 +2415,7 @@ mod tests {
 
 	/// A stretched channel that has run dry places a write exactly, since
 	/// silence plays until it anyway; one trailing its positions plays late,
-	/// up to the bound plus a window, past which it skips back to the bound.
+	/// up to the bound, past which it skips onto its positions.
 	#[test]
 	fn a_stretched_channel_places_onto_dry_and_skips_past_its_bound() {
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
@@ -2444,8 +2444,8 @@ mod tests {
 		assert_eq!(left.iter().position(|sample| *sample != 0.0), Some(0));
 		assert_eq!(stretched(&bus, &channel, |cons| cons.trimmed()), 0);
 
-		// Trailing by 300 ms, past the bound and a window: skips the 200 ms
-		// past the bound.
+		// Trailing by 300 ms, past the bound: skips all 300 ms onto its
+		// positions.
 		mixed(&mut driver, &mut reader, &[BLOCK], 48_000);
 		let next = driver.position();
 		channel.write(next - 14_400, &tone(0, 15_360)).unwrap();
@@ -2459,7 +2459,7 @@ mod tests {
 
 		driver.advance(BLOCK);
 		ready(&mut reader);
-		assert_eq!(stretched(&bus, &channel, |cons| cons.trimmed()), 9_600);
+		assert_eq!(stretched(&bus, &channel, |cons| cons.trimmed()), 14_400);
 		channel.write(next, &tone(0, 960)).unwrap();
 	}
 

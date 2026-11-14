@@ -17,9 +17,6 @@ exclude_re = [
     # The rotation's xorshift step only picks which fresh identity comes next,
     # and the guard after it enforces freshness and range.
     'replace (\^= with \|=|<< with >>|>> with <<) in Router<N, A>::rotate',
-    # The forget counter only feeds test assertions, which read it per claim of
-    # the identity they forget.
-    'replace && with \|\| in Router<N, A>::forgot_outside$',
     # An index of a neighbor's interest: `carries()` filters each entry again.
     'replace Router<N, A>::asked -> Path with Default::default\(\)',
     # `full(old) == full(new)` is the same with both sides negated.

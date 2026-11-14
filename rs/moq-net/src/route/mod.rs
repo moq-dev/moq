@@ -17,7 +17,9 @@
 )]
 
 pub(crate) mod node;
+pub(crate) mod path;
 mod proof;
+mod reader;
 mod rtt;
 mod view;
 
@@ -40,10 +42,11 @@ pub(crate) use node::Node;
 pub(crate) use proof::EXPORTER_LABEL;
 pub use proof::RouteKey;
 pub(crate) use proof::{Proof, Transcript};
+use reader::Reader;
 #[cfg(feature = "async")]
 pub(crate) use rtt::LinkRtt;
 pub(crate) use view::{View, within};
-use view::{above, ancestors, below, covering, narrow, within_any};
+use view::{above, below, covering, narrow, within_any};
 
 /// An opaque routing identity, declared by an origin or derived by [`Scope`].
 pub(crate) type Id = u64;
@@ -452,24 +455,17 @@ pub(crate) struct Router<N, A> {
 	current: BTreeMap<Id, Vec<Path>>,
 	heard: BTreeMap<(Id, N), Heard<A>>,
 	sent_views: BTreeMap<(Id, N), View<A>>,
-	shown: BTreeMap<(Id, Path), Shown<A>>,
+	reader: Reader<A>,
 	/// The claims changed per identity since it was last recomputed.
 	dirty: BTreeMap<Id, Dirty>,
 	/// Each identity's context as last recomputed: a change marks every claim dirty.
 	ctxs: BTreeMap<Id, Ctx<N>>,
-	/// The identities recomputed since [`Self::changed`] last took them, each with
-	/// the claims whose shown state changed.
-	changed: BTreeMap<Id, BTreeSet<Path>>,
 	/// Mints a fresh identity on rotation.
 	rng: u64,
-	/// Per claim this node has shown, how many times it forgot that claim.
-	#[cfg(test)]
-	forgot: BTreeMap<(Id, Path), u32>,
 	/// Identities recomputed, so fixtures can bound the work per message.
 	#[cfg(test)]
 	touched: usize,
 	out: Vec<Out<N, A>>,
-	events: Vec<Event<A>>,
 }
 
 /// A refused input.
@@ -504,24 +500,20 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			current: BTreeMap::new(),
 			heard: BTreeMap::new(),
 			sent_views: BTreeMap::new(),
-			shown: BTreeMap::new(),
+			reader: Reader::default(),
 			dirty: BTreeMap::new(),
 			ctxs: BTreeMap::new(),
-			changed: BTreeMap::new(),
 			rng: seed | 1,
-			#[cfg(test)]
-			forgot: BTreeMap::new(),
 			#[cfg(test)]
 			touched: 0,
 			out: Vec::new(),
-			events: Vec::new(),
 		}
 	}
 
 	/// Take the identities recomputed since the last call, whose selection may have
 	/// changed, each with the claims whose shown state did.
 	pub fn changed(&mut self) -> BTreeMap<Id, BTreeSet<Path>> {
-		std::mem::take(&mut self.changed)
+		self.reader.changed()
 	}
 
 	/// Take the messages queued for neighbors, in order.
@@ -531,7 +523,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 
 	/// Take the reader events, in order.
 	pub fn events(&mut self) -> Vec<Event<A>> {
-		std::mem::take(&mut self.events)
+		self.reader.events()
 	}
 
 	// --- Sessions ---
@@ -1201,7 +1193,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			&& none(&self.unacked, id)
 			&& none(&self.heard, id)
 			&& none(&self.sent_views, id)
-			&& !self.shown.keys().any(|(key, _)| *key == id)
+			&& self.reader.claims(id).next().is_none()
 	}
 
 	#[cfg(test)]
@@ -1247,13 +1239,13 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 
 	/// What this node's reader sees.
 	pub fn shown(&self) -> &BTreeMap<(Id, Path), Shown<A>> {
-		&self.shown
+		self.reader.shown()
 	}
 
 	#[cfg(test)]
 	/// Whether this node shows `claim` from `id`, and whether it is available.
 	pub fn shows(&self, id: Id, claim: &Path) -> Option<bool> {
-		self.shown.get(&(id, claim.clone())).map(|shown| shown.available)
+		self.reader.get(id, claim).map(|shown| shown.available)
 	}
 
 	#[cfg(test)]
@@ -1467,14 +1459,8 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	}
 
 	/// Count a forget against each shown claim of `id` overlapping none of `kept`.
-	#[cfg_attr(not(test), allow(unused_variables, reason = "only fixtures count forgets"))]
 	fn forgot_outside(&mut self, id: Id, kept: &BTreeSet<Path>) {
-		#[cfg(test)]
-		for ((key, claim), count) in self.forgot.iter_mut() {
-			if *key == id && !within_any(claim, kept) {
-				*count += 1;
-			}
-		}
+		self.reader.forget(id, |claim| within_any(claim, kept));
 	}
 
 	/// The view this node shows and forwards for `id`, having selected `route`: what
@@ -1546,7 +1532,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		ids.extend(self.sent.keys().map(|(id, _)| *id));
 		ids.extend(self.unacked.keys().map(|(id, _)| *id));
 		ids.extend(self.heard.keys().map(|(id, _)| *id));
-		ids.extend(self.shown.keys().map(|(id, _)| *id));
+		ids.extend(self.reader.shown().keys().map(|(id, _)| *id));
 		ids
 	}
 
@@ -1596,7 +1582,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			self.touched += ids.len();
 		}
 		for &id in &ids {
-			self.changed.entry(id).or_default();
+			self.reader.touch(id);
 		}
 		for id in ids {
 			if prune {
@@ -1956,20 +1942,11 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			return;
 		}
 		let route = self.selected(id);
-		let mut all: BTreeSet<Path> = (self.shown.range((id, Path::empty())..))
-			.take_while(|((key, _), _)| *key == id)
-			.map(|((_, claim), _)| claim.clone())
-			.collect();
+		let mut all: BTreeSet<Path> = self.reader.claims(id).cloned().collect();
 		if let Some(view) = self.adopted(id, route) {
 			all.extend(view.items.keys().cloned());
 		}
-		for (claim, full) in self.shown_now(id, ctx, all.iter()) {
-			let got = match now.get(&claim) {
-				Some(got) => got.as_ref(),
-				None => self.shown.get(&(id, claim.clone())),
-			};
-			assert_eq!(got, full.as_ref(), "incremental reader view of {claim:?}");
-		}
+		self.reader.check(id, now, self.shown_now(id, ctx, all.iter()));
 	}
 
 	/// Recompute what this node's reader sees of `id` in `ctx` and log each change:
@@ -1977,10 +1954,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	fn show(&mut self, id: Id, ctx: &Ctx<N>, dirty: &Dirty) {
 		let claims: BTreeSet<Path> = match dirty.all {
 			true => {
-				let mut claims: BTreeSet<Path> = (self.shown.range((id, Path::empty())..))
-					.take_while(|((key, _), _)| *key == id)
-					.map(|((_, claim), _)| claim.clone())
-					.collect();
+				let mut claims: BTreeSet<Path> = self.reader.claims(id).cloned().collect();
 				if let Some(view) = self.adopted(id, self.selected(id)) {
 					claims.extend(view.items.keys().cloned());
 				}
@@ -1995,73 +1969,13 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		// A claim no routed neighbor's region covers was let go, not ended, and so
 		// was one the view never certified: only its stream left.
 		let regions = self.certified(id, true);
-		let shown = |claim: &Path| match now.get(claim) {
-			Some(now) => now.as_ref(),
-			None => self.shown.get(&(id, claim.clone())),
+		let views = &self.views;
+		let uncertified = |claim: &Path| {
+			regions.as_ref().is_some_and(|regions| !within_any(claim, regions))
+				|| !ctx.own && views.get(&id).is_none_or(|view| view.as_of(claim).is_none())
 		};
-		let mut events = Vec::new();
-		for (claim, now) in &now {
-			let Some(was) = self.shown.get(&(id, claim.clone())) else {
-				continue;
-			};
-			match now {
-				Some(now) => {
-					if was.item != now.item {
-						events.push((claim, Kind::Update, &now.item));
-					}
-					if was.available != now.available {
-						let kind = match now.available {
-							true => Kind::Available,
-							false => Kind::Unavailable,
-						};
-						events.push((claim, kind, &now.item));
-					}
-				}
-				None => {
-					let uncertified = regions.as_ref().is_some_and(|regions| !within_any(claim, regions))
-						|| !ctx.own && self.views.get(&id).is_none_or(|view| view.as_of(claim).is_none());
-					// A claim presented at a narrower region moved up to the claim it
-					// stood for, which is still shown. That claim may have changed
-					// meanwhile, so a presented claim needs only something shown above it.
-					let moved = ancestors(claim)
-						.filter(|above| above != claim)
-						.any(|above| shown(&above).is_some_and(|now| was.presented || now.item == was.item));
-					let kind = if !within(claim, &self.watch) {
-						Kind::Unwatched
-					} else if ctx.live && !uncertified && !moved {
-						Kind::End
-					} else {
-						Kind::Offline
-					};
-					events.push((claim, kind, &was.item));
-				}
-			}
-		}
-		for (claim, now) in &now {
-			if let Some(now) = now
-				&& !self.shown.contains_key(&(id, claim.clone()))
-			{
-				events.push((claim, Kind::Start, &now.item));
-			}
-		}
-		let events: Vec<(Path, Kind, A)> = (events.into_iter())
-			.map(|(claim, kind, item)| (claim.clone(), kind, item.clone()))
-			.collect();
-		for (claim, kind, item) in events {
-			self.log(id, &claim, kind, &item);
-		}
-		let changed = self.changed.entry(id).or_default();
-		for (claim, now) in now {
-			let key = (id, claim);
-			if self.shown.get(&key) == now.as_ref() {
-				continue;
-			}
-			changed.insert(key.1.clone());
-			match now {
-				Some(now) => self.shown.insert(key, now),
-				None => self.shown.remove(&key),
-			};
-		}
+		self.reader
+			.apply(id, &self.watch, now, |claim| ctx.live && !uncertified(claim));
 	}
 
 	/// How the reader now sees each of `claims` of `id`, in `ctx`.
@@ -2110,18 +2024,5 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			})
 		};
 		claims.map(|claim| (claim.clone(), at(claim))).collect()
-	}
-
-	fn log(&mut self, id: Id, claim: &Path, kind: Kind, item: &A) {
-		#[cfg(test)]
-		let forgot = *self.forgot.entry((id, claim.clone())).or_insert(0);
-		self.events.push(Event {
-			id,
-			claim: claim.clone(),
-			kind,
-			item: item.clone(),
-			#[cfg(test)]
-			forgot,
-		});
 	}
 }

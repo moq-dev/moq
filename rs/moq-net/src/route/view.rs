@@ -2,7 +2,7 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
-	ops::Bound,
+	ops::{Bound, RangeBounds},
 };
 
 use crate::Path;
@@ -249,19 +249,52 @@ impl<A: Clone + Eq> View<A> {
 	}
 }
 
-/// The entries of `map` strictly below `prefix`, as one range: a path lies below a
-/// non-empty prefix exactly when it starts with the prefix and a `/`.
+/// All descendants of a prefix. Whole segments lie in `prefix/`..`prefix0`;
+/// the root excludes only itself. Both map and set indexes use these bounds.
+struct Descendants {
+	lo: String,
+	hi: Option<String>,
+	root: bool,
+}
+
+impl Descendants {
+	fn new(prefix: &Path) -> Self {
+		Self {
+			lo: if prefix.is_empty() {
+				String::new()
+			} else {
+				format!("{prefix}/")
+			},
+			hi: (!prefix.is_empty()).then(|| format!("{prefix}0")),
+			root: prefix.is_empty(),
+		}
+	}
+}
+
+impl RangeBounds<str> for Descendants {
+	fn start_bound(&self) -> Bound<&str> {
+		if self.root {
+			Bound::Excluded(&self.lo)
+		} else {
+			Bound::Included(&self.lo)
+		}
+	}
+
+	fn end_bound(&self) -> Bound<&str> {
+		self.hi.as_deref().map_or(Bound::Unbounded, Bound::Excluded)
+	}
+}
+
+/// The entries of `map` strictly below `prefix`, as one range.
 pub(crate) fn below<'a, V>(map: &'a BTreeMap<Path, V>, prefix: &Path) -> impl Iterator<Item = (&'a Path, &'a V)> {
-	let (lo, hi) = match prefix.is_empty() {
-		true => (String::new(), None),
-		false => (format!("{prefix}/"), Some(format!("{prefix}0"))),
-	};
-	let lo = match prefix.is_empty() {
-		true => Bound::Excluded(lo.as_str()),
-		false => Bound::Included(lo.as_str()),
-	};
-	let hi = hi.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
-	map.range::<str, _>((lo, hi))
+	map.range::<str, _>(Descendants::new(prefix))
+}
+
+/// The paths in `set` at or below `prefix`, without walking its siblings.
+pub(crate) fn within_set<'a>(set: &'a BTreeSet<Path>, prefix: &Path) -> impl Iterator<Item = &'a Path> {
+	set.get(prefix)
+		.into_iter()
+		.chain(set.range::<str, _>(Descendants::new(prefix)))
 }
 
 /// `path` and every prefix above it, the root first.
