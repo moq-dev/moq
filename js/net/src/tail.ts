@@ -1,7 +1,7 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { READER_RUN_OVERHEAD, type Reader } from "./cache.ts";
-import { insertRun, type Run, runGaps } from "./internal.ts";
+import { insertRun, type Run, runGaps, runsFrom } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
 import { max, min } from "./util/sequence.ts";
 
@@ -11,6 +11,19 @@ export interface TailOptions {
 	grace?: () => Duration;
 	/** Bills the bytes the tail keeps to the subscription's copy's account, as a reader's record. */
 	bill?: Reader;
+}
+
+/** A group stream a {@link Tail} counts, from its header until it is read to its end. */
+export interface Counted {
+	/** Mark it read to its end. Idempotent. */
+	done(): void;
+	/**
+	 * The publisher accounted for its group another way, such as a drop, so {@link Tail.settle}
+	 * waits for it at most the grace. Idempotent.
+	 */
+	excuse(): void;
+	/** Hold the end again: the drop that excused it no longer stands, as an update reopens a stale one. */
+	restore(): void;
 }
 
 /**
@@ -29,9 +42,12 @@ export interface TailOptions {
 export class Tail {
 	// The sequences accounted for, whose gaps fold once the grace stops waiting for them.
 	#ledger = new Ledger();
-	// Group streams whose header arrived, and those still being read.
+	// Group streams whose header arrived, and those still being read and holding the end.
 	#streams = 0;
 	#active = 0;
+	// Streams still being read that the end waits for at most the grace, until a settle gives up
+	// on them, as the ledger does on a gap.
+	#excused = new Set<object>();
 	#changed = new Signal(0);
 	#grace: () => Duration;
 	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under that
@@ -42,7 +58,11 @@ export class Tail {
 	// stale drop there for a group the ledger already accounted may be one its stream overtook, so
 	// the next update owes none of it again.
 	#folded?: Run;
-	// What `#finished` bills, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
+	// Sequences a final drop named, so a stream whose header the drop overtook can be told from one
+	// whose gap the grace gave up on. Under the pool's debt they fold into one span, which excuses
+	// more streams for at most the grace rather than forget a drop and hold the end forever.
+	#dropped: Run[] = [];
+	// What `#finished` and `#dropped` bill, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
 	// streams it finishes between updates costs what the cache would hold.
 	#bill?: Reader;
 
@@ -51,12 +71,27 @@ export class Tail {
 		this.#bill = options.bill;
 	}
 
-	// Bill what `#finished` keeps, and under the pool's debt fold it. Mirrors the Rust `Tail::rebill`.
+	// Bill what `#finished` and `#dropped` keep, and under the pool's debt fold them. Mirrors the Rust
+	// `Tail::rebill`, which keeps no `#dropped`.
 	#rebill(): void {
 		const bill = this.#bill;
 		if (!bill) return;
-		bill.set((this.#finished.length + (this.#folded ? 1 : 0)) * READER_RUN_OVERHEAD);
-		if (bill.debt > 0 && this.fold()) bill.set(2 * READER_RUN_OVERHEAD);
+		bill.set(this.#kept() * READER_RUN_OVERHEAD);
+		if (bill.debt <= 0) return;
+		const folded = this.fold();
+		if (this.#foldDropped() || folded) bill.set(this.#kept() * READER_RUN_OVERHEAD);
+	}
+
+	// Fold the dropped runs into the one span they reach, returning whether there was more than one.
+	#foldDropped(): boolean {
+		const dropped = this.#dropped;
+		if (dropped.length < 2) return false;
+		this.#dropped = [{ start: dropped[0].start, end: dropped[dropped.length - 1].end }];
+		return true;
+	}
+
+	#kept(): number {
+		return this.#finished.length + (this.#folded ? 1 : 0) + this.#dropped.length;
 	}
 
 	/**
@@ -79,6 +114,7 @@ export class Tail {
 	close(): void {
 		this.#finished = [];
 		this.#folded = undefined;
+		this.#dropped = [];
 		// A stream still in flight finishes after this: with no bill, it can never bill again.
 		this.#bill?.close();
 		this.#bill = undefined;
@@ -89,21 +125,36 @@ export class Tail {
 		return this.#streams;
 	}
 
-	/**
-	 * Record a group stream whose header arrived. Returns the call that marks it read to
-	 * its end, which is idempotent.
-	 */
-	open(sequence: bigint): () => void {
+	/** Record a group stream whose header arrived, held until it is read to its end. */
+	open(sequence: bigint): Counted {
 		this.#streams += 1;
 		this.#active += 1;
 		this.#account(sequence, sequence + 1n);
 
-		let closed = false;
-		return () => {
-			if (closed) return;
-			closed = true;
-			this.#active -= 1;
-			this.#bump();
+		let state: "held" | "excused" | "done" = "held";
+		const token = {};
+		return {
+			done: () => {
+				if (state === "done") return;
+				if (state === "held") this.#active -= 1;
+				else this.#excused.delete(token);
+				state = "done";
+				this.#bump();
+			},
+			excuse: () => {
+				if (state !== "held") return;
+				state = "excused";
+				this.#active -= 1;
+				this.#excused.add(token);
+				this.#bump();
+			},
+			restore: () => {
+				if (state !== "excused") return;
+				state = "held";
+				this.#excused.delete(token);
+				this.#active += 1;
+				this.#bump();
+			},
 		};
 	}
 
@@ -184,6 +235,19 @@ export class Tail {
 		this.#account(start, end);
 	}
 
+	/** Record `[start, end)` as given up by a final drop, accounting for it. */
+	drop(start: bigint, end: bigint): void {
+		insertRun(this.#dropped, start, end);
+		this.#rebill();
+		this.#account(start, end);
+	}
+
+	/** Whether a final drop named `sequence`, or a fold under the pool's debt spans it. */
+	dropped(sequence: bigint): boolean {
+		const run = this.#dropped[runsFrom(this.#dropped, sequence)];
+		return run !== undefined && run.start <= sequence;
+	}
+
 	/** Owe `[start, end)` again: a stale drop that accounted for it was reversed by a widening. */
 	unaccount(start: bigint, end: bigint): void {
 		this.#ledger.unaccount(start, end, now());
@@ -199,9 +263,9 @@ export class Tail {
 		return runGaps(this.#ledger.gaps(start, end), start, end);
 	}
 
-	/** Whether a group stream is still being read. */
+	/** Whether a group stream is still being read, an excused one included until a settle gives up on it. */
 	get reading(): boolean {
-		return this.#active > 0;
+		return this.#active > 0 || this.#excused.size > 0;
 	}
 
 	/** Bumped on every change {@link settle} watches. */
@@ -216,11 +280,12 @@ export class Tail {
 
 	/**
 	 * Wait until every stream is read to its end and `complete()` holds, or the grace passes
-	 * with nothing left being read, or `closed` settles.
+	 * with nothing left being read but excused streams, or `closed` settles.
 	 *
-	 * A stream still being read is always waited for: a group ends on its own stream's FIN
-	 * or reset, never because its track ended. The grace only gives up on streams that never
-	 * arrived.
+	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset,
+	 * never because its track ended. The grace gives up on streams that never arrived, and on
+	 * excused ones: a browser can lose a stream's reset, leaving it open forever, and the
+	 * publisher's drop already accounted for its group.
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
@@ -237,7 +302,13 @@ export class Tail {
 		);
 		try {
 			while (closed.peek() === undefined) {
-				if (this.#active === 0 && (expired || complete())) return;
+				if (this.#active === 0 && expired) {
+					// Given up on, so a later settle, such as the one the publisher's FIN starts, does
+					// not wait another grace for them.
+					this.#excused.clear();
+					return;
+				}
+				if (this.#active === 0 && this.#excused.size === 0 && complete()) return;
 				await Signal.race(this.#changed, closed);
 			}
 		} finally {
