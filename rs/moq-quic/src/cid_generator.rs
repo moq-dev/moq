@@ -133,7 +133,7 @@ impl RandomConnectionIdGenerator {
 			self.cid_len
 		);
 		assert!(
-			count % self.generations == 0,
+			count.is_multiple_of(self.generations),
 			"{count} shards cannot split into {} generations",
 			self.generations
 		);
@@ -155,7 +155,7 @@ impl RandomConnectionIdGenerator {
 		assert!(generations > 0, "a group holds at least one generation");
 		if let Some(shard) = self.shard {
 			assert!(
-				shard.count % generations == 0,
+				shard.count.is_multiple_of(generations),
 				"{} shards cannot split into {generations} generations",
 				shard.count
 			);
