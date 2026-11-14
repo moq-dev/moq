@@ -20,6 +20,7 @@ mod reset_secret;
 mod runtime;
 mod scream;
 mod sim;
+mod sim_client;
 mod stream_code;
 mod stream_limits;
 mod subscription_end_integrity;

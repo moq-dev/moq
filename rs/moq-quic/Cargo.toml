@@ -25,7 +25,7 @@ sim = []
 # Exposes the `fuzz/` harness's target bodies, and the plaintext crypto the connection
 # target and the benches run on, through the `fuzz` module. rind keys the endpoint's
 # reset and token secrets. Off by default.
-fuzz = ["dep:arbitrary"]
+fuzz = ["dep:arbitrary", "sim"]
 
 [dependencies]
 arbitrary = { version = "1.5", features = ["derive"], optional = true }

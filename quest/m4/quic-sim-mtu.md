@@ -32,7 +32,3 @@ fixed by [moq-dev/moq#7429](https://github.com/moq-dev/moq/pull/7429), and the 0
 report is moot ([0-RTT leftovers](https://github.com/moq-dev/moq/pull/7492)).
 
 Public API: none (test harness only). Wire: none.
-
-## Related
-
-- [QUIC on the sim](/quest/m1/quic-sim.md) - reuses this `Pair` for MoQ sessions

@@ -44,7 +44,7 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq", version = env!("CARGO_PKG_VERSION"))]
-#[usage(completion, settings)]
+#[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 #[usage(after_help = "Separate additional import/export stages with `--`; they share one \
                         connection and one Origin. Every `--` starts a stage, so it is not an \
                         end-of-options marker: write a path starting with `-` as `./-name`.")]
@@ -179,13 +179,7 @@ impl Invocation {
 			print!("{reply}");
 			std::process::exit(0);
 		}
-		match Self::try_parse_from(args).and_then(|parsed| {
-			// Here rather than in `try_parse_from`, which tests drive under whatever
-			// environment the test runner has.
-			moq_tokio::cli::check_env(&[Cli::spec(), Stage::spec()], &[])
-				.map_err(|err| ParseError::new(ParseErrorKind::ValueValidation, format!("error: {err}\n")))?;
-			Ok(parsed)
-		}) {
+		match Self::try_parse_from(args) {
 			Ok(parsed) => parsed,
 			Err(err) => err.exit(),
 		}
@@ -2685,6 +2679,21 @@ mod tests {
 
 		let typed = Invocation::try_parse_from(["moq", "--connect", url, "auth", "generate"]).expect("parse");
 		assert!(typed.reject("auth").is_err(), "a typed --connect stopped being refused");
+	}
+
+	/// A `MOQ_*` variable no verb reads is refused, even for a local verb that reads none.
+	#[test]
+	fn unknown_env_is_refused() {
+		if !test_env::Env::default()
+			.set("MOQ_CONECT", "https://relay.example.com")
+			.isolate()
+		{
+			return;
+		}
+		let Err(error) = Invocation::try_parse_from(["moq", "auth", "generate"]) else {
+			panic!("an unknown variable was accepted");
+		};
+		assert!(error.to_string().contains("MOQ_CONECT"), "{error}");
 	}
 
 	#[test]
