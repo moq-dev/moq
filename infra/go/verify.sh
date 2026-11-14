@@ -40,15 +40,15 @@ done
 WORK=$(mktemp -d)
 trap 'chmod -R u+w "$WORK"; rm -rf "$WORK"' EXIT
 export GOMODCACHE="$WORK/mod" GOFLAGS=-modcacherw GOWORK=off
-export GOPROXY="$PROXY" GOSUMDB=sum.golang.org GONOSUMDB= GOPRIVATE= GONOSUMCHECK= GOINSECURE=
+export GOPROXY="$PROXY" GOSUMDB=sum.golang.org GONOSUMDB='' GONOPROXY='' GOPRIVATE='' GOINSECURE=''
 
 if [[ "${#VERSIONS[@]}" -eq 0 ]]; then
-    served=$(go list -m -versions "$MODULE" | cut -d' ' -f2- | tr ' ' '\n')
+    served=$(go list -m -versions -json "$MODULE" | jq -r '.Versions[]?')
     expected=$(curl -fsSL "https://proxy.golang.org/$MODULE/@v/list")
     missing=$(grep -vxF -f <(printf '%s\n' "$served") <<<"$expected" || true)
     if [[ -n "$missing" ]]; then
         echo "Error: $PROXY lacks versions proxy.golang.org lists:" >&2
-        printf '  %s\n' $missing >&2
+        printf '  %s\n' "$missing" >&2
         exit 1
     fi
     # A read loop, not mapfile: macOS ships bash 3.2.

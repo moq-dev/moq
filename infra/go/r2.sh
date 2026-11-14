@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Sourced by the go.moq.dev scripts: sets BUCKET, the rclone destination, from
 # GO_BUCKET (default r2:go-moq-dev), and configures the r2: remote when used.
 #

@@ -26,7 +26,7 @@ versions=$(curl -fsSL "https://proxy.golang.org/$MODULE/@v/list" | sort -V)
 have=$(rclone lsf -R --files-only --include "/$MODULE/@v/*.info" "$BUCKET" | sed 's|.*/||; s|\.info$||')
 
 export GOMODCACHE="$WORK/mod" GOFLAGS=-modcacherw GOWORK=off
-export GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB= GOPRIVATE= GONOSUMCHECK= GOINSECURE=
+export GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB='' GONOPROXY='' GOPRIVATE='' GOINSECURE=''
 
 out="$WORK/out/$MODULE/@v"
 mkdir -p "$out"
