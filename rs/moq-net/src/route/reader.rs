@@ -9,6 +9,7 @@ use super::view::ancestors;
 use super::{Event, Id, Kind, Shown, within};
 
 /// How the reader sees each claim, and the events not yet taken.
+#[derive(Clone, Debug)]
 pub(crate) struct Reader<A> {
 	shown: BTreeMap<(Id, Path), Shown<A>>,
 	/// The identities recomputed since [`Self::changed`] last took them, each with

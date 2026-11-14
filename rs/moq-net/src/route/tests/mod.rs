@@ -17,6 +17,7 @@ mod residual;
 mod routing;
 mod rtt;
 mod scope;
+mod search;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -78,6 +79,7 @@ macro_rules! both {
 pub(super) use both;
 
 /// One node's router, under either rule.
+#[derive(Clone)]
 enum Relay {
 	Distance(Router<Node, Item>),
 	Path(path::Router<Node, Item>),
@@ -332,12 +334,14 @@ pub(super) struct Stats {
 	pub delivered: usize,
 }
 
+#[derive(Clone, Debug)]
 struct Change {
 	rev: Rev,
 	claim: Path,
 	item: Option<Item>,
 }
 
+#[derive(Clone)]
 pub(super) struct Sim {
 	rule: Rule,
 	nodes: Vec<Relay>,
@@ -884,6 +888,18 @@ impl Sim {
 	pub fn wait(&mut self, elapsed: Duration) {
 		self.now = self.now.saturating_add(elapsed);
 		self.tick();
+	}
+
+	/// Move the clock to `node`'s next doubt or dead-hop timer, unless already past
+	/// it, and fire that node's timers due by then, leaving every other node's.
+	pub fn fire(&mut self, node: Node) {
+		let at = self.nodes[node].deadline().expect("a timer");
+		self.now = self.now.max(at);
+		let now = self.now;
+		if let Relay::Path(router) = &mut self.nodes[node] {
+			router.timeout(now);
+		}
+		self.flush();
 	}
 
 	/// Fire every doubt timer due by now.
