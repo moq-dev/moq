@@ -1570,6 +1570,25 @@ test.each([
 	broadcast.close();
 });
 
+test("fill: a drop of a held group landing while its head is asked leaves the head to its fill", async () => {
+	const { broadcast, track } = headless();
+	const requests = track.requests();
+	const ordered = track.subscribe(twoAndThree).ordered();
+	const first = ordered.nextGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no head asked");
+	expect([fill.start, fill.end]).toEqual([2n, 3n]);
+
+	// A drop the feed sent before the head was asked, as a late SUBSCRIBE_DROP, lands now.
+	hooks.dropTrackGroups(track, 0n, 3n, { error: new NotFound("dropped") });
+	serve(fill, whole);
+	const group = await first;
+	expect([group?.sequence, group && (await frames(group))]).toEqual([2n, ["c0", "c1", "c2", "c3", "c4"]]);
+
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: with no handler, a bounded reader gives a headless group up while an open one reads it", async () => {
 	const { broadcast, track } = headless();
 

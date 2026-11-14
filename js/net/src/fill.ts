@@ -266,9 +266,19 @@ export class FillState {
 		if (live) this.#resolve(live.pending, sequence, sequence + 1n);
 	}
 
-	/** `[start, end)` was given up, by a fill or otherwise: nobody waits for it from a fill. */
+	/**
+	 * `[start, end)` was given up, by a fill or otherwise: nobody waits for it from a fill. A head
+	 * of a group the cache holds is left to its own fill, as the Rust `drop_groups` touches no
+	 * fill: a drop of that group, such as an earlier SUBSCRIBE_DROP arriving late, says nothing of
+	 * whether its source can still bring frame 0.
+	 */
 	dropped(start: bigint, end: bigint): void {
-		const owing = new Set(this.#overlapping(start, end).map((live) => live.pending));
+		const owing = new Set<Pending>();
+		for (const live of this.#overlapping(start, end)) {
+			// A held group is no miss, so the only fill owing it is its head's, one group wide.
+			if (live.end - live.start === 1n && this.#track.holds(live.start) === "headless") continue;
+			owing.add(live.pending);
+		}
 		for (const pending of owing) this.#resolve(pending, start, end);
 	}
 
