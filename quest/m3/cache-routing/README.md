@@ -30,7 +30,7 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    cache-dependent route prices. (rejected: per-broadcast forwarding with a
    cache-only subscribe and no advertisement; keeping routing cache-agnostic)
 2. ✅ **A warm route is per neighbor and travels one hop.** Reopened by
-   item 13. It goes only to
+   item 13; replaced by item 14. It goes only to
    direct neighbors and is never forwarded. B is warm toward N only while B
    has demand besides N's (a local reader or another downstream session),
    and withdraws once that demand has been gone for the copy's existing
@@ -40,7 +40,7 @@ Decided 2026-11-08 (maintainer, /quest-plan):
    warm because it still feeds N, and N never skips it again. (rejected:
    broadcast-wide warmth, as the pre-#3225 design had; forwarding warmth k
    hops, which floods every warm transition)
-3. ✅ **One cost per link, priced marginally.** Pulling through a warm
+3. ✅ **One cost per link, priced marginally.** Replaced by item 14. Pulling through a warm
    neighbor costs the link alone, since that neighbor's cold metric is
    already paid; a cold neighbor costs the link plus its cold metric. A tie
    goes to the warm route, then to item 4's hash. A topology that wants both
@@ -94,7 +94,7 @@ Decided 2026-11-10 (maintainer, /quest-iterate on
 [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457)), from the
 proof's proposals:
 
-9. ✅ **Each pull names whom it serves**, amending item 2: a trailing
+9. ✅ **Each pull names whom it serves**, amending item 2; replaced by item 14: a trailing
    `Serves` field on SUBSCRIBE and SUBSCRIBE_UPDATE. (rejected: no field)
    "Demand besides N's" can't be told from one hop: if B's only demand is a
    relay pulling on N's behalf, B counts warm toward N, N joins B, B's demand
@@ -105,7 +105,7 @@ proof's proposals:
    narrowed warm route stands until the copy's linger runs out, as the
    withdrawal already does.
 10. ✅ **Price a dependent copy at its cost, and move only on strict
-    improvement**, amending item 3; the Goal's "cheapest cold route" became
+    improvement**, amending item 3; replaced by item 14; the Goal's "cheapest cold route" became
     "cheapest route given the copies the others hold". (rejected: dropping
     mutual warmth so only a relay with a local reader advertises, which
     converges trivially but loses the LAN sharing that feeding two sessions
@@ -121,7 +121,7 @@ proof's proposals:
     narrowed route standing while two relays swap between them. The sweep names them in
     `UNSETTLED` and checks each still never settles, and the
     [proof's rewrite](/quest/m2/cache-routing-proof.md) settles them first.
-11. ✅ **The wire is in moq-lite-07 itself**, overturning the proof's choice
+11. ✅ **The wire is in moq-lite-07 itself** (its warm fields replaced by item 14), overturning the proof's choice
     of a SETUP extension. (rejected: an additive Warm Routes SETUP
     extension) Lite-07 is unpublished, so its shape can still change until
     the cut, and a later change goes to the next version. The draft's
@@ -179,6 +179,20 @@ Measured by the proof:
     the news crosses their link.
     [moq-dev/moq#8457](https://github.com/moq-dev/moq/pull/8457) proves items
     2 and 4 as first decided.
+
+14. **The proven rule** ([proof](/quest/m2/cache-routing-proof.md),
+    [moq-dev/moq#8615](https://github.com/moq-dev/moq/pull/8615)), on the
+    path prototype with item 27's routes. A warm route offers a copy's Hops,
+    its Warm Cost (0 at its carrier, the relay with a reader where it left the
+    route; else the cost of the sender's own pull), and its carrier. A relay
+    pulls through the cheapest of its next hop and the copies whose Hops name
+    neither it nor a neighbor it serves, offers its copy to every neighbor
+    even one the Hops name, moves between copies only toward a carrier with a
+    lower Rendezvous Hash, and, pulling along its route, is bound by the
+    carriers of the neighbors behind it. `Serves` is gone. The pulls are free
+    of loops once the copies offered are delivered, which the maintainer
+    accepted on 2026-11-13. The proof's remaining work is a few scenarios
+    under fresh seeds that never settle.
 
 Prior art: warm/cold route prices
 ([moq-dev/moq#2925](https://github.com/moq-dev/moq/pull/2925)) were deleted

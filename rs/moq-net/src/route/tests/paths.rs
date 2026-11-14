@@ -1,9 +1,9 @@
-//! Cache-copy experiments that keep a route free of loops by its path alone.
+//! A prototype router that keeps a route free of loops by its path alone, carrying
+//! the warm copies `cache.rs` proves.
 //!
-//! Only `copies.rs` uses this prototype, for warm per-broadcast copies that
-//! `route::path::Router` does not implement. The router comparisons in `compare.rs`
-//! use `Sim` and the real path router. The separate cache-routing proof (#8615)
-//! replaces these experiments; they make no claim about the shipping route rule.
+//! The router comparisons in `compare.rs` run on [`Sim`] and the real
+//! `route::path::Router`, which has no warm copies yet; this prototype exists only
+//! for the copies. Nothing outside the tests uses it.
 //!
 //! A route is one per publisher and names every relay it crossed, each with the
 //! session that relay learned the route on. A relay uses the cheapest route whose
@@ -20,10 +20,12 @@
 //!   dead relay is reported one neighbour at a time. No relay moves to a route
 //!   through a node in doubt until that node advances its epoch.
 //! - **Copies.** A relay with a reader for a broadcast offers a route to its copy,
-//!   which `copies.rs` exercises.
+//!   and pulls each broadcast it has demand for from the cheapest of its publisher's
+//!   route and the copies offered, which `cache.rs` proves.
 //!
-//! Left out, since the comparison does not need them: scoped grants, qualified
-//! keys, interests, GOAWAY, priorities, upstream marks, and RTT.
+//! Left out, since the copies do not need them: scoped grants, qualified
+//! keys, interests, priorities, upstream marks, and RTT. GOAWAY only moves
+//! pulls off a neighbour's copy.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -62,8 +64,8 @@ pub(super) struct Rules {
 	/// The same doubt on a timer: it lifts by itself after this many hops of delay,
 	/// with no epoch and so no message. 0 is off.
 	pub wait: u64,
-	/// A relay already pulling a broadcast moves onto another relay's copy only if
-	/// that relay ranks below it, so two relays never trade copies.
+	/// A relay on a copy moves onto another only if that copy's carrier ranks below
+	/// the one it is on, so relays never trade copies.
 	pub ranked: bool,
 }
 
@@ -129,17 +131,16 @@ pub(super) enum Msg {
 	/// before that.
 	Epoch { node: Id, epoch: u64 },
 	/// A copy of one broadcast is `cost` away through the sender, having come from
-	/// its publisher along `path`: 0 where the sender carries it.
-	/// `carrier` is the relay that carries it.
+	/// its publisher along `path`: 0 at its carrier, the relay with a reader where the
+	/// copy left the publisher's route.
 	Warm {
-		id: Id,
-		claim: Path,
+		cast: Cast,
 		path: Arc<[Hop]>,
 		cost: Metric,
 		carrier: Id,
 	},
 	/// The sender offers no copy of that broadcast any more.
-	Cold { id: Id, claim: Path },
+	Cold { cast: Cast },
 	/// Changes to a route's claims, complete as of the publisher's revision `rev`.
 	Claims {
 		id: Id,
@@ -189,6 +190,8 @@ struct Session {
 	hop: Id,
 	/// Whether the neighbour passes routes on, as a relay does and a client does not.
 	forwards: bool,
+	/// Whether the neighbour reads copies: a relay that chooses per broadcast.
+	reads: bool,
 	cost: Metric,
 	rx: BTreeMap<Id, Heard>,
 	tx: BTreeMap<Id, Sent>,
@@ -199,7 +202,7 @@ struct Session {
 	/// The copies this neighbour offers.
 	copies: BTreeMap<Cast, Copy>,
 	/// The copies this neighbour was offered.
-	casts: BTreeMap<Cast, (Arc<[Hop]>, Metric, Id)>,
+	casts: BTreeMap<Cast, Offer>,
 }
 
 /// The route a relay uses for a publisher, and the claims it shows.
@@ -215,8 +218,41 @@ struct Route {
 	rev: Rev,
 }
 
-/// One broadcast: its publisher and its claim.
-pub(super) type Cast = (Id, Path);
+/// One broadcast: its publisher, its path, and its instance. Two instances of one
+/// path are two broadcasts, and a copy of one never serves the other.
+pub(super) type Cast = (Id, Path, u64);
+
+/// A relay's demand for one broadcast, and where it pulls it from.
+#[derive(Clone, Debug, Default)]
+struct Carry {
+	/// A reader of its own, such as a session that forwards nothing: the relay
+	/// carries a copy, and offers it.
+	reader: bool,
+	/// Each neighbour's subscription streams that arrived and were not cancelled. A
+	/// neighbour that moves back here opens a new stream, which can arrive before the
+	/// old one's cancel.
+	downstream: BTreeMap<Node, BTreeSet<u64>>,
+	/// The neighbour it pulls through, and whether that joins a copy.
+	parent: Option<(Node, bool)>,
+	/// The stream of the pull through `parent`.
+	stream: u64,
+	/// Demand is gone, and the copy stays until the linger runs out.
+	lingering: bool,
+}
+
+/// The draft's Rendezvous Hash of a broadcast's path and a relay, which ranks two
+/// neighbours offering each other a copy.
+pub(super) fn rendezvous(path: &Path, node: Id) -> u64 {
+	let mut hash: u64 = 0x420C_0DEC_B00B;
+	for byte in path.as_str().bytes().chain(node.to_le_bytes()) {
+		hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+	}
+	hash
+}
+
+/// A copy of a broadcast offered to a neighbour: the path it took from its
+/// publisher, its cost from its carrier, and its carrier.
+pub(super) type Offer = (Arc<[Hop]>, Metric, Id);
 
 /// A copy of a broadcast a neighbour offers.
 #[derive(Clone, Debug)]
@@ -238,7 +274,7 @@ pub(super) struct Source {
 	pub path: Arc<[Hop]>,
 	/// Whether it joins a copy, rather than follow the publisher's route.
 	pub warm: bool,
-	/// The relay carrying that copy.
+	/// That copy's carrier.
 	pub carrier: Id,
 }
 
@@ -270,9 +306,23 @@ pub(super) struct Relay {
 	/// With a timer in place of epochs: when the doubt on each node lifts.
 	until: BTreeMap<Id, u64>,
 	now: u64,
-	/// The broadcasts this relay has a reader for, so it carries a copy, each with
-	/// the neighbour it pulls from and whether that is a copy.
-	readers: BTreeMap<Cast, Option<(Node, bool)>>,
+	/// Each broadcast this relay has demand for, or still pulls while its linger runs.
+	carry: BTreeMap<Cast, Carry>,
+	/// Never sends or reads a copy: it pulls along its publisher's route alone, as
+	/// an endpoint that does not choose per broadcast.
+	pub legacy: bool,
+	/// Neighbours that sent GOAWAY: no pull joins, or stays on, their copies.
+	draining: BTreeSet<Node>,
+	/// The source last chosen for each broadcast, pulled or only offered on: its
+	/// neighbour, whether it is a copy, and that copy's carrier.
+	via: BTreeMap<Cast, (Node, bool, Id)>,
+	/// Subscription changes for the request streams: a pull, or a cancel, each on
+	/// its stream.
+	subs: Vec<(Node, Cast, u64, bool)>,
+	/// The last subscription stream opened.
+	streams: u64,
+	/// A pull moved from one neighbour to another.
+	pub moves: usize,
 	shown: BTreeMap<(Id, Path), (Rev, bool)>,
 	out: Vec<(Node, Msg)>,
 	events: Vec<(Id, Path, Kind)>,
@@ -309,7 +359,13 @@ impl Relay {
 			doubt: BTreeMap::new(),
 			until: BTreeMap::new(),
 			now: 0,
-			readers: BTreeMap::new(),
+			carry: BTreeMap::new(),
+			legacy: false,
+			draining: BTreeSet::new(),
+			via: BTreeMap::new(),
+			subs: Vec::new(),
+			streams: 0,
+			moves: 0,
 			shown: BTreeMap::new(),
 			out: Vec::new(),
 			events: Vec::new(),
@@ -324,12 +380,13 @@ impl Relay {
 		std::mem::take(&mut self.events)
 	}
 
-	pub fn connect(&mut self, peer: Node, hop: Id, forwards: bool, cost: Metric) {
+	pub fn connect(&mut self, peer: Node, hop: Id, forwards: bool, reads: bool, cost: Metric) {
 		self.opened += 1;
 		let session = Session {
 			id: self.opened,
 			hop,
 			forwards,
+			reads,
 			cost,
 			rx: BTreeMap::new(),
 			tx: BTreeMap::new(),
@@ -357,6 +414,10 @@ impl Relay {
 		};
 		let lost = session.rx.keys().copied().collect();
 		let far = (session.hop, self.epochs.get(&session.hop).copied().unwrap_or(0));
+		self.draining.remove(&peer);
+		for carry in self.carry.values_mut() {
+			carry.downstream.remove(&peer);
+		}
 		if self.rules.epochs && session.forwards {
 			// This relay is still here, whatever its neighbour tells the others. A
 			// neighbour that passes nothing on tells nobody.
@@ -426,6 +487,8 @@ impl Relay {
 			}
 			Msg::End { id } => {
 				session.rx.remove(&id);
+				// A ROUTE_END retires the copies offered under the route.
+				session.copies.retain(|cast, _| cast.0 != id);
 				self.update(id);
 			}
 			Msg::Claims { id, changes, rev } => {
@@ -454,12 +517,14 @@ impl Relay {
 				self.warm(None);
 			}
 			Msg::Warm {
-				id,
-				claim,
+				cast,
 				path,
 				cost,
 				carrier,
 			} => {
+				if self.legacy {
+					return;
+				}
 				let dead = state(&self.dead, &path) == State::Dead;
 				let copy = Copy {
 					path,
@@ -467,12 +532,14 @@ impl Relay {
 					carrier,
 					dead,
 				};
-				session.copies.insert((id, claim), copy);
+				let id = cast.0;
+				session.copies.insert(cast, copy);
 				self.warm(Some(id));
 				self.collect();
 			}
-			Msg::Cold { id, claim } => {
-				session.copies.remove(&(id, claim));
+			Msg::Cold { cast } => {
+				let id = cast.0;
+				session.copies.remove(&cast);
 				self.warm(Some(id));
 				self.collect();
 			}
@@ -509,6 +576,7 @@ impl Relay {
 				} else if reported && rules.batch {
 					if gone || !rules.holds {
 						session.rx.remove(&id);
+						session.copies.retain(|cast, _| cast.0 != id);
 					} else if !child(&heard.path, me) {
 						heard.state = State::Held;
 					}
@@ -602,6 +670,7 @@ impl Relay {
 					Want::Keep => rest += 1,
 					Want::End => {
 						session.tx.remove(&id);
+						session.casts.retain(|cast, _| cast.0 != id);
 						ended.push(id);
 					}
 				}
@@ -644,40 +713,156 @@ impl Relay {
 	/// A reader for `cast` arrives at this relay, which carries a copy from now on.
 	pub fn carry(&mut self, cast: Cast) {
 		let id = cast.0;
-		self.readers.insert(cast, None);
+		self.carry.entry(cast).or_default().reader = true;
 		self.warm(Some(id));
 	}
 
 	/// The reader for `cast` leaves.
 	pub fn uncarry(&mut self, cast: &Cast) {
-		self.readers.remove(cast);
+		if let Some(carry) = self.carry.get_mut(cast) {
+			carry.reader = false;
+		}
 		self.warm(Some(cast.0));
 	}
 
-	/// Where this relay pulls `cast` from: the cheapest of its publisher's route and
-	/// any copy whose path does not name this relay. A tie goes to the copy. A relay
-	/// that already pulls it stays put unless the cheaper way is the publisher's
-	/// route, the same neighbour, or a copy whose carrier ranks below this relay.
+	/// A subscription for `cast` from `from` arrives on `stream`, or its cancel.
+	pub fn subscribed(&mut self, from: Node, cast: Cast, stream: u64, pull: bool) {
+		if !self.sessions.contains_key(&from) {
+			return;
+		}
+		let id = cast.0;
+		let carry = self.carry.entry(cast).or_default();
+		let streams = carry.downstream.entry(from).or_default();
+		match pull {
+			true => streams.insert(stream),
+			false => streams.remove(&stream),
+		};
+		if streams.is_empty() {
+			carry.downstream.remove(&from);
+		}
+		self.warm(Some(id));
+	}
+
+	/// `peer` sent GOAWAY: every pull on its copy moves off.
+	pub fn goaway(&mut self, peer: Node) {
+		if self.sessions.contains_key(&peer) && self.draining.insert(peer) {
+			self.warm(None);
+		}
+	}
+
+	/// The linger for `cast` runs out: a copy with no demand left goes.
+	pub fn expire(&mut self, cast: &Cast) {
+		if let Some(carry) = self.carry.get_mut(cast)
+			&& carry.lingering
+		{
+			carry.lingering = false;
+			if let Some((parent, _)) = carry.parent.take()
+				&& self.sessions.contains_key(&parent)
+			{
+				self.subs.push((parent, cast.clone(), carry.stream, false));
+			}
+		}
+		self.warm(Some(cast.0));
+	}
+
+	/// Where this relay pulls `cast` from: the cheapest of its next hop toward the
+	/// publisher and each copy offered. Pulling through the next hop goes wherever
+	/// that neighbour pulls: its copy when it offers one, else its own route. A copy
+	/// whose path names this relay, or a neighbour it serves, would loop.
+	///
+	/// A relay already on a copy, its own included, joins another, its next hop's
+	/// included, only if that copy's carrier ranks below, so copies crossing on their
+	/// way never trade places round any cycle. Off a copy, it is bound the same way by
+	/// the carriers of the neighbours that pull, or would pull, along its route, since
+	/// what it joins they take with it. Left with no source and no such neighbour, it
+	/// chooses afresh. It neither joins nor stays on a copy of a neighbour that sent
+	/// GOAWAY, unless that is its next hop's. A tie stays on the current source, then
+	/// goes to the copy.
 	pub fn source(&self, cast: &Cast) -> Option<Source> {
+		let carry = self.carry.get(cast);
+		let reader = carry.is_some_and(|carry| carry.reader);
+		let downstream = carry.map(|carry| &carry.downstream);
+		let serves: BTreeSet<Id> = (downstream.into_iter().flat_map(BTreeMap::keys))
+			.filter_map(|peer| self.sessions.get(peer))
+			.map(|session| session.hop)
+			.collect();
+		let via = self.via.get(cast).copied();
+		let pull = via.map(|(next, warm, _)| (next, warm));
+		let rank = |node: Id| rendezvous(&cast.1, node);
+		// The carrier of the copy this relay is on: the one it joins while that is still
+		// offered, or its own, pulled along the publisher's route for a reader.
+		let own = match via {
+			Some((next, true, carrier)) => (self.sessions.get(&next))
+				.and_then(|session| session.copies.get(cast))
+				.filter(|copy| copy.carrier == carrier)
+				.map(|_| carrier),
+			Some((_, false, _)) if reader => Some(self.hop),
+			_ => None,
+		};
+		let next = self
+			.routes
+			.get(&cast.0)
+			.and_then(|route| route.next.zip(route.path.clone()));
+		// Off a copy, the copies it would hand on are those of each neighbour that pulls
+		// through it, or would on its route, since that neighbour's next hop's copy is no
+		// choice: each offers its copy back along this relay's route. Joining another
+		// would hand each of them another carrier, so it joins only one that ranks below
+		// them all, and none until each that pulls through it has offered one: an offer
+		// along any other path is from before it took the route, and a neighbour that
+		// offers none may feed copies further on. `None` joins nothing it chooses.
+		let chosen: Option<Option<Id>> = match own {
+			Some(own) => Some(Some(own)),
+			None => (self.sessions.iter())
+				.filter_map(|(peer, session)| {
+					let pulls = downstream.is_some_and(|downstream| downstream.contains_key(peer));
+					let behind = (session.rx.get(&cast.0)).is_some_and(|heard| child(&heard.path, self.hop));
+					let fresh = (session.copies.get(cast))
+						.filter(|copy| next.as_ref().is_some_and(|(_, path)| copy.path.starts_with(path)))
+						.map(|copy| copy.carrier);
+					match fresh {
+						Some(carrier) if pulls || behind => Some(Some(carrier)),
+						None if pulls => Some(None),
+						_ => None,
+					}
+				})
+				.try_fold(None, |low: Option<Id>, carrier| {
+					let carrier = carrier?;
+					Some(Some(low.filter(|&low| rank(low) < rank(carrier)).unwrap_or(carrier)))
+				}),
+		};
 		let mut options = Vec::new();
-		options.extend(self.routes.get(&cast.0).and_then(|route| {
-			Some(Source {
-				next: route.next?,
-				cost: route.cost,
-				path: route.path.clone()?,
-				warm: false,
-				carrier: 0,
-			})
-		}));
-		let pull = self.readers.get(cast).copied().flatten();
 		for (&peer, session) in &self.sessions {
+			let hop = next.as_ref().filter(|(next, _)| *next == peer);
 			let Some(copy) = session.copies.get(cast) else {
+				options.extend(hop.map(|(next, path)| Source {
+					next: *next,
+					cost: self.routes[&cast.0].cost,
+					path: path.clone(),
+					warm: false,
+					carrier: 0,
+				}));
 				continue;
 			};
 			// As in `select`, doubt keeps a reader from moving to a copy, not on the one
 			// it pulls: that copy's own neighbour says when it goes.
 			let doubted = pull != Some((peer, true)) && self.doubted(&copy.path);
-			if copy.dead || names(&copy.path, self.hop) || doubted {
+			let loops = copy
+				.path
+				.iter()
+				.any(|hop| hop.node == self.hop || serves.contains(&hop.node));
+			if copy.dead || loops || doubted {
+				continue;
+			}
+			let ranked = |on: Id| copy.carrier == on || rank(copy.carrier) < rank(on);
+			let on = match hop {
+				Some(_) => Some(own),
+				None => chosen,
+			};
+			if self.rules.ranked && !on.is_some_and(|on| on.is_none_or(ranked)) {
+				continue;
+			}
+			// The next hop's copy is where its route leads; any other is a choice.
+			if hop.is_none() && self.draining.contains(&peer) {
 				continue;
 			}
 			let Some(cost) = copy.cost.checked_add(session.cost) else {
@@ -696,37 +881,82 @@ impl Relay {
 				carrier: copy.carrier,
 			});
 		}
-		let pull = pull.filter(|pull| options.iter().any(|source| (source.next, source.warm) == *pull));
-		let rank = |node: Id| fnv(cast.1.as_str(), &[cast.0, node]);
-		let free = |source: &Source| match pull {
-			Some((next, _)) if self.rules.ranked => {
-				!source.warm || source.next == next || rank(source.carrier) < rank(self.hop)
-			}
-			_ => true,
-		};
-		(options.into_iter())
-			.filter(free)
-			.min_by_key(|source| (source.cost, !source.warm, source.next))
+		(options.into_iter()).min_by_key(|source| {
+			let stay = pull == Some((source.next, source.warm));
+			(source.cost, !stay, !source.warm, source.next)
+		})
 	}
 
-	/// What this relay offers its neighbours for `cast`: its own copy at no cost, or
-	/// a copy it would join, for as long as that is cheaper than the publisher's route.
-	fn copy(&self, cast: &Cast) -> Option<(Arc<[Hop]>, Metric, Id)> {
-		if self.own == Some(cast.0) || self.leaf {
+	/// What this relay offers its neighbours for `cast`, under its route to the
+	/// publisher: a copy it would join, at what joining it costs, for as long as that
+	/// is cheaper than the publisher's route, or else, with a reader of its own, the
+	/// copy it pulls along the publisher's route at no cost. A copy's cost so rises
+	/// with every link from where it left the publisher's route.
+	fn copy(&self, cast: &Cast) -> Option<Offer> {
+		if self.own == Some(cast.0) || self.leaf || self.legacy {
 			return None;
 		}
+		self.routes.get(&cast.0)?.path.as_ref()?;
 		let source = self.source(cast)?;
-		match self.readers.contains_key(cast) {
+		match self.carry.get(cast).is_some_and(|carry| carry.reader) {
+			_ if source.warm => Some((source.path, source.cost, source.carrier)),
 			true => Some((source.path, 0, self.hop)),
-			false if source.warm => Some((source.path, source.cost, source.carrier)),
 			false => None,
 		}
 	}
 
-	/// Bring what each neighbour was offered up to date, for the copies of `id` or
-	/// for every copy. A neighbour is offered no copy whose path names it.
+	/// Follow the demand for `cast`: pull it from its source, move with the source,
+	/// and keep the pull while the linger runs once the demand is gone.
+	fn pull(&mut self, cast: &Cast) {
+		let source = self.source(cast);
+		match &source {
+			Some(source) => self
+				.via
+				.insert(cast.clone(), (source.next, source.warm, source.carrier)),
+			None => self.via.remove(cast),
+		};
+		let source = source.map(|source| (source.next, source.warm));
+		let Some(carry) = self.carry.get_mut(cast) else {
+			return;
+		};
+		let demand = carry.reader || !carry.downstream.is_empty();
+		if demand {
+			carry.lingering = false;
+		} else if carry.parent.is_some() {
+			carry.lingering = true;
+		}
+		let parent = source.filter(|_| demand || carry.lingering);
+		let old = std::mem::replace(&mut carry.parent, parent);
+		let (old, new) = (old.map(|(next, _)| next), parent.map(|(next, _)| next));
+		let stream = carry.stream;
+		if new.is_some() && old != new {
+			self.streams += 1;
+			carry.stream = self.streams;
+		}
+		if !demand && parent.is_none() {
+			self.carry.remove(cast);
+		}
+		if old == new {
+			return;
+		}
+		if let Some(old) = old
+			&& self.sessions.contains_key(&old)
+		{
+			self.subs.push((old, cast.clone(), stream, false));
+		}
+		if let Some(new) = new {
+			self.subs.push((new, cast.clone(), self.streams, true));
+		}
+		if old.is_some() && new.is_some() {
+			self.moves += 1;
+		}
+	}
+
+	/// Bring each pull, and what each neighbour was offered, up to date, for the
+	/// copies of `id` or for every copy. A neighbour that reads copies is offered this
+	/// relay's, even one whose path names it, under the route it was sent.
 	fn warm(&mut self, id: Option<Id>) {
-		let mut casts: BTreeSet<Cast> = self.readers.keys().cloned().collect();
+		let mut casts: BTreeSet<Cast> = self.carry.keys().cloned().collect();
 		for session in self.sessions.values() {
 			casts.extend(session.copies.keys().cloned());
 			casts.extend(session.casts.keys().cloned());
@@ -735,26 +965,40 @@ impl Relay {
 			if id.is_some_and(|id| id != cast.0) {
 				continue;
 			}
-			let pull = self.source(&cast).map(|source| (source.next, source.warm));
-			if let Some(reader) = self.readers.get_mut(&cast) {
-				*reader = pull;
+			// What this relay offers decides which offers it may join, so the two settle
+			// together: joining a neighbour's copy only ends what it offers that neighbour.
+			for _ in 0..4 {
+				self.pull(&cast);
+				if !self.offer(&cast) {
+					break;
+				}
 			}
+		}
+	}
+
+	/// Bring what each neighbour was offered for `cast` up to date. Whether anything changed.
+	fn offer(&mut self, cast: &Cast) -> bool {
+		let mut changed = false;
+		{
+			let cast = cast.clone();
 			let copy = self.copy(&cast);
 			let peers: Vec<Node> = self.sessions.keys().copied().collect();
 			for peer in peers {
 				let session = &self.sessions[&peer];
-				let want = copy.clone().filter(|(path, ..)| !names(path, session.hop));
+				// Even a copy whose path names the neighbour: it tells the neighbour that
+				// pulling through this relay leads back to it.
+				let routed = session.tx.contains_key(&cast.0) && session.reads;
+				let want = copy.clone().filter(|_| routed);
 				if session.casts.get(&cast) == want.as_ref() {
 					continue;
 				}
-				let (id, claim) = cast.clone();
+				changed = true;
 				match want {
 					Some((path, cost, carrier)) => {
 						let session = self.sessions.get_mut(&peer).unwrap();
 						session.casts.insert(cast.clone(), (path.clone(), cost, carrier));
 						let msg = Msg::Warm {
-							id,
-							claim,
+							cast: cast.clone(),
 							path: path.clone(),
 							cost,
 							carrier,
@@ -764,11 +1008,60 @@ impl Relay {
 					}
 					None => {
 						self.sessions.get_mut(&peer).unwrap().casts.remove(&cast);
-						self.out.push((peer, Msg::Cold { id, claim }));
+						self.out.push((peer, Msg::Cold { cast: cast.clone() }));
 					}
 				}
 			}
 		}
+		changed
+	}
+
+	pub fn drain_subs(&mut self) -> Vec<(Node, Cast, u64, bool)> {
+		std::mem::take(&mut self.subs)
+	}
+
+	/// The neighbour this relay pulls `cast` through, if it pulls it.
+	pub fn parent(&self, cast: &Cast) -> Option<Node> {
+		self.carry.get(cast)?.parent.map(|(next, _)| next)
+	}
+
+	pub fn reading(&self, cast: &Cast) -> bool {
+		self.carry.get(cast).is_some_and(|carry| carry.reader)
+	}
+
+	pub fn downstream(&self, cast: &Cast) -> BTreeSet<Node> {
+		self.carry
+			.get(cast)
+			.map(|carry| carry.downstream.keys().copied().collect())
+			.unwrap_or_default()
+	}
+
+	/// The subscription streams for `cast` that arrived and were not cancelled.
+	pub fn streams(&self, cast: &Cast) -> usize {
+		(self.carry.get(cast)).map_or(0, |carry| carry.downstream.values().map(BTreeSet::len).sum())
+	}
+
+	/// Whether the copy of `cast` stays only while its linger runs.
+	pub fn lingering(&self, cast: &Cast) -> bool {
+		self.carry.get(cast).is_some_and(|carry| carry.lingering)
+	}
+
+	/// The broadcasts this relay pulls while its linger runs.
+	pub fn lingers(&self) -> Vec<Cast> {
+		(self.carry.iter())
+			.filter(|(_, carry)| carry.lingering)
+			.map(|(cast, _)| cast.clone())
+			.collect()
+	}
+
+	/// The copy of `cast` this relay offers `peer`, and the one `peer` offers it.
+	pub fn offers(&self, peer: Node, cast: &Cast) -> (Option<Offer>, Option<Offer>) {
+		let Some(session) = self.sessions.get(&peer) else {
+			return (None, None);
+		};
+		let sent = session.casts.get(cast).cloned();
+		let heard = (session.copies.get(cast)).map(|copy| (copy.path.clone(), copy.cost, copy.carrier));
+		(sent, heard)
 	}
 
 	/// Forget each dead hop no neighbour's route names any more.
@@ -1003,6 +1296,7 @@ impl Relay {
 				}
 				Want::End => {
 					if session.tx.remove(&id).is_some() {
+						session.casts.retain(|cast, _| cast.0 != id);
 						self.out.push((peer, Msg::End { id }));
 					}
 					continue;
@@ -1117,6 +1411,8 @@ pub(super) struct PathStats {
 	pub claim_items: usize,
 	/// Copy offers and their ends, also counted as route messages.
 	pub warm_msgs: usize,
+	/// Subscriptions and their cancels.
+	pub subscribes: usize,
 	pub delivered: usize,
 }
 
@@ -1126,7 +1422,13 @@ pub(super) struct PathSim {
 	links: Vec<Vec<Option<Metric>>>,
 	up: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
+	/// Subscriptions, each on a stream of its own, unordered against the routes and
+	/// each other: true pulls, false cancels.
+	subs: BTreeMap<(Node, Node, Cast, u64), VecDeque<bool>>,
+	held: BTreeSet<(Node, Node)>,
 	pub stats: PathStats,
+	/// Copy offers and their ends sent per broadcast.
+	pub warm: BTreeMap<Cast, usize>,
 	pub events: Vec<(Node, Id, String, Kind)>,
 }
 
@@ -1137,7 +1439,10 @@ impl PathSim {
 			links: vec![vec![None; nodes]; nodes],
 			up: BTreeSet::new(),
 			queues: BTreeMap::new(),
+			subs: BTreeMap::new(),
+			held: BTreeSet::new(),
 			stats: PathStats::default(),
+			warm: BTreeMap::new(),
 			events: Vec::new(),
 		}
 	}
@@ -1168,7 +1473,8 @@ impl PathSim {
 			let cost = self.links[x][y].expect("a configured link");
 			let peer = hop(y, 0);
 			let forwards = !self.nodes[y].leaf;
-			self.nodes[x].connect(y, peer, forwards, cost);
+			let reads = forwards && !self.nodes[y].legacy;
+			self.nodes[x].connect(y, peer, forwards, reads, cost);
 		}
 		self.flush();
 	}
@@ -1181,9 +1487,17 @@ impl PathSim {
 		self.up.remove(&Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
+			self.subs.retain(|(from, to, ..), _| (*from, *to) != (x, y));
+			self.held.remove(&(x, y));
 			self.nodes[y].disconnect(x);
 		}
 		self.flush();
+	}
+
+	fn peers(&self, node: Node) -> Vec<Node> {
+		(0..self.nodes.len())
+			.filter(|&peer| self.links[node][peer].is_some() && self.connected(node, peer))
+			.collect()
 	}
 
 	pub fn originate(&mut self, node: Node, id: Id) {
@@ -1196,20 +1510,75 @@ impl PathSim {
 		self.flush();
 	}
 
-	/// A reader for `claim` of `id` arrives at `node`.
-	pub fn carry(&mut self, node: Node, id: Id, claim: &str) {
-		self.nodes[node].carry((id, p(claim)));
+	/// A reader for `cast` arrives at `node`.
+	pub fn carry(&mut self, node: Node, cast: &Cast) {
+		self.nodes[node].carry(cast.clone());
 		self.flush();
 	}
 
-	pub fn uncarry(&mut self, node: Node, id: Id, claim: &str) {
-		self.nodes[node].uncarry(&(id, p(claim)));
+	pub fn uncarry(&mut self, node: Node, cast: &Cast) {
+		self.nodes[node].uncarry(cast);
 		self.flush();
 	}
 
-	/// Where `node` pulls `claim` of `id` from.
-	pub fn source(&self, node: Node, id: Id, claim: &str) -> Option<Source> {
-		self.nodes[node].source(&(id, p(claim)))
+	/// `node` sends GOAWAY on every session.
+	pub fn goaway(&mut self, node: Node) {
+		for peer in self.peers(node) {
+			self.nodes[peer].goaway(node);
+		}
+		self.flush();
+	}
+
+	/// The linger for `cast` runs out at `node`.
+	pub fn expire(&mut self, node: Node, cast: &Cast) {
+		self.nodes[node].expire(cast);
+		self.flush();
+	}
+
+	pub fn hold(&mut self, from: Node, to: Node) {
+		self.held.insert((from, to));
+	}
+
+	pub fn release(&mut self, from: Node, to: Node) {
+		self.held.remove(&(from, to));
+	}
+
+	/// The subscription streams with a change to deliver, held or not.
+	pub fn pending_subs(&self) -> Vec<(Node, Node, Cast, u64)> {
+		self.subs.keys().cloned().collect()
+	}
+
+	/// The subscription streams with a change to deliver that are not held.
+	pub fn busy_subs(&self) -> Vec<(Node, Node, Cast, u64)> {
+		(self.subs.keys())
+			.filter(|(from, to, ..)| !self.held.contains(&(*from, *to)))
+			.cloned()
+			.collect()
+	}
+
+	/// Deliver the next change on the oldest stream of `cast`'s subscriptions from
+	/// `from` to `to`.
+	pub fn deliver_sub(&mut self, from: Node, to: Node, cast: &Cast) -> bool {
+		let stream = (self.subs.keys()).find(|key| (key.0, key.1, &key.2) == (from, to, cast));
+		match stream.map(|key| key.3) {
+			Some(stream) => self.deliver_stream(from, to, cast, stream),
+			None => false,
+		}
+	}
+
+	/// Deliver the next change on one subscription stream from `from` to `to`.
+	pub fn deliver_stream(&mut self, from: Node, to: Node, cast: &Cast, stream: u64) -> bool {
+		let key = (from, to, cast.clone(), stream);
+		let Some(pull) = self.subs.get_mut(&key).and_then(VecDeque::pop_front) else {
+			return false;
+		};
+		if self.subs[&key].is_empty() {
+			self.subs.remove(&key);
+		}
+		self.nodes[to].subscribed(from, cast.clone(), stream, pull);
+		self.stats.delivered += 1;
+		self.flush();
+		true
 	}
 
 	/// One hop of delay passes at every node. Whether any still waits on a timer.
@@ -1222,10 +1591,10 @@ impl PathSim {
 		waiting
 	}
 
-	/// The queues with a message to deliver.
+	/// The queues with a message to deliver that are not held.
 	pub fn busy(&self) -> Vec<(Node, Node)> {
 		(self.queues.iter())
-			.filter(|(_, queue)| !queue.is_empty())
+			.filter(|(key, queue)| !queue.is_empty() && !self.held.contains(key))
 			.map(|(key, _)| *key)
 			.collect()
 	}
@@ -1240,15 +1609,19 @@ impl PathSim {
 		true
 	}
 
-	/// Deliver round-robin until every queue is empty, or give up.
+	/// Deliver round-robin until every unheld queue, subscriptions included, is
+	/// empty, or give up.
 	pub fn run(&mut self) -> bool {
 		for _ in 0..10_000 {
-			let ready = self.busy();
-			if ready.is_empty() {
+			let (ready, subs) = (self.busy(), self.busy_subs());
+			if ready.is_empty() && subs.is_empty() {
 				return true;
 			}
 			for (from, to) in ready {
 				self.deliver(from, to);
+			}
+			for (from, to, cast, stream) in subs {
+				self.deliver_stream(from, to, &cast, stream);
 			}
 		}
 		false
@@ -1262,10 +1635,11 @@ impl PathSim {
 						self.stats.route_msgs += 1;
 						self.stats.route_items += 1;
 					}
-					Msg::Warm { .. } | Msg::Cold { .. } => {
+					Msg::Warm { cast, .. } | Msg::Cold { cast } => {
 						self.stats.route_msgs += 1;
 						self.stats.route_items += 1;
 						self.stats.warm_msgs += 1;
+						*self.warm.entry(cast.clone()).or_default() += 1;
 					}
 					Msg::Dead { moved, .. } => {
 						self.stats.route_msgs += 1;
@@ -1277,6 +1651,10 @@ impl PathSim {
 					}
 				}
 				self.queues.entry((node, to)).or_default().push_back(msg);
+			}
+			for (to, cast, stream, pull) in self.nodes[node].drain_subs() {
+				self.stats.subscribes += 1;
+				self.subs.entry((node, to, cast, stream)).or_default().push_back(pull);
 			}
 			for (id, claim, kind) in self.nodes[node].events() {
 				self.events.push((node, id, claim.as_str().to_string(), kind));

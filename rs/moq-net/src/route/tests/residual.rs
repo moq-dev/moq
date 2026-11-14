@@ -102,10 +102,7 @@ fn a_relay_behind_a_scoped_neighbour_is_blind(rule: Rule) {
 		assert_eq!(sim.shows(node, 7, "b/x"), (!blind).then_some(true), "node {node}");
 	}
 	if rule == Rule::Distance {
-		let routes: Vec<Node> = (sim.babel(relay).eligible(7).into_iter())
-			.filter(|route| !route.tied)
-			.map(|route| route.next)
-			.collect();
+		let routes: Vec<Node> = sim.babel(relay).routes(7).into_iter().map(|(next, ..)| next).collect();
 		assert_eq!(routes, [narrow], "the wide neighbour is no route either");
 		return;
 	}

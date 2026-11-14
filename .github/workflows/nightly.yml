@@ -14,7 +14,7 @@ name: Nightly
 #
 # The `release-*` jobs are diff-independent because the release workflows only
 # ever run on a tag: a change that compiles under plain cargo can still break a
-# release artifact (crane vendors and stubs sources in ways cargo never does,
+# release artifact (the per-crate Nix build resolves features and filters sources itself,
 # the wheel builds in a manylinux container, the Kotlin/Swift/Go/Dart packages
 # link the FFI on every platform) and nothing notices until the tag is pushed.
 #

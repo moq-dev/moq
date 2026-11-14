@@ -24,7 +24,7 @@ This README's own work, after the children:
 
 - Confirm a scheduled run on `main` passes; never dispatch Nightly. Failures
   already owned elsewhere stay there: the audio near-zero p95 row belongs to
-  [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
+  [audio playout](/quest/m2/audio-playout/README.md), the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
   [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, and the paired bench
@@ -47,3 +47,15 @@ more children for the causes nothing owned. Dropped: one-night bench moves
 near the paired threshold (re-check if one repeats), a one-off
 `remote error: 52` in the browser bench smoke, and failures main or
 [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) already fixes.
+
+Decided 2026-11-13 (maintainer, /quest-plan), from the triage of run
+[43447849289](https://github.com/moq-dev/moq/actions/runs/43447849289): four
+more children, all in m0. Owned elsewhere: the fuzz build
+([moq-dev/moq#8657](https://github.com/moq-dev/moq/pull/8657)), the Python
+audit ([moq-dev/moq#8648](https://github.com/moq-dev/moq/pull/8648)), the size
+report's output ([moq-dev/moq#8654](https://github.com/moq-dev/moq/pull/8654)),
+the firefox resume ([resume sync](/quest/m0/interop-green/resume-sync.md)),
+and the chromium `av_lag` rows
+([output latency](/quest/m2/audio-playout/output-latency.md) and
+[congestion catch-up](/quest/m2/audio-playout/congestion-catch-up.md)).
+

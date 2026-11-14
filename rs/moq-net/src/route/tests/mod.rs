@@ -11,7 +11,6 @@
 
 mod cache;
 mod compare;
-mod copies;
 mod handoff;
 mod paths;
 mod residual;
@@ -285,25 +284,6 @@ enum Msg {
 	Synced {
 		interest: u32,
 	},
-	/// A warm route for one of [`cache`]'s broadcasts, on the stream carrying the
-	/// sender's routes.
-	Warm {
-		broadcast: usize,
-		warm: Option<cache::Warm>,
-	},
-}
-
-/// A delivery the cache layer reacts to.
-#[derive(Clone, Copy, Debug)]
-enum Note {
-	Warm {
-		from: Node,
-		to: Node,
-		broadcast: usize,
-		warm: Option<cache::Warm>,
-	},
-	/// A ROUTE_END, which retires the warm routes under it.
-	Ended { from: Node, to: Node, id: Id },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -383,8 +363,6 @@ pub(super) struct Sim {
 	/// The work of routers a restart replaced.
 	spent: usize,
 	pub events: Vec<SimEvent>,
-	/// Deliveries the cache layer has yet to take.
-	notes: Vec<Note>,
 }
 
 impl Sim {
@@ -418,7 +396,6 @@ impl Sim {
 			stats: Stats::default(),
 			spent: 0,
 			events: Vec::new(),
-			notes: Vec::new(),
 		}
 	}
 
@@ -771,13 +748,7 @@ impl Sim {
 		};
 		let now = self.now;
 		match (&mut self.nodes[to], msg) {
-			(Relay::Distance(router), Msg::Route { id, reach }) => {
-				let ended = reach.is_none();
-				router.route(from, id, reach);
-				if ended {
-					self.notes.push(Note::Ended { from, to, id });
-				}
-			}
+			(Relay::Distance(router), Msg::Route { id, reach }) => router.route(from, id, reach),
 			(
 				Relay::Distance(router),
 				Msg::Batch {
@@ -796,13 +767,7 @@ impl Sim {
 					reach,
 					interest,
 				},
-			) => {
-				let ended = reach.is_none();
-				router.route(from, id, prefix, reach, interest);
-				if ended {
-					self.notes.push(Note::Ended { from, to, id });
-				}
-			}
+			) => router.route(from, id, prefix, reach, interest),
 			(
 				Relay::Path(router),
 				Msg::Claims {
@@ -815,12 +780,6 @@ impl Sim {
 			) => router.batch(from, id, prefix, changes, floor, interest),
 			(Relay::Path(router), Msg::Dead(dead)) => router.dead(from, dead, now),
 			(Relay::Path(router), Msg::Synced { interest }) => router.synced(from, interest),
-			(_, Msg::Warm { broadcast, warm }) => self.notes.push(Note::Warm {
-				from,
-				to,
-				broadcast,
-				warm,
-			}),
 			(_, msg) => panic!("node {to} cannot read {msg:?}"),
 		}
 		self.stats.delivered += 1;

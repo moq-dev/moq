@@ -78,6 +78,11 @@ fix *args:
     cargo hakari generate
     cargo sort --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
 
+# Regenerate nix/Cargo.nix, the per-crate Nix build, after a manifest or lock change.
+[positional-arguments]
+cargo-nix *args:
+    sh/rs/cargo-nix.sh "$@"
+
 # Like `check`, but only the crates in a changed-file list plus their dependents.
 check-changed $LIST:
     sh/rs/select.sh check "$LIST"
