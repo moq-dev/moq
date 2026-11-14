@@ -954,12 +954,14 @@ async function connectWebSocket(
 	cancel: Promise<void>,
 	options: QmuxOptions,
 ): Promise<Qmux | undefined> {
-	// qmux loads on demand, since most sessions win over WebTransport; fetch it during the head
-	// start so the fallback dials as soon as it would have.
-	const loaded = Promise.all([import("@moq/qmux"), sleep(delay)]);
-	const qmux = await race([cancel, loaded]);
+	const active = await race([cancel, sleep(delay).then(() => true)]);
+	if (!active) return undefined;
+
+	// qmux loads only once the fallback dials, so a session WebTransport wins within its head
+	// start never downloads it.
+	const qmux = await race([cancel, import("@moq/qmux")]);
 	if (!qmux) return undefined;
-	const [{ Session }] = qmux;
+	const { Session } = qmux;
 
 	for (let wait = WEBSOCKET_REDIAL; ; wait = wait.mul(2)) {
 		const quic = new Session(url, options);
