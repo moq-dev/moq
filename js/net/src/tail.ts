@@ -1,7 +1,7 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { READER_RUN_OVERHEAD, type Reader } from "./cache.ts";
-import { insertRun, type Run, runGaps } from "./internal.ts";
+import { insertRun, type Run, runGaps, runsFrom } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
 import { max, min } from "./util/sequence.ts";
 
@@ -58,7 +58,11 @@ export class Tail {
 	// stale drop there for a group the ledger already accounted may be one its stream overtook, so
 	// the next update owes none of it again.
 	#folded?: Run;
-	// What `#finished` bills, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
+	// Sequences a final drop named, so a stream whose header the drop overtook can be told from one
+	// whose gap the grace gave up on. Under the pool's debt they fold into one span, which excuses
+	// more streams for at most the grace rather than forget a drop and hold the end forever.
+	#dropped: Run[] = [];
+	// What `#finished` and `#dropped` bill, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
 	// streams it finishes between updates costs what the cache would hold.
 	#bill?: Reader;
 
@@ -67,12 +71,27 @@ export class Tail {
 		this.#bill = options.bill;
 	}
 
-	// Bill what `#finished` keeps, and under the pool's debt fold it. Mirrors the Rust `Tail::rebill`.
+	// Bill what `#finished` and `#dropped` keep, and under the pool's debt fold them. Mirrors the Rust
+	// `Tail::rebill`, which keeps no `#dropped`.
 	#rebill(): void {
 		const bill = this.#bill;
 		if (!bill) return;
-		bill.set((this.#finished.length + (this.#folded ? 1 : 0)) * READER_RUN_OVERHEAD);
-		if (bill.debt > 0 && this.fold()) bill.set(2 * READER_RUN_OVERHEAD);
+		bill.set(this.#kept() * READER_RUN_OVERHEAD);
+		if (bill.debt <= 0) return;
+		const folded = this.fold();
+		if (this.#foldDropped() || folded) bill.set(this.#kept() * READER_RUN_OVERHEAD);
+	}
+
+	// Fold the dropped runs into the one span they reach, returning whether there was more than one.
+	#foldDropped(): boolean {
+		const dropped = this.#dropped;
+		if (dropped.length < 2) return false;
+		this.#dropped = [{ start: dropped[0].start, end: dropped[dropped.length - 1].end }];
+		return true;
+	}
+
+	#kept(): number {
+		return this.#finished.length + (this.#folded ? 1 : 0) + this.#dropped.length;
 	}
 
 	/**
@@ -95,6 +114,7 @@ export class Tail {
 	close(): void {
 		this.#finished = [];
 		this.#folded = undefined;
+		this.#dropped = [];
 		// A stream still in flight finishes after this: with no bill, it can never bill again.
 		this.#bill?.close();
 		this.#bill = undefined;
@@ -213,6 +233,19 @@ export class Tail {
 	/** Record sequences `[start, end)` as accounted for without a stream: dropped, or a datagram. */
 	account(start: bigint, end: bigint): void {
 		this.#account(start, end);
+	}
+
+	/** Record `[start, end)` as given up by a final drop, accounting for it. */
+	drop(start: bigint, end: bigint): void {
+		insertRun(this.#dropped, start, end);
+		this.#rebill();
+		this.#account(start, end);
+	}
+
+	/** Whether a final drop named `sequence`, or a fold under the pool's debt spans it. */
+	dropped(sequence: bigint): boolean {
+		const run = this.#dropped[runsFrom(this.#dropped, sequence)];
+		return run !== undefined && run.start <= sequence;
 	}
 
 	/** Owe `[start, end)` again: a stale drop that accounted for it was reversed by a widening. */

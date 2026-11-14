@@ -1387,10 +1387,6 @@ export class Producer {
 			return runs;
 		};
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
-		hooks.trackDropped = (producer, sequence) => {
-			const run = producer.#state.drops.at(sequence);
-			return run !== undefined && !run.skip && run.stale === undefined;
-		};
 		hooks.supersedeStale = (producer, judged) => {
 			const held = producer.#state.drops.all
 				.filter((run) => run.stale !== undefined)

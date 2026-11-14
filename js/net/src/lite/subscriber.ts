@@ -2800,6 +2800,8 @@ export class Subscriber {
 				const cause = resp.drop.cause(this.version);
 				// A paused group the drop names ends there: no continuation follows.
 				this.#dropPaused(entry, start, end, cause);
+				// Final, so a stream it overtook is told from one whose gap the grace gave up on.
+				entry.tail.drop(start, end);
 				giveUp(start, end, dropped(cause));
 			} else if ("skip" in resp) {
 				// Never produced: final, as the subscription feeding the copy records it.
@@ -3088,7 +3090,9 @@ export class Subscriber {
 				// Asked before this drop is accounted: what a fold forgot finishing that the ledger
 				// already accounted may be a stream this drop overtook.
 				const overtaken = stale ? entry.tail.overtaken(start, end) : [];
-				entry.tail.account(start, end);
+				// Lite-07 tells a stream a final drop overtook from one whose gap the grace gave up on.
+				if (!stale && hasYield(this.version)) entry.tail.drop(start, end);
+				else entry.tail.account(start, end);
 				// A paused group the drop names ends there: no continuation follows.
 				this.#dropPaused(entry, start, end, error, stale ? update : undefined);
 				// Judged under the budget this subscriber sent with that update.
@@ -3449,9 +3453,8 @@ export class Subscriber {
 		const yields = hasYield(this.version);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.sequence, group.sequence + 1n);
-		// Asked before this stream takes the group, which forgets the drop: a final drop that
-		// overtook this stream, rather than a gap the grace gave up on.
-		const dropped = !owed && yields && hooks.trackDropped(track, group.sequence);
+		// A final drop that overtook this stream, rather than a gap the grace gave up on.
+		const dropped = !owed && tail.dropped(group.sequence);
 		// A stale drop that overtook this stream: the next update supersedes that verdict, so a
 		// YIELDED reset after it pauses the group.
 		const unowedUnder =

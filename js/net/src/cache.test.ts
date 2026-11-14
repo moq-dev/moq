@@ -453,6 +453,30 @@ test("a tail forgets its finished streams under debt", () => {
 	tail.close();
 });
 
+// A tail's fragmented final drops bill its track's account too. Under the pool's debt they fold into
+// the one span they reach, which still names every dropped sequence, so a stream a drop overtook is
+// never held as owed, and the gaps between them are excused at worst.
+test("a tail folds its final drops under debt", () => {
+	const runs = 4000n;
+	const pool = new cache.Pool({ capacity: 1 << 30 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const tail = new Tail({ bill: hooks.billTrack(producer) });
+	for (let run = 0n; run < runs; run++) tail.drop(2n * run, 2n * run + 1n);
+	expect(tail.dropped(2n)).toBe(true);
+	expect(tail.dropped(3n)).toBe(false);
+	expect(pool.used).toBeGreaterThanOrEqual(Number(runs) * cache.READER_RUN_OVERHEAD);
+
+	const capacity = 64 * cache.RUN_OVERHEAD;
+	pool.resize(capacity);
+	for (let i = 0; i < 64; i++) finished(producer, 16 * 1024);
+	tail.drop(2n * runs, 2n * runs + 1n);
+	expect(pool.used).toBeLessThanOrEqual(capacity + 2 * (16 * 1024 + cache.ENTRY_OVERHEAD));
+	for (let run = 0n; run <= runs; run++) expect(tail.dropped(2n * run)).toBe(true);
+	expect(tail.dropped(2n * runs + 1n)).toBe(false);
+	tail.close();
+});
+
 // Whatever a bill frees pays its readers' debt, however it shrank, and the debt is forgiven once
 // the pool is back within its capacity. A closed tail never bills again. Mirrors Rust
 // `a_debt_is_paid_by_any_shrink_and_forgiven_without_pressure`.
