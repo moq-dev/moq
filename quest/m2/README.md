@@ -3,9 +3,8 @@
 ## Goal
 
 Every change that would need a semver-breaking release if it landed right
-after the next cut of `main` into `release`, plus the cut
-gate, which the [release cut](/quest/m3/release/cut.md) re-creates here each
-cycle. The cut waits on this milestone alone;
+after the next cut of `main` into `release`. The
+[release cut](/quest/m3/release/cut.md) waits on this milestone alone;
 complete it before cutting main into release.
 
 ## Plan
