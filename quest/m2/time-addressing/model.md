@@ -202,7 +202,7 @@ moq-transport-18, direct and through a relay, against a contiguous baseline
 
 Update `doc/concept`, the lite draft's legacy mapping, and the
 Rust half of every consumer the API change breaks to compile;
-[consumers](/quest/m2/time-addressing/consumers.md) and
+[consumers](/quest/m3/time-addressing-consumers.md) and
 [bindings](/quest/m2/time-addressing/bindings.md) own the behavior changes.
 Test the legacy mapping both ways on every wire, with the
 resume model (`rs/moq-net/src/model/resume_model.rs`,

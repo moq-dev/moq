@@ -229,6 +229,7 @@ export default defineConfig({
 								{ text: "@moq/clock", link: "/lib/js/clock" },
 								{ text: "@moq/json", link: "/lib/js/json" },
 								{ text: "@moq/stats", link: "/lib/js/api/stats" },
+								{ text: "@moq/obs", link: "/lib/js/api/obs" },
 								{ text: "API reference", link: "/lib/js/api/" },
 							],
 						},

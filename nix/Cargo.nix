@@ -18276,6 +18276,10 @@ rec {
             optional = true;
           }
           {
+            name = "rand";
+            packageId = "rand 0.10.3";
+          }
+          {
             name = "reqwest";
             packageId = "reqwest";
             usesDefaultFeatures = false;

@@ -4,7 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
-import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { type Hop, toHop, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -321,8 +321,8 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 });
 
 /** The Hop IDs a cluster-negotiated session declared, ours first. */
-const SELF: Hop = HopSchema.parse(7n);
-const PEER: Hop = HopSchema.parse(9n);
+const SELF: Hop = toHop(7n);
+const PEER: Hop = toHop(9n);
 
 /**
  * A peer that knows our Hop ID never advertises a path that already ran through us, so
@@ -491,7 +491,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 	await acceptSubscribeNamespace(pair.client);
 
 	// Published by 11, relayed by the peer. Every update keeps that publisher.
-	const publisher = HopSchema.parse(11n);
+	const publisher = toHop(11n);
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(
 		new PublishNamespace({
@@ -598,7 +598,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			params: { cluster: { hops: [HopSchema.parse(11n), PEER], cost: 0n } },
+			params: { cluster: { hops: [toHop(11n), PEER], cost: 0n } },
 		}),
 		request,
 	);
@@ -610,7 +610,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 	const held = subscriber.consume(Path.from("theirs"));
 
 	await peer.writer.u53(PublishNamespaceUpdate.id);
-	await new PublishNamespaceUpdate({ requestId: 3n, update: { hops: [HopSchema.parse(8n), PEER] } }).encode(
+	await new PublishNamespaceUpdate({ requestId: 3n, update: { hops: [toHop(8n), PEER] } }).encode(
 		peer.writer,
 		VERSION,
 	);
@@ -619,7 +619,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "update",
-		route: { hops: [HopSchema.parse(8n), PEER] },
+		route: { hops: [toHop(8n), PEER] },
 	});
 
 	expect(subscriber.consume(Path.from("theirs")).closed).toBe(held.closed);

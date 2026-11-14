@@ -156,7 +156,7 @@ Linux 6.14 up to the 7.3 fix (backported to stable kernels) charges rings to
 locked memory per user across processes, not per nextest run; other kernels
 charge them to the memory cgroup.
 Unit tests use 128 SQ entries and 512 CQ entries instead of the production
-256/2048 geometry. Integration tests still exercise production rings.
+256/1024 geometry. Integration tests still exercise production rings.
 The nextest group allows four ring tests per invocation. Each socket-queue
 benchmark axis occupies all four slots, excluding other ring tests while measuring.
 
@@ -164,7 +164,7 @@ Other programs draw on the same budget. libuv gives every event loop a
 256-entry ring of 28 KiB, and it creates these without checking
 `UV_USE_IO_URING`. A desktop running nine agent sessions held 4 to 5 MiB of an
 8 MiB limit before any test started, mostly in Node.js tool servers. A
-production-geometry worker takes 52 KiB and a unit-test worker 20 KiB.
+production-geometry worker takes 36 KiB and a unit-test worker 20 KiB.
 One `moq-uring` plus `moq-relay` test invocation needs about 0.5 to 1 MiB
 of what is left. Count the rings with `ls -l /proc/*/fd 2>/dev/null | grep -c io_uring`.
 

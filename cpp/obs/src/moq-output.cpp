@@ -135,6 +135,7 @@ bool MoQOutput::Start()
 	// OBS restarts a reconnecting output by calling start again with no stop in
 	// between, so drop whatever the previous attempt left behind.
 	Reset();
+	total_bytes_sent = 0;
 
 	obs_service_t *service = obs_output_get_service(output);
 	if (!service) {
@@ -667,7 +668,7 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 		return;
 	}
 
-	total_bytes_sent += packet->size;
+	total_bytes_sent.fetch_add(packet->size, std::memory_order_relaxed);
 }
 
 void MoQOutput::VideoData(struct encoder_packet *packet)
@@ -730,7 +731,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	}
 	track.started = true;
 
-	total_bytes_sent += packet->size;
+	total_bytes_sent.fetch_add(packet->size, std::memory_order_relaxed);
 }
 
 // NOTE: Caller must hold media_mutex.
