@@ -1707,10 +1707,16 @@ test.each(["continued", "dropped"] as const)("a reset without its code pauses th
 
 // Lite-07: Chromium can lose the reset of a Group Stream it has not handed to the page yet, which
 // leaves the stream open forever. A drop accounts for its group, so the subscription's end waits
-// for that stream at most the grace, whether the drop lands before or after its header.
-test.each(["before", "after"] as const)(
-	"a drop lets the end give up on a stream that never ends (drop %s its header)",
-	async (order) => {
+// for that stream at most the grace: a stale drop before or after its header, or a final one before
+// it, even once a later stale drop of the group expires. A final drop after it ends the read at once.
+test.each([
+	["stale", "before"],
+	["stale", "after"],
+	["final", "before"],
+	["final then stale", "before"],
+] as const)(
+	"a drop lets the end give up on a stream that never ends (%s drop %s its header)",
+	async (kind, order) => {
 		const clock = new Manual();
 		const installed = clock.install();
 		const version = Version.DRAFT_07;
@@ -1724,16 +1730,29 @@ test.each(["before", "after"] as const)(
 			await request.reading;
 			await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
 
-			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) };
-			if (order === "before") await respond(request, version, [drop]);
+			const error = kind === "stale" ? StreamCode.Old : StreamCode.NotFound;
+			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error }) };
+			if (order === "before") {
+				await respond(request, version, [drop]);
+				await drainReactions();
+			}
 			const lost = handStream(version);
 			lost.write(await liteFrame(0, new Uint8Array([1])));
 			void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), lost.reader);
 			const group = await track.recvGroup();
 			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 			if (order === "after") await respond(request, version, [drop]);
+			if (kind === "final then stale")
+				await respond(request, version, [
+					{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) },
+				]);
 			await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 			await drainReactions();
+			// The update expires the stale drop, but not the final one beneath it.
+			if (kind === "final then stale") {
+				track.update({ priority: 1 });
+				await drainReactions();
+			}
 
 			let fin = false;
 			void request.finished.then(() => {

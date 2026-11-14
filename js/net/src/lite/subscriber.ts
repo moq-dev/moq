@@ -297,17 +297,17 @@ type YieldVerdict =
 	| { kind: "accounted-stale"; under: bigint; error: Error }
 	| { kind: "dropped"; error: Error };
 
-// Whether a drop that still stands under `update` accounts for the group, so the subscription's
-// end waits for its stream at most the grace: a browser can lose that stream's reset.
+// Whether the group is accounted for under `update`, so the subscription's end waits for its
+// stream at most the grace: a browser can lose that stream's reset. Only a stale drop that overtook
+// nothing final expires; one over an accounted header falls back to it, as `yieldError` does.
 function excused(verdict: YieldVerdict, update: bigint): boolean {
 	switch (verdict.kind) {
-		case "dropped":
-			return true;
+		case "owed":
+			return false;
 		case "stale":
-		case "accounted-stale":
 			return verdict.under >= update;
 		default:
-			return false;
+			return true;
 	}
 }
 
