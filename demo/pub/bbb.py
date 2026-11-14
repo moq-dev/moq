@@ -85,44 +85,49 @@ def retime(source, target):
             duration = f"if(eq(N\\,{packet})\\,{length}\\,{duration})"
         filters += [f"-bsf:{index}", f"setts=ts={ts}:duration={duration}"]
     partial = target.with_suffix(".tmp.mp4")
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-nostdin",
-            "-y",
-            "-copyts",
-            "-i",
-            str(source),
-            "-map",
-            "0",
-            "-c",
-            "copy",
-            *filters,
-            "-f",
-            "mp4",
-            "-movflags",
-            "cmaf+separate_moof+delay_moov+skip_trailer",
-            "-frag_duration",
-            "1000",
-            str(partial),
-        ],
-        check=True,
-    )
-    retimed = probe(partial)
-    strict(partial, retimed)
-    for stream in media["streams"]:
-        before = [p["pts"] for p in packets(media, stream)]
-        after = [p["pts"] for p in packets(retimed, stream)]
-        changed = {index: b for index, (a, b) in enumerate(zip(before, after)) if a != b}
-        expected = {index: value for index, (value, _) in moves[stream["index"]].items()}
-        assert len(before) == len(after) and changed == expected, "Retiming moved other packets"
-    assert [s["duration_ts"] for s in retimed["streams"]] == [s["duration_ts"] for s in media["streams"]], (
-        "Retiming changed a stream's duration"
-    )
-    os.replace(partial, target)
+    # `just pub sync` uploads all of media/, so a rejected remux must not stay there.
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-nostdin",
+                "-y",
+                "-copyts",
+                "-i",
+                str(source),
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                *filters,
+                "-f",
+                "mp4",
+                "-movflags",
+                "cmaf+separate_moof+delay_moov+skip_trailer",
+                "-frag_duration",
+                "1000",
+                str(partial),
+            ],
+            check=True,
+        )
+        retimed = probe(partial)
+        strict(partial, retimed)
+        for stream in media["streams"]:
+            before = [p["pts"] for p in packets(media, stream)]
+            after = [p["pts"] for p in packets(retimed, stream)]
+            changed = {index: b for index, (a, b) in enumerate(zip(before, after)) if a != b}
+            expected = {index: value for index, (value, _) in moves[stream["index"]].items()}
+            assert len(before) == len(after) and changed == expected, "Retiming moved other packets"
+        assert [s["duration_ts"] for s in retimed["streams"]] == [s["duration_ts"] for s in media["streams"]], (
+            "Retiming changed a stream's duration"
+        )
+        os.replace(partial, target)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def check(source, target):
