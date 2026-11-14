@@ -708,6 +708,19 @@ pub struct MappedResource<'a, T> {
 	pitch: u32,
 }
 
+impl<T> MappedResource<'_, T> {
+	/// Unmap now, reporting a failure that dropping would swallow.
+	///
+	/// # Errors
+	///
+	/// Could error if the driver cannot unmap the resource. NVENC may then
+	/// still hold it, so the registration and its allocation are leaked and
+	/// the allocation must not be written again.
+	pub fn unmap(self) -> Result<(), EncodeError> {
+		self.mapped.unmap()
+	}
+}
+
 /// A registered external resource plus the owner keeping its allocation alive.
 #[derive(Debug)]
 struct Registration<A: ResourceApi, T> {
@@ -773,15 +786,26 @@ impl<A: ResourceApi, T> Mapped<'_, A, T> {
 		let registration = unsafe { ptr::read(&this.registration) };
 		registration.leaked = true;
 	}
+
+	fn unmap(self) -> Result<(), EncodeError> {
+		let mut this = ManuallyDrop::new(self);
+		this.release()
+	}
+
+	/// A failed unmap leaves the resource mapped. Unregistering or freeing it
+	/// could release memory NVENC still holds, so leak the owner instead.
+	fn release(&mut self) -> Result<(), EncodeError> {
+		let result = self.registration.api.unmap_input_resource(self.map_ptr);
+		if result.is_err() {
+			self.registration.leaked = true;
+		}
+		result
+	}
 }
 
 impl<A: ResourceApi, T> Drop for Mapped<'_, A, T> {
 	fn drop(&mut self) {
-		// A failed unmap leaves the resource mapped. Unregistering or freeing
-		// it could release memory NVENC still holds, so leak the owner instead.
-		if self.registration.api.unmap_input_resource(self.map_ptr).is_err() {
-			self.registration.leaked = true;
-		}
+		let _ = self.release();
 	}
 }
 
@@ -981,7 +1005,12 @@ mod tests {
 		api.unmap_error = Some(ErrorKind::ResourceNotMapped);
 
 		let mut registration = register(&api, owner).expect("registration should succeed");
-		drop(registration.map().expect("mapping should succeed"));
+		let error = registration
+			.map()
+			.expect("mapping should succeed")
+			.unmap()
+			.expect_err("unmapping should fail");
+		assert_eq!(error.kind(), ErrorKind::ResourceNotMapped);
 		drop(registration);
 
 		assert!(alive.get(), "a possibly mapped allocation must remain owned");

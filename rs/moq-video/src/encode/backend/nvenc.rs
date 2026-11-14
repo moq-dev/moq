@@ -332,11 +332,15 @@ impl Backend for Nvenc {
 		// guarantees NVENC is done reading the input, so releasing the input
 		// first would race the encoder.
 		let data = if let Some(gpu) = gpu {
-			let target = match self.target.take() {
+			// Held locally and put back only after a clean encode: NVENC may
+			// still read a target whose completion or unmap failed, so any failure
+			// drops it instead and it is never written again (such a registration
+			// leaks its allocation rather than free it). The next frame gets a new
+			// target.
+			let mut target = match self.target.take() {
 				Some(target) => target,
 				None => Target::new(&self.session, &self.cuda, self.size)?,
 			};
-			let target = self.target.insert(target);
 			// Written only while unmapped, and finished before mapping: NVENC
 			// orders only against the default stream, which the target avoids.
 			target.buffer.fill(gpu)?;
@@ -348,8 +352,12 @@ impl Backend for Nvenc {
 				.session
 				.encode_picture(mapped, output, params)
 				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-			let (data, _mapped, output) = drain_output(submission)?;
+			let (data, mapped, output) = drain_output(submission)?;
 			self.output = Some(output);
+			mapped
+				.unmap()
+				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC unmap CUDA input: {e}")))?;
+			self.target = Some(target);
 			data
 		} else {
 			// Everything else goes through a CPU NV12 input buffer.

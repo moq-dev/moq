@@ -81,9 +81,9 @@ pub(crate) struct Reservation<A: Alloc>(Held<A>);
 
 impl<A: Alloc> Reservation<A> {
 	/// A buffer of at least `len` bytes: the smallest idle one that fits, else a
-	/// fresh allocation, freeing an idle one too small for the job when a
-	/// bounded pool is at capacity. Only a failed allocation is an error, and
-	/// it releases the reservation.
+	/// fresh allocation replacing the smallest idle one, all too small for the
+	/// job, so the pool never holds more buffers than were ever live at once.
+	/// Only a failed allocation is an error, and it releases the reservation.
 	pub(crate) fn fill(self, len: usize) -> Result<Lease<A>, Error> {
 		let mut held = self.0;
 		let pool = &held.pool;
@@ -98,20 +98,14 @@ impl<A: Alloc> Reservation<A> {
 		let buffer = match fits {
 			Some(index) => state.idle.swap_remove(index),
 			None => {
-				// `live` counts this reservation, so an idle buffer exists
-				// whenever the two together exceed capacity.
-				if pool
-					.capacity
-					.is_some_and(|capacity| state.live + state.idle.len() > capacity.get())
-				{
-					let smallest = state
-						.idle
-						.iter()
-						.enumerate()
-						.min_by_key(|(_, (have, _))| *have)
-						.map(|(index, _)| index)
-						.expect("an idle buffer exists past capacity");
-					state.idle.swap_remove(smallest);
+				let smallest = state
+					.idle
+					.iter()
+					.enumerate()
+					.min_by_key(|(_, (have, _))| *have)
+					.map(|(index, _)| index);
+				if let Some(index) = smallest {
+					state.idle.swap_remove(index);
 				}
 				(len, pool.alloc.alloc(len)?)
 			}
@@ -228,6 +222,20 @@ mod tests {
 		assert_eq!(*medium, 50);
 		assert_eq!(*take(&pool, 40), 100, "the next fit, not a fresh allocation");
 		assert_eq!(pool.alloc.0.load(Ordering::Relaxed), 3);
+	}
+
+	#[test]
+	fn an_unbounded_pool_replaces_buffers_it_outgrows() {
+		let pool = Arc::new(Pool::new(Counting(AtomicUsize::new(0)), None));
+		let _live = take(&pool, 10);
+		for len in 11..100 {
+			drop(take(&pool, len));
+		}
+		assert_eq!(
+			pool.state.lock().unwrap().idle.len(),
+			1,
+			"one buffer was ever idle at once"
+		);
 	}
 
 	#[test]
