@@ -36,7 +36,7 @@ import {
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { readSize, sendPayload } from "../payload.ts";
+import { readSize, sendPayload, sendPayloadFrom } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
@@ -279,7 +279,10 @@ type ServeGroup = {
 };
 
 /** What serving fetched frames needs beyond the group and destination stream. */
-type ServeFetch = Omit<ServeGroup, "sub">;
+type ServeFetch = Omit<ServeGroup, "sub"> & {
+	/** The byte frame `start` is served from: only its rest follows its full-size header. */
+	byte: number;
+};
 
 /** What the serving loop takes from the subscribe stream instead of serving a group. */
 type Control =
@@ -1415,6 +1418,7 @@ export class Publisher {
 					stamp: stamping(this.version, info),
 					compress: info.compress,
 					start: msg.startFrame,
+					byte: msg.startByte,
 					end: msg.endFrame,
 				});
 				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
@@ -2476,8 +2480,10 @@ export class Publisher {
 	async #runFetchGroup(
 		group: group.Consumer,
 		stream: Writer,
-		{ stamp, compress, start: startFrame, end: endFrame }: ServeFetch,
+		{ stamp, compress, start: startFrame, byte, end: endFrame }: ServeFetch,
 	) {
+		// A compressed frame inflates only from its first byte; no subscriber asks for less.
+		if (byte > 0 && compress) throw new Error("a compressed frame is served whole");
 		// The response carries no header, so the receiver numbers the first frame it gets
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
@@ -2502,11 +2508,14 @@ export class Publisher {
 				prevTs = ts;
 			}
 
-			await stream.write(
-				frameHeader(stream.version, delta, read.inflated, readSize(read), hasLengthFirst(this.version)),
-			);
-			if (read.chunks) await sendPayload(read.chunks, (chunk) => stream.write(chunk), stream.closed);
-			else if (frame.payload.length > 0) await stream.write(frame.payload);
+			// The first frame states its full size, then carries only the bytes from `byte`.
+			const skip = index === startFrame ? byte : 0;
+			const size = readSize(read);
+			// A non-zero start byte names a byte of the frame, so the rest is never empty.
+			if (skip > 0 && skip >= size) throw new Error(`fetch start byte ${skip} not within the frame's ${size}`);
+			await stream.write(frameHeader(stream.version, delta, read.inflated, size, hasLengthFirst(this.version)));
+			if (read.chunks) await sendPayloadFrom(read.chunks, skip, (chunk) => stream.write(chunk), stream.closed);
+			else if (frame.payload.length > skip) await stream.write(frame.payload.subarray(skip));
 		}
 	}
 

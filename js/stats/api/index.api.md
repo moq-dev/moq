@@ -26,6 +26,7 @@ export const BucketFrameSchema: ZodMiniObject<{
 			announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
 			received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			requests: ZodMiniDefault<ZodMiniNumber<number>>;
+			routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 			sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 			sessions_failed: ZodMiniPrefault<ZodMiniObject<{
@@ -113,6 +114,7 @@ export const BucketFrameSchema: ZodMiniObject<{
 			announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
 			received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			requests: ZodMiniDefault<ZodMiniNumber<number>>;
+			routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 			sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 			sessions_failed: ZodMiniPrefault<ZodMiniObject<{
@@ -167,6 +169,7 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
+		routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 		sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_failed: ZodMiniPrefault<ZodMiniObject<{
@@ -254,6 +257,7 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
+		routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 		sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_failed: ZodMiniPrefault<ZodMiniObject<{
@@ -609,6 +613,7 @@ export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPi
 	announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
 	received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	requests: ZodMiniDefault<ZodMiniNumber<number>>;
+	routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 	sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 	sessions_failed: ZodMiniPrefault<ZodMiniObject<{
@@ -635,6 +640,7 @@ export const PresenceSchema: ZodMiniPipe<ZodMiniTransform<unknown, unknown>, Zod
 	announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
 	received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	requests: ZodMiniDefault<ZodMiniNumber<number>>;
+	routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 	sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 	sessions_failed: ZodMiniPrefault<ZodMiniObject<{
@@ -702,6 +708,7 @@ export const TotalsFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPref
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
+		routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 		sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_failed: ZodMiniPrefault<ZodMiniObject<{
@@ -770,6 +777,7 @@ export const TotalsSchema: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
+		routes_refused: ZodMiniDefault<ZodMiniNumber<number>>;
 		sent_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_ended: ZodMiniDefault<ZodMiniNumber<number>>;
 		sessions_failed: ZodMiniPrefault<ZodMiniObject<{

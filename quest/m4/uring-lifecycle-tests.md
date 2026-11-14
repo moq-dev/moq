@@ -1,15 +1,11 @@
-# [XS] moq-uring's handle lifecycle tests cover the newly spawned queue and a woken close watcher
+# [XS] moq-uring's handle lifecycle tests cover a driver in the newly spawned queue
 
 ## Goal
 
-Two regressions cover the shutdown paths
+A regression covers the shutdown path
 [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309) added: a
 `moq-uring` worker dropped while a connection driver is still in its newly
-spawned queue (never polled) fails that connection's handles promptly, and
-a reset arriving while moq-tokio's adapter `RecvStream` sits at its
-read-ahead cap wakes the parked close watcher through the backend's own
-wake, not a manual repoll. moq-tokio's test-only adapter read path is
-narrowed if that removes adapter state.
+spawned queue (never polled) fails that connection's handles promptly.
 
 ## Plan
 
@@ -17,18 +13,17 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /que
 (merged; its online review's non-blocking coverage suggestions), which
 finished the io_uring handle lifecycle quest.
 
-- Newly spawned queue: [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309) makes `Worker::drop` also drop tasks spawned
-  since its last turn (`rs/moq-uring/src/worker.rs`, `spawn` at :697 and
-  :789 at be39188000) and gives `Driver` a `Drop` that fails the connection
-  (`rs/moq-uring/src/quic/driver/connection.rs:827`).
-  Spawn a driver, drop the worker before its next turn, and check a handle
-  fails with the worker-gone error instead of pending.
-- Reset at the cap: [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309)'s `recv_closed_sees_a_reset_at_the_cap` and
-  `recv_closed_resumes_when_a_read_drains_the_cap` in
-  `rs/moq-tokio/src/transport.rs` repoll `poll_closed` by hand. Use a
-  backend (moq-uring or the real moq-tokio QUIC stream) whose reset fires
-  the registered waker, and assert the watcher wakes on its own.
-- The adapter read path [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309) added is reached only by tests today; if a
-  narrower shape passes both tests, take it.
+[moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309) makes `Worker::drop` also drop tasks spawned
+since its last turn (`rs/moq-uring/src/worker.rs`, the `spawns` queue taken in
+`impl Drop for Worker`) and gives `Driver` a `Drop` that fails the connection
+(`impl Drop for Driver` in `rs/moq-uring/src/quic/driver/connection.rs`).
+Only `dropped_worker_rejects_operations` covers a dropped worker today. Spawn
+a driver, drop the worker before its next turn, and check a handle fails with
+the worker-gone error instead of pending.
+
+The other half of the original quest, a reset at moq-tokio's adapter
+read-ahead cap waking the close watcher, is gone:
+[moq-dev/moq#7771](https://github.com/moq-dev/moq/pull/7771) replaced that
+adapter read path, and its `recv_closed_*_cap` tests with it.
 
 Public API: none. Wire: none.

@@ -24,7 +24,7 @@ reference's `master` head then was
 
 Only the queue-delay target path is ported. The L4S path, competing-flow
 compensation, and the draft's media-queue terms were left out on purpose (see
-the [realtime uplink epic](/quest/m3/quic-realtime/README.md)), so a fix
+the [realtime uplink epic](/quest/m4/quic-realtime.md)), so a fix
 confined to them does not apply. Keep the PR's two recorded deviations
 (delay backoff counts as congestion; `scl_t` taken after the reduction) unless
 upstream settles them differently. SCReAMv2 is a bake-off candidate; if the

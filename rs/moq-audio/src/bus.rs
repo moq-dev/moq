@@ -182,6 +182,10 @@ struct Stretching {
 	/// its queued audio of the bus's however long the bus has run: the ring
 	/// holds that distance in 32 bits.
 	origin: u64,
+	/// The bus position a write to the dry channel starts at, before which it
+	/// plays silence without reading the ring, so no stretch reaches that
+	/// silence and the write lands exactly.
+	start: u64,
 }
 
 impl Stretching {
@@ -200,8 +204,13 @@ impl Feed {
 				ring.read(output);
 			}
 			Queue::Stretched(stretching) => {
-				let now = stretching.clock(position);
-				stretching.ring.read_at_frame(output, now, output.len() / channels);
+				let lead = (stretching.start.saturating_sub(position) as usize * channels).min(output.len());
+				output[..lead].fill(0.0);
+				let output = &mut output[lead..];
+				if !output.is_empty() {
+					let now = stretching.clock(position + (lead / channels) as u64);
+					stretching.ring.read_at_frame(output, now, output.len() / channels);
+				}
 			}
 			Queue::Positioned(queue) => {
 				let queued = queue.len().min(output.len());
@@ -407,8 +416,7 @@ impl Bus {
 				capacity: LATENCY + HEADROOM,
 				// Correct drift against the clock by trimming or padding back to
 				// the target depth, not by letting the ring run dry or full.
-				pad: true,
-				trim: true,
+				correction: ring::Correction::Fixed { pad: true, trim: true },
 				// No writer here declares a silence, so measuring for comfort
 				// noise would be wasted on every block.
 				comfort: false,
@@ -455,7 +463,7 @@ impl Bus {
 			return Ok(Positioned { port, stretch: None });
 		}
 
-		let (prod, mut cons) = ring::channel(
+		let (prod, cons) = ring::channel(
 			channels,
 			sample_rate,
 			sample_rate,
@@ -466,15 +474,17 @@ impl Bus {
 				// Audio trailing its positions by the bound and one stretch
 				// window, then as much as a write may reach past the clock.
 				capacity: stretch + WINDOW + REACH,
-				pad: false,
-				trim: false,
+				correction: ring::Correction::Stretch,
 				comfort: false,
 			},
 		);
-		cons.stretch(sample_rate);
 		// Writes land before the first advance, as an exact channel's do.
 		cons.start();
-		let stretching = Stretching { ring: cons, origin: 0 };
+		let stretching = Stretching {
+			ring: cons,
+			origin: 0,
+			start: 0,
+		};
 		let port = self.open(input, strip, Queue::Stretched(Box::new(stretching)))?;
 		Ok(Positioned {
 			port,
@@ -1098,10 +1108,11 @@ impl Positioned {
 	/// With one, a write plays right after the audio the channel holds, and the
 	/// channel speeds up or slows down onto its position, as the playback sink
 	/// does onto its clock. Audio trailing its positions by more than the bound
-	/// skips onto them. Only a write to a
-	/// channel that has run dry is placed exactly, behind silence, since
-	/// nothing audible plays before it. A write fails whole if the channel has
-	/// no room for it.
+	/// skips onto them. While little audio is queued, the channel slows down to
+	/// bridge until the next write, so the last write before a gap plays up to
+	/// 20 ms longer than written. Only a write to a channel that has run dry is
+	/// placed exactly, behind silence, since nothing audible plays before it. A
+	/// write fails whole if the channel has no room for it.
 	///
 	/// Either way, a write fails if it would end more than [`REACH`] past the
 	/// next frame the bus mixes.
@@ -1147,32 +1158,26 @@ impl Positioned {
 			let Queue::Stretched(stretching) = &mut feed.queue else {
 				unreachable!("a stretched channel feeds a stretched queue");
 			};
-			// A dry channel plays silence until the write anyway, so it waits
-			// there exactly rather than playing early and slowing down. With
-			// nothing queued, the ring's clock restarts on the bus's here.
-			let dry = stretching.ring.available() == 0;
-			let gap = if dry {
-				stretching.origin = next.wrapping_sub(stretching.ring.consumed() as u64);
-				position.saturating_sub(next) as usize
-			} else {
-				0
-			};
 			let vacant = stretched.prod.vacant();
-			if gap + frames as usize > vacant {
+			if frames as usize > vacant {
 				return Err(Error::Unsupported(format!(
 					"a write of {frames} frames at bus position {position} overflows this channel, with room for {vacant}"
 				)));
 			}
-			const SILENCE: [f32; 1024] = [0.0; 1024];
-			let mut silence = gap * channels;
-			while silence > 0 {
-				let samples = silence.min(SILENCE.len() / channels * channels);
-				let _ = stretched.prod.push(&SILENCE[..samples]);
-				silence -= samples;
+			// A dry channel plays silence until the write anyway, so it waits
+			// there exactly rather than playing early and slowing down. With
+			// nothing queued, the ring's clock restarts on the bus's there.
+			if stretching.ring.available() == 0 {
+				// Past a gap, no splice reaches back to the audio before it.
+				if position > next {
+					stretching.ring.forget();
+				}
+				stretching.start = position.max(next);
+				stretching.origin = stretching.start.wrapping_sub(stretching.ring.consumed() as u64);
 			}
 			let _ = stretched.prod.push(&pcm);
 			let due = stretching.clock(position.wrapping_add(frames));
-			stretched.prod.due_frame(due, stretched.bound, 0);
+			stretched.prod.due_frame(due, stretched.bound);
 			return Ok(());
 		}
 
@@ -2339,6 +2344,14 @@ mod tests {
 		f(&stretching.ring)
 	}
 
+	/// The most the bridge repeats of `frames` that nothing follows, which it
+	/// can't tell from a late write: the span its allowance starts with, and the
+	/// cap's share of what it plays meanwhile.
+	fn bridged(frames: usize) -> usize {
+		let span = 2 * crate::stretch::hop(48_000);
+		span + ((frames + span) as f64 * crate::stretch::CAP) as usize
+	}
+
 	/// How far `channel`'s audio trails the positions it was written at, whose
 	/// last write ends at `due`: negative when ahead.
 	fn lag(bus: &Bus, channel: &Positioned, due: u64, next: u64) -> i64 {
@@ -2348,13 +2361,14 @@ mod tests {
 	/// A positioned channel with a stretch bound glides onto positions that
 	/// step by a jitter target's 20 ms, later and earlier, as the playback
 	/// sink glides onto its clock: no silence written into the audio, none of
-	/// it skipped, and back on its positions within one pitch period before
+	/// it skipped, and back on its positions within half a 10 ms hop before
 	/// each next step.
 	#[test]
 	fn a_stretched_channel_glides_onto_stepping_positions() {
 		const FRAME: usize = 960;
 		const AHEAD: u64 = 2_880;
-		const PERIOD: i64 = 240;
+		// The lag the stretch leaves alone: half a hop.
+		let settled = crate::stretch::hop(48_000) as i64 / 2;
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 		let strip = Strip::default();
 		let mut channel = bus
@@ -2381,7 +2395,7 @@ mod tests {
 				if k % 50 == 0 && k > 0 {
 					// Back on its positions before the step...
 					let before = lag(&bus, &channel, due, next);
-					assert!(before.abs() <= PERIOD, "frame {k}: {before} off before the step");
+					assert!(before.abs() <= settled, "frame {k}: {before} off before the step");
 				}
 				channel.write(at(k), &tone(k * FRAME, FRAME)).unwrap();
 				due = at(k) + FRAME as u64;
@@ -2391,7 +2405,7 @@ mod tests {
 					let after = lag(&bus, &channel, due, next);
 					let step = offset(k - 1) - offset(k);
 					assert!(
-						(after - step).abs() <= PERIOD,
+						(after - step).abs() <= settled,
 						"frame {k}: {after} off after a {step} step"
 					);
 				}
@@ -2409,8 +2423,13 @@ mod tests {
 		let end = left.iter().rposition(|sample| *sample != 0.0).unwrap() + 1;
 		assert!(left[onset..end].iter().all(|sample| *sample != 0.0), "silence written");
 		assert_eq!(stretched(&bus, &channel, |cons| cons.trimmed()), 0);
-		// Ending on its last position, which the stretch converged on.
-		assert!((end as i64 - due as i64).abs() <= PERIOD, "ends at {end}, due at {due}");
+		// Ending on its last position, which the stretch converged on, but for
+		// the tail the bridge slows since nothing follows it.
+		let over = end as i64 - due as i64;
+		assert!(
+			(-settled..=bridged(FRAME) as i64).contains(&over),
+			"ends at {end}, due at {due}"
+		);
 	}
 
 	/// A stretched channel that has run dry places a write exactly, since
@@ -2434,7 +2453,8 @@ mod tests {
 		channel.write(next + 333, &tone(0, 960)).unwrap();
 		let left = mixed(&mut driver, &mut reader, &[BLOCK], 4_800);
 		assert_eq!(left.iter().position(|sample| *sample != 0.0), Some(333));
-		assert_eq!(left.iter().filter(|sample| **sample != 0.0).count(), 960);
+		let heard = left.iter().filter(|sample| **sample != 0.0).count();
+		assert!((960..=960 + bridged(960)).contains(&heard), "{heard} heard");
 
 		// Already mixed by less than the bound: plays now, late, rather than
 		// failing.
@@ -2463,6 +2483,31 @@ mod tests {
 		channel.write(next, &tone(0, 960)).unwrap();
 	}
 
+	/// A write to a dry channel lands exactly however far ahead it is: the
+	/// silence before it is never stretched.
+	#[test]
+	fn a_stretched_channel_places_a_dry_write_ahead_exactly() {
+		for gap in [333, 480, 960, 1_440, 1_920, 4_000] {
+			let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+			let strip = Strip::default();
+			let mut channel = bus
+				.positioned(input(48_000, Layout::Stereo), strip.clone(), Duration::from_millis(200))
+				.unwrap();
+			let program = bus.mix();
+			program.route(&strip);
+			let mut reader = program.reader();
+
+			let next = driver.position();
+			channel.write(next + gap, &tone(0, 480)).unwrap();
+			let left = mixed(&mut driver, &mut reader, &[BLOCK], 9_600);
+			assert_eq!(
+				left.iter().position(|sample| *sample != 0.0),
+				Some(gap as usize),
+				"gap {gap}"
+			);
+		}
+	}
+
 	/// A stretched channel plays its writes however long the bus ran before it
 	/// opened or sat idle, past the 12 hours its ring's clock spans.
 	#[test]
@@ -2483,7 +2528,8 @@ mod tests {
 			channel.write(next + 100, &tone(0, 960)).unwrap();
 			let left = mixed(&mut driver, &mut reader, &[BLOCK], 4_800);
 			assert_eq!(left.iter().position(|sample| *sample != 0.0), Some(100));
-			assert_eq!(left.iter().filter(|sample| **sample != 0.0).count(), 960);
+			let heard = left.iter().filter(|sample| **sample != 0.0).count();
+			assert!((960..=960 + bridged(960)).contains(&heard), "{heard} heard");
 			// Idle as long again.
 			bus.inner.mixer.lock().unwrap().position += HOURS;
 		}

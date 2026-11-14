@@ -113,7 +113,7 @@ if (existsSync("src/version.ts")) {
 }
 
 // Copy static files, including the license and patent notices of any third-party code ported in,
-// such as js/watch's WEBRTC-LICENSE and WEBRTC-PATENTS.
+// named like `<UPSTREAM>-LICENSE` and `<UPSTREAM>-PATENTS`.
 console.log("📄 Copying README.md...");
 copyFileSync("README.md", join("dist", "README.md"));
 for (const notice of readdirSync(".").filter((name) => /^[A-Z0-9]+-(LICENSE|PATENTS)$/.test(name))) {

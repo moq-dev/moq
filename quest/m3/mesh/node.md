@@ -28,6 +28,19 @@ CLI verbs, service install, and UI moved to Kixel. Carried over from it:
   embedding application supplies a trust store (decided 2026-11-07,
   maintainer).
 
+Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ the node
+takes a credential handle, and the embedding application decides how it
+enrolls (rejected: `moq_auth::mesh`'s coordinator and `Enrollment` learning
+to issue certificates, which puts one consumer's contract in a public crate;
+deferring). The handle yields what the node presents to the mesh's relays
+and to LAN peers and says when to renew; `moq_auth::mesh::Client`'s token
+enrollment is the implementation this repository ships and the `[mesh]`
+config section uses, and a
+[certificate credential](/quest/m3/mesh/cert-credentials.md) is another. The
+Goal's "enrolls with an enrollment key" describes that default, not the only
+path. Keep the handle a small trait or enum in moq-relay's mesh module, private
+to the crate until an embedder outside this repository needs to implement it.
+
 Tests in network namespaces: two relay nodes enroll through `moq auth`, take
 the LAN link when they share a segment and the relay path otherwise, refuse
 a LAN peer without an enrollment, and survive a relay restart. Update
@@ -35,4 +48,4 @@ a LAN peer without an enrollment, and survive a relay restart. Update
 
 ## Required
 
-- [Outbound federation](/quest/m2/cluster-routing/federation.md) - upstream links and LAN preference
+- [Outbound federation](/quest/m3/cluster-routing/federation.md) - upstream links and LAN preference
