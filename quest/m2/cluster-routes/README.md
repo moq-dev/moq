@@ -134,7 +134,11 @@ the bullets below are the contract it carries.
   both orders). Using a draining peer's routes locally without advertising
   them was rejected: downstream nodes would lose their only route during the
   drain. The path rule carries drain in each offer instead (decided
-  2026-11-13, with priority below). Existing readers resume only
+  2026-11-13, with priority below), and, decided the same day, a relay that
+  hears GOAWAY sends a DRAIN naming the leaving node in the DEAD message, so
+  every relay doubts it and moves at once only onto paths that avoid it: a
+  draining path ranks worst but stays usable, and no request loops through
+  offers that predate the drain. Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
 - Fresh routing identity per process/tab restart, declared by the origin and
   shared across its live sessions, decided 2026-10-13. It is unverified.

@@ -3,10 +3,15 @@
 //!
 //! A hop names a relay and the session it learned a route on. A node uses the
 //! best route whose path does not name it, at once: one crossing no draining
-//! session, then the one whose lowest link priority is highest, then the cheapest.
+//! node, then the one whose lowest link priority is highest, then the cheapest.
 //! Each is a property of the whole path, so no relay prefers a path its
-//! neighbour ranked lower, and selection converges. When a session closes,
-//! the node that lost it names that hop in one [`Dead`] per neighbour, which
+//! neighbour ranked lower, and selection converges. A draining path is the worst
+//! rank but stays usable: it is never removed. A node that hears GOAWAY names the
+//! leaving node in a [`Dead::Draining`] to each neighbour it sent a route through
+//! it, which passes it on the same way, and each node doubts the leaving node as
+//! a closed session's far end is doubted, so no node moves onto a stale offer
+//! through it and a request cannot loop through offers that predate the drain. When a session closes,
+//! the node that lost it names that hop in one [`Dead::Closed`] per neighbour, which
 //! lists the routes that moved to another path, and every node drops every route
 //! through the hop, whoever offered it. A node with no route left holds its
 //! claims, unavailable, until each neighbour that learned the route from it has
@@ -61,8 +66,8 @@ pub(crate) type RouteId = (Id, Path);
 pub(crate) struct Offer {
 	/// Every node it crossed, the publisher first and the sender last.
 	pub path: Arc<[Hop]>,
-	/// A session on its path drains after GOAWAY, which ranks it below every route
-	/// that does not.
+	/// A node on its path sent GOAWAY, which ranks it below every route that avoids
+	/// one, though it stays usable.
 	pub draining: bool,
 	/// The lowest local priority of a link on its path, ranked before cost; the
 	/// publisher's own route has no link to lower it.
@@ -106,16 +111,25 @@ pub(crate) struct Moved {
 	pub offer: Offer,
 }
 
-/// The session `hop` names closed, so every route through it is dead, whoever
-/// offered it. Of the sender's own routes through it, each one `moved` lists
-/// continues on its new path; the rest are ended if `gone`, and held if not.
+/// News about a node or session on routes this node offered, sent to each
+/// neighbour once per hop or node while a route sent to it names that hop or node.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Dead {
-	pub hop: Hop,
-	/// The node at the other end of that session, which the news casts doubt on.
-	pub far: Id,
-	pub moved: Vec<Moved>,
-	pub gone: bool,
+pub(crate) enum Dead {
+	/// The session `hop` names closed, so every route through it is dead, whoever
+	/// offered it. Of the sender's own routes through it, each one `moved` lists
+	/// continues on its new path; the rest are ended if `gone`, and held if not.
+	Closed {
+		hop: Hop,
+		/// The node at the other end of that session, which the news casts doubt on.
+		far: Id,
+		moved: Vec<Moved>,
+		gone: bool,
+	},
+	/// `node` sent GOAWAY: every path through it ranks as draining, the worst rank,
+	/// and stays usable. The news casts doubt on the node, so no relay moves onto a
+	/// stale offer through it until the timer fires, and a request cannot loop through
+	/// offers that predate the drain.
+	Draining { node: Id },
 }
 
 /// A message for one neighbour.
@@ -383,6 +397,8 @@ struct Answer<A> {
 	tx: BTreeMap<RouteId, Sent<A>>,
 	/// The dead hops it was told of, while a route sent to it names one.
 	told: BTreeSet<Hop>,
+	/// The draining nodes it was told of, while a route sent to it names one.
+	told_draining: BTreeSet<Id>,
 }
 
 struct Origin<A> {
@@ -424,6 +440,13 @@ enum Want {
 	Keep,
 }
 
+/// News an update tells the neighbours that were sent a route naming it.
+#[derive(Clone, Copy)]
+enum Report {
+	Closed(Hop),
+	Draining(Id),
+}
+
 /// Retained state, summed over the node, for budgets and leak checks.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -438,6 +461,7 @@ pub(crate) struct Retained {
 	pub routes: usize,
 	pub dead: usize,
 	pub doubt: usize,
+	pub draining: usize,
 }
 
 pub(crate) struct Router<N, A> {
@@ -467,6 +491,8 @@ pub(crate) struct Router<N, A> {
 	dead: BTreeMap<Hop, Death>,
 	/// Each node's doubt and deadline.
 	doubted: BTreeMap<Id, Suspicion>,
+	/// Nodes that sent GOAWAY, kept while a heard route names one or it is in doubt.
+	draining: BTreeSet<Id>,
 	watch: Path,
 	interest: u32,
 	reader: Reader<A>,
@@ -537,6 +563,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			filed: BTreeMap::new(),
 			dead: BTreeMap::new(),
 			doubted: BTreeMap::new(),
+			draining: BTreeSet::new(),
 			watch: Path::empty(),
 			interest: 0,
 			reader: Reader::default(),
@@ -616,7 +643,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				session: session.number,
 			};
 			ids.extend(self.fail(hop, session.hop, None, Vec::new(), false, now));
-			hops.push(hop);
+			hops.push(Report::Closed(hop));
 		}
 		self.update(ids, hops, None);
 	}
@@ -650,6 +677,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					watch,
 					tx: BTreeMap::new(),
 					told: BTreeSet::new(),
+					told_draining: BTreeSet::new(),
 				},
 			);
 		}
@@ -661,13 +689,19 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		Ok(())
 	}
 
-	/// `neighbor` sent GOAWAY: it ranks below every other route while its session stays up.
-	pub fn goaway(&mut self, neighbor: N) {
-		if let Some(session) = self.sessions.get_mut(&neighbor) {
-			session.draining = true;
-		}
-		let ids = self.through(neighbor);
-		self.update(ids, Vec::new(), None);
+	/// `neighbor` sent GOAWAY at `now`. Every path through it ranks below every path
+	/// that avoids it, and stays usable while its session stays up. This node moves at
+	/// once only onto a path that avoids it, and tells the neighbours it sent a route
+	/// through it.
+	pub fn goaway(&mut self, neighbor: N, now: Instant) {
+		let Some(session) = self.sessions.get_mut(&neighbor) else {
+			return;
+		};
+		session.draining = true;
+		let node = session.hop;
+		let mut ids = self.through(neighbor);
+		ids.extend(self.drains(node, now));
+		self.update(ids, vec![Report::Draining(node)], None);
 	}
 
 	/// The link to `neighbor` has `rtt`, or `None` unmeasured.
@@ -930,7 +964,19 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if !self.sessions.contains_key(&from) {
 			return;
 		}
-		let Dead { hop, far, moved, gone } = dead;
+		let (hop, far, moved, gone) = match dead {
+			Dead::Closed { hop, far, moved, gone } => (hop, far, moved, gone),
+			Dead::Draining { node } => {
+				// As with a closed hop, only a node on a path this peer offered counts.
+				let credited = (self.rx_hops.range(hop_range(node))).any(|(_, peers)| peers.contains_key(&from));
+				if node == self.hop || !credited {
+					return;
+				}
+				let ids = self.drains(node, now);
+				self.update(ids, vec![Report::Draining(node)], None);
+				return;
+			}
+		};
 		// A peer only reports hops it previously advertised to us. Also bind the far
 		// node to that path: unrelated DEADs must not allocate hop or doubt state.
 		let credited = self.rx_hops.get(&hop).and_then(|peers| peers.get(&from));
@@ -952,7 +998,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			}
 		}
 		let ids = self.fail(hop, far, Some(from), filed, gone, now);
-		self.update(ids, vec![hop], None);
+		self.update(ids, vec![Report::Closed(hop)], None);
 	}
 
 	/// `from`'s stream answering interest generation `interest` sent its initial set:
@@ -1187,6 +1233,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				.count(),
 			dead: self.dead.len(),
 			doubt: self.doubted.len(),
+			draining: self.draining.len(),
 		}
 	}
 
@@ -1213,6 +1260,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Whether `path` holds a hop this node knows is dead.
 	fn dead_in(&self, path: &[Hop]) -> bool {
 		path.iter().any(|hop| self.dead.contains_key(hop))
+	}
+
+	/// Whether `path` crosses a node known to have sent GOAWAY.
+	fn drains_path(&self, path: &[Hop]) -> bool {
+		path.iter().any(|hop| self.draining.contains(&hop.node))
 	}
 
 	/// Whether `path` crosses a node in doubt.
@@ -1301,6 +1353,19 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Whether any heard route names `node`.
 	fn named(&self, node: Id) -> bool {
 		self.rx_hops.range(hop_range(node)).next().is_some()
+	}
+
+	/// `node` sent GOAWAY, as of `now`. The first word of it casts doubt on the node,
+	/// so no stale offer through it is taken before the timer fires. Returns the
+	/// identities whose routes rank anew.
+	fn drains(&mut self, node: Id, now: Instant) -> BTreeSet<Id> {
+		if !self.draining.insert(node) {
+			return BTreeSet::new();
+		}
+		let at = now.saturating_add(self.doubt.timer);
+		let at = self.doubted.get(&node).map_or(at, |state| state.deadline().max(at));
+		self.doubted.insert(node, Suspicion::Doubted(at));
+		self.naming(node)
 	}
 
 	/// The session `hop` names closed. `from` reported it, with what became of its own
@@ -1425,7 +1490,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				// It may come back once the doubt lifts.
 				continue;
 			}
-			let draining = session.draining || heard.offer.draining;
+			let draining = session.draining || heard.offer.draining || self.drains_path(&heard.offer.path);
 			let priority = session.link.priority.min(heard.offer.priority);
 			let rank = ((draining, Reverse(priority), metric), Some(peer) != current, peer);
 			if best.as_ref().is_some_and(|(best, _)| *best <= rank) {
@@ -1923,7 +1988,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				let far = self.dead.get(&hop).expect("a dead hop").far();
 				self.out.push(Out::Dead {
 					to: peer,
-					dead: Dead { hop, far, moved, gone },
+					dead: Dead::Closed { hop, far, moved, gone },
 				});
 				if !gone {
 					for key in &parents {
@@ -1951,6 +2016,26 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 			}
 			self.answering.get_mut(&peer).expect("answering").told.insert(hop);
+		}
+	}
+
+	/// Tell each neighbour that was sent a route through draining `node`, once while
+	/// such a route stays sent. It goes before the routes that re-rank, so the
+	/// neighbour doubts the node before it hears them.
+	fn report_draining(&mut self, node: Id) {
+		let tx_hops = &self.tx_hops;
+		for (&peer, answer) in &mut self.answering {
+			let sent = (tx_hops.range(hop_range(node))).any(|(_, set)| {
+				set.range((peer, (0, Path::empty()))..)
+					.next()
+					.is_some_and(|(to, _)| *to == peer)
+			});
+			if sent && answer.told_draining.insert(node) {
+				self.out.push(Out::Dead {
+					to: peer,
+					dead: Dead::Draining { node },
+				});
+			}
 		}
 	}
 
@@ -2205,7 +2290,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	// --- Internals: the update ---
 
 	/// Recompute each of `ids`.
-	fn update(&mut self, ids: BTreeSet<Id>, reports: Vec<Hop>, claims: Option<(Id, Dirty)>) {
+	fn update(&mut self, ids: BTreeSet<Id>, reports: Vec<Report>, claims: Option<(Id, Dirty)>) {
 		let mut dirty = BTreeMap::new();
 		if let Some((id, claims)) = claims {
 			dirty.insert(id, claims);
@@ -2239,13 +2324,22 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	fn run(
 		&mut self,
 		mut ids: BTreeSet<Id>,
-		reports: Vec<Hop>,
+		reports: Vec<Report>,
 		delta: Option<Delta<N>>,
 		mut dirty: BTreeMap<Id, Dirty>,
 		scope: Option<RouteId>,
 	) {
-		for hop in &reports {
-			ids.extend(self.tx_hops.get(hop).into_iter().flatten().map(|(_, (id, _))| *id));
+		for report in &reports {
+			match report {
+				Report::Closed(hop) => {
+					ids.extend(self.tx_hops.get(hop).into_iter().flatten().map(|(_, (id, _))| *id));
+				}
+				Report::Draining(node) => ids.extend(
+					(self.tx_hops.range(hop_range(*node)))
+						.flat_map(|(_, set)| set)
+						.map(|(_, (id, _))| *id),
+				),
+			}
 		}
 		#[cfg(test)]
 		{
@@ -2355,8 +2449,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			prefixes.extend(keys.iter().cloned());
 			self.know(id, &keys, delta.as_ref(), dirty);
 		}
-		for hop in reports {
-			self.report(hop);
+		for report in reports {
+			match report {
+				Report::Closed(hop) => self.report(hop),
+				Report::Draining(node) => self.report_draining(node),
+			}
 		}
 		for &id in &ids {
 			let mut dirty = dirty.remove(&id).unwrap_or_default();
@@ -2425,8 +2522,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 	}
 
-	/// Forget each dead hop no heard route names once its timer fired, and each
-	/// told hop no sent route names. Tests also compare early doubt collection.
+	/// Forget each dead hop no heard route names once its timer fired, each draining
+	/// node no heard route names once its doubt lifted, and each told hop or draining
+	/// node no sent route names. Tests also compare early doubt collection.
 	fn collect_doubt(&mut self) {
 		let named: BTreeSet<Hop> = self
 			.dead
@@ -2450,15 +2548,25 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				self.doubted.insert(node, Suspicion::Lifted(at));
 			}
 		}
+		let draining: Vec<Id> = self.draining.iter().copied().collect();
+		for node in draining {
+			if !self.named(node) && !self.doubted.contains_key(&node) {
+				self.draining.remove(&node);
+			}
+		}
 		let tx_hops = &self.tx_hops;
+		let sent = |peer: &N, hop: &Hop| {
+			tx_hops.get(hop).is_some_and(|set| {
+				set.range((*peer, (0, Path::empty()))..)
+					.next()
+					.is_some_and(|(to, _)| to == peer)
+			})
+		};
 		for (peer, answer) in &mut self.answering {
-			answer.told.retain(|hop| {
-				tx_hops.get(hop).is_some_and(|set| {
-					set.range((*peer, (0, Path::empty()))..)
-						.next()
-						.is_some_and(|(to, _)| to == peer)
-				})
-			});
+			answer.told.retain(|hop| sent(peer, hop));
+			answer
+				.told_draining
+				.retain(|node| (tx_hops.range(hop_range(*node))).any(|(hop, _)| sent(peer, hop)));
 		}
 	}
 

@@ -1263,12 +1263,12 @@ const RELAYS: usize = 5;
 const CLAIMS: [&str; 4] = ["live/", "live/a/", "live/a/x", "live/b"];
 
 /// Random meshes with two origins and a client under churn: claims change,
-/// sessions drop and return, messages are held and replayed out of step, the
-/// client changes interest, nodes collect route-less identities, and an
-/// origin restarts with a fresh identity. Selected routes never loop, every
-/// view is always some revision of the origin's truth, nothing revives and
-/// nothing ends falsely, and once churn stops every node shows every live
-/// origin's current claims and holds nothing for a dead one.
+/// sessions drop and return, relays send GOAWAY, messages are held and replayed
+/// out of step, the client changes interest, nodes collect route-less
+/// identities, and an origin restarts with a fresh identity. Selected routes
+/// never loop, every view is always some revision of the origin's truth,
+/// nothing revives and nothing ends falsely, and once churn stops every node
+/// shows every live origin's current claims and holds nothing for a dead one.
 fn sweep_handoff(rule: Rule) {
 	for scenario in 0..scenarios() {
 		let mut sim = churn(rule, scenario);
@@ -1372,6 +1372,7 @@ fn churn(rule: Rule, scenario: usize) -> Sim {
 					sim.unannounce(first + origin, claim);
 				}
 			}
+			4 if rng.chance(20) => sim.goaway(rng.next(RELAYS as u64) as usize),
 			4 => {
 				let (a, b) = links[rng.next(links.len() as u64) as usize];
 				if sim.connected(a, b) {
@@ -1744,4 +1745,65 @@ fn goaway_moves_a_relay_to_a_path_that_does_not_drain() {
 		"the relay's new path does not drain"
 	);
 	assert_eq!(sim.shows(edge, 7, "x"), Some(true));
+}
+
+/// Three relays in a ring that is cheap one way round and dear the other, each
+/// joined to `hub`, which reaches the publisher. A GOAWAY from `leaving` reaches
+/// the hub's side before any ring relay hears the others re-rank. Ranking drain
+/// alone, each moved onto the next relay's old, undrained offer, and a request went
+/// round the ring with no session closed. The drain news casts doubt on the leaving
+/// node, so no relay moves onto a stale offer through it, and every request reaches
+/// the publisher after each delivery and timer.
+fn goaway_around_a_ring(sim: &mut Sim, hub: Node, leaving: Node) {
+	let (origin, ring) = (0, [1, 2, 3]);
+	for relay in ring {
+		sim.join(hub, relay, 1);
+	}
+	for (i, &relay) in ring.iter().enumerate() {
+		sim.link(relay, ring[(i + 1) % 3], SimLink::cost(1), SimLink::cost(2));
+	}
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "x", 0, None);
+	assert!(sim.run());
+	sim.goaway(leaving);
+	for _ in 0..10_000 {
+		for relay in ring {
+			assert_eq!(sim.reaches(relay, 7, &p("x")), Some(origin), "relay {relay}");
+		}
+		// News from outside the ring first: every ring relay re-ranks before it hears
+		// the others do.
+		let busy = sim.busy();
+		let next = busy.iter().find(|(from, _)| !ring.contains(from)).or(busy.first());
+		if let Some(&(from, to)) = next {
+			sim.deliver(from, to);
+		} else if sim.deadline().is_some() {
+			sim.wait(HOP);
+		} else {
+			break;
+		}
+	}
+	assert_eq!(sim.pending(), 0);
+	for relay in ring {
+		assert_eq!(sim.toward(relay, 7), Some(Some(hub)), "relay {relay}");
+		assert_eq!(sim.shows(relay, 7, "x"), Some(true), "relay {relay}");
+	}
+}
+
+/// The publisher itself leaves, and each ring relay hears it directly.
+#[test]
+fn a_goaway_in_a_ring_never_loops_a_request() {
+	let mut sim = Sim::with(Rule::PATH, 4);
+	goaway_around_a_ring(&mut sim, 0, 0);
+	// Each relay remembers the publisher drains while a route it hears names it.
+	assert_eq!(sim.kept().draining, 3);
+}
+
+/// A relay two hops from the ring leaves: the ring hears of it only from the hub.
+#[test]
+fn a_goaway_two_hops_from_a_ring_never_loops_a_request() {
+	let (origin, leaving, hub) = (0, 4, 5);
+	let mut sim = Sim::with(Rule::PATH, 6);
+	sim.join(origin, leaving, 1);
+	sim.join(leaving, hub, 1);
+	goaway_around_a_ring(&mut sim, hub, leaving);
 }

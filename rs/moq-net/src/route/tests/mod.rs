@@ -697,11 +697,12 @@ impl Sim {
 	}
 
 	pub fn goaway(&mut self, node: Node) {
+		let now = self.now;
 		let peers: Vec<Node> = self.peers(node).collect();
 		for peer in peers {
 			match &mut self.nodes[peer] {
 				Relay::Distance(router) => router.goaway(node),
-				Relay::Path(router) => router.goaway(node),
+				Relay::Path(router) => router.goaway(node, now),
 			}
 		}
 		self.flush();
@@ -1039,7 +1040,10 @@ impl Sim {
 				}
 				path::Out::Dead { to, dead } => {
 					self.stats.route_msgs += 1;
-					self.stats.route_items += 1 + dead.moved.len();
+					self.stats.route_items += 1 + match &dead {
+						path::Dead::Closed { moved, .. } => moved.len(),
+						path::Dead::Draining { .. } => 0,
+					};
 					(to, Msg::Dead(dead))
 				}
 				path::Out::Synced { to } => {
@@ -1254,6 +1258,7 @@ impl Sim {
 			out.routes += r.routes;
 			out.dead += r.dead;
 			out.doubt += r.doubt;
+			out.draining += r.draining;
 		}
 		out
 	}

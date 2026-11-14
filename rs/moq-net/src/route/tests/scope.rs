@@ -58,7 +58,7 @@ fn repeating_an_expired_dead_hop_does_not_restart_its_timer() {
 		.into();
 		router.route(peer, 7, p(""), Some(path::Reach::Finite(offer)), 0);
 	}
-	let dead = path::Dead {
+	let dead = path::Dead::Closed {
 		hop,
 		far: 6,
 		moved: Vec::new(),
@@ -119,7 +119,7 @@ fn flapping_a_far_node_does_not_extend_older_dead_hops() {
 		router.route(1, 7, p(""), Some(path::Reach::Finite(offer)), 0);
 		router.dead(
 			1,
-			path::Dead {
+			path::Dead::Closed {
 				hop: path::Hop {
 					node: 2,
 					session: session as u64,
@@ -178,7 +178,7 @@ fn a_dead_repath_withdraws_its_claims_before_ending_the_sent_route() {
 	};
 	router.dead(
 		2,
-		path::Dead {
+		path::Dead::Closed {
 			hop: path::Hop { node: 4, session: 1 },
 			far: 6,
 			moved: vec![path::Moved {
@@ -802,7 +802,7 @@ fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 	for node in 100..1100 {
 		router.dead(
 			1,
-			path::Dead {
+			path::Dead::Closed {
 				hop: path::Hop { node, session: 1 },
 				far: node + 1,
 				moved: Vec::new(),
@@ -818,7 +818,7 @@ fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 	// Another peer has no credit for this hop, even though this node heard it.
 	router.dead(
 		2,
-		path::Dead {
+		path::Dead::Closed {
 			hop,
 			far: 7,
 			moved: Vec::new(),
@@ -830,7 +830,7 @@ fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 	for far in 100..1100 {
 		router.dead(
 			1,
-			path::Dead {
+			path::Dead::Closed {
 				hop,
 				far,
 				moved: Vec::new(),
@@ -843,7 +843,7 @@ fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 	assert!(router.shown()[&(7, p("a"))].available);
 	router.dead(
 		1,
-		path::Dead {
+		path::Dead::Closed {
 			hop,
 			far: 7,
 			moved: Vec::new(),
@@ -877,7 +877,7 @@ fn dead_replacement_paths_obey_the_same_limit_as_route_paths() {
 		};
 		router.dead(
 			1,
-			path::Dead {
+			path::Dead::Closed {
 				hop: path::Hop { node: 1, session: 1 },
 				far: 7,
 				moved: vec![path::Moved {
@@ -1010,9 +1010,13 @@ fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
 			"keep {held:?} while its child answers: {messages:?}"
 		);
 		assert!(
-			messages
-				.iter()
-				.any(|msg| matches!(msg, path::Out::Dead { to: 3, dead } if !dead.gone)),
+			messages.iter().any(|msg| matches!(
+				msg,
+				path::Out::Dead {
+					to: 3,
+					dead: path::Dead::Closed { gone: false, .. }
+				}
+			)),
 			"the child must hear a hold, not an end: {messages:?}"
 		);
 		assert!(

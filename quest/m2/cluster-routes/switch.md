@@ -42,6 +42,17 @@ Decided 2026-11-13 (maintainer,
   carries them (rejected: drain and priority as tie-breakers below cost; a
   drain cost penalty that drops priority). The router sends an update when
   either changes, and a DEAD's moved routes carry them too.
+- ✅ The message that carries DEAD gains a DRAIN entry naming a node that
+  sent GOAWAY (decided 2026-11-13, maintainer, /quest-complete). The relay
+  that hears GOAWAY sends it to each neighbour it sent a route through that
+  node, and each relay passes it on the same way, once per neighbour while
+  such a route stays sent. Every relay ranks a path through the node as
+  draining, the worst rank, but keeps it usable and never removes it. It
+  doubts the node until the existing timer fires, so it moves at once only
+  onto paths that avoid the node, and a request never loops through offers
+  that predate the drain. A relay accepts a DRAIN only for a node on a path
+  that neighbour offered. Rejected: taking drain out of the rank, so routes
+  move only when the session closes; accepting brief request loops.
 
 Recommended wire, for the implementer to confirm or improve in the PR; each
 departure is a choice to list there. Where the model settled something
@@ -54,7 +65,8 @@ else, the model wins:
   are safe. The hop limit stays the wire's 32.
 - One message names a dead hop. A relay sends it once per session it loses,
   to every neighbour, covering every publisher, and it lists the routes that
-  moved to another path, as the prototype has it.
+  moved to another path, as the prototype has it. The same message carries DRAIN
+  entries, each naming a node that sent GOAWAY, covering every publisher.
 - The answer that ends a hold rides the publisher half: the stream that
   carries the answering side's routes to the relay that waits. It is then
   ordered behind every route its sender sent first, on today's streams. A
