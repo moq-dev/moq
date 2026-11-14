@@ -1146,7 +1146,10 @@ fn equal_relays_pull_one_copy_owned_by_the_lower_hash() {
 /// but one of those links while every link of the ring is held, so each relay acts on
 /// what it last heard. Delivered in any order, once quiet every reader is fed through
 /// the one link left, and the pulls formed a cycle only while a change was still
-/// crossing a link.
+/// crossing a link. A relay that lost its link may take a neighbour's direct route
+/// that the neighbour's own close made stale, until that close's DEAD crosses the
+/// link between them: the transient loop the routes epic's Plan item 27 accepts. The
+/// budget pins the seeded total, so a change in the rate shows here.
 #[test]
 fn a_ring_of_stale_offers_settles_on_the_link_left() {
 	const RING: usize = 5;
@@ -1192,7 +1195,7 @@ fn a_ring_of_stale_offers_settles_on_the_link_left() {
 		assert_eq!(mesh.parent(relays[0], &x), Some(o), "seed {seed}");
 		loops += mesh.loops;
 	}
-	assert!(loops <= 40, "{loops} steps with a cycle across 20 seeds");
+	assert!(loops <= 204, "{loops} steps with a cycle across 20 seeds");
 }
 
 /// `b` withdraws its copy while `c`'s subscription to it is on its way. The
