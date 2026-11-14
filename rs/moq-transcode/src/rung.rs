@@ -276,7 +276,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		// so wait for one before attaching to the feed. Demand that leaves, a retirement or
 		// a closing broadcast gives up the wait.
 		let session = tokio::select! {
-			session = rung.transcode.sessions.acquire() => session,
+			session = rung.transcode.sessions.serve() => session,
 			unused = until_wanted(&demand, false) => {
 				if unused.is_err() {
 					return Ok(Ended::Unfinished);
@@ -648,7 +648,7 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	let session = tokio::select! {
 		biased;
 		_ = fill.unwanted(sequence) => return abandon(sequence),
-		session = rung.transcode.sessions.acquire() => session,
+		session = rung.transcode.sessions.serve() => session,
 	};
 	let pipeline = match rung.pipeline(session).await {
 		Ok(pipeline) => pipeline,

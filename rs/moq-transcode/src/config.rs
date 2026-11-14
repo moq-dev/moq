@@ -50,10 +50,9 @@ pub struct Config {
 	pub resize: moq_video::resize::Config,
 
 	/// How many encoder sessions may be open at once, shared by every transcoder whose
-	/// config holds a clone: each rung's live encoder, each fetched group's, and each catalog
-	/// probe. A hardware encoder refuses sessions past a device limit, which a device shared
-	/// with other work reaches sooner, so past the budget an encoder waits for one to close
-	/// instead. The default sets no budget.
+	/// config holds a clone. A hardware encoder refuses sessions past a device limit, which a
+	/// device shared with other work reaches sooner, so past the budget an encoder waits for
+	/// one to close instead. The default sets no budget.
 	pub sessions: Sessions,
 
 	/// The VA-API render node the decoder and encoders open; see
@@ -107,26 +106,49 @@ impl Config {
 }
 
 /// A budget of open encoder sessions, shared by its clones.
+///
+/// Encoders that serve, each rung's live encoder and each fetched group's, share the budget's
+/// serving sessions. One more session is kept for probing a new rung's catalog entry, so a
+/// catalog update never waits on serving encoders that only the new catalog would retire.
 #[derive(Clone, Debug, Default)]
-pub struct Sessions(Option<Arc<Semaphore>>);
+pub struct Sessions(Option<Budget>);
+
+#[derive(Clone, Debug)]
+struct Budget {
+	serving: Arc<Semaphore>,
+	/// One permit, so probes across every clone take turns on the kept session.
+	probe: Arc<Semaphore>,
+}
 
 impl Sessions {
-	/// At most `limit` encoder sessions open at once across every clone.
-	pub fn new(limit: NonZeroUsize) -> Self {
-		Self(Some(Arc::new(Semaphore::new(limit.get()))))
+	/// At most `serving` serving encoders open at once across every clone, plus one probe:
+	/// leave room for `serving + 1` sessions on the device.
+	pub fn new(serving: NonZeroUsize) -> Self {
+		Self(Some(Budget {
+			serving: Arc::new(Semaphore::new(serving.get())),
+			probe: Arc::new(Semaphore::new(1)),
+		}))
 	}
 
-	/// Wait for a session, held until the permit drops; `None` without a budget.
-	pub(crate) async fn acquire(&self) -> Option<OwnedSemaphorePermit> {
-		let semaphore = self.0.clone()?;
-		Some(semaphore.acquire_owned().await.expect("the budget is never closed"))
+	/// Wait for a serving session, held until the permit drops; `None` without a budget.
+	pub(crate) async fn serve(&self) -> Option<OwnedSemaphorePermit> {
+		Some(acquire(self.0.as_ref()?.serving.clone()).await)
 	}
 
-	/// The sessions still free, for tests.
+	/// Wait for the probe's session, held until the permit drops; `None` without a budget.
+	pub(crate) async fn probe(&self) -> Option<OwnedSemaphorePermit> {
+		Some(acquire(self.0.as_ref()?.probe.clone()).await)
+	}
+
+	/// The serving sessions still free, for tests.
 	#[cfg(test)]
 	pub(crate) fn available(&self) -> usize {
 		self.0
 			.as_ref()
-			.map_or(usize::MAX, |semaphore| semaphore.available_permits())
+			.map_or(usize::MAX, |budget| budget.serving.available_permits())
 	}
+}
+
+async fn acquire(semaphore: Arc<Semaphore>) -> OwnedSemaphorePermit {
+	semaphore.acquire_owned().await.expect("the budget is never closed")
 }

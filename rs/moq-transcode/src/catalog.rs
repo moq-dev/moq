@@ -329,8 +329,8 @@ pub(crate) async fn rung_entry(
 	let mut config = transcode.encoder(rung.size, encode_rate);
 	config.bitrate = Some(rung.bitrate);
 
-	// The probe opens a session like any rung encoder, so it waits for the budget too.
-	let session = transcode.sessions.acquire().await;
+	// The probe opens a session like any rung encoder, on the one the budget keeps for probes.
+	let session = transcode.sessions.probe().await;
 	let mut entry = config.probe().await?;
 	drop(session);
 	entry.framerate = rung.framerate.map(moq_video::FrameRate::as_f64);

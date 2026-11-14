@@ -718,9 +718,8 @@ mod tests {
 		transcoder.abort();
 	}
 
-	/// Every encoder takes its place in the shared session budget: the catalog probes give
-	/// theirs back, a rung's live encoder holds one while it serves, and a second rung waits
-	/// for it rather than opening a session past the budget.
+	/// Serving encoders share the session budget: a rung's live encoder holds one while it
+	/// serves, and a second rung waits for it rather than opening a session past the budget.
 	#[tokio::test]
 	async fn encoders_share_the_session_budget() {
 		let source = source_broadcast(2, 5);
@@ -753,7 +752,7 @@ mod tests {
 			snapshot.video.renditions.contains_key("video/120p") && snapshot.video.renditions.contains_key("video/60p")
 		})
 		.await;
-		assert_eq!(sessions.available(), 1, "a catalog probe kept its session");
+		assert_eq!(sessions.available(), 1, "a catalog probe took a serving session");
 
 		let mut first = subscribe(&consumer, "video/120p").await;
 		let mut group = first.recv_group().await.unwrap().unwrap();
@@ -770,6 +769,59 @@ mod tests {
 
 		drop(group);
 		drop(second);
+		transcoder.abort();
+	}
+
+	/// A source that resizes while viewers hold the whole budget still gets its new ladder: the
+	/// probe for the fresh rung never waits on the serving encoders, which retire only once
+	/// that probe has resolved the new ladder.
+	#[tokio::test]
+	async fn a_full_budget_still_follows_a_source_resize() {
+		let mut source = source_catalog(640, 360);
+		let sessions = Sessions::new(std::num::NonZeroUsize::MIN);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			sessions: sessions.clone(),
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let track = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		// A viewer's live encoder takes the only serving session and keeps it.
+		let _viewer = subscribe(&consumer, "video/120p").await;
+		while sessions.available() > 0 {
+			tokio::task::yield_now().await;
+		}
+
+		// Same height, wider pixels: the rung retires and a fresh one needs a probe.
+		source.resize(480, 360);
+		let derived = kio::clock::timeout(
+			std::time::Duration::from_secs(5),
+			await_catalog(&mut catalogs, |snapshot| {
+				!snapshot.video.renditions.contains_key("video/120p")
+			}),
+		)
+		.await
+		.expect("the probe waited on the session its own retiring rung holds");
+		assert!(derived.video.renditions.contains_key("video/120p.2"));
+
 		transcoder.abort();
 	}
 
