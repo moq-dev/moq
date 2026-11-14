@@ -260,7 +260,11 @@ impl Track {
 			other => return Err(crate::Error::UnsupportedCodec(format!("{other:?}"))),
 		};
 
-		Ok(Self { consumer, convert, bill })
+		Ok(Self {
+			consumer,
+			convert,
+			bill,
+		})
 	}
 
 	/// Pull the next RTP-ready frame. Returns `None` when the track ends.

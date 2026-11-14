@@ -3645,7 +3645,14 @@ where
 				// Only a delay leaves the frames time to wait for the ones after them.
 				let track = self.program.tracks.get(name).context("missing track")?;
 				if let Some((samples, rate)) = track.samples(&es_payload).filter(|_| !self.program.delay.is_zero()) {
-					return self.pack(name, unit, decode, (psi, out), (es_payload, charge), (samples, rate, pes));
+					return self.pack(
+						name,
+						unit,
+						decode,
+						(psi, out),
+						(es_payload, charge),
+						(samples, rate, pes),
+					);
 				}
 				self.flush(name)?;
 				self.program.psi_due |= psi;

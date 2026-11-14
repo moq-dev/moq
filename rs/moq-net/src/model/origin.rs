@@ -9743,9 +9743,19 @@ mod tests {
 
 		let mut read = subscriber.recv_group().await.unwrap().expect("a group");
 		let mut chunked = read.clone();
-		assert_eq!(read.read_frame().await.unwrap().expect("a frame").payload.as_ref(), b"dropped");
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"dropped"
+		);
 		let sent = read.read_frame().await.unwrap().expect("a frame").payload;
-		chunked.next_frame().await.unwrap().expect("a frame").read_all().await.unwrap();
+		chunked
+			.next_frame()
+			.await
+			.unwrap()
+			.expect("a frame")
+			.read_all()
+			.await
+			.unwrap();
 		assert_eq!(counted(), (0, 0), "a read counts nothing");
 
 		bill.deliver(sent.len() as u64);

@@ -1079,7 +1079,9 @@ mod tests {
 				.map(|(_, _, traffic)| traffic.bytes)
 				.sum()
 		};
-		let mut egress = EgressSource::new(moq_mux::Source::new(consumer, resolved)).await.unwrap();
+		let mut egress = EgressSource::new(moq_mux::Source::new(consumer, resolved))
+			.await
+			.unwrap();
 		let mut writes = egress.take_writes();
 		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
 

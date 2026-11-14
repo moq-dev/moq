@@ -12602,8 +12602,14 @@ async fn a_joiner_counts_only_the_payload_it_is_sent() {
 			_ => {}
 		}
 	}
-	assert!(pictures > 60, "the pictures from the second keyframe on go out: {pictures}");
+	assert!(
+		pictures > 60,
+		"the pictures from the second keyframe on go out: {pictures}"
+	);
 	let billed = metered.billed() - catalog;
-	assert!(billed >= (pictures * PAD) as u64, "{billed} bytes billed for {pictures} pictures");
+	assert!(
+		billed >= (pictures * PAD) as u64,
+		"{billed} bytes billed for {pictures} pictures"
+	);
 	assert!(billed <= sent as u64, "{billed} bytes billed, {sent} sent");
 }

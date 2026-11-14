@@ -2268,7 +2268,12 @@ impl Scope {
 	/// Hand the payload counts of the meters this scope hands out from now on to the returned
 	/// [`Bill`].
 	pub(crate) fn bill(&mut self) -> Bill {
-		let bill = Bill(self.is_tagged().then(|| Arc::new(Self { billed: false, ..self.clone() })));
+		let bill = Bill(self.is_tagged().then(|| {
+			Arc::new(Self {
+				billed: false,
+				..self.clone()
+			})
+		}));
 		self.billed = true;
 		bill
 	}

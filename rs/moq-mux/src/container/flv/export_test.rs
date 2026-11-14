@@ -1937,6 +1937,9 @@ async fn a_joiner_counts_only_the_payload_it_is_sent() {
 		.filter(|tag| tag.tag_type == super::TAG_VIDEO && tag.body[1] == super::AVC_NALU)
 		.map(|tag| tag.body.len() - 5)
 		.sum();
-	assert!(sent > 60 * 1000, "the frames from the second keyframe on go out: {sent} bytes");
+	assert!(
+		sent > 60 * 1000,
+		"the frames from the second keyframe on go out: {sent} bytes"
+	);
 	assert_eq!(metered.billed() - catalog, sent as u64);
 }
