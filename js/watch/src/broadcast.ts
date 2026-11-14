@@ -132,13 +132,18 @@ export type BroadcastInput = {
 	// The manual-mode catalog source. Used directly when catalogFormat is "manual";
 	// ignored otherwise. Read `output.catalog` for the effective catalog in any mode.
 	catalog: Getter<Catalog.Root | undefined>;
+
+	// Whether playback still has media of the broadcast left to play once its publisher finished it.
+	// A finished broadcast reads "live" until this is false. Defaults to false.
+	tail: Getter<boolean>;
 };
 
 /** Signals the component derives. */
 export type BroadcastOutput = {
 	// "connecting" means no session can answer yet: none is attached, as while the connection
 	// dials, redials, or was refused, or one is still delivering its initial announcements.
-	// "offline" means one could answer and the broadcast is not there.
+	// "offline" means one could answer and the broadcast is not there, or its publisher finished it
+	// and `tail` says nothing is left to play.
 	// "error" means the origin refused the broadcast; `error` says why.
 	// "unsupported" means its catalog requires a newer player.
 	status: Signal<"connecting" | "offline" | "loading" | "live" | "error" | "unsupported">;
@@ -189,6 +194,8 @@ export class Broadcast {
 
 	// `#runCatalog`'s view of the broadcast, before "absent" is told apart.
 	readonly #progress = new Signal<Progress>("absent");
+	// Whether the publisher finished the catalog, which it does only when it ends the broadcast.
+	readonly #finished = new Signal(false);
 
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
@@ -227,6 +234,7 @@ export class Broadcast {
 			follow: getter(props?.follow ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
 			catalog: getter(props?.catalog),
+			tail: getter(props?.tail ?? false),
 		};
 
 		this.#signals.run(this.#runBroadcast.bind(this));
@@ -240,6 +248,10 @@ export class Broadcast {
 	// a bare origin has no session at all; either way nobody has answered yet.
 	#runStatus(effect: Effect): void {
 		const progress = effect.get(this.#progress);
+		if (progress === "live" && effect.get(this.#finished) && !effect.get(this.in.tail)) {
+			this.#out.status.set("offline");
+			return;
+		}
 		if (progress !== "absent") {
 			this.#out.status.set(progress);
 			return;
@@ -457,7 +469,10 @@ export class Broadcast {
 		}
 
 		// The snapshot outlives a clean end of the catalog track, so it clears with this run.
-		effect.cleanup(() => this.#raw.set(undefined));
+		effect.cleanup(() => {
+			this.#raw.set(undefined);
+			this.#finished.set(false);
+		});
 
 		effect.spawn(async () => {
 			let status: Progress = "absent";
@@ -466,11 +481,13 @@ export class Broadcast {
 			try {
 				for (;;) {
 					const update = await effect.race(fetchNext());
-					// A finished catalog only means no more edits. A finished broadcast keeps serving
-					// its tail until it closes or is withdrawn, which reruns this, so keep playing it.
-					// One that ended empty has nothing to play.
+					// A finished catalog means the publisher ended the broadcast. It keeps serving its tail
+					// until it closes or is withdrawn, which reruns this, so keep playing it, and read
+					// offline once `tail` has nothing left. One that ended empty has nothing to play.
 					if (!update) {
 						finished = received;
+						// A rerun cancelling the read ends it the same way, which says nothing of the publisher.
+						if (!effect.abort.aborted) this.#finished.set(finished);
 						break;
 					}
 					received = true;

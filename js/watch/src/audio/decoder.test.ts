@@ -209,6 +209,10 @@ beforeEach(() => {
 			this.needsKey = true;
 			pendingAudio = [];
 		}
+		// Like WebCodecs, a flush emits every frame still inside the decoder.
+		async flush() {
+			for (const emit of pendingAudio.splice(0)) emit();
+		}
 		decode(chunk: { timestamp: number; type: EncodedAudioChunkType }) {
 			if (decodeThrows) throw decodeThrows;
 			if (this.needsKey && chunk.type !== "key") throw new DOMException("key chunk required", "DataError");
@@ -253,12 +257,13 @@ afterEach(() => {
 	mock.restore();
 });
 
-// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close. An
-// Error stands in for a malformed read.
+// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close or
+// once the publisher finishes the track. An Error stands in for a malformed read.
 function feed() {
 	let currentConsumer: Container.Consumer | undefined;
 	const closed = new WeakSet<Container.Consumer>();
 	const queue: (Read | Error)[] = [];
+	let finished = false;
 	let waiter:
 		| { consumer: Container.Consumer; resolve: (read: Read | undefined) => void; reject: (err: Error) => void }
 		| undefined;
@@ -268,7 +273,7 @@ function feed() {
 		if (closed.has(this)) return Promise.resolve(undefined);
 		const read = queue.shift();
 		if (read instanceof Error) return Promise.reject(read);
-		if (read) return Promise.resolve(read);
+		if (read || finished) return Promise.resolve(read);
 		return new Promise<Read | undefined>((resolve, reject) => {
 			waiter = { consumer: this, resolve, reject };
 		});
@@ -291,8 +296,14 @@ function feed() {
 		else if (read instanceof Error) current.reject(read);
 		else current.resolve(read);
 	};
+	const finish = () => {
+		finished = true;
+		waiter?.resolve(undefined);
+		waiter = undefined;
+	};
 	return {
 		push,
+		finish,
 		// Network arrivals can advance while next() is held behind decoder backpressure.
 		buffered: (ranges: Container.BufferedRanges) => {
 			if (!currentConsumer) throw new Error("consumer has not started");
@@ -304,7 +315,7 @@ function feed() {
 async function play(initial: Delay, buffered = false, cmaf = false) {
 	// These cases test timeline handover after the optional decoder has loaded.
 	if (cmaf) await import("@moq/hang/cmaf");
-	const { push, buffered: queued } = feed();
+	const { push, finish, buffered: queued } = feed();
 	const truncate = spyOn(AudioRingBuffer.prototype, "truncate");
 	const reset = spyOn(AudioRingBuffer.prototype, "reset");
 	const insert = spyOn(AudioRingBuffer.prototype, "write");
@@ -369,11 +380,13 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		stretch,
 		sync,
 		push,
+		finish,
 		queued,
 		enabled,
 		decoding,
 		context: decoder.out.context,
 		stalled: () => decoder.out.stalled.peek(),
+		ended: () => decoder.out.ended.peek(),
 		stats: () => decoder.out.stats.peek(),
 		timestamp: () => decoder.out.timestamp.peek(),
 		feedback: () => decoder.feedback(Moq.Path.from("watched")),
@@ -892,6 +905,36 @@ describe("Decoder across a rendition's absence", () => {
 			expect(playback.stats()).toMatchObject({ underruns: 0, stalls: 0 });
 		} finally {
 			playback.close();
+		}
+	});
+
+	// A publisher that stops cleanly finishes the track instead of declaring an end.
+	it("runs dry into silence at a finished track's end, and ends once the clock reaches it", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		deferAudioOutput = true;
+		const playback = await play(Duration.millis(100));
+		try {
+			await playback.play(12);
+			// The codec still holds the last frame when the track finishes.
+			for (const emit of pendingAudio.splice(0, pendingAudio.length - 1)) emit();
+			const [ring] = playback.rings();
+			playback.finish();
+			await microtasks();
+			expect(drain(ring)).toBeGreaterThan(0);
+			await microtasks();
+			expect(ring.ring?.silent).toBe(true);
+			expect(playback.stalled()).toBe(false);
+			expect(playback.ended()).toBe(false);
+
+			await clock.advance(Duration.millis(1000));
+			await microtasks();
+			expect(playback.ended()).toBe(true);
+			expect(playback.stats()).toMatchObject({ underruns: 0, stalls: 0 });
+		} finally {
+			playback.close();
+			await microtasks();
+			installed.close();
 		}
 	});
 

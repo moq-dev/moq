@@ -75,6 +75,9 @@ export type DecoderOutput = {
 	// a push-to-talk mute, is not a stall.
 	stalled: Signal<boolean>;
 
+	// Whether the publisher finished the selected rendition and the clock reached the end of its audio.
+	ended: Signal<boolean>;
+
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
 };
@@ -163,6 +166,7 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Duration | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
+		ended: new Signal<boolean>(false),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	/** The derived outputs, read-only. */
@@ -600,6 +604,7 @@ export class Decoder {
 
 		effect.run((run) => {
 			attempt = run;
+			run.cleanup(() => this.#out.ended.set(false));
 			const sub = subscribeMedia(run, {
 				broadcast: active,
 				track: Catalog.track(track, identity),
@@ -640,10 +645,13 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill(hosted.url);
 			if (!loaded) return; // cancelled
 
+			// Where the PCM written so far ends, in microseconds.
+			let written: number | undefined;
 			const decoder = new AudioDecoder({
 				output: (data) => {
 					this.#count(key, { decoded: 1 });
-					this.#emit(data);
+					const landed = this.#emit(data);
+					if (landed !== undefined) written = Math.max(written ?? landed, landed);
 				},
 				error: (error) => failure.set(error),
 			});
@@ -674,11 +682,15 @@ export class Decoder {
 				return this.#play(effect, decoder, decoderConfig, order, reads);
 			};
 			for (;;) {
-				const next = await nextMedia(consumer);
+				const next = await nextMedia(consumer, effect.abort);
 				if (next?.kind !== "frame") {
 					// The track ending, or a gap or end, cuts a held head short.
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
+					if (next.kind === "finish") {
+						await this.#finish(effect, decoder, () => written);
+						break;
+					}
 					if (this.#onRead(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
@@ -736,10 +748,13 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill(hosted.url);
 			if (!loaded) return; // cancelled
 
+			// Where the PCM written so far ends, in microseconds.
+			let written: number | undefined;
 			const decoder = new AudioDecoder({
 				output: (data) => {
 					this.#count(key, { decoded: 1 });
-					this.#emit(data);
+					const landed = this.#emit(data);
+					if (landed !== undefined) written = Math.max(written ?? landed, landed);
 				},
 				error: (error) => failure.set(error),
 			});
@@ -764,11 +779,15 @@ export class Decoder {
 				return this.#play(effect, decoder, decoderConfig, order, reads);
 			};
 			for (;;) {
-				const next = await nextMedia(consumer);
+				const next = await nextMedia(consumer, effect.abort);
 				if (next?.kind !== "frame") {
 					// The track ending, or a gap or end, cuts a held head short.
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
+					if (next.kind === "finish") {
+						await this.#finish(effect, decoder, () => written);
+						break;
+					}
 					if (this.#onRead(next)) {
 						this.#reprime(decoder, decoderConfig, order);
 					}
@@ -942,7 +961,20 @@ export class Decoder {
 		}
 	}
 
-	#emit(sample: AudioData) {
+	// The publisher finished the track. Decode what the codec still holds, then declare the end where
+	// the written audio stops, so the ring runs dry into silence rather than a stall, and mark the
+	// rendition ended once the clock reaches it.
+	async #finish(effect: Effect, decoder: AudioDecoder, written: () => number | undefined): Promise<void> {
+		if (decoder.state === "configured") await decoder.flush();
+		if (effect.abort.aborted) return;
+		const end = written();
+		this.#ring.peek()?.end(end ?? 0);
+		if (end !== undefined) await this.#track.wait(Duration.micros(end), effect.abort);
+		if (!effect.abort.aborted) this.#out.ended.set(true);
+	}
+
+	// Place decoded audio, returning where the PCM written ends, in microseconds.
+	#emit(sample: AudioData): number | undefined {
 		// Whatever becomes of it, the output answers the frames it was decoded from, so the gate counts
 		// only what still decodes. Reported after any insert, so the gate always counts the frame as
 		// either decoding or in the ring.
@@ -953,6 +985,7 @@ export class Decoder {
 		} finally {
 			this.#ring.peek()?.decoded(decoded, landed);
 		}
+		return landed;
 	}
 
 	// Trim the output and write it to the ring, returning where the PCM written ends.

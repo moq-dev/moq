@@ -111,6 +111,10 @@ export type DecoderOutput = {
 	display: Signal<{ width: number; height: number } | undefined>;
 
 	stalled: Signal<boolean>;
+
+	// Whether the publisher finished the selected rendition and the clock reached its last picture.
+	ended: Signal<boolean>;
+
 	stats: Signal<Stats | undefined>;
 
 	/**
@@ -142,6 +146,7 @@ export class Decoder {
 		timestamp: new Signal<Duration | undefined>(undefined),
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
 		stalled: new Signal<boolean>(false),
+		ended: new Signal<boolean>(false),
 		stats: new Signal<Stats | undefined>(undefined),
 		jitter: new Signal<Duration | undefined>(undefined),
 		buffered: new Signal<Container.BufferedRanges>([]),
@@ -214,6 +219,7 @@ export class Decoder {
 		this.#signals.run(this.#runActive.bind(this));
 		this.#signals.run(this.#runDisplay.bind(this));
 		this.#signals.run(this.#runBuffering.bind(this));
+		this.#signals.run(this.#runEnded.bind(this));
 		this.#signals.run(this.#runStalls.bind(this));
 	}
 
@@ -488,6 +494,11 @@ export class Decoder {
 		}, BUFFERING);
 	}
 
+	#runEnded(effect: Effect): void {
+		const active = effect.get(this.#active);
+		effect.set(this.#out.ended, active !== undefined && effect.get(active.finished), false);
+	}
+
 	// Count each stall, and how long it lasted, against the rendition on screen. Each active rendition
 	// starts a run, and disabling the decoder clears it: the wait for its first picture on the clock
 	// is a startup even while a poster shows, and so is a restarted timeline's.
@@ -636,6 +647,8 @@ class DecoderTrack {
 	// The group the publisher declared the media ends with. It stays in force through holes until a
 	// later group starts a new timeline.
 	readonly ended = new Signal<bigint | undefined>(undefined);
+	// Whether the publisher finished the track and the clock reached the last picture fed to the codec.
+	readonly finished = new Signal<boolean>(false);
 
 	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
 	// is only held until the first one opens.
@@ -838,8 +851,12 @@ class DecoderTrack {
 
 		this.#spawn(effect, async () => {
 			for (;;) {
-				const next = await nextMedia(consumer);
+				const next = await nextMedia(consumer, effect.abort);
 				if (!next) break;
+				if (next.kind === "finish") {
+					await this.#finish(effect, decoder, latest);
+					break;
+				}
 				this.#onRead(next, latest);
 
 				// A gap or declared end cuts the decoded span; neither bridges buffered ranges.
@@ -913,8 +930,12 @@ class DecoderTrack {
 
 		this.#spawn(effect, async () => {
 			for (;;) {
-				const next = await nextMedia(consumer);
+				const next = await nextMedia(consumer, effect.abort);
 				if (!next) break;
+				if (next.kind === "finish") {
+					await this.#finish(effect, decoder, latest);
+					break;
+				}
 				this.#onRead(next, latest);
 
 				// Do not bridge buffered ranges across a gap or end (see #runLegacy).
@@ -973,7 +994,7 @@ class DecoderTrack {
 		waiting.run((inner) => {
 			// An adaptive floor can rise while another track fills. Resume decoding to reach it,
 			// rather than waiting on a clock whose startup now needs more video.
-			if (!filled((signal) => inner.get(signal))) refill.set(true);
+			if (refill.peek() === undefined && !filled((signal) => inner.get(signal))) refill.set(true);
 		});
 		try {
 			// Wait on the first picture, which is due the moment startup releases, so decoding
@@ -999,6 +1020,16 @@ class DecoderTrack {
 			this.ended.set(undefined);
 			this.#onBreak(read.group);
 		}
+	}
+
+	// The publisher finished the track, which ends it like a declared end. Drain the pictures the codec
+	// still holds, and mark it finished once the clock reaches the last one.
+	async #finish(effect: Effect, decoder: VideoDecoder, latest: bigint | undefined): Promise<void> {
+		if (this.ended.peek() === undefined) this.ended.set(latest ?? 0n);
+		if (decoder.state === "configured") await decoder.flush();
+		const last = this.#submitted;
+		if (last !== undefined) await this.clock.wait(last, effect.abort);
+		if (!effect.abort.aborted) this.finished.set(true);
 	}
 
 	// A fresh timeline invalidates parked pictures and its previous decoded span. The held picture
@@ -1250,6 +1281,11 @@ class Rendition {
 	// The group the publisher declared the clock-driving decoder's media ends with.
 	get ended(): Getter<bigint | undefined> {
 		return this.min.ended;
+	}
+
+	// Whether the publisher finished the clock-driving decoder's track and its last picture is due.
+	get finished(): Getter<boolean> {
+		return this.min.finished;
 	}
 
 	// Show the max-delay picture when it is at or past the min-delay one, so it wins ties, else the

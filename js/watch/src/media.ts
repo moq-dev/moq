@@ -29,10 +29,20 @@ export function subscribeMedia(
 	return subscriber;
 }
 
-/** Read the next media frame, ending playback when its subscription is reset. @internal */
-export async function nextMedia(consumer: Container.Consumer) {
+/** A container read, or the publisher finishing the track once every read is delivered. @internal */
+export type MediaRead = Container.Read | { kind: "finish" };
+
+/**
+ * Read the next media item. Undefined once the subscription is reset or `signal`, the reader's
+ * owner, closed it: either way nothing says the media ended.
+ * @internal
+ */
+export async function nextMedia(consumer: Container.Consumer, signal: AbortSignal): Promise<MediaRead | undefined> {
 	try {
-		return await consumer.next();
+		const read = await consumer.next();
+		// A reader only reads as finished on its own when the publisher finished the track cleanly.
+		if (read || signal.aborted) return read;
+		return { kind: "finish" };
 	} catch (err) {
 		if (!(err instanceof NetError.Stream)) throw err;
 		// The subscription is over, even when other tracks on the session are still live.

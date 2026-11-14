@@ -110,6 +110,7 @@ export class Player {
 	#videoRate = new Signal<number | undefined>(undefined);
 	#audioEnabled = new Signal(false);
 	#captionsEnabled = new Signal(false);
+	#tail = new Signal(false);
 	#signals = new Effect();
 
 	constructor(props: PlayerProps = {}) {
@@ -149,7 +150,7 @@ export class Player {
 			},
 		};
 
-		this.broadcast = new Broadcast(this.in);
+		this.broadcast = new Broadcast({ ...this.in, tail: this.#tail });
 		this.#signals.cleanup(() => this.broadcast.close());
 
 		const videoSource = new Video.Source({
@@ -228,6 +229,21 @@ export class Player {
 				this.#videoRate,
 				rate === undefined ? undefined : Math.max(0, rate - (effect.get(audioBitrate) ?? 0)),
 			);
+		});
+
+		// A finished broadcast stays live while the media being played has some of it left, so it reads
+		// offline only once playback reached the end. Media not downloading has nothing to play.
+		this.#signals.run((effect) => {
+			const video =
+				effect.get(this.#videoEnabled) &&
+				effect.get(videoSource.out.config) !== undefined &&
+				!effect.get(this.video.out.ended);
+			const audio =
+				effect.get(this.#audioEnabled) &&
+				!effect.get(this.sync.out.instant) &&
+				effect.get(audioSource.out.config) !== undefined &&
+				!effect.get(this.audio.out.ended);
+			this.#tail.set(video || audio);
 		});
 
 		this.#signals.run((effect) => {

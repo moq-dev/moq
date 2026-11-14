@@ -144,8 +144,9 @@ describe("unsupported catalog", () => {
 });
 
 // Regression: a finished catalog track dropped the catalog at once, so a publisher finishing its
-// broadcast cut every viewer off before it drained the tail the broadcast still served.
-it("keeps playing a finished catalog until the broadcast ends", async () => {
+// broadcast cut every viewer off before it drained the tail the broadcast still served. Once nothing
+// is left to play it reads offline, though the broadcast still serves the tail to late subscribers.
+it("keeps playing a finished catalog until the broadcast ends, and reads offline once the tail played", async () => {
 	const owner = new Origin.Producer();
 	// A session that could announce the broadcast, so its absence reads offline.
 	wireOf(owner).attach(true);
@@ -155,16 +156,28 @@ it("keeps playing a finished catalog until the broadcast ends", async () => {
 		track: published.createTrack(Catalog.TRACK),
 		deltas: false,
 	});
-	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
+	const tail = new Signal(true);
+	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true, tail });
 	try {
 		const ready = source.out.catalog.changed();
 		producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } } });
 		await ready;
 		expect(source.out.status.peek()).toBe("live");
 
+		// A live broadcast stays live whatever the tail says.
+		tail.set(false);
+		await settle();
+		expect(source.out.status.peek()).toBe("live");
+		tail.set(true);
+
 		producer.finish();
 		await settle();
 		expect(source.out.status.peek()).toBe("live");
+		expect(videoRenditions(source)).toEqual(["hd"]);
+
+		tail.set(false);
+		await settle();
+		expect(source.out.status.peek()).toBe("offline");
 		expect(videoRenditions(source)).toEqual(["hd"]);
 
 		published.close();
