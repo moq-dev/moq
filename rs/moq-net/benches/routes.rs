@@ -26,6 +26,13 @@
 //! - path/watched, path/unwatched, path/received: the same fan-out grids on the path rule.
 //! - path/follow, path/teardown, path/refollow: the prefix-by-claim grid on the path
 //!   router, including initial following and timer work with a virtual clock.
+//! - path/drain: a relay hears a node it reaches over many sessions send GOAWAY, with
+//!   a route per session sent to each stream it answers. Swept over the leaving
+//!   node's sessions and the streams: both axes are expected to grow, since each
+//!   stream is re-sent each route ranked draining, and no faster than their product.
+//! - path/drained: after the drain, an RTT change on a session with no routes. Swept
+//!   over the same grid: the streams axis is expected to grow, since each stream's
+//!   DRAIN notice is kept; the sessions axis is not.
 //!
 //! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
@@ -45,6 +52,10 @@ const HELD: [(usize, usize); 4] = [(10, 10), (10_000, 10), (10, 100), (10_000, 1
 
 /// `(prefixes, claims)` shapes for a node following one origin per prefix.
 const FOLLOWED: [(usize, usize); 4] = [(16, 1), (1_024, 1), (16, 16), (1_024, 16)];
+
+/// `(sessions, streams)` shapes for a relay hearing a node it reaches over many
+/// sessions drain.
+const DRAINING: [(usize, usize); 4] = [(4, 4), (128, 4), (4, 128), (128, 128)];
 
 /// `(claims, lag)` shapes for a relay hearing a stream that lags another.
 const LAGGING: [(usize, usize); 4] = [(100, 1), (10_000, 1), (100, 100), (10_000, 10_000)];
@@ -239,6 +250,38 @@ fn bench_path_refollow(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_path_drain(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/drain");
+	for (sessions, streams) in DRAINING {
+		let id = BenchmarkId::from_parameter(format!("{sessions}n_{streams}s"));
+		group.bench_function(id, |b| {
+			b.iter_batched(
+				|| fuzz::PathRouteDrain::new(sessions, streams),
+				|mut node| node.drain(),
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
+fn bench_path_drained(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/drained");
+	for (sessions, streams) in DRAINING {
+		let id = BenchmarkId::from_parameter(format!("{sessions}n_{streams}s"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let node = fixture.get_or_insert_with(|| {
+				let mut node = fuzz::PathRouteDrain::new(sessions, streams);
+				node.drain();
+				node
+			});
+			b.iter(|| node.idle());
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_watched,
@@ -253,6 +296,8 @@ criterion_group!(
 	bench_path_unwatched,
 	bench_path_received,
 	bench_path_teardown,
-	bench_path_refollow
+	bench_path_refollow,
+	bench_path_drain,
+	bench_path_drained
 );
 criterion_main!(benches);

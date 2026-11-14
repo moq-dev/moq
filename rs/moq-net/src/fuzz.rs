@@ -1046,6 +1046,112 @@ impl PathRouteFollower {
 	}
 }
 
+/// A path router hearing one publisher through `sessions` sessions of a node that
+/// then sends GOAWAY, a route per session, and answering `recipients` streams that
+/// watch the root, for the routes bench.
+pub struct PathRouteDrain {
+	router: crate::route::path::Router<usize, ()>,
+	recipients: usize,
+	idle: usize,
+	rtt: u64,
+}
+
+impl PathRouteDrain {
+	const LEAVING: u64 = 500;
+
+	/// Hear a route over each of `sessions` sessions of the leaving node, and answer
+	/// `recipients` streams watching the root.
+	pub fn new(sessions: usize, recipients: usize) -> Self {
+		use crate::route::path::{Hop, Offer, Reach};
+		let mut router = crate::route::path::Router::new(2, 2, crate::route::path::Doubt::default());
+		for i in 0..sessions {
+			let prefix = Path::new(&format!("live/{i}")).unwrap();
+			let via = 1_000 + i as u64;
+			router.connect(i, via, crate::route::Link::default()).unwrap();
+			let path = [
+				Hop { node: 1, session: 0 },
+				Hop {
+					node: Self::LEAVING,
+					session: i as u64 + 1,
+				},
+				Hop { node: via, session: 1 },
+			];
+			router.route(
+				i,
+				1,
+				prefix.clone(),
+				Some(Reach::Finite(Offer {
+					path: path.into(),
+					draining: false,
+					priority: i8::MAX,
+					metric: 1,
+					down_only: false,
+					rtt: None,
+				})),
+				0,
+			);
+			let claim = Path::new(&format!("live/{i}/x")).unwrap();
+			router.batch(i, 1, prefix, vec![(claim, Some(()))], Some(1), 0);
+		}
+		for r in 0..recipients {
+			let peer = sessions + r;
+			router
+				.connect(peer, 5_000 + r as u64, crate::route::Link::default())
+				.unwrap();
+			router.peer_interest(peer, Some(Path::empty())).unwrap();
+		}
+		let idle = sessions + recipients;
+		router.connect(idle, 9_000, crate::route::Link::default()).unwrap();
+		let mut node = Self {
+			router,
+			recipients,
+			idle,
+			rtt: 0,
+		};
+		node.flush();
+		node
+	}
+
+	/// Hear the leaving node drain, returning the messages sent: each recipient's
+	/// DRAIN, then each route it was sent, now ranked draining.
+	pub fn drain(&mut self) -> usize {
+		use crate::route::path::{Dead, Out};
+		let now = kio::clock::Instant::now();
+		self.router.dead(0, Dead::Draining { node: Self::LEAVING }, now);
+		let out = self.router.drain();
+		let told = (out.iter())
+			.filter(|out| {
+				matches!(
+					out,
+					Out::Dead {
+						dead: Dead::Draining { .. },
+						..
+					}
+				)
+			})
+			.count();
+		assert_eq!(told, self.recipients, "each recipient hears the drain once");
+		self.router.events();
+		self.router.changed();
+		out.len()
+	}
+
+	/// An RTT change on a session with no routes, which changes nothing it was sent.
+	pub fn idle(&mut self) {
+		self.rtt = self.rtt % 8 + 1;
+		self.router
+			.rtt(self.idle, Some(std::time::Duration::from_millis(self.rtt)));
+		assert_eq!(self.flush(), 0);
+	}
+
+	fn flush(&mut self) -> usize {
+		let sent = self.router.drain().len();
+		self.router.events();
+		self.router.changed();
+		sent
+	}
+}
+
 /// What a client session fed into an origin hears it should ask its peer about, for
 /// the interests bench.
 pub struct Interests(crate::model::Interests);
