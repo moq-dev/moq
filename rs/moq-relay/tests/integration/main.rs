@@ -30,6 +30,8 @@ mod logs;
 mod memory;
 mod peer_limits;
 mod public_rules;
+#[cfg(all(feature = "test-support", feature = "quic"))]
+mod quic_sim;
 mod refusals;
 mod released_cli;
 mod runtime_uring;

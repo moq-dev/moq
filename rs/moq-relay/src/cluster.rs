@@ -1046,6 +1046,11 @@ pub struct Options {
 	/// `None` dials over sockets.
 	#[cfg(feature = "test-support")]
 	pub network: Option<moq_tokio::sim::Network>,
+
+	/// The simulated host peer dials bind on, for tests over QUIC on `kio::clock::sim`;
+	/// see [`moq_tokio::client::Config::sim`]. `None` binds UDP sockets.
+	#[cfg(all(feature = "test-support", feature = "quic"))]
+	pub sim: Option<moq_tokio::quic::driver::sim::Host>,
 }
 
 impl Options {
@@ -1321,6 +1326,9 @@ pub struct Cluster {
 	/// Where peer dials go in place of the network; see [`Options::network`].
 	#[cfg(feature = "test-support")]
 	network: Option<moq_tokio::sim::Network>,
+	/// The simulated host peer dials bind on; see [`Options::sim`].
+	#[cfg(all(feature = "test-support", feature = "quic"))]
+	sim: Option<moq_tokio::quic::driver::sim::Host>,
 	/// The client static and API peers share when the template binds a fixed
 	/// `[connect]` port, so that port stays the cluster's egress port. Otherwise
 	/// `None`, and every session builds its own client on an ephemeral port. Built
@@ -1443,6 +1451,8 @@ impl Cluster {
 			stats,
 			#[cfg(feature = "test-support")]
 			network,
+			#[cfg(all(feature = "test-support", feature = "quic"))]
+			sim,
 		} = options;
 		let deprecated = config.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
@@ -1500,6 +1510,8 @@ impl Cluster {
 			quic: None,
 			#[cfg(feature = "test-support")]
 			network,
+			#[cfg(all(feature = "test-support", feature = "quic"))]
+			sim,
 			dial: None,
 			dialers: Dialers::new(),
 			advertise: None,
@@ -2350,7 +2362,14 @@ impl Cluster {
 		}
 		let mut quic = self.quic.as_deref().cloned().unwrap_or_default();
 		self.peer_quic.dial(&mut quic);
-		let client = connect.init(quic)?;
+		let mut config = moq_tokio::client::Config::default();
+		config.connect = connect;
+		config.quic = quic;
+		#[cfg(all(feature = "test-support", feature = "quic"))]
+		{
+			config.sim = self.sim.clone();
+		}
+		let client = config.init()?;
 		#[cfg(feature = "test-support")]
 		let client = match &self.network {
 			Some(network) => client.with_network(network.clone()),

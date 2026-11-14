@@ -26,6 +26,11 @@ pub struct Config {
 
 	/// QUIC socket and transport settings, shared with [`crate::Server`].
 	pub quic: crate::quic::Config,
+
+	/// The simulated host the QUIC endpoint binds on, at the configured bind port, in place of
+	/// a UDP socket. For tests on `kio::clock::sim`; see [`crate::quic::driver::sim`].
+	#[cfg(all(feature = "sim", feature = "quic"))]
+	pub sim: Option<crate::quic::driver::sim::Host>,
 }
 
 impl Config {
@@ -122,7 +127,10 @@ impl Client {
 	#[cfg(feature = "_transport")]
 	pub fn new(config: Config) -> crate::Result<Self> {
 		let Config {
-			connect: config, quic, ..
+			connect: config,
+			quic,
+			#[cfg(all(feature = "sim", feature = "quic"))]
+			sim,
 		} = config;
 
 		// Refuse here rather than in `init`, so a caller that skipped its own check
@@ -143,8 +151,15 @@ impl Client {
 
 		#[cfg(any(feature = "websocket", feature = "tcp"))]
 		let qmux = crate::qmux_config(&quic.resolve());
+		#[cfg(all(feature = "quic", not(feature = "sim")))]
+		let quic = crate::quic::Client::new(&config, &quic);
+		#[cfg(all(feature = "quic", feature = "sim"))]
+		let quic = match sim {
+			Some(host) => crate::quic::Client::simulated(&config, &quic, host),
+			None => crate::quic::Client::new(&config, &quic),
+		};
 		#[cfg(feature = "quic")]
-		let quic = Some(crate::quic::Client::new(&config, &quic)?);
+		let quic = Some(quic?);
 
 		let versions = config.versions();
 		// Read before the struct literal below moves fields out of `config`.
@@ -333,6 +348,10 @@ impl Client {
 		// An explicitly closed QUIC endpoint cannot open another socket.
 		#[cfg(feature = "quic")]
 		let quic = self.quic.as_ref().is_some_and(|quic| !quic.is_closed());
+		#[cfg(all(feature = "sim", feature = "quic"))]
+		if self.simulated() {
+			return quic && simulated_scheme(scheme);
+		}
 		#[cfg(not(feature = "quic"))]
 		let quic = false;
 		#[cfg(feature = "websocket")]
@@ -347,6 +366,12 @@ impl Client {
 			"moqt" | "moql" => quic,
 			_ => false,
 		}
+	}
+
+	/// Whether QUIC binds on a simulated host, where no other transport can dial.
+	#[cfg(all(feature = "sim", feature = "quic"))]
+	fn simulated(&self) -> bool {
+		self.quic.as_ref().is_some_and(crate::quic::Client::is_simulated)
 	}
 
 	#[cfg(feature = "quic")]
@@ -452,6 +477,10 @@ impl Client {
 		// `unix://` carry no TLS, so none can present it to an authenticated server.
 		if self.client_cert && matches!(addr.url().scheme(), "http" | "ws" | "tcp" | "unix") {
 			return Err(Error::ClientCertScheme(addr.url().scheme().to_string()));
+		}
+		#[cfg(all(feature = "sim", feature = "quic"))]
+		if self.simulated() && !simulated_scheme(addr.url().scheme()) {
+			return Err(Error::SimScheme(addr.url().scheme().to_string()));
 		}
 		#[cfg(test)]
 		if let Some(dialer) = &self.dialer {
@@ -586,17 +615,15 @@ impl Client {
 					.map_err(Error::from)
 			};
 
+			// A simulated host has no TCP for the fallback to race.
 			#[cfg(feature = "websocket")]
-			{
+			if !quic.is_simulated() {
 				return self.race_moq_connect(&moq, addr, quic_handle).await;
 			}
 
-			#[cfg(not(feature = "websocket"))]
-			{
-				let session = quic_handle.await?;
-				let session = connect_session(&moq, session).await?;
-				return Ok(Dialed::new(session, quic_transport(&url)));
-			}
+			let session = quic_handle.await?;
+			let session = connect_session(&moq, session).await?;
+			return Ok(Dialed::new(session, quic_transport(&url)));
 		}
 
 		#[cfg(feature = "websocket")]
@@ -767,6 +794,13 @@ where
 /// Auth is terminal only when both arms refused. A WebTransport-only endpoint
 /// answers the fallback with 403 while QUIC is still in flight, and reconnect
 /// treats is_auth() as terminal, so a mixed pair reports the retryable error.
+/// Whether a client on a simulated host can dial `scheme`: only QUIC's, without the `http://`
+/// bootstrap's fetch over TCP.
+#[cfg(all(feature = "sim", feature = "quic"))]
+fn simulated_scheme(scheme: &str) -> bool {
+	matches!(scheme, "https" | "moqt" | "moql")
+}
+
 #[cfg(all(feature = "websocket", feature = "quic"))]
 fn race_error(quic: Error, websocket: Error) -> Error {
 	match (quic.is_auth(), websocket.is_auth()) {
@@ -786,7 +820,8 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 ) -> Result<moq_net::Session, moq_net::Error> {
 	let (session, driver) = client.connect(moq_net::time::Instant::now(), transport).await?;
 	use tracing::Instrument;
-	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
+	crate::runtime::Spawner::current()
+		.spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)
 }
 

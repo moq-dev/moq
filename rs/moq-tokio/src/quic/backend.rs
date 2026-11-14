@@ -89,6 +89,12 @@ pub enum Error {
 	#[error("failed to bind UDP socket")]
 	BindSocket(#[source] std::io::Error),
 
+	/// A client on a simulated host was asked to look a name up, which only a real resolver can.
+	/// The payload is the name.
+	#[cfg(feature = "sim")]
+	#[error("{0} can't be resolved from a simulated host; dial an IP literal or pinned addresses")]
+	SimResolve(String),
+
 	/// The QUIC endpoint could not be created around the bound socket.
 	#[error("failed to create QUIC endpoint")]
 	CreateEndpoint(#[source] driver::endpoint::Error),
@@ -294,7 +300,7 @@ pub(crate) struct Client {
 	/// Each reconnect loop may replace its endpoint without moving other sessions.
 	/// Weak handles let close reach all of them without retaining abandoned sockets.
 	endpoints: Arc<Mutex<Endpoints>>,
-	bind: net::SocketAddr,
+	bind: Bind,
 	pub transport: driver::transport::Config,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
@@ -313,6 +319,51 @@ pub(crate) struct Client {
 	keylog: Option<Arc<crate::tls::KeyLog>>,
 }
 
+/// Where a client's endpoints get their sockets
+#[derive(Clone)]
+enum Bind {
+	/// A UDP socket at this address
+	Udp(net::SocketAddr),
+	/// This port, or an ephemeral one for 0, on a simulated host
+	#[cfg(feature = "sim")]
+	Sim(driver::sim::Host, u16),
+}
+
+impl Bind {
+	fn port(&self) -> u16 {
+		match self {
+			Self::Udp(addr) => addr.port(),
+			#[cfg(feature = "sim")]
+			Self::Sim(_, port) => *port,
+		}
+	}
+
+	/// A new endpoint, and whether its socket reaches IPv4 destinations as well as its own family
+	#[cfg_attr(
+		not(feature = "sim"),
+		allow(unused_mut, reason = "only a simulated socket seeds the endpoint")
+	)]
+	fn endpoint(&self) -> Result<(driver::endpoint::Endpoint, bool)> {
+		let mut config = driver::endpoint::Config::default();
+		let (socket, dual_stack): (driver::endpoint::Socket, _) = match self {
+			Self::Udp(addr) => {
+				let socket = crate::bind::udp(crate::bind::Udp::new(*addr)).map_err(Error::BindSocket)?;
+				let dual_stack = crate::bind::udp_is_dual_stack(&socket);
+				(socket.into(), dual_stack)
+			}
+			#[cfg(feature = "sim")]
+			Self::Sim(host, port) => {
+				let (socket, seed) = host.bind(*port).map_err(Error::BindSocket)?;
+				config.rng_seed = Some(seed);
+				// A host has one concrete address, so it reaches only its own family.
+				(socket.into(), false)
+			}
+		};
+		let endpoint = driver::endpoint::Endpoint::new(config, socket).map_err(Error::CreateEndpoint)?;
+		Ok((endpoint, dual_stack))
+	}
+}
+
 struct Endpoints {
 	closed: bool,
 	all: Vec<driver::endpoint::WeakEndpoint>,
@@ -323,10 +374,28 @@ impl Client {
 		self.endpoints.lock().unwrap().closed
 	}
 
+	/// Whether each endpoint binds on a simulated host rather than a UDP socket.
+	pub fn is_simulated(&self) -> bool {
+		match self.bind {
+			Bind::Udp(_) => false,
+			#[cfg(feature = "sim")]
+			Bind::Sim(..) => true,
+		}
+	}
+
 	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
+		Self::bound(config, quic, Bind::Udp(config.resolve().bind))
+	}
+
+	/// [`Self::new`], binding each endpoint on `host` at the configured port.
+	#[cfg(feature = "sim")]
+	pub fn simulated(config: &connect::Config, quic: &crate::quic::Config, host: driver::sim::Host) -> Result<Self> {
+		Self::bound(config, quic, Bind::Sim(host, config.resolve().bind.port()))
+	}
+
+	fn bound(config: &connect::Config, quic: &crate::quic::Config, bind: Bind) -> Result<Self> {
 		let resolved = config.resolve();
-		let socket = crate::bind::udp(crate::bind::Udp::new(resolved.bind)).map_err(Error::BindSocket)?;
-		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
+		let (endpoint, dual_stack) = bind.endpoint()?;
 
 		let quic = quic.resolve();
 		let transport = transport(&quic, "client")?;
@@ -337,8 +406,7 @@ impl Client {
 			.transpose()?
 			.map(Arc::new);
 
-		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
-			.map_err(Error::CreateEndpoint)?;
+		let quic = endpoint;
 		let endpoints = Arc::new(Mutex::new(Endpoints {
 			closed: false,
 			all: vec![quic.downgrade()],
@@ -347,7 +415,7 @@ impl Client {
 		Ok(Self {
 			quic,
 			endpoints,
-			bind: resolved.bind,
+			bind,
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
@@ -368,10 +436,7 @@ impl Client {
 			return Ok(());
 		}
 		// Bind before dropping the old endpoint so the kernel cannot reuse its port.
-		let socket = crate::bind::udp(crate::bind::Udp::new(self.bind)).map_err(Error::BindSocket)?;
-		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
-		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
-			.map_err(Error::CreateEndpoint)?;
+		let (quic, dual_stack) = self.bind.endpoint()?;
 		endpoints.all.retain(|endpoint| endpoint.upgrade().is_some());
 		endpoints.all.push(quic.downgrade());
 		tracing::info!(old = %self.quic.local_addr(), new = %quic.local_addr(), "redialing from a fresh UDP port");
@@ -422,6 +487,14 @@ impl Client {
 		// answers Happy Eyeballs style as they land, so neither a broken family nor a
 		// lookup still waiting on its AAAA record can stall the connect.
 		let local = self.quic.local_addr();
+		#[cfg(feature = "sim")]
+		if self.is_simulated()
+			&& addr.addresses().is_none()
+			&& let url::Host::Domain(domain) = &target
+			&& domain.parse::<net::IpAddr>().is_err()
+		{
+			return Err(Error::SimResolve(domain.to_string()));
+		}
 		let candidates = match addr.addresses() {
 			Some(addrs) => crate::resolve::Candidates::fixed(addrs.iter().copied()),
 			None => crate::resolve::Candidates::resolve(target, port, self.resolution_delay),
@@ -595,6 +668,9 @@ pub(crate) struct Options {
 	pub member: Option<listen::Socket>,
 	pub tls: crate::tls::Serve,
 	pub demux: super::demux::Demux,
+	/// Bind on this simulated host instead of a UDP socket.
+	#[cfg(feature = "sim")]
+	pub sim: Option<driver::sim::Host>,
 }
 
 impl Server {
@@ -605,6 +681,8 @@ impl Server {
 			member,
 			tls: served,
 			demux,
+			#[cfg(feature = "sim")]
+			sim,
 		} = options;
 		let quic = quic.resolve();
 		let mut transport = transport(&quic, "server")?;
@@ -706,12 +784,27 @@ impl Server {
 
 		// A group socket was released only after every member bound and the
 		// steering filter covered the final array.
-		let socket = match member {
-			Some(member) => member.into_inner(),
-			None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
+		#[cfg(feature = "sim")]
+		let simulated = match &sim {
+			Some(host) => {
+				let (socket, seed) = host.bind(listen.port()).map_err(Error::BindSocket)?;
+				endpoint_config.rng_seed = Some(seed);
+				Some(Box::new(socket) as Box<dyn driver::endpoint::AsyncUdpSocket>)
+			}
+			None => None,
 		};
-
-		let socket = driver::wrap_udp_socket(socket).map_err(|err| Error::CreateEndpoint(err.into()))?;
+		#[cfg(not(feature = "sim"))]
+		let simulated = None;
+		let socket = match simulated {
+			Some(socket) => socket,
+			None => {
+				let socket = match member {
+					Some(member) => member.into_inner(),
+					None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
+				};
+				driver::wrap_udp_socket(socket).map_err(|err| Error::CreateEndpoint(err.into()))?
+			}
+		};
 		let socket = demux.wrap(socket);
 		let (quic, peers) = match forward {
 			Some(Forwarding { forward, watcher }) => (
@@ -1011,6 +1104,8 @@ mod tests {
 			member: None,
 			tls,
 			demux,
+			#[cfg(feature = "sim")]
+			sim: None,
 		})
 		.expect("server init");
 		let port = server.local_addr().port();
@@ -1101,6 +1196,8 @@ mod tests {
 			member: None,
 			tls,
 			demux: Default::default(),
+			#[cfg(feature = "sim")]
+			sim: None,
 		})
 		.expect("server init");
 		let addr = server.local_addr();
@@ -1203,6 +1300,8 @@ mod tests {
 			member: None,
 			tls,
 			demux: Default::default(),
+			#[cfg(feature = "sim")]
+			sim: None,
 		})
 		.expect("server init");
 		let addr = server.local_addr();
@@ -1295,6 +1394,8 @@ mod tests {
 			member: None,
 			tls,
 			demux: Default::default(),
+			#[cfg(feature = "sim")]
+			sim: None,
 		})
 		.expect("server init");
 		let addr = server.local_addr();

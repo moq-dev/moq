@@ -38,14 +38,14 @@ Agent's choices, for the implementer to revisit:
 - Prove the harness finds things: `test/drill/mutations`'s patches, applied
   one at a time, must each fail some seed within the nightly budget. Report
   which do not, since those are the drills this cannot replace.
+- Build on `rs/moq-relay/tests/integration/quic_sim.rs`: a relay serves a
+  moq-tokio `Server` whose `server::Config::sim` binds it on a
+  `quic::driver::sim::Host`, peers dial through `cluster::Options::sim`, and
+  clients through `client::Config::sim`, all on one `Network`.
 - No turmoil or madsim: `kio::clock::sim` and `moq_quic::sim` already give a
   seeded scheduler and network with no shims.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The relay over QUIC on the sim](/quest/m1/quic-sim.md) - relays and clients on one simulated `Network`
 
 ## Related
 

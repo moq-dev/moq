@@ -36,7 +36,8 @@ doc = false
 
 [features]
 # A programmatic relay fixture with generated TLS and ephemeral ports, and
-# `cluster::Options::network`, which routes peer dials over in-memory links.
+# `cluster::Options::network`, which routes peer dials over in-memory links, and with
+# `quic`, `cluster::Options::sim`, which binds them on a simulated QUIC host.
 test-support = ["moq-tokio/sim"]
 # The optional public STUN Binding listener (`--stun-bind`).
 stun = ["dep:stun-types"]
