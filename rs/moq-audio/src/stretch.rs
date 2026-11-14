@@ -6,8 +6,8 @@
 /// The most the stretch speeds up or slows down, as a fraction of real time.
 pub(crate) const CAP: f64 = 0.1;
 
-/// The lag, in milliseconds, whose rate reaches the cap: the rate is the lag
-/// over this.
+/// The rate is the lag over this many milliseconds: a lag past 50 ms runs at
+/// the cap, and a smaller one decays with this time constant.
 const GAIN: f64 = 500.0;
 
 /// What a hop boundary decides on, in frames at the device rate.

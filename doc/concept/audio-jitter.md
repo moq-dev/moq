@@ -729,7 +729,8 @@ window = 3 * hop                        the received audio past the playhead a s
 ```
 
 `CAP` is 0.1, the most the stretch speeds up or slows down as a fraction of real
-time, and `GAIN` is 500 ms, the lag at which the rate reaches the cap.
+time, and `GAIN` is 500 ms: the rate is the lag over it, so a lag past 50 ms
+runs at the cap and a smaller one decays with a 500 ms time constant.
 
 ### Decision
 

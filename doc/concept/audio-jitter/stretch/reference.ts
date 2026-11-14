@@ -13,7 +13,7 @@
 /** The most the stretch speeds up or slows down, as a fraction of real time. */
 export const CAP = 0.1;
 
-/** The lag, in milliseconds, whose rate reaches the cap. */
+/** The rate is the lag over this many milliseconds, so it reaches the cap at 50 ms. */
 export const GAIN = 500;
 
 /** What a hop boundary decides on, in frames. */

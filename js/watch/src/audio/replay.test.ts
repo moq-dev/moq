@@ -388,8 +388,8 @@ describe("buffered replay against the shared clock", () => {
 		expect(warn).not.toHaveBeenCalled();
 	});
 
-	// The rate follows the lag, so a clock running 1% fast leaves audio trailing it by about 1% of the
-	// 500 ms lag that reaches the cap, and a splice every second or so: within a 20 ms frame.
+	// The rate is the lag over 500 ms, so a clock running 1% fast leaves audio trailing it by about 1% of
+	// that, and a splice every second or so: within a 20 ms frame.
 	it("follows a publisher clock running 1% fast at auto", async () => {
 		const trace = paced(60, (i) => 30 - (i * 20) / 101);
 		const options: Options = {
