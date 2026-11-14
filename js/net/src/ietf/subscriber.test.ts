@@ -1535,15 +1535,15 @@ test("an END_OF_TRACK after the track closed locally leaves the session open", a
 		opened.resolve();
 		return open.call(this, sequence);
 	});
-	let controller: ReadableStreamDefaultController<Uint8Array>;
+	const ended = Promise.withResolvers<void>();
+	// A standalone END_OF_TRACK at object 0, whose stream has not ended yet.
 	const readable = new ReadableStream<Uint8Array>({
-		start(value) {
-			controller = value;
+		start(controller) {
+			controller.enqueue(new Uint8Array([0, 0, 4]));
+			void ended.promise.then(() => controller.close());
 		},
 	});
-	// A standalone END_OF_TRACK at object 0, whose stream has not ended yet.
 	const reader = new Reader(readable, undefined, VERSION);
-	controller.enqueue(new Uint8Array([0, 0, 4]));
 	const handled = subscriber.handleGroup(
 		new GroupMessage({
 			trackAlias: ALIAS,
@@ -1559,7 +1559,7 @@ test("an END_OF_TRACK after the track closed locally leaves the session open", a
 	for (let i = 0; i < 10; i++) await yieldNow();
 	track.close();
 	await handled;
-	controller.close();
+	ended.resolve();
 
 	expect(close).not.toHaveBeenCalled();
 	close.mockRestore();
