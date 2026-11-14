@@ -56,6 +56,6 @@ audit ([moq-dev/moq#8648](https://github.com/moq-dev/moq/pull/8648)), the size
 report's output ([moq-dev/moq#8654](https://github.com/moq-dev/moq/pull/8654)),
 the firefox resume ([moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)),
 and the chromium `av_lag` rows
-([output latency](/quest/m2/audio-playout/output-latency.md) and
+([moq-dev/moq#8676](https://github.com/moq-dev/moq/pull/8676) and
 [congestion catch-up](/quest/m2/audio-playout/congestion-catch-up.md)).
 

@@ -68,7 +68,7 @@ export type DecoderOutput = {
 	sampleRate: Signal<number | undefined>;
 	stats: Signal<Stats | undefined>;
 
-	// Current playback timestamp from worklet
+	// The playback timestamp sounding at the speaker, as of the worklet's last report.
 	timestamp: Signal<Duration | undefined>;
 
 	// Whether the audio buffer is stalled (waiting to fill). A silence the publisher declared, such as
@@ -225,11 +225,14 @@ export class Decoder {
 			const measured = effect.get(this.#measured);
 			if (measured === undefined) return undefined;
 			const delay = effect.get(this.source.out.config)?.delay;
+			const ring = effect.get(this.#ring);
 			return target({
 				measured,
 				advertised: effect.get(this.source.out.jitter),
 				frame: effect.get(this.#frame),
 				delay: delay !== undefined ? Duration.millis(delay) : undefined,
+				// Audio is placed on the clock where it is heard, so video waits for the output too.
+				output: ring ? effect.get(ring.output) : undefined,
 			});
 		});
 		const startup = this.#signals.computed((effect) => {
@@ -244,8 +247,17 @@ export class Decoder {
 			for (const range of effect.get(this.#queued) ?? []) {
 				queued = queued.add(range.end.saturatingSub(range.start.max(span.end)));
 			}
-			const hold = ringHold(effect.get(this.sync.out.delay));
-			return { start: span.start, end: span.end.add(queued.min(hold)) };
+			// The ring holds the delay less the output latency, which the speaker covers: the opening
+			// sounds that much after it renders, so it comes due then rather than being skipped.
+			const delay = effect.get(this.sync.out.delay);
+			const ring = effect.get(this.#ring);
+			if (ring) effect.get(ring.output);
+			const held = ring ? ring.held(delay) : delay;
+			return {
+				start: span.start,
+				end: span.end.add(queued.min(ringHold(held))),
+				lead: delay.saturatingSub(held),
+			};
 		});
 		this.#track = this.sync.track({ target: playout, startup });
 		this.#signals.cleanup(() => this.#track.close());
@@ -511,7 +523,9 @@ export class Decoder {
 		if (!ring) return;
 
 		// The ring plays onto the shared clock, slowing down onto a rise and speeding up onto a fall,
-		// and skips only audio trailing it past what the subscription still delivers.
+		// and skips only audio trailing it past what the subscription still delivers. It holds the
+		// delay less the output latency, which moves its target even under a fixed delay.
+		effect.get(ring.output);
 		const budget = this.#budget(effect);
 		ring.setLatency(budget.delay, bound(budget));
 	}

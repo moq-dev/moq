@@ -86,8 +86,12 @@ export type SyncOutput = {
 	maxDelay: Signal<Duration>;
 };
 
-/** A decoded span from the opening of a track's timeline. @internal */
-export type Span = { start: Duration; end: Duration };
+/**
+ * What a track holds from the opening of its timeline, and how long its output takes to sound the
+ * opening once released, which counts toward the delay and holds the opening's turn back as long.
+ * @internal
+ */
+export type Span = { start: Duration; end: Duration; lead?: Duration };
 
 /** What a track holds in the shared clock. @internal */
 export type TrackProps = {
@@ -268,11 +272,17 @@ export class Clock {
 	}
 
 	now(): Duration | undefined {
+		const position = this.position();
+		// Media time is nonnegative, so a playhead before the first frame's turn reads as zero.
+		return position === undefined ? undefined : Duration.millis(Math.max(0, position));
+	}
+
+	// The media time due now in milliseconds, negative before media zero's turn.
+	position(): number | undefined {
 		if (!this.playing.peek()) return undefined;
 		const reference = this.out.reference.peek();
 		if (reference === undefined) return undefined;
-		// Media time is nonnegative, so a playhead before the first frame's turn reads as zero.
-		return Duration.millis(Math.max(0, wall() - reference - this.out.delay.peek().asMillis()));
+		return wall() - reference - this.out.delay.peek().asMillis();
 	}
 
 	async wait(part: Part, timestamp: Duration, signal?: AbortSignal): Promise<boolean> {
@@ -442,22 +452,25 @@ export class Sync {
 		}
 		if (clock.phase.peek() === "playing") return;
 		const ready = spans.flatMap(({ part, span }) => (span ? [{ part, span }] : []));
+		const lead = (span: Span) => span.lead ?? Duration.ZERO;
 		if (
 			reference === undefined ||
 			ready.length !== spans.length ||
-			ready.some(({ span }) => span.end.saturatingSub(span.start).lt(delay))
+			ready.some(({ span }) => span.end.add(lead(span)).saturatingSub(span.start).lt(delay))
 		) {
 			clock.phase.set("starting");
 			return;
 		}
-		// The track with the earliest opening holds the reference it anchors.
-		const earliest = ready.reduce((a, b) => (b.span.start.lt(a.span.start) ? b : a));
-		const first = earliest.span.start;
+		// The track whose opening sounds earliest holds the reference it anchors.
+		const opens = (span: Span) => span.start.asMillis() - lead(span).asMillis();
+		const earliest = ready.reduce((a, b) => (opens(b.span) < opens(a.span) ? b : a));
+		const first = opens(earliest.span);
 		clock.owner = earliest.part;
 		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
 		// Every track's own anchor moves by the same offset, keeping the gaps between tracks that
-		// playing would have held, so a later handoff moves the playhead only by that gap.
-		const anchored = wall() - first.asMillis() - delay.asMillis();
+		// playing would have held, so a later handoff moves the playhead only by that gap. An opening
+		// whose output takes a while to sound comes due that much later.
+		const anchored = wall() - first - delay.asMillis();
 		for (const part of clock.parts.peek()) {
 			if (part.anchor !== undefined) part.anchor += anchored - reference;
 		}
@@ -515,6 +528,15 @@ export class Sync {
 	 */
 	now(): Duration | undefined {
 		return this.#clock.now();
+	}
+
+	/**
+	 * {@link Sync.now} in milliseconds, negative rather than zero before media time zero's turn, as
+	 * when an opening waits for its output to sound it.
+	 * @internal
+	 */
+	position(): number | undefined {
+		return this.#clock.position();
 	}
 
 	/** Stop and release everything this holds. */

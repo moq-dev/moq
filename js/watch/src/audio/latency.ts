@@ -1,4 +1,4 @@
-import { Duration } from "@moq/clock";
+import { Duration, type Instant } from "@moq/clock";
 
 /** The terms of the audio playout target. */
 export interface Target {
@@ -10,11 +10,13 @@ export interface Target {
 	frame?: Duration;
 	/** The catalog `delay`: how far this rendition trails the broadcast's others, if any. */
 	delay?: Duration;
+	/** How long the output takes to sound what the ring renders, once known. */
+	output?: Duration;
 }
 
 /**
  * The "auto" playout target: the measured term floored by the advertised span, plus one frame, plus
- * the rendition's catalog delay.
+ * the rendition's catalog delay, plus the output latency.
  *
  * The advertised span is a floor rather than an addend, because the receiver's measurement already
  * contains the publisher's batching. The catalog delay is an addend, because the measurement is
@@ -23,7 +25,29 @@ export interface Target {
  */
 export function target(props: Target): Duration {
 	const floored = props.measured.max(props.advertised ?? Duration.ZERO);
-	return floored.add(props.frame ?? Duration.ZERO).add(props.delay ?? Duration.ZERO);
+	return floored
+		.add(props.frame ?? Duration.ZERO)
+		.add(props.delay ?? Duration.ZERO)
+		.add(props.output ?? Duration.ZERO);
+}
+
+// How long the highest reported output latency holds. A browser's report moves with where each read
+// lands, so the delay the clock holds for it follows the peak rather than every reading, and falls
+// once a lower latency, as after a switch off a Bluetooth headset, has held this long.
+const OUTPUT_WINDOW = Duration.secs(5);
+
+/** The highest output latency reported within the last five seconds. */
+export class Peak {
+	// Each reading that no later one is at least as high as, oldest first, so the first is the peak.
+	#readings: { at: Instant; latency: Duration }[] = [];
+
+	/** Fold in the latency reported at `at`, returning the peak. */
+	observe(latency: Duration, at: Instant): Duration {
+		while (this.#readings.length > 0 && (this.#readings.at(-1)?.latency.le(latency) ?? false)) this.#readings.pop();
+		this.#readings.push({ at, latency });
+		while (this.#readings.length > 1 && at.since(this.#readings[0].at).gt(OUTPUT_WINDOW)) this.#readings.shift();
+		return this.#readings[0].latency;
+	}
 }
 
 /**

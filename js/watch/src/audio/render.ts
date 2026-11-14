@@ -61,14 +61,15 @@ export interface Latency extends Terms {
 }
 
 /**
- * Where the shared clock stands, for the ring to time-stretch onto. The clock runs at real time, so one
- * reading maps it onto the worklet's own time until the next.
+ * Where the shared clock stands, for the ring to time-stretch onto, at the context time the output
+ * sounds then. The clock runs at real time, so one reading maps it onto the worklet's own time until
+ * the next.
  */
 export interface Clock {
 	type: "clock";
-	// The clock's media time at context time `time`, in the ring's coordinates, unset while it has none.
+	// The media time due at context time `time`, in the ring's coordinates, unset while the clock has none.
 	timestamp?: number;
-	// The AudioContext's `currentTime` when the clock was read, in seconds.
+	// A context time in seconds.
 	time: number;
 	// How far the clock's reference moved earlier since the last reading, in microseconds, which the
 	// ring skips rather than speeds through.
@@ -85,6 +86,8 @@ export interface Received {
 export interface State {
 	type: "state";
 	timestamp: number;
+	// The context time `timestamp` was rendered at, in seconds: the end of the quantum just read.
+	time: number;
 	stalled: boolean;
 	// Whether `timestamp` is on the current timeline: it reads 0 until a frame anchors the ring.
 	anchored: boolean;

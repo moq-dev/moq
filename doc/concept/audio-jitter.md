@@ -415,6 +415,30 @@ reference window restarts, so the new track's frames are measured against its
 own fastest. Its opening backlog would read as seconds late against the old
 track's arrivals.
 
+## At the speaker
+
+Audio is placed on the clock where it is heard, not where it is rendered. The
+output takes time to sound what the player hands it, so an audio track's target
+also counts that **output latency**, and video waits for it too, which lip sync
+on that device needs:
+
+```
+target = max(measured, advertised) + frame + output
+```
+
+The player reads the clock at the moment the output sounds a sample and renders
+the media due then; its buffer holds the target less the delay between render
+and speaker. The output latency is the most the device reported over the last
+5 s, since a host's report moves with where each read lands.
+
+| | Placed at | `output` |
+| --- | --- | --- |
+| Browser | `getOutputTimestamp()`, the context time sounding at a page instant, against which the clock is paired at the greatest offset, falling 0.1 ms a report | `baseLatency` plus the peak `outputLatency` |
+| Native | the callback's playback timestamp | the host's reported delay plus one device period |
+
+A fixed browser delay is still taken literally, and a fixed native delay is
+raised to the output latency, as [Fixed targets](#fixed-targets) describes.
+
 ## Rise, fall, startup, and the ceiling
 
 There is **no separate rise or fall limiter**. The histogram is the only
@@ -521,6 +545,12 @@ target = delay
 An impossible fixed target is refused, not silently adjusted. A negative delay,
 or one beyond the track's max age, is an error at configuration time.
 Supported or refused, not warned about and continued.
+
+The one exception is the [output latency](#at-the-speaker), which no delay can
+undercut. Natively, `moq play` raises a fixed delay below its device's output
+latency to that latency, since audio cannot sound sooner. The browser keeps the
+delay as given, so one shorter than the jitter plus the output latency
+underruns rather than letting audio trail video.
 
 In the browser this is the numeric `delay` setting; natively it is
 `decode::Options::delay.min` with `decode::Options::estimate` set to `false`.

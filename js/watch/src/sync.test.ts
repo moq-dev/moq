@@ -418,6 +418,33 @@ describe("buffered startup", () => {
 			}
 		});
 	}
+	// Audio's output sounds its opening a while after it renders, so that wait counts toward the
+	// delay, and the opening, even at media zero, comes due as it first sounds instead of being skipped.
+	it("holds the opening's turn back by the time its output takes to sound it", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const sync = new Sync({ delay: Duration.millis(300), lookahead: Duration.millis(1000) });
+		const span = new Signal<{ start: Duration; end: Duration; lead?: Duration } | null>(null);
+		const audio = sync.track({ target: new Signal(Duration.millis(300)), startup: span });
+		try {
+			await clock.advance(Duration.ZERO);
+			audio.received(Duration.ZERO);
+			span.set({ start: Duration.ZERO, end: Duration.millis(170), lead: Duration.millis(120) });
+			await clock.advance(Duration.ZERO);
+			expect(sync.now()).toBeUndefined();
+			span.set({ start: Duration.ZERO, end: Duration.millis(180), lead: Duration.millis(120) });
+			await clock.advance(Duration.ZERO);
+			// Short of media zero, which the clock reads as zero until the opening's turn.
+			expect(sync.now()).toEqual(Duration.ZERO);
+			await clock.advance(Duration.millis(150));
+			expect(sync.now()).toEqual(Duration.millis(30));
+		} finally {
+			audio.close();
+			sync.close();
+			installed.close();
+		}
+	});
+
 	it("releases startup waits on abort, reset, and close without starting playback", async () => {
 		const clock = new Manual();
 		const installed = clock.install();

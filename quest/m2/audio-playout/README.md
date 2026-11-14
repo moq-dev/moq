@@ -91,8 +91,10 @@ Order: [congestion catch-up](/quest/m2/audio-playout/congestion-catch-up.md)
 gives the stall its snap on today's splices, the
 [lag rule](/quest/m2/audio-playout/lag-rule.md) replaces the controller
 under it, and the [clock step](/quest/m2/audio-playout/clock-step.md) builds
-on the lag rule. [Target fall](/quest/m2/audio-playout/target-fall.md) and
-[output latency](/quest/m2/audio-playout/output-latency.md) are independent.
+on the lag rule. [Target fall](/quest/m2/audio-playout/target-fall.md) is
+independent. Output latency landed in
+[moq-dev/moq#8676](https://github.com/moq-dev/moq/pull/8676): both players
+place audio where it is heard and count the output latency in the target.
 The [calibration](/quest/m3/audio-calibrate.md) re-measures every ceiling
 after this epic.
 

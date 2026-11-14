@@ -393,8 +393,10 @@ export type Sample = {
 	render?: Ms;
 
 	/**
-	 * `audio.out.timestamp`: the playhead on the `media` clock. Undefined while there is none.
-	 * Natively, projected from the last write into the speaker at the wall rate, held at its end.
+	 * The playhead sounding at the speaker, on the `media` clock. Undefined while there is none. In
+	 * the browser `audio.out.timestamp`, projected at the wall rate from when the player last reported
+	 * it, and held while stalled. Natively, projected from the last write into the speaker at the wall
+	 * rate, held at its end.
 	 */
 	timestamp?: Ms;
 	/**

@@ -121,9 +121,11 @@ async fn plays_a_tone_through_the_default_device() {
 		kio::clock::sleep(Duration::from_millis(100)).await;
 
 		peaked |= sink.control().peak() > 0.4;
-		// The device is consuming if the queue stays near the target latency
-		// rather than growing by a full chunk every write.
-		drained |= sink.buffered() < Duration::from_millis(250);
+		// The device is consuming if what is buffered stays near the target
+		// latency rather than growing by a full chunk every write. It runs to the
+		// speaker, so it counts the device's own latency too.
+		let output = sink.output_latency().unwrap_or_default();
+		drained |= sink.buffered() < Duration::from_millis(250) + output;
 	}
 
 	assert!(peaked, "the mixer never saw the tone");
@@ -217,7 +219,7 @@ async fn switches_devices_without_dropping_sinks() {
 		let _ = sink.write(&tone).expect("write");
 		kio::clock::sleep(Duration::from_millis(200)).await;
 		assert!(
-			sink.buffered() < Duration::from_secs(1),
+			sink.buffered() < Duration::from_secs(1) + sink.output_latency().unwrap_or_default(),
 			"{} did not drain after the switch",
 			device.name
 		);

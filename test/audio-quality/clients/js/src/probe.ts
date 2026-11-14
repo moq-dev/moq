@@ -78,6 +78,20 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 
 	// The tap follows the output node, which the player rebuilds with its graph. A tap left on the old
 	// node would report a perfect run as one long silence.
+	// The playhead the player last reported, and when. It reports once per render callback, so a sample
+	// projects it at real time to the instant it is read, as the native player's is.
+	// A stall ending re-anchors it too: the playhead held through the stall, so it resumes from now.
+	let reported: { timestamp: number; at: number } | undefined;
+	signals.run((effect) => {
+		const timestamp = effect.get(audio.out.timestamp);
+		effect.get(audio.out.stalled);
+		reported = timestamp === undefined ? undefined : { timestamp: timestamp.asMillis(), at: performance.now() };
+	});
+	const playhead = (at: number): number | undefined => {
+		if (!reported) return undefined;
+		return audio.out.stalled.peek() ? reported.timestamp : reported.timestamp + (at - reported.at);
+	};
+
 	let tapped: AudioNode | undefined;
 	let current: Tap | undefined;
 	let renderLoad: number | undefined;
@@ -121,11 +135,12 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 		const gaps = current?.take() ?? [];
 		const taken = stalls;
 		stalls = [];
+		const at = performance.now();
 		return {
 			// Read back to back, so the pair calibrates the render clock against the viewer's.
-			at: performance.now(),
+			at,
 			render: context ? context.currentTime * 1000 : undefined,
-			timestamp: audio.out.timestamp.peek()?.asMillis(),
+			timestamp: playhead(at),
 			stalled: audio.out.stalled.peek(),
 			clock: sync.now()?.asMillis(),
 			delay: sync.out.delay.peek().asMillis(),

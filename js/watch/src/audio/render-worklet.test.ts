@@ -46,7 +46,14 @@ function renderer(target = 100) {
 		sent: render.sent,
 		read(samples: number) {
 			const output = new Float32Array(samples);
-			expect(render.process([], [[output]], {})).toBe(true);
+			// The context's time, at zero unless a test runs it.
+			const time = Object.getOwnPropertyDescriptor(globalThis, "currentTime");
+			if (!time) Object.defineProperty(globalThis, "currentTime", { configurable: true, value: 0 });
+			try {
+				expect(render.process([], [[output]], {})).toBe(true);
+			} finally {
+				if (!time) Reflect.deleteProperty(globalThis, "currentTime");
+			}
 			return output;
 		},
 	};
@@ -85,6 +92,8 @@ describe("render dispatch", () => {
 				type: "state",
 				epoch: 7,
 				timestamp: 560_000,
+				// The end of the 20-sample quantum at 1 kHz, at a context time of zero.
+				time: 0.02,
 				stalled: false,
 				anchored: true,
 				underruns: 0,
