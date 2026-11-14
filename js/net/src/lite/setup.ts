@@ -5,7 +5,7 @@
  * @module
  */
 
-import { type Hop, HopSchema, wireHop } from "../hop.ts";
+import { type Hop, toHop, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
@@ -313,7 +313,7 @@ export class Setup {
 		if (hopRaw !== undefined && hasRoutes(version) && (hopRaw === 0n || hopRaw >= QUALIFIED)) {
 			throw new Error("setup Node ID must be non-zero and unqualified");
 		}
-		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
+		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : toHop(hopRaw);
 
 		// An older version does not know the token parameter, so it ignores it like any other.
 		const token = hasAuth(version) ? params.getBytes(PARAM_TOKEN) : undefined;

@@ -276,6 +276,13 @@ function connect(config?: Config): { session: Session; peer: FakePeer } {
 
 const ORIGINAL_WSS = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
 
+// @moq/net tells the fallback from native WebTransport by this label alone, without loading qmux.
+test("a session labels its transport as websocket", () => {
+	const { session } = connect();
+	expect(session.transport).toBe("websocket");
+	session.close();
+});
+
 test("a non-finite sendBufferSize throws instead of parking every write", () => {
 	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
 	for (const sendBufferSize of [Number.NaN, Number.POSITIVE_INFINITY]) {

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
-import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { type Hop, toHop, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Cluster from "./cluster.ts";
@@ -19,7 +19,7 @@ const VERSION = Version.DRAFT_18;
 const CLUSTER = { cluster: true };
 
 function origin(id: bigint): Hop {
-	return HopSchema.parse(id);
+	return toHop(id);
 }
 
 function hops(...ids: bigint[]): Hop[] {

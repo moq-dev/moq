@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
-import { Cost, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, toHop, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -53,7 +53,7 @@ async function roundTrip(msg: AnnounceBroadcast, version: Version): Promise<Anno
 }
 
 test("AnnounceBroadcast round-trips on draft-05", async () => {
-	const hops = [HopSchema.parse(7n)];
+	const hops = [toHop(7n)];
 	const gotActive = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops }, Version.DRAFT_05);
 	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops });
 
@@ -62,7 +62,7 @@ test("AnnounceBroadcast round-trips on draft-05", async () => {
 });
 
 test("AnnounceBroadcast round-trips on draft-06", async () => {
-	const hops = [HopSchema.parse(7n)];
+	const hops = [toHop(7n)];
 	// An absent cost encodes as zero and decodes explicitly.
 	const gotActive = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops }, Version.DRAFT_06);
 	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 0n });
@@ -184,14 +184,14 @@ async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise
 // Draft04/05 carry the subscriber's Hop ID so the publisher can skip reflected
 // announces before they hit the wire.
 test("AnnounceRequest carries excludeHop on draft-05", async () => {
-	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room"), HopSchema.parse(42n)), Version.DRAFT_05);
-	expect(got.excludeHop).toBe(HopSchema.parse(42n));
+	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room"), toHop(42n)), Version.DRAFT_05);
+	expect(got.excludeHop).toBe(toHop(42n));
 });
 
 // Draft06 dropped the field: the receiver's reflected-announce check catches the same
 // loops, so a value set locally is simply not sent and decodes as zero.
 test("AnnounceRequest drops excludeHop on draft-06", async () => {
-	const msg = new AnnounceRequest(Path.from("room"), HopSchema.parse(42n));
+	const msg = new AnnounceRequest(Path.from("room"), toHop(42n));
 	const got = await requestRoundTrip(msg, Version.DRAFT_06);
 	expect(got.excludeHop).toBe(UNKNOWN_HOP);
 
@@ -225,21 +225,21 @@ test("AnnounceOk accepts the reserved unknown origin", async () => {
 });
 
 test("AnnounceOk round-trips a declared origin", async () => {
-	const msg = new AnnounceOk(HopSchema.parse(42n), 1);
+	const msg = new AnnounceOk(toHop(42n), 1);
 	const reader = new Reader(
 		undefined,
 		await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05),
 		Version.DRAFT_05,
 	);
 	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
-	expect(got.hop).toBe(HopSchema.parse(42n));
+	expect(got.hop).toBe(toHop(42n));
 	expect(got.active).toBe(1);
 });
 
 // A QUIC varint stops at 2^62-1, so draft-06 carries a wider hop as unknown.
 test("a 64-bit hop is unknown on draft-06", async () => {
 	const version = Version.DRAFT_06;
-	const wide = HopSchema.parse((1n << 64n) - 1n);
+	const wide = toHop((1n << 64n) - 1n);
 	const got = await roundTrip({ status: "active", suffix: Path.from("room"), hops: [wide] }, version);
 	expect(got).toMatchObject({ hops: [UNKNOWN_HOP] });
 
@@ -249,8 +249,8 @@ test("a 64-bit hop is unknown on draft-06", async () => {
 });
 
 test("a hop chain that revisits a hop is refused in both directions", async () => {
-	const four = HopSchema.parse(4n);
-	const eight = HopSchema.parse(8n);
+	const four = toHop(4n);
+	const eight = toHop(8n);
 	const looped: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [four, eight, four] };
 
 	// Outbound: refused before it reaches the wire. A receiver must close the session over
@@ -265,7 +265,7 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 	const legal: AnnounceBroadcast = {
 		status: "active",
 		suffix: Path.from("room"),
-		hops: [four, eight, HopSchema.parse(9n)],
+		hops: [four, eight, toHop(9n)],
 	};
 	const forged = await bytes((w) => encodeAnnounceBroadcast(w, legal, Version.DRAFT_06), Version.DRAFT_06);
 	const nine = forged.lastIndexOf(9);
@@ -284,7 +284,7 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 
 	// Repeated unknowns are not a loop: 0 identifies nothing, so any number of hops may
 	// be unknown. A lite-03 announcement is nothing but these.
-	const unknown = HopSchema.parse(0n);
+	const unknown = toHop(0n);
 	const anonymous: AnnounceBroadcast = {
 		status: "active",
 		suffix: Path.from("room"),
@@ -419,9 +419,7 @@ test("the route layer round-trips on draft-07", async () => {
 	const literal: AnnounceBroadcast = { status: "active", suffix: Path.from("x"), route: 2n, instance: a, epoch: 1n };
 	expect(await roundTrip(literal, v)).toEqual({ ...literal, cost: 0n });
 	await expect(bytes((w) => encodeAnnounceBroadcast(w, { ...literal, route: undefined }, v), v)).rejects.toThrow();
-	await expect(
-		bytes((w) => encodeAnnounceBroadcast(w, { ...literal, hops: [HopSchema.parse(1n)] }, v), v),
-	).rejects.toThrow();
+	await expect(bytes((w) => encodeAnnounceBroadcast(w, { ...literal, hops: [toHop(1n)] }, v), v)).rejects.toThrow();
 });
 
 test("the route layer refuses the last seqno and Node ID 0", async () => {
@@ -655,7 +653,7 @@ test("SYNCED is empty and belongs only to lite-07", async () => {
 // Lite-07 drops both: the count for SYNCED, and the Hop ID for the route layer.
 test("ANNOUNCE_OK is empty on lite-07", async () => {
 	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-		const wire = await bytes((w) => new AnnounceOk(HopSchema.parse(1n), 7).encode(w, version), version);
+		const wire = await bytes((w) => new AnnounceOk(toHop(1n), 7).encode(w, version), version);
 		expect(wire).toEqual(new Uint8Array(version === Version.DRAFT_06 ? [2, 1, 7] : [0]));
 	}
 });

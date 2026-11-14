@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { HopSchema } from "../hop.ts";
+import { toHop } from "../hop.ts";
 import { encodeVarint, Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { ProbeLevel, Role, Setup } from "./setup.ts";
@@ -138,7 +138,7 @@ test("unknown probe level saturates to Increase", async () => {
 });
 
 test("SETUP with hop round-trips", async () => {
-	const hop = HopSchema.parse(42n);
+	const hop = toHop(42n);
 	const got = await roundTrip(new Setup({ hop }));
 	expect(got.hop).toBe(hop);
 });
@@ -153,17 +153,17 @@ test("lite-07 Node ID is never 0 or qualified", async () => {
 	for (const id of [0n, (1n << 63n) | 7n]) {
 		await expect(decodeParam(PARAM_HOP, encodeVarint(id, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
 	}
-	const qualified = new Setup({ hop: HopSchema.parse((1n << 63n) | 7n) });
+	const qualified = new Setup({ hop: toHop((1n << 63n) | 7n) });
 	await expect(bytes((w) => qualified.encode(w, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
 });
 
 test("SETUP with implementation round-trips", async () => {
 	const got = await roundTrip(
-		new Setup({ hop: HopSchema.parse(7n), implementation: "moq-ffi/0.4.12 moq-net-rs/0.3.10" }),
+		new Setup({ hop: toHop(7n), implementation: "moq-ffi/0.4.12 moq-net-rs/0.3.10" }),
 		Version.DRAFT_07,
 	);
 	expect(got.implementation).toBe("moq-ffi/0.4.12 moq-net-rs/0.3.10");
-	expect(got.hop).toBe(HopSchema.parse(7n));
+	expect(got.hop).toBe(toHop(7n));
 });
 
 test("an empty implementation is omitted rather than encoded", async () => {
