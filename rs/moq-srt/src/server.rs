@@ -868,6 +868,8 @@ mod tests {
 		use moq_mux::container::{Producer, ts};
 		use moq_net::Timestamp;
 
+		kio::clock::host_time(); // real SRT sockets
+
 		// Short enough to keep the test quick, long enough that the release instants
 		// either side of the marker are separated by more than clock noise.
 		const LATENCY: Duration = Duration::from_millis(300);
