@@ -185,7 +185,27 @@ describe("Tail", () => {
 
 		await clock.advance(Duration.millis(50));
 		expect(settled).toBe(false);
-		read();
+		read.done();
 		await settling;
+	});
+
+	test("an excused stream is waited for at most the grace", async () => {
+		const { clock, tail: t } = tail(Duration.millis(10));
+		const stream = t.open(0n);
+		stream.excuse();
+		let settled = false;
+		const settling = t
+			.settle(() => true, new Once<unknown>())
+			.then(() => {
+				settled = true;
+			});
+
+		await clock.advance(Duration.millis(5));
+		expect(settled).toBe(false);
+		await clock.advance(Duration.millis(10));
+		await settling;
+		// Read to its end after all, it is let go once.
+		stream.done();
+		stream.done();
 	});
 });

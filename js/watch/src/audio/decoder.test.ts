@@ -74,8 +74,7 @@ class FakeWorklet {
 	#playing = true;
 	readonly port = Object.assign(new EventTarget(), {
 		postMessage: (msg: Message) => {
-			if (msg.type === "init" || msg.type === "latency")
-				this.terms = { latency: msg.latency, target: msg.target, bound: msg.bound };
+			if (msg.type === "init" || msg.type === "latency") this.terms = { latency: msg.latency, bound: msg.bound };
 			if (msg.type === "init") {
 				this.ring = new AudioRingBuffer(msg);
 				this.#playing = msg.playing ?? true;
@@ -1841,7 +1840,7 @@ for (const cmaf of [false, true]) {
 
 				// Either ring keeps what it receives and plays onto the clock, which audio may trail by the
 				// larger of the lookahead and the default stretch, even at a fixed delay.
-				expect(worklets.at(-1)?.terms).toEqual({ latency: 100, target: 100, bound: buffered ? 1000 : 200 });
+				expect(worklets.at(-1)?.terms).toEqual({ latency: 100, bound: buffered ? 1000 : 200 });
 			} finally {
 				playback.close();
 				await microtasks();

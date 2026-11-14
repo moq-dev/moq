@@ -64,5 +64,4 @@ Work:
 
 ## Related
 
-- [A relay that refuses a forwarded route drops the route, not the session](/quest/m1/refuse-route.md) - another failure mode from the same BGP comparison
 - [A request loop heals once routes settle](/quest/m2/cluster-routes/request-loop.md) - another failure mode from the same BGP comparison

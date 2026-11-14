@@ -108,6 +108,13 @@ export function decode(raw: string): Valid {
 	return encode(from(raw));
 }
 
+/** Like {@link decode}, but `undefined` for an invalid path rather than a throw. @internal */
+export function tryDecode(raw: string): Valid | undefined {
+	if (spelling(raw) !== undefined) return undefined;
+	const path = raw as Valid;
+	return check(path) === undefined ? path : undefined;
+}
+
 /**
  * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS} and a 4096 byte limit.
  *

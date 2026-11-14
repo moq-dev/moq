@@ -658,11 +658,15 @@ impl Sessions {
 	}
 }
 
-/// A token's identity in the table, without holding the credential itself.
+/// A token's identity in the table, without holding the credential itself: its signing
+/// input, so an ECDSA signature malleated into a second valid string counts as the same token.
 fn hash(token: &str) -> u64 {
 	use std::hash::{Hash, Hasher};
 	let mut hasher = std::hash::DefaultHasher::new();
-	token.hash(&mut hasher);
+	token
+		.rsplit_once('.')
+		.map_or(token, |(input, _)| input)
+		.hash(&mut hasher);
 	hasher.finish()
 }
 
@@ -1959,6 +1963,52 @@ mod tests {
 		assert_eq!(
 			server.answer(&same_host).await.unwrap_err(),
 			Denial::RemoteLimit {
+				root: Some("demo".into())
+			}
+		);
+	}
+
+	/// An ECDSA signature `(r, s)` has a twin `(r, n - s)` that verifies the same
+	/// claims, so the cap must count the signing input, not the compact string.
+	#[tokio::test]
+	async fn a_malleated_signature_shares_its_tokens_cap() {
+		use base64::Engine;
+		const N: [u8; 32] = [
+			0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xbc, 0xe6,
+			0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
+		];
+		let dir = tempfile::tempdir().unwrap();
+		let key = Key::generate(Algorithm::ES256, Some(KeyId::decode("kid1").unwrap())).unwrap();
+		key.to_file(dir.path().join("kid1.jwk")).unwrap();
+		let server = Server::new(Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			limits: Limits {
+				token: Some(1),
+				remote: None,
+			},
+			..limited()
+		})
+		.unwrap();
+		let jwt = sign(&key, "demo", &["**"], &[], None);
+
+		let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+		let (input, signature) = jwt.rsplit_once('.').unwrap();
+		let mut signature = b64.decode(signature).unwrap();
+		let mut borrow = 0i16;
+		for i in (0..32).rev() {
+			let diff = N[i] as i16 - signature[32 + i] as i16 - borrow;
+			signature[32 + i] = diff.rem_euclid(256) as u8;
+			borrow = (diff < 0) as i16;
+		}
+		let twin = format!("{input}.{}", b64.encode(signature));
+		assert_ne!(twin, jwt);
+
+		server.answer(&with_token(request("/demo"), &jwt)).await.unwrap();
+		let mut second = with_token(request("/demo"), &twin);
+		second.id = "second".into();
+		assert_eq!(
+			server.answer(&second).await.unwrap_err(),
+			Denial::TokenLimit {
 				root: Some("demo".into())
 			}
 		);

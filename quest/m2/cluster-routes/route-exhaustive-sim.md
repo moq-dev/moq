@@ -43,7 +43,7 @@ out.
 - A search that takes seconds joins the merge gate; a larger one runs in
   Nightly.
 
-This sits beside [trace validation](/quest/m1/route-trace-validation.md), which
+This sits beside [trace validation](/quest/m3/route-trace-validation.md), which
 keeps the TLA+ model honest for the design work done on the spec before code exists. It replaces neither
 that nor the seeded sweeps on larger meshes
 (`tests/integration/mesh_sweep.rs`). If the spike shows the
@@ -54,11 +54,11 @@ Decided 2026-11-12 (maintainer, pick round): the search runs on the `Router`
 after [the router quest](https://github.com/moq-dev/moq/pull/8622)'s rewrite to
 the path rule (`route::path::Router`), so it checks the code that ships and nothing is built twice
 (rejected: today's Babel `Router`, which the rewrite throws away; the test-only
-`paths.rs` prototype). The storm self-check above then runs against a router
+`paths.rs` prototype, since deleted). The storm self-check above then runs against a router
 from before the rewrite.
 
 Public API: none. Wire: none.
 
 ## Related
 
-- [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - guards the model against the code; this checks the code itself
+- [Route sweeps are checked against the TLA+ model](/quest/m3/route-trace-validation.md) - guards the model against the code; this checks the code itself
