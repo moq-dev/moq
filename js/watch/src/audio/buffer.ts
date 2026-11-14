@@ -366,7 +366,10 @@ export class AudioBuffer {
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
 					if (clock) {
-						const msg: Clock = { type: "clock", ...this.#read(clock.position(), clock.out.reference.peek(), heard) };
+						const msg: Clock = {
+							type: "clock",
+							...this.#read(clock.position(), clock.out.reference.peek(), heard),
+						};
 						this.#worklet.port.postMessage(msg);
 					}
 				}

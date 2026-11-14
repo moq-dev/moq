@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { Duration, Instant, Manual, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { type Getter, Signal } from "@moq/signals";
 import { AudioBuffer, Backpressure } from "./buffer";
 import type { Init, Message, State } from "./render";
@@ -638,10 +639,11 @@ describe("AudioBuffer steering", () => {
 			expect(buffer.output.peek()).toEqual(Duration.millis(130));
 			buffer.setLatency(Duration.millis(300));
 			// A delay short of the output latency still holds one callback.
+			expect(buffer.held(Duration.millis(50))).toEqual(Duration.millis(10));
 			buffer.setLatency(Duration.millis(50));
 			expect(sent.filter((msg) => msg.type === "latency")).toEqual([
-				{ type: "latency", latency: 180, target: 180, bound: 0 },
-				{ type: "latency", latency: 128, target: 10, bound: 0 },
+				{ type: "latency", latency: 180, bound: 0 },
+				{ type: "latency", latency: 128, bound: 0 },
 			]);
 		} finally {
 			buffer.close();
@@ -662,7 +664,7 @@ describe("AudioBuffer steering", () => {
 		});
 		try {
 			expect(buffer.held(Duration.millis(300))).toEqual(Duration.millis(180));
-			expect(sent[0]).toMatchObject({ type: "init", target: 180 });
+			expect(sent[0]).toMatchObject({ type: "init", latency: 180 });
 		} finally {
 			buffer.close();
 		}
