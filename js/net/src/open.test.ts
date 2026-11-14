@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Session as Qmux } from "@moq/qmux";
 import { Version } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";

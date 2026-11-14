@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Duration, type Installed, Instant, Manual } from "@moq/clock";
+import { Duration, type Installed, Instant } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";

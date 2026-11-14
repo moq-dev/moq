@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { manual, settlesWithin } from "../mock.ts";
 import { Reader, Stream } from "../stream.ts";

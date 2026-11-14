@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
