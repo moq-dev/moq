@@ -970,10 +970,8 @@ impl State {
 	/// there is none. Only `claims`, whose shown state changed, are served anew, unless
 	/// the routes changed too.
 	fn home(&mut self, id: Id, claims: BTreeSet<Path>, ended: &BTreeMap<(Id, Path), bool>) {
-		// A tied route needs a broadcast's hash, which the claim ranking here lacks.
-		let routes: Routes = (self.router.eligible(id).into_iter())
-			.filter(|route| !route.tied)
-			.map(|route| (route.next, route.metric, route.rtt, self.router.name(route.next, id)))
+		let routes: Routes = (self.router.routes(id).into_iter())
+			.map(|(key, metric, rtt)| (key, metric, rtt, self.router.name(key, id)))
 			.collect();
 		let last = self.routes.get(&id).map_or(&[][..], Vec::as_slice);
 		let claims = match last == routes.as_slice() {
@@ -1747,6 +1745,51 @@ mod tests {
 			rtt: None,
 			hops: [].into(),
 		}))
+	}
+
+	/// A route that already crossed as many nodes as one may is not forwarded, since this
+	/// node's hop would take it past what any peer can decode, so a session never fails to
+	/// encode one. One hop fewer forwards at exactly the limit.
+	#[test]
+	fn a_route_at_the_hop_limit_is_not_forwarded() {
+		use crate::route::MAX_HOPS;
+		for (hops, forwarded) in [(MAX_HOPS - 1, Some(MAX_HOPS)), (MAX_HOPS, None)] {
+			let relay = Node::new(2, 2);
+			let to_b = relay.answer(Link::default(), Path::empty()).unwrap();
+			let from_a = relay.receive(Link::default(), Path::empty()).unwrap();
+			from_a.route(
+				5,
+				Some(Reach::Finite(Advert {
+					seqno: 1,
+					metric: 1,
+					down_only: false,
+					rtt: None,
+					hops: (100..100 + hops as u64).collect(),
+				})),
+			);
+			// A route goes on the wire only with a claim it shows, once that is served.
+			let live = claim(&Instance::random(), 0);
+			from_a.batch(5, vec![(p("live"), Some(live.clone()))], Some(0));
+			from_a.serving(5, &p("live"), &live);
+			let sent: Vec<_> = (outputs(&to_b).into_iter())
+				.filter_map(|output| match output {
+					Output::Route {
+						id: 5,
+						reach: Some(Reach::Finite(advert)),
+					} => Some(advert),
+					_ => None,
+				})
+				.collect();
+			assert_eq!(
+				sent.iter().map(|advert| advert.hops.len()).max(),
+				forwarded,
+				"{hops} hops"
+			);
+			for advert in sent {
+				let start = crate::lite::AnnounceBroadcast::RouteStart { node: 5, advert };
+				crate::coding::Encode::encode_bytes(&start, crate::lite::Version::Lite07).unwrap();
+			}
+		}
 	}
 
 	/// A relay's own seqno advances only when a session over which another node

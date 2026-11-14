@@ -1,6 +1,6 @@
 {
 	"moq-lite-07-wip": {
-		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Remeasured 2026-11-11 against these releases, with the media lanes checking the audio tone: all 16 cross-version lite-07-wip media, publication, and FETCH cells fail, while its FETCH capability check and the stable lite-01 through lite-06 cells pass, including the Opus phase check (moq-cli keeps the Opus edit list since 0.14.10). Current and released lite-07-wip framing differs (long buffer, invalid value, protocol violation). Reassess when any affected release changes.",
+		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Current and released lite-07-wip framing may differ. Reassess against every affected release; the remeasurement PR body and logs record the failing media, publication, and FETCH cells, with stable lite versions and same-source media as controls.",
 		"releases": {
 			"moq-cli": "0.14.16",
 			"moq-relay": "0.17.16",

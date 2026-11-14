@@ -760,7 +760,9 @@ esac
             with self.subTest(filter=filter):
                 self.env["CHECK_MODULES"] = filter
                 calls = self.run_ci("--all")
-                self.assertEqual([call for call in calls if call.startswith("rs ")], expected)
+                # cargo_nix is a module of its own that runs a recipe of rs/justfile.
+                rs = [call for call in calls if call.startswith("rs ") and not call.startswith("rs cargo-nix")]
+                self.assertEqual(rs, expected)
                 # Every other module runs in the job that does not name one.
                 self.assertEqual("gh check" in calls, filter.startswith("-"))
         self.env["CHECK_MODULES"] = "rs_shapes"
@@ -792,6 +794,26 @@ esac
                 (self.repo / path).unlink()
                 self.assertEqual("nix flake check --print-build-logs" in calls, expected)
         self.assertIn("nix flake check --print-build-logs", self.run_ci("--all"))
+
+    def test_cargo_nix_follows_what_crate2nix_reads(self):
+        for path, expected in (
+            ("Cargo.lock", True),
+            ("rs/moq-net/Cargo.toml", True),
+            ("rs/moq-c/build.rs", True),
+            ("rs/moq-net/src/lib.rs", True),
+            ("rs/moq-cli/src/main.rs", True),
+            ("rs/moq-cli/src/bin/extra.rs", True),
+            ("rs/moq-net/src/session.rs", False),
+            ("nix/Cargo.nix", True),
+            ("flake.lock", True),
+            ("flake.nix", False),
+        ):
+            with self.subTest(path=path):
+                self.change(path)
+                calls = self.run_ci()
+                (self.repo / path).unlink()
+                self.assertEqual("rs cargo-nix --check" in calls, expected)
+        self.assertIn("rs cargo-nix --check", self.run_ci("--all"))
 
 
 def benchmark():

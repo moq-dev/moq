@@ -259,6 +259,12 @@ static void start_audio(ctx_t *c, int32_t catalog) {
         moq_audio_decoder_output out;
         memset(&out, 0, sizeof(out));
         out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
+        // moq-audio waits on a missing group for its playout delay, measured from arrival timing
+        // at tens of ms, so a runtime starved longer than that skips a group that is only late.
+        // This reader checks delivery between implementations, not a real-time deadline: it holds
+        // a playout delay of the max delay, waiting on a hole for the same budget it grants a late
+        // group.
+        out.delay.min_us = MAX_DELAY_US;
         out.delay.max_us = MAX_DELAY_US;
         int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
         pthread_mutex_lock(&c->mu);
@@ -626,9 +632,15 @@ int main(int argc, char **argv) {
         config.versions = versions;
         config.versions_len = 1;
     }
+    // The finish case checks one session end to end, so it stays on QUIC: leaving a
+    // WebSocket fallback that won a slow race would open a second session.
+    if (c.finish.enabled) {
+        config.has_websocket_enabled = true;
+        config.websocket_enabled = false;
+    }
 
     // origin_publish = 0 disables publishing; consume via our origin.
-    c.session = moq_session_connect(url, strlen(url), version ? &config : NULL, 0, (uint32_t)c.origin, on_state, &c);
+    c.session = moq_session_connect(url, strlen(url), &config, 0, (uint32_t)c.origin, on_state, &c);
     if (c.session <= 0) {
         // A registration that fails never invokes its callback, so &c isn't held
         // yet and returning is still safe here.

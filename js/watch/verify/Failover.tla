@@ -4,9 +4,9 @@
 \* Two relays serve the page's configured URL, which reaches whichever is up (DNS or anycast).
 \* The reconnect loop (js/net/src/connection/reload.ts) serves one session from relay `on`. A
 \* GOAWAY with an empty URI, all moq-relay sends, migrates: the old session keeps serving for the
-\* handover while the replacement dials the configured URL. A GOAWAY naming a relay pins every
-\* later dial to it (`#redirect`, "an assignment, not a detour"), until the URL changes; one the
-\* default `same-host` policy refuses stops the loop. A session that dies retracts its
+\* handover while the replacement dials the configured URL. A GOAWAY naming a relay pins later
+\* dials to it (`#redirect`, "an assignment, not a detour") until a dial to it fails, which
+\* drops the pin and returns to the configured URL; one the default `same-host` policy refuses stops the loop. A session that dies retracts its
 \* announcements, so the watch's handle clears and the screen reads CONNECTING until a new session
 \* delivers its initial announcements (`heard`, Watch.tla); a route of the same instance taking
 \* over keeps the handle and resumes its tracks (`Following.active`). `path` is whether the relays
@@ -99,7 +99,8 @@ Connected ==
 DialFails ==
     /\ loop = "dialing" /\ Targets = {}
     /\ loop' = "waiting"
-    /\ UNCHANGED <<up, on, pin, path, heard, handle, media>>
+    /\ pin' = 0
+    /\ UNCHANGED <<up, on, path, heard, handle, media>>
 
 \* The new session's initial announcements arrive: the viewer subscribes again if the relays
 \* reach the broadcast, and knows it is unreachable otherwise.
@@ -144,7 +145,8 @@ OfflineOnlyWhenUnreachable == OfflineShown => (path = "lost" \/ up = {})
 \* A viewer whose relay left keeps reconnecting while some relay is up.
 KeepsReconnecting == (on = 0 /\ up # {}) => loop # "stopped"
 
-\* A viewer that is reconnecting can land on a relay that is up.
-RedialsALiveRelay == (on = 0 /\ loop # "stopped" /\ up # {}) => Targets # {}
+\* A reconnecting viewer can land on a relay that is up: a failed dial never leaves the next
+\* one pinned, so it dials the configured URL, which reaches whichever relay is up.
+RedialsALiveRelay == [][loop = "dialing" /\ loop' = "waiting" => pin' = 0]_vars
 
 ====

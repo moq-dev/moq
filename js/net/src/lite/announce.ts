@@ -4,7 +4,7 @@ import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
-import { decodeRoute, encodeRoute } from "./instance.ts";
+import { decodeForwarded, decodeRoute, encodeRoute, utf8 } from "./instance.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
@@ -129,7 +129,26 @@ export type AnnounceBroadcast =
 	/** Lite07+ ANNOUNCE_FLOOR: closes the batch of claims under the route with this id, certifying
 	 * the stream's claims for it across the requested prefix as the origin's at `revision`, or
 	 * nothing when `revision` is undefined. */
-	| { status: "floor"; id: bigint; revision?: bigint };
+	| { status: "floor"; id: bigint; revision?: bigint }
+	/** Lite07+: a route message whose content, which the sender only forwarded, this node refuses.
+	 * The receiver withdraws what it names and keeps the session. Decoded only as far as keeps the
+	 * stream's ids in step; never sent. */
+	| { status: "refused"; message: Refusable; reason: Refusal };
+
+/** What a refused route message still tells the receiver, so the ids that follow it resolve. */
+export type Refusable =
+	/** ROUTE_START: assigns the next Route ID to the origin node `node`. */
+	| { kind: "routeStart"; node: bigint }
+	/** ROUTE_UPDATE of the route with this Route ID. */
+	| { kind: "routeUpdate"; id: bigint }
+	/** ANNOUNCE_START under Route ID `route`: assigns the next Announce ID, to `path`, or to no path
+	 * when the path itself was refused. */
+	| { kind: "start"; route: bigint; path?: { suffix: Path.Valid; pathBase?: Base } }
+	/** ANNOUNCE_RESTART of the claim with this Announce ID. */
+	| { kind: "change"; id: bigint };
+
+/** Why a node refuses content a peer forwarded: well framed, but nothing it can use. */
+export type Refusal = "node" | "seqno" | "flags" | "hops" | "path" | "instance";
 
 /**
  * A message the subscriber sends on a lite-07 Announce Stream after its ANNOUNCE_REQUEST.
@@ -271,18 +290,69 @@ async function encodeAdvert(w: Writer, advert: Advert) {
 	for (const hop of advert.hops) await w.u62(hop);
 }
 
-async function decodeAdvert(r: Reader): Promise<Advert> {
+/** Decode an advertisement, refusing one whose seqno no origin advertises, whose flags this node
+ * does not know, or that crossed too many hops. The rest of the body is skipped, since an unknown
+ * flag may announce a field ahead of the hops. Mirrors rs/moq-net. */
+async function decodeAdvert(r: Reader): Promise<Advert | Refusal> {
+	const refuse = async (reason: Refusal) => {
+		await r.readAll();
+		return reason;
+	};
 	const seqno = await r.u62();
-	if (seqno === ROUTE_MAX) throw new ProtocolViolation("a route advertised the last seqno");
+	if (seqno === ROUTE_MAX) return refuse("seqno");
 	const metric = await r.u62();
 	const flags = await r.u8();
-	if (flags & ~(DOWN_ONLY | RTT)) throw new ProtocolViolation(`unknown route flags: ${flags}`);
+	if (flags & ~(DOWN_ONLY | RTT)) return refuse("flags");
 	const rtt = flags & RTT ? await r.u62() : undefined;
 	const count = await r.u62();
-	if (count > BigInt(ROUTE_MAX_HOPS)) throw new ProtocolViolation(`a route crossed ${count} nodes`);
+	if (count > BigInt(ROUTE_MAX_HOPS)) return refuse("hops");
 	const hops: bigint[] = [];
 	for (let i = 0n; i < count; i++) hops.push(await r.u62());
 	return { seqno, metric, downOnly: (flags & DOWN_ONLY) !== 0, rtt, hops };
+}
+
+/** Refuse a route to the reserved Node ID 0, skipping the rest of its body. */
+async function refuseNode(r: Reader): Promise<Refusal> {
+	await r.readAll();
+	return "node";
+}
+
+/** Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded, or
+ * undefined for a path this node refuses. */
+async function decodeForwardedPath(r: Reader): Promise<{ suffix: Path.Valid; pathBase?: Base } | undefined> {
+	const distance = await r.u62();
+	const keep = await r.u53();
+	// A distance of 0 names nothing, so a keep without a base is a violation.
+	if (distance === 0n && keep !== 0) throw new ProtocolViolation("announce keep without a base");
+	const text = utf8(await r.read(await r.u53()));
+	const suffix = text === undefined ? undefined : Path.tryDecode(text);
+	if (suffix === undefined) return undefined;
+	return distance === 0n ? { suffix } : { suffix, pathBase: { distance, keep } };
+}
+
+/** A lite-07 ANNOUNCE_START: its suffix, Route ID, instance and epoch, and cost. */
+async function decodeStart(r: Reader, version: Version): Promise<AnnounceBroadcast> {
+	const path = await decodeForwardedPath(r);
+	const route = await r.u62();
+	const refused = async (reason: Refusal): Promise<AnnounceBroadcast> => {
+		await r.readAll();
+		return { status: "refused", message: { kind: "start", route, path }, reason };
+	};
+	if (!path) return refused("path");
+	const { instance, epoch } = await decodeForwarded(r);
+	if (instance === undefined) return refused("instance");
+	return { status: "active", ...path, route, instance, epoch, cost: await decodeRouteCost(r, version) };
+}
+
+/** A lite-07 ANNOUNCE_RESTART: its Announce ID, instance and epoch, and cost. */
+async function decodeRestart(r: Reader, version: Version): Promise<AnnounceBroadcast> {
+	const id = await r.u62();
+	const { instance, epoch } = await decodeForwarded(r);
+	if (instance === undefined) {
+		await r.readAll();
+		return { status: "refused", message: { kind: "change", id }, reason: "instance" };
+	}
+	return { status: "restart", id, instance, epoch, cost: await decodeRouteCost(r, version) };
 }
 
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).
@@ -338,6 +408,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			// The pre-lite-06 path-form retraction has no place on lite-06.
 			throw new Error("ended-by-path not supported for this version");
 		case "skipped":
+		case "refused":
 			throw new Error("decode-only announce type cannot be encoded");
 	}
 }
@@ -374,6 +445,7 @@ function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 		case "ended":
 			throw new Error("ended-by-path not supported for this version");
 		case "skipped":
+		case "refused":
 			throw new Error("decode-only announce type cannot be encoded");
 	}
 }
@@ -381,6 +453,8 @@ function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): Promise<AnnounceBroadcast> {
 	switch (typ) {
 		case ANNOUNCE_START: {
+			// Lite-07's claims carry what the sender forwarded, which a receiver may refuse.
+			if (hasRoutes(version)) return decodeStart(r, version);
 			const path = await decodePath(r, version);
 			const route = hasRoutes(version) ? { route: await r.u62() } : {};
 			const served = await decodeRoute(r, version);
@@ -400,6 +474,7 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		case ANNOUNCE_RESTART: {
 			// Unknown before lite-07: skipped below like any other.
 			if (!hasAnnounceRestart(version)) break;
+			if (hasRoutes(version)) return decodeRestart(r, version);
 			const id = await r.u62();
 			const served = await decodeRoute(r, version);
 			return { status: "restart", id, ...served, cost: await decodeRouteCost(r, version) };
@@ -407,12 +482,19 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		case ROUTE_START: {
 			if (!hasRoutes(version)) break;
 			const node = await r.u62();
-			if (node === 0n) throw new ProtocolViolation("Node ID 0 names no origin");
-			return { status: "routeStart", node, advert: await decodeAdvert(r) };
+			const advert = node === 0n ? await refuseNode(r) : await decodeAdvert(r);
+			if (typeof advert === "string")
+				return { status: "refused", message: { kind: "routeStart", node }, reason: advert };
+			return { status: "routeStart", node, advert };
 		}
-		case ROUTE_UPDATE:
+		case ROUTE_UPDATE: {
 			if (!hasRoutes(version)) break;
-			return { status: "routeUpdate", id: await r.u62(), advert: await decodeAdvert(r) };
+			const id = await r.u62();
+			const advert = await decodeAdvert(r);
+			if (typeof advert === "string")
+				return { status: "refused", message: { kind: "routeUpdate", id }, reason: advert };
+			return { status: "routeUpdate", id, advert };
+		}
 		case ROUTE_HOLD:
 			if (!hasRoutes(version)) break;
 			return { status: "routeHold", id: await r.u62() };
@@ -540,34 +622,39 @@ export async function decodeAnnounceReplyMaybe(r: Reader, version: Version): Pro
 export class AnnounceHistory {
 	#next = 0n;
 	#live = new Map<bigint, Path.Valid>();
+	// The live ids whose path was refused, which a base names only to be refused too.
+	#refused = new Set<bigint>();
 
 	/** The Announce ID the next ANNOUNCE_START is assigned. */
 	get next(): bigint {
 		return this.#next;
 	}
 
-	/** An ANNOUNCE_START: resolve its suffix and assign it the next id. */
-	start(msg: { suffix: Path.Valid; pathBase?: Base }): Path.Valid {
-		let suffix = msg.suffix;
-		if (msg.pathBase) {
-			const base = this.#live.get(this.#next - msg.pathBase.distance);
-			if (base === undefined) throw new ProtocolViolation(`announce base ${msg.pathBase.distance} is not live`);
-			const head = Path.parts(base);
-			const keep = msg.pathBase.keep;
-			if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
-			// Joined as text before parsing: a kept segment may end in the `\` of an escaped `/`.
-			const kept = head.slice(0, keep);
-			if (suffix !== Path.empty()) kept.push(suffix);
-			try {
-				suffix = Path.from(kept.join("/"));
-			} catch (cause) {
-				throw new ProtocolViolation("announce keeps half an escape", { cause });
-			}
-			const error = Path.check(suffix);
-			if (error) throw new ProtocolViolation(error);
-		}
-		this.#live.set(this.#next++, suffix);
+	/** An ANNOUNCE_START: assign it the next id, and resolve its suffix, or undefined when that
+	 * suffix, or the base it names, is no path this node can hold. */
+	start(msg: { suffix: Path.Valid; pathBase?: Base } | undefined): Path.Valid | undefined {
+		const suffix = msg && this.#resolve(msg);
+		const id = this.#next++;
+		if (suffix === undefined) this.#refused.add(id);
+		else this.#live.set(id, suffix);
 		return suffix;
+	}
+
+	#resolve(msg: { suffix: Path.Valid; pathBase?: Base }): Path.Valid | undefined {
+		const suffix = msg.suffix;
+		if (!msg.pathBase) return suffix;
+		const id = this.#next - msg.pathBase.distance;
+		if (this.#refused.has(id)) return undefined;
+		const base = this.#live.get(id);
+		if (base === undefined) throw new ProtocolViolation(`announce base ${msg.pathBase.distance} is not live`);
+		const head = Path.parts(base);
+		const keep = msg.pathBase.keep;
+		if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
+		// Joined as text before parsing: a kept segment may end in the `\` of an escaped `/`. A path
+		// that does not resolve is refused as content, as rs/moq-net does.
+		const kept = head.slice(0, keep);
+		if (suffix !== Path.empty()) kept.push(suffix);
+		return Path.tryDecode(kept.join("/"));
 	}
 
 	/** The suffix of the live announcement `id`, which an update or restart references. */
@@ -577,8 +664,9 @@ export class AnnounceHistory {
 		return live;
 	}
 
-	/** An ANNOUNCE_END: retire the id, returning its suffix. */
-	end(id: bigint): Path.Valid {
+	/** An ANNOUNCE_END: retire the id, returning its suffix, or undefined if it was refused. */
+	end(id: bigint): Path.Valid | undefined {
+		if (this.#refused.delete(id)) return undefined;
 		const live = this.get(id);
 		this.#live.delete(id);
 		return live;

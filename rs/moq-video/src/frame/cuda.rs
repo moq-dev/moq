@@ -1,5 +1,6 @@
 //! Linux CUDA device memory: the NV12 [`Frame`] behind `Surface::Cuda`, which
-//! NVDEC or a `Converter` produces and NVENC consumes in place.
+//! NVDEC or a `Converter` produces and NVENC scales into its own input on the
+//! GPU.
 //!
 //! # The GPU-only path
 //!
@@ -8,13 +9,15 @@
 //! one full-size conversion per capture and color space, then scaling each
 //! rendition on the GPU. Those images are never downloaded.
 //!
-//! Native `Surface::Cuda` frames from NVDEC also encode in place. Their portable
+//! Native `Surface::Cuda` frames from NVDEC also stay on the GPU. Their portable
 //! `Surface` methods permit CPU readback for software transcoding, while an
 //! external Vulkan image refuses that fallback.
 //!
-//! NVENC takes the converted frame as a registered `cuMemAlloc` NV12 buffer
-//! (`NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR`), the registration the NVDEC
-//! path already proved on hardware. The SDK 12.1 bindings could also register
+//! NVENC reads a registered `cuMemAlloc` NV12 buffer
+//! (`NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR`): each session's own `Target`,
+//! which every frame is copied into, or scaled into when its size differs. The
+//! one copy is what lets a session register once rather than per frame, and
+//! costs microseconds of GPU time. The SDK 12.1 bindings could also register
 //! the imported Vulkan image itself as a CUDA array in an RGB session, but NVENC
 //! would then own the color matrix, and the smaller rendition would still need
 //! its own conversion, so a kernel that writes NV12 straight from the image is
@@ -23,17 +26,24 @@
 //! What the hardware says (RTX 3070 Ti, driver 595.91.07, `just rs gpu`):
 //! the kernels match a CPU reference exactly, and an `nsys --trace=cuda` capture
 //! of `tests::vulkan_cuda_three_view_workload` records no `cuMemcpy` in either
-//! direction. Registering a converted buffer with NVENC costs around 70us and
-//! releasing it around 150us, a tenth of a 1280x720 encode; holding one
-//! registration per pool buffer would reclaim that, but a registration belongs
-//! to one session while the pool is shared by all of them, so that cache has to
-//! live in the encoder.
+//! direction.
+//!
+//! # Nothing per frame takes the driver's device lock
+//!
+//! Allocating, freeing, and registering device memory go through the
+//! driver's per-GPU lock, which every process on the device shares, and
+//! `cuMemFree` also waits for the whole device. Paid per frame, those calls
+//! serialize every transcode on the GPU while its engines sit idle. So every
+//! frame's buffer comes from a `Pool` and goes back to it, and each NVENC
+//! session copies or scales its input into one `Target` it registered once. Scaling
+//! and copies run on their owner's own stream, never the legacy default
+//! stream, which would wait for every other thread's work in the process.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig, PushKernelArg, result};
+use cudarc::driver::{CudaContext, CudaFunction, CudaStream, LaunchConfig, PushKernelArg, result};
 
 use super::pool::{self, Pool};
 use super::{I420, cuda_vulkan, vulkan};
@@ -77,6 +87,14 @@ fn kernels(ctx: &Arc<CudaContext>) -> Result<Arc<Kernels>, Error> {
 		})
 		.clone()
 		.map_err(|e| Error::codec(anyhow::anyhow!("CUDA resize unavailable: {e}")))
+}
+
+/// Whether the driver loads the resize kernels on `ctx`'s device. A driver can
+/// refuse the vendored PTX, so a consumer that would scale on the GPU checks
+/// once and otherwise leaves scaling to [`Surface::resize`](crate::Surface::resize),
+/// which falls back to the CPU.
+pub(crate) fn scales(ctx: &Arc<CudaContext>) -> bool {
+	kernels(ctx).is_ok()
 }
 
 /// An owned device allocation. Plain `cuMemAlloc` on purpose: NVENC's
@@ -125,21 +143,24 @@ impl pool::Alloc for Device {
 	}
 }
 
-/// A frame's allocation: a buffer leased from a `Converter`'s pool, handed
-/// back for reuse on drop, or a plain one freed on drop.
-enum Buffer {
-	Pooled(pool::Lease<Device>),
-	Plain(Raw),
-}
+/// Recycled NV12 buffers on one device for a producer that cannot refuse a
+/// frame, such as a decoder: never exhausted, and holding at most as many
+/// buffers as its frames ever had alive at once. Frames scaled from these draw
+/// from the same buffers.
+#[derive(Clone)]
+pub(crate) struct Frames(Arc<Pool<Device>>);
 
-impl std::ops::Deref for Buffer {
-	type Target = Raw;
+impl Frames {
+	/// Buffers on `ctx`'s device.
+	pub(crate) fn new(ctx: &Arc<CudaContext>) -> Self {
+		Self(Arc::new(Pool::new(Device(ctx.clone()), None)))
+	}
 
-	fn deref(&self) -> &Raw {
-		match self {
-			Self::Pooled(lease) => lease,
-			Self::Plain(raw) => raw,
-		}
+	/// An uninitialized frame of `size` (both dimensions even) at row pitch
+	/// `pitch`: the caller writes the full extent.
+	pub(crate) fn alloc(&self, size: Size, pitch: u32) -> Result<Frame, Error> {
+		let reservation = self.0.reserve().expect("an unbounded pool always has room");
+		Frame::pooled(reservation, size, pitch, None)
 	}
 }
 
@@ -153,7 +174,7 @@ impl std::ops::Deref for Buffer {
 /// retains it), so a frame decoded by NVDEC is directly addressable by NVENC.
 #[derive(Clone)]
 pub struct Frame {
-	buf: Arc<Buffer>,
+	buf: Arc<pool::Lease<Device>>,
 	pub(crate) width: u32,
 	pub(crate) height: u32,
 	/// Row pitch in bytes of both planes (>= `width`).
@@ -169,7 +190,6 @@ impl std::fmt::Debug for Frame {
 			.field("size", &self.size())
 			.field("pitch", &self.pitch)
 			.field("color", &self.color)
-			.field("pooled", &matches!(*self.buf, Buffer::Pooled(_)))
 			.finish()
 	}
 }
@@ -200,25 +220,16 @@ fn aligned_pitch(width: u32) -> Result<u32, Error> {
 }
 
 impl Frame {
-	/// Allocate an NV12 buffer for `width` x `height` (both even) at row
-	/// pitch `pitch`. Uninitialized: the caller copies the full extent in.
-	pub(crate) fn alloc(ctx: &Arc<CudaContext>, width: u32, height: u32, pitch: u32) -> Result<Self, Error> {
-		debug_assert!(pitch >= width && width.is_multiple_of(2) && height.is_multiple_of(2));
-		let raw = Raw::alloc(ctx, nv12_len(height, pitch)?)?;
+	/// An uninitialized frame of `size` filling `reservation` at row pitch `pitch`.
+	fn pooled(
+		reservation: pool::Reservation<Device>,
+		size: Size,
+		pitch: u32,
+		color: Option<Color>,
+	) -> Result<Self, Error> {
+		debug_assert!(pitch >= size.width && size.width.is_multiple_of(2) && size.height.is_multiple_of(2));
 		Ok(Self {
-			buf: Arc::new(Buffer::Plain(raw)),
-			width,
-			height,
-			pitch,
-			color: None,
-		})
-	}
-
-	/// An uninitialized frame filling `reservation` at the aligned pitch.
-	fn pooled(reservation: pool::Reservation<Device>, size: Size, color: Option<Color>) -> Result<Self, Error> {
-		let pitch = aligned_pitch(size.width)?;
-		Ok(Self {
-			buf: Arc::new(Buffer::Pooled(reservation.fill(nv12_len(size.height, pitch)?)?)),
+			buf: Arc::new(reservation.fill(nv12_len(size.height, pitch)?)?),
 			width: size.width,
 			height: size.height,
 			pitch,
@@ -288,38 +299,68 @@ impl Frame {
 
 	/// A copy scaled to `size` (both dimensions even) on the GPU, for
 	/// [`Surface::resize`](crate::Surface::resize), which falls back to the CPU
-	/// when this fails. A pooled frame draws the copy from its own pool, so a
-	/// full pool is one such failure; a GPU-only producer scales through
-	/// the encoder's pooled rendition scaler instead.
+	/// when this fails. The copy comes from this frame's own pool, so a full
+	/// bounded pool is one such failure; an NVENC session scales into its own
+	/// [`Target`] instead.
 	pub(crate) fn resize(&self, size: Size) -> Result<Self, Error> {
 		size.validate("resize to")?;
-		let dst = match &*self.buf {
-			Buffer::Pooled(lease) => {
-				let pool = lease.pool();
-				let reservation = pool.reserve().ok_or_else(|| {
-					Error::Unsupported(format!("GPU frame pool capacity {} exhausted", pool.capacity()))
-				})?;
-				Self::pooled(reservation, size, self.color)?
-			}
-			Buffer::Plain(raw) => {
-				let mut dst = Self::alloc(&raw.ctx, size.width, size.height, aligned_pitch(size.width)?)?;
-				dst.color = self.color;
-				dst
-			}
-		};
-		self.scale_into(&dst)?;
+		let pool = self.buf.pool();
+		let reservation = pool.reserve().ok_or_else(|| {
+			Error::Unsupported(format!(
+				"GPU frame pool of {} buffers exhausted",
+				pool.capacity().map_or(0, NonZeroUsize::get)
+			))
+		})?;
+		let dst = Self::pooled(reservation, size, aligned_pitch(size.width)?, self.color)?;
+		self.scale_into(&dst, &self.buf.ctx.default_stream())?;
 		Ok(dst)
 	}
 
-	/// Scale this frame into `dst` with the box-filter kernels, on this frame's
-	/// device.
-	fn scale_into(&self, dst: &Self) -> Result<(), Error> {
-		let ctx = &self.buf.ctx;
-		let kernels = kernels(ctx)?;
+	/// Copy into `dst`, the same size, on `stream` and wait for it. The copy
+	/// engine needs no PTX, unlike [`scale_into`](Self::scale_into).
+	fn copy_into(&self, dst: &Self, stream: &Arc<CudaStream>) -> Result<(), Error> {
+		stream
+			.context()
+			.bind_to_thread()
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;
+		// NV12 keeps its chroma rows right after the luma rows at the same pitch,
+		// so one copy of 3/2 the height moves both planes.
+		let copy = cudarc::driver::sys::CUDA_MEMCPY2D {
+			srcXInBytes: 0,
+			srcY: 0,
+			srcMemoryType: cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+			srcHost: std::ptr::null(),
+			srcDevice: self.buf.ptr,
+			srcArray: std::ptr::null_mut(),
+			srcPitch: self.pitch as usize,
+			dstXInBytes: 0,
+			dstY: 0,
+			dstMemoryType: cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+			dstHost: std::ptr::null_mut(),
+			dstDevice: dst.buf.ptr,
+			dstArray: std::ptr::null_mut(),
+			dstPitch: dst.pitch as usize,
+			WidthInBytes: self.width as usize,
+			Height: self.height as usize * 3 / 2,
+		};
+		// SAFETY: both buffers are live NV12 allocations of `width` x `height` at
+		// their own pitch, which is at least `width`, so every row stays inside.
+		unsafe { cudarc::driver::sys::cuMemcpy2DAsync_v2(&copy, stream.cu_stream()) }
+			.result()
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA copy: {e:?}")))?;
+		// As for `scale_into`: NVENC orders only against the default stream.
+		stream
+			.synchronize()
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA copy sync: {e:?}")))
+	}
+
+	/// Scale this frame into `dst` with the box-filter kernels on `stream`, a
+	/// stream of this frame's device, and wait for them.
+	fn scale_into(&self, dst: &Self, stream: &Arc<CudaStream>) -> Result<(), Error> {
+		let kernels = kernels(&self.buf.ctx)?;
 		let (width, height) = (dst.width, dst.height);
 		let pitch = dst.pitch;
 
-		let stream = ctx.default_stream();
 		let block = (16u32, 16, 1);
 		let grid = |w: u32, h: u32| (w.div_ceil(16), h.div_ceil(16), 1);
 		let launch_err = |plane: &str, e| Error::codec(anyhow::anyhow!("CUDA resize {plane}: {e:?}"));
@@ -374,8 +415,8 @@ impl Frame {
 		}
 		.map_err(|e| launch_err("chroma", e))?;
 
-		// The frame may head straight to NVENC (which does not order against
-		// our stream), so wait for the kernels rather than queueing.
+		// The frame may head straight to NVENC, which orders only against the
+		// default stream, so wait for the kernels rather than queueing.
 		stream
 			.synchronize()
 			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA resize sync: {e:?}")))
@@ -394,12 +435,11 @@ const CONVERT_PTX: &str = include_str!("rgba_to_nv12.ptx");
 /// [`encode::Config::color`](crate::encode::Config::color) declares in the
 /// bitstream, and the frames it returns report that space through
 /// [`Frame::color`] so the two cannot silently disagree. Convert once at the
-/// captured size and resize the result for smaller renditions, each into a
-/// `Slot` from `reserve`; every buffer, converted or scaled,
+/// captured size, into a `Slot` from `reserve`, and let each rendition's
+/// encoder scale the result into its own [`Target`]. Every converted buffer
 /// comes from the pool sized by `capacity`, so a producer that outruns its
 /// encoder gets `None` from `reserve` instead of unbounded device memory. Drop
-/// the frames the encoder has finished with (it retains its own clone until
-/// then) and the buffers come back.
+/// the frames the encoders have finished with and the buffers come back.
 ///
 /// The pixels are taken as the producer's final display-referred output: no
 /// transfer function is applied on the way to Y'CbCr, so an sRGB-encoded 8-bit
@@ -425,8 +465,8 @@ impl std::fmt::Debug for Converter {
 
 impl Converter {
 	/// Open CUDA device `ordinal`, load the conversion kernel, and size the
-	/// buffer pool. Two live frames per captured frame (the converted one and
-	/// one scaled copy) plus one of slack is a reasonable `capacity`.
+	/// buffer pool. One live frame per captured frame in flight, plus slack, is
+	/// a reasonable `capacity`.
 	pub(crate) fn new(ordinal: usize, color: Color, capacity: NonZeroUsize) -> Result<Self, Error> {
 		let ctx = CudaContext::new(ordinal)
 			.map_err(|e| Error::Unsupported(format!("CUDA device {ordinal} is unavailable: {e:?}")))?;
@@ -436,7 +476,7 @@ impl Converter {
 			.map_err(|e| Error::Unsupported(format!("CUDA color conversion unavailable: {e:?}")))?;
 		Ok(Self {
 			importer: cuda_vulkan::Importer::new(ordinal)?,
-			pool: Arc::new(Pool::new(Device(ctx.clone()), capacity)),
+			pool: Arc::new(Pool::new(Device(ctx.clone()), Some(capacity))),
 			ctx,
 			color,
 			kernel,
@@ -509,7 +549,7 @@ impl Slot {
 		let size = frame.size();
 		size.validate("Vulkan/CUDA conversion of")?;
 
-		let dst = Frame::pooled(self.reservation, size, Some(self.color))?;
+		let dst = Frame::pooled(self.reservation, size, aligned_pitch(size.width)?, Some(self.color))?;
 		let weights = self.color.coefficients();
 		let bgra = u32::from(frame.format() == vulkan::Format::Bgra8);
 		let stream = frame.cuda_stream();
@@ -548,23 +588,60 @@ impl Slot {
 			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA color conversion sync: {e:?}")))?;
 		Ok(dst)
 	}
+}
 
-	/// A copy of `frame` scaled to `size` (both dimensions even) with the
-	/// box-filter kernel, in the same color space. Fails without touching the
-	/// CPU when `frame` lives on another device or the driver refuses the
-	/// kernel.
-	pub(crate) fn resize(self, frame: &Frame, size: Size) -> Result<Frame, Error> {
-		if frame.buf.ctx.ordinal() != self.ctx.ordinal() {
+/// One NV12 buffer that frames are copied or scaled into, for a consumer that reads it
+/// in place: an NVENC session registers it once and encodes every frame from
+/// it. Scaling runs on the target's own stream, so it never waits on other
+/// work in the process.
+pub(crate) struct Target {
+	frame: Frame,
+	stream: Arc<CudaStream>,
+}
+
+impl std::fmt::Debug for Target {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Target")
+			.field("frame", &self.frame)
+			.finish_non_exhaustive()
+	}
+}
+
+impl Target {
+	/// Allocate a `size` (both dimensions even) buffer on `ctx`'s device.
+	pub(crate) fn new(ctx: &Arc<CudaContext>, size: Size) -> Result<Self, Error> {
+		size.validate("CUDA target")?;
+		let frame = Frames::new(ctx).alloc(size, aligned_pitch(size.width)?)?;
+		let stream = ctx
+			.new_stream()
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA stream: {e:?}")))?;
+		Ok(Self { frame, stream })
+	}
+
+	/// The buffer, uninitialized until the first [`fill`](Self::fill).
+	pub(crate) fn frame(&self) -> &Frame {
+		&self.frame
+	}
+
+	/// Copy or scale `src` into the buffer and wait for it, so the consumer may
+	/// read the buffer next. A copy needs no kernel; scaling fails without
+	/// touching the CPU when the driver refuses the kernels (see [`scales`]).
+	/// Either fails when `src` lives on another device.
+	pub(crate) fn fill(&mut self, src: &Frame) -> Result<(), Error> {
+		if src.buf.ctx.ordinal() != self.frame.buf.ctx.ordinal() {
 			return Err(Error::Unsupported(format!(
 				"CUDA frame on device {} cannot be scaled on device {}",
-				frame.buf.ctx.ordinal(),
-				self.ctx.ordinal()
+				src.buf.ctx.ordinal(),
+				self.frame.buf.ctx.ordinal()
 			)));
 		}
-		size.validate("resize to")?;
-		let dst = Frame::pooled(self.reservation, size, frame.color)?;
-		frame.scale_into(&dst)?;
-		Ok(dst)
+		if src.size() == self.frame.size() {
+			src.copy_into(&self.frame, &self.stream)?;
+		} else {
+			src.scale_into(&self.frame, &self.stream)?;
+		}
+		self.frame.color = src.color;
+		Ok(())
 	}
 }
 

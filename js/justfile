@@ -55,9 +55,9 @@ fix-changed list:
 
 # Model-check a TLA+ spec with TLC, e.g. `just js tla watch/verify/Watch.tla`.
 # Pass `-config js/<path>.cfg` for a config not named after the spec.
-# TLC runs at the lowest priority with a 4 GB heap, as `just rs tla` explains.
+# sh/tlc.py says how a run shares the host.
 tla spec *args:
-    cd .. && JAVA_TOOL_OPTIONS=-Xmx4g nice -n 19 nix shell --inputs-from . nixpkgs#tlaplus18 --command tlc -workers auto -cleanup -noGenerateSpecTE -metadir "$(mktemp -d)" {{ args }} js/{{ spec }}
+    python3 ../sh/tlc.py js/{{ spec }} {{ args }}
 
 # Run all unit tests.
 test:

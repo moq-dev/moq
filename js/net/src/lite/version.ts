@@ -311,6 +311,12 @@ export function hasRanges(version: Version): boolean {
 	}
 }
 
+/** Whether FETCH carries a Start Byte within its first frame, so a reader cut off partway
+ * through a frame asks for only the rest of it. Added in lite-07. */
+export function hasByteStart(version: Version): boolean {
+	return hasFetchMaxDelay(version);
+}
+
 /** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
  * fetch is bounded by the publisher's max age alone. */
 export function hasFetchMaxDelay(version: Version): boolean {
@@ -489,7 +495,7 @@ export function hasAnnounceCompression(version: Version): boolean {
 }
 
 /** Whether the announce stream carries warm routes (WARM_START, WARM_UPDATE, and WARM_END), and
- * SUBSCRIBE and SUBSCRIBE_UPDATE say whom each pull serves. Added in lite-07. */
+ * SUBSCRIBE and SUBSCRIBE_UPDATE say whether each pull joins the publisher's copy. Added in lite-07. */
 export function hasWarm(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
@@ -746,6 +752,42 @@ export function hasRouteKey(version: Version): boolean {
 
 /** Whether SETUP recognizes the Implementation parameter, added in lite-07. */
 export function hasImplementation(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether FRAME leads with its `Payload Length`, the payload size plus one, leaving 0 for a
+ * future GROUP_END. Added in lite-07; an earlier FRAME ends its header with the payload size.
+ */
+export function hasLengthFirst(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether a Group Stream reset with YIELDED pauses its group, which a later stream continues.
+ * Added in lite-07; an earlier publisher out of stream credit gives the reset group up.
+ */
+export function hasYield(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

@@ -39,7 +39,7 @@ consumers in this repository and its downstream applications. Mean 6.9; three
 clusters were restrictive (the native playout clock, JS duration units, and
 moq-video's environment knobs). Its approved changes are m2 quests
 (route-roles, js-time-types, mux-sync, no-sentinels, video-devices,
-gateway-ingest (landed), and the [api-shape epic](/quest/m2/api-shape/README.md)),
+gateway-ingest (landed), and the api-shape epic (landed)),
 two m1 quests, and plan edits. Check first, next run: surfaces `just
 api-diff` cannot see (GStreamer properties, CLI flags and env, MIGRATE drift)
 and publish versions of packages exempt from the cut's version. `just

@@ -98,6 +98,9 @@ type dialOptions struct {
 	version string
 	// grant waits for the relay's grant and prints it.
 	grant bool
+	// quicOnly turns off the WebSocket fallback. The finish case checks one session end to
+	// end, and leaving a fallback that won a slow race would open a second one.
+	quicOnly bool
 }
 
 // dial connects to url, printing the relay's grant in the Rust client's
@@ -106,6 +109,10 @@ func dial(ctx context.Context, url string, opts dialOptions, timeout time.Durati
 	config := moq.ClientConfig{TLS: moq.ClientTLS{Insecure: true}}
 	if opts.version != "" {
 		config.Versions = []string{opts.version}
+	}
+	if opts.quicOnly {
+		enabled := false
+		config.WebSocket.Enabled = &enabled
 	}
 	client, err := moq.Dial(ctx, url, config)
 	if err != nil || !opts.grant {
@@ -462,7 +469,11 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 	out += "." + codec
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
 		Format: moq.AudioSampleFormatF32,
-		Delay:  moq.Delay{Max: maxDelay},
+		// moq-audio waits on a missing group for its playout delay, measured from arrival timing at tens
+		// of ms, so a runtime starved longer than that skips a group that is only late. This reader
+		// checks delivery between implementations, not a real-time deadline: it holds a playout delay of
+		// the max delay, waiting on a hole for the same budget it grants a late group.
+		Delay:  moq.Delay{Min: maxDelay, Max: maxDelay},
 	})
 	if err != nil {
 		return err
@@ -494,7 +505,7 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 			frame = read.Frame
 		// moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
 		case moqaudio.ReadGap:
-			return fmt.Errorf("audio gap after %d samples", decoded)
+			return fmt.Errorf("audio gap after %d samples, at %v for %v", decoded, read.Timestamp, read.Duration)
 		default: // nil, the track's end, or a ReadEnd, the encoder's
 			return errors.New("audio track ended early")
 		}
@@ -633,7 +644,7 @@ func run() error {
 	}
 	wait := time.Duration(*timeout * float64(time.Second))
 	ctx := context.Background()
-	opts := dialOptions{version: *version, grant: *grant}
+	opts := dialOptions{version: *version, grant: *grant, quicOnly: *finish || *finishAck != ""}
 	switch role {
 	case "publish":
 		var tones []float64

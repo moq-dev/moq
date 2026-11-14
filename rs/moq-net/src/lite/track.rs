@@ -134,6 +134,9 @@ pub(crate) struct Framing {
 	pub ietf: Option<crate::ietf::Version>,
 	/// The track is compressed, so a datagram's payload follows its inflated size.
 	pub compressed: bool,
+	/// FRAME leads with its `Payload Length`, the payload size plus one (lite-07), rather
+	/// than ending its header with the size.
+	pub length_first: bool,
 }
 
 impl Framing {
@@ -144,6 +147,7 @@ impl Framing {
 			timescale: version.wire_timescale(info.timescale),
 			ietf: info.ietf(),
 			compressed: info.compressed(),
+			length_first: version.has_length_first(),
 		}
 	}
 }

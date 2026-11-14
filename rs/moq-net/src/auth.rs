@@ -217,6 +217,8 @@ struct Attached {
 	requests: bool,
 	/// Set once the session ends.
 	closed: Option<Error>,
+	/// The tokens still unanswered when the session ended, whose answer is that end.
+	cut: Vec<u64>,
 	/// The session's GOAWAY: once either side sends one, the session is draining.
 	goaway: Option<std::sync::Arc<crate::goaway::Handle>>,
 	/// Every token this session presented that has not been withdrawn.
@@ -318,6 +320,7 @@ impl Attached {
 			supported,
 			requests,
 			closed: None,
+			cut: Vec::new(),
 			goaway: None,
 			slots: BTreeMap::new(),
 			opening: VecDeque::new(),
@@ -923,7 +926,7 @@ impl Link {
 		&self.handle.state
 	}
 
-	fn id(&self) -> u64 {
+	pub(crate) fn id(&self) -> u64 {
 		self.attached.id
 	}
 
@@ -1445,6 +1448,12 @@ impl Link {
 			let link = attached(&mut state.links, link);
 			link.closed = Some(err.clone());
 			link.opening.clear();
+			link.cut = link
+				.slots
+				.iter()
+				.filter(|(_, slot)| !slot.phase.answered())
+				.map(|(id, _)| *id)
+				.collect();
 			for slot in link.slots.values_mut() {
 				if !matches!(slot.phase, Phase::Ended(_)) {
 					slot.phase = Phase::Ended(err.clone());

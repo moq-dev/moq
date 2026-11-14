@@ -210,6 +210,15 @@ impl Version {
 		)
 	}
 
+	/// Whether FETCH carries a `Start Byte` within its first frame, so a reader cut off
+	/// partway through a frame asks for only the rest of it. Added in lite-07.
+	pub(crate) fn has_byte_start(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether this version's SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO
 	/// carry the retired `Ordered` byte.
 	///
@@ -281,6 +290,26 @@ impl Version {
 	/// its inflated size. Added in lite-07; an earlier peer receives the
 	/// frames inflated.
 	pub(crate) fn has_compression(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether FRAME leads with its `Payload Length`, the payload size plus one. Added in
+	/// lite-07; an earlier FRAME ends its header with the payload size.
+	pub(crate) fn has_length_first(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether a Group Stream reset with YIELDED pauses its group, which a later stream
+	/// continues. Added in lite-07; an earlier publisher out of stream credit gives the reset
+	/// group up.
+	#[cfg(feature = "async")]
+	pub(crate) fn has_yield(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -378,8 +407,8 @@ impl Version {
 	}
 
 	/// Whether the announce stream carries warm routes (WARM_START, WARM_UPDATE, and
-	/// WARM_END), and SUBSCRIBE and SUBSCRIBE_UPDATE say whom each pull serves. Added in
-	/// lite-07.
+	/// WARM_END), and SUBSCRIBE and SUBSCRIBE_UPDATE say whether each pull joins the
+	/// publisher's copy. Added in lite-07.
 	pub(crate) fn has_warm(self) -> bool {
 		!matches!(
 			self,

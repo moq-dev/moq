@@ -33,7 +33,7 @@ mod probe;
 #[cfg(feature = "async")]
 mod publisher;
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
-pub use publisher::CoverageBench;
+pub use publisher::{CoverageBench, PausedBench};
 #[cfg(feature = "async")]
 mod replay;
 #[cfg(feature = "async")]
@@ -72,9 +72,6 @@ use subscriber::*;
 // The fuzz harness drives a group stream's ingest directly.
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 pub(crate) use subscriber::FrameIngest;
-// The range-count bench looks up a subscription's frame bounds directly.
-#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
-pub(crate) use publisher::FramesBench;
 pub use track::*;
 pub use tracks::*;
 pub use version::Version;

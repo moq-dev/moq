@@ -175,12 +175,16 @@ impl Serving {
 		let origin = &self.cluster.origin;
 		let directions = self.directions;
 		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
-		// The listener's handshake deadline covers admission; `within` closes a session
+		// The listener's handshake deadline covers admission; `expired` closes a session
 		// it gives up on with the timeout code.
-		let lease = match request.within(self.auth.admit(auth_request)).await {
-			Err(err) => return Err(anyhow::Error::new(err).context("admission timed out")),
-			Ok(Ok(lease)) => lease,
-			Ok(Err(err)) => {
+		let admitted = tokio::select! {
+			biased;
+			admitted = self.auth.admit(auth_request) => admitted,
+			() = request.expired() => return Err(anyhow::Error::new(moq_net::Error::Timeout).context("admission timed out")),
+		};
+		let lease = match admitted {
+			Ok(lease) => lease,
+			Err(err) => {
 				request.reject(moq_net::SessionError::from(&err)).await.ok();
 				return Err(anyhow::Error::new(err).context("session refused"));
 			}

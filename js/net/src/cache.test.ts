@@ -1,11 +1,36 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
 import { RUN_OVERHEAD as ARRIVAL_OVERHEAD } from "./ledger.ts";
 import { Tail } from "./tail.ts";
 import { Producer as TrackProducer } from "./track.ts";
+
+// A reader continued on a held re-offer keeps the frames the failed copy wrote that it has yet to
+// read, so the pool still counts them once that copy leaves the cache.
+test("a re-offer bills the failed copy's frames its readers still hold", async () => {
+	await withClock(async () => {
+		const pool = new cache.Pool({ capacity: 100 * billed(10_000) });
+		const producer = new TrackProducer("test");
+		hooks.poolTrack(producer, pool);
+		const track = producer.accept({ maxAge: null });
+		hooks.receiveTrack(track);
+		const first = hooks.receiveGroup(track, { sequence: 0n, start: 0 });
+		first.writeFrame({ payload: new Uint8Array(10_000) });
+		const reader = first.consume();
+		const arriving = hooks.arrivingGroup(track, 0n);
+		first.abort(new Error("reset"));
+		// The re-offer starts past the frame the reader still holds.
+		hooks.receiveGroup(track, { sequence: 0n, start: 1 });
+		arriving?.release();
+		expect(pool.used).toBeGreaterThan(10_000);
+		expect((await reader.readFrame())?.payload.byteLength).toBe(10_000);
+		reader.close();
+		track.close();
+	});
+});
 
 // Run `fn` on a manual clock, stepped in milliseconds.
 async function withClock(fn: (clock: { advance: (ms: number) => Promise<void> }) => Promise<void> | void) {
@@ -420,11 +445,35 @@ test("a tail forgets its finished streams under debt", () => {
 	expect(pool.used).toBeLessThanOrEqual(capacity + 2 * (16 * 1024 + cache.ENTRY_OVERHEAD));
 	// A stale drop inside what the fold forgot is owed again only where the ledger had not accounted
 	// for it: there a stream may have finished and overtaken the drop.
-	tail.open(2n)();
+	tail.open(2n).done();
 	expect(tail.overtaken(0n, 4n)).toEqual([{ start: 2n, end: 3n }]);
 	expect(tail.overtaken(2n * runs, 2n * runs + 1n)).toEqual([]);
 	tail.updated();
 	expect(tail.overtaken(0n, 4n)).toEqual([]);
+	tail.close();
+});
+
+// A tail's fragmented final drops bill its track's account too. Under the pool's debt they fold into
+// the one span they reach, which still names every dropped sequence, so a stream a drop overtook is
+// never held as owed, and the gaps between them are excused at worst.
+test("a tail folds its final drops under debt", () => {
+	const runs = 4000n;
+	const pool = new cache.Pool({ capacity: 1 << 30 });
+	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
+	const tail = new Tail({ bill: hooks.billTrack(producer) });
+	for (let run = 0n; run < runs; run++) tail.drop(2n * run, 2n * run + 1n);
+	expect(tail.dropped(2n)).toBe(true);
+	expect(tail.dropped(3n)).toBe(false);
+	expect(pool.used).toBeGreaterThanOrEqual(Number(runs) * cache.READER_RUN_OVERHEAD);
+
+	const capacity = 64 * cache.RUN_OVERHEAD;
+	pool.resize(capacity);
+	for (let i = 0; i < 64; i++) finished(producer, 16 * 1024);
+	tail.drop(2n * runs, 2n * runs + 1n);
+	expect(pool.used).toBeLessThanOrEqual(capacity + 2 * (16 * 1024 + cache.ENTRY_OVERHEAD));
+	for (let run = 0n; run <= runs; run++) expect(tail.dropped(2n * run)).toBe(true);
+	expect(tail.dropped(2n * runs + 1n)).toBe(false);
 	tail.close();
 });
 

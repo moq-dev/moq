@@ -1,4 +1,4 @@
-# More tests hold up under load
+# [S] More tests hold up under load
 
 ## Goal
 
@@ -28,7 +28,14 @@ Rules every child keeps:
   budget). Wait out the jitter's whole window, not a count of small steps.
 
 This README's own work, after the children: run `just check --all` several
-times on a loaded machine, as the first round did.
+times on a loaded machine, as the first round did. Done 2026-11-13 on fedora
+(32 cores, load average 4 to 14 from other agents' sessions): three runs all
+passed. The one failure seen on that host the same day, moq-relay's
+io_uring `ENOMEM` at ring setup, is planned in
+[uring-setup-enomem](/quest/m0/test-flakes-2/uring-setup-enomem.md).
+Decided 2026-11-13 (maintainer, `/quest-complete`): that child stays in m0
+under this epic, so the epic stays open until it lands (rejected: moving it to
+m1, moving it to m3). The epic completes when that child lands.
 
 The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
@@ -279,5 +286,15 @@ its third failure since 2026-10-16 and its first after
 [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160) and
 [moq-dev/moq#8526](https://github.com/moq-dev/moq/pull/8526). It is
 quarantined with `#[ignore]` until its child fixes it.
+
+The `go -> python` media cell failed with `audio gap after 648 samples` in
+scheduled run [43260674067](https://github.com/moq-dev/moq/actions/runs/43260674067).
+[moq-dev/moq#8633](https://github.com/moq-dev/moq/pull/8633) investigated
+[moq-dev/moq#8531](https://github.com/moq-dev/moq/pull/8531) and ran ten complete
+full matrices in the dev shell with retained debug logs. The cell passed every
+one; nine matrices passed entirely. The repeated-run outcome, authorized by the
+maintainer on 2026-11-13, retires its separate quest without claiming a runtime
+fix or ruling out a rarer failure. The shared container's CPU-starvation skip
+is being fixed in [moq-dev/moq#8611](https://github.com/moq-dev/moq/pull/8611).
 
 Public API: none. Wire: none.

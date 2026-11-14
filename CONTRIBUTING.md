@@ -16,6 +16,7 @@ PRs into `release` use a merge commit, so their history survives until they land
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - Never commit binaries or build artifacts (`.a`, `.so`, `.dylib`, `.dll`, wheels).
 - Keep other binary files, such as images and fixtures, under 500 KiB; list an unavoidable exception in `sh/large-files.allow` with a reason.
+- `nix/Cargo.nix`, the Nix packages' per-crate build plan, is generated from the manifests and `Cargo.lock`: `just fix` (or `just rs cargo-nix`) regenerates it, and `just check` fails while it is stale. It needs Nix; without it, leave the plan stale and the merge queue's fixer regenerates it, as it does the workspace-hack.
 
 # PRs
 
@@ -34,7 +35,7 @@ Run `just ci` before every push, and mark the PR ready yourself when the work is
 
 # Landing gate
 
-Ready PRs into `main` run **Check** against the PR's base on each push as a signal only; drafts skip it. **Queue** reports as skipped until queued. Check never blocks the merge queue.
+**Check** runs only on PRs into `release`, including drafts. PRs into `main` get their verdict from the merge queue; run `just ci` locally for a signal before queueing. **Queue** reports as skipped until queued.
 `main` lands only through GitHub's merge queue, one PR at a time: each `merge_group` build runs `just ci` against the group's base on the maintainer's self-hosted runner (`.github/workflows/queue.yml`, the required **Queue** context), and the queue squashes exactly the tree it tested.
 Request landing with `quest merge <pr> --land <full-head-sha>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
 An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.

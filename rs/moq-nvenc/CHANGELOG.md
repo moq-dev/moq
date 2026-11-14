@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `Session::register_generic_resource` and `Session::register_cuda_resource` only register the allocation; call `RegisteredResource::map` for each encode and pass the returned `MappedResource` to `Session::encode_picture`. Registration is the expensive call, so a reused input registers once.
+- `RegisteredResource::map` refuses with `ErrorKind::InvalidCall` once an earlier mapping never unmapped (it failed to unmap, or its submission was abandoned or forgotten), and such a registration never releases its allocation.
+
 ## [0.1.2](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.1.1...moq-nvenc-v0.1.2) - 2026-09-26
 
 ### Fixed

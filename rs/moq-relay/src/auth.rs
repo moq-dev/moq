@@ -959,7 +959,7 @@ impl Auth {
 	///
 	/// Waits on the decider for as long as the caller does. The caller owns the
 	/// deadline: a listener bounds it with the connection's handshake deadline
-	/// ([`moq_tokio::server::Request::within`]), and dropping the future withdraws
+	/// ([`moq_tokio::server::Request::expired`]), and dropping the future withdraws
 	/// the admission from the decider.
 	///
 	/// A path naming a `.` or `..` segment is refused before the decider sees it. A

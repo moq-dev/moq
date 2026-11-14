@@ -18,15 +18,14 @@ Decided 2026-11-09 (maintainer, rind's quest audit): one rind 0.4 that carries
 all three breaking changes, and a MoQ-side PR ready before the m0 adapter patch
 releases publish ✅ (rejected: the 0.4 quest alone, accepting that MoQ's build
 breaks until fixed; leaving both to release-plz). rind holds those releases
-until this PR is ready
-([its epic](https://github.com/moq-dev/rind/blob/main/quest/m0/adapters/README.md)).
+until this PR is ready.
 
 The same day the plan changed: two of rind 0.4's breaking changes merged while
 rind's 0.3.3 was unpublished, so the maintainer chose ✅ to set rind to 0.4.0
 and hold the release until the last one, the CPU-check removal, lands
 (rejected: ship 0.4.0 now and take the CPU-check removal in 0.5; revert both
 and release 0.3.3). So the adapter fixes and rind 0.4 publish in one release
-([moq-dev/rind#548](https://github.com/moq-dev/rind/pull/548)), each adapter
+([kixel-ai/rind#548](https://github.com/kixel-ai/rind/pull/548)), each adapter
 requires rind 0.4, and this PR moves MoQ to both at once. Moving to the
 adapters alone would leave two copies of rind in the graph.
 
@@ -41,16 +40,16 @@ aws-lc-rs), so `main` and the next cut are exposed, not a shipped release.
 Lines below are at `ecfa75a0` (2026-11-09). Three rind PRs change what MoQ
 calls:
 
-- [moq-dev/rind#521](https://github.com/moq-dev/rind/pull/521), rind-rustls:
+- [kixel-ai/rind#521](https://github.com/kixel-ai/rind/pull/521), rind-rustls:
   `default_provider()` returns `CryptoProvider`, no longer a `Result`. Drop
   the `.expect(..)`, `.unwrap()`, or `?` after it.
-- [moq-dev/rind#519](https://github.com/moq-dev/rind/pull/519),
+- [kixel-ai/rind#519](https://github.com/kixel-ai/rind/pull/519),
   rind-jsonwebtoken: `default_provider()` becomes the static
   `DEFAULT_PROVIDER`, so `rind_jsonwebtoken::default_provider().expect(..)`
   becomes `&rind_jsonwebtoken::DEFAULT_PROVIDER`. rind-object-store:
   `default_provider()` returns `Arc<dyn CryptoProvider>`, no longer a
   `Result`; drop the `?`.
-- [moq-dev/rind#515](https://github.com/moq-dev/rind/pull/515), rind-rcgen:
+- [kixel-ai/rind#515](https://github.com/kixel-ai/rind/pull/515), rind-rcgen:
   `KeyPair::generate(&alg)` becomes `KeyPair::generate_for(&alg)`
   (`generate()` now takes no argument and makes a P-256 key), and
   `to_pkcs8()` is gone. `key.to_pkcs8().secret_pkcs8_der().to_vec()` becomes
@@ -131,12 +130,12 @@ rind 0.4 itself changes three things, of which MoQ uses two:
     `rs/moq-webrtc/src/vendor/dimpl/error.rs:363` drops
     `UnsupportedCpu(rind::cpu::MissingFeature)`.
 - Agreement keys keep their public key
-  ([moq-dev/rind#529](https://github.com/moq-dev/rind/pull/529)):
+  ([kixel-ai/rind#529](https://github.com/kixel-ai/rind/pull/529)):
   `agreement::PrivateKey::public_key()` returns a borrow. The vendored dimpl
   provider calls it at `rs/moq-webrtc/src/vendor/dimpl/crypto/rind/kx.rs:38`;
   check that line and the rest of that file against #529's Public API section.
 - AES-CBC encryption takes a typed `CbcIv`
-  ([moq-dev/rind#530](https://github.com/moq-dev/rind/pull/530)): MoQ calls no
+  ([kixel-ai/rind#530](https://github.com/kixel-ai/rind/pull/530)): MoQ calls no
   AES-CBC encryption, by grep at that commit.
 
 Raise `rind` to 0.4 (`Cargo.toml:217`, keeping `wipe`) and the four adapter
@@ -144,7 +143,7 @@ requirements in `Cargo.toml:218-221` to the releases that carry the fixes,
 since the new calls do not compile against the old ones.
 
 Until those releases exist, check the branch with an uncommitted
-`[patch.crates-io]` that points `rind` and the four adapters at moq-dev/rind's
+`[patch.crates-io]` that points `rind` and the four adapters at kixel-ai/rind's
 `main` once the three PRs merge. #521 and #515 have merged; #519 is open and
 ready for review, so re-read its Public API section when it merges; a
 signature may have moved.
@@ -153,7 +152,7 @@ Public API: `moq_crypto::provider` keeps its signatures; `moq_crypto::cpu::check
 
 ## Waiting
 
-- moq-dev/rind: publishes rind 0.4.0 and the adapter patch releases in one
+- kixel-ai/rind: publishes rind 0.4.0 and the adapter patch releases in one
   release, once its CPU-check removal has landed and this PR is ready. Check
   that `cargo search rind` shows 0.4.0, and that each of rind-rustls,
   rind-jsonwebtoken, rind-object-store, and rind-rcgen has a release whose

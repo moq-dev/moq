@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class Builds(unittest.TestCase):
     def test_base_builds_report_errors_and_distinguish_new_targets(self):
         (ROOT / ".tmp").mkdir(exist_ok=True)
-        for base in ("broken", "existing", "new", "log-failure"):
+        for base in ("broken", "existing", "new", "log-failure", "hangs"):
             with self.subTest(base=base), tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
                 repo = Path(directory) / "repo"
                 repo.mkdir()
@@ -39,9 +39,16 @@ class Builds(unittest.TestCase):
                     bench.write_text(
                         'compile_error!("base catalog source failed");\n'
                         if base == "broken"
+                        else 'fn main() { println!("base catalog ran"); loop { std::thread::park(); } }\n'
+                        if base == "hangs"
                         else 'fn main() { println!("base catalog ran"); }\n'
                     )
-                env = dict(os.environ, CARGO_TARGET_DIR=str(repo / "target"), BENCH_BASE="HEAD")
+                env = dict(
+                    os.environ,
+                    CARGO_TARGET_DIR=str(repo / "target"),
+                    BENCH_BASE="HEAD",
+                    BENCH_CRITERION_IDLE_SECONDS="2",
+                )
                 for key in ("BENCH_ARTIFACTS", "BENCH_RUNS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"):
                     env.pop(key, None)
 
@@ -91,6 +98,12 @@ class Builds(unittest.TestCase):
                         report["unavailable"], [{"target": "moq-relay/catalog", "reason": "base build failed"}]
                     )
                     self.assertEqual((evidence / "criterion-base.targets").read_text(), "")
+                elif base == "hangs":
+                    # The silent base is killed and marked unavailable; the current run still reports.
+                    self.assertIn("moq-relay/catalog hung: no output for 2s after: base catalog ran", result.stderr)
+                    self.assertEqual(
+                        report["unavailable"], [{"target": "moq-relay/catalog", "reason": "base run failed"}]
+                    )
                 else:
                     self.assertEqual(report["unavailable"], [])
                     self.assertEqual("base catalog ran" in result.stdout, base in ("existing", "log-failure"))

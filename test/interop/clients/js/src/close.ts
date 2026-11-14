@@ -9,6 +9,7 @@
  *
  * @module
  */
+import { Duration } from "@moq/clock";
 import { Connection, Error as MoqError } from "@moq/net";
 import type { CloseState } from "./contract";
 
@@ -41,20 +42,34 @@ export async function refused(relay: string): Promise<CloseState> {
 	return closed;
 }
 
-/** A WebSocket refusal reaches the reconnecting handle as a terminal session error. */
+/**
+ * A WebSocket refusal reaches the reconnecting handle as its session error.
+ *
+ * The relay closes a session that ALPN already established, so the handle redials it like any
+ * other close until its retry window runs out, then publishes the last close.
+ */
 export async function refusedWebSocket(relay: string): Promise<CloseState> {
 	const url = new URL(relay);
 	url.protocol = "ws:";
 	url.searchParams.set("jwt", "refused");
-	const connection = new Connection({ url, share: false });
+	const connection = new Connection({
+		url,
+		share: false,
+		delay: { initial: Duration.millis(200), max: Duration.millis(200), timeout: Duration.secs(2) },
+	});
+	// Every refused session counted as connected first; a second one proves the handle redialed.
+	let connected = 0;
+	const dispose = connection.status.subscribe((status) => {
+		if (status === "connected") connected++;
+	});
 	try {
-		// The default retry window is unlimited. An error is published only once
-		// Reload stops this URL, so observing it proves the rejection is terminal.
 		let error = connection.error.peek();
 		while (!error) error = await connection.error.changed();
+		if (connected < 2) return { error: `gave up after ${connected} session(s) instead of redialing: ${error}` };
 		if (!(error instanceof MoqError.Session)) return { error: String(error) };
 		return { closeCode: error.code, reason: error.message };
 	} finally {
+		dispose();
 		connection.close();
 	}
 }

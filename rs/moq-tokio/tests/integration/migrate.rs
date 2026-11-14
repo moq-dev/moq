@@ -30,6 +30,16 @@ async fn relay(
 	origin: &moq_net::origin::Producer,
 	versions: Vec<moq_net::Version>,
 ) -> (u16, tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>) {
+	relay_into(origin, origin.clone(), versions).await
+}
+
+/// A relay as [`relay`], subscribing into `ingress` instead, whose scope is the grant a
+/// client's publications are checked against.
+async fn relay_into(
+	origin: &moq_net::origin::Producer,
+	ingress: moq_net::origin::Producer,
+	versions: Vec<moq_net::Version>,
+) -> (u16, tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>) {
 	let mut listen = moq_tokio::listen::Config::default();
 	listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	if !versions.is_empty() {
@@ -46,7 +56,7 @@ async fn relay(
 	let origin = origin.clone();
 	tokio::spawn(async move {
 		while let Ok(request) = server.accept().await {
-			let request = request.with_publisher(&origin).with_subscriber(origin.clone());
+			let request = request.with_publisher(&origin).with_subscriber(ingress.clone());
 			if let Ok(session) = request.ok().await {
 				let _ = accepted.send(session);
 			}
@@ -239,4 +249,45 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 	drop(downstream);
 	assert_closes(&old).await;
 	assert!(sessions.try_recv().is_err(), "the client dialed past its replacement");
+}
+
+/// A replacement and its draining predecessor share the client's origin, so each sees
+/// what the other learned from the relay. Neither checks that against its publish grant:
+/// the relay is where it came from, not something this client publishes.
+#[tokio::test]
+async fn a_replacement_does_not_check_what_its_predecessor_learned() {
+	let versions = vec![LITE_07.parse().unwrap()];
+	let origin = moq_tokio::origin::spawn();
+	let only: moq_net::Patterns = [moq_net::Pattern::subtree("up").unwrap()].into_iter().collect();
+	let ingress = origin.scope("", &only).expect("scope");
+	let (port, mut sessions) = relay_into(&origin, ingress, versions.clone()).await;
+	let local = moq_tokio::origin::spawn();
+	let connection = connect(&local, port, versions);
+	let old = kio::clock::timeout(TIMEOUT, sessions.recv())
+		.await
+		.expect("the client never connected")
+		.expect("the relay stopped");
+
+	publish(&origin, "down");
+	let mut downstream = view(&local, "down");
+	let mut down = Vec::new();
+	read(&mut downstream, GROUPS, &mut down).await;
+
+	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	let replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
+		.await
+		.expect("the client never redialed")
+		.expect("the relay stopped");
+
+	// The old session still serves `down` into the shared origin while the replacement runs.
+	read(&mut downstream, GROUPS, &mut down).await;
+	assert_contiguous("the client", &down);
+	assert!(
+		futures::FutureExt::now_or_never(replacement.closed()).is_none(),
+		"the replacement closed while its predecessor served a subscription"
+	);
+	drop(downstream);
+	assert_closes(&old).await;
+	assert!(futures::FutureExt::now_or_never(replacement.closed()).is_none());
+	assert_eq!(connection.connects(), 2, "the client dialed past its replacement");
 }

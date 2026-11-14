@@ -1,3 +1,4 @@
 * text=auto eol=lf
 quest/** merge=quest
 .github/actions/nextest/VERSION text eol=lf
+nix/Cargo.nix linguist-generated

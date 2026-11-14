@@ -36,7 +36,7 @@ import {
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { readSize, sendPayload } from "../payload.ts";
+import { readSize, sendPayload, sendPayloadFrom } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
@@ -67,10 +67,9 @@ import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
-	entriesOf,
 	hasWireTime,
 	LiveRanges,
-	type RangeEntry,
+	rangesOf,
 	requestedRanges,
 	type Subscribe,
 	SubscribeDrop,
@@ -82,6 +81,7 @@ import {
 	SubscribeStarted,
 	SubscribeUpdate,
 	spanOf,
+	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
 import { encodeTracksEvent, type Tracks as TracksMessage } from "./tracks.ts";
@@ -93,12 +93,14 @@ import {
 	hasDatagramTracks,
 	hasEndError,
 	hasLargest,
+	hasLengthFirst,
 	hasProbeRtt,
 	hasRanges,
 	hasRouteCost,
 	hasRoutes,
 	hasSkip,
 	hasTrackStream,
+	hasYield,
 	keepsSubscribeOpen,
 	resolvesStart,
 	Version,
@@ -120,13 +122,21 @@ function zigzag(delta: bigint): bigint {
 /**
  * A frame's fields ahead of its payload, built in memory for one write: a stream write is far
  * costlier than a varint, and a backlog pays it for every frame. The timestamp `delta` is present
- * when the track is stamped, and `inflated` when the frame was decompressed.
+ * when the track is stamped, and `inflated` when the frame was decompressed. Lite-07 leads with the
+ * size plus one, leaving 0 for GROUP_END; earlier versions end the header with the size.
  */
-function frameHeader(version: StreamVersion, delta: bigint | undefined, inflated: number | undefined, size: number) {
+export function frameHeader(
+	version: StreamVersion,
+	delta: bigint | undefined,
+	inflated: number | undefined,
+	size: number,
+	lengthFirst: boolean,
+) {
 	const parts: Uint8Array[] = [];
+	if (lengthFirst) parts.push(encodeVarint(size + 1, version));
 	if (delta !== undefined) parts.push(encodeVarint(zigzag(delta), version));
 	if (inflated !== undefined) parts.push(encodeVarint(inflated, version));
-	parts.push(encodeVarint(size, version));
+	if (!lengthFirst) parts.push(encodeVarint(size, version));
 	return concat(parts);
 }
 
@@ -269,7 +279,10 @@ type ServeGroup = {
 };
 
 /** What serving fetched frames needs beyond the group and destination stream. */
-type ServeFetch = Omit<ServeGroup, "sub">;
+type ServeFetch = Omit<ServeGroup, "sub"> & {
+	/** The byte frame `start` is served from: only its rest follows its full-size header. */
+	byte: number;
+};
 
 /** What the serving loop takes from the subscribe stream instead of serving a group. */
 type Control =
@@ -291,7 +304,7 @@ type SubscriptionControlOptions = {
 	/** The SUBSCRIBE's ranges, which each lite-07 update edits. */
 	live: LiveRanges;
 	/** Apply an update, with every live range by Range ID on lite-07. */
-	apply: (update: SubscribeUpdate, live: { id: bigint; entry: RangeEntry }[]) => void;
+	apply: (update: SubscribeUpdate, live: { id: bigint; range: WireRange }[]) => void;
 };
 
 /**
@@ -427,20 +440,15 @@ class SubscriptionControls {
 // nor looks a time start up again in newer holdings. A start reaching back to the oldest group
 // held stays as it was, since an absolute start would turn it into a floor the subscriber never
 // named.
-function pin(entry: RangeEntry, resolved: Resolved | undefined): RangeEntry {
-	if (!resolved) return entry;
-	const range = { ...entry.range };
-	let { from, to } = entry;
-	if (resolved.floored && (range.start?.relative !== undefined || range.start?.time !== undefined)) {
+function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
+	if (!resolved) return asked;
+	const range = { ...asked };
+	if (resolved.floored && (range.start?.relative !== undefined || range.start?.time !== undefined))
 		range.start = { absolute: resolved.start };
-		from = [resolved.start, 0];
-	}
 	// An end resolves once it settles; until then it is reported open.
-	if ((range.end?.relative !== undefined || range.end?.time !== undefined) && resolved.end !== undefined) {
+	if ((range.end?.relative !== undefined || range.end?.time !== undefined) && resolved.end !== undefined)
 		range.end = { absolute: resolved.end };
-		to = [resolved.end, 0];
-	}
-	return { range, from, to };
+	return range;
 }
 
 // The later of two locations, either of which may be unknown.
@@ -1241,7 +1249,7 @@ export class Publisher {
 			}
 
 			// The SUBSCRIBE's ranges, and the Range ID of each range the model holds, in its order.
-			const asked = entriesOf(msg);
+			const asked = rangesOf(msg);
 			// Where each Range ID sits among the model's ranges, as of the last update applied.
 			let positions = new Map(asked.map((_, index) => [BigInt(index), index]));
 			controls = new SubscriptionControls({
@@ -1255,11 +1263,11 @@ export class Publisher {
 					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					if (hasRanges(this.version)) {
 						const resolved = hooks.servingResolved(track);
-						const entries = live.map(({ id, entry }) => {
+						const ranges = live.map(({ id, range }) => {
 							const index = positions.get(id);
-							return index === undefined ? entry : pin(entry, resolved[index]);
+							return index === undefined ? range : pin(range, resolved[index]);
 						});
-						Object.assign(update, spanOf(this.version, entries));
+						Object.assign(update, spanOf(this.version, ranges));
 						positions = new Map(live.map(({ id }, index) => [id, index]));
 					}
 					// Every update restates the wanted group. Past our largest it is a join, which
@@ -1395,11 +1403,14 @@ export class Publisher {
 				// A group the track does not cache goes to its request handler at once, written yet
 				// or not, as in Rust; with none open it is NotFound. A pending answer holds this
 				// FETCH's slot until the requester leaves.
-				group = await front.track(msg.track).fetchGroup(msg.group, {
+				const options: track.FetchGroupOptions & broadcast.FetchFrom = {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay === undefined ? undefined : Duration.millis(msg.maxDelay),
 					signal: left.signal,
-				});
+					// A copy holding the frames asked on serves them; one missing them is filled whole.
+					frameStart: msg.startFrame,
+				};
+				group = await front.track(msg.track).fetchGroup(msg.group, options);
 				serving(group);
 				// Revoked while the group resolved: the watch already reset the stream.
 				if (watch.revoked()) {
@@ -1410,6 +1421,7 @@ export class Publisher {
 					stamp: stamping(this.version, info),
 					compress: info.compress,
 					start: msg.startFrame,
+					byte: msg.startByte,
 					end: msg.endFrame,
 				});
 				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
@@ -1640,6 +1652,18 @@ export class Publisher {
 		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
 		// The expired groups an update re-offers, still cached and in range, served again in turn.
 		const reoffered: group.Consumer[] = [];
+		// Lite-07: a fresh read of the group `serving` served, whose stream the session reset to make
+		// room, for a new stream to continue it at the same frames; undefined once the subscription's
+		// budget or the cache gave it up. The Rust publisher keeps an unread clone of the reset
+		// stream's cursor instead, which a read handle here cannot make.
+		const continuation = (serving: RunGroup): RunGroup | undefined => {
+			const sequence = serving.group.sequence;
+			// From the reset stream's Frame Start, which a cache holding only the group's tail can serve.
+			const [resumed, ...extra] = hooks.reofferGroups(track, sequence, sequence + 1n, serving.start).groups;
+			for (const other of extra) other.close();
+			if (!resumed) return undefined;
+			return { ...serving, group: resumed, givenUp: new GivenUp(resumed) };
+		};
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -2023,18 +2047,48 @@ export class Publisher {
 					start: range.start,
 					end: range.end,
 				};
-				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
-				const opened = this.#openGroup(options);
-				const task = opened.then(async (writer) => {
-					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
-					if (emitRange && failed instanceof Error) {
-						pendingDrops.push({ start: group.sequence, end: group.sequence + 1n, error: failed });
-						drops.update((revision) => revision + 1);
+				// The FIN waits for every stream to finish or reset, including one that has not opened yet,
+				// and a paused group's continuation.
+				const task = (async () => {
+					let serving = options;
+					for (;;) {
+						const writer = await this.#openGroup(serving);
+						let failed: Error | undefined;
+						try {
+							failed = writer instanceof Error ? writer : await this.#serveGroup(writer, serving);
+						} finally {
+							serving.givenUp.close();
+						}
+						if (!failed) return;
+						// Lite-07: the session reset the stream to make room, which only pauses the group.
+						// The subscriber keeps what arrived, and a new stream continues the group from
+						// the reset one's Frame Start, owing no drop. Mirrors the Rust `GroupServe::settle_failed`.
+						if (!(writer instanceof Error) && writer.preempted && hasYield(this.version)) {
+							// The group's own failure, such as the publisher's abort or an eviction, ends
+							// it with that error, as the Rust continuation reads it off the group. Read
+							// before the release replaces it with the reset's.
+							const fate = serving.group.closed.peek();
+							hooks.releaseGroupReader(serving.group, failed);
+							const resumed = fate instanceof Error ? undefined : continuation(serving);
+							if (resumed) {
+								console.debug(
+									`continuing paused group: track=${track.name} sequence=${group.sequence} frame_start=${serving.start}`,
+								);
+								serving = resumed;
+								continue;
+							}
+							// Given up meanwhile, such as by the subscription's budget: the usual stale drop.
+							failed = fate instanceof Error ? fate : new StreamError(StreamCode.Old);
+						}
+						if (emitRange) {
+							pendingDrops.push({ start: group.sequence, end: group.sequence + 1n, error: failed });
+							drops.update((revision) => revision + 1);
+						}
+						return;
 					}
-				});
+				})();
 				groups.add(task);
 				void task.finally(() => {
-					options.givenUp.close();
 					groups.delete(task);
 				});
 			}
@@ -2429,8 +2483,10 @@ export class Publisher {
 	async #runFetchGroup(
 		group: group.Consumer,
 		stream: Writer,
-		{ stamp, compress, start: startFrame, end: endFrame }: ServeFetch,
+		{ stamp, compress, start: startFrame, byte, end: endFrame }: ServeFetch,
 	) {
+		// A compressed frame inflates only from its first byte; no subscriber asks for less.
+		if (byte > 0 && compress) throw new Error("a compressed frame is served whole");
 		// The response carries no header, so the receiver numbers the first frame it gets
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
@@ -2455,9 +2511,14 @@ export class Publisher {
 				prevTs = ts;
 			}
 
-			await stream.write(frameHeader(stream.version, delta, read.inflated, readSize(read)));
-			if (read.chunks) await sendPayload(read.chunks, (chunk) => stream.write(chunk), stream.closed);
-			else if (frame.payload.length > 0) await stream.write(frame.payload);
+			// The first frame states its full size, then carries only the bytes from `byte`.
+			const skip = index === startFrame ? byte : 0;
+			const size = readSize(read);
+			// A non-zero start byte names a byte of the frame, so the rest is never empty.
+			if (skip > 0 && skip >= size) throw new Error(`fetch start byte ${skip} not within the frame's ${size}`);
+			await stream.write(frameHeader(stream.version, delta, read.inflated, size, hasLengthFirst(this.version)));
+			if (read.chunks) await sendPayloadFrom(read.chunks, skip, (chunk) => stream.write(chunk), stream.closed);
+			else if (frame.payload.length > skip) await stream.write(frame.payload.subarray(skip));
 		}
 	}
 
@@ -2490,6 +2551,8 @@ export class Publisher {
 					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned]),
 					group: true,
+					// Lite-07: a reset to make room pauses the group, which a new stream continues.
+					yields: hasYield(this.version),
 				});
 			} finally {
 				opened.resolve();
@@ -2567,7 +2630,13 @@ export class Publisher {
 					prevTs = ts;
 				}
 
-				const header = frameHeader(stream.version, delta, read.inflated, readSize(read));
+				const header = frameHeader(
+					stream.version,
+					delta,
+					read.inflated,
+					readSize(read),
+					hasLengthFirst(this.version),
+				);
 				const chunks = read.chunks;
 				const payload = chunks ? undefined : read.frame.payload;
 				// One budget race covers the frame's header and payload.
@@ -2588,7 +2657,9 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
-			hooks.releaseGroupReader(group, e);
+			// A reset that pauses the group leaves the reader to the caller, which reads its fate
+			// first. A reset stream is never preempted after, so the caller sees the same flag.
+			if (!(stream.preempted && hasYield(this.version))) hooks.releaseGroupReader(group, e);
 			return e;
 		} finally {
 			priority.remove(stream);

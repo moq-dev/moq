@@ -3,9 +3,8 @@
 ## Goal
 
 Every change that would need a semver-breaking release if it landed right
-after the next cut of `main` into `release`, plus the cut
-gate, which the [release cut](/quest/m3/release/cut.md) re-creates here each
-cycle. The cut waits on this milestone alone;
+after the next cut of `main` into `release`. The
+[release cut](/quest/m3/release/cut.md) waits on this milestone alone;
 complete it before cutting main into release.
 
 ## Plan
@@ -27,11 +26,29 @@ fixes, and moq-c parity) live under the recurring
 cut gate, decided the same day; the [release cut](/quest/m3/release/cut.md)
 holds its template.
 
-Held by open claims: the m1 epics and quests marked below stay where they
-are until their claims merge, and the [probe epic](/quest/m2/probe/README.md)
-stays here while its open claims last, so the cut waits on it until the
-[re-cut follow-up](/quest/m2/recut-held.md) moves it to m3. Its padding and JS
-rung disable quests already moved to m3 on 2026-11-06.
+Decided 2026-11-12 (maintainer, /quest-audit before the cut):
+
+- ✅ Left m2, so the cut stops waiting on them: the
+  [probe epic](/quest/m3/probe/README.md) to m3 and the routes
+  [browser proof](/quest/m5/routes-browser-proof.md) to m5 (each waits on a
+  browser release and breaks nothing); the docs-only and additive quests and
+  outbound federation to [m1](/quest/m1/README.md); and
+  [unbounded groups](/quest/m3/unbounded-groups/README.md) to m3, whose byte
+  offset goes on the wire version after lite-07 (rejected for each: staying
+  in m2). The padding and JS rung disable quests are parked in m5.
+- ✅ Joined m2, each a small break the cut would otherwise freeze: the mesh
+  [grant shape](/quest/m2/mesh-grant-shape.md) and
+  [key budget](/quest/m2/mesh-device-bounds.md), since `moq_auth::mesh`
+  publishes for the first time at this cut;
+  [auth key validation](/quest/m2/auth-key-validation.md); the
+  [RTMPS connect](/quest/m2/rtmp-rtmps-tcurl.md) signature;
+  [usage's derived settings](/quest/m2/usage-derive-settings.md); and three
+  API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md),
+  [the capture selections](/quest/m2/api-capture-fences.md), and
+  [the acknowledgment hook's trait](/quest/m2/api-ack-hook-trait.md). None
+  is on the routes chain, which stays the critical path.
+- ✅ Under the path rule a route keeps one sticky down-only flag beside its
+  path; see the [routes epic](/quest/m2/cluster-routes/README.md).
 
 Carried from m1's Plan before the re-cut, where "m1" means the whole pre-cut
 milestone, now m1 and m2:
@@ -86,7 +103,7 @@ warmup rule for the shipping dual decoder, the binding migration guide fixes,
 and the API-diff tooling. Public routes now wait on cluster routing.
 
 Added 2026-10-20 (maintainer): the probe target, native probing, and the
-native rung disable moved up from the [m2 probe epic](/quest/m2/probe/README.md),
+native rung disable moved up from the [m2 probe epic](/quest/m3/probe/README.md),
 so Rust, FFI, and OBS publishers recover a stopped rendition in this release;
 padding and the browser's rung disable stayed in m2, with only padding's
 lite-07 stream type here. Both moved to m3 on 2026-11-06 (maintainer,
@@ -189,6 +206,14 @@ quests that require them.
   Address groups by timestamp, and the API audit just above Cluster routing.
 - Not chosen: moving the dependents down; leaving the order as it was.
 
-## Required
+Decided 2026-11-13 (maintainer, /quest-run): ✅ m2 no longer requires the m1
+stream-credit epic (rejected: keep the gate). It was an ordering rule, not a
+code dependency, and with takeover moved to m3 the epic changes no wire.
 
-- [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
+Decided 2026-11-13 (maintainer, /quest-plan from an audit of `main`'s audio):
+✅ the [audio playout](/quest/m2/audio-playout/README.md) epic moves here from
+m1, with its calibration in m3 (rejected: calibration here too; only the lag
+rule here). Its lag rule reshapes `main`-only API the cut would publish (the
+`stretch` setting, moq-audio's `Sink::due` and `bus::Positioned`), and the
+cut should not ship the 2026-11-09 stretch model, which lets audio trail
+video by up to 2 s.

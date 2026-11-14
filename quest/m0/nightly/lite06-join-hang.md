@@ -8,12 +8,13 @@ inside its hour with every cell, including the moq-lite-06 cells of
 
 ## Plan
 
-The lite-06 join hang that kept those cells in their warm-up is fixed: a final
-drop no longer hides a group the relay holds whole. Locally, every
-`relay_session_join_*` cell finishes, the first lite-06 one in about 0.2 ms per
-join. Confirm the first scheduled Nightly after the fix lands; never dispatch
-Nightly.
+The lite-06 join hang itself is fixed: a final drop no longer hides a group the
+relay holds whole. The first scheduled Nightly after that fix still timed out
+because its paired base, the previous Nightly's commit, predated the fix and hung
+in the same cell; the base run now ends when it prints nothing for ten minutes and
+only marks its target unavailable. Confirm the first scheduled Nightly after that
+lands; never dispatch Nightly.
 
 ## Waiting
 
-- moq-dev/moq: the first scheduled Nightly on `main` after the fix lands finishes its `Relay session benchmarks` job inside the hour; check with `gh run list --workflow nightly.yml --event schedule`, then delete this quest
+- moq-dev/moq: the first scheduled Nightly on `main` after the idle bound lands finishes its `Relay session benchmarks` job inside the hour; check with `gh run list --workflow nightly.yml --event schedule`, then delete this quest

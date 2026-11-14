@@ -129,6 +129,9 @@ struct Dial {
     std::string version;
     // Wait for the relay's grant and print it.
     bool grant = false;
+    // Turn off the WebSocket fallback. The finish case checks one session end to end, and
+    // leaving a fallback that won a slow race would open a second one.
+    bool quic_only = false;
 };
 
 // The session owns its connection; the client that made it can go. With `grant`, waits for
@@ -138,6 +141,9 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
     config.tls.insecure = true;
     if (!dial.version.empty()) {
         config.versions = {dial.version};
+    }
+    if (dial.quic_only) {
+        config.websocket.enabled = false;
     }
     auto client = ok(moq::Client::init(config), "client init");
     open_session = until(client->connect(url), deadline, "connect");
@@ -304,7 +310,11 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.delay = moq::Delay{std::chrono::nanoseconds(0), MAX_DELAY};
+    // moq-audio waits on a missing group for its playout delay, measured from arrival timing at
+    // tens of ms, so a runtime starved longer than that skips a group that is only late. This
+    // reader checks delivery between implementations, not a real-time deadline: it holds a playout
+    // delay of the max delay, waiting on a hole for the same budget it grants a late group.
+    output.delay = moq::Delay{MAX_DELAY, MAX_DELAY};
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");
@@ -318,8 +328,13 @@ void decode_audio(
             fail("audio track ended early");
         }
         // moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
-        if (std::holds_alternative<moq::AudioRead::kGap>(read->get_variant())) {
-            fail("audio gap");
+        if (const auto *gap = std::get_if<moq::AudioRead::kGap>(&read->get_variant())) {
+            const auto at = gap->timestamp.value / gap->timestamp.scale * 1'000'000 +
+                            gap->timestamp.value % gap->timestamp.scale * 1'000'000 / gap->timestamp.scale;
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(gap->duration).count();
+            fail(("audio gap after " + std::to_string(decoded) + " samples, at " + std::to_string(at) + "us for " +
+                  std::to_string(us) + "us")
+                     .c_str());
         }
         const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
         if (!variant) {
@@ -501,6 +516,7 @@ int main(int argc, char **argv) {
     if (url.empty() || broadcast.empty()) {
         fail("--url and --broadcast are required");
     }
+    dial.quic_only = finish || !finish_ack.empty();
     // Warnings and errors from the Rust layer, such as a publication outside the grant.
     ok(moq::log_level("warn"), "log level");
 

@@ -18,6 +18,14 @@ with it, while shipping a simpler profile you can use today.
 
 ## moq-transport
 
+Our moq-transport support is frozen at what a third-party implementation needs
+to exchange live media with ours: `SETUP`, the standard `AUTHORIZATION TOKEN`,
+live `PUBLISH_NAMESPACE` and `SUBSCRIBE`, a joining `FETCH`, and relay
+forwarding between moq-transport and moq-lite sessions, including across our
+relays, plus the extensions below that a third party speaks. Features past that
+scope, such as a multi-group `FETCH` or an in-band `AUTH` exchange, are refused
+rather than added; [moq-lite](/concept/moq-lite) is where new features land.
+
 moq-transport is the full protocol: namespaces that several publishers may
 share, sub-groups, object metadata and gaps, ranged `FETCH`, push, and
 pausing. moq-lite keeps the parts a CDN can implement without conflicts and

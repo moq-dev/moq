@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Broadcast, Time } from "@moq/net";
 import { HISTORY, info, Publisher, Subscriber, TRACK } from "./chat.ts";
 

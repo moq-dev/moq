@@ -1205,7 +1205,7 @@ export class Subscriber {
 			while (!receiving) {
 				if (!wantedRuns(fill).some((run) => run.start < until && run.end > start))
 					throw new StreamError(StreamCode.Cancel);
-				await untilAborted(fillChanged(fill), active);
+				await untilAborted(Promise.resolve(fillChanged(fill)), active);
 			}
 			await untilAborted(receiving.unwanted(), active);
 			throw new StreamError(StreamCode.Cancel);
@@ -2081,7 +2081,7 @@ export class Subscriber {
 			}
 			stream.stop(e);
 		} finally {
-			read();
+			read.done();
 		}
 	}
 
@@ -2202,7 +2202,7 @@ export class Subscriber {
 			if (e instanceof StreamError && e.code === StreamCode.MalformedTrack) track.abort(e);
 			stream.stop(e);
 		} finally {
-			read?.();
+			read?.done();
 		}
 	}
 

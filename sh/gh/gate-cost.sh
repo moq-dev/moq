@@ -13,10 +13,11 @@ out=${BENCH_RESULTS:-$root/target/bench/nightly/gate-cost}
 target=${CARGO_TARGET_DIR:-$root/target}
 edit=rs/moq-net/src/lib.rs
 
-# Instructions are the low-noise series for compiles, and perf counts
-# user-space instructions only at a paranoia level of 2 or below.
+# Instructions are the low-noise series for compiles. Counting user-space ones
+# needs a hardware PMU, kernel.perf_event_paranoid at 2 or below, and
+# perf_event_open allowed by any seccomp filter, which systemd-nspawn's denies.
 if ! perf stat -x, -e instructions:u -o /dev/null -- true; then
-    echo "gate-cost: perf cannot count user-space instructions; set kernel.perf_event_paranoid=2" >&2
+    echo "gate-cost: perf cannot count user-space instructions; this host needs a PMU, kernel.perf_event_paranoid<=2, and perf_event_open past any seccomp filter" >&2
     exit 1
 fi
 # A compiler cache such as mbx, through a rustc wrapper in the environment or a

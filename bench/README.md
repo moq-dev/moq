@@ -209,7 +209,7 @@ also run during timing. Every timed round reads and checks all payload bytes,
 returns lease credit, and fills each stream again. Throughput counts delivered
 payload once. Nightly's supplemental Rust benchmark leg records the series and
 keeps the memory output with its raw results. The broader MoQ session transport
-and version sweep remains in [its quest](/quest/m4/bench-transport-sweep.md).
+and version sweep remains in [its quest](/quest/m5/bench-transport-sweep.md).
 
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
@@ -853,7 +853,7 @@ The table includes these measurements:
   night its growth check fails. Release build times stay out.
 - The merge gate's own cost (`bench-gate-cost`), described below.
 
-The gate cost source runs `just gh gate-cost` on a merge queue runner VM in two
+The gate cost source runs `just gh gate-cost` on a merge queue runner in two
 scenarios: `cold`, a `just ci --all` from an empty target directory with no
 Rust cache, then `moq-net`, the diff-scoped `just ci` an agent runs after an
 edit to moq-net, on what `cold` built. Modules run one at a time
@@ -874,7 +874,9 @@ shrink) from the workspace nextest run's JUnit report and a Bun JUnit report
 per package. The total's history keeps the load average before the scenario
 and the toolchain versions. Reproduce it from a clean checkout with an empty
 target directory, the Rust cache off (no mbx shim on PATH), and
-`kernel.perf_event_paranoid` at 2 or below; it takes hours.
+`kernel.perf_event_paranoid` at 2 or below, and `perf_event_open` allowed by
+any seccomp filter (a systemd-nspawn container needs
+`--system-call-filter=perf_event_open`); it takes hours.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.
@@ -975,6 +977,10 @@ Each run's evidence directory keeps both builds' estimates (`criterion` and
 `paired.json`. The base build streams its diagnostics and retains them in
 `base-build.log`, including when it fails.
 
+A target that prints nothing for ten minutes (`BENCH_CRITERION_IDLE_SECONDS`) is killed and
+named as hung. A hung base only marks its target unavailable, so one hang in the revision
+being compared cannot hold the leg to its hour and lose the current results.
+
 Each revision builds in its own Cargo target directory (`base` and `current`
 under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use
 `run.sh`'s `BENCH_BASE` mode or a target directory per source tree: two trees
@@ -990,10 +996,11 @@ contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
 builds only single-threaded targets without I/O, and Nightly keeps measuring
 every bench. Workspace benches import `criterion`, which `rs/bench-harness`
 resolves to Criterion, or to CodSpeed's instrumented Criterion under
-`cargo codspeed`. Nothing gates on it.
+`cargo codspeed`. Nothing gates on it. CI uploads three shards (`net`, `mux`,
+`rest`), since CodSpeed rejects a run of more than about 1,000 benchmarks.
 
 ```bash
-nix develop --command just rs codspeed
+nix develop --command just rs codspeed net  # or mux, rest
 nix develop --command cargo codspeed run
 ```
 

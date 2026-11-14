@@ -8692,20 +8692,26 @@ impl Routes {
 
 	/// The next update must be a retraction at `expected`.
 	pub fn assert_next_ended(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
+		self.assert_next_gone(RouteKind::End, expected);
+	}
+
+	/// The next update must be `expected` let go of here, not retracted by its origin.
+	pub fn assert_next_offline(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
+		self.assert_next_gone(RouteKind::Offline, expected);
+	}
+
+	fn assert_next_gone(&mut self, kind: RouteKind, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
 		match kio::wait(|waiter| self.poll_next(waiter))
 			.now_or_never()
 			.expect("next blocked")
 			.expect("no next")
 		{
-			RouteEvent {
-				kind: RouteKind::End,
-				announce,
-			} => assert_eq!(
+			RouteEvent { kind: got, announce } if got == kind => assert_eq!(
 				announce.prefix,
 				expected.try_into().expect("expected path"),
 				"wrong prefix"
 			),
-			other => panic!("should be a retraction: got {other:?}"),
+			other => panic!("should be {kind:?}: got {other:?}"),
 		}
 	}
 
@@ -9698,6 +9704,61 @@ mod tests {
 			b"frame"
 		);
 		assert_eq!(bytes(), 5, "the metered handle still counts");
+	}
+
+	/// A group a fill answers is ingress like a group the publisher writes live: a relay
+	/// writes what a FETCH brings back through its track's requests.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_fetched_group_counts_as_ingress() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1).produce().with_stats(
+			registry
+				.tier(stats::Tier::default())
+				.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
+		);
+		let route = producer.route("room/alice", RouteOptions::default()).unwrap();
+		let track = route
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
+		let requests = track.requests();
+		let ingress = || -> u64 {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.filter(|(_, role, _)| *role == stats::Role::Subscriber)
+				.map(|(_, _, traffic)| traffic.bytes)
+				.sum()
+		};
+
+		let mut live = track.create_group(crate::group::Info { sequence: 1 }).unwrap();
+		live.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
+		live.finish().unwrap();
+		assert_eq!(ingress(), 4);
+
+		let fetch = track.consume().fetch_group(0, None);
+		let fill = requests.requested_fill_group().await.unwrap();
+		let mut fetched = fill.accept(crate::track::Info::timed()).unwrap();
+		fetched
+			.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref())
+			.unwrap();
+		fetched.finish().unwrap();
+		fetch.await.unwrap();
+		assert_eq!(ingress(), 4 + 7, "the fetched group counts as well");
+
+		// A reader outliving the publisher keeps the track's groups, not its session.
+		let reader = track.consume();
+		drop((track, requests, route, producer));
+		let active: u64 = registry
+			.snapshot()
+			.sessions()
+			.into_iter()
+			.map(|(_, presence)| presence.active())
+			.sum();
+		assert_eq!(active, 0, "the publisher's session ended");
+		drop(reader);
 	}
 
 	/// A route that turns up later is filtered the same way as the replay.

@@ -247,6 +247,11 @@ pub enum StreamError {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// The publisher reset a group's stream to make room for a higher-priority one, pausing
+	/// the group for a later stream to continue rather than giving it up.
+	#[error("yielded")]
+	Yielded,
+
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	#[error("app code={0}")]
 	App(u16),
@@ -279,6 +284,7 @@ impl StreamError {
 			Self::FrameTooLarge => 0x38,
 			Self::TimestampMismatch => 0x39,
 			Self::Unauthorized => 0x3b,
+			Self::Yielded => 0x3c,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -311,6 +317,7 @@ impl StreamError {
 			0x38 => Self::FrameTooLarge,
 			0x39 => Self::TimestampMismatch,
 			0x3b => Self::Unauthorized,
+			0x3c => Self::Yielded,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -876,6 +883,7 @@ mod tests {
 			(StreamError::FrameTooLarge, 0x38),
 			(StreamError::TimestampMismatch, 0x39),
 			(StreamError::Unauthorized, 0x3b),
+			(StreamError::Yielded, 0x3c),
 			(StreamError::App(7), 0x40 + 7),
 		] {
 			assert_eq!(err.to_code(), spec, "{err:?} moved off its assigned code");

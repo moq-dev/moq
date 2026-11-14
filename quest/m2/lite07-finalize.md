@@ -24,14 +24,14 @@ until the maintainer calls the cut. This quest is the mechanical rename and
 checks done at that call; the Required list is the work already known to land
 first, not a closed freeze set.
 
-The route layer of [Cluster routing](/quest/m2/cluster-routing/README.md)
+The route layer of [Cluster routing](/quest/m3/cluster-routing/README.md)
 (ROUTE_START/UPDATE/END, path-less ANNOUNCE, the native hop list dropped) lands in
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
 has to plan for a lite-07 without native hop lists; only the temporary Lite-06
 Chain, negotiated by its Setup Parameter, rides announcements until the lite-07
 to lite-08 migration. Only
-[Routes and announces](/quest/m2/cluster-routing/routes/README.md) gates the cut,
+[Routes and announces](/quest/m2/cluster-routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
@@ -41,7 +41,7 @@ gates the cut, and lite-07 routing identities stay declared and unverified
 (2026-11-02: peer grants are dropped and no key proof is planned). Reversed
 2026-11-04 (maintainer, /quest-unblock): a peer proves a route key before the
 cut, which landed as lite-07's Route Key Setup Parameter; its routes are filed
-under it in [Routes and announces](/quest/m2/cluster-routing/routes/README.md). Decided 2026-10-26
+under it in [Routes and announces](/quest/m2/cluster-routes/README.md). Decided 2026-10-26
 (maintainer): receivers do not stamp per-session identities either, since
 that splits one origin into several identities across a relay mesh.
 
@@ -79,7 +79,7 @@ parameter, has landed, and the rest is API work that does not block the rename.
 The archive line's TRACKS request (a per-broadcast track listing that
 replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/6158)
 and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
-type for the browser [padding probes](/quest/m3/probe-padding.md) landed in
+type for the browser [padding probes](/quest/m5/probe-padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
 Decided 2026-10-30 (maintainer, on
 [moq-dev/moq#7390](https://github.com/moq-dev/moq/pull/7390)): those probes
@@ -92,7 +92,7 @@ Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m2/subscribe-range
 only the children that change the lite-07 wire gate the cut:
 Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872)),
 JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), and
-[Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md). The
+Lite-07 FETCH is single-group only ([moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616)). The
 fill path, fetch as a range, and the start bookkeeping change no wire.
 
 Decided 2026-10-25 (maintainer): addressing groups by timestamp gates the
@@ -125,15 +125,12 @@ transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 
 ## Required
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
-- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
-- [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - rewrites lite-07's one-hop warm routes and `Serves` for routes that propagate
 
 ## Related
 
+- [Takeover](/quest/m3/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
 - [The moq.pro mesh runs lite-07](/quest/m5/lite07-mesh.md) - the deployment condition that follows this

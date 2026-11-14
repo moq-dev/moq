@@ -4,7 +4,7 @@ set working-directory := '..'
 cache:
     bash sh/gh/cache.sh
 
-# Publish Smoke's runtime packages and their build artifacts to nix.moq.dev.
+# Publish the packages Smoke and deploys pin, and their build artifacts, to nix.moq.dev.
 cache-runtime:
     bash sh/gh/cache-runtime.sh
 
@@ -80,8 +80,10 @@ test:
     python3 sh/migrate.test.py
     python3 sh/text.test.py
     python3 sh/coverage-tables.test.py
+    python3 sh/tlc.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/gh/test-inventory.test.py
+    bun test ./sh/gh/remeasure.test.ts
     bun test ./sh/gh/setup.test.ts
     bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py
@@ -189,3 +191,7 @@ pages-publish directory report site:
 # Delete this run's Pages artifact before uploading a replacement on a rerun.
 pages-clean:
     sh/gh/pages-clean.sh
+
+# Re-measure stale planned-break pins and prepare their release update PR.
+remeasure:
+    bun sh/gh/remeasure.ts

@@ -37,10 +37,10 @@ try {
 }
 
 // A 100 ms floor at 1 kHz, with no clock until a test sends one.
-function renderer(target = 100) {
+function renderer() {
 	const render = new Render();
 	const send = (data: Message) => render.port.onmessage?.({ data } as MessageEvent<Message>);
-	send({ type: "init", channels: 1, rate: 1000, latency: 100, target, bound: 0 });
+	send({ type: "init", channels: 1, rate: 1000, latency: 100, bound: 0 });
 	return {
 		send,
 		sent: render.sent,
@@ -54,14 +54,11 @@ function renderer(target = 100) {
 
 describe("render dispatch", () => {
 	it("truncates the old track's tail without flushing the due prefix", () => {
-		// A target that holds what arrives, so the stretch leaves every sample in place.
-		const { send, read } = renderer(200);
+		const { send, read } = renderer();
 		send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(1)] });
 		expect([...read(50)]).toEqual(Array(50).fill(1));
 		send({ type: "truncate", timestamp: 100_000 });
 		send({ type: "data", timestamp: 100_000, data: [new Float32Array(20).fill(2)] });
-		// The retired tail no longer counts toward the depth, so a target at what is left holds it.
-		send({ type: "latency", latency: 100, target: 70, bound: 0 });
 		const output = read(100);
 		// A short quantum fades its final 64 samples. The full prefix remains untouched and the
 		// retired tail is silent, so ignoring either message changes the output.
@@ -100,7 +97,7 @@ describe("render dispatch", () => {
 		const { send, read } = renderer();
 		send({ type: "data", timestamp: 0, data: [new Float32Array(100).fill(1)] });
 		expect([...read(20)]).toEqual(Array(20).fill(1));
-		send({ type: "latency", latency: 200, target: 200, bound: 0 });
+		send({ type: "latency", latency: 200, bound: 0 });
 		expect([...read(20)]).toEqual(Array(20).fill(1));
 		send({ type: "data", timestamp: 100_000, data: [new Float32Array(120).fill(2)] });
 		const output = read(100);
@@ -124,11 +121,15 @@ describe("render dispatch", () => {
 			send({ type: "clock", timestamp: 500_000, time: now });
 			for (let i = 0; i < 5; i++) tick();
 			expect(sent.at(-1)).toMatchObject({ timestamp: 600_000, skips: 1, trimmed: 500 });
-			// A latency update moves the clock, so the old reading no longer applies.
-			send({ type: "latency", latency: 100, target: 100, bound: 0 });
+			// A latency update moves the clock, so one without a new reading leaves none.
+			send({ type: "latency", latency: 100, bound: 0 });
 			now += 1;
 			for (let i = 0; i < 5; i++) tick();
-			expect(sent.at(-1)).toMatchObject({ skips: 1, trimmed: 500 });
+			expect(sent.at(-1)).toMatchObject({ timestamp: 700_000, skips: 1, trimmed: 500 });
+			// One carrying the moved clock keeps playing onto it.
+			send({ type: "latency", latency: 100, bound: 0, clock: { timestamp: 800_000, time: now } });
+			for (let i = 0; i < 5; i++) tick();
+			expect(sent.at(-1)).toMatchObject({ timestamp: 900_000, skips: 2, trimmed: 600 });
 		} finally {
 			if (time) Object.defineProperty(globalThis, "currentTime", time);
 			else Reflect.deleteProperty(globalThis, "currentTime");

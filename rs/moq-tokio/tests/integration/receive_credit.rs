@@ -601,9 +601,9 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	let mut bytes = vec![0x00];
 	varint(&mut bytes, header.len() as u64);
 	bytes.extend_from_slice(&header);
-	// The zigzag timestamp delta, then the frame's size and payload.
+	// The frame's size plus one, the zigzag timestamp delta, then the payload.
+	varint(&mut bytes, size as u64 + 1);
 	varint(&mut bytes, 0);
-	varint(&mut bytes, size as u64);
 	bytes.resize(bytes.len() + size, 5);
 	bytes
 }

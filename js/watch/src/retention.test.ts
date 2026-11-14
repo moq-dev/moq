@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { Duration, type Installed, Instant, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, type Installed, Instant, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";

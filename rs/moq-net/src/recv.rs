@@ -21,12 +21,38 @@ impl Group {
 		&self.handle
 	}
 
+	/// The index the next frame gets, counting one a frame still being written holds.
+	pub fn frame_count(&self) -> usize {
+		self.handle.frame_count()
+	}
+
+	/// Whether the parent track compresses, readable while a frame holds the writer.
+	pub fn compressed(&self) -> bool {
+		self.handle.compressed()
+	}
+
 	/// Move the writer and cancellation cleanup into its next frame.
 	pub fn create_object(&mut self, frame: frame::Header) -> Result<frame::Producer, Error> {
 		self.writer
 			.take()
 			.expect("group writer is available between frames")
 			.create_object(frame)
+			.map(frame::Producer::cancel_on_drop)
+	}
+
+	/// The byte the copy starts frame `index` at, if it holds only the rest of that frame
+	/// (see [`group::Producer::create_lead`]).
+	pub fn lead_at(&self, index: u64) -> Option<u64> {
+		self.handle.lead_at(index)
+	}
+
+	/// Move the writer and cancellation cleanup into the rest of the frame the copy starts
+	/// partway into.
+	pub fn create_lead(&mut self, frame: frame::Header) -> Result<frame::Producer, Error> {
+		self.writer
+			.take()
+			.expect("group writer is available between frames")
+			.create_lead(frame)
 			.map(frame::Producer::cancel_on_drop)
 	}
 

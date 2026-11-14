@@ -49,7 +49,8 @@ Decisions (maintainer, 2026-10-13):
   queue, and no separate warm rebuilds what landed. Since
   [#6040](https://github.com/moq-dev/moq/pull/6040) the queue runs on the
   self-hosted `moq-queue` runner with mbx's local store, so the R2 writers are
-  the hosted Nightly jobs on `main`.
+  the hosted scheduled jobs on `main`: Nightly and the workflows it calls,
+  CodSpeed, Interop and TS.
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
   Reopened 2026-10-19, conditionally, to compare runners once the pipeline
@@ -89,7 +90,7 @@ frozen. The landing quest closed 2026-11-04 with busy hours merging a median
 holds the cutover record). Decided 2026-11-06 (maintainer, /quest-unblock):
 ✅ drop the trial of a second concurrent entry, which ran out of shared runner
 disk on 2026-11-05; the queue stays at one entry. Not chosen: retrying it after
-[kixelated/nixos#26](https://github.com/kixelated/nixos/pull/26)'s inode fix.
+kixel-ai/nixos#26's inode fix.
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
@@ -147,7 +148,8 @@ gate drops `loom-check` and Nightly its loom job; a separate PR deletes the
 models. On Send-depth: "Move it to Nightly." It guards a real downstream
 breakage (moq-net futures not Send at the default recursion limit), so
 `just rs send-depth` keeps its pinned nightly and runs as its own Nightly job
-instead of in the land gate.
+instead of in the land gate. Superseded 2026-11-13 (maintainer): it gates
+moq-net changes again, since a Nightly-only check let a break land on `main`.
 
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration
@@ -157,12 +159,26 @@ own sake and replacing cargo are non-goals. mbx already caches each compilation,
 so the work is making builds identical enough to hit it (flags in
 `.cargo/config.toml`, cargo-hakari), and auditing the package selection `just ci`
 already does. Nix builds run sandboxed and cannot reach R2, so they stay on crane
-for packaging only; CI builds with cargo and mbx. Decided 2026-10-26 from
+for packaging only (superseded 2026-11-13, below: per crate); CI builds with cargo
+and mbx. Decided 2026-10-26 from
 moq-dev/rust2's [Nix build benchmark](https://github.com/moq-dev/rust2/pull/63),
 in billions of instructions over a clean build, a second package, the moq-net edit,
 and a lockfile bump: cargo with mbx totals 9,692 and crane 14,756. crate2nix built
 to the release profile totals 14,538: it wins only the lockfile bump (1,255 against
 crane's 3,681) and costs 11-27% more on the rest.
+
+Decided 2026-11-13 (maintainer), from the spike in
+[moq-dev/moq#8662](https://github.com/moq-dev/moq/pull/8662): ✅ Nix builds
+moq's Rust packages per crate, with crate2nix's generated `nix/Cargo.nix` on
+nixpkgs' `buildRustCrate`, replacing crane. A change rebuilds only the crates
+whose source, features, or dependencies moved, where crane rebuilt every
+workspace crate on any edit and every dependency on any lock change. Crates
+only the final fat-LTO link reads compile to bitcode alone, as cargo does:
+the spike measured that ~11% cheaper than crane cold and modeled it 49% cheaper
+over a week of `main`. Those builds run on free GitHub-hosted runners today,
+but many of these jobs are planned to move to self-hosted runners, where the
+saving lands on our own hosts. The generated file, and the release profile
+restated in `nix/crates.nix`, are accepted for that caching.
 
 Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
 generics dominate its build (53% of the library's CPU), and its test target

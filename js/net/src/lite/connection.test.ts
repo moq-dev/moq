@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Session as Qmux } from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
@@ -1006,8 +1007,8 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 				await group.encode(writer, version);
 
 				if (violation === "a partial group") {
+					await writer.u53(2); // a one-byte payload's size plus one
 					await writer.u62(2000n); // timestamp 1000, zigzag delta from 0
-					await writer.u53(1);
 					await writer.write(new Uint8Array([7]));
 					writer.close();
 					const received = await track.recvGroup();

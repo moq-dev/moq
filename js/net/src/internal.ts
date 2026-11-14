@@ -419,6 +419,14 @@ export interface GroupRecover {
 	replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement>;
 }
 
+/** A copy of a group still arriving, held for a duplicate that waits on it. */
+export interface Arriving {
+	/** How the copy ends. */
+	readonly settled: GetPromise<Error | null>;
+	/** Stop holding it, once the duplicate took the group or gave up. Idempotent. */
+	release(): void;
+}
+
 /** A candidate copy of a group, committed only once the read can use it. */
 export interface Replacement {
 	readonly group: GroupConsumer;
@@ -511,7 +519,7 @@ export interface ResumeSource {
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
 	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
-	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] };
+	reofferGroups(start: bigint, end: bigint, from?: number): { groups: GroupConsumer[]; givenUp: Run[] };
 	/**
 	 * See {@link hooks.reofferStale}: the stale runs queued here, those this reader reported, which a
 	 * route change keeps, and those the serving copy reported.
@@ -647,8 +655,14 @@ export const hooks: {
 	 * fill's subscription answered, which the feed never promised. Assigned by `track.ts`.
 	 */
 	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number; fill?: boolean }) => GroupProducer;
-	/** How the copy of `sequence` still arriving ends, if one is, for a duplicate to wait on. Assigned by `track.ts`. */
-	arrivingGroup: (producer: Producer, sequence: bigint) => GetPromise<Error | null> | undefined;
+	/**
+	 * Hold the copy of `sequence` still arriving, if one is, for a duplicate to wait on: until
+	 * released, that copy's failure leaves its readers open for the duplicate to continue. Assigned
+	 * by `track.ts`.
+	 */
+	arrivingGroup: (producer: Producer, sequence: bigint) => Arriving | undefined;
+	/** The cached groups of `[start, end)` still arriving, by sequence, costing what the cache holds. Assigned by `track.ts`. */
+	arrivingIn: (producer: Producer, start: bigint, end: bigint) => bigint[];
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -805,9 +819,16 @@ export const hooks: {
 	 * Fresh reads of the groups in `[start, end)` a subscriber's track still caches, its range still
 	 * admits, and its current budget no longer judges stale, each expiring against that budget, and
 	 * the runs still given up: for a wire whose update re-offers a group whose stream it gave up as
-	 * stale. Mirrors the Rust crate-private `track::Subscriber::reoffer_groups`.
+	 * stale, or a lite-07 continuation of a group whose stream yielded. Each read starts at frame
+	 * `from`, so a group whose cache holds only frames past it is given up. Mirrors the Rust
+	 * crate-private `track::Subscriber::reoffer_groups`.
 	 */
-	reofferGroups: (subscriber: Subscriber, start: bigint, end: bigint) => { groups: GroupConsumer[]; givenUp: Run[] };
+	reofferGroups: (
+		subscriber: Subscriber,
+		start: bigint,
+		end: bigint,
+		from?: number,
+	) => { groups: GroupConsumer[]; givenUp: Run[] };
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -835,8 +856,8 @@ export const hooks: {
 	) => Subscriber;
 	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
-	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined) => void;
+	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default, and the frame it asks from. */
+	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined, frameStart?: number) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
@@ -863,6 +884,10 @@ export const hooks: {
 	startGroup: (group: GroupProducer, start: number) => void;
 	/** The first absolute frame this source copy began at. Assigned by `group.ts`. */
 	groupOffset: (group: GroupProducer) => number;
+	/** Whether this source copy can no longer serve frame 0: it began past it, or shed it. */
+	groupHeadless: (group: GroupProducer) => boolean;
+	/** Whether this source copy began at frame 0 and may still write it. */
+	groupMayStart: (group: GroupProducer) => boolean;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -915,6 +940,8 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
+	/** The first frame this copy begins at: past 0 for one missing its head. */
+	groupFirstFrame: (group: GroupConsumer) => number;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -928,6 +955,17 @@ export const hooks: {
 	 * out, so its `closed` never settles on a failure the recovery continues past.
 	 */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
+	/**
+	 * Hold a received copy still arriving for a duplicate: if it fails while held, its readers wait
+	 * for the duplicate to take over (see {@link Arriving}). Assigned by `group.ts`.
+	 */
+	holdGroup: (group: GroupProducer) => () => void;
+	/**
+	 * Hand `next` the readers `failed` kept open while held, teeing each from the frame it reached.
+	 * Fails those `next` cannot serve. Returns the bytes of `failed`'s frames they still hold.
+	 * Assigned by `group.ts`.
+	 */
+	succeedGroup: (next: GroupProducer, failed: GroupProducer) => number;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
@@ -1199,7 +1237,22 @@ export const hooks: {
 	arrivingGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
+	arrivingIn: () => {
+		throw new Error("track.ts not loaded");
+	},
+	succeedGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	holdGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupOffset: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupHeadless: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupMayStart: () => {
 		throw new Error("group.ts not loaded");
 	},
 	startGroup: () => {
@@ -1266,6 +1319,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStarted: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupFirstFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFate: () => {

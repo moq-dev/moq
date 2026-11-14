@@ -45,7 +45,7 @@ Build output may live outside the checkout and gets wiped, so scratch never goes
 
 Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary and its skills come from the moq-dev/quest flake input; change them upstream and bump the input.
-Review locally with one reviewer, not the pair: `quest review --harness codex`, or `--harness claude` when Codex wrote the change last. Pullfrog's online review already supplies the DeepSeek pass.
+Review locally with one reviewer, not the pair: `quest review --harness codex`, or `quest review --harness opencode --model opencode-go/deepseek-v4.1-flash --effort high` when Codex wrote the change last. Pullfrog's online review already supplies the Claude pass.
 
 # Cross-Package Sync
 

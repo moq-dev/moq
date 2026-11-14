@@ -16,7 +16,7 @@ comes back once it reconnects.
 ## Run
 
 ```sh
-just test tla js/room
+quest gate just js tla room/verify/Room.tla
 ```
 
 `Room.cfg` plays only Bob's camera; add `"screen"` to

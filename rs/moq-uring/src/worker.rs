@@ -34,9 +34,9 @@ const SQ_ENTRIES: u32 = 128;
 /// allocation-per-CQE slow path and it ends any armed multishot receive, so
 /// the CQ is sized to keep it out of steady state.
 ///
-/// No larger: the ring is charged to `RLIMIT_MEMLOCK` at 16 bytes per entry,
-/// most of each worker's footprint, and that budget is shared by every
-/// io_uring the user runs.
+/// No larger: the ring costs 16 bytes per entry, most of each worker's
+/// footprint, and Linux 6.14 up to the 7.3 fix charges it to `RLIMIT_MEMLOCK`,
+/// a budget shared by every io_uring the user runs.
 const PRODUCTION_CQ_ENTRIES: u32 = 2048;
 #[cfg(not(test))]
 const CQ_ENTRIES: u32 = PRODUCTION_CQ_ENTRIES;

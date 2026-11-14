@@ -137,8 +137,9 @@ released relays and clients, skip it.
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
 `WebTransport.closed` must carry the relay's code and reason. A WebSocket-only
-`Connection` must publish the same Unauthorized session error and stop its
-unlimited reconnect loop. Chromium treats a
+`Connection` counts the refused session as connected, so it must redial it
+like any other close and, once a short retry window runs out, publish the same
+session error. Chromium treats a
 server's HTTP/3 control stream ending as fatal, so a server that ends it under
 the close capsule loses both; no Rust peer is that strict.
 
@@ -398,12 +399,15 @@ skipped cell is logged with the break's name. Entries become errors once an
 affected release changes or no longer offers a listed version, forcing a
 re-measure. Future WIP drafts receive no automatic exception.
 
-`just test wire-compat --remeasure` is that re-measure, run after each release
-publishes (see `RELEASE.md`). It runs the cells planned breaks cover
+`just test wire-compat --remeasure` is that re-measure. Release remeasure runs
+it after Rust or JS publication changes a planned-break pin (see `RELEASE.md`).
+It runs the cells planned breaks cover
 without letting them fail the run, then rewrites `compat/planned-breaks.json`:
 a break with a failing cell is re-pinned to the releases just measured, and one
-with none is deleted. It prints each break's failing cells. Review the diff and
-refresh each reason before committing.
+with none is deleted. It prints each break's failing cells; the release workflow
+copies that report into the pin-update PR body and retains failure artifacts for
+seven days. Reasons describe why a break is allowed; the measured pins and PR
+body record its current extent.
 
 ## Media QA
 
@@ -580,8 +584,7 @@ Not covered yet: publishing from engines other than Chromium in CI, the worker
 capture path, and any claim about physical playback.
 
 The relay's port is reserved for the run rather than fixed, so two checkouts can
-run the interop test at once; `INTEROP_PORT` pins one instead. `INTEROP_QUARANTINED=1`
-runs the cells quarantined for flakes, to reproduce one. A failing run keeps its
+run the interop test at once; `INTEROP_PORT` pins one instead. A failing run keeps its
 directory, including a Playwright trace of the failing page, and CI uploads it;
 `HARNESS_KEEP=1` keeps a passing run's too. See [the harness
 contract](../README.md).

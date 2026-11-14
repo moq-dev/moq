@@ -50,8 +50,9 @@ qmux = ["_transport", "dep:qmux"]
 uds = ["tcp", "qmux/uds"]
 # Inside `kio::clock::sim::run`, detached tasks spawn on kio's deterministic simulator,
 # and with `driver`, `quic::driver::sim` carries datagrams over seeded, impaired
-# `moq_quic::sim::Link`s with no sockets. With `net`, `sim::Network` routes a client's dials
-# over in-memory links instead. Turns on no transport of its own. Hidden from the
+# `moq_quic::sim::Link`s with no sockets; with `quic` too, `client::Config::sim` and
+# `server::Config::sim` bind a `Client` or `Server` on one of its hosts. With `net`,
+# `sim::Network` routes a client's dials over in-memory links instead. Turns on no transport of its own. Hidden from the
 # docs. Meant for dev-dependencies, so production builds never compile it.
 sim = ["kio/sim", "moq-quic?/sim"]
 

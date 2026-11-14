@@ -278,6 +278,14 @@ impl SendStream {
 		Self(Sender::Own(Box::new(stream)))
 	}
 
+	/// Whether the session reset this group stream to make room for a higher-ranked open.
+	pub(crate) fn preempted(&self) -> bool {
+		match &self.0 {
+			Sender::Own(_) => false,
+			Sender::Listed(listing) => listing.listed.lock().preempted,
+		}
+	}
+
 	/// Run `f` on the transport's stream, then leave the session's list if `unlist`.
 	fn with<T>(&mut self, unlist: bool, f: impl FnOnce(&mut dyn ErasedSend) -> T) -> T {
 		match &mut self.0 {
@@ -593,6 +601,8 @@ trait ErasedSend: Send + Sync {
 	fn reset(&mut self, code: u32);
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
 	fn acknowledged(&self) -> Option<bool>;
+	fn delivered(&self) -> Option<u64>;
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()>;
 }
 
 trait ErasedRecv: Send + Sync {
@@ -772,6 +782,14 @@ impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
 
 	fn acknowledged(&self) -> Option<bool> {
 		poll::SendStream::acknowledged(self)
+	}
+
+	fn delivered(&self) -> Option<u64> {
+		poll::SendStream::delivered(self)
+	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		poll::SendStream::poll_delivered(self, waiter)
 	}
 }
 
@@ -987,6 +1005,14 @@ impl poll::SendStream for SendStream {
 
 	fn acknowledged(&self) -> Option<bool> {
 		self.get().acknowledged()
+	}
+
+	fn delivered(&self) -> Option<u64> {
+		self.get().delivered()
+	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.get().poll_delivered(waiter)
 	}
 }
 

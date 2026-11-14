@@ -1287,25 +1287,13 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 
 /// A ring refused at worker startup reaches a `Ready` waiter with the actionable error.
 #[tokio::test]
-async fn uring_startup_reports_the_memlock_limit() {
-	// Resource limits belong to the process, so isolate even under libtest.
-	if !test_env::Env::default().set("MOQ_TEST_MEMLOCK", "0").isolate() {
+async fn uring_startup_reports_a_refused_ring() {
+	// The filter binds the whole process, so isolate even under libtest.
+	if !test_env::Env::default().set("MOQ_TEST_REFUSE_RING", "1").isolate() {
 		return;
 	}
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
-		return;
-	}
-	// CAP_IPC_LOCK, which root holds, exempts io_uring from the limit.
-	let status = std::fs::read_to_string("/proc/self/status").expect("process status");
-	let effective = status
-		.lines()
-		.find_map(|line| line.strip_prefix("CapEff:"))
-		.expect("effective capabilities");
-	let effective = u64::from_str_radix(effective.trim(), 16).expect("capability mask");
-	const CAP_IPC_LOCK: u32 = 14;
-	if effective & (1 << CAP_IPC_LOCK) != 0 {
-		eprintln!("skipping the memlock test: CAP_IPC_LOCK lifts the limit");
 		return;
 	}
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -1314,18 +1302,10 @@ async fn uring_startup_reports_the_memlock_limit() {
 		.await
 		.expect("load relay")
 		.with_signals(false);
-	let mut limit = libc::rlimit {
-		rlim_cur: 0,
-		rlim_max: 0,
-	};
-	// SAFETY: valid out-pointer in an isolated test process.
-	assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) }, 0);
-	limit.rlim_cur = 0;
-	// SAFETY: valid limit in an isolated test process.
-	assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) }, 0);
+	refuse_rings();
 	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
-	let error = ready.wait().await.expect_err("a worker needs locked memory");
+	let error = ready.wait().await.expect_err("a worker needs a ring");
 	let message = format!("{error:#}");
 	for expected in [
 		"io_uring worker 0 failed to start",
@@ -1339,4 +1319,54 @@ async fn uring_startup_reports_the_memlock_limit() {
 		.await
 		.expect("join relay")
 		.expect_err("run fails with the waiter");
+}
+
+/// Fails every later `io_uring_setup` in this process with `ENOMEM`, the way a
+/// spent memory cgroup or, on Linux 6.14 up to the 7.3 fix, a spent
+/// `RLIMIT_MEMLOCK` refuses a ring. Which one a kernel charges varies, so the
+/// test injects the refusal instead of exhausting either.
+fn refuse_rings() {
+	use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, sock_filter};
+	let op = |code: u32, k: u32| sock_filter {
+		code: code as u16,
+		jt: 0,
+		jf: 0,
+		k,
+	};
+	// Matching the syscall number alone suffices: this test only issues native
+	// syscalls, and the filter injects a fault rather than enforcing a policy.
+	let filter = [
+		// seccomp_data.nr
+		op(BPF_LD | BPF_W | BPF_ABS, 0),
+		sock_filter {
+			code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
+			jt: 0,
+			jf: 1,
+			k: libc::SYS_io_uring_setup as u32,
+		},
+		op(BPF_RET | BPF_K, libc::SECCOMP_RET_ERRNO | libc::ENOMEM as u32),
+		op(BPF_RET | BPF_K, libc::SECCOMP_RET_ALLOW),
+	];
+	let program = libc::sock_fprog {
+		len: filter.len() as u16,
+		filter: filter.as_ptr().cast_mut(),
+	};
+	// SAFETY: plain flag; without it an unprivileged process may not install a filter.
+	assert_eq!(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, 0);
+	// SAFETY: `program` points at `filter`, both live across the call, which copies them.
+	// TSYNC applies it to the threads already running too, not only the ones spawned later.
+	let installed = unsafe {
+		libc::syscall(
+			libc::SYS_seccomp,
+			libc::SECCOMP_SET_MODE_FILTER,
+			libc::SECCOMP_FILTER_FLAG_TSYNC,
+			&program,
+		)
+	};
+	assert_eq!(
+		installed,
+		0,
+		"install the seccomp filter: {}",
+		std::io::Error::last_os_error()
+	);
 }

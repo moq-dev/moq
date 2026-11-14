@@ -39,6 +39,7 @@ on:
       - Release Nix
       - Release Py
       - Release Py FFI
+      - Release remeasure
       - Release RS
       - Release Swift FFI
       - Release Swift Lib

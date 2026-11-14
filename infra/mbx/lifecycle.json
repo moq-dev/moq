@@ -4,7 +4,7 @@
 			"id": "expire",
 			"enabled": true,
 			"conditions": { "prefix": "" },
-			"deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": 1209600 } },
+			"deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": 604800 } },
 			"abortMultipartUploadsTransition": { "condition": { "type": "Age", "maxAge": 86400 } }
 		}
 	]

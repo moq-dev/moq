@@ -39,6 +39,11 @@ const MAX_HISTORY = 8192;
 /** The cold-start distribution, which is also what an idle interval relaxes back to. */
 const PRIOR = Float64Array.from({ length: BUCKETS }, (_, i) => 0.5 ** (i + 1));
 
+// The histogram bucket a delay in milliseconds lands in, the last holding everything past it.
+function bucket(delay: number): number {
+	return Math.min(BUCKETS - 1, Math.floor(delay / BUCKET));
+}
+
 /**
  * How much buffer late arrivals need, measured from arrival timing alone.
  *
@@ -59,8 +64,29 @@ export class Jitter {
 	#interval = 0;
 	/** The largest delay seen in that interval. */
 	#peak = 0;
+	/** The oldest media timestamp measured in that interval. */
+	#oldest = 0;
+	/** The first arrival, when the subscription began, unset until the first observation. */
+	#start?: number;
+	/** The latest a frame produced before the subscription arrived, starting at `#start`. */
+	#joined = 0;
 	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
 	#ended = false;
+	/** The earliest a frame stalled in this interval was due. */
+	#due = Number.POSITIVE_INFINITY;
+	/** The latest a frame stalled in this interval arrived. */
+	#late = Number.NEGATIVE_INFINITY;
+
+	/** The bucket of the open stall's largest delay, folded once the stall ends. */
+	#stall?: number;
+	/** When the open stall's latest stalled frame arrived. */
+	#stallLate = 0;
+	/** The earliest the open stall's frames were due. */
+	#stallDue = 0;
+	/** Intervals the open stall spanned besides the one it folds as. */
+	#span = 0;
+	/** Empty intervals before this one, held until it shows whether they belong to a stall. */
+	#pending = 0;
 
 	#histogram = Float64Array.from(PRIOR);
 	/** How much of the histogram is still the prior's rather than evidence. */
@@ -75,11 +101,20 @@ export class Jitter {
 			this.#history.push(arrival, media);
 		}
 
+		// A frame due before the first arrival by the window's fastest path was produced before the
+		// subscription began: it is the backlog a join delivers, and the join lasts until it has all
+		// arrived.
+		if (this.#start === undefined) {
+			this.#start = arrival;
+			this.#joined = arrival;
+		} else if (media + this.#history.fastest() < this.#start) {
+			this.#joined = Math.max(this.#joined, arrival);
+		}
+
 		// Delay against the fastest frame in the window at or before this one, not the previous one,
 		// so a queue that fills a little per frame reads as the build-up it is, and an older frame
 		// held behind newer ones reads as the wait playing it in order costs. A frame older than the
-		// whole window, such as the backlog a subscription delivers after its live edge, has no
-		// reference and is not measured.
+		// whole window has no reference and is not measured.
 		const reference = this.#history.reference(media);
 		if (reference === undefined) return;
 		// Written in this order on purpose: the document requires bit-identical arithmetic,
@@ -89,6 +124,8 @@ export class Jitter {
 		if (this.#origin === undefined) {
 			this.#origin = arrival;
 			this.#peak = delay;
+			this.#oldest = media;
+			this.#note(arrival, delay);
 			return;
 		}
 
@@ -97,23 +134,86 @@ export class Jitter {
 		this.#ended = false;
 		if (interval <= this.#interval) {
 			this.#peak = Math.max(this.#peak, delay);
+			this.#oldest = Math.min(this.#oldest, media);
+			this.#note(arrival, delay);
 			return;
 		}
 
-		this.#fold(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
+		if (this.#joining()) this.#pending += 1;
+		else this.#close(bucket(this.#peak));
 
 		if (resumed) {
 			// A silence the publisher declared says nothing about the path, so the estimate keeps
 			// what it had and a fresh interval starts here.
+			this.#settle();
 			this.#origin = arrival;
 			this.#interval = 0;
 		} else {
-			// An interval with no arrival relaxes the estimate toward the prior at the same rate.
-			const idle = Math.min(interval - this.#interval - 1, IDLE_MAX);
-			for (let i = 0; i < idle; i++) this.#fold(undefined);
+			// Held until this interval closes: a stall it holds owns them.
+			this.#pending += interval - this.#interval - 1;
 			this.#interval = interval;
 		}
 		this.#peak = delay;
+		this.#oldest = media;
+		this.#due = Number.POSITIVE_INFINITY;
+		this.#late = Number.NEGATIVE_INFINITY;
+		this.#note(arrival, delay);
+	}
+
+	// An interval holding a frame due before the join's backlog finished arriving measured the join,
+	// not the path: its frames queued behind the backlog, and the player skipped onto the clock past
+	// all of it. It folds nothing, like an interval with no arrival.
+	#joining(): boolean {
+		return this.#oldest + this.#history.fastest() < this.#joined;
+	}
+
+	// A frame later than a whole interval was due in an earlier one, so it is stalled.
+	#note(arrival: number, delay: number): void {
+		if (delay > RESAMPLE) {
+			this.#due = Math.min(this.#due, arrival - delay);
+			this.#late = Math.max(this.#late, arrival);
+		}
+	}
+
+	// An interval whose stalled frames were due before the open stall's last one arrived is still
+	// behind that stall, so it joins it instead of counting again: one outage is one observation,
+	// as one queue's hundred frames are within an interval. Only for a window of due time, since
+	// back-to-back flushes are a recurring stall, not one.
+	#close(bucket: number): void {
+		const stalled = this.#late !== Number.NEGATIVE_INFINITY;
+		const pending = this.#pending;
+		this.#pending = 0;
+		if (
+			stalled &&
+			this.#stall !== undefined &&
+			this.#due < this.#stallLate &&
+			this.#due - this.#stallDue < WINDOW
+		) {
+			this.#stall = Math.max(this.#stall, bucket);
+			this.#span += pending + 1;
+			this.#stallLate = this.#late;
+			return;
+		}
+
+		this.#settle();
+		if (stalled) {
+			this.#stall = bucket;
+			this.#span = pending;
+			this.#stallLate = this.#late;
+			this.#stallDue = this.#due;
+		} else {
+			for (let i = 0; i < Math.min(pending, IDLE_MAX); i++) this.#fold(undefined);
+			this.#fold(bucket);
+		}
+	}
+
+	// A stall folds once, its largest delay, and every other interval it spanned is idle, so the
+	// estimate keeps its time constant without the stall taking the prior's regained weight.
+	#settle(): void {
+		if (this.#stall === undefined) return;
+		this.#fold(this.#stall);
+		for (let i = 0; i < Math.min(this.#span, IDLE_MAX); i++) this.#fold(undefined);
+		this.#stall = undefined;
 	}
 
 	/**
@@ -135,6 +235,24 @@ export class Jitter {
 		const fork = new Jitter();
 		fork.#histogram = Float64Array.from(this.#histogram);
 		fork.#prior = this.#prior;
+		// What this one gathered but has not folded, the interval in progress and an open stall,
+		// folds as if that interval closed here: a switch right after an outage is the likeliest,
+		// and would otherwise lose the outage's one observation. This one is left as it was.
+		if (this.#origin !== undefined) {
+			fork.#stall = this.#stall;
+			fork.#span = this.#span;
+			fork.#stallLate = this.#stallLate;
+			fork.#stallDue = this.#stallDue;
+			fork.#pending = this.#pending;
+			fork.#due = this.#due;
+			fork.#late = this.#late;
+			// Judged by this track's join, which the interval belongs to.
+			if (this.#joining()) fork.#pending += 1;
+			else fork.#close(bucket(this.#peak));
+			fork.#settle();
+			fork.#due = Number.POSITIVE_INFINITY;
+			fork.#late = Number.NEGATIVE_INFINITY;
+		}
 		return fork;
 	}
 
@@ -225,6 +343,12 @@ export class History {
 		for (let node = (capacity + slot) >> 1; node > 0; node >>= 1) {
 			this.#tree[node] = this.#faster(this.#tree[2 * node], this.#tree[2 * node + 1]);
 		}
+	}
+
+	/** The smallest `arrival - media` held, the fastest path seen. Must not be empty. */
+	fastest(): number {
+		const entry = this.reference(Number.POSITIVE_INFINITY) as Entry;
+		return entry.arrival - entry.media;
 	}
 
 	/** The fastest entry with `entry.media <= media`, the oldest on a tie. */

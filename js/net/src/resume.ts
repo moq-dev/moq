@@ -730,10 +730,10 @@ class Reader implements ResumeSource {
 	 * handed out as any group of that copy is, and the runs still given up: all of them while no
 	 * copy serves. Mirrors the Rust `Reader::reoffer_groups`.
 	 */
-	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] } {
+	reofferGroups(start: bigint, end: bigint, from = 0): { groups: GroupConsumer[]; givenUp: Run[] } {
 		const serving = this.#serving();
 		if (!serving) return { groups: [], givenUp: [{ start, end }] };
-		const { groups, givenUp } = hooks.reofferGroups(serving.sub, start, end);
+		const { groups, givenUp } = hooks.reofferGroups(serving.sub, start, end, from);
 		return { groups: groups.map((group) => this.#handOut(serving, group)), givenUp };
 	}
 
