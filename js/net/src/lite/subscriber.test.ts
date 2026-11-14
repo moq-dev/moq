@@ -4130,6 +4130,44 @@ test("a lite-07 refused route's floors hide no other stream's claims", async () 
 	subscriber.close();
 });
 
+// A route refused once live leaves what its last floor certified, as an ended one does: the claims
+// it reads afterwards never rewrite that.
+test("a lite-07 route refused once live leaves its last floor as it was", async () => {
+	const { subscriber, announced, send, raw, another } = await routedStream();
+	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const instance = Instance.parse("i");
+	const node = 7n;
+	const x = Path.from("live/x");
+
+	// Both streams carry live/x, the first at revision 5 and the second lagging at 3.
+	await send({ status: "routeStart", node, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 5n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
+	await live.send({ status: "routeStart", node, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance });
+	await live.send({ status: "floor", id: 0n, revision: 3n });
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start" });
+
+	// The first stream's route is refused, then ends live/x at a floor no view takes.
+	raw([7, 5, 0, 1, 0, 0x80, 42]);
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "offline" });
+	await send({ status: "endedId", id: 0n });
+	await send({ status: "floor", id: 0n, revision: 6n });
+
+	// The second stream's next floor still has live/x, as revision 5 did: what it shows next is
+	// another node's claim, not live/x withdrawn.
+	await live.send({ status: "floor", id: 0n, revision: 4n });
+	await live.send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("z"), route: 1n, instance });
+	await live.send({ status: "floor", id: 1n, revision: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+
+	live.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
 // Two streams carry one origin's claims, and a withdrawal reaches one first. Of the floors that
 // certify a claim, the newest decides whether it exists, so the lagging stream's copy is held back
 // rather than selected and refused: also once the newer stream's route ends.

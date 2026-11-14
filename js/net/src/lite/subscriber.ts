@@ -1256,7 +1256,11 @@ export class Subscriber {
 			const joined = wire.advert !== undefined;
 			// The reserved node names no route, whatever the peer forwards for it.
 			wire.advert = wire.node === 0n ? undefined : advert;
-			if (joined && wire.advert === undefined) this.#floors.leave(wire.node, wire.carrier);
+			if (joined && wire.advert === undefined) {
+				this.#floors.leave(wire.node, wire.carrier);
+				// What its floor certified stays as it was, while the route goes on reading claims.
+				wire.view.claims = new Map(wire.view.claims);
+			}
 			if (joined || wire.advert === undefined) return;
 			this.#floors.join(wire.node, wire.carrier);
 			const others = this.#floors.floor(wire.node, wire.carrier);
