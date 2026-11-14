@@ -156,8 +156,6 @@ case "$action" in
     check | check-test | lint)
         # The isolated feature builds (`just rs features`) stay out of the
         # gate; the Features workflow runs them nightly and on release PRs.
-        # Nightly runs the Send-depth proof (`just rs send-depth`) on its
-        # pinned toolchain.
         just rs "$action" "${flags[@]}"
         # The test build enables device features, which can hide unused items
         # in the default-feature test cfg. Keep this compile isolated from the
@@ -172,6 +170,8 @@ case "$action" in
         fi
         # moq-net without `async`, which every other build unifies back in.
         if wants moq-net; then just rs no-async; fi
+        # The session driver's Send proof, which a deeper session state breaks.
+        if [[ "$action" == lint ]] && wants moq-net; then just rs send-depth; fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         ;;

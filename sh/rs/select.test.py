@@ -123,16 +123,19 @@ class SelectTest(unittest.TestCase):
         for owner in ("tokio", "media", "net"):
             self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
 
-    def test_gate_leaves_send_depth_to_nightly(self):
-        # Nightly runs `rs send-depth` on the pinned toolchain.
+    def test_gate_proves_send_depth_for_net(self):
+        # moq-net and its dependencies can deepen the session driver's Send proof.
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = self.selected(path)
-                self.assertEqual(len(calls), 3, calls)
+                self.assertEqual(len(calls), 4, calls)
                 self.assertTrue(calls[0].startswith("rs lint "), calls)
                 self.assertEqual(calls[1], "rs media-defaults", calls)
                 self.assertEqual(calls[2], "rs no-async", calls)
-        self.assertEqual(self.selected("sh/rs/send-depth.sh"), [])
+                self.assertEqual(calls[3], "rs send-depth", calls)
+        # Only the lint phase runs it, so the gate compiles it once.
+        self.assertNotIn("rs send-depth", self.selected("rs/moq-net/src/lib.rs", action="test"))
+        self.assertNotIn("rs send-depth", self.selected("rs/moq-auth/src/lib.rs"))
 
     def test_media_defaults_are_isolated_from_device_features(self):
         for path in ("rs/moq-audio/src/lib.rs", "rs/moq-video/src/lib.rs", "Cargo.lock"):

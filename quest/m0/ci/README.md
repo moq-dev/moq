@@ -148,7 +148,8 @@ gate drops `loom-check` and Nightly its loom job; a separate PR deletes the
 models. On Send-depth: "Move it to Nightly." It guards a real downstream
 breakage (moq-net futures not Send at the default recursion limit), so
 `just rs send-depth` keeps its pinned nightly and runs as its own Nightly job
-instead of in the land gate.
+instead of in the land gate. Superseded 2026-11-13 (maintainer): it gates
+moq-net changes again, since a Nightly-only check let a break land on `main`.
 
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration
