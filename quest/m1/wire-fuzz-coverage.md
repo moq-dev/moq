@@ -23,6 +23,9 @@ Ordering:
 - `moq-sock`'s `CMsg::decode` still reads `size_of::<T>()` past a short message (only a `debug_assert_eq!` checks it), which [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) fixes. A moq-sock target landing first would fail nightly on that known overread, so land it after, or with, that fix. The moq-uring target has no such dependency.
 - `just rs miri` and its nightly job already exist ([moq-dev/moq#7315](https://github.com/moq-dev/moq/pull/7315)); this quest adds its crates to them.
 
+Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): ✅ m1
+(rejected: staying in m4). This unsafe is reachable by any peer.
+
 Public API: none. Wire: none.
 
 ## Related

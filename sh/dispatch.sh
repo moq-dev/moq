@@ -118,6 +118,11 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # moq-relay's tests read its NixOS module.
 module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
     tools='cargo jq' compiles='check fix' fix
+# nix/Cargo.nix records each crate's dependencies, features, and targets,
+# read from the manifests, the lockfile, and the files cargo discovers targets
+# from. The pinned crate2nix comes from flake.lock.
+module cargo_nix '((^|/)(Cargo\.(toml|lock)|build\.rs)$|^rs/.*/src/(lib\.rs|main\.rs|bin/)|^nix/(Cargo\.nix|crate-hashes\.json)$|^sh/rs/cargo-nix\.sh$|^flake\.lock$)' \
+    tools='nix nixfmt cargo' fix
 # The C package links moq-c's native-libs lists, and the C++ package's FFI
 # pin. Both packages format with sh/clang-format.sh and OBS's style file.
 module c '^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
@@ -449,6 +454,7 @@ step() {
             }
             ;;
         check:ts_paths) run python3 sh/gh/ts-paths.py ;;
+        check:cargo_nix) run just rs cargo-nix --check ;;
         check:biome) run just biome ;;
         check:markdown)
             run uv run --no-project python sh/js/install.py frozen
@@ -478,6 +484,7 @@ step() {
         test:gh) run just gh test ;;
         fix:rs) run just rs fix-changed "$rs_list" ;;
         fix:carla_bridge) run just carla bridge-fix ;;
+        fix:cargo_nix) run just rs cargo-nix ;;
         fix:js) run just js fix-changed "$js_list" ;;
         fix:biome) run just biome-fix ;;
         fix:markdown)

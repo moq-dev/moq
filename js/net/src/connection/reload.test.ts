@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, type Instant, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, type Instant, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Session as Qmux, type WebSocketStreamLike } from "@moq/qmux";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
