@@ -258,7 +258,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 34;
+const LITE_KINDS: u8 = 33;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 27;
@@ -426,7 +426,6 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		30 => roundtrip::<lite::Datagrams<'_>, _>(rest, &mut Vec::new(), version),
 		31 => roundtrip::<lite::DatagramsUpdate, _>(rest, &mut Vec::new(), version),
 		32 => roundtrip::<lite::DatagramsInfo, _>(rest, &mut Vec::new(), version),
-		33 => roundtrip::<lite::AnnounceReply, _>(rest, &mut Vec::new(), version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -570,6 +569,28 @@ pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
 	Snapshot(origin.snapshot(prefix))
 }
 
+/// A clock for a route node in a bench, which never fires its timers.
+fn route_clock() -> kio::clock::Deadlines {
+	kio::clock::Deadlines::new(kio::clock::Instant::now())
+}
+
+/// The session `tag` to the node `node`.
+fn route_peer(tag: u64, node: u64) -> crate::route::node::Peer {
+	crate::route::node::Peer { tag, node }
+}
+
+/// The route the publisher `node` sends about itself.
+fn route_offer(node: u64) -> crate::route::path::Offer {
+	crate::route::path::Offer {
+		path: [crate::route::path::Hop { node, session: 0 }].into(),
+		draining: false,
+		priority: i8::MAX,
+		metric: 0,
+		down_only: false,
+		rtt: None,
+	}
+}
+
 /// One origin's lite-07 route node answering announce streams, for the routes bench.
 pub struct RouteNode {
 	node: crate::route::Node,
@@ -581,15 +602,16 @@ impl RouteNode {
 	/// A node holding `claims` claims of its own under `live/`, answering one stream
 	/// per prefix in `streams`, each already sent its snapshot.
 	pub fn new(claims: usize, streams: &[&str]) -> Self {
-		let node = crate::route::Node::new(1, 1);
+		let node = crate::route::Node::new(1, 1, route_clock());
 		let instance = crate::Instance::random();
 		for i in 0..claims {
 			node.own(Path::new(&format!("live/{i}")).unwrap(), Some(Self::claim(&instance)));
 		}
-		let streams = (streams.iter())
-			.map(|prefix| {
+		let streams = (streams.iter().enumerate())
+			.map(|(i, prefix)| {
 				let link = crate::route::Link::default();
-				node.answer(link, Path::new(prefix).unwrap()).unwrap()
+				let peer = route_peer(i as u64 + 1, i as u64 + 2);
+				node.answer(peer, link, Path::new(prefix).unwrap()).unwrap()
 			})
 			.collect();
 		let node = Self {
@@ -650,27 +672,25 @@ impl RouteRelay {
 	/// A relay that already heard the origin's `claims` claims under `live/` on each of
 	/// `streams` streams, and forwarded them on each of `answers` streams.
 	fn new(claims: usize, streams: usize, answers: usize) -> Self {
-		let node = crate::route::Node::new(2, 2);
-		let answer = (0..answers)
-			.map(|_| node.answer(crate::route::Link::default(), Path::empty()).unwrap())
+		let node = crate::route::Node::new(2, 2, route_clock());
+		let answer = (0..answers as u64)
+			.map(|i| {
+				let peer = route_peer(i + 1, i + 3);
+				node.answer(peer, crate::route::Link::default(), Path::empty()).unwrap()
+			})
 			.collect();
 		let instance = crate::Instance::random();
 		let rev = claims as u64;
-		let advert = crate::route::Advert {
-			seqno: 0,
-			metric: 0,
-			down_only: false,
-			rtt: None,
-			hops: [].into(),
-		};
-		let receive = (0..streams)
-			.map(|_| {
-				let receive = node.receive(crate::route::Link::default(), Path::empty()).unwrap();
-				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert.clone())));
+		let receive = (0..streams as u64)
+			.map(|i| {
+				let peer = route_peer(answers as u64 + i + 1, Self::ORIGIN);
+				let receive = node.receive(peer, crate::route::Link::default()).unwrap();
+				let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
+				receive.route(Self::ORIGIN, Path::empty(), Some(reach));
 				let snapshot = (0..claims)
 					.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
 					.collect();
-				receive.batch(Self::ORIGIN, snapshot, Some(rev));
+				receive.batch(Self::ORIGIN, Path::empty(), snapshot, Some(rev));
 				receive
 			})
 			.collect();
@@ -731,7 +751,7 @@ impl RouteRelay {
 		self.rev += 1;
 		let claim = Self::claim(&self.instance, self.rev);
 		let batch = (0..changes).map(|i| (Self::path(i), Some(claim.clone()))).collect();
-		self.receive[0].batch(Self::ORIGIN, batch, Some(self.rev));
+		self.receive[0].batch(Self::ORIGIN, Path::empty(), batch, Some(self.rev));
 		self.drain()
 	}
 
@@ -748,11 +768,19 @@ impl RouteRelay {
 			epoch,
 			..Self::claim(&self.instance, 0)
 		};
-		self.receive[0].batch(Self::ORIGIN, vec![(Self::path(0), Some(claim))], Some(self.rev));
+		let batch = vec![(Self::path(0), Some(claim))];
+		self.receive[0].batch(Self::ORIGIN, Path::empty(), batch, Some(self.rev));
 		let serves: Vec<_> = std::iter::from_fn(|| self.receive[0].try_output()).collect();
 		for serve in &serves {
-			if let crate::route::node::Output::Serve { id, claim, served, .. } = serve {
-				self.receive[0].serving(*id, claim, &served.claim);
+			if let crate::route::node::Output::Serve {
+				id,
+				claim,
+				prefix,
+				served,
+				..
+			} = serve
+			{
+				self.receive[0].serving(*id, claim, prefix, &served.claim);
 			}
 		}
 		serves.len() + self.drain()
@@ -763,7 +791,7 @@ impl RouteRelay {
 		self.rev += 1;
 		let i = self.rev as usize % self.claims;
 		let batch = vec![(Self::path(i), Some(Self::claim(&self.instance, self.rev)))];
-		self.receive[0].batch(Self::ORIGIN, batch, Some(self.rev));
+		self.receive[0].batch(Self::ORIGIN, Path::empty(), batch, Some(self.rev));
 		self.behind.push_back((self.rev, i));
 	}
 
@@ -773,7 +801,7 @@ impl RouteRelay {
 		self.advance();
 		let (rev, i) = self.behind.pop_front().expect("the second stream lags");
 		let batch = vec![(Self::path(i), Some(Self::claim(&self.instance, rev)))];
-		self.receive[1].batch(Self::ORIGIN, batch, Some(rev));
+		self.receive[1].batch(Self::ORIGIN, Path::empty(), batch, Some(rev));
 		self.drain()
 	}
 
@@ -800,11 +828,13 @@ impl RouteFollower {
 	/// The origin's identity and revision as the node hears them.
 	const ORIGIN: u64 = 1;
 	const REV: u64 = 1;
+	/// The viewer session every stream belongs to.
+	const TAG: u64 = 1;
 
 	/// A node following `prefixes` prefixes `live/{k}`, each holding `claims` claims.
 	pub fn new(prefixes: usize, claims: usize) -> Self {
 		let mut follower = Self {
-			node: crate::route::Node::new(2, 2),
+			node: crate::route::Node::new(2, 2, route_clock()),
 			streams: Vec::new(),
 			instance: crate::Instance::random(),
 			claims,
@@ -818,15 +848,10 @@ impl RouteFollower {
 	/// Open the stream for prefix `k`, which hears the origin's route and snapshot.
 	fn follow(&self, k: usize) -> crate::route::node::Stream {
 		let prefix = Path::new(&format!("live/{k}")).unwrap();
-		let stream = self.node.receive(crate::route::Link::default(), prefix).unwrap();
-		let advert = crate::route::Advert {
-			seqno: 0,
-			metric: 0,
-			down_only: false,
-			rtt: None,
-			hops: [].into(),
-		};
-		stream.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert)));
+		let peer = route_peer(Self::TAG, Self::ORIGIN);
+		let stream = self.node.receive(peer, crate::route::Link::default()).unwrap();
+		let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
+		stream.route(Self::ORIGIN, prefix.clone(), Some(reach));
 		let claim = crate::route::node::Claim {
 			instance: self.instance.clone(),
 			epoch: 0,
@@ -838,7 +863,7 @@ impl RouteFollower {
 		let snapshot = (0..self.claims)
 			.map(|j| (Path::new(&format!("live/{k}/{j}")).unwrap(), Some(claim.clone())))
 			.collect();
-		stream.batch(Self::ORIGIN, snapshot, Some(Self::REV));
+		stream.batch(Self::ORIGIN, prefix, snapshot, Some(Self::REV));
 		stream
 	}
 
@@ -855,7 +880,7 @@ impl RouteFollower {
 
 	/// Close every stream at once, as a session ending does.
 	pub fn teardown(self) {
-		let _closing = self.node.closing();
+		let _closing = self.node.closing(Self::TAG);
 		drop(self.streams);
 	}
 
@@ -1363,6 +1388,7 @@ impl LiteSample {
 				order: crate::track::Order::Descending,
 				instance: None,
 				node: 0,
+				depth: 0,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -1563,6 +1589,7 @@ impl Default for Messages {
 				order: crate::track::Order::Descending,
 				instance: None,
 				node: 0,
+				depth: 0,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -1748,6 +1775,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			broadcast: broadcast.clone(),
 			instance: None,
 			node: 0,
+			depth: 0,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,
@@ -1967,21 +1995,22 @@ pub fn pattern(data: &[u8]) -> bool {
 }
 
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
-/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message
-/// (the sweep sets ROUTE_START's type byte but fills its size byte with the body
-/// pattern, so none decodes whole), the ROUTE_END echo, ROUTE_REQUEST, and a DATAGRAMS
-/// request, whose seven fields outgrow the sweep's longest body.
+/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message and
+/// both kinds of DEAD (the sweep sets ROUTE_START's type byte but fills its size byte
+/// with the body pattern, so none decodes whole), and a DATAGRAMS request, whose eight
+/// fields outgrow the sweep's longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
-	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
+	(30, &[8, 0, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 6, 1, 0, 1, 0, 1, 1]),
-	(5, &[7, 6, 0, 1, 2, 0, 1, 1]),
+	(5, &[6, 8, 1, 0, 1, 1, 0, 0, 0x80, 1]),
+	(5, &[7, 7, 0, 1, 1, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),
-	(33, &[8, 1, 0]),
-	(33, &[10, 2, 1, 0]),
+	(5, &[15, 6, 0, 1, 1, 2, 0, 0]),
+	(5, &[15, 14, 0, 1, 1, 2, 1, 1, 0, 6, 1, 1, 1, 0, 0x80, 1]),
+	(5, &[15, 2, 1, 1]),
 ];
 
 /// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,

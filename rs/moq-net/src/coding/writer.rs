@@ -193,6 +193,11 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		Poll::Ready(Ok(()))
 	}
 
+	/// How many bytes the stream took through this writer.
+	pub fn written(&self) -> u64 {
+		self.written
+	}
+
 	/// Whether every buffered byte has hit the stream, so a FIN would not cut a message short.
 	pub fn is_flushed(&self) -> bool {
 		self.buffer.is_empty()
@@ -744,6 +749,7 @@ mod tests {
 				broadcast: crate::Path::from_static("test"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				track: "video".into(),
 			})
 			.unwrap();

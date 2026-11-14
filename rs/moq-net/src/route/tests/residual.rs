@@ -1,14 +1,12 @@
 //! What the reviews of the hop list found on meshes where neighbours know different
-//! parts of a publisher's claims, run on both rules.
+//! parts of a publisher's claims.
 //!
-//! The first three were bugs of [`Router`], which the route per scope fixes: each
-//! asserts the fix under the path rule and still pins the bug under the distance
-//! rule, which sessions run until the switch (`quest/m2/cluster-routes/switch.md`)
-//! deletes it. The others are rules either must keep.
+//! The first three were bugs of Babel's distance rule, which the route per scope
+//! fixes: each asserts the fix. The others are rules the path rule must keep.
 
 use super::*;
 
-both!(
+fixtures!(
 	a_seqno_advance_storms_between_two_grants,
 	a_relay_behind_a_scoped_neighbour_is_blind,
 	a_relay_forgets_a_claim_a_fresh_relay_would_show,
@@ -20,12 +18,9 @@ both!(
 
 /// The cost of `node`'s route for `id` under `prefix`.
 fn metric(sim: &Sim, node: Node, id: Id, prefix: &str) -> Option<Metric> {
-	match sim.rule() {
-		Rule::Distance => sim.route(node, id).map(|route| route.metric),
-		Rule::Path(_) => (sim.path(node).route_for(id, &p(prefix)))
-			.and_then(|route| route.offer())
-			.map(|offer| offer.metric),
-	}
+	(sim.path(node).route_for(id, &p(prefix)))
+		.and_then(|route| route.offer())
+		.map(|offer| offer.metric)
 }
 
 /// One advance of the origin's seqno and this mesh never goes quiet again under
@@ -57,18 +52,11 @@ fn a_seqno_advance_storms_between_two_grants(rule: Rule) {
 	sim.link(5, 6, SimLink::cost(1).grant(ga), SimLink::cost(1));
 	sim.link(5, 7, SimLink::cost(1).grant(gb), SimLink::cost(1));
 	sim.link(6, 7, SimLink::cost(3), SimLink::cost(1));
-	sim.originate(origin, 8, 0);
+	sim.originate(origin, 8);
 	sim.announce(origin, "", 0, None);
 	sim.watch(4, "a");
 	sim.watch(7, "b");
 	assert!(sim.settle(3000));
-	if rule == Rule::Distance {
-		assert_eq!(sim.seqno(origin), 0, "it converges with no request");
-		sim.bump(origin);
-		assert!(!sim.settle(500), "the storm is fixed: drop the residual");
-		assert!(sim.seqno(origin) > 20, "each lap asks the origin for another seqno");
-		return;
-	}
 	let shown = |sim: &Sim| [4, 7].map(|node| sim.shown(node).clone());
 	let before = shown(&sim);
 	sim.disconnect(origin, 4);
@@ -91,20 +79,14 @@ fn a_relay_behind_a_scoped_neighbour_is_blind(rule: Rule) {
 	sim.join(far, wide, 1);
 	sim.join(wide, relay, 1);
 	sim.join(relay, tail, 1);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	sim.announce(origin, "b/x", 0, None);
 	assert!(sim.run());
 	assert_eq!(sim.shows(wide, 7, "b/x"), Some(true));
 	for node in [relay, tail] {
 		assert_eq!(sim.shows(node, 7, "a/x"), Some(true), "node {node}");
-		let blind = rule == Rule::Distance;
-		assert_eq!(sim.shows(node, 7, "b/x"), (!blind).then_some(true), "node {node}");
-	}
-	if rule == Rule::Distance {
-		let routes: Vec<Node> = sim.babel(relay).routes(7).into_iter().map(|(next, ..)| next).collect();
-		assert_eq!(routes, [narrow], "the wide neighbour is no route either");
-		return;
+		assert_eq!(sim.shows(node, 7, "b/x"), Some(true), "node {node}");
 	}
 	assert_eq!(sim.reaches(relay, 7, &p("b/x")), Some(origin));
 	let first = sim.path(relay).forward(7, &p("b/x"), None);
@@ -142,9 +124,9 @@ fn forgetful(rule: Rule, cut: bool, narrow: bool) -> Sim {
 	sim.join(2, 3, 1);
 	sim.join(2, 5, 1);
 	sim.link(3, 4, SimLink::cost(1), SimLink::cost(2));
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "", 0, None);
-	sim.originate(other, 8, 0);
+	sim.originate(other, 8);
 	sim.announce(other, "", 0, None);
 	assert!(sim.run());
 	sim
@@ -169,8 +151,7 @@ fn a_relay_forgets_a_claim_a_fresh_relay_would_show(rule: Rule) {
 		assert_eq!(metric(sim, 0, 7, ""), Some(4));
 	}
 	assert_eq!(fresh.shows(0, 7, ""), Some(true));
-	let forgot = rule == Rule::Distance;
-	assert_eq!(sim.shows(0, 7, ""), (!forgot).then_some(true));
+	assert_eq!(sim.shows(0, 7, ""), Some(true));
 }
 
 /// A neighbour that stops certifying and returns brings back what it certified.
@@ -201,26 +182,17 @@ fn a_seqno_advance_leaves_a_relays_claims_alone(rule: Rule) {
 	sim.join(origin, narrow, 1);
 	sim.join(wide, relay, 1);
 	sim.join(narrow, relay, 1);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "", 0, None);
 	assert!(sim.run());
-	let claim = match rule {
-		Rule::Distance => "a",
-		Rule::Path(_) => "",
-	};
-	assert_eq!(sim.shows(relay, 7, claim), Some(true));
+	assert_eq!(sim.shows(relay, 7, ""), Some(true));
 
 	let before = sim.events.len();
-	match rule {
-		Rule::Distance => sim.bump(origin),
-		Rule::Path(_) => {
-			sim.disconnect(origin, narrow);
-			sim.connect(origin, narrow);
-		}
-	}
+	sim.disconnect(origin, narrow);
+	sim.connect(origin, narrow);
 	assert!(sim.settle(500));
 	assert!(sim.events[before..].iter().all(|event| event.node != relay));
-	assert_eq!(sim.shows(relay, 7, claim), Some(true));
+	assert_eq!(sim.shows(relay, 7, ""), Some(true));
 	assert_eq!(sim.shown(relay).len(), 1);
 }
 
@@ -238,10 +210,9 @@ fn two_narrowed_interests_settle(rule: Rule) {
 	sim.join(relay, b, 1);
 	sim.join(b, tail, 1);
 	sim.link(tail, a, SimLink::cost(4), SimLink::cost(1));
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "", 0, None);
 	assert!(sim.settle(3000), "never settles");
-	assert!(sim.paths() || sim.seqno(origin) <= 1);
 }
 
 /// Two relays behind a relay whose only way to the origin asked for `a`. One of
@@ -258,7 +229,7 @@ fn two_relays_behind_a_scoped_relay_let_a_dead_claim_go(rule: Rule) {
 	sim.join(relay, right, 1);
 	sim.join(left, right, 1);
 	sim.join(origin, right, 5);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	sim.announce(origin, "b/x", 0, None);
 	assert!(sim.run());

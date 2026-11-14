@@ -56,11 +56,6 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 		std::mem::take(&mut self.changed)
 	}
 
-	/// Mark `id` recomputed, whether or not anything it shows changed.
-	pub fn touch(&mut self, id: Id) {
-		self.changed.entry(id).or_default();
-	}
-
 	/// Take the events, in order.
 	pub fn events(&mut self) -> Vec<Event<A>> {
 		std::mem::take(&mut self.events)

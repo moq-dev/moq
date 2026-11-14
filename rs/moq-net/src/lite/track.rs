@@ -24,6 +24,9 @@ pub struct Track<'a> {
 	/// The Node ID of the origin that serves the request, or 0 for whichever the
 	/// publisher selects. Lite07+ only.
 	pub node: u64,
+	/// How many leading segments of the broadcast path make up the prefix of the route
+	/// the request follows (lite-07); 0 with no node named.
+	pub depth: u64,
 	pub track: Cow<'a, str>,
 }
 
@@ -34,6 +37,7 @@ impl Track<'_> {
 			broadcast: self.broadcast,
 			instance: self.instance,
 			node: self.node,
+			depth: self.depth,
 			track: Cow::Owned(self.track.into_owned()),
 		}
 	}
@@ -48,13 +52,14 @@ impl<'a> Message<'a> for Track<'a> {
 
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		let node = super::instance::decode_node(r, version)?;
+		let (node, depth) = super::instance::decode_node(r, version, &broadcast)?;
 		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
 			instance,
 			node,
+			depth,
 			track,
 		})
 	}
@@ -66,7 +71,7 @@ impl<'a> Message<'a> for Track<'a> {
 
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node)?;
+		super::instance::encode_node(w, version, self.node, self.depth)?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -512,12 +517,14 @@ mod test {
 		let msg = Track {
 			instance: None,
 			node: 5,
+			depth: 0,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("v"),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
-		// Length, the path, an empty unminted instance, the node, then the track name.
-		assert_eq!(&buf[..], [10, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 1, b'v']);
+		// Length, the path, an empty unminted instance, the node and its route's depth,
+		// then the track name.
+		assert_eq!(&buf[..], [11, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 0, 1, b'v']);
 		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, 5);
 
 		let buf = msg.encode_bytes(Version::Lite06).unwrap();
@@ -530,6 +537,7 @@ mod test {
 		let msg = Track {
 			instance: None,
 			node: 0,
+			depth: 0,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
@@ -547,6 +555,7 @@ mod test {
 		let msg = Track {
 			instance: None,
 			node: 0,
+			depth: 0,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};

@@ -561,6 +561,36 @@ async fn better_route_restarts(version: &str) {
 	);
 }
 
+/// A route through the far end of a closed link waits out the doubt. `A` loses its
+/// session to `P`, the far end, and `B`'s route names `P` too: `R` cannot tell `P` from a
+/// dead relay whose news is still on its way, so it holds the claim and moves to `B` only
+/// once the doubt lifts. The subscription through `A` ends meanwhile; a new one reads on
+/// through `B`.
+async fn waits_out_the_doubt(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let (mut topology, sub) = Topology::new(version).await;
+	let mut rx = read(sub);
+	topology.standby().await;
+
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
+	group.finish().unwrap();
+	assert_eq!(next(&mut rx).await, (0, payload(0, 0)));
+
+	topology.trigger(Trigger::Unannounce).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
+	group.finish().unwrap();
+	let remote = topology.subscriber.consume().request("live", None).await.unwrap();
+	let mut fresh = read(remote.track("video").unwrap().subscribe(None).await.unwrap());
+	assert_eq!(next(&mut fresh).await, (1, payload(1, 0)), "{version}: through B");
+	assert!(
+		std::iter::from_fn(|| rx.try_recv().ok()).all(|(_, frame)| frame.is_err()),
+		"{version}: the subscription through A read nothing more"
+	);
+}
+
 macro_rules! route_change_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
@@ -598,13 +628,10 @@ macro_rules! route_change_tests {
 				}
 
 				#[kio::test]
-				async fn unannounce_between_groups() {
-					run(Trigger::Unannounce, Position::BetweenGroups).await;
-				}
-
-				#[kio::test]
-				async fn unannounce_mid_group() {
-					run(Trigger::Unannounce, Position::MidGroup).await;
+				async fn unannounce_waits_out_the_doubt() {
+					kio::clock::timeout(TEST_TIMEOUT, waits_out_the_doubt($version))
+						.await
+						.expect("timed out");
 				}
 
 				#[kio::test]

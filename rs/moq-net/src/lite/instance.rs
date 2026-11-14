@@ -1,5 +1,5 @@
 use crate::{
-	Instance,
+	Instance, Path,
 	coding::{DecodeError, Decoder, EncodeError, Encoder},
 };
 
@@ -38,21 +38,33 @@ pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option
 	}
 }
 
-/// Encode the origin node a request names, 0 letting the publisher select one. Only
-/// lite-07 carries it, so an older peer always selects, and a node set here is dropped.
-pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: u64) -> Result<(), EncodeError> {
-	match version.has_routes() {
-		true => w.varint(node),
-		false => Ok(()),
+/// Encode the publisher a request names, 0 letting the receiver select one, and how many
+/// leading segments of the broadcast path make up the prefix of the route it follows. Only
+/// lite-07 carries them, so an older peer always selects, and what is set here is dropped.
+pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: u64, depth: u64) -> Result<(), EncodeError> {
+	if !version.has_routes() {
+		return Ok(());
 	}
+	// A route needs its publisher.
+	if node == 0 && depth != 0 {
+		return Err(EncodeError::InvalidState);
+	}
+	w.varint(node)?;
+	w.varint(depth)
 }
 
-/// Decode the origin node a request names; see [`encode_node`].
-pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version) -> Result<u64, DecodeError> {
-	match version.has_routes() {
-		true => r.varint(),
-		false => Ok(0),
+/// Decode the publisher a request for `broadcast` names, and its route's depth; see
+/// [`encode_node`]. A depth past the path's segments names no prefix of it.
+pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version, broadcast: &Path) -> Result<(u64, u64), DecodeError> {
+	if !version.has_routes() {
+		return Ok((0, 0));
 	}
+	let node = r.varint()?;
+	let depth = r.varint()?;
+	if (node == 0 && depth != 0) || depth > broadcast.parts().count() as u64 {
+		return Err(DecodeError::InvalidValue);
+	}
+	Ok((node, depth))
 }
 
 /// Encode the instance, its minted flag, and the epoch an announcement serves. Every route

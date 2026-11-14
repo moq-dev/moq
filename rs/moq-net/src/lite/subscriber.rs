@@ -915,6 +915,7 @@ impl Subscriber {
 			| lite::AnnounceBroadcast::RouteUpdate { .. }
 			| lite::AnnounceBroadcast::RouteHold { .. }
 			| lite::AnnounceBroadcast::RouteEnd { .. }
+			| lite::AnnounceBroadcast::Dead(_)
 			| lite::AnnounceBroadcast::Floor { .. }
 			| lite::AnnounceBroadcast::WarmStart { .. }
 			| lite::AnnounceBroadcast::WarmUpdate { .. }
@@ -1462,7 +1463,7 @@ impl Drop for SubscriberDriver {
 		// dropped without that still has to name an end before its setup machines drop.
 		self.subscriber.note_end(&Error::Cancel);
 		// Every announce stream closes with the session: disconnect them together.
-		let _closing = self.subscriber.origin.route_closing();
+		let _closing = self.subscriber.origin.route_closing(self.subscriber.peer_setup.tag());
 		self.announces = kio::Tasks::new();
 	}
 }
@@ -2796,15 +2797,18 @@ impl AnnouncePrefix {
 
 		// Waiting for the link cost (may block on the peer's SETUP).
 		let link_cost: u64 = wait!(Cost => self.subscriber.poll_link_cost(waiter));
-		// Lite-07: a scoped peer's routes file under the route key its SETUP proved, so
-		// that waits for the SETUP. An unscoped peer's identities file as they are.
+		// Lite-07: the route layer files a scoped peer's routes under the route key it
+		// proved, so that waits for the SETUP. It names the peer by the Node ID the SETUP
+		// declared, or else by the last hop of the first route the peer sends.
 		let scoped: bool = version.has_routes()
-			&& (self.subscriber.auth)
+			&& self
+				.subscriber
+				.auth
 				.permit(crate::auth::Direction::Subscribe)
 				.regions()
 				.is_some();
 		wait!(RouteKey => match scoped {
-			true => self.subscriber.peer_setup.poll_route_key(waiter).map(|_| ()),
+			true => self.subscriber.peer_setup.poll_node(waiter).map(|_| ()),
 			false => Poll::Ready(()),
 		});
 		let mut run: PrefixRun = PrefixRun {
@@ -2943,7 +2947,7 @@ impl AnnouncePrefix {
 			// above. Each route parks on its own waker, so the rest cost nothing.
 			run.announced.poll_serve(&self.subscriber, waiter);
 			if let Some(routed) = &mut run.routed {
-				routed.poll(&self.subscriber, &mut stream.writer, waiter)?;
+				routed.poll(&self.subscriber, waiter)?;
 			}
 			Poll::Pending
 		}))
@@ -2957,6 +2961,8 @@ struct MintedSource {
 	instance: Option<crate::Instance>,
 	/// The origin node every request names (lite-07), or 0.
 	node: u64,
+	/// How many leading segments of the path make up the route's prefix (lite-07).
+	depth: u64,
 	source: crate::model::broadcast::SourceGuard,
 	/// The source's track handler, registered before its requester could ask for a track.
 	dynamic: crate::broadcast::Requests,
@@ -2975,6 +2981,8 @@ struct SourceServe {
 	path: Path,
 	instance: Option<crate::Instance>,
 	node: u64,
+	/// How many leading segments of the path make up the route's prefix (lite-07).
+	depth: u64,
 	source: crate::model::broadcast::SourceGuard,
 	dynamic: crate::broadcast::Requests,
 	route: kio::Consumer<()>,
@@ -3053,6 +3061,7 @@ impl TracksRecv {
 					broadcast: source.path.clone(),
 					instance: source.instance.clone(),
 					node: source.node,
+					depth: source.depth,
 				})?;
 				self.stream.insert(stream)
 			}
@@ -3119,6 +3128,7 @@ impl SourceServe {
 			path: minted.path,
 			instance: minted.instance,
 			node: minted.node,
+			depth: minted.depth,
 			source: minted.source,
 			datagram_requests: minted.dynamic.datagrams(),
 			dynamic: minted.dynamic,
@@ -3213,7 +3223,7 @@ impl kio::Task for SourceServe {
 				let serve = DatagramServe::new(
 					self.subscriber.clone(),
 					self.path.clone(),
-					(self.instance.clone(), self.node),
+					(self.instance.clone(), self.node, self.depth),
 					self.dynamic.validity().clone(),
 					self.source.consume(),
 					request,
@@ -3232,6 +3242,7 @@ impl kio::Task for SourceServe {
 						path: self.path.clone(),
 						instance: self.instance.clone(),
 						node: self.node,
+						depth: self.depth,
 						name: request.name().to_string(),
 					};
 					// One machine per track serves its lone subscription and any number
@@ -3284,6 +3295,8 @@ struct DatagramServe {
 	path: Path,
 	instance: Option<crate::Instance>,
 	node: u64,
+	/// How many leading segments of the path make up the route's prefix (lite-07).
+	depth: u64,
 	validity: crate::model::broadcast::RequestValidity,
 	// A dedicated close-watch handle.
 	closed: Transport,
@@ -3346,7 +3359,7 @@ impl DatagramServe {
 	fn new(
 		subscriber: Subscriber,
 		path: Path,
-		(instance, node): (Option<crate::Instance>, u64),
+		(instance, node, depth): (Option<crate::Instance>, u64, u64),
 		validity: crate::model::broadcast::RequestValidity,
 		source: crate::broadcast::Consumer,
 		request: datagram::Request,
@@ -3361,6 +3374,7 @@ impl DatagramServe {
 			path,
 			instance,
 			node,
+			depth,
 			validity,
 			id,
 			source: Some(source),
@@ -3461,6 +3475,7 @@ impl DatagramServe {
 						broadcast: self.path.clone(),
 						instance: self.instance.clone(),
 						node: self.node,
+						depth: self.depth,
 						track: request.name().to_string().into(),
 						priority,
 					})?;
@@ -6140,6 +6155,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -6205,6 +6221,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6312,6 +6329,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6365,6 +6383,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6875,6 +6894,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -6950,6 +6970,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -7067,6 +7088,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -7140,6 +7162,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -7318,6 +7341,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -7391,6 +7415,7 @@ mod tests {
 					path: Path::from_static("room"),
 					instance: None,
 					node: 0,
+					depth: 0,
 					name: "video".into(),
 				};
 				let info = track::Info::default().with_timescale(None);
@@ -7466,6 +7491,7 @@ mod tests {
 					path: Path::from_static("room"),
 					instance: None,
 					node: 0,
+					depth: 0,
 					name: "video".to_string(),
 				},
 				request,
@@ -7520,6 +7546,7 @@ mod tests {
 			path: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "video".to_string(),
 		};
 		(waiting, TrackServeRun::new(serve, request))
@@ -7858,6 +7885,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -7907,6 +7935,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				source: crate::model::broadcast::SourceGuard::new(broadcast),
 				dynamic,
 				route: route.consume(),
@@ -8053,6 +8082,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -8106,6 +8136,7 @@ mod tests {
 			path: Path::from_static("room/host"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "catalog.json".to_string(),
 		};
 
@@ -8175,6 +8206,7 @@ mod tests {
 			path: Path::from_static("room/host"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "audio".to_string(),
 		};
 
@@ -8240,6 +8272,7 @@ mod tests {
 				path: Path::from_static("room/host"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "audio".to_string(),
 			};
 
@@ -8338,6 +8371,7 @@ mod tests {
 			path: Path::from_static("room/host"),
 			instance: None,
 			node: 0,
+			depth: 0,
 			name: "audio".to_string(),
 		};
 
@@ -8401,6 +8435,7 @@ mod tests {
 				path: Path::from_static("room/host"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "audio".to_string(),
 			};
 
@@ -8520,6 +8555,7 @@ mod tests {
 					path: Path::from_static("room/host"),
 					instance: None,
 					node: 0,
+					depth: 0,
 					name: "catalog.json".to_string(),
 				},
 				session,
@@ -8596,6 +8632,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -8670,6 +8707,7 @@ mod tests {
 				path: Path::from_static("room"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -10054,19 +10092,24 @@ mod tests {
 		}
 	}
 
-	/// A lite-07 ROUTE_START to the origin node `node`.
+	/// A lite-07 ROUTE_START to the publisher `node`, which the peer sends itself.
 	fn route_start(node: crate::route::Id) -> impl Fn(&mut crate::coding::Encoder<'_>) {
 		move |w| {
-			let advert = crate::route::Advert {
-				seqno: 0,
+			let offer = crate::route::path::Offer {
+				path: [crate::route::path::Hop { node, session: 0 }].into(),
+				draining: false,
+				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
 				rtt: None,
-				hops: [].into(),
 			};
-			lite::AnnounceBroadcast::RouteStart { node, advert }
-				.encode(w, Version::Lite07)
-				.unwrap()
+			lite::AnnounceBroadcast::RouteStart {
+				node,
+				suffix: Path::empty(),
+				offer,
+			}
+			.encode(w, Version::Lite07)
+			.unwrap()
 		}
 	}
 
@@ -10285,18 +10328,23 @@ mod tests {
 		}
 	}
 
-	/// An advertisement body: seqno 1, metric 0, `flags`, then `hops` hops, and `rest`.
-	fn advert_body(lead: u64, seqno: u64, flags: u8, hops: u64, rest: &[u8]) -> Vec<u8> {
+	/// A route message body: `lead` (a ROUTE_START's Node ID and empty suffix, or a
+	/// ROUTE_UPDATE's Route ID), then an offer along `hops` hops from Node ID `first` up,
+	/// with `flags`, the top priority, metric 0, and `rest`.
+	fn offer_body(lead: &[u64], hops: u64, first: u64, flags: u8, rest: &[u8]) -> Vec<u8> {
 		let mut body = Vec::new();
 		let w = &mut crate::coding::Encoder::new(&mut body, Version::Lite07.into());
-		w.varint(lead).unwrap();
-		w.varint(seqno).unwrap();
-		w.varint(0).unwrap();
-		w.u8(flags);
+		for field in lead {
+			w.varint(*field).unwrap();
+		}
 		w.varint(hops).unwrap();
 		for hop in 0..hops {
-			w.varint(100 + hop).unwrap();
+			w.varint(first + hop).unwrap();
+			w.varint(0).unwrap();
 		}
+		w.u8(flags);
+		w.u8(0xff);
+		w.varint(0).unwrap();
 		w.slice(rest);
 		body
 	}
@@ -10304,15 +10352,15 @@ mod tests {
 	const ROUTE_START: u64 = 6;
 	const ROUTE_UPDATE: u64 = 7;
 
-	/// Every advertisement a relay refuses as content: a flag no version defines (with the
-	/// field it might announce), the last seqno, and more hops than a route may cross.
-	fn refused_adverts(lead: u64) -> [(&'static str, Vec<u8>); 3] {
+	/// Every offer a relay refuses as content: a flag no version defines (with the field it
+	/// might announce), a hop naming Node ID 0, and more hops than a route may cross.
+	fn refused_offers(lead: &[u64]) -> [(&'static str, Vec<u8>); 3] {
 		[
-			("an unknown flag", advert_body(lead, 1, 0x80, 0, &[42])),
-			("the last seqno", advert_body(lead, crate::route::MAX, 0, 0, &[])),
+			("an unknown flag", offer_body(lead, 1, 100, 0x80, &[42])),
+			("a hop naming node 0", offer_body(lead, 2, 0, 0, &[])),
 			(
 				"33 hops",
-				advert_body(lead, 1, 0, crate::route::MAX_HOPS as u64 + 1, &[]),
+				offer_body(lead, crate::route::MAX_HOPS as u64 + 1, 100, 0, &[]),
 			),
 		]
 	}
@@ -10340,7 +10388,7 @@ mod tests {
 	/// once the neighbour forwards it usably again.
 	#[kio::test]
 	async fn a_refused_route_update_withdraws_only_that_route() {
-		for (what, body) in refused_adverts(0) {
+		for (what, body) in refused_offers(&[0]) {
 			let session = crate::lite::test_transport::ScriptedSession::new(two_routes());
 			let log = session.log.clone();
 			let (registry, stats) = counted();
@@ -10369,7 +10417,7 @@ mod tests {
 			cursor.assert_next_active("c");
 
 			// Forwarded usably again, the route files its last floor's claims again.
-			push(&[&raw(ROUTE_UPDATE, advert_body(0, 2, 0, 0, &[]))]);
+			push(&[&raw(ROUTE_UPDATE, offer_body(&[0], 1, 7, 0, &[]))]);
 			poll(&mut prefix);
 			cursor.assert_next_active("a");
 			cursor.assert_next_wait();
@@ -10397,8 +10445,8 @@ mod tests {
 	/// the reserved node, and ROUTE_END retires it like any other.
 	#[kio::test]
 	async fn a_refused_route_start_holds_its_route_id() {
-		let mut cases = refused_adverts(7).map(|(what, body)| (what, body, true)).to_vec();
-		cases.push(("node 0", advert_body(0, 1, 0, 0, &[]), false));
+		let mut cases = refused_offers(&[7, 0]).map(|(what, body)| (what, body, true)).to_vec();
+		cases.push(("node 0", offer_body(&[0, 0], 1, 7, 0, &[]), false));
 		for (what, body, revives) in cases {
 			let script = announce_script(
 				Version::Lite07,
@@ -10426,7 +10474,7 @@ mod tests {
 
 			session.push(&announce_script(
 				Version::Lite07,
-				&[&raw(ROUTE_UPDATE, advert_body(0, 2, 0, 0, &[]))],
+				&[&raw(ROUTE_UPDATE, offer_body(&[0], 1, 7, 0, &[]))],
 			));
 			poll(&mut prefix);
 			match revives {
@@ -10600,7 +10648,7 @@ mod tests {
 		let unknown: [(&str, Vec<u8>, u64); 3] = [
 			(
 				"a refused update of an unknown route",
-				refused_adverts(5)[0].1.clone(),
+				refused_offers(&[5])[0].1.clone(),
 				ROUTE_UPDATE,
 			),
 			("a refused change of an unknown claim", vec![9, 0, 0], ANNOUNCE_UPDATE),
@@ -11383,7 +11431,7 @@ impl Announced {
 				continue;
 			};
 			// No origin node to name before lite-07.
-			mint_sources(subscriber, entry, 0);
+			mint_sources(subscriber, entry, (0, 0));
 		}
 	}
 
@@ -11429,9 +11477,13 @@ impl Announced {
 
 /// Serve the queued requests on a route whose queue woke: mint a source per requested
 /// path, answer the requester with its consumer, and hand the source to the driver's
-/// serve machines. Every request through it names the origin node `node` (lite-07; 0
-/// lets the peer select).
-fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry: &mut AnnouncedRoute<K>, node: u64) {
+/// serve machines. Every request through it names the publisher `node` and the depth of
+/// the route it follows (lite-07; 0 lets the peer select).
+fn mint_sources<K: Clone + Send + Sync + 'static>(
+	subscriber: &Subscriber,
+	entry: &mut AnnouncedRoute<K>,
+	(node, depth): (u64, u64),
+) {
 	let root = subscriber.origin.root();
 	// Cleared before polling, so a request landing mid-pass queues the route again.
 	entry.wake.popped();
@@ -11464,6 +11516,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
 			path,
 			instance: entry.route.instance.clone(),
 			node,
+			depth,
 			source: crate::model::broadcast::SourceGuard::new(source),
 			dynamic,
 			route: entry.live.consume(),
@@ -11552,6 +11605,8 @@ struct TrackServe {
 	instance: Option<crate::Instance>,
 	/// The origin node to ask for (lite-07), or 0 to let the peer select.
 	node: u64,
+	/// How many leading segments of the path make up the route's prefix (lite-07).
+	depth: u64,
 	name: String,
 }
 
@@ -12080,6 +12135,7 @@ impl Establish {
 		let msg = lite::Subscribe {
 			instance: self.serve.instance.clone(),
 			node: self.serve.node,
+			depth: self.serve.depth,
 			id: self.id,
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
@@ -12745,6 +12801,7 @@ impl TrackInfoFetch {
 		stream.writer.buffer(&lite::Track {
 			instance: serve.instance.clone(),
 			node: serve.node,
+			depth: serve.depth,
 			broadcast: serve.path.clone(),
 			track: serve.name.as_str().into(),
 		})?;
@@ -14167,6 +14224,7 @@ impl kio::Task for FetchServeRun {
 					let msg = lite::Fetch {
 						instance: self.serve.instance.clone(),
 						node: self.serve.node,
+						depth: self.serve.depth,
 						broadcast: self.serve.path.clone(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),

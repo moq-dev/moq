@@ -6,7 +6,7 @@ use std::time::Duration;
 use super::*;
 
 fn originate(sim: &mut Sim, node: Node, id: Id) {
-	sim.originate(node, id, 0);
+	sim.originate(node, id);
 	sim.announce(node, "", 0, None);
 }
 
@@ -16,10 +16,17 @@ fn ms(ms: u64) -> Option<Duration> {
 
 /// The RTT `node` advertises to `peer` for `id`.
 fn advertised(sim: &Sim, node: Node, peer: Node, id: Id) -> Option<Duration> {
-	match sim.sent(node, peer, id) {
-		Some(Reach::Finite(advert)) => advert.rtt,
-		other => panic!("{node} sends {peer} {other:?}"),
+	match sim.offer(node, peer, id, &Path::empty()) {
+		Some(offer) => offer.rtt,
+		None => panic!("{node} sends {peer} no route for {id}"),
 	}
+}
+
+/// The next hop, metric, and RTT of `node`'s route for `id`.
+fn route(sim: &Sim, node: Node, id: Id) -> Option<(Option<Node>, Metric, Option<Duration>)> {
+	let route = sim.path(node).route_for(id, &Path::empty())?;
+	let offer = route.offer()?;
+	Some((route.next(), offer.metric, offer.rtt))
 }
 
 /// A chain origin, a, b, c: each relay measures its link toward the origin.
@@ -44,8 +51,7 @@ fn each_relay_adds_its_link_to_the_sum() {
 	assert_eq!(advertised(&sim, origin, a, 7), ms(0), "the origin's own route");
 	assert_eq!(advertised(&sim, a, b, 7), ms(10));
 	assert_eq!(advertised(&sim, b, c, 7), ms(30));
-	let routes = sim.babel(c).routes(7);
-	assert_eq!(routes, [(b, 3, ms(60))]);
+	assert_eq!(route(&sim, c, 7), Some((Some(b), 3, ms(60))));
 }
 
 /// A shift on one link sends one ROUTE_UPDATE on each stream carrying the route from
@@ -77,7 +83,7 @@ fn an_unknown_link_ends_the_sum() {
 	assert!(sim.run());
 	assert_eq!(advertised(&sim, a, b, 7), ms(10));
 	assert_eq!(advertised(&sim, b, c, 7), None);
-	assert_eq!(sim.babel(c).routes(7)[0].2, None);
+	assert_eq!(route(&sim, c, 7).and_then(|(_, _, rtt)| rtt), None);
 }
 
 /// The metric selects; a far lower RTT through a costlier link changes nothing.
@@ -93,6 +99,6 @@ fn rtt_never_selects_a_route() {
 	sim.rtt(fast, origin, Some(1));
 	originate(&mut sim, origin, 7);
 	assert!(sim.run());
-	assert_eq!(sim.route(edge, 7).and_then(|route| route.next), Some(cheap));
+	assert_eq!(sim.next_hop(edge, 7), Some(cheap));
 	assert_eq!(advertised(&sim, cheap, edge, 7), ms(200));
 }

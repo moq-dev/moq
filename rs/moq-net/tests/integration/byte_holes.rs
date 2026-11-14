@@ -110,6 +110,8 @@ async fn a_half_read_frame_continues_from_its_byte() {
 	}
 	assert!(got == payload, "the frame continues at its byte");
 
+	// A publisher bills what the transport acknowledged, which trails what `E` read.
+	settle().await;
 	let rest = (SIZE - HALF) as u64;
 	let sent = sent(&registry);
 	assert!(sent >= rest, "{sent} bytes cannot carry the {rest} left");

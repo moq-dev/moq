@@ -454,6 +454,8 @@ struct PeerSetupState {
 	/// What the peer's route key proof must sign, or `None` when the transport cannot bind
 	/// one to this session, so any proof leaves the peer unproven.
 	transcript: Option<crate::route::Transcript>,
+	/// Unique to the session, so the route layer tells its streams' sessions apart.
+	tag: u64,
 }
 
 /// Where the peer's SETUP stands.
@@ -512,6 +514,12 @@ impl PeerSetupState {
 	}
 }
 
+/// A tag no other session holds: every route stream of one session shares it.
+pub(crate) fn session_tag() -> u64 {
+	static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+	NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl PeerSetup {
 	pub fn new(client: bool, address: crate::transport::Address) -> Self {
 		Self(kio::Shared::new(PeerSetupState {
@@ -522,7 +530,23 @@ impl PeerSetup {
 			implementation: Default::default(),
 			accept: None,
 			transcript: None,
+			tag: session_tag(),
 		}))
+	}
+
+	/// Unique to this session: every route stream of the session shares it.
+	pub fn tag(&self) -> u64 {
+		self.0.read().tag
+	}
+
+	/// The Node ID the peer's SETUP declared (lite-07), once it arrived.
+	pub fn node(&self) -> Option<std::num::NonZeroU64> {
+		self.0.read().setup().and_then(|setup| setup.node)
+	}
+
+	/// Poll for the Node ID the peer's SETUP declared (lite-07), waiting until it arrives.
+	pub fn poll_node(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<std::num::NonZeroU64>> {
+		self.poll_get(waiter, |setup| setup.node)
 	}
 
 	/// Check the peer's route key proof against `transcript`, this session's.
@@ -593,16 +617,6 @@ impl PeerSetup {
 	/// The route key the peer proved, once its SETUP arrived.
 	pub fn route_key(&self) -> Option<[u8; 32]> {
 		self.0.lock().route_key()
-	}
-
-	/// Poll for the route key the peer proved, waiting until its SETUP arrives.
-	/// `None` when it proved none.
-	pub fn poll_route_key(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<[u8; 32]>> {
-		let state = std::task::ready!(self.0.poll(waiter, |state| match state.setup() {
-			Some(_) => std::task::Poll::Ready(()),
-			None => std::task::Poll::Pending,
-		}));
-		std::task::Poll::Ready(state.route_key())
 	}
 
 	/// Claim the Setup Stream before decoding its body, refusing any second stream.
