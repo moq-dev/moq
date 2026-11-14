@@ -1205,7 +1205,7 @@ export class Subscriber {
 			while (!receiving) {
 				if (!wantedRuns(fill).some((run) => run.start < until && run.end > start))
 					throw new StreamError(StreamCode.Cancel);
-				await untilAborted(fillChanged(fill), active);
+				await untilAborted(Promise.resolve(fillChanged(fill)), active);
 			}
 			await untilAborted(receiving.unwanted(), active);
 			throw new StreamError(StreamCode.Cancel);

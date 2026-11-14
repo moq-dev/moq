@@ -1256,7 +1256,7 @@ impl StreamsState {
 		if !stream.released
 			&& let Some(end) = stream.end()
 		{
-			self.ends.insert(id, (end, stream.pending.acked()));
+			self.ends.insert(id, (end, stream.acked_len()));
 		}
 	}
 

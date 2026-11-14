@@ -11,6 +11,7 @@ import { rescale } from "./rescale.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { authoredInfo, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
+import { LIVE, rangesStart } from "./window.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -631,6 +632,30 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	const none = producer.subscription.changed();
 	bounded.close();
 	expect(await none).toBeUndefined();
+});
+
+// A reader without ranges reads from the oldest group, as Rust's `Range::oldest()` default does,
+// so beside a history reader the union still reaches the history floor and below it. A reader that
+// asks for the live edge alone keeps the history reader's floor as its own range.
+test("a reader without ranges keeps a history reader's floor", () => {
+	const producer = new TrackProducer("test");
+	const history = producer.subscribe({ ranges: [{ start: { absolute: 5n }, end: { absolute: 9n } }] });
+	const plain = producer.subscribe();
+	expect(producer.subscription.peek()?.ranges).toEqual([{}]);
+	expect(rangesStart(producer.subscription.peek()?.ranges ?? [])).toBeUndefined();
+
+	plain.close();
+	history.close();
+
+	const other = new TrackProducer("test");
+	const kept = other.subscribe({ ranges: [{ start: { absolute: 5n }, end: { absolute: 9n } }] });
+	const live = other.subscribe({ ranges: [LIVE] });
+	expect(other.subscription.peek()?.ranges).toEqual([
+		{ start: { absolute: 5n }, end: { absolute: 9n } },
+		{ start: { relative: 0n } },
+	]);
+	live.close();
+	kept.close();
 });
 
 test("each reader reads only its own ranges, whatever the union asks for", () => {

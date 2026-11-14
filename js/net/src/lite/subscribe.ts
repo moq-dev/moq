@@ -184,12 +184,11 @@ export function hasWireTime(ranges: readonly WireRange[] | undefined): boolean {
 	return ranges?.some((range) => range.start?.time !== undefined || range.end?.time !== undefined) ?? false;
 }
 
-/** Encode one lite-07 range end, `undefined` for none: an absolute end names a group's first frame. */
+/** Encode one lite-07 range end, `undefined` for none: an absolute end stops before its group. */
 async function encodeAnchor(w: Writer, anchor: WireAnchor | undefined) {
 	if (anchor?.absolute !== undefined) {
 		await w.u53(1);
 		await w.u62(anchor.absolute);
-		await w.u53(0);
 	} else if (anchor?.relative !== undefined) {
 		await w.u53(2);
 		await w.u62(anchor.relative);
@@ -223,27 +222,15 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 		return;
 	}
 
-	const { startGroup, startFrame, endGroup, endFrame } = span;
-	if ((startFrame !== 0 && startGroup === undefined) || (endFrame !== undefined && endGroup === undefined)) {
-		throw new Error("frame bound without a group bound");
-	}
+	// A lite-07 range covers whole groups: a slice of one is a FETCH.
+	if (span.startFrame !== 0 || span.endFrame !== undefined)
+		throw new Error("frame bounds not supported for this version");
 	await w.u53(1);
-	// Each end is a type, then its fields: 0 is none (the oldest group as a start, the live
-	// edge as an end) and 1 an absolute position, which an end stops just before.
-	if (startGroup === undefined) {
-		await w.u53(0);
-	} else {
-		await w.u53(1);
-		await w.u62(startGroup);
-		await w.u53(startFrame);
-	}
-	if (endGroup === undefined) {
-		await w.u53(0);
-	} else {
-		await w.u53(1);
-		await w.u62(endFrame === undefined ? endGroup + 1n : endGroup);
-		await w.u53(endFrame === undefined ? 0 : endFrame + 1);
-	}
+	const range: WireRange = {};
+	if (span.startGroup !== undefined) range.start = { absolute: span.startGroup };
+	if (span.endGroup !== undefined) range.end = { absolute: span.endGroup + 1n };
+	await encodeAnchor(w, range.start);
+	await encodeAnchor(w, range.end);
 }
 
 /**
@@ -273,93 +260,70 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }, timescale:
 	return [range];
 }
 
-/** A position as a comparable pair, group then frame. */
-export type Point = [group: bigint, frame: number];
-
-function before(a: Point, b: Point): boolean {
-	return a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
-}
-
-/**
- * Decode one lite-07 range end: its absolute position, if any, and the wire anchor, `undefined`
- * for none. An absolute end past frame 0 includes its group.
- */
-async function decodeAnchor(r: Reader, end: boolean): Promise<{ point?: Point; anchor?: WireAnchor }> {
+/** Decode one lite-07 range end, `undefined` for none. */
+async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
 	const kind = await r.u53();
 	switch (kind) {
 		case 0:
-			return {};
-		case 1: {
-			const point: Point = [await r.u62(), await r.u53()];
-			return { point, anchor: { absolute: end && point[1] > 0 ? point[0] + 1n : point[0] } };
-		}
+			return undefined;
+		case 1:
+			return { absolute: await r.u62() };
 		case 2:
-			return { anchor: { relative: await r.u62() } };
+			return { relative: await r.u62() };
 		case 3:
-			return { anchor: { time: await r.u53() } };
+			return { time: await r.u53() };
 		default:
 			throw new ProtocolViolation(`unknown range anchor: ${kind}`);
 	}
 }
 
-/**
- * A decoded lite-07 range, with the positions its absolute anchors name, which a
- * {@link WireRange} rounds to whole groups.
- */
-export interface RangeEntry {
-	range: WireRange;
-	from?: Point;
-	to?: Point;
-}
-
 /** Decode one lite-07 range: its start, then its end. */
-async function decodeEntry(r: Reader): Promise<RangeEntry> {
-	const from = await decodeAnchor(r, false);
-	const to = await decodeAnchor(r, true);
+async function decodeRange(r: Reader): Promise<WireRange> {
+	const start = await decodeAnchor(r);
+	const end = await decodeAnchor(r);
 	const range: WireRange = {};
-	if (from.anchor) range.start = from.anchor;
-	if (to.anchor) range.end = to.anchor;
-	// Empty partway through a group, which whole groups can't say: keep its place,
-	// covering no group, as the Rust publisher does.
-	if (from.point && to.point && !before(from.point, to.point)) range.end = { absolute: from.point[0] };
-	return { range, from: from.point, to: to.point };
+	if (start) range.start = start;
+	if (end) range.end = end;
+	// Ending at or before its start: keep its place, covering no group, as the Rust publisher does.
+	if (start?.absolute !== undefined && end?.absolute !== undefined && end.absolute < start.absolute)
+		range.end = { absolute: start.absolute };
+	return range;
 }
 
 /** Decode a lite-07 `Range Count` and its ranges, which may be none. */
-async function decodeEntries(r: Reader): Promise<RangeEntry[]> {
+async function decodeRanges(r: Reader): Promise<WireRange[]> {
 	// Not preallocated: each range costs at least two bytes of the bounded message.
-	const entries: RangeEntry[] = [];
-	for (let count = await r.u53(); count > 0; count--) entries.push(await decodeEntry(r));
-	return entries;
+	const ranges: WireRange[] = [];
+	for (let count = await r.u53(); count > 0; count--) ranges.push(await decodeRange(r));
+	return ranges;
 }
 
 /**
- * Lite-07 `entries` as their ranges and the one span covering every one of them, which the
- * subscriber narrows again.
+ * Lite-07 `ranges` and the one span covering every one of them, which the subscriber narrows
+ * again. A range covers whole groups, so the span bounds no frame.
  */
-export function spanOf(version: Version, entries: readonly RangeEntry[]): Span & { ranges: WireRange[] } {
-	let start: Point | undefined;
-	let end: Point | undefined;
+export function spanOf(version: Version, ranges: readonly WireRange[]): Span & { ranges: WireRange[] } {
+	let start: bigint | undefined;
+	let end: bigint | undefined;
 	let floor = true;
 	let live = false;
-	for (const { from, to } of entries) {
+	for (const range of ranges) {
+		const from = range.start?.absolute;
+		const to = range.end?.absolute;
 		if (from === undefined) floor = false;
-		else if (start === undefined || before(from, start)) start = from;
+		else if (start === undefined || from < start) start = from;
 		if (to === undefined) live = true;
-		else if (end === undefined || before(end, to)) end = to;
+		else if (end === undefined || end < to) end = to;
 	}
 	if (!floor) start = undefined;
 	if (live) end = undefined;
-	// An exclusive end at the very first position names nothing.
-	if (end !== undefined && end[0] === 0n && end[1] === 0) throw new ProtocolViolation(EMPTY_RANGE);
-
-	const startFrame = start?.[1] ?? 0;
+	// An exclusive end at the very first group names nothing.
+	if (end === 0n) throw new ProtocolViolation(EMPTY_RANGE);
 	return {
-		ranges: entries.map((entry) => entry.range),
-		startGroup: canonicalStartGroup(version, start?.[0], startFrame),
-		startFrame,
-		endGroup: end === undefined ? undefined : end[1] === 0 ? end[0] - 1n : end[0],
-		endFrame: end === undefined || end[1] === 0 ? undefined : end[1] - 1,
+		ranges: [...ranges],
+		startGroup: canonicalStartGroup(version, start, 0),
+		startFrame: 0,
+		endGroup: end === undefined ? undefined : end - 1n,
 	};
 }
 
@@ -367,10 +331,7 @@ export function spanOf(version: Version, entries: readonly RangeEntry[]): Span &
  * The inverse of {@link encodeSpan}. A lite-07 list decodes as its ranges and as the one span
  * covering every range in it, which the subscriber narrows again.
  */
-async function decodeSpan(
-	r: Reader,
-	version: Version,
-): Promise<Span & { ranges?: WireRange[]; entries?: RangeEntry[] }> {
+async function decodeSpan(r: Reader, version: Version): Promise<Span & { ranges?: WireRange[] }> {
 	if (!hasRanges(version)) {
 		const startGroup = await decodeStartGroup(r, version);
 		const endGroup = (await r.u62()) || undefined;
@@ -379,45 +340,36 @@ async function decodeSpan(
 		return { startGroup: canonicalStartGroup(version, startGroup, frames.startFrame), endGroup: end, ...frames };
 	}
 
-	const entries = await decodeEntries(r);
-	if (entries.length === 0) throw new ProtocolViolation("a subscription asks for no range");
-	return { ...spanOf(version, entries), entries };
+	const ranges = await decodeRanges(r);
+	if (ranges.length === 0) throw new ProtocolViolation("a subscription asks for no range");
+	return spanOf(version, ranges);
 }
 
 /**
- * The ranges `msg` carries as lite-07 entries: its decoded list, or else the one span it
- * encodes as its only range.
+ * The ranges `msg` carries on lite-07: its list, or else the one span it encodes as its only
+ * range, in whole groups.
  */
-export function entriesOf(msg: Span & { ranges?: WireRange[]; entries?: RangeEntry[] }): RangeEntry[] {
-	if (msg.entries) return msg.entries;
-	if (msg.ranges) return msg.ranges.map((range) => ({ range }));
+export function rangesOf(msg: Span & { ranges?: WireRange[] }): WireRange[] {
+	if (msg.ranges) return msg.ranges;
 	const range: WireRange = {};
-	const entry: RangeEntry = { range };
-	if (msg.startGroup !== undefined) {
-		range.start = { absolute: msg.startGroup };
-		entry.from = [msg.startGroup, msg.startFrame];
-	}
-	if (msg.endGroup !== undefined) {
-		entry.to = msg.endFrame === undefined ? [msg.endGroup + 1n, 0] : [msg.endGroup, msg.endFrame + 1];
-		range.end = { absolute: msg.endGroup + 1n };
-	}
-	return [entry];
+	if (msg.startGroup !== undefined) range.start = { absolute: msg.startGroup };
+	if (msg.endGroup !== undefined) range.end = { absolute: msg.endGroup + 1n };
+	return [range];
 }
 
 /** The bytes a lite-07 range takes on the wire, whose varints count leading ones. */
-function entrySize({ range, from, to }: RangeEntry): number {
+function rangeSize(range: WireRange): number {
 	const size = (value: number | bigint) => {
 		const lo = split(value);
 		return lengthLeadingOnes(parts.hi, lo);
 	};
-	const anchor = (anchor: WireAnchor | undefined, point: Point | undefined): number => {
-		if (point) return size(1) + size(point[0]) + size(point[1]);
-		if (anchor?.absolute !== undefined) return size(1) + size(anchor.absolute) + size(0);
+	const anchor = (anchor: WireAnchor | undefined): number => {
+		if (anchor?.absolute !== undefined) return size(1) + size(anchor.absolute);
 		if (anchor?.relative !== undefined) return size(2) + size(anchor.relative);
 		if (anchor?.time !== undefined) return size(3) + size(anchor.time);
 		return size(0);
 	};
-	return anchor(range.start, from) + anchor(range.end, to);
+	return anchor(range.start) + anchor(range.end);
 }
 
 /** A range's anchors as a key, so equal ranges compare equal. */
@@ -443,39 +395,38 @@ export class LiveRanges {
 	readonly #version: Version;
 	#next = 0n;
 	// In Range ID order, since each id is the next.
-	readonly #live = new Map<bigint, RangeEntry>();
+	readonly #live = new Map<bigint, WireRange>();
 	// The bytes the live ranges take on the wire, held to what one SUBSCRIBE carries.
 	#size = 0;
 	/** How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports. */
 	readonly initial: bigint;
 
 	/** The ranges a SUBSCRIBE carried. */
-	constructor(version: Version, ranges: readonly (RangeEntry | WireRange)[]) {
+	constructor(version: Version, ranges: readonly WireRange[]) {
 		this.#version = version;
 		this.initial = BigInt(ranges.length);
 		this.#add(ranges);
 	}
 
-	#add(ranges: readonly (RangeEntry | WireRange)[]) {
+	#add(ranges: readonly WireRange[]) {
 		for (const range of ranges) {
-			const entry = "range" in range ? (range as RangeEntry) : { range: range as WireRange };
 			// Only lite-07 numbers ranges on the wire, and only it is held to one SUBSCRIBE.
-			if (hasRanges(this.#version)) this.#size += entrySize(entry);
-			this.#live.set(this.#next++, entry);
+			if (hasRanges(this.#version)) this.#size += rangeSize(range);
+			this.#live.set(this.#next++, range);
 		}
 	}
 
 	#remove(id: bigint): boolean {
-		const entry = this.#live.get(id);
-		if (!entry) return false;
-		if (hasRanges(this.#version)) this.#size -= entrySize(entry);
+		const range = this.#live.get(id);
+		if (!range) return false;
+		if (hasRanges(this.#version)) this.#size -= rangeSize(range);
 		this.#live.delete(id);
 		return true;
 	}
 
 	/** The live range with Range ID `id`. */
 	get(id: bigint): WireRange | undefined {
-		return this.#live.get(id)?.range;
+		return this.#live.get(id);
 	}
 
 	/** Whether `id` was ever assigned. */
@@ -490,12 +441,12 @@ export class LiveRanges {
 
 	/** Every live range, in Range ID order. */
 	ranges(): WireRange[] {
-		return [...this.#live.values()].map((entry) => entry.range);
+		return [...this.#live.values()];
 	}
 
 	/** Every live range with its Range ID, in order. */
 	entries(): [bigint, WireRange][] {
-		return [...this.#live].map(([id, entry]) => [id, entry.range]);
+		return [...this.#live];
 	}
 
 	/** Whether the publisher reports where each range starts, which lite-07 does by Range ID. */
@@ -508,18 +459,18 @@ export class LiveRanges {
 	 * {@link ProtocolViolation} for an edit it cannot apply. Before lite-07 an update restates
 	 * its ranges, so nothing is numbered.
 	 */
-	apply(update: SubscribeUpdate): { id: bigint; entry: RangeEntry }[] {
+	apply(update: SubscribeUpdate): { id: bigint; range: WireRange }[] {
 		if (!hasRanges(this.#version)) return [];
 		for (const id of update.remove ?? []) {
 			// An id never assigned, or already retired (including earlier in this list).
 			if (!this.#remove(id)) throw new ProtocolViolation(`unknown range id: ${id}`);
 		}
-		this.#add(update.entries ?? update.ranges ?? []);
+		this.#add(update.ranges ?? []);
 		// Asking for nothing is refused like a SUBSCRIBE that does, and a set no SUBSCRIBE
 		// could carry like one too large to send.
 		if (this.#live.size === 0) throw new ProtocolViolation("a subscription asks for no range");
 		if (this.#size > Message.MAX_MESSAGE_SIZE) throw new ProtocolViolation("too many ranges");
-		return [...this.#live].map(([id, entry]) => ({ id, entry }));
+		return [...this.#live].map(([id, range]) => ({ id, range }));
 	}
 
 	/**
@@ -527,8 +478,16 @@ export class LiveRanges {
 	 * to retire and the ranges to add. A range already live keeps its Range ID, so an update that
 	 * changes one range sends only that one, and the publisher keeps where the rest resolved.
 	 * Before lite-07 replaced ranges take fresh Range IDs.
+	 *
+	 * The last `fills` of `ranges` ask for fills, and `isFill` names the live ones that do: a fill
+	 * asking for what a demand range does still takes a range of its own, so each Range ID stays
+	 * the demand's or a fill's. `fillIds` are the Range IDs the added fill ranges took.
 	 */
-	edit(ranges: readonly WireRange[]): { remove: bigint[]; add: WireRange[] } {
+	edit(
+		ranges: readonly WireRange[],
+		fills = 0,
+		isFill: (id: bigint) => boolean = () => false,
+	): { remove: bigint[]; add: WireRange[]; fillIds: bigint[] } {
 		if (ranges.length === 0) throw new Error(EMPTY_RANGE);
 		if (!hasRanges(this.#version)) {
 			const same =
@@ -538,30 +497,39 @@ export class LiveRanges {
 				this.#live.clear();
 				this.#add(ranges);
 			}
-			return { remove: [], add: [...ranges] };
+			return { remove: [], add: [...ranges], fillIds: [] };
 		}
+		const demand = ranges.length - fills;
+		const key = (range: WireRange, fill: boolean) => `${fill ? "f" : "d"}${rangeKey(range)}`;
 		// Each live range keeps at most one wanted copy, so duplicates edit like any other.
 		const wanted = new Map<string, number>();
-		for (const range of ranges) wanted.set(rangeKey(range), (wanted.get(rangeKey(range)) ?? 0) + 1);
+		ranges.forEach((range, index) => {
+			const k = key(range, index >= demand);
+			wanted.set(k, (wanted.get(k) ?? 0) + 1);
+		});
 		const remove: bigint[] = [];
-		for (const [id, entry] of this.#live) {
-			const key = rangeKey(entry.range);
-			const count = wanted.get(key) ?? 0;
-			if (count > 0) wanted.set(key, count - 1);
+		for (const [id, range] of this.#live) {
+			const k = key(range, isFill(id));
+			const count = wanted.get(k) ?? 0;
+			if (count > 0) wanted.set(k, count - 1);
 			else remove.push(id);
 		}
 		// In the order asked for, so the publisher numbers them the way this side does.
-		const add = ranges.filter((range) => {
-			const key = rangeKey(range);
-			const count = wanted.get(key) ?? 0;
-			if (count === 0) return false;
-			wanted.set(key, count - 1);
-			return true;
+		const add: WireRange[] = [];
+		const fillIds: bigint[] = [];
+		const first = this.#next;
+		ranges.forEach((range, index) => {
+			const k = key(range, index >= demand);
+			const count = wanted.get(k) ?? 0;
+			if (count === 0) return;
+			wanted.set(k, count - 1);
+			add.push(range);
+			if (index >= demand) fillIds.push(first + BigInt(add.length - 1));
 		});
 		for (const id of remove) this.#remove(id);
 		this.#add(add);
 		if (this.#size > Message.MAX_MESSAGE_SIZE) throw new Error("too many ranges for one SUBSCRIBE");
-		return { remove, add };
+		return { remove, add, fillIds };
 	}
 }
 
@@ -663,8 +631,6 @@ export class SubscribeUpdate {
 	update: bigint;
 	/** Lite-07: the Range IDs of the live ranges to retire before adding {@link ranges}. */
 	remove?: bigint[];
-	/** Lite-07: the ranges a received update adds, with the positions they name; see {@link RangeEntry}. */
-	entries?: RangeEntry[];
 
 	constructor(props: {
 		priority: number;
@@ -679,7 +645,6 @@ export class SubscribeUpdate {
 		ranges?: WireRange[];
 		update?: bigint;
 		remove?: bigint[];
-		entries?: RangeEntry[];
 	}) {
 		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
 			throw new RangeError("wanted group must be non-negative");
@@ -695,7 +660,6 @@ export class SubscribeUpdate {
 		this.ranges = props.ranges;
 		this.update = props.update ?? 0n;
 		this.remove = props.remove;
-		this.entries = props.entries;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -745,13 +709,12 @@ export class SubscribeUpdate {
 				const order = await decodeOrder(r, version);
 				const maxDelay = await r.u53();
 				const minDelay = await decodeMinDelay(r, version);
-				let span: Span & { ranges?: WireRange[]; remove?: bigint[]; entries?: RangeEntry[] };
+				let span: Span & { ranges?: WireRange[]; remove?: bigint[] };
 				if (hasRanges(version)) {
 					// Not preallocated, like the ranges: each id costs a byte of the bounded message.
 					const remove: bigint[] = [];
 					for (let count = await r.u53(); count > 0; count--) remove.push(await r.u62());
-					const entries = await decodeEntries(r);
-					span = { startFrame: 0, remove, entries, ranges: entries.map((entry) => entry.range) };
+					span = { startFrame: 0, remove, ranges: await decodeRanges(r) };
 				} else {
 					span = await decodeSpan(r, version);
 				}
@@ -828,8 +791,6 @@ export class Subscribe {
 	 * the span alone; decoding a lite-07 list fills them alongside the span covering them all.
 	 */
 	ranges?: WireRange[];
-	/** Lite-07: the decoded ranges with the positions they name; see {@link RangeEntry}. */
-	entries?: RangeEntry[];
 
 	/**
 	 * The number of the terms in effect: the SUBSCRIBE is 0 and every SUBSCRIBE_UPDATE carries a
@@ -854,7 +815,6 @@ export class Subscribe {
 		endFrame?: number;
 		ranges?: WireRange[];
 		update?: bigint;
-		entries?: RangeEntry[];
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -871,7 +831,6 @@ export class Subscribe {
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
 		this.update = props.update ?? 0n;
-		this.entries = props.entries;
 	}
 
 	async #encode(w: Writer, version: Version) {

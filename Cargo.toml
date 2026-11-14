@@ -302,6 +302,7 @@ opt-level = 3
 
 # The Go mirror stores native staticlibs in Git, whose per-file limit is 100 MB.
 # Keep all release entry points on the same compact native profile.
+# nix/crates.nix restates this profile for the Nix packages; change both.
 [profile.release]
 lto = "fat"
 codegen-units = 1

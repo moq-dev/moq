@@ -23,13 +23,15 @@
 		//     so a formatter rewriting it would fight the generator on every `just fix`.
 		//   - Recorded audio traces, which record.ts writes one arrival per line so a
 		//     re-recording diffs cleanly; the formatter would undo that.
+		//   - crate2nix's hash cache, which `just rs cargo-nix` writes.
 		"includes": [
 			"**",
 			"!rs/moq-mux/src/container/ts/test_data",
 			"!rs/moq-audio/src/decode/test_data/*.ts",
 			"!**/*.svg",
 			"!doc/concept/audio-jitter/*.json",
-			"!test/audio-quality/traces/*.json"
+			"!test/audio-quality/traces/*.json",
+			"!nix/crate-hashes.json"
 		]
 	},
 	"linter": {

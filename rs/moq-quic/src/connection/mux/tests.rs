@@ -375,6 +375,48 @@ fn draft00_sends_one_length_prefixed_frame_per_message() {
 	assert!(fin);
 }
 
+/// A record's stream data is acknowledged only once the transport takes it, so a session that
+/// fails with records still unsent never reports them delivered. On draft-00 that holds for
+/// each frame split from one batch, not only the first. A stream reset between handing a record
+/// out and the transport taking it still counts the record's data.
+#[test]
+fn stream_data_is_acknowledged_once_the_transport_takes_it() {
+	for &version in Version::ALL {
+		let mut pair = Pair::new(config(version));
+		let a = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+		let b = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+		pair.client.send_stream(a).write(&mut &b"first"[..]).unwrap();
+		pair.client.send_stream(b).write(&mut &b"second"[..]).unwrap();
+		let acked = |pair: &mut Pair| {
+			(
+				pair.client.send_stream(a).acked_len(),
+				pair.client.send_stream(b).acked_len(),
+			)
+		};
+
+		let mut records = Vec::new();
+		while let Poll::Ready(record) = pair.client.poll_transmit(&kio::Waiter::noop(), pair.now) {
+			records.push(record);
+		}
+		assert_eq!(acked(&mut pair), (0, 0), "{version:?}: handed out, none taken");
+		pair.client.send_stream(b).reset(VarInt::from_u32(1)).unwrap();
+		pair.client.transmitted();
+		let first = acked(&mut pair);
+		assert!(first.0 + first.1 > 0, "{version:?}: the first record taken");
+		if version == Version::QMux00 {
+			assert_eq!(records.len(), 2, "one frame per stream");
+			assert!(
+				first.0 == 0 || first.1 == 0,
+				"{version:?}: the second frame is not taken yet"
+			);
+		}
+		for _ in 1..records.len() {
+			pair.client.transmitted();
+		}
+		assert_eq!(acked(&mut pair), (5, 6), "{version:?}: every record taken");
+	}
+}
+
 #[test]
 fn stream_offsets_follow_the_transport_order() {
 	let now = Instant::now();
