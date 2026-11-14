@@ -97,8 +97,10 @@ Order: the 200 ms snap both ways and the
 that replaced the NetEq controller and splices under it, are done, as is the
 shared clock following a lasting path-delay step
 ([moq-dev/moq#8749](https://github.com/moq-dev/moq/pull/8749)).
-[Output latency](/quest/m2/audio-playout/output-latency.md) and the
-[join's hold](/quest/m2/audio-playout/join-hold.md) are independent.
+The estimator stops folding a join's intervals
+([moq-dev/moq#8730](https://github.com/moq-dev/moq/pull/8730));
+[output latency](/quest/m2/audio-playout/output-latency.md) and the
+[join's skipped backlog](/quest/m2/audio-playout/join-backlog.md) are independent.
 The [calibration](/quest/m3/audio-calibrate.md) re-measures every ceiling
 after this epic.
 
