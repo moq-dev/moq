@@ -134,7 +134,8 @@ export type BroadcastInput = {
 	catalog: Getter<Catalog.Root | undefined>;
 
 	// Whether playback still has media of the broadcast left to play once its publisher finished it.
-	// A finished broadcast reads "live" until this is false. Defaults to false.
+	// A finished broadcast reads "live" until this is false. Defaults to true, so a broadcast nothing
+	// plays out (one no Player drives, or an included one) reads "live" until it closes.
 	tail: Getter<boolean>;
 };
 
@@ -234,7 +235,7 @@ export class Broadcast {
 			follow: getter(props?.follow ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
 			catalog: getter(props?.catalog),
-			tail: getter(props?.tail ?? false),
+			tail: getter(props?.tail ?? true),
 		};
 
 		this.#signals.run(this.#runBroadcast.bind(this));
