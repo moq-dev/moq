@@ -5,7 +5,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
-import { HopSchema, WireRoute } from "../src/hop.ts";
+import { toHop, WireRoute } from "../src/hop.ts";
 import * as Instance from "../src/instance.ts";
 import { AnnounceRequest } from "../src/lite/announce.ts";
 import { Publisher } from "../src/lite/publisher.ts";
@@ -202,15 +202,7 @@ for (const patternCount of [8, 32, 128]) {
 			...Array.from({ length: patternCount - 1 }, (_, i) => Path.Pattern.literal(`other/${i}`)),
 		]);
 		const grant = new Signal<Grant | undefined>({ publish: new Path.Patterns(), subscribe });
-		const subscriber = new Subscriber(
-			quic,
-			Version.DRAFT_05,
-			HopSchema.parse(1n),
-			undefined,
-			undefined,
-			undefined,
-			grant,
-		);
+		const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
 		const groups = await Promise.all(
 			Array.from({ length: fetchCount }, (_, i) => subscriber.fetchGroup(Path.from(`room/${i}`), "video", 0n)),
 		);
@@ -409,7 +401,7 @@ for (const routeCount of routeCounts) {
 		});
 		const senders = Array.from({ length: observerCount }, () => {
 			const pair = createMockTransportPair(ALPN_07_WIP);
-			const publisher = new Publisher(pair.server, Version.DRAFT_07, HopSchema.parse(1n), origin.consume());
+			const publisher = new Publisher(pair.server, Version.DRAFT_07, toHop(1n), origin.consume());
 			const entered = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
 			const stream = new Stream({
