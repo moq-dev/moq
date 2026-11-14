@@ -1181,6 +1181,30 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	}
 
 	#[cfg(test)]
+	/// Whether this node keeps no state at all for `id`, beyond the changes
+	/// [`Self::changed`] has yet to take.
+	pub fn keeps_nothing(&self, id: Id) -> bool {
+		fn none<K: Ord + Copy, V, N: Ord>(map: &BTreeMap<(K, N), V>, id: K) -> bool {
+			!map.keys().any(|(key, _)| *key == id)
+		}
+		!self.origins.contains_key(&id)
+			&& !self.rx.contains_key(&id)
+			&& !self.fd.contains_key(&id)
+			&& !self.advertised.contains_key(&id)
+			&& !self.pending.contains_key(&id)
+			&& !self.views.contains_key(&id)
+			&& !self.current.contains_key(&id)
+			&& !self.dirty.contains_key(&id)
+			&& !self.ctxs.contains_key(&id)
+			&& none(&self.filed, id)
+			&& none(&self.sent, id)
+			&& none(&self.unacked, id)
+			&& none(&self.heard, id)
+			&& none(&self.sent_views, id)
+			&& !self.shown.keys().any(|(key, _)| *key == id)
+	}
+
+	#[cfg(test)]
 	/// How many identities this node holds routes to.
 	pub fn identities(&self) -> usize {
 		self.rx.len()

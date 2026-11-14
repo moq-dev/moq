@@ -1668,3 +1668,23 @@ fn a_forwarded_request_goes_with_its_requesters_session() {
 fn a_forwarded_request_goes_with_the_route_it_follows() {
 	assert_eq!(forwarded_request_closes(0), 0);
 }
+
+/// A relay keeps nothing for an identity once the only session that routed it
+/// closes: no state outlives what a peer told it.
+#[test]
+fn a_relay_keeps_nothing_once_its_only_route_closes() {
+	let up = 0;
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(9, 0), hop(up, 0)]),
+	};
+	router.route(up, 7, Some(Reach::Finite(advert)));
+	assert!(!router.keeps_nothing(7));
+	router.disconnect([up]);
+	assert!(router.keeps_nothing(7));
+}
