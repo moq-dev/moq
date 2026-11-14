@@ -20,8 +20,10 @@
 (*   neighbour that learned the route from it has answered.               *)
 (* - A closed session casts doubt on the node at its far end: no relay     *)
 (*   moves to a route through it until a timer lifts the doubt. A route    *)
-(*   that begins at it is exempt: it cannot loop through its own end. The  *)
-(*   timer is the step `Lift`, which may fire at any moment.              *)
+(*   that begins at it is exempt, since it cannot loop through its own     *)
+(*   end, except over a session to it opened since the doubt began         *)
+(*   (`Returned`): a link that comes back waits out the timer. The timer   *)
+(*   is the step `Lift`, which may fire at any moment.                     *)
 (*                                                                         *)
 (* Each node's every entry point is one atomic step ending in `Update`,    *)
 (* as in the router. Messages travel on one FIFO per direction. A          *)
@@ -603,7 +605,8 @@ Fail(n, s, hop, from, moved, gone) ==
                  !.since = Since(n, s, hop[2])]
 
 \* `drains`: x sent GOAWAY. The first word of it casts doubt on x, so no relay
-\* takes a stale offer through it until the timer fires.
+\* takes a stale offer through it until the timer fires. A route that begins at
+\* x needs none: every path to x drains alike, so no relay moves.
 MarkDrain(n, s, x) ==
     IF x \in s.draining \/ x = n THEN s
     ELSE [s EXCEPT !.draining = @ \cup {x}, !.doubt = @ \cup {x}, !.wait = @ \cup {x},

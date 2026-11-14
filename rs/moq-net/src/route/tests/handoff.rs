@@ -1751,9 +1751,10 @@ fn goaway_moves_a_relay_to_a_path_that_does_not_drain() {
 /// joined to `hub`, which reaches the publisher. A GOAWAY from `leaving` reaches
 /// the hub's side before any ring relay hears the others re-rank. Ranking drain
 /// alone, each moved onto the next relay's old, undrained offer, and a request went
-/// round the ring with no session closed. The drain news casts doubt on the leaving
-/// node, so no relay moves onto a stale offer through it, and every request reaches
-/// the publisher after each delivery and timer.
+/// round the ring with no session closed. When the hub leaves, the drain news casts
+/// doubt on it, so no relay moves onto a stale offer through it. When the publisher
+/// leaves, every path names it and ranks as draining alike, so no relay moves. Either
+/// way every request reaches the publisher after each delivery and timer.
 fn goaway_around_a_ring(sim: &mut Sim, hub: Node, leaving: Node) {
 	let (origin, ring) = (0, [1, 2, 3]);
 	for relay in ring {

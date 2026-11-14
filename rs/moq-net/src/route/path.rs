@@ -10,7 +10,9 @@
 //! leaving node in a [`Dead::Draining`] to each neighbour it sent a route through
 //! it, which passes it on the same way, and each node doubts the leaving node as
 //! a closed session's far end is doubted, so no node moves onto a stale offer
-//! through it and a request cannot loop through offers that predate the drain. When a session closes,
+//! through it and a request cannot loop through offers that predate the drain.
+//! When the leaving node is the publisher, every path to it ranks as draining
+//! alike, so no node moves at all. When a session closes,
 //! the node that lost it names that hop in one [`Dead::Closed`] per neighbour, which
 //! lists the routes that moved to another path, and every node drops every route
 //! through the hop, whoever offered it. A node with no route left holds its
@@ -135,7 +137,8 @@ pub(crate) enum Dead {
 	/// `node` sent GOAWAY: every path through it ranks as draining, the worst rank,
 	/// and stays usable. The news casts doubt on the node, so no relay moves onto a
 	/// stale offer through it until the timer fires, and a request cannot loop through
-	/// offers that predate the drain.
+	/// offers that predate the drain. A publisher's drain needs no doubt: every path to
+	/// it ranks as draining alike, so no relay moves.
 	Draining { node: Id },
 }
 
@@ -1442,7 +1445,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// `node` sent GOAWAY, as of `now`. The first word of it casts doubt on the node,
-	/// so no stale offer through it is taken before the timer fires. Returns the
+	/// so no stale offer through it is taken before the timer fires; a route that
+	/// begins at it ends there and cannot loop. Returns the
 	/// identities whose routes rank anew.
 	fn drains(&mut self, node: Id, now: Instant) -> BTreeSet<Id> {
 		if !self.draining.insert(node) {

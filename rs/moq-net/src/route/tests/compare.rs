@@ -584,6 +584,14 @@ impl Lab {
 		}
 		self.net.reset(relay);
 		self.revive(relay);
+		// Unlike after a crash, the links the mesh lacks reconnect too, such as a
+		// publisher's second home.
+		let linked: Vec<(Node, Node)> = (self.linked.iter().copied())
+			.filter(|&(a, b)| (a == relay || b == relay) && !self.is_up(a, b))
+			.collect();
+		for (a, b) in linked {
+			self.mend(a, b);
+		}
 	}
 
 	/// Deliver one message from a queue `pick` chooses. False if none waits.
@@ -835,7 +843,11 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>, two_homes: bool) 
 						false => lab.mend(a, b),
 					}
 				}
-				2 if case % 4 == 0 && script.chance(25) => lab.restart(script.next(relays as u64) as usize),
+				2 if case % 4 == 0 && script.chance(25) => {
+					let relay = script.next(relays as u64) as usize;
+					lab.restart(relay);
+					assert!(homes.iter().all(|&home| home != relay || lab.is_up(node, home)));
+				}
 				_ => {
 					lab.deliver(&mut pick);
 				}
