@@ -39,8 +39,15 @@ pub(super) enum Step {
 	Deliver(Node, Node),
 	/// An echoed ROUTE_END, under the distance rule.
 	Ack(Node, Node),
-	Announce { origin: Node, claim: &'static str, seed: Metric },
-	Unannounce { origin: Node, claim: &'static str },
+	Announce {
+		origin: Node,
+		claim: &'static str,
+		seed: Metric,
+	},
+	Unannounce {
+		origin: Node,
+		claim: &'static str,
+	},
 	Connect(Node, Node),
 	Disconnect(Node, Node),
 	Fire(Node),
@@ -92,6 +99,9 @@ impl fmt::Display for Failure {
 	}
 }
 
+/// What one node's reader shows.
+type Showing = BTreeMap<(Id, Path), Shown<Item>>;
+
 /// A claim's life on one node's reader: the node, its restarts and forgets, the
 /// identity, the claim, and the revision its life began at.
 type Life = (Node, (u32, u32), Id, String, Rev);
@@ -120,9 +130,15 @@ impl World {
 				Relay::Path(router) => router.fingerprint(sim.now, &mut hasher),
 			}
 		}
-		digest(&mut hasher, &(&sim.watch, &sim.restarts, &sim.declared, &sim.up, &sim.held));
+		digest(
+			&mut hasher,
+			&(&sim.watch, &sim.restarts, &sim.declared, &sim.up, &sim.held),
+		);
 		digest(&mut hasher, &(&sim.queues, &sim.acks, &sim.history));
-		digest(&mut hasher, &(self.changes, self.flaps, &self.ended, self.burst, self.churn));
+		digest(
+			&mut hasher,
+			&(self.changes, self.flaps, &self.ended, self.burst, self.churn),
+		);
 		hasher.finish()
 	}
 
@@ -169,10 +185,9 @@ pub(super) fn search(mesh: Mesh, bounds: &Bounds) -> Result<Report, Failure> {
 		burst: 0,
 		churn: 1,
 	};
-	search.check(&root, None, &root.sim.shown_all()).map_err(|rule| Failure {
-		rule,
-		path: Vec::new(),
-	})?;
+	search
+		.check(&root, None, &root.sim.shown_all())
+		.map_err(|rule| Failure { rule, path: Vec::new() })?;
 	// The shallowest depth each state was reached at: under a depth bound, one
 	// reached again sooner is searched again, so the search covers every state within it.
 	let mut seen = HashMap::from([(root.fingerprint(), 0)]);
@@ -203,7 +218,10 @@ pub(super) fn search(mesh: Mesh, bounds: &Bounds) -> Result<Report, Failure> {
 			return Err(Failure { rule, path });
 		}
 		let fp = world.fingerprint();
-		if seen.get(&fp).is_some_and(|&was| bounds.depth.is_none() || was <= at + 1) {
+		if seen
+			.get(&fp)
+			.is_some_and(|&was| bounds.depth.is_none() || was <= at + 1)
+		{
 			continue;
 		}
 		seen.insert(fp, at + 1);
@@ -241,7 +259,11 @@ impl Search<'_> {
 	fn steps(&self, world: &World) -> Vec<Step> {
 		let sim = &world.sim;
 		let bounds = self.bounds;
-		let mut out: Vec<Step> = sim.busy().into_iter().map(|(from, to)| Step::Deliver(from, to)).collect();
+		let mut out: Vec<Step> = sim
+			.busy()
+			.into_iter()
+			.map(|(from, to)| Step::Deliver(from, to))
+			.collect();
 		out.extend(sim.busy_acks().into_iter().map(|(from, to)| Step::Ack(from, to)));
 		for node in 0..sim.nodes.len() {
 			if sim.nodes[node].deadline().is_some() && self.patient(sim, node) {
@@ -336,13 +358,7 @@ impl Search<'_> {
 		}
 		let events = std::mem::take(&mut world.sim.events);
 		for event in &events {
-			let life = (
-				event.node,
-				event.forgot,
-				event.id,
-				event.claim.clone(),
-				event.since,
-			);
+			let life = (event.node, event.forgot, event.id, event.claim.clone(), event.since);
 			match event.kind {
 				Kind::End if !event.withdrawn => {
 					return Err(format!("NoFalseEnd: node {} saw {} end", event.node, event.claim));
@@ -351,12 +367,15 @@ impl Search<'_> {
 					world.ended.insert(life);
 				}
 				Kind::Start if world.ended.contains(&life) => {
-					return Err(format!("NoRevival: node {} saw {} start again", event.node, event.claim));
+					return Err(format!(
+						"NoRevival: node {} saw {} start again",
+						event.node, event.claim
+					));
 				}
 				_ => {}
 			}
 		}
-		self.check(world, stable.then_some(&before), &before)
+		self.check(world, stable.then_some(before.as_slice()), &before)
 	}
 
 	fn take(&self, world: &mut World, step: &Step) {
@@ -417,12 +436,7 @@ impl Search<'_> {
 	/// Check every rule in `world`. `stable` holds what the readers showed before a
 	/// step that only changed a path or lifted a doubt; `before` what they showed
 	/// before any step.
-	fn check(
-		&self,
-		world: &World,
-		stable: Option<&Vec<BTreeMap<(Id, Path), Shown<Item>>>>,
-		before: &[BTreeMap<(Id, Path), Shown<Item>>],
-	) -> Result<(), String> {
+	fn check(&self, world: &World, stable: Option<&[Showing]>, before: &[Showing]) -> Result<(), String> {
 		let sim = &world.sim;
 		sim.check().map_err(|err| format!("Truthful: {err}"))?;
 		let rev = sim.revision(self.id);
@@ -454,7 +468,9 @@ impl Search<'_> {
 			for &claim in self.bounds.claims {
 				for key in self.keys(sim) {
 					if let Ask::Loop(chain) = self.ask(sim, node, key, &p(claim)) {
-						return Err(format!("RequestsLoopFree: {claim} from node {node} loops round {chain:?}"));
+						return Err(format!(
+							"RequestsLoopFree: {claim} from node {node} loops round {chain:?}"
+						));
 					}
 				}
 			}
@@ -553,11 +569,15 @@ impl Search<'_> {
 					.filter_map(|key| Some((key, sim.shown(node).get(&(key, claim.clone()))?)))
 					.collect();
 				let right = match want {
-					Some(item) => !shown.is_empty() && shown.iter().all(|(_, shown)| shown.item == item && shown.available),
+					Some(item) => {
+						!shown.is_empty() && shown.iter().all(|(_, shown)| shown.item == item && shown.available)
+					}
 					None => shown.is_empty(),
 				};
 				if !right {
-					return Err(format!("node {node} shows {claim} as {shown:?}, where a path carries {want:?}"));
+					return Err(format!(
+						"node {node} shows {claim} as {shown:?}, where a path carries {want:?}"
+					));
 				}
 				for (key, _) in shown {
 					if sim.paths() && self.ask(sim, node, key, &claim) != Ask::Origin {
@@ -594,7 +614,7 @@ enum Ask {
 
 impl Sim {
 	/// What every node's reader shows.
-	fn shown_all(&self) -> Vec<BTreeMap<(Id, Path), Shown<Item>>> {
+	fn shown_all(&self) -> Vec<Showing> {
 		(0..self.nodes.len()).map(|node| self.shown(node).clone()).collect()
 	}
 }

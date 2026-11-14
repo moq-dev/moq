@@ -1152,7 +1152,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Whether `from` offered a route for `id` under `prefix`, in any state.
 	#[cfg(test)]
 	pub fn hears(&self, id: Id, prefix: &Path, from: N) -> bool {
-		self.rx.get(&(id, prefix.clone())).is_some_and(|routes| routes.contains_key(&from))
+		self.rx
+			.get(&(id, prefix.clone()))
+			.is_some_and(|routes| routes.contains_key(&from))
 	}
 
 	/// Every route this node uses for `id`, by prefix.
@@ -1302,7 +1304,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	#[cfg(test)]
 	pub fn due(&self, now: Instant) -> BTreeSet<Id> {
 		let doubts = (self.doubted.iter()).filter_map(|(node, state)| (state.deadline() <= now).then_some(*node));
-		let deaths = (self.dead.values()).filter_map(|death| death.deadline().is_some_and(|at| at <= now).then_some(death.far()));
+		let deaths = (self.dead.values())
+			.filter_map(|death| death.deadline().is_some_and(|at| at <= now).then_some(death.far()));
 		doubts.chain(deaths).collect()
 	}
 
