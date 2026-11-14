@@ -43,8 +43,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   publishes for the first time at this cut;
   [auth key validation](/quest/m2/auth-key-validation.md); the
   [RTMPS connect](/quest/m2/rtmp-rtmps-tcurl.md) signature;
-  [usage's derived settings](/quest/m2/usage-derive-settings.md);
-  [first-publish versions](/quest/m2/first-publish-versions.md); and two
+  [usage's derived settings](/quest/m2/usage-derive-settings.md); and two
   API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md) and
   [the capture selections](/quest/m2/api-capture-fences.md). None
   is on the routes chain, which stays the critical path.
