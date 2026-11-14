@@ -148,7 +148,7 @@ every hop, so a slow reader slows the writer, as TCP backpressure does, and
 nothing is lost. A writer that doesn't wait sheds the front of its half, and a
 reader that falls behind it fails with an eviction error instead of skipping
 data. Pacing reaches across native QUIC and qmux hops; see
-[unbounded groups](https://github.com/moq-dev/moq/tree/main/quest/m2/unbounded-groups)
+[unbounded groups](https://github.com/moq-dev/moq/tree/main/quest/m3/unbounded-groups)
 for what remains, such as browsers, which read without pacing.
 
 Use `tcp` for a byte stream or a log of records that must all arrive in order,

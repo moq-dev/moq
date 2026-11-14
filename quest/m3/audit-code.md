@@ -52,7 +52,7 @@ lints [moq-dev/moq#6576](https://github.com/moq-dev/moq/pull/6576).
 
 - Still open from m0: `ietf/session.rs` `start()` builds both halves twice
   across the draft arms; lite and IETF `GroupServe` share their open, flush,
-  and FIN-settle driver; `ietf/adapter.rs` reimplements `kio::Queue`.
+  and FIN-settle driver.
 - The codec importers each forward `demand`, `flush`, `finish`, `abort`,
   `cut`, `discontinuity`, and `seek` to their container producer. Dropping
   them means a shared track handle, which is an API proposal.

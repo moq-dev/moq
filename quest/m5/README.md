@@ -9,6 +9,13 @@ speculative feature or study with no named consumer yet.
 
 ## Plan
 
+Decided 2026-11-13 (maintainer, /quest-plan): this milestone requires the
+[release cut](/quest/m3/release/cut.md), so until it lands spare capacity goes
+to m0 to m3 and then to [m9](/quest/m9/README.md)'s lab work (rejected:
+requiring m0, m1, and m2, which lifts only when they empty, and m0 rarely
+does; also gating m3, which holds the cut). The cut's PR deletes the cut
+quest, which lifts this gate.
+
 A quest gated on the outside world has a condition quest beside it, as the
 root [questline](/quest/README.md) describes. A speculative feature or study
 with no consumer needs no condition quest: it parks here rather than in m3 or m4
@@ -33,3 +40,14 @@ in this repository and in moq.pro's plans, which kept the io_uring tuning
 quests (fleet relays on io_uring workers), broadcast fairness, and the
 transcode and NVENC quests (production transcoding). Re-plan one when a
 consumer asks.
+
+Parked 2026-11-12 (maintainer, /quest-audit before the cut): 29 quests the
+audit judged not worth their weight (no consumer in this repository or the
+downstream plans, and no bug in shipped code) are kept here instead of
+deleted (rejected: deleting them; leaving them in m3 and m4). Each says so in
+its Plan. The tuning experiments that touch no published surface moved to
+the lab, [m9](/quest/m9/README.md).
+
+## Required
+
+- [Release cut](/quest/m3/release/cut.md) - the cut lands before this milestone's work starts

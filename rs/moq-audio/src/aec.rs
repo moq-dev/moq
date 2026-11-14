@@ -531,8 +531,7 @@ fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
 			// back up to the target depth with silence the speaker never played
 			// would be both a fabricated reference and the standing delay this
 			// is shaped to avoid.
-			pad: false,
-			trim: true,
+			correction: ring::Correction::Fixed { pad: false, trim: true },
 			comfort: false,
 		},
 	)

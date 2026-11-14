@@ -43,4 +43,4 @@ Public API: the encode error names the minimum size; the probe stays private. Wi
 
 ## Related
 
-- [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - may report a different minimum
+- [Vulkan Video encode on AMD](/quest/m5/vulkan-encode.md) - may report a different minimum

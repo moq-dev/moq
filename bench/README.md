@@ -209,7 +209,7 @@ also run during timing. Every timed round reads and checks all payload bytes,
 returns lease credit, and fills each stream again. Throughput counts delivered
 payload once. Nightly's supplemental Rust benchmark leg records the series and
 keeps the memory output with its raw results. The broader MoQ session transport
-and version sweep remains in [its quest](/quest/m4/bench-transport-sweep.md).
+and version sweep remains in [its quest](/quest/m5/bench-transport-sweep.md).
 
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:

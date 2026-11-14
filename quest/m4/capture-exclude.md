@@ -91,11 +91,18 @@ Tests:
 Public API: breaking if the exclusion joins `Source::Display`, additive
 otherwise. Wire: none.
 
+Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ this quest
+stays after the cut, and
+[capture listings and selections can grow](/quest/m2/api-capture-fences.md)
+fences the display selection the exclusion joins in m2 (rejected: pulling this quest into m2; a second moq-video
+break). What this adds is then additive.
+
 ## Required
 
+- [Capture listings and selections can grow](/quest/m2/api-capture-fences.md) - the fenced structs this adds fields to
 - [A capture listing a picker can draw](/quest/m3/capture-list.md) - the app identity an exclusion names
 
 ## Related
 
 - [The foreground app](/quest/m4/capture-foreground.md) - names apps by the same identity
-- [Per-app audio on macOS](/quest/m3/capture-app-audio-macos.md) - the same content filter, limiting audio to one app
+- [Per-app audio on macOS](/quest/m4/capture-app-audio-macos.md) - the same content filter, limiting audio to one app

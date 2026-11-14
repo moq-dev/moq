@@ -37,7 +37,9 @@ Decisions:
   (2026-09-30)
 - An index, not a payload filter on the watch: each route records the
   fronts it serves or is requesting through, and each prefix node records
-  only its waiting fronts and `routed_broadcast` waiters. A payload filter
+  only its waiting fronts and the pending `request` and `follow` resolutions
+  that retry when their covering routes change (`routed_broadcast` became
+  these in #7172). A payload filter
   would still walk every watch under the prefix, which stays linear in paths.
   (2026-09-30)
 - No pin sets (decided 2026-10-03: #4741 deletes `Pin`, so any covering route
@@ -62,9 +64,7 @@ Decisions:
   the changed route now wins; only those fronts re-select. A leave wakes only
   the fronts the leaver served or was requesting through.
 - Builds on fronts keyed by effective exclusion, so the index hangs off the final front
-  identity. `origin-front-parks.md` replaces the `routed_broadcast` retry
-  loop, one of the watch consumers here; whichever lands second adapts it.
-  (2026-09-30)
+  identity. (2026-09-30)
 
 Decided 2026-10-13: coordinate the index with the per-origin route model and
 per-track active/standby selection. Routes and announces records identity
@@ -80,6 +80,6 @@ served root is withdrawn.
 
 Public API: none. Wire: none.
 
-## Related
+## Required
 
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the identity and selection views the index serves
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - settles the source-selection model the index serves, so it is built once on the final selection
