@@ -2,7 +2,10 @@
 //! machine: a route per publisher and prefix, believed by its own path.
 //!
 //! A hop names a relay and the session it learned a route on. A node uses the
-//! cheapest route whose path does not name it, at once. When a session closes,
+//! best route whose path does not name it, at once: one crossing no draining
+//! session, then the one whose lowest link priority is highest, then the cheapest.
+//! Each is a property of the whole path, so no relay prefers a path its
+//! neighbour ranked lower, and selection converges. When a session closes,
 //! the node that lost it names that hop in one [`Dead`] per neighbour, which
 //! lists the routes that moved to another path, and every node drops every route
 //! through the hop, whoever offered it. A node with no route left holds its
@@ -15,7 +18,7 @@
 //! A route covers a prefix: the one its receiver asked for, or a narrower one a
 //! node on its path asked for. A stream answering a prefix carries the sender's
 //! routes inside it under their own prefixes, and one for the prefix itself from
-//! the cheapest usable route covering it. A node keeps one view of a
+//! the best usable route covering it. A node keeps one view of a
 //! publisher's claims per prefix: the newest floor any believed route covering
 //! that prefix gave it, kept whole while it holds a route covering the prefix. It
 //! shows each claim from the narrowest view above it, available while a live
@@ -58,7 +61,13 @@ pub(crate) type RouteId = (Id, Path);
 pub(crate) struct Offer {
 	/// Every node it crossed, the publisher first and the sender last.
 	pub path: Arc<[Hop]>,
-	/// The cost that ranks it: the sum of configured link costs.
+	/// A session on its path drains after GOAWAY, which ranks it below every route
+	/// that does not.
+	pub draining: bool,
+	/// The lowest local priority of a link on its path, ranked before cost; the
+	/// publisher's own route has no link to lower it.
+	pub priority: i8,
+	/// The cost ranked after drain and priority: the sum of configured link costs.
 	pub metric: Metric,
 	/// An upstream link is on its path, so it is never sent to one.
 	pub down_only: bool,
@@ -70,6 +79,14 @@ impl Offer {
 	/// A received path must leave room for this node's hop.
 	fn extendable(&self) -> bool {
 		!self.path.is_empty() && self.path.len() < MAX_HOPS
+	}
+
+	/// How it ranks, lower first. Extending a path never improves drain or priority
+	/// and strictly raises the cost, so every relay ranks it no better than the
+	/// relay it came from did, and selection converges. Ranking a relay's own drain
+	/// or link priority alone lets two relays prefer each other's paths forever.
+	fn rank(&self) -> (bool, Reverse<i8>, Metric) {
+		(self.draining, Reverse(self.priority), self.metric)
 	}
 }
 
@@ -731,6 +748,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}]);
 		let route = Route::Origin(Offer {
 			path,
+			draining: false,
+			priority: i8::MAX,
 			metric: 0,
 			down_only: false,
 			rtt: Some(Duration::ZERO),
@@ -1384,13 +1403,14 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.collect()
 	}
 
-	/// Pick the cheapest usable live route, staying on the next hop among equals.
+	/// Pick the best-ranked usable live route ([`Offer::rank`]), staying on the next
+	/// hop among equals.
 	/// Doubt keeps this node from moving to a route, not on the one it uses.
 	fn select(&self, key: &RouteId) -> Option<Route<N>> {
 		let was = self.routes.get(key);
 		let current = was.and_then(Route::next);
 		let using = current.filter(|_| was.is_some_and(Route::live));
-		type Rank<N> = (bool, Reverse<i8>, Metric, bool, N);
+		type Rank<N> = ((bool, Reverse<i8>, Metric), bool, N);
 		let mut best: Option<(Rank<N>, Offer)> = None;
 		for (&peer, heard) in self.rx.get(key).into_iter().flatten() {
 			self.step();
@@ -1405,13 +1425,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				// It may come back once the doubt lifts.
 				continue;
 			}
-			let rank = (
-				session.draining,
-				Reverse(session.link.priority),
-				metric,
-				Some(peer) != current,
-				peer,
-			);
+			let draining = session.draining || heard.offer.draining;
+			let priority = session.link.priority.min(heard.offer.priority);
+			let rank = ((draining, Reverse(priority), metric), Some(peer) != current, peer);
 			if best.as_ref().is_some_and(|(best, _)| *best <= rank) {
 				continue;
 			}
@@ -1423,6 +1439,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				.collect();
 			let offer = Offer {
 				path,
+				draining,
+				priority,
 				metric,
 				down_only: session.link.upstream || heard.offer.down_only,
 				rtt: heard.offer.rtt.zip(session.rtt).and_then(|(a, b)| a.checked_add(b)),
@@ -1522,7 +1540,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// The prefix of this node's own route that what it offers a stream answering
 	/// `watch` under `prefix` reflects: the route itself inside the interest, and at the
-	/// interest the cheapest live route covering it that does not name the
+	/// interest the best-ranked live route covering it that does not name the
 	/// neighbour. Prefer the narrower scope among equal ranks. Without a usable
 	/// path, reflect a live or held route so a child can answer its loss. Preferring
 	/// a narrower route regardless of cost can make covering paths oscillate.
@@ -1540,13 +1558,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					if self.sessions[&peer].link.upstream && offer.down_only || usable && names(&offer.path, hop) {
 						return None;
 					}
-					let session = route.next().and_then(|next| self.sessions.get(&next));
-					let rank = (
-						session.is_some_and(|session| session.draining),
-						Reverse(session.map_or(0, |session| session.link.priority)),
-						offer.metric,
-					);
-					Some((rank, key))
+					Some((offer.rank(), key))
 				})
 				.min_by_key(|(rank, _)| *rank)
 				.map(|(_, key)| key)

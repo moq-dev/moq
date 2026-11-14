@@ -133,7 +133,8 @@ the bullets below are the contract it carries.
   (`goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible` pins
   both orders). Using a draining peer's routes locally without advertising
   them was rejected: downstream nodes would lose their only route during the
-  drain. Existing readers resume only
+  drain. The path rule carries drain in each offer instead (decided
+  2026-11-13, with priority below). Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
 - Fresh routing identity per process/tab restart, declared by the origin and
   shared across its live sessions, decided 2026-10-13. It is unverified.
@@ -265,6 +266,12 @@ the bullets below are the contract it carries.
   (`transit_priority_depends_on_arrival_order`). This limitation is accepted;
   priority remains local policy, not a propagated metric tier. Endpoints
   that advertise no transit routes hold no transit feasibility distance.
+  Reversed for the path rule on 2026-11-13 (maintainer,
+  [moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622)): with no
+  feasibility, a local preference lets two relays prefer each other's paths
+  forever. A route's priority is the lowest link priority on its path, and a
+  route drains if any session on it drains; drain, then priority, rank before
+  cost. The switch carries both on the wire.
 - Decided 2026-10-14: one selection per identity, keeping the `upstream`
   link mark and its down-only bit. A node advertises its best route whether
   or not anything subscribes. A route learned on an upstream link, or through

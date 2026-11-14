@@ -33,6 +33,16 @@ Babel):
   routing message on the subscriber half, so the ordering the route stream
   was planned to give the echo is not needed here.
 
+Decided 2026-11-13 (maintainer,
+[moq-dev/moq#8622](https://github.com/moq-dev/moq/pull/8622)):
+
+- ✅ ROUTE_START and ROUTE_UPDATE carry the route's drain bit, set when any
+  session on its path drains after GOAWAY, and its priority, the lowest link
+  priority on its path. Both rank before the metric, as `path::Offer`
+  carries them (rejected: drain and priority as tie-breakers below cost; a
+  drain cost penalty that drops priority). The router sends an update when
+  either changes, and a DEAD's moved routes carry them too.
+
 Recommended wire, for the implementer to confirm or improve in the PR; each
 departure is a choice to list there. Where the model settled something
 else, the model wins:

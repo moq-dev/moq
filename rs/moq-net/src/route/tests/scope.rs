@@ -7,6 +7,8 @@ use super::*;
 fn offered(via: Id, session: u64) -> path::Reach {
 	path::Reach::Finite(path::Offer {
 		path: [path::Hop { node: 7, session }, path::Hop { node: via, session: 1 }].into(),
+		draining: false,
+		priority: i8::MAX,
 		metric: 1,
 		down_only: false,
 		rtt: None,
@@ -867,6 +869,8 @@ fn dead_replacement_paths_obey_the_same_limit_as_route_paths() {
 					session: 1,
 				})
 				.collect(),
+			draining: false,
+			priority: i8::MAX,
 			metric: 1,
 			down_only: false,
 			rtt: None,

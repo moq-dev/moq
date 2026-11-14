@@ -941,6 +941,8 @@ impl PathRouteRelay {
 			Path::empty(),
 			Some(Reach::Finite(Offer {
 				path: [Hop { node: 1, session: 0 }].into(),
+				draining: false,
+				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
 				rtt: None,
@@ -1014,6 +1016,8 @@ impl PathRouteFollower {
 			prefix.clone(),
 			Some(Reach::Finite(Offer {
 				path: [Hop { node: 1, session: 0 }].into(),
+				draining: false,
+				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
 				rtt: None,

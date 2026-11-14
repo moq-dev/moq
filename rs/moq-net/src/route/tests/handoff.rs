@@ -45,6 +45,8 @@ both!(
 	a_covering_claim_moves_with_a_disjoint_interest,
 	a_restarted_floorless_route_drops_what_it_no_longer_carries,
 	a_change_of_hops_alone_lets_go_of_no_claim,
+	a_publishers_goaway_settles_between_its_neighbours,
+	mutually_preferred_links_settle,
 );
 
 /// An origin reaching a node through two relays, the first preferred and the
@@ -1675,4 +1677,71 @@ fn a_change_of_hops_alone_lets_go_of_no_claim(rule: Rule) {
 	sim.disconnect(2, 3);
 	assert!(sim.run());
 	assert_eq!(sim.shows(4, 7, ""), Some(true));
+}
+
+/// A publisher joined to two relays that are joined to each other.
+fn triangle(rule: Rule, ab: SimLink) -> Sim {
+	let (origin, a, b) = (0, 1, 2);
+	let mut sim = Sim::with(rule, 3);
+	sim.join(origin, a, 1);
+	sim.join(origin, b, 1);
+	sim.link(a, b, ab, ab);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "x", 0, None);
+	assert!(sim.run());
+	sim
+}
+
+/// Both relays hear the publisher's GOAWAY before either hears the other move.
+/// Ranking only its own drain, each would take the other's path, find itself on
+/// the reply, and go back, forever. Every path drains, so both stay direct.
+fn a_publishers_goaway_settles_between_its_neighbours(rule: Rule) {
+	let (origin, a, b) = (0, 1, 2);
+	let mut sim = triangle(rule, SimLink::cost(1));
+	sim.goaway(origin);
+	assert!(sim.settle(100));
+	for relay in [a, b] {
+		assert_eq!(sim.toward(relay, 7), Some(Some(origin)), "relay {relay}");
+		assert_eq!(sim.shows(relay, 7, "x"), Some(true), "relay {relay}");
+	}
+}
+
+/// Each relay prefers the link to the other. Ranking only its own link's priority,
+/// each would take the other's path and flip back forever. A path ranks by the
+/// lowest priority on it, so the preferred link lifts neither and both stay direct.
+fn mutually_preferred_links_settle(rule: Rule) {
+	let (origin, a, b) = (0, 1, 2);
+	let sim = triangle(rule, SimLink::cost(1).priority(1));
+	for relay in [a, b] {
+		assert_eq!(sim.toward(relay, 7), Some(Some(origin)), "relay {relay}");
+	}
+}
+
+/// A relay leaves a draining neighbour for a costlier path that does not drain,
+/// and that path, not draining itself, is what it offers on. The distance rule
+/// keeps the edge on the draining neighbour until a seqno refresh instead.
+#[test]
+fn goaway_moves_a_relay_to_a_path_that_does_not_drain() {
+	let (origin, near, far, relay, edge) = (0, 1, 2, 3, 4);
+	let mut sim = Sim::with(Rule::PATH, 5);
+	sim.join(origin, near, 1);
+	sim.join(origin, far, 1);
+	sim.join(relay, near, 1);
+	sim.join(relay, far, 2);
+	sim.join(edge, relay, 1);
+	sim.join(edge, near, 3);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "x", 0, None);
+	assert!(sim.run());
+	assert_eq!(sim.toward(relay, 7), Some(Some(near)));
+	assert_eq!(sim.toward(edge, 7), Some(Some(relay)));
+	sim.goaway(near);
+	assert!(sim.run());
+	assert_eq!(sim.toward(relay, 7), Some(Some(far)));
+	assert_eq!(
+		sim.toward(edge, 7),
+		Some(Some(relay)),
+		"the relay's new path does not drain"
+	);
+	assert_eq!(sim.shows(edge, 7, "x"), Some(true));
 }
