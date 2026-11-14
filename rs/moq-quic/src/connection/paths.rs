@@ -18,11 +18,18 @@ pub(super) struct Challenge {
 	/// A packet of its own is still due for it; after that, it only rides along with the path's
 	/// other frames
 	pub(super) pending: bool,
+	/// A datagram carrying it was shorter than `min_mtu`, so its response validates the address
+	/// but not the path's MTU
+	pub(super) short: bool,
 }
 
 impl Challenge {
 	pub(super) fn new(token: u64) -> Self {
-		Self { token, pending: true }
+		Self {
+			token,
+			pending: true,
+			short: false,
+		}
 	}
 }
 

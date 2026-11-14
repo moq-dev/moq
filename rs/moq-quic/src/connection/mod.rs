@@ -660,6 +660,8 @@ impl Connection {
 		let mut builder_storage: Option<PacketBuilder> = None;
 		let mut sent_frames = None;
 		let mut pad_datagram = false;
+		// Whether the datagram carries the current path's PATH_CHALLENGE
+		let mut challenge_datagram = false;
 		let mut pad_datagram_to_mtu = false;
 		// Set when either the congestion window or the pacer held a send back; drives
 		// `app_limited`, since neither case means the application ran dry.
@@ -825,7 +827,7 @@ impl Connection {
 				// Finish current packet
 				if let Some(mut builder) = builder_storage.take() {
 					if pad_datagram {
-						builder.pad_to(min_mtu.min((buf_capacity - datagram_start) as u16));
+						self.pad_datagram(&mut builder, min_mtu, buf_capacity - datagram_start, challenge_datagram);
 					}
 
 					if num_datagrams > 1 || pad_datagram_to_mtu {
@@ -923,6 +925,7 @@ impl Connection {
 				num_datagrams += 1;
 				coalesce = true;
 				pad_datagram = false;
+				challenge_datagram = false;
 				datagram_start = buf.len();
 
 				debug_assert_eq!(
@@ -1106,6 +1109,7 @@ impl Connection {
 				"SendableFrames was {can_send:?}, but only ACKs have been written"
 			);
 			pad_datagram |= sent.requires_padding;
+			challenge_datagram |= sent.path_challenge;
 
 			if sent.largest_acked.is_some() {
 				self.spaces[space_id].pending_acks.acks_sent();
@@ -1122,11 +1126,8 @@ impl Connection {
 
 		// Finish the last packet
 		if let Some(mut builder) = builder_storage {
-			// Only a datagram the anti-amplification limit shrank is smaller than `min_mtu`, and
-			// RFC 9000 §8.2.1 exempts it from padding: padding past its end would run into frames
-			// written to fill it.
 			if pad_datagram {
-				builder.pad_to(min_mtu.min((buf_capacity - datagram_start) as u16));
+				self.pad_datagram(&mut builder, min_mtu, buf_capacity - datagram_start, challenge_datagram);
 			}
 
 			// If this datagram is a loss probe and `segment_size` is larger than `min_mtu`,
@@ -1221,6 +1222,20 @@ impl Connection {
 			},
 			local_ip: self.local_ip,
 		})
+	}
+
+	/// Pad a datagram to `min_mtu`, or to its `room` when the anti-amplification limit shrank it
+	/// below that. RFC 9000 §8.2.1 exempts such a datagram from padding, and padding past its end
+	/// would run into frames written to fill it; a challenge sent in one is marked short.
+	fn pad_datagram(&mut self, builder: &mut PacketBuilder, min_mtu: u16, room: usize, challenge: bool) {
+		let room = u16::try_from(room).unwrap_or(u16::MAX);
+		if room < min_mtu
+			&& challenge
+			&& let Some(challenge) = &mut self.path.challenge
+		{
+			challenge.short = true;
+		}
+		builder.pad_to(min_mtu.min(room));
 	}
 
 	/// Send PATH_CHALLENGE for a previous path if necessary
@@ -3176,15 +3191,24 @@ impl Connection {
 					}
 				}
 				Frame::PathResponse(token) => {
-					if self.path.challenge.is_some_and(|challenge| challenge.token == token)
+					if let Some(challenge) = self.path.challenge.filter(|challenge| challenge.token == token)
 						&& remote == self.path.remote
 					{
-						trace!("new path validated");
-						self.timers.stop(Timer::PathValidation);
-						self.path.challenge = None;
 						self.path.validated = true;
 						if let Some((_, prev_path)) = &mut self.prev_path {
 							prev_path.challenge = None;
+						}
+						if challenge.short {
+							// RFC 9000 §8.2.1: the address is validated, but the path is not yet shown
+							// to carry `min_mtu`, so validate it again at full size.
+							trace!("path validated through a short datagram, challenging again");
+							self.path.challenge = Some(Challenge::new(self.rng.random()));
+							self.timers
+								.set(Timer::PathValidation, now.saturating_add(3 * self.pto(SpaceId::Data)));
+						} else {
+							trace!("new path validated");
+							self.timers.stop(Timer::PathValidation);
+							self.path.challenge = None;
 						}
 					} else {
 						debug!(token, "ignoring invalid PATH_RESPONSE");
@@ -3596,6 +3620,7 @@ impl Connection {
 				let token = challenge.token;
 				sent.non_retransmits = true;
 				sent.requires_padding = true;
+				sent.path_challenge = true;
 				trace!("PATH_CHALLENGE {:08x}", token);
 				buf.write(frame::FrameType::PATH_CHALLENGE);
 				buf.write(token);
@@ -4547,6 +4572,8 @@ struct SentFrames {
 	/// Whether the packet contains non-retransmittable frames (like datagrams)
 	non_retransmits: bool,
 	requires_padding: bool,
+	/// Whether the packet carries the current path's PATH_CHALLENGE
+	path_challenge: bool,
 }
 
 impl SentFrames {
