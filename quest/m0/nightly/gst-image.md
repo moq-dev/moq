@@ -41,9 +41,11 @@ can publish.
   `.github/docker/gstreamer/image` (one `ghcr.io/...@sha256:...` line), that
   the consumers read, not in a workflow file: an app token that edits
   workflows needs `workflows: write`.
-- Skip the push and the PR when the built image's `dpkg-query -W` package
-  list matches the pinned image's, so a week with no Ubuntu updates opens no
-  PR. With no pin file yet, the first run publishes and proposes the file.
+- A scheduled run skips the push and the PR when the built image's
+  `dpkg-query -W` package list matches the pinned image's, so a week with no
+  Ubuntu updates opens no PR. A push or dispatch always publishes, so a
+  Dockerfile change that installs the same packages still ships. With no pin
+  file yet, the first run publishes and proposes the file.
 - Validate the image locally with podman before pushing: the smoke test
   loads a moq-gst tarball, and `cargo zigbuild` of `moq-gst` links in it.
   After merge, confirm the push-triggered run published both architectures
