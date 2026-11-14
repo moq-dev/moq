@@ -1,6 +1,5 @@
 use crate::{Algorithm, EllipticCurve, Error, Jwk, Key, KeyMaterial, RsaPublicKey};
 use pkcs1::der::Decode as _;
-use pkcs8::der::Decode as _;
 use rind::rsa::KeySize;
 use rind::signature::{EcdsaKeyPair, EcdsaSigningAlgorithm, Ed25519KeyPair, RsaKeyPair, sign};
 
@@ -40,7 +39,7 @@ fn generate_rsa_key() -> crate::Result<KeyMaterial> {
 		.map_err(Error::crypto)?
 		.to_pkcs8();
 	let info = pkcs8::PrivateKeyInfoRef::from_der(pkcs8.as_ref()).map_err(Error::crypto)?;
-	let key = pkcs1::RsaPrivateKey::from_der(info.private_key.as_bytes()).map_err(Error::crypto)?;
+	let key = pkcs1::RsaPrivateKeyRef::from_der(info.private_key.as_bytes()).map_err(Error::crypto)?;
 
 	Ok(KeyMaterial::RSA {
 		public: RsaPublicKey {

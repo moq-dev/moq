@@ -26,7 +26,7 @@ interface Case {
 	budget?: number;
 	/** `client_setup`: the one version the server accepts. */
 	server?: string;
-	expect: "decoded" | "refused";
+	expect: "decoded" | "refused" | "withdrawn";
 }
 
 const VERSIONS = new Map<string, Version>(Object.values(Version).map((v) => [versionName(v), v]));
@@ -38,10 +38,11 @@ function version(name: string): Version {
 }
 
 // Decode `r` the way a session does, returning how to encode what it decoded.
-async function decode(c: Case, r: Reader, v: Version): Promise<(w: Writer) => Promise<void>> {
+async function decode(c: Case, r: Reader, v: Version): Promise<((w: Writer) => Promise<void>) | "withdrawn"> {
 	switch (c.message) {
 		case "announce": {
 			const msg = await decodeAnnounceBroadcast(r, v);
+			if (msg.status === "refused") return "withdrawn";
 			return (w) => encodeAnnounceBroadcast(w, msg, v);
 		}
 		case "announce_reply": {
@@ -69,7 +70,7 @@ async function decode(c: Case, r: Reader, v: Version): Promise<(w: Writer) => Pr
 async function outcome(c: Case): Promise<string> {
 	const v = version(c.version);
 	const r = new Reader(undefined, Buffer.from(c.hex, "hex"), v);
-	let encode: (w: Writer) => Promise<void>;
+	let encode: ((w: Writer) => Promise<void>) | "withdrawn";
 	try {
 		encode = await decode(c, r, v);
 	} catch (err) {
@@ -77,6 +78,7 @@ async function outcome(c: Case): Promise<string> {
 		return err instanceof UnexpectedEnd && !isDecodeError(err) ? "short" : "refused";
 	}
 	if (!(await r.done())) return "left bytes";
+	if (encode === "withdrawn") return encode;
 	return Buffer.from(await Writer.collect(v, encode)).toString("hex");
 }
 
@@ -88,6 +90,6 @@ test("the corpus has cases", () => {
 
 for (const c of cases) {
 	test(c.name, async () => {
-		expect(await outcome(c)).toBe(c.expect === "decoded" ? c.hex : "refused");
+		expect(await outcome(c)).toBe(c.expect === "decoded" ? c.hex : c.expect);
 	});
 }

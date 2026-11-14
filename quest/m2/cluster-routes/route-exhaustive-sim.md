@@ -12,7 +12,7 @@ does not fit, the PR records the numbers and lands no test.
 ## Plan
 
 Decided 2026-11-10 (maintainer, /quest-plan), as a spike: `RouteHandoff.tla`
-is a hand-kept mirror of the rule `route/tests/paths.rs` prototypes, which TLC interprets, while `Sim`
+is a hand-kept mirror of `route::path::Router` in `rs/moq-net/src/route/path.rs`, which TLC interprets, while `Sim`
 already drives the router one atomic step at a time. Searching `Sim` itself
 runs compiled code, has no model to drift, and reaches what the model leaves
 out.
@@ -32,8 +32,8 @@ out.
   rule at the step that would break it rather than from that log.
 - The check that the search works: run on today's router before the switch to
   the path rule, it must find the storm
-  `residual_a_seqno_advance_storms_between_two_grants` replays, or another
-  `residual_` test in `route/tests/residual.rs`. Those fixtures use 6 to 10
+  `distance::a_seqno_advance_storms_between_two_grants` replays, or another
+  of today's bugs in `route/tests/residual.rs`. Those fixtures use 6 to 10
   nodes, beyond the triangle, so the self-check searches the fixture's own
   mesh, bounded by depth and by the fixture's scripted claims, rather than
   the triangle's bounds; the search code takes the mesh as a parameter.
@@ -43,7 +43,7 @@ out.
 - A search that takes seconds joins the merge gate; a larger one runs in
   Nightly.
 
-This sits beside [trace validation](/quest/m1/route-trace-validation.md), which
+This sits beside [trace validation](/quest/m3/route-trace-validation.md), which
 keeps the TLA+ model honest for the design work done on the spec before code exists. It replaces neither
 that nor the seeded sweeps on larger meshes
 (`tests/integration/mesh_sweep.rs`). If the spike shows the
@@ -51,18 +51,14 @@ search covers what a model check does, recommend in the PR what to do with the
 route model's TLC runs.
 
 Decided 2026-11-12 (maintainer, pick round): the search runs on the `Router`
-after [the router quest](/quest/m2/cluster-routes/scope.md)'s rewrite to
-the path rule, so it checks the code that ships and nothing is built twice
+after [the router quest](https://github.com/moq-dev/moq/pull/8622)'s rewrite to
+the path rule (`route::path::Router`), so it checks the code that ships and nothing is built twice
 (rejected: today's Babel `Router`, which the rewrite throws away; the test-only
 `paths.rs` prototype). The storm self-check above then runs against a router
 from before the rewrite.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [The router quest](/quest/m2/cluster-routes/scope.md) - rewrites `route::Router` to the path rule, the router this searches
-
 ## Related
 
-- [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - guards the model against the code; this checks the code itself
+- [Route sweeps are checked against the TLA+ model](/quest/m3/route-trace-validation.md) - guards the model against the code; this checks the code itself

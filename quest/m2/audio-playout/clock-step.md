@@ -24,7 +24,7 @@ keeps the old reference, so every frame is late for it. On the 2026-11-09
 rule audio rested behind: at #8507's head the `step` rows rested 35.2 and
 41.8 ms behind in the browser (AAC, Opus) and 5.7 and 17.3 ms natively; a
 simulated +200 ms step left native audio 150 to 160 ms behind. Under the
-[lag rule](/quest/m2/audio-playout/lag-rule.md) audio follows the clock
+[lag rule](https://github.com/moq-dev/moq/pull/8722) audio follows the clock
 instead, so the same stale reference shows as underruns.
 
 Recommendations:
@@ -36,7 +36,3 @@ Recommendations:
 - Keep one rule in `js/watch` `Sync` and `moq_mux::sync`, with a shared test
   vector, as the estimator's corpus does.
 - Do not add latency to reach zero underruns on the step.
-
-## Required
-
-- [Lag rule](/quest/m2/audio-playout/lag-rule.md) - the controller that treats a reference move as lag

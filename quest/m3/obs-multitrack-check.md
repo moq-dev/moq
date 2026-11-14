@@ -1,13 +1,11 @@
-# [S] OBS simulcast layers reach moq-watch from a live OBS, including the dock's Go Live
+# [S] The MoQ dock's Go Live publishes OBS simulcast layers
 
 ## Goal
 
-A live OBS 32.2.2 run, recorded in the PR, shows the
-`WHIPSimulcastTotalLayers` profile setting attaching two or more scaled
-video encoders to `moq_output`, each published as its own rendition and
-watched in `<moq-watch>`, both through the obs-websocket recipe in
-`doc/bin/obs.md` and through the MoQ dock's Go Live, which honors the
-profile's layer count instead of creating a single encoder.
+A live OBS 32.2.2 run, recorded in the PR, shows the MoQ dock's Go Live
+honoring the profile's `WHIPSimulcastTotalLayers` count instead of creating
+a single encoder: two or more scaled video encoders attach to `moq_output`,
+each published as its own rendition and watched in `<moq-watch>`.
 
 ## Plan
 
@@ -16,9 +14,12 @@ which finished the OBS multitrack quest as docs only.
 [moq-dev/moq#7333](https://github.com/moq-dev/moq/pull/7333) derived the recipe from OBS and obs-websocket sources without running
 OBS, so the manual run never happened.
 
-- Manual check: follow `doc/bin/obs.md`'s Simulcast renditions section on
-  OBS 32.2.2 (the version `cpp/obs/buildspec.json` pins). Fix the doc if a
-  step is wrong.
+Decided 2026-11-13 (maintainer, /quest-plan of `@moq/obs`): ✅ the
+obs-websocket recipe's first live run moved to
+[@moq/obs](/quest/m1/obs-js.md), which drives it from code and fixes the
+doc (rejected: `@moq/obs` waits on this m3 quest). This quest keeps the
+dock.
+
 - Dock: `MoQDock::CreateVideoEncoder` (`cpp/obs/src/moq-dock.cpp:1050`)
   creates one encoder and attaches it with `obs_output_set_video_encoder`
   (:1112), ignoring `Stream1/WHIPSimulcastTotalLayers`. Read the count from
@@ -27,10 +28,15 @@ OBS, so the manual run never happened.
   `obs_output_set_video_encoder2`. This gives a GUI path to simulcast,
   since stock Settings > Stream can't select `moq_service`.
 - Cover the dock's layers with `just obs test`; verify with
-  `just obs compile` and the manual run.
+  `just obs compile` and the live run on OBS 32.2.2 (the version
+  `cpp/obs/buildspec.json` pins).
 - [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029) (merged)
   added a multi-encoder ladder to the OBS output tests
   (`g_ladder` in `cpp/obs/test/moq-output-test.cpp`). Extend it to assert
   each rendition advertises its own bitrate in the catalog.
 
 Public API: none. Wire: none.
+
+## Related
+
+- [@moq/obs](/quest/m1/obs-js.md) - runs the obs-websocket simulcast recipe live

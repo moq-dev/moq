@@ -5,7 +5,7 @@ import * as Duration from "./duration.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { hasFetchMaxDelay, hasFrameBounds, Version } from "./version.ts";
+import { hasByteStart, hasFetchMaxDelay, hasFrameBounds, Version } from "./version.ts";
 
 function guardFetch(version: Version) {
 	switch (version) {
@@ -33,6 +33,12 @@ export class Fetch {
 	startFrame: number;
 
 	/**
+	 * Offset of the first byte to return within frame {@link startFrame}; 0 is the whole
+	 * frame. The response still states that frame's full size. Lite-07+.
+	 */
+	startByte: number;
+
+	/**
 	 * Index of the last frame to return (inclusive), or undefined for through the end
 	 * of the group. Lite-06+.
 	 */
@@ -47,6 +53,7 @@ export class Fetch {
 		maxDelay,
 		group,
 		startFrame = 0,
+		startByte = 0,
 		endFrame,
 	}: {
 		broadcast: Path.Valid;
@@ -57,6 +64,7 @@ export class Fetch {
 		maxDelay?: number;
 		group: bigint;
 		startFrame?: number;
+		startByte?: number;
 		endFrame?: number;
 	}) {
 		this.broadcast = broadcast;
@@ -67,6 +75,7 @@ export class Fetch {
 		this.maxDelay = maxDelay;
 		this.group = group;
 		this.startFrame = startFrame;
+		this.startByte = startByte;
 		this.endFrame = endFrame;
 	}
 
@@ -80,13 +89,17 @@ export class Fetch {
 		else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
 		await w.u62(this.group);
 
-		if (hasFrameBounds(version)) {
-			await w.u53(this.startFrame);
-			await w.u53(this.endFrame !== undefined ? this.endFrame + 1 : 0);
-		} else if (this.startFrame !== 0 || this.endFrame !== undefined) {
+		if (!hasFrameBounds(version) && (this.startFrame !== 0 || this.endFrame !== undefined)) {
 			// The peer would serve the whole group, including frames we excluded.
 			throw new Error("frame bounds not supported for this version");
 		}
+		if (!hasByteStart(version) && this.startByte !== 0) {
+			// The peer would resend the frame from its start, misaligning the reader.
+			throw new Error("fetch start byte not supported for this version");
+		}
+		if (hasFrameBounds(version)) await w.u53(this.startFrame);
+		if (hasByteStart(version)) await w.u53(this.startByte);
+		if (hasFrameBounds(version)) await w.u53(this.endFrame !== undefined ? this.endFrame + 1 : 0);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Fetch> {
@@ -103,6 +116,7 @@ export class Fetch {
 		}
 
 		const startFrame = await r.u53();
+		const startByte = hasByteStart(version) ? await r.u53() : 0;
 		const endFrame = await r.u53();
 		if (endFrame > 0 && endFrame - 1 < startFrame) {
 			throw new Error("fetch frame range ends before it starts");
@@ -117,6 +131,7 @@ export class Fetch {
 			maxDelay,
 			group,
 			startFrame,
+			startByte,
 			endFrame: endFrame > 0 ? endFrame - 1 : undefined,
 		});
 	}
