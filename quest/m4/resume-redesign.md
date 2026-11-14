@@ -77,6 +77,10 @@ Land it in Rust first, then mirror `js/net` unless
 `benches/origin.rs` with the reader times flap sweep before starting, to
 measure the change.
 
+Nightly mutates `resume.rs` (#8712): the rewrite kills or excludes, in
+`.cargo/mutants.toml`, every survivor of the code it adds, and drops the
+exclusions of the code it deletes.
+
 Public API: none. Wire: none.
 
 Decided 2026-11-05 (maintainer, follow-up from
