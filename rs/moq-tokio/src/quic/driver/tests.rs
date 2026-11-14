@@ -225,10 +225,8 @@ async fn ip_blocking() {
 			let accepting = server.accept().await.unwrap();
 			if accepting.remote_address() == client_1_addr {
 				accepting.refuse();
-			} else if accepting.remote_address_validated() {
+			} else if let Some(accepting) = accepting.validate_address() {
 				accepting.accept().expect("accept").await.expect("connection");
-			} else {
-				accepting.retry().unwrap();
 			}
 		}
 	});
@@ -973,11 +971,10 @@ async fn retry_after_rebind() {
 	timeout(Duration::from_secs(5), async {
 		let connecting = client.dial(server.local_addr(), "localhost").unwrap();
 		let incoming = server.accept().await.unwrap();
-		assert!(!incoming.remote_address_validated());
-		incoming.retry().unwrap();
+		assert!(incoming.validate_address().is_none(), "a first dial is unvalidated");
 
 		let incoming = server.accept().await.unwrap();
-		assert!(incoming.remote_address_validated());
+		let incoming = incoming.validate_address().expect("the Retry token validates the redial");
 		let (accepted, connected) = join!(incoming.accept().unwrap(), connecting);
 		let _server_connection = accepted.unwrap();
 		let _client_connection = connected.unwrap();

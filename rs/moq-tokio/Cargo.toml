@@ -164,6 +164,11 @@ required-features = ["net"]
 name = "clock"
 required-features = ["net"]
 
+# The QUIC Interop Runner endpoint (`test/quic-interop`), on the driver alone.
+[[example]]
+name = "quic-interop"
+required-features = ["driver"]
+
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"

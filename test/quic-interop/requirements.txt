@@ -1,0 +1,11 @@
+# The runner's requirements.txt, pinned so a release cannot change how a pcap is judged.
+prettytable==3.18.0
+pycryptodome==4.4.0
+pyshark==0.6
+random-slugs==1.0.4
+termcolor==3.3.0
+# pyshark's own dependencies, pinned for the same reason.
+appdirs==1.4.4
+lxml==6.1.3
+packaging==26.3
+wcwidth==0.9.4
