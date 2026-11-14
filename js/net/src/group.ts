@@ -312,6 +312,11 @@ export class Producer {
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
+		hooks.groupHeadless = (group) => group.#state.start > 0 || headShed(group.#state.frames.peek().first);
+		hooks.groupMayStart = (group) => {
+			const state = group.#state;
+			return state.offset === 0 && state.total.peek() === 0 && state.closed.peek() === undefined;
+		};
 		hooks.holdGroup = (group) => {
 			group.#holds++;
 			let held = true;
@@ -1119,6 +1124,7 @@ export class Consumer {
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
 		hooks.groupIndex = (group) => group.#index();
+		hooks.groupFirstFrame = (group) => group.#state.offset;
 		hooks.groupStarted = (group) =>
 			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
 		hooks.groupFate = (group) => {
