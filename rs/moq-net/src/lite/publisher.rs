@@ -3924,11 +3924,12 @@ mod announce_test {
 		);
 	}
 
-	/// A DEAD whose moved routes outgrow one message moves each first with a ROUTE_UPDATE
-	/// and then names none, so failing over many routes at once never fails the stream;
+	/// A DEAD whose moved routes outgrow one message lists as many as fit and moves the
+	/// rest first with ROUTE_UPDATEs, so failing over many routes at once never fails the
+	/// stream, and the DEAD still names a route through its hop for the peer to apply it;
 	/// one that fits goes whole.
 	#[test]
-	fn a_lite07_dead_past_one_message_moves_each_route_first() {
+	fn a_lite07_dead_past_one_message_moves_the_rest_first() {
 		use crate::route::path::{Hop, Offer};
 		let offer = Offer {
 			// The longest path, of the widest Hop IDs.
@@ -3944,18 +3945,23 @@ mod announce_test {
 			down_only: false,
 			rtt: None,
 		};
-		let dead = |routes: u64, moved: bool| lite::Dead::Closed {
+		let dead = |moved: std::ops::Range<u64>| lite::Dead::Closed {
 			hop: Hop { node: 7, session: 1 },
 			far: 8,
 			gone: true,
-			moved: match moved {
-				true => (0..routes).map(|id| (id, Ok(offer.clone()))).collect(),
-				false => Vec::new(),
-			},
+			moved: moved.map(|id| (id, Ok(offer.clone()))).collect(),
+		};
+		let encodes = |msg: &lite::AnnounceBroadcast| {
+			crate::coding::Encode::encode(
+				msg,
+				&mut crate::coding::Encoder::new(&mut Vec::new(), Version::Lite07.into()),
+				Version::Lite07,
+			)
+			.is_ok()
 		};
 		// Past 65,535 bytes at about 300 a route.
 		let many = 300;
-		assert!(dead(2, true).fits() && !dead(many, true).fits());
+		assert!(!encodes(&lite::AnnounceBroadcast::Dead(dead(0..many))));
 
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3971,18 +3977,27 @@ mod announce_test {
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
 		let waiter = kio::Waiter::noop();
-		super::routed::buffer_dead(&mut stream, dead(2, true)).unwrap();
+		super::routed::buffer_dead(&mut stream, dead(0..2)).unwrap();
 		assert!(stream.writer.poll_flush(&waiter).is_ready());
-		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Dead(dead(2, true))]);
+		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Dead(dead(0..2))]);
 
-		super::routed::buffer_dead(&mut stream, dead(many, true)).unwrap();
+		super::routed::buffer_dead(&mut stream, dead(0..many)).unwrap();
 		assert!(stream.writer.poll_flush(&waiter).is_ready());
-		let updates = (0..many).map(|id| lite::AnnounceBroadcast::RouteUpdate {
-			id,
-			offer: offer.clone(),
-		});
-		let expected: Vec<_> = updates.chain([lite::AnnounceBroadcast::Dead(dead(0, false))]).collect();
-		assert_eq!(wire.take_announces(), expected);
+		let sent = wire.take_announces();
+		let (last, updates) = sent.split_last().expect("a DEAD");
+		let lite::AnnounceBroadcast::Dead(lite::Dead::Closed { moved, .. }) = last else {
+			panic!("the DEAD goes last: {last:?}");
+		};
+		let fit = moved.len() as u64;
+		assert!(fit > 100 && fit < many, "listed {fit}");
+		assert_eq!(*last, lite::AnnounceBroadcast::Dead(dead(0..fit)));
+		let expected: Vec<_> = (fit..many)
+			.map(|id| lite::AnnounceBroadcast::RouteUpdate {
+				id,
+				offer: offer.clone(),
+			})
+			.collect();
+		assert_eq!(updates, expected);
 	}
 
 	#[test]

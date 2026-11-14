@@ -410,15 +410,7 @@ fn encode_dead(w: &mut Encoder<'_>, dead: &Dead) -> Result<(), EncodeError> {
 			w.u8(u8::from(*gone));
 			w.varint(moved.len() as u64)?;
 			for (id, offer) in moved {
-				// A refused offer is decode-only: this node never forwards one.
-				let Ok(offer) = offer else {
-					return Err(EncodeError::Unsupported);
-				};
-				w.varint(*id)?;
-				// Sized, so a receiver refusing one offer still reads the next.
-				let prefix = w.prefix_varint();
-				encode_offer(w, offer)?;
-				w.fill(prefix)?;
+				encode_moved(w, *id, offer)?;
 			}
 		}
 		Dead::Drain { node } => {
@@ -432,13 +424,56 @@ fn encode_dead(w: &mut Encoder<'_>, dead: &Dead) -> Result<(), EncodeError> {
 	Ok(())
 }
 
+fn encode_moved(w: &mut Encoder<'_>, id: u64, offer: &Heard) -> Result<(), EncodeError> {
+	// A refused offer is decode-only: this node never forwards one.
+	let Ok(offer) = offer else {
+		return Err(EncodeError::Unsupported);
+	};
+	w.varint(id)?;
+	// Sized, so a receiver refusing one offer still reads the next.
+	let prefix = w.prefix_varint();
+	encode_offer(w, offer)?;
+	w.fill(prefix)?;
+	Ok(())
+}
+
 impl Dead {
-	/// Whether it fits one message. A DEAD whose moved routes outgrow that is sent with
-	/// none, each moved route going ahead of it as a ROUTE_UPDATE instead.
-	pub(crate) fn fits(&self) -> bool {
-		let mut body = Vec::new();
-		encode_dead(&mut Encoder::new(&mut body, Version::Lite07.into()), self).is_ok()
-			&& body.len() <= MAX_MESSAGE_SIZE
+	/// Split off, in order, the moved routes past what one message holds, keeping at
+	/// least one. Each goes ahead of the DEAD as a ROUTE_UPDATE instead, while the
+	/// receiver still uses it, and the DEAD still names a route through its hop, so the
+	/// receiver applies it as it would the whole one.
+	pub(crate) fn overflow(&mut self) -> Vec<(u64, Heard)> {
+		let Self::Closed { hop, far, gone, moved } = self else {
+			return Vec::new();
+		};
+		let form = Version::Lite07.into();
+		let size = |encode: &dyn Fn(&mut Encoder<'_>) -> Result<(), EncodeError>| {
+			let mut body = Vec::new();
+			// What cannot encode fails the DEAD when it is sent instead.
+			let _ = encode(&mut Encoder::new(&mut body, form));
+			body.len()
+		};
+		let bare = Self::Closed {
+			hop: *hop,
+			far: *far,
+			gone: *gone,
+			moved: Vec::new(),
+		};
+		// The bare DEAD, its Moved Count grown to the widest varint.
+		let mut used = size(&|w| encode_dead(w, &bare)) + 7;
+		let mut kept = std::mem::take(moved);
+		let mut fit = 0;
+		for (id, offer) in &kept {
+			let entry = size(&|w| encode_moved(w, *id, offer));
+			if fit > 0 && used + entry > MAX_MESSAGE_SIZE {
+				break;
+			}
+			used += entry;
+			fit += 1;
+		}
+		let rest = kept.split_off(fit);
+		*moved = kept;
+		rest
 	}
 }
 

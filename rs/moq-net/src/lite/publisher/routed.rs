@@ -119,17 +119,12 @@ enum Phase {
 /// Whether a stream on `link` carries `claim` at all: never an upstream-learned claim
 /// to an upstream, nor one learned from another node to a peer this node does not
 /// proxy for.
-/// Buffer `dead`. When its moved routes outgrow one message, each goes ahead of it as a
-/// ROUTE_UPDATE instead: it moves while the peer still uses it, so a DEAD naming none of
-/// them leaves the peer as the whole one would.
+/// Buffer `dead`, each moved route past what one message holds going ahead of it as a
+/// ROUTE_UPDATE (see [`lite::Dead::overflow`]).
 pub(super) fn buffer_dead(stream: &mut Stream<Transport, Version>, mut dead: lite::Dead) -> Result<(), Error> {
-	if !dead.fits()
-		&& let lite::Dead::Closed { moved, .. } = &mut dead
-	{
-		for (id, offer) in moved.drain(..) {
-			let offer = offer.expect("this node forwards only usable offers");
-			stream.writer.buffer(&Msg::RouteUpdate { id, offer })?;
-		}
+	for (id, offer) in dead.overflow() {
+		let offer = offer.expect("this node forwards only usable offers");
+		stream.writer.buffer(&Msg::RouteUpdate { id, offer })?;
 	}
 	stream.writer.buffer(&Msg::Dead(dead))?;
 	Ok(())

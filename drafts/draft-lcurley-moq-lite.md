@@ -563,7 +563,7 @@ A minted Instance is new for every announcement, so a publisher reconnecting or 
 A node that loses a session names the hop it lost: its own Hop ID and that session's Session Number, with the Hop ID of the node at the far end.
 It sends one [DEAD](#dead) for it to each neighbour it sent a route whose Path holds the hop, covering every origin node, and each neighbour passes the hop on in the same way, once per neighbour while it has sent that neighbour a route through it.
 The DEAD lists the routes on the stream that moved to another Path, each with its new Route Offer.
-A sender whose moved routes do not fit one message instead sends each as a ROUTE_UPDATE right before a DEAD that lists none: each moves while the receiver still uses it, so the receiver ends as the whole DEAD would leave it.
+A sender whose moved routes do not fit one message lists as many as fit, at least one, and sends each of the rest as a ROUTE_UPDATE right before the DEAD: those move while the receiver still uses them, and the DEAD still names a route through the hop, so the receiver applies it as it would the whole one.
 The sender's other routes on the stream through the hop end if `Gone` is set.
 Otherwise each is held, except one the sender ends with a ROUTE_END after the DEAD, and one the sender learned from the receiver itself, which the sender holds only by a ROUTE_HOLD after the DEAD: until then the receiver waits for its answer (see [Holds](#holds)).
 

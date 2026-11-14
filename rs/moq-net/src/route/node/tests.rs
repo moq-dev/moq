@@ -271,7 +271,7 @@ fn nothing_moves_across_a_dead() {
 	let mut waiting = Waiting::default();
 	let key = (1, Path::empty());
 	outbox.route(7, key.clone(), Some(Reach::Finite(offer(1))), &mut waiting);
-	outbox.dead(Dead::Draining { node: 1 });
+	outbox.dead(7, Dead::Draining { node: 1 }, &mut waiting);
 	outbox.route(7, key.clone(), Some(Reach::Finite(offer(2))), &mut waiting);
 	let read: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();
 	let route = |metric| Output::Route {
@@ -282,47 +282,55 @@ fn nothing_moves_across_a_dead() {
 	assert_eq!(read, [route(1), Output::Dead(Dead::Draining { node: 1 }), route(2)]);
 }
 
-/// A reader that falls behind repeated failures of the route it holds overruns its
+/// A reader that falls behind repeated failures of the routes it holds overruns its
 /// stream, while one behind a failure of every hop a path can cross does not, and
-/// reading what was queued clears it.
+/// reading what was queued clears it. A route a DEAD ends counts no longer, so neither
+/// does a publisher that came and went.
 #[test]
 fn a_reader_behind_repeated_failures_overruns() {
+	use super::super::path::Hop;
 	let offer = |session| Offer {
-		path: [
-			super::super::path::Hop { node: 1, session: 0 },
-			super::super::path::Hop { node: 2, session },
-		]
-		.into(),
+		path: [Hop { node: 1, session: 0 }, Hop { node: 2, session }].into(),
 		draining: false,
 		priority: 0,
 		metric: 1,
 		down_only: false,
 		rtt: None,
 	};
+	let dead = |session, gone| Dead::Closed {
+		hop: Hop { node: 2, session },
+		far: 3,
+		moved: Vec::new(),
+		gone,
+	};
+
+	// One route whose hop keeps failing, the route moving on after each.
 	let mut outbox = Outbox::default();
 	let mut waiting = Waiting::default();
 	let key = (1, Path::empty());
 	outbox.route(7, key.clone(), Some(Reach::Finite(offer(0))), &mut waiting);
-	// Each failure of the route's hop is a DEAD, and the route moves on after it.
 	let mut failures = 0;
 	while !outbox.overrun() {
 		failures += 1;
-		outbox.dead(Dead::Closed {
-			hop: super::super::path::Hop {
-				node: 2,
-				session: failures,
-			},
-			far: 3,
-			moved: Vec::new(),
-			gone: false,
-		});
+		outbox.dead(7, dead(failures, false), &mut waiting);
 		outbox.route(7, key.clone(), Some(Reach::Finite(offer(failures))), &mut waiting);
 	}
 	assert!(failures > MAX_HOPS as u64, "overran {failures} failures behind");
-
 	assert_eq!(std::iter::from_fn(|| outbox.pop()).count() as u64, 2 * failures + 1);
 	assert!(!outbox.overrun());
 	assert_eq!(outbox.sealed, 0, "everything read");
+
+	// Publishers that each come and go with their session, the DEAD ending each route.
+	let mut outbox = Outbox::default();
+	let mut publishers = 0;
+	while !outbox.overrun() {
+		publishers += 1;
+		assert!(publishers < 1000, "a reader holding no route never overran");
+		let key = (publishers, Path::empty());
+		outbox.route(7, key, Some(Reach::Finite(offer(publishers))), &mut waiting);
+		outbox.dead(7, dead(publishers, true), &mut waiting);
+	}
+	assert!(outbox.known.is_empty(), "every route ended with its DEAD");
 }
 
 /// A route the reader read ends even when its ROUTE_END is queued alone, with no batch
@@ -341,7 +349,7 @@ fn a_read_route_ends_alone() {
 	let mut waiting = Waiting::default();
 	let key = (1, Path::empty());
 	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut waiting);
-	outbox.dead(Dead::Draining { node: 1 });
+	outbox.dead(7, Dead::Draining { node: 1 }, &mut waiting);
 	assert_eq!(std::iter::from_fn(|| outbox.pop()).count(), 2);
 	outbox.route(7, key, None, &mut waiting);
 	let read: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();

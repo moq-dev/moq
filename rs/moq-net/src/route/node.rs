@@ -35,7 +35,7 @@ use rand::RngExt;
 
 use super::{
 	Error, GENERATED, Id, Link, MAX_HOPS, Metric, QUALIFIED, Rev,
-	path::{Dead, Doubt, Forward, Offer, Reach, RouteId, Router},
+	path::{Dead, Doubt, Forward, Hop, Offer, Reach, RouteId, Router},
 	view::{ancestors, below},
 };
 
@@ -172,8 +172,9 @@ struct Outbox {
 	serves: BTreeMap<u64, Output>,
 	/// Where each claim's last change on each route sits in `serves`.
 	serving: HashMap<(Id, Path, Path), u64>,
-	/// The routes the reader holds once it reads everything queued.
-	known: HashSet<RouteId>,
+	/// The routes the reader holds once it reads everything queued, each with its path,
+	/// so a DEAD ending the rest of a hop's routes ends them here too.
+	known: HashMap<RouteId, Arc<[Hop]>>,
 	/// Claim starts and restarts held back until a stream serving them confirms their
 	/// instance, by route, with the route's last floor, which certifies nothing while any
 	/// is held. Bounded like the segments: one per claim. The node's `waiting` indexes
@@ -255,7 +256,7 @@ impl Outbox {
 
 	/// The pending entry for `key` in the open segment, queued behind the others when new.
 	fn entry(&mut self, key: &RouteId) -> &mut Pending {
-		let was = self.known.contains(key);
+		let was = self.known.contains_key(key);
 		let next = &mut self.next;
 		let segment = {
 			if self.segments.back().is_none_or(|segment| segment.dead.is_some()) {
@@ -319,21 +320,17 @@ impl Outbox {
 	fn route(&mut self, stream: Key, key: RouteId, reach: Option<Reach>, waiting: &mut Waiting) {
 		match reach {
 			Some(Reach::Finite(offer)) => {
+				let path = offer.path.clone();
 				let entry = self.entry(&key);
 				entry.finite = Some(offer);
 				entry.held = false;
-				self.known.insert(key);
+				self.known.insert(key, path);
 			}
 			Some(Reach::Held) => {
 				self.entry(&key).held = true;
 			}
 			None => {
-				// The peer drops the route's claims, so nothing held back is owed.
-				if let Some((held, _)) = self.withheld.remove(&key) {
-					for path in held.keys() {
-						unwait(waiting, key.0, path, stream, &key.1);
-					}
-				}
+				self.unwithhold(stream, &key, waiting);
 				// Whether the reader holds the route is read before it is forgotten: an end
 				// queued alone, with no batch ahead of it, opens the entry.
 				let entry = self.entry(&key);
@@ -417,8 +414,39 @@ impl Outbox {
 		merged.insert(path.clone(), Some(item));
 	}
 
-	/// Queue a DEAD, read once every route change queued before it is.
-	fn dead(&mut self, dead: Dead) {
+	/// The peer drops the route's claims, so nothing held back is owed.
+	fn unwithhold(&mut self, stream: Key, key: &RouteId, waiting: &mut Waiting) {
+		if let Some((held, _)) = self.withheld.remove(key) {
+			for path in held.keys() {
+				unwait(waiting, key.0, path, stream, &key.1);
+			}
+		}
+	}
+
+	/// Queue a DEAD for the stream `stream`, read once every route change queued before
+	/// it is. The reader's routes through its hop move as it says, and with `gone` the
+	/// rest end with it.
+	fn dead(&mut self, stream: Key, dead: Dead, waiting: &mut Waiting) {
+		if let Dead::Closed { hop, moved, gone, .. } = &dead {
+			let mut kept = HashSet::new();
+			for moved in moved {
+				let key = (moved.id, moved.prefix.clone());
+				if let Some(path) = self.known.get_mut(&key) {
+					*path = moved.offer.path.clone();
+				}
+				kept.insert(key);
+			}
+			if *gone {
+				let ended: Vec<RouteId> = (self.known.iter())
+					.filter(|(key, path)| !kept.contains(*key) && path.contains(hop))
+					.map(|(key, _)| key.clone())
+					.collect();
+				for key in ended {
+					self.known.remove(&key);
+					self.unwithhold(stream, &key, waiting);
+				}
+			}
+		}
 		let segment = self.segment();
 		let sealed = 1 + segment.pending.len() + moved(&dead);
 		segment.dead = Some(dead);
@@ -1176,7 +1204,7 @@ impl State {
 				}
 				super::path::Out::Dead { to, dead } => {
 					if let Some(queue) = self.queues.get(&to) {
-						queue.lock().dead(dead);
+						queue.lock().dead(to, dead, &mut self.waiting);
 					}
 				}
 				// The stream answering the peer sends its own once its initial set is out.
