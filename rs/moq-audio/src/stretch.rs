@@ -188,6 +188,17 @@ impl Stretch {
 		(self.filled as i64 - self.head as i64 - self.shift - self.faded as i64) as usize
 	}
 
+	/// Input frames past the playhead, with a crossfade's played share mapped
+	/// onto the shifted input, to the nearest frame.
+	pub fn ahead(&self) -> usize {
+		let moved = if self.shift == 0 {
+			0.0
+		} else {
+			self.faded as f64 * (self.hop as i64 + self.shift) as f64 / self.hop as f64
+		};
+		(self.filled as f64 - self.head as f64 - moved).round() as usize
+	}
+
 	/// Input frames past where the playhead, or the crossfade it plays, starts.
 	pub fn queued(&self) -> usize {
 		self.filled - self.head
@@ -573,6 +584,31 @@ mod tests {
 			0,
 			"without history there is nowhere to repeat from"
 		);
+	}
+
+	#[test]
+	fn maps_a_crossfades_played_share_onto_the_input_it_shifts_to() {
+		let mut stretch = Stretch::new(8000, 1);
+		let (window, hop) = (stretch.window, stretch.hop);
+		let input = tone(window + hop);
+		stretch.spare(window).copy_from_slice(&input[..window]);
+		stretch.commit(window);
+		// A hop of history, so the bridge can reach back one period.
+		stretch.next(HOLD);
+		stretch.read(&mut vec![0.0; hop]);
+		stretch.spare(hop).copy_from_slice(&input[window..]);
+		stretch.commit(hop);
+		assert_eq!(stretch.ahead(), window);
+
+		assert_eq!(stretch.next(bridge(8000)), -80);
+		// Half the crossfade moves the playhead half of a hop less the period it
+		// repeats: nowhere.
+		stretch.read(&mut vec![0.0; hop / 2]);
+		assert_eq!(stretch.ahead(), window);
+		assert_eq!(stretch.available(), window + hop / 2);
+		stretch.read(&mut vec![0.0; hop / 2]);
+		assert!(stretch.due());
+		assert_eq!(stretch.ahead(), window);
 	}
 
 	#[test]

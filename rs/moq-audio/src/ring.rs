@@ -727,9 +727,10 @@ impl Consumer {
 	}
 
 	/// The playhead on the writer's stream: what was taken off the ring and the
-	/// comfort noise played, less what the stretch still holds to play.
+	/// comfort noise played, less the input the stretch holds past the
+	/// playhead, a crossfade's played share mapped onto the input it shifts to.
 	fn playhead(&self) -> usize {
-		let staged = self.stretch.as_ref().map_or(0, |stretch| stretch.available());
+		let staged = self.stretch.as_ref().map_or(0, |stretch| stretch.ahead());
 		self.position.wrapping_add(self.cushioned).wrapping_sub(staged)
 	}
 
@@ -793,8 +794,14 @@ impl Consumer {
 		if late == 0 {
 			return 0;
 		}
+		// Discarding plays out a crossfade in progress, which lands the playhead
+		// off the one it maps to by what the crossfade's rest still shifts.
+		let mapping = self
+			.stretch
+			.as_ref()
+			.map_or(0, |stretch| stretch.ahead() as i64 - stretch.available() as i64);
 		let available = self.available();
-		let pushed = self.discard(late as usize);
+		let pushed = self.discard((late - mapping).max(0) as usize);
 		// A join inside the startup silence shortens it, which drops nothing heard.
 		if pushed == 0 {
 			return 0;
@@ -1481,6 +1488,53 @@ mod tests {
 		assert_eq!(cons.skips(), 2);
 		let left = cons.available() as f64 * 1000.0 / rate as f64;
 		assert!((940.0..960.0).contains(&left), "{left} ms left");
+	}
+
+	/// Right after a splice repeats audio, the stretch holds more than a window
+	/// past the playhead, and the crossfade may still be playing, so a snap past
+	/// a short bound can start inside it: it still lands on the clock.
+	#[test]
+	fn a_snap_lands_on_the_clock_from_inside_a_crossfade() {
+		let rate = 48_000;
+		let read = 128;
+		for jump in 0..150 {
+			let (mut prod, mut cons, _) = tone(rate, Duration::from_millis(10));
+			// A 50 Hz tone, whose 20 ms period is one packet and where a
+			// slowdown splices.
+			let pcm: Vec<f32> = (0..960)
+				.flat_map(|i| [(i as f32 * std::f32::consts::TAU * 50.0 / rate as f32).sin() * 0.25; 2])
+				.collect();
+			for _ in 0..100 {
+				assert_eq!(prod.push(&pcm), Push::Ok);
+			}
+			let base = prod.base;
+			let bound = Duration::from_millis(30);
+			let mut out = vec![0.0; read * 2];
+			let mut due = base + Duration::from_millis(2010);
+			prod.due(due, bound);
+			let mut now = base;
+			let step = Duration::from_secs_f64(read as f64 / rate as f64);
+			// Through the prime, which joins the clock.
+			while now < base + Duration::from_millis(20) {
+				assert_eq!(pull(&mut cons, &mut out, now), Read::Ok);
+				now += step;
+			}
+			// 25 ms ahead of the clock: slowing down, under the snap.
+			due += Duration::from_millis(25);
+			prod.due(due, bound);
+			for _ in 0..jump {
+				assert_eq!(pull(&mut cons, &mut out, now), Read::Ok);
+				now += step;
+			}
+			// Then 35 ms behind it: past the 30 ms bound and window.
+			let lag = cons.lag(0).0;
+			due -= Duration::from_secs_f64((35 * rate as i64 / 1000 - lag) as f64 / rate as f64);
+			prod.due(due, bound);
+			let read = pull(&mut cons, &mut out, now);
+			assert!(matches!(read, Read::Trimmed { .. }), "jump {jump}: {read:?}");
+			let lag = cons.lag(0).0 + 128;
+			assert!(lag.abs() <= 2, "jump {jump}: {lag} frames off the clock");
+		}
 	}
 
 	/// Without a clock, a level up to a window past the bound is the stretch's
