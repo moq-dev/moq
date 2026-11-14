@@ -36,8 +36,8 @@ maintainer opens the PR rather than an agent.
 
 Two stages, each its own PR here:
 
-1. Prepare. Fork NixOS/nixpkgs to kixelated/nixpkgs (none exists as of
-   2026-11-05) and push a branch with two commits: kixelated's
+1. Prepare. Use the existing kixelated/nixpkgs fork (it exists as of
+   2026-11-12, with no moq-relay branch yet) and push a branch with two commits: kixelated's
    `maintainers/maintainer-list.nix` entry (GitHub `kixelated`, id 432854),
    then `pkgs/by-name/mo/moq-relay/package.nix`. Both commits carry
    `Assisted-by:`. Package from the latest `moq-relay-v*` tag with

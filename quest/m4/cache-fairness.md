@@ -32,7 +32,7 @@ limits (`rs/moq-relay/src/limits.rs`) bound each session, not a tenant's
 total across sessions.
 
 Decided 2026-10-28 (maintainer): measure first, then propose. Waits for
-[unbounded groups](/quest/m2/unbounded-groups/README.md), which bounds each
+[unbounded groups](/quest/m3/unbounded-groups/README.md), which bounds each
 group copy at a 32 MB tail and lets front eviction shed a live latest group, so
 the measurement runs against the final eviction rules. Show with a test
 whether a heavy tenant (many sessions and tracks, or a stopped publisher)
@@ -50,7 +50,7 @@ Wire: none.
 
 ## Required
 
-- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - each group copy holds a 32 MB tail and front eviction can shed a live latest group
+- [Unbounded groups](/quest/m3/unbounded-groups/README.md) - each group copy holds a 32 MB tail and front eviction can shed a live latest group
 
 ## Related
 

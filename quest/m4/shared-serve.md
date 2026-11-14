@@ -31,11 +31,11 @@ cheaper, since epoch semantics already live in the model.
 
 Decision prompts:
 
-- Plan a shared core: not now; ✅ in m2; in m1.
+- Plan a shared core: not now; ✅ after the cut; before the cut.
 - Scope: Rust first, then JS, publisher only; ✅ also the subscriber side;
   Rust and JS together; Rust only.
 - Rank: ✅ after Perf and the transport benches, so they show no regression;
-  with the moq-transport work; end of m2.
+  with the moq-transport work; last before the cut.
 
 Implementation guidance:
 
@@ -61,4 +61,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Shared group serving and ingest in JS](/quest/m4/shared-serve-js.md) - the JS mirror
-- [Perf](/quest/m4/perf/README.md) - hot-path work in the same machines
+- [Perf](/quest/m9/perf/README.md) - hot-path work in the same machines

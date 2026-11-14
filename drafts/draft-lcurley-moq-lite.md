@@ -135,7 +135,7 @@ Any broadcasts and subscriptions are transparently proxied by the CDN behind the
 A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
 A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with `/` or contains two in a row; the empty path has no segments and prefixes every path.
-A `\` (0x5C) escapes the `\` or `/` that follows it, as a MoqTransport namespace field holding either is spelled; a path with any other `\` is a PROTOCOL_VIOLATION.
+A `\` (0x5C) escapes the `\` or `/` that follows it, as a MoqTransport namespace field holding either is spelled; a path with any other `\` is a PROTOCOL_VIOLATION, or in a claim refused (see [Refused Content](#refused-content)).
 A continuous stream is named by an Instance, carried on its claims (see [ANNOUNCE_START](#announce-start)): a path and an Instance name one Broadcast, and a publisher MUST NOT serve different content under the same pair.
 Within one Instance, group sequences never restart and never name two different groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
 A publisher that starts its group sequences over, such as a restarted process, uses a new Instance, while replicas of the same content share one.
@@ -437,7 +437,7 @@ An ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces a claim while keeping
 The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives a message referencing a Route ID or Announce ID that was never assigned or already retired, a ROUTE_START for an origin node that already has a live route on the stream, an ANNOUNCE_START for a prefix its route already claims, or any message before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that every route and claim on it is gone.
 
-A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, including one resolved by [Compression](#announce-compression).
+A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except in a claim, which it refuses instead (see [Refused Content](#refused-content)), including one resolved by [Compression](#announce-compression).
 A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
 A publisher answering a request stream presents, per route, each claim inside the requested prefix and only the most specific claim at or above it, at the requested prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
 When that most specific covering claim changes, such as when it is withdrawn and a broader one still covers the request, the publisher moves the presented claim to the new one with an ANNOUNCE_UPDATE or ANNOUNCE_RESTART, and ends it only when no claim of the route covers the requested prefix.
@@ -466,7 +466,20 @@ The receiver resolves the base against the claims live when the message arrives,
 The base need not share the new claim's route.
 A publisher MAY always send a `Path Base` of 0.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `Path Base` names an Announce ID that was never assigned or already retired, a `Path Keep` is non-zero with a `Path Base` of 0 or exceeds the base's segments, or the resolved path breaks its own rules.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `Path Base` names an Announce ID that was never assigned or already retired, or a `Path Keep` is non-zero with a `Path Base` of 0 or exceeds the base's segments.
+A resolved path that breaks its own rules, or a base whose path the subscriber refused, refuses the claim (see [Refused Content](#refused-content)).
+
+#### Refused Content {#refused-content}
+Route messages carry content the publisher may only have forwarded: a route's Node ID, Seqno, Flags, and Hops, a claim's path, Instance, and Lite-06 Chain, and a warm route's path, Instance, Carrier Index, and Hops.
+A newer version or release may send such content that an older receiver cannot use, so a receiver that refuses it withdraws only the route or claim it describes and keeps the session, as BGP treats a malformed attribute as a withdrawal ({{?RFC7606}}).
+This specification marks each such value "refused"; the receiver skips the rest of the message's body, and SHOULD log and count each refusal so a refused route is never silently missing.
+
+- A refused ROUTE_START still assigns its Route ID, and a refused ROUTE_UPDATE keeps it; either leaves the receiver no route, so its claims go offline as on ROUTE_END. The messages naming the Route ID stay valid, and a later ROUTE_UPDATE the receiver can use makes the route usable again, with the claims its last floor certified. A route to Node ID 0 stays refused.
+- A refused ANNOUNCE_START still assigns its Announce ID, and a refused ANNOUNCE_UPDATE or ANNOUNCE_RESTART keeps it; the claim goes offline at its route's next floor, which is not an ANNOUNCE_END. A claim whose path was refused stays refused; any other comes back with a later ANNOUNCE_RESTART the receiver can use. Its origin withdrew nothing, so while a route has a live claim the receiver refused, the receiver takes the route's floors as certifying nothing, and a relay forwards no withdrawal for the claim.
+- A refused WARM_START still assigns its Warm ID.
+
+Only the publisher's own framing and stream state close the session: a message that does not decode within its Message Length, such as an RTT flag without its RTT, and a message naming an id that was never assigned or already retired, or breaking the stream's order, as above.
+A relay never forwards content a peer would refuse for the relay's own part in it: a route that arrives with 32 Hops is unusable, so the relay's Hop never takes one past 32.
 
 #### Hidden Paths {#hidden}
 A claim is hidden from a request when a segment of its path below the requested prefix starts with `.` (0x2E).
@@ -959,7 +972,7 @@ moq-lite-07 uses the leading-ones encoding of [moqt]: the number of leading 1 bi
 Most messages are prefixed with a variable-length integer indicating the number of bytes in the message payload that follows.
 This length field does not include the length of the varint length itself.
 
-A message on the Setup Stream or any bidirectional stream that fails to decode, such as one whose fields disagree with its Message Length or carry a value this specification forbids, MUST close the session with a PROTOCOL_VIOLATION.
+A message on the Setup Stream or any bidirectional stream that fails to decode, such as one whose fields disagree with its Message Length or carry a value this specification forbids, MUST close the session with a PROTOCOL_VIOLATION, except content a route message forwards, which the receiver refuses (see [Refused Content](#refused-content)).
 Resetting only the stream would let the peer repeat the violation on the next one.
 A stream that ends or is reset before its message completes only terminates that stream, except on the Setup and Auth Streams.
 A GROUP or FRAME that fails to decode resets only its Group or Fetch Stream, and a STREAM_TYPE the negotiated version does not define resets only its stream (see [STREAM_TYPE](#stream_type)).
@@ -1217,18 +1230,18 @@ Set to 0x6 to indicate a ROUTE_START message.
 
 **Node ID**:
 The origin node, as the publisher names it on this session.
-0 is a PROTOCOL_VIOLATION.
+0 is refused (see [Refused Content](#refused-content)).
 
 **Seqno**:
 The origin's sequence number of the route, which only the origin advances.
-2^64-1 is a PROTOCOL_VIOLATION.
+2^64-1 is refused.
 
 **Metric**:
 The publisher's metric to the origin node, 0 when it is the origin.
 
 **Flags**:
 A bit field: 0x1 when the route is down-only (see [Routing](#routing)), and 0x2 when an RTT follows.
-Any other bit set is a PROTOCOL_VIOLATION.
+Any other bit set is refused, rather than ignored: a later version may give a bit a meaning that changes the route, or a field ahead of the Hops.
 
 **RTT**:
 The publisher's RTT to the origin node in milliseconds (see [Routing](#routing)), 0 when it is the origin.
@@ -1236,7 +1249,7 @@ Present only when Flags has 0x2 set, and absent when the publisher has none.
 
 **Hop Count**:
 The number of Hop IDs that follow.
-More than 32 is a PROTOCOL_VIOLATION.
+More than 32 is refused.
 
 **Hop ID**:
 The route's Hops (see [Routing](#routing)), in order, the publisher's own last.
@@ -1377,7 +1390,7 @@ A claim never changes its Route ID.
 
 **Instance**:
 The stream the claim serves (see [Broadcast](#broadcast)): non-empty UTF-8 text.
-An empty or non-UTF-8 Instance is a PROTOCOL_VIOLATION.
+An empty or non-UTF-8 Instance is refused (see [Refused Content](#refused-content)).
 A relay forwards the Instance unchanged.
 
 **Minted**:
@@ -1398,7 +1411,7 @@ A relay forwards it unchanged; the cost of a path through the claim is the Annou
 
 **Lite-06 Chain**:
 The moq-lite-06 Hop ID list a claim arrived with where its origin node learned it over moq-lite-06, encoded as that list: a count, then each Hop ID.
-A publisher sends it, as the message's last field, only to a peer that sent the [Lite-06 Chain Parameter](#lite06-chain-parameter), and only when the claim has one; a received empty chain is a PROTOCOL_VIOLATION.
+A publisher sends it, as the message's last field, only to a peer that sent the [Lite-06 Chain Parameter](#lite06-chain-parameter), and only when the claim has one; a received chain that is empty, or names a Hop ID twice, is refused.
 A relay forwards it unchanged, and translating the claim for a moq-lite-06 peer sends it followed by a Hop ID standing for the claim's origin node.
 A node MUST NOT serve a claim whose chain names itself, by its own Hop ID or one standing for its Node ID, or whose translated chain would exceed its hop limit.
 
@@ -1538,11 +1551,11 @@ What pulling the copy cost the publisher, 0 when it is the copy's carrier (see [
 
 **Carrier Index**:
 The position of the copy's carrier among the Hop IDs that follow, 0 for the first.
-A value not below `Hop Count` is a PROTOCOL_VIOLATION.
+A value not below `Hop Count` is refused (see [Refused Content](#refused-content)).
 
 **Hop Count**:
 The number of Hop IDs that follow.
-More than 32 is a PROTOCOL_VIOLATION.
+More than 32 is refused.
 
 **Hop ID**:
 The copy's Hops (see [Warm Routes](#warm-routes)), in order, the publisher's own last.
@@ -2473,6 +2486,7 @@ An application-specific payload.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.
+- A receiver refuses forwarded route content it cannot use, such as an unknown route flag, more than 32 Hops, or an invalid claim path or Instance, withdrawing only that route or claim rather than closing the session ([Refused Content](#refused-content)). A refused claim goes offline, and its route's floors certify nothing while it holds one.
 
 ## moq-lite-06
 

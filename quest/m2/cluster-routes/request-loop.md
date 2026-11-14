@@ -42,5 +42,4 @@ pending request (the front in `rs/moq-net/src/model/front.rs`, and how
 
 ## Related
 
-- [A relay that refuses a forwarded route drops the route, not the session](/quest/m1/refuse-route.md) - another failure mode from the same BGP comparison
 - [A dual-homed publisher stays reachable while one link flaps](/quest/m2/cluster-routes/flapping-publisher.md) - another failure mode from the same BGP comparison

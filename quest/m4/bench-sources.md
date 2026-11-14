@@ -19,8 +19,8 @@ series. The relay load benches left Nightly in
 through the same input format; the sources decided with the maintainer on
 2026-10-15 left it for later:
 
-- The audio-quality job's benchmarks: `just js qmux-bench`, `serve-bench` and
-  `ring-bench`. Check each prints a CSV table the `js` converter reads before
+- The audio-quality job's benchmarks: `just js qmux-bench`, `serve-bench`,
+  `raw-audio-bench`, and `ring-bench`. Check each prints a CSV table the `js` converter reads before
   recording it.
 
 A source joins as a `bench-*` artifact with a recorded outcome, which the

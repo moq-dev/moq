@@ -57,8 +57,9 @@ a producer would need per-track memory of its last number.
   wire, Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872),
   merged 2026-11-05) and
   Delete the old start bookkeeping (finished in [moq-dev/moq#8613](https://github.com/moq-dev/moq/pull/8613)),
-  not the whole epic. Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)) lands first too: its
-  runs keyed by group sequence convert mechanically to starts.
+  not the whole epic. Drop set landed first, as planned
+  ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476), 2026-11-12):
+  its runs keyed by group sequence convert mechanically to starts.
 - **Old relays** (decided 2026-10-26, maintainer): a released relay fills a
   hole over lite-05/06 with one FETCH per integer ID, so sparse IDs cost it
   one FETCH per tick in the hole. Accepted: "This was a lingering problem.
@@ -140,10 +141,11 @@ recorded only sequencing.
   and moq-net-tests.
 - **One anchor rule.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ collapse `Anchor` to `{Oldest,
   Relative(n), Time(ts)}` with every end inclusive (rejected: keep
-  `Absolute` and make it inclusive; only add `Oldest`). Today an `Absolute`
-  end is exclusive while `Relative` and `Time` ends include their group
-  (`rs/moq-net/src/model/subscription.rs`), and "oldest" is the sentinel
-  `Relative(u64::MAX)`. Once keys are starts, `Absolute(key)` and `Time(ts)`
+  `Absolute` and make it inclusive; only add `Oldest`). `Oldest` landed in
+  [moq-dev/moq#8204](https://github.com/moq-dev/moq/pull/8204), replacing the
+  `Relative(u64::MAX)` sentinel, so what remains is `Absolute`: today an
+  `Absolute` end is exclusive while `Relative` and `Time` ends include their
+  group (`rs/moq-net/src/model/subscription.rs`). Once keys are starts, `Absolute(key)` and `Time(ts)`
   name the same group, so `Absolute` goes; a legacy exclusive end `E` maps
   to `Time(E - 1)`, since legacy keys pass through. A legacy inclusive
   start `S` keeps its bound: it resolves to the first group keyed at or
@@ -153,13 +155,11 @@ recorded only sequencing.
   `Subscription::end()`) selects nothing, so it is dropped as an empty range
   before conversion, never saturated to `Time(0)`, which would include
   group 0. Regressions cover `E = 0` and `E = 1` beside the legacy round
-  trips. `Oldest` is explicit and
-  encoded the same on every wire (lite-07, lite-06 and earlier, IETF), where
-  today the lite encoder treats any `back > MAX_QUIC` as oldest and the
-  model does not. `Range::groups(RangeBounds<u64>)` and
+  trips. `Oldest` stays explicit on every wire, as #8204 left it: lite-07
+  sends it as no anchor and every relative count as it is, and older lite
+  and IETF carry only `Oldest` and `Relative(0)` as starts.
+  `Range::groups(RangeBounds<u64>)` and
   `Subscription::with_range` go. JS's omitted start keeps meaning `Oldest`.
-  This absorbs the deleted anchor-oldest quest (from the 2026-11-07
-  invariant audit, model-4).
 - **Fence what grows after the cut.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `Position` becomes
   `#[non_exhaustive]`, so byte-holes can add a byte offset without a break.
 - **Wires without a start.** Check which moq-lite versions can encode a

@@ -45,13 +45,18 @@ histogram and dropped counters across.
 
 Decided (2026-10-08): the egress histogram is its own quest,
 [viewer lag histogram](/quest/m3/qos/lag-histogram.md), since every other
-child reads it. The line's PR, #4133, closed without landing (2026-10-09).
+child reads it. Since 2026-11-12 the histogram type and bucket edges are
+defined by [publisher timeliness](/quest/m3/qos-publisher-timeliness.md),
+which needs no acknowledgments, and the lag histogram reuses them. The line's PR, #4133, closed without landing (2026-10-09).
 Its port, #6791, closed unmerged on 2026-10-26 to wait for the ACK hook,
 since `lag` and `dropped` are measured per acknowledged frame; its branch is
 the histogram quest's starting point.
 
 Decided (2026-09-28): the line's moq-stats changes break the published
-crate. Client stats left the line (2026-09-29)
+crate. No longer so since
+[moq-dev/moq#8266](https://github.com/moq-dev/moq/pull/8266): `stats::Registry::report`
+already takes the drain's instant, so the
+[lag histogram](/quest/m3/qos/lag-histogram.md) adds fields only. Client stats left the line (2026-09-29)
 when media stats moved out of moq-stats onto hang tracks, which are additive
 on `main`.
 

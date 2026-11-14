@@ -25,4 +25,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Watch worker](/quest/m3/watch-worker.md) - moves decode and `Sync` into a worker
+- [Watch worker](/quest/m4/watch-worker.md) - moves decode and `Sync` into a worker

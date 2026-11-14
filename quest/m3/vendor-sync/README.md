@@ -39,8 +39,7 @@ This README's own work, once every child has merged:
    vendored commit. Code whose upstream is gone or frozen (moq-tokio's
    `quic::web`, from moq-dev/noq) is listed in the README it lives in and
    gets no child.
-2. Re-create the questline at `/quest/m3/vendor-sync/`, linked from
-   `/quest/m3/README.md`'s `Required`. Every child keeps its Goal and carries
+2. Re-create the questline at `/quest/m3/vendor-sync/`. Every child keeps its Goal and carries
    forward its last checked commit and what this run learned (what to check
    first, what was ruled out). Each child requires
    [the release cut](/quest/m3/release/cut.md), which removes itself from
@@ -58,6 +57,11 @@ SCReAMv2 port recorded no upstream commit, so its first run establishes one.
 moq-audio's NetEq time stretch port, once part of the WebRTC child, was
 replaced by a stretch written from its published description. moq-congestion's Cubic came from
 quinn and stays with the quinn child.
+
+The 2026-11-12 audit found moq-webrtc's vendored str0m, dimpl, `is`, and
+sctp-proto (vendored 2026-11-07, after that scan) with no child, so they got
+[one](/quest/m3/vendor-sync/webrtc-stack.md) starting from the revisions
+`rs/moq-webrtc/src/vendor/mod.rs` records.
 
 Out of scope: forks moq no longer consumes (moq-dev/quiche, moq-dev/noq,
 kixelated/cros-codecs, kixelated/openh264-rs, kixelated/fflate, and

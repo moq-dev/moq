@@ -22,7 +22,7 @@ plus the `api/transport`, `api/units`, `modules/pacing`, and
 apply the changes file by file. Keep the recorded departures (the ALR
 detector's per-send rounding, the 1 Mbit/s start, restarted probe clusters)
 unless upstream fixes what they work around. GoogCC is a candidate in the
-[realtime uplink bake-off](/quest/m3/quic-realtime/README.md); if the bake-off
+[realtime uplink bake-off](/quest/m4/quic-realtime.md); if the bake-off
 deletes it, drop that half.
 
 The NetEq time stretch port this quest also covered was replaced by a
