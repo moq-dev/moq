@@ -175,6 +175,11 @@ pub async fn connect_export(
 /// Split `rtmp[s]://host[:port]/<app>/<key>` into what to dial and the stream key.
 /// `rtmps://` trusts the system's root certificates.
 fn parse_url(url: &Url) -> anyhow::Result<(Connect, String)> {
+	// Refused before anything logs the URL, since these could carry secrets.
+	anyhow::ensure!(
+		url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none(),
+		"rtmp url must not carry credentials, a query, or a fragment"
+	);
 	let path = url.path().trim_matches('/').to_string();
 	let (app, key) = path.split_once('/').unwrap_or((&path, ""));
 	anyhow::ensure!(
@@ -209,5 +214,11 @@ mod tests {
 	fn requires_app_and_key() {
 		assert!(parse("rtmp://127.0.0.1/live").is_err());
 		assert!(parse("rtmp://127.0.0.1/").is_err());
+	}
+
+	#[test]
+	fn refuses_secrets_outside_the_key() {
+		assert!(parse("rtmps://u:p@127.0.0.1/live/cam0").is_err());
+		assert!(parse("rtmps://127.0.0.1/live/cam0?token=x").is_err());
 	}
 }
