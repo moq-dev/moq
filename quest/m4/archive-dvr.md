@@ -27,7 +27,3 @@ route, so the archive lives at its own path.
 
 Test seeks within the cache, past it into the archive, across a pruned start,
 over missing groups, and return to live.
-
-## Required
-
-- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - the `Time(pts)` range a seek sends

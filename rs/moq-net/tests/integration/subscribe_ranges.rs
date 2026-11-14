@@ -8,7 +8,7 @@ use moq_net::track::Delay;
 
 use std::time::Duration;
 
-use moq_net::track::{Info, Range, Subscription};
+use moq_net::track::{Info, Order, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -207,6 +207,13 @@ struct RangeFixture {
 	_sessions: Vec<support::harness::MockPair>,
 	_origins: [moq_net::origin::Producer; 3],
 	_broadcast: moq_net::origin::Route,
+}
+
+impl RangeFixture {
+	/// The forwarding hop's own view of the broadcast, which reads its cache directly.
+	fn relay(&self) -> moq_net::origin::Consumer {
+		self._origins[1].consume()
+	}
 }
 
 async fn range_fixture(relay: bool) -> RangeFixture {
@@ -819,4 +826,108 @@ async fn a_covered_bounded_subscription_stays_open() {
 			.unwrap();
 		drop((track, session, subscriber, broadcast, publisher));
 	}
+}
+
+/// A relay whose cache holds only some of a track's history answers one subscription for a
+/// past range wider than it holds plus the live edge, newest or oldest first: it serves what
+/// it caches and fills the rest from the publisher. Every sequence in range is delivered once
+/// or dropped, so the read ends with the track instead of waiting on a hole.
+#[kio::test]
+async fn a_relay_with_holes_answers_a_wide_past_range_plus_live() {
+	holes_through_a_relay("moq-lite-07-wip").await;
+}
+
+/// [`a_relay_with_holes_answers_a_wide_past_range_plus_live`] over moq-transport, where a
+/// hole in range is never settled and the read stalls once the track ends.
+#[kio::test]
+#[ignore = "stalls on a hole until /quest/m2/ietf-hole-stall.md"]
+async fn a_relay_with_holes_answers_a_wide_past_range_plus_live_over_moq_transport() {
+	for version in ["moq-transport-18", "moq-transport-22"] {
+		holes_through_a_relay(version).await;
+	}
+}
+
+async fn holes_through_a_relay(version: &str) {
+	// The publisher drops group 4 and never produces group 7. Group 8 lies outside both ranges.
+	const DROPPED: u64 = 4;
+	const ABSENT: u64 = 7;
+	const WANT: [u64; 8] = [0, 1, 2, 3, 5, 6, 9, 10];
+	let mut failures = Vec::new();
+	for order in [Order::Ascending, Order::Descending] {
+		let name = format!("{version} {order:?}");
+		let fixture = range_fixture_history(version, true, 0).await;
+		for sequence in (0..=9).filter(|sequence| *sequence != ABSENT) {
+			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			if sequence == DROPPED {
+				group.abort(moq_net::Error::App(1)).unwrap();
+				continue;
+			}
+			group
+				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		// Warm the relay's cache with groups 1 and 5 alone, one-group runs every wire fills.
+		let relay = kio::clock::timeout(TIMEOUT, fixture.relay().follow("ranges", None).unwrap().available())
+			.await
+			.expect("relay resolve timeout")
+			.unwrap()
+			.expect("the relay resolves the broadcast");
+		let mut warm = subscribe(
+			&relay,
+			Subscription::default()
+				.with_delay(Delay::default().with_max(None))
+				.with_ranges([Range::groups(1..2), Range::groups(5..6)]),
+		)
+		.await;
+		let mut warmed = read_all(&mut warm).await;
+		warmed.sort_unstable();
+		assert_eq!(warmed, [1, 5], "{name}: the warm reader");
+		drop(warm);
+
+		let mut reader = subscribe(
+			&fixture.remote,
+			Subscription::default()
+				.with_delay(Delay::default().with_max(None))
+				.with_order(order)
+				.with_ranges([Range::groups(0..8), Range::live()]),
+		)
+		.await;
+		// Everything in range that exists now, before the live edge moves.
+		let mut got = Vec::new();
+		for _ in 0..WANT.len() - 1 {
+			got.extend(next(&mut reader).await);
+		}
+		let mut group = fixture
+			.track
+			.create_group(moq_net::group::Info { sequence: 10 })
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(10_000).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		let _finished = fixture.track.clone().finish().unwrap();
+		// The read ends only once every sequence in range was delivered or dropped.
+		loop {
+			match kio::clock::timeout(TIMEOUT, reader.recv_group()).await {
+				Ok(Ok(Some(group))) => got.push(group.sequence),
+				Ok(Ok(None)) => break,
+				Ok(Err(err)) => {
+					failures.push(format!("{name}: {err} after {got:?}"));
+					break;
+				}
+				Err(_) => {
+					failures.push(format!("{name}: stalled after {got:?}"));
+					break;
+				}
+			}
+		}
+		let mut sorted = got.clone();
+		sorted.sort_unstable();
+		if sorted != WANT {
+			failures.push(format!("{name}: {got:?}"));
+		}
+	}
+	assert!(failures.is_empty(), "{failures:#?}");
 }

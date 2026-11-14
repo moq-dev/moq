@@ -79,4 +79,4 @@ Public API: none. Wire: none (draft-defined messages only).
 
 ## Related
 
-- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - owns the one-group refusal note this narrows
+- [moq-transport read ends over a hole](/quest/m2/ietf-hole-stall.md) - settles the holes a refused range leaves
