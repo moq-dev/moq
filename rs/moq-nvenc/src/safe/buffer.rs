@@ -4,7 +4,11 @@ use std::{ffi::c_void, mem::ManuallyDrop, ptr, sync::Arc};
 
 use cudarc::driver::{DevicePtr, MappedBuffer};
 
-use super::{encoder::Encoder, result::EncodeError, session::Session};
+use super::{
+	encoder::Encoder,
+	result::{EncodeError, ErrorKind},
+	session::Session,
+};
 use crate::sys::nvEncodeAPI::{
 	NV_ENC_BUFFER_FORMAT, NV_ENC_CREATE_BITSTREAM_BUFFER, NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
 	NV_ENC_CREATE_INPUT_BUFFER, NV_ENC_CREATE_INPUT_BUFFER_VER, NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_LOCK_BITSTREAM,
@@ -690,8 +694,11 @@ impl<T> RegisteredResource<T> {
 	///
 	/// # Errors
 	///
-	/// Could error if the driver cannot map the resource. The registration
-	/// stays usable.
+	/// Could error if the driver cannot map the resource; the registration
+	/// stays usable. Errors with [`ErrorKind::InvalidCall`](super::ErrorKind::InvalidCall)
+	/// if an earlier mapping was never unmapped, because it was forgotten,
+	/// abandoned, or failed to unmap: NVENC may still hold it, so the
+	/// registration is retired and its allocation must not be written again.
 	pub fn map(&mut self) -> Result<MappedResource<'_, T>, EncodeError> {
 		let pitch = self.pitch;
 		Ok(MappedResource {
@@ -728,9 +735,10 @@ struct Registration<A: ResourceApi, T> {
 	api: A,
 	// Dropped only once the resource is unregistered.
 	marker: ManuallyDrop<T>,
-	/// Set when NVENC may still hold a mapping, so the registration and the
-	/// owner of its memory are leaked rather than released.
-	leaked: bool,
+	/// Set before a mapping is handed out and cleared only once it unmaps, so a
+	/// mapping that never does (forgotten, abandoned, or failed) leaves the
+	/// registration and the owner of its memory leaked rather than released.
+	mapped: bool,
 }
 
 impl<A: ResourceApi, T> Registration<A, T> {
@@ -742,12 +750,19 @@ impl<A: ResourceApi, T> Registration<A, T> {
 			reg_ptr,
 			api,
 			marker: ManuallyDrop::new(marker),
-			leaked: false,
+			mapped: false,
 		})
 	}
 
 	fn map(&mut self) -> Result<Mapped<'_, A, T>, EncodeError> {
+		if self.mapped {
+			return Err(EncodeError::new(
+				ErrorKind::InvalidCall,
+				Some("an earlier mapping was never unmapped".into()),
+			));
+		}
 		let map_ptr = self.api.map_input_resource(self.reg_ptr)?;
+		self.mapped = true;
 		Ok(Mapped {
 			registration: self,
 			map_ptr,
@@ -758,7 +773,8 @@ impl<A: ResourceApi, T> Registration<A, T> {
 /// Unregister the external resource when it goes out of scope.
 impl<A: ResourceApi, T> Drop for Registration<A, T> {
 	fn drop(&mut self) {
-		if self.leaked {
+		// NVENC may still read a mapping that never unmapped.
+		if self.mapped {
 			return;
 		}
 		// NVENC may still refer to an allocation it failed to unregister, so
@@ -778,13 +794,10 @@ struct Mapped<'a, A: ResourceApi, T> {
 }
 
 impl<A: ResourceApi, T> Mapped<'_, A, T> {
-	/// Give up a mapping the driver may still be reading: never unmap it, and
-	/// never unregister or release its allocation.
+	/// Give up a mapping the driver may still be reading: never unmap it, so the
+	/// registration stays marked mapped and is never unregistered or released.
 	fn abandon(self) {
-		let this = ManuallyDrop::new(self);
-		// SAFETY: read once from a value whose destructor never runs.
-		let registration = unsafe { ptr::read(&this.registration) };
-		registration.leaked = true;
+		std::mem::forget(self);
 	}
 
 	fn unmap(self) -> Result<(), EncodeError> {
@@ -792,14 +805,12 @@ impl<A: ResourceApi, T> Mapped<'_, A, T> {
 		this.release()
 	}
 
-	/// A failed unmap leaves the resource mapped. Unregistering or freeing it
-	/// could release memory NVENC still holds, so leak the owner instead.
+	/// A failed unmap leaves the registration marked mapped: unregistering or
+	/// freeing it could release memory NVENC still holds.
 	fn release(&mut self) -> Result<(), EncodeError> {
-		let result = self.registration.api.unmap_input_resource(self.map_ptr);
-		if result.is_err() {
-			self.registration.leaked = true;
-		}
-		result
+		self.registration.api.unmap_input_resource(self.map_ptr)?;
+		self.registration.mapped = false;
+		Ok(())
 	}
 }
 
@@ -837,7 +848,6 @@ mod tests {
 	};
 
 	use super::*;
-	use crate::safe::result::ErrorKind;
 
 	#[derive(Debug, Default, PartialEq, Eq)]
 	struct Calls {
@@ -1044,6 +1054,56 @@ mod tests {
 				unregister: 0,
 			}
 		);
+	}
+
+	#[test]
+	fn a_forgotten_mapping_retains_the_owner() {
+		let (owner, alive) = setup();
+		let api = TestApi::new(alive.clone());
+
+		let mut registration = register(&api, owner).expect("registration should succeed");
+		// Safe code can skip every destructor, so this must not rely on one.
+		std::mem::forget(registration.map().expect("mapping should succeed"));
+		drop(registration);
+
+		assert!(alive.get(), "an allocation the driver may still read must remain owned");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 0,
+				unregister: 0,
+			}
+		);
+	}
+
+	#[test]
+	fn a_mapping_never_unmapped_refuses_the_next() {
+		let (owner, alive) = setup();
+		let mut api = TestApi::new(alive.clone());
+		api.unmap_error = Some(ErrorKind::ResourceNotMapped);
+
+		let mut registration = register(&api, owner).expect("registration should succeed");
+		std::mem::forget(registration.map().expect("mapping should succeed"));
+		let error = registration
+			.map()
+			.expect_err("a forgotten mapping should refuse the next");
+		assert_eq!(error.kind(), ErrorKind::InvalidCall);
+
+		let mut registration = register(&api, Owner(alive.clone())).expect("registration should succeed");
+		registration.map().expect("mapping should succeed").abandon();
+		let error = registration
+			.map()
+			.expect_err("an abandoned mapping should refuse the next");
+		assert_eq!(error.kind(), ErrorKind::InvalidCall);
+
+		let mut registration = register(&api, Owner(alive.clone())).expect("registration should succeed");
+		let _ = registration.map().expect("mapping should succeed").unmap();
+		let error = registration.map().expect_err("a failed unmap should refuse the next");
+		assert_eq!(error.kind(), ErrorKind::InvalidCall);
+
+		assert_eq!(api.calls.borrow().map, 3, "a refused mapping never reaches the driver");
 	}
 
 	#[test]
