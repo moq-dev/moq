@@ -3153,7 +3153,7 @@ impl Connection {
 					close = Some(reason);
 				}
 				Frame::PathChallenge(token) => {
-					self.path_responses.push(number, token, remote);
+					self.path_responses.push(number, token, remote, self.path.remote);
 					if remote == self.path.remote {
 						// PATH_CHALLENGE on active path, possible off-path packet forwarding
 						// attack. Send a non-probing packet to recover the active path.
@@ -3584,8 +3584,8 @@ impl Connection {
 			}
 		}
 
-		// PATH_RESPONSE
-		if buf.len() + 9 < max_size
+		// PATH_RESPONSE, one for each challenge received on this path
+		while buf.len() + 9 < max_size
 			&& space_id == SpaceId::Data
 			&& let Some(token) = self.path_responses.pop_on_path(self.path.remote)
 		{
