@@ -1173,8 +1173,9 @@ export class Subscriber {
 			!wire.offer.path.some((hop) => hop.node === this.hop);
 
 		// A claim through this session: its cost plus the route's metric, past this session's link
-		// cost of 1 as Rust's default, ranked last while a node on its path drains, and unavailable
-		// while the route is held. Requests through it name its publisher and its prefix's depth.
+		// cost of 1 as Rust's default, ranked last while a node on its path drains, then by the
+		// lowest priority on its path, past this link's 0 as Rust's default, and unavailable while
+		// the route is held. Requests through it name its publisher and its prefix's depth.
 		const candidate = (wire: Route & { offer: Offer; prefix: Path.Valid }, claim: Claim): WireRoute =>
 			this.#drained(
 				WireRoute.normalize({
@@ -1183,6 +1184,7 @@ export class Subscriber {
 					cost: claim.cost + wire.offer.metric + 1n,
 					node: wire.node,
 					depth: Path.parts(wire.prefix).length,
+					priority: Math.min(0, wire.offer.priority),
 					draining: wire.offer.draining || wire.drain || undefined,
 					available: !wire.held,
 					// The relay's sum plus this link's own, unknown while either is.

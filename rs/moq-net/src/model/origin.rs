@@ -560,6 +560,9 @@ pub(crate) struct Lane {
 	/// The Node IDs of the origin nodes the route's path crosses: a request from one of
 	/// them never follows it.
 	pub path: std::sync::Arc<[u64]>,
+	/// The lowest priority of a link on the route's path, which ranks the route where a
+	/// session's preference does, or `None` for a route the route layer did not select.
+	pub priority: Option<i8>,
 }
 
 impl Default for Lane {
@@ -569,6 +572,7 @@ impl Default for Lane {
 			primary: true,
 			selected: true,
 			path: std::sync::Arc::new([]),
+			priority: None,
 		}
 	}
 }
@@ -884,7 +888,11 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		entry.draining || !entry.available,
 		// The route layer's selected route ahead of its alternates.
 		!entry.lane.selected,
-		Reverse(entry.preference),
+		// A lite-07 route ranks by the lowest preference of any link on its path.
+		Reverse(match entry.lane.priority {
+			Some(priority) => entry.preference.min(Preference::new(priority)),
+			None => entry.preference,
+		}),
 		anonymous,
 		entry.cost,
 		!entry.local,
@@ -10567,6 +10575,37 @@ mod tests {
 		assert!(
 			demoted.poll_requested(&kio::Waiter::noop()).is_pending(),
 			"the cheaper demoted link must not serve"
+		);
+	}
+
+	/// A lite-07 route ranks by the lowest priority of any link on its path, so one that
+	/// crossed a demoted link further on loses to a dearer one that crossed none.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn request_avoids_a_path_through_a_demoted_link_even_when_cheaper() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let route = |node, priority, cost| {
+			let lane = Lane {
+				priority: Some(priority),
+				..Lane::default()
+			};
+			RouteInfo::new()
+				.with_hops(hops(&[node]))
+				.with_node(Some(node))
+				.with_lane(lane)
+				.with_cost(cost)
+		};
+
+		let demoted = producer.forward("room", route(10, -10, 1)).unwrap();
+		let unranked = producer.forward("room", route(11, 0, 5)).unwrap();
+
+		let _pending = consumer.request("room/alice", None);
+		let request = queued(&unranked).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		assert!(
+			demoted.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"the cheaper path through a demoted link must not serve"
 		);
 	}
 

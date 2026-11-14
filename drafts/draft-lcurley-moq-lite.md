@@ -577,6 +577,7 @@ Nothing on the wire carries the doubt.
 A node that sees a session close doubts its far end in the same way.
 
 On a session whose peer holds a scoped publish grant (see [AUTH_OK](#auth-ok)), a DEAD applies only to the routes heard on that session, and the receiver neither remembers the hop nor doubts the far node: a peer withdraws only what it sent, and cannot drop routes through a hop it only read in a path.
+Such a peer also names itself as it likes, so its GOAWAY ranks only the routes heard on that session draining and is not passed on, and its session closing doubts no node and sends no DEAD: the routes it sent end one by one.
 
 A node that receives a GOAWAY ranks every route through its peer draining, and doubts the peer as a closed session's far end, so it moves at once only onto routes that avoid it.
 It sends a DEAD naming the draining node to each neighbour it sent a route through that node, and each neighbour passes it on in the same way, once per neighbour while it has sent that neighbour such a route.

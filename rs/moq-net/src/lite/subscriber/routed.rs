@@ -798,6 +798,7 @@ impl Routed {
 			primary: served.primary,
 			selected: served.selected,
 			path: served.path.clone(),
+			priority: Some(served.priority),
 		};
 		// A route held without a path to it is unavailable: it serves only as a last
 		// resort, like a draining one, at its real cost.

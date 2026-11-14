@@ -5419,6 +5419,30 @@ test("a lite-07 DRAIN ranks the routes through its node last", async () => {
 	subscriber.close();
 });
 
+// A claim ranks by the lowest priority of a link on its route's path before its cost, as routes to
+// one node do, so a cheaper claim behind a demoted link loses to a dearer one. Mirrors rs/moq-net.
+test("a lite-07 claim ranks by its path's priority before its cost", async () => {
+	const { subscriber, announced, send } = await routedStream();
+	const room = Path.from("room");
+	const instance = Instance.parse("i");
+	await send({
+		status: "routeStart",
+		node: NODE_A,
+		suffix: Path.empty(),
+		offer: offer(NODE_A, { priority: -10 }),
+	});
+	await send({ status: "active", suffix: room, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { node: NODE_A } });
+	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 5n }) });
+	await send({ status: "active", suffix: room, route: 1n, instance });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "update", route: { node: NODE_B } });
+
+	announced.close();
+	subscriber.close();
+});
+
 // A route covers the requested prefix joined with its suffix: one origin node may have a route
 // per prefix, and a request through one names how many segments of its path that prefix spans.
 test("a lite-07 request names its route's prefix depth", async () => {

@@ -69,6 +69,7 @@ fn served_at(claim: Claim, metric: Metric, primary: bool) -> Served {
 		rtt: None,
 		available: true,
 		draining: false,
+		priority: 0,
 		primary,
 		selected: true,
 		path: std::sync::Arc::new([1, 2]),
@@ -331,6 +332,62 @@ fn a_reader_behind_repeated_failures_overruns() {
 		outbox.dead(7, dead(publishers, true), &mut waiting);
 	}
 	assert!(outbox.known.is_empty(), "every route ended with its DEAD");
+}
+
+/// A claim started and withdrawn before the reader read it leaves nothing queued, so a
+/// route whose claims churn at fresh paths keeps only its live ones however slowly the
+/// peer reads. A withdrawal of a claim the reader holds still goes, and so does one of a
+/// claim sent ahead of a DEAD the reader has yet to read.
+#[test]
+fn a_claim_started_and_withdrawn_unread_leaves_nothing() {
+	let offer = Offer {
+		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
+		draining: false,
+		priority: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+	};
+	let instance = Instance::random();
+	let mut outbox = Outbox::default();
+	let mut waiting = Waiting::default();
+	let key = (1, Path::empty());
+	let mut batch = |outbox: &mut Outbox, path: Path, claim: Option<Claim>, floor| {
+		let changes = (vec![(path, claim)], Some(floor));
+		outbox.batch(7, key.clone(), changes, |_, _| None, &mut waiting);
+	};
+	let read = |changes: Vec<(Path, Option<Claim>)>, floor| Output::Batch {
+		id: 1,
+		prefix: Path::empty(),
+		changes,
+		floor: Some(floor),
+	};
+	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut Waiting::default());
+	batch(&mut outbox, p("live/held"), Some(claim(&instance, 0)), 1);
+	assert_eq!(std::iter::from_fn(|| outbox.pop()).count(), 2);
+
+	for n in 0..100 {
+		let path = Path::new(format!("live/{n}").as_str()).unwrap();
+		batch(&mut outbox, path.clone(), Some(claim(&instance, 0)), 2 + 2 * n);
+		batch(&mut outbox, path, None, 3 + 2 * n);
+	}
+	batch(&mut outbox, p("live/held"), None, 500);
+	let sent: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();
+	assert_eq!(sent, [read(vec![(p("live/held"), None)], 500)]);
+	assert!(outbox.claims.is_empty(), "the reader holds no claim");
+
+	batch(&mut outbox, p("live/a"), Some(claim(&instance, 0)), 501);
+	outbox.dead(7, Dead::Draining { node: 1 }, &mut Waiting::default());
+	batch(&mut outbox, p("live/a"), None, 502);
+	let sent: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();
+	assert_eq!(
+		sent,
+		[
+			read(vec![(p("live/a"), Some(claim(&instance, 0)))], 501),
+			Output::Dead(Dead::Draining { node: 1 }),
+			read(vec![(p("live/a"), None)], 502),
+		]
+	);
 }
 
 /// A route the reader read ends even when its ROUTE_END is queued alone, with no batch

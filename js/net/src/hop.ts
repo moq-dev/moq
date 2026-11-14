@@ -190,6 +190,12 @@ export interface WireRoute {
 	 * {@link node}, which every request through it names. Local, as `node` is.
 	 */
 	readonly depth?: number;
+	/**
+	 * The lowest priority of a link on the path of the lite-07 route to {@link node}: higher
+	 * ranks first, after drain and before cost, as routes to one node rank. Unset ranks as 0, the
+	 * priority of a link no one set. Local, as `node` is.
+	 */
+	readonly priority?: number;
 	/** See {@link RouteInfo.rtt}. */
 	readonly rtt?: Duration;
 }
@@ -215,6 +221,7 @@ export const WireRoute = {
 			available: route.available,
 			node: route.node,
 			depth: route.depth,
+			priority: route.priority,
 			rtt: route.rtt,
 		};
 	},
@@ -234,7 +241,7 @@ export function isAnonymous(route: WireRoute): boolean {
 
 /**
  * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
- * availability, origin node and route depth, and RTT.
+ * availability, origin node, route depth and priority, and RTT.
  *
  * @internal
  */
@@ -250,6 +257,7 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		(a.available ?? true) === (b.available ?? true) &&
 		a.node === b.node &&
 		a.depth === b.depth &&
+		(a.priority ?? 0) === (b.priority ?? 0) &&
 		(a.rtt === b.rtt || (!!a.rtt && !!b.rtt && a.rtt.eq(b.rtt))) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])

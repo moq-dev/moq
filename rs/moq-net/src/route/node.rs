@@ -76,6 +76,9 @@ pub(crate) struct Served {
 	pub available: bool,
 	/// A node on the route's path sent GOAWAY: it ranks below every route avoiding one.
 	pub draining: bool,
+	/// The lowest priority of a link on the route's path, the one it arrives on
+	/// included: a claim ranks by it after drain, as a route does.
+	pub priority: i8,
 	/// A route at the narrowest prefix with a live route covering the claim: one a
 	/// reader here follows, and a request naming no route.
 	pub primary: bool,
@@ -175,6 +178,10 @@ struct Outbox {
 	/// The routes the reader holds once it reads everything queued, each with its path,
 	/// so a DEAD ending the rest of a hop's routes ends them here too.
 	known: HashMap<RouteId, Arc<[Hop]>>,
+	/// The claims the reader holds under each route once it reads everything queued, so
+	/// a withdrawal of a claim it was never sent cancels the start instead of queueing:
+	/// what a stream keeps for its claims stays within the live ones.
+	claims: HashMap<RouteId, BTreeSet<Path>>,
 	/// Claim starts and restarts held back until a stream serving them confirms their
 	/// instance, by route, with the route's last floor, which certifies nothing while any
 	/// is held. Bounded like the segments: one per claim. The node's `waiting` indexes
@@ -211,11 +218,60 @@ struct Pending {
 	held: bool,
 	/// The batches since, merged: each claim's last change, and the last floor.
 	batch: Option<Batch>,
+	/// The claims `batch` starts that the reader did not hold when the entry began.
+	fresh: BTreeSet<Path>,
 }
 
 impl Pending {
 	fn is_empty(&self) -> bool {
 		!self.ended && self.finite.is_none() && !self.held && self.batch.is_none()
+	}
+
+	/// Whether the reader held a claim at `path` when the entry began, given what it
+	/// holds once everything queued is read: a change queued here that did not start the
+	/// claim changed or withdrew one it held.
+	fn had(&self, holds: &BTreeSet<Path>, path: &Path) -> bool {
+		let queued = self.batch.as_ref().is_some_and(|(merged, _)| merged.contains_key(path));
+		!self.fresh.contains(path) && (queued || holds.contains(path))
+	}
+
+	/// Queue `claim` at `path`, given the claims the reader holds once everything queued
+	/// is read, which it updates: a withdrawal of a claim the reader was not sent when the
+	/// entry began cancels its start, or is dropped.
+	fn change(&mut self, holds: &mut BTreeSet<Path>, path: Path, claim: Option<Claim>) {
+		let had = self.had(holds, &path);
+		let (merged, _) = self.batch.get_or_insert_default();
+		match claim {
+			Some(claim) => {
+				if !had {
+					self.fresh.insert(path.clone());
+				}
+				holds.insert(path.clone());
+				merged.insert(path, Some(claim));
+			}
+			None => {
+				holds.remove(&path);
+				self.fresh.remove(&path);
+				match had {
+					true => merged.insert(path, None),
+					false => merged.remove(&path),
+				};
+			}
+		}
+	}
+
+	/// Drop what is queued at `path`, which the reader keeps as it held it when the entry
+	/// began.
+	fn unqueue(&mut self, holds: &mut BTreeSet<Path>, path: &Path) {
+		let had = self.had(holds, path);
+		if let Some((merged, _)) = &mut self.batch {
+			merged.remove(path);
+		}
+		self.fresh.remove(path);
+		match had {
+			true => holds.insert(path.clone()),
+			false => holds.remove(path),
+		};
 	}
 }
 
@@ -349,7 +405,10 @@ impl Outbox {
 						entry.batch = None;
 					}
 				}
+				// Its claims end with it.
+				entry.fresh.clear();
 				self.known.remove(&key);
+				self.claims.remove(&key);
 				self.prune(&key);
 			}
 		}
@@ -366,8 +425,8 @@ impl Outbox {
 		waiting: &mut Waiting,
 	) {
 		let mut withheld = self.withheld.remove(&key);
+		let mut holds = self.claims.remove(&key).unwrap_or_default();
 		let entry = self.entry(&key);
-		let (merged, last) = entry.batch.get_or_insert_default();
 		for (path, claim) in changes {
 			// A newer change replaces one held back.
 			if let Some((held, _)) = &mut withheld
@@ -379,7 +438,7 @@ impl Outbox {
 				&& awaits(&path, item) == Some(true)
 			{
 				// The reader keeps what it was sent until then.
-				merged.remove(&path);
+				entry.unqueue(&mut holds, &path);
 				waiting
 					.entry(key.0)
 					.or_default()
@@ -389,9 +448,12 @@ impl Outbox {
 				withheld.get_or_insert_default().0.insert(path, item.clone());
 				continue;
 			}
-			merged.insert(path, claim);
+			entry.change(&mut holds, path, claim);
 		}
-		*last = floor;
+		entry.batch.get_or_insert_default().1 = floor;
+		if !holds.is_empty() {
+			self.claims.insert(key.clone(), holds);
+		}
 		if let Some(withheld) = withheld.filter(|(held, _)| !held.is_empty()) {
 			self.withheld.insert(key, withheld);
 		}
@@ -409,9 +471,12 @@ impl Outbox {
 		if held.is_empty() {
 			self.withheld.remove(key);
 		}
+		let mut holds = self.claims.remove(key).unwrap_or_default();
+		let entry = self.entry(key);
 		// A batch still queued closes with a newer floor.
-		let (merged, _) = self.entry(key).batch.get_or_insert_with(|| (Changes::new(), floor));
-		merged.insert(path.clone(), Some(item));
+		entry.batch.get_or_insert_with(|| (Changes::new(), floor));
+		entry.change(&mut holds, path.clone(), Some(item));
+		self.claims.insert(key.clone(), holds);
 	}
 
 	/// The peer drops the route's claims, so nothing held back is owed.
@@ -443,6 +508,7 @@ impl Outbox {
 					.collect();
 				for key in ended {
 					self.known.remove(&key);
+					self.claims.remove(&key);
 					self.unwithhold(stream, &key, waiting);
 				}
 			}
@@ -1297,6 +1363,7 @@ impl State {
 							rtt: offer.rtt,
 							available,
 							draining: offer.draining,
+							priority: offer.priority,
 							primary: prefix == &narrowest[0].0,
 							selected: rank == 0,
 							path: offer.path.iter().map(|hop| hop.node).collect(),

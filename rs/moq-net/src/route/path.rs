@@ -758,7 +758,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				session: session.number,
 			};
 			ids.extend(self.fail(hop, session.hop, None, Vec::new(), false, now));
-			hops.push(Report::Closed(hop));
+			// A scoped peer names itself as it likes, so its close neither doubts that node
+			// nor names it to the neighbours: the routes it sent end one by one instead.
+			if session.link.scope.is_none() {
+				ids.extend(self.suspect(session.hop, now));
+				hops.push(Report::Closed(hop));
+			}
 		}
 		self.update(ids, hops, None);
 	}
@@ -816,7 +821,14 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		};
 		session.draining = true;
 		let node = session.hop;
+		let scoped = session.link.scope.is_some();
 		let mut ids = self.through(neighbor);
+		// A scoped peer's GOAWAY drains only the routes it sent: the node it names itself
+		// could be any, and routes through that node outside its scope are not its to rank.
+		if scoped {
+			self.update(ids, Vec::new(), None);
+			return;
+		}
 		ids.extend(self.drains(node, now));
 		self.update(ids, vec![Report::Draining(node)], None);
 	}
@@ -1201,7 +1213,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			self.update(ids, Vec::new(), None);
 			return;
 		}
-		let ids = self.fail(hop, far, Some(from), filed, gone, now);
+		let mut ids = self.fail(hop, far, Some(from), filed, gone, now);
+		ids.extend(self.suspect(far, now));
 		self.update(ids, vec![Report::Closed(hop)], None);
 	}
 
@@ -1604,9 +1617,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.naming(node)
 	}
 
-	/// The session `hop` names closed. `from` reported it, with what became of its own
-	/// routes through it, or this node saw it close. It casts doubt on `far`. Returns
-	/// the identities touched.
+	/// The session `hop` names closed, at the node `far` at its other end. `from`
+	/// reported it, with what became of its own routes through it, or this node saw it
+	/// close. Returns the identities touched.
 	fn fail(
 		&mut self,
 		hop: Hop,
@@ -1646,14 +1659,20 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				heard.state = State::Dead;
 			}
 		}
-		if far != self.hop {
-			let at = now.saturating_add(self.doubt.timer);
-			let at = self.doubted.get(&far).map_or(at, |state| state.deadline().max(at));
-			self.doubted.insert(far, Suspicion::Doubted(at));
-			// Any route through that node may have become unusable.
-			ids.extend(self.naming(far));
-		}
 		ids
+	}
+
+	/// A session to `far` closed, as of `now`: no route through it is taken until the
+	/// timer fires. Returns the identities whose routes rank anew.
+	fn suspect(&mut self, far: Id, now: Instant) -> BTreeSet<Id> {
+		if far == self.hop {
+			return BTreeSet::new();
+		}
+		let at = now.saturating_add(self.doubt.timer);
+		let at = self.doubted.get(&far).map_or(at, |state| state.deadline().max(at));
+		self.doubted.insert(far, Suspicion::Doubted(at));
+		// Any route through that node may have become unusable.
+		self.naming(far)
 	}
 
 	/// What became of the route `peer` sent under `key` through a hop it reported dead:

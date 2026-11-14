@@ -902,6 +902,33 @@ fn holds_never_close_a_cycle() {
 	}
 }
 
+/// A peer under a scoped grant names itself as it likes. Declaring a core relay's Node
+/// ID, its GOAWAY ranks only the routes it sent as draining, and its close doubts no
+/// node, so the relay's own routes carry on as they were.
+#[test]
+fn a_scoped_peers_goaway_and_close_touch_only_its_routes() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	let scoped = Link {
+		scope: Some(Scope {
+			regions: vec![p("a")],
+			qualify: super::super::qualifier([1; 32]),
+		}),
+		..Link::default()
+	};
+	router.connect(2, 1, scoped).unwrap();
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.batch(1, 7, p(""), vec![(p("a"), Some(1))], Some(1), 0);
+	let draining = |router: &path::Router<usize, u8>| router.routes(7).next().unwrap().1.offer().unwrap().draining;
+	assert!(!draining(&router));
+
+	router.goaway(2, Instant::ZERO);
+	assert!(!draining(&router), "the relay's route does not drain");
+	router.disconnect([2], Instant::ZERO);
+	assert_eq!(router.retained().doubt, 0, "no node is doubted");
+	assert!(router.shown()[&(7, p("a"))].available);
+}
+
 /// A DEAD needs a path from this peer naming both the hop and its far end.
 #[test]
 fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
