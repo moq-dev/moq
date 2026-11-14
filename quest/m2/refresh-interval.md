@@ -51,8 +51,8 @@ Facts found while planning:
 - SUBSCRIBE_UPDATE's `Wanted Group` already carries a relay's coalesced
   demand upstream, and [time addressing](/quest/m2/time-addressing/lite07.md)
   turns it into a start time. Build on that rather than adding a second
-  field. The request barrier above rides the request's arrival at each hop,
-  not that start time, so it needs no clock shared between hops.
+  field. The request barrier above rides the update numbers, not that start
+  time, so it needs no clock shared between hops.
 - `rs/moq-video/src/encode/producer.rs` forces a keyframe on a join; it
   keeps working on the byte ratio.
 
@@ -62,13 +62,21 @@ Recommendations for the PR:
   a typed choice. A track may want both (video wants a keyframe when the GOP
   is long, and not more than once a second), so recommend both, either one
   firing within the interval.
-- `refresh()` has a request barrier: it resolves only with a group that
-  reached the answering node after that node received the request, so a
-  group made before an action settled never answers a request made after it.
-  A relay answers from its cache only with such a group, else it passes the
-  request upstream, and the publisher makes one. The interval may delay the
-  new group, never substitute an older one. Rust and `@moq/net` share this
-  contract.
+- `refresh()` has a request barrier, and it must be causal at the publisher:
+  a group already in flight when the request reached a relay would pass an
+  arrival check while showing the state before the request. So a group
+  answers a request only if the publisher created it after receiving that
+  request. Recommend reusing SUBSCRIBE_UPDATE's update number: each hop
+  forwards a request as a new update after it receives it (coalescing
+  requests that arrive between two forwards), the publisher tags each group
+  it creates with the highest update it had seen, and `refresh()` resolves
+  only with a group tagged at or past the update its request rode. The PR
+  settles the field's place in the draft and measures its cost; if it costs
+  more wire than it earns, weaken the guarantee to "a group that reached the
+  node after the request", state that post-action freshness is then best
+  effort, and change the thumbnail's promise to match. The interval may
+  delay the new group, never substitute an older one. Rust and `@moq/net`
+  share this contract.
 - Update the lite draft (TRACK_INFO, SUBSCRIBE_UPDATE, and the changelog),
   `doc/concept/moq-lite.md`, and the matching JS. Run `just test interop
   --all`.

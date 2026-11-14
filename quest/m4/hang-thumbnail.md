@@ -42,8 +42,13 @@ Facts found while planning:
 
 Recommendations for the PR:
 
-- Timestamps follow the root's `media.clock`, so a still lines up with the
-  video frame it came from.
+- A group's identity is its start timestamp, and the same identity must never
+  carry different content. So each still is stamped with the time it was
+  sampled, on the root's `media.clock`, strictly after the previous still's
+  (one tick later when two samplings collide), and never with the source
+  frame's own timestamp: a static screen would give two refreshes the same
+  frame and so the same start. The still shows the newest frame at that
+  time, so it lines up with the video at its timestamp.
 - Each still is encoded after the request that asks for it, from the newest
   frame the capture has delivered by then, and never reuses an earlier
   encode, so it meets the `refresh()` request barrier. A capture that
