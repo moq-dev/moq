@@ -21,11 +21,10 @@ which saw two causes in its first matrix:
   probes off to gaps of 13.2 s and 12.9 s, and the server logged
   "handshake timed out" three times in one run. The self pair hits it too:
   on a later run, both moq-quic endpoints gave up 10 s after their last
-  progress. Pick a bound that outlasts a
-  client's probe backoff without letting half-open handshakes pin server
-  state, for example the idle timeout, or a server bound counted from the
-  last packet that made progress. Recommendation: the idle timeout (30 s),
-  since a half-open handshake already costs no more than an idle connection.
+  progress. Decided 2026-11-14 (maintainer, /quest-complete): the bound
+  becomes the idle timeout, 30 s, since a half-open handshake already costs
+  no more than an idle connection (rejected: keep 10 s, leave it open, drop
+  the quest).
 - **The server burns connection IDs it never used.** On a reordered
   NEW_CONNECTION_ID (sequence 4 before 1 to 3), a server still on sequence 0
   switches at once (`update_rem_cid` where `active_seq() == 0` in
