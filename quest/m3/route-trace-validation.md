@@ -48,7 +48,3 @@ Run it on the sweeps' existing seeds in CI only if it stays fast; otherwise in
 Nightly with the sweeps' fresh seeds.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The router runs the path rule with a route per scope](/quest/m2/cluster-routes/scope.md) - the router `Sim` records, running the rule the model has

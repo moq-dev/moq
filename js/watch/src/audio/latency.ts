@@ -26,20 +26,26 @@ export function target(props: Target): Duration {
 	return floored.add(props.frame ?? Duration.ZERO).add(props.delay ?? Duration.ZERO);
 }
 
+// The arrival estimate's ceiling, `BUCKET * BUCKETS` in @moq/hang's jitter estimator: no lateness past
+// it moves the target, so a subscription reaching that far past the delay observes all it can measure.
+const REACH = Duration.secs(2);
+
 /**
- * The audio subscription's max delay, less warmup: the shared `maxDelay`, raised to `delay + stretch`
- * so audio trailing the clock by up to the stretch still arrives for the ring to catch up on.
+ * The audio subscription's max delay, less warmup: the shared `maxDelay`, raised to the delay plus the
+ * estimator's 2 s ceiling, so every frame late enough to move the target is still observed. The
+ * `stretch` setting does not size it.
  */
-export function maxDelay(props: { delay: Duration; maxDelay: Duration; stretch: Duration }): Duration {
-	return props.maxDelay.max(props.delay.add(props.stretch));
+export function maxDelay(props: { delay: Duration; maxDelay: Duration }): Duration {
+	return props.maxDelay.max(props.delay.add(REACH));
 }
 
 /**
- * How far the ring lets audio trail the clock before it skips ahead: the audio max delay less the
- * playout delay, or zero, which turns the time stretch off, when `stretch` is zero.
+ * How far the ring lets audio trail the clock before it skips onto it: the `stretch` threshold, or
+ * for a buffered player the larger of it and the lookahead (`maxDelay` less the delay). Zero, which
+ * turns the time stretch off, when `stretch` is zero.
  */
 export function bound(props: { delay: Duration; maxDelay: Duration; stretch: Duration }): Duration {
-	return props.stretch.isZero() ? Duration.ZERO : maxDelay(props).saturatingSub(props.delay);
+	return props.stretch.isZero() ? Duration.ZERO : props.stretch.max(props.maxDelay.saturatingSub(props.delay));
 }
 
 // An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can

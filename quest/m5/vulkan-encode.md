@@ -34,6 +34,19 @@ added this quest):
   lets it import the producer's `OPAQUE_FD` BGRA image as a dedicated
   allocation with create info identical to the exporter's. It also leaves
   AV1 possible later.
+- Re-checked against gpu-video 0.5.0 on 2026-11-13: still ✅ ash (rejected:
+  gpu-video 0.5). 0.5 is on wgpu 30 and ash 0.38, and its wgpu-based
+  `request_device_with_video_support` gets `VK_KHR_external_memory_fd` from
+  wgpu-hal, so memory import alone would now work. Still missing:
+  `VK_KHR_external_semaphore_fd` (neither gpu-video nor wgpu enables it, and
+  `VideoDeviceDescriptor` takes no extra extensions), so the producer's
+  timeline can't be waited on the GPU, and any live bitrate change, since rate
+  control is fixed at creation while moq-video follows the send estimate.
+- Borrow 0.5's throughput design, which reached about 98% encoder use: let a
+  few submits stay in flight (it defaults to 3), rotate several input
+  pictures so conversion overlaps the previous encode, and order consecutive
+  encodes explicitly. Its completion thread wakes on a semaphore the CPU
+  signals when it queues work, rather than sleeping and polling.
 - H.264 and H.265. AV1 is out of scope.
 - The bar is no CPU round trip; GPU-side copies are allowed.
 
