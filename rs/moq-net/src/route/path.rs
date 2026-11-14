@@ -1782,6 +1782,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	fn stream(&self, id: Id, peer: N, watch: &Path, region: Option<&Path>) -> BTreeSet<Path> {
 		let session = &self.sessions[&peer];
 		let answer = &self.answering[&peer];
+		let sent_only = !session.link.proxy && !self.origins.contains_key(&id);
+		if sent_only && region.is_none() {
+			// A non-proxy peer is sent only what it was already sent, so skip scanning every route.
+			return of(&answer.tx, id).map(|((_, prefix), _)| prefix.clone()).collect();
+		}
 		let mut out = BTreeSet::new();
 		if region.is_none_or(|region| meet(watch, region).is_some()) {
 			out.insert(watch.clone());
@@ -1802,7 +1807,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			);
 			out.extend(of(&answer.tx, id).map(|((_, prefix), _)| prefix.clone()));
 		}
-		if !session.link.proxy && !self.origins.contains_key(&id) {
+		if sent_only {
 			out.retain(|prefix| answer.tx.contains_key(&(id, prefix.clone())));
 		}
 		out
