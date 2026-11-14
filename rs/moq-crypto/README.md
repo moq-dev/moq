@@ -54,7 +54,7 @@ the instance of the route that serves the broadcast, which the route mints fresh
 
 ```rust
 let key = SecretKey::load_or_generate("/var/lib/moq/endpoint.key")?;
-let path = moq_net::Path::new(&format!("mesh/{}/agent", key.public()))?;
+let path = moq_net::Path::new(&format!("mesh/node/{}/agent", key.public()))?;
 let route = origin.route(&path, RouteOptions::hidden())?;
 let signed = broadcast::Producer::new(route.broadcast().clone(), key, path, route.instance());
 let messages = signed.create_track("messages", None)?;

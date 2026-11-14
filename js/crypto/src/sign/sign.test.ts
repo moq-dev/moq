@@ -70,7 +70,7 @@ async function payload(group: Group.Consumer | undefined): Promise<string | unde
 
 test("frames roundtrip signed, timestamps included", async () => {
 	const key = await SecretKey.generate();
-	const path = Path.from(`mesh/${key.public}/agent`);
+	const path = Path.from(`mesh/node/${key.public}/agent`);
 	const published = await publish(key, path);
 	const options: { timescale: Time.Timescale } = { timescale: Time.Timescale.MILLI };
 	const video = published.signed.createTrack("video", options);
@@ -201,7 +201,7 @@ test("a group sequence is never signed twice", async () => {
 test("a broadcast signed under another key is refused", async () => {
 	const impostor = await SecretKey.generate();
 	const victim = await SecretKey.generate();
-	const path = Path.from(`mesh/${victim.public}/ssh`);
+	const path = Path.from(`mesh/node/${victim.public}/ssh`);
 	const published = await publish(impostor, path);
 	const stream = published.signed.createTrack("stream");
 	const group = stream.appendGroup();

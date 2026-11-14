@@ -12,7 +12,7 @@
  *
  * ```ts
  * const key = await SecretKey.generate();
- * const path = Path.from(`mesh/${key.public}/agent`);
+ * const path = Path.from(`mesh/node/${key.public}/agent`);
  * const route = origin.route(path, { hidden: true });
  * const signed = new Broadcast.Producer(route.broadcast, key, { path, instance: route.instance });
  * const messages = signed.createTrack("messages");

@@ -52,13 +52,10 @@ member A put `.server/B` under A's own grant, so A could answer as B; the
 one path segment, validated when the `Endpoint` is built, so `*` in the
 grant covers it (`video/h264` would fall outside).
 
-The grant change itself is its own quest, in m2, so it lands before the cut
-publishes `moq_auth::mesh` (split 2026-11-12, maintainer, /quest-audit):
-[mesh grants scope nodes and services apart](/quest/m2/mesh-grant-shape.md).
-This quest builds the `Endpoint` on the new grant, and the dual-grant rollout
+The grant change landed on its own in m2, before the cut publishes
+`moq_auth::mesh` (split 2026-11-12, maintainer, /quest-audit). This quest builds the `Endpoint` on the new grant, and the dual-grant rollout
 question it carried is gone, since no release ever issued the old shape.
 
 ## Required
 
 - [Rust byte streams](/quest/m1/stream/rust.md) - the stream this API returns
-- [Mesh grant shape](/quest/m2/mesh-grant-shape.md) - the grant that lets a member publish its service endpoints
