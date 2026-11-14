@@ -88,7 +88,7 @@ only on lite-07. Lite-07 now defines the padding datagram type and both receiver
 discard it.
 The `Time(pts)` range end rides in the subscribe-ranges children already Required.
 
-Decided 2026-10-27 (maintainer): of the Subscribe ranges epic (finished and deleted 2026-11-14),
+Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m2/subscribe-ranges/README.md),
 only the children that change the lite-07 wire gate the cut:
 Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872)),
 JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), and

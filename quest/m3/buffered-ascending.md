@@ -83,3 +83,7 @@ keeps waiting on lite-07 for the head-hold simplification.
 ## Required
 
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - an ascending request is served newest-first until lite-07 negotiates by default
+
+## Related
+
+- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor
