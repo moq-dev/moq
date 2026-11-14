@@ -912,12 +912,11 @@ async fn a_peer_goaway_wins_over_a_probe() {
 	);
 }
 
-/// Pins an open finding (`verify-reconnect`, `RedirectFollowed`): once a probe got
-/// through, the fallback session drains as the predecessor and nothing watches its peer's
-/// GOAWAY anymore, so a redirect the peer sends while the handshake runs is never read and
-/// the redial goes back to the node that is leaving.
+/// Once a probe got through, the fallback session drains as the predecessor, and a
+/// redirect its peer sends while the handshake runs still decides where we go: the
+/// handshake to the leaving node is dropped and the dial goes where the peer named.
 #[kio::test]
-async fn residual_a_redirect_after_a_probe_got_through_is_lost() {
+async fn a_redirect_after_a_probe_got_through_is_followed() {
 	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
 	probe(&mut machine).await;
 	assert!(machine.probed(kio::clock::now(), Ok(())));
@@ -928,19 +927,34 @@ async fn residual_a_redirect_after_a_probe_got_through_is_lost() {
 		.drain()
 		.send(goaway::Goaway::redirect(elsewhere.to_string()))
 		.expect("the fallback peer sends a GOAWAY");
-	kio::clock::sim::idle().await;
-	// The handshake over the preferred transport fails, so the policy dials again.
+	assert!(matches!(next(&mut machine).await, Action::Abandon));
+	let Action::Dial(attempt) = next(&mut machine).await else {
+		panic!("expected a dial");
+	};
+	assert_eq!(attempt.target(), &elsewhere);
+	assert!(machine.predecessor().is_some(), "the redirected session still drains");
+}
+
+/// A redirect from the draining fallback's peer during the backoff after a failed
+/// handshake keeps the wait, and the redial goes where the peer named.
+#[kio::test]
+async fn a_redirect_during_the_backoff_after_a_probe_is_followed() {
+	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
+	probe(&mut machine).await;
+	assert!(machine.probed(kio::clock::now(), Ok(())));
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
 	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Retry);
 	assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
+
+	let elsewhere = url("https://peer:2/");
+	fallback_server
+		.drain()
+		.send(goaway::Goaway::redirect(elsewhere.to_string()))
+		.expect("the fallback peer sends a GOAWAY");
 	let Action::Dial(attempt) = next(&mut machine).await else {
 		panic!("expected a redial");
 	};
-	assert_eq!(
-		attempt.target(),
-		&url("https://peer:1/"),
-		"the redial followed the redirect: flip this test"
-	);
-	assert!(machine.predecessor().is_some(), "the redirected session still drains");
+	assert_eq!(attempt.target(), &elsewhere);
 }
 
 /// A client and server session where the client holds a subscription the server serves,

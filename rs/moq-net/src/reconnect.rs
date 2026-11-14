@@ -64,10 +64,11 @@ const PROBE_MAX: Duration = Duration::from_secs(300);
 /// peer sends one to each session until it goes, and each of those serves, so it
 /// restarts the timeout instead.
 ///
-/// A GOAWAY off a healthy session migrates at once, unless it sends the connection back
-/// to an endpoint that already redirected it elsewhere and the session lived less than
-/// `max`. Two peers redirecting to each other thus wait out this backoff and count
-/// against the timeout.
+/// A GOAWAY off a healthy session migrates at once, unless the run of redirects, among
+/// sessions that each lived less than `max`, has looped back through an endpoint. The loop
+/// check keeps one endpoint, so it catches a cycle within a few laps rather than at the
+/// first revisit: A to B, B to C, C to B is followed once before it is caught. Peers
+/// redirecting in a loop then wait out this backoff and count against the timeout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Backoff {
@@ -324,7 +325,7 @@ pub enum Action<A, E> {
 	/// [`Attempt::client`].
 	Dial(Attempt<A>),
 	/// Drop the dial or probe in flight: it ran out its deadline, which already counted as
-	/// its failure.
+	/// its failure, or the predecessor's peer redirected while it headed for that peer.
 	Abandon,
 	/// The [`predecessor`](Reconnect::predecessor) serves while a replacement is dialed: the
 	/// live session got a GOAWAY and now drains as it, or the replacement closed while it
@@ -558,6 +559,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					continue;
 				}
 			}
+			// Until a replacement serves, a redirect the predecessor's peer sends decides where
+			// the next dial goes.
+			if !live && let Some(action) = self.follow(waiter) {
+				return action;
+			}
 			let handover = self.predecessor.as_ref().map(|predecessor| predecessor.deadline);
 
 			match &mut self.phase {
@@ -727,10 +733,20 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		if let Some(older) = self.predecessor.take() {
 			older.retire();
 		}
+		// Its peer may still redirect us while it drains, which `follow` acts on. A fixed
+		// target never moves, so it needs no watch.
+		let redirect = old
+			.goaway
+			.filter(|_| !self.targets[index].fixed())
+			.map(|goaway| Redirected {
+				goaway,
+				url: self.targets[index].url().clone(),
+			});
 		self.predecessor = Some(Predecessor {
 			deadline: now.saturating_add(self.config.goaway.handover),
 			session: old.session,
 			closing: false,
+			redirect,
 		});
 		// Only now, once the fallback stops taking new work: a probe that never gets through
 		// leaves the serving session's tokens and their grants alone.
@@ -883,6 +899,51 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		self.back_off(now, self.config.backoff.timeout, false, "reconnecting after backoff");
 	}
 
+	/// Act on a GOAWAY the predecessor's peer sent after a probe moved us off it, the way
+	/// [`end`](Self::end) would have: an accepted redirect becomes the only target, and a dial
+	/// still headed for the leaving peer is dropped. Anything else leaves the targets alone,
+	/// since the policy is already leaving that session.
+	fn follow(&mut self, waiter: &kio::Waiter) -> Option<Action<A, E>> {
+		let predecessor = self.predecessor.as_mut()?;
+		let redirect = predecessor.redirect.as_ref()?;
+		let Poll::Ready(msg) = redirect.goaway.poll(waiter) else {
+			return None;
+		};
+		let redirect = predecessor.redirect.take()?;
+		let target = match msg.map(|msg| {
+			self.config
+				.goaway
+				.redirect
+				.target(msg.uri(), &redirect.url, self.config.pinned)
+		}) {
+			Ok(Ok(Some(target))) => target,
+			// A closed session, a restart in place, or a refused redirect: nothing to follow.
+			_ => return None,
+		};
+		tracing::info!(peer = %Shown(&target), "draining fallback peer redirected; following");
+		// No loop scoring here: only a probe that got through leads here, and the probe's
+		// backoff paces those. The session this dial lands on is scored when it ends.
+		let redirected = std::mem::replace(&mut self.targets, vec![A::from(target)]);
+		self.configured.get_or_insert(redirected);
+		// A walk of the replaced targets gives way to one of the new target.
+		if matches!(self.phase, Phase::Dialing(_) | Phase::Next { .. }) {
+			self.walk = Walk::default();
+		}
+		match self.phase {
+			Phase::Dialing(_) => {
+				self.phase = Phase::Start;
+				Some(Action::Abandon)
+			}
+			// An index into the replaced targets.
+			Phase::Next { .. } => {
+				self.phase = Phase::Start;
+				None
+			}
+			// A backoff still paces the next dial, which now goes to the new target.
+			_ => None,
+		}
+	}
+
 	/// Score how a live session ended and decide what follows.
 	fn end(&mut self, now: Instant, ended: Ended) {
 		let Phase::Live(live) = std::mem::replace(&mut self.phase, Phase::Start) else {
@@ -964,6 +1025,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			deadline: now.saturating_add(self.config.goaway.handover(msg.timeout())),
 			session: live.session,
 			closing: false,
+			// Its GOAWAY was just acted on.
+			redirect: None,
 		});
 		self.queue.push_back(Action::Migrating);
 
@@ -1153,6 +1216,14 @@ struct Predecessor {
 	deadline: Instant,
 	/// Whether [`Self::poll_idle`] started the graceful close.
 	closing: bool,
+	/// Watches for a redirect from the peer, set when a probe moved us off this session.
+	redirect: Option<Redirected>,
+}
+
+/// A drained fallback session's GOAWAY, and the URL a redirect in it is judged against.
+struct Redirected {
+	goaway: goaway::Consumer,
+	url: Url,
 }
 
 impl Predecessor {
