@@ -59,14 +59,15 @@
           "nixpkgs"
         ],
         "nixpkgs-bun": "nixpkgs-bun",
-        "quest-pinned": "quest-pinned"
+        "quest-pinned": "quest-pinned",
+        "token-max": "token-max"
       },
       "locked": {
-        "lastModified": 1794614120,
-        "narHash": "sha256-otitrvqsiaT8Y8ppBAVJK+kOqJw8oEn4KsVSb8u4Jog=",
+        "lastModified": 1794614559,
+        "narHash": "sha256-3QBtFK1OtZLzvIAg/LP+danE6ZEAsahGAKeRK3aRXkk=",
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "8b4abed5540a147c08f786e4a6c3e711273ce73a",
+        "rev": "d0f289d7013af5ae75ccf1d74bc0a90db718368a",
         "type": "github"
       },
       "original": {
@@ -131,6 +132,34 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "token-max": {
+      "inputs": {
+        "flake-utils": [
+          "quest",
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "quest",
+          "nixpkgs"
+        ],
+        "quest": [
+          "quest"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794593870,
+        "narHash": "sha256-6qw7DHhjqGi51kqLHgzWFTg7RLlImW8jnall3cpsB8Q=",
+        "owner": "kixel-ai",
+        "repo": "token-max",
+        "rev": "83ab6167e232f073e2188f1f6c8d37bae13b763c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kixel-ai",
+        "repo": "token-max",
         "type": "github"
       }
     }
