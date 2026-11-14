@@ -20,20 +20,16 @@ so it only needs to stay green.
   so the pass now runs the datagram step; the `replacement` case stays
   quarantined by default. Decided 2026-11-09 (maintainer, AFK, accepting the
   recommendation): close this quest on a pass, which the maintainer set with
-  those cases skipped; the pass that closes it now runs them. Decided
-  2026-11-12 (maintainer): this epic also waits for its
-  [planned-break remeasure](/quest/m0/interop-green/planned-break-remeasure.md)
-  child, so the pass closes the epic only once that child lands too. Until then,
-  a red run whose only failure is a stale planned break is fixed by hand: run
-  `just test wire-compat --remeasure` and land the rewritten
-  `test/interop/compat/planned-breaks.json`, as RELEASE.md's release
-  procedure describes.
+  those cases skipped; the pass that closes it now runs them.
+  Release remeasure now updates stale planned-break pins after publication
+  and requests landing through the main merge queue. Check its run and PR
+  when a scheduled run reports stale pins.
 
 ## Plan
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
-- ✅ the release-remeasure pipeline is a child quest of quest/m0/interop-green/ (rejected: quest/m3/release/; drop the follow-up). See [planned-break remeasure](/quest/m0/interop-green/planned-break-remeasure.md).
+- ✅ the release-remeasure pipeline is a child quest of quest/m0/interop-green/ (rejected: quest/m3/release/; drop the follow-up).
 - ✅ the release cut keeps its manual post-publish `just test wire-compat --remeasure` step until that child lands, and does not require it (rejected: block the cut on the new quest; accept a red Interop run per release).
 
 Decided 2026-10-27 (maintainer), from an external release-to-main audit
@@ -177,16 +173,13 @@ Scheduled run
   carries it, as the Rust side of the test expects.
   [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) fixes the
   expectation, and is open.
-- Interop (full matrix): `go -> python` fails with `audio gap after 648 samples`
-  at 2 s of 30 s. It passed once locally, and 8 more local runs of
-  `--publishers go --subscribers python,rust,go` passed every cell. A lead, not
-  checked: [moq-dev/moq#8531](https://github.com/moq-dev/moq/pull/8531) now waits on
-  a missing group in moq-audio only for the playout delay, which is small at a
-  cold start, so a reordered group early on reads as a gap. No open PR names this cell;
-  [moq-dev/moq#8587](https://github.com/moq-dev/moq/pull/8587) covers `python -> go`.
-  Decided 2026-11-12 (maintainer): the cell moves to
-  [test flakes](/quest/m0/test-flakes-2/interop-go-python.md), which checks
-  #8531 first.
+- Interop (full matrix): `go -> python` failed with `audio gap after 648 samples`
+  in the scheduled run. [moq-dev/moq#8633](https://github.com/moq-dev/moq/pull/8633)
+  could not reproduce it in ten completed full matrices on 2026-11-13: the cell
+  passed all ten, nine matrices passed entirely, and one failed other cells.
+  No runtime fix is claimed. The related
+  [moq-dev/moq#8611](https://github.com/moq-dev/moq/pull/8611) reproduces a
+  missing-group skip under CPU starvation in the same consumer and owns that fix.
 - Media output and lifecycle: after the pause case resumes, the audio trails the
   picture by about 1.7 s. [moq-dev/moq#8507](https://github.com/moq-dev/moq/pull/8507)
   keeps audio that trails the clock up to its 2 s stretch bound and plays it

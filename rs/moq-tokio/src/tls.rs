@@ -186,26 +186,6 @@ pub enum Error {
 	Deprecated(crate::cli::Deprecated),
 }
 
-impl Error {
-	/// A configuration no retry can fix, unlike a certificate file read mid-rotation.
-	#[cfg(feature = "net")]
-	pub(crate) fn is_terminal(&self) -> bool {
-		!matches!(
-			self,
-			Self::Open(_)
-				| Self::ReadFile(_)
-				| Self::Read(_)
-				| Self::Key(_)
-				| Self::LoadKey { .. }
-				| Self::Empty
-				| Self::EmptyRoots(_)
-				| Self::AddRoot(_)
-				| Self::KeyMismatch { .. }
-				| Self::ServerVerifier(_)
-		)
-	}
-}
-
 #[cfg(feature = "_certs")]
 crate::error::from_message! {
 	rcgen::Error => Rcgen,
@@ -3518,13 +3498,11 @@ mod tests {
 		resolver.inner.state.reload();
 		assert_eq!(leaf(&resolver), b);
 
-		// A well-formed PEM block whose key the provider refuses is retryable, like
-		// the other mid-rotation reads, so a `tls://` redial tries again.
+		// A well-formed PEM block whose key the provider refuses fails to load.
 		let (cert, key) = write_client_pair(dir.path(), "d");
 		std::fs::write(&key, pem::encode(&pem::Pem::new("PRIVATE KEY", vec![0u8; 16]))).unwrap();
 		let error = load_key_pair(&crypto::provider().unwrap(), &cert, &key).unwrap_err();
 		assert!(matches!(error, Error::LoadKey { .. }), "{error:?}");
-		assert!(!error.is_terminal());
 	}
 
 	#[cfg(all(feature = "watch", feature = "quic"))]

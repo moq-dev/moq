@@ -2,7 +2,7 @@
   description = "MoQ - Media over QUIC";
 
   # nix.moq.dev caches the default branch's dev shell, along with moq-relay
-  # and moq on x86 Linux, with a 30-day expiry:
+  # and moq on x86 Linux, with a 14-day expiry:
   #   nix run github:moq-dev/moq#moq-relay --accept-flake-config
   # Release Nix retains tagged packages permanently once a release cut
   # carries that workflow from main; earlier tags still build from source.
@@ -10,7 +10,7 @@
   # --accept-flake-config opts into the nixConfig below for one command. To
   # trust the cache permanently instead, add these settings to nix.conf.
   #
-  # The CI paths expire 30 days after upload, possibly before a path
+  # The CI paths expire 14 days after upload, possibly before a path
   # that depends on them; `fallback` builds whatever is missing instead of
   # failing the substitution.
   nixConfig = {
@@ -24,7 +24,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -32,7 +31,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/2a80c90206a8136e9e8d86d524d766caa42bc267";
+      url = "github:moq-dev/quest";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -43,7 +42,6 @@
       self,
       nixpkgs,
       flake-utils,
-      crane,
       rust-overlay,
       quest,
       ...
@@ -61,7 +59,7 @@
         github-runner-vm = import ./nix/modules/github-runner-vm.nix;
       };
 
-      overlays.default = import ./nix/overlay.nix { inherit crane; };
+      overlays.default = import ./nix/overlay.nix;
     }
     // eachSupportedSystem (
       system:
@@ -738,20 +736,24 @@
 
         # Heavy Rust CI (clippy / doc / test) runs via `just check` and `just
         # test` (see rs/justfile), reaching mbx through the Cargo shim the dev
-        # shell puts on PATH. Neither path goes through crane.
-        # `nix flake check` is kept -- it still validates flake eval + builds the
-        # runner tests. The dispatcher runs it for Nix and packaging inputs;
-        # Rust source changes use the Cargo gate above. Release
-        # artifacts still build via crane `buildPackage` (see `packages` above /
-        # release-*.yml).
+        # shell puts on PATH. `nix flake check` validates flake eval and builds
+        # the checks below; the dispatcher runs it for Nix and packaging
+        # inputs. Release artifacts build per crate (nix/crates.nix).
         #
         # Which compiler cache those runs get is a workflow concern
         # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
-          package-source-assets = pkgs.runCommand "package-source-assets" { } ''
-            test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
-            touch "$out"
-          '';
+          # The per-crate source filter keeps what moq-video embeds.
+          package-source-assets =
+            let
+              moq-video = pkgs.lib.findFirst (
+                crate: crate.crateName == "moq-video"
+              ) (throw "moq-boy links no moq-video") overlayPkgs.moq-boy.completeDeps;
+            in
+            pkgs.runCommand "package-source-assets" { } ''
+                test -f "${moq-video.src}/src/frame/nv12_resize.ptx"
+              touch "$out"
+            '';
         }
         // pkgs.lib.optionalAttrs (system == "x86_64-linux") (
           import ./nix/runner/checks.nix { inherit pkgs; }

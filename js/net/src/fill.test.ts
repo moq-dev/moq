@@ -283,6 +283,35 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	broadcast.close();
 }
 
+// A reader whose range lowers the copy's floor asks the live feed for those groups, as the update
+// it sends does, so none is asked of a fill too, even before the session declares the new floor:
+// the START answered the old floor, so it no longer bounds what the feed owes.
+test("fill: a group a lowered floor asks the feed for is not asked of a fill", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	hooks.receiveTrack(track);
+	const live = track.subscribe({ ranges: [{ start: { relative: 0n } }], delay: { max: null } });
+	hooks.startTrack(track, { start: 1n });
+	hooks.receiveGroup(track, { sequence: 1n, start: 0 }).finish();
+	expect((await live.recvGroup())?.sequence).toBe(1n);
+	const requests = track.requests();
+	const asked = requests.requestedFill();
+
+	const history = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }],
+		delay: { max: null },
+	});
+	const next = history.recvGroup();
+	expect(await Promise.race([asked.then(() => "asked"), yieldNow().then(() => "waiting")])).toBe("waiting");
+	hooks.receiveGroup(track, { sequence: 0n, start: 0 }).finish();
+	expect((await next)?.sequence).toBe(0n);
+
+	live.close();
+	history.close();
+	requests.close();
+	broadcast.close();
+});
+
 // Withheld as it fails, so a read in the same turn cannot take it either.
 test("fill: a failed answer is withheld from a subscribed reader that reads at once", async () => {
 	for (const dispositions of [false, true]) {

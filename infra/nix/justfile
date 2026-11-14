@@ -59,7 +59,7 @@ refresh bucket rev:
     # The bucket expires objects by upload age, and `nix copy` never rewrites
     # one it already has, so a path every commit reuses keeps its first upload's
     # age. Refreshed when published, the newest cached commit's closure stays
-    # inside the 30-day expiry as long as `main` merges within that window.
+    # inside the 14-day expiry as long as `main` merges within that window.
     set -euo pipefail
     : "${AWS_ACCESS_KEY_ID:?not set}"
     : "${AWS_SECRET_ACCESS_KEY:?not set}"

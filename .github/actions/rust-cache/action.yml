@@ -59,6 +59,13 @@ runs:
           echo "AWS_SECRET_ACCESS_KEY=$SECRET"
           echo "MBX_REMOTE_S3_ENDPOINT=https://dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com"
           echo "MBX_REMOTE_S3_REGION=auto"
+          # The action store's size budget also caps what one build downloads,
+          # and a hosted disk scales it to 5 GiB on Linux and 10 on Windows.
+          # Prefetching predictions every job shares spends that early, so the
+          # job's own results then fail to restore, compile again, and re-upload
+          # objects the bucket already holds, each a refused but billed put.
+          # 20 GiB covers the most any job downloaded with the cap lifted.
+          echo "MBX_GC_MAX_SIZE=20GiB"
           if [ "$WRITE" = "true" ]; then
             echo "MBX_REMOTE_MODE=read-write"
             # mbx trusts only a push to a protected branch, which leaves out
