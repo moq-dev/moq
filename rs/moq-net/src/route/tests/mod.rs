@@ -319,6 +319,8 @@ pub(super) struct State {
 pub(super) struct Stats {
 	/// Route messages: ROUTE, DEAD, and echoed ROUTE_ENDs.
 	pub route_msgs: usize,
+	/// Routes those messages name: a DEAD counts itself and each route it moved.
+	pub route_items: usize,
 	/// Route messages that changed nothing but the hops: what naming them costs.
 	pub hop_updates: usize,
 	pub claim_msgs: usize,
@@ -935,6 +937,7 @@ impl Sim {
 							self.routed.remove(&(node, to, id));
 						}
 						self.stats.route_msgs += 1;
+						self.stats.route_items += 1;
 						(to, Msg::Route { id, reach })
 					}
 					Out::Batch { to, id, changes, floor } => {
@@ -960,6 +963,7 @@ impl Sim {
 					}
 					Out::Echo { to, id } => {
 						self.stats.route_msgs += 1;
+						self.stats.route_items += 1;
 						self.acks.entry((node, to)).or_default().push_back(id);
 						continue;
 					}
@@ -1000,6 +1004,7 @@ impl Sim {
 						self.offered.remove(&key);
 					}
 					self.stats.route_msgs += 1;
+					self.stats.route_items += 1;
 					let interest = self.nodes[to].interest();
 					(
 						to,
@@ -1034,6 +1039,7 @@ impl Sim {
 				}
 				path::Out::Dead { to, dead } => {
 					self.stats.route_msgs += 1;
+					self.stats.route_items += 1 + dead.moved.len();
 					(to, Msg::Dead(dead))
 				}
 				path::Out::Synced { to } => {

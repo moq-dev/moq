@@ -177,7 +177,7 @@ impl Net for Sim {
 		let (offline, unavailable, starts) = tally(self.events.iter().map(|event| event.kind));
 		Sent {
 			msgs: self.stats.route_msgs + self.stats.requests,
-			items: self.stats.route_msgs + self.stats.requests,
+			items: self.stats.route_items + self.stats.requests,
 			claims: self.stats.claim_items,
 			offline,
 			unavailable,
