@@ -1,15 +1,11 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=moq-test/interop active=true
-[page] announced: broadcast=moq-test/interop active=false
-[page] announced: broadcast=moq-test/interop active=true
-[page] announced: broadcast=moq-test/interop active=false
-[page] announced: broadcast=moq-test/subscribe-namespace-lifecycle-1794615347081/child active=true
-[page] announced: broadcast=moq-test/subscribe-namespace-lifecycle-1794615347081/child active=false
-[page] announced: broadcast=moq-test/publish-namespace-retention-1794615347892/shared active=true
-[page] announced: broadcast=moq-test/publish-namespace-retention-1794615347892/shared active=false
-[page] announced: broadcast=moq-test/interop active=true
-[page] announced: broadcast=moq-test/interop active=false
-[page] announced: broadcast=moq-test/interop active=true
-[page] announced: broadcast=moq-test/interop active=false
-decoded 0 frames from smoke-rust-4047-23396.hang (vite)
+[page] announced: broadcast=smoke-rust-4515-15126.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4515-15126.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4515-15126.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4515-15126.hang track=catalog.json
+[page] received catalog hang smoke-rust-4515-15126.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4515-15126.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4515-15126.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4515-15126.hang track=0.avc3
+decoded 15 frames from smoke-rust-4515-15126.hang (vite)

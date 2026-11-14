@@ -2,12 +2,13 @@
 [page] announced: prefix=
 [page] announce: prefix=
 [page] announced: broadcast=sp-blume-town-test active=true
-[page] announced: broadcast=vs-3ec3c809f198a9cd6fa810402a193c04 active=true
-[page] announced: broadcast=smoke-js-web-4047-8856.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-js-web-4047-8856.hang track=catalog.json
-[page] subscribe ok: id=0 broadcast=smoke-js-web-4047-8856.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4047-8856.hang {video: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-js-web-4047-8856.hang track=video
-[page] subscribe ok: id=1 broadcast=smoke-js-web-4047-8856.hang track=video
-[page] subscribe update: id=1 broadcast=smoke-js-web-4047-8856.hang track=video
-decoded 2 frames from smoke-js-web-4047-8856.hang (vite)
+[page] announced: broadcast=smoke-js-web-4515-20179.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-js-web-4515-20179.hang track=catalog.json
+[page] subscribe ok: id=0 broadcast=smoke-js-web-4515-20179.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4515-20179.hang {video: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-js-web-4515-20179.hang track=video
+[page] subscribe ok: id=1 broadcast=smoke-js-web-4515-20179.hang track=video
+[page] subscribe update: id=1 broadcast=smoke-js-web-4515-20179.hang track=video
+[page] received catalog hang smoke-js-web-4515-20179.hang {video: Object, clock: Object}
+[page] subscribe update: id=1 broadcast=smoke-js-web-4515-20179.hang track=video
+decoded 5 frames from smoke-js-web-4515-20179.hang (vite)
