@@ -84,6 +84,23 @@ function gap(trace: Trace, at: number, length: number): Trace {
 	return { arrival, media };
 }
 
+/**
+ * Hold a FIFO queue to one frame per `service` ms from `from` for `length` ms, as a link
+ * collapsing behind a full queue does, then drain it at 2 ms per frame.
+ */
+function outage(trace: Trace, from: number, length: number, service: number): Trace {
+	const arrival = [...trace.arrival];
+	let free = Number.NEGATIVE_INFINITY;
+	for (let i = 0; i < arrival.length; i++) {
+		const start = Math.max(arrival[i], free);
+		if (start >= from && start < from + length) free = start + service;
+		else if (start > arrival[i]) free = start + 2;
+		else free = start;
+		arrival[i] = free;
+	}
+	return { arrival, media: trace.media };
+}
+
 function paced(frames: number, frame: number, base: number): Trace {
 	return flushed(frames, frame, 1, base);
 }
@@ -215,6 +232,42 @@ const traces: Omit<Case, "target">[] = [
 				for (let i = start; i < start + 15; i++) arrival[i] = arrival[start + 14];
 			}
 			return { arrival, media: trace.media };
+		})(),
+	},
+	{
+		name: "outage",
+		about: "Even audio with a 1.5 s outage 10 s in: a queue serving one frame per 300 ms, then draining the backlog, so its delays climb past a second across four intervals. The frames stuck behind it are one stall, which folds once, so the one-off leaves the target where it was. So does a 1.5 s blackout 20 s in, recovering with the live edge before its backlog, whose empty intervals belong to the stall that ends them. Three more outages 3 s apart from 30 s still raise it, and it decays once they stop.",
+		frame: FRAME,
+		...(() => {
+			let trace = paced(3000, FRAME, 50);
+			trace = outage(trace, 10_050, 1500, 300);
+			trace = outage(trace, 20_050, 1500, 1500);
+			// The blackout recovers with the live edge first, then the backlog behind it.
+			const arrival = [...trace.arrival];
+			const media = [...trace.media];
+			const [edge] = media.splice(1075, 1);
+			arrival.splice(1075, 1);
+			media.splice(1000, 0, edge);
+			arrival.splice(1000, 0, arrival[1000]);
+			trace = { arrival, media };
+			for (const at of [30_000, 33_000, 36_000]) trace = outage(trace, at + 50, 1500, 300);
+			return trace;
+		})(),
+	},
+	{
+		name: "batches",
+		about: "A publisher flushing 1 s of media at once, every second, newest frame first. Each flush is due before the previous one finished arriving, so the flushes chain, but a stall covers at most a window of due time, so they still fold and the target rises to cover the flush span.",
+		frame: FRAME,
+		...(() => {
+			const arrival: number[] = [];
+			const media: number[] = [];
+			for (let flush = 0; flush < 40; flush++) {
+				for (let k = 0; k < 50; k++) {
+					arrival.push(50 + (flush + 1) * 1000 + k * 2);
+					media.push(flush * 1000 + (49 - k) * FRAME);
+				}
+			}
+			return { arrival, media };
 		})(),
 	},
 	{
