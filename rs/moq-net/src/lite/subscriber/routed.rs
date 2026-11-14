@@ -25,6 +25,15 @@ use crate::{
 use super::{AnnouncedRoute, Subscriber};
 
 /// One route the peer sent on the stream, by its Route ID.
+/// The parts of a DEAD read so far, which apply as one once its last arrives.
+struct Continued {
+	hop: Hop,
+	far: route::Id,
+	gone: bool,
+	/// The new offer of each route its parts moved, by Route ID.
+	offers: HashMap<u64, Result<Offer, Arc<[Hop]>>>,
+}
+
 struct WireRoute {
 	node: route::Id,
 	/// The prefix it covers, absolute, or `None` when this node refused the suffix the
@@ -144,6 +153,8 @@ pub(super) struct Routed {
 	ready: kio::Queue<ServedKey>,
 	/// The peer sent a GOAWAY: every claim served here ranks last.
 	drained: bool,
+	/// A DEAD whose next part the peer sends next.
+	continued: Option<Continued>,
 	/// The link's min RTT, which the peer's routes add.
 	rtt: route::LinkRtt,
 	/// When to read the link's RTT next, or `None` once it stopped reading.
@@ -210,6 +221,7 @@ impl Routed {
 			previous: HashMap::new(),
 			ready: Default::default(),
 			drained: false,
+			continued: None,
 			rtt: Default::default(),
 			read_rtt: None,
 			sampling: false,
@@ -225,6 +237,10 @@ impl Routed {
 		decoder: &mut lite::AnnounceDecoder,
 	) -> Result<(), Error> {
 		use lite::AnnounceBroadcast as Msg;
+		// The parts of a DEAD arrive back to back.
+		if self.continued.is_some() && !matches!(announce, Msg::Dead(lite::Dead::Closed { .. })) {
+			return Err(Error::ProtocolViolation);
+		}
 		match announce {
 			Msg::RouteStart { node, suffix, offer } => self.route_start(node, Some(suffix), Ok(offer))?,
 			Msg::RouteUpdate { id, offer } => self.offer(id, Ok(offer))?,
@@ -410,16 +426,31 @@ impl Routed {
 
 	/// A DEAD: the stream's routes through the hop it names carry on as it says, which the
 	/// node is told as the peer's news. A route this node refuses still follows it, so
-	/// the two ends agree on which routes live.
+	/// the two ends agree on which routes live. A DEAD in parts applies with its last.
 	fn dead(&mut self, dead: lite::Dead, decoder: &mut lite::AnnounceDecoder) -> Result<(), Error> {
-		let (hop, far, gone, moved) = match dead {
+		let (hop, far, gone, more, moved) = match dead {
 			lite::Dead::Drain { node } => {
 				self.stream.dead(Dead::Draining { node });
 				return Ok(());
 			}
-			lite::Dead::Closed { hop, far, gone, moved } => (hop, far, gone, moved),
+			lite::Dead::Closed {
+				hop,
+				far,
+				gone,
+				more,
+				moved,
+			} => (hop, far, gone, more, moved),
 		};
-		let mut offers = HashMap::new();
+		let mut parts = self.continued.take().unwrap_or(Continued {
+			hop,
+			far,
+			gone,
+			offers: HashMap::new(),
+		});
+		if (parts.hop, parts.far, parts.gone) != (hop, far, gone) {
+			return Err(Error::ProtocolViolation);
+		}
+		// Each part names live routes, so what the parts hold stays within the stream's.
 		for (id, heard) in moved {
 			if !self.routes.contains_key(&id) {
 				return Err(Error::ProtocolViolation);
@@ -429,8 +460,13 @@ impl Routed {
 				self.stats.refuse_route();
 				refused.path
 			});
-			offers.insert(id, heard);
+			parts.offers.insert(id, heard);
 		}
+		if more {
+			self.continued = Some(parts);
+			return Ok(());
+		}
+		let mut offers = parts.offers;
 		let mut ids: Vec<u64> = (self.routes.iter())
 			.filter(|(_, route)| route.path().contains(&hop))
 			.map(|(id, _)| *id)

@@ -147,24 +147,31 @@
 		"expect": "decoded"
 	},
 	{
-		"name": "a DEAD CLOSED names the hop, the far node, Gone, and the routes that moved, each offer sized",
+		"name": "a DEAD CLOSED names the hop, the far node, Gone, More, and the routes that moved, each offer sized",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0f1000070209010100080207000501008003",
+		"hex": "0f110007020901000100080207000501008003",
+		"expect": "decoded"
+	},
+	{
+		"name": "a DEAD CLOSED with More set continues in the next DEAD",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0f0700070209000100",
 		"expect": "decoded"
 	},
 	{
 		"name": "a DEAD CLOSED moved offer this node refuses is withdrawn, and the entries after it still read",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0f18000702090102000802070005010880030306010700008001",
+		"hex": "0f1900070209010002000802070005010880030306010700008001",
 		"expect": "withdrawn"
 	},
 	{
 		"name": "a DEAD CLOSED moved offer short of its size is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0f1000070209010100080107000080030000",
+		"hex": "0f110007020901000100080107000080030000",
 		"expect": "refused"
 	},
 	{
@@ -185,7 +192,14 @@
 		"name": "a DEAD whose Gone is neither 0 nor 1 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0f06000702090200",
+		"hex": "0f0700070209020000",
+		"expect": "refused"
+	},
+	{
+		"name": "a DEAD whose More is neither 0 nor 1 is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0f0700070209000200",
 		"expect": "refused"
 	},
 	{

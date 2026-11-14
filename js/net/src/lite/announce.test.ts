@@ -445,17 +445,19 @@ test("the route layer round-trips on draft-07", async () => {
 					hop: { node: 7n, session: 3n },
 					far: 9n,
 					gone: false,
+					more: false,
 					moved: [{ id: 1n, offer: one }],
 				},
 			},
-			[15, 14, 0, 7, 3, 9, 0, 1, 1, 6, 1, 7, 0, 0, 128, 0],
+			[15, 15, 0, 7, 3, 9, 0, 0, 1, 1, 6, 1, 7, 0, 0, 128, 0],
 		],
+		// More: the next DEAD continues this one's moved routes.
 		[
 			{
 				status: "dead",
-				dead: { kind: "closed", hop: { node: 7n, session: 3n }, far: 9n, gone: true, moved: [] },
+				dead: { kind: "closed", hop: { node: 7n, session: 3n }, far: 9n, gone: true, more: true, moved: [] },
 			},
-			[15, 6, 0, 7, 3, 9, 1, 0],
+			[15, 7, 0, 7, 3, 9, 1, 1, 0],
 		],
 		// Revision 4 travels as 5: 0 certifies nothing.
 		[{ status: "floor", id: 1n, revision: 4n }, [9, 2, 1, 5]],
@@ -507,6 +509,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 				hop: { node: 1n, session: 0n },
 				far: 2n,
 				gone: false,
+				more: false,
 				moved: [{ id: 0n, offer: { refused: "flags", path: offer.path } }],
 			},
 		}),
@@ -565,6 +568,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 		await w.u62(0n);
 		await w.u62(2n);
 		await w.u8(0);
+		await w.u8(0);
 		await w.u62(2n);
 		for (const flags of [8, 0]) {
 			await w.u62(flags === 8 ? 3n : 4n);
@@ -584,6 +588,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 			hop: { node: 1n, session: 0n },
 			far: 2n,
 			gone: false,
+			more: false,
 			moved: [
 				{ id: 3n, offer: { refused: "flags", path } },
 				{

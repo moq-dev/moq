@@ -5310,13 +5310,13 @@ test("a lite-07 DEAD moves, ends, or holds the routes through its hop", async ()
 	// The peer's session to a publisher, as each route's path names it.
 	const closed = (node: bigint, gone: boolean, moved: { id: bigint; offer: Offer }[] = []): AnnounceBroadcast => ({
 		status: "dead",
-		dead: { kind: "closed", hop: { node: PEER_NODE, session: node }, far: node, gone, moved },
+		dead: { kind: "closed", hop: { node: PEER_NODE, session: node }, far: node, gone, more: false, moved },
 	});
 
 	// A hop no route crosses changes nothing: the next thing shown is the move below.
 	await send({
 		status: "dead",
-		dead: { kind: "closed", hop: { node: 0x55n, session: 4n }, far: 0x56n, gone: true, moved: [] },
+		dead: { kind: "closed", hop: { node: 0x55n, session: 4n }, far: 0x56n, gone: true, more: false, moved: [] },
 	});
 	// Route 0 moved to a costlier path through another of the peer's sessions.
 	const detour = [
@@ -5347,12 +5347,52 @@ test("a lite-07 DEAD moves, ends, or holds the routes through its hop", async ()
 	expect(await held.announced.next()).toMatchObject({ prefix: c, kind: "update", route: { available: true } });
 	// Moved to an offer this node refuses, it goes offline, and a later usable offer brings it back.
 	// DEAD: the session NODE_C (two varint bytes) closed, route 0 moved to an offer with an unknown flag.
-	await held.raw([15, 16, 0, 2, 0x80, 0x9c, 0x80, 0x9c, 0, 1, 0, 6, 1, 7, 0, 0x80, 128, 0]);
+	await held.raw([15, 17, 0, 2, 0x80, 0x9c, 0x80, 0x9c, 0, 0, 1, 0, 6, 1, 7, 0, 0x80, 128, 0]);
 	expect(await held.announced.next()).toMatchObject({ prefix: c, kind: "offline" });
 	await held.send({ status: "routeUpdate", id: 0n, offer: offer(NODE_C) });
 	expect(await held.announced.next()).toMatchObject({ prefix: c, kind: "start" });
 	held.announced.close();
 	held.subscriber.close();
+});
+
+// A DEAD in parts applies with its last: a route an earlier part moved is not ended by the gone
+// hop, and nothing shows before the last part. Mirrors rs/moq-net.
+test("a lite-07 DEAD in parts applies with its last", async () => {
+	const { subscriber, announced, send } = await routedStream();
+	const [a, b] = ["a", "b"].map((path) => Path.from(path));
+	const instance = Instance.parse("i");
+	// Both routes reach the peer over its session to NODE_A.
+	const hop = { node: PEER_NODE, session: NODE_A };
+	const through = (node: bigint) => [
+		{ node, session: 0n },
+		...(node === NODE_A ? [] : [{ node: NODE_A, session: 1n }]),
+		hop,
+	];
+	for (const [id, node, path] of [
+		[0n, NODE_A, a],
+		[1n, NODE_B, b],
+	] as const) {
+		await send({ status: "routeStart", node, suffix: Path.empty(), offer: offer(node, { path: through(node) }) });
+		await send({ status: "active", suffix: path, route: id, instance });
+		await send({ status: "floor", id, revision: 0n });
+		expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
+	}
+	const detour = (node: bigint) => ({
+		id: node === NODE_A ? 0n : 1n,
+		offer: offer(node, { metric: 4n, path: [...through(node).slice(0, -1), { node: PEER_NODE, session: 9n }] }),
+	});
+	const part = (more: boolean, moved: { id: bigint; offer: Offer }[]): AnnounceBroadcast => ({
+		status: "dead",
+		dead: { kind: "closed", hop, far: NODE_A, gone: true, more, moved },
+	});
+	await send(part(true, [detour(NODE_A)]));
+	await send(part(false, [detour(NODE_B)]));
+	for (const path of [a, b]) {
+		expect(await announced.next()).toMatchObject({ prefix: path, kind: "update", route: { cost: 5n } });
+	}
+
+	announced.close();
+	subscriber.close();
 });
 
 // DRAIN: a node on a route's path sent GOAWAY, so it ranks below every route without one, until
@@ -5431,7 +5471,53 @@ test.each([
 					hop: { node: PEER_NODE, session: 1n },
 					far: 3n,
 					gone: false,
+					more: false,
 					moved: [{ id: 0n, offer: offer(NODE_A) }],
+				},
+			},
+		],
+	],
+	[
+		"a DEAD part followed by another message",
+		[
+			{ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) },
+			{
+				status: "dead",
+				dead: {
+					kind: "closed",
+					hop: { node: PEER_NODE, session: NODE_A },
+					far: NODE_A,
+					gone: true,
+					more: true,
+					moved: [],
+				},
+			},
+			{ status: "floor", id: 0n },
+		],
+	],
+	[
+		"a DEAD part continued by one naming another hop",
+		[
+			{
+				status: "dead",
+				dead: {
+					kind: "closed",
+					hop: { node: PEER_NODE, session: 1n },
+					far: 3n,
+					gone: true,
+					more: true,
+					moved: [],
+				},
+			},
+			{
+				status: "dead",
+				dead: {
+					kind: "closed",
+					hop: { node: PEER_NODE, session: 2n },
+					far: 3n,
+					gone: true,
+					more: false,
+					moved: [],
 				},
 			},
 		],

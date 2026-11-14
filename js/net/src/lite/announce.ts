@@ -85,10 +85,19 @@ export interface Unusable {
 /** News on DEAD about the routes the sender offered. `closed`: the session `hop` names closed, at
  * the node `far` at its other end. Each route on the stream through that hop that `moved` names by
  * Route ID continues on its offer there; the rest end if `gone`, and are held if not, unless the
- * receiver is the node just before the sender on the route's path. `drain`: `node` sent GOAWAY, so
- * every path through it ranks as draining. */
+ * receiver is the node just before the sender on the route's path. With `more`, the next message is
+ * a DEAD naming the same hop, far node, and `gone` whose `moved` continues this one's, and the
+ * receiver applies them as one. `drain`: `node` sent GOAWAY, so every path through it ranks as
+ * draining. */
 export type Dead =
-	| { kind: "closed"; hop: RouteHop; far: bigint; gone: boolean; moved: { id: bigint; offer: Offer | Unusable }[] }
+	| {
+			kind: "closed";
+			hop: RouteHop;
+			far: bigint;
+			gone: boolean;
+			more: boolean;
+			moved: { id: bigint; offer: Offer | Unusable }[];
+	  }
 	| { kind: "drain"; node: bigint };
 
 /** The most Hops a route may carry. One that arrives with this many is unusable. */
@@ -353,6 +362,7 @@ async function encodeDead(w: Writer, dead: Dead) {
 	await w.u62(dead.hop.session);
 	await w.u62(dead.far);
 	await w.u8(dead.gone ? 1 : 0);
+	await w.u8(dead.more ? 1 : 0);
 	await w.u62(BigInt(dead.moved.length));
 	for (const { id, offer } of dead.moved) {
 		if ("refused" in offer) throw new Error("a refused offer is never sent");
@@ -374,11 +384,13 @@ async function decodeDead(r: Reader): Promise<Dead> {
 	const far = nonzero(await r.u62());
 	const gone = await r.u8();
 	if (gone > 1) throw new ProtocolViolation(`DEAD Gone ${gone}`);
+	const more = await r.u8();
+	if (more > 1) throw new ProtocolViolation(`DEAD More ${more}`);
 	const count = await r.u62();
 	const moved: { id: bigint; offer: Offer | Unusable }[] = [];
 	// Each entry takes bytes, so the body bounds the count before this loop runs out.
 	for (let i = 0n; i < count; i++) moved.push({ id: await r.u62(), offer: await Message.decode(r, decodeOffer) });
-	return { kind: "closed", hop, far, gone: gone === 1, moved };
+	return { kind: "closed", hop, far, gone: gone === 1, more: more === 1, moved };
 }
 
 /** Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded, or

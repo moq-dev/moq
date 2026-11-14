@@ -499,6 +499,79 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
 }
 
+/// A DEAD in parts applies as one with its last: an earlier part changes nothing, the
+/// last moves what any part listed and ends the rest, and another message between them,
+/// or a part naming another hop, is a violation.
+#[kio::test]
+async fn a_dead_in_parts_applies_with_its_last() {
+	use crate::lite::Dead;
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let prefix = Path::empty();
+	let hop = |session| Hop { node: 5, session };
+	// Node 8's route reaches node 5 through node 7, over the same session as 7's own.
+	let through = |node, session| Offer {
+		path: match node {
+			7 => [Hop { node: 7, session: 0 }, hop(session)].into(),
+			_ => [Hop { node, session: 0 }, Hop { node: 7, session: 1 }, hop(session)].into(),
+		},
+		..offer()
+	};
+	let start = || {
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		for node in [7, 8] {
+			let start = Msg::RouteStart {
+				node,
+				suffix: Path::empty(),
+				offer: through(node, 3),
+			};
+			routed.receive(&prefix, start, &mut decoder).unwrap();
+		}
+		(routed, decoder)
+	};
+	let part = |session, more, moved| {
+		Msg::Dead(Dead::Closed {
+			hop: hop(session),
+			far: 7,
+			gone: true,
+			more,
+			moved,
+		})
+	};
+
+	let (mut routed, mut decoder) = start();
+	routed
+		.receive(&prefix, part(3, true, vec![(0, Ok(through(7, 4)))]), &mut decoder)
+		.unwrap();
+	assert_eq!(routed.routes.len(), 2);
+	assert!(routed.routes[&0].path().contains(&hop(3)));
+	routed
+		.receive(&prefix, part(3, false, Vec::new()), &mut decoder)
+		.unwrap();
+	assert_eq!(routed.routes.keys().collect::<Vec<_>>(), [&0]);
+	assert!(routed.routes[&0].path().contains(&hop(4)));
+
+	let (mut routed, mut decoder) = start();
+	routed
+		.receive(&prefix, part(3, true, Vec::new()), &mut decoder)
+		.unwrap();
+	let floor = Msg::Floor {
+		id: 0,
+		revision: Some(0),
+	};
+	assert!(routed.receive(&prefix, floor, &mut decoder).is_err());
+
+	let (mut routed, mut decoder) = start();
+	routed
+		.receive(&prefix, part(3, true, Vec::new()), &mut decoder)
+		.unwrap();
+	assert!(
+		routed
+			.receive(&prefix, part(4, false, Vec::new()), &mut decoder)
+			.is_err()
+	);
+}
+
 /// A route this node refuses still follows a DEAD naming a hop on its path, so both
 /// ends agree on which routes live: the closed session it crossed ends it, its claims
 /// with it, and the peer may start it over. A refused moved offer withdraws the route
@@ -525,6 +598,7 @@ async fn a_refused_route_still_follows_a_dead() {
 			hop: Hop { node: 5, session },
 			far: 7,
 			gone,
+			more: false,
 			moved,
 		})
 	};

@@ -3924,12 +3924,12 @@ mod announce_test {
 		);
 	}
 
-	/// A DEAD whose moved routes outgrow one message lists as many as fit and moves the
-	/// rest first with ROUTE_UPDATEs, so failing over many routes at once never fails the
-	/// stream, and the DEAD still names a route through its hop for the peer to apply it;
-	/// one that fits goes whole.
+	/// A DEAD whose moved routes outgrow one message goes in consecutive parts, each
+	/// fitting one and all but the last with More set, which list its moved routes in
+	/// order, so failing over many routes at once never fails the stream; one that fits
+	/// goes whole.
 	#[test]
-	fn a_lite07_dead_past_one_message_moves_the_rest_first() {
+	fn a_lite07_dead_past_one_message_goes_in_parts() {
 		use crate::route::path::{Hop, Offer};
 		let offer = Offer {
 			// The longest path, of the widest Hop IDs.
@@ -3945,10 +3945,11 @@ mod announce_test {
 			down_only: false,
 			rtt: None,
 		};
-		let dead = |moved: std::ops::Range<u64>| lite::Dead::Closed {
+		let dead = |moved: std::ops::Range<u64>, more| lite::Dead::Closed {
 			hop: Hop { node: 7, session: 1 },
 			far: 8,
 			gone: true,
+			more,
 			moved: moved.map(|id| (id, Ok(offer.clone()))).collect(),
 		};
 		let encodes = |msg: &lite::AnnounceBroadcast| {
@@ -3959,9 +3960,9 @@ mod announce_test {
 			)
 			.is_ok()
 		};
-		// Past 65,535 bytes at about 300 a route.
-		let many = 300;
-		assert!(!encodes(&lite::AnnounceBroadcast::Dead(dead(0..many))));
+		// Past three times 65,535 bytes at about 300 a route.
+		let many = 700;
+		assert!(!encodes(&lite::AnnounceBroadcast::Dead(dead(0..many, false))));
 
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3977,27 +3978,31 @@ mod announce_test {
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
 		let waiter = kio::Waiter::noop();
-		super::routed::buffer_dead(&mut stream, dead(0..2)).unwrap();
+		super::routed::buffer_dead(&mut stream, dead(0..2, false)).unwrap();
 		assert!(stream.writer.poll_flush(&waiter).is_ready());
-		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Dead(dead(0..2))]);
+		assert_eq!(
+			wire.take_announces(),
+			[lite::AnnounceBroadcast::Dead(dead(0..2, false))]
+		);
 
-		super::routed::buffer_dead(&mut stream, dead(0..many)).unwrap();
+		super::routed::buffer_dead(&mut stream, dead(0..many, false)).unwrap();
 		assert!(stream.writer.poll_flush(&waiter).is_ready());
 		let sent = wire.take_announces();
-		let (last, updates) = sent.split_last().expect("a DEAD");
-		let lite::AnnounceBroadcast::Dead(lite::Dead::Closed { moved, .. }) = last else {
-			panic!("the DEAD goes last: {last:?}");
-		};
-		let fit = moved.len() as u64;
-		assert!(fit > 100 && fit < many, "listed {fit}");
-		assert_eq!(*last, lite::AnnounceBroadcast::Dead(dead(0..fit)));
-		let expected: Vec<_> = (fit..many)
-			.map(|id| lite::AnnounceBroadcast::RouteUpdate {
-				id,
-				offer: offer.clone(),
-			})
-			.collect();
-		assert_eq!(updates, expected);
+		assert!(sent.len() >= 3, "{} parts", sent.len());
+		let mut next = 0;
+		for (i, part) in sent.iter().enumerate() {
+			let lite::AnnounceBroadcast::Dead(lite::Dead::Closed { moved, .. }) = part else {
+				panic!("a DEAD part: {part:?}");
+			};
+			let end = next + moved.len() as u64;
+			assert!(end > next, "part {i} lists no route");
+			assert_eq!(
+				*part,
+				lite::AnnounceBroadcast::Dead(dead(next..end, i + 1 < sent.len()))
+			);
+			next = end;
+		}
+		assert_eq!(next, many);
 	}
 
 	#[test]

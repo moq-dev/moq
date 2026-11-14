@@ -116,20 +116,18 @@ enum Phase {
 	Closing,
 }
 
-/// Whether a stream on `link` carries `claim` at all: never an upstream-learned claim
-/// to an upstream, nor one learned from another node to a peer this node does not
-/// proxy for.
-/// Buffer `dead`, each moved route past what one message holds going ahead of it as a
-/// ROUTE_UPDATE (see [`lite::Dead::overflow`]).
-pub(super) fn buffer_dead(stream: &mut Stream<Transport, Version>, mut dead: lite::Dead) -> Result<(), Error> {
-	for (id, offer) in dead.overflow() {
-		let offer = offer.expect("this node forwards only usable offers");
-		stream.writer.buffer(&Msg::RouteUpdate { id, offer })?;
+/// Buffer `dead`, in as many consecutive DEADs as its moved routes need (see
+/// [`lite::Dead::split`]).
+pub(super) fn buffer_dead(stream: &mut Stream<Transport, Version>, dead: lite::Dead) -> Result<(), Error> {
+	for part in dead.split() {
+		stream.writer.buffer(&Msg::Dead(part))?;
 	}
-	stream.writer.buffer(&Msg::Dead(dead))?;
 	Ok(())
 }
 
+/// Whether a stream on `link` carries `claim` at all: never an upstream-learned claim
+/// to an upstream, nor one learned from another node to a peer this node does not
+/// proxy for.
 fn sends(link: &route::Link, claim: &node::Claim) -> bool {
 	!(link.upstream && claim.upstream) && (link.proxy || !claim.learned)
 }
@@ -581,6 +579,7 @@ impl Answer {
 					hop,
 					far,
 					gone: ends,
+					more: false,
 					moved,
 				},
 			)?;

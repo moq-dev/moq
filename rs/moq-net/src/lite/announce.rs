@@ -288,10 +288,13 @@ pub(crate) enum Dead {
 	/// the receiver doubts. Each route on the stream through that hop that `moved` names
 	/// by Route ID continues on its offer there; the rest end if `gone`, and are held if
 	/// not, unless the receiver is the node just before the sender on the route's path.
+	/// With `more`, the next message is a DEAD naming the same hop, far node, and `gone`
+	/// whose `moved` continues this one's, and the receiver applies them as one.
 	Closed {
 		hop: route::path::Hop,
 		far: route::Id,
 		gone: bool,
+		more: bool,
 		moved: Vec<(u64, Heard)>,
 	},
 	/// DRAIN: `node` sent GOAWAY, so every path through it ranks as draining.
@@ -399,7 +402,13 @@ fn decode_offer(r: &mut Decoder<'_>) -> Result<Heard, DecodeError> {
 
 fn encode_dead(w: &mut Encoder<'_>, dead: &Dead) -> Result<(), EncodeError> {
 	match dead {
-		Dead::Closed { hop, far, gone, moved } => {
+		Dead::Closed {
+			hop,
+			far,
+			gone,
+			more,
+			moved,
+		} => {
 			if hop.node == 0 || *far == 0 {
 				return Err(EncodeError::InvalidState);
 			}
@@ -408,6 +417,7 @@ fn encode_dead(w: &mut Encoder<'_>, dead: &Dead) -> Result<(), EncodeError> {
 			w.varint(hop.session)?;
 			w.varint(*far)?;
 			w.u8(u8::from(*gone));
+			w.u8(u8::from(*more));
 			w.varint(moved.len() as u64)?;
 			for (id, offer) in moved {
 				encode_moved(w, *id, offer)?;
@@ -438,13 +448,18 @@ fn encode_moved(w: &mut Encoder<'_>, id: u64, offer: &Heard) -> Result<(), Encod
 }
 
 impl Dead {
-	/// Split off, in order, the moved routes past what one message holds, keeping at
-	/// least one. Each goes ahead of the DEAD as a ROUTE_UPDATE instead, while the
-	/// receiver still uses it, and the DEAD still names a route through its hop, so the
-	/// receiver applies it as it would the whole one.
-	pub(crate) fn overflow(&mut self) -> Vec<(u64, Heard)> {
-		let Self::Closed { hop, far, gone, moved } = self else {
-			return Vec::new();
+	/// Split into consecutive DEADs that each fit one message, in order, every one but
+	/// the last with `more` set, so the receiver applies them as this one.
+	pub(crate) fn split(self) -> Vec<Self> {
+		let Self::Closed {
+			hop,
+			far,
+			gone,
+			more,
+			moved,
+		} = self
+		else {
+			return vec![self];
 		};
 		let form = Version::Lite07.into();
 		let size = |encode: &dyn Fn(&mut Encoder<'_>) -> Result<(), EncodeError>| {
@@ -453,27 +468,29 @@ impl Dead {
 			let _ = encode(&mut Encoder::new(&mut body, form));
 			body.len()
 		};
-		let bare = Self::Closed {
-			hop: *hop,
-			far: *far,
-			gone: *gone,
-			moved: Vec::new(),
+		let part = |more, moved| Self::Closed {
+			hop,
+			far,
+			gone,
+			more,
+			moved,
 		};
-		// The bare DEAD, its Moved Count grown to the widest varint.
-		let mut used = size(&|w| encode_dead(w, &bare)) + 7;
-		let mut kept = std::mem::take(moved);
-		let mut fit = 0;
-		for (id, offer) in &kept {
-			let entry = size(&|w| encode_moved(w, *id, offer));
-			if fit > 0 && used + entry > MAX_MESSAGE_SIZE {
-				break;
+		// A DEAD without its moved routes, its Moved Count grown to the widest varint.
+		let bare = size(&|w| encode_dead(w, &part(true, Vec::new()))) + 7;
+		let mut parts = Vec::new();
+		let mut listed = Vec::new();
+		let mut used = bare;
+		for (id, offer) in moved {
+			let entry = size(&|w| encode_moved(w, id, &offer));
+			if !listed.is_empty() && used + entry > MAX_MESSAGE_SIZE {
+				parts.push(part(true, std::mem::take(&mut listed)));
+				used = bare;
 			}
 			used += entry;
-			fit += 1;
+			listed.push((id, offer));
 		}
-		let rest = kept.split_off(fit);
-		*moved = kept;
-		rest
+		parts.push(part(more, listed));
+		parts
 	}
 }
 
@@ -489,11 +506,13 @@ fn decode_dead(r: &mut Decoder<'_>) -> Result<Dead, DecodeError> {
 				session: r.varint()?,
 			};
 			let far = nonzero(r.varint()?)?;
-			let gone = match r.u8()? {
-				0 => false,
-				1 => true,
-				_ => return Err(DecodeError::InvalidValue),
+			let flag = |byte| match byte {
+				0 => Ok(false),
+				1 => Ok(true),
+				_ => Err(DecodeError::InvalidValue),
 			};
+			let gone = flag(r.u8()?)?;
+			let more = flag(r.u8()?)?;
 			let count = r.varint()?;
 			// Each entry takes at least a byte per field, so the body bounds the count.
 			if count > r.remaining() as u64 {
@@ -512,7 +531,13 @@ fn decode_dead(r: &mut Decoder<'_>) -> Result<Dead, DecodeError> {
 					Ok((id, heard))
 				})
 				.collect::<Result<_, DecodeError>>()?;
-			Dead::Closed { hop, far, gone, moved }
+			Dead::Closed {
+				hop,
+				far,
+				gone,
+				more,
+				moved,
+			}
 		}
 		DEAD_DRAIN => Dead::Drain {
 			node: nonzero(r.varint()?)?,
@@ -2189,12 +2214,14 @@ mod tests {
 				hop: route::path::Hop { node: 4, session: 2 },
 				far: 9,
 				gone: false,
+				more: true,
 				moved: Vec::new(),
 			}),
 			AnnounceBroadcast::Dead(Dead::Closed {
 				hop: route::path::Hop { node: 4, session: 0 },
 				far: route::MAX,
 				gone: true,
+				more: false,
 				moved: vec![
 					(0, Ok(offer(&[(1, 0), (5, 1)], 3, false))),
 					(7, Ok(offer(&[(1, 0)], 0, true))),
@@ -2325,6 +2352,7 @@ mod tests {
 				hop: route::path::Hop { node: 1, session: 1 },
 				far: 0,
 				gone: false,
+				more: false,
 				moved: Vec::new(),
 			}),
 			// The last revision has no room for the offset.
@@ -2441,6 +2469,7 @@ mod tests {
 				w.varint(field).unwrap();
 			}
 			w.u8(1);
+			w.u8(0);
 			w.varint(2u64).unwrap();
 			for (id, flags) in [(4u64, 8u8), (5, 0)] {
 				w.varint(id).unwrap();
@@ -2497,7 +2526,7 @@ mod tests {
 				w.varint(0u64).unwrap();
 				w.varint(0u64).unwrap();
 			}),
-			// A DEAD of a kind no version defines, naming Node ID 0, or Gone past 1.
+			// A DEAD of a kind no version defines, naming Node ID 0, or Gone or More past 1.
 			forge(DEAD, |w| {
 				w.varint(2u64).unwrap();
 				w.varint(1u64).unwrap();
@@ -2511,12 +2540,22 @@ mod tests {
 					w.varint(field).unwrap();
 				}
 				w.u8(0);
+				w.u8(0);
 				w.varint(0u64).unwrap();
 			}),
 			forge(DEAD, |w| {
 				for field in [DEAD_CLOSED, 1, 1, 2] {
 					w.varint(field).unwrap();
 				}
+				w.u8(2);
+				w.u8(0);
+				w.varint(0u64).unwrap();
+			}),
+			forge(DEAD, |w| {
+				for field in [DEAD_CLOSED, 1, 1, 2] {
+					w.varint(field).unwrap();
+				}
+				w.u8(0);
 				w.u8(2);
 				w.varint(0u64).unwrap();
 			}),
@@ -2526,6 +2565,7 @@ mod tests {
 					w.varint(field).unwrap();
 				}
 				w.u8(1);
+				w.u8(0);
 				w.varint(1u64 << 40).unwrap();
 			}),
 			// A floor without its revision, and one with trailing bytes.

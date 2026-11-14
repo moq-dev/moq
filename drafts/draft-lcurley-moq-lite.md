@@ -563,7 +563,7 @@ A minted Instance is new for every announcement, so a publisher reconnecting or 
 A node that loses a session names the hop it lost: its own Hop ID and that session's Session Number, with the Hop ID of the node at the far end.
 It sends one [DEAD](#dead) for it to each neighbour it sent a route whose Path holds the hop, covering every origin node, and each neighbour passes the hop on in the same way, once per neighbour while it has sent that neighbour a route through it.
 The DEAD lists the routes on the stream that moved to another Path, each with its new Route Offer.
-A sender whose moved routes do not fit one message lists as many as fit, at least one, and sends each of the rest as a ROUTE_UPDATE right before the DEAD: those move while the receiver still uses them, and the DEAD still names a route through the hop, so the receiver applies it as it would the whole one.
+A sender whose moved routes do not fit one message lists them over consecutive DEADs naming the same hop, each but the last with `More` set, and the receiver applies them as one DEAD listing all of them once the last arrives.
 The sender's other routes on the stream through the hop end if `Gone` is set.
 Otherwise each is held, except one the sender ends with a ROUTE_END after the DEAD, and one the sender learned from the receiver itself, which the sender holds only by a ROUTE_HOLD after the DEAD: until then the receiver waits for its answer (see [Holds](#holds)).
 
@@ -1395,6 +1395,7 @@ Closed {
   Hop (..),
   Far Hop ID (i),
   Gone (8),
+  More (8),
   Moved Count (i),
   Moved (..) ...,
 }
@@ -1427,6 +1428,11 @@ The Hop ID of the node at the session's other end, which the receiver doubts.
 
 **Gone**:
 1 when every route on the stream through the hop that Moved does not list has ended, 0 when the rest are held (see [Dead Hops](#dead-hops)).
+Any other value is a PROTOCOL_VIOLATION.
+
+**More**:
+1 when the next message on the stream is a DEAD continuing this one's Moved list, which the receiver applies with it, and 0 for the last or only part.
+A part with More set followed by any other message, or by a DEAD whose Kind, Hop, Far Hop ID, or Gone differs, is a PROTOCOL_VIOLATION.
 Any other value is a PROTOCOL_VIOLATION.
 
 **Moved Count**:

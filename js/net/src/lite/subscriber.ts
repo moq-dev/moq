@@ -1420,6 +1420,9 @@ export class Subscriber {
 			if (was && !filed(wire)) this.#consumes.revalidate();
 		};
 
+		// The parts of a DEAD read so far, which apply as one once its last arrives.
+		let continued: { hop: RouteHop; far: bigint; gone: boolean; offers: Map<bigint, Offer | Unusable> } | undefined;
+
 		// A DEAD: the stream's routes through the hop it names carry on as it says. A route this
 		// node refuses still follows it, so both ends agree on which routes live. An endpoint casts
 		// no doubt: it never forwards a route, so no detour waits on one.
@@ -1432,8 +1435,22 @@ export class Subscriber {
 				}
 				return;
 			}
-			const offers = new Map<bigint, Offer | Unusable>();
+			// A DEAD in parts applies with its last, each part naming the same hop, far node, and gone.
+			const parts = continued ?? { hop: news.hop, far: news.far, gone: news.gone, offers: new Map() };
+			continued = undefined;
+			const same =
+				parts.hop.node === news.hop.node &&
+				parts.hop.session === news.hop.session &&
+				parts.far === news.far &&
+				parts.gone === news.gone;
+			if (!same) throw new ProtocolViolation("DEAD part names another hop");
+			// Each part names live routes, so what the parts hold stays within the stream's.
+			const offers = parts.offers;
 			for (const { id, offer } of news.moved) offers.set(route(id).id, offer);
+			if (news.more) {
+				continued = parts;
+				return;
+			}
 			const through = [...routes.values()].filter((wire) =>
 				wire.path.some((hop) => hop.node === news.hop.node && hop.session === news.hop.session),
 			);
@@ -1492,6 +1509,9 @@ export class Subscriber {
 				// undefined: the stream ended. null: the consumer closed cleanly.
 				if (!msg) break;
 				if (msg instanceof Error) throw msg;
+				// The parts of a DEAD arrive back to back.
+				if (continued && !(msg.status === "dead" && msg.dead.kind === "closed"))
+					throw new ProtocolViolation("DEAD part followed by another message");
 
 				switch (msg.status) {
 					case "routeStart":
