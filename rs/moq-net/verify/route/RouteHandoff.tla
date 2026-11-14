@@ -19,8 +19,9 @@
 (* - A relay with no route left holds its claims, unavailable, until each  *)
 (*   neighbour that learned the route from it has answered.               *)
 (* - A closed session casts doubt on the node at its far end: no relay     *)
-(*   moves to a route through it until a timer lifts the doubt. The timer  *)
-(*   is the step `Lift`, which may fire at any moment.                    *)
+(*   moves to a route through it until a timer lifts the doubt. A route    *)
+(*   that begins at it is exempt: it cannot loop through its own end. The  *)
+(*   timer is the step `Lift`, which may fire at any moment.              *)
 (*                                                                         *)
 (* Each node's every entry point is one atomic step ending in `Update`,    *)
 (* as in the router. Messages travel on one FIFO per direction. A          *)
@@ -47,6 +48,12 @@ CONSTANTS
     Patient       \* TRUE: a doubt lifts only once no news about its node is in flight
 
 Relays == Nodes \ {Origin}
+\* The links whose sessions open and close. A config may narrow them to the
+\* publisher's own (`OwnLinks`) or to one of them (`FirstLink`).
+Flaky == Links
+OwnLinks == {l \in Links : Origin \in l}
+\* The publisher's link to the lowest relay.
+FirstLink == {{Origin, CHOOSE r \in Relays : \A x \in Relays : r <= x}}
 
 Cost == [l \in Links |-> IF l \in Dear THEN 2 ELSE 1]
 \* The relay after n round `Ring`, the lowest after the highest.
@@ -162,7 +169,12 @@ Live(r) == r.on /\ ~r.held
 -----------------------------------------------------------------------------
 (* Selection on node n's state s (path.rs: `select`, `pending`, `hopes`). *)
 
-Doubted(s, path) == \E i \in DOMAIN path : path[i][1] \in s.doubt
+\* The path crosses a relay in doubt. Its first node, where the route begins,
+\* does not count: a route cannot loop through its own end.
+RelayDoubted(s, path) == \E i \in DOMAIN path : i > 1 /\ path[i][1] \in s.doubt
+\* Doubt keeps a node off a route through a doubted relay, not off one that
+\* begins at a doubted publisher.
+Doubted(s, path) == RelayDoubted(s, path)
 \* The path crosses a node this node knows sent GOAWAY.
 Drains(s, path) == \E i \in DOMAIN path : path[i][1] \in s.draining
 
@@ -673,7 +685,8 @@ Connect(l) ==
         rs == [x \in l |->
                  LET y == CHOOSE y \in l : y # x
                  IN Update(x, Closed(st[x], y), OV, up1, gen1, ended[x], NoReport, FALSE)]
-    IN /\ l \notin up
+    IN /\ l \in Flaky
+       /\ l \notin up
        /\ flaps < MaxFlaps
        /\ up' = up1
        /\ gen' = gen1
@@ -694,7 +707,8 @@ Disconnect(l) ==
                     THEN Update(x, s, OV, up1, gen, ended[x], NoReport, FALSE)
                     ELSE Update(x, Fail(x, s, hop, None, {}, FALSE), OV, up1, gen, ended[x],
                                 DeadReport(hop), FALSE)]
-    IN /\ l \in up
+    IN /\ l \in Flaky
+       /\ l \in up
        /\ flaps < MaxFlaps
        /\ up' = up1
        /\ flaps' = flaps + 1
@@ -825,6 +839,31 @@ LoopsAreStale ==
 
 \* A request never loops. It does while news is in flight: `Loop.cfg` pins it.
 RequestsLoopFree == \A n \in Relays, c \in Claims : Request(n, c) # "loop"
+
+\* A request that loops goes round relays whose routes each begin on a closed
+\* session of the publisher: it left every one of them, and their news is in
+\* flight. Moving onto a route that begins at a doubted node allows that loop;
+\* doubt about a relay still keeps every other one out.
+LoopsLostThePublisher ==
+    \A n \in Relays, c \in Claims :
+        Request(n, c) = "loop" =>
+            LET w == Walk(n, IF c \in Narrow /\ Live(st[n].rt["a"]) THEN "a" ELSE "root", None, Cardinality(Nodes))
+                \* The positions inside a stretch of the walk that comes back to its start.
+                round == {i \in DOMAIN w : \E j, k \in DOMAIN w : j <= i /\ i < k /\ w[j].node = w[k].node}
+            IN \A i \in round : Len(w[i].path) >= 2 /\ Gone(w[i].path[2])
+
+\* A route a relay knows over sessions that are still open, crossing no relay
+\* it doubts.
+Fresh(n, m, k) ==
+    /\ Usable(n, st[n], m, k)
+    /\ ~Stale(st[n].rx[m][k].path)
+    /\ ~RelayDoubted(st[n], st[n].rx[m][k].path)
+
+\* Doubt about the publisher alone never leaves a relay without a route: one
+\* that knows a fresh route uses some route, so a request stops only at a relay
+\* that knows no way on. Which route it uses may still be stale while the news
+\* that ends it is in flight, which `StaleIsChased` bounds.
+Routed == \A n \in Relays, k \in Keys : (\E m \in Nodes : Fresh(n, m, k)) => Live(st[n].rt[k])
 
 \* No node may use a route through a hop it once learned had died: after a
 \* dead hop is forgotten, no stale route returns. It holds only for one failure

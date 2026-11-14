@@ -11,6 +11,7 @@
 
 mod cache;
 mod compare;
+mod flap;
 mod handoff;
 mod paths;
 mod residual;
@@ -49,6 +50,12 @@ impl Rule {
 	/// The comparison rule lifting doubt once no heard route names the node.
 	pub const EARLY: Self = Self::Path(Doubt {
 		lift: Lift::Unnamed,
+		origin: true,
+		..Doubt::DEFAULT
+	});
+	/// The replaced rule, where doubt also blocks every route to a doubted publisher.
+	pub const ORIGIN: Self = Self::Path(Doubt {
+		origin: true,
 		..Doubt::DEFAULT
 	});
 
@@ -58,6 +65,11 @@ impl Rule {
 			Self::Path(Doubt {
 				lift: Lift::Unnamed, ..
 			}) => "path+early",
+			Self::Path(Doubt {
+				lift: Lift::Timer,
+				origin: true,
+				..
+			}) => "path+origin",
 			Self::Path(Doubt { lift: Lift::Timer, .. }) => "path",
 		}
 	}

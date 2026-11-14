@@ -20,7 +20,10 @@
 //! holds only the path it last sent, so holds never close a cycle. A closed
 //! session casts doubt on the node at its far end, since a dead relay is reported
 //! one neighbour at a time: no node moves to a route through it until a timer
-//! lifts the doubt. There is no distance, seqno, route request, or echo.
+//! lifts the doubt. A route that begins at the doubted node is exempt, so a
+//! publisher stays reachable through its other links while one flaps; when it
+//! leaves three or more relays at once, requests can go round them until the
+//! news arrives. There is no distance, seqno, route request, or echo.
 //!
 //! A route covers a prefix: the one its receiver asked for, or a narrower one a
 //! node on its path asked for. A stream answering a prefix carries the sender's
@@ -180,6 +183,9 @@ pub(crate) struct Doubt {
 	pub timer: Duration,
 	#[cfg(test)]
 	pub lift: Lift,
+	/// The replaced comparison rule: doubt also blocks a route that begins at the node.
+	#[cfg(test)]
+	pub origin: bool,
 }
 
 impl Doubt {
@@ -188,6 +194,8 @@ impl Doubt {
 		timer: Duration::from_secs(1),
 		#[cfg(test)]
 		lift: Lift::Timer,
+		#[cfg(test)]
+		origin: false,
 	};
 }
 
@@ -1295,9 +1303,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		path.iter().any(|hop| self.draining.contains(&hop.node))
 	}
 
-	/// Whether `path` crosses a node in doubt.
+	/// Whether `path` crosses a node in doubt. The node a route begins at does not
+	/// count: a route cannot loop through its own end.
 	fn doubts_path(&self, path: &[Hop]) -> bool {
+		#[cfg(test)]
+		let skip = usize::from(!self.doubt.origin);
+		#[cfg(not(test))]
+		let skip = 1;
 		path.iter()
+			.skip(skip)
 			.any(|hop| matches!(self.doubted.get(&hop.node), Some(Suspicion::Doubted(_))))
 	}
 

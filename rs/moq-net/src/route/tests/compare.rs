@@ -1,6 +1,7 @@
 //! One script on both rules: [`Router`], which keeps Babel's distance, and
 //! [`path::Router`], which keeps its doubt until the timer fires. The ignored
-//! benchmarks also compare the rejected early-collection policy.
+//! benchmarks also compare the rejected early-collection policy, and the replaced
+//! rule where doubt also kept relays off routes to a doubted publisher.
 //!
 //! A [`Lab`] builds the same mesh on each, applies one change at a time, and
 //! delivers in rounds: every message queued when a round starts crosses its link
@@ -17,7 +18,7 @@ use super::*;
 const RULES: [Rule; 2] = [Rule::Distance, Rule::PATH];
 
 /// The rules compared, in the report's order.
-pub(super) const COMPARED: [Rule; 3] = [Rule::Distance, Rule::EARLY, Rule::PATH];
+pub(super) const COMPARED: [Rule; 4] = [Rule::Distance, Rule::EARLY, Rule::ORIGIN, Rule::PATH];
 
 /// A queue of messages, or of echoed ROUTE_ENDs, from one node to another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
