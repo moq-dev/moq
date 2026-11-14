@@ -399,7 +399,8 @@ export class Consumer {
 
 	// Mark the track finished once the transport delivered its last group and every buffered group ended.
 	#settle(): void {
-		if (!this.#delivered || this.#finished.peek()) return;
+		// A closed consumer abandoned whatever was still arriving.
+		if (!this.#delivered || this.#finished.peek() || this.#signals.abort.aborted) return;
 		if (this.#groups.every((group) => group.fault !== undefined || group.consumer.done)) this.#finished.set(true);
 	}
 

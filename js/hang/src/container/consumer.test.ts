@@ -611,6 +611,17 @@ test("Consumer delivers frames from a single group, finished once it ends", asyn
 	expect(frames[0].timestamp).toBe(33_000);
 	consumer.close();
 	track.close();
+
+	// Closing with a group still arriving abandons it, so the consumer never reads as finished.
+	const other = new Track.Producer("other");
+	const abandoned = new Consumer(replay(other), { format: new LegacyFormat("data"), delay: { max: Duration.millis(500) } });
+	other.createGroup(0n).writeFrame({ payload: encodeLegacy(0), timestamp: Time.Timestamp.fromMicros(0) });
+	other.finish();
+	expect(frameOf(await poll(abandoned.next())).timestamp.asMicros()).toBe(0);
+	abandoned.close();
+	await flush();
+	expect(abandoned.finished.peek()).toBe(false);
+	other.close();
 });
 
 test("Consumer forces keyframe true at index 0", async () => {
