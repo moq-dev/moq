@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `container::mp4::Export::stop` ends a recording before the broadcast does: `next` still returns the fragment each track was buffering, then `None`, so `finish` indexes it.
 - `container::fmp4::Muxer::picture_size` reads the picture size a group's keyframe declares in band, so a fetch-on-demand consumer can tell which side of an in-band resize a group falls on.
 - `container::Producer::fail` finishes a track with an error instead of aborting it: every group written stays readable, and a reader reaching the end gets the error instead of the end of stream.
+- `container::Consumer::arrival` reports when the frame the latest read returned landed in this node's cache, so a decoder downstream can tell network delay from its own.
 
 ### Changed
 
