@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Duration, type Installed, Instant, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, type Installed, Instant, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 
 // A monotonic instant `ms` after the clock origin.
 const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));

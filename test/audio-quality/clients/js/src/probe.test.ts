@@ -1,5 +1,6 @@
 import { expect, mock, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Effect, Signal } from "@moq/signals";
 import type MoqWatch from "@moq/watch/element";
 import { Observed } from "../../../../../js/net/src/util/observed.ts";

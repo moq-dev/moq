@@ -1,5 +1,6 @@
 /** Sweep retained groups, unrelated tracks, and joined readers for a refresh crossing one lite hop. */
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
 import { ALPN_07_WIP } from "../src/lite/version.ts";

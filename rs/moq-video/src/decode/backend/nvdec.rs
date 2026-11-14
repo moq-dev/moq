@@ -28,7 +28,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cudarc::driver::CudaContext;
+use cudarc::driver::{CudaContext, CudaStream};
 use moq_net::Timestamp;
 use moq_nvenc::cuvid;
 use moq_nvenc::sys::cuviddec::{
@@ -64,6 +64,9 @@ pub(crate) struct Nvdec {
 struct State {
 	api: &'static cuvid::Api,
 	ctx: Arc<CudaContext>,
+	/// Where each picture is post-processed and copied out: never the legacy
+	/// default stream, which would wait for every other thread's work.
+	stream: Arc<CudaStream>,
 	/// Requested output size; `None` decodes at the stream's display size.
 	resize: Option<crate::Size>,
 	decoder: Option<Decoder>,
@@ -93,6 +96,8 @@ struct Decoder {
 	/// Decode surfaces it was created with; the parser may index any of the
 	/// count it reports, so a larger requirement needs a new decoder.
 	surfaces: c_int,
+	/// The buffers pictures are copied out into, recycled as their frames drop.
+	frames: cuda::Frames,
 }
 
 impl Drop for Decoder {
@@ -109,6 +114,10 @@ impl Drop for Decoder {
 
 impl Nvdec {
 	pub(crate) fn open(stream: &Stream, config: &super::Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self::new(stream, config)?))
+	}
+
+	fn new(stream: &Stream, config: &super::Config) -> Result<Self, Error> {
 		let codec = stream.codec;
 		// cudarc panics when libcuda is missing, so probe it and turn a missing
 		// driver into a recoverable error; the cuvid table already loads fallibly.
@@ -140,8 +149,10 @@ impl Nvdec {
 		};
 		check_caps(api, cuda_codec, coded)?;
 
+		let stream = ctx.new_stream().map_err(|e| codec_err(format!("CUDA stream: {e:?}")))?;
 		let mut state = Box::new(State {
 			api,
+			stream,
 			ctx,
 			resize: config.scale_hint,
 			decoder: None,
@@ -151,12 +162,12 @@ impl Nvdec {
 
 		let parser = create_parser(cuda_codec, &mut state)?;
 		tracing::info!(decoder = NAME, codec = ?codec, resize = ?config.scale_hint, "opened video decoder");
-		Ok(Box::new(Self {
+		Ok(Self {
 			parser: Some(parser),
 			codec: cuda_codec,
 			state,
 			ready: VecDeque::new(),
-		}))
+		})
 	}
 
 	/// Submit one parser packet and queue a copy of every picture its display
@@ -313,12 +324,6 @@ impl State {
 				format.bit_depth_luma_minus8 + 8
 			)));
 		}
-		check_caps(
-			self.api,
-			format.codec,
-			Coded::Exact(format.coded_width, format.coded_height),
-		)?;
-
 		// Output size: the requested resize, or the display area (the coded size
 		// minus cropping). Rounded down to even for NV12.
 		let display = crate::Size::new(
@@ -350,6 +355,16 @@ impl State {
 			return Ok(decoder.surfaces);
 		}
 		self.decoder = None;
+
+		// Only for a new decoder: the answer cannot change for the same coded
+		// size, and the driver serializes the query across every process on the
+		// GPU at several milliseconds each, while every flush brings a new
+		// parser that repeats the sequence header.
+		check_caps(
+			self.api,
+			format.codec,
+			Coded::Exact(format.coded_width, format.coded_height),
+		)?;
 
 		let mut info = CUVIDDECODECREATEINFO {
 			ulWidth: format.coded_width as c_ulong,
@@ -404,11 +419,12 @@ impl State {
 			width,
 			height,
 			surfaces,
+			frames: cuda::Frames::new(&self.ctx),
 		});
 		Ok(surfaces)
 	}
 
-	/// Map one decoded picture and copy it device-to-device into an owned CUDA
+	/// Map one decoded picture and copy it device-to-device into a recycled CUDA
 	/// buffer, so the fixed surface pool is released before the next decode.
 	fn map_frame(&self, disp: &CUVIDPARSERDISPINFO) -> Result<Frame, Error> {
 		let decoder = self
@@ -419,6 +435,7 @@ impl State {
 		let mut proc_params = CUVIDPROCPARAMS {
 			progressive_frame: disp.progressive_frame,
 			top_field_first: disp.top_field_first,
+			output_stream: self.stream.cu_stream() as _,
 			..Default::default()
 		};
 
@@ -441,14 +458,23 @@ impl State {
 
 		// The mapped surface is NV12 at the decoder's target size: `height` luma
 		// rows of `pitch` bytes, then `height / 2` interleaved-UV rows. Copy it
-		// linearly into an owned buffer with the identical layout.
+		// linearly into a buffer with the identical layout, on the stream that
+		// post-processed it, and wait before the surface is unmapped.
 		let copied = (|| -> Result<cuda::Frame, Error> {
-			let frame = cuda::Frame::alloc(&self.ctx, decoder.width, decoder.height, pitch)?;
+			let frame = decoder
+				.frames
+				.alloc(crate::Size::new(decoder.width, decoder.height), pitch)?;
 			let len = pitch as usize * decoder.height as usize * 3 / 2;
 			// SAFETY: both regions are `len` bytes of device memory: the mapped
-			// surface by cuvid's layout above, the destination by `alloc`.
-			unsafe { cudarc::driver::result::memcpy_dtod_sync(frame.device_ptr(), dev_ptr, len) }
-				.map_err(|e| codec_err(format!("CUDA device copy: {e:?}")))?;
+			// surface by cuvid's layout above, the destination by `alloc`, and
+			// both outlive the synchronize below.
+			unsafe {
+				cudarc::driver::result::memcpy_dtod_async(frame.device_ptr(), dev_ptr, len, self.stream.cu_stream())
+			}
+			.map_err(|e| codec_err(format!("CUDA device copy: {e:?}")))?;
+			self.stream
+				.synchronize()
+				.map_err(|e| codec_err(format!("CUDA device copy sync: {e:?}")))?;
 			Ok(frame)
 		})();
 
@@ -695,8 +721,19 @@ mod tests {
 		out
 	}
 
+	/// Counts `cuvidGetDecoderCaps` calls, forwarding each to the driver.
+	static CAPS_QUERIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+	unsafe extern "C" fn counting_caps(caps: *mut CUVIDDECODECAPS) -> cudarc::driver::sys::CUresult {
+		CAPS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		// SAFETY: forwards the caller's pointer unchanged to the real entry point.
+		unsafe { (cuvid::Api::get().unwrap().get_decoder_caps)(caps) }
+	}
+
 	/// The transcode feed drains at every group end, so a drain must leave the
-	/// decoder decoding the next keyframe and everything behind it.
+	/// decoder decoding the next keyframe and everything behind it, without
+	/// asking the driver for caps again: that query is serialized across every
+	/// process on the GPU and takes milliseconds.
 	#[test]
 	fn nvdec_decodes_after_a_flush() {
 		if !hw_available() {
@@ -708,7 +745,11 @@ mod tests {
 			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
-		let mut decoder = Nvdec::open(&Codec::H264.into(), &decode_config(None)).expect("NVDEC H.264 decoder");
+		let mut decoder = Nvdec::new(&Codec::H264.into(), &decode_config(None)).expect("NVDEC H.264 decoder");
+		decoder.state.api = Box::leak(Box::new(cuvid::Api {
+			get_decoder_caps: counting_caps,
+			..*cuvid::Api::get().unwrap()
+		}));
 		let rgba = gradient_rgba(w, h);
 
 		let mut decoded = Vec::new();
@@ -738,6 +779,11 @@ mod tests {
 			let expected: Vec<u64> = (0..10).map(|i| (group as u64 * 10 + i) * 33_333).collect();
 			assert_eq!(timestamps, &expected, "group {group} after {group} flushes");
 		}
+		assert_eq!(
+			CAPS_QUERIES.load(std::sync::atomic::Ordering::Relaxed),
+			1,
+			"only the decoder the first group created asked for caps"
+		);
 	}
 
 	/// H.264 through the real hardware: openh264 encodes a gradient (Annex-B,

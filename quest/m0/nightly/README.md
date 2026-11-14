@@ -32,7 +32,7 @@ This README's own work, after the children:
   fixtures were repaired in [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940).
   The receive-windows benchmark's overcommitted cells, skipped since
   [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838), moved to
-  [m1](/quest/m1/receive-windows-evicted.md) on 2026-11-04 (maintainer).
+  [m1](/quest/m3/receive-windows-evicted.md) on 2026-11-04 (maintainer).
 
 Decided 2026-11-05 (maintainer, /quest-plan): catch the next moq-net bench
 break in Nightly's measured coverage only. Do not add a test-mode bench run
@@ -56,6 +56,5 @@ audit ([moq-dev/moq#8648](https://github.com/moq-dev/moq/pull/8648)), the size
 report's output ([moq-dev/moq#8654](https://github.com/moq-dev/moq/pull/8654)),
 the firefox resume ([moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)),
 and the chromium `av_lag` rows
-([output latency](/quest/m2/audio-playout/output-latency.md) and
-[congestion catch-up](/quest/m2/audio-playout/congestion-catch-up.md)).
+([output latency](/quest/m2/audio-playout/output-latency.md)).
 

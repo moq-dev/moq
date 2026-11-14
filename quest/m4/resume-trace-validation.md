@@ -14,7 +14,7 @@ moq-net): every TLA+ model gets trace validation, not route alone, so none
 can keep passing on code that has moved on. Milestone m4, behind route's.
 
 - Reuse the trace format and the TLC recipe
-  [route trace validation](/quest/m1/route-trace-validation.md) builds. The
+  [route trace validation](/quest/m3/route-trace-validation.md) builds. The
   sweep records each step as the model action it corresponds to (the
   `verify-resume` skill's Coverage table is the mapping) with the variables
   the model keeps, and TLC checks the trace is a behaviour of the spec.
@@ -32,7 +32,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - the trace format and TLC recipe this reuses
+- [Route sweeps are checked against the TLA+ model](/quest/m3/route-trace-validation.md) - the trace format and TLC recipe this reuses
 
 ## Related
 

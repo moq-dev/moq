@@ -22,7 +22,7 @@ What it costs today, from #8487's measurements: a change of hops alone is
 control messages over real sessions, and on a 32-relay full mesh one link
 coming up costs 592 route messages against 251 before the hops.
 
-[Cluster routing](/quest/m2/cluster-routing/README.md) already decided that
+[Cluster routing](/quest/m3/cluster-routing/README.md) already decided that
 "a new connection alone does not outrank a different equal-cost route", so
 this implements a settled rule. Keep the deterministic path hash among equal
 routes for a request's first hop: that choice is per request and is not this
@@ -41,8 +41,8 @@ selection.
   means what it says, rather than editing expectations to match.
 - How a route is selected is being replaced
   ([routes epic](/quest/m2/cluster-routes/README.md) Plan item 27).
-  Apply this to the rule that stands when this starts. The prototype in
-  `route/tests/paths.rs` already stays on its next hop among equals.
+  Apply this to the rule that stands when this starts. The scoped path router in
+  `rs/moq-net/src/route/path.rs` already stays on its next hop among equals.
 - Measure with `Sim`'s `hop_updates` count and, if it has landed,
   `mesh_sweep.rs`'s benchmark, before and after.
 

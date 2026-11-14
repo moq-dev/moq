@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { Duration, Instant, Manual } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Container from "@moq/hang/container";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -127,18 +128,23 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 	return result;
 }
 
-/** The subscription "auto" asks for at the default stretch: the target plus the stretch. */
-const stretched = (target: Duration) => maxDelay({ delay: target, maxDelay: target, stretch: STRETCH });
+/** The subscription "auto" asks for: the target plus the estimator's 2 s ceiling. */
+const reached = (target: Duration) => maxDelay({ delay: target, maxDelay: target });
 
 /** The target the estimator settles on by the end of `t`, given the subscription "auto" asks for. */
 async function settled(t: Arrival[]): Promise<number> {
-	const { targets } = await measure(t, stretched);
+	const { targets } = await measure(t, reached);
 	return targets[targets.length - 1];
 }
 
-/** The worklet's ring at `latencyMs`. */
-function build(latencyMs: number): AudioRingBuffer {
-	return new AudioRingBuffer({ rate: RATE, channels: 1, latency: latencyMs, bound: STRETCH.asMillis() });
+/** The worklet's ring at `latencyMs`, and the clock it plays onto. */
+interface Built {
+	ring: AudioRingBuffer;
+	latency: number;
+}
+
+function build(latency: number): Built {
+	return { ring: new AudioRingBuffer({ rate: RATE, channels: 1, latency, bound: STRETCH.asMillis() }), latency };
 }
 
 interface Result {
@@ -152,9 +158,10 @@ interface Result {
 
 /**
  * Play `t` through `ring` in real time: insert every frame the moment it arrives, and pull one
- * render quantum every quantum's worth of wall time, which is what the AudioWorklet does.
+ * render quantum every quantum's worth of wall time, which is what the AudioWorklet does. The shared
+ * clock trails the trace's 50 ms network delay by the latency.
  */
-function replay(ring: AudioRingBuffer, t: Arrival[], warmupMs: number): Result {
+function replay({ ring, latency }: Built, t: Arrival[], warmupMs: number): Result {
 	const step = (QUANTUM / RATE) * 1000;
 	const output = [new Float32Array(QUANTUM)];
 	const end = t[t.length - 1].arrival;
@@ -174,6 +181,7 @@ function replay(ring: AudioRingBuffer, t: Arrival[], warmupMs: number): Result {
 			next++;
 		}
 
+		ring.clock((now - 50 - latency) * 1000);
 		const count = ring.read(output);
 		if (now < warmupMs) {
 			if (count > 0) started = true;
@@ -210,16 +218,16 @@ describe("ring replay", () => {
 		expect(replay(build(await settled(t)), t, 2000)).toMatchObject({ underruns: 0, skips: 0 });
 	});
 
-	it("still underruns when the target ignores the arrival spread, but drops nothing", () => {
+	it("trails the clock to bridge a target that ignores the arrival spread, dropping nothing", () => {
 		// 46ms is what the round-trip formula produced on the connection this was measured on: it
 		// describes the network and says nothing about a sender that flushes five frames at once.
-		// Every flush's trough falls below it, and the ring never slows down to cover one, since that
-		// would only settle audio behind the clock, so it runs dry on most flushes; accelerate brings
-		// each peak back down rather than skipping it.
+		// Every flush's trough falls below it, so audio about to run out slows down, a tenth at most,
+		// until it trails the clock by about the shortfall, inside the bound, and plays through every
+		// flush rather than skipping or running dry on most of them.
 		const t = trace(600, 5, 5);
 		const result = replay(build(46), t, 2000);
 		const flushes = (t.length - 2000 / CHUNK_MS) / 5;
-		expect(result.underruns).toBeGreaterThan(flushes / 2);
+		expect(result.underruns).toBeLessThan(flushes / 10);
 		expect(result.skips).toBe(0);
 		expect(result.stretched).toBeGreaterThan(0);
 	});
@@ -244,7 +252,7 @@ describe("subscription budget", () => {
 	}
 
 	it("reaches a flush that starts after the target settled", async () => {
-		const { targets, delivered } = await measure(t, stretched);
+		const { targets, delivered } = await measure(t, reached);
 		expect(targets[PACED - 1]).toBe(2 * CHUNK_MS);
 		expect(delivered).toBe(t.length);
 		// Every flush lands whole, so its 100ms reaches the 95th percentile within a few intervals.

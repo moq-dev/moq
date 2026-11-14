@@ -1,5 +1,6 @@
 import { expect, jest, onTestFinished, test } from "bun:test";
-import { Duration, Manual, now } from "@moq/clock";
+import { Duration, now } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Connection from "../connection/index.ts";
 import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";

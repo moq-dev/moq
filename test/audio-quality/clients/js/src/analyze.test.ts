@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { analyze, type Input, longestAway, percentile } from "./analyze.ts";
+import { analyze, type Input, percentile, recovery } from "./analyze.ts";
 import type { Sample, Shaper } from "./schema.ts";
 
 const row = { runtime: "chromium", codec: "opus", rate: 48000, profile: "mild" } as const;
@@ -33,12 +33,28 @@ const input = (samples: Sample[], extra: Partial<Input> = {}): Input => ({
 	...extra,
 });
 
-test("the longest time away runs from the first away sample to the next one back", () => {
-	const at = (away: boolean[]) => away.map((a, i) => ({ at: i * 250, away: a }));
-	expect(longestAway(at([false, true, true, false, true, false]))).toBe(500);
-	// Still away at the end: it lasts to the last sample.
-	expect(longestAway(at([false, false, true, true, true]))).toBe(500);
-	expect(longestAway(at([false, false]))).toBe(0);
+test("recovery runs from a disturbance to audio back within a frame of where it rested before it", () => {
+	const at = (lags: (number | "stalled")[]) =>
+		lags.map((lag, i) => ({
+			at: i * 250,
+			lag: lag === "stalled" ? undefined : lag,
+			stalled: lag === "stalled",
+		}));
+	// Resting 30 ms behind, jittering within a frame, then a stall and a trail that recovers.
+	const rest = [30, 40, 25, 35, 30, 30];
+	expect(recovery(at([...rest, "stalled", 400, 200, 60, 45, 30]), 20)).toBe(1000);
+	// Ahead of where it rested counts too, as after a target rise.
+	expect(recovery(at([...rest, -70, -20, 15, 30]), 20)).toBe(500);
+	// Settling somewhere new never returns: it lasts to the last sample.
+	expect(recovery(at([...rest, 200, 200, 200]), 20)).toBe(500);
+	expect(recovery(at(rest), 20)).toBe(0);
+	// Nothing before the first sample to rest on.
+	expect(recovery(at(["stalled"]), 20)).toBeNull();
+	// What precedes `from` only sets the rest, so a disturbance right at it is still measured.
+	expect(recovery(at([...rest, "stalled", 200, 30]), 20, 1500)).toBe(500);
+	expect(recovery(at(["stalled", 30, ...rest]), 20, 500)).toBe(0);
+	// Settling somewhere new before `from` is the tune-in: the rest at `from` is where it settled.
+	expect(recovery(at([0, 0, 100, 100, 100, 100, 100, 100, "stalled", 300, 100]), 20, 1500)).toBe(500);
 });
 
 test("percentile is nearest rank", () => {
@@ -125,7 +141,7 @@ describe("analyze", () => {
 		expect(analyze(input(samples)).metrics.underruns_total).toBe(0);
 	});
 
-	test("recovery is the longest audio spent stalled or trailing its resting lag", () => {
+	test("recovery is the longest audio spent off where it rested before a disturbance", () => {
 		// At rest 20 ms ahead of the clock; samples 80 to 83 stall, and audio then trails until 91.
 		const samples = clean().map((s, i) => {
 			const timestamp = s.timestamp ?? 0;
@@ -133,7 +149,7 @@ describe("analyze", () => {
 			const lag = i >= 84 && i < 92 ? 300 - (i - 84) * 30 : -20;
 			return { ...s, clock: timestamp + lag };
 		});
-		// 300 down to 90 ms trail by more than a bucket past rest; 92 is back.
+		// 300 down to 90 ms trail by more than a frame past rest; 92 is back.
 		expect(analyze(input(samples)).metrics).toMatchObject({ av_lag_ms_p50: -20, recover_ms_max: 12 * 250 });
 		expect(analyze(input(clean())).metrics.recover_ms_max).toBeNull();
 	});

@@ -9,7 +9,7 @@ or a system `openssl.cnf`.
 ## Plan
 
 Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
-[moq-dev/moq#7700](https://github.com/moq-dev/moq/pull/7700)): milestone m2.
+[moq-dev/moq#7700](https://github.com/moq-dev/moq/pull/7700)).
 
 - #7700's moxygen smoke passed only with an explicit `OPENSSL_CONF`, because
   the dev shell's LibreSSL has no system `openssl.cnf`.
