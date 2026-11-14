@@ -717,7 +717,10 @@ fn rekey<A: Clone + Eq, T: Carried<A>>(
 		for inside in within_set(new, &region) {
 			let mut copy = route.clone();
 			*copy.view().expect("a carried route") = view.present(inside);
-			arriving.entry((*id, inside.clone())).or_default().push((key.clone(), copy));
+			arriving
+				.entry((*id, inside.clone()))
+				.or_default()
+				.push((key.clone(), copy));
 		}
 	}
 	let mut moved = Vec::new();

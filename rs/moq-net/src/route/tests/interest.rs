@@ -227,7 +227,11 @@ fn narrowing_keeps_the_route_the_sender_would_reflect() {
 	assert_eq!(sim.next_hop(client, 7), Some(r1));
 	assert!(sim.queued(r1, client) > 0, "the relay's marker waits");
 	while sim.deliver(r1, client) {
-		assert!(sim.shows(client, 7, "live/a/x").is_some(), "{:?}", life(&sim, client, "live/a/x"));
+		assert!(
+			sim.shows(client, 7, "live/a/x").is_some(),
+			"{:?}",
+			life(&sim, client, "live/a/x")
+		);
 	}
 	sim.release(r1, client);
 	assert!(sim.run());
