@@ -1335,7 +1335,7 @@ impl Inner {
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
 			if let Ok(group) = &res
-				&& (self.flight || frames.start > 0 || frames.end.is_some())
+				&& (self.flight || frames.start > 0 || frames.byte > 0 || frames.end.is_some())
 			{
 				outcome.partial.insert(sequence, group.handle());
 			}
