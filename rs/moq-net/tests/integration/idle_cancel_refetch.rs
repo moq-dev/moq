@@ -35,10 +35,10 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	broadcast.announce().unwrap();
 
 	let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
-	g0.write_frame(None, &b"0a"[..]).unwrap();
+	g0.write_frame(moq_net::Timestamp::unscaled(g0.start), &b"0a"[..]).unwrap();
 	g0.close().unwrap();
 	let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
-	g1.write_frame(None, &b"1a"[..]).unwrap();
+	g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1a"[..]).unwrap();
 
 	let client = produce_origin(2);
 	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
@@ -78,10 +78,10 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 		.unwrap()
 		.unwrap();
 
-	g1.write_frame(None, &b"1b"[..]).unwrap();
+	g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1b"[..]).unwrap();
 	g1.close().unwrap();
 	let mut g2 = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
-	g2.write_frame(None, &b"2a"[..]).unwrap();
+	g2.write_frame(moq_net::Timestamp::unscaled(g2.start), &b"2a"[..]).unwrap();
 
 	let track = remote.track("audio").unwrap();
 	let _feed = track.subscribe(None);

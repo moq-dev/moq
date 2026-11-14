@@ -29,15 +29,12 @@ use crate::{Error, IntoBytes, Result, Timestamp, stats};
 pub struct Info {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
-	/// Presentation timestamp, or `None` on an untimed track. It must match the track
-	/// ([`Error::TimestampMismatch`] otherwise).
+	/// Presentation timestamp, or on a scale-less track [`Timestamp::unscaled`] at its
+	/// group's key. It must match the track ([`Error::TimestampMismatch`] otherwise).
 	///
 	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
-	/// No receiver fills one in, so an untimed track stays untimed across hops, except
-	/// over moq-lite 05 and 06, which can't mark a track untimed and carry the encoder's
-	/// send time instead.
-	pub timestamp: Option<Timestamp>,
+	pub timestamp: Timestamp,
 }
 
 /// A completed frame: an optional timestamp, its full, contiguous payload, and when it
@@ -49,8 +46,9 @@ pub struct Info {
 /// [`Consumer::poll_read_chunk`] hands out each segment without a copy.
 #[derive(Clone, Debug)]
 pub struct Frame {
-	/// Presentation timestamp, at the parent track's timescale, or `None` when untimed.
-	pub timestamp: Option<Timestamp>,
+	/// Presentation timestamp, at the parent track's timescale, or on a scale-less track
+	/// [`Timestamp::unscaled`] at its group's key.
+	pub timestamp: Timestamp,
 	/// The full frame payload.
 	pub payload: Bytes,
 	// Stamped as the frame enters a group's cache; see [`Self::arrived`].
@@ -58,10 +56,11 @@ pub struct Frame {
 }
 
 impl Frame {
-	/// A frame of `payload` presented at `timestamp`, or `None` on an untimed track.
-	pub fn new(timestamp: impl Into<Option<Timestamp>>, payload: impl IntoBytes) -> Self {
+	/// A frame of `payload` presented at `timestamp`, or on a scale-less track at
+	/// [`Timestamp::unscaled`] of its group's key.
+	pub fn new(timestamp: Timestamp, payload: impl IntoBytes) -> Self {
 		Self {
-			timestamp: timestamp.into(),
+			timestamp,
 			payload: payload.into_bytes(),
 			// Stamped when written to a group, so building one never reads the clock.
 			arrived: Instant::ZERO,
@@ -246,7 +245,7 @@ impl Buf for Payload {
 /// A completed frame as its group stores it.
 #[derive(Clone, Debug)]
 pub(crate) struct Cached {
-	pub timestamp: Option<Timestamp>,
+	pub timestamp: Timestamp,
 	pub payload: Payload,
 	// When the frame's last byte landed in this node's cache; see [`Frame::arrived`].
 	pub arrived: Instant,

@@ -194,7 +194,7 @@ impl Topology {
 }
 
 /// A frame as the reader saw it: its group, then its timestamp and payload.
-pub(super) type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
+pub(super) type Delivery = (u64, moq_net::Result<(Timestamp, Vec<u8>)>);
 
 /// Read every group in full, reporting each frame as it arrives.
 pub(super) fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
@@ -236,7 +236,7 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
 }
 
 /// [`next`], keeping the frame's timestamp.
-async fn next_timed(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
+async fn next_timed(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Timestamp, Vec<u8>) {
 	let (group, frame) = kio::clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
@@ -770,7 +770,7 @@ async fn lagging_route_dies(version: Version) {
 		let timestamp = Timestamp::from_millis(1_000 + key * 100 + frame).unwrap();
 		assert_eq!(
 			next_timed(&mut rx).await,
-			(key, Some(timestamp), payload(key, frame)),
+			(key, timestamp, payload(key, frame)),
 			"{version}"
 		);
 	}

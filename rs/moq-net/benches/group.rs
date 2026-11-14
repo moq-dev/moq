@@ -562,7 +562,7 @@ fn bench_compressed_updates(c: &mut Criterion) {
 									)
 									.unwrap();
 								let mut group = track.append_group(0).unwrap();
-								group.write_frame(None, payload.clone()).unwrap();
+								group.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone()).unwrap();
 								group.close().unwrap();
 								track
 							})
@@ -575,7 +575,7 @@ fn bench_compressed_updates(c: &mut Criterion) {
 								for index in 0..concurrent {
 									let key = (1 + update * concurrent + index) as u64;
 									let mut group = track.append_group(key).unwrap();
-									group.write_frame(None, payload.clone()).unwrap();
+									group.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone()).unwrap();
 									groups.push(group);
 								}
 								for group in groups.drain(..) {
@@ -800,7 +800,7 @@ fn contended(
 				written = 0;
 			}
 			for _ in 0..burst {
-				group.write_frame(None, payload.clone()).unwrap();
+				group.write_frame(moq_net::Timestamp::unscaled(group.start), payload.clone()).unwrap();
 			}
 			written += burst;
 			crew.run();
@@ -849,9 +849,9 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 	let track = broadcast
 		.create_track("bench", track::Info::default().with_max_age(None))
 		.unwrap();
-	let info = frame::Info {
+	let info = |key| frame::Info {
 		size: (arrivals * chunk.len()) as u64,
-		timestamp: None,
+		timestamp: moq_net::Timestamp::unscaled(key),
 	};
 	let mut key = 0;
 	let group = track.append_group(key).unwrap();
@@ -900,7 +900,7 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 	let crew = Crew::new(work);
 
 	let mut frames = 0;
-	let mut writing = Some(group.create_frame(info).unwrap());
+	let mut writing = Some(group.create_frame(info(key)).unwrap());
 	b.iter_custom(|iters| {
 		let start = Instant::now();
 		for _ in 0..iters {
@@ -916,9 +916,9 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 						*next.lock().unwrap() = rolled.consume();
 						group.close().unwrap();
 						frames = 0;
-						rolled.create_frame(info).unwrap()
+						rolled.create_frame(info(key)).unwrap()
 					} else {
-						group.create_frame(info).unwrap()
+						group.create_frame(info(key)).unwrap()
 					}
 				}
 				_ => frame,
@@ -1017,7 +1017,7 @@ fn bench_paced(c: &mut Criterion) {
 			let mut parked = 0u64;
 			let next = moq_net::frame::Info {
 				size: payload.len() as u64,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 			};
 			b.iter(|| {
 				parked += ctx.group.poll_ready(&writer, &next).is_pending() as u64;
@@ -1059,7 +1059,7 @@ fn shed_live_group(payloads: &[Bytes]) -> Flights {
 	let mut reader = live.consume();
 	let waiter = kio::Waiter::noop();
 	for payload in payloads {
-		live.write_frame(None, payload.clone()).unwrap();
+		live.write_frame(moq_net::Timestamp::unscaled(live.start), payload.clone()).unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_read_frame(&waiter) {}
 	}
 	Flights {
@@ -1126,7 +1126,7 @@ fn replay_flights(ctx: &Flights, payloads: &[Bytes], readers: usize, apart: usiz
 			while let Some(payload) = payloads.get(flight.next)
 				&& flight.group.poll_ready(&waiter, &frame_info(payload)).is_ready()
 			{
-				flight.group.write_frame(None, payload.clone()).unwrap();
+				flight.group.write_frame(moq_net::Timestamp::unscaled(flight.group.start), payload.clone()).unwrap();
 				flight.next += 1;
 				written += 1;
 			}
@@ -1136,10 +1136,11 @@ fn replay_flights(ctx: &Flights, payloads: &[Bytes], readers: usize, apart: usiz
 	(served, written, peak)
 }
 
+/// The header admission weighs: only its size.
 fn frame_info(payload: &Bytes) -> frame::Info {
 	frame::Info {
 		size: payload.len() as u64,
-		timestamp: None,
+		timestamp: moq_net::Timestamp::unscaled(0),
 	}
 }
 

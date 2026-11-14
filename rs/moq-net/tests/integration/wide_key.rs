@@ -61,9 +61,12 @@ async fn largest_quic_key_reaches_the_subscriber() {
 				assert_eq!(got.start, key, "{alpn} relayed={relayed}");
 				let frame = got.read_frame().await.unwrap().unwrap();
 				assert_eq!(frame.payload, b"ladder".as_ref());
-				// Lite-02 carries no timestamps.
-				let timed = alpn != "moq-lite-02";
-				assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn} relayed={relayed}");
+				// Lite-02 carries no timestamps, so its frames carry their key.
+				let expected = match alpn {
+					"moq-lite-02" => Timestamp::unscaled(key),
+					_ => timestamp,
+				};
+				assert_eq!(frame.timestamp, expected, "{alpn} relayed={relayed}");
 			}
 		}
 	}

@@ -485,7 +485,8 @@ impl Bystander {
 			let mut payload = key.to_be_bytes().repeat(8);
 			payload.push(frame);
 			let payload = Bytes::from(payload);
-			group.write_frame(None, payload.clone()).expect("the bystander's frame");
+			let key = crate::Timestamp::unscaled(group.start);
+			group.write_frame(key, payload.clone()).expect("the bystander's frame");
 			frames.push(payload);
 		}
 		group.close().expect("the bystander's group finish");
@@ -778,7 +779,8 @@ fn record(version: Version, scenario: Scenario) -> Vec<Action> {
 					let subscribed = async { while let Ok(None) = track.subscription_changed().await {} };
 					let _ = kio::clock::timeout(timeout, subscribed).await;
 					let mut group = track.append_next().expect("the client's group");
-					group.write_frame(None, Bytes::from_static(b"frame")).expect("a frame");
+					let key = crate::Timestamp::unscaled(group.start);
+					group.write_frame(key, Bytes::from_static(b"frame")).expect("a frame");
 					group.close().expect("the client's group finish");
 					kio::clock::sleep(timeout).await;
 				}

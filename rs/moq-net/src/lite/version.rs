@@ -448,8 +448,10 @@ impl Version {
 	/// The timescale the wire carries for a track with `timescale`, or `None` when its
 	/// frames or datagrams carry no timestamp.
 	///
-	/// Lite05 and Lite06 always carry one, so an untimed track declares milliseconds there
-	/// and its payloads carry their send times instead.
+	/// Lite05 and Lite06 always carry one, and those published drafts treat a TRACK_INFO
+	/// `Timescale` of 0 as invalid, so their wire forces a scale-less track to declare
+	/// milliseconds. Its frames then carry their group's key, and its datagrams their
+	/// sequence, never a clock.
 	pub(crate) fn wire_timescale(self, timescale: Option<crate::Timescale>) -> Option<crate::Timescale> {
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => None,

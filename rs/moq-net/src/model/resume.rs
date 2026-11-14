@@ -3437,7 +3437,7 @@ mod test {
 		let header = crate::model::frame::Header {
 			info: crate::model::frame::Info {
 				size: slice.len() as u64,
-				timestamp: Some(ts(1)),
+				timestamp: ts(1),
 			},
 			fields: None,
 			inflated: Some(frame().len() as u64 + 1),
@@ -3516,7 +3516,7 @@ mod test {
 		let mut frame = open
 			.create_frame(crate::frame::Info {
 				size: 4,
-				timestamp: Some(ts(0)),
+				timestamp: ts(0),
 			})
 			.unwrap();
 		frame.write(b"ab".as_ref()).unwrap();
@@ -6148,7 +6148,7 @@ mod test {
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(1));
 			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
-			open.write_frame(None, b"a".as_ref()).unwrap();
+			open.write_frame(crate::Timestamp::unscaled(open.start), b"a".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 
@@ -6158,7 +6158,7 @@ mod test {
 			pool.step(Duration::ZERO);
 			let write = |key| {
 				let mut group = b.create_group(group::Info { start: key }).unwrap();
-				group.write_frame(None, b"b".as_ref()).unwrap();
+				group.write_frame(crate::Timestamp::unscaled(group.start), b"b".as_ref()).unwrap();
 				group.close().unwrap();
 			};
 			if warm {
@@ -6438,7 +6438,7 @@ mod test {
 			let mut frame = open
 				.create_frame(crate::frame::Info {
 					size: 4,
-					timestamp: Some(ts(0)),
+					timestamp: ts(0),
 				})
 				.unwrap();
 			frame.write(b"ab".as_ref()).unwrap();
@@ -6488,7 +6488,7 @@ mod test {
 			let mut frame = open
 				.create_frame(crate::frame::Info {
 					size: 4,
-					timestamp: Some(ts(0)),
+					timestamp: ts(0),
 				})
 				.unwrap();
 			frame.write(b"a".as_ref()).unwrap();
@@ -6501,7 +6501,7 @@ mod test {
 			let mut replacement_frame = replacement
 				.create_frame(crate::frame::Info {
 					size: 4,
-					timestamp: Some(ts(0)),
+					timestamp: ts(0),
 				})
 				.unwrap();
 			replacement_frame.write(b"ab".as_ref()).unwrap();
@@ -6623,7 +6623,7 @@ mod test {
 			.create_object(crate::frame::Header {
 				info: crate::frame::Info {
 					size: 1,
-					timestamp: Some(ts(0)),
+					timestamp: ts(0),
 				},
 				fields: Some(Arc::new(super::super::object::Fields {
 					id: 6,
@@ -6643,7 +6643,7 @@ mod test {
 			.create_object(crate::frame::Header {
 				info: crate::frame::Info {
 					size: 2,
-					timestamp: Some(ts(1)),
+					timestamp: ts(1),
 				},
 				fields: Some(Arc::new(super::super::object::Fields {
 					id: 8,
@@ -6691,7 +6691,7 @@ mod test {
 			let header = crate::frame::Header {
 				info: crate::frame::Info {
 					size: payload.len() as u64,
-					timestamp: Some(ts(id)),
+					timestamp: ts(id),
 				},
 				fields: Some(Arc::new(super::super::object::Fields {
 					id,
@@ -6738,7 +6738,7 @@ mod test {
 				.create_object(crate::frame::Header {
 					info: crate::frame::Info {
 						size: payload.len() as u64,
-						timestamp: Some(ts(id)),
+						timestamp: ts(id),
 					},
 					fields: Some(Arc::new(super::super::object::Fields {
 						id,
@@ -6767,7 +6767,7 @@ mod test {
 		let mut frame = open
 			.create_frame(crate::frame::Info {
 				size: 4,
-				timestamp: Some(ts(0)),
+				timestamp: ts(0),
 			})
 			.unwrap();
 		frame.write(b"ab".as_ref()).unwrap();
@@ -7363,7 +7363,7 @@ mod test {
 									let mut frame = group
 										.create_frame(crate::frame::Info {
 											size: 4,
-											timestamp: Some(ts(1)),
+											timestamp: ts(1),
 										})
 										.unwrap();
 									frame.write(b"ab".as_ref()).unwrap();

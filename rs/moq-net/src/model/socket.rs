@@ -1324,13 +1324,13 @@ impl Pump {
 			if let Some(frame) = &self.pending {
 				let info = frame::Info {
 					size: frame.payload.len() as u64,
-					timestamp: None,
+					timestamp: frame.timestamp,
 				};
 				if local.poll_ready(waiter, &info).is_pending() {
 					return Ok(());
 				}
 				let frame = self.pending.take().expect("checked above");
-				local.write_frame(None, frame.payload)?;
+				local.write_frame(frame.timestamp, frame.payload)?;
 			}
 			match remote.poll_read_frame(waiter) {
 				Poll::Pending => return Ok(()),

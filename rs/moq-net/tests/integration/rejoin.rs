@@ -731,8 +731,8 @@ async fn rejoin_keeps_source_timestamps() {
 				};
 				let frame = group.read_frame().await.unwrap().unwrap();
 				assert_eq!(
-					frame.timestamp.map(Timestamp::as_millis),
-					Some(u128::from(ms)),
+					frame.timestamp.as_millis().unwrap(),
+					u128::from(ms),
 					"{version} group {key}"
 				);
 				drop((group, sub));

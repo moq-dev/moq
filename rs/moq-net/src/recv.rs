@@ -122,7 +122,7 @@ mod tests {
 			.create_object(
 				crate::frame::Info {
 					size: 2,
-					timestamp: Some(crate::Timestamp::ZERO),
+					timestamp: crate::Timestamp::ZERO,
 				}
 				.into(),
 			)
@@ -143,7 +143,7 @@ mod tests {
 			.create_object(
 				crate::frame::Info {
 					size: 2,
-					timestamp: Some(crate::Timestamp::ZERO),
+					timestamp: crate::Timestamp::ZERO,
 				}
 				.into(),
 			)

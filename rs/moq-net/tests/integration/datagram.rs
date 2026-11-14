@@ -111,16 +111,17 @@ async fn a_datagram_track_crosses_a_session() {
 		let chain = Chain::new(&["moq-lite-07-wip"]).await;
 		let info = datagram::Info::default().with_timescale(timescale).with_priority(3);
 		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, info).unwrap();
-		let timestamp = |ms| timescale.map(|_| millis(ms));
+		// A scale-less datagram's timestamp names its sequence.
+		let timestamp = |ms, sequence| timescale.map_or(moq_net::Timestamp::unscaled(sequence), |_| millis(ms));
 		// Nobody reads it yet, so nobody ever will.
-		assert_eq!(producer.append(timestamp(1), &b"early"[..]).unwrap(), 0);
+		assert_eq!(producer.append(timestamp(1, 0), &b"early"[..]).unwrap(), 0);
 
 		let mut consumer = chain.consume(&producer, 0).await;
 		assert_eq!(consumer.info().await.unwrap(), info, "{timescale:?}");
-		assert_eq!(producer.append(timestamp(2), &b"live"[..]).unwrap(), 1);
+		assert_eq!(producer.append(timestamp(2, 1), &b"live"[..]).unwrap(), 1);
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(datagram.sequence, 1, "{timescale:?}");
-		assert_eq!(datagram.timestamp, timestamp(2), "{timescale:?}");
+		assert_eq!(datagram.timestamp, timestamp(2, 1), "{timescale:?}");
 		assert_eq!(&datagram.payload[..], b"live", "{timescale:?}");
 
 		producer.finish();
@@ -179,7 +180,7 @@ async fn a_relay_carries_a_datagram_track() {
 	assert_eq!(producer.append(millis(5), &b"relayed"[..]).unwrap(), 0);
 	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 	assert_eq!(datagram.sequence, 0);
-	assert_eq!(datagram.timestamp, Some(millis(5)));
+	assert_eq!(datagram.timestamp, millis(5));
 	assert_eq!(&datagram.payload[..], b"relayed");
 
 	consumer.set_priority(4);
@@ -284,7 +285,7 @@ async fn legacy_versions_map_a_datagram_track_onto_a_subscription() {
 		assert_eq!(producer.append(millis(9), &b"mapped"[..]).unwrap(), 1);
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(datagram.sequence, 1, "{version}");
-		assert_eq!(datagram.timestamp, Some(millis(9)), "{version}");
+		assert_eq!(datagram.timestamp, millis(9), "{version}");
 		assert_eq!(&datagram.payload[..], b"mapped", "{version}");
 
 		consumer.set_priority(6);
@@ -339,7 +340,7 @@ async fn legacy_versions_carry_both_kinds_of_a_name() {
 		producer.append(millis(1), &b"datagram"[..]).unwrap();
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(&datagram.payload[..], b"datagram", "{hops:?}");
-		let timestamp = datagram.timestamp.expect("a timestamp");
+		let timestamp = datagram.timestamp;
 		assert_eq!(timestamp.convert(Timescale::MILLI).unwrap(), millis(1), "{hops:?}");
 
 		track.write_frame(millis(2), &b"frame"[..]).unwrap();
@@ -452,7 +453,7 @@ async fn lite05_and_lite06_answer_a_datagram_request_beside_a_silent_stream_hand
 		producer.append(millis(1), &b"requested"[..]).unwrap();
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(&datagram.payload[..], b"requested", "{version}");
-		assert_eq!(datagram.timestamp, Some(millis(1)), "{version}");
+		assert_eq!(datagram.timestamp, millis(1), "{version}");
 	}
 }
 
@@ -496,7 +497,7 @@ async fn an_old_subscriber_reaches_a_datagram_track_through_a_lite07_relay() {
 	producer.append(millis(4), &b"relayed"[..]).unwrap();
 	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 	assert_eq!(&datagram.payload[..], b"relayed");
-	assert_eq!(datagram.timestamp, Some(millis(4)));
+	assert_eq!(datagram.timestamp, millis(4));
 }
 
 /// A relay's upstream datagram subscription outlives its last demanding reader while an old

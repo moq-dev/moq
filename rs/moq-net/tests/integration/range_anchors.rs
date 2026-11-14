@@ -199,7 +199,7 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 	broadcast.announce().unwrap();
 	for key in 0..5 {
 		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-		group.write_frame(None, &b"x"[..]).unwrap();
+		group.write_frame(moq_net::Timestamp::unscaled(group.start), &b"x"[..]).unwrap();
 		group.close().unwrap();
 	}
 	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
@@ -228,7 +228,7 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 		"the publisher's resolved start, counting its frameless newest group"
 	);
 
-	newest.write_frame(None, &b"x"[..]).unwrap();
+	newest.write_frame(moq_net::Timestamp::unscaled(newest.start), &b"x"[..]).unwrap();
 	newest.close().unwrap();
 	let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
 		.await

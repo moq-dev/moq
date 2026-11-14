@@ -1585,7 +1585,7 @@ mod test {
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::default()).unwrap();
 		let mut group = track.append_next().unwrap();
-		group.write_frame(None, &b"a"[..]).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), &b"a"[..]).unwrap();
 		let mut handle = consumer.track("a").unwrap();
 		let waiter = kio::Waiter::noop();
 		assert_eq!(
@@ -2517,7 +2517,7 @@ mod test {
 		));
 
 		let mut reader = consumer.datagrams("audio").unwrap();
-		datagrams.append(None, "x").unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut reader), 0);
 
 		// Once it ends, the name is free again, and a reader no longer joins it.
@@ -2549,7 +2549,7 @@ mod test {
 		let info = datagram::Info::default().with_priority(2);
 		let mut served = request.accept(info);
 		assert!(matches!(second.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
-		served.append(None, "x").unwrap();
+		served.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut first), 0);
 		assert_eq!(received(&mut second), 0);
 
@@ -2572,7 +2572,7 @@ mod test {
 		let info = datagram::Info::default().with_priority(2);
 		let mut datagrams = producer.create_datagrams("audio", info).unwrap();
 		assert!(matches!(reader.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
-		datagrams.append(None, "x").unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut reader), 0);
 		assert!(handler.poll_requested(&kio::Waiter::noop()).is_pending());
 	}

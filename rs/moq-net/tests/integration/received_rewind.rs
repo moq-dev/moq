@@ -15,7 +15,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A group's key and its first frame's timestamp, or the error reading it.
-type Read = (u64, Result<Option<moq_net::Timestamp>, moq_net::Error>);
+type Read = (u64, Result<moq_net::Timestamp, moq_net::Error>);
 
 fn millis(ms: u64) -> moq_net::Timestamp {
 	moq_net::Timestamp::from_millis(ms).unwrap()
@@ -134,7 +134,7 @@ async fn a_timed_track_keeps_its_timestamps_through_a_relay() {
 			let ok = timescale == Some(moq_net::Timescale::MILLI)
 				&& matches!(
 					got.as_slice(),
-					[(1000, Ok(Some(one))), (0, Ok(Some(zero)))] if *one == millis(1000) && *zero == millis(0)
+					[(1000, Ok(one)), (0, Ok(zero))] if *one == millis(1000) && *zero == millis(0)
 				);
 			if !ok {
 				failures.push(format!("{upstream} -> {downstream}: {timescale:?} {got:?}"));

@@ -188,8 +188,8 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			let frame = group.read_frame().await.unwrap().unwrap();
 			assert_eq!(
-				frame.timestamp.map(Timestamp::as_millis),
-				Some(stamp.as_millis()),
+				frame.timestamp.as_millis().unwrap(),
+				stamp.as_millis().unwrap(),
 				"{version}"
 			);
 		})

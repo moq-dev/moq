@@ -337,10 +337,12 @@ pub(crate) fn egress_time(
 		return Ok(None);
 	};
 	if let Some(sealed) = properties.sealed_time {
-		if timescale != Some(sealed.scale()) {
+		if timescale != sealed.scale() {
 			return Err(Error::Unsupported);
 		}
-		if frame.convert(sealed.scale()).is_ok_and(|frame| frame == sealed) {
+		if let Some(scale) = sealed.scale()
+			&& frame.convert(scale).is_ok_and(|frame| frame == sealed)
+		{
 			return Ok(None);
 		}
 	}
@@ -803,7 +805,7 @@ mod compression_tests {
 		let header = crate::frame::Header {
 			info: crate::frame::Info {
 				size: 1,
-				timestamp: None,
+				timestamp: crate::Timestamp::unscaled(group.start),
 			},
 			fields: None,
 			inflated: inflated(Some(crate::group::MAX_CACHE_BYTES + 1), true).unwrap(),

@@ -13492,7 +13492,7 @@ mod tests {
 
 		let front = producer.consume().request("room", None).await.unwrap();
 		let mut reader = front.datagrams("audio").unwrap();
-		datagrams.append(None, "x").unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		let datagram = reader.recv().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(datagram.sequence, 0);
 		assert!(matches!(front.datagrams("video"), Err(Error::NotFound)));

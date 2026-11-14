@@ -133,7 +133,7 @@ impl From<u16> for Info {
 /// The in-flight (tail) frame being written. At most one exists at a time, since a
 /// group is a single ordered stream.
 pub(super) struct Partial {
-	timestamp: Option<Timestamp>,
+	timestamp: Timestamp,
 	fields: Option<Arc<super::object::Fields>>,
 	buf: FrameBuf,
 	// How much of `buf` has been charged to the cache so far.
@@ -777,7 +777,7 @@ enum Source {
 	Inflate {
 		job: Inflate,
 		local: usize,
-		timestamp: Option<Timestamp>,
+		timestamp: Timestamp,
 		fields: Option<Arc<super::object::Fields>>,
 	},
 }
@@ -1292,8 +1292,8 @@ impl GroupState {
 
 	/// Check frame 0's `timestamp` against the track's `neighbors`, returning how to record
 	/// it. Anything but a timed frame 0 checked under an open local track is unchecked.
-	fn check_start(&self, neighbors: Option<&track::Neighbors>, timestamp: Option<Timestamp>) -> Result<Origin> {
-		match (neighbors, timestamp) {
+	fn check_start(&self, neighbors: Option<&track::Neighbors>, timestamp: Timestamp) -> Result<Origin> {
+		match (neighbors, timestamp.timed()) {
 			(Some(neighbors), Some(start)) if self.next_index == 0 => neighbors.admit(start),
 			_ => Ok(self.origin),
 		}
@@ -1312,11 +1312,11 @@ impl GroupState {
 	/// Record a frame's place in presentation time: the first frame starts the group,
 	/// and later frames can extend a timed group's end. Every frame matches its track
 	/// ([`track::Info::rescale`]), so a group never mixes the two.
-	fn stamp(&mut self, timestamp: Option<Timestamp>) {
-		self.timeline = match (self.timeline, timestamp) {
+	fn stamp(&mut self, timestamp: Timestamp) {
+		self.timeline = match (self.timeline, timestamp.timed()) {
 			(Timeline::Timed { start, latest }, Some(timestamp)) => Timeline::Timed {
 				start,
-				latest: latest.max(timestamp),
+				latest: latest.later(timestamp),
 			},
 			(_, Some(start)) => Timeline::Timed { start, latest: start },
 			(_, None) => Timeline::Untimed,
@@ -1834,10 +1834,11 @@ impl Producer {
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
 	/// But an upfront size is required.
 	///
-	/// `timestamp` is converted into the parent track's timescale. Pass `None` on an
-	/// untimed track; a frame that doesn't match its track is [`Error::TimestampMismatch`].
-	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: impl Into<Option<Timestamp>>, data: B) -> Result<()> {
-		let timestamp = self.handle.track.rescale(timestamp.into())?;
+	/// `timestamp` is converted into the parent track's timescale. On a scale-less track it
+	/// is [`Timestamp::unscaled`] at this group's start; a frame that doesn't match its track
+	/// is [`Error::TimestampMismatch`].
+	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
+		let timestamp = self.handle.track.rescale_in(timestamp, self.handle.info.start)?;
 		let payload = data.into_bytes();
 		if payload.len() as u64 > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
@@ -1898,7 +1899,7 @@ impl Producer {
 		// eviction debt if enough has been written since the track last paid.
 		self.handle.cache.settle(now);
 		// An untimed frame presents nothing, so it can expire no read.
-		if let Some(timestamp) = timestamp {
+		if let Some(timestamp) = timestamp.timed() {
 			self.handle.cache.wakes().presented(timestamp);
 		}
 
@@ -1920,7 +1921,7 @@ impl Producer {
 	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
 		for frame in frames.filled() {
-			self.handle.track.rescale(frame.timestamp)?;
+			self.handle.track.rescale_in(frame.timestamp, self.handle.info.start)?;
 			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
 				return Err(Error::FrameTooLarge);
 			}
@@ -1947,7 +1948,7 @@ impl Producer {
 				neighbors.as_ref(),
 				self.handle
 					.track
-					.rescale(timestamp)
+					.rescale_in(timestamp, self.handle.info.start)
 					.expect("timestamp scale checked above"),
 			)?,
 			None => state.origin,
@@ -1968,7 +1969,7 @@ impl Producer {
 
 		// The last frame's tick, reused below so settling does not re-read the clock.
 		let mut now = None;
-		let mut latest = None;
+		let mut latest: Option<Timestamp> = None;
 		let mut deflated = deflated.into_iter();
 		let arrived = super::clock::now();
 		// Validation is done, so the batch is taken by value: a conflict below fails the group,
@@ -1981,7 +1982,7 @@ impl Producer {
 			let timestamp = self
 				.handle
 				.track
-				.rescale(frame.timestamp)
+				.rescale_in(frame.timestamp, self.handle.info.start)
 				.expect("timestamp scale checked above");
 			let (payload, inflated) = match state.flate.is_some() {
 				true => (
@@ -1998,7 +1999,10 @@ impl Producer {
 				},
 				inflated,
 			);
-			latest = latest.max(timestamp);
+			latest = match (latest, timestamp.timed()) {
+				(Some(latest), Some(timestamp)) => Some(latest.later(timestamp)),
+				(latest, timestamp) => latest.or(timestamp),
+			};
 			if !canonical {
 				now = state.commit(entry);
 				continue;
@@ -2088,7 +2092,7 @@ impl Producer {
 	/// size is only a promise until they arrive.
 	fn open_frame(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf, Option<frame::Admission>)> {
 		let frame = header.info;
-		let timestamp = self.handle.track.rescale(frame.timestamp)?;
+		let timestamp = self.handle.track.rescale_in(frame.timestamp, self.handle.info.start)?;
 		if frame.size > MAX_CACHE_BYTES || header.inflated.is_some_and(|inflated| inflated > MAX_CACHE_BYTES) {
 			return Err(Error::FrameTooLarge);
 		}
@@ -2180,7 +2184,7 @@ impl Producer {
 		// eviction debt if enough has been written since the track last paid.
 		self.handle.cache.settle(now);
 		// An untimed frame presents nothing, so it can expire no read.
-		if let Some(timestamp) = timestamp {
+		if let Some(timestamp) = timestamp.timed() {
 			self.handle.cache.wakes().presented(timestamp);
 		}
 
@@ -2728,12 +2732,15 @@ impl Handle {
 		}
 		state.offset = head.start;
 		state.cache += payload;
-		let start = entries.iter().find_map(|entry| entry.frame.timestamp);
-		let head_latest = entries.iter().filter_map(|entry| entry.frame.timestamp).max();
+		let start = entries.iter().find_map(|entry| entry.frame.timestamp.timed());
+		let head_latest = entries
+			.iter()
+			.filter_map(|entry| entry.frame.timestamp.timed())
+			.reduce(Timestamp::later);
 		state.timeline = match (state.timeline, start) {
 			(Timeline::Timed { latest, .. }, Some(start)) => Timeline::Timed {
 				start,
-				latest: latest.max(head_latest.unwrap_or(start)),
+				latest: latest.later(head_latest.unwrap_or(start)),
 			},
 			(Timeline::Empty, Some(start)) => Timeline::Timed {
 				start,
@@ -5106,7 +5113,7 @@ mod test {
 						let frame = group
 							.create_frame(frame::Info {
 								size: 0,
-								timestamp: Some(timestamp),
+								timestamp: timestamp,
 							})
 							.unwrap();
 						group = frame.finish().unwrap();
@@ -5167,7 +5174,7 @@ mod test {
 		timed.close().unwrap();
 		let mut untimed = Info { start: 0 }.produce_untimed();
 		assert_eq!(untimed.handle.latest(), None);
-		untimed.write_frame(None, Bytes::new()).unwrap();
+		untimed.write_frame(crate::Timestamp::unscaled(untimed.start), Bytes::new()).unwrap();
 		assert_eq!(untimed.handle.latest(), None);
 		untimed.close().unwrap();
 	}
@@ -5180,14 +5187,14 @@ mod test {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
-		group.write_frame(None, Bytes::from_static(b"p")).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from_static(b"p")).unwrap();
 		let plain = pool.used();
 		// Ten fielded frames span two prefetch batches, then plain frames follow.
 		for id in 1..=10u64 {
 			let header = frame::Header {
 				info: frame::Info {
 					size: 1,
-					timestamp: None,
+					timestamp: Timestamp::unscaled(0),
 				},
 				fields: Some(Arc::new(super::super::object::Fields {
 					id: id * 10,
@@ -5201,7 +5208,7 @@ mod test {
 		}
 		assert!(pool.used() > plain + 10, "the metadata table is charged");
 		for _ in 0..Prefetch::CAP {
-			group.write_frame(None, Bytes::from_static(b"p")).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from_static(b"p")).unwrap();
 		}
 		let group = group.close().unwrap();
 		let expected = |index: u64| (1..=10).contains(&index).then_some(index * 10);
@@ -5249,7 +5256,7 @@ mod test {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
-		group.write_frame(None, Bytes::from_static(b"payload")).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::from_static(b"payload")).unwrap();
 		let fields = super::super::object::Fields {
 			id: 4,
 			properties: Default::default(),
@@ -5351,7 +5358,7 @@ mod test {
 						let frame = group
 							.create_frame(frame::Info {
 								size: 0,
-								timestamp: Some(Timestamp::ZERO),
+								timestamp: Timestamp::ZERO,
 							})
 							.unwrap();
 						group = frame.finish().unwrap();
@@ -5404,7 +5411,7 @@ mod test {
 
 		let mut consumer = producer.consume();
 		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.timestamp.unwrap().as_micros(), 20_000);
+		assert_eq!(frame.timestamp.as_micros().unwrap(), 20_000);
 		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
 
@@ -5420,7 +5427,7 @@ mod test {
 			"nothing presented yet"
 		);
 
-		producer.write_frame(None, Bytes::from_static(b"hello")).unwrap();
+		producer.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"hello")).unwrap();
 		let producer = producer.close().unwrap();
 
 		assert!(producer.handle.poll_started(&waiter).is_ready());
@@ -5429,13 +5436,17 @@ mod test {
 
 		let mut consumer = producer.consume();
 		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.timestamp, None);
+		assert_eq!(frame.timestamp, Timestamp::unscaled(0));
 		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
 
 	/// A track is all timed or all untimed, so a frame that doesn't match it is refused.
 	#[test]
 	fn a_mismatched_frame_is_refused() {
+		let time = |timed| match timed {
+			true => Timestamp::ZERO,
+			false => Timestamp::unscaled(0),
+		};
 		for timed in [false, true] {
 			let mut group = if timed {
 				Info { start: 0 }.produce()
@@ -5444,14 +5455,9 @@ mod test {
 			};
 			let mut frames = frame::Buffer::<2>::new();
 			frames
-				.push(Frame::new(timed.then_some(Timestamp::ZERO), Bytes::from_static(b"a")))
+				.push(Frame::new(time(timed), Bytes::from_static(b"a")))
 				.unwrap();
-			frames
-				.push(Frame::new(
-					(!timed).then_some(Timestamp::ZERO),
-					Bytes::from_static(b"b"),
-				))
-				.unwrap();
+			frames.push(Frame::new(time(!timed), Bytes::from_static(b"b"))).unwrap();
 			assert!(matches!(group.write_frames(&mut frames), Err(Error::TimestampMismatch)));
 			assert_eq!(frames.len(), 2, "a refused tail leaves the whole batch intact");
 			assert_eq!(group.frame_count(), 0, "a refused tail publishes no prefix");
@@ -5467,13 +5473,18 @@ mod test {
 
 		let mut timed = Info { start: 0 }.produce();
 		assert!(matches!(
-			timed.write_frame(None, Bytes::from_static(b"x")),
+			timed.write_frame(crate::Timestamp::unscaled(timed.start), Bytes::from_static(b"x")),
+			Err(Error::TimestampMismatch)
+		));
+		// A scale-less frame carries its group's key, so another key is a mismatch.
+		assert!(matches!(
+			untimed.write_frame(Timestamp::unscaled(1), Bytes::from_static(b"x")),
 			Err(Error::TimestampMismatch)
 		));
 		assert!(matches!(
 			timed.create_frame(frame::Info {
 				size: 1,
-				timestamp: None
+				timestamp: Timestamp::unscaled(0)
 			}),
 			Err(Error::TimestampMismatch)
 		));
@@ -5486,7 +5497,7 @@ mod test {
 		let mut frame = producer
 			.create_frame(frame::Info {
 				size: 10,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 			})
 			.unwrap();
 		frame.write(Bytes::from_static(b"hello")).unwrap();
@@ -5510,7 +5521,7 @@ mod test {
 		let mut frame = producer
 			.create_frame(frame::Info {
 				size: 6,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 			})
 			.unwrap();
 		frame.write(Bytes::from_static(b"foo")).unwrap();
@@ -5629,8 +5640,8 @@ mod test {
 			let pool = cache::Pool::unbounded();
 			let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 			let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
-			producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
-			producer.write_frame(None, Bytes::from_static(b"b")).unwrap();
+			producer.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a")).unwrap();
+			producer.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"b")).unwrap();
 			let handoff = producer.consume().handoff();
 			assert_eq!(handoff.head().map(|head| head.entries.len()), Some(2), "read live");
 
@@ -5656,7 +5667,7 @@ mod test {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
-		producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
+		producer.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a")).unwrap();
 		let handoff = producer.consume().handoff();
 		producer.handle().abort(Error::Cancel).unwrap();
 		drop(producer);
@@ -5677,7 +5688,7 @@ mod test {
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let fail = |key: u64| {
 			let mut producer = Producer::new(Info::from(key), track::Info::default(), cache.clone());
-			producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
+			producer.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a")).unwrap();
 			let handoff = producer.consume().handoff();
 			producer.abort(Error::Cancel).unwrap();
 			handoff
@@ -5704,7 +5715,7 @@ mod test {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(1));
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
-		producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
+		producer.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a")).unwrap();
 		let handoff = producer.consume().handoff();
 		producer.handle().abort(Error::Cancel).unwrap();
 		assert!(handoff.head().is_none());
@@ -5723,14 +5734,14 @@ mod test {
 		let _frame = tail
 			.create_frame(frame::Info {
 				size: MAX_CACHE_BYTES - 1,
-				timestamp: None,
+				timestamp: Timestamp::unscaled(0),
 			})
 			.unwrap();
 		let head = Head {
 			content: None,
 			start: 0,
 			first_object: true,
-			entries: vec![Entry::plain(Frame::new(None, Bytes::from_static(b"ab")).into(), 0)],
+			entries: vec![Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"ab")).into(), 0)],
 			compressed: false,
 		};
 		adopter.adopt_head(&head);
@@ -5752,7 +5763,7 @@ mod test {
 		let count = MAX_CACHE_BYTES as usize / size_of::<Entry>() + 1;
 		tail.start_at(count as u64).unwrap();
 		let adopter = tail.handle();
-		let entry = Entry::plain(Frame::new(None, Bytes::new()).into(), 0);
+		let entry = Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::new()).into(), 0);
 		let head = Head {
 			content: None,
 			start: 0,
@@ -5780,10 +5791,10 @@ mod test {
 			start: 0,
 			first_object: true,
 			entries: vec![
-				Entry::plain(Frame::new(None, Bytes::from_static(b"a")).into(), 0),
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"a")).into(), 0),
 				Entry {
 					owner: Mutex::new(None),
-					frame: Frame::new(None, Bytes::from_static(b"b")).into(),
+					frame: Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"b")).into(),
 					fields: fields(1),
 					inflated: 0,
 					end: 0,
@@ -5825,7 +5836,7 @@ mod test {
 				tail.handle.state.read().wire().unwrap().fetchable,
 				"no gap below the stream"
 			);
-			tail.write_frame(None, Bytes::from_static(b"c")).unwrap();
+			tail.write_frame(crate::Timestamp::unscaled(tail.start), Bytes::from_static(b"c")).unwrap();
 			let tail = tail.close().unwrap();
 
 			let waiter = kio::Waiter::noop();
@@ -5973,7 +5984,7 @@ mod test {
 
 		let frames = mebibytes(48);
 		for (index, frame) in frames.iter().enumerate() {
-			producer.write_frame(None, frame.clone()).unwrap();
+			producer.write_frame(crate::Timestamp::unscaled(producer.start), frame.clone()).unwrap();
 			let read = live.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(read.payload, *frame, "frame {index}");
 			assert!(pool.used() <= MAX_CACHE_BYTES + (1 << 20), "{} bytes held", pool.used());
@@ -6356,7 +6367,7 @@ mod test {
 		let mut frame = producer
 			.create_frame(frame::Info {
 				size: 6,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 			})
 			.unwrap();
 		let mut f = consumer.next_frame().await.unwrap().unwrap();
@@ -6387,7 +6398,7 @@ mod test {
 		let mut chunked = producer
 			.create_frame(frame::Info {
 				size: 2,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 			})
 			.unwrap();
 		chunked.write(Bytes::from_static(b"b")).unwrap();
@@ -6453,11 +6464,11 @@ mod test {
 		);
 		let frame = frame::Info {
 			size: 3,
-			timestamp: Some(Timestamp::from_millis(1).unwrap()), // 1ms -> 1000µs
+			timestamp: Timestamp::from_millis(1).unwrap(), // 1ms -> 1000µs
 		};
 		let writer = producer.create_frame(frame).unwrap();
-		assert_eq!(writer.timestamp.unwrap().scale(), Timescale::MICRO);
-		assert_eq!(writer.timestamp.unwrap().value(), 1000);
+		assert_eq!(writer.timestamp.scale(), Some(Timescale::MICRO));
+		assert_eq!(writer.timestamp.value(), 1000);
 	}
 
 	/// A group can start partway in, so a route can serve the tail of a group whose
@@ -6623,7 +6634,7 @@ mod test {
 		let producer = Info { start: 0 }.produce();
 		let result = producer.create_frame(frame::Info {
 			size: MAX_CACHE_BYTES + 1,
-			timestamp: Some(Timestamp::ZERO),
+			timestamp: Timestamp::ZERO,
 		});
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}
@@ -6631,7 +6642,7 @@ mod test {
 	fn sized(size: u64) -> frame::Info {
 		frame::Info {
 			size,
-			timestamp: Some(Timestamp::ZERO),
+			timestamp: Timestamp::ZERO,
 		}
 	}
 
@@ -6853,7 +6864,7 @@ mod test {
 			let mut frame = group
 				.create_frame(frame::Info {
 					size: payload.len() as u64,
-					timestamp: Some(Timestamp::ZERO),
+					timestamp: Timestamp::ZERO,
 				})
 				.unwrap();
 			// Written in pieces, so the large ones chain.
@@ -6902,10 +6913,11 @@ mod test {
 		Bytes::from(format!("{index}:{}", "moq".repeat(300)))
 	}
 
+	/// A scale-less frame of `size` bytes in group 0.
 	fn untimed(size: usize) -> frame::Info {
 		frame::Info {
 			size: size as u64,
-			timestamp: None,
+			timestamp: Timestamp::unscaled(0),
 		}
 	}
 
@@ -6939,15 +6951,15 @@ mod test {
 		let mut raw = group.consume().compressed();
 
 		let frames = mebibytes(80);
-		group.write_frame(None, frames[0].clone()).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), frames[0].clone()).unwrap();
 		assert_eq!(read_plain(&mut plain).unwrap().unwrap(), frames[0]);
 		// 34 frames behind, past the stored tail but within the inflated one: the slices it
 		// needs inflate before they go.
 		for frame in &frames[1..35] {
-			group.write_frame(None, frame.clone()).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), frame.clone()).unwrap();
 		}
 		for (index, frame) in frames.iter().enumerate().skip(35) {
-			group.write_frame(None, frame.clone()).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), frame.clone()).unwrap();
 			let read = read_plain(&mut plain).unwrap().unwrap();
 			assert_eq!(read, frames[index - 34], "frame {}", index - 34);
 			assert!(pool.used() <= 3 * MAX_CACHE_BYTES, "{} bytes held", pool.used());
@@ -6969,7 +6981,7 @@ mod test {
 		let pool = cache::Pool::unbounded();
 		let mut group = compressed_group(&pool);
 		for frame in &mebibytes(40) {
-			group.write_frame(None, frame.clone()).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), frame.clone()).unwrap();
 		}
 		let held = group.handle.state.read().held();
 		assert!(held > 1, "the slices were shed");
@@ -6992,7 +7004,7 @@ mod test {
 		let mut group = compressed_group(&pool);
 		let mut plain = group.consume();
 		for _ in 0..1_000 {
-			group.write_frame(None, Bytes::new()).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), Bytes::new()).unwrap();
 			assert!(read_plain(&mut plain).unwrap().unwrap().is_empty());
 		}
 		let flate = group.handle.state.read().flate.as_ref().unwrap().plain.clone();
@@ -7009,7 +7021,7 @@ mod test {
 		let mut group = compressed_group(&pool);
 		let frame = Bytes::from(vec![7u8; 31 << 20]);
 		for _ in 0..8 {
-			group.write_frame(None, frame.clone()).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), frame.clone()).unwrap();
 		}
 		let group = group.close().unwrap();
 		let mut plain = group.consume();
@@ -7034,14 +7046,14 @@ mod test {
 		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let info = track::Info::default().with_compression(crate::track::Compression::Deflate);
 		let mut concurrent = Producer::new(0u64.into(), info.clone(), account.clone());
-		concurrent.write_frame(None, verbose(0)).unwrap();
+		concurrent.write_frame(crate::Timestamp::unscaled(concurrent.start), verbose(0)).unwrap();
 		for key in 1..5u64 {
 			let mut group = Producer::new(key.into(), info.clone(), account.clone());
 			let mut reference = flate::Encoder::new();
 			let frames = [verbose(0), Bytes::new(), verbose(key as usize)];
 			let slices: Vec<_> = frames.iter().map(|frame| reference.frame(frame)).collect();
 			for frame in &frames {
-				group.write_frame(None, frame.clone()).unwrap();
+				group.write_frame(crate::Timestamp::unscaled(group.start), frame.clone()).unwrap();
 			}
 			let group = group.close().unwrap();
 			let mut raw = group.consume().compressed();
@@ -7055,7 +7067,7 @@ mod test {
 				assert_eq!(decoder.frame(&slice, frame.len()).unwrap(), *frame);
 			}
 		}
-		concurrent.write_frame(None, verbose(1)).unwrap();
+		concurrent.write_frame(crate::Timestamp::unscaled(concurrent.start), verbose(1)).unwrap();
 		let mut reader = concurrent.consume();
 		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
 		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
@@ -7073,14 +7085,14 @@ mod test {
 	fn compressed_group_stores_slices_and_inflates_once() {
 		let pool = cache::Pool::unbounded();
 		let mut group = compressed_group(&pool);
-		group.write_frame(None, verbose(0)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(0)).unwrap();
 		// A chunked frame is invisible until its last chunk, then compressed whole.
 		let mut frame = group.create_frame(untimed(verbose(1).len())).unwrap();
 		for chunk in verbose(1).chunks(100) {
 			frame.write(Bytes::copy_from_slice(chunk)).unwrap();
 		}
 		group = frame.finish().unwrap();
-		group.write_frame(None, verbose(2)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(2)).unwrap();
 		let group = group.close().unwrap();
 
 		let plain: usize = (0..3).map(|index| verbose(index).len()).sum();
@@ -7092,7 +7104,7 @@ mod test {
 			cache::Track::new(uncompressed.clone(), Default::default(), kio::Weak::new()),
 		);
 		for index in 0..3 {
-			reference.write_frame(None, verbose(index)).unwrap();
+			reference.write_frame(crate::Timestamp::unscaled(reference.start), verbose(index)).unwrap();
 		}
 		let _reference = reference.close().unwrap();
 		assert!(
@@ -7149,8 +7161,8 @@ mod test {
 	fn a_compressed_group_adopts_a_compressed_head() {
 		let pool = cache::Pool::unbounded();
 		let fail = |group: &mut Producer| {
-			group.write_frame(None, verbose(0)).unwrap();
-			group.write_frame(None, verbose(1)).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), verbose(0)).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), verbose(1)).unwrap();
 			let handoff = group.consume().handoff();
 			group.handle().abort(Error::Cancel).unwrap();
 			handoff.head().expect("held for its resumers")
@@ -7213,7 +7225,7 @@ mod test {
 		let write = || {
 			let mut group = compressed_group(&pool);
 			for index in 0..3 {
-				group.write_frame(None, verbose(index)).unwrap();
+				group.write_frame(crate::Timestamp::unscaled(group.start), verbose(index)).unwrap();
 			}
 			group.close().unwrap()
 		};
@@ -7254,14 +7266,14 @@ mod test {
 		let mut released = Producer::new(Info::from(0u64), info.clone(), cache.clone());
 		released.bound(Bounds { start: 0, end: Some(2) }).unwrap();
 		for index in 0..2 {
-			released.write_frame(None, verbose(index)).unwrap();
+			released.write_frame(crate::Timestamp::unscaled(released.start), verbose(index)).unwrap();
 		}
 		let released = released.close().unwrap();
 		let content = released.handle.activate_content().unwrap().unwrap();
 		let mut survivor = Producer::new(Info::from(0u64), info, cache);
 		survivor.handle.share_content(content);
 		for index in 0..3 {
-			survivor.write_frame(None, verbose(index)).unwrap();
+			survivor.write_frame(crate::Timestamp::unscaled(survivor.start), verbose(index)).unwrap();
 		}
 		let survivor = survivor.close().unwrap();
 		let late = take_slices(&released.handle, 1);
@@ -7301,10 +7313,10 @@ mod test {
 		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &stats::Tier::default());
 		let mut group = compressed_group(&pool).with_meter(meter);
 
-		group.write_frame(None, verbose(0)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(0)).unwrap();
 		let mut batch = frame::Buffer::<2>::new();
 		for index in 1..3 {
-			batch.push(Frame::new(None, verbose(index))).unwrap();
+			batch.push(Frame::new(Timestamp::unscaled(0), verbose(index))).unwrap();
 		}
 		group.write_frames(&mut batch).unwrap();
 		let mut frame = group.create_frame(untimed(verbose(3).len())).unwrap();
@@ -7329,10 +7341,10 @@ mod test {
 	fn codec_state_is_billed_while_held() {
 		let pool = cache::Pool::unbounded();
 		let mut group = compressed_group(&pool);
-		group.write_frame(None, verbose(0)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(0)).unwrap();
 		let stored = group.handle.state.read().charge.size() + Flate::RELEASE_HEAP;
 		assert_eq!(group.handle.cache_size(), stored + flate::ENCODER_HEAP);
-		group.write_frame(None, verbose(1)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(1)).unwrap();
 
 		// The read inflates both frames ahead, but the open group may still get a third.
 		let mut reader = group.consume();
@@ -7353,10 +7365,10 @@ mod test {
 
 		// A finished group's decoder goes with the last frame it inflates.
 		let mut group = compressed_group(&pool);
-		group.write_frame(None, verbose(0)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(0)).unwrap();
 		let mut reader = group.consume();
 		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
-		group.write_frame(None, verbose(1)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(1)).unwrap();
 		let group = group.close().unwrap();
 		let stored = group.handle.state.read().charge.size() + Flate::RELEASE_HEAP;
 		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
@@ -7364,8 +7376,8 @@ mod test {
 
 		// So does one whose reader took the last slice before the group finished.
 		let mut group = compressed_group(&pool);
-		group.write_frame(None, verbose(0)).unwrap();
-		group.write_frame(None, verbose(1)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(0)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(1)).unwrap();
 		let job = take_slices(&group.handle, 1);
 		let group = group.close().unwrap();
 		job.run(&stats::Meter::default());
@@ -7380,7 +7392,7 @@ mod test {
 		let pool = cache::Pool::unbounded();
 		let mut group = compressed_group(&pool);
 		group.start_at(1).unwrap();
-		group.write_frame(None, verbose(1)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(1)).unwrap();
 		let group = group.close().unwrap();
 
 		let mut consumer = group.consume().with_range(1..);
@@ -7396,8 +7408,8 @@ mod test {
 			let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
 			let info = track::Info::default().with_compression(compression);
 			let mut first = Producer::new(Info::from(0u64), info.clone(), cache.clone());
-			first.write_frame(None, verbose(0)).unwrap();
-			first.write_frame(None, verbose(1)).unwrap();
+			first.write_frame(crate::Timestamp::unscaled(first.start), verbose(0)).unwrap();
+			first.write_frame(crate::Timestamp::unscaled(first.start), verbose(1)).unwrap();
 			let content = first.handle.activate_content().unwrap().unwrap();
 			let copy = || {
 				let copy = Producer::new(Info::from(0u64), info.clone(), cache.clone());
@@ -7407,15 +7419,15 @@ mod test {
 
 			let mut whole = copy();
 			assert!(matches!(
-				whole.write_frame(None, verbose(10)),
+				whole.write_frame(crate::Timestamp::unscaled(whole.start), verbose(10)),
 				Err(Error::ProtocolViolation)
 			));
 			assert!(whole.handle.is_aborted());
 
 			let mut batch = copy();
 			let mut frames = frame::Buffer::<2>::new();
-			frames.push(Frame::new(None, verbose(0))).unwrap();
-			frames.push(Frame::new(None, verbose(10))).unwrap();
+			frames.push(Frame::new(Timestamp::unscaled(0), verbose(0))).unwrap();
+			frames.push(Frame::new(Timestamp::unscaled(0), verbose(10))).unwrap();
 			assert!(matches!(batch.write_frames(&mut frames), Err(Error::ProtocolViolation)));
 			assert!(batch.handle.is_aborted());
 		}
@@ -7453,7 +7465,7 @@ mod test {
 		let res = compressed_group(&pool).create_object(header(MAX_CACHE_BYTES + 1));
 		assert!(matches!(res, Err(Error::FrameTooLarge)));
 
-		let res = Info::from(1u64).produce_untimed().create_object(header(1));
+		let res = Info::from(0u64).produce_untimed().create_object(header(1));
 		assert!(matches!(res, Err(Error::ProtocolViolation)));
 	}
 
@@ -7577,7 +7589,7 @@ mod test {
 		let mut frame = producer
 			.create_frame(frame::Info {
 				size: 6,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 			})
 			.unwrap();
 		frame.write(Bytes::from_static(b"foo")).unwrap();
@@ -7669,7 +7681,7 @@ mod test {
 	fn inflater_release_guard_charge_follows_its_last_job() {
 		let pool = cache::Pool::unbounded();
 		let mut group = compressed_group(&pool);
-		group.write_frame(None, verbose(0)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), verbose(0)).unwrap();
 		let group = group.close().unwrap();
 		let job = take_slices(&group.handle, 0);
 		let retained = job.release.clone();

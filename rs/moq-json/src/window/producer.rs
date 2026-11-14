@@ -71,12 +71,12 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().encoder.range()
 	}
 
-	/// Drop records from the front at `count`'s timestamp, or untimed when absent.
+	/// Drop records from the front at `count`'s timestamp (see [`Timed::at`]).
 	///
 	/// A no-op when the window is already empty, and clamped to what it holds, so a caller can trim
 	/// unconditionally.
-	pub fn pop(&mut self, count: impl Into<Timed<u64>>) -> Result<()> {
-		self.inner.lock().unwrap().pop(count.into())
+	pub fn pop(&mut self, count: Timed<u64>) -> Result<()> {
+		self.inner.lock().unwrap().pop(count)
 	}
 
 	/// Close the open group, leaving the next edit to open a replacement with a header.
@@ -127,12 +127,12 @@ impl<T> Producer<T> {
 }
 
 impl<T: Serialize> Producer<T> {
-	/// Append a record at its timestamp, or untimed when absent.
-	pub fn push<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<()>
+	/// Append a record at its timestamp (see [`Timed::at`]).
+	pub fn push<'a>(&mut self, value: Timed<&'a T>) -> Result<()>
 	where
 		T: 'a,
 	{
-		self.inner.lock().unwrap().push(value.into())
+		self.inner.lock().unwrap().push(value)
 	}
 }
 
@@ -189,6 +189,7 @@ struct Inner<T> {
 
 	/// The newest timestamp written, which a refresh restates the window at. An edit may carry an
 	/// older timestamp than its group's first frame, and a new group may not start before that one.
+	/// `None` before the first write.
 	at: Option<moq_net::Timestamp>,
 
 	/// Whether this producer still publishes, or how it ended the track.
@@ -209,7 +210,9 @@ impl<T> Inner<T> {
 		// new group, since a consumer may hold the group the frame was meant for.
 		track.write(at, &frame)?;
 		frame.commit();
-		self.at = self.at.max(at);
+		if self.at.is_none_or(|newest| at > newest) {
+			self.at = Some(at);
+		}
 
 		Ok(())
 	}
@@ -222,11 +225,14 @@ impl<T> Inner<T> {
 		let Inner { track, encoder, at, .. } = self;
 		// Two groups never share a start, so a refresh at the newest group's own start waits for a
 		// later write. Checked before encoding, since a header dropped unwritten resets the encoder.
-		if !crate::starts_past(&track.inner, *at) {
+		let Some(at) = *at else {
+			return std::task::Poll::Pending;
+		};
+		if !crate::starts_past(&track.inner, at) {
 			return std::task::Poll::Pending;
 		}
 		let frame = encoder.snapshot()?;
-		track.write(*at, &frame)?;
+		track.write(at, &frame)?;
 		frame.commit();
 		std::task::Poll::Ready(Ok(()))
 	}
@@ -305,7 +311,9 @@ impl<T: Serialize> Inner<T> {
 		let frame = encoder.push(value.value)?;
 		track.write(at, &frame)?;
 		frame.commit();
-		self.at = self.at.max(at);
+		if self.at.is_none_or(|newest| at > newest) {
+			self.at = Some(at);
+		}
 
 		Ok(())
 	}
@@ -325,18 +333,18 @@ struct Track {
 
 impl Track {
 	/// `timestamp` at the track's timescale, or [`moq_net::Error::TimestampMismatch`] when it is
-	/// missing on a timed track, present on an untimed one, or beyond what the scale can hold.
+	/// unscaled on a timed track, scaled on a scale-less one, or beyond what the scale can hold.
 	///
 	/// An edit checks this before encoding. Found by `write_frame` instead, the mismatch would
 	/// come after a header published its group, leaving an empty newest group behind, and the
 	/// dropped frame would reset the encoder, rolling a group for an edit that changed nothing.
-	fn rescale(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
+	fn rescale(&self, timestamp: moq_net::Timestamp) -> Result<moq_net::Timestamp> {
 		Ok(self.inner.info().rescale(timestamp)?)
 	}
 
 	/// Write one encoded frame at a timestamp already [rescaled](Self::rescale) to the track, rolling a
 	/// group when it is a header.
-	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
+	fn write(&mut self, timestamp: moq_net::Timestamp, encoded: &Encoded) -> Result<()> {
 		match encoded.keyframe {
 			true => self.write_header(timestamp, encoded.payload.clone()),
 			false => self.write_op(timestamp, encoded.payload.clone()),
@@ -348,8 +356,8 @@ impl Track {
 	///
 	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], refused
 	/// before the previous group closes.
-	fn write_header(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
-		let start = crate::group_start(&self.inner, timestamp);
+	fn write_header(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
+		let start = timestamp.value();
 		let mut group = self.inner.append_group(start)?;
 		self.largest = Some(start);
 
@@ -371,11 +379,12 @@ impl Track {
 	}
 
 	/// Append an op to the group the last header opened.
-	fn write_op(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
-		self.group
+	fn write_op(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
+		let group = self
+			.group
 			.as_mut()
-			.expect("the encoder only emits an op after a header opened a group")
-			.write_frame(timestamp, payload)?;
+			.expect("the encoder only emits an op after a header opened a group");
+		group.write_frame(crate::frame_time(group, timestamp), payload)?;
 		Ok(())
 	}
 

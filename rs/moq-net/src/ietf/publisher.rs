@@ -7187,7 +7187,7 @@ fn emit_datagram(
 ) -> bool {
 	let mut properties = Vec::new();
 	if let Some(timescale) = timescale {
-		let Some(timestamp) = datagram.timestamp else {
+		let Some(timestamp) = datagram.timestamp.timed() else {
 			tracing::debug!(sequence = datagram.sequence, "dropping a datagram without a timestamp");
 			return false;
 		};
@@ -7474,7 +7474,7 @@ impl FetchGroupWrite {
 			object: self.index,
 			prior: fetch_prior(self.prior, self.index)?,
 			priority: self.priority,
-			timestamp: frame.timestamp,
+			timestamp: frame.timestamp.timed(),
 			inflated: frame.inflated,
 			timescale: self.timescale,
 			version: self.version,
@@ -7546,7 +7546,7 @@ impl FetchGroupWrite {
 								object: self.index,
 								prior: fetch_prior(self.prior, self.index)?,
 								priority: self.priority,
-								timestamp: frame.timestamp,
+								timestamp: frame.timestamp.timed(),
 								inflated: frame.inflated,
 								timescale: self.timescale,
 								version: self.version,
@@ -8162,7 +8162,7 @@ impl GroupServe {
 									writer,
 									Object {
 										delta,
-										timestamp: batched.timestamp,
+										timestamp: batched.timestamp.timed(),
 										size: batched.payload.len() as u64,
 										inflated: batched.inflated,
 										status: 0,
@@ -8210,7 +8210,7 @@ impl GroupServe {
 											writer,
 											Object {
 												delta: object_delta(self.prior_object, id)?,
-												timestamp: next.timestamp,
+												timestamp: next.timestamp.timed(),
 												size: next.size,
 												inflated: next.inflated,
 												status: 0,
@@ -9001,7 +9001,7 @@ mod group_priority_test {
 		assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
 		// A later group is served meanwhile, its stream independent of the one waiting.
 		let mut later = track.create_group(group::Info { start: 1 }).unwrap();
-		later.write_frame(None, b"later".as_slice()).unwrap();
+		later.write_frame(crate::Timestamp::unscaled(later.start), b"later".as_slice()).unwrap();
 		later.close().unwrap();
 		for _ in 0..8 {
 			assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
@@ -9025,7 +9025,7 @@ mod group_priority_test {
 			.create_object(frame::Header {
 				info: frame::Info {
 					size: 1,
-					timestamp: None,
+					timestamp: crate::Timestamp::unscaled(0),
 				},
 				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
 					id: 3,
@@ -9366,7 +9366,7 @@ mod group_priority_test {
 		);
 
 		let mut edge = track.create_group(group::Info { start: 1 }).unwrap();
-		edge.write_frame(None, b"edge".as_slice()).unwrap();
+		edge.write_frame(crate::Timestamp::unscaled(edge.start), b"edge".as_slice()).unwrap();
 		edge.close().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
@@ -9525,7 +9525,7 @@ mod group_priority_test {
 		let old = track.append_next().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
-				timestamp: Some(crate::Timestamp::ZERO),
+				timestamp: crate::Timestamp::ZERO,
 				size: 2,
 			})
 			.unwrap();
@@ -10418,7 +10418,7 @@ mod serve_tests {
 		let group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		let mut frame = group
 			.create_frame(frame::Info {
-				timestamp: Some(timestamp()),
+				timestamp: timestamp(),
 				size: 4,
 			})
 			.unwrap();
@@ -10570,7 +10570,7 @@ mod serve_tests {
 		let track = broadcast.create_track("audio", track::Info::default()).unwrap();
 		let subscriber = track.subscribe(Subscription::default().with_start(0).with_end(1));
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(None, &b"bounded"[..]).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), &b"bounded"[..]).unwrap();
 		group.close().unwrap();
 		let mut datagrams = broadcast.create_datagrams("audio", Default::default()).unwrap();
 		let consumer = broadcast.consume().datagrams("audio").unwrap();
@@ -10595,7 +10595,7 @@ mod serve_tests {
 			serving.track.poll_recv_group(&kio::Waiter::noop()),
 			Poll::Ready(Ok(None))
 		));
-		datagrams.append(None, &b"live"[..]).unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), &b"live"[..]).unwrap();
 		assert!(serving.poll(&kio::Waiter::noop()).is_pending());
 		assert_eq!(session.log.datagrams.lock().unwrap().len(), 1);
 	}
@@ -10625,7 +10625,7 @@ mod serve_tests {
 				let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
 				serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
 				if !start_paused {
-					datagrams.append(None, &b"before"[..]).unwrap();
+					datagrams.append(crate::Timestamp::unscaled(0), &b"before"[..]).unwrap();
 					serve_until(serve.as_mut(), "the datagram", || {
 						h.log.datagrams.lock().unwrap().len() == 1
 					})
@@ -10634,10 +10634,10 @@ mod serve_tests {
 				}
 				serve_until(serve.as_mut(), "demand released", || datagrams.priority().is_none()).await;
 				let sent = h.log.datagrams.lock().unwrap().len();
-				datagrams.append(None, &b"paused"[..]).unwrap();
+				datagrams.append(crate::Timestamp::unscaled(1), &b"paused"[..]).unwrap();
 				request.push(&forward_update(version, 4, true));
 				serve_until(serve.as_mut(), "resumed demand", || datagrams.priority().is_some()).await;
-				datagrams.append(None, &b"after"[..]).unwrap();
+				datagrams.append(crate::Timestamp::unscaled(2), &b"after"[..]).unwrap();
 				serve_until(serve.as_mut(), "the resumed datagram", || {
 					h.log.datagrams.lock().unwrap().len() == sent + 1
 				})
@@ -13362,7 +13362,7 @@ mod serve_tests {
 					.create_object(frame::Header {
 						info: frame::Info {
 							size: payload.len() as u64,
-							timestamp: Some(timestamp()),
+							timestamp: timestamp(),
 						},
 						fields: Some(std::sync::Arc::new(crate::model::object::Fields {
 							id: 5,
@@ -15232,7 +15232,7 @@ mod serve_tests {
 		let fetching = request.consume().fetch_group(4, None);
 		let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
 		for object in 0..2 {
-			fetched.write_frame(None, format!("4-{object}").into_bytes()).unwrap();
+			fetched.write_frame(crate::Timestamp::unscaled(fetched.start), format!("4-{object}").into_bytes()).unwrap();
 		}
 		fetched.close().unwrap();
 		fetching.await.unwrap();

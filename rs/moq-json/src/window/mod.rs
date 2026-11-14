@@ -74,13 +74,30 @@ mod test {
 
 	use super::*;
 
+	/// `value` at the next key of a scale-less track, whose writes name their group keys: keys
+	/// only have to increase, so one counter serves every track a test writes.
+	fn next<V>(value: V) -> crate::Timed<V> {
+		crate::Timed::new(value, key())
+	}
+
+	/// `value` at scale-less `key`.
+	fn keyed<V>(value: V, key: u64) -> crate::Timed<V> {
+		crate::Timed::new(value, moq_net::Timestamp::unscaled(key))
+	}
+
+	/// The next key of a scale-less track; see [`next`].
+	fn key() -> moq_net::Timestamp {
+		thread_local!(static KEY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
+		moq_net::Timestamp::unscaled(KEY.with(|key| key.replace(key.get() + 1)))
+	}
+
 	#[test]
 	fn pushes_and_pops_keep_the_callers_timestamps() {
 		let (mut producer, mut groups) = producer_on(ProducerConfig::default(), timed());
 		let first = moq_net::Timestamp::from_millis(100).unwrap();
 		let second = moq_net::Timestamp::from_millis(200).unwrap();
-		producer.push(crate::Timed::from(&json!({ "n": 1 })).at(first)).unwrap();
-		producer.pop(crate::Timed::from(1u64).at(second)).unwrap();
+		producer.push(crate::Timed::new(&json!({ "n": 1 }), first)).unwrap();
+		producer.pop(crate::Timed::new(1u64, second)).unwrap();
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
 			panic!("expected the window group");
@@ -89,7 +106,7 @@ mod test {
 			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 				panic!("expected the timestamped window edit");
 			};
-			assert_eq!(frame.timestamp, Some(at));
+			assert_eq!(frame.timestamp, at);
 		}
 	}
 
@@ -98,7 +115,7 @@ mod test {
 	fn a_timed_track_refuses_a_bare_publish() {
 		let (mut producer, mut track) = producer_on(ProducerConfig::default(), timed());
 		assert!(matches!(
-			producer.push(&json!({ "n": 0 })),
+			producer.push(next(&json!({ "n": 0 }))),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
 		assert_eq!(
@@ -107,8 +124,8 @@ mod test {
 			"a refused header published a group"
 		);
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
-		producer.push(crate::Timed::from(&rec(1)).at(at)).unwrap();
-		producer.push(crate::Timed::from(&rec(2)).at(at)).unwrap();
+		producer.push(crate::Timed::new(&rec(1), at)).unwrap();
+		producer.push(crate::Timed::new(&rec(2), at)).unwrap();
 		let _finished = producer.finish().unwrap();
 		let pushed: Vec<_> = drain(&mut consumer(track))
 			.into_iter()
@@ -137,13 +154,13 @@ mod test {
 			));
 		};
 
-		refused(producer.push(crate::Timed::from(&rec(1)).at(huge)));
+		refused(producer.push(crate::Timed::new(&rec(1), huge)));
 		assert_eq!(largest(&mut track), None, "a refused header published a group");
 
-		producer.push(crate::Timed::from(&rec(1)).at(at)).unwrap();
-		refused(producer.push(crate::Timed::from(&rec(2)).at(huge)));
-		refused(producer.pop(crate::Timed::from(1u64).at(huge)));
-		producer.push(crate::Timed::from(&rec(2)).at(at)).unwrap();
+		producer.push(crate::Timed::new(&rec(1), at)).unwrap();
+		refused(producer.push(crate::Timed::new(&rec(2), huge)));
+		refused(producer.pop(crate::Timed::new(1u64, huge)));
+		producer.push(crate::Timed::new(&rec(2), at)).unwrap();
 		assert_eq!(largest(&mut track), Some(100), "a refused op rolled the group");
 
 		let _finished = producer.finish().unwrap();
@@ -168,9 +185,9 @@ mod test {
 		let mut producer = Producer::new(track, ProducerConfig::default());
 		let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 
-		producer.push(crate::Timed::from(&rec(1)).at(at(100))).unwrap();
-		producer.push(crate::Timed::from(&rec(2)).at(at(200))).unwrap();
-		producer.pop(crate::Timed::from(1u64).at(at(300))).unwrap();
+		producer.push(crate::Timed::new(&rec(1), at(100))).unwrap();
+		producer.push(crate::Timed::new(&rec(2), at(200))).unwrap();
+		producer.pop(crate::Timed::new(1u64, at(300))).unwrap();
 		let events: Vec<_> = drain_timed(&mut live).into_iter().map(|e| (e.value, e.at)).collect();
 		assert_eq!(
 			events,
@@ -180,23 +197,23 @@ mod test {
 						index: 0,
 						value: rec(1)
 					},
-					Some(at(100))
+					at(100)
 				),
 				(
 					Event::Push {
 						index: 1,
 						value: rec(2)
 					},
-					Some(at(200))
+					at(200)
 				),
-				(Event::Pop(0..1), Some(at(300))),
+				(Event::Pop(0..1), at(300)),
 			]
 		);
 
 		// A reader joining at a later group learns of the retained record from its header, so it
 		// gets the header frame's time rather than the record's original push time.
 		producer.cut().unwrap();
-		producer.push(crate::Timed::from(&rec(3)).at(at(400))).unwrap();
+		producer.push(crate::Timed::new(&rec(3), at(400))).unwrap();
 		let late = late.with_range(1..);
 		let mut late = consumer(late);
 		let events: Vec<_> = drain_timed(&mut late).into_iter().map(|e| (e.value, e.at)).collect();
@@ -208,27 +225,27 @@ mod test {
 						index: 1,
 						value: rec(2)
 					},
-					Some(at(400))
+					at(400)
 				),
 				(
 					Event::Push {
 						index: 2,
 						value: rec(3)
 					},
-					Some(at(400))
+					at(400)
 				),
 			]
 		);
 	}
 
 	#[test]
-	fn untimed_events_have_no_timestamp() {
+	fn scale_less_events_carry_their_keys() {
 		let (mut producer, track) = producer(ProducerConfig::default());
-		producer.push(&rec(1)).unwrap();
-		producer.pop(1).unwrap();
+		producer.push(next(&rec(1))).unwrap();
+		producer.pop(next(1)).unwrap();
 		let events = drain_timed(&mut consumer(track));
 		assert_eq!(events.len(), 2);
-		assert!(events.iter().all(|event| event.at.is_none()));
+		assert!(events.iter().all(|event| event.at.scale().is_none()));
 	}
 
 	#[test]
@@ -239,7 +256,7 @@ mod test {
 			.unwrap();
 		let mut groups = track.subscribe(None);
 		let mut producer = Producer::new(track, ProducerConfig::default());
-		producer.push(&json!({ "n": 1 })).unwrap();
+		producer.push(next(&json!({ "n": 1 }))).unwrap();
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
 			panic!("expected an untimed group");
@@ -247,7 +264,7 @@ mod test {
 		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("expected an untimed frame");
 		};
-		assert_eq!(frame.timestamp, None);
+		assert_eq!(frame.timestamp.scale(), None);
 	}
 
 	/// A millisecond track: the frames written here carry timestamps.
@@ -357,12 +374,12 @@ mod test {
 		}
 
 		fn push(&mut self, n: u64) {
-			self.producer.push(&rec(n)).unwrap();
+			self.producer.push(next(&rec(n))).unwrap();
 			self.read();
 		}
 
 		fn pop(&mut self, count: u64) {
-			self.producer.pop(count).unwrap();
+			self.producer.pop(next(count)).unwrap();
 			self.read();
 		}
 
@@ -425,9 +442,9 @@ mod test {
 	fn the_window_slides() {
 		let (mut producer, _track) = producer(ProducerConfig::default());
 		for n in 0..5 {
-			producer.push(&rec(n)).unwrap();
+			producer.push(next(&rec(n))).unwrap();
 			if n >= 2 {
-				producer.pop(1).unwrap();
+				producer.pop(next(1)).unwrap();
 			}
 		}
 
@@ -539,9 +556,9 @@ mod test {
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_ops(false));
 
 		for n in 0..5 {
-			producer.push(&rec(n)).unwrap();
+			producer.push(next(&rec(n))).unwrap();
 		}
-		producer.pop(3).unwrap();
+		producer.pop(next(3)).unwrap();
 		let mut subscriber = producer.consume();
 		let largest = subscriber
 			.largest()
@@ -702,13 +719,13 @@ mod test {
 		);
 
 		// A 32 byte header and a 16 byte push: under the ratio.
-		producer.push(&rec(0)).unwrap();
-		producer.push(&rec(1)).unwrap();
+		producer.push(keyed(&rec(0), 0)).unwrap();
+		producer.push(keyed(&rec(1), 1)).unwrap();
 		let _early = producer.consume();
 		assert!(producer.poll_refresh(&waiter).is_pending(), "a join under the ratio");
 
-		producer.push(&rec(2)).unwrap();
-		producer.pop(1).unwrap();
+		producer.push(keyed(&rec(2), 2)).unwrap();
+		producer.pop(keyed(1, 3)).unwrap();
 		assert!(producer.poll_refresh(&waiter).is_pending(), "no join, no refresh");
 		let mut late = producer.consume();
 		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
@@ -720,7 +737,8 @@ mod test {
 		})
 		.last()
 		.expect("the fresh group");
-		assert_eq!(fresh.start, 1);
+		// Restated at the newest key written.
+		assert_eq!(fresh.start, 3);
 		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
 			panic!("expected the restating header");
 		};
@@ -730,7 +748,7 @@ mod test {
 		);
 
 		// The next edit rides as an op in the fresh group.
-		producer.push(&rec(3)).unwrap();
+		producer.push(next(&rec(3))).unwrap();
 		let Poll::Ready(Ok(Some(op))) = fresh.poll_read_frame(&waiter) else {
 			panic!("expected an op in the fresh group");
 		};
@@ -747,9 +765,9 @@ mod test {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
 		for n in 0..4 {
-			producer.push(crate::Timed::from(&rec(n)).at(ms(100 + n))).unwrap();
+			producer.push(crate::Timed::new(&rec(n), ms(100 + n))).unwrap();
 		}
-		producer.pop(crate::Timed::from(1).at(ms(200))).unwrap();
+		producer.pop(crate::Timed::new(1, ms(200))).unwrap();
 
 		let mut late = producer.consume();
 		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
@@ -762,7 +780,7 @@ mod test {
 		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
 			panic!("expected the restating header");
 		};
-		assert_eq!(header.timestamp, Some(ms(200)));
+		assert_eq!(header.timestamp, ms(200));
 	}
 
 	/// An op may carry a timestamp older than its group's first frame, but a new group must start
@@ -774,7 +792,7 @@ mod test {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
-			producer.push(crate::Timed::from(&rec(n as u64)).at(ms(at))).unwrap();
+			producer.push(crate::Timed::new(&rec(n as u64), ms(at))).unwrap();
 		}
 
 		let mut late = producer.consume();
@@ -782,7 +800,7 @@ mod test {
 			producer.poll_refresh(&waiter).is_pending(),
 			"no group may share the open group's start"
 		);
-		producer.push(crate::Timed::from(&rec(4)).at(ms(140))).unwrap();
+		producer.push(crate::Timed::new(&rec(4), ms(140))).unwrap();
 		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
 		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
 			Poll::Ready(Ok(Some(group))) => Some(group),
@@ -794,7 +812,7 @@ mod test {
 			panic!("expected the restating header");
 		};
 		assert_eq!(fresh.start, 140);
-		assert_eq!(header.timestamp, Some(ms(140)));
+		assert_eq!(header.timestamp, ms(140));
 	}
 
 	/// Without a ratio no join asks for a group, and a finished producer stops refreshing.
@@ -802,7 +820,7 @@ mod test {
 	fn refresh_needs_a_ratio_and_an_open_track() {
 		let (mut producer, _track) = producer(ProducerConfig::default());
 		for n in 0..8 {
-			producer.push(&rec(n)).unwrap();
+			producer.push(next(&rec(n))).unwrap();
 		}
 		let _late = producer.consume();
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
@@ -835,7 +853,7 @@ mod test {
 	#[test]
 	fn an_empty_pop_writes_nothing() {
 		let (mut producer, mut track) = producer(ProducerConfig::default());
-		producer.pop(5).unwrap();
+		producer.pop(next(5)).unwrap();
 		let _finished = producer.finish().unwrap();
 
 		// Nothing was ever pushed, so there is nothing to drop and no group to publish.
@@ -852,7 +870,7 @@ mod test {
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
 		// Rewound past the first group, so the header group is published before the write fails.
-		assert!(producer.push(crate::Timed::from(&rec(1)).at(rewound())).is_err());
+		assert!(producer.push(crate::Timed::new(&rec(1), rewound())).is_err());
 		assert_eq!(producer.range(), 0..0);
 		assert!(producer.window().is_empty());
 
@@ -867,7 +885,7 @@ mod test {
 	fn the_window_stays_readable_after_finish() {
 		let (producer, mut track) = producer(ProducerConfig::default());
 		let mut clone = producer.clone();
-		clone.push(&rec(1)).unwrap();
+		clone.push(next(&rec(1))).unwrap();
 		let finished = producer.finish().unwrap();
 
 		assert_eq!(finished.window(), vec![rec(1)]);
@@ -879,7 +897,7 @@ mod test {
 		);
 		// A clone sharing the finished state refuses edits, and finishing it again does nothing.
 		assert!(matches!(
-			clone.push(&rec(2)),
+			clone.push(next(&rec(2))),
 			Err(crate::Error::Net(moq_net::Error::Closed))
 		));
 		let _finished = clone.finish().unwrap();
@@ -894,13 +912,13 @@ mod test {
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
-		producer.push(&rec(1)).unwrap();
+		producer.push(next(&rec(1))).unwrap();
 		// Another handle ends the track, so finishing it fails.
 		track.abort(moq_net::Error::Cancel).unwrap();
 
 		let err = producer.clone().finish().err().unwrap().to_string();
 		assert_eq!(producer.clone().finish().err().unwrap().to_string(), err);
-		assert_eq!(producer.push(&rec(2)).unwrap_err().to_string(), err);
+		assert_eq!(producer.push(next(&rec(2))).unwrap_err().to_string(), err);
 	}
 
 	/// A track another handle already ended still has its open group closed by this producer's
@@ -913,7 +931,7 @@ mod test {
 			.unwrap();
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
-		producer.push(&rec(1)).unwrap();
+		producer.push(next(&rec(1))).unwrap();
 		let _track = track.finish().unwrap();
 		let _finished = producer.clone().finish().unwrap();
 
@@ -927,7 +945,7 @@ mod test {
 			"the group ends rather than waiting for a producer that finished"
 		);
 		assert!(matches!(
-			producer.push(&rec(2)),
+			producer.push(next(&rec(2))),
 			Err(crate::Error::Net(moq_net::Error::Closed))
 		));
 	}
@@ -936,11 +954,11 @@ mod test {
 	#[test]
 	fn edits_after_an_abort_report_its_cause() {
 		let (mut producer, _track) = producer(ProducerConfig::default());
-		producer.push(&rec(1)).unwrap();
+		producer.push(next(&rec(1))).unwrap();
 		producer.clone().abort(moq_net::Error::Cancel).unwrap();
 
 		assert!(matches!(
-			producer.push(&rec(2)),
+			producer.push(next(&rec(2))),
 			Err(crate::Error::Net(moq_net::Error::Cancel))
 		));
 		assert!(matches!(
@@ -952,15 +970,15 @@ mod test {
 	#[test]
 	fn writes_after_another_clone_finishes_are_rejected() {
 		let (mut producer, _track) = producer(ProducerConfig::default());
-		producer.push(&rec(1)).unwrap();
+		producer.push(next(&rec(1))).unwrap();
 		let _finished = producer.clone().finish().unwrap();
 
 		assert!(matches!(
-			producer.push(&rec(2)),
+			producer.push(next(&rec(2))),
 			Err(crate::Error::Net(moq_net::Error::Closed))
 		));
 		assert!(matches!(
-			producer.pop(1),
+			producer.pop(next(1)),
 			Err(crate::Error::Net(moq_net::Error::Closed))
 		));
 		assert_eq!(producer.window(), vec![rec(1)]);
@@ -1052,11 +1070,11 @@ mod test {
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
 		producer.cut().unwrap();
-		producer.push(&rec(0)).unwrap();
-		producer.push(&rec(1)).unwrap();
+		producer.push(next(&rec(0))).unwrap();
+		producer.push(next(&rec(1))).unwrap();
 		producer.cut().unwrap();
 		producer.cut().unwrap();
-		producer.push(&rec(2)).unwrap();
+		producer.push(next(&rec(2))).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut first))) = groups.poll_recv_group(&waiter) else {

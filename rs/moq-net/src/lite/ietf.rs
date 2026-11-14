@@ -297,7 +297,7 @@ impl Records {
 				if fields
 					.properties
 					.sealed_time
-					.is_some_and(|sealed| self.timescale != Some(sealed.scale()))
+					.is_some_and(|sealed| self.timescale != sealed.scale())
 				{
 					return Err(Error::Unsupported);
 				}
@@ -827,7 +827,7 @@ mod hop_tests {
 			.create_object(frame::Header {
 				info: frame::Info {
 					size: payload.len() as u64,
-					timestamp: Some(ts(millis)),
+					timestamp: ts(millis),
 				},
 				fields: fields.map(Arc::new),
 				inflated: None,
@@ -920,7 +920,7 @@ mod hop_tests {
 			// The upstream group is still open.
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload.contiguous(0)[..], b"a");
-			assert_eq!(frame.timestamp, Some(ts(0)));
+			assert_eq!(frame.timestamp, ts(0));
 			match negotiated {
 				true => {
 					assert_eq!(fields(&frame), Some((first.id, first.properties.clone())), "{offer:?}");
@@ -1114,7 +1114,7 @@ mod hop_tests {
 		let frame = next(&mut received).await.unwrap();
 		assert_eq!(
 			(frame.timestamp, &frame.payload.contiguous(0)[..]),
-			(Some(ts(5)), &b"key"[..])
+			(ts(5), &b"key"[..])
 		);
 		assert!(frame.fields.is_none() && received.wire().is_none());
 		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
@@ -1122,7 +1122,7 @@ mod hop_tests {
 		let frame = next(&mut received).await.unwrap();
 		assert_eq!(
 			(frame.timestamp, &frame.payload.contiguous(0)[..]),
-			(Some(ts(6)), &b"delta"[..])
+			(ts(6), &b"delta"[..])
 		);
 		assert!(frame.fields.is_none());
 		assert!(next(&mut received).await.is_none());
@@ -1177,7 +1177,7 @@ mod hop_tests {
 				.await
 				.unwrap()
 				.unwrap();
-			assert_eq!(next(&mut fetched).await.unwrap().timestamp, Some(ts(100)));
+			assert_eq!(next(&mut fetched).await.unwrap().timestamp, ts(100));
 			assert!(next(&mut fetched).await.is_none());
 			let mut subscriber =
 				kio::clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
@@ -1194,7 +1194,7 @@ mod hop_tests {
 			let mut received = recv(&mut subscriber).await;
 			assert_eq!(received.start, 1);
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(frame.timestamp, Some(start), "{offer:?}");
+			assert_eq!(frame.timestamp, start, "{offer:?}");
 			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
 			drop(sessions);
@@ -1225,7 +1225,7 @@ mod hop_tests {
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(
 				(frame.timestamp, &frame.payload.contiguous(0)[..]),
-				(Some(ts(millis)), &payload(n)[..])
+				(ts(millis), &payload(n)[..])
 			);
 			assert!(frame.fields.is_none());
 		}

@@ -83,7 +83,7 @@ fn timestamp(group: u64, frame: u64) -> Timestamp {
 }
 
 /// A frame as the reader saw it.
-type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
+type Delivery = (u64, moq_net::Result<(Timestamp, Vec<u8>)>);
 
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
@@ -121,7 +121,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 }
 
 /// The next frame the reader reports, failing on an error or a hang.
-async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
+async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Timestamp, Vec<u8>) {
 	let (group, frame) = kio::clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
@@ -223,7 +223,7 @@ impl Topology {
 	async fn group_through_a(
 		&mut self,
 		rx: &mut mpsc::UnboundedReceiver<Delivery>,
-	) -> Vec<(u64, Vec<u8>, Option<Timestamp>)> {
+	) -> Vec<(u64, Vec<u8>, Timestamp)> {
 		self.s_to_b.server_transport.hold_unis();
 		let written = self.group();
 		let mut seen = Vec::new();
@@ -239,7 +239,7 @@ impl Topology {
 	async fn group_anywhere(
 		&mut self,
 		rx: &mut mpsc::UnboundedReceiver<Delivery>,
-	) -> Vec<(u64, Vec<u8>, Option<Timestamp>)> {
+	) -> Vec<(u64, Vec<u8>, Timestamp)> {
 		let written = self.group();
 		let mut seen = Vec::new();
 		for _ in &written {
@@ -262,7 +262,7 @@ impl Topology {
 }
 
 /// Every frame once, in order, with no timestamp rewinding.
-fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
+fn assert_continuous(seen: &[(u64, Vec<u8>, Timestamp)], groups: u64) {
 	let expected: Vec<_> = (0..groups)
 		.flat_map(|group| (0..FRAMES).map(move |frame| (group, payload(group, frame))))
 		.collect();
@@ -270,7 +270,7 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 	assert_eq!(frames, expected);
 	for pair in seen.windows(2) {
 		assert!(
-			pair[0].2.expect("timed") < pair[1].2.expect("timed"),
+			pair[0].2 < pair[1].2,
 			"timestamp rewound at {pair:?}"
 		);
 	}

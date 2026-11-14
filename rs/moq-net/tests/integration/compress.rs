@@ -215,7 +215,7 @@ async fn relay_serves_every_version() {
 			let mut frame = group
 				.create_frame(moq_net::frame::Info {
 					size: chunked.len() as u64,
-					timestamp: Some(Timestamp::from_millis(2).unwrap()),
+					timestamp: Timestamp::from_millis(2).unwrap(),
 				})
 				.unwrap();
 			for chunk in chunked.chunks(100) {

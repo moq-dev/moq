@@ -2914,7 +2914,7 @@ impl DatagramSend {
 	fn send(&self, datagram: crate::datagram::Datagram) -> Result<(), Error> {
 		let Ok(timestamp) = self
 			.stamp
-			.map(|stamp| stamp.wire(datagram.timestamp, datagram.sequence))
+			.map(|stamp| stamp.wire(datagram.timestamp))
 			.transpose()
 		else {
 			return Ok(());
@@ -3255,7 +3255,6 @@ impl Request for FetchServe {
 							batched.frame.payload.len() as u64,
 							*stamp,
 							prev_ts,
-							group.start,
 						)?;
 						let payload = std::mem::take(&mut batched.frame.payload);
 						if !payload.is_empty() {
@@ -3291,7 +3290,6 @@ impl Request for FetchServe {
 									next.size,
 									*stamp,
 									prev_ts,
-									group.start,
 								)?;
 								*frame = Some(next);
 								return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -4544,12 +4542,11 @@ mod announce_test {
 fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	version: Version,
-	timestamp: Option<crate::Timestamp>,
+	timestamp: crate::Timestamp,
 	inflated: Option<u64>,
 	size: u64,
 	stamp: Option<Stamp>,
 	prev_ts: &mut u64,
-	key: u64,
 ) -> Result<(), Error> {
 	// Lite-07 leads with the size plus one, leaving 0 for GROUP_END.
 	let length_first = version.has_length_first();
@@ -4560,7 +4557,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 		writer.buffer_varint(length)?;
 	}
 	if let Some(stamp) = stamp {
-		buffer_zigzag_delta(writer, stamp.wire(timestamp, key)?, prev_ts)?;
+		buffer_zigzag_delta(writer, stamp.wire(timestamp)?, prev_ts)?;
 	}
 	// Only a compressed group read in its stored form has one, and only on lite-07.
 	if let Some(inflated) = inflated {
@@ -4578,9 +4575,6 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 struct Stamp {
 	/// The wire timescale TRACK_INFO declared (see [`Version::wire_timescale`]).
 	timescale: crate::Timescale,
-	/// Whether each frame's own timestamp goes out. Lite05/06 cannot encode a scale-less
-	/// track, so a scale-less one carries its group's key instead, its frames' time.
-	timed: bool,
 }
 
 impl Stamp {
@@ -4588,17 +4582,16 @@ impl Stamp {
 	fn new(version: Version, timescale: Option<crate::Timescale>) -> Option<Self> {
 		Some(Self {
 			timescale: version.wire_timescale(timescale)?,
-			timed: timescale.is_some(),
 		})
 	}
 
-	/// A frame or datagram's `timestamp` as its raw wire value, or `key`, its group's key
-	/// or its datagram's sequence, verbatim when the track is scale-less: nothing is
-	/// stamped with a clock.
-	fn wire(self, timestamp: Option<crate::Timestamp>, key: u64) -> Result<u64, Error> {
-		let Some(timestamp) = timestamp.filter(|_| self.timed) else {
-			return Ok(key);
-		};
+	/// A frame or datagram's `timestamp` as its raw wire value. A scale-less track's is its
+	/// group's key, or its datagram's sequence, which goes out verbatim: nothing is stamped
+	/// with a clock.
+	fn wire(self, timestamp: crate::Timestamp) -> Result<u64, Error> {
+		if timestamp.scale().is_none() {
+			return Ok(timestamp.value());
+		}
 		timestamp
 			.convert(self.timescale)
 			.map(|time| time.value())
@@ -6307,7 +6300,7 @@ impl PausedBench {
 		// Past the subscribed ranges, so the run itself never serves them.
 		for start in 100..100 + paused {
 			let mut group = coverage.track.create_group(group::Info { start }).unwrap();
-			group.write_frame(None, b"x".to_vec()).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(start), b"x".to_vec()).unwrap();
 			coverage.run.pause(Paused {
 				group: group.consume(),
 				frame_start: 0,
@@ -6327,7 +6320,8 @@ impl PausedBench {
 	pub fn wake(&mut self, frames: usize) {
 		for _ in 0..frames {
 			let group = &mut self.groups[self.next];
-			group.write_frame(None, b"x".to_vec()).unwrap();
+			let key = crate::Timestamp::unscaled(group.start);
+			group.write_frame(key, b"x".to_vec()).unwrap();
 			self.next = (self.next + 1) % self.groups.len();
 		}
 		let run = &mut self.coverage.run;
@@ -6673,7 +6667,6 @@ impl GroupServe {
 											batched.frame.payload.len() as u64,
 											self.ctx.stamp,
 											&mut self.prev_ts,
-											self.group.start,
 										)
 									});
 								if let Err(err) = buffered {
@@ -6728,7 +6721,6 @@ impl GroupServe {
 													next.size,
 													self.ctx.stamp,
 													&mut self.prev_ts,
-													self.group.start,
 												)
 											});
 										if let Err(err) = buffered {
@@ -7037,10 +7029,10 @@ mod serve_group_test {
 		let stamped = Timestamp::from_millis(36_000_000).unwrap();
 		for version in [Version::Lite06, Version::Lite07] {
 			let stamp = Stamp::new(version, Some(crate::Timescale::MILLI)).unwrap();
-			assert_eq!(stamp.wire(Some(stamped), 7).unwrap(), stamped.value(), "{version}");
+			assert_eq!(stamp.wire(stamped).unwrap(), stamped.value(), "{version}");
 		}
 		let stamp = Stamp::new(Version::Lite06, None).unwrap();
-		assert_eq!(stamp.wire(None, 7).unwrap(), 7);
+		assert_eq!(stamp.wire(Timestamp::unscaled(7)).unwrap(), 7);
 		assert!(Stamp::new(Version::Lite07, None).is_none());
 	}
 
@@ -7381,7 +7373,7 @@ mod serve_group_test {
 		let old = track.append_next().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 				size: 2,
 			})
 			.unwrap();
@@ -7891,8 +7883,8 @@ mod serve_group_test {
 		let subscriber = track.subscribe(None);
 		let (mut run, _, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), subscriber);
 		let mut group = track.append_next().unwrap();
-		group.write_frame(None, &b"key"[..]).unwrap();
-		group.write_frame(None, &b"more"[..]).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), &b"key"[..]).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), &b"more"[..]).unwrap();
 		group.close().unwrap();
 		let update = |wanted_group| lite::SubscribeUpdate {
 			wanted_group,
@@ -7908,7 +7900,7 @@ mod serve_group_test {
 		run.replace(update(Some(1)));
 		assert_eq!(track.demand().wanted(), Some(1));
 		let mut group = track.append_next().unwrap();
-		group.write_frame(None, &b"key"[..]).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), &b"key"[..]).unwrap();
 		group.close().unwrap();
 		run.replace(update(Some(1)));
 		assert_eq!(track.demand().wanted(), Some(1), "answered request stays answered");
@@ -7952,7 +7944,7 @@ mod serve_group_test {
 					datagram_send(version, session)
 						.send(crate::datagram::Datagram {
 							sequence: 1,
-							timestamp: Some(Timestamp::ZERO),
+							timestamp: Timestamp::ZERO,
 							payload: bytes::Bytes::from(vec![0; size - header]),
 						})
 						.unwrap();
@@ -7974,7 +7966,7 @@ mod serve_group_test {
 			let log = session.log.clone();
 			let sent = datagram_send(version, session).send(crate::datagram::Datagram {
 				sequence: 1 << 62,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 				payload: bytes::Bytes::from_static(b"d"),
 			});
 			let carried = version == Version::Lite07;
@@ -7992,7 +7984,7 @@ mod serve_group_test {
 		for key in [4, 9] {
 			send.send(crate::datagram::Datagram {
 				sequence: key,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 				payload: bytes::Bytes::from_static(b"d"),
 			})
 			.unwrap();
@@ -8008,7 +8000,7 @@ mod serve_group_test {
 		datagram_send(Version::Lite07, session)
 			.send(crate::datagram::Datagram {
 				sequence: 4,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp: Timestamp::ZERO,
 				payload: bytes::Bytes::from_static(b"d"),
 			})
 			.unwrap();
@@ -11318,7 +11310,7 @@ mod tests {
 				let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 				assert!(!drive(&mut track_info).await, "{case}: the TRACK stream is held");
 
-				datagrams.append(None, b"between".as_slice()).unwrap();
+				datagrams.append(crate::Timestamp::unscaled(0), b"between".as_slice()).unwrap();
 
 				let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(-5)).await;
 				assert!(!drive(&mut subscribe).await, "{case}: the subscription is live");
@@ -11359,7 +11351,7 @@ mod tests {
 
 			let _track = reserved.accept(crate::track::Info::timed());
 			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
-			datagrams.append(None, b"between".as_slice()).unwrap();
+			datagrams.append(crate::Timestamp::unscaled(0), b"between".as_slice()).unwrap();
 			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
 			assert_eq!(log.lock().unwrap().len(), 1, "{version:?}");
 		}
@@ -11381,7 +11373,7 @@ mod tests {
 
 			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
-			datagrams.append(None, b"between".as_slice()).unwrap();
+			datagrams.append(crate::Timestamp::unscaled(0), b"between".as_slice()).unwrap();
 			let mut newer = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 			assert!(!drive(&mut newer).await, "{version:?}: the newer TRACK stream is held");
 
@@ -11407,7 +11399,7 @@ mod tests {
 
 			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
-			first.append(None, b"first".as_slice()).unwrap();
+			first.append(crate::Timestamp::unscaled(0), b"first".as_slice()).unwrap();
 			first.finish();
 
 			let mut current = broadcast
@@ -11416,7 +11408,7 @@ mod tests {
 				.unwrap();
 			let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
 			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
-			current.append(None, b"current".as_slice()).unwrap();
+			current.append(crate::Timestamp::unscaled(0), b"current".as_slice()).unwrap();
 
 			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
 			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");

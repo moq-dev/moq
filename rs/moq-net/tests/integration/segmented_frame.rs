@@ -57,7 +57,7 @@ async fn a_segmented_frame_crosses_whole() {
 			let mut frame = group
 				.create_frame(frame::Info {
 					size: SIZE as u64,
-					timestamp: Some(Timestamp::ZERO),
+					timestamp: Timestamp::ZERO,
 				})
 				.unwrap();
 			for chunk in payload.chunks(300_000) {

@@ -6162,6 +6162,8 @@ impl Subscriber {
 			);
 			return Ok(None);
 		}
+		// A scale-less datagram's time is its sequence.
+		let timestamp = crate::Timestamp::received(timestamp, datagram.group_id);
 		if let Err(err) = producer.insert(crate::datagram::Datagram {
 			sequence: datagram.group_id,
 			timestamp,
@@ -8117,7 +8119,7 @@ impl FetchPayloadRecv {
 		let size = wait!(Size => stream.poll_varint(waiter))?;
 		let FetchPayload { decoded, timescale, id } = payload;
 		super::object::check_frame(&decoded.properties, timescale)?;
-		let timestamp = object_time(timescale, decoded.timestamp)?;
+		let timestamp = object_time(timescale, decoded.timestamp, producer.key)?;
 		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
 		let fields = (!plain).then(|| {
 			std::sync::Arc::new(crate::model::object::Fields {
@@ -8328,15 +8330,16 @@ fn first_piece(run: std::ops::Range<u64>, group: u64, order: track::Order) -> st
 	piece.expect("the run holds the group")
 }
 
-/// A Normal object's timestamp: none on an untimed track, and required on a timed one,
-/// where an object without a Timestamp is malformed.
+/// A Normal object's timestamp: required on a timed track, where an object without a
+/// Timestamp is malformed, and its group's `key` on a scale-less one, which carries none.
 fn object_time(
 	timescale: Option<Timescale>,
 	timestamp: Option<crate::Timestamp>,
-) -> Result<Option<crate::Timestamp>, Error> {
+	key: u64,
+) -> Result<crate::Timestamp, Error> {
 	match (timescale, timestamp) {
 		(Some(_), None) => Err(Error::MalformedTrack),
-		(_, timestamp) => Ok(timestamp),
+		(_, timestamp) => Ok(crate::Timestamp::received(timestamp, key)),
 	}
 }
 
@@ -8413,7 +8416,7 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
 					}
-					let timestamp = object_time(self.timescale, *timestamp)?;
+					let timestamp = object_time(self.timescale, *timestamp, group.start)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
 					self.phase = IngestPhase::Admit { header };
 				}
@@ -8436,7 +8439,7 @@ impl GroupIngest {
 				IngestPhase::Status { timestamp } => {
 					let status = ready!(reader.poll_varint(waiter))?;
 					if status == 0 {
-						let timestamp = object_time(self.timescale, *timestamp)?;
+						let timestamp = object_time(self.timescale, *timestamp, group.start)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
 						self.phase = IngestPhase::Admit { header };
 						continue;
@@ -15104,7 +15107,7 @@ mod stitch_tests {
 	}
 
 	/// Every frame of the next group, once it finishes.
-	async fn read_group(subscriber: &mut track::Subscriber) -> (u64, Vec<(Option<Timestamp>, Vec<u8>)>) {
+	async fn read_group(subscriber: &mut track::Subscriber) -> (u64, Vec<(Timestamp, Vec<u8>)>) {
 		let mut group = subscriber
 			.recv_group()
 			.await
@@ -15179,9 +15182,9 @@ mod stitch_tests {
 		assert_eq!(
 			frames,
 			vec![
-				(Some(timestamp(0)), b"head-0".to_vec()),
-				(Some(timestamp(1)), b"head-1".to_vec()),
-				(Some(timestamp(2)), b"tail-2".to_vec()),
+				(timestamp(0), b"head-0".to_vec()),
+				(timestamp(1), b"head-1".to_vec()),
+				(timestamp(2), b"tail-2".to_vec()),
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
@@ -15217,14 +15220,14 @@ mod stitch_tests {
 		tail.expect("tail");
 		let (key, frames) = read_group(&mut consumer).await;
 		assert_eq!(key, KEY - 2);
-		assert_eq!(frames, vec![(Some(timestamp(0)), b"history".to_vec())]);
+		assert_eq!(frames, vec![(timestamp(0), b"history".to_vec())]);
 		let (key, frames) = read_group(&mut consumer).await;
 		assert_eq!(key, KEY);
 		assert_eq!(
 			frames,
 			vec![
-				(Some(timestamp(1)), b"head".to_vec()),
-				(Some(timestamp(1)), b"tail".to_vec())
+				(timestamp(1), b"head".to_vec()),
+				(timestamp(1), b"tail".to_vec())
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done));
@@ -15938,7 +15941,7 @@ mod stitch_tests {
 			let mut consumer = h.track.subscribe(None);
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-			assert_eq!(read_group(&mut consumer).await, (KEY, vec![(None, vec![42]); 3]));
+			assert_eq!(read_group(&mut consumer).await, (KEY, vec![(Timestamp::unscaled(KEY), vec![42]); 3]));
 		}
 	}
 
@@ -16052,7 +16055,10 @@ mod stitch_tests {
 
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-			assert_eq!(read_group(&mut consumer).await, (KEY + 1, vec![(None, vec![42])]));
+			assert_eq!(
+				read_group(&mut consumer).await,
+				(KEY + 1, vec![(Timestamp::unscaled(KEY + 1), vec![42])])
+			);
 
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
@@ -19305,9 +19311,9 @@ mod new_group_tests {
 			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
 			drop(state);
 			let mut group = copy.create_group(group::Info { start: key }).unwrap();
-			group.write_frame(None, b"key".as_slice()).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice()).unwrap();
 			if delta {
-				group.write_frame(None, b"delta".as_slice()).unwrap();
+				group.write_frame(crate::Timestamp::unscaled(group.start), b"delta".as_slice()).unwrap();
 			}
 			self.landed.push(group);
 		}

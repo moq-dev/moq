@@ -44,23 +44,20 @@ pub mod bench {
 /// also holds, so a larger frame is refused before it is written.
 pub(crate) const MAX_GROUP_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Where a group whose first frame is at `timestamp` starts on `track`.
-///
-/// A timed group starts at its first frame's timestamp, which the caller already rescaled to the
-/// track. A scale-less frame carries none, so its group starts one past the newest start the track
-/// holds: that stands in until every write carries a timestamp.
-pub(crate) fn group_start(track: &moq_net::track::Producer, timestamp: Option<moq_net::Timestamp>) -> u64 {
-	match timestamp {
-		Some(timestamp) => timestamp.value(),
-		None => track.largest().map_or(0, |largest| largest.group + 1),
-	}
+/// Whether a group whose first frame is at `timestamp`, rescaled to `track`, would start past
+/// every group on `track`, which a new group must: two groups never share a start. A timed group
+/// starts at its first frame's time, and a scale-less one at the key its unscaled timestamp names.
+pub(crate) fn starts_past(track: &moq_net::track::Producer, timestamp: moq_net::Timestamp) -> bool {
+	track.largest().is_none_or(|largest| timestamp.value() > largest.group)
 }
 
-/// Whether a group whose first frame is at `timestamp` would start past every group on `track`,
-/// which a new group must: two groups never share a start.
-pub(crate) fn starts_past(track: &moq_net::track::Producer, timestamp: Option<moq_net::Timestamp>) -> bool {
-	let start = group_start(track, timestamp);
-	track.largest().is_none_or(|largest| start > largest.group)
+/// `timestamp` for a frame of `group`: a scale-less track's frames carry their group's key, so a
+/// frame appended to an open group carries that group's key, whatever key the caller named.
+pub(crate) fn frame_time(group: &moq_net::group::Producer, timestamp: moq_net::Timestamp) -> moq_net::Timestamp {
+	match timestamp.scale() {
+		Some(_) => timestamp,
+		None => moq_net::Timestamp::unscaled(group.start),
+	}
 }
 
 /// Errors produced while publishing or consuming JSON.

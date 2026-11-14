@@ -154,7 +154,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		let header = frame::Header {
 			info: frame::Info {
 				size: payload.len() as u64,
-				timestamp: None,
+				timestamp: crate::Timestamp::unscaled(group.start),
 			},
 			fields,
 			inflated: None,
@@ -2088,7 +2088,7 @@ impl FrameRecv {
 				// Each group starts at its own key, so the starts increase.
 				let info = frame::Info {
 					size: size as u64,
-					timestamp: Some(crate::Timestamp::from_millis(group.start).unwrap()),
+					timestamp: crate::Timestamp::from_millis(group.start).unwrap(),
 				};
 				let frame = group.create_frame(info).unwrap();
 				let stream = Chunks {
@@ -2231,7 +2231,7 @@ impl GroupRecv {
 	/// Receive one frame whose payload is `chunks`, in order, and commit it.
 	pub fn frame(
 		&mut self,
-		timestamp: Option<crate::Timestamp>,
+		timestamp: crate::Timestamp,
 		chunks: impl IntoIterator<Item = Bytes>,
 	) -> crate::Result<()> {
 		let mut size = 0;

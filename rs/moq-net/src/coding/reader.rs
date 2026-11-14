@@ -744,7 +744,7 @@ mod tests {
 		let frame = group
 			.create_frame(crate::frame::Info {
 				size: size as u64,
-				timestamp: Some(crate::Timestamp::ZERO),
+				timestamp: crate::Timestamp::ZERO,
 			})
 			.unwrap();
 
@@ -1002,7 +1002,7 @@ mod tests {
 		let group = crate::recv::Group::new(group);
 		let header = crate::frame::Header::from(crate::frame::Info {
 			size: 1,
-			timestamp: Some(crate::Timestamp::ZERO),
+			timestamp: crate::Timestamp::ZERO,
 		});
 		let mut reader = queue(&[], crate::lite::Version::Lite05);
 		assert!(reader.poll_admit(noop, &group, &header).is_pending(), "paused to admit");
@@ -1013,7 +1013,7 @@ mod tests {
 		let mut frame = group
 			.create_frame(crate::frame::Info {
 				size: 1,
-				timestamp: Some(crate::Timestamp::ZERO),
+				timestamp: crate::Timestamp::ZERO,
 			})
 			.unwrap();
 		let mut reader = queue(&[b"x"], crate::lite::Version::Lite05);

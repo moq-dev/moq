@@ -313,7 +313,7 @@ impl Cache {
 			let chunks: Vec<_> = frame.chunks.iter().map(|chunk| driver.chunk(media, *chunk)).collect();
 			*bytes += chunks.iter().map(Bytes::len).sum::<usize>();
 			let timestamp = Timestamp::new(frame.timestamp, Timescale::MILLI).unwrap();
-			recv.frame(Some(timestamp), chunks).unwrap();
+			recv.frame(timestamp, chunks).unwrap();
 		}
 		for (track, recv) in open.into_iter().enumerate() {
 			if let Some((recv, bytes)) = recv {

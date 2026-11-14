@@ -126,7 +126,7 @@ mod timestamps {
 				producer
 					.append(crate::Timed {
 						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
-						at: Some(at),
+						at,
 					})
 					.unwrap();
 			}
@@ -136,9 +136,9 @@ mod timestamps {
 					panic!("missing state {n}")
 				};
 				assert_eq!(value.value["n"].as_u64().unwrap(), n as u64);
-				let at = value.at.unwrap();
+				let at = value.at;
 				assert_eq!(at.value(), ticks);
-				assert_eq!(at.scale(), scale);
+				assert_eq!(at.scale(), Some(scale));
 			}
 			assert!(matches!(
 				consumer.poll_next(&kio::Waiter::noop()),

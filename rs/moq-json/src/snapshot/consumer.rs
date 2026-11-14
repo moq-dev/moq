@@ -244,7 +244,7 @@ mod timestamps {
 				producer
 					.update(crate::Timed {
 						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
-						at: Some(at),
+						at,
 					})
 					.unwrap();
 				if n == 1 {
@@ -254,9 +254,9 @@ mod timestamps {
 					panic!("missing state {n}")
 				};
 				assert_eq!(value.value["n"].as_u64().unwrap(), n as u64);
-				let at = value.at.unwrap();
+				let at = value.at;
 				assert_eq!(at.value(), ticks);
-				assert_eq!(at.scale(), scale);
+				assert_eq!(at.scale(), Some(scale));
 			}
 			let _finished = producer.finish().unwrap();
 			assert!(matches!(
@@ -267,8 +267,8 @@ mod timestamps {
 				panic!("missing latest state")
 			};
 			assert_eq!(value.value["n"].as_u64().unwrap(), 2);
-			assert_eq!(value.at.unwrap().value(), 990_007);
-			assert_eq!(value.at.unwrap().scale(), scale);
+			assert_eq!(value.at.value(), 990_007);
+			assert_eq!(value.at.scale(), Some(scale));
 		}
 	}
 
@@ -286,25 +286,25 @@ mod timestamps {
 		let waiter = kio::Waiter::noop();
 		for n in 0..3 {
 			producer
-				.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}))
+				.update(crate::Timed::new(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}), moq_net::Timestamp::unscaled(n)))
 				.unwrap();
 			if n == 0 {
 				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
 					panic!("missing first state")
 				};
 				assert_eq!(value.value["n"].as_u64().unwrap(), 0);
-				assert_eq!(value.at, None);
+				assert_eq!(value.at.scale(), None);
 			}
 		}
 		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
 			panic!("missing latest state")
 		};
 		assert_eq!(value.value["n"].as_u64().unwrap(), 2);
-		assert_eq!(value.at, None);
+		assert_eq!(value.at.scale(), None);
 		assert!(consumer.poll_next(&waiter).is_pending());
 		let n = 3;
 		producer
-			.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}))
+			.update(crate::Timed::new(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}), moq_net::Timestamp::unscaled(n)))
 			.unwrap();
 		let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
 			panic!("missing new state")

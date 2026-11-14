@@ -106,7 +106,11 @@ impl Default for Wakes {
 impl Wakes {
 	/// A frame write left its group presenting up to `latest`: wake the reads it expires.
 	pub(super) fn presented(&self, latest: Timestamp) {
-		let at = micros(latest.as_micros());
+		// A group key presents nothing in time.
+		let Ok(at) = latest.as_micros() else {
+			return;
+		};
+		let at = micros(at);
 		if at < self.earliest.load(Ordering::Relaxed) {
 			return;
 		}
@@ -127,7 +131,10 @@ impl Wakes {
 
 	/// Park `waiter` until the edge reaches `reach` plus `budget`.
 	pub(super) fn watch_deadline(&self, reach: Timestamp, budget: Duration, waiter: &kio::Waiter) {
-		let deadline = micros(reach.as_micros()).saturating_add(micros(budget.as_micros()));
+		let Ok(reach) = reach.as_micros() else {
+			return;
+		};
+		let deadline = micros(reach).saturating_add(micros(budget.as_micros()));
 		// No timestamp reaches it.
 		if deadline == u64::MAX {
 			return;

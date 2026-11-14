@@ -1183,12 +1183,13 @@ impl Subscriber {
 		let Some((mut producer, timescale)) = target else {
 			return Ok(Some(dg.subscribe));
 		};
-		let timestamp = dg
-			.timestamp
-			.zip(timescale)
-			.map(|(value, scale)| Timestamp::new(value, scale))
-			.transpose()
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		// A scale-less datagram's time is its sequence.
+		let timestamp = match (dg.timestamp, timescale) {
+			(Some(value), Some(scale)) => {
+				Timestamp::new(value, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?
+			}
+			_ => Timestamp::unscaled(dg.sequence),
+		};
 		producer.insert(crate::datagram::Datagram {
 			sequence: dg.sequence,
 			timestamp,
@@ -2089,6 +2090,7 @@ impl FrameIngest {
 			}
 			None => None,
 		};
+		let timestamp = Timestamp::received(timestamp, group.key);
 		Ok(frame::Header {
 			info: frame::Info { size, timestamp },
 			fields,
@@ -3758,7 +3760,7 @@ mod tests {
 	/// A group arriving at the relay as its header lands: cached, then accounted for.
 	fn arrive(track: &track::Producer, tail: &kio::Producer<Tail>, key: u64, now: crate::time::Instant) {
 		let mut group = track.create_group(group::Info { start: key }).unwrap();
-		group.write_frame(None, &b"x"[..]).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..]).unwrap();
 		group.close().unwrap();
 		let Ok(mut ledger) = tail.write() else {
 			panic!("ledger closed")
@@ -3875,7 +3877,7 @@ mod tests {
 			let (mut track, fetching, req) = feed_fetch(3);
 			for key in [5, 6] {
 				let mut group = track.create_group(group::Info { start: key }).unwrap();
-				group.write_frame(None, &b"x"[..]).unwrap();
+				group.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..]).unwrap();
 				group.close().unwrap();
 			}
 			kio::clock::sleep(crate::tail::GRACE * 2).await;
@@ -3935,7 +3937,7 @@ mod tests {
 			);
 
 			let mut group = track.create_group(group::Info { start: 3 }).unwrap();
-			group.write_frame(None, &b"x"[..]).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..]).unwrap();
 			group.close().unwrap();
 			fetches.poll(&sub, now, &kio::Waiter::noop());
 			let group = fetching
@@ -5246,7 +5248,7 @@ mod tests {
 			if ok {
 				let mut group = track.consume().peek_group(0).unwrap();
 				let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-				assert_eq!(frame.timestamp, Some(Timestamp::from_millis(500).unwrap()), "{reason}");
+				assert_eq!(frame.timestamp, Timestamp::from_millis(500).unwrap(), "{reason}");
 			}
 		}
 	}
@@ -5358,7 +5360,7 @@ mod tests {
 			assert_eq!(group.start, 5, "{version}");
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(frame.payload.as_ref(), b"frame", "{version}");
-			assert_eq!(frame.timestamp, Timestamp::from_millis(500).ok(), "{version}");
+			assert_eq!(frame.timestamp, Timestamp::from_millis(500).unwrap(), "{version}");
 		}
 	}
 
@@ -5381,7 +5383,7 @@ mod tests {
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 			let mut group = track.consume().peek_group(5).unwrap();
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-			assert_eq!(frame.timestamp.map(Timestamp::value), Some(max as u64), "{version}");
+			assert_eq!(frame.timestamp.value(), max as u64, "{version}");
 
 			let (res, _) = receive_group(version, &[max, 1]).await;
 			assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{version}: {res:?}");
@@ -7249,7 +7251,7 @@ mod tests {
 				panic!("{version}: the datagram was not delivered");
 			};
 			assert_eq!(datagram.sequence, 1);
-			assert_eq!(datagram.timestamp, Some(Timestamp::new(1, Timescale::MILLI).unwrap()));
+			assert_eq!(datagram.timestamp, Timestamp::new(1, Timescale::MILLI).unwrap());
 
 			let max_payload = 1200 - payload(2, 0).len();
 			let oversized = payload(2, max_payload + 1);
@@ -9007,7 +9009,7 @@ mod tests {
 		let arrive = |serving: &ServeLoop, key| {
 			let mut group = serving.serving.create_group(group::Info { start: key }).unwrap();
 			for frame in [&b"key"[..], b"abc", b"d"] {
-				group.write_frame(None, frame).unwrap();
+				group.write_frame(crate::Timestamp::unscaled(group.start), frame).unwrap();
 			}
 			group.close().unwrap();
 		};

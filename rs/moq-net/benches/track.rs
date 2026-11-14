@@ -483,10 +483,10 @@ impl Aged {
 					track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)),
 				);
 				let mut held = track.append_group(0).unwrap();
-				held.write_frame(None, Bytes::from_static(b"x")).unwrap();
+				held.write_frame(moq_net::Timestamp::unscaled(held.start), Bytes::from_static(b"x")).unwrap();
 				for key in 1..groups.max(2) as u64 {
 					let mut group = track.append_group(key).unwrap();
-					group.write_frame(None, Bytes::from_static(b"x")).unwrap();
+					group.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x")).unwrap();
 					group.close().unwrap();
 				}
 				let waiter = kio::Waiter::noop();
@@ -1139,7 +1139,7 @@ fn bench_range_serving(c: &mut Criterion) {
 			// A gap between neighbors keeps every range distinct, and its group cached.
 			for key in 0..ranges * (width + 1) {
 				let mut group = track.append_group(key).unwrap();
-				group.write_frame(None, Bytes::from_static(b"x")).unwrap();
+				group.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x")).unwrap();
 				group.close().unwrap();
 			}
 			let subscription = track::Subscription::default()
@@ -1308,7 +1308,10 @@ impl Sparse {
 	}
 
 	fn hand_out(&mut self, key: u64) {
-		let timestamp = self.timed.then(|| at(key));
+		let timestamp = match self.timed {
+			true => at(key),
+			false => moq_net::Timestamp::unscaled(key),
+		};
 		let mut group = self.track.create_group(moq_net::group::Info { start: key }).unwrap();
 		group.write_frame(timestamp, Bytes::from_static(b"x")).unwrap();
 		group.close().unwrap();
@@ -1700,7 +1703,7 @@ fn bench_range_widening(c: &mut Criterion) {
 						.unwrap();
 					for key in 0..cached {
 						let mut group = track.append_group(key).unwrap();
-						group.write_frame(None, Bytes::from_static(b"x")).unwrap();
+						group.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x")).unwrap();
 						group.close().unwrap();
 					}
 					let narrow = track::Subscription::default()

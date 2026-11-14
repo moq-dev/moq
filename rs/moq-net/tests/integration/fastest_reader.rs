@@ -338,7 +338,7 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 				let payload = Bytes::from(vec![(index % 251) as u8; FRAME]);
 				let info = frame::Info {
 					size: FRAME as u64,
-					timestamp: Some(Timestamp::ZERO),
+					timestamp: Timestamp::ZERO,
 				};
 				group.ready(&info).await;
 				group.write_frame(group.at_start(), payload).unwrap();
