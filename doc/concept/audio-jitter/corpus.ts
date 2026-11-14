@@ -4,7 +4,7 @@
 // fails when the checked-in files no longer match, so the corpus cannot be edited by
 // hand to make a failing implementation pass.
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Estimator } from "./reference";
@@ -130,6 +130,15 @@ function run(
 
 const FRAME = 20;
 
+/** The first `until` ms of a recorded replay trace under `test/audio-quality/traces`. */
+function recorded(name: string, until: number): Trace {
+	const here = dirname(fileURLToPath(import.meta.url));
+	const path = join(here, "../../../test/audio-quality/traces", `${name}.json`);
+	const { arrivals } = JSON.parse(readFileSync(path, "utf8")) as { arrivals: [number, number][] };
+	const kept = arrivals.filter(([arrival]) => arrival < until);
+	return { arrival: kept.map(([arrival]) => arrival), media: kept.map(([, media]) => media) };
+}
+
 const traces: Omit<Case, "target">[] = [
 	{
 		name: "paced",
@@ -188,6 +197,12 @@ const traces: Omit<Case, "target">[] = [
 				media: [...media, ...even.media.map((v) => v + live + FRAME)],
 			};
 		})(),
+	},
+	{
+		name: "join",
+		about: "The first 30 s of a real microphone's subscription through the public relay (`relay-mic-rtt40`). The relay delivers its backlog interleaved with the live edge, and the live frames produced meanwhile queue behind it, up to 760 ms late. Every interval holding a frame due before the backlog finished arriving measured the join, not the path, so it folds nothing: the target leaves the prior for the path's own 60 to 100 ms within seconds, instead of holding 780 ms for a 20 s half-life.",
+		frame: FRAME,
+		...recorded("relay-mic-rtt40", 30_000),
 	},
 	{
 		name: "idle",

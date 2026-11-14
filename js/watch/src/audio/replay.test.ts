@@ -389,7 +389,8 @@ describe("buffered replay against the shared clock", () => {
 	});
 
 	// The rate is the lag over 500 ms, so a clock running 1% fast leaves audio trailing it by about 1% of
-	// that, and a splice every second or so: within a 20 ms frame.
+	// that, and a splice every second or so: within a 20 ms frame. Graded until the last arrival, past
+	// which audio slows down as it runs out, as far as the splice's phase there leaves it.
 	it("follows a publisher clock running 1% fast at auto", async () => {
 		const trace = paced(60, (i) => 30 - (i * 20) / 101);
 		const options: Options = {
@@ -399,7 +400,8 @@ describe("buffered replay against the shared clock", () => {
 			lookahead: 500,
 			duration: observed(60),
 		};
-		const result = await play(trace, options, (at) => at >= 10_000);
+		const last = trace[trace.length - 1].at;
+		const result = await play(trace, options, (at) => at >= 10_000 && at < last);
 		expect(result.min).toBeGreaterThanOrEqual(-HOP);
 		expect(result.max).toBeLessThan(20);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
