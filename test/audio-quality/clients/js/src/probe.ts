@@ -80,9 +80,11 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 	// node would report a perfect run as one long silence.
 	// The playhead the player last reported, and when. It reports once per render callback, so a sample
 	// projects it at real time to the instant it is read, as the native player's is.
+	// A stall ending re-anchors it too: the playhead held through the stall, so it resumes from now.
 	let reported: { timestamp: number; at: number } | undefined;
 	signals.run((effect) => {
 		const timestamp = effect.get(audio.out.timestamp);
+		effect.get(audio.out.stalled);
 		reported = timestamp === undefined ? undefined : { timestamp: timestamp.asMillis(), at: performance.now() };
 	});
 	const playhead = (at: number): number | undefined => {

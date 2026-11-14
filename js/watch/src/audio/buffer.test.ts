@@ -648,6 +648,26 @@ describe("AudioBuffer steering", () => {
 		}
 	});
 
+	// Startup holds only what the ring must from the first message, before any state report.
+	it("holds the delay less the output latency the context reports at construction", () => {
+		const sent: Message[] = [];
+		const port = Object.assign(new EventTarget(), { postMessage: (msg: Message) => sent.push(msg), start() {} });
+		const context = silent();
+		context.outputLatency = 0.12;
+		const buffer = new AudioBuffer({ port, context } as unknown as AudioWorkletNode, {
+			channels: 1,
+			rate: 1000,
+			delay: Duration.millis(300),
+			buffered: false,
+		});
+		try {
+			expect(buffer.held(Duration.millis(300))).toEqual(Duration.millis(180));
+			expect(sent[0]).toMatchObject({ type: "init", target: 180 });
+		} finally {
+			buffer.close();
+		}
+	});
+
 	// The speaker sounds what was rendered an output latency ago, so the playback timestamp is where
 	// the rendered playhead stood then, advancing at real time, and holds through a stall.
 	it("reports the playhead sounding now", () => {

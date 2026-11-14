@@ -436,9 +436,8 @@ and speaker. The output latency is the most the device reported over the last
 | Browser | `getOutputTimestamp()`, the context time sounding at a page instant, against which the clock is paired at the greatest offset, falling 0.1 ms a report | `baseLatency` plus the peak `outputLatency` |
 | Native | the callback's playback timestamp | the host's reported delay plus one device period |
 
-A fixed browser delay is still taken literally: one shorter than the jitter plus
-the output latency underruns rather than letting audio trail video. A fixed
-native delay is floored at the output latency, since audio cannot sound sooner.
+A fixed browser delay is still taken literally, and a fixed native delay is
+raised to the output latency, as [Fixed targets](#fixed-targets) describes.
 
 ## Rise, fall, startup, and the ceiling
 
@@ -546,6 +545,12 @@ target = delay
 An impossible fixed target is refused, not silently adjusted. A negative delay,
 or one beyond the track's max age, is an error at configuration time.
 Supported or refused, not warned about and continued.
+
+The one exception is the [output latency](#at-the-speaker), which no delay can
+undercut. Natively, `moq play` raises a fixed delay below its device's output
+latency to that latency, since audio cannot sound sooner. The browser keeps the
+delay as given, so one shorter than the jitter plus the output latency
+underruns rather than letting audio trail video.
 
 In the browser this is the numeric `delay` setting; natively it is
 `decode::Options::delay.min` with `decode::Options::estimate` set to `false`.

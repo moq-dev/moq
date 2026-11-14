@@ -328,6 +328,8 @@ export class AudioBuffer {
 		this.rate = rate;
 		this.#bound = props.bound ?? Duration.ZERO;
 
+		// The output latency the context already reports, so startup holds only what the ring must.
+		this.#observeOutput();
 		const held = this.held(props.delay);
 		this.#backpressure = new Backpressure(rate, buffered, held);
 

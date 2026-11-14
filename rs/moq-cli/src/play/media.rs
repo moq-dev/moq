@@ -700,12 +700,13 @@ async fn play_audio<O: Output>(
 	};
 	steer(None);
 	// What the sink holds: the shared delay, which counts the device's own
-	// latency, capped at what the sink was sized for and never below that latency.
+	// latency, never below that latency, and capped last at what the sink was
+	// sized for, so a device reporting more than that cannot get it refused.
 	let target = |sink: &<O::Speaker as Speaker>::Sink| {
 		schedule
 			.delay()
-			.min(cap)
 			.max(sink.output_latency().unwrap_or(AUDIO_BUFFER_MIN))
+			.min(cap)
 	};
 	// Anchor the sink to the shared clock: the media written so far ends at
 	// `end`, and sounds when the clock says it is due. The callback stretches
