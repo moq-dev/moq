@@ -45,4 +45,7 @@ exclude_re = [
 	# For its own identity, the node's own view answers every claim, `current`
 	# never holds it, and nothing serves it.
 	':\d+:31: replace && with \|\| in Router<N, A>::shown_now$',
+	# The nearest home with a slot at or above a presented claim always serves
+	# that claim's instance and epoch, so a looser match picks the same home.
+	'node\.rs:\d+:57: replace && with \|\| in awaits$',
 ]

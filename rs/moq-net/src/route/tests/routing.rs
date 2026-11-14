@@ -1567,12 +1567,24 @@ fn a_batch_replacing_a_streams_only_claim_keeps_its_route() {
 	};
 	router.route(up, 7, Some(Reach::Finite(advert)));
 	router.batch(up, 7, vec![(p("live/a"), Some(item(1)))], Some(1), interest);
-	assert!(router.drain().iter().any(|out| matches!(out, Out::Route { to, reach: Some(_), .. } if *to == down)));
+	assert!(
+		router
+			.drain()
+			.iter()
+			.any(|out| matches!(out, Out::Route { to, reach: Some(_), .. } if *to == down))
+	);
 
-	router.batch(up, 7, vec![(p("live/a"), None), (p("live/b"), Some(item(2)))], Some(2), interest);
+	router.batch(
+		up,
+		7,
+		vec![(p("live/a"), None), (p("live/b"), Some(item(2)))],
+		Some(2),
+		interest,
+	);
 	let out = router.drain();
 	assert!(
-		!out.iter().any(|out| matches!(out, Out::Route { to, reach: None, .. } if *to == down)),
+		!out.iter()
+			.any(|out| matches!(out, Out::Route { to, reach: None, .. } if *to == down)),
 		"{out:?}"
 	);
 	assert!(out.contains(&Out::Batch {
@@ -1676,7 +1688,11 @@ fn forwarded_request_closes(close: Node) -> usize {
 	};
 	router.route(up, 7, Some(Reach::Finite(advert)));
 	router.request(requester, 7, 1);
-	assert!(router.drain().contains(&Out::Request { to: up, id: 7, seqno: 1 }));
+	assert!(router.drain().contains(&Out::Request {
+		to: up,
+		id: 7,
+		seqno: 1
+	}));
 	assert_eq!(router.retained().pending, 1);
 	router.disconnect([close]);
 	router.retained().pending
