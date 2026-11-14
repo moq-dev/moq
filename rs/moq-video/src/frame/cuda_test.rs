@@ -215,8 +215,9 @@ async fn vulkan_cuda_convert_resize_encode() {
 		..crate::decode::Config::new()
 	};
 	let mut decoder = crate::decode::backend::open(&crate::decode::backend::Codec::H264.into(), &decode).unwrap();
+	let mut sd_decoder = crate::decode::backend::open(&crate::decode::backend::Codec::H264.into(), &decode).unwrap();
 	let mut decoded = None;
-	let mut sd_packets = 0;
+	let mut sd_decoded = 0;
 	let mut expected = None;
 
 	for i in 0..8u64 {
@@ -270,11 +271,25 @@ async fn vulkan_cuda_convert_resize_encode() {
 			.unwrap();
 		assert_eq!(packets.len(), 1);
 		assert_eq!(packets[0].timestamp, timestamp);
-		sd_packets += packets.len();
+		// Every SD picture is this frame scaled: a stale or misplaced input fails.
+		for out in sd_decoder
+			.decode_all(packets[0].payload.clone(), timestamp, i == 0)
+			.unwrap()
+		{
+			let actual = out.surface.to_i420().unwrap().into_owned();
+			assert_eq!(actual.size(), sd, "SD picture size at {i}");
+			let expected = reference(&gradient(size, Format::Rgba8, i as usize * 4), size, color)
+				.resize(sd)
+				.unwrap();
+			assert!(mae(actual.y(), expected.y()) < 8, "SD luma corrupt at {i}");
+			assert!(mae(actual.u(), expected.u()) < 8, "SD u corrupt at {i}");
+			assert!(mae(actual.v(), expected.v()) < 8, "SD v corrupt at {i}");
+			sd_decoded += 1;
+		}
 
 		slot = completion.wait().await.expect("completion worker stopped");
 	}
-	assert_eq!(sd_packets, 8);
+	assert!(sd_decoded > 0, "openh264 decoded the SD stream");
 
 	// The decoded picture is the uploaded gradient: the registered NVENC input
 	// read the converted buffer at the right pitch and planes.

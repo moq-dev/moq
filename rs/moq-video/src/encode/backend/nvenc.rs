@@ -24,8 +24,8 @@
 //!
 //! The session's input format is NV12 (NVENC's native layout). A CPU I420 frame
 //! is interleaved into an NVENC input buffer; a CUDA frame ([`Surface::Cuda`],
-//! NVDEC output, already NV12) is scaled on the GPU into the session's own
-//! [`cuda::Target`], an exact copy at the session size, so the NVDEC -> NVENC
+//! NVDEC output, already NV12) is copied, or scaled on the GPU when resizing,
+//! into the session's own [`cuda::Target`], so the NVDEC -> NVENC
 //! transcode path never touches the CPU. The target, the input buffer, and the
 //! output bitstream are each created and registered once per session: those
 //! calls take the driver's per-GPU lock, which every session in every process
@@ -96,6 +96,10 @@ pub(crate) struct Nvenc {
 	codec: Codec,
 	size: crate::Size,
 	converter: Option<cuda::Converter>,
+	/// Whether CUDA frames are scaled into the target here: only for a resizing
+	/// encoder on a driver that loads the resize kernels, so one that refuses
+	/// them keeps `Frame::resize`'s CPU fallback.
+	scales: bool,
 	ready: VecDeque<Encoded>,
 }
 
@@ -272,6 +276,7 @@ impl Nvenc {
 				.input
 				.map(|_| cuda::Converter::new(cuda.ordinal(), config.resolved_color(), NonZeroUsize::new(8).unwrap()))
 				.transpose()?,
+			scales: config.resize.is_some() && cuda::scales(&cuda),
 			target: None,
 			input: None,
 			output: None,
@@ -434,7 +439,7 @@ impl Backend for Nvenc {
 	}
 
 	fn scales(&self, surface: &Surface) -> bool {
-		matches!(surface, Surface::Cuda(_))
+		self.scales && matches!(surface, Surface::Cuda(_))
 	}
 
 	fn name(&self) -> &'static str {

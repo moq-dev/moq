@@ -89,6 +89,14 @@ fn kernels(ctx: &Arc<CudaContext>) -> Result<Arc<Kernels>, Error> {
 		.map_err(|e| Error::codec(anyhow::anyhow!("CUDA resize unavailable: {e}")))
 }
 
+/// Whether the driver loads the resize kernels on `ctx`'s device. A driver can
+/// refuse the vendored PTX, so a consumer that would scale on the GPU checks
+/// once and otherwise leaves scaling to [`Surface::resize`](crate::Surface::resize),
+/// which falls back to the CPU.
+pub(crate) fn scales(ctx: &Arc<CudaContext>) -> bool {
+	kernels(ctx).is_ok()
+}
+
 /// An owned device allocation. Plain `cuMemAlloc` on purpose: NVENC's
 /// resource registration rejects stream-ordered pool memory
 /// (`cuMemAllocAsync`), which is what cudarc's `CudaSlice` uses on any GPU
@@ -311,6 +319,44 @@ impl Frame {
 	/// Scale this frame into `dst` with the box-filter kernels on `stream`, a
 	/// stream of this frame's device, and wait for them. At the same size the
 	/// box filter is an exact copy.
+	/// Copy into `dst`, the same size, on `stream` and wait for it. The copy
+	/// engine needs no PTX, unlike [`scale_into`](Self::scale_into).
+	fn copy_into(&self, dst: &Self, stream: &Arc<CudaStream>) -> Result<(), Error> {
+		stream
+			.context()
+			.bind_to_thread()
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;
+		// NV12 keeps its chroma rows right after the luma rows at the same pitch,
+		// so one copy of 3/2 the height moves both planes.
+		let copy = cudarc::driver::sys::CUDA_MEMCPY2D {
+			srcXInBytes: 0,
+			srcY: 0,
+			srcMemoryType: cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+			srcHost: std::ptr::null(),
+			srcDevice: self.buf.ptr,
+			srcArray: std::ptr::null_mut(),
+			srcPitch: self.pitch as usize,
+			dstXInBytes: 0,
+			dstY: 0,
+			dstMemoryType: cudarc::driver::sys::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+			dstHost: std::ptr::null_mut(),
+			dstDevice: dst.buf.ptr,
+			dstArray: std::ptr::null_mut(),
+			dstPitch: dst.pitch as usize,
+			WidthInBytes: self.width as usize,
+			Height: self.height as usize * 3 / 2,
+		};
+		// SAFETY: both buffers are live NV12 allocations of `width` x `height` at
+		// their own pitch, which is at least `width`, so every row stays inside.
+		unsafe { cudarc::driver::sys::cuMemcpy2DAsync_v2(&copy, stream.cu_stream()) }
+			.result()
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA copy: {e:?}")))?;
+		// As for `scale_into`: NVENC orders only against the default stream.
+		stream
+			.synchronize()
+			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA copy sync: {e:?}")))
+	}
+
 	fn scale_into(&self, dst: &Self, stream: &Arc<CudaStream>) -> Result<(), Error> {
 		let kernels = kernels(&self.buf.ctx)?;
 		let (width, height) = (dst.width, dst.height);
@@ -578,10 +624,10 @@ impl Target {
 		&self.frame
 	}
 
-	/// Scale `src` into the buffer, an exact copy at the same size, and wait
-	/// for it, so the consumer may read the buffer next. Fails without touching
-	/// the CPU when `src` lives on another device or the driver refuses the
-	/// kernels.
+	/// Copy or scale `src` into the buffer and wait for it, so the consumer may
+	/// read the buffer next. A copy needs no kernel; scaling fails without
+	/// touching the CPU when the driver refuses the kernels (see [`scales`]).
+	/// Either fails when `src` lives on another device.
 	pub(crate) fn fill(&mut self, src: &Frame) -> Result<(), Error> {
 		if src.buf.ctx.ordinal() != self.frame.buf.ctx.ordinal() {
 			return Err(Error::Unsupported(format!(
@@ -590,7 +636,11 @@ impl Target {
 				self.frame.buf.ctx.ordinal()
 			)));
 		}
-		src.scale_into(&self.frame, &self.stream)?;
+		if src.size() == self.frame.size() {
+			src.copy_into(&self.frame, &self.stream)?;
+		} else {
+			src.scale_into(&self.frame, &self.stream)?;
+		}
 		self.frame.color = src.color;
 		Ok(())
 	}
