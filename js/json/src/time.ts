@@ -8,9 +8,10 @@ import * as Moq from "@moq/net";
  * so it always does. Mirrors the Rust `starts_past`.
  */
 export function startsPast(track: Moq.Track.Producer, at: Moq.Time.Timestamp): boolean {
-	if (at.scale !== undefined) return true;
+	const key = Moq.Time.keyOf(at);
+	if (key === undefined) return true;
 	const largest = track.largest();
-	return largest === undefined || BigInt(at.value) > largest.group;
+	return largest === undefined || key > largest.group;
 }
 
 /**
@@ -19,9 +20,9 @@ export function startsPast(track: Moq.Track.Producer, at: Moq.Time.Timestamp): b
  * otherwise). The sequences it passes are skipped, as `appendGroup` skips them.
  */
 export function openGroup(track: Moq.Track.Producer, at: Moq.Time.Timestamp): Moq.Group.Producer {
-	if (at.scale !== undefined) return track.appendGroup();
+	const key = Moq.Time.keyOf(at);
+	if (key === undefined) return track.appendGroup();
 	if (!startsPast(track, at)) throw new Moq.Error.TimestampMismatch();
-	const key = BigInt(at.value);
 	const largest = track.largest();
 	if (largest !== undefined && largest.group + 1n < key) track.skipGroups(largest.group + 1n, key);
 	return track.createGroup(key);

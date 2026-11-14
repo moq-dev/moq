@@ -47,9 +47,8 @@ function assertTimestampValue(value: number): void {
 const MAX_SAFE_KEY = BigInt(Number.MAX_SAFE_INTEGER);
 
 /**
- * The group key of an unscaled timestamp, or `undefined` when it is scaled.
- *
- * @internal
+ * The group key of an unscaled timestamp, exact at any u64, or `undefined` when it is scaled.
+ * Unlike {@link Timestamp.value}, it never throws on a key past `Number.MAX_SAFE_INTEGER`.
  */
 export let keyOf: (timestamp: Timestamp) => bigint | undefined;
 

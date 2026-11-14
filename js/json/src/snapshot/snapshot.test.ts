@@ -299,6 +299,19 @@ test("live consumer sees each update", async () => {
 	}
 });
 
+test("a key past the safe number range opens its group", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track });
+	const consumer = new Consumer<Value>({ track });
+	const wide = 1n << 53n;
+
+	producer.update(keyed({ a: 1 }, wide));
+	expect(track.largest()?.group).toBe(wide);
+	expect((await consumer.next())?.value).toEqual({ a: 1 });
+	producer.update(keyed({ a: 2 }, wide + 1n));
+	expect((await consumer.next())?.value).toEqual({ a: 2 });
+});
+
 test("unchanged value writes nothing", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });
