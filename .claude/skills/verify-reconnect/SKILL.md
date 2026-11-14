@@ -29,7 +29,7 @@ quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RedirectLost.cfg
 ```
 
-The first checks every rule but the one with an open finding, over four sessions: about 1.7M distinct states, under a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 300k states. Both pass at the sync commit. The last fails at the sync commit, on its finding below, within seconds. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
+The first checks every rule but the one with an open finding, over four sessions: about 1.7M distinct states, under a minute. The second checks the same rules under `Restart::Wait` over three sessions: about 290k states. Both pass at the sync commit. The last fails at the sync commit, on its finding below, within seconds. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 
