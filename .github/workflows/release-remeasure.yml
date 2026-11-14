@@ -1,0 +1,88 @@
+name: Release remeasure
+
+# Run trusted main after either publisher completes, including partial failures.
+# This works before the next cut brings the workflow to release. Never execute
+# the triggering head.
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] only trusted main is executed.
+    workflows: [Release RS, Release JS]
+    types: [completed]
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Measure without opening or queueing a PR
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-remeasure
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  remeasure:
+    if: >-
+      github.repository == 'moq-dev/moq' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.head_repository.full_name == github.repository &&
+        contains(fromJSON('["push","workflow_dispatch"]'), github.event.workflow_run.event)))
+    runs-on: ubuntu-latest
+    environment: bot
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - name: Re-measure published pins
+        id: measure
+        run: nix develop --command just gh remeasure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REMEASURE_FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+          HARNESS_RUNS: ${{ runner.temp }}/remeasure
+      - name: Upload measurements
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-remeasure
+          path: |
+            .tmp/remeasure
+            ${{ runner.temp }}/remeasure
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+      - name: Generate moq-bot token
+        if: ${{ steps.measure.outputs.changed == 'true' && github.ref == 'refs/heads/main' && !inputs.dry-run }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq
+          permission-contents: write
+          permission-pull-requests: write
+          permission-merge-queues: write
+      - name: Propose measured pins
+        if: ${{ steps.token.outputs.token != '' }}
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        id: pr
+        with:
+          token: ${{ steps.token.outputs.token }}
+          branch: release/planned-breaks
+          base: main
+          add-paths: test/interop/compat/planned-breaks.json
+          commit-message: 'chore(interop): remeasure planned breaks against published packages'
+          title: 'chore(interop): remeasure planned breaks against published packages'
+          body-path: .tmp/remeasure/body.md
+      - name: Request checked landing
+        if: ${{ steps.pr.outputs.pull-request-number != '' }}
+        run: nix develop --command quest merge "$PR_URL" --land "$PR_HEAD"
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+          PR_HEAD: ${{ steps.pr.outputs.pull-request-head-sha }}

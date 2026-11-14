@@ -308,9 +308,45 @@ impl Client {
 		Connection::new(self.clone(), addrs.into())
 	}
 
-	#[cfg(feature = "quic")]
-	pub(crate) fn quic_closed(&self) -> bool {
-		self.quic.as_ref().is_some_and(|quic| quic.is_closed())
+	/// With no transport compiled in, no URL can be dialed.
+	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")))]
+	pub(crate) fn reaches(&self, _url: &Url) -> bool {
+		false
+	}
+
+	/// Whether this client has a transport that can ever dial `url`, decided from its scheme
+	/// and the backends and certificate it was built with, not from a failed dial.
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
+	pub(crate) fn reaches(&self, url: &Url) -> bool {
+		#[cfg(test)]
+		if self.dialer.is_some() {
+			return true;
+		}
+		#[cfg(feature = "sim")]
+		if self.network.is_some() {
+			return true;
+		}
+		let scheme = url.scheme();
+		if self.client_cert && matches!(scheme, "http" | "ws" | "tcp" | "unix") {
+			return false;
+		}
+		// An explicitly closed QUIC endpoint cannot open another socket.
+		#[cfg(feature = "quic")]
+		let quic = self.quic.as_ref().is_some_and(|quic| !quic.is_closed());
+		#[cfg(not(feature = "quic"))]
+		let quic = false;
+		#[cfg(feature = "websocket")]
+		let websocket = self.websocket.resolve().enabled;
+		#[cfg(not(feature = "websocket"))]
+		let websocket = false;
+		match scheme {
+			"tcp" | "tls" => cfg!(feature = "tcp"),
+			"unix" => cfg!(all(feature = "uds", unix)),
+			"ws" | "wss" => websocket,
+			"http" | "https" => quic || websocket,
+			"moqt" | "moql" => quic,
+			_ => false,
+		}
 	}
 
 	#[cfg(feature = "quic")]

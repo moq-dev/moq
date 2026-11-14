@@ -28,7 +28,6 @@ import {
 	hasRanges,
 	hasRefresh,
 	hasSkip,
-	hasWarm,
 	resolvesStart,
 	Version,
 } from "./version.ts";
@@ -41,27 +40,6 @@ async function decodeUpdate(r: Reader, version: Version): Promise<bigint> {
 /** Encode the `Update` number, dropping it on a wire without the field. */
 async function encodeUpdate(w: Writer, version: Version, update: bigint) {
 	if (hasSkip(version)) await w.u62(update);
-}
-
-// `Serves Type`: whom a pull serves. A relay names the one relay its demand traces back to.
-const SERVES_UNKNOWN = 0n;
-const SERVES_ALONE = 1n;
-const SERVES_RELAY = 2n;
-
-/** Encode whom a pull serves: Alone, since this endpoint forwards nothing and every pull is its own. */
-async function encodeServes(w: Writer, version: Version) {
-	if (hasWarm(version)) await w.u62(SERVES_ALONE);
-}
-
-/** Decode whom a pull serves, and ignore it: only a relay choosing a parent per broadcast prices by it. */
-async function decodeServes(r: Reader, version: Version) {
-	if (!hasWarm(version)) return;
-	const serves = await r.u62();
-	if (serves === SERVES_RELAY) {
-		if ((await r.u62()) === 0n) throw new ProtocolViolation("serves names relay 0");
-	} else if (serves !== SERVES_UNKNOWN && serves !== SERVES_ALONE) {
-		throw new ProtocolViolation(`unknown serves type ${serves}`);
-	}
 }
 
 /**
@@ -717,7 +695,6 @@ export class SubscribeUpdate {
 				}
 				await encodeUpdate(w, version, this.update);
 				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
-				await encodeServes(w, version);
 				break;
 		}
 	}
@@ -743,7 +720,6 @@ export class SubscribeUpdate {
 				}
 				const update = await decodeUpdate(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
-				await decodeServes(r, version);
 				return new SubscribeUpdate({
 					wantedGroup: wanted === 0n ? undefined : wanted - 1n,
 					priority,
@@ -877,7 +853,6 @@ export class Subscribe {
 				break;
 		}
 		await encodeUpdate(w, version, this.update);
-		await encodeServes(w, version);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
@@ -898,7 +873,6 @@ export class Subscribe {
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
 				const update = await decodeUpdate(r, version);
-				await decodeServes(r, version);
 				return new Subscribe({
 					id,
 					broadcast,

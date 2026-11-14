@@ -284,7 +284,7 @@ if ((${#failed[@]})); then
     exit 1
 fi
 if [[ -n "$remeasure" ]]; then
-    bun "$DIR/compat/resolve.ts" remeasure "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/measured"
+    bun "$DIR/compat/resolve.ts" remeasure "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/measured" | tee "${REMEASURE_REPORT:-$HARNESS_RUN/remeasure.txt}"
     bun x biome format --write "$DIR/compat/planned-breaks.json"
     echo "rewrote compat/planned-breaks.json: review the diff and refresh each reason"
 fi

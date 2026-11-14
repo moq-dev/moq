@@ -1923,7 +1923,14 @@ impl<R: Request> RequestServe<R> {
 			return Poll::Ready(Err(Error::Unauthorized));
 		}
 		loop {
-			ready!(self.budget.poll_yield(waiter));
+			if self.budget.poll_yield(waiter).is_pending() {
+				// A reply that never stalls only parks here, so bill what was delivered: unsettled
+				// frames would otherwise pile up for the whole transfer.
+				if let Some(stream) = &mut self.stream {
+					stream.writer.poll_settle(waiter);
+				}
+				return Poll::Pending;
+			}
 			// Once answered, the requester's FIN is the normal end, not a cancel.
 			if matches!(self.state, RequestState::Resolve { .. } | RequestState::Serve(_))
 				&& let Poll::Ready(next) = self.poll_requester(waiter)
@@ -1995,7 +2002,13 @@ impl<R: Request> RequestServe<R> {
 					self.state = RequestState::Serve(request);
 				}
 				RequestState::Serve(request) => {
-					if ready!(request.poll(&self.shared, &mut stream.writer, waiter))?.is_break() {
+					let step = request.poll(&self.shared, &mut stream.writer, waiter);
+					// Parked, perhaps right after writing a frame: an acknowledgement then wakes
+					// this to bill it.
+					if step.is_pending() {
+						stream.writer.poll_settle(waiter);
+					}
+					if ready!(step)?.is_break() {
 						let RequestState::Serve(request) =
 							std::mem::replace(&mut self.state, RequestState::Finish { finished: false })
 						else {
@@ -2647,7 +2660,8 @@ impl Request for SubscribeServe {
 				} => {
 					if send.is_none() {
 						let info = ready!(consumer.poll_info(waiter))?;
-						*send = Some(DatagramSend::new(shared, *id, info, *priority));
+						let stats = consumer.delegate();
+						*send = Some(DatagramSend::new(shared, *id, info, *priority, stats));
 					}
 					let send = send.as_ref().expect("set above");
 					return match ready!(consumer.poll_recv(waiter))? {
@@ -2908,7 +2922,8 @@ impl LegacyDatagrams {
 				return Poll::Ready(false);
 			};
 			let info = info.with_timescale(self.timescale);
-			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority));
+			let stats = self.consumer.delegate();
+			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority, stats));
 		}
 		let send = self.send.as_ref().expect("set above");
 		match ready!(self.consumer.poll_recv(waiter)) {
@@ -2931,10 +2946,12 @@ struct DatagramSend {
 	publisher: i8,
 	/// The subscription's send group, or `None` on a transport without groups.
 	group: Option<GroupOf<Transport>>,
+	/// Counts each datagram the transport takes, under the session's current tier.
+	stats: crate::stats::Scope,
 }
 
 impl DatagramSend {
-	fn new(shared: &Shared, id: u64, info: datagram::Info, priority: i8) -> Self {
+	fn new(shared: &Shared, id: u64, info: datagram::Info, priority: i8, stats: crate::stats::Scope) -> Self {
 		let session = shared.session.clone();
 		let group = session.send_group(crate::priority::group(priority, info.priority));
 		Self {
@@ -2945,6 +2962,7 @@ impl DatagramSend {
 			runtime: shared.runtime.clone(),
 			publisher: info.priority,
 			group,
+			stats,
 		}
 	}
 
@@ -2971,6 +2989,7 @@ impl DatagramSend {
 			return Ok(());
 		};
 		let sequence = datagram.sequence;
+		let size = datagram.payload.len();
 		let body = lite::Datagram {
 			subscribe: self.id,
 			sequence,
@@ -2989,7 +3008,9 @@ impl DatagramSend {
 			group: self.group.as_ref(),
 			priority: crate::priority::in_group(sequence, 0, Order::Descending),
 		};
-		let _ = self.session.send_datagram(body, options);
+		if self.session.send_datagram(body, options).is_ok() {
+			self.stats.meter().datagram(size as u64);
+		}
 		Ok(())
 	}
 }
@@ -3068,7 +3089,8 @@ impl Request for DatagramServe {
 			// Ahead of the datagrams, which a subscriber drops until it lands.
 			writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
 			writer.buffer(&lite::DatagramsInfo::from(info))?;
-			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority));
+			let stats = self.consumer.delegate();
+			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority, stats));
 		}
 		ready!(writer.poll_flush(waiter))?;
 		let send = self.send.as_ref().expect("set above");
@@ -3248,6 +3270,7 @@ impl Request for FetchServe {
 					if shared.version.has_compression() {
 						group = group.compressed();
 					}
+					writer.bill(group.delegate());
 					let capped = msg.end_frame.is_some();
 					let timescale = stamp.map(|stamp| stamp.timescale);
 					let records = lite::ietf::Records::new(ietf, capped, timescale);
@@ -4619,6 +4642,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if !length_first {
 		writer.buffer_varint(size)?;
 	}
+	writer.frame(size);
 	Ok(())
 }
 
@@ -6420,6 +6444,8 @@ struct GroupServe {
 	state: GroupState,
 	// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
+	/// Bills the group's payload as each stream delivers it.
+	meter: crate::stats::Meter,
 }
 
 #[cfg_attr(
@@ -6466,10 +6492,11 @@ impl GroupServe {
 		group: group::Consumer,
 	) -> Self {
 		// A lite-07 peer receives a compressed group as stored, others inflated.
-		let group = match ctx.version.has_compression() {
+		let mut group = match ctx.version.has_compression() {
 			true => group.compressed(),
 			false => group,
 		};
+		let meter = group.delegate();
 		let rewind = Self::yields(&ctx).then(|| group.clone());
 		Self {
 			rewind,
@@ -6484,6 +6511,7 @@ impl GroupServe {
 			prev_ts: 0,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
+			meter,
 		}
 	}
 
@@ -6540,6 +6568,7 @@ impl GroupServe {
 		};
 		self.settle_open(true);
 		let mut writer = Writer::new(stream, self.ctx.version);
+		writer.bill(self.meter.clone());
 
 		let msg = lite::Group {
 			subscribe: self.ctx.id,
@@ -6575,6 +6604,18 @@ impl GroupServe {
 	/// a routine cancel. Without this the Writer's Drop fallback would report
 	/// every failure as Cancel.
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let res = self.poll_serving(waiter);
+		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
+		// bill it, rather than the next frame or the stream's end.
+		if res.is_pending()
+			&& let GroupState::Serve { writer, .. } = &mut self.state
+		{
+			writer.poll_settle(waiter);
+		}
+		res
+	}
+
+	fn poll_serving(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
 			// Queue and SUBSCRIBE_UPDATE priority changes apply on every pass, whatever
 			// the stream is blocked on, including a FIN awaiting its acknowledgement
@@ -7136,6 +7177,169 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// Egress counts only payload the transport took: a group reset while its frames wait in
+	/// the read-ahead batch bills none of them, and one served whole bills every byte.
+	#[kio::test]
+	async fn egress_bills_only_payload_the_transport_took() {
+		const FRAME: usize = 1000;
+		const FRAMES: usize = 4;
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let billed = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.filter(|(_, role, _)| *role == crate::stats::Role::Publisher)
+				.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
+				.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
+		};
+		// The payload bytes among `writes`: everything but the frames' headers.
+		let payload = |writes: &[u8]| writes.iter().filter(|byte| **byte == b'x').count() as u64;
+
+		for (budget, sent_frames) in [(2, 0), (usize::MAX, FRAMES)] {
+			let budget = kio::Producer::new(budget);
+			let session = SinkSession::stepped_uni(budget.consume());
+			let log = session.log.clone();
+			let steer = kio::Producer::new(Steer::default());
+			let subscription = Subscription {
+				session: crate::driver::Transport::new(session.clone()),
+				id: 0,
+				track_name: "test".into(),
+				priority: PriorityQueue::default(),
+				publisher: 0,
+				group: None,
+				steer: steer.consume(),
+				steer_seen: Steer::default(),
+				version: Version::Lite06,
+				stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
+				runtime: crate::time::sim(),
+				outcomes: Default::default(),
+				ietf: false,
+			};
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut subscriber = track.subscribe(None);
+			let mut group = track.append_group().unwrap();
+			for _ in 0..FRAMES {
+				group.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
+			}
+			group.finish().unwrap();
+			let before = billed();
+			let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
+			let consumer = subscriber
+				.recv_group()
+				.await
+				.unwrap()
+				.expect("the group")
+				.with_meter(meter);
+
+			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+			let serve = subscription.serve_group(0, 0, handle, consumer);
+			if sent_frames == FRAMES {
+				serve.await.unwrap();
+			} else {
+				let mut serve = Box::pin(serve);
+				assert!(
+					futures::poll!(serve.as_mut()).is_pending(),
+					"the transport took 2 writes"
+				);
+				drop(serve);
+				assert!(!log.resets().is_empty(), "the unserved group resets");
+			}
+			let (bytes, frames) = billed();
+			let sent = payload(&log.writes.lock().unwrap());
+			assert_eq!(sent, (sent_frames * FRAME) as u64, "budget {:?}", *budget.read());
+			assert_eq!((bytes - before.0, frames - before.1), (sent, sent_frames as u64));
+		}
+	}
+
+	/// A group left open after its last frame bills that frame once the transport acknowledges
+	/// it. Nothing else happens on the stream, and an acknowledgement never wakes `poll_closed`
+	/// (as on QUIC), so the serve loop must be waiting on delivery while it waits for a frame.
+	#[kio::test]
+	async fn an_idle_group_bills_its_last_frame_when_acknowledged() {
+		const FRAME: usize = 1000;
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let billed = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.filter(|(_, role, _)| *role == crate::stats::Role::Publisher)
+				.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
+				.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
+		};
+		let session = SinkSession::default();
+		let log = session.log.clone();
+		log.ack(0);
+		let steer = kio::Producer::new(Steer::default());
+		let subscription = Subscription {
+			session: crate::driver::Transport::new(session.clone()),
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			publisher: 0,
+			group: None,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
+			version: Version::Lite06,
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
+			runtime: crate::time::sim(),
+			outcomes: Default::default(),
+			ietf: false,
+		};
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut subscriber = track.subscribe(None);
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
+		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
+		let consumer = subscriber
+			.recv_group()
+			.await
+			.unwrap()
+			.expect("the group")
+			.with_meter(meter);
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = Box::pin(subscription.serve_group(0, 0, handle, consumer));
+		let woken = Arc::new(Woken::default());
+		let waker = std::task::Waker::from(woken.clone());
+		let mut cx = std::task::Context::from_waker(&waker);
+		assert!(serve.as_mut().poll(&mut cx).is_pending(), "the group stays open");
+		assert!(
+			log.writes.lock().unwrap().iter().filter(|byte| **byte == b'x').count() == FRAME,
+			"the transport took the frame"
+		);
+		assert_eq!(billed(), (0, 0), "nothing is acknowledged yet");
+
+		woken.0.store(false, Ordering::Relaxed);
+		log.ack(u64::MAX);
+		assert!(
+			woken.0.load(Ordering::Relaxed),
+			"the acknowledgement wakes the serve loop"
+		);
+		assert!(serve.as_mut().poll(&mut cx).is_pending(), "the group stays open");
+		assert_eq!(billed(), (FRAME as u64, 1));
+		drop(group);
+	}
+
+	/// A waker that records being woken.
+	#[derive(Default)]
+	struct Woken(std::sync::atomic::AtomicBool);
+
+	impl std::task::Wake for Woken {
+		fn wake(self: Arc<Self>) {
+			self.0.store(true, Ordering::Relaxed);
+		}
 	}
 
 	/// A group parked at its tail when the budget gives up resets with `Old`. A FIN would
@@ -7782,6 +7986,7 @@ mod serve_group_test {
 			runtime: crate::time::sim(),
 			publisher: 0,
 			group,
+			stats: crate::stats::Scope::default(),
 		}
 	}
 
@@ -11940,6 +12145,99 @@ mod tests {
 		let request = dynamic.requested_fill_group().await.unwrap();
 		assert_eq!(request.frame_start(), 0, "a cold relay keeps the prefix");
 		drop(run);
+	}
+
+	/// A FETCH served from cache never stalls, so it bills what was delivered each time its
+	/// loop yields rather than only at its end, when it would bill a whole transfer at once.
+	#[kio::test]
+	async fn a_fetch_that_never_stalls_bills_as_it_yields() {
+		const VERSION: Version = Version::Lite06;
+		const FRAMES: usize = 1024;
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let billed = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.filter(|(_, role, _)| *role == crate::stats::Role::Publisher)
+				.map(|(_, _, traffic)| traffic.frames)
+				.sum::<u64>()
+		};
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track("video", track::Info::timed())
+			.unwrap();
+		broadcast.announce().unwrap();
+		let mut group = track.append_group().unwrap();
+		for _ in 0..FRAMES {
+			group.write_frame(crate::Timestamp::ZERO, b"x".to_vec()).unwrap();
+		}
+		group.finish().unwrap();
+
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let session = registry
+			.tier(crate::stats::Tier::default())
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("viewer")));
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(ScriptedSession::new(Vec::new())),
+			origin: origin.consume().with_stats(session),
+			version: VERSION,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			auth: crate::auth::Link::new(false),
+			peer_grant: Default::default(),
+			client: false,
+			subscriptions: Default::default(),
+			estimate: kio::Producer::default().weak(),
+		});
+		let mut script = Vec::new();
+		lite::Fetch {
+			instance: None,
+			node: 0,
+			broadcast: crate::Path::from_static("room"),
+			track: "video".into(),
+			priority: 0,
+			max_delay: None,
+			group: 0,
+			start_frame: 0,
+			end_frame: None,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<Transport, Version> {
+			writer: Writer::new(crate::transport::boxed::SendStream::new(send), VERSION),
+			reader: crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION),
+		};
+		let mut serve = RequestServe::<FetchServe>::new(publisher.shared.clone(), stream);
+
+		// The most frames billed while the fetch was parked, before its end.
+		let mut parked = 0;
+		let served = kio::clock::timeout(
+			Duration::from_millis(1),
+			kio::wait(|waiter| {
+				let step = serve.poll(waiter);
+				if step.is_pending() {
+					parked = parked.max(billed());
+				}
+				step
+			}),
+		)
+		.await;
+		assert!(served.is_ok(), "the fetch never finished");
+		assert_eq!(billed(), FRAMES as u64, "the whole group, once served");
+		assert!(parked > 0, "nothing billed before the end");
 	}
 
 	/// A FETCH whose own budget gives up on its group partway resets as too old: a FIN

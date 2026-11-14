@@ -1,176 +1,97 @@
-//! Cache-aware routing over the route layer, as `quest/m3/cache-routing/README.md`
-//! decides it.
+//! Cache-aware routing on the path prototype in `paths.rs`, as
+//! `quest/m3/cache-routing/README.md` decides it: a warm route is per broadcast,
+//! propagates, and is kept free of loops by its path, with what
+//! `quest/m2/cache-routing-proof.md` found a path needs besides.
 //!
-//! [`Mesh`] adds per-broadcast demand and forwarding to [`Sim`]: readers join and
-//! leave, and each relay pulls a broadcast it has demand for through one neighbor,
-//! its parent. A relay picks the cheapest neighbor its eligibility rule allows
-//! ([`Router::eligible`], a tied route only toward the lower rendezvous hash), where
-//! a warm neighbor costs the link alone and a cold one the link plus its cold
-//! metric; ties go to warm, then to the lower hash. A copy with no demand left
-//! lingers.
+//! A relay with a reader whose pull follows the publisher's route offers its copy
+//! at no cost, as its carrier, with the path the copy took. Each relay pulls a
+//! broadcast it has demand for (a reader, or a neighbour's subscription) through
+//! the cheapest of its next hop toward the publisher and each copy offered, and
+//! offers a copy it joined on at what its pull costs, so a copy's cost rises with
+//! every link from where it left the publisher's route. Pulling through a
+//! neighbour goes wherever that neighbour pulls, so each relay offers every
+//! neighbour its copy, even one whose path names that neighbour, which can then
+//! use neither. A relay on one copy moves onto another only if that copy's carrier
+//! ranks below by the Rendezvous Hash, so copies crossing on their way never trade
+//! places; a relay pulling along its route is held to the carriers of the
+//! neighbours behind it, which those neighbours' offers back name. A copy with no
+//! demand left lingers.
 //!
-//! Every pull names whom it serves ([`Serves`]): a pull whose whole demand traces
-//! back to one relay names that relay, its root. A carrier tells each neighbor whose
-//! cold metric is at least its own that it is warm, naming whom its copy serves, and
-//! the neighbor counts it warm unless that is the neighbor's own root or itself:
-//! demand a neighbor causes, through any number of relays, never warms a carrier
-//! toward it. A carrier narrows what it tells only once the linger runs out.
-//!
-//! Each relay recomputes its choices in the same step as its router changes, as the
-//! router's own node does, and every step checks that each broadcast's parents form
-//! no cycle. Warm routes ride the stream carrying the sender's routes, so a
-//! ROUTE_END retires them; subscriptions ride streams of their own, unordered
-//! against both. Lingers run out only when a fixture or sweep says time passed.
+//! [`Mesh`] adds what a sweep checks to [`PathSim`]: after every step, whether a
+//! broadcast's pulls form a cycle, which the path allows only while a withdrawal
+//! crosses a link; once quiet, every reader is fed and nothing would change.
+//! Subscriptions ride streams of their own, unordered against the routes and
+//! copies.
 
+use super::paths::{Cast, PathSim, Rules, rendezvous};
 use super::*;
 
-/// A path its origin serves under one instance: two broadcasts sharing a path
-/// and origin are two instances of it.
-#[derive(Clone, Copy, Debug)]
-struct Broadcast {
-	path: &'static str,
-	origin: Node,
-}
+/// The rule item 27 of the routes epic picked: holds, causes, and a doubt that lifts
+/// after 4 hops of delay.
+const PICK: Rules = Rules::waits(4);
 
-/// Whom a pull or a copy serves.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Serves {
-	/// Demand of its own: a reader, or pulls tracing back to two or more relays.
-	#[default]
-	Alone,
-	/// Demand that traces back to this one relay alone.
-	Relay(Node),
-	/// Demand some of which came from a relay that names no one.
-	Unknown,
-}
-
-/// A warm route: whom the sender's copy serves, and what keeping it costs a
-/// receiver it serves alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Warm {
-	pub serves: Serves,
-	/// The sender's price for its own pull, the cost of the copy to the demand it serves.
-	pub cost: Metric,
-}
-
-/// One node's state for one broadcast.
-#[derive(Clone, Debug, Default)]
-struct Carry {
-	reader: bool,
-	/// Neighbors whose subscription arrived and was not cancelled, and whom each serves.
-	downstream: BTreeMap<Node, Serves>,
-	/// The neighbor this node pulls the broadcast through.
-	parent: Option<Node>,
-	/// Whom this node's pull serves, as it last told its parent.
-	serves: Serves,
-	/// Demand is gone and the copy lingers.
-	lingering: bool,
-	/// What this node advertises warm, or `None` when cold.
-	advert: Option<Warm>,
-	/// The advert is narrower than it was, and the old one stands until the linger
-	/// runs out.
-	fading: bool,
-	/// What each neighbor was last told.
-	told: BTreeMap<Node, Warm>,
-	/// Each neighbor's warm route that arrived.
-	warm: BTreeMap<Node, Warm>,
-}
-
-/// What the cache layer sent and moved.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct CacheStats {
-	/// Warm route starts, updates, and ends.
-	pub warm: usize,
-	/// Subscriptions, updates, and cancels.
-	pub subscribes: usize,
-	/// A relay moved a copy from one parent to another.
-	pub moves: usize,
+/// A queue the mesh delivers from.
+#[derive(Clone, Debug)]
+enum Queue {
+	Route(Node, Node),
+	/// One subscription stream: from, to, broadcast, stream.
+	Sub(Node, Node, Cast, u64),
 }
 
 pub(super) struct Mesh {
-	pub sim: Sim,
-	broadcasts: Vec<Broadcast>,
-	carry: Vec<Vec<Carry>>,
-	/// Subscriptions, each broadcast's on a stream of its own.
-	subs: BTreeMap<(Node, Node, usize), VecDeque<Sub>>,
-	/// `(node, neighbor)`: the neighbor sent `node` GOAWAY.
-	draining: BTreeSet<(Node, Node)>,
-	/// Relays that never negotiated warm routes: each pulls through its selected
-	/// route, sends no warm route, and its pulls name no one.
-	legacy: BTreeSet<Node>,
-	pub stats: CacheStats,
-	/// Warm messages per broadcast.
-	warm: Vec<usize>,
-}
-
-/// The draft's Rendezvous Hash that orders a tie, by node index standing in for the Node ID.
-fn hash(path: &str, node: Node) -> u64 {
-	let mut hash: u64 = 0x420C_0DEC_B00B;
-	for byte in path.bytes().chain((node as u64).to_le_bytes()) {
-		hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
-	}
-	hash
-}
-
-/// A change to one subscription.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Sub {
-	/// Pull, or update whom the pull serves.
-	Pull(Serves),
-	Cancel,
-}
-
-/// A neighbor a node may pull a broadcast through.
-#[derive(Clone, Copy, Debug)]
-struct Candidate {
-	next: Node,
-	/// The node's metric through it.
-	cold: Metric,
-	/// The link to it alone, what pulling through it costs when it is warm.
-	link: Metric,
-	draining: bool,
+	pub sim: PathSim,
+	/// Each publisher's node.
+	origins: BTreeMap<Id, Node>,
+	casts: Vec<Cast>,
+	/// Steps after which some broadcast's pulls formed a cycle.
+	pub loops: usize,
+	pub steps: usize,
+	/// Of those, steps after which a reader's pulls led into the cycle.
+	pub starved: usize,
+	/// The most deliveries in a row after which a cycle remained, and the current run.
+	pub longest: usize,
+	run: usize,
+	delivered: bool,
 }
 
 impl Mesh {
-	pub fn new(nodes: usize) -> Self {
+	pub fn new(nodes: usize, rules: Rules) -> Self {
 		Self {
-			sim: Sim::new(nodes),
-			broadcasts: Vec::new(),
-			carry: vec![Vec::new(); nodes],
-			subs: BTreeMap::new(),
-			draining: BTreeSet::new(),
-			legacy: BTreeSet::new(),
-			stats: CacheStats::default(),
-			warm: Vec::new(),
+			sim: PathSim::new(nodes, rules),
+			origins: BTreeMap::new(),
+			casts: Vec::new(),
+			loops: 0,
+			steps: 0,
+			starved: 0,
+			longest: 0,
+			run: 0,
+			delivered: false,
 		}
 	}
 
 	fn nodes(&self) -> usize {
-		self.carry.len()
+		self.sim.nodes.len()
 	}
 
-	/// A publisher at `node`, a leaf that originates `id` with a claim covering
-	/// every broadcast path. Called before its links, which a leaf configures.
+	/// A publisher at `node`, a leaf that originates `id` and claims `live`. Called
+	/// before its links.
 	pub fn origin(&mut self, node: Node, id: Id) {
 		self.sim.leaf(node);
-		self.sim.originate(node, id, 0);
-		self.sim.announce(node, "live/", 0, None);
-		self.step();
+		self.sim.originate(node, id);
+		self.sim.announce(node, "live");
+		self.origins.insert(id, node);
 	}
 
-	/// `node` never negotiates warm routes.
+	/// `node` never sends or reads a copy.
 	pub fn legacy(&mut self, node: Node) {
-		self.legacy.insert(node);
+		self.sim.nodes[node].legacy = true;
 	}
 
-	/// A broadcast at `path` served by the origin at `origin`.
-	pub fn broadcast(&mut self, path: &'static str, origin: Node) -> usize {
-		self.broadcasts.push(Broadcast { path, origin });
-		for carry in &mut self.carry {
-			carry.push(Carry::default());
-		}
-		self.warm.push(0);
-		self.broadcasts.len() - 1
+	/// A broadcast at `path` of the publisher `id`, under `instance`.
+	pub fn broadcast(&mut self, id: Id, path: &str, instance: u64) -> Cast {
+		let cast = (id, p(path), instance);
+		self.casts.push(cast.clone());
+		cast
 	}
 
 	pub fn join(&mut self, a: Node, b: Node, cost: Metric) {
@@ -178,50 +99,32 @@ impl Mesh {
 		self.step();
 	}
 
-	/// A reader at `node` starts or stops reading `broadcast`.
-	pub fn read(&mut self, node: Node, broadcast: usize, reading: bool) {
-		self.carry[node][broadcast].reader = reading;
-		self.step();
-	}
-
-	pub fn reading(&self, node: Node, broadcast: usize) -> bool {
-		self.carry[node][broadcast].reader
-	}
-
 	pub fn connect(&mut self, a: Node, b: Node) {
 		self.sim.connect(a, b);
 		self.step();
 	}
 
-	/// The session closes: everything on it goes, subscriptions and warm routes too.
 	pub fn disconnect(&mut self, a: Node, b: Node) {
 		self.sim.disconnect(a, b);
-		for (x, y) in [(a, b), (b, a)] {
-			self.subs.retain(|&(from, to, _), _| (from, to) != (x, y));
-			self.draining.remove(&(x, y));
-			for carry in &mut self.carry[x] {
-				carry.downstream.remove(&y);
-				carry.told.remove(&y);
-				carry.warm.remove(&y);
-			}
-		}
 		self.step();
 	}
 
-	/// `node` sends GOAWAY on every session: its neighbors rank it last.
 	pub fn goaway(&mut self, node: Node) {
-		let peers: Vec<Node> = self.sim.peers(node).collect();
-		for peer in peers {
-			self.draining.insert((peer, node));
-		}
 		self.sim.goaway(node);
 		self.step();
 	}
 
-	/// The origin at `node` advances its seqno.
-	pub fn bump(&mut self, node: Node) {
-		self.sim.bump(node);
+	/// A reader at `node` starts or stops reading `cast`.
+	pub fn read(&mut self, node: Node, cast: &Cast, reading: bool) {
+		match reading {
+			true => self.sim.carry(node, cast),
+			false => self.sim.uncarry(node, cast),
+		}
 		self.step();
+	}
+
+	pub fn reading(&self, node: Node, cast: &Cast) -> bool {
+		self.sim.nodes[node].reading(cast)
 	}
 
 	pub fn hold(&mut self, from: Node, to: Node) {
@@ -232,574 +135,333 @@ impl Mesh {
 		self.sim.release(from, to);
 	}
 
-	/// The linger at `node` for `broadcast` runs out: a copy with no demand goes, and
-	/// a narrowed advert takes effect.
-	pub fn tick(&mut self, node: Node, broadcast: usize) {
-		let carry = &mut self.carry[node][broadcast];
-		let parent = match carry.lingering {
-			true => {
-				carry.lingering = false;
-				carry.parent.take()
-			}
-			false => None,
-		};
-		if carry.fading {
-			carry.fading = false;
-			self.carry[node][broadcast].advert = self.desired(node, broadcast);
-		}
-		if let Some(parent) = parent {
-			self.subscribe(node, parent, broadcast, Sub::Cancel);
-		}
+	/// The linger for `cast` at `node` runs out.
+	pub fn expire(&mut self, node: Node, cast: &Cast) {
+		self.sim.expire(node, cast);
 		self.step();
 	}
 
-	/// Deliver the next message on `from`'s route stream to `to`.
-	pub fn deliver(&mut self, from: Node, to: Node) -> bool {
-		let delivered = self.sim.deliver(from, to);
+	/// One hop of delay passes everywhere. Whether a doubt still waits to lift.
+	pub fn tick(&mut self) -> bool {
+		let waiting = self.sim.tick();
+		self.step();
+		waiting
+	}
+
+	pub fn deliver_sub(&mut self, from: Node, to: Node, cast: &Cast) -> bool {
+		let delivered = self.sim.deliver_sub(from, to, cast);
 		self.step();
 		delivered
 	}
 
-	pub fn deliver_ack(&mut self, from: Node, to: Node) -> bool {
-		let delivered = self.sim.deliver_ack(from, to);
+	pub fn deliver_stream(&mut self, from: Node, to: Node, cast: &Cast, stream: u64) -> bool {
+		let delivered = self.sim.deliver_stream(from, to, cast, stream);
 		self.step();
 		delivered
 	}
 
-	/// Deliver the next subscription change for `broadcast` from `from` to `to`.
-	pub fn deliver_sub(&mut self, from: Node, to: Node, broadcast: usize) -> bool {
-		let Some(sub) = self.subs.get_mut(&(from, to, broadcast)).and_then(VecDeque::pop_front) else {
-			return false;
-		};
-		self.subs.retain(|_, queue| !queue.is_empty());
-		let downstream = &mut self.carry[to][broadcast].downstream;
-		match sub {
-			Sub::Pull(serves) => downstream.insert(from, serves),
-			Sub::Cancel => downstream.remove(&from),
-		};
-		self.step();
-		true
-	}
-
-	/// Every queue with something to deliver: routes, echoes, then subscriptions.
-	fn busy(&self) -> Vec<Queue> {
-		(self.sim.busy().into_iter().map(|(from, to)| Queue::Route(from, to)))
-			.chain(self.sim.busy_acks().into_iter().map(|(from, to)| Queue::Ack(from, to)))
-			.chain(self.subs.keys().map(|&(from, to, b)| Queue::Sub(from, to, b)))
+	/// The subscription streams from `from` to `to` with a change to deliver, oldest first.
+	pub fn streams(&self, from: Node, to: Node) -> Vec<u64> {
+		(self.sim.pending_subs().into_iter())
+			.filter(|(f, t, ..)| (*f, *t) == (from, to))
+			.map(|(.., stream)| stream)
 			.collect()
 	}
 
-	fn deliver_one(&mut self, queue: Queue) {
+	/// Every unheld queue with something to deliver.
+	fn busy(&self) -> Vec<Queue> {
+		(self.sim.busy().into_iter().map(|(from, to)| Queue::Route(from, to)))
+			.chain(
+				(self.sim.busy_subs().into_iter()).map(|(from, to, cast, stream)| Queue::Sub(from, to, cast, stream)),
+			)
+			.collect()
+	}
+
+	fn deliver_one(&mut self, queue: &Queue) {
+		self.delivered = true;
 		match queue {
-			Queue::Route(from, to) => self.deliver(from, to),
-			Queue::Ack(from, to) => self.deliver_ack(from, to),
-			Queue::Sub(from, to, b) => self.deliver_sub(from, to, b),
+			Queue::Route(from, to) => self.sim.deliver(*from, *to),
+			Queue::Sub(from, to, cast, stream) => self.sim.deliver_stream(*from, *to, cast, *stream),
 		};
+		self.step();
 	}
 
 	/// Deliver round-robin until every unheld queue is empty, letting no linger run
-	/// out. False if it never settles.
+	/// out and no time pass. False if it never empties.
 	pub fn run(&mut self) -> bool {
-		for _ in 0..10_000 {
-			let ready: Vec<Queue> = (self.busy().into_iter())
-				.filter(|queue| !self.sim.held.contains(&queue.pair()))
-				.collect();
+		self.rounds(10_000)
+	}
+
+	/// Deliver up to `rounds` rounds, one message from each unheld queue per round.
+	/// Whether every unheld queue emptied.
+	fn rounds(&mut self, rounds: usize) -> bool {
+		for _ in 0..rounds {
+			let ready = self.busy();
 			if ready.is_empty() {
 				return true;
 			}
-			for queue in ready {
+			for queue in &ready {
 				self.deliver_one(queue);
 			}
 		}
 		false
 	}
 
-	/// Run, then let every linger run out, until nothing changes.
+	/// Run, let time pass until every doubt lifts, and let every linger run out,
+	/// until nothing changes. A round of deliveries takes a hop of delay, so a long
+	/// exchange lets time pass too, if more slowly. False if it never settles.
 	pub fn settle(&mut self) -> bool {
-		for _ in 0..100 {
-			if !self.run() {
-				return false;
+		for _ in 0..1000 {
+			if !self.rounds(64) {
+				self.tick();
+				continue;
 			}
-			let lingering: Vec<(Node, usize)> = (0..self.nodes())
-				.flat_map(|node| (0..self.broadcasts.len()).map(move |b| (node, b)))
-				.filter(|&(node, b)| {
-					let carry = &self.carry[node][b];
-					carry.lingering || carry.fading
-				})
+			if self.tick() {
+				continue;
+			}
+			let lingering: Vec<(Node, Cast)> = (0..self.nodes())
+				.flat_map(|node| self.sim.nodes[node].lingers().into_iter().map(move |cast| (node, cast)))
 				.collect();
-			if lingering.is_empty() {
+			if lingering.is_empty() && self.busy().is_empty() {
 				return true;
 			}
-			for (node, b) in lingering {
-				self.tick(node, b);
+			for (node, cast) in lingering {
+				self.expire(node, &cast);
 			}
 		}
 		false
 	}
 
-	pub fn parent(&self, node: Node, broadcast: usize) -> Option<Node> {
-		self.carry[node][broadcast].parent
+	pub fn parent(&self, node: Node, cast: &Cast) -> Option<Node> {
+		self.sim.nodes[node].parent(cast)
 	}
 
-	/// Whether `node` pulls `broadcast`.
-	pub fn carries(&self, node: Node, broadcast: usize) -> bool {
-		self.parent(node, broadcast).is_some()
+	/// Whether `node` pulls `cast`.
+	pub fn carries(&self, node: Node, cast: &Cast) -> bool {
+		self.parent(node, cast).is_some()
 	}
 
-	/// Whether `node` counts `from` warm for `broadcast`: its copy stays whether or not
-	/// `node` pulls through it.
-	pub fn warm_at(&self, node: Node, from: Node, broadcast: usize) -> bool {
-		let carry = &self.carry[node][broadcast];
-		carry.warm.get(&from).is_some_and(|warm| match warm.serves {
-			Serves::Alone => true,
-			Serves::Relay(root) => match carry.serves {
-				Serves::Unknown => false,
-				Serves::Alone => root != node,
-				Serves::Relay(own) => root != node && root != own,
-			},
-			Serves::Unknown => false,
-		})
-	}
-
-	/// What pulling `broadcast` through `c` costs `node`: the link alone through a warm
-	/// neighbor, the link plus the copy's cost through one whose copy serves only
-	/// `node`'s demand, and the cold metric through any other.
-	fn price(&self, node: Node, broadcast: usize, c: &Candidate) -> Metric {
-		match self.carry[node][broadcast].warm.get(&c.next) {
-			_ if self.warm_at(node, c.next, broadcast) => c.link,
-			Some(warm) if warm.serves != Serves::Unknown => c.link + warm.cost,
-			_ => c.cold,
-		}
-	}
-
-	/// The relays pulling `broadcast` straight from its origin.
-	pub fn copies(&self, broadcast: usize) -> usize {
-		let origin = self.broadcasts[broadcast].origin;
+	/// The relays pulling `cast` straight from its publisher.
+	pub fn copies(&self, cast: &Cast) -> usize {
+		let origin = self.origins[&cast.0];
 		(0..self.nodes())
-			.filter(|&node| self.parent(node, broadcast) == Some(origin))
+			.filter(|&node| self.parent(node, cast) == Some(origin))
 			.count()
 	}
 
-	/// Warm messages sent for `broadcast`.
-	pub fn warm_sent(&self, broadcast: usize) -> usize {
-		self.warm[broadcast]
+	/// Copy offers and their ends sent for `cast`.
+	pub fn warm_sent(&self, cast: &Cast) -> usize {
+		self.sim.warm.get(cast).copied().unwrap_or(0)
 	}
 
-	fn id(&self, broadcast: usize) -> Id {
-		self.sim.proven(self.broadcasts[broadcast].origin)
+	/// Whether `node` is offered a copy of `cast` by `from`.
+	pub fn offered(&self, node: Node, from: Node, cast: &Cast) -> bool {
+		self.sim.nodes[node].offers(from, cast).1.is_some()
 	}
 
-	fn subscribe(&mut self, from: Node, to: Node, broadcast: usize, sub: Sub) {
-		self.subs.entry((from, to, broadcast)).or_default().push_back(sub);
-		self.stats.subscribes += 1;
-	}
-
-	/// Take the deliveries, recompute every node's choices, and check for a loop.
+	/// Count a step after which some broadcast's pulls form a cycle.
 	fn step(&mut self) {
-		for note in std::mem::take(&mut self.sim.notes) {
-			match note {
-				Note::Warm {
-					from,
-					to,
-					broadcast,
-					warm,
-				} => {
-					let map = &mut self.carry[to][broadcast].warm;
-					match warm {
-						Some(warm) => map.insert(from, warm),
-						None => map.remove(&from),
-					};
-				}
-				Note::Ended { from, to, id } => {
-					for b in 0..self.broadcasts.len() {
-						if self.id(b) == id {
-							self.carry[to][b].warm.remove(&from);
-						}
+		self.steps += 1;
+		let cycle = self.cycle().is_some();
+		self.loops += usize::from(cycle);
+		self.run = match cycle {
+			true => self.run + usize::from(std::mem::take(&mut self.delivered)),
+			false => 0,
+		};
+		self.delivered = false;
+		self.longest = self.longest.max(self.run);
+		self.starved += usize::from(cycle && self.starving());
+	}
+
+	/// Whether some reader's pulls lead into a cycle.
+	fn starving(&self) -> bool {
+		self.casts.iter().any(|cast| {
+			(0..self.nodes()).filter(|&node| self.reading(node, cast)).any(|node| {
+				let mut at = node;
+				for _ in 0..=self.nodes() {
+					match self.parent(at, cast) {
+						Some(next) => at = next,
+						None => return false,
 					}
 				}
-			}
-		}
-		for node in 0..self.nodes() {
-			for b in 0..self.broadcasts.len() {
-				self.choose(node, b);
-				self.tell(node, b);
-			}
-		}
-		self.check_loops();
-	}
-
-	/// The neighbors `node` may pull `broadcast` through.
-	fn candidates(&self, node: Node, broadcast: usize) -> Vec<Candidate> {
-		let path = self.broadcasts[broadcast].path;
-		(self.sim.nodes[node].eligible(self.id(broadcast)).into_iter())
-			.filter(|route| !route.tied || hash(path, route.next) < hash(path, node))
-			.map(|route| Candidate {
-				next: route.next,
-				cold: route.metric,
-				link: self.sim.links[node][route.next].expect("a configured link").cost,
-				draining: self.draining.contains(&(node, route.next)),
+				true
 			})
-			.collect()
+		})
 	}
 
-	/// The neighbor `node` pulls `broadcast` through: its current parent unless another
-	/// candidate is strictly cheaper, otherwise the cheapest, ties going to warm and
-	/// then to the lower hash.
-	fn best(&self, node: Node, broadcast: usize) -> Option<Node> {
-		if self.legacy.contains(&node) {
-			return self.sim.nodes[node]
-				.selected(self.id(broadcast))
-				.and_then(|route| route.next);
-		}
-		let path = self.broadcasts[broadcast].path;
-		let ranked: Vec<_> = (self.candidates(node, broadcast).into_iter())
-			.map(|c| {
-				let warm = self.warm_at(node, c.next, broadcast);
-				(
-					(c.draining, self.price(node, broadcast, &c)),
-					!warm,
-					hash(path, c.next),
-					c.next,
-				)
-			})
-			.collect();
-		let best = ranked.iter().min()?;
-		let parent = self.carry[node][broadcast].parent;
-		match ranked.iter().find(|rank| Some(rank.3) == parent) {
-			Some(current) if current.0 <= best.0 => parent,
-			_ => Some(best.3),
-		}
-	}
-
-	/// What `node` pays for its own pull of `broadcast`.
-	fn cost(&self, node: Node, broadcast: usize) -> Option<Metric> {
-		let parent = self.carry[node][broadcast].parent?;
-		let c = (self.candidates(node, broadcast).into_iter()).find(|c| c.next == parent)?;
-		Some(self.price(node, broadcast, &c))
-	}
-
-	/// Whom `node`'s demand for `broadcast` serves: itself for a reader, the one root
-	/// its pulls trace back to, or no one in particular across two or more roots.
-	fn served(&self, node: Node, broadcast: usize) -> Serves {
-		let carry = &self.carry[node][broadcast];
-		if self.legacy.contains(&node) {
-			return Serves::Unknown;
-		}
-		if carry.reader {
-			return Serves::Alone;
-		}
-		let mut roots = BTreeSet::new();
-		let mut unknown = false;
-		for (&from, &serves) in &carry.downstream {
-			match serves {
-				Serves::Alone => roots.insert(from),
-				Serves::Relay(root) => roots.insert(root),
-				Serves::Unknown => {
-					unknown = true;
-					false
-				}
-			};
-		}
-		match (roots.len(), unknown) {
-			(2.., _) => Serves::Alone,
-			(1, false) => Serves::Relay(*roots.first().expect("one root")),
-			_ => Serves::Unknown,
-		}
-	}
-
-	/// What `node` would advertise for `broadcast` now: warm while it pulls for demand
-	/// it can name.
-	fn desired(&self, node: Node, broadcast: usize) -> Option<Warm> {
-		let carry = &self.carry[node][broadcast];
-		let demand = carry.reader || !carry.downstream.is_empty();
-		if node == self.broadcasts[broadcast].origin || self.legacy.contains(&node) || !demand {
-			return None;
-		}
-		let serves = self.served(node, broadcast);
-		let cost = self.cost(node, broadcast)?;
-		(serves != Serves::Unknown).then_some(Warm { serves, cost })
-	}
-
-	/// Recompute `node`'s parent for `broadcast`, and move or update the subscription.
-	fn choose(&mut self, node: Node, broadcast: usize) {
-		if node == self.broadcasts[broadcast].origin {
-			return;
-		}
-		let carry = &mut self.carry[node][broadcast];
-		let demand = carry.reader || !carry.downstream.is_empty();
-		if demand {
-			carry.lingering = false;
-		} else if carry.parent.is_some() {
-			carry.lingering = true;
-		}
-		let want = demand || carry.lingering;
-		// A lingering copy serves whom it last served.
-		let serves = match demand {
-			true => self.served(node, broadcast),
-			false => self.carry[node][broadcast].serves,
-		};
-		let parent = match want {
-			true => self.best(node, broadcast),
-			false => None,
-		};
-		let carry = &mut self.carry[node][broadcast];
-		let (old, told) = (carry.parent, carry.serves);
-		carry.parent = parent;
-		carry.serves = serves;
-		if parent != old
-			&& let Some(old) = old
-			&& self.sim.connected(node, old)
-		{
-			self.subscribe(node, old, broadcast, Sub::Cancel);
-		}
-		if let Some(parent) = parent
-			&& (Some(parent) != old || serves != told)
-		{
-			self.subscribe(node, parent, broadcast, Sub::Pull(serves));
-		}
-		if old.is_some() && parent.is_some() && parent != old {
-			self.stats.moves += 1;
-		}
-	}
-
-	/// Update `node`'s advert for `broadcast`, widening at once and narrowing once the
-	/// linger runs out, and tell each neighbor that may use it.
-	fn tell(&mut self, node: Node, broadcast: usize) {
-		let desired = self.desired(node, broadcast);
-		let carry = &mut self.carry[node][broadcast];
-		// Narrower: some neighbor that counted the copy warm would no longer.
-		let narrower = match (carry.advert, desired) {
-			(Some(old), Some(new)) => old.serves != new.serves && new.serves != Serves::Alone,
-			(Some(_), None) => true,
-			(None, _) => false,
-		};
-		carry.fading = narrower;
-		if !narrower {
-			carry.advert = desired;
-		}
-		let advert = carry.advert;
-		let id = self.id(broadcast);
-		let peers: Vec<Node> = (self.sim.peers(node))
-			.filter(|&peer| !self.sim.leaf[peer] && !self.legacy.contains(&peer))
-			.collect();
-		for to in peers {
-			let router = &self.sim.nodes[node];
-			// A warm route names the route it travels under, which a ROUTE_END retires.
-			let routed = router.sent.contains_key(&(id, to));
-			let own = router.selected(id).map(|route| route.metric);
-			// A neighbor with no usable route to the origin has an infinite cold metric.
-			let behind = (router.rx.get(&id).and_then(|routes| routes.get(&to)))
-				.is_none_or(|entry| entry.held || own.is_some_and(|own| entry.advert.metric >= own));
-			let carry = &mut self.carry[node][broadcast];
-			if !routed {
-				carry.told.remove(&to);
-			}
-			let want = advert.filter(|_| routed && own.is_some() && behind);
-			if want == carry.told.get(&to).copied() {
-				continue;
-			}
-			match want {
-				Some(warm) => carry.told.insert(to, warm),
-				None => carry.told.remove(&to),
-			};
-			let msg = Msg::Warm { broadcast, warm: want };
-			self.sim.queues.entry((node, to)).or_default().push_back(msg);
-			self.stats.warm += 1;
-			self.warm[broadcast] += 1;
-		}
-	}
-
-	/// Each broadcast's parents form no cycle.
-	fn check_loops(&self) {
-		for b in 0..self.broadcasts.len() {
+	/// A broadcast whose pulls form a cycle, and each relay's parent for it.
+	fn cycle(&self) -> Option<(Cast, Vec<Option<Node>>)> {
+		for cast in &self.casts {
 			for node in 0..self.nodes() {
 				let mut at = node;
 				for hop in 0.. {
-					let Some(next) = self.parent(at, b) else {
+					let Some(next) = self.parent(at, cast) else {
 						break;
 					};
-					assert!(
-						hop <= self.nodes(),
-						"broadcast {b} loops from node {node}: {:?}",
-						(0..self.nodes()).map(|n| self.parent(n, b)).collect::<Vec<_>>()
-					);
+					if hop > self.nodes() {
+						let parents = (0..self.nodes()).map(|n| self.parent(n, cast)).collect();
+						return Some((cast.clone(), parents));
+					}
 					at = next;
 				}
 			}
 		}
+		None
 	}
 
-	/// The steady state once demand and topology stop changing: every reader is
-	/// delivered, subscriptions and warm routes match what their senders hold, nothing
-	/// would change, every carrier has demand, and no relay could pull more cheaply
-	/// given the copies the others hold.
+	/// The steady state once demand and topology stop changing: every reader is fed
+	/// from its publisher, subscriptions and copies offered match what their senders
+	/// hold, no copy lingers, and each relay pulls exactly what it has demand for,
+	/// from its cheapest source. So a relay carries a broadcast only for a reader, or
+	/// for neighbours whose cheapest source it is.
 	pub fn steady(&mut self, label: &str) {
-		for (b, broadcast) in self.broadcasts.iter().enumerate() {
+		assert!(self.busy().is_empty(), "{label}: still busy");
+		assert_eq!(self.cycle(), None, "{label}");
+		for cast in &self.casts {
+			let origin = self.origins[&cast.0];
 			for node in 0..self.nodes() {
-				let carry = &self.carry[node][b];
-				if carry.reader {
+				let relay = &self.sim.nodes[node];
+				if relay.reading(cast) {
 					let mut at = node;
-					while let Some(next) = self.parent(at, b) {
+					while let Some(next) = self.parent(at, cast) {
 						at = next;
 					}
-					assert_eq!(at, broadcast.origin, "{label}: broadcast {b} reaches node {node}");
+					assert_eq!(at, origin, "{label}: {cast:?} reaches node {node}");
 				}
-				let feeds: BTreeMap<Node, Serves> = (0..self.nodes())
-					.filter(|&n| self.parent(n, b) == Some(node))
-					.map(|n| (n, self.carry[n][b].serves))
+				let feeds: BTreeSet<Node> = (0..self.nodes())
+					.filter(|&n| self.parent(n, cast) == Some(node))
 					.collect();
-				assert_eq!(carry.downstream, feeds, "{label}: broadcast {b} at node {node}");
-				assert!(
-					!carry.fading && !carry.lingering,
-					"{label}: broadcast {b} at node {node}"
+				assert_eq!(relay.downstream(cast), feeds, "{label}: {cast:?} at node {node}");
+				assert_eq!(
+					relay.streams(cast),
+					feeds.len(),
+					"{label}: {cast:?} at node {node}: one stream each"
 				);
-				for to in 0..self.nodes() {
+				assert!(!relay.lingering(cast), "{label}: {cast:?} at node {node}");
+				if node != origin {
+					let demand = relay.reading(cast) || !feeds.is_empty();
+					let source = relay.source(cast).map(|source| source.next);
 					assert_eq!(
-						carry.told.get(&to),
-						self.carry[to][b].warm.get(&node),
-						"{label}: broadcast {b} warm from {node} at {to}"
+						relay.parent(cast),
+						source.filter(|_| demand),
+						"{label}: {cast:?} at node {node}"
 					);
 				}
-				if node == broadcast.origin || carry.parent.is_none() {
-					continue;
-				}
-				assert!(
-					carry.reader || !feeds.is_empty(),
-					"{label}: node {node} carries broadcast {b} for no one"
-				);
-			}
-			for node in 0..self.nodes() {
-				if node == broadcast.origin || self.legacy.contains(&node) {
-					continue;
-				}
-				let Some(cost) = self.cost(node, b) else {
-					continue;
-				};
-				let parent = self.parent(node, b);
-				let draining = parent.is_some_and(|parent| self.draining.contains(&(node, parent)));
-				for c in self.candidates(node, b) {
-					assert!(
-						(c.draining, self.price(node, b, &c)) >= (draining, cost),
-						"{label}: node {node} would move broadcast {b} from {parent:?} to {}",
-						c.next
-					);
+				for peer in 0..self.nodes() {
+					if !self.sim.connected(node, peer) || self.sim.nodes[peer].legacy {
+						continue;
+					}
+					let sent = relay.offers(peer, cast).0;
+					let heard = self.sim.nodes[peer].offers(node, cast).1;
+					assert_eq!(sent, heard, "{label}: {cast:?} offered from {node} to {peer}");
 				}
 			}
 		}
-		let stats = self.stats;
-		let queued: usize = self.sim.queues.values().map(VecDeque::len).sum();
-		self.step();
-		assert_eq!(self.stats, stats, "{label}: a choice changed at quiescence");
-		assert_eq!(queued, self.sim.queues.values().map(VecDeque::len).sum::<usize>());
+		let stats = self.sim.stats;
+		self.tick();
+		assert_eq!(self.sim.stats, stats, "{label}: something changed at quiescence");
 	}
 }
 
-/// A queue the cache layer delivers from.
-#[derive(Clone, Copy, Debug)]
-enum Queue {
-	Route(Node, Node),
-	Ack(Node, Node),
-	Sub(Node, Node, usize),
-}
-
-impl Queue {
-	fn pair(self) -> (Node, Node) {
-		match self {
-			Self::Route(from, to) | Self::Ack(from, to) | Self::Sub(from, to, _) => (from, to),
-		}
-	}
-}
-
-/// An origin behind relay `a`, then relays `a`, `b`, `c` in a chain priced 3, with
-/// a skip from `a` to `c` priced `skip`, and one broadcast.
-fn chain(skip: Metric) -> (Mesh, usize) {
+/// An origin behind relay `a`, then relays `a`, `b`, `c` in a chain priced 3, with a
+/// skip from `a` to `c` priced `skip`, and one broadcast.
+fn chain(skip: Metric) -> (Mesh, Cast) {
 	let (o, a, b, c) = (0, 1, 2, 3);
-	let mut mesh = Mesh::new(4);
+	let mut mesh = Mesh::new(4, PICK);
 	mesh.origin(o, 7);
 	mesh.join(o, a, 1);
 	mesh.join(a, b, 3);
 	mesh.join(b, c, 3);
 	mesh.join(a, c, skip);
-	let x = mesh.broadcast("live/x", o);
+	let x = mesh.broadcast(7, "live/x", 0);
 	assert!(mesh.settle());
 	(mesh, x)
 }
 
-/// A cold broadcast takes the skip. A reader on the skipped relay makes it pull
-/// through `a` and warm toward `c`, which joins it. When that reader leaves, its
-/// warm route goes after the linger and `c` returns to the skip.
+/// A cold broadcast takes the skip. A reader on the skipped relay `b` makes `c` join
+/// its copy, and when that reader leaves, `c` returns to the skip. Readers arriving
+/// the other way round join the other way: `b` joins `c`'s copy, which is farther
+/// from the publisher than `b` is.
 #[test]
-fn a_skipped_relay_draws_its_neighbor_while_it_has_a_reader() {
+fn a_skipped_relay_draws_its_neighbour_while_it_has_a_reader() {
 	let (a, b, c) = (1, 2, 3);
 	let (mut mesh, x) = chain(5);
-	mesh.read(c, x, true);
+	mesh.read(c, &x, true);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(c, x), Some(a), "a cold broadcast takes the skip");
-	assert!(!mesh.carries(b, x));
+	assert_eq!(mesh.parent(c, &x), Some(a), "a cold broadcast takes the skip");
+	assert!(!mesh.carries(b, &x));
 	mesh.steady("cold");
 
-	mesh.read(b, x, true);
+	mesh.read(b, &x, true);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(b, x), Some(a));
-	assert_eq!(mesh.parent(c, x), Some(b), "c joins b's copy");
-	mesh.steady("warm");
+	assert_eq!(mesh.parent(b, &x), Some(c), "b joins c's copy, though c is farther");
+	assert_eq!(mesh.parent(c, &x), Some(a));
+	mesh.steady("b joins c");
 
-	mesh.read(b, x, false);
+	let (mut mesh, x) = chain(5);
+	mesh.read(b, &x, true);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(c, x), Some(a), "back to the skip");
-	assert!(!mesh.carries(b, x));
+	assert_eq!(mesh.parent(b, &x), Some(a));
+	mesh.read(c, &x, true);
+	assert!(mesh.settle());
+	assert_eq!(mesh.parent(c, &x), Some(b), "c joins b's copy");
+	mesh.steady("c joins b");
+
+	mesh.read(b, &x, false);
+	assert!(mesh.settle());
+	assert_eq!(mesh.parent(c, &x), Some(a), "back to the skip");
+	assert!(!mesh.carries(b, &x));
 	mesh.steady("cold again");
+	assert_eq!(mesh.loops, 0);
 }
 
-/// A relay whose only consumer is `c` withdraws its warm route toward `c`. With
-/// a cheaper skip, `c` bypasses it; when the relay is `c`'s cheapest cold route,
-/// `c` stays and the relay keeps carrying for it alone.
+/// A relay whose only consumer is `c` offers `c` nothing once its own reader goes.
+/// With a cheaper skip, `c` bypasses it; when the relay is `c`'s cheapest route to
+/// the publisher, `c` stays and the relay keeps pulling for it alone.
 #[test]
-fn a_relay_feeding_one_consumer_stays_only_on_its_cheapest_cold_route() {
+fn a_relay_feeding_one_consumer_stays_only_on_its_cheapest_route() {
 	let (a, b, c) = (1, 2, 3);
 	for (skip, stays) in [(5, false), (9, true)] {
 		let (mut mesh, x) = chain(skip);
-		mesh.read(b, x, true);
-		mesh.read(c, x, true);
+		mesh.read(b, &x, true);
+		mesh.read(c, &x, true);
 		assert!(mesh.settle());
-		assert_eq!(mesh.parent(c, x), Some(b), "skip {skip}");
-		mesh.read(b, x, false);
+		assert_eq!(mesh.parent(c, &x), Some(b), "skip {skip}");
+		mesh.read(b, &x, false);
 		assert!(mesh.settle());
-		assert!(!mesh.warm_at(c, b, x), "skip {skip}: b withdrew");
-		assert_eq!(mesh.parent(c, x), Some(if stays { b } else { a }), "skip {skip}");
-		assert_eq!(mesh.carries(b, x), stays, "skip {skip}");
+		assert_eq!(mesh.parent(c, &x), Some(if stays { b } else { a }), "skip {skip}");
+		assert_eq!(mesh.carries(b, &x), stays, "skip {skip}");
 		mesh.steady(&format!("skip {skip}"));
 	}
 }
 
-/// `r2`'s cheapest cold route runs through `r1` to `r3`, so `r3`'s only demand is
-/// `r1`'s pull on `r2`'s behalf. Counted as demand besides `r2`'s, it would warm `r3`
-/// toward `r2`: `r2` would join `r3` over its direct link, `r1`'s pull and with it
-/// `r3`'s warmth would go, and `r2` would return to `r1`, once per linger forever.
-/// A pull names the relay it serves, so `r3` stays cold toward `r2`.
+/// `r2`'s cheapest route runs through `r1` to `r3`, so `r3` pulls only on `r2`'s
+/// behalf, and offers `r2` nothing: were it to, `r2` would join it over the direct
+/// link, `r1`'s pull would go, and with it the reason for `r3`'s copy. A reader of
+/// `r1`'s own makes it offer a copy, which `r2` already pulls.
 #[test]
-fn a_pull_on_a_neighbors_behalf_never_warms_its_parent_toward_it() {
+fn a_pull_on_a_neighbours_behalf_offers_nothing() {
 	let (o, r1, r2, r3) = (0, 1, 2, 3);
-	let mut mesh = Mesh::new(4);
+	let mut mesh = Mesh::new(4, PICK);
 	mesh.origin(o, 7);
 	mesh.join(o, r3, 1);
 	mesh.join(r3, r1, 1);
 	mesh.join(r1, r2, 1);
 	mesh.join(r2, r3, 3);
-	let x = mesh.broadcast("live/x", o);
-	mesh.read(r2, x, true);
+	let x = mesh.broadcast(7, "live/x", 0);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(r2, x), Some(r1));
-	assert_eq!(mesh.parent(r1, x), Some(r3));
-	assert!(!mesh.warm_at(r2, r3, x));
+	mesh.read(r2, &x, true);
+	assert!(mesh.settle());
+	assert_eq!(mesh.parent(r2, &x), Some(r1));
+	assert_eq!(mesh.parent(r1, &x), Some(r3));
+	assert!(!mesh.offered(r2, r3, &x) && !mesh.offered(r2, r1, &x));
+	assert_eq!(mesh.warm_sent(&x), 2, "r2's own copy, offered to r1 and r3");
 	mesh.steady("behalf");
 
-	// A reader of its own makes r1's pull stand alone and r3 warm toward r2, but r1,
-	// warm too, is the cheaper join.
-	mesh.read(r1, x, true);
+	mesh.read(r1, &x, true);
 	assert!(mesh.settle());
-	assert!(mesh.warm_at(r2, r3, x));
-	assert_eq!(mesh.parent(r2, x), Some(r1));
+	assert!(mesh.offered(r2, r1, &x));
+	assert_eq!(mesh.parent(r2, &x), Some(r1));
 	mesh.steady("own reader");
 }
 
@@ -807,58 +469,69 @@ const PATHS: [&str; 8] = [
 	"live/0", "live/1", "live/2", "live/3", "live/4", "live/5", "live/6", "live/7",
 ];
 
-/// Two relays at equal cold metric, both warm toward each other: per broadcast,
-/// only the lower hash keeps its uplink and the other joins it, so the pair pulls
-/// one copy, and the owner differs across broadcasts.
+/// Two relays at equal cost, each with a reader of every broadcast, whose readers
+/// arrive in the same instant: per broadcast only the lower hash keeps its uplink and
+/// the other joins it, so the pair pulls one copy, and the owner differs across
+/// broadcasts. Unranked, the two trade copies for good.
 #[test]
 fn equal_relays_pull_one_copy_owned_by_the_lower_hash() {
 	let (o, x, y) = (0, 1, 2);
-	let mut mesh = Mesh::new(3);
-	mesh.origin(o, 7);
-	mesh.join(o, x, 3);
-	mesh.join(o, y, 3);
-	mesh.join(x, y, 1);
-	let broadcasts: Vec<usize> = PATHS.iter().map(|path| mesh.broadcast(path, o)).collect();
-	for &b in &broadcasts {
-		mesh.read(x, b, true);
-		mesh.read(y, b, true);
-	}
+	let build = |rules: Rules| {
+		let mut mesh = Mesh::new(3, rules);
+		mesh.origin(o, 7);
+		mesh.join(o, x, 3);
+		mesh.join(o, y, 3);
+		mesh.join(x, y, 1);
+		let casts: Vec<Cast> = PATHS.iter().map(|path| mesh.broadcast(7, path, 0)).collect();
+		for cast in &casts {
+			mesh.sim.carry(x, cast);
+			mesh.sim.carry(y, cast);
+		}
+		(mesh, casts)
+	};
+	let (mut mesh, casts) = build(PICK);
 	assert!(mesh.settle());
 	let mut owners = BTreeSet::new();
-	for (&b, path) in broadcasts.iter().zip(PATHS) {
-		let (low, high) = match hash(path, x) < hash(path, y) {
+	for cast in &casts {
+		let rank = |node: Node| rendezvous(&cast.1, hop(node, 0));
+		let (low, high) = match rank(x) < rank(y) {
 			true => (x, y),
 			false => (y, x),
 		};
-		assert_eq!(mesh.parent(low, b), Some(o), "{path}");
-		assert_eq!(mesh.parent(high, b), Some(low), "{path}");
-		assert_eq!(mesh.copies(b), 1, "{path}");
+		assert_eq!(mesh.parent(low, cast), Some(o), "{cast:?}");
+		assert_eq!(mesh.parent(high, cast), Some(low), "{cast:?}");
+		assert_eq!(mesh.copies(cast), 1, "{cast:?}");
 		owners.insert(low);
 	}
 	assert_eq!(owners.len(), 2, "the hash spreads the owner");
 	mesh.steady("pair");
+	assert_eq!(mesh.loops, 0);
+
+	let (mut mesh, _) = build(Rules { ranked: false, ..PICK });
+	assert!(!mesh.run(), "unranked, the two trade copies for good");
 }
 
-/// A ring of relays, each holding its neighbors' reports from while every relay
-/// had its own link to the origin, loses all but one of those links. Each report
-/// is now lower than the truth, the hazard that let a whole ring let go at once
-/// under the old rank. Delivered in any order, no broadcast loops, and once quiet
-/// every reader is fed through the one link left.
+/// A ring of relays, each with its own link to the publisher and a reader, loses all
+/// but one of those links while every link of the ring is held, so each relay acts on
+/// what it last heard. Delivered in any order, once quiet every reader is fed through
+/// the one link left, and the pulls formed a cycle only while a withdrawal was still
+/// crossing a link.
 #[test]
-fn a_ring_of_stale_lower_reports_forms_no_loop() {
+fn a_ring_of_stale_offers_settles_on_the_link_left() {
 	const RING: usize = 5;
 	let o = 0;
 	let relays: Vec<Node> = (1..=RING).collect();
+	let mut loops = 0;
 	for seed in 0..20u64 {
-		let mut mesh = Mesh::new(RING + 1);
+		let mut mesh = Mesh::new(RING + 1, PICK);
 		mesh.origin(o, 7);
 		for (i, &relay) in relays.iter().enumerate() {
 			mesh.join(o, relay, 1);
 			mesh.join(relay, relays[(i + 1) % RING], 1);
 		}
-		let x = mesh.broadcast("live/x", o);
+		let x = mesh.broadcast(7, "live/x", 0);
 		for &relay in &relays {
-			mesh.read(relay, x, true);
+			mesh.read(relay, &x, true);
 		}
 		assert!(mesh.settle());
 		for (i, &relay) in relays.iter().enumerate() {
@@ -869,80 +542,122 @@ fn a_ring_of_stale_lower_reports_forms_no_loop() {
 		for &relay in &relays[1..] {
 			mesh.disconnect(o, relay);
 		}
+		for (i, &relay) in relays.iter().enumerate() {
+			let next = relays[(i + 1) % RING];
+			mesh.release(relay, next);
+			mesh.release(next, relay);
+		}
 		let mut rng = XorShift(0x5717_e000 + seed);
 		loop {
 			let busy = mesh.busy();
 			if busy.is_empty() {
 				break;
 			}
-			mesh.deliver_one(busy[rng.next(busy.len() as u64) as usize]);
+			mesh.deliver_one(&busy[rng.next(busy.len() as u64) as usize]);
 		}
-		assert!(mesh.settle());
+		assert!(mesh.settle(), "seed {seed}");
 		mesh.steady(&format!("seed {seed}"));
-		assert_eq!(mesh.copies(x), 1, "seed {seed}");
-		assert_eq!(mesh.parent(relays[0], x), Some(o), "seed {seed}");
+		assert_eq!(mesh.copies(&x), 1, "seed {seed}");
+		assert_eq!(mesh.parent(relays[0], &x), Some(o), "seed {seed}");
+		loops += mesh.loops;
 	}
+	assert!(loops <= 20, "{loops} steps with a cycle across 20 seeds");
 }
 
-/// `b` withdraws its warm route toward `c` while `c`'s subscription to it is on
-/// its way. The subscription reaches `b` with no copy left, and `b` pulls it
-/// along its own route, as for any request; `c` then moves back to the skip.
+/// `b` withdraws its copy while `c`'s subscription to it is on its way. The
+/// subscription reaches `b` with no copy left, and `b` pulls along its own route, as
+/// for any request; `c` then moves back to the skip.
 #[test]
-fn a_request_crossing_a_warm_withdrawal_is_forwarded_without_a_loop() {
+fn a_request_crossing_a_withdrawal_is_forwarded_without_a_loop() {
 	let (a, b, c) = (1, 2, 3);
 	let (mut mesh, x) = chain(5);
-	mesh.read(b, x, true);
+	mesh.read(b, &x, true);
 	assert!(mesh.settle());
-	assert!(mesh.warm_at(c, b, x));
+	assert!(mesh.offered(c, b, &x));
 	mesh.hold(c, b);
 	mesh.hold(b, c);
-	mesh.read(c, x, true);
+	mesh.read(c, &x, true);
 	assert!(mesh.run());
-	assert_eq!(mesh.parent(c, x), Some(b), "c's subscription waits");
+	assert_eq!(mesh.parent(c, &x), Some(b), "c's subscription waits");
 
-	mesh.read(b, x, false);
-	mesh.tick(b, x);
+	mesh.read(b, &x, false);
+	mesh.expire(b, &x);
 	assert!(mesh.run());
-	assert!(!mesh.carries(b, x), "b let its copy go");
-	assert!(mesh.warm_at(c, b, x), "its withdrawal waits");
+	assert!(!mesh.carries(b, &x), "b let its copy go");
+	assert!(mesh.offered(c, b, &x), "its withdrawal waits");
 
-	assert!(mesh.deliver_sub(c, b, x));
-	assert_eq!(mesh.parent(b, x), Some(a), "b forwards the request along its own route");
+	assert!(mesh.deliver_sub(c, b, &x));
+	assert_eq!(
+		mesh.parent(b, &x),
+		Some(a),
+		"b forwards the request along its own route"
+	);
 	mesh.release(c, b);
 	mesh.release(b, c);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(c, x), Some(a));
-	assert!(!mesh.carries(b, x));
+	assert_eq!(mesh.parent(c, &x), Some(a));
+	assert!(!mesh.carries(b, &x));
 	mesh.steady("crossed");
+	assert_eq!(mesh.loops, 0);
 }
 
-/// A warm route for another instance of the same path is never joined: `c`'s
-/// reader of the new instance takes the skip although `b` is warm for the old one.
+/// `c` moves off `b` and back while its subscriptions to `b` wait. The new stream's
+/// pull reaches `b` before the old stream's cancel, and `b` keeps feeding `c`.
 #[test]
-fn a_warm_route_for_another_instance_is_never_joined() {
-	let (o, a, b, c) = (0, 1, 2, 3);
-	let (mut mesh, old) = chain(5);
-	let new = mesh.broadcast("live/x", o);
-	mesh.read(b, old, true);
-	mesh.read(c, new, true);
+fn a_replacement_pull_overtaking_the_old_cancel_keeps_its_feed() {
+	let (a, b, c) = (1, 2, 3);
+	let (mut mesh, x) = chain(5);
+	mesh.read(b, &x, true);
+	mesh.read(c, &x, true);
 	assert!(mesh.settle());
-	assert!(mesh.warm_at(c, b, old));
-	assert_eq!(mesh.parent(c, new), Some(a));
-	assert!(!mesh.carries(b, new));
+	assert_eq!(mesh.parent(c, &x), Some(b));
+	mesh.hold(c, b);
+
+	mesh.read(b, &x, false);
+	assert!(mesh.run());
+	assert_eq!(mesh.parent(c, &x), Some(a), "c leaves for the skip");
+	mesh.read(b, &x, true);
+	assert!(mesh.run());
+	assert_eq!(mesh.parent(c, &x), Some(b), "c comes back");
+
+	let streams = mesh.streams(c, b);
+	assert_eq!(streams.len(), 2, "the old cancel and the new pull wait");
+	assert!(mesh.deliver_stream(c, b, &x, streams[1]));
+	assert!(mesh.deliver_stream(c, b, &x, streams[0]));
+	assert_eq!(mesh.sim.nodes[b].downstream(&x), BTreeSet::from([c]));
+	mesh.release(c, b);
+	assert!(mesh.settle());
+	assert_eq!(mesh.parent(c, &x), Some(b));
+	mesh.steady("overtaken");
+	assert_eq!(mesh.loops, 0);
+}
+
+/// A copy of another instance of the same path is never joined: `c`'s reader of the
+/// new instance takes the skip although `b` offers the old one.
+#[test]
+fn a_copy_of_another_instance_is_never_joined() {
+	let (a, b, c) = (1, 2, 3);
+	let (mut mesh, old) = chain(5);
+	let new = mesh.broadcast(7, "live/x", 1);
+	mesh.read(b, &old, true);
+	mesh.read(c, &new, true);
+	assert!(mesh.settle());
+	assert!(mesh.offered(c, b, &old));
+	assert_eq!(mesh.parent(c, &new), Some(a));
+	assert!(!mesh.carries(b, &new));
 	mesh.steady("instances");
 }
 
-/// `k` relays on a LAN, each with its own uplink and a reader of every broadcast.
-/// In a full mesh each broadcast crosses one uplink. In a ring a relay joins only a
-/// neighbor with a lower hash, so each relay whose neighbors both hash higher keeps
-/// an uplink copy, which the epic accepts.
+/// `k` relays on a LAN, each with its own uplink and a reader of every broadcast. In
+/// a full mesh each broadcast crosses one uplink. In a ring some relays keep an
+/// uplink copy of their own, which the epic accepts.
 #[test]
 fn lan_relays_share_uplink_copies() {
 	const K: usize = 6;
 	let o = 0;
 	let relays: Vec<Node> = (1..=K).collect();
 	for full in [true, false] {
-		let mut mesh = Mesh::new(K + 1);
+		let mut mesh = Mesh::new(K + 1, PICK);
 		mesh.origin(o, 7);
 		for &relay in &relays {
 			mesh.join(o, relay, 3);
@@ -954,94 +669,240 @@ fn lan_relays_share_uplink_copies() {
 				}
 			}
 		}
-		let broadcasts: Vec<usize> = PATHS.iter().map(|path| mesh.broadcast(path, o)).collect();
-		for &b in &broadcasts {
+		let casts: Vec<Cast> = PATHS.iter().map(|path| mesh.broadcast(7, path, 0)).collect();
+		for cast in &casts {
 			for &relay in &relays {
-				mesh.read(relay, b, true);
+				mesh.read(relay, cast, true);
 			}
 		}
 		assert!(mesh.settle());
-		mesh.steady(if full { "full mesh" } else { "ring" });
-		let mut copies = 0;
-		for (&b, path) in broadcasts.iter().zip(PATHS) {
-			let minima = (0..K)
-				.filter(|&i| {
-					let h = hash(path, relays[i]);
-					h < hash(path, relays[(i + 1) % K]) && h < hash(path, relays[(i + K - 1) % K])
-				})
-				.count();
-			assert_eq!(mesh.copies(b), if full { 1 } else { minima }, "{path}");
-			copies += mesh.copies(b);
-		}
-		// Recorded: one copy per broadcast in the full mesh, 12 for 8 in the ring.
-		assert_eq!(copies, if full { 8 } else { 12 });
+		let label = if full { "full mesh" } else { "ring" };
+		mesh.steady(label);
+		let copies: Vec<usize> = casts.iter().map(|cast| mesh.copies(cast)).collect();
+		// Recorded: one uplink copy per broadcast in the full mesh, and a few in the
+		// ring, where a relay joins only a copy whose carrier ranks below its own.
+		// Readers arriving everywhere at once cross their offers on the way, and the
+		// pulls form a cycle until those cross back.
+		let total: usize = copies.iter().sum();
+		assert_eq!(
+			(total, mesh.loops),
+			if full { (8, 5) } else { (15, 0) },
+			"{label}: {copies:?}"
+		);
 	}
 }
 
-/// While a broadcast is pulled: its origin advances its seqno, a relay loses its
-/// route, and a relay drains. The seqno reaches `c` through the skip before `b`
-/// passes it on, and `b`'s older route is then ineligible, so `c` moves off `b`
-/// and back: what staying loop-free across seqnos costs a joined copy.
+/// While a broadcast is pulled, a relay loses its link toward the publisher, and
+/// later a relay drains (GOAWAY moves pulls off its copy).
 #[test]
-fn a_seqno_advance_a_lost_route_and_a_drain_keep_pulls_loop_free() {
-	let (o, a, b, c) = (0, 1, 2, 3);
+fn a_lost_route_and_a_drain_move_pulls_without_a_loop() {
+	let (a, b, c) = (1, 2, 3);
 	let (mut mesh, x) = chain(5);
-	mesh.read(b, x, true);
-	mesh.read(c, x, true);
+	mesh.read(b, &x, true);
+	mesh.read(c, &x, true);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(c, x), Some(b));
-
-	let moves = mesh.stats.moves;
-	mesh.bump(o);
-	assert!(mesh.settle());
-	assert_eq!(mesh.parent(c, x), Some(b));
-	assert_eq!(mesh.stats.moves - moves, 2, "c left b while b's route was older");
-	mesh.steady("seqno");
+	assert_eq!(mesh.parent(c, &x), Some(b));
 
 	mesh.disconnect(a, b);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(c, x), Some(a));
-	assert_eq!(mesh.parent(b, x), Some(c), "b reaches the origin only through c");
+	assert_eq!(mesh.parent(c, &x), Some(a));
+	assert_eq!(mesh.parent(b, &x), Some(c), "b reaches the publisher only through c");
 	mesh.steady("route loss");
 
 	mesh.connect(a, b);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(c, x), Some(b));
+	mesh.steady("reconnected");
 	mesh.goaway(b);
 	assert!(mesh.settle());
-	assert_eq!(mesh.parent(c, x), Some(a), "c leaves the draining relay");
+	assert_eq!(mesh.parent(c, &x), Some(a), "c leaves the draining relay");
 	mesh.steady("drain");
+	assert_eq!(mesh.loops, 0);
 }
 
-/// Random relay meshes with two origins under churn: readers come and go,
+const HOME: Node = 0;
+const NEAR: Node = 1;
+const FAR: Node = 2;
+const TAIL: Node = 3;
+const ORIGIN: Node = 4;
+const SIDE: Node = 5;
+
+/// Two relays with an uplink each to the publisher's relay, `NEAR`'s the cheaper, and
+/// a cheap link between them. `TAIL` hangs off `FAR`, and `SIDE` off `NEAR`.
+fn uplinks(rules: Rules) -> (Mesh, Cast) {
+	let mut mesh = Mesh::new(6, rules);
+	mesh.origin(ORIGIN, 7);
+	mesh.join(HOME, NEAR, 10);
+	mesh.join(HOME, FAR, 12);
+	mesh.join(NEAR, FAR, 3);
+	mesh.join(FAR, TAIL, 1);
+	mesh.join(NEAR, SIDE, 1);
+	mesh.join(ORIGIN, HOME, 1);
+	let x = mesh.broadcast(7, "live", 0);
+	assert!(mesh.settle());
+	(mesh, x)
+}
+
+/// `FAR` carries the broadcast and is farther from the publisher than `NEAR`. A reader
+/// at `SIDE` pulls through `NEAR`, which joins `FAR`'s copy over the cheap link rather
+/// than pull its own over its uplink. Babel's distance cannot allow this: `FAR`'s cost
+/// to the publisher is not below `NEAR`'s.
+#[test]
+fn a_relay_joins_a_copy_farther_from_the_publisher() {
+	for rules in [PICK, Rules::EPOCHS] {
+		let (mut mesh, x) = uplinks(rules);
+		mesh.read(FAR, &x, true);
+		assert!(mesh.settle());
+		let before = mesh.sim.stats;
+		mesh.read(SIDE, &x, true);
+		assert!(mesh.settle());
+		assert_eq!(mesh.parent(SIDE, &x), Some(NEAR), "{rules:?}");
+		assert_eq!(
+			mesh.parent(NEAR, &x),
+			Some(FAR),
+			"{rules:?}: NEAR joins the farther copy"
+		);
+		assert_eq!(mesh.parent(FAR, &x), Some(HOME), "{rules:?}");
+		assert_eq!(mesh.sim.nodes[NEAR].cost(7), Some(11));
+		assert_eq!(mesh.sim.nodes[FAR].cost(7), Some(13));
+		mesh.steady(&format!("{rules:?}"));
+		// SIDE's copy came through NEAR, its only neighbour, so it offers it to no one.
+		assert_eq!(mesh.sim.stats.warm_msgs - before.warm_msgs, 0, "{rules:?}");
+
+		mesh.read(FAR, &x, false);
+		assert!(mesh.settle());
+		assert_eq!(mesh.parent(NEAR, &x), Some(HOME), "{rules:?}");
+		assert!(!mesh.carries(FAR, &x), "{rules:?}");
+		mesh.steady(&format!("{rules:?}: FAR's reader left"));
+		assert_eq!(mesh.loops, 0, "{rules:?}");
+	}
+}
+
+/// Both relays carry a copy, `NEAR`'s pulled from `FAR`'s whenever `FAR` ranks below
+/// it. When `FAR`'s uplink closes the two swap if they must, each still fed from the
+/// publisher, and the pulls loop only while the news crosses their link.
+#[test]
+fn two_copies_never_feed_each_other_once_quiet() {
+	for rules in [PICK, Rules::EPOCHS] {
+		let (mut mesh, x) = uplinks(rules);
+		mesh.read(FAR, &x, true);
+		assert!(mesh.settle());
+		mesh.read(NEAR, &x, true);
+		mesh.read(TAIL, &x, true);
+		assert!(mesh.settle());
+		mesh.steady(&format!("{rules:?}"));
+		assert_eq!(mesh.loops, 0, "{rules:?}");
+
+		mesh.disconnect(HOME, FAR);
+		assert!(mesh.settle());
+		assert_eq!(mesh.parent(NEAR, &x), Some(HOME), "{rules:?}");
+		assert_eq!(mesh.parent(FAR, &x), Some(NEAR), "{rules:?}");
+		assert_eq!(mesh.parent(TAIL, &x), Some(FAR), "{rules:?}");
+		mesh.steady(&format!("{rules:?}: FAR's uplink closed"));
+		assert!(mesh.loops <= 3, "{rules:?}: {} steps with a cycle", mesh.loops);
+	}
+}
+
+/// `NEAR` pulls `FAR`'s copy, whose path crosses `HOME`, and then loses its own
+/// session to `HOME`, which casts doubt on `HOME`. Doubt keeps a reader from moving
+/// to a copy, not on the one it pulls, so `NEAR` stays on `FAR`'s throughout.
+#[test]
+fn a_doubt_leaves_the_copy_in_use_alone() {
+	let (mut mesh, x) = uplinks(PICK);
+	mesh.read(FAR, &x, true);
+	mesh.read(SIDE, &x, true);
+	assert!(mesh.settle());
+	assert_eq!(mesh.parent(NEAR, &x), Some(FAR));
+
+	mesh.disconnect(HOME, NEAR);
+	assert_eq!(mesh.parent(NEAR, &x), Some(FAR));
+	for _ in 0..64 {
+		match mesh.busy().first().cloned() {
+			Some(queue) => mesh.deliver_one(&queue),
+			None => {
+				mesh.tick();
+			}
+		};
+		assert_eq!(mesh.parent(NEAR, &x), Some(FAR));
+	}
+	assert!(mesh.settle());
+	mesh.steady("doubt");
+	assert_eq!(mesh.loops, 0);
+}
+
+/// The publisher leaves while two relays carry a copy. Every copy goes with its
+/// route, nothing is left pulling, and nothing remembers a dead hop.
+#[test]
+fn a_copy_that_goes_takes_its_offers_along() {
+	let (mut mesh, x) = uplinks(PICK);
+	mesh.read(FAR, &x, true);
+	mesh.read(NEAR, &x, true);
+	mesh.read(TAIL, &x, true);
+	assert!(mesh.settle());
+
+	mesh.disconnect(ORIGIN, HOME);
+	assert!(mesh.settle());
+	for relay in [HOME, NEAR, FAR, TAIL, SIDE] {
+		assert!(!mesh.carries(relay, &x), "relay {relay}");
+		assert_eq!(mesh.sim.nodes[relay].retained(), (0, 0), "relay {relay}");
+	}
+}
+
+/// Random relay meshes with two publishers under churn: readers come and go,
 /// sessions drop and return, messages are held and delivered out of step, lingers
-/// run out, origins advance their seqno, and relays drain. No broadcast's parents
-/// ever form a cycle. Once churn stops the mesh settles on the steady state, and a
-/// broadcast nobody reads has sent no warm route.
+/// run out, time passes, and relays drain, with links held or not. Once churn stops
+/// every mesh settles on the steady state, and a broadcast nobody reads has sent no
+/// copy offer. The pulls form a cycle only while a withdrawal crosses a link, which
+/// the sweep counts.
 #[test]
 fn sweep_cache_routing() {
-	sweep(100);
+	for holds in [true, false] {
+		sweep(SEED, 100, holds);
+	}
 }
 
-/// The sweep at length, too slow for the merge gate.
+/// The gate's seed, and the long sweep's unless `MOQ_ROUTE_SEED` names another.
+const SEED: u64 = 0xcac4_e5ee;
+
+/// The sweep at length from `MOQ_ROUTE_SEED` over `MOQ_ROUTE_CASES` scenarios each way,
+/// which prints what it measured.
 #[test]
-#[ignore = "3000 scenarios take minutes"]
+#[ignore = "slow: nightly"]
 fn sweep_cache_routing_long() {
-	sweep(3000);
+	let setting = |name: &str, fallback: u64| std::env::var(name).map_or(fallback, |value| value.parse().expect(name));
+	let seed = setting("MOQ_ROUTE_SEED", SEED);
+	let cases = setting("MOQ_ROUTE_CASES", 3000) as usize;
+	println!("MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASES={cases}");
+	for holds in [true, false] {
+		let out = sweep(seed, cases, holds);
+		println!("holds {holds}: {out:?}");
+	}
 }
 
-/// The scenarios that stay loop-free but never settle: two carriers each keep a
-/// narrowed advert standing while two relays swap between them. The sweep checks
-/// that each still never settles, so the list shrinks as convergence is fixed.
-const UNSETTLED: [usize; 1] = [2251];
+/// What a sweep measured.
+#[derive(Debug, Default)]
+struct Sweep {
+	/// Steps after which some broadcast's pulls formed a cycle, of all steps.
+	loops: usize,
+	steps: usize,
+	/// Scenarios with any such step.
+	looped: usize,
+	/// Steps after which a reader's pulls led into a cycle.
+	starved: usize,
+	/// The most deliveries in a row after which a cycle remained.
+	longest: usize,
+	/// Copy offers and their ends sent, and reader changes, during churn.
+	warm: usize,
+	reads: usize,
+}
 
-fn sweep(scenarios: usize) {
+fn sweep(seed: u64, scenarios: usize, holds: bool) -> Sweep {
 	const RELAYS: usize = 6;
-	let mut rng = XorShift(0xcac4_e5ee);
+	let mut rng = XorShift(seed);
+	let mut out = Sweep::default();
 	for scenario in 0..scenarios {
-		let label = format!("scenario {scenario}");
+		let label = format!("seed {seed} holds {holds} scenario {scenario}");
 		let origins = [RELAYS, RELAYS + 1];
-		let mut mesh = Mesh::new(RELAYS + 2);
+		let mut mesh = Mesh::new(RELAYS + 2, PICK);
 		mesh.origin(origins[0], 100);
 		mesh.origin(origins[1], 200);
 		if rng.chance(30) {
@@ -1063,21 +924,23 @@ fn sweep(scenarios: usize) {
 			mesh.join(a, b, 1 + rng.next(5));
 		}
 		let read = [
-			mesh.broadcast("live/a", origins[0]),
-			mesh.broadcast("live/b", origins[0]),
-			mesh.broadcast("live/a", origins[1]),
+			mesh.broadcast(100, "live/a", 0),
+			mesh.broadcast(100, "live/b", 0),
+			mesh.broadcast(200, "live/a", 0),
 			// Another instance of the first.
-			mesh.broadcast("live/a", origins[0]),
+			mesh.broadcast(100, "live/a", 1),
 		];
-		let idle = mesh.broadcast("live/idle", origins[0]);
+		let idle = mesh.broadcast(100, "live/idle", 0);
 		assert!(mesh.settle(), "{label}");
 
+		let warm = mesh.sim.stats.warm_msgs;
 		for _ in 0..60 {
 			match rng.next(12) {
 				0..=2 => {
-					let (relay, b) = (rng.next(RELAYS as u64) as usize, read[rng.next(4) as usize]);
-					let reading = mesh.reading(relay, b);
-					mesh.read(relay, b, !reading);
+					let (relay, cast) = (rng.next(RELAYS as u64) as usize, &read[rng.next(4) as usize]);
+					let reading = mesh.reading(relay, cast);
+					mesh.read(relay, cast, !reading);
+					out.reads += 1;
 				}
 				3 => {
 					let (a, b) = links[rng.next(links.len() as u64) as usize];
@@ -1090,12 +953,15 @@ fn sweep(scenarios: usize) {
 					let (a, b) = links[rng.next(links.len() as u64) as usize];
 					let (from, to) = if rng.chance(50) { (a, b) } else { (b, a) };
 					match rng.chance(70) {
-						true => mesh.hold(from, to),
+						true if holds => mesh.hold(from, to),
+						true => {}
 						false => mesh.release(from, to),
 					}
 				}
-				5 => mesh.tick(rng.next(RELAYS as u64) as usize, read[rng.next(4) as usize]),
-				6 if rng.chance(50) => mesh.bump(origins[rng.next(2) as usize]),
+				5 => mesh.expire(rng.next(RELAYS as u64) as usize, &read[rng.next(4) as usize]),
+				6 if rng.chance(50) => {
+					mesh.tick();
+				}
 				6 if rng.chance(20) => mesh.goaway(rng.next(RELAYS as u64) as usize),
 				_ => {
 					for _ in 0..rng.next(8) {
@@ -1103,11 +969,12 @@ fn sweep(scenarios: usize) {
 						if busy.is_empty() {
 							break;
 						}
-						mesh.deliver_one(busy[rng.next(busy.len() as u64) as usize]);
+						mesh.deliver_one(&busy[rng.next(busy.len() as u64) as usize]);
 					}
 				}
 			}
 		}
+		out.warm += mesh.sim.stats.warm_msgs - warm;
 
 		for &(a, b) in &links {
 			mesh.release(a, b);
@@ -1116,12 +983,14 @@ fn sweep(scenarios: usize) {
 				mesh.connect(a, b);
 			}
 		}
-		if UNSETTLED.contains(&scenario) {
-			assert!(!mesh.settle(), "{label} settles: drop it from UNSETTLED");
-			continue;
-		}
 		assert!(mesh.settle(), "{label}");
 		mesh.steady(&label);
-		assert_eq!(mesh.warm_sent(idle), 0, "{label}");
+		assert_eq!(mesh.warm_sent(&idle), 0, "{label}");
+		out.loops += mesh.loops;
+		out.steps += mesh.steps;
+		out.looped += usize::from(mesh.loops > 0);
+		out.starved += mesh.starved;
+		out.longest = out.longest.max(mesh.longest);
 	}
+	out
 }

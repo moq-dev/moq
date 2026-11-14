@@ -34,7 +34,9 @@ a revision. Start from the last WebRTC `main` commit on 2026-11-04, and record
 the revision checked in `stretch.rs`'s module doc. The port is a deliberate
 floating-point adaptation (maintainer, 2026-11-04), so an upstream change to
 Q15 arithmetic alone does not apply; `doc/concept/audio-jitter.md` and its PCM
-corpus define the algorithm, so update both with any ported change.
+corpus define the algorithm, so update both with any ported change. The
+[lag rule](/quest/m2/audio-playout/lag-rule.md) replaces the port with a
+continuous time stretch before the cut; once it lands, drop that half.
 
 WebRTC's gitiles history pages need a Google sign-in; clone
 `https://webrtc.googlesource.com/src` instead.

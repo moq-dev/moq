@@ -524,6 +524,20 @@
         "@moq/web-transport": "^0.1.6",
       },
     },
+    "test/stream-credit": {
+      "name": "@moq/stream-credit-test",
+      "dependencies": {
+        "@moq/clock": "workspace:*",
+        "@moq/net": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.4",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
+        "playwright": "1.64.1",
+        "typescript": "7.0.2",
+        "vite": "^8.3.5",
+      },
+    },
     "test/video": {
       "name": "@moq/video-test",
       "dependencies": {
@@ -881,6 +895,8 @@
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
     "@moq/stats": ["@moq/stats@workspace:js/stats"],
+
+    "@moq/stream-credit-test": ["@moq/stream-credit-test@workspace:test/stream-credit"],
 
     "@moq/ui": ["@moq/ui@workspace:js/ui"],
 
