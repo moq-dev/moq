@@ -505,6 +505,38 @@ impl<T: Clone> Dpb<T> {
 		pics
 	}
 
+	/// Stores or outputs a decoded picture whose reference marking has run,
+	/// appending the pictures that leave the DPB to `output` in output order.
+	///
+	/// C.4.4 empties every frame buffer the marking left unused for reference
+	/// and not needed for output, before C.4.5.3 bumps for the new picture. A
+	/// picture already output stays only as a reference, so it must leave the
+	/// moment memory management releases it, even when nothing is left to bump.
+	/// C.4.5.1 stores a reference picture after bumping until a frame buffer is
+	/// free. C.4.5.2 stores a non-reference picture when a buffer is free, and
+	/// outputs it directly otherwise. Whatever the reorder limit already lets out
+	/// then leaves now rather than when a later picture needs its buffer.
+	pub fn finish_picture(
+		&mut self,
+		pic: PictureData,
+		handle: T,
+		output: &mut Vec<T>,
+	) -> Result<(), StorePictureError> {
+		self.check_output_order(&pic);
+		self.remove_unused();
+
+		output.extend(self.bump_as_needed(&pic).into_iter().flatten());
+		if pic.is_ref() || self.has_empty_frame_buffer() {
+			self.store_picture(pic.into_rc(), Some(handle))?;
+		} else {
+			self.output_unstored(&pic);
+			output.push(handle);
+		}
+		output.extend(self.bump_over_reorder_limit().into_iter().flatten());
+
+		Ok(())
+	}
+
 	/// Bumps the pictures the stream's reorder limit already lets out.
 	///
 	/// C.4.5.3 bumps only when a new picture needs a frame buffer, which fixes
@@ -515,7 +547,7 @@ impl<T: Clone> Dpb<T> {
 	/// and follow it in output order, so once more than that wait for output,
 	/// no later picture can come before the one with the lowest order count,
 	/// and it is due now.
-	pub fn bump_over_reorder_limit(&mut self) -> Vec<Option<T>> {
+	fn bump_over_reorder_limit(&mut self) -> Vec<Option<T>> {
 		let limit = self.reorder_limit();
 		let mut pics = vec![];
 		while self.entries.iter().filter(|entry| entry.is_bumpable()).count() > limit {
@@ -531,7 +563,7 @@ impl<T: Clone> Dpb<T> {
 
 	/// Records that `pic` was output without passing through the DPB, as
 	/// C.4.5.2 does with a non-reference picture when no frame buffer is free.
-	pub fn output_unstored(&mut self, pic: &PictureData) {
+	fn output_unstored(&mut self, pic: &PictureData) {
 		let poc = pic.pic_order_cnt;
 		self.last_output_poc = Some(self.last_output_poc.map_or(poc, |last| last.max(poc)));
 	}
@@ -544,7 +576,7 @@ impl<T: Clone> Dpb<T> {
 	/// further than C.4.5.3 does. A stream that understates its reordering
 	/// shows one picture out of order and then gets one more frame of slack,
 	/// up to the DPB size, which is where C.4.5.3 alone would have left it.
-	pub fn check_output_order(&mut self, pic: &PictureData) {
+	fn check_output_order(&mut self, pic: &PictureData) {
 		let Some(last_output_poc) = self.last_output_poc else {
 			return;
 		};
@@ -1327,18 +1359,64 @@ mod tests {
 		pic
 	}
 
-	/// Decodes `pocs` in order through the steps `finish_picture` takes for a
-	/// non-reference frame with a free buffer, returning what comes out.
+	/// Decodes non-reference frames with order counts `pocs`, returning what
+	/// comes out.
 	fn decode(dpb: &mut Dpb<i32>, pocs: &[i32]) -> Vec<i32> {
 		let mut output = Vec::new();
 		for &poc in pocs {
-			let pic = frame(poc);
-			dpb.check_output_order(&pic);
-			dpb.store_picture(pic.into_rc(), Some(poc))
-				.expect("a free frame buffer");
-			output.extend(dpb.bump_over_reorder_limit().into_iter().flatten());
+			dpb.finish_picture(frame(poc), poc, &mut output)
+				.expect("store a non-reference frame");
 		}
 		output
+	}
+
+	/// A reference that was output as soon as it decoded frees its frame buffer
+	/// the moment memory management releases it, whether it was a short-term
+	/// reference (MMCO 1) or a long-term one (MMCO 2). A one-frame DPB with no
+	/// reordering has nothing left to bump, so it would otherwise stay full.
+	#[test]
+	fn a_released_reference_already_output_frees_its_buffer() {
+		for long_term in [false, true] {
+			let mut dpb = Dpb::default();
+			dpb.set_limits(1, 0);
+			let mut output = Vec::new();
+
+			let mut idr = frame(0);
+			idr.is_idr = IsIdr::Yes { idr_pic_id: 0 };
+			if long_term {
+				idr.set_reference(Reference::LongTerm, false);
+			} else {
+				idr.set_reference(Reference::ShortTerm, false);
+			}
+			dpb.finish_picture(idr, 0, &mut output).expect("store the IDR");
+			assert_eq!(output, [0], "a stream without reordering lets the IDR out at once");
+
+			let mut p = frame(2);
+			p.frame_num = 1;
+			p.pic_num = 1;
+			p.set_reference(Reference::ShortTerm, false);
+			dpb.update_pic_nums(p.frame_num, 16, &p);
+			if long_term {
+				let marking = RefPicMarkingInner {
+					memory_management_control_operation: 2,
+					long_term_pic_num: 0,
+					..Default::default()
+				};
+				dpb.mmco_op_2(&p, &marking).expect("release the long-term IDR");
+			} else {
+				let marking = RefPicMarkingInner {
+					memory_management_control_operation: 1,
+					difference_of_pic_nums_minus1: 0,
+					..Default::default()
+				};
+				dpb.mmco_op_1(&p, &marking).expect("release the short-term IDR");
+			}
+
+			dpb.finish_picture(p, 2, &mut output)
+				.expect("the released IDR frees its frame buffer");
+			assert_eq!(output, [0, 2]);
+			assert_eq!(dpb.len(), 1, "only the new reference is left");
+		}
 	}
 
 	/// A stream that reorders by the amount it declares comes out in order, each

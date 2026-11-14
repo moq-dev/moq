@@ -22,13 +22,15 @@
 //! unit's first slice arrives, so the hardware is never left holding a
 //! half-submitted picture between calls.
 //!
-//! Output trails input by the stream's reorder depth and no more. H.264 bumps
+//! Output trails input by the reorder depth the SPS declares. H.264 bumps
 //! the DPB when a new picture needs a frame buffer (C.4.5.3), and also lets a
 //! picture out as soon as more pictures wait than the SPS's reorder limit
-//! allows, so a stream coded without reordering comes out as it decodes rather
-//! than one picture behind. H.265 bumps by the SPS's reorder limit (C.5.2) to
-//! the same effect. A stream with B-frames still holds pictures back, so
-//! [`Frame`] carries the timestamp of the access unit it was coded in, and
+//! allows, so a stream that declares no reordering comes out as it decodes
+//! rather than one picture behind. An SPS without `bitstream_restriction`
+//! declares nothing, so E.2.1 infers the DPB size and such a stream still
+//! trails by it. H.265 bumps by the SPS's reorder limit (C.5.2) to the same
+//! effect. A stream with B-frames still holds pictures back, so [`Frame`]
+//! carries the timestamp of the access unit it was coded in, and
 //! [`Decoder::flush`] is what releases the tail at the end of a stream.
 //!
 //! Progressive 8-bit 4:2:0 only: a sequence that is interlaced, deeper than 8
@@ -650,27 +652,10 @@ impl H264 {
 			self.drain();
 		}
 
-		self.dpb.check_output_order(&pic);
-
-		// C.4.5.3 clauses 1, 4, 5, and 6.
-		self.ready.extend(self.dpb.bump_as_needed(&pic).into_iter().flatten());
-
-		// C.4.5.1: a reference picture is bumped until a frame buffer is free,
-		// then stored. C.4.5.2: a non-reference picture is stored if a buffer is
-		// free after bumping, and output directly otherwise.
-		if pic.is_ref() || self.dpb.has_empty_frame_buffer() {
-			self.dpb
-				.store_picture(pic.into_rc(), Some(handle))
-				.map_err(|e| anyhow!("store picture in DPB: {e}"))?;
-		} else {
-			self.dpb.output_unstored(&pic);
-			self.ready.push(handle);
-		}
-
-		// Whatever the reorder limit already lets out leaves now rather than
-		// when a later picture needs its frame buffer.
-		self.ready
-			.extend(self.dpb.bump_over_reorder_limit().into_iter().flatten());
+		// C.4.4 and C.4.5: free what the marking released, then store or output.
+		self.dpb
+			.finish_picture(pic, handle, &mut self.ready)
+			.map_err(|e| anyhow!("store picture in DPB: {e}"))?;
 
 		Ok(())
 	}
