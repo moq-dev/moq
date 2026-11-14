@@ -134,6 +134,7 @@ test("puts a MoQ destination in a new profile and reloads it for the layers", as
 	expect(fake.param("SimpleOutput", "ABitrate")).toBe("128");
 	expect(fake.param("SimpleOutput", "x264Settings")).toContain("bframes=0");
 	expect(fake.param("SimpleOutput", "x264Settings")).toContain("keyint=120");
+	expect(fake.param("Output", "DelayEnable")).toBe("false");
 
 	// The reload went through the other profile, after every write.
 	const types = fake.log.map((entry) => entry.type);
@@ -160,6 +161,28 @@ test("a new profile starts from the current profile's video", async () => {
 	await client.configure(MOQ);
 	expect(fake.current).toBe("MoQ");
 	expect(fake.video).toEqual(before);
+	client.close();
+});
+
+test("changes only the video settings that differ", async () => {
+	obs();
+	const client = await connect();
+	await client.configure(MOQ);
+	// A canvas obs-websocket can't set must not ride along with a frame rate change.
+	fake.video.baseWidth = 5120;
+	fake.log = [];
+	await client.configure({ ...MOQ, video: { fps: 60 } });
+	const set = fake.log.find((entry) => entry.type === "SetVideoSettings");
+	expect(set?.data).toEqual({ fpsNumerator: 60, fpsDenominator: 1 });
+	client.close();
+});
+
+test("refuses a new profile for a canvas obs-websocket can't copy", async () => {
+	obs();
+	fake.video.baseWidth = 5120;
+	const client = await connect();
+	await expect(client.configure(MOQ)).rejects.toThrow("larger than obs-websocket can copy");
+	expect(fake.profiles.has("MoQ")).toBe(false);
 	client.close();
 });
 
@@ -303,6 +326,9 @@ test("rejects invalid settings before touching OBS", async () => {
 	await expect(client.configure(layers(1.5))).rejects.toThrow(RangeError);
 	await expect(client.configure({ ...MOQ, video: { fps: 29.97 } })).rejects.toThrow(RangeError);
 	await expect(client.configure({ ...MOQ, audio: { bitrate: -1 } })).rejects.toThrow(RangeError);
+	await expect(client.configure({ ...MOQ, video: { size: { width: 8192, height: 4320 } } })).rejects.toThrow(
+		RangeError,
+	);
 	expect(fake.log).toEqual([]);
 	client.close();
 });
@@ -336,12 +362,17 @@ test("a start OBS fails without an event rejects at the deadline", async () => {
 	expect(String(await failed)).toContain("OBS did not go live within 30 s");
 	expect(client.stream.peek()).toBe("stopped");
 
-	// An output that went live without its event counts as live.
-	const late = client.start();
+	// An output capturing ahead of its connection, as a stream delay does, waits for the event.
+	let settled = false;
+	const delayed = client.start().finally(() => {
+		settled = true;
+	});
 	await clock.advance(Duration.ZERO);
 	fake.streaming = true;
-	await clock.advance(Duration.secs(30));
-	await late;
+	await clock.advance(Duration.secs(60));
+	expect(settled).toBe(false);
+	fake.stream("STARTED", true);
+	await delayed;
 	expect(client.stream.peek()).toBe("live");
 	client.close();
 });

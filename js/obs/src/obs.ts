@@ -250,6 +250,12 @@ export class Obs {
 			if (kbps !== undefined && (!Number.isInteger(kbps) || kbps < 1))
 				throw new RangeError(`invalid bitrate: ${kbps}`);
 		}
+		const size = publish.video?.size;
+		if (size && !(fits(size.width) && fits(size.height))) {
+			throw new RangeError(
+				`invalid size: ${size.width}x${size.height}, each side must be ${MIN_SIDE} to ${MAX_SIDE}`,
+			);
+		}
 
 		const active = Outputs.parse(await this.#session.request("GetOutputList")).outputs.filter(
 			(o) => o.outputActive,
@@ -263,6 +269,15 @@ export class Obs {
 		const created = !before.profiles.includes(profile);
 		// A new profile's canvas is the monitor's, but the scene collection was laid out on this one.
 		const inherited = created ? VideoSettings.parse(await this.#session.request("GetVideoSettings")) : undefined;
+		if (inherited) {
+			const sides = [inherited.baseWidth, inherited.baseHeight];
+			if (!size) sides.push(inherited.outputWidth, inherited.outputHeight);
+			if (!sides.every(fits)) {
+				throw new Error(
+					`OBS's video is larger than obs-websocket can copy into a new profile (${MAX_SIDE} per side); create "${profile}" in OBS's Profile menu`,
+				);
+			}
+		}
 		if (created) {
 			await this.#activate(profile, () => this.#session.request("CreateProfile", { profileName: profile }));
 		} else if (before.currentProfileName !== profile) {
@@ -274,7 +289,6 @@ export class Obs {
 		// So change it only when it differs, and reload the profile after when layers exist.
 		const current = VideoSettings.parse(await this.#session.request("GetVideoSettings"));
 		const base = inherited ?? current;
-		const size = publish.video?.size;
 		const video: z.infer<typeof VideoSettings> = {
 			baseWidth: base.baseWidth,
 			baseHeight: base.baseHeight,
@@ -283,7 +297,18 @@ export class Obs {
 			fpsNumerator: fps ?? base.fpsNumerator,
 			fpsDenominator: fps === undefined ? base.fpsDenominator : 1,
 		};
-		const changed = Object.entries(video).some(([key, value]) => current[key as keyof typeof video] !== value);
+		// obs-websocket sets each pair only when given, and checks the given ones against its limits.
+		const pairs = [
+			["baseWidth", "baseHeight"],
+			["outputWidth", "outputHeight"],
+			["fpsNumerator", "fpsDenominator"],
+		] as const;
+		const change = Object.fromEntries(
+			pairs
+				.filter((pair) => pair.some((key) => video[key] !== current[key]))
+				.flatMap((pair) => pair.map((key) => [key, video[key]])),
+		);
+		const changed = Object.keys(change).length > 0;
 
 		// OBS reads these when it builds its outputs, which only a profile load does.
 		const reload: [string, string, string][] = [
@@ -314,6 +339,8 @@ export class Obs {
 		const keyint = Math.round((2 * video.fpsNumerator) / video.fpsDenominator);
 		const options = `tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0 keyint=${keyint}`;
 		const live: [string, string, string][] = [
+			// A stream delay holds every frame back by its length, and OBS applies it per start.
+			["Output", "DelayEnable", "false"],
 			["SimpleOutput", "UseAdvanced", "true"],
 			["SimpleOutput", "x264Settings", options],
 		];
@@ -340,7 +367,7 @@ export class Obs {
 				streamServiceSettings: { server: String(destination.server), key: destination.key, use_auth: false },
 			});
 		}
-		if (changed) await this.#session.request("SetVideoSettings", video);
+		if (changed) await this.#session.request("SetVideoSettings", change);
 		for (const [category, name, value] of [...reload, ...live]) await this.#setParameter(category, name, value);
 
 		if (stale.length > 0 && other !== undefined) {
@@ -439,8 +466,11 @@ export class Obs {
 			if (target === "STARTED") {
 				waits.push(sleep(START_TIMEOUT, { signal: abort.signal }).then(() => "timeout" as const));
 			}
-			const done = await race(waits);
-			if (done === "timeout") return await this.#startTimedOut();
+			let done = await race(waits);
+			if (done === "timeout") {
+				await this.#startTimedOut();
+				done = await race([waits[0], this.closed]);
+			}
 			if (done !== true) throw done ?? new Error("the OBS connection is closed");
 		} finally {
 			abort.abort();
@@ -449,12 +479,11 @@ export class Obs {
 	}
 
 	// OBS sends no event when a start fails before connecting, so ask whether the output runs.
+	// One that does is capturing ahead of its connection, as a stream delay does, and the
+	// connection's own event settles it.
 	async #startTimedOut() {
 		const status = StreamStatus.parse(await this.#session.request("GetStreamStatus"));
-		if (status.outputActive) {
-			this.#stream.set(status.outputReconnecting ? "reconnecting" : "live");
-			return;
-		}
+		if (status.outputActive) return;
 		// A start still connecting corrects this with its own event.
 		this.#stream.set("stopped");
 		throw new Error(`OBS did not go live within ${START_TIMEOUT.asSecs()} s; see OBS for the error`);
@@ -499,6 +528,14 @@ export class Obs {
 			}
 		});
 	}
+}
+
+// obs-websocket's bounds on each side of a canvas or output size.
+const MIN_SIDE = 8;
+const MAX_SIDE = 4096;
+
+function fits(side: number): boolean {
+	return Number.isInteger(side) && side >= MIN_SIDE && side <= MAX_SIDE;
 }
 
 // Compares dotted versions numerically; a missing part counts as 0.
