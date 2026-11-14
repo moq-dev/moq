@@ -47,4 +47,37 @@ of it, so this waits for the router too.
 Run it on the sweeps' existing seeds in CI only if it stays fast; otherwise in
 Nightly with the sweeps' fresh seeds.
 
+Paused 2026-11-14 when the quest moved to m3, with the work done on its
+branch ([moq-dev/moq#8733](https://github.com/moq-dev/moq/pull/8733)), taken
+under /quest-afk for the maintainer's review:
+
+- Done: `route::tests::Sim` records each path-rule run of both sweeps
+  (`rs/moq-net/src/route/tests/trace.rs`), `rs/moq-net/verify/route/trace/RouteTrace.tla`
+  follows it step by step comparing every message and each touched relay's
+  route and shown claims, `sh/tla-trace.py` runs TLC per trace, and
+  `test route-trace` (Nightly, a fresh window of 150 scenarios) wires it up.
+  All 300 traces of the gate's scenarios pass on the pinned TLC, and two of
+  four planted router bugs fail traces while the sweeps pass.
+- ✅ Restrict the sweeps, and grow the model only where the router had
+  drifted (rejected: growing the model to several publishers, restarts,
+  grants, and interest edits, which four open PRs on `RouteHandoff.tla`
+  would conflict with). `sweep_handoff` runs one origin whose every claim change
+  changes a claim, with no restart; `the_rules_agree_on_every_script` keeps the
+  full script. The client, a leaf that offers no route, is dropped from the
+  traces. The model grew three ways: a route goes to a stream only while a
+  claim meets it, timers due together fire in one `Timeout`, and an ended
+  stream forgets what it reflected. Every config still passes.
+- ✅ Nightly only (rejected: the merge gate): 300 traces cost about 20
+  core-minutes of TLC.
+- Found: `Stable` breaks on an accepted trace, a behaviour of the model the
+  configs miss ([stable-repath](/quest/m2/cluster-routes/stable-repath.md)),
+  so `RouteTrace.cfg` leaves it out.
+
+Left: run `just fix` and `just check`, refresh the skill's state-count table
+for the grown model (`RouteHandoff.cfg` now 29,229 distinct states; the
+configs' new counts are in each run's output), run `test route-trace` through
+`sh/tlc.py` once Nix fetches TLC again (this host's daemon hung on it, so the
+runs used the same jars by hand), review with `/quest-review`, and finish the
+PR body.
+
 Public API: none. Wire: none.

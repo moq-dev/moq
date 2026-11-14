@@ -1048,18 +1048,24 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.update(ids, Vec::new(), None);
 	}
 
-	/// Fire every doubt and dead-hop timer due by `now`.
-	pub fn timeout(&mut self, now: Instant) {
-		let due: Vec<Id> = self
+	/// The doubts and dead hops whose timers are due by `now`.
+	pub fn due(&self, now: Instant) -> (Vec<Id>, Vec<Hop>) {
+		let due = self
 			.doubted
 			.iter()
 			.filter_map(|(node, state)| (state.deadline() <= now).then_some(*node))
 			.collect();
-		let expired: Vec<Hop> = self
+		let expired = self
 			.dead
 			.iter()
 			.filter_map(|(hop, state)| state.deadline().filter(|at| *at <= now).map(|_| *hop))
 			.collect();
+		(due, expired)
+	}
+
+	/// Fire every doubt and dead-hop timer due by `now`.
+	pub fn timeout(&mut self, now: Instant) {
+		let (due, expired) = self.due(now);
 		if due.is_empty() && expired.is_empty() {
 			return;
 		}
@@ -1098,6 +1104,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	// --- Queries ---
+
+	/// How this node numbers its session to `neighbor` in the hops it names.
+	#[cfg(test)]
+	pub fn session(&self, neighbor: N) -> Option<u64> {
+		self.sessions.get(&neighbor).map(|session| session.number)
+	}
 
 	/// The route this node uses for `id` under `prefix`.
 	pub fn route_for(&self, id: Id, prefix: &Path) -> Option<&Route<N>> {

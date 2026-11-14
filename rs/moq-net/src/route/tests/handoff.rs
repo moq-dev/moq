@@ -1147,7 +1147,9 @@ fn announcement_cost_follows_sessions_and_live_claims(rule: Rule) {
 /// grant under one subject, so both feed one qualified view. Under churn every
 /// view stays some revision of the origin's truth, the widening guard stays
 /// bounded, no claim ends while the origin still has it, and once churn stops
-/// the client shows exactly the claims its interest and the scopes admit.
+/// the client shows exactly the claims its interest and the scopes admit. Each
+/// claim change changes a claim, as the route model's do, so every run under the
+/// path rule is a trace `RouteTrace.tla` checks (`MOQ_ROUTE_TRACE`).
 fn sweep_scoped_handoff(rule: Rule) {
 	const CLAIMS: [&str; 5] = ["live/a/x", "live/a/y/", "live/b/z", "live/c", "live/"];
 	const WATCHES: [&str; 5] = ["", "live/", "live/a/", "live/b/z", "live/c"];
@@ -1172,13 +1174,16 @@ fn sweep_scoped_handoff(rule: Rule) {
 		let links = [(origin, r1), (origin, r2), (r1, r2), (client, r1), (client, r2)];
 		sim.originate(origin, 7, 0);
 		assert!(sim.run());
+		sim.trace("scoped", scenario, origin, &CLAIMS);
+		let mut seed = 0;
 		for _ in 0..40 {
 			match rng.next(8) {
 				0..=2 => {
 					let claim = CLAIMS[rng.next(CLAIMS.len() as u64) as usize];
 					if rng.chance(60) {
-						sim.announce(origin, claim, rng.next(3), None);
-					} else {
+						seed += 1;
+						sim.announce(origin, claim, seed, None);
+					} else if sim.truth(7, claim, sim.revision(7)).is_some() {
 						sim.unannounce(origin, claim);
 					}
 				}
@@ -1223,6 +1228,7 @@ fn sweep_scoped_handoff(rule: Rule) {
 			}
 		}
 		assert!(sim.run());
+		sim.finish_trace();
 		sim.check().unwrap_or_else(|err| panic!("scenario {scenario}: {err}"));
 		let watch = sim.watching(client).clone();
 		let rev = sim.revision(7);
@@ -1262,16 +1268,17 @@ fn sweep_scoped_handoff(rule: Rule) {
 const RELAYS: usize = 5;
 const CLAIMS: [&str; 4] = ["live/", "live/a/", "live/a/x", "live/b"];
 
-/// Random meshes with two origins and a client under churn: claims change,
-/// sessions drop and return, relays send GOAWAY, messages are held and replayed
-/// out of step, the client changes interest, nodes collect route-less
-/// identities, and an origin restarts with a fresh identity. Selected routes
-/// never loop, every view is always some revision of the origin's truth,
-/// nothing revives and nothing ends falsely, and once churn stops every node
-/// shows every live origin's current claims and holds nothing for a dead one.
+/// A random mesh under churn, as the route model has it: one origin's claims
+/// change, sessions drop and return, relays send GOAWAY, messages are held and
+/// replayed out of step, and a client changes interest. Selected routes never
+/// loop, every view is always some revision of the origin's truth, nothing
+/// revives and nothing ends falsely, and once churn stops every node shows the
+/// origin's current claims. Under the path rule every run is a trace
+/// `RouteTrace.tla` checks (`MOQ_ROUTE_TRACE`); `the_rules_agree_on_every_script`
+/// runs the full script, with a second origin, restarts, and collection.
 fn sweep_handoff(rule: Rule) {
 	for scenario in 0..scenarios() {
-		let mut sim = churn(rule, scenario);
+		let mut sim = churn(rule, scenario, Shape::Model);
 		let label = format!("scenario {scenario}");
 		assert_eq!(revivals(&sim.events), 0, "{label}");
 		assert_eq!(false_ends(&sim.events), 0, "{label}");
@@ -1318,7 +1325,7 @@ fn the_rules_agree_on_every_script() {
 	for scenario in 0..scenarios() {
 		let label = format!("scenario {scenario}");
 		let sims = [Rule::Distance, Rule::PATH].map(|rule| {
-			let mut sim = churn(rule, scenario);
+			let mut sim = churn(rule, scenario, Shape::Full);
 			assert_eq!(revivals(&sim.events), 0, "{label}: {rule:?}");
 			assert_eq!(false_ends(&sim.events), 0, "{label}: {rule:?}");
 			settled(&mut sim, &label);
@@ -1330,10 +1337,22 @@ fn the_rules_agree_on_every_script() {
 	}
 }
 
+/// What a [`churn`] script does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+	/// Two origins, either of which restarts with a fresh identity, and nodes
+	/// collect route-less identities.
+	Full,
+	/// What the route model has: one origin, whose every claim change changes a
+	/// claim, and no restart. The second origin's node is a leaf with nothing to
+	/// publish. The run is recorded as a trace when `MOQ_ROUTE_TRACE` is set.
+	Model,
+}
+
 /// Origins sit at `RELAYS` and `RELAYS + 1`, the client at `RELAYS + 2`. The script,
-/// every change made from outside, depends on `scenario` alone, so both rules run
-/// the same one; which queued message arrives next is drawn apart from it.
-fn churn(rule: Rule, scenario: usize) -> Sim {
+/// every change made from outside, depends on `scenario` and `shape` alone, so both
+/// rules run the same one; which queued message arrives next is drawn apart from it.
+fn churn(rule: Rule, scenario: usize, shape: Shape) -> Sim {
 	let rng = &mut XorShift(0x4a4d_0ff5 ^ (scenario as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
 	let mut pick = XorShift(0x5eed_0003 + scenario as u64);
 	let (first, client) = (RELAYS, RELAYS + 2);
@@ -1358,18 +1377,32 @@ fn churn(rule: Rule, scenario: usize) -> Sim {
 	}
 	let mut ids = [100, 200];
 	sim.originate(first, ids[0], 0);
-	sim.originate(first + 1, ids[1], 0);
+	if shape == Shape::Full {
+		sim.originate(first + 1, ids[1], 0);
+	}
 	assert!(sim.run());
+	sim.trace("handoff", scenario, first, &CLAIMS);
 
+	let mut seed = 0;
 	for _ in 0..40 {
 		match rng.next(10) {
 			0..=3 => {
-				let origin = rng.next(2) as usize;
+				let origin = match shape {
+					Shape::Full => rng.next(2) as usize,
+					Shape::Model => 0,
+				};
 				let claim = CLAIMS[rng.next(CLAIMS.len() as u64) as usize];
-				if rng.chance(50) {
-					sim.announce(first + origin, claim, rng.next(3), None);
-				} else {
-					sim.unannounce(first + origin, claim);
+				let announce = rng.chance(50);
+				let id = ids[origin];
+				match shape {
+					Shape::Full if announce => sim.announce(first + origin, claim, rng.next(3), None),
+					Shape::Full => sim.unannounce(first + origin, claim),
+					Shape::Model if announce => {
+						seed += 1;
+						sim.announce(first, claim, seed, None);
+					}
+					Shape::Model if sim.truth(id, claim, sim.revision(id)).is_some() => sim.unannounce(first, claim),
+					Shape::Model => {}
 				}
 			}
 			4 if rng.chance(20) => sim.goaway(rng.next(RELAYS as u64) as usize),
@@ -1393,6 +1426,7 @@ fn churn(rule: Rule, scenario: usize) -> Sim {
 			6 => {
 				sim.watch(client, ["", "live/a/", "live/b"][rng.next(3) as usize]);
 			}
+			7 if shape == Shape::Model => {}
 			7 if rng.chance(50) => {
 				// Collection is allowed once a node holds no route to an identity.
 				let node = rng.next(RELAYS as u64 + 3) as usize;
@@ -1438,6 +1472,7 @@ fn churn(rule: Rule, scenario: usize) -> Sim {
 		}
 	}
 	assert!(sim.run());
+	sim.finish_trace();
 	sim
 }
 
@@ -1446,10 +1481,12 @@ fn churn(rule: Rule, scenario: usize) -> Sim {
 /// for an identity whose process is gone.
 fn settled(sim: &mut Sim, label: &str) {
 	sim.check().unwrap();
-	let live: Vec<Id> = (RELAYS..RELAYS + 2).map(|origin| sim.proven(origin)).collect();
+	let live: Vec<(Node, Id)> = (RELAYS..RELAYS + 2)
+		.filter_map(|origin| Some((origin, sim.nodes[origin].declared()?)))
+		.collect();
 	for node in 0..RELAYS + 3 {
 		let mut expected = BTreeMap::new();
-		for (origin, &id) in (RELAYS..).zip(&live) {
+		for &(origin, id) in &live {
 			let presented = sim.presented(id, sim.watching(node), sim.revision(id));
 			// A route reaches a node only while a claim meets its interest.
 			assert_eq!(
@@ -1480,7 +1517,10 @@ fn settled(sim: &mut Sim, label: &str) {
 				"{label}: node {node} {id} {claim}"
 			);
 		}
-		for id in (100..110).chain(200..210).filter(|id| !live.contains(id)) {
+		for id in (100..110)
+			.chain(200..210)
+			.filter(|id| live.iter().all(|(_, live)| live != id))
+		{
 			assert!(!sim.holds(node, id), "{label}: node {node} holds dead {id}");
 			assert!(
 				sim.paths() || !sim.remembers(node, id),

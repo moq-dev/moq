@@ -310,6 +310,10 @@ tla *paths:
 route-key-model:
     bash route-key-model.sh
 
+# Check that the router's handoff sweeps, from a fresh replayable window, are behaviours of the route model.
+route-trace:
+    bash ../sh/local.sh bash route-trace.sh
+
 # Check random lite-07 meshes against the route rules from a fresh replayable seed.
 route-sweep:
     bash ../sh/local.sh bash route-sweep.sh
