@@ -441,7 +441,8 @@ already inside every number on this page: a publisher writing 100 ms of media at
 once produces arrivals whose relative delay reaches
 100 ms less one frame, on a perfect network, with no help from the catalog.
 
-So the advertised value is a **floor**, not an addend:
+So the advertised value is a **floor**, not an addend, in the network's share of
+the target (audio adds its output latency [at the speaker](#at-the-speaker)):
 
 ```
 target = max(measured, advertised) + frame
