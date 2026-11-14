@@ -930,12 +930,13 @@ impl GroupState {
 		self.cache + self.relay.as_ref().map_or(0, |relay| relay.bytes) + self.lead_bytes() + self.unwritten()
 	}
 
-	/// The bytes written of the frame the copy started partway into.
+	/// The rest of the frame the copy started partway into, at its declared size like the
+	/// in-flight frame, since its later writes trim nothing.
 	fn lead_bytes(&self) -> u64 {
 		self.lead
 			.as_deref()
 			.and_then(|lead| lead.open.as_ref())
-			.map_or(0, |(_, buf)| buf.content_size())
+			.map_or(0, |(_, buf)| buf.size() as u64)
 	}
 
 	/// The frame slots the tail holds beyond the log's first segment, so a group of empty
@@ -2189,6 +2190,8 @@ impl Producer {
 			timestamp,
 		};
 		state.lead.as_deref_mut().expect("checked above").open = Some((info, buf.clone()));
+		// The ingest settled the relay state before writing the lead, as before any frame.
+		state.wrote = true;
 		Ok((info, buf, admission))
 	}
 
@@ -2788,7 +2791,15 @@ impl Handle {
 		let same_form = head.compressed == state.flate.is_some();
 		// A copy that shed its front holds no run from `offset` for the head to precede.
 		let shed = state.held() != offset;
-		if state.outcome.error().is_some() || state.sparse() || !same_form || shed || head.start >= offset || !reaches {
+		// Nor does one holding only the rest of the frame below `offset` (see [`Lead`]).
+		let lead = state.lead.is_some();
+		if state.outcome.error().is_some()
+			|| state.sparse()
+			|| !same_form
+			|| shed || lead
+			|| head.start >= offset
+			|| !reaches
+		{
 			return;
 		}
 		let count = offset - head.start;
@@ -4347,8 +4358,11 @@ impl Consumer {
 		from: usize,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<frame::Consumer>>> {
+		if self.expired {
+			return Poll::Ready(Err(Error::Old));
+		}
 		let index = self.cursor.index;
-		let lead = ready!(self.cursor.poll(waiter, |state| {
+		let res = self.cursor.poll(waiter, |state| {
 			let Some(lead) = state.lead.as_deref().filter(|lead| lead.index == index) else {
 				return Poll::Ready(Ok(None));
 			};
@@ -4362,7 +4376,9 @@ impl Consumer {
 				}
 				None => Poll::Pending,
 			}
-		}))?;
+		});
+		// A lead that stops arriving is judged by the read's budget, as a whole frame is.
+		let lead = ready!(self.poll_expired_if_blocked(waiter, res))?;
 		let frame = match lead {
 			Some((info, _, _)) if from as u64 > info.size => return Poll::Ready(Err(Error::WrongSize)),
 			Some((info, buf, base)) => {
@@ -4373,9 +4389,17 @@ impl Consumer {
 					fields: None,
 					inflated: None,
 				};
-				frame::Consumer::new(self.cursor.state.clone(), header, frame::Source::Partial(buf))
+				let frame = frame::Consumer::new(self.cursor.state.clone(), header, frame::Source::Partial(buf))
 					.with_meter(self.stats.clone())
-					.starting_at(base, from)
+					.starting_at(base, from);
+				let end = self.cursor.end.unwrap_or(usize::MAX);
+				match &self.expiry {
+					Some(policy) => frame.with_expiry(
+						frame::Expiry::new(policy.clone(), self.stats.clone(), self.delivery.clone())
+							.for_frame(self.cursor.index..end, true),
+					),
+					None => frame,
+				}
 			}
 			None => match ready!(self.poll_next_frame(waiter))? {
 				Some(frame) if from as u64 > frame.size => return Poll::Ready(Err(Error::WrongSize)),
@@ -5934,6 +5958,30 @@ mod test {
 		);
 	}
 
+	/// A copy holding only the rest of a frame adopts no head over it: the head would hold
+	/// that frame whole beside its rest, outside the live tail's admission.
+	#[test]
+	fn a_copy_with_a_lead_adopts_no_head() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.bound(Bounds {
+				start: 1,
+				byte: 1,
+				end: None,
+			})
+			.unwrap();
+		let adopter = producer.handle();
+		let head = Head {
+			content: None,
+			start: 0,
+			first_object: true,
+			entries: vec![Entry::plain(Frame::new(None, Bytes::from_static(b"ab")).into(), 0); 2],
+			compressed: false,
+		};
+		adopter.adopt_head(&head);
+		assert_eq!(adopter.state.read().offset, 2, "the head was adopted over the lead");
+	}
+
 	/// A head's slots count against the live tail, so a head of empty frames that would
 	/// take the group's slots past it is not adopted.
 	#[test]
@@ -6898,6 +6946,10 @@ mod test {
 		let before = handle.cache_size();
 		let mut lead = producer.create_lead(sized(6).into()).unwrap();
 		assert_eq!(handle.lead_at(1), None, "opened");
+		assert!(
+			plain.clone().poll_wire(&kio::Waiter::noop()).is_ready(),
+			"the lead settles the relay state"
+		);
 		assert_eq!(lead.remaining(), 3, "only the rest is written");
 		lead.write(b"de".as_ref()).unwrap();
 		assert!(
@@ -6932,6 +6984,7 @@ mod test {
 	/// The rest of a frame the copy started partway into counts toward the live tail, and
 	/// is the first frame a later one sheds past it; a reader already holding it keeps it.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_lead_is_shed_first_past_the_live_tail() {
 		let half = MAX_CACHE_BYTES / 2;
 		let mut producer = Info { sequence: 0 }.produce();
@@ -7851,6 +7904,57 @@ mod test {
 		);
 		assert!(matches!(next.poll_next_frame(&waiter), Poll::Ready(Err(Error::Old))));
 		assert!(matches!(finished.poll_finished(&waiter), Poll::Ready(Err(Error::Old))));
+	}
+
+	/// A read continuing a frame from a byte gives up with the read's budget, whether the
+	/// rest of the frame never opens or stops arriving partway.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_lead_read_expires_as_old() {
+		let bounded = || {
+			let mut producer = Info { sequence: 0 }.produce();
+			producer
+				.bound(Bounds {
+					start: 0,
+					byte: 1,
+					end: None,
+				})
+				.unwrap();
+			producer
+		};
+		let waiter = kio::Waiter::noop();
+
+		let producer = bounded();
+		let expired = Switch::default();
+		let mut group = producer
+			.consume()
+			.with_expiry(Arc::new(expired.clone()))
+			.at(0, 1)
+			.unwrap();
+		assert!(group.poll_next_frame_at(1, &waiter).is_pending(), "waits for the lead");
+		expired.set(true);
+		assert!(matches!(
+			group.poll_next_frame_at(1, &waiter),
+			Poll::Ready(Err(Error::Old))
+		));
+
+		let producer = bounded();
+		let expired = Switch::default();
+		let mut group = producer
+			.consume()
+			.with_expiry(Arc::new(expired.clone()))
+			.at(0, 1)
+			.unwrap();
+		let mut lead = producer.create_lead(sized(4).into()).unwrap();
+		lead.write(b"b".as_ref()).unwrap();
+		let mut frame = match group.poll_next_frame_at(1, &waiter) {
+			Poll::Ready(Ok(Some(frame))) => frame,
+			_ => panic!("the lead is readable"),
+		};
+		assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"b");
+		assert!(frame.read_chunk().now_or_never().is_none(), "waits for the rest");
+		expired.set(true);
+		assert!(matches!(frame.read_chunk().now_or_never(), Some(Err(Error::Old))));
 	}
 
 	/// Records a wake.
