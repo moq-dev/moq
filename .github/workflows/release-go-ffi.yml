@@ -139,7 +139,11 @@ jobs:
       # the go.moq.dev cutover. Temporary; the `git` steps go with the mirror.
       - name: Find the module's origin
         id: origin
-        run: echo "vcs=$(just go ffi-origin)" >> "$GITHUB_OUTPUT"
+        # A separate assignment, so a failed lookup fails the step rather than
+        # skipping both publishers.
+        run: |
+          vcs=$(just go ffi-origin)
+          echo "vcs=$vcs" >> "$GITHUB_OUTPUT"
 
       - name: Download package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8

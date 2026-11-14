@@ -36,11 +36,17 @@ for module in $modules; do
     rclone copy "$src" "$dst" --include '*.{mod,zip}' --immutable --checksum
     rclone copy "$src" "$dst" --include '*.info' --immutable --checksum
 
-    # Every version whose three files are all in the bucket, this upload's and earlier ones.
-    rclone lsf --files-only "$dst" |
-        awk '
-            /\.(info|mod|zip)$/ { v = $0; sub(/\.[a-z]+$/, "", v); n[v]++ }
-            END { for (v in n) if (n[v] == 3) print v }
-        ' | sort -V | rclone rcat "$dst/list"
+    # Every version whose three files are all in the bucket, this upload's and
+    # earlier ones. Built locally first, so a failed listing never replaces it.
+    names=$(rclone lsf --files-only "$dst")
+    list=$(awk '
+        /\.(info|mod|zip)$/ { v = $0; sub(/\.[a-z]+$/, "", v); n[v]++ }
+        END { for (v in n) if (n[v] == 3) print v }
+    ' <<<"$names" | sort -V)
+    [[ -n "$list" ]] || {
+        echo "Error: no complete version in $dst" >&2
+        exit 1
+    }
+    printf '%s\n' "$list" | rclone rcat "$dst/list"
     echo "$module: $(rclone cat "$dst/list" | wc -l) versions listed"
 done
