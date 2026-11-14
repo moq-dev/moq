@@ -111,4 +111,3 @@ the third, and survives a relay restart.
 - [P2P](/quest/m4/p2p/README.md) - internet peer sessions, which the m3 mesh does not use
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - deferred direct paths between mesh nodes on different networks
 - [End-to-end encryption](/quest/m5/e2ee/README.md) - the AEAD the encryption level will reuse
-- [Teleoperation](/quest/m5/teleop-robot.md) - robot track conventions that could ride the mesh
