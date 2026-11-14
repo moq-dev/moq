@@ -1518,3 +1518,43 @@ fn rotated_identities_are_fresh_and_in_range() {
 		assert!(seen.insert(fresh), "{fresh:#x} was drawn before");
 	}
 }
+
+/// One batch may withdraw a stream's only claim and start another: the stream
+/// moves to the new claim, and the route it rides on stays up throughout.
+#[test]
+fn a_batch_replacing_a_streams_only_claim_keeps_its_route() {
+	let (up, down) = (0, 1);
+	let item = |seed| Item {
+		seed,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	router.connect(down, Link::default()).unwrap();
+	router.peer_interest(down, Path::empty()).unwrap();
+	let interest = router.interest();
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(0, 0)]),
+	};
+	router.route(up, 7, Some(Reach::Finite(advert)));
+	router.batch(up, 7, vec![(p("live/a"), Some(item(1)))], Some(1), interest);
+	assert!(router.drain().iter().any(|out| matches!(out, Out::Route { to, reach: Some(_), .. } if *to == down)));
+
+	router.batch(up, 7, vec![(p("live/a"), None), (p("live/b"), Some(item(2)))], Some(2), interest);
+	let out = router.drain();
+	assert!(
+		!out.iter().any(|out| matches!(out, Out::Route { to, reach: None, .. } if *to == down)),
+		"{out:?}"
+	);
+	assert!(out.contains(&Out::Batch {
+		to: down,
+		id: 7,
+		changes: vec![(p("live/b"), Some(item(2))), (p("live/a"), None)],
+		floor: Some(2),
+	}));
+}
