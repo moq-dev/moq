@@ -192,9 +192,11 @@ impl Protocol {
 		}
 	}
 
-	/// What a session's reader asks for: every message, oldest first, however late it is.
-	fn subscription(self) -> Subscription {
+	/// What a session's reader asks for: every message, oldest first, however late it is,
+	/// scheduled at `priority` against the reader's other subscriptions.
+	fn subscription(self, priority: i8) -> Subscription {
 		let reliable = Subscription::default()
+			.with_priority(priority)
 			.with_order(Order::Ascending)
 			.with_delay(Delay::default().with_max(None));
 		match self {
@@ -288,8 +290,10 @@ impl sealed::Open for TcpStream {
 			received: false,
 			remote: None,
 			local_handle: local.handle(),
-			local: Some(local),
-			pending: None,
+			local: Some(Local::Between {
+				group: local,
+				next: None,
+			}),
 		};
 		shared.tasks.push(pump);
 		Self {
@@ -777,8 +781,11 @@ impl Endpoint {
 	/// itself or across a hop that can't carry it (see [`Endpoint`]). The first dial
 	/// announces the client broadcast, and fails as [`origin::Producer::route`] does when
 	/// the origin may not publish it.
-	pub fn dial_tcp(&self, peer: &str) -> Result<kio::Pending<Dialing<TcpStream>>, Error> {
-		self.dial(peer, None)
+	///
+	/// `priority` schedules the peer's half against this origin's other subscriptions on
+	/// every hop, as a track subscription's does; see [`Subscription::priority`].
+	pub fn dial_tcp(&self, peer: &str, priority: i8) -> Result<kio::Pending<Dialing<TcpStream>>, Error> {
+		self.dial(peer, None, priority)
 	}
 
 	/// Dial the server `peer` in a new `track` session; see [`Self::dial_tcp`].
@@ -790,10 +797,15 @@ impl Endpoint {
 		peer: &str,
 		info: impl Into<Option<track::Info>>,
 	) -> Result<kio::Pending<Dialing<TrackStream>>, Error> {
-		self.dial(peer, Some(info.into().unwrap_or_else(messages)))
+		self.dial(peer, Some(info.into().unwrap_or_else(messages)), 0)
 	}
 
-	fn dial<S: Stream>(&self, peer: &str, info: Option<track::Info>) -> Result<kio::Pending<Dialing<S>>, Error> {
+	fn dial<S: Stream>(
+		&self,
+		peer: &str,
+		info: Option<track::Info>,
+		priority: i8,
+	) -> Result<kio::Pending<Dialing<S>>, Error> {
 		let shared = &self.shared;
 		let path = endpoint_path(&shared.prefix, Role::Server, peer)?;
 		if peer == &*shared.id {
@@ -813,6 +825,7 @@ impl Endpoint {
 			session,
 			name,
 			info,
+			subscription: S::PROTOCOL.subscription(priority),
 			demand: answer.demand(),
 			answer: Some(Answer::Reserved(answer)),
 			step: Step::Resolving(resolving),
@@ -899,7 +912,7 @@ impl<S: Stream> Incoming<S> {
 		}
 	}
 
-	fn accept_with(mut self, info: Option<track::Info>) -> kio::Pending<Accepting<S>> {
+	fn accept_with(mut self, info: Option<track::Info>, priority: i8) -> kio::Pending<Accepting<S>> {
 		let shared = self.shared.clone();
 		let (peer, session) = (self.peer.clone(), self.session.clone());
 		let request = self.request.take().expect("taken only by accept, reject or drop");
@@ -918,6 +931,7 @@ impl<S: Stream> Incoming<S> {
 			peer,
 			session,
 			info,
+			subscription: S::PROTOCOL.subscription(priority),
 			demand: request.demand(),
 			request: Some(request),
 			step,
@@ -929,9 +943,10 @@ impl<S: Stream> Incoming<S> {
 impl Incoming<TcpStream> {
 	/// Accept the dial, resolving once the dialer answers, which proves it dialed.
 	///
-	/// Nothing is written before the dialer answers.
-	pub fn accept(self) -> kio::Pending<Accepting<TcpStream>> {
-		self.accept_with(None)
+	/// `priority` schedules the dialer's half, as for [`Endpoint::dial_tcp`]. Nothing is
+	/// written before the dialer answers.
+	pub fn accept(self, priority: i8) -> kio::Pending<Accepting<TcpStream>> {
+		self.accept_with(None, priority)
 	}
 }
 
@@ -941,7 +956,7 @@ impl Incoming<TrackStream> {
 	/// `info` describes this side's half, as for [`Endpoint::dial_track`]. Nothing is
 	/// written before the dialer answers.
 	pub fn accept(self, info: impl Into<Option<track::Info>>) -> kio::Pending<Accepting<TrackStream>> {
-		self.accept_with(Some(info.into().unwrap_or_else(messages)))
+		self.accept_with(Some(info.into().unwrap_or_else(messages)), 0)
 	}
 }
 
@@ -969,13 +984,13 @@ enum Step {
 
 impl Step {
 	/// Advance until the peer serves its half, subscribing to `track` in its endpoint.
-	fn poll(&mut self, waiter: &kio::Waiter, protocol: Protocol, track: &str) -> Poll<Result<(), Error>> {
+	fn poll(&mut self, waiter: &kio::Waiter, subscription: &Subscription, track: &str) -> Poll<Result<(), Error>> {
 		loop {
 			match self {
 				Self::Resolving(following) => {
 					// Only the first call is made here, and it never reports the path offline.
 					let broadcast = ready!(following.poll_available(waiter))?.expect("the first call is never offline");
-					let subscribing = broadcast.track(track)?.subscribe(protocol.subscription()).into_inner();
+					let subscribing = broadcast.track(track)?.subscribe(subscription.clone()).into_inner();
 					*self = Self::Subscribing(subscribing);
 				}
 				Self::Subscribing(subscribing) => {
@@ -1054,6 +1069,8 @@ pub struct Dialing<S: Stream> {
 	/// The session's track name.
 	name: String,
 	info: Option<track::Info>,
+	/// How this side reads the peer's half.
+	subscription: Subscription,
 	/// Whether the peer asked for this side's half, which it does on accept.
 	demand: track::Demand,
 	answer: Option<Answer>,
@@ -1093,7 +1110,7 @@ impl<S: Stream> Dialing<S> {
 			}
 		}
 
-		ready!(self.step.poll(waiter, S::PROTOCOL, &self.name))?;
+		ready!(self.step.poll(waiter, &self.subscription, &self.name))?;
 		// The peer serves its half only after asking for this side's, so a conforming peer
 		// asked already; wait for its request regardless.
 		let Some(Answer::Served(_)) = &self.answer else {
@@ -1131,6 +1148,8 @@ pub struct Accepting<S: Stream> {
 	/// The session's track name.
 	name: String,
 	info: Option<track::Info>,
+	/// How this side reads the peer's half.
+	subscription: Subscription,
 	/// The dialer's request for this side's half, served once the dialer answers.
 	request: Option<track::Request>,
 	/// Whether the dialer still subscribes to this side's half: the dial stays open while
@@ -1165,7 +1184,7 @@ impl<S: Stream> Accepting<S> {
 		if self.demand.poll_state(waiter) != track::DemandState::Active {
 			return Poll::Ready(Err(Error::Cancel));
 		}
-		ready!(self.step.poll(waiter, S::PROTOCOL, &self.name))?;
+		ready!(self.step.poll(waiter, &self.subscription, &self.name))?;
 
 		// Accepted outside the lock, since it wakes the dialer.
 		let request = self.request.take().ok_or(Error::Closed)?;
@@ -1210,17 +1229,36 @@ struct Pump {
 	/// The peer's group, from its arrival until it ends.
 	remote: Option<group::Consumer>,
 	/// The application's copy of the peer's group, until it ends.
-	local: Option<group::Producer>,
+	local: Option<Local>,
 	local_handle: group::Handle,
-	/// A frame read from the peer, waiting for the application's reader to make room.
-	pending: Option<frame::Frame>,
+}
+
+/// Where a `tcp` session's pump is in copying the peer's group.
+enum Local {
+	/// Between frames, holding the next one read from the peer until the application's
+	/// reader makes room for it.
+	Between {
+		group: group::Producer,
+		next: Option<frame::Consumer>,
+	},
+	/// Copying a frame as its bytes arrive, so a reader sees them before the frame ends.
+	Frame { from: frame::Consumer, to: frame::Producer },
+}
+
+impl Local {
+	fn abort(self, err: Error) {
+		let _ = match self {
+			Self::Between { group, .. } => group.abort(err),
+			Self::Frame { to, .. } => to.abort(err),
+		};
+	}
 }
 
 impl Pump {
 	/// Reset everything still open with `err`.
 	fn reset(&mut self, err: Error) {
 		if let Some(local) = self.local.take() {
-			let _ = local.abort(err.clone());
+			local.abort(err.clone());
 		}
 		if let Some(track) = self.track.take() {
 			let _ = track.abort(err);
@@ -1228,7 +1266,6 @@ impl Pump {
 		self.ours = None;
 		self.subscriber = None;
 		self.remote = None;
-		self.pending = None;
 	}
 
 	fn poll_session(&mut self, waiter: &kio::Waiter) -> Result<(), Error> {
@@ -1311,34 +1348,72 @@ impl Pump {
 			// Finished without a group: an empty half.
 			if !self.received
 				&& self.subscriber.is_none()
-				&& let Some(local) = self.local.take()
+				&& let Some(Local::Between { group, .. }) = self.local.take()
 			{
-				let _ = local.finish();
+				let _ = group.finish();
 			}
 			return Ok(());
 		};
-		let local = self.local.as_mut().expect("checked above");
 		loop {
-			if let Some(frame) = &self.pending {
-				let info = frame::Info {
-					size: frame.payload.len() as u64,
-					timestamp: None,
-				};
-				if local.poll_ready(waiter, &info).is_pending() {
-					return Ok(());
+			match self.local.take().expect("checked above") {
+				Local::Between { group, next: None } => match remote.poll_next_frame(waiter) {
+					Poll::Pending => {
+						self.local = Some(Local::Between { group, next: None });
+						return Ok(());
+					}
+					Poll::Ready(Ok(Some(frame))) => {
+						self.local = Some(Local::Between {
+							group,
+							next: Some(frame),
+						})
+					}
+					Poll::Ready(Ok(None)) => {
+						group.finish()?;
+						self.remote = None;
+						return Ok(());
+					}
+					Poll::Ready(Err(err)) => {
+						self.local = Some(Local::Between { group, next: None });
+						return Err(err);
+					}
+				},
+				Local::Between {
+					group,
+					next: Some(from),
+				} => {
+					let info = frame::Info {
+						size: from.size,
+						timestamp: None,
+					};
+					if group.poll_ready(waiter, &info).is_pending() {
+						self.local = Some(Local::Between {
+							group,
+							next: Some(from),
+						});
+						return Ok(());
+					}
+					let to = group.create_frame(info)?;
+					self.local = Some(Local::Frame { from, to });
 				}
-				let frame = self.pending.take().expect("checked above");
-				local.write_frame(None, frame.payload)?;
-			}
-			match remote.poll_read_frame(waiter) {
-				Poll::Pending => return Ok(()),
-				Poll::Ready(Ok(Some(frame))) => self.pending = Some(frame),
-				Poll::Ready(Ok(None)) => {
-					self.local.take().expect("checked above").finish()?;
-					self.remote = None;
-					return Ok(());
-				}
-				Poll::Ready(Err(err)) => return Err(err),
+				Local::Frame { mut from, mut to } => match from.poll_read_chunk(waiter) {
+					Poll::Pending => {
+						self.local = Some(Local::Frame { from, to });
+						return Ok(());
+					}
+					Poll::Ready(Ok(Some(chunk))) => {
+						let written = to.write(chunk);
+						self.local = Some(Local::Frame { from, to });
+						written?;
+					}
+					Poll::Ready(Ok(None)) => {
+						let group = to.finish()?;
+						self.local = Some(Local::Between { group, next: None });
+					}
+					Poll::Ready(Err(err)) => {
+						self.local = Some(Local::Frame { from, to });
+						return Err(err);
+					}
+				},
 			}
 		}
 	}

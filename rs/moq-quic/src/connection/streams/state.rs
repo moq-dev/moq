@@ -223,9 +223,13 @@ impl StreamsState {
 			(Dir::Uni, params.initial_max_streams_uni),
 		] {
 			let count = count.into();
-			// A caller can attempt an open before the peer's limit is known.
-			if count > self.max[dir as usize] && mem::take(&mut self.open_refused[dir as usize]) {
-				self.waits.wake_open(dir);
+			// A caller can attempt an open before the peer's limit is known. A raised limit also
+			// drops the STREAMS_BLOCKED owed for the old one, as MAX_STREAMS does.
+			if count > self.max[dir as usize] {
+				self.streams_blocked[dir as usize] = false;
+				if mem::take(&mut self.open_refused[dir as usize]) {
+					self.waits.wake_open(dir);
+				}
 			}
 			self.max[dir as usize] = count;
 		}
@@ -458,6 +462,11 @@ impl StreamsState {
 	/// stream, or a queued datagram whose frame fits
 	pub(crate) fn can_send_frames(&self, space: usize) -> bool {
 		self.pending.can_send(space)
+	}
+
+	/// Whether a STREAMS_BLOCKED is owed that the connection's pending frames do not show yet
+	pub(crate) fn owes_streams_blocked(&self) -> bool {
+		self.streams_blocked.contains(&true)
 	}
 
 	/// The offset just past the data received so far on `id`

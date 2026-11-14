@@ -1,0 +1,20 @@
+# drill: tests::sim::random_workloads
+# expect: RFC 9000 §12.2
+# package: moq-quic
+# target: --lib
+#
+# Addresses each Handshake packet to the sender's own connection ID, so a
+# Handshake packet coalesced behind an Initial carries a different destination.
+diff --git a/rs/moq-quic/src/connection/packet_builder.rs b/rs/moq-quic/src/connection/packet_builder.rs
+--- a/rs/moq-quic/src/connection/packet_builder.rs
++++ b/rs/moq-quic/src/connection/packet_builder.rs
+@@ -102,7 +102,8 @@
+ 			SpaceId::Handshake => Header::Long {
+ 				ty: LongType::Handshake,
+ 				src_cid: conn.handshake_cid,
+-				dst_cid,
++				// MUTATION: the Handshake packet names the sender's own ID as its destination.
++				dst_cid: conn.handshake_cid,
+ 				number,
+ 				version,
+ 			},

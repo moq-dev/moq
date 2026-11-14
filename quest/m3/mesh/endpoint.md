@@ -25,7 +25,7 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
   `connect` dials with the caller's own endpoint ID, and `accept` reads the
   remote ID from the dial, which the socket's answer check proves and the
   grant pins (publish `.server/<id>` and `.client/<id>` only).
-- Streams are [byte streams](/quest/m1/stream/rust.md) at the protection
+- Streams are byte streams (`moq_tokio::socket::TcpStream`) at the protection
   level the service declares: identity reads `moq-net` directly, and
   authentication, the mesh default, reads through `moq_crypto::sign` against the
   `PublicKey` parsed from the peer's endpoint id, which names the endpoint
@@ -60,5 +60,4 @@ question it carried is gone, since no release ever issued the old shape.
 
 ## Required
 
-- [Rust byte streams](/quest/m1/stream/rust.md) - the stream this API returns
 - [Mesh grant shape](/quest/m2/mesh-grant-shape.md) - the grant that lets a member publish its service endpoints

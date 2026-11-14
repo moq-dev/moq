@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { SessionCode, SessionError } from "./error.ts";
-import { HopSchema } from "./hop.ts";
+import { toHop } from "./hop.ts";
 import { RequestOk } from "./ietf/request.ts";
 import { SubscribeNamespaceEntry } from "./ietf/subscribe_namespace.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
@@ -27,7 +27,7 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(chunk.slice()) }),
 		version,
 	);
-	if (protocol === "lite") await new AnnounceOk(HopSchema.parse(2n), 0).encode(writer, LiteVersion.DRAFT_06);
+	if (protocol === "lite") await new AnnounceOk(toHop(2n), 0).encode(writer, LiteVersion.DRAFT_06);
 	else {
 		await writer.u53(RequestOk.id);
 		await new RequestOk({}).encode(writer, IetfVersion.DRAFT_22);
@@ -66,7 +66,7 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 						close: pair.server.close.bind(pair.server),
 					} as unknown as WebTransport,
 					LiteVersion.DRAFT_06,
-					HopSchema.parse(1n),
+					toHop(1n),
 					undefined,
 					undefined,
 					undefined,
