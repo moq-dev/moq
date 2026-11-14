@@ -1278,8 +1278,11 @@ export class Subscriber {
 				case "routeUpdate": {
 					const wire = route(message.id);
 					console.warn(`refusing a forwarded route: node=${wire.node} route=${message.id} reason=${reason}`);
+					const joined = wire.advert !== undefined;
 					reach(wire, undefined);
 					refreshRoute(wire, true);
+					// Its floors no longer cover anything, as on ROUTE_END.
+					if (joined) this.#consumes.revalidate();
 					return;
 				}
 				case "start":

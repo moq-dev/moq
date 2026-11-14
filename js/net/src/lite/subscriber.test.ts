@@ -4023,7 +4023,7 @@ async function routedStream(options?: RouteOptions, getStats?: () => Promise<unk
 		const request = await Track.decode(reader, version);
 		return { request, consumed, info };
 	};
-	return { subscriber, announced, send, raw, replies, version, trackRequest, another };
+	return { subscriber, announced, send, raw, replies, version, trackRequest, another, opened };
 }
 
 // A route or claim whose forwarded content this subscriber refuses is withdrawn alone: the session,
@@ -4365,6 +4365,49 @@ test("a lite-07 consume skips a claim above a newer floor's region", async () =>
 	announced.close();
 	subscriber.close();
 	await pick.info;
+});
+
+// A route refused once live stops covering, as an ended one does: a held consume a narrower floor
+// of it took off a broader claim is routable again once that floor is gone.
+test("a lite-07 route refused once live gives a held consume back its broader claim", async () => {
+	const { subscriber, announced, send, trackRequest, another, opened } = await routedStream();
+	const live = Path.from("live");
+	const y = Path.from("live/x/y");
+	const minted = Mint.fresh();
+
+	// NODE_A claims live under a floor that certifies nothing, and a consume of live/x/y takes it.
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: live, route: 0n, instance: minted });
+	await send({ status: "floor", id: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: live, kind: "start" });
+	const x = await another(1, Path.Pattern.subtree(Path.from("live/x")));
+	const held = await trackRequest(y, 2);
+	expect(held.request).toMatchObject({ node: NODE_A });
+
+	// NODE_A's revision 1 presents only live/x/m under live/x, so live no longer covers live/x/y.
+	await x.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await x.send({ status: "active", suffix: Path.from("m"), route: 0n, instance: minted });
+	await x.send({ status: "floor", id: 0n, revision: 1n });
+	expect(await x.announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "start" });
+	await held.info;
+
+	// That route is refused: nothing certifies live/x/y any more, so live covers it again.
+	x.raw([7, 5, 0, 1, 0, 0x80, 42]);
+	expect(await x.announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "offline" });
+	const info = held.consumed
+		.track("audio")
+		.info()
+		.then(
+			() => "answered",
+			() => "refused",
+		);
+	expect(await Promise.race([opened(3).then(() => "opened"), info])).toBe("opened");
+
+	held.consumed.close();
+	x.announced.close();
+	announced.close();
+	subscriber.close();
+	await info;
 });
 
 // A route that cannot be used for a while keeps its claims' place in a tie, so the announcements
