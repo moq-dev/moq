@@ -328,15 +328,16 @@ pub enum Action<A, E> {
 	/// Drop the dial or probe in flight: it ran out its deadline, which already counted as
 	/// its failure.
 	Abandon,
-	/// The live session got a GOAWAY and now drains as the [`predecessor`](Reconnect::predecessor)
-	/// while a replacement is dialed.
+	/// The [`predecessor`](Reconnect::predecessor) serves while a replacement is dialed: the
+	/// live session got a GOAWAY and now drains as it, or the replacement closed while it
+	/// still drains.
 	Migrating,
 	/// The predecessor closed or overstayed its handover.
 	Retired,
 	/// Nothing serves anymore: the live session ended with this error, or the predecessor
 	/// retired between sessions. A redial follows.
 	Offline(Option<E>),
-	/// Why the policy is waiting to redial: a walk failed or a session ended too soon.
+	/// Why the policy is waiting to redial: a walk failed, or a session ended.
 	Retrying(E),
 	/// Poll again by this instant, or on a wake.
 	Wait(Option<Instant>),
@@ -1006,7 +1007,18 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			return self.done(Err(err));
 		}
 
-		self.queue.push_back(Action::Offline(Some(err.clone())));
+		// A predecessor still draining serves again, so this is no outage: the caller moves
+		// back onto it. One closing gracefully already carries nothing and takes no new work.
+		if self
+			.predecessor
+			.as_ref()
+			.is_some_and(|predecessor| !predecessor.closing)
+		{
+			self.queue.push_back(Action::Migrating);
+			self.queue.push_back(Action::Retrying(err.clone()));
+		} else {
+			self.queue.push_back(Action::Offline(Some(err.clone())));
+		}
 		if healthy {
 			// The window was reset, so a one-off drop reconnects promptly.
 			tracing::warn!(peer = %Shown(url), "session closed, reconnecting");
