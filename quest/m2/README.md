@@ -41,7 +41,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   [grant shape](/quest/m2/mesh-grant-shape.md) and
   [key budget](/quest/m2/mesh-device-bounds.md), since `moq_auth::mesh`
   publishes for the first time at this cut;
-  [auth key validation](/quest/m2/auth-key-validation.md); the
+  auth key validation; the
   [RTMPS connect](/quest/m2/rtmp-rtmps-tcurl.md) signature;
   [usage's derived settings](/quest/m2/usage-derive-settings.md);
   [first-publish versions](/quest/m2/first-publish-versions.md); and three

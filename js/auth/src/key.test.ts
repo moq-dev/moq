@@ -929,3 +929,25 @@ test("sign refuses a root no path can spell", async () => {
 		await expect(Key.sign(key, { root, publish: ["**"] })).resolves.toBeString();
 	}
 });
+
+test("public - refuses a key that cannot verify", async () => {
+	const key = await Key.generate("ES256");
+	key.key_ops = ["sign"];
+	expect(() => Key.public(key)).toThrow(/verify/);
+});
+
+test("public - shares no scope with the signer, and parses back", async () => {
+	const key = await Key.generate("EdDSA");
+	key.scope = { root: "", publish: ["a"] };
+	const publicKey = Key.public(key);
+	expect(publicKey.scope).toEqual(key.scope);
+	expect(publicKey.scope).not.toBe(key.scope);
+	expect(Key.parse(JSON.stringify(publicKey)).key_ops).toEqual(["verify"]);
+});
+
+test("parse - refuses an algorithm another key type owns", async () => {
+	const key = await Key.generate("HS256");
+	expect(() => Key.parse(JSON.stringify({ ...key, alg: "ES256" }))).toThrow(/incompatible with oct/);
+	const ec = await Key.generate("ES256");
+	expect(() => Key.parse(JSON.stringify({ ...ec, alg: "ES384" }))).toThrow(/requires curve/);
+});
