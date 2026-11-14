@@ -37,8 +37,8 @@ pub const MAX_FRAME: usize = 64 * 1024;
 /// ([`moq_net::Error::Evicted`]), or the session to the relay ending. Dropping the stream
 /// resets it too, unless both halves already ended.
 pub struct TcpStream {
-	/// This side's half, until it is shut down.
-	writer: Option<group::Producer>,
+	/// This side's half.
+	writer: Write,
 	reader: group::Consumer,
 	/// The peer's frame being read.
 	frame: Option<frame::Consumer>,
@@ -67,13 +67,13 @@ impl TcpStream {
 	/// Reset the session with `err`, which the peer reads as its error, such as a
 	/// [`moq_net::Error::App`] code.
 	pub fn abort(mut self, err: moq_net::Error) {
-		match self.writer.take() {
-			Some(writer) => {
+		match std::mem::replace(&mut self.writer, Write::Shut) {
+			Write::Open(writer) => {
 				let _ = writer.abort(err);
 			}
 			// Shut down already: the peer reads its end, and dropping the reader resets
 			// the session.
-			None => tracing::debug!(%err, "aborted a tcp session after its shutdown"),
+			_ => tracing::debug!(%err, "aborted a tcp session after its shutdown"),
 		}
 	}
 }
@@ -88,7 +88,7 @@ impl From<moq_net::socket::TcpStream> for TcpStream {
 impl TcpStream {
 	fn new(writer: group::Producer, reader: group::Consumer, peer: String, session: String) -> Self {
 		Self {
-			writer: Some(writer),
+			writer: Write::Open(writer),
 			reader,
 			frame: None,
 			chunk: Bytes::new(),
@@ -97,6 +97,24 @@ impl TcpStream {
 			session,
 			read: kio::Park::default(),
 			write: kio::Park::default(),
+		}
+	}
+}
+
+/// Where this side's half is.
+enum Write {
+	Open(group::Producer),
+	/// Finished, or aborted by [`TcpStream::abort`].
+	Shut,
+	/// Finishing it failed, which every later write and shutdown reports again.
+	Failed(moq_net::Error),
+}
+
+impl Drop for TcpStream {
+	fn drop(&mut self) {
+		// Reset deliberately: an unfinished half dropped silently reads as a bug.
+		if let Write::Open(writer) = std::mem::replace(&mut self.writer, Write::Shut) {
+			let _ = writer.abort(moq_net::Error::Cancel);
 		}
 	}
 }
@@ -136,8 +154,10 @@ impl AsyncRead for TcpStream {
 impl AsyncWrite for TcpStream {
 	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
 		let this = self.get_mut();
-		let Some(writer) = &mut this.writer else {
-			return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+		let writer = match &mut this.writer {
+			Write::Open(writer) => writer,
+			Write::Shut => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+			Write::Failed(err) => return Poll::Ready(Err(reset(err.clone()))),
 		};
 		if buf.is_empty() {
 			return Poll::Ready(Ok(0));
@@ -160,10 +180,18 @@ impl AsyncWrite for TcpStream {
 	}
 
 	fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-		if let Some(writer) = self.get_mut().writer.take() {
-			writer.finish().map_err(reset)?;
+		let this = self.get_mut();
+		this.writer = match std::mem::replace(&mut this.writer, Write::Shut) {
+			Write::Open(writer) => match writer.finish() {
+				Ok(_) => Write::Shut,
+				Err(err) => Write::Failed(err),
+			},
+			other => other,
+		};
+		match &this.writer {
+			Write::Failed(err) => Poll::Ready(Err(reset(err.clone()))),
+			_ => Poll::Ready(Ok(())),
 		}
-		Poll::Ready(Ok(()))
 	}
 }
 
@@ -278,12 +306,39 @@ mod tests {
 		}
 	}
 
+	/// Dropping a stream before shutting it down resets the peer, as a cancellation.
+	#[kio::test]
+	async fn dropping_resets_as_cancelled() {
+		let (a, mut b) = pair();
+		drop(a);
+		let err = b.read(&mut [0; 4]).await.unwrap_err();
+		assert!(matches!(cause(&err), moq_net::Error::Cancel), "{err}");
+	}
+
+	/// A shutdown that fails keeps failing, rather than reading as done the second time.
+	#[kio::test]
+	async fn a_failed_shutdown_stays_failed() {
+		let broadcast = moq_net::broadcast::Producer::new(Default::default());
+		let track = broadcast.create_track("half", None).unwrap();
+		let writer = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut a = TcpStream::new(writer, group().consume(), "b".into(), "s".into());
+		// The track ending under the group fails its finish.
+		track.abort(moq_net::Error::App(3)).unwrap();
+		for _ in 0..2 {
+			assert!(a.shutdown().await.is_err());
+		}
+		assert!(a.write(b"x").await.is_err());
+	}
+
 	/// A reader that fell behind its window is reset, never handed a gap or an end.
 	#[kio::test]
 	async fn eviction_is_a_reset() {
 		let (mut a, mut b) = pair();
 		// What a session's pump does when the peer's half shed a frame its reader needed.
-		a.writer.take().unwrap().abort(moq_net::Error::Evicted).unwrap();
+		let Write::Open(writer) = std::mem::replace(&mut a.writer, Write::Shut) else {
+			unreachable!("open");
+		};
+		writer.abort(moq_net::Error::Evicted).unwrap();
 		let err = b.read(&mut [0; 4]).await.unwrap_err();
 		assert!(matches!(cause(&err), moq_net::Error::Evicted), "{err}");
 	}

@@ -105,9 +105,19 @@ pub async fn run(moq: MoqSide, args: Args, net: crate::Net) -> anyhow::Result<()
 		.with_subscriber(origin.clone());
 	let connection = client.connect(url).established().await.context("failed to connect")?;
 
-	let result = match args.side {
-		Side::Dial(dial) => run_dial(&origin, dial).await,
-		Side::Accept(accept) => run_accept(&origin, accept).await,
+	let serve = async {
+		match args.side {
+			Side::Dial(dial) => run_dial(&origin, dial).await,
+			Side::Accept(accept) => run_accept(&origin, accept).await,
+		}
+	};
+	// The connection redials on its own; once it gives up, nothing can reach the peer.
+	let result = tokio::select! {
+		result = serve => result,
+		closed = connection.closed() => match closed {
+			Ok(()) => Err(anyhow::anyhow!("the connection to the relay closed")),
+			Err(err) => Err(err).context("the connection to the relay failed"),
+		},
 	};
 	let _ = connection.close().await;
 	client.close().await;
