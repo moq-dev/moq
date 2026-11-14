@@ -32,6 +32,8 @@ _manual = ["kio/manual"]
 # Builds `moq-uring-probe`, the relay benchmarks' host check. A binary rather than an
 # example, so building it skips the dev-dependencies. For the bench harness.
 _probe = []
+# Exposes the `fuzz/` harness's target body and seeds through the `udp::fuzz` module, on 64-bit.
+fuzz = ["moq-sock/fuzz"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytes = "1"
@@ -72,6 +74,8 @@ io-uring = { workspace = true }
 libc = { workspace = true }
 # The socket-queue benchmark's rate-limited path.
 moq-shaper = { path = "../moq-shaper" }
+# The control-message fuzz target's input format, which its tests replay.
+moq-sock = { path = "../moq-sock", features = ["fuzz"] }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic"] }
 # Tests run workers on a manual clock.
 moq-uring = { path = ".", features = ["_manual"] }
@@ -85,6 +89,13 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = "0.1"
+
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# `--all-targets` build skips it rather than failing to find the module.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
 
 [[bench]]
 name = "udp_tokio"

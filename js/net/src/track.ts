@@ -19,7 +19,7 @@ import {
 	TooFarBehind,
 	toStreamCode,
 } from "./error.ts";
-import { type Asker, FillState, type Requests, requestsOf } from "./fill.ts";
+import { type Asker, FillState, type Lookup, type Requests, requestsOf } from "./fill.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import {
@@ -856,10 +856,28 @@ type CachedGroup = {
 // A group's checked start, kept by sequence.
 type Start = { sequence: bigint; start: Timestamp };
 
+// Insert group `sequence`'s start into `starts`, sorted by sequence.
+function insertStart(starts: Start[], sequence: bigint, start: Timestamp): void {
+	const last = starts.at(-1);
+	if (!last || last.sequence < sequence) starts.push({ sequence, start });
+	else starts.splice(timelineIndex(starts, sequence), 0, { sequence, start });
+}
+
+// Remove group `sequence`'s start from `starts`, if indexed.
+function removeStart(starts: Start[], sequence: bigint): void {
+	const index = timelineIndex(starts, sequence);
+	if (starts[index]?.sequence === sequence) starts.splice(index, 1);
+}
+
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, sequence: bigint, from: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: bigint) => boolean;
+// Whether group `sequence` is cached as a copy from frame 0 that has not written it yet, so its
+// start may still land, as the Rust `Slot::may_start` says.
+let cachedMayStart: (producer: Producer, sequence: bigint) => boolean;
+// Whether the producer is a copy a session receives, whose handler fetches by group alone.
+let receivedCopy: (producer: Producer) => boolean;
 // The sequences in `[start, end)` the producer caches, unsorted, costing the smaller of the span
 // and the cache; assigned in its static block.
 let cachedIn: (producer: Producer, start: bigint, end: bigint) => bigint[];
@@ -1090,6 +1108,11 @@ export class Producer {
 	// The cached groups' checked starts, sorted by sequence, so a first frame finds its
 	// neighbors' with a search.
 	#bounds: Start[] = [];
+	// Where each cached group's frame 0 presented, sorted by sequence: what a time anchor resolves
+	// against. The checked starts, plus one accepted below the eviction watermark on a track whose
+	// history a local handler serves, which trusts it since no remote publisher wrote it, as the
+	// Rust `TrackState::starts` holds.
+	#starts: Start[] = [];
 	// The highest-sequence checked start evicted. Eviction is not a sequence prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
@@ -1156,7 +1179,11 @@ export class Producer {
 				this.#drop(start, end, hole);
 				this.#chargeDebt();
 			},
-			holds: (sequence) => cachedHolds(this, sequence),
+			holds: (sequence) => {
+				const entry = this.#cached.get(sequence);
+				if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
+				return hooks.groupHeadless(entry.group) ? "headless" : true;
+			},
 			closed: () => this.#state.closed.peek() !== undefined,
 			released: this.#state.closed,
 		});
@@ -1366,7 +1393,7 @@ export class Producer {
 			);
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
-		startsOf = (producer) => producer.#bounds;
+		startsOf = (producer) => producer.#starts;
 		goneAt = (producer, sequence) => {
 			// Without a declared start, the first arrival stands in for it, as the tail's does.
 			const floor = producer.#wire?.served?.start ?? producer.#arrivals.first() ?? 0n;
@@ -1414,6 +1441,11 @@ export class Producer {
 			const entry = producer.#cached.get(sequence);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
 		};
+		cachedMayStart = (producer, sequence) => {
+			const entry = producer.#cached.get(sequence);
+			return entry !== undefined && hooks.groupMayStart(entry.group);
+		};
+		receivedCopy = (producer) => producer.#wire !== undefined;
 		cachedIn = (producer, start, end) => {
 			if (end - start <= BigInt(producer.#cached.size)) {
 				const found: bigint[] = [];
@@ -1847,28 +1879,30 @@ export class Producer {
 		return late;
 	}
 
-	// Record a cached group's checked start: a bound for its neighbors, or unverified.
+	// Record a cached group's checked start: a bound for its neighbors, or unverified. Either
+	// indexes where it starts, an unverified one only where a local handler serves the history,
+	// as the Rust `index_start` does.
 	#record(entry: CachedGroup, start: Timestamp, late: boolean): void {
+		const sequence = entry.group.sequence;
 		if (late) {
 			entry.unverified = true;
 			for (const mirror of entry.mirrors.values()) hooks.unverifyGroup(mirror);
+			if (!this.#wire && this.#fills.serving) insertStart(this.#starts, sequence, start);
 			return;
 		}
 		entry.bound = start;
-		const sequence = entry.group.sequence;
-		const last = this.#bounds.at(-1);
-		if (!last || last.sequence < sequence) this.#bounds.push({ sequence, start });
-		else this.#bounds.splice(timelineIndex(this.#bounds, sequence), 0, { sequence, start });
+		insertStart(this.#bounds, sequence, start);
+		insertStart(this.#starts, sequence, start);
 	}
 
 	// Drop a group's checked start as it leaves the cache, raising the watermark to it when
 	// it was evicted.
 	#unbound(entry: CachedGroup, evicted = false): void {
+		const sequence = entry.group.sequence;
+		removeStart(this.#starts, sequence);
 		const start = entry.bound;
 		if (start === undefined) return;
-		const sequence = entry.group.sequence;
-		const index = timelineIndex(this.#bounds, sequence);
-		if (this.#bounds[index]?.sequence === sequence) this.#bounds.splice(index, 1);
+		removeStart(this.#bounds, sequence);
 		if (evicted && (this.#evicted === undefined || sequence > this.#evicted.sequence)) {
 			this.#evicted = { sequence, start };
 		}
@@ -2219,8 +2253,15 @@ export class Producer {
 		this.#refuseSkipped(sequence);
 		const existing = this.#cached.get(sequence);
 		let kept: Map<TrackState, GroupConsumer> | undefined;
-		if (existing) {
-			if (!(existing.group.closed.peek() instanceof Error)) {
+		const failed = existing?.group.closed.peek() instanceof Error ? existing.group : undefined;
+		if (existing && !failed && start === 0 && hooks.groupHeadless(existing.group)) {
+			// A copy from frame 0, a fill a bounded reader asked or the feed's own, replaces one that
+			// can't serve its head. One still arriving keeps arriving for the readers already holding
+			// it, outside the cache.
+			this.#unlink(existing);
+			this.#uncache(existing);
+		} else if (existing) {
+			if (!failed) {
 				throw new Error(`duplicate group: sequence=${sequence}`);
 			}
 			// A mirror the failed copy kept open, held for a duplicate, is the new copy's to continue.
@@ -2241,7 +2282,7 @@ export class Producer {
 		hooks.startGroup(group, start);
 		this.#bind(group);
 		this.#cap(group);
-		this.#publish(group, fetched, existing && { failed: existing.group, kept });
+		this.#publish(group, fetched, failed && { failed, kept });
 		return group;
 	}
 
@@ -2698,6 +2739,8 @@ export class Subscriber {
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
 	// default, an omitted one is unbounded, leaving the publisher's maxAge as the only bound.
 	#fetchBudget?: number;
+	// The first frame a fetch asks of its group: a copy starting past it lacks its head.
+	#fetchFrom = 0;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
 	// it to sequence order; whichever wins is the only one allowed from here on.
@@ -2747,6 +2790,10 @@ export class Subscriber {
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
+	// The heads this reader asked a fill for, each once: one met again with no fill bringing it
+	// is given up, as the Rust `Heads` gives up a head whose fetch ended without one. Clipped to
+	// what it still reads, so a widening back over one asks it afresh.
+	#heads: Run[] = [];
 	// The sequences the fill probe has yet to judge, and the terms it last judged under: each is
 	// judged once, then again only once a change reopens it (see #reopen), as the Rust `Misses`
 	// keeps `judged`. A run the live feed still owes stays unjudged until the feed gives it up.
@@ -2775,6 +2822,9 @@ export class Subscriber {
 	// Bumped whenever the fills this reader joined are rejudged, which may withdraw groups it reads
 	// again by the time it looks (a narrowing undone in one turn moves no signal), so it asks anew.
 	#fillMoves = new Signal(0);
+	// The time starts this reader asked its fills to look up, each with its fill, absent when no
+	// handler could take it.
+	#lookups: { pts: Timestamp; lookup?: Lookup }[] = [];
 
 	#drift(): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
@@ -3023,6 +3073,7 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (!asker || !producer) return;
 		this.#reclip(this.#givenUp, start, end, (run) => this.#reads(run.start, run.end));
+		this.#reclip(this.#heads, start, end, (run) => this.#reads(run.start, run.end));
 		this.#reclip(this.#asked, start, end, (run) => this.#wants(run.start, run.end));
 		this.#reclip(this.#refilled, start, end, (run) => this.#wants(run.start, run.end));
 		fillsOf(producer).moved(asker, start, end);
@@ -3061,6 +3112,7 @@ export class Subscriber {
 	// clipped group asks it once more, as in Rust.
 	#clipAsked(): void {
 		if (this.#givenUp.length > 0) this.#givenUp = this.#givenUp.flatMap((run) => this.#reads(run.start, run.end));
+		if (this.#heads.length > 0) this.#heads = this.#heads.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
 		if (this.#refilled.length > 0) {
 			this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
@@ -3250,6 +3302,7 @@ export class Subscriber {
 			this.#reported = new Runs<Reported>(sameReport);
 			this.#skipped.clear();
 			this.#givenUp = [];
+			this.#heads = [];
 			return new TooFarBehind();
 		}
 		return undefined;
@@ -3297,6 +3350,7 @@ export class Subscriber {
 		this.#pending = this.#pending.flatMap((run) => removeRun([run], 0n, floor));
 		this.#reported.set(0n, floor);
 		this.#givenUp = removeRun(this.#givenUp, 0n, floor);
+		this.#heads = removeRun(this.#heads, 0n, floor);
 		// The fills it refused, as the Rust `Misses::given_up` is forgotten below the floor.
 		if (this.#state.refused.peek().some((run) => run.start < floor))
 			this.#state.refused.update((runs) => removeRun(runs, 0n, floor));
@@ -3397,6 +3451,7 @@ export class Subscriber {
 		const fills = fillsOf(producer);
 		if (!fills.serving && !fills.active) return false;
 		this.#givenUp = removeRun(this.#givenUp, run.start, run.end);
+		this.#heads = removeRun(this.#heads, run.start, run.end);
 		this.#asked = removeRun(this.#asked, run.start, run.end);
 		this.#refilled = removeRun(this.#refilled, run.start, run.end);
 		insertRun(this.#unjudged, run.start, run.end);
@@ -3444,6 +3499,8 @@ export class Subscriber {
 	// Resolve this reader's ranges again, as when they are replaced.
 	#resolve(): void {
 		this.#window = new Window(this.#state.update.peek()?.ranges ?? [{}], this.#latestGroup(), this.#holdings());
+		// Leaves the lookups the old ranges asked, which a settled window never reads again.
+		if (this.#lookups.length > 0) this.#lookUp();
 		this.#moved();
 	}
 
@@ -3482,13 +3539,20 @@ export class Subscriber {
 			nextHeld: (from) => {
 				const group = state.timeline[timelineIndex(state.timeline, from)];
 				if (!group) return undefined;
-				const started = hooks.groupTimestamp(group);
+				// The start the cache indexed counts too: one accepted unverified, where a local handler
+				// serves the history, starts where its first frame says, as `nextStart` reports.
+				const starts = startsOf(producer);
+				const indexed = starts[timelineIndex(starts, group.sequence)];
+				const started =
+					hooks.groupTimestamp(group) ?? (indexed?.sequence === group.sequence ? indexed.start : undefined);
 				if (started) return { sequence: group.sequence, held: { started } };
 				return { sequence: group.sequence, held: hooks.groupStarted(group) ? "never" : "pending" };
 			},
 			gone: (sequence) => goneAt(producer, sequence),
 			// Only once the producer is gone: a group held below a reached end may still start.
 			complete: () => state.closed.peek() !== undefined,
+			// A received copy's handler is its session, which fetches by group alone.
+			looksUp: () => !receivedCopy(producer) && fillsOf(producer).serving,
 		};
 	}
 
@@ -3509,8 +3573,48 @@ export class Subscriber {
 		if (this.#resume || this.#window.settled) return undefined;
 		// The live feed had no group when the ranges resolved, so the newest one then was the first.
 		const latest = this.#window.pending ? this.#state.first : this.#latestGroup();
-		if (this.#window.settle(latest, this.#holdings())) this.#moved();
+		const looked = this.#lookUp();
+		if (this.#window.settle(latest, this.#holdings()) || looked) this.#moved();
 		return undefined;
+	}
+
+	// Look up each time start the window can't resolve from the cache, once, and take in the
+	// answers. Returns whether the groups in range moved. Mirrors the Rust `Cursor::look_up`.
+	#lookUp(): boolean {
+		const wanted = this.#window.lookups();
+		if (wanted.length === 0 && this.#lookups.length === 0) return false;
+		const producer = this.#state.producer;
+		const same = (a: Timestamp, b: Timestamp) => !a.isBefore(b) && !b.isBefore(a);
+		// The window stops looking once replaced.
+		this.#lookups = this.#lookups.filter((lookup) => {
+			if (wanted.some((want) => same(want.pts, lookup.pts))) return true;
+			lookup.lookup?.leave();
+			return false;
+		});
+		for (const { pts, below } of wanted) {
+			if (this.#lookups.some((lookup) => same(lookup.pts, pts))) continue;
+			// With no handler open any more, nothing can answer.
+			const lookup = producer && fillsOf(producer).lookup(pts, below, this.#askerOf());
+			this.#lookups.push({ pts, lookup });
+		}
+		let moved = false;
+		for (const lookup of [...this.#lookups]) {
+			const answer = lookup.lookup?.answer();
+			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
+			// The answer's first frame says whether it starts at or before the time.
+			const holdings = this.#holdings();
+			if (
+				answer !== undefined &&
+				producer &&
+				holdings.nextStart(answer)?.sequence !== answer &&
+				cachedMayStart(producer, answer)
+			)
+				continue;
+			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
+			lookup.lookup?.leave();
+			if (this.#window.found(lookup.pts, answer, holdings)) moved = true;
+		}
+		return moved;
 	}
 
 	// Narrow the local bounds to the window into the hull every read starts from.
@@ -3606,7 +3710,7 @@ export class Subscriber {
 			const asker = this.#askerOf();
 			// A moving read floor retires only its prefix: what lies above it stays asked.
 			const read = max(this.#cursor.peek().start, this.#nextSequence);
-			for (const runs of [this.#asked, this.#refilled, this.#givenUp]) cutRun(runs, 0n, read);
+			for (const runs of [this.#asked, this.#refilled, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
 			this.#reopen(producer, fills, budget, coverage);
@@ -3642,7 +3746,10 @@ export class Subscriber {
 					const span = { ...dropped, start: max(dropped.start, over), end: min(dropped.end, to) };
 					if (span.start < span.end && !settles(span, budget, coverage, this.#state.judged)) spans.push(span);
 				}
-				for (const run of spans.flatMap((span) => this.#wants(span.start, span.end))) {
+				// Only what the window lets a miss ask for: none below the oldest group held for a time
+				// start reaching back past it.
+				const missable = spans.flatMap((span) => this.#window.missable(span.start, span.end));
+				for (const run of missable.flatMap((span) => this.#wants(span.start, span.end))) {
 					const gone = [...accounted];
 					for (const dropped of givenUp(drops, refused.peek(), run.start, run.end, (run) =>
 						settles(run, budget, coverage, this.#state.judged),
@@ -3841,6 +3948,36 @@ export class Subscriber {
 			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "group evicted again" }));
 		}
 		if (lost.length > 0) this.#fillsMoved(lost);
+	}
+
+	// Whether `group` is one this reader hands out only from its first frame, which it lacks: the
+	// window is bounded, so it reads whole groups as a fetch would, from the frame a fetch asks.
+	// Mirrors the Rust `Cursor::lacks_head`, and a fetch's `poll_fetch_cached` frame bounds.
+	#lacksHead(group: GroupConsumer): boolean {
+		return this.#window.end() !== undefined && hooks.groupFirstFrame(group) > this.#fetchFrom;
+	}
+
+	// Ask a fill for the head of group `sequence` once, as a fetch from frame 0 would, unless one
+	// is already out. Returns whether one still owes it; false once it is given up, as with no
+	// handler to ask, or a fill that ended without a copy from frame 0 (dropped, or closed
+	// unanswered), which refuses it to this reader as a miss no fill can serve. Mirrors the Rust
+	// `Cursor::ask_head` and `give_up_heads`.
+	#askHead(sequence: bigint): boolean {
+		const end = sequence + 1n;
+		if (dropAt(this.#state.refused.peek(), sequence) || runGaps(this.#givenUp, sequence, end).length === 0)
+			return false;
+		const producer = this.#state.producer;
+		if (!producer) return false;
+		const fills = fillsOf(producer);
+		const asker = this.#askerOf();
+		if (!fills.covered(sequence, end, asker).next().done) return true;
+		if (runGaps(this.#heads, sequence, end).length > 0 && fills.ask(sequence, end, asker).length > 0) {
+			insertRun(this.#heads, sequence, end);
+			return true;
+		}
+		// A head the reader found missing belonged to a group that existed.
+		asker.refuse(sequence, end, new StreamError(StreamCode.NotFound, { message: `group ${sequence} has no head` }));
+		return false;
 	}
 
 	// Whether a held group waits on the local cap rising: one past it may still be read. A
@@ -4121,8 +4258,9 @@ export class Subscriber {
 		};
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.askFetch = (subscriber, sequence) => subscriber.#askFetch(sequence);
-		hooks.fetchBudget = (subscriber, maxDelay) => {
+		hooks.fetchBudget = (subscriber, maxDelay, frameStart = 0) => {
 			subscriber.#fetchBudget = maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY;
+			subscriber.#fetchFrom = frameStart;
 			subscriber.#state.fetch = true;
 			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
 			if (subscriber.#state.producer) resubscribe(subscriber.#state.producer);
@@ -4533,6 +4671,15 @@ export class Subscriber {
 				}
 				continue;
 			}
+			// A group missing its head comes from the fill asked for it, in its turn.
+			if (this.#lacksHead(group)) {
+				if (this.#askHead(group.sequence)) {
+					groups.splice(index++, 0, group);
+					continue;
+				}
+				group.close();
+				continue;
+			}
 			this.#handOut(group.sequence, false);
 			return { kind: "group", group: this.#guard(group) };
 		}
@@ -4743,6 +4890,7 @@ export class Subscriber {
 			this.#state.drops.version.changed(fn),
 			this.#state.refused.changed(fn),
 			this.#fillMoves.changed(fn),
+			...this.#lookups.flatMap((lookup) => (lookup.lookup ? [lookup.lookup.changed.changed(fn)] : [])),
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
 			this.#state.startChanged.changed(fn),
@@ -4900,6 +5048,22 @@ export class Subscriber {
 				continue;
 			}
 			if (this.#waitOwed(start, group.sequence, drift)) return { kind: "idle" };
+			// A group missing its head comes from the fill asked for it, in its turn.
+			if (this.#lacksHead(group)) {
+				if (this.#askHead(group.sequence)) {
+					// Its staleness deadline wakes the cursor, as for any owed hole.
+					this.#fillWait = true;
+					return { kind: "idle" };
+				}
+				// Given up: past it, as past any group no fill can serve.
+				const passed = this.#nextSequence;
+				this.#pass(groups, index);
+				this.#stoppedReading(passed, this.#nextSequence);
+				start = this.#nextSequence;
+				index = 0;
+				group.close();
+				continue;
+			}
 			this.#pass(groups, index);
 			this.#handOut(group.sequence, true);
 			return { kind: "group", group: this.#guard(group) };

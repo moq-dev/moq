@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Duration, type Installed, Instant, now, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 
@@ -657,4 +660,44 @@ describe("tracks", () => {
 		expect(sync.now()).toEqual(Duration.millis(10));
 		sync.close();
 	});
+});
+
+describe("clock corpus", () => {
+	type Run = {
+		tracks: ("audio" | "video")[];
+		start: number;
+		every: number;
+		frames: number;
+		offsets: number[];
+		reference: number;
+	};
+	type Case = { name: string; delay: number; runs: Run[] };
+
+	// Shared with moq-mux, so neither implementation is graded against the other.
+	const corpus = join(dirname(fileURLToPath(import.meta.url)), "../../../doc/concept/audio-jitter/clock/corpus.json");
+	const cases = JSON.parse(readFileSync(corpus, "utf8")) as Case[];
+
+	// Arrivals start this far after the clock origin and media this far into the track, so neither is negative.
+	const ARRIVAL = 5000;
+	const MEDIA = 100_000;
+
+	for (const { name, delay, runs } of cases) {
+		it(`follows the corpus reference: ${name}`, async () => {
+			const sync = new Sync({ delay: Duration.millis(delay) });
+			const held = () => ({ target: new Signal<Duration | undefined>(undefined) });
+			const tracks = { audio: sync.track(held()), video: sync.track(held()) };
+			await flush();
+			for (const [index, run] of runs.entries()) {
+				for (let i = 0; i < run.frames; i++) {
+					const arrival = run.start + i * run.every;
+					const offset = run.offsets[i % run.offsets.length];
+					const track = tracks[run.tracks[i % run.tracks.length]];
+					track.received(Duration.millis(MEDIA + arrival - offset), at(ARRIVAL + arrival));
+				}
+				const reference = (sync.out.reference.peek() ?? Number.NaN) - ARRIVAL + MEDIA;
+				expect([index, reference]).toEqual([index, run.reference]);
+			}
+			sync.close();
+		});
+	}
 });
