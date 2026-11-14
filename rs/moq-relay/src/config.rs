@@ -143,7 +143,7 @@ pub struct Config {
 #[derive(usage_rs::Cli, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-relay", version = env!("CARGO_PKG_VERSION"))]
-#[usage(completion, settings)]
+#[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 struct Cli {
 	#[usage(flatten)]
 	config: Config,
@@ -158,6 +158,11 @@ struct Cli {
 /// one and read as though it were theirs.
 pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 	Cli::spec()
+}
+
+/// Every setting the relay merges, as its flags declare them.
+pub(crate) const fn registry() -> usage_rs::config::Registry {
+	Cli::SETTINGS_REGISTRY
 }
 
 impl Config {
@@ -182,7 +187,6 @@ impl Config {
 			std::process::exit(0);
 		}
 		let config = Self::parse_and_merge(args)?;
-		moq_tokio::cli::check_env(&[Cli::spec()], &[])?;
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
@@ -1225,13 +1229,6 @@ ws = false
 		}
 	}
 
-	/// The two declarations of every merged flag stay in step.
-	#[test]
-	fn the_settings_registry_matches_the_cli() {
-		let drift = crate::settings::Settings::SETTINGS_REGISTRY.drift(Cli::SETTINGS_BINDINGS);
-		assert!(drift.is_empty(), "{drift:#?}");
-	}
-
 	/// The relay refuses to start on a `MOQ_*` variable it doesn't read, so a stale
 	/// name in the NixOS module would stop every NixOS relay; catch it here first.
 	#[test]
@@ -1259,6 +1256,21 @@ ws = false
 			unknown.is_empty(),
 			"{path} sets variables moq-relay doesn't read: {unknown:?}"
 		);
+	}
+
+	/// A `MOQ_*` variable the relay does not read is refused, naming it, while a
+	/// declared one beside it is not.
+	#[test]
+	fn unknown_env_is_refused() {
+		let env = test_env::Env::default()
+			.set("MOQ_LISTEN_TLS_CRET", "cert.pem")
+			.set("MOQ_CLUSTER_MAX_HOPS", "3");
+		if !env.isolate() {
+			return;
+		}
+		let error = Config::parse_and_merge(["moq-relay"]).unwrap_err().to_string();
+		assert!(error.contains("MOQ_LISTEN_TLS_CRET"), "{error}");
+		assert!(!error.contains("MOQ_CLUSTER_MAX_HOPS"), "{error}");
 	}
 
 	/// An embedder can merge its relay fragment without parsing the binary CLI again.
