@@ -4211,12 +4211,7 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::with_range`] cap.
-	#[cfg(feature = "async")]
-	pub async fn next_frame(&mut self) -> Result<Option<frame::Consumer>> {
-		kio::wait(|waiter| self.poll_next_frame(waiter)).await
-	}
-
-	/// The next frame, as a consumer for chunked reading; see [`Self::next_frame`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		let res = match self.recover().is_none() {
 			true => {
