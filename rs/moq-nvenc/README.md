@@ -29,8 +29,11 @@ alive until synchronous completion. Raw SDK structs remain available under
 
 An external input is registered once and mapped for each encode, as NVENC
 expects: registration is the expensive call, and the allocation may be written
-only while unmapped. When an unmap or unregister fails, or a submission is
-abandoned, the allocation stays owned because the driver may still refer to it.
+only while unmapped. A registration marks itself mapped before handing out a
+mapping and clears the mark only once that mapping unmaps, so when an unmap or
+unregister fails, or a submission is abandoned or forgotten, the allocation
+stays owned because the driver may still refer to it, and no later mapping is
+allowed.
 
 The `sys` bindings are generated with bindgen from the vendored headers
 (`src/sys/headers/`); see the [upstream repo](https://github.com/ViliamVadocz/nvidia-video-codec-sdk)
