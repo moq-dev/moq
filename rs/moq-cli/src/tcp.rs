@@ -133,8 +133,21 @@ async fn run_dial(origin: &moq_net::origin::Producer, args: Dial) -> anyhow::Res
 		.with_context(|| format!("failed to listen on {}", args.local))?;
 	tracing::info!(local = %args.local, peer = %args.peer, "forwarding");
 
+	let health = moq_tokio::accept::Health::new("tcp dial");
 	loop {
-		let (local, addr) = listener.accept().await.context("failed to accept a local connection")?;
+		let (local, addr) = match listener.accept().await {
+			Ok(accepted) => {
+				health.accepted();
+				accepted
+			}
+			// One connection's failure or a passing fd shortage, not the forward's.
+			Err(err) => {
+				if let Some(delay) = health.failed(&err) {
+					kio::clock::sleep(delay).await;
+				}
+				continue;
+			}
+		};
 		let dial = endpoint
 			.dial_tcp(&args.peer, args.socket.priority)
 			.context("failed to dial")?;

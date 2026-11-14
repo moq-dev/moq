@@ -141,7 +141,7 @@ object_store = { workspace = true, features = ["fs"] }
 percent-encoding = { workspace = true }
 pollster = { workspace = true, optional = true }
 # A `tcp dial` endpoint's id, which must stay unguessable.
-rand = "0.10.1"
+rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 rind-object-store = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std"] }
