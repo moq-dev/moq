@@ -15,7 +15,7 @@ replace are retired.
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): acceptance is of the path rule
 ([epic](/quest/m2/cluster-routes/README.md) Plan item 27), on the
-sessions [the switch](/quest/m2/cluster-routes/switch.md) leaves.
+sessions [the switch](https://github.com/moq-dev/moq/pull/8731) left.
 The seqno request fixtures are replaced below, since the rule has no seqno
 and no request.
 
@@ -105,10 +105,6 @@ which shows whether the doubt timer must follow the keep-alive or relay
 keep-alives must shorten. Three relays whose local priorities form a dispute
 wheel settle, or the test pins how they fail (RFC 4264). A primary route
 fails and returns, and every relay ends back on it.
-
-## Required
-
-- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the sessions and the route rule these fixtures accept
 
 ## Related
 

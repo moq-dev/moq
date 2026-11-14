@@ -25,7 +25,7 @@ Babel): ✅ this edits the path router, after
 and the model as it has a route per prefix
 (`rs/moq-net/verify/route/RouteHandoff.tla`)
 (rejected: landing first on Babel's router, which
-[the switch](/quest/m2/cluster-routes/switch.md) deletes). The path
+[the switch](https://github.com/moq-dev/moq/pull/8731) deleted). The path
 rule has no echo and no route request
 ([epic](/quest/m2/cluster-routes/README.md) Plan item 27), so an edit
 is checked against a withdrawal that names a dead hop and against a hold and
@@ -120,7 +120,3 @@ one key, which `Sim` and the tests use, so this changes no behaviour on its
 own.
 
 Public API: none (the router is crate-private). Wire: none.
-
-## Related
-
-- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - deletes Babel's router; whichever lands second adapts

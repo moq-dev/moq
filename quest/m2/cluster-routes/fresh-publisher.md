@@ -45,7 +45,3 @@ draft wherever the wire switch has already landed.
   otherwise retain the baseline. An agent can gather that evidence, but adopting
   an exception changes the coordinator's accepted routing policy and needs an
   explicit decision.
-
-## Related
-
-- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - supplies the authenticated session boundary when it puts the rule on the wire

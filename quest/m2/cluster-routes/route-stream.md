@@ -25,7 +25,7 @@ session. This removes the ordering hazard as a class and makes a
 token-scope change an edit.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
-Babel): ✅ [the switch](/quest/m2/cluster-routes/switch.md) to the
+Babel): ✅ [the switch](https://github.com/moq-dev/moq/pull/8731) to the
 path rule lands first, on today's streams, and this follows (rejected: this
 first, which builds the echo and ROUTE_REQUEST on the new stream and then
 deletes them; one wire change for both, which joins two XL quests). The path
@@ -70,7 +70,7 @@ departure is a choice to list there:
   sends as a publisher: one ANNOUNCE_OK per edit it applied, the marker where
   the edit takes effect, then ROUTE_START, UPDATE, HOLD, and END, the
   withdrawal that names a dead hop and the hold answer as
-  [the switch](/quest/m2/cluster-routes/switch.md) shaped them, the
+  [the switch](https://github.com/moq-dev/moq/pull/8731) shaped them, the
   ANNOUNCE messages, ANNOUNCE_FLOOR with a Prefix ID, and SYNCED with a
   Prefix ID. ANNOUNCE_START names the Prefix ID its suffix is relative to,
   and a compression base shares it.
@@ -102,6 +102,16 @@ Code this replaces, for lite-07 only:
 - `Routed` (`lite/subscriber/routed.rs`) and `Answer`
   (`lite/publisher/routed.rs`) become one per session, holding the prefixes.
   `Answer` already reads several node streams (one per mount).
+- `Router::admit` (`rs/moq-net/src/route/path.rs`) files a scoped
+  neighbour's route that is wider than the scope's regions at each region
+  inside it, because a stream for a scope with several regions asks for a
+  prefix above them all ([the switch](https://github.com/moq-dev/moq/pull/8731)
+  added this). Two routes of one node at nested prefixes then both file at
+  a region inside both, so one overwrites the other and an end of either
+  drops the route there until the other sends again. With one prefix per
+  region in the set, the peer answers at the region and nothing narrows, so
+  the narrowing goes. Test a two-region scope behind a peer that holds a
+  broad and a narrow route of one node, ending each in turn.
 - `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
 - `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic
@@ -137,7 +147,6 @@ Public API: none expected. Wire: lite-07-wip only.
 ## Required
 
 - [The route model and router take an interest as an edited set of prefixes](/quest/m2/cluster-routes/interest-set.md) - the edit rule proven in the model and the router that implements it
-- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the messages this moves onto one stream, with no echo or route request among them
 
 ## Related
 
