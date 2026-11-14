@@ -68,6 +68,7 @@ impl fmt::Display for Step {
 }
 
 /// What the search covered.
+#[expect(dead_code, reason = "search statistics are reported through derived Debug")]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Report {
 	/// Distinct states.
