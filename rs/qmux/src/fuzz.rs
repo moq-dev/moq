@@ -106,7 +106,9 @@ fn framing(version: Version) -> Vec<Action> {
 	];
 	if version.uses_records() {
 		// QX_PING request (0x348c67529ef8c7bd) with sequence 1.
-		actions.push(Action::Record(vec![0xf4, 0x8c, 0x67, 0x52, 0x9e, 0xf8, 0xc7, 0xbd, 0x01]));
+		actions.push(Action::Record(vec![
+			0xf4, 0x8c, 0x67, 0x52, 0x9e, 0xf8, 0xc7, 0xbd, 0x01,
+		]));
 		// A Size field of 16383, one past the largest record, and no record behind it.
 		actions.push(Action::Raw(vec![0x7f, 0xff]));
 	} else {

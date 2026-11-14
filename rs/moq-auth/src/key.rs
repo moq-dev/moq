@@ -555,11 +555,9 @@ impl Key {
 				_ => return Err(KeyError::InvalidCurve("EC").into()),
 			},
 			KeyMaterial::OKP { ref curve, ref x, .. } => match curve {
-				EllipticCurve::Ed25519 => {
-					DecodingKey::from_ed_components(
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
-					)?
-				}
+				EllipticCurve::Ed25519 => DecodingKey::from_ed_components(
+					base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
+				)?,
 				_ => return Err(KeyError::InvalidCurve("OKP").into()),
 			},
 			KeyMaterial::RSA { ref public, .. } => {
@@ -758,7 +756,9 @@ where
 	D: Deserializer<'de>,
 {
 	let s: Option<String> = Option::deserialize(deserializer)?;
-	s.map(|s| decode_base64url(&s)).transpose().map_err(serde::de::Error::custom)
+	s.map(|s| decode_base64url(&s))
+		.transpose()
+		.map_err(serde::de::Error::custom)
 }
 
 /// A key field: unpadded base64url, or padded for backwards compatibility. Empty is refused,

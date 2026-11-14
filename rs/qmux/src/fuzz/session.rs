@@ -250,7 +250,12 @@ impl Reader {
 		for &byte in chunk {
 			let tag = *self.tag.get_or_insert(byte);
 			if !tainted {
-				assert_eq!(byte, pattern(tag, self.offset), "stream {tag} corrupted at {}", self.offset);
+				assert_eq!(
+					byte,
+					pattern(tag, self.offset),
+					"stream {tag} corrupted at {}",
+					self.offset
+				);
 			}
 			self.offset += 1;
 		}
@@ -268,11 +273,11 @@ async fn serve(mode: Mode, io: DuplexStream, book: Rc<Book>) {
 				.with_session_config(config)
 				.accept()
 				.await
-				.map(|(session, driver)| (session, victim(async { driver.await })))
+				.map(|(session, driver)| (session, victim(driver)))
 		}
 		false => Session::accept(Stream::new(io), config)
 			.await
-			.map(|(session, driver)| (session, victim(async { driver.await }))),
+			.map(|(session, driver)| (session, victim(driver))),
 	};
 	let Ok((session, driver)) = accepted else {
 		return;
@@ -370,21 +375,40 @@ pub(super) enum Action {
 	OpenUni,
 	OpenBi,
 	/// Write the next `len` bytes of a stream's pattern, as much as it takes now.
-	Write { stream: u8, len: u16 },
-	Finish { stream: u8 },
-	Reset { stream: u8, code: u8 },
-	Stop { stream: u8, code: u8 },
+	Write {
+		stream: u8,
+		len: u16,
+	},
+	Finish {
+		stream: u8,
+	},
+	Reset {
+		stream: u8,
+		code: u8,
+	},
+	Stop {
+		stream: u8,
+		code: u8,
+	},
 	/// Read what the server echoed on a stream.
-	Read { stream: u8 },
-	Datagram { len: u16 },
+	Read {
+		stream: u8,
+	},
+	Datagram {
+		len: u16,
+	},
 	/// One record of arbitrary frames, framed by the transport.
 	Record(Vec<u8>),
 	/// Arbitrary bytes straight onto the socket.
 	Raw(Vec<u8>),
 	/// Stop or resume reading the socket.
 	Stall(bool),
-	Advance { ticks: u8 },
-	Close { code: u8 },
+	Advance {
+		ticks: u8,
+	},
+	Close {
+		code: u8,
+	},
 	/// Drop the socket without a close.
 	Abort,
 }
@@ -620,13 +644,14 @@ impl Peer {
 		let config = config(mode.version);
 		let (session, driver) = match mode.websocket {
 			true => {
-				let socket = WebSocketStream::from_raw_socket(tap.clone(), Role::Client, Some(ws::capped(&config))).await;
+				let socket =
+					WebSocketStream::from_raw_socket(tap.clone(), Role::Client, Some(ws::capped(&config))).await;
 				let transport = Inject {
 					inner: WsTransport::new(socket, moq_net::transport::Address::Uri),
 					queue: injected.clone(),
 				};
 				let (session, driver) = Session::start(transport, Side::Client, config).await.ok()?;
-				(session, sim::spawn(async { driver.await }))
+				(session, sim::spawn(driver))
 			}
 			false => {
 				let transport = Inject {
@@ -634,7 +659,7 @@ impl Peer {
 					queue: injected.clone(),
 				};
 				let (session, driver) = Session::start(transport, Side::Client, config).await.ok()?;
-				(session, sim::spawn(async { driver.await }))
+				(session, sim::spawn(driver))
 			}
 		};
 		Some(Self {
@@ -800,8 +825,16 @@ impl Peer {
 					assert_eq!(report.fin, stream.finished, "stream {} ended wrong", stream.tag);
 				}
 				true => {
-					assert_eq!(stream.echo.offset, stream.written, "stream {} echo lost bytes", stream.tag);
-					assert_eq!(stream.echo_fin, stream.finished, "stream {} echo ended wrong", stream.tag);
+					assert_eq!(
+						stream.echo.offset, stream.written,
+						"stream {} echo lost bytes",
+						stream.tag
+					);
+					assert_eq!(
+						stream.echo_fin, stream.finished,
+						"stream {} echo ended wrong",
+						stream.tag
+					);
 				}
 			}
 		}

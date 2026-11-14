@@ -27,13 +27,17 @@ const KEYS: &[&str] = &[
 	r#"{"alg":"HS256","key_ops":["sign","verify"],"kty":"oct","k":"Mayc-1UbXngAVLAyPJljKTrOA7rwVTS_Im_LRXYvDzE","kid":"fuzz-hs256"}"#,
 	r#"{"alg":"EdDSA","key_ops":["verify","sign"],"kty":"OKP","crv":"Ed25519","x":"GDjNqZlC0ZyXp2Lb8c_eT-oDp4UhTUYc_6q8HMaWauE","d":"_cHIr6X1GEQ6qc-9GUjSDTtlcmTnsOctwUkvE28ZDMw","kid":"fuzz-eddsa"}"#,
 	r#"{"alg":"ES256","key_ops":["verify","sign"],"kty":"EC","crv":"P-256","x":"MTm-tdpUeGdRtA4lS-SYQSs2VtinHFTfB8Wi2WnzSqw","y":"m0kSg8wde8t0aoeK5fiikAsyQtDUJsL30sZgE5Vcsd8","d":"lT-UkeuPDxJ8Cm35e6yfeehclkJptYGwvC3Iv-SmAZc","kid":"fuzz-es256"}"#,
-	r#"{"alg":"RS256","key_ops":["sign","verify"],"kty":"RSA","n":"p2nsYkS2yzIvhdcez-PS9Sew7aN7fZlGwbyOJrzzfhYKj1lcKEnlc1UCnTvIuqVqAMZ2H2W0flT7dP6oYETN0mDxJMTrccAUcB9GvMIc0774y5mXSNMDD2cF7M6m7FDYo1xFk8GMUhIFJXewknY9g_SVy2OUIgEET6hqGJmhgfiw9o6WVKAKAgewHjUi2KPJcvKYwUMTLvMPnIpsGZmJBH3CU85RnkmYEg91ZJsDuJXlPv9WOrWMmeo9kkj_dFElwANxhA5-Mlzzmzz6up-skzonpMknYaCUsruYI3GheenRMWIu6Blzm-acgDgsJjwkwN_xW9qBSdfMAqW1mcmaKw","e":"AQAB","d":"C7NrCpk732rUCHo3FJebRHgwNQPCm04ttFe95bY6HHtk5Iz91HEJwOxVoPCvQGBUTtaQJfShT10YMB6mXQgiDIyq_gNnY01mAEonUwUMJ76GvBAxkyzwX1C3iMwOvaCO66gE0uVprcjFpE8_v5TVCtZ667q7fT7t8rVWKP7_20oN-AP5ei0MjdNAZlIcyMZsAbyzKkOxVUqkov33mNaERlUqgZr7Y6yADtEXq6T08K4JPRfuWFkl35DYZSPbmfGZIj630YTa7-u6FpABLvWSmqP58qXAVYicMut4v4p6wbjHqgg5ShjmxZm7yrSj8YUw5yjSXNx6jaVvJp_iOi1AgQ","p":"2NeGjrclLhNQXA464tFAaFu5hZ5HeNq9D5hg6hQXIyos_gl7xzKzO49rzdO09QomDGO0aLsshlXcZIOwB1DwTdFI3fHVjbOYoBd1uxq98QMJvDMbKYDeQyl-DekMr0Y5LeYwAibOQtpBO2d8-KB8XAl57_ATeegdDWaFxGT0Fqs","q":"xaVdLVwdvCqj3cwLLbtBd35MgG4Fmf6XFVu8C0vIlpi0e14p6N03TxtugTZ9rgN5Nowk7TQAZCXHJn3_kXP8tr5A2LFXyuwa0GkkWJS-2rWhXdsowM2ewpHzFhcA-MkbgRJ5jh-1KdqgzWm_DJ1a0x7AtloKoagYM9V-NRu2ioE","dp":"HDrS1bmaKYlyKMnheK3tSKjIWlDk1SMFAgbAdzjuWjGfceMiLii3lMVzL3SkVlJf6bUBQ7E6drKu4pcST6GF51ubtOlK-Autjwn-1cEBgWL33Xx5yMlyJiQ8uOriL99gik0xatZKfAGWBHnQlz2tcv341ffXUUOapKf4Oj06Wck","dq":"f5qr9cUrTXkaIvDBptzm_4cDTUe7Rhkg4iE_3usmrlQY8i1xUW7Bbsl_Jt1PdzG26IjCroKMXhwl36wpfHcuCa37n-ufitu01CmN1cLzFbF-ZWJBhXk7rtMb5n8jmXv9ze9nm2LNTCBjATvspPBS20tXkGPByW0FczG7Mf6adAE","qi":"utxsd7Bxcmjyp16suwnTtZWXTPtxwrL8dpA5lgFia3QjLWX3AC7JUEsoH10RN2a1-pW7HnqjYE__xw6P2AePWJCrF9gXTR_5GDXu-_2vceqlGqflt7UgyWkXWC4__34UVezRjkNBa0BexXDhLR3c3vC_9KHUx5IFqCBqeTUcMzI","kid":"fuzz-rs256"}"#
+	r#"{"alg":"RS256","key_ops":["sign","verify"],"kty":"RSA","n":"p2nsYkS2yzIvhdcez-PS9Sew7aN7fZlGwbyOJrzzfhYKj1lcKEnlc1UCnTvIuqVqAMZ2H2W0flT7dP6oYETN0mDxJMTrccAUcB9GvMIc0774y5mXSNMDD2cF7M6m7FDYo1xFk8GMUhIFJXewknY9g_SVy2OUIgEET6hqGJmhgfiw9o6WVKAKAgewHjUi2KPJcvKYwUMTLvMPnIpsGZmJBH3CU85RnkmYEg91ZJsDuJXlPv9WOrWMmeo9kkj_dFElwANxhA5-Mlzzmzz6up-skzonpMknYaCUsruYI3GheenRMWIu6Blzm-acgDgsJjwkwN_xW9qBSdfMAqW1mcmaKw","e":"AQAB","d":"C7NrCpk732rUCHo3FJebRHgwNQPCm04ttFe95bY6HHtk5Iz91HEJwOxVoPCvQGBUTtaQJfShT10YMB6mXQgiDIyq_gNnY01mAEonUwUMJ76GvBAxkyzwX1C3iMwOvaCO66gE0uVprcjFpE8_v5TVCtZ667q7fT7t8rVWKP7_20oN-AP5ei0MjdNAZlIcyMZsAbyzKkOxVUqkov33mNaERlUqgZr7Y6yADtEXq6T08K4JPRfuWFkl35DYZSPbmfGZIj630YTa7-u6FpABLvWSmqP58qXAVYicMut4v4p6wbjHqgg5ShjmxZm7yrSj8YUw5yjSXNx6jaVvJp_iOi1AgQ","p":"2NeGjrclLhNQXA464tFAaFu5hZ5HeNq9D5hg6hQXIyos_gl7xzKzO49rzdO09QomDGO0aLsshlXcZIOwB1DwTdFI3fHVjbOYoBd1uxq98QMJvDMbKYDeQyl-DekMr0Y5LeYwAibOQtpBO2d8-KB8XAl57_ATeegdDWaFxGT0Fqs","q":"xaVdLVwdvCqj3cwLLbtBd35MgG4Fmf6XFVu8C0vIlpi0e14p6N03TxtugTZ9rgN5Nowk7TQAZCXHJn3_kXP8tr5A2LFXyuwa0GkkWJS-2rWhXdsowM2ewpHzFhcA-MkbgRJ5jh-1KdqgzWm_DJ1a0x7AtloKoagYM9V-NRu2ioE","dp":"HDrS1bmaKYlyKMnheK3tSKjIWlDk1SMFAgbAdzjuWjGfceMiLii3lMVzL3SkVlJf6bUBQ7E6drKu4pcST6GF51ubtOlK-Autjwn-1cEBgWL33Xx5yMlyJiQ8uOriL99gik0xatZKfAGWBHnQlz2tcv341ffXUUOapKf4Oj06Wck","dq":"f5qr9cUrTXkaIvDBptzm_4cDTUe7Rhkg4iE_3usmrlQY8i1xUW7Bbsl_Jt1PdzG26IjCroKMXhwl36wpfHcuCa37n-ufitu01CmN1cLzFbF-ZWJBhXk7rtMb5n8jmXv9ze9nm2LNTCBjATvspPBS20tXkGPByW0FczG7Mf6adAE","qi":"utxsd7Bxcmjyp16suwnTtZWXTPtxwrL8dpA5lgFia3QjLWX3AC7JUEsoH10RN2a1-pW7HnqjYE__xw6P2AePWJCrF9gXTR_5GDXu-_2vceqlGqflt7UgyWkXWC4__34UVezRjkNBa0BexXDhLR3c3vC_9KHUx5IFqCBqeTUcMzI","kid":"fuzz-rs256"}"#,
 ];
 
 /// The keys behind [`KEYS`].
 fn keys() -> &'static [Key] {
 	static KEYS_: OnceLock<Vec<Key>> = OnceLock::new();
-	KEYS_.get_or_init(|| KEYS.iter().map(|jwk| jwk.parse().expect("a fixed key parses")).collect())
+	KEYS_.get_or_init(|| {
+		KEYS.iter()
+			.map(|jwk| jwk.parse().expect("a fixed key parses"))
+			.collect()
+	})
 }
 
 /// What the keys signed, as the targets compare it: the claims, encoded.
@@ -143,7 +147,11 @@ fn verify(token: &str) -> bool {
 	if let Ok(key) = set().key(token)
 		&& let Ok(claims) = key.verify_claims(token)
 	{
-		let index = set().keys.iter().position(|k| Arc::ptr_eq(k, &key)).expect("from the set");
+		let index = set()
+			.keys
+			.iter()
+			.position(|k| Arc::ptr_eq(k, &key))
+			.expect("from the set");
 		check(index, &claims);
 		assert!(verified, "the set verified {token}, which its key alone refused");
 	}
@@ -199,7 +207,12 @@ pub fn jwk(data: &[u8]) -> bool {
 					if let Ok(key) = set.key(&issued.token)
 						&& key.verify_claims(&issued.token).is_ok()
 					{
-						assert_eq!(material(&key), material(&keys()[issued.key]), "{text} verified {}", issued.token);
+						assert_eq!(
+							material(&key),
+							material(&keys()[issued.key]),
+							"{text} verified {}",
+							issued.token
+						);
 					}
 				}
 				true
@@ -213,7 +226,10 @@ pub fn jwk(data: &[u8]) -> bool {
 fn material(key: &Key) -> Value {
 	let jwk = encode(key);
 	let fields = ["kty", "crv", "x", "y", "n", "e", "k"];
-	fields.iter().map(|&field| jwk.get(field).cloned().unwrap_or(Value::Null)).collect()
+	fields
+		.iter()
+		.map(|&field| jwk.get(field).cloned().unwrap_or(Value::Null))
+		.collect()
 }
 
 /// A key as JSON, with `key_ops` sorted: it is a set, so its order varies.
@@ -227,12 +243,19 @@ fn encode_key(key: &Key) -> Value {
 
 fn check_key(key: &Key) {
 	let text = key.to_str().expect("a parsed key encodes");
-	let again: Key = text.parse().unwrap_or_else(|err| panic!("{text} does not parse: {err}"));
+	let again: Key = text
+		.parse()
+		.unwrap_or_else(|err| panic!("{text} does not parse: {err}"));
 	assert_eq!(encode_key(&again), encode_key(key));
 
 	for issued in issued() {
 		if key.verify_claims(&issued.token).is_ok() {
-			assert_eq!(material(key), material(&keys()[issued.key]), "{key:?} verified {}", issued.token);
+			assert_eq!(
+				material(key),
+				material(&keys()[issued.key]),
+				"{key:?} verified {}",
+				issued.token
+			);
 		}
 	}
 
@@ -314,7 +337,11 @@ mod tests {
 			target(&seed.data);
 		}
 		for issued in issued() {
-			assert!(token(&[&[0], issued.token.as_bytes()].concat()), "{} refused", issued.token);
+			assert!(
+				token(&[&[0], issued.token.as_bytes()].concat()),
+				"{} refused",
+				issued.token
+			);
 		}
 		for key in KEYS {
 			assert!(jwk(&[&[0], key.as_bytes()].concat()));

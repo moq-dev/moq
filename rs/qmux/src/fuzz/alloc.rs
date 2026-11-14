@@ -100,10 +100,7 @@ pub(super) fn measure<T>(run: impl FnOnce() -> T) -> (T, Usage) {
 	let result = run();
 	let books = BOOKS.with(|books| {
 		let b = books.get();
-		books.set(Books {
-			measuring: false,
-			..b
-		});
+		books.set(Books { measuring: false, ..b });
 		b
 	});
 	(
