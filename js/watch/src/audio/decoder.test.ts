@@ -324,7 +324,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	let producer = new Moq.Broadcast.Producer();
 	let consumer = producer.consume();
 	const relativeBroadcast = mock(() => consumer);
-	// Published, so finishing it settles the decoder's subscription as a publisher's FIN does. The
+	// Published, so finishing it declares the subscription's end as a publisher's FIN does. The
 	// reads themselves come from `feed`.
 	const publish = () =>
 		producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
@@ -386,11 +386,11 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		stretch,
 		sync,
 		push,
-		// Finish the track the decoder reads, publishing a fresh one for the next subscription.
+		// Finish the track the decoder reads, still serving its cache, and publish a fresh one for the
+		// next subscription.
 		finish: () => {
 			finish();
 			track.finish();
-			track.close();
 			producer.removeTrack("audio");
 			track = publish();
 		},

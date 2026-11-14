@@ -177,7 +177,7 @@ export class Decoder {
 	// The publisher finishing the running rendition: "read" once every frame is decoded, then "played"
 	// once the clock reached the end of its audio.
 	#finish = new Signal<"read" | "played" | undefined>(undefined);
-	// Whether the running subscription finished cleanly, so it holds every frame it will deliver. The
+	// Whether the publisher declared the running subscription's end, so it grows no further. The
 	// decode loop reads the finish only past the frames admission holds back, which wait on startup.
 	#complete = new Signal(false);
 	#queued = new Signal<Container.BufferedRanges | undefined>(undefined);
@@ -945,14 +945,15 @@ export class Decoder {
 			if (arrived !== undefined) ring.received(arrived);
 		});
 
-		// A finished track queued everything it will send, so neither admission nor startup waits for
-		// more. The decode loop learns of the finish only past the frames admission holds, which a
-		// buffered ring releases only once startup does.
-		effect.run((inner) => {
-			if (inner.get(sub.closed) !== null) return;
-			this.#complete.set(true);
-			inner.cleanup(() => this.#complete.set(false));
+		// A track whose publisher declared its end grows no further, so neither admission nor startup
+		// waits for more. The decode loop learns of the finish only past the frames admission holds,
+		// which a buffered ring releases only once startup does. The end, not the subscription closing:
+		// a publisher keeps a finished track open to serve its cache.
+		effect.spawn(async () => {
+			const end = await effect.race(sub.finished().catch(() => undefined));
+			if (end !== undefined && !effect.abort.aborted) this.#complete.set(true);
 		});
+		effect.cleanup(() => this.#complete.set(false));
 		effect.run((inner) => {
 			const ring = inner.get(this.#ring);
 			if (!ring || !inner.get(this.#complete)) return;
