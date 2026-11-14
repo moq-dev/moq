@@ -759,6 +759,39 @@ async fn a_connect_cancels_the_offline_a_retirement_queued() {
 	assert!(machine.session().is_some());
 }
 
+/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps the
+/// session: no migration and no redial. Its close then reconnects like any drop.
+#[kio::test]
+async fn a_waited_restart_redials_only_once_the_session_closes() {
+	let peer = url("tcp://peer:1/");
+	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+	config.restart = Restart::Wait;
+	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	kio::clock::sim::idle().await;
+	assert!(
+		matches!(
+			machine.poll(kio::clock::now(), &kio::Waiter::noop()),
+			Action::Wait(None)
+		),
+		"the policy left the session"
+	);
+
+	run.servers.remove(0).abort(Error::GoawayTimeout);
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 2
+	})
+	.await;
+	assert_eq!(run.events, ["offline"]);
+}
+
 /// The actions a policy asks for until it only waits, by name.
 async fn settle(machine: &mut Reconnect<Url, TestError>) -> Vec<&'static str> {
 	let mut events = Vec::new();
@@ -773,14 +806,14 @@ async fn settle(machine: &mut Reconnect<Url, TestError>) -> Vec<&'static str> {
 	events
 }
 
-/// Under [`Restart::Wait`] a healthy session's empty-URI GOAWAY redials the same address once
+/// Under [`Restart::Handoff`] a healthy session's empty-URI GOAWAY redials the same address once
 /// while the drained session serves, so a replacement already serving beside the draining
 /// process takes over and the drained session retires once it carries nothing.
 #[kio::test]
-async fn a_waited_restart_moves_to_a_replacement() {
+async fn a_handoff_restart_moves_to_a_replacement() {
 	let peer = url("tcp://peer:1/");
 	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
-	config.restart = Restart::Wait;
+	config.restart = Restart::Handoff;
 	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
 	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
@@ -802,14 +835,14 @@ async fn a_waited_restart_moves_to_a_replacement() {
 	assert_eq!(run.dials.len(), 2);
 }
 
-/// Under [`Restart::Wait`] a redial that reaches the draining process again, drained before
+/// Under [`Restart::Handoff`] a redial that reaches the draining process again, drained before
 /// it is healthy, changes nothing while the peer keeps it: no further redial. Its close then
 /// reconnects like any drop.
 #[kio::test]
-async fn a_waited_restart_redials_only_once_the_session_closes() {
+async fn a_handoff_restart_redials_once_until_the_session_closes() {
 	let peer = url("tcp://peer:1/");
 	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
-	config.restart = Restart::Wait;
+	config.restart = Restart::Handoff;
 	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
 	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {

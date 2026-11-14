@@ -2328,7 +2328,7 @@ impl Cluster {
 		// replacement.
 		let reconnect = client
 			.with_reconnect(true)
-			.with_restart(moq_tokio::Restart::Wait)
+			.with_restart(moq_tokio::Restart::Handoff)
 			.connect(addrs.clone());
 		let monitor = reconnect.monitor();
 		let mut observation = monitor.state();

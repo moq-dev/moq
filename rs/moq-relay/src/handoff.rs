@@ -8,7 +8,7 @@
 //! name (see [`moq_sock::shard`]). The new relay then serves, takes every new QUIC
 //! handshake, and tells the old one, which stops accepting and drains: each session
 //! gets a GOAWAY and stays until it leaves or the drain deadline passes. A cluster
-//! peer that redials (see [`moq_tokio::Restart::Wait`]) reaches the new relay, so the
+//! peer that redials (see [`moq_tokio::Restart::Handoff`]) reaches the new relay, so the
 //! drain no longer waits on inbound peers.
 //!
 //! The two relays share the node's identity for the length of the drain. Each

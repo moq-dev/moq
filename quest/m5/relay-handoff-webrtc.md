@@ -23,8 +23,5 @@ relay's flows from new ones. Options:
 - Steer by the ICE username fragment, which only STUN checks carry, not DTLS
   or RTP. Rejected.
 
-## Waiting
-
-- Maintainer: keep this, or drop it until an embedder serves WebRTC on a relay
-  that hands off. Recommendation: keep it in m5 with no consumer yet; nothing
-  in this repository serves WebRTC with handoff today.
+Kept in m5 with no consumer yet (maintainer, 2026-11-14): ✅ keep it in m5
+(rejected: drop it until an embedder serves WebRTC on a relay that hands off).

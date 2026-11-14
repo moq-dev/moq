@@ -149,16 +149,21 @@ pub enum Restart {
 	/// off the drained one. The default.
 	#[default]
 	Redial,
+	/// Keep serving on the drained session until the peer closes it, then reconnect as after
+	/// any drop. Right for an address that names one node, where a redial only reaches the
+	/// draining process again. The peer must close the session itself, as a relay does at
+	/// its drain deadline.
+	Wait,
 	/// Redial the same addresses once, as [`Self::Redial`] does, and keep serving on the
 	/// drained session meanwhile. A redial that reaches the draining process again, which
-	/// drains it before it is [healthy](Backoff::healthy), then serves until the peer closes
-	/// it, and the reconnect after that close finds the restarted node.
+	/// drains it before it is [healthy](Backoff::healthy), then serves as under
+	/// [`Self::Wait`] until the peer closes it.
 	///
-	/// Right for an address that names one node. A node that starts its replacement beside
-	/// the draining process before it drains is reached by the one redial; any other costs
-	/// a single extra session to the draining process rather than one per backoff. The peer
-	/// must close a session it drains itself, as a relay does at its drain deadline.
-	Wait,
+	/// Right for an address that names one node which may start its replacement beside the
+	/// draining process, as a relay with `[handoff]` does: the one redial reaches the
+	/// replacement. A node that restarts in place costs a single extra session to the
+	/// draining process rather than one per backoff.
+	Handoff,
 }
 
 /// The whole connect policy for one peer.
@@ -590,10 +595,15 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					// Checked before the close: a GOAWAY means the session is still up, and
 					// migrating from it is not the same as reconnecting after it died.
 					if let Some(Poll::Ready(Ok(msg))) = live.goaway.as_ref().map(|goaway| goaway.poll(waiter)) {
-						// Drained before it was healthy: the redial reached the draining process
-						// rather than a replacement, so another would only reach it again.
-						let drained = now.saturating_duration_since(live.since) < self.config.backoff.healthy;
-						if self.config.restart == Restart::Wait && msg.uri().is_empty() && drained {
+						// Under `Handoff`, a session drained before it was healthy is a redial that
+						// reached the draining process rather than a replacement, so another would
+						// only reach it again.
+						let wait = match self.config.restart {
+							Restart::Redial => false,
+							Restart::Wait => true,
+							Restart::Handoff => now.saturating_duration_since(live.since) < self.config.backoff.healthy,
+						};
+						if wait && msg.uri().is_empty() {
 							tracing::info!("peer is restarting; serving until it closes the session");
 							live.goaway = None;
 						} else {

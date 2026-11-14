@@ -28,7 +28,7 @@ CONSTANTS
     Endpoints,    \* where a dial can land
     Start,        \* the configured target
     Refused,      \* a GOAWAY URI `Redirect::target` refuses
-    Restart,      \* `Config::restart`: "redial" or "wait"
+    Restart,      \* `Config::restart`: "redial", "wait", or "handoff"
     MaxSessions   \* sessions that connect in one behaviour
 
 Sessions == 1..MaxSessions
@@ -334,9 +334,13 @@ EndClosed ==
 \* `Phase::Live`: a GOAWAY is checked before the close.
 Goaway(s) == watch /\ sess[s].goaway # NoGoaway
 
-\* `Restart::Wait` serves out a restart in place on a session drained before
-\* it was healthy; an older one redials once, as `Restart::Redial` does.
-WaitOut(s) == Restart = "wait" /\ sess[s].goaway = "" /\ sess[s].age = 0
+\* `Restart::Wait` serves out a restart in place; `Restart::Handoff` does so
+\* only on a session drained before it was healthy, and redials an older one
+\* once, as `Restart::Redial` does.
+WaitOut(s) ==
+    /\ sess[s].goaway = ""
+    /\ \/ Restart = "wait"
+       \/ Restart = "handoff" /\ sess[s].age = 0
 
 LiveEnds ==
     /\ queue = <<>>
@@ -344,8 +348,7 @@ LiveEnds ==
     /\ phase = "live"
     /\ \/ /\ Goaway(live)
           /\ WaitOut(live)
-          \* `Restart::Wait`, drained before healthy: the redial reached the
-          \* draining process again, so drop the latch and serve until it closes.
+          \* Drop the latch and serve until the peer closes.
           /\ watch' = FALSE
           /\ UNCHANGED <<phase, live, probe, pred, target, queue, sess, timer>>
           /\ CallerSame
@@ -466,7 +469,7 @@ ProbeGetsThrough ==
        \/ /\ ~Goaway(live)
           /\ phase' = "dialing"
           /\ timer' = [timer EXCEPT !["dial"] = FALSE, !["handover"] = FALSE]
-          \* Its watcher moves with it, unless `Restart::Wait` dropped it.
+          \* Its watcher moves with it, unless `WaitOut` dropped it.
           /\ sess' = [Abort(sess, pred) EXCEPT ![live].sent = TRUE, ![live].watched = watch]
           /\ pred' = live
           /\ live' = None

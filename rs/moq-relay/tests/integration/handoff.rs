@@ -110,12 +110,9 @@ async fn connect(url: &str) -> moq_tokio::Connection {
 	established(dial().init(Default::default()).unwrap().with_reconnect(false), url).await
 }
 
-/// A session that stays through the relay's drain, as a cluster peer's does: never
-/// healthy, so it reads the GOAWAY as a redial that reached the draining relay again.
+/// A session that stays through the relay's drain until the relay closes it.
 async fn stays(url: &str, quic: moq_tokio::quic::Config) -> moq_tokio::Connection {
-	let mut config = dial();
-	config.backoff.healthy = Some(Duration::from_secs(600).into());
-	established(config.init(quic).unwrap().with_restart(moq_tokio::Restart::Wait), url).await
+	established(dial().init(quic).unwrap().with_restart(moq_tokio::Restart::Wait), url).await
 }
 
 /// Wait for the GOAWAY a draining relay sends `connection`.
