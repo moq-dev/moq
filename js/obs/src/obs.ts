@@ -21,6 +21,10 @@ const SWITCH_TIMEOUT = Duration.secs(10);
 // A profile parameter `configure` sets while a reload is owed, so a retry finishes it.
 const PENDING = ["MoQ", "PendingReload"] as const;
 
+// The obs-websocket slot holding, per profile `configure` is creating, the video it copies from
+// the profile it came from. It is global since OBS switches to a new profile as it creates it.
+const INHERITED = { realm: "OBS_WEBSOCKET_DATA_REALM_GLOBAL", slotName: "moq.inherited" } as const;
+
 // How long `start` waits to hear the stream went live or stopped. A start that fails in OBS
 // before connecting shows an error dialog and emits neither, so this is the only sign of it.
 const START_TIMEOUT = Duration.secs(30);
@@ -139,6 +143,7 @@ const VideoSettings = z.object({
 	fpsNumerator: z.number(),
 	fpsDenominator: z.number(),
 });
+const Inherited = z.object({ slotValue: z.nullable(z.record(z.string(), VideoSettings)) });
 const Outputs = z.object({ outputs: z.array(z.object({ outputName: z.string(), outputActive: z.boolean() })) });
 const StreamStatus = z.object({
 	outputActive: z.boolean(),
@@ -195,6 +200,8 @@ export class Obs {
 	#effect = new Effect();
 	#stream: Signal<StreamState>;
 	#stats = new Signal<Stats | undefined>(undefined);
+	// Each configure runs whole: they all write to whichever profile is current.
+	#configuring: Promise<unknown> = Promise.resolve();
 
 	/** The OBS and obs-websocket versions. */
 	readonly version: Version;
@@ -237,9 +244,16 @@ export class Obs {
 	 * Puts `publish.destination` in a dedicated profile and tunes it for low latency, switching
 	 * OBS to that profile. The user's other profiles keep their service and settings.
 	 *
-	 * Refuses while any OBS output runs, since switching profiles resets them.
+	 * Refuses while any OBS output runs, since switching profiles resets them. Calls made before
+	 * an earlier one settles wait for it.
 	 */
-	async configure(publish: Publish): Promise<Configured> {
+	configure(publish: Publish): Promise<Configured> {
+		const run = this.#configuring.then(() => this.#configure(publish));
+		this.#configuring = run.catch(() => {});
+		return run;
+	}
+
+	async #configure(publish: Publish): Promise<Configured> {
 		const destination = publish.destination;
 		const layers = destination.kind === "moq" ? (destination.layers ?? 1) : 1;
 		if (!Number.isInteger(layers) || layers < 1) throw new RangeError(`invalid layer count: ${layers}`);
@@ -268,8 +282,11 @@ export class Obs {
 		const before = Profiles.parse(await this.#session.request("GetProfileList"));
 		const created = !before.profiles.includes(profile);
 		// A new profile's canvas is the monitor's, but the scene collection was laid out on this one.
-		const inherited = created ? VideoSettings.parse(await this.#session.request("GetVideoSettings")) : undefined;
-		if (inherited) {
+		// A creation the connection dropped before its video was set left the copy in INHERITED.
+		const pending = Inherited.parse(await this.#session.request("GetPersistentData", INHERITED)).slotValue ?? {};
+		let inherited = pending[profile];
+		if (created) {
+			inherited = VideoSettings.parse(await this.#session.request("GetVideoSettings"));
 			const sides = [inherited.baseWidth, inherited.baseHeight];
 			if (!size) sides.push(inherited.outputWidth, inherited.outputHeight);
 			if (!sides.every(fits)) {
@@ -279,6 +296,7 @@ export class Obs {
 			}
 		}
 		if (created) {
+			await this.#setInherited({ ...pending, [profile]: inherited });
 			await this.#activate(profile, () => this.#session.request("CreateProfile", { profileName: profile }));
 		} else if (before.currentProfileName !== profile) {
 			await this.#activate(profile, () => this.#session.request("SetCurrentProfile", { profileName: profile }));
@@ -368,6 +386,10 @@ export class Obs {
 			});
 		}
 		if (changed) await this.#session.request("SetVideoSettings", change);
+		if (inherited) {
+			const { [profile]: _, ...rest } = pending;
+			await this.#setInherited(rest);
+		}
 		for (const [category, name, value] of [...reload, ...live]) await this.#setParameter(category, name, value);
 
 		if (stale.length > 0 && other !== undefined) {
@@ -426,6 +448,10 @@ export class Obs {
 		await this.#session.request("SetProfileParameter", { parameterCategory, parameterName, parameterValue });
 	}
 
+	async #setInherited(slotValue: Record<string, z.infer<typeof VideoSettings>>) {
+		await this.#session.request("SetPersistentData", { ...INHERITED, slotValue });
+	}
+
 	async #parameter(parameterCategory: string, parameterName: string): Promise<string | null> {
 		const response = await this.#session.request("GetProfileParameter", { parameterCategory, parameterName });
 		return Parameter.parse(response).parameterValue;
@@ -439,7 +465,8 @@ export class Obs {
 		});
 		try {
 			await request();
-			await timeout(SWITCH_TIMEOUT, promise);
+			const done = await timeout(SWITCH_TIMEOUT, race([promise.then(() => true as const), this.closed]));
+			if (done !== true) throw done ?? new Error("the OBS connection is closed");
 		} finally {
 			dispose();
 		}

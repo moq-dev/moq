@@ -59,6 +59,8 @@ export class FakeObs {
 	skipped = 0;
 	outputs = [{ outputName: "simple_stream", outputActive: false }];
 	sockets: FakeSocket[] = [];
+	// obs-websocket's global persistent data, which outlives connections and profile switches.
+	persistent = new Map<string, unknown>();
 
 	constructor(options: FakeOptions = {}) {
 		this.options = options;
@@ -167,6 +169,15 @@ export class FakeObs {
 				}
 				return undefined;
 			}
+			case "GetPersistentData":
+				if (data.realm !== "OBS_WEBSOCKET_DATA_REALM_GLOBAL") throw [600, "realm"];
+				return { slotValue: this.persistent.get(String(data.slotName)) ?? null };
+			case "SetPersistentData":
+				if (data.realm !== "OBS_WEBSOCKET_DATA_REALM_GLOBAL") throw [600, "realm"];
+				// obs-websocket refuses a missing or null value.
+				if (data.slotValue === undefined || data.slotValue === null) throw [300, "slotValue"];
+				this.persistent.set(String(data.slotName), data.slotValue);
+				return undefined;
 			case "GetVideoSettings":
 				return { ...this.video };
 			case "SetVideoSettings":

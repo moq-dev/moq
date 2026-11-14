@@ -164,6 +164,37 @@ test("a new profile starts from the current profile's video", async () => {
 	client.close();
 });
 
+test("a retry keeps the copied video when creation dropped before setting it", async () => {
+	obs({ quitAfter: (type) => type === "CreateProfile" });
+	const before = { ...fake.video };
+	const first = await connect();
+	await expect(first.configure(MOQ)).rejects.toThrow();
+	expect(fake.profiles.has("MoQ")).toBe(true);
+
+	fake.options.quitAfter = undefined;
+	const client = await connect();
+	await client.configure(MOQ);
+	expect(fake.current).toBe("MoQ");
+	expect(fake.video).toEqual(before);
+	expect(fake.persistent.get("moq.inherited")).toEqual({});
+	client.close();
+});
+
+test("runs concurrent configures one after another", async () => {
+	obs();
+	fake.profiles.set("A", new Map());
+	fake.profiles.set("B", new Map());
+	const client = await connect();
+	const a = client.configure({ ...MOQ, profile: "A", video: { bitrate: 1000 } });
+	const b = client.configure({ ...MOQ, profile: "B", video: { bitrate: 2000 } });
+	expect((await a).profile).toBe("A");
+	expect((await b).profile).toBe("B");
+	expect(fake.profiles.get("A")?.get("SimpleOutput.VBitrate")).toBe("1000");
+	expect(fake.profiles.get("B")?.get("SimpleOutput.VBitrate")).toBe("2000");
+	expect(fake.current).toBe("B");
+	client.close();
+});
+
 test("changes only the video settings that differ", async () => {
 	obs();
 	const client = await connect();
