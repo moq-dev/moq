@@ -50,18 +50,7 @@ const BaseKeySchema = z.object({
 
 const OctKeySchema = z.extend(BaseKeySchema, {
 	kty: z.literal("oct"),
-	k: Base64FieldSchema.check(
-		z.refine(
-			(secret) => {
-				// Validate minimum length (at least 32 bytes when decoded)
-				const decoded = decodeBase64Flexible(secret);
-				return decoded && decoded.byteLength >= MIN_HMAC_SECRET_BYTES;
-			},
-			{
-				message: `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`,
-			},
-		),
-	),
+	k: Base64FieldSchema,
 });
 
 const RsaKeySchema = z
@@ -111,9 +100,13 @@ const OkpKeySchema = z.extend(BaseKeySchema, {
 	d: z.optional(Base64FieldSchema),
 });
 
-const CanonicalKeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]);
-/** A JSON Web Key of any supported type: oct, RSA, EC, or OKP. */
-export const KeySchema = CanonicalKeySchema;
+/** A JSON Web Key of any supported type: oct, RSA, EC, or OKP, with an algorithm and curve its type supports. */
+export const KeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]).check(
+	z.superRefine((key, ctx) => {
+		const message = keyIssue(key);
+		if (message) ctx.addIssue({ code: "custom", message });
+	}),
+);
 /** A value parsed by {@link KeySchema}. */
 export type Key = z.infer<typeof KeySchema>;
 /** An RSA, EC, or OKP key. */
@@ -123,27 +116,16 @@ export type SymmetricKey = Extract<Key, { kty: "oct" }>;
 /** An asymmetric key without its private parameters. */
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 
-/** Derive a verify-only copy of this key, dropping the private material. */
+/** Derive a verify-only copy of this key, dropping the private material and sharing nothing with it. */
 function toPublic(key: Key): PublicKey {
-	switch (key.kty) {
-		case "oct":
-			throw new Error("Cannot derive public key from oct (symmetric) key");
+	if (key.kty === "oct") throw new Error("Cannot derive public key from oct (symmetric) key");
+	if (!key.key_ops.includes("verify")) throw new Error("Key does not support verify operation");
 
-		case "RSA": {
-			const { d, p, q, dp, dq, qi, key_ops, ...publicKey } = key;
-			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
-		}
-
-		case "EC": {
-			const { d, key_ops, ...publicKey } = key;
-			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
-		}
-
-		case "OKP": {
-			const { d, key_ops, ...publicKey } = key;
-			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
-		}
-	}
+	// A deep copy, since the signer enforces its scope and an alias would let the copy edit it.
+	const copy: Record<string, unknown> = structuredClone(key);
+	for (const field of ["d", "p", "q", "dp", "dq", "qi"]) delete copy[field];
+	copy.key_ops = ["verify"];
+	return copy as PublicKey;
 }
 
 /** Parse a key from a string, auto-detecting JSON or base64url encoding. */
@@ -172,20 +154,11 @@ function parse(jwk: string): Key {
 		}
 	}
 
-	let key: Key;
 	try {
-		key = KeySchema.parse(data);
+		return KeySchema.parse(data);
 	} catch (error) {
 		throw new Error(`Failed to validate JWK: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-
-	try {
-		validateKey(key);
-	} catch (error) {
-		throw new Error(`Failed to validate JWK: ${error instanceof Error ? error.message : "unknown error"}`);
-	}
-
-	return key;
 }
 
 /**
@@ -433,45 +406,38 @@ function ensureClaimsWithinScope(key: PublicKey | SymmetricKey | Key, claims: Cl
 	}
 }
 
-function validateKey(key: Key): void {
+/** Why the key's algorithm, curve, or secret can never work, or undefined when it can. */
+function keyIssue(
+	key: z.infer<typeof OctKeySchema | typeof RsaKeySchema | typeof EcKeySchema | typeof OkpKeySchema>,
+): string | undefined {
 	switch (key.kty) {
 		case "oct": {
-			if (!HMAC_ALGORITHMS.has(key.alg)) {
-				throw new Error(`Algorithm ${key.alg} is incompatible with oct keys`);
-			}
+			if (!HMAC_ALGORITHMS.has(key.alg)) return `Algorithm ${key.alg} is incompatible with oct keys`;
 			const secret = decodeBase64Flexible(key.k);
 			if (!secret || secret.byteLength < MIN_HMAC_SECRET_BYTES) {
-				throw new Error("Secret must be at least 32 bytes when decoded");
+				return `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`;
 			}
-			break;
+			return;
 		}
-		case "RSA": {
-			if (!RSA_ALGORITHMS.has(key.alg)) {
-				throw new Error(`Algorithm ${key.alg} is incompatible with RSA keys`);
-			}
-			break;
-		}
+		case "RSA":
+			if (!RSA_ALGORITHMS.has(key.alg)) return `Algorithm ${key.alg} is incompatible with RSA keys`;
+			return;
 		case "EC": {
-			if (!isEcAlgorithm(key.alg)) {
-				throw new Error(`Algorithm ${key.alg} is incompatible with EC keys`);
-			}
+			if (!isEcAlgorithm(key.alg)) return `Algorithm ${key.alg} is incompatible with EC keys`;
 			const expectedCurve = EC_ALGORITHM_TO_CURVE[key.alg];
-			if (key.crv !== expectedCurve) {
-				throw new Error(`Algorithm ${key.alg} requires curve ${expectedCurve}`);
+			if (key.crv !== expectedCurve) return `Algorithm ${key.alg} requires curve ${expectedCurve}`;
+			const length = key.crv === "P-256" ? 32 : 48;
+			if (
+				decodeBase64Flexible(key.x)?.byteLength !== length ||
+				decodeBase64Flexible(key.y)?.byteLength !== length
+			) {
+				return `Coordinates must be ${length} bytes for ${key.crv}`;
 			}
-			break;
+			return;
 		}
-		case "OKP": {
-			if (key.alg !== "EdDSA") {
-				throw new Error(`Algorithm ${key.alg} is incompatible with OKP keys`);
-			}
-			if (key.crv !== "Ed25519") {
-				throw new Error("Only Ed25519 OKP keys are supported");
-			}
-			break;
-		}
-		default:
-			throw new Error(`Unsupported key type ${(key as { kty: string }).kty}`);
+		case "OKP":
+			if (key.alg !== "EdDSA") return `Algorithm ${key.alg} is incompatible with OKP keys`;
+			return;
 	}
 }
 
@@ -488,7 +454,7 @@ function ensureOperationSupported(key: Key | PublicKey, operation: Operation): v
 function ensurePrivateMaterial(key: Key): void {
 	switch (key.kty) {
 		case "oct":
-			return; // shared secret already validated by validateKey()
+			return; // KeySchema already checked the secret
 		case "RSA":
 			if (!key.d) {
 				throw new Error("RSA key is missing the private exponent required for signing");

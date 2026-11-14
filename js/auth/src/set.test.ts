@@ -86,3 +86,8 @@ test("public - rejects a symmetric key, which has no public half", async () => {
 	const set = await keySet("key-1");
 	expect(() => KeySet.public(set)).toThrow(/Cannot derive public key/);
 });
+
+test("parse - refuses a key Key.parse refuses", async () => {
+	const key = await Key.generate("HS256");
+	expect(() => KeySet.parse(JSON.stringify({ keys: [{ ...key, alg: "ES256" }] }))).toThrow(/incompatible with oct/);
+});
