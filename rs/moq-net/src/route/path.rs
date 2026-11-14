@@ -15,10 +15,12 @@
 //! lists the routes that moved to another path, and every node drops every route
 //! through the hop, whoever offered it. A node with no route left holds its
 //! claims, unavailable, until each neighbour that learned the route from it has
-//! answered. A closed session casts doubt on the node at its far end, since a dead
-//! relay is reported one neighbour at a time: no node moves to a route through it
-//! until a timer lifts the doubt. There is no distance, seqno, route request, or
-//! echo.
+//! answered. A hold follows only the path it was built on: a node holds under its
+//! next hop while that hop holds the path this node's route extended, and a stream
+//! holds only the path it last sent, so holds never close a cycle. A closed
+//! session casts doubt on the node at its far end, since a dead relay is reported
+//! one neighbour at a time: no node moves to a route through it until a timer
+//! lifts the doubt. There is no distance, seqno, route request, or echo.
 //!
 //! A route covers a prefix: the one its receiver asked for, or a narrower one a
 //! node on its path asked for. A stream answering a prefix carries the sender's
@@ -349,9 +351,16 @@ pub(crate) enum Route<N> {
 	/// Live choices are installed before reflected sources move and holds resolve.
 	Planning {
 		under: Option<N>,
+		/// The path of the last live route.
+		path: Arc<[Hop]>,
 	},
+	/// Unavailable while `under` may still get the route back or a child has yet to
+	/// answer. `path` is the last live route's, so a hold follows only the path it
+	/// was built on: a hold under a next hop that has since sent another path could
+	/// close a cycle of holds that never resolves.
 	Held {
 		under: Option<N>,
+		path: Arc<[Hop]>,
 	},
 }
 
@@ -360,7 +369,7 @@ impl<N: Copy> Route<N> {
 		match self {
 			Self::Origin(_) => None,
 			Self::Live { next, .. } => Some(*next),
-			Self::Planning { under } | Self::Held { under } => *under,
+			Self::Planning { under, .. } | Self::Held { under, .. } => *under,
 		}
 	}
 
@@ -373,6 +382,14 @@ impl<N: Copy> Route<N> {
 
 	fn live(&self) -> bool {
 		self.offer().is_some()
+	}
+
+	/// The path of the route, or of the last live one while it plans or holds.
+	fn path(&self) -> &Arc<[Hop]> {
+		match self {
+			Self::Origin(offer) | Self::Live { offer, .. } => &offer.path,
+			Self::Planning { path, .. } | Self::Held { path, .. } => path,
+		}
 	}
 }
 
@@ -1517,20 +1534,23 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// With no live route, keep what an upstream or a child has yet to answer.
 	fn retain(&self, key: &RouteId) -> Option<Route<N>> {
-		let was = self.routes.get(key);
-		let current = was.and_then(Route::next);
 		// Only a node that had the route holds it.
-		was?;
-		// Its next hop holds, or has yet to say what became of a dead route. A next hop
-		// whose own route names this node waits on this node instead.
-		let under = current.filter(|next| {
-			(self.rx.get(key).and_then(|routes| routes.get(next)))
-				.is_some_and(|heard| heard.state != State::Live && !names(&heard.offer.path, self.hop))
+		let was = self.routes.get(key)?;
+		let path = was.path().clone();
+		// Its next hop holds, or has yet to say what became of a dead route, on the
+		// path this node's route was built on. A next hop that has since sent another
+		// path, perhaps one through this node, may wait on this node instead: were
+		// every hold in a cycle on the path it was built on, each path would extend
+		// itself.
+		let under = was.next().filter(|next| {
+			(self.rx.get(key).and_then(|routes| routes.get(next))).is_some_and(|heard| {
+				heard.state != State::Live && path.split_last().is_some_and(|(_, on)| *on == *heard.offer.path)
+			})
 		});
 		if under.is_none() && !self.hopes(key) && !self.pending(key) {
 			return None;
 		}
-		Some(Route::Held { under })
+		Some(Route::Held { under, path })
 	}
 
 	/// Whether a neighbour that learned this node's route for `key` has yet to answer
@@ -1835,7 +1855,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					false => Want::End,
 				}
 			}
-			None => Want::Hold,
+			// A hold names no path, so a stream holds only the path it last sent: one now
+			// answered by a held route on another path ends, or the neighbour would hold
+			// under a path this node no longer has, and holds could close a cycle.
+			None => {
+				let sent = (self.answering.get(&peer)).and_then(|answer| answer.tx.get(&(id, prefix.clone())));
+				match sent.and_then(Sent::offer) {
+					Some(sent) if sent.path != *route.path() => Want::End,
+					_ => Want::Hold,
+				}
+			}
 		};
 		// A route goes to a stream only while a claim meets it.
 		match (self.meets(id, prefix), want) {
@@ -2375,7 +2404,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 				None => {
 					if let Some(was) = self.routes.get_mut(&key) {
-						*was = Route::Planning { under: was.next() };
+						*was = Route::Planning {
+							under: was.next(),
+							path: was.path().clone(),
+						};
 						held.push(key);
 					}
 				}

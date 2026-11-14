@@ -89,8 +89,8 @@ OHop == <<Origin, Origin, 0>>
 \* holds a hop this node knows is dead, and the neighbour has not said what
 \* became of it), or "held".
 NoHeard == [on |-> FALSE, path |-> <<>>, drain |-> FALSE, state |-> "live", rev |-> None, items |-> NoItems]
-\* The route a node uses for a key (`Route`). Held: no path, and `next` is the
-\* neighbour it holds under, or None on its own account.
+\* The route a node uses for a key (`Route`). Held: `path` is the last live
+\* route's, and `next` is the neighbour it holds under, or None on its own account.
 NoRoute == [on |-> FALSE, held |-> FALSE, next |-> None, path |-> <<>>, drain |-> FALSE]
 \* What a node last sent a neighbour for a key (`Sent`). `src` is the key of
 \* the node's own route the offer reflects, kept after an end.
@@ -215,15 +215,19 @@ SelectKey(n, s, k, gens) ==
         best == CHOOSE m \in C : \A x \in C :
                     \/ Below(R(m), R(x))
                     \/ R(m) = R(x) /\ (m = current \/ (x # current /\ m <= x))
+        \* The next hop holds on the path this route was built on. One that has
+        \* since sent another path may wait on this node instead: were every hold
+        \* in a cycle on the path it was built on, each path would extend itself.
         under == /\ current # None
                  /\ s.rx[current][k].on
                  /\ s.rx[current][k].state # "live"
-                 /\ ~Names(s.rx[current][k].path, n)
+                 /\ Len(was.path) > 0
+                 /\ s.rx[current][k].path = SubSeq(was.path, 1, Len(was.path) - 1)
     IN IF C # {}
        THEN [on |-> TRUE, held |-> FALSE, next |-> best, path |-> Path(best), drain |-> Drain(best)]
        ELSE IF ~was.on THEN NoRoute
        ELSE IF ~under /\ ~Hopes(n, s, k) /\ ~Pending(n, s, k) THEN NoRoute
-       ELSE [on |-> TRUE, held |-> TRUE, next |-> IF under THEN current ELSE None, path |-> <<>>, drain |-> FALSE]
+       ELSE [on |-> TRUE, held |-> TRUE, next |-> IF under THEN current ELSE None, path |-> was.path, drain |-> FALSE]
 
 \* The publisher's own route covers everything.
 OwnRoutes == [k \in Keys |-> IF k = "root"
@@ -235,7 +239,7 @@ OwnRoutes == [k \in Keys |-> IF k = "root"
 PlanKey(n, s, k, gens) ==
     LET live == SelectKey(n, s, k, gens)
     IN IF Live(live) THEN live
-       ELSE IF s.rt[k].on THEN [s.rt[k] EXCEPT !.held = TRUE, !.path = <<>>, !.drain = FALSE]
+       ELSE IF s.rt[k].on THEN [s.rt[k] EXCEPT !.held = TRUE, !.drain = FALSE]
        ELSE NoRoute
 
 Select(n, s, gens) ==
@@ -297,6 +301,9 @@ Want(n, s, k, p) ==
        ELSE IF r.next = p
             THEN [kind |-> IF Pending(n, s, src) \/ Hopes(n, s, src) THEN "keep" ELSE "end",
                   path |-> <<>>, drain |-> FALSE, src |-> src]
+       \* A hold names no path, so a stream holds only the path it last sent.
+       ELSE IF s.tx[p][k].on /\ s.tx[p][k].path # r.path
+            THEN [kind |-> "end", path |-> <<>>, drain |-> FALSE, src |-> src]
        ELSE [kind |-> "hold", path |-> <<>>, drain |-> FALSE, src |-> src]
 
 \* `advertise` for one key on the stream to p.

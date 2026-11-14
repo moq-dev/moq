@@ -791,6 +791,38 @@ fn sweep_scoped_meshes_show_what_the_rule_says() {
 	);
 }
 
+/// Relays 0 and 1 ask for "a/" alone, each nearer the other's choice of open relay.
+/// Relay 3 takes its narrow route from 0, which answers it from 4's covering route,
+/// and 4 takes its narrow route from 1, which answers it from 3's. When the
+/// publisher's session closes and the covering routes end, each held stream would
+/// fall back to the narrow route, on another path, and the holds would wait on
+/// each other for good. A stream holds only the path it last sent, so they end.
+#[test]
+fn holds_never_close_a_cycle() {
+	let (origin, hub) = (5, 2);
+	let mut sim = Sim::with(Rule::PATH, 6);
+	for (a, b, cost) in [(hub, 3, 1), (hub, 4, 1), (0, 3, 2), (0, 4, 1), (1, 3, 1), (1, 4, 2)] {
+		sim.join(a, b, cost);
+	}
+	sim.join(origin, hub, 1);
+	sim.watch(0, "a/");
+	sim.watch(1, "a/");
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "a/x", 0, None);
+	assert!(sim.run());
+	quiet(&sim, origin, "connected");
+	for (relay, next) in [(3, 0), (4, 1)] {
+		let narrow = sim.path(relay).routes(7).find(|(prefix, _)| **prefix == p("a/"));
+		assert_eq!(narrow.and_then(|(_, route)| route.next()), Some(next), "relay {relay}");
+	}
+	sim.disconnect(origin, hub);
+	assert!(sim.run());
+	quiet(&sim, origin, "cut off");
+	for node in 0..origin {
+		assert_eq!(sim.path(node).routes(7).count(), 0, "node {node}\n{}", mesh(&sim));
+	}
+}
+
 /// A DEAD needs a path from this peer naming both the hop and its far end.
 #[test]
 fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
