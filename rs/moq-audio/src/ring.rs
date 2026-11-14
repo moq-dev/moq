@@ -872,17 +872,15 @@ impl Consumer {
 	/// more than its bound, or one window when that is larger, as a target rise
 	/// leaves it, until the clock reaches it, returning the samples padded.
 	/// Less than that is the stretch's to slow down onto. Before it `joined`,
-	/// past one hop.
+	/// past one hop. A tail before a declared or finished end is never skipped,
+	/// but it still waits for the clock rather than playing early.
 	fn pad(&mut self, joined: bool, output: &mut [f32]) -> usize {
 		let Some((hop, window)) = self.stretch.as_ref().map(|stretch| (stretch.hop, stretch.window)) else {
 			return 0;
 		};
 		let (lag, bound) = self.lag(0);
 		let lead = -lag;
-		let eligible = self.shared.clocked.load(Ordering::Acquire)
-			&& !self.refill
-			&& !self.shared.finished.load(Ordering::Relaxed)
-			&& !self.declared();
+		let eligible = self.shared.clocked.load(Ordering::Acquire) && !self.refill && self.available() > 0;
 		let threshold = if joined { bound.max(window as i64) } else { hop as i64 };
 		self.padding = eligible && lead > if self.padding { 0 } else { threshold };
 		if !self.padding {
@@ -1676,6 +1674,38 @@ mod tests {
 		assert!(cons.available() <= available, "padding plays nothing written");
 		assert_eq!(cons.skips(), 0);
 		assert!(cons.lag(0).0.abs() <= 480, "lag {}", cons.lag(0).0);
+	}
+
+	/// A finished queue plays out its whole tail, but a tail ahead of the clock
+	/// still waits for it in silence rather than playing early.
+	#[test]
+	fn a_finished_tail_ahead_of_the_clock_pads_onto_it() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
+		let base = prod.base;
+		let mut out = vec![0.0; 480 * 2];
+		for _ in 0..100 {
+			assert_eq!(prod.push(&pcm), Push::Ok);
+		}
+		prod.flush();
+		let bound = Duration::from_millis(200);
+		prod.due(base + Duration::from_millis(2010), bound);
+		assert_eq!(pull(&mut cons, &mut out, base), Read::Ok);
+		let mut now = base + Duration::from_millis(10);
+
+		prod.due(base + Duration::from_millis(2310), bound);
+		let mut padded = 0;
+		loop {
+			assert_eq!(pull(&mut cons, &mut out, now), Read::Ok);
+			now += Duration::from_millis(10);
+			if out.iter().any(|sample| *sample != 0.0) {
+				break;
+			}
+			padded += 1;
+			assert!(padded <= 32, "never caught up");
+		}
+		assert!(padded >= 29, "padded {padded} reads");
+		assert_eq!(cons.skips(), 0);
 	}
 
 	/// A zero stretch plays what was written unaltered: a lag under a window

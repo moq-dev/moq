@@ -468,19 +468,18 @@ export class AudioRingBuffer {
 		// Snap onto the clock past the bound, or one window when that is larger: skip what trails it, and
 		// pad silence ahead of a playhead that leads it until the clock arrives. Less than that is the
 		// stretch's to play onto. Nothing was heard off the clock before a join, so a join snaps onto it
-		// past the hop the stretch leaves alone, whichever way it is off. A finite tail plays as received.
+		// past the hop the stretch leaves alone, whichever way it is off. A finite tail is never skipped,
+		// since all of it is heard, but it still waits for the clock rather than playing early.
 		let skip = 0;
 		let pad = 0;
 		if (this.#clock !== undefined) {
 			const lag = this.#clock - this.#playhead();
 			const threshold = this.#joined ? Math.max(this.#bound, this.#stretch.window) : this.#stretch.hop;
 			this.#joined = true;
-			if (!this.#ending()) {
-				if (lag > threshold) skip = lag;
-				const lead = Math.round(-lag);
-				this.#padding = lead > (this.#padding ? 0 : threshold);
-				if (this.#padding) pad = Math.min(lead, output[0].length);
-			}
+			if (!this.#ending() && lag > threshold) skip = lag;
+			const lead = Math.round(-lag);
+			this.#padding = lead > (this.#padding ? 0 : threshold);
+			if (this.#padding) pad = Math.min(lead, output[0].length);
 		}
 		if (skip > 0) {
 			const index = Math.min(this.#writeIndex, Math.ceil(this.#playhead() + skip));
@@ -530,8 +529,9 @@ export class AudioRingBuffer {
 		return samples;
 	}
 
-	// Whether the playhead is in audio before a declared end: a finite tail, which drains as received,
-	// since the next utterance re-anchors the ring anyway and its depth says nothing about the clock.
+	// Whether the playhead is in audio before a declared end: a finite tail, which is never skipped or
+	// stretched, since the next utterance re-anchors the ring anyway and its depth says nothing about
+	// the clock.
 	// The playhead rather than the read index, since the stretch may already hold the whole tail.
 	#ending(): boolean {
 		const end = this.#previous ?? this.#end;

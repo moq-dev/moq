@@ -1271,6 +1271,29 @@ describe("time stretch", () => {
 		expect(read(buffer, QUANTUM, 1)[0].every((sample) => sample === 0.5)).toBe(true);
 	});
 
+	// A finished track's whole tail is declared before it plays, as for a late joiner during the
+	// linger. Audio that starts after the clock still waits for it, and none of the tail is skipped.
+	it("pads a finished tail that starts after the clock, then plays all of it", () => {
+		const buffer = live(100, { bound: 1000 });
+		write(buffer, 500, frames(100), { value: 0.5 });
+		buffer.end(600_000);
+		let clock = 0;
+		let padded = 0;
+		let played = 0;
+		for (;;) {
+			buffer.clock(clock);
+			const [output] = read(buffer, QUANTUM, 1);
+			clock += QUANTUM_US;
+			if (output.length === 0) break;
+			if (output.some((sample) => sample !== 0)) played += output.filter((sample) => sample !== 0).length;
+			else padded += QUANTUM;
+		}
+		expect(padded).toBe(Math.floor(frames(500) / QUANTUM) * QUANTUM);
+		expect(played).toBe(frames(100));
+		expect(buffer.skips).toBe(0);
+		expect(buffer.silent).toBe(true);
+	});
+
 	// A zero bound turns the stretch off: a lag under a window that the stretch would speed through
 	// stays, more skips onto the clock, and a playhead more than a window ahead of it pads silence until
 	// the clock reaches it.
