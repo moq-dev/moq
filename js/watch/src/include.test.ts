@@ -36,7 +36,7 @@ async function unwanted(track: Track.Producer): Promise<void> {
 
 const video = (codec: string) => ({ codec, container: { kind: "legacy" as const } });
 
-it("opens a listed include only on selection, keeping its rendition IDs its own", async () => {
+it("reads a listed include's catalog but no media, keeping its rendition IDs its own", async () => {
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
 	const include = publish(origin, "room/extra.hang");
@@ -59,17 +59,21 @@ it("opens a listed include only on selection, keeping its rendition IDs its own"
 	});
 	const selection = new Effect();
 	try {
-		await settle();
-		expect(source.out.catalog.peek()?.include).toEqual(root.include);
-		// Listing the entry does not subscribe to its catalog.
-		expect(includeCatalog.demand().wanted.peek()).toBeUndefined();
-
-		const child = source.include(selection, "video");
 		catalog.update({ value: { video: { renditions: { video: video("vp8") } } } });
 		await settle();
+		expect(source.out.catalog.peek()?.include).toEqual(root.include);
+		// The root selects every include it lists: it reads the catalog, but subscribes no media.
 		expect(includeCatalog.demand().wanted.peek()).toBeDefined();
+		expect(includeVideo.demand().wanted.peek()).toBeUndefined();
+		// Listed under its include's ID, so it never shadows the root's own "video".
+		expect(source.out.catalog.peek()?.video?.renditions).toEqual({
+			video: video("avc1.42001f"),
+			"video/video": { ...video("vp8"), broadcast: "extra.hang" as Path.Relative, track: "video" },
+		});
+
+		const child = source.include(selection, "video");
+		await settle();
 		expect(child.out.catalog.peek()?.video?.renditions.video?.codec).toBe("vp8");
-		expect(source.out.catalog.peek()?.video?.renditions.video?.codec).toBe("avc1.42001f");
 
 		const media = new Source({ broadcast: child, target: { name: "video" }, supported: async () => true });
 		selection.cleanup(() => media.close());
@@ -92,9 +96,12 @@ it("opens a listed include only on selection, keeping its rendition IDs its own"
 		// An unlisted ID leaves the child disabled.
 		expect(source.include(selection, "unknown").in.enabled.peek()).toBe(false);
 
+		// Dropping the selection releases the media; closing the root releases the catalog.
 		selection.close();
-		await unwanted(includeCatalog);
 		await unwanted(includeVideo);
+		expect(includeCatalog.demand().wanted.peek()).toBeDefined();
+		source.close();
+		await unwanted(includeCatalog);
 	} finally {
 		selection.close();
 		source.close();
@@ -401,6 +408,167 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 	} finally {
 		owner.close();
 		parent.close();
+		origin.close();
+	}
+});
+
+it("offers every include's renditions to selection, subscribing only the selected one", async () => {
+	const origin = new Origin.Producer();
+	const parent = publish(origin, "room/main.hang");
+	const parentHd = parent.createTrack("hd");
+	const served = Instance.random();
+	const ladder = publish(origin, "room/ladder.hang", served);
+	const ladderTrack = ladder.createTrack(Catalog.TRACK);
+	const ladderCatalog = new Json.Snapshot.Producer<Catalog.Root>({ track: ladderTrack, deltas: false });
+	const rung = (name: string) => {
+		const track = ladder.createTrack(name);
+		track.writeFrame({ payload: new TextEncoder().encode(name) });
+		return track;
+	};
+	const [high, low, ladderHd] = [rung("720p"), rung("360p"), rung("hd")];
+	const remote = publish(origin, "room/remote.hang").createTrack("remote");
+	const nested = publish(origin, "room/nested.hang").createTrack(Catalog.TRACK);
+
+	const sized = (width: number, height: number, bitrate: number): Catalog.VideoConfig =>
+		Catalog.VideoConfigSchema.parse({ ...video("avc1.42001f"), codedWidth: width, codedHeight: height, bitrate });
+	ladderCatalog.update({
+		value: Catalog.RootSchema.parse({
+			video: {
+				renditions: {
+					"720p": sized(1280, 720, 2_000_000),
+					"360p": sized(640, 360, 600_000),
+					// The source the ladder relists, read from the root itself: the same media, so left out.
+					source: { ...sized(1920, 1080, 5_000_000), broadcast: "./main.hang", track: "hd" },
+					// Its own track named like the root's rendition: other media, under its include's ID.
+					hd: sized(1920, 1080, 4_000_000),
+					// A reference of its own, rebased onto the root's broadcast.
+					remote: { ...sized(320, 180, 200_000), broadcast: "./remote.hang" },
+					// A reference back to the include itself still reads the stream its entry names.
+					alt: { ...sized(426, 240, 300_000), broadcast: "./ladder.hang" },
+				},
+			},
+			audio: {
+				renditions: {
+					aac: { codec: "mp4a.40.2", container: { kind: "legacy" }, sampleRate: 48000, numberOfChannels: 2 },
+				},
+			},
+			// An include's own include needs a selection of its own, so it is never expanded.
+			include: { nested: { broadcast: "./nested.hang" } },
+		}),
+	});
+
+	const root = (own: Record<string, Catalog.VideoConfig>) =>
+		Catalog.RootSchema.parse({
+			video: { renditions: own },
+			include: { ladder: { broadcast: "./ladder.hang", instance: served } },
+		});
+	const catalog = new Signal(root({ hd: sized(1920, 1080, 5_000_000) }));
+	const broadcast = new Broadcast({ origin, name: Path.from("room/main.hang"), catalogFormat: "manual", catalog });
+	const rate = new Signal<number | undefined>(1_000_000);
+	const source = new Source({ broadcast, supported: async () => true, rate });
+	const selection = new Effect();
+	try {
+		await settle();
+		const ref = { broadcast: "ladder.hang" as Path.Relative, instance: served };
+		expect(broadcast.out.catalog.peek()?.video?.renditions).toEqual({
+			hd: sized(1920, 1080, 5_000_000),
+			"ladder/720p": { ...sized(1280, 720, 2_000_000), ...ref, track: "720p" },
+			"ladder/360p": { ...sized(640, 360, 600_000), ...ref, track: "360p" },
+			"ladder/hd": { ...sized(1920, 1080, 4_000_000), ...ref, track: "hd" },
+			"ladder/remote": {
+				...sized(320, 180, 200_000),
+				broadcast: "remote.hang" as Path.Relative,
+				track: "remote",
+			},
+			"ladder/alt": { ...sized(426, 240, 300_000), ...ref, track: "alt" },
+		});
+		expect(Object.keys(broadcast.out.catalog.peek()?.audio?.renditions ?? {})).toEqual(["ladder/aac"]);
+		expect(nested.demand().wanted.peek()).toBeUndefined();
+		// Listing a rendition subscribes none of its media.
+		for (const track of [parentHd, high, low, ladderHd, remote])
+			expect(track.demand().wanted.peek()).toBeUndefined();
+
+		// One selection spans the root and its include, and the config says where the media lives.
+		expect(source.out.track.peek()).toBe("ladder/360p");
+		rate.set(10_000_000);
+		await settle();
+		expect(source.out.track.peek()).toBe("hd");
+		rate.set(3_000_000);
+		await settle();
+		const selected = source.out.config.peek();
+		expect(source.out.track.peek()).toBe("ladder/720p");
+		expect(selected?.broadcast).toBe(ref.broadcast);
+
+		// Reading the selected rendition, as the decoder does, subscribes that track alone.
+		const frames = broadcast
+			.relativeBroadcast(selection, selected?.broadcast, selected?.instance)
+			?.track(Catalog.track("ladder/720p", selected ?? {}))
+			.subscribe()
+			.ordered();
+		try {
+			expect(await frames?.readString()).toBe("720p");
+			for (const track of [parentHd, low, ladderHd, remote]) expect(track.demand().wanted.peek()).toBeUndefined();
+		} finally {
+			frames?.close();
+		}
+
+		// The root's own ID always wins over an include's.
+		catalog.set(root({ hd: sized(1920, 1080, 5_000_000), "ladder/360p": sized(640, 360, 500_000) }));
+		await settle();
+		expect(broadcast.out.catalog.peek()?.video?.renditions["ladder/360p"]).toEqual(sized(640, 360, 500_000));
+
+		// Dropping the entry drops its renditions and releases its catalog.
+		catalog.set(Catalog.RootSchema.parse({ video: { renditions: { hd: sized(1920, 1080, 5_000_000) } } }));
+		await settle();
+		expect(Object.keys(broadcast.out.catalog.peek()?.video?.renditions ?? {})).toEqual(["hd"]);
+		expect(broadcast.out.catalog.peek()?.audio).toBeUndefined();
+		await unwanted(ladderTrack);
+	} finally {
+		selection.close();
+		source.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
+it("dedupes an include's rendition only against a usable one", async () => {
+	const origin = new Origin.Producer();
+	publish(origin, "room/main.hang");
+	const [oldInstance, newInstance] = [Instance.random(), Instance.random()];
+	const serve = (instance: Instance.Valid) => {
+		const broadcast = publish(origin, "room/extra.hang", instance);
+		const catalog = new Json.Snapshot.Producer<Catalog.Root>({
+			track: broadcast.createTrack(Catalog.TRACK),
+			deltas: false,
+		});
+		catalog.update({ value: Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }) });
+		return broadcast;
+	};
+	const old = serve(oldInstance);
+	const parent = new Broadcast({
+		origin,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog: Catalog.RootSchema.parse({
+			video: { renditions: { v: { ...video("vp8"), broadcast: "./extra.hang", instance: oldInstance } } },
+			include: { extra: { broadcast: "./extra.hang" } },
+		}),
+	});
+	try {
+		await settle();
+		// The root already lists the include's media, so it is listed once.
+		expect(Object.keys(parent.out.catalog.peek()?.video?.renditions ?? {})).toEqual(["v"]);
+
+		// A restart proves the root's entry stale, while the include follows it.
+		const replacement = serve(newInstance);
+		await quietly(settle);
+		expect(parent.out.catalog.peek()?.video?.renditions).toEqual({
+			"extra/v": { ...video("vp8"), broadcast: "extra.hang" as Path.Relative, track: "v" },
+		});
+		replacement.close();
+	} finally {
+		parent.close();
+		old.close();
 		origin.close();
 	}
 });
