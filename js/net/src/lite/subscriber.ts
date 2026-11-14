@@ -1178,8 +1178,9 @@ export class Subscriber {
 					ids.add(wire.id);
 				}
 				serve(wire, path, restart ?? false);
-				// A claim gone where no floor certifies it was let go, not withdrawn by its origin.
-				refresh(path, !now && !this.#floors.certified(wire.node, wire.view, path));
+				// A claim gone unless the newest floor certifying it says so was let go, not withdrawn by
+				// its origin.
+				refresh(path, !now && !this.#floors.withdrawn(wire.node, wire.view, path));
 			}
 		};
 		const refreshRoute = (wire: Route, lost: boolean) => {

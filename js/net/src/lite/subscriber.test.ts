@@ -4116,6 +4116,33 @@ test("a lite-07 refused claim goes offline, its route certifying nothing meanwhi
 	subscriber.close();
 });
 
+// Another stream certifying the refused claim still present proves no withdrawal either: the
+// refusing stream's reader sees it go offline.
+test("a lite-07 refused claim another stream still certifies goes offline", async () => {
+	const { subscriber, announced, send, raw, another } = await routedStream();
+	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const x = Path.from("live/x");
+	const instance = Instance.parse("i");
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
+	await live.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance });
+	await live.send({ status: "floor", id: 0n, revision: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start" });
+
+	// ANNOUNCE_RESTART of Announce ID 0 to an empty instance.
+	raw([3, 5, 0, 0, 0, 0, 0]);
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "offline" });
+
+	live.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
 // A claim at the session root has the empty path, which is a path all the same: its updates,
 // restarts, and end apply as any other's.
 test("a lite-07 claim at the root updates and ends", async () => {

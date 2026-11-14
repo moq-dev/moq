@@ -167,14 +167,19 @@ export class Floors {
 	}
 
 	/**
-	 * Whether `view` or a live view of `node` certifies whether a claim at `path` exists, so a
-	 * claim gone there was withdrawn by its origin rather than let go, as rs/moq-net's router
-	 * tells an end from going offline.
+	 * Whether the newest of `view` and the live views of `node` certifying `path` presents no
+	 * claim there, so a claim gone from `view` was withdrawn by its origin rather than let go, as
+	 * rs/moq-net's router tells an end from going offline.
 	 */
-	certified(node: bigint, view: View, path: Path.Valid): boolean {
-		if (certifies(view, path)) return true;
-		for (const carrier of this.#nodes.get(node)?.carriers ?? []) if (certifies(carrier.view, path)) return true;
-		return false;
+	withdrawn(node: bigint, view: View, path: Path.Valid): boolean {
+		// The view itself wins a tie, as in shows().
+		let best: View | undefined = certifies(view, path) ? view : undefined;
+		for (const carrier of this.#nodes.get(node)?.carriers ?? []) {
+			const other = carrier.view;
+			// biome-ignore lint/style/noNonNullAssertion: certifies() checked both revisions.
+			if (certifies(other, path) && (best === undefined || other.revision! > best.revision!)) best = other;
+		}
+		return best !== undefined && presented(best, path, path === view.prefix) === undefined;
 	}
 
 	/**
