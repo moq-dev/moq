@@ -780,6 +780,7 @@ mod tests {
 	#[cfg(feature = "tls")]
 	#[tokio::test]
 	async fn connect_dials_rtmps_and_advertises_tc_url() {
+		kio::clock::host_time(); // real RTMP over TCP
 		let (mut server, fingerprint) = rtmps_server().await;
 		let port = server.local_addr().unwrap().port();
 		let url: Url = format!("rtmps://localhost:{port}/live").parse().unwrap();
@@ -806,6 +807,7 @@ mod tests {
 	#[cfg(feature = "tls")]
 	#[tokio::test]
 	async fn connect_refuses_an_untrusted_certificate() {
+		kio::clock::host_time(); // real RTMP over TCP
 		let (mut server, _) = rtmps_server().await;
 		let port = server.local_addr().unwrap().port();
 		let url: Url = format!("rtmps://localhost:{port}/live").parse().unwrap();
@@ -1174,6 +1176,7 @@ mod tests {
 	/// request, and the receive -> FLV-demux -> republish path end to end.
 	#[tokio::test]
 	async fn pull_round_trips_a_broadcast() {
+		kio::clock::host_time(); // real RTMP over TCP
 		// A minimal AVC sequence header + keyframe, published into the server's origin
 		// via the FLV importer so the played-back stream carries a catalog + frames.
 		let avcc = {
