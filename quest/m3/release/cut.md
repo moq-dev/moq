@@ -66,7 +66,8 @@ the old phase, so its API diff only reports its breaks) and performs the re-spli
 adoption quests move to a release epic in m0, m3's other quests sort by kind
 into m1 (additive), m2 (API breaks) and m3 (wire changes), m4 stays, m5 moves
 to m6 with its `Required` and a new empty m5 requires the wire cut too, each
-milestone README's Goal is rewritten for its new role, and each audit's
+milestone README's Goal and current Plan rule are rewritten for its new
+role (dated decision entries stay as history), and each audit's
 recurrence names m4 and the wire cut instead of m3 and this path.
 
 Every cut's PR removes its own path from every `Required`, which releases the
@@ -116,6 +117,8 @@ Each run follows its kind:
   back to `additive` on `main`, and shift the milestones: remaining
   publication and adoption quests to m0, m4's quests other than the wire cut
   by kind into m1, m2 and m3, m5's to m4, and m6 stays the deferred bucket.
+  Rewrite the Goal and the current Plan rule of each milestone it moves (m4,
+  m5, m6) to match, so no README keeps a rule from an older split.
 
 The `0.22.0` cut re-creates both quests, points m5's `Required` at the wire
 cut in place of this path, and drops m4's, so m4 opens. It and each wire cut

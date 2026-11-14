@@ -17,6 +17,12 @@ does; also gating m3, which holds the cut). The cut's PR deletes the cut
 quest and points this gate at the next cycle's wire cut, which keeps it
 every cycle; m5's quests start once the shift brings them into m4.
 
+Current rule: until the `0.22.0` cut, m5 is the deferred bucket, as below.
+That cut moves it, with its `Required`, to m6, and the new m5 starts empty as
+later work of lower priority, required by the wire cut like m6; each wire
+cut's shift moves m5's quests to m4, and m6 stays the deferred bucket. The
+entries below are history.
+
 A quest gated on the outside world has a condition quest beside it, as the
 root [questline](/quest/README.md) describes. A speculative feature or study
 with no consumer needs no condition quest: it parks here rather than in m3 or m4
