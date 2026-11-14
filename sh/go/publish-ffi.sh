@@ -74,7 +74,8 @@ fi
 
 # shellcheck source=infra/go/r2.sh
 source "$INFRA_DIR/r2.sh"
-published=$(rclone lsf --files-only --include "$VERSION.info" "$BUCKET/moq.dev/moq-ffi/@v")
+# Recursive from the bucket root, so a module with no versions yet lists empty.
+published=$(rclone lsf -R --files-only --include "/moq.dev/moq-ffi/@v/$VERSION.info" "$BUCKET")
 if [[ -n "$published" ]]; then
     echo "$VERSION is already in the bucket: relisting and verifying it instead of uploading."
     # An empty @v directory uploads nothing but still rewrites `list`, in case
