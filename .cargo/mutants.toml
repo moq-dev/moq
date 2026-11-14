@@ -36,6 +36,10 @@ exclude_re = [
 	':\d+:(25|38): replace && with \|\| in Router<N, A>::recompute$',
 	# A claim an answering certifier certifies is always in the merged view.
 	':\d+:35: replace && with \|\| in Router<N, A>::meets$',
+	# A new stream's first batch either flips its certifier's answer, which marks
+	# every claim, or reaches the reader only through the merge, which marks its own
+	# changes; marking all only reorders independent changes in a forwarded batch.
+	':\d+:32: replace != with == in Router<N, A>::batch$',
 	# At an equal metric both arms assign the same distance.
 	'replace < with <= in Router<N, A>::record$',
 	# The full presentation of a stream the interest misses is empty, and a full
