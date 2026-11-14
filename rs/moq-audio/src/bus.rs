@@ -182,6 +182,10 @@ struct Stretching {
 	/// its queued audio of the bus's however long the bus has run: the ring
 	/// holds that distance in 32 bits.
 	origin: u64,
+	/// The bus position a write to the dry channel starts at, before which it
+	/// plays silence without reading the ring, so no stretch reaches that
+	/// silence and the write lands exactly.
+	start: u64,
 }
 
 impl Stretching {
@@ -200,8 +204,13 @@ impl Feed {
 				ring.read(output);
 			}
 			Queue::Stretched(stretching) => {
-				let now = stretching.clock(position);
-				stretching.ring.read_at_frame(output, now, output.len() / channels);
+				let lead = (stretching.start.saturating_sub(position) as usize * channels).min(output.len());
+				output[..lead].fill(0.0);
+				let output = &mut output[lead..];
+				if !output.is_empty() {
+					let now = stretching.clock(position + (lead / channels) as u64);
+					stretching.ring.read_at_frame(output, now, output.len() / channels);
+				}
 			}
 			Queue::Positioned(queue) => {
 				let queued = queue.len().min(output.len());
@@ -471,7 +480,11 @@ impl Bus {
 		);
 		// Writes land before the first advance, as an exact channel's do.
 		cons.start();
-		let stretching = Stretching { ring: cons, origin: 0 };
+		let stretching = Stretching {
+			ring: cons,
+			origin: 0,
+			start: 0,
+		};
 		let port = self.open(input, strip, Queue::Stretched(Box::new(stretching)))?;
 		Ok(Positioned {
 			port,
@@ -1145,28 +1158,18 @@ impl Positioned {
 			let Queue::Stretched(stretching) = &mut feed.queue else {
 				unreachable!("a stretched channel feeds a stretched queue");
 			};
-			// A dry channel plays silence until the write anyway, so it waits
-			// there exactly rather than playing early and slowing down. With
-			// nothing queued, the ring's clock restarts on the bus's here.
-			let dry = stretching.ring.available() == 0;
-			let gap = if dry {
-				stretching.origin = next.wrapping_sub(stretching.ring.consumed() as u64);
-				position.saturating_sub(next) as usize
-			} else {
-				0
-			};
 			let vacant = stretched.prod.vacant();
-			if gap + frames as usize > vacant {
+			if frames as usize > vacant {
 				return Err(Error::Unsupported(format!(
 					"a write of {frames} frames at bus position {position} overflows this channel, with room for {vacant}"
 				)));
 			}
-			const SILENCE: [f32; 1024] = [0.0; 1024];
-			let mut silence = gap * channels;
-			while silence > 0 {
-				let samples = silence.min(SILENCE.len() / channels * channels);
-				let _ = stretched.prod.push(&SILENCE[..samples]);
-				silence -= samples;
+			// A dry channel plays silence until the write anyway, so it waits
+			// there exactly rather than playing early and slowing down. With
+			// nothing queued, the ring's clock restarts on the bus's there.
+			if stretching.ring.available() == 0 {
+				stretching.start = position.max(next);
+				stretching.origin = stretching.start.wrapping_sub(stretching.ring.consumed() as u64);
 			}
 			let _ = stretched.prod.push(&pcm);
 			let due = stretching.clock(position.wrapping_add(frames));
@@ -2474,6 +2477,27 @@ mod tests {
 		ready(&mut reader);
 		assert_eq!(stretched(&bus, &channel, |cons| cons.trimmed()), 14_400);
 		channel.write(next, &tone(0, 960)).unwrap();
+	}
+
+	/// A write to a dry channel lands exactly however far ahead it is: the
+	/// silence before it is never stretched.
+	#[test]
+	fn a_stretched_channel_places_a_dry_write_ahead_exactly() {
+		for gap in [333, 480, 960, 1_440, 1_920, 4_000] {
+			let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+			let strip = Strip::default();
+			let mut channel = bus
+				.positioned(input(48_000, Layout::Stereo), strip.clone(), Duration::from_millis(200))
+				.unwrap();
+			let program = bus.mix();
+			program.route(&strip);
+			let mut reader = program.reader();
+
+			let next = driver.position();
+			channel.write(next + gap, &tone(0, 480)).unwrap();
+			let left = mixed(&mut driver, &mut reader, &[BLOCK], 9_600);
+			assert_eq!(left.iter().position(|sample| *sample != 0.0), Some(gap as usize), "gap {gap}");
+		}
 	}
 
 	/// A stretched channel plays its writes however long the bus ran before it
