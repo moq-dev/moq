@@ -20,8 +20,9 @@ use crate::{Error, udp};
 /// Submission queue depth. The SQ only holds SQEs staged between submits,
 /// never in-flight operations, so it needs no relation to the socket pools;
 /// [`Shared::push`] submits inline whenever it fills.
+const PRODUCTION_SQ_ENTRIES: u32 = 256;
 #[cfg(not(test))]
-const SQ_ENTRIES: u32 = 256;
+const SQ_ENTRIES: u32 = PRODUCTION_SQ_ENTRIES;
 #[cfg(test)]
 const SQ_ENTRIES: u32 = 128;
 
@@ -34,10 +35,13 @@ const SQ_ENTRIES: u32 = 128;
 /// allocation-per-CQE slow path and it ends any armed multishot receive, so
 /// the CQ is sized to keep it out of steady state.
 ///
-/// No larger: the ring costs 16 bytes per entry, most of each worker's
-/// footprint, and Linux 6.14 up to the 7.3 fix charges it to `RLIMIT_MEMLOCK`,
-/// a budget shared by every io_uring the user runs.
-const PRODUCTION_CQ_ENTRIES: u32 = 2048;
+/// No larger: the kernel allocates the CQEs, the ring header, and the SQ
+/// array as one region, first as one compound allocation and then as single
+/// pages that the bulk allocator may hand back short, failing setup with
+/// `ENOMEM`. At 1024 entries the region fits order 3 (32 KiB), which the page
+/// allocator reclaims for rather than give up on; 2048 spills into order 4,
+/// which fails on a fragmented host.
+const PRODUCTION_CQ_ENTRIES: u32 = 1024;
 #[cfg(not(test))]
 const CQ_ENTRIES: u32 = PRODUCTION_CQ_ENTRIES;
 // Unit tests exercise overflow handling but do not need production pool capacity.
@@ -1491,6 +1495,17 @@ mod tests {
 			PRODUCTION_CQ_ENTRIES > per_socket,
 			"PRODUCTION_CQ_ENTRIES fell behind the pool defaults"
 		);
+	}
+
+	#[test]
+	fn the_rings_region_stays_within_order_3() {
+		// v7.3 `rings_size`: a cacheline header, the CQEs, then the SQ array
+		// at the next cacheline. Past `PAGE_ALLOC_COSTLY_ORDER` the compound
+		// allocation gives up under fragmentation and setup can fail.
+		const CACHELINE: u32 = 64;
+		let cqes = CACHELINE + PRODUCTION_CQ_ENTRIES * 16;
+		let rings = cqes.next_multiple_of(CACHELINE) + PRODUCTION_SQ_ENTRIES * 4;
+		assert!(rings <= 32 * 1024, "the rings region needs {rings} bytes, past order 3");
 	}
 
 	#[test]
