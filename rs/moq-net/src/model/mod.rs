@@ -64,12 +64,12 @@ pub mod origin {
 	pub(crate) use super::origin_impl::Lookup;
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::Mounted;
-	#[cfg(feature = "async")]
-	pub(crate) use super::origin_impl::{Lane, NodeFilter};
 	pub use super::origin_impl::{
 		Claim, Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
 		RouteOptions, Source,
 	};
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::{Lane, NodeFilter};
 	pub use crate::route::RouteKey;
 
 	// Relay-level: every route change, for forwarding and stats. Apps read

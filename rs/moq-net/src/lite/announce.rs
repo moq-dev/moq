@@ -111,7 +111,11 @@ pub enum AnnounceBroadcast {
 	Synced,
 	/// ROUTE_START (lite-07+): the sender has a route to the publisher `node` covering
 	/// the requested prefix joined with `suffix`, and assigns it the next Route ID.
-	RouteStart { node: route::Id, suffix: Path, offer: Offer },
+	RouteStart {
+		node: route::Id,
+		suffix: Path,
+		offer: Offer,
+	},
 	/// ROUTE_UPDATE (lite-07+): the route with this id changed, and is usable.
 	RouteUpdate { id: u64, offer: Offer },
 	/// ROUTE_HOLD (lite-07+): the sender has no usable route with this id, but still
@@ -1099,7 +1103,6 @@ impl<'a> Message<'a> for AnnounceRequest {
 		Ok(())
 	}
 }
-
 
 /// Send by the publisher, used to determine the message that follows.
 #[derive(Clone, Copy, Debug, IntoPrimitive, TryFromPrimitive)]
@@ -2127,7 +2130,10 @@ mod tests {
 				hop: route::path::Hop { node: 4, session: 0 },
 				far: route::MAX,
 				gone: true,
-				moved: vec![(0, Ok(offer(&[(1, 0), (5, 1)], 3, false))), (7, Ok(offer(&[(1, 0)], 0, true)))],
+				moved: vec![
+					(0, Ok(offer(&[(1, 0), (5, 1)], 3, false))),
+					(7, Ok(offer(&[(1, 0)], 0, true))),
+				],
 			}),
 			AnnounceBroadcast::Dead(Dead::Drain { node: 4 }),
 			AnnounceBroadcast::Floor {
@@ -2309,10 +2315,22 @@ mod tests {
 				named(1, hops(over, 1)),
 				Refusal::Hops(over),
 			),
-			(start(1, Box::new(path(0, 1, 1, 0))), named(1, hops(1, 0)), Refusal::Node),
-			(start(0, Box::new(path(0, 1, 1, 1))), named(0, hops(1, 1)), Refusal::Node),
+			(
+				start(1, Box::new(path(0, 1, 1, 0))),
+				named(1, hops(1, 0)),
+				Refusal::Node,
+			),
+			(
+				start(0, Box::new(path(0, 1, 1, 1))),
+				named(0, hops(1, 1)),
+				Refusal::Node,
+			),
 			// A flag no version defines, which may change what follows it.
-			(start(1, Box::new(path(8, 1, 1, 1))), named(1, hops(1, 1)), Refusal::Flags(8)),
+			(
+				start(1, Box::new(path(8, 1, 1, 1))),
+				named(1, hops(1, 1)),
+				Refusal::Flags(8),
+			),
 			(
 				start(1, Box::new(path(0x86, 1, 1, 1))),
 				named(1, hops(1, 1)),
@@ -2337,7 +2355,10 @@ mod tests {
 					w.varint(0u64).unwrap();
 					path(8, 1, 1, 1)(w);
 				}),
-				Refusable::RouteUpdate { id: 0, path: hops(1, 1) },
+				Refusable::RouteUpdate {
+					id: 0,
+					path: hops(1, 1),
+				},
 				Refusal::Flags(8),
 			),
 		];
@@ -2371,7 +2392,13 @@ mod tests {
 			moved.iter().map(|(id, heard)| (*id, heard.is_ok())).collect::<Vec<_>>(),
 			[(4, false), (5, true)]
 		);
-		assert_eq!(moved[0].1, Err(Unusable { path: hops(1, 3), reason: Refusal::Flags(8) }));
+		assert_eq!(
+			moved[0].1,
+			Err(Unusable {
+				path: hops(1, 3),
+				reason: Refusal::Flags(8)
+			})
+		);
 
 		let malformed = [
 			// No hops at all, and fewer than it counts.

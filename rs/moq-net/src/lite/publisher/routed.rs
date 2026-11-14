@@ -483,7 +483,11 @@ impl Answer {
 		let Some(sent) = self.routes.get_mut(key) else {
 			return Ok(());
 		};
-		let reached = sent.reach.values().next().expect("a route stands while a source carries it");
+		let reached = sent
+			.reach
+			.values()
+			.next()
+			.expect("a route stands while a source carries it");
 		let Some(wire) = sent.wire.as_mut().filter(|wire| wire.told.differs(reached)) else {
 			return Ok(());
 		};
@@ -536,7 +540,11 @@ impl Answer {
 		// its first source.
 		let single = self.sources.len() == 1;
 		let mut told: Vec<RouteKey> = (self.routes.iter())
-			.filter(|(_, sent)| sent.wire.as_ref().is_some_and(|wire| wire.told.offer.path.contains(&hop)))
+			.filter(|(_, sent)| {
+				sent.wire
+					.as_ref()
+					.is_some_and(|wire| wire.told.offer.path.contains(&hop))
+			})
 			.map(|(key, _)| key.clone())
 			.collect();
 		told.sort_unstable();

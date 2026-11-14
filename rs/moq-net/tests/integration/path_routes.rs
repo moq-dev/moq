@@ -156,9 +156,15 @@ async fn a_detour_through_the_far_end_waits_out_the_doubt() {
 	cut(&a_w);
 	quiesce().await;
 	let seen = watch.seen(start);
-	assert!(!seen.iter().any(withdrawn), "the claim is held, not withdrawn: {seen:?}");
+	assert!(
+		!seen.iter().any(withdrawn),
+		"the claim is held, not withdrawn: {seen:?}"
+	);
 	let held = seen.iter().find(|seen| !seen.available).expect("held meanwhile");
-	let usable = seen.iter().find(|seen| seen.available).expect("B's route serves in the end");
+	let usable = seen
+		.iter()
+		.find(|seen| seen.available)
+		.expect("B's route serves in the end");
 	assert!(usable.at >= held.at + DOUBT, "not before the doubt lifts: {seen:?}");
 }
 
@@ -195,7 +201,12 @@ async fn a_dead_relay_reaches_every_neighbour_as_withdrawals() {
 			"R{}: no move onto a route through X: {seen:?}",
 			i + 1
 		);
-		assert_eq!(seen.iter().filter(|seen| withdrawn(seen)).count(), 1, "R{}: {seen:?}", i + 1);
+		assert_eq!(
+			seen.iter().filter(|seen| withdrawn(seen)).count(),
+			1,
+			"R{}: {seen:?}",
+			i + 1
+		);
 		assert!(withdrawn(seen.last().unwrap()), "R{}: {seen:?}", i + 1);
 	}
 }
@@ -243,7 +254,14 @@ async fn hold_behind(child: Child) -> Duration {
 	quiesce().await;
 	let seen = watch.seen(start);
 	assert!(
-		matches!(seen.first(), Some(Seen { kind: support::Kind::Update, available: false, .. })),
+		matches!(
+			seen.first(),
+			Some(Seen {
+				kind: support::Kind::Update,
+				available: false,
+				..
+			})
+		),
 		"held first: {seen:?}"
 	);
 	assert_eq!(seen.iter().filter(|seen| withdrawn(seen)).count(), 1, "{seen:?}");

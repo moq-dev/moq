@@ -680,7 +680,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// How `neighbor`'s peer names itself in a path, or 0 while this node has not learned it.
 	pub fn hop_of(&self, neighbor: N) -> Id {
 		match self.sessions.get(&neighbor).map_or(0, |session| session.hop) {
-			0 => self.sessions.get(&self.listen(neighbor)).map_or(0, |session| session.hop),
+			0 => self
+				.sessions
+				.get(&self.listen(neighbor))
+				.map_or(0, |session| session.hop),
 			hop => hop,
 		}
 	}
@@ -1946,10 +1949,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// nothing certified, or `None` while it has none, does not believe it, or its sender
 	/// has not yet closed a batch of its claims.
 	fn carried(&self, id: Id, prefix: &Path) -> Option<View<A>> {
-		let (above, next) = ancestors(prefix).rev().find_map(|above| match self.routes.get(&(id, above.clone()))? {
-			Route::Live { next, .. } => Some((above, *next)),
-			_ => None,
-		})?;
+		let (above, next) =
+			ancestors(prefix)
+				.rev()
+				.find_map(|above| match self.routes.get(&(id, above.clone()))? {
+					Route::Live { next, .. } => Some((above, *next)),
+					_ => None,
+				})?;
 		let heard = self.rx.get(&(id, above))?.get(&next)?;
 		if !heard.batched || !self.believed(next, heard) {
 			return None;
@@ -1975,7 +1981,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	fn believed(&self, from: N, heard: &Heard<A>) -> bool {
 		heard.state == State::Live
 			&& !names(&heard.offer.path, self.hop)
-			&& self.sessions.get(&from).is_some_and(|session| heard.interest == session.interest)
+			&& self
+				.sessions
+				.get(&from)
+				.is_some_and(|session| heard.interest == session.interest)
 	}
 
 	/// Bring every view of `id` up to date: each prefix within the interest that a route
@@ -2145,9 +2154,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		// a child of another route. The peer cannot use that path anyway.
 		if self.name(self.listen(peer), id) != id
 			&& (route.next() == Some(self.listen(peer))
-				|| route
-					.offer()
-					.is_some_and(|offer| names(&offer.path, self.hop_of(peer))))
+				|| route.offer().is_some_and(|offer| names(&offer.path, self.hop_of(peer))))
 		{
 			return Want::End;
 		}
@@ -2767,7 +2774,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		for key in held {
 			match self.retain(&key) {
 				Some(route) => {
-					self.held_until.entry(key.clone()).or_insert(self.now.saturating_add(HOLD));
+					self.held_until
+						.entry(key.clone())
+						.or_insert(self.now.saturating_add(HOLD));
 					self.routes.insert(key, route);
 				}
 				None => {
@@ -3066,7 +3075,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let ended = |claim: &Path| {
 			ancestors(claim).any(|above| routes.contains_key(&(id, above)))
 				&& (origin
-					|| of(views, id).any(|((_, prefix), view)| within(claim, prefix) && view.floors.contains_key(prefix)))
+					|| of(views, id)
+						.any(|((_, prefix), view)| within(claim, prefix) && view.floors.contains_key(prefix)))
 		};
 		for (claim, shown) in &now {
 			match shown {

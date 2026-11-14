@@ -779,7 +779,9 @@ impl Sim {
 
 	/// The neighbour `node` routes `id` through: the widest live route's.
 	pub fn next_hop(&self, node: Node, id: Id) -> Option<Node> {
-		(self.nodes[node].routes(id).find(|(_, route)| route.offer().is_some()))?.1.next()
+		(self.nodes[node].routes(id).find(|(_, route)| route.offer().is_some()))?
+			.1
+			.next()
 	}
 
 	/// The neighbour `node` routes `id` through, `Some(None)` at its publisher, or

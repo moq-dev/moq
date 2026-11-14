@@ -1,5 +1,10 @@
 use crate::lite::{AnnounceBroadcast as Msg, AnnounceDecoder, PathRef, test_transport::SinkSession};
-use crate::{Instance, Path, auth::Permit, origin::Cost, route::path::{Hop, Offer}};
+use crate::{
+	Instance, Path,
+	auth::Permit,
+	origin::Cost,
+	route::path::{Hop, Offer},
+};
 
 fn offer() -> Offer {
 	Offer {
@@ -187,11 +192,7 @@ async fn a_claim_is_served_only_where_the_limit_admits_it() {
 }
 
 /// The route and claims a peer sends one stream, its Route ID 0.
-fn feed(
-	routed: &mut super::Routed,
-	decoder: &mut AnnounceDecoder,
-	paths: &[&'static str],
-) -> Result<(), crate::Error> {
+fn feed(routed: &mut super::Routed, decoder: &mut AnnounceDecoder, paths: &[&'static str]) -> Result<(), crate::Error> {
 	let prefix = Path::empty();
 	let route = Msg::RouteStart {
 		node: 7,
@@ -509,9 +510,7 @@ async fn a_refused_route_still_follows_a_dead() {
 	let prefix = Path::empty();
 	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let mut decoder = AnnounceDecoder::default();
-	let path = |session| -> std::sync::Arc<[Hop]> {
-		[Hop { node: 7, session: 0 }, Hop { node: 5, session }].into()
-	};
+	let path = |session| -> std::sync::Arc<[Hop]> { [Hop { node: 7, session: 0 }, Hop { node: 5, session }].into() };
 	let floor = |id| Msg::Floor { id, revision: Some(0) };
 	let claim = |route, path: &'static str| Msg::Active {
 		suffix: PathRef::literal(Path::from_static(path)),
@@ -546,7 +545,9 @@ async fn a_refused_route_still_follows_a_dead() {
 	assert!(served(&routed).is_empty());
 
 	// The session it crossed closed for good: it ends, and its Announce ID retires.
-	routed.receive(&prefix, closed(3, true, Vec::new()), &mut decoder).unwrap();
+	routed
+		.receive(&prefix, closed(3, true, Vec::new()), &mut decoder)
+		.unwrap();
 	assert!(routed.routes.is_empty() && routed.claims.is_empty() && routed.named.is_empty());
 	assert!(routed.receive(&prefix, Msg::EndedId { id: 0 }, &mut decoder).is_err());
 
@@ -596,8 +597,14 @@ async fn a_refused_route_still_follows_a_dead() {
 	assert!(routed.routes[&1].reach().is_none());
 
 	// A usable offer files it again with its last floor's claims.
-	let update = Msg::RouteUpdate { id: 1, offer: usable(6) };
+	let update = Msg::RouteUpdate {
+		id: 1,
+		offer: usable(6),
+	};
 	routed.receive(&prefix, update, &mut decoder).unwrap();
 	assert!(routed.routes[&1].reach().is_some());
-	assert_eq!(routed.routes[&1].committed.as_ref().map(|(claims, _)| claims.len()), Some(1));
+	assert_eq!(
+		routed.routes[&1].committed.as_ref().map(|(claims, _)| claims.len()),
+		Some(1)
+	);
 }

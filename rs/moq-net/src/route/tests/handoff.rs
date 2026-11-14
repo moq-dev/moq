@@ -775,10 +775,7 @@ fn stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it(rule:
 		assert_eq!(sim.shows(b, 7, "live/x"), None);
 		sim.release(a, b);
 		assert!(sim.run());
-		assert_eq!(
-			kinds(&at(&sim, b)),
-			[Kind::Start, Kind::End, Kind::Start, Kind::End]
-		);
+		assert_eq!(kinds(&at(&sim, b)), [Kind::Start, Kind::End, Kind::Start, Kind::End]);
 		assert!(!sim.holds(b, 7));
 	}
 }

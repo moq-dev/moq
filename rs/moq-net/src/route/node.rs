@@ -94,11 +94,7 @@ pub(crate) struct Served {
 pub(crate) enum Output {
 	/// Send ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD (`Held`), or for `None` ROUTE_END,
 	/// for the route to `id` covering `prefix`.
-	Route {
-		id: Id,
-		prefix: Path,
-		reach: Option<Reach>,
-	},
+	Route { id: Id, prefix: Path, reach: Option<Reach> },
 	/// Send these claim changes for the route, closed by ANNOUNCE_FLOOR.
 	Batch {
 		id: Id,
@@ -287,13 +283,7 @@ impl Outbox {
 	/// Queue a serving change: each replaces the last for its claim and route, the session
 	/// acting on where the claim ends up, in place when it keeps its instance.
 	fn serve(&mut self, output: Output) {
-		let (Output::Serve {
-			id, claim, prefix, ..
-		}
-		| Output::Unserve {
-			id, claim, prefix, ..
-		}) = &output
-		else {
+		let (Output::Serve { id, claim, prefix, .. } | Output::Unserve { id, claim, prefix, .. }) = &output else {
 			unreachable!("only serving changes are queued here");
 		};
 		let key = (*id, claim.clone(), prefix.clone());
@@ -425,13 +415,7 @@ impl Outbox {
 		while self.ready.is_empty() {
 			let Some(segment) = self.segments.front_mut() else {
 				let (_, output) = self.serves.pop_first()?;
-				if let Output::Serve {
-					id, claim, prefix, ..
-				}
-				| Output::Unserve {
-					id, claim, prefix, ..
-				} = &output
-				{
+				if let Output::Serve { id, claim, prefix, .. } | Output::Unserve { id, claim, prefix, .. } = &output {
 					self.serving.remove(&(*id, claim.clone(), prefix.clone()));
 				}
 				return Some(output);
@@ -546,7 +530,10 @@ fn recheck(homes: &Homes, queues: &Queues, waiting: &mut Waiting, id: Id, change
 	for claim in changed {
 		let at = paths.get_key_value(claim).into_iter();
 		for (path, keys) in at.chain(below(paths, claim)) {
-			held.extend(keys.iter().map(|(stream, prefix)| (path.clone(), *stream, prefix.clone())));
+			held.extend(
+				keys.iter()
+					.map(|(stream, prefix)| (path.clone(), *stream, prefix.clone())),
+			);
 		}
 	}
 	for (path, stream, prefix) in held {
@@ -669,7 +656,11 @@ struct Slot {
 impl Home {
 	/// Unserve every leaving slot once a wanted one serves the claim.
 	fn release(&mut self, queues: &Queues, id: Id, claim: &Path) {
-		if !self.slots.values().any(|slot| !slot.leaving && slot.confirmed.is_some()) {
+		if !self
+			.slots
+			.values()
+			.any(|slot| !slot.leaving && slot.confirmed.is_some())
+		{
 			return;
 		}
 		self.slots.retain(|(stream, prefix), slot| {
@@ -1177,7 +1168,9 @@ impl State {
 		let routes: Routes = (self.router.routes(id))
 			.flat_map(|(prefix, _)| {
 				let usable = self.router.usable(&(id, prefix.clone()));
-				usable.into_iter().map(|(next, offer)| (prefix.clone(), next, offer, self.router.name(next, id)))
+				usable
+					.into_iter()
+					.map(|(next, offer)| (prefix.clone(), next, offer, self.router.name(next, id)))
 			})
 			.collect();
 		let last = self.routes.get(&id).map_or(&[][..], Vec::as_slice);

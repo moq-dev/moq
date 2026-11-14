@@ -11134,7 +11134,10 @@ mod tests {
 			proxy: true,
 			..Default::default()
 		};
-		let stream = producer.route_node().answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty()).unwrap();
+		let stream = producer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		assert!(
 			matches!(
 				stream.try_output(),
@@ -11191,7 +11194,10 @@ mod tests {
 			proxy: true,
 			..Default::default()
 		};
-		let stream = producer.route_node().answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty()).unwrap();
+		let stream = producer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		let reenter = Arc::new(Reenter {
 			consumer: producer.consume(),
 			reentered: AtomicUsize::new(0),
@@ -16164,7 +16170,10 @@ mod tests {
 		};
 		let consumer = producer.consume();
 		let alice = producer.announce("room/alice", RouteInfo::new()).unwrap();
-		let stream = consumer.route_node().answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty()).unwrap();
+		let stream = consumer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		assert!(
 			driver.poll(Instant::now(), &waiter).is_ok(),
 			"the producer owns the origin"

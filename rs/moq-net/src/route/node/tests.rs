@@ -204,7 +204,9 @@ fn only_a_closed_session_reports_its_hop_dead() {
 		drop(receive);
 		drop(guard);
 		let sent = wire(outputs(&down));
-		let dead = sent.iter().any(|output| matches!(output, Output::Dead(Dead::Closed { .. })));
+		let dead = sent
+			.iter()
+			.any(|output| matches!(output, Output::Dead(Dead::Closed { .. })));
 		assert_eq!(dead, closed, "{sent:?}");
 		assert_eq!(
 			relay.lock().router.deadline().is_some(),
@@ -226,7 +228,9 @@ fn a_route_ended_unread_leaves_nothing() {
 	// The origin's own route stays for the prefix; its claims net out.
 	let read = outputs(&answer);
 	let starts = (read.iter())
-		.filter(|output| matches!(output, Output::Batch { changes, .. } if changes.iter().any(|(_, claim)| claim.is_some())))
+		.filter(
+			|output| matches!(output, Output::Batch { changes, .. } if changes.iter().any(|(_, claim)| claim.is_some())),
+		)
 		.count();
 	assert_eq!(starts, 0, "{read:?}");
 }
@@ -351,7 +355,10 @@ fn a_claim_goes_on_only_once_served() {
 fn the_doubt_timer_fires_on_the_origins_clock() {
 	let instance = Instance::random();
 	let clock = clock();
-	let (origin, relay) = (Node::new(1, 1, Deadlines::new(Instant::ZERO)), Node::new(2, 2, clock.clone()));
+	let (origin, relay) = (
+		Node::new(1, 1, Deadlines::new(Instant::ZERO)),
+		Node::new(2, 2, clock.clone()),
+	);
 	let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
 	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
 	origin.own(p("live/x"), Some(claim(&instance, 0)));
@@ -406,7 +413,11 @@ fn a_route_at_the_hop_limit_is_not_forwarded() {
 				_ => None,
 			})
 			.collect();
-		assert_eq!(sent.iter().map(|offer| offer.path.len()).max(), forwarded, "{hops} hops");
+		assert_eq!(
+			sent.iter().map(|offer| offer.path.len()).max(),
+			forwarded,
+			"{hops} hops"
+		);
 		for offer in sent {
 			let start = crate::lite::AnnounceBroadcast::RouteStart {
 				node: 100,

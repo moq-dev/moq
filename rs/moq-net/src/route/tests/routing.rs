@@ -133,7 +133,10 @@ fn two_uplinks_never_carry_cdn_transit() {
 	let mut sim = two_uplinks(true, None);
 	assert!(sim.run());
 	assert_eq!(next(&sim, c2, 7), Some(c1));
-	let route = sim.path(l2).route_for(7, &Path::empty()).and_then(|route| route.offer());
+	let route = sim
+		.path(l2)
+		.route_for(7, &Path::empty())
+		.and_then(|route| route.offer());
 	assert!(route.expect("a route").down_only);
 }
 
@@ -356,10 +359,7 @@ fn a_route_stops_at_the_hop_limit() {
 	assert!(sim.run());
 	let full = MAX_HOPS - 1;
 	assert_eq!(metric(&sim, full, 7), Some(full as Metric));
-	assert!(
-		!sim.routed(full + 1, 7),
-		"the route crossed as many nodes as one may"
-	);
+	assert!(!sim.routed(full + 1, 7), "the route crossed as many nodes as one may");
 	assert!(!sim.holds(last, 7), "nothing is sent on");
 }
 

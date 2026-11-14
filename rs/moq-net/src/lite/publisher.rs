@@ -210,7 +210,10 @@ impl Shared {
 		}
 		let prefix = origin.resolve(&broadcast.head(usize::try_from(depth).ok()?)?)?;
 		let claim = origin.resolve(broadcast)?;
-		let filter = match origin.route_node().forward(self.peer_setup.tag(), node, &claim, &prefix)? {
+		let filter = match origin
+			.route_node()
+			.forward(self.peer_setup.tag(), node, &claim, &prefix)?
+		{
 			crate::route::node::Via::Here => origin::NodeFilter::Own,
 			crate::route::node::Via::Route { prefix } => origin::NodeFilter::Route {
 				node,
@@ -3814,8 +3817,12 @@ mod announce_test {
 		}
 
 		let origin = Hop::new(1).unwrap().produce();
-		let mut answer =
-			super::routed::Answer::new(origin.consume(), crate::Path::empty(), true, crate::auth::Link::new(false));
+		let mut answer = super::routed::Answer::new(
+			origin.consume(),
+			crate::Path::empty(),
+			true,
+			crate::auth::Link::new(false),
+		);
 		let log = Log::default();
 		let mut stream = Stream::<Transport, Version> {
 			writer: Writer::new(
