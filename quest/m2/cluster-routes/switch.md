@@ -82,6 +82,9 @@ else, the model wins:
   draining for a set time is closed (epic Plan item 30); a hold protects
   presence, not loop freedom, so either is safe.
 - ROUTE_HOLD stays as the model has it (epic Plan items 14 and 19).
+- `RouteHandoff.tla` gains the down-only flag and its export rule (epic Plan
+  item 29), which the router already has, so the model checks the rule the
+  wire carries.
 - ROUTE_REQUEST and the echo are removed with their types. The Node ID a
   request names (epic Plan item 2) stays.
 - The doubt is local: nothing on the wire carries it. Its timer is the
