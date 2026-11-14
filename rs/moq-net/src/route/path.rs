@@ -1447,6 +1447,20 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		(heard.state == State::Live).then_some(&heard.offer)
 	}
 
+	/// Whether this node files `from`'s route for `id` under `prefix` as held.
+	#[cfg(test)]
+	pub fn heard_held(&self, id: Id, prefix: &Path, from: N) -> Option<bool> {
+		let heard = self.rx.get(&(id, prefix.clone()))?.get(&from)?;
+		Some(heard.state == State::Held)
+	}
+
+	/// Whether what this node last sent `peer` for `id` under `prefix` holds it.
+	#[cfg(test)]
+	pub fn sent_held(&self, peer: N, id: Id, prefix: &Path) -> Option<bool> {
+		let sent = self.answering.get(&peer)?.tx.get(&(id, prefix.clone()))?;
+		sent.offer().map(|_| sent.held())
+	}
+
 	/// Every route this node uses for `id`, by prefix.
 	pub fn routes(&self, id: Id) -> impl Iterator<Item = (&Path, &Route<N>)> {
 		of(&self.routes, id).map(|((_, prefix), route)| (prefix, route))
@@ -1740,14 +1754,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				if gone {
 					self.forget_heard(&key, peer);
 				} else {
-					let is_child = self.is_child(key.0, peer, &self.rx[&key][&peer].offer.path);
+					let hop = self.hop;
 					let heard = self
 						.rx
 						.get_mut(&key)
 						.and_then(|routes| routes.get_mut(&peer))
 						.expect("heard");
 					// A neighbour that holds under this node answers once those behind it have.
-					if !is_child {
+					// The neighbour cannot tell whether this node qualified the key, so
+					// both sides decide by the path alone, as the sender's report does.
+					if !child(&heard.offer.path, hop) {
 						heard.state = State::Held;
 					}
 				}
@@ -1938,9 +1954,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// The prefix of this node's own route that what it offers a stream answering
 	/// `prefixes` under `prefix` reflects: the route itself inside one of them, and at
-	/// one the best-ranked live route covering it that does not name the neighbour. Prefer the narrower scope among equal ranks. Without a usable
-	/// path, reflect a live or held route so a child can answer its loss. Preferring
-	/// a narrower route regardless of cost can make covering paths oscillate.
+	/// one the best-ranked live route covering it that does not name the neighbour.
+	/// Prefer the narrower scope among equal ranks. Without a usable path, reflect a
+	/// live or held route so a child can answer its loss. Preferring a narrower route
+	/// regardless of cost can make covering paths oscillate.
 	fn src(&self, id: Id, prefix: &Path, peer: N, prefixes: &BTreeSet<Path>) -> Path {
 		if !prefixes.contains(prefix) {
 			return prefix.clone();

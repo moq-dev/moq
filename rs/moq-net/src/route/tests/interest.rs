@@ -194,7 +194,7 @@ fn an_edit_crossing_a_dead_hop_and_a_hold_settles() {
 /// cannot use, here one the relay learned through the receiver's own dead session,
 /// keeps the covering route the receiver used there instead, as the sender would
 /// reflect it, so the claim stays available across the marker. Found by TLC
-/// (`EditSmall.cfg`).
+/// (`Edit.cfg`).
 #[test]
 fn narrowing_keeps_the_route_the_sender_would_reflect() {
 	let (origin, r1, client) = (0, 1, 2);

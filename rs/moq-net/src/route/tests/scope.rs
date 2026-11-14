@@ -1192,3 +1192,43 @@ fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
 		);
 	}
 }
+
+/// A node qualifies every key a scoped neighbour sends, so a route it reflected
+/// comes back under another key. While doubt keeps that neighbour off another
+/// path, it holds the route under this node and keeps it live through a first
+/// DEAD, so this node files it live too.
+#[test]
+fn a_qualified_reflection_stays_live_through_a_first_dead() {
+	let (origin, relay, scoped, other, spare) = (0, 1, 2, 3, 4);
+	let mut sim = Sim::with(Rule::PATH, 5);
+	sim.join(origin, relay, 1);
+	sim.link(
+		relay,
+		scoped,
+		SimLink::cost(1).grant(Grant {
+			subject: "ga",
+			scope: "a",
+		}),
+		SimLink::cost(1),
+	);
+	sim.join(origin, other, 5);
+	sim.join(other, scoped, 5);
+	sim.join(origin, spare, 5);
+	sim.join(spare, relay, 5);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "a/x", 0, None);
+	assert!(sim.run());
+	let key = qualified("ga", 7);
+	let at = p("a");
+	assert_eq!(sim.path(scoped).sent_held(relay, 7, &at), Some(false));
+	sim.disconnect(origin, relay);
+	assert!(sim.flow());
+	// The neighbour holds under this node, waiting out its doubt of another path.
+	assert_eq!(sim.path(scoped).sent_held(relay, 7, &at), Some(false), "{}", mesh(&sim));
+	assert_eq!(
+		sim.path(relay).heard_held(key, &at, scoped),
+		Some(false),
+		"{}",
+		mesh(&sim)
+	);
+}
