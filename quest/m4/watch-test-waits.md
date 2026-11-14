@@ -15,7 +15,7 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 [moq-dev/moq#7312](https://github.com/moq-dev/moq/pull/7312):
 
 - Fixed yields in watch tests:
-  - ✅ Quest in m2, one quest across `js/watch` tests. Reason: a fixed
+  - ✅ One quest across `js/watch` tests. Reason: a fixed
     yield count is flaky by construction.
   - Drop.
 

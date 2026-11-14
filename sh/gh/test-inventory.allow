@@ -6,7 +6,7 @@
 ignore moq-carla-bridge::gpu_video_reaches_the_worker /quest/m5/carla-bridge.md
 recipe carla::bridge-gpu /quest/m5/carla-bridge.md
 recipe rs::gpu /quest/m3/gpu-ci.md
-ignore moq-video::encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu /quest/m4/vaapi-render-tests.md
+ignore moq-video::encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu /quest/m3/vaapi-render-tests.md
 ignore moq-video::frame::vulkan::tests::vulkan_gpu_device /quest/m3/gpu-ci.md
 ignore moq-video::frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown /quest/m3/gpu-ci.md
 ignore moq-video::frame::cuda::tests::vulkan_cuda_auto_external_encode /quest/m3/gpu-ci.md
@@ -14,14 +14,14 @@ ignore moq-video::frame::cuda::tests::vulkan_cuda_convert_resize_encode /quest/m
 ignore moq-video::frame::cuda::tests::vulkan_cuda_three_view_workload /quest/m3/gpu-ci.md
 ignore moq-video::render::export::vulkan::tests::nvenc_encodes_the_export_in_place /quest/m3/gpu-ci.md
 ignore moq-video::render::export::vulkan::tests::vulkan_export_round_trips /quest/m3/gpu-ci.md
-ignore moq-video::render::renderer::tests::decoded_frames_reach_the_gpu_without_a_download /quest/m4/vaapi-render-tests.md
-ignore moq-video::render::renderer::tests::packed_dmabuf_renders_through_vulkan /quest/m4/vaapi-render-tests.md
-ignore moq-video::render::renderer::tests::recycled_decoder_surfaces_draw_the_latest_picture /quest/m4/vaapi-render-tests.md
-ignore moq-video::render::renderer::tests::the_i420_dmabuf_import_matches_the_cpu_path /quest/m4/vaapi-render-tests.md
-ignore moq-video::render::renderer::tests::the_nv12_dmabuf_import_matches_the_cpu_path /quest/m4/vaapi-render-tests.md
-ignore moq-video::capture::wgc::native::tests::wgc_displays_reopen_with_cursor_on_and_off /quest/m4/capture-wgc.md
-ignore moq-video::capture::wgc::native::tests::wgc_minimized_window_is_rejected_before_the_first_frame /quest/m4/capture-wgc.md
-ignore moq-video::capture::wgc::native::tests::wgc_window_reopens_with_cursor_on_and_off /quest/m4/capture-wgc.md
+ignore moq-video::render::renderer::tests::decoded_frames_reach_the_gpu_without_a_download /quest/m3/vaapi-render-tests.md
+ignore moq-video::render::renderer::tests::packed_dmabuf_renders_through_vulkan /quest/m3/vaapi-render-tests.md
+ignore moq-video::render::renderer::tests::recycled_decoder_surfaces_draw_the_latest_picture /quest/m3/vaapi-render-tests.md
+ignore moq-video::render::renderer::tests::the_i420_dmabuf_import_matches_the_cpu_path /quest/m3/vaapi-render-tests.md
+ignore moq-video::render::renderer::tests::the_nv12_dmabuf_import_matches_the_cpu_path /quest/m3/vaapi-render-tests.md
+ignore moq-video::capture::wgc::native::tests::wgc_displays_reopen_with_cursor_on_and_off /quest/m3/capture-wgc.md
+ignore moq-video::capture::wgc::native::tests::wgc_minimized_window_is_rejected_before_the_first_frame /quest/m3/capture-wgc.md
+ignore moq-video::capture::wgc::native::tests::wgc_window_reopens_with_cursor_on_and_off /quest/m3/capture-wgc.md
 ignore moq-video::capture::pipewire::camera::tests::pipewire_camera_captures_frames /quest/m5/video-hardware.md
 ignore moq-video::capture::pipewire::camera::tests::pipewire_camera_shares_a_running_stream /quest/m5/video-hardware.md
 ignore moq-video::capture::pipewire::tests::portal_captures_frames /quest/m5/video-hardware.md
@@ -35,9 +35,6 @@ ignore moq-video::frame::tests::d3d11_resize_defaults_to_the_gpu /quest/m5/video
 ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
-
-# Flaked under load; disabled until fixed at its cause.
-recipe test::stream-credit /quest/m1/stream-credit/browser-resets.md
 
 # Too slow for the merge gate; the quest runs it nightly once every scenario settles.
 ignore moq-net::route::tests::cache::sweep_cache_routing_long /quest/m2/cache-routing-proof.md

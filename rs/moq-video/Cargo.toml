@@ -176,7 +176,7 @@ ash = { workspace = true, optional = true }
 # user picks a monitor or window in a compositor dialog, and we get back a PipeWire fd +
 # node id to stream from. The Camera portal grants a sandboxed app a PipeWire
 # remote that exposes the cameras.
-ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast", "camera"] }
+ashpd = { version = "0.14", optional = true, default-features = false, features = ["tokio", "screencast", "camera"] }
 # The NVIDIA codecs, behind the default-on `nvidia` feature. Everything is
 # dlopen'd at runtime: cudarc loads CUDA, and moq-nvenc (an in-tree fork of
 # nvidia-video-codec-sdk, see rs/moq-nvenc) loads libnvidia-encode. So the binary

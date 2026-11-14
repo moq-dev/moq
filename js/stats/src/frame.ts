@@ -85,6 +85,7 @@ export const PresenceSchema = legacy(
 		subscriptions_peak: counter,
 		wire_tx: counter,
 		wire_rx: counter,
+		routes_refused: counter,
 	}),
 );
 

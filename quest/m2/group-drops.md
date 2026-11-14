@@ -55,17 +55,15 @@ every run; the 256-stream cell sometimes does.
   for a named consumer (for example a player or container reader that skips
   gaps), per the API audit rule that new
   surface needs one; name it in the PR or leave the mirror out.
-- **Order with the drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)).** The drop set
-  replaces `poll_drop`'s `Delivered` argument and the skipped record, and
-  edits the lite-07 SUBSCRIBE_DROP wording. Publish the API against its
-  final disposition record, so the public shape doesn't change twice.
+- **After the drop set.** This waited (2026-11-05) for Drop set, which
+  rewrote the lite-07 SUBSCRIBE_DROP wording and the drop signal, and
+  finished in [moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476) on
+  2026-11-12. `poll_drop` now takes no `Delivered` argument and yields the
+  given-up run with its `Hole` (`rs/moq-net/src/model/track.rs`,
+  `track/hole.rs`). Publish the API against that record.
 - The drop set owns the per-cursor drop runs and their reasons. This quest
   reports what a cursor gives up; it doesn't change how a cursor judges a
   missing group.
-
-Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
-Drop set ([moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476)), since both rewrite the lite-07
-SUBSCRIBE_DROP draft wording and the drop signal's `Delivered` argument.
 
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ key the drop signal by group start and land after
 [time addressing's model](/quest/m2/time-addressing/model.md), so its public
@@ -100,4 +98,4 @@ Wire: possibly lite-07 (SUBSCRIBE_DROP for a stopped group), decided here.
 - [Address groups by timestamp](/quest/m2/time-addressing/model.md) - the drop range is keyed by start
 
 ## Related
-- [The receive-windows benchmark](/quest/m1/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)
+- [The receive-windows benchmark](/quest/m3/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)

@@ -2081,7 +2081,7 @@ export class Subscriber {
 			}
 			stream.stop(e);
 		} finally {
-			read();
+			read.done();
 		}
 	}
 
@@ -2202,7 +2202,7 @@ export class Subscriber {
 			if (e instanceof StreamError && e.code === StreamCode.MalformedTrack) track.abort(e);
 			stream.stop(e);
 		} finally {
-			read?.();
+			read?.done();
 		}
 	}
 
