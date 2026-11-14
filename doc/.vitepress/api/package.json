@@ -18,6 +18,7 @@
 		"@moq/qmux": "workspace:*",
 		"@moq/room": "workspace:*",
 		"@moq/signals": "workspace:*",
+		"@moq/obs": "workspace:*",
 		"@moq/stats": "workspace:*",
 		"@moq/ui": "workspace:*",
 		"@moq/video": "workspace:*",

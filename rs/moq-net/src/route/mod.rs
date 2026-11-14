@@ -93,7 +93,7 @@ impl Key for u64 {
 }
 
 /// One side's configuration of a link to a neighbor.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Link {
 	/// Strictly positive: a zero-cost link would leave a route equal to its own
 	/// feasibility distance.
@@ -160,6 +160,21 @@ pub(crate) fn qualifier(key: [u8; 32]) -> Arc<dyn Fn(Id) -> Id + Send + Sync> {
 /// The most nodes a route crosses, its origin included: the longest hop list a
 /// message carries.
 pub(crate) const MAX_HOPS: usize = 32;
+
+/// Feed `value`'s `Debug` form to `hasher`: how the exhaustive search fingerprints
+/// router state without a `Hash` impl on every type it holds.
+#[cfg(test)]
+pub(crate) fn digest(hasher: &mut impl std::hash::Hasher, value: &impl fmt::Debug) {
+	struct Feed<'a, H>(&'a mut H);
+	impl<H: std::hash::Hasher> fmt::Write for Feed<'_, H> {
+		fn write_str(&mut self, s: &str) -> fmt::Result {
+			self.0.write(s.as_bytes());
+			Ok(())
+		}
+	}
+	fmt::write(&mut Feed(&mut *hasher), format_args!("{value:?}")).expect("Debug never fails");
+	hasher.write_u8(0xff);
+}
 
 /// What a node advertises for one identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -354,6 +369,7 @@ impl<A: Clone + Eq> Heard<A> {
 	}
 }
 
+#[derive(Clone, Debug)]
 struct Peer {
 	link: Link,
 	/// The link's min RTT, which routes learned here add; `None` while unmeasured.
@@ -379,7 +395,7 @@ impl Peer {
 
 /// The claims of an identity changed since it was last recomputed: the ones named,
 /// or any when `all` is set.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct Dirty {
 	all: bool,
 	claims: BTreeSet<Path>,
@@ -400,6 +416,7 @@ struct Ctx<N> {
 }
 
 /// An identity this node serves itself.
+#[derive(Clone, Debug)]
 struct Origin<A> {
 	seqno: Seqno,
 	/// Whether the node declared it, rather than forging it with no claims.
@@ -421,6 +438,7 @@ pub(crate) struct Retained {
 	pub certified: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct Router<N, A> {
 	/// How this node names itself in the hops of a route it forwards. A rotation
 	/// leaves it alone, so a route that crossed this node always says so.
@@ -1211,6 +1229,40 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	#[cfg(test)]
 	pub fn touched(&self) -> usize {
 		self.touched
+	}
+
+	/// Hash what decides this node's future, leaving out the work counter. Its output
+	/// and reader events must already be taken.
+	#[cfg(test)]
+	pub fn fingerprint(&self, hasher: &mut impl std::hash::Hasher) {
+		let Self {
+			hop,
+			neighbors,
+			origins,
+			rx,
+			filed,
+			fd,
+			advertised,
+			sent,
+			unacked,
+			pending,
+			watch,
+			interest,
+			views,
+			current,
+			heard,
+			sent_views,
+			reader,
+			dirty,
+			ctxs,
+			rng,
+			touched: _,
+			out,
+		} = self;
+		debug_assert!(out.is_empty(), "output not taken");
+		digest(hasher, &(hop, neighbors, origins, rx, filed, fd, advertised, sent));
+		digest(hasher, &(unacked, pending, watch, interest, views, current, heard));
+		digest(hasher, &(sent_views, reader, dirty, ctxs, rng));
 	}
 
 	/// What this node's reader sees.

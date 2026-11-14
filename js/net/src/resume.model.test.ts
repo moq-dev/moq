@@ -18,7 +18,7 @@ import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { HopSchema, WireRoute } from "./hop.ts";
+import { toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
@@ -450,7 +450,7 @@ class Model {
 		if (publisher.routes[slot]) return;
 		const route = WireRoute.normalize({
 			instance: INSTANCES[instance],
-			hops: [HopSchema.parse(BigInt(10 * (instance + 1) + slot))],
+			hops: [toHop(BigInt(10 * (instance + 1) + slot))],
 			// The second instance's routes all undercut the first's.
 			cost: BigInt((INSTANCES.length - instance) * SLOTS - slot),
 		});

@@ -635,6 +635,8 @@ type End =
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
 export class Session implements WebTransport {
+	/** The transport label MoQ reports, telling this session apart from native WebTransport. */
+	readonly transport = "websocket";
 	// The transport: a native `WebSocketStream` when the platform has one,
 	// otherwise the `WebSocketStream` ponyfill over a plain `WebSocket`. Either
 	// way, one API.
