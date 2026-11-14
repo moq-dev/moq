@@ -3460,6 +3460,65 @@ mod test {
 		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
 	}
 
+	/// A frame read partway when its route dies asks the next route for only the rest of it,
+	/// which a copy starting partway into the frame serves.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_half_read_frame_asks_only_for_the_rest() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+		let open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut frame = open
+			.create_frame(crate::frame::Info {
+				size: 4,
+				timestamp: Some(ts(0)),
+			})
+			.unwrap();
+		frame.write(b"ab".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(
+			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+			b"ab"
+		);
+
+		drop(frame);
+		a.clone().abort(Error::Dropped).unwrap();
+		let b = copy();
+		let dynamic = b.requests();
+		routes.serve(b.consume());
+		assert!(chunks.read_chunk().now_or_never().is_none());
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!((request.frame_start(), request.byte_start()), (0, 2));
+
+		// The answer holds the frame from byte 2 only, so a whole read of it finds nothing.
+		let rest = request.accept(None).unwrap();
+		let mut lead = rest
+			.create_lead(
+				crate::frame::Info {
+					size: 4,
+					timestamp: Some(ts(0)),
+				}
+				.into(),
+			)
+			.unwrap();
+		lead.write(b"cd".as_ref()).unwrap();
+		let mut rest = lead.finish().unwrap();
+		rest.write_frame(ts(1), b"e".as_ref()).unwrap();
+		rest.finish().unwrap();
+
+		assert_eq!(
+			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+			b"cd"
+		);
+		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
+		assert_eq!(read(&mut reading), Some(b"e".to_vec()));
+	}
+
 	/// A resumed group that the serving route gives up or aborts ends with that route's
 	/// error, even with no successor or later writes and its fetch still unanswered.
 	#[test]

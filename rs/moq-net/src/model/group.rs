@@ -6817,6 +6817,76 @@ mod test {
 		}
 	}
 
+	/// A copy started partway into frame 1 holds its rest aside: whole reads find the frame
+	/// missing, a read from at or past the copy's start byte streams the rest, and the frames
+	/// after it read as usual.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_copy_started_partway_into_a_frame_serves_only_its_rest() {
+		let bounded = || {
+			let mut producer = Info { sequence: 0 }.produce();
+			producer
+				.bound(Bounds {
+					start: 1,
+					byte: 3,
+					end: None,
+				})
+				.unwrap();
+			producer
+		};
+		let next_at = |group: &mut Consumer, from| match group.poll_next_frame_at(from, &kio::Waiter::noop()) {
+			Poll::Ready(res) => Some(res),
+			Poll::Pending => None,
+		};
+
+		// The rest of a frame no larger than the start is no frame at all.
+		assert!(matches!(
+			bounded().create_lead(sized(3).into()),
+			Err(Error::ProtocolViolation)
+		));
+
+		let producer = bounded();
+		let handle = producer.handle();
+		assert_eq!(handle.lead_at(1), Some(3));
+		let covers = |start, byte| handle.covers(Bounds { start, byte, end: None });
+		assert!(covers(1, 3) && covers(1, 4) && covers(2, 0));
+		assert!(!covers(1, 2) && !covers(1, 0) && !covers(0, 0));
+
+		let mut lagged = producer.consume();
+		lagged.skip_to(1);
+		assert!(matches!(lagged.read_frame().now_or_never(), Some(Err(Error::Lagged))));
+		let mut plain = producer.consume().with_range(0..);
+		assert_eq!(plain.index(), 2, "a whole read starts past the frame");
+		assert!(plain.clone().at(1, 2).is_none(), "the copy starts past byte 2");
+		let mut rest = plain.clone().at(1, 4).unwrap();
+		let mut early = plain.clone().at(1, 3).unwrap();
+		assert!(next_at(&mut rest, 4).is_none(), "waits for the frame to open");
+
+		let mut lead = producer.create_lead(sized(6).into()).unwrap();
+		assert_eq!(handle.lead_at(1), None, "opened");
+		assert_eq!(lead.remaining(), 3, "only the rest is written");
+		lead.write(b"de".as_ref()).unwrap();
+		let mut frame = next_at(&mut rest, 4).unwrap().unwrap().unwrap();
+		assert_eq!(frame.size, 6, "it states the frame's full size");
+		assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"e");
+		lead.write(b"f".as_ref()).unwrap();
+		let mut producer = lead.finish().unwrap();
+		producer.write_frame(Timestamp::ZERO, b"g".as_ref()).unwrap();
+		producer.finish().unwrap();
+		assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"f");
+		assert!(frame.read_chunk().now_or_never().unwrap().unwrap().is_none());
+		assert_eq!(
+			rest.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+			b"g"[..]
+		);
+
+		let mut frame = next_at(&mut early, 3).unwrap().unwrap().unwrap();
+		assert_eq!(frame.read_all().now_or_never().unwrap().unwrap(), b"def"[..]);
+
+		let read = plain.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read.payload, b"g"[..], "whole reads skip the frame held in part");
+	}
+
 	/// A declared size costs the peer nothing, so the pool is charged as the bytes
 	/// arrive. Charging the declaration would let a peer evict the cache without
 	/// sending anything.
