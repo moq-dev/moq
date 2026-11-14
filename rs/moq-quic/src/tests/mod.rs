@@ -2369,13 +2369,39 @@ fn migration() {
 	pair.drive_server();
 	assert_ne!(pair.server_conn_mut(server_ch).total_recvd(), 0);
 
+	pair.client.capture_inbound_packets = true;
 	pair.drive();
 	// The connection survives the client's own path change.
 	assert_matches!(pair.client_conn_mut(client_ch).error(), None);
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
 
-	// Assert that the client's response to the PATH_CHALLENGE was an IMMEDIATE_ACK, instead of a
-	// second ping
+	// The lone PING left the server a budget far short of 1200 bytes, so its first PATH_CHALLENGE
+	// went out short, and a full-size one followed once the address was validated (RFC 9000
+	// §8.2.1). These are the payload sizes of the packets carrying one, in arrival order.
+	let challenges: Vec<usize> = pair
+		.client
+		.captured_packets
+		.iter()
+		.filter(|payload| {
+			frame::Iter::new(Bytes::copy_from_slice(payload))
+				.unwrap()
+				.any(|frame| matches!(frame, Ok(Frame::PathChallenge(_))))
+		})
+		.map(Vec::len)
+		.collect();
+	assert_eq!(challenges.len(), 2, "PATH_CHALLENGE payload sizes: {challenges:?}");
+	assert!(
+		challenges[0] < 1000,
+		"the first challenge was not short: {challenges:?}"
+	);
+	// Header and AEAD tag take well under 60 bytes of the 1200
+	assert!(
+		challenges[1] + 60 >= usize::from(INITIAL_MTU),
+		"the second challenge was short: {challenges:?}"
+	);
+
+	// Assert that the client answered each PATH_CHALLENGE on its active path with an
+	// IMMEDIATE_ACK, instead of another ping
 	let client_stats_after_migrate = pair.client_conn_mut(client_ch).stats();
 	assert_eq!(
 		client_stats_after_migrate.frame_tx.ping - client_stats_after_connect.frame_tx.ping,
@@ -2383,7 +2409,7 @@ fn migration() {
 	);
 	assert_eq!(
 		client_stats_after_migrate.frame_tx.immediate_ack - client_stats_after_connect.frame_tx.immediate_ack,
-		1
+		2
 	);
 }
 

@@ -742,6 +742,7 @@ export namespace Track {
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
 		readonly start: bigint;
+		readonly time?: Time.Timestamp;
 		unwanted(sequence: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;
