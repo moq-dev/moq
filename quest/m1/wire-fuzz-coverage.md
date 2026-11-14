@@ -2,9 +2,9 @@
 
 ## Goal
 
-The hand-written unsafe that peer input reaches in `moq-c`, `moq-uring`, and `moq-sock` runs under Miri or a fuzz target of its own, asserting more than "it did not panic". Other peer-facing decoders, such as the media importers and RTMP's AMF0, are outside this quest.
+The hand-written unsafe that peer input reaches in `moq-uring` and `moq-sock` runs under Miri or a fuzz target of its own, asserting more than "it did not panic". Other peer-facing decoders, such as the media importers and RTMP's AMF0, are outside this quest.
 
-The moq-net half is done: the `ingest` and `request` targets cover the incremental group ingest and request-stream framing, and the seeds include prefixes at and past every cap. What remains: `rs/moq-c`, `rs/moq-uring`, and `rs/moq-sock` have no fuzz target and no Miri run. Their cmsg walks bound every length by the buffer, with unit tests, but nothing searches for the next mistake.
+The moq-net half is done: the `ingest` and `request` targets cover the incremental group ingest and request-stream framing, and the seeds include prefixes at and past every cap. What remains: `rs/moq-uring` and `rs/moq-sock` have no fuzz target and no Miri run. `moq-c`'s unsafe is the C ABI, reached by its C caller rather than by a peer, so it is not part of this quest. Their cmsg walks bound every length by the buffer, with unit tests, but nothing searches for the next mistake.
 
 ## Plan
 
@@ -18,10 +18,7 @@ The point is the invariant, not the coverage number: a target that only checks f
 
 Each crate follows moq-net's shape (`rs/moq-net/fuzz/README.md`): the target body in a `fuzz` module, documented as test support behind the `fuzz` feature, so the crate's own tests replay `fuzz/regressions/` on stable, a one-line shim per target, an `--exclude` in the `no_fuzz` list of `rs/justfile`, and a row in `nightly.yml`'s fuzz matrix. Target names must stay unique across crates.
 
-Ordering:
-
-- `moq-sock`'s `CMsg::decode` still reads `size_of::<T>()` past a short message (only a `debug_assert_eq!` checks it), which [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) fixes. A moq-sock target landing first would fail nightly on that known overread, so land it after, or with, that fix. The moq-uring target has no such dependency.
-- `just rs miri` and its nightly job already exist ([moq-dev/moq#7315](https://github.com/moq-dev/moq/pull/7315)); this quest adds its crates to them.
+`moq-sock`'s known overread is fixed: [moq-dev/moq#7394](https://github.com/moq-dev/moq/pull/7394) (merged 2026-11-01) bounds `CMsg::decode` (`rs/moq-sock/src/udp/cmsg/mod.rs`), which now returns `None` for a short message, so neither target waits on anything. `just rs miri` and its nightly job already exist ([moq-dev/moq#7315](https://github.com/moq-dev/moq/pull/7315)); this quest adds its crates to them.
 
 Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): ✅ m1
 (rejected: staying in m4). This unsafe is reachable by any peer.
@@ -31,4 +28,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [CI cost and latency](/quest/m0/ci/README.md) - where the nightly budget lives
-- [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) - fixes the moq-sock overread a cmsg target would hit

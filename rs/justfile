@@ -435,8 +435,8 @@ quic-sim:
 rung-disable:
     just rs test -p moq-ffi --lib --run-ignored only --no-capture -E 'test(/^test::rung::/)'
 
-# Prove downstream futures are Send at the default recursion limit on the
-# flake's pinned nightly. Nightly runs it; the land gate does not.
+# Prove the session driver and downstream futures are Send at the default recursion limit on the
+# flake's pinned nightly. The gate's rs lint phase runs it when moq-net is selected; Nightly runs it too.
 send-depth:
     bash sh/rs/send-depth.sh
 

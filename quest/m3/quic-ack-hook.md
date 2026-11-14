@@ -111,3 +111,14 @@ close.
 Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
 [viewer lag histogram](/quest/m3/qos/lag-histogram.md) and a
 delivery-delay histogram, whose plan was deleted on 2026-11-09.
+
+Split 2026-11-12 (maintainer, /quest-audit before the cut): the trait shape
+(`Offset`, `offset()`, and a defaulted `poll_acked`) lands in m2 as
+[its own quest](/quest/m2/api-ack-hook-trait.md), because
+`poll::SendStream` is public and unsealed and the cut would freeze it. This
+quest keeps the driver half: moq-quic's `poll_acked` leaves `#[cfg(test)]`,
+and the moq-tokio and moq-uring adapters implement the hook.
+
+## Required
+
+- [The send-stream trait has its acknowledgment hook](/quest/m2/api-ack-hook-trait.md) - the trait methods the drivers implement

@@ -21,19 +21,30 @@ release is out, delete this quest.
 
 ## Plan
 
+Moved from m5 to m3 2026-11-13 (maintainer, /quest-plan):
+[cli-packaging](/quest/m3/cli-packaging.md) in m3 requires it, and no quest
+requires one in a later milestone. ✅ m3 (rejected: moving cli-packaging and
+nixpkgs-cli to m5, which waits for the cut).
+
 Decided 2026-10-08: the capture chain (this quest,
 [capture-alsa-link](/quest/m3/capture-alsa-link.md), and
-[Ship capture and playback](/quest/m3/cli-packaging.md)) moves to m2 and parks
-until cpal ships runtime ALSA loading. Nothing is posted upstream and no fork
-is taken meanwhile.
+[Ship capture and playback](/quest/m3/cli-packaging.md)) parks until cpal
+ships runtime ALSA loading, with no fork taken meanwhile.
+
+Moved to m5 2026-11-12 (maintainer, /quest-audit): it waits only on an upstream cpal release. Superseded 2026-11-13: it is back in m3, per the decision above.
 
 Filed 2026-11-02 (maintainer-approved, /quest-unblock): [RustAudio/cpal#1421](https://github.com/RustAudio/cpal/issues/1421), recommending runtime loading first (most naturally in alsa-sys) and an optional ALSA host second. Related, not duplicates: RustAudio/cpal#1404 (FreeBSD-only `alsa` feature), cpal#929, and diwic/alsa-sys#10 (static linking).
 
-State as of 2026-10-05: cpal 0.18.2 (pinned here) and cpal master (0.19.0)
+State as of 2026-11-12: #1421 is open. A cpal maintainer replied on
+2026-11-04 that an optional ALSA host would break existing builds and that
+`default_host()` would then have no host to return on a headless Linux
+build, and asked whether static linking would do; nothing is decided. cpal's
+latest release is still 0.18.2 (2026-08-16), the version pinned here.
+
+State as of 2026-10-05: cpal 0.18.2 and cpal master (0.19.0)
 both depend on `alsa` unconditionally on Linux and the BSDs. `alsa` 0.12.1
 depends on `alsa-sys` 0.6.1, whose build script links libasound through
-pkg-config and offers no runtime-loading mode. No upstream issue or PR asks
-for either.
+pkg-config and offers no runtime-loading mode.
 
 Two upstream shapes, either of which unblocks
 [Audio capture without runtime system libraries](/quest/m3/capture-alsa-link.md):

@@ -11,7 +11,8 @@ The [`moq`](https://pub.dev/packages/moq) package on pub.dev wraps the
 generated [`moq_ffi`](https://pub.dev/packages/moq_ffi) bindings in Dart
 futures and streams. A Native Assets hook supplies the Rust core for Android
 (API 24+), iOS (16+), Linux, macOS, and Windows. Flutter web is not supported,
-since it can't load a native library.
+since it can't load a native library. The iOS library ships but has not yet
+been run in an iOS app, so treat iOS as untested.
 
 Import `package:moq/media.dart` with a prefix for catalogs, encoded-media imports, and
 container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,

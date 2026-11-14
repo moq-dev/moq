@@ -8,11 +8,7 @@ eviction turned off instead of passing.
 
 ## Plan
 
-Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs), milestone:
-
-- m0
-- m1
-- ✅ m2
+Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): a quest of its own, after the cut (rejected: m0, m1).
 
 Today they pass with eviction off, so they don't guard what they name.
 Candidates include "an evicted successor with unread frames still starts the

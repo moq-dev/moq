@@ -9,11 +9,7 @@ instead of ending. `rs/moq-json`'s snapshot consumer does the same.
 
 ## Plan
 
-Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs), milestone:
-
-- m0
-- m1
-- ✅ m2
+Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs).
 
 From [moq-dev/moq#7693](https://github.com/moq-dev/moq/pull/7693)'s
 follow-ups, where both automated reviewers asked moq-boy to keep reading
