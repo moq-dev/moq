@@ -530,3 +530,45 @@ it("offers every include's renditions to selection, subscribing only the selecte
 		origin.close();
 	}
 });
+
+it("dedupes an include's rendition only against a usable one", async () => {
+	const origin = new Origin.Producer();
+	publish(origin, "room/main.hang");
+	const [oldInstance, newInstance] = [Instance.random(), Instance.random()];
+	const serve = (instance: Instance.Valid) => {
+		const broadcast = publish(origin, "room/extra.hang", instance);
+		const catalog = new Json.Snapshot.Producer<Catalog.Root>({
+			track: broadcast.createTrack(Catalog.TRACK),
+			deltas: false,
+		});
+		catalog.update({ value: Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }) });
+		return broadcast;
+	};
+	const old = serve(oldInstance);
+	const parent = new Broadcast({
+		origin,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog: Catalog.RootSchema.parse({
+			video: { renditions: { v: { ...video("vp8"), broadcast: "./extra.hang", instance: oldInstance } } },
+			include: { extra: { broadcast: "./extra.hang" } },
+		}),
+	});
+	try {
+		await settle();
+		// The root already lists the include's media, so it is listed once.
+		expect(Object.keys(parent.out.catalog.peek()?.video?.renditions ?? {})).toEqual(["v"]);
+
+		// A restart proves the root's entry stale, while the include follows it.
+		const replacement = serve(newInstance);
+		await quietly(settle);
+		expect(parent.out.catalog.peek()?.video?.renditions).toEqual({
+			"extra/v": { ...video("vp8"), broadcast: "extra.hang" as Path.Relative, track: "v" },
+		});
+		replacement.close();
+	} finally {
+		parent.close();
+		old.close();
+		origin.close();
+	}
+});

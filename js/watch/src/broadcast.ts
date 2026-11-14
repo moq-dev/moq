@@ -105,8 +105,8 @@ function identity(path: Moq.Path.Valid, track: string): string {
 	return JSON.stringify([path, track]);
 }
 
-// Merge each include's renditions of one kind into `own`, keyed `<include>/<id>` and rebased so
-// their `broadcast` reference resolves from `base`. Skips one that reads media already listed, such
+// Merge each include's usable renditions of one kind into `own`, keyed `<include>/<id>` and rebased
+// so their `broadcast` reference resolves from `base`. Skips one that reads media already listed, such
 // as the source an include relists, and one whose ID is taken, so the root's IDs are never shadowed.
 function mergeRenditions<T extends Rendition>(
 	own: Record<string, T> | undefined,
@@ -114,6 +114,7 @@ function mergeRenditions<T extends Rendition>(
 	base: Moq.Path.Valid,
 	taken: Set<string>,
 	seen: Set<string>,
+	usable: Usable,
 ): Record<string, T> {
 	const merged: [string, T][] = Object.entries(own ?? {});
 	for (const { include, renditions } of includes) {
@@ -131,6 +132,7 @@ function mergeRenditions<T extends Rendition>(
 
 			// One reading the include's own broadcast inherits the stream its entry names.
 			const instance = target === include.path ? (config.instance ?? include.instance) : config.instance;
+			if (!usable(broadcast, instance)) continue;
 			const { broadcast: _broadcast, instance: _instance, ...rest } = config;
 			const rebased = { ...rest, track } as T;
 			if (broadcast !== undefined) rebased.broadcast = broadcast;
@@ -145,16 +147,23 @@ function mergeRenditions<T extends Rendition>(
 	return Object.fromEntries(merged);
 }
 
-// The root catalog with each read include's video and audio renditions beside its own, as one set
-// to select from. The root's settings govern them all, since an include shares its timeline.
-function withIncludes(root: Catalog.Root, base: Moq.Path.Valid, includes: Included[]): Catalog.Root {
+// The root catalog with each read include's usable video and audio renditions beside its own, as one
+// set to select from. The root's settings govern them all, since an include shares its timeline.
+// `root` is already filtered, so a stale entry of its own never hides an include's playable one, while
+// `raw` keeps every ID the root publishes reserved, so an include's ID never takes one over.
+function withIncludes(
+	raw: Catalog.Root,
+	root: Catalog.Root,
+	base: Moq.Path.Valid,
+	includes: Included[],
+	usable: Usable,
+): Catalog.Root {
 	if (includes.length === 0) return root;
 
-	const taken = new Set<string>();
+	const taken = new Set([...Object.keys(raw.video?.renditions ?? {}), ...Object.keys(raw.audio?.renditions ?? {})]);
 	const seen = new Set<string>();
 	for (const renditions of [root.video?.renditions, root.audio?.renditions]) {
 		for (const [id, config] of Object.entries(renditions ?? {})) {
-			taken.add(id);
 			const path = config.broadcast === undefined ? base : Path.tryResolve(base, config.broadcast);
 			if (path !== undefined) seen.add(identity(path, Catalog.track(id, config)));
 		}
@@ -166,6 +175,7 @@ function withIncludes(root: Catalog.Root, base: Moq.Path.Valid, includes: Includ
 		base,
 		taken,
 		seen,
+		usable,
 	);
 	const audio = mergeRenditions(
 		root.audio?.renditions,
@@ -173,6 +183,7 @@ function withIncludes(root: Catalog.Root, base: Moq.Path.Valid, includes: Includ
 		base,
 		taken,
 		seen,
+		usable,
 	);
 
 	// A root without a section of its own takes the display settings of the first include with one,
@@ -395,7 +406,10 @@ export class Broadcast {
 		const usable: Usable = (rel, instance) =>
 			this.#relativeTarget(effect, rel) !== undefined &&
 			(instance === undefined || !provesOther(this.#relativeActive(effect, rel), instance));
-		effect.set(this.#out.catalog, filterCatalog(withIncludes(raw, effect.get(this.in.name), included), usable));
+		effect.set(
+			this.#out.catalog,
+			withIncludes(raw, filterCatalog(raw, usable), effect.get(this.in.name), included, usable),
+		);
 	}
 
 	// Select every include the catalog lists, opening each one's catalog but none of its media. An
