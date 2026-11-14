@@ -1,30 +1,45 @@
-# [S] Nightly's release builds pass
+# [S] Nightly's moq-gst builds survive an apt mirror outage
 
 ## Goal
 
-The release builds Nightly runs pass every night, so the jobs that need them,
-such as `Shipping sizes`, run instead of being skipped.
+`moq-gst`'s Nightly builds stop failing when Ubuntu's apt mirrors can't be
+reached, so `Shipping sizes` still runs on those nights.
 
 ## Plan
 
-Found by the triage of Nightly run
-[43447849289](https://github.com/moq-dev/moq/actions/runs/43447849289)
-(2026-11-13): `Shipping sizes` was skipped 11-08 to 11-12 because release
-builds it depends on failed, so six days of size growth surfaced at once.
-Failures seen, each with its own cause:
+On 11-11 an apt DNS failure (`Temporary failure resolving
+'security.ubuntu.com'`) failed both `moq-gst / Build tarball` jobs and both
+`Package .deb/.rpm` jobs at their apt step, and so skipped `Shipping sizes`.
+That apt use is deliberate. The tarball job smoke-tests the plugin against
+the distro's own GStreamer, and the package job links against the distro's
+GStreamer headers. Nix can't stand in for either.
 
-- 11-12, `moq-cli / release / Build (armv7-unknown-linux-gnueabihf)`:
-  `error[E0463]: can't find crate for core`, so the toolchain lacks that
-  target's standard library.
-- 11-11, `Release FFI / Shared moq-ffi / Build moq-ffi (aarch64-unknown-linux-gnu)`:
-  apt failed with `Temporary failure resolving 'security.ubuntu.com'`, and
-  `Release C`/`Release Cpp` aarch64 then failed on a missing
-  `cpp-native-aarch64-unknown-linux-gnu` artifact.
-- 11-11/11-12: the macOS `moq-cli` tarball, the Go FFI bindings and package,
-  the Kotlin FFI package, and the aarch64 `moq-gst` builds, not yet triaged.
+Decided 2026-11-13 (maintainer, /quest-complete): ✅ the Linux jobs take the
+distro GStreamer from a weekly-published ghcr.io image with the packages
+preinstalled (rejected: accepting a mirror outage as a real failure).
+[The GStreamer CI image](/quest/m0/nightly/gst-image.md) publishes it and the
+digest pin, `.github/docker/gstreamer/image`.
 
-Fix each at its root. A network fetch at build time that can fail on a DNS
-blip is a defect to remove, for example by taking the cross toolchain from
-Nix, not to retry.
+- Tarball job: on Linux, run `just rs gst-smoke` over the extracted tarball
+  inside the pinned image with `docker run`, instead of apt-installing
+  GStreamer on the runner. macOS keeps `brew install gstreamer`.
+- Package job: run only the `cargo zigbuild` step inside the image, with the
+  checkout, `$HOME` (rustup's toolchain), and `/nix` (the packaging tools)
+  mounted, so pkg-config finds the image's GStreamer. Don't make it a
+  `container:` job: Nix's installer and the composite actions would then run
+  inside the image too.
+- Read the pin from the file, log in to ghcr.io with `GITHUB_TOKEN`, and
+  grant `packages: read` in `moq-gst.yml` and in Nightly's `release-moq-gst`
+  caller.
+- Drop the apt steps. Validate with a `workflow_dispatch` of `moq-gst.yml`
+  on the quest branch, which publishes nothing off a tag.
 
-Public API: none. Wire: none.
+The other release-build failures from 11-11 to 11-12 are fixed: armv7 by
+[#8509](https://github.com/moq-dev/moq/pull/8509), the Go bindings by
+[#8585](https://github.com/moq-dev/moq/pull/8585), and the FFI aarch64
+cross toolchain by
+[moq-dev/moq#8668](https://github.com/moq-dev/moq/pull/8668).
+
+## Required
+
+- [GStreamer CI image](/quest/m0/nightly/gst-image.md) - publishes the image and the pin file this reads
