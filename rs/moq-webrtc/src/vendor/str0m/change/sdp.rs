@@ -1704,9 +1704,15 @@ mod test {
 
 		let has_candidate = |m: &MediaLine| m.attrs.iter().any(|a| matches!(a, MediaAttribute::Candidate(_)));
 		assert!(answer.media_lines[0].disabled, "the data channel was accepted");
-		assert!(!has_candidate(&answer.media_lines[0]), "a candidate sits on the rejected line");
+		assert!(
+			!has_candidate(&answer.media_lines[0]),
+			"a candidate sits on the rejected line"
+		);
 		assert_eq!(answer.media_lines[1].mid(), audio);
-		assert!(has_candidate(&answer.media_lines[1]), "the accepted audio has no candidate");
+		assert!(
+			has_candidate(&answer.media_lines[1]),
+			"the accepted audio has no candidate"
+		);
 	}
 
 	#[test]
