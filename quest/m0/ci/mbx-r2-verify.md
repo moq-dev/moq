@@ -116,10 +116,9 @@ compilation is "not looked up".
   history (`fetch-depth: 0` with `filter: blob:none`) only once Windows hits
   after the mbx bump, which shows inheritance pays. Windows hit on
   2026-11-05 (above), so this quest's PR gives Nightly's five Linux
-  Rust-cache jobs full history. On the first scheduled Nightly after it
-  lands, compare each job's hits with its own depth-1 hits: the doctest
-  job's with the baseline below, and each other job's with its last
-  completed depth-1 scheduled run, since the jobs build different workloads.
+  Rust-cache jobs full history; it landed as
+  [#8342](https://github.com/moq-dev/moq/pull/8342). Each job's hits against
+  its own depth-1 hits are under "Evidence checked 2026-11-13" below.
 - `Cargo.lock` changed 7, 2, 6, 10, 8 and 8 times between consecutive
   scheduled Nightlies from 2026-10-21 to 2026-10-27. Nightly is the only
   hosted writer for Windows and macOS, so after more than 8 changes the
@@ -198,26 +197,161 @@ Workspace builds (hits / misses / not looked up):
   player) 58, 84 (11-11 cancelled before its build); Audio quality, hits of
   each of its three builds per night, 74, 77, 0 (11-09), 57, 97, 0 (11-10),
   54, 25, 0 (11-11). The doctest job is one entry of the `Tests` matrix.
-  The remaining Linux Rust-cache jobs (the `Nightly` matrix, the `Tests`
-  matrix's other recipes, and `Shipping sizes`) have no baseline recorded
-  here; read each one's depth-1 baseline from its own cache summary in these
-  three runs.
+  Every other Linux job's baseline is in the 2026-11-13 table below.
+
+Evidence checked 2026-11-13, scheduled runs
+[43250182795](https://github.com/moq-dev/moq/actions/runs/43250182795)
+(11-12 15:39 UTC, the first after #8342, still mbx 1.29.2) and
+[43447849289](https://github.com/moq-dev/moq/actions/runs/43447849289)
+(11-13, the first on mbx 1.30.0). Both predate
+[#8631](https://github.com/moq-dev/moq/pull/8631) (11-13 15:36 UTC), which
+lifts mbx's download budget from its hosted default (5 GiB on Linux, 10 GiB
+on Windows) to 20 GiB. Numbers come from each job's `mbx[cache]: object
+cache` lines.
+
+- 11-13 is an expiry wave. `NoSuchKey` prefetch failures went from 20 per
+  night (11-11, 11-12) to 5,270 across 38 jobs, including 2,837 on macOS,
+  which never reaches its budget. The 7-day rule applied 11-12 deleted every
+  object stored before about 11-06 at once: a refused 412 put does not
+  refresh an object, so a unit every night restores still expires 7 days
+  after its first upload. macOS's workspace build fell from
+  [989 / 141 / 59](https://github.com/moq-dev/moq/actions/runs/43250182795/job/131296895948)
+  on 11-12 to
+  [650 / 556 / 1](https://github.com/moq-dev/moq/actions/runs/43447849289/job/131965078558)
+  on 11-13, and every platform fell with it, so 11-13 cannot isolate either
+  full history or mbx 1.30.0. For the rebuild count in the Goal: a unit that
+  never changes still rebuilds once every 7 days, since no restore refreshes
+  it, and this wave was larger because the switch from 14 to 7 days expired
+  a week of uploads at once.
+- Windows still misses most looked-up keys. The
+  [11-13 workspace build](https://github.com/moq-dev/moq/actions/runs/43447849289/job/131965078875)
+  had 92 hits, 1,062 misses, 13 not looked up and 237 prefetched, and
+  downloaded exactly 10.0 GiB. 11-12 had 116 / 1,030 / 19, also at
+  10.0 GiB. Its `Explain Rust cache misses` step (`mbx analyze`) puts all
+  1,062 misses under "misses with no earlier recording", as expected on a
+  fresh runner, so it names no cause. The download budget is the leading
+  suspect. The only night with many hits,
+  [846 on 11-05](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127326015447),
+  downloaded 8.7 GiB with no budget refusals. Every night since 11-08 hit
+  the 10 GiB cap (2,591 to 6,840 refusals) and got 92 to 163 hits. Linux,
+  also budget-bound, logs 28,000 to 45,000 "action metadata is missing"
+  prefetch warnings a night, and macOS logged none before the expiry wave.
+- Linux full history works as intended for prediction: not looked up fell to
+  near 0 in most jobs (doctest about 200 to 0, `rs quic-sim` 598 to
+  33, `rs send-depth` 596 to 1). It did not raise hits, because every job
+  still spends its 5 GiB budget on prefetch, so the new predictions mostly
+  become misses. On 11-12, the cleanest comparison (one change, before the
+  expiry wave), the summed hits of the jobs below were 10,990, inside the
+  depth-1 range of 9,748 to 11,065. Ten jobs were above their own range,
+  16 inside it and 3 below it (`gate` with 3 more builds than before,
+  `test drill impaired` already falling from 406 to 259, and
+  `rs rung-disable` 5 under). No job regressed because of full history. On
+  11-13, 15 fell below their range and the sum fell to 9,317, which is the
+  expiry wave above. Doctest: 165 on 11-12 and 78 on 11-13, against the
+  174 of 11-08.
+
+Linux hits per job (depth-1 nights 11-09, 11-10, 11-11; then 11-12 and
+11-13 with full history). Jobs with no `mbx[cache]` summary build no Rust
+through mbx: `Audit`, `JS audit`, `Python audit`,
+`Rust coverage`, `JS coverage`, `JS benchmarks`, `BBB rendition
+alignment`, `gh test-integration`, `test qmux`, `test drill-sensitivity`,
+`js worklet-matrix`, `rs miri` and `test route-key-model`.
+
+| Job | 11-09 | 11-10 | 11-11 | 11-12 | 11-13 |
+| --- | --- | --- | --- | --- | --- |
+| Tests: `rs doctest --workspace` | 124 | 502 | 150 | 165 | 78 |
+| Tests: `gate` | 1,851 | 1,715 | 2,001 | 1,306 | 2,103 |
+| Tests: `test resume-model` | 119 | 114 | 218 | 143 | 222 |
+| Tests: `rs cli-export` | 155 | 142 | 140 | 181 | 72 |
+| Tests: `test drill impaired` | 406 | 398 | 259 | 219 | 61 |
+| Tests: `rs quic-sim` | 29 | 28 | 29 | 181 | 59 |
+| Tests: `rs audio-devices` | 0 | 400 | 131 | 150 | 79 |
+| Tests: `rs uring` | 78 | 75 | 42 | 248 | 318 |
+| Tests: `rs hls-conformance` | 194 | 438 | 232 | 194 | 91 |
+| Tests: `rs quic-stress` | 172 | 104 | 265 | 149 | 71 |
+| Tests: `test json-properties` | 93 | 131 | 219 | 145 | 86 |
+| Tests: `rs rung-disable` | 124 | 369 | 110 | 105 | 117 |
+| Tests: `rs multicast` | 366 | 178 | 210 | 192 | 158 |
+| Tests: `rs v4l2` | 80 | 0 | 146 | 125 | 76 |
+| Tests: `rs render-sw` | 220 | 115 | 143 | 164 | 90 |
+| Tests: `rs send-depth` | 0 | 0 | 0 | 172 | 4 |
+| Tests: `test drain` (new) | | | | 142 | 90 |
+| Tests: `test route-sweep` (new) | | | | 96 | 17 |
+| Nightly: Binding benchmark runners | 212 | 227 | 193 | 481 | 162 |
+| Nightly: Rust bench targets (cancelled) | 761 | 789 | 894 | 837 | 743 |
+| Nightly: Rust shared bench targets | 874 | 937 | 800 | 951 | 885 |
+| Nightly: Relay session benchmarks (cancelled) | 801 | 861 | 882 | 939 | 871 |
+| Nightly: Rust supplemental benchmarks | 983 | 1,369 | 1,296 | 1,282 | 1,147 |
+| Nightly: io_uring benchmarks | 737 | 927 | 1,017 | 909 | 873 |
+| Nightly: Browser benchmark smoke | 146 | 66 | 62 | 158 | 40 |
+| Nightly: Go audit | 159 | 161 | 0 | 124 | 74 |
+| Nightly: OBS | 563 | 555 | 585 | 567 | 544 |
+| Nightly: OBS TSan | 170 | 109 | 178 | 151 | 79 |
+| Nightly: moq-c C fixtures | 122 | 117 | 288 | 269 | 49 |
+| Nightly: Rust benchmark tests (split since) | 400 | 397 | 341 | 156 | 141 |
+| Nightly: Rust application benchmark tests (new) | | | | 150 | 104 |
+| Media (firefox player) | 58 | 84 | | 180 | 35 |
+| Audio quality (three builds summed) | 151 | 154 | 79 | 303 | 130 |
+| Shipping sizes (skipped until 11-13) | | | | | 104 |
+
+The sums above leave out the rows marked new or split and `Shipping sizes`,
+which have no comparable baseline.
+
+What the after-#8631 nights must show here, read from the same summaries
+the [failed-puts quest](/quest/m0/ci/mbx-failed-puts.md) already collects for
+its own after-measurement:
+
+- Windows: whether its workspace build hits most looked-up keys once its
+  download stays under 20 GiB with no budget refusals. That decides the
+  upstream report below.
+- Linux: whether full history now raises each job's hits above its depth-1
+  range. If the jobs still sit inside it once restores stop failing, plan a
+  quest that returns them to `fetch-depth: 1`, since full history then costs
+  checkout time for nothing.
+- Pick nights at least a week after 11-13, or note where the expiry wave
+  still shows.
+- The Goal's same-commit restore-plus-build comparison is still unmeasured;
+  take it from two scheduled runs on one `main` commit if a quiet day gives
+  them, else say none occurred.
+
+Draft upstream issue for jdx/mr-boxington, to file only on the maintainer's
+approval (Waiting). Its CONTRIBUTING.md accepts bug reports in Issues or
+Discussions only from real use, and requires AI disclosure. Its AGENTS.md
+gives the disclosure line, which the poster appends verbatim with its own
+runtime identifiers, followed by the `(Written by <model> with <effort>)`
+line. Cite only logs and behavior; no source code. Replace the bracketed
+placeholder with the first night after #8631.
+
+> **Title:** Windows CI: most predicted compilations miss in a remote that the previous night's same job wrote
+>
+> **What I was trying to do:** Share one S3-compatible remote (Cloudflare R2) between nightly GitHub-hosted jobs, namespaced per runner OS and arch, through mr-boxington-action with mbx 1.30.0, `MBX_REMOTE_MODE=read-write` and `MBX_GC_MAX_SIZE=20GiB`. The Windows job (`windows-latest`, x86_64-pc-windows-msvc) runs `cargo check --locked --workspace --all-targets`, and the same job wrote the remote the night before with at most a few `Cargo.lock` changes in between.
+>
+> **What happened:** macOS restores most of what it looks up; Windows restores about one in ten:
+>
+> ```
+> macOS   mbx[cache]: object cache: 989 hits, 141 misses, 59 not looked up, ...
+> Windows mbx[cache]: object cache: 116 hits, 1030 misses, 19 not looked up, 257 prefetched, 3 bypassed, 1 remote failures; 10.0 GiB downloaded, 1.2 GiB uploaded, 11.2 GiB stored locally
+> Windows, after raising the download budget: [summary line from the first night after moq-dev/moq#8631]
+> ```
+>
+> `mbx analyze` after the build reports all of them as `misses with no earlier recording`, which is expected on a fresh runner, so it doesn't say whether the remote held those keys. One earlier Windows night on 1.29.2, under the default 10 GiB budget, had 846 hits and 224 misses at 8.7 GiB downloaded.
+>
+> **What would help:** a way to tell, for a predicted compilation that missed, whether the remote held an action under that key, and which task manifest the build inherited its predictions from.
 
 ## Waiting
 
-- GitHub Actions: the first scheduled Nightly on mbx 1.30.0 shows whether
-  Windows still misses most looked-up keys (above). If it does, file an issue
-  on jdx/mr-boxington with that run's `Explain Rust cache misses` output and
-  cache summary, following its CONTRIBUTING.md and AGENTS.md AI disclosure
-  rules (the maintainer approved filing). If the misses are gone, record that
-  run's numbers here. Either way, drop this item.
-- GitHub Actions: the first scheduled Nightly after #8342 (2026-11-12 afternoon or
-  later) must show each Linux Rust-cache job's hits against its depth-1
-  baseline (above, or for the `Nightly` matrix, the `Tests` matrix's other
-  recipes and `Shipping sizes`, their own summaries in runs 42659882487, 42842827718 and 43041909115) and the
-  174-hit doctest run of 11-08, and scheduled runs
-  must supply the same-commit restore-plus-build comparison and the
-  rebuild-frequency count in the Goal.
+- Maintainer: approve filing the drafted Windows issue (Plan) on
+  jdx/mr-boxington, which is outside the maintainer's orgs, so an agent may
+  not post there unasked. Recommended: approve filing only if the first
+  scheduled Nightly after #8631 still shows Windows missing most looked-up
+  keys with no `download budget exceeded` warnings; if hits recover, the
+  Windows before and after goes to
+  [jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950)
+  with the failed-puts numbers instead, and no issue is filed. Not
+  recommended: filing now, since the budget explains the same pattern on
+  Linux and upstream would chase our configuration; never filing, since the
+  draft is ready if the misses outlast the budget. Done when the answer is
+  recorded in the Plan.
 - moq-dev/moq: no earlier than 2026-11-26, an agent on the maintainer's
   desktop collects `mbx-moq-dev`'s size and request counts for the first
   month and checks that the six old oversized manifests expired. Size comes
