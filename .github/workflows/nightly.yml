@@ -817,13 +817,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
+        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0, qmux, token, jwk]
         # A whole session runs at 50 to 90 inputs a second, and its coverage still climbs
         # after five minutes, so it gets fifteen.
         include:
           - target: session_lite
             seconds: 900
           - target: session_ietf
+            seconds: 900
+          - target: qmux
             seconds: 900
     steps:
       - name: Checkout

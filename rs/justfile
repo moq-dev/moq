@@ -13,7 +13,7 @@ set working-directory := '..'
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, as does
 # sh/rs/select.sh, since it cannot read this.
-no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz"
+no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude qmux-fuzz --exclude moq-auth-fuzz"
 
 default:
     just check

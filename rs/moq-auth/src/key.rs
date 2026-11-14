@@ -111,6 +111,17 @@ pub enum EllipticCurve {
 	Ed25519,
 }
 
+impl EllipticCurve {
+	/// The curve's JWK name.
+	fn name(&self) -> &'static str {
+		match self {
+			Self::P256 => "P-256",
+			Self::P384 => "P-384",
+			Self::Ed25519 => "Ed25519",
+		}
+	}
+}
+
 /// RSA public key parameters.
 ///
 /// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.1>
@@ -276,6 +287,8 @@ impl Jwk {
 			scope.validate()?;
 		}
 
+		self.check_algorithm()?;
+
 		if let KeyMaterial::OCT { secret } = &self.material
 			&& secret.len() < MIN_OCT_SECRET_BYTES
 		{
@@ -295,6 +308,37 @@ impl Jwk {
 			decode: Default::default(),
 			encode: Default::default(),
 		})
+	}
+
+	/// Refuse an algorithm the key type or curve cannot use, as `@moq/auth` does, rather than
+	/// fail at the first token.
+	fn check_algorithm(&self) -> crate::Result<()> {
+		use Algorithm::*;
+		let fits = match &self.material {
+			KeyMaterial::OCT { .. } => matches!(self.algorithm, HS256 | HS384 | HS512),
+			KeyMaterial::RSA { .. } => matches!(self.algorithm, RS256 | RS384 | RS512 | PS256 | PS384 | PS512),
+			KeyMaterial::EC { curve, .. } => {
+				let expected = match curve {
+					EllipticCurve::P256 => ES256,
+					EllipticCurve::P384 => ES384,
+					EllipticCurve::Ed25519 => return Err(KeyError::InvalidCurve("EC").into()),
+				};
+				if self.algorithm != expected {
+					return Err(KeyError::InvalidAlgorithmForCurve(curve.name()).into());
+				}
+				true
+			}
+			KeyMaterial::OKP { curve, .. } => {
+				if *curve != EllipticCurve::Ed25519 {
+					return Err(KeyError::InvalidCurve("OKP").into());
+				}
+				self.algorithm == EdDSA
+			}
+		};
+		match fits {
+			true => Ok(()),
+			false => Err(KeyError::InvalidAlgorithm.into()),
+		}
 	}
 }
 
@@ -480,10 +524,8 @@ impl Key {
 		}
 
 		let decoding_key = match self.material {
-			KeyMaterial::OCT { ref secret } => match self.algorithm {
-				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => DecodingKey::from_secret(secret),
-				_ => return Err(KeyError::InvalidAlgorithm.into()),
-			},
+			// `Jwk::import` checked the algorithm fits the material.
+			KeyMaterial::OCT { ref secret } => DecodingKey::from_secret(secret),
 			KeyMaterial::EC {
 				ref curve,
 				ref x,
@@ -491,9 +533,6 @@ impl Key {
 				..
 			} => match curve {
 				EllipticCurve::P256 => {
-					if self.algorithm != Algorithm::ES256 {
-						return Err(KeyError::InvalidAlgorithmForCurve("P-256").into());
-					}
 					if x.len() != 32 || y.len() != 32 {
 						return Err(KeyError::InvalidCoordinateLength("P-256").into());
 					}
@@ -504,9 +543,6 @@ impl Key {
 					)?
 				}
 				EllipticCurve::P384 => {
-					if self.algorithm != Algorithm::ES384 {
-						return Err(KeyError::InvalidAlgorithmForCurve("P-384").into());
-					}
 					if x.len() != 48 || y.len() != 48 {
 						return Err(KeyError::InvalidCoordinateLength("P-384").into());
 					}
@@ -519,15 +555,9 @@ impl Key {
 				_ => return Err(KeyError::InvalidCurve("EC").into()),
 			},
 			KeyMaterial::OKP { ref curve, ref x, .. } => match curve {
-				EllipticCurve::Ed25519 => {
-					if self.algorithm != Algorithm::EdDSA {
-						return Err(KeyError::InvalidAlgorithmForCurve("Ed25519").into());
-					}
-
-					DecodingKey::from_ed_components(
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
-					)?
-				}
+				EllipticCurve::Ed25519 => DecodingKey::from_ed_components(
+					base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
+				)?,
 				_ => return Err(KeyError::InvalidCurve("OKP").into()),
 			},
 			KeyMaterial::RSA { ref public, .. } => {
@@ -544,10 +574,7 @@ impl Key {
 		}
 
 		let encoding_key = match self.material {
-			KeyMaterial::OCT { ref secret } => match self.algorithm {
-				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => EncodingKey::from_secret(secret),
-				_ => return Err(KeyError::InvalidAlgorithm.into()),
-			},
+			KeyMaterial::OCT { ref secret } => EncodingKey::from_secret(secret),
 			KeyMaterial::EC {
 				ref curve,
 				ref x,
@@ -721,16 +748,7 @@ fn deserialize_base64url<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
 	D: Deserializer<'de>,
 {
-	let s = String::deserialize(deserializer)?;
-
-	// Try to decode as unpadded base64url first (preferred format)
-	base64::engine::general_purpose::URL_SAFE_NO_PAD
-		.decode(&s)
-		.or_else(|_| {
-			// Fall back to padded base64url for backwards compatibility
-			base64::engine::general_purpose::URL_SAFE.decode(&s)
-		})
-		.map_err(serde::de::Error::custom)
+	decode_base64url(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
 }
 
 fn deserialize_base64url_optional<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
@@ -738,16 +756,21 @@ where
 	D: Deserializer<'de>,
 {
 	let s: Option<String> = Option::deserialize(deserializer)?;
-	match s {
-		Some(s) => {
-			let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-				.decode(&s)
-				.or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&s))
-				.map_err(serde::de::Error::custom)?;
-			Ok(Some(decoded))
-		}
-		None => Ok(None),
+	s.map(|s| decode_base64url(&s))
+		.transpose()
+		.map_err(serde::de::Error::custom)
+}
+
+/// A key field: unpadded base64url, or padded for backwards compatibility. Empty is refused,
+/// as `@moq/auth` does, since no key material is empty.
+fn decode_base64url(s: &str) -> Result<Vec<u8>, String> {
+	if s.is_empty() {
+		return Err("empty key field".to_string());
 	}
+	base64::engine::general_purpose::URL_SAFE_NO_PAD
+		.decode(s)
+		.or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(s))
+		.map_err(|err| err.to_string())
 }
 
 #[cfg(test)]

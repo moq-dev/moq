@@ -112,8 +112,19 @@ const OkpKeySchema = z.extend(BaseKeySchema, {
 });
 
 const CanonicalKeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]);
-/** A JSON Web Key of any supported type: oct, RSA, EC, or OKP. */
-export const KeySchema = CanonicalKeySchema;
+/**
+ * A JSON Web Key of any supported type: oct, RSA, EC, or OKP, with an algorithm its type and
+ * curve can use. A key set's keys are held to the same rules as a single key.
+ */
+export const KeySchema = CanonicalKeySchema.check(
+	z.superRefine((key, ctx) => {
+		try {
+			validateKey(key);
+		} catch (error) {
+			ctx.addIssue({ code: "custom", message: error instanceof Error ? error.message : "invalid key" });
+		}
+	}),
+);
 /** A value parsed by {@link KeySchema}. */
 export type Key = z.infer<typeof KeySchema>;
 /** An RSA, EC, or OKP key. */
@@ -175,12 +186,6 @@ function parse(jwk: string): Key {
 	let key: Key;
 	try {
 		key = KeySchema.parse(data);
-	} catch (error) {
-		throw new Error(`Failed to validate JWK: ${error instanceof Error ? error.message : "unknown error"}`);
-	}
-
-	try {
-		validateKey(key);
 	} catch (error) {
 		throw new Error(`Failed to validate JWK: ${error instanceof Error ? error.message : "unknown error"}`);
 	}

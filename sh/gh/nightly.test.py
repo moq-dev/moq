@@ -470,7 +470,8 @@ class FuzzTest(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                "run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds",
+                "run --locked -q --manifest-path rs/moq-net/Cargo.toml --features fuzz --example fuzz-seeds -- "
+                "rs/moq-net/fuzz/seeds",
                 "fuzz run --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite rs/moq-net/fuzz/seeds/lite "
                 "-- -runs=2",
             ],
