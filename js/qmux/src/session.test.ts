@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { Duration, type Installed, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, type Installed, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";

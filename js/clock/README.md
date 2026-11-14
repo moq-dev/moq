@@ -1,10 +1,11 @@
 # @moq/clock
 
 Logical monotonic time, wall time, and timers from one clock per JavaScript realm.
-Use `Manual` to test time without replacing the host's timers.
+Use `Manual` from `@moq/clock/test` to test time without replacing the host's timers.
 
 ```ts
-import { Duration, Instant, Manual, now, sleep } from "@moq/clock";
+import { Duration, Instant, now, sleep } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 
 const clock = new Manual();
 const installed = clock.install();

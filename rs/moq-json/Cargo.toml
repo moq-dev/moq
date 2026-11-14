@@ -36,7 +36,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
-json-patch = "4"
+json-patch = "5"
 # Compile the generated wrappers used by the tests.
 moq-json = { path = ".", features = ["async"] }
 moq-net = { path = "../moq-net", features = ["async"] }

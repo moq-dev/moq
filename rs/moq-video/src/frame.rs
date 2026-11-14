@@ -453,8 +453,8 @@ pub enum Surface {
 	/// Zero-copy GPU texture (Windows Direct3D11 NV12).
 	#[cfg(target_os = "windows")]
 	Texture(d3d11::Texture),
-	/// Zero-copy GPU buffer (Linux CUDA NV12). Produced by the NVDEC decoder or
-	/// the GPU color converter, consumed in place by the NVENC encoder.
+	/// GPU buffer (Linux CUDA NV12). Produced by the NVDEC decoder or the GPU
+	/// color converter, and scaled on the GPU into the NVENC encoder's input.
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Cuda(cuda::Frame),
 	/// External Vulkan RGBA8 / BGRA8 image with explicit GPU synchronization.
@@ -3399,7 +3399,7 @@ mod tests {
 
 		// Upload as pitched NV12: Y rows, then interleaved UV rows.
 		let pitch = 512u32;
-		let frame = cuda::Frame::alloc(&ctx, w, h, pitch).unwrap();
+		let frame = cuda::Frames::new(&ctx).alloc(Size::new(w, h), pitch).unwrap();
 		let mut host = vec![0u8; pitch as usize * h as usize * 3 / 2];
 		for row in 0..h as usize {
 			let dst = row * pitch as usize;

@@ -13,8 +13,12 @@ those buffers with the ring is
 Decided in the 2026-09-30 plan: commit to the redesign, but start only after
 a `moq-quic` profile shows where ingress and egress spend their time
 (`just bench-profile cpu` on `io-uring-workers`).
-No current profile is from `moq-quic`, and moq-uring already avoids every
-other copy the current API allows.
+`moq-quic` is moq-uring's only backend, so the io_uring relay profiles the
+[perf epic](/quest/m9/perf/README.md) cites (such as
+[moq-dev/moq#7505](https://github.com/moq-dev/moq/pull/7505)'s) are `moq-quic`
+profiles, but none recorded so far splits ingress and egress across this
+boundary; take that profile first. moq-uring already avoids every other copy
+the current API allows.
 
 Candidates, to be ranked by the profile:
 

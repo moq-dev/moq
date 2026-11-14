@@ -2513,7 +2513,12 @@ mod tests {
 				shared.bgids.borrow().free
 			);
 			let err = handle.udp(bind(), Config::default()).expect_err("every id is live");
-			assert!(err.to_string().contains("buffer group id"), "{err}");
+			// The cause sits in the source chain; `Error::Io` displays only its kind.
+			let chain = std::iter::successors(Some(&err as &dyn std::error::Error), |err| err.source())
+				.map(ToString::to_string)
+				.collect::<Vec<_>>()
+				.join(": ");
+			assert!(chain.contains("buffer group id"), "{chain}");
 
 			let weak = sock.downgrade();
 			drop(sock);

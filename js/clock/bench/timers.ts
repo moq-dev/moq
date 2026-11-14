@@ -1,5 +1,6 @@
 // Sweep armed timers x timers made ready, with independent and shared abort scopes.
-import { Duration, Manual, sleep } from "../src/index.ts";
+import { Duration, sleep } from "../src/index.ts";
+import { Manual } from "../src/test.ts";
 
 console.log("mode,scope,armed,ready,arm_us,advance_us,cancel_us");
 for (const mode of ["jump", "advance"]) {
