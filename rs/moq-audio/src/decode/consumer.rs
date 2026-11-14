@@ -651,8 +651,7 @@ impl Consumer {
 					// A group the container dropped unread is never observed, so the estimator
 					// learns when it arrived instead: a join lasts until its skipped backlog has.
 					if let Some(skipped) = self.track.skipped() {
-						self.target
-							.backlog(jitter::millis(skipped.duration_since(self.origin)));
+						self.target.backlog(jitter::millis(skipped.duration_since(self.origin)));
 					}
 					// Every packet the container hands over is an arrival, including one the
 					// decoder will refuse, so it is observed before anything can fail.

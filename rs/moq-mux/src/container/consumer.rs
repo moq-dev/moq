@@ -2031,7 +2031,10 @@ mod tests {
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
 
 		write_group(&mut track, 5, &[ts(100_000)]);
-		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { group: 5, .. })));
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 5, .. })
+		));
 		assert_eq!(reader.skipped(), None, "nothing dropped yet");
 
 		tokio::time::advance(Duration::from_millis(30)).await;
@@ -2039,7 +2042,10 @@ mod tests {
 		write_group(&mut track, 2, &[ts(40_000)]);
 		tokio::time::advance(Duration::from_millis(30)).await;
 		write_group(&mut track, 6, &[ts(120_000)]);
-		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { group: 6, .. })));
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 6, .. })
+		));
 		assert_eq!(reader.skipped(), Some(below));
 	}
 
