@@ -160,5 +160,4 @@ setup after the capabilities land.
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions feed the shared routing model
 - [Routing guide](/quest/m3/routing-guide.md) - concept page and federation setup; P2P extends it in m4
 - [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
-- [Link quality](/quest/m5/link-quality.md) - optional measured link cost, distinct from delivery-health failover
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - per-broadcast warm routes ranked against these node routes

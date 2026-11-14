@@ -46,8 +46,7 @@ What it demonstrates:
 
 Code: [`rs/moq-boy`](https://github.com/moq-dev/moq/tree/main/rs/moq-boy) (emulator
 and publisher) and [`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy)
-(the `<moq-boy>` element and page). The same
-shape covers teleoperation: swap the emulator for a robot.
+(the `<moq-boy>` element and page).
 
 ## CARLA
 

@@ -132,7 +132,6 @@ export default defineConfig({
 								{ text: "vs RTMP/SRT", link: "/concept/use-case/contribution" },
 								{ text: "vs WebRTC", link: "/concept/use-case/conferencing" },
 								{ text: "For AI", link: "/concept/use-case/ai" },
-								{ text: "For teleoperation", link: "/concept/use-case/teleoperation" },
 							],
 						},
 					],
