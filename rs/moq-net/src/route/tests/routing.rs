@@ -1688,3 +1688,38 @@ fn a_relay_keeps_nothing_once_its_only_route_closes() {
 	router.disconnect([up]);
 	assert!(router.keeps_nothing(7));
 }
+
+/// A claim only ever carried uncertified, as a stream's own, goes offline when the
+/// stream drops it: that proves only the stream left it, not that the origin
+/// withdrew it. That holds while another certifier has yet to answer, so which
+/// regions are certified is unknown.
+#[test]
+fn an_uncertified_claim_dropped_goes_offline_while_a_certifier_is_unanswered() {
+	let (answered, silent) = (0, 1);
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(answered, Link::default()).unwrap();
+	router.connect(silent, Link::default()).unwrap();
+	let interest = router.interest();
+	for from in [answered, silent] {
+		let advert = Advert {
+			seqno: 0,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+			hops: Arc::from([hop(9, 0), hop(from, 0)]),
+		};
+		router.route(from, 7, Some(Reach::Finite(advert)));
+	}
+	router.batch(answered, 7, vec![(p("live/x"), Some(item))], None, interest);
+	assert_eq!(router.shows(7, &p("live/x")), Some(true));
+	router.events();
+
+	router.batch(answered, 7, vec![(p("live/x"), None)], None, interest);
+	let kinds: Vec<Kind> = router.events().into_iter().map(|event| event.kind).collect();
+	assert_eq!(kinds, [Kind::Offline]);
+}
