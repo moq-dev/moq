@@ -24,7 +24,7 @@ Implement in `moq-quic`.
   deadline, estimate the arrival instant as now plus the forward one-way
   delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay.
   Measure whether receive-time differences (`moq_congestion::Acked::received`,
-  from the [realtime epic](/quest/m3/quic-realtime/README.md)) improve that
+  from the [realtime epic](/quest/m4/quic-realtime.md)) improve that
   estimate, accounting for clock offset, drift, and uncertainty. They do not
   alone measure absolute one-way delay. If the estimate is past the deadline,
   reset the stream with a dedicated error code and drop its retransmit ranges,
@@ -91,7 +91,7 @@ Restored 2026-11-12 in m4 (maintainer, `/quest-import` of
 m5 for want of a consumer. The consumer: MPEG-TS trunks under a fixed
 `moq export ts --delay`, which compete with SRT on delivering whatever can
 still arrive within the delay. The outage loss that issue measured belongs to
-[Buffered exports pick their group order by measurement](/quest/m1/export-order.md)
+[Buffered exports pick their group order by measurement](/quest/m3/export-order.md)
 and [A path that's back is used within an RTT](/quest/m3/quic-path-return.md),
 not this quest: the early probe never exceeds the congestion window, which is
 full of unacknowledged packets during an outage. This quest is the

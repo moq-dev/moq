@@ -188,7 +188,7 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Duration | undefined>(undefined);
 
-	// The subscription's max delay: the shared budget, raised to the delay plus the stretch.
+	// The subscription's max delay: the shared budget, raised to the delay plus the estimator's ceiling.
 	#subscribeMaxDelay = new Signal<Duration>(Duration.ZERO);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
@@ -321,9 +321,9 @@ export class Decoder {
 		});
 	}
 
-	// The subscription reaches the stretch past the delay, so audio the ring could still catch up on
-	// arrives. A group the relay expires is never observed, so a zero stretch, which cuts the
-	// subscription to the target, leaves the estimate rising one bucket at a time. The container
+	// The subscription reaches the estimator's 2 s ceiling past the delay, whatever the stretch, since a
+	// group the relay expires is never observed: a subscription cut to the target would leave the
+	// estimate rising one bucket at a time. The container
 	// consumer drops aged media at the same max delay, since it observes each frame before applying
 	// it, and carves out the warmup the subscription adds once it has warmed, as Rust's does. It waits
 	// on a missing group only for the delay plus the lookahead: past that the group would play late,
@@ -338,7 +338,7 @@ export class Decoder {
 		this.#subscribeMaxDelay.set(max.add(warmup));
 	}
 
-	// The terms of the subscription's max delay: the shared delay and max delay, and the stretch.
+	// The shared delay and max delay, and the stretch threshold the ring skips past.
 	#budget(effect: Effect): { delay: Duration; maxDelay: Duration; stretch: Duration } {
 		return {
 			delay: effect.get(this.sync.out.delay),
@@ -511,7 +511,7 @@ export class Decoder {
 		if (!ring) return;
 
 		// The ring plays onto the shared clock, slowing down onto a rise and speeding up onto a fall,
-		// and skips only audio trailing it past what the subscription still delivers.
+		// and skips onto it only audio trailing it past the stretch threshold.
 		const budget = this.#budget(effect);
 		ring.setLatency(budget.delay, bound(budget));
 	}

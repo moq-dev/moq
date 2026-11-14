@@ -41,6 +41,8 @@ pub(in crate::model) struct FillState {
 /// One fill until it ends.
 struct Pending {
 	start: Position,
+	// The first byte asked of frame `start`, for a reader continuing it partway.
+	byte: u64,
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
@@ -278,6 +280,8 @@ impl Eq for Refusal {}
 /// A reader's request: the run `start.group..end`, from `start.frame` in its first group.
 pub(super) struct Ask {
 	pub start: Position,
+	/// The first byte of frame `start` the reader wants: it already holds those before.
+	pub byte: u64,
 	pub end: u64,
 	pub frame_end: Option<u64>,
 	pub asking: Asking,
@@ -458,13 +462,13 @@ impl FillState {
 				.expect("a covered sequence names a pending fill");
 			if groups.start == pending.start.group {
 				// A reader starting in an earlier group wants this one whole.
-				let frame = match ask.start.group == groups.start {
-					true => ask.start.frame,
-					false => 0,
+				let (frame, byte) = match ask.start.group == groups.start {
+					true => (ask.start.frame, ask.byte),
+					false => (0, 0),
 				};
-				if frame < pending.start.frame {
+				if (frame, byte) < (pending.start.frame, pending.byte) {
 					match pending.queued {
-						true => pending.start.frame = frame,
+						true => (pending.start.frame, pending.byte) = (frame, byte),
 						// Taken: its handler may have asked its source from the later frame
 						// already, so the earlier frames are a fill of their own.
 						false => {
@@ -514,9 +518,9 @@ impl FillState {
 			}
 			let id = self.next;
 			self.next += 1;
-			let start = match groups.start == ask.start.group {
-				true => ask.start,
-				false => Position::group(groups.start),
+			let (start, byte) = match groups.start == ask.start.group {
+				true => (ask.start, ask.byte),
+				false => (Position::group(groups.start), 0),
 			};
 			let result = kio::Producer::<Outcome>::default();
 			let mut asks = Asks::default();
@@ -538,6 +542,7 @@ impl FillState {
 				id,
 				Pending {
 					start,
+					byte,
 					end: groups.end,
 					frame_end: if groups.end == ask.end { ask.frame_end } else { None },
 					time: None,
@@ -589,6 +594,7 @@ impl FillState {
 					id,
 					Pending {
 						start: Position { group: sequence, frame },
+						byte: 0,
 						end: groups.end,
 						frame_end: None,
 						time: None,
@@ -639,6 +645,7 @@ impl FillState {
 			id,
 			Pending {
 				start: ask.start,
+				byte: 0,
 				end: ask.end,
 				frame_end: None,
 				time: Some(time),
@@ -769,8 +776,9 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end, frame_end, time, flight) = (
+		let (start, byte, end, frame_end, time, flight) = (
 			pending.start,
+			pending.byte,
 			pending.end,
 			pending.frame_end,
 			pending.time,
@@ -784,6 +792,7 @@ pub(super) fn poll_requested(
 			fills: fills.clone(),
 			id,
 			start,
+			byte,
 			end,
 			frame_end,
 			time,
@@ -850,6 +859,8 @@ struct Inner {
 	fills: kio::Shared<FillState>,
 	id: u64,
 	start: Position,
+	// The first byte of frame `start` asked for.
+	byte: u64,
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
@@ -1191,6 +1202,7 @@ impl Fill {
 			inner: self.inner.clone(),
 			sequence,
 			frame_start: self.inner.frame_start(sequence),
+			byte_start: self.inner.byte_start(sequence),
 			frame_end: self.inner.bounds(sequence).end,
 			priority: self.priority(),
 			max_delay: self.max_delay(),
@@ -1249,9 +1261,18 @@ impl Inner {
 		}
 	}
 
+	/// The first byte group `sequence` starts from within its first frame.
+	fn byte_start(&self, sequence: u64) -> u64 {
+		match sequence == self.start.group {
+			true => self.byte,
+			false => 0,
+		}
+	}
+
 	fn bounds(&self, sequence: u64) -> group::Bounds {
 		group::Bounds {
 			start: self.frame_start(sequence),
+			byte: self.byte_start(sequence),
 			end: if sequence.checked_add(1) == Some(self.end) {
 				self.frame_end
 			} else {
@@ -1260,8 +1281,15 @@ impl Inner {
 		}
 	}
 
+	/// A writer that never says it answers from a byte writes whole frames, so its copy
+	/// starts at a frame boundary even when the fill asked from a byte: only
+	/// [`GroupFill::accept_from`] starts one partway into a frame.
 	fn accept(&self, sequence: u64, info: Option<Info>) -> Result<group::Producer> {
-		self.accept_from(sequence, info, self.bounds(sequence))
+		let frames = group::Bounds {
+			byte: 0,
+			..self.bounds(sequence)
+		};
+		self.accept_from(sequence, info, frames)
 	}
 
 	fn accept_from(&self, sequence: u64, info: Option<Info>, frames: group::Bounds) -> Result<group::Producer> {
@@ -1307,7 +1335,7 @@ impl Inner {
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
 			if let Ok(group) = &res
-				&& (self.flight || frames.start > 0 || frames.end.is_some())
+				&& (self.flight || frames.start > 0 || frames.byte > 0 || frames.end.is_some())
 			{
 				outcome.partial.insert(sequence, group.handle());
 			}
@@ -1519,6 +1547,7 @@ pub(crate) struct GroupFill {
 	inner: Arc<SendCell<Inner>>,
 	sequence: u64,
 	frame_start: u64,
+	byte_start: u64,
 	frame_end: Option<u64>,
 	priority: i8,
 	max_delay: Option<Duration>,
@@ -1545,6 +1574,11 @@ impl GroupFill {
 	/// The first frame of the group the readers want; 0 is the whole group.
 	pub(crate) fn frame_start(&self) -> u64 {
 		self.frame_start
+	}
+
+	/// The first byte of frame [`Self::frame_start`] the readers want; 0 is the whole frame.
+	pub(crate) fn byte_start(&self) -> u64 {
+		self.byte_start
 	}
 
 	/// The requested exclusive last frame, if this copy is bounded at the back.

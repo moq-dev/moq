@@ -137,8 +137,9 @@ released relays and clients, skip it.
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
 `WebTransport.closed` must carry the relay's code and reason. A WebSocket-only
-`Connection` must publish the same Unauthorized session error and stop its
-unlimited reconnect loop. Chromium treats a
+`Connection` counts the refused session as connected, so it must redial it
+like any other close and, once a short retry window runs out, publish the same
+session error. Chromium treats a
 server's HTTP/3 control stream ending as fatal, so a server that ends it under
 the close capsule loses both; no Rust peer is that strict.
 
