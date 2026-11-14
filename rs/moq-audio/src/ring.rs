@@ -760,8 +760,9 @@ impl Consumer {
 	}
 
 	/// Skip what trails the clock by more than its bound, or one window when
-	/// that is larger, onto the clock, or the jumps of its reference past one
-	/// window, returning
+	/// that is larger, onto the clock (without a clock, what passes the bound
+	/// by a window, back to it), or the jumps of its reference past one window,
+	/// returning
 	/// the frames skipped. Less than that is the stretch's to catch up, as a
 	/// writer's clock drifting fast moves the reference. A join has the bound
 	/// of nothing heard yet, so it lands on the clock past whatever backlog it
@@ -788,9 +789,12 @@ impl Consumer {
 			0
 		};
 		self.joined |= clocked && self.prime == 0;
-		// Onto the clock, or without one back to the bound.
-		let late = if inputs.lag > bound.max(window as i64) {
-			(if clocked { inputs.lag } else { inputs.lag - bound }) as usize
+		// Onto the clock past its bound, or without one, a window past the
+		// bound back to it, so a level hovering there skips no scraps.
+		let late = if clocked && inputs.lag > bound.max(window as i64) {
+			inputs.lag as usize
+		} else if !clocked && inputs.lag > bound.saturating_add(window as i64) {
+			(inputs.lag - bound) as usize
 		} else {
 			0
 		};
@@ -1456,6 +1460,41 @@ mod tests {
 		assert_eq!(cons.skips(), 2);
 		let left = cons.available() as f64 * 1000.0 / rate as f64;
 		assert!((940.0..960.0).contains(&left), "{left} ms left");
+	}
+
+	/// Without a clock, a level up to a window past the bound is the stretch's
+	/// to play down; past that it skips back to the bound, so a writer hovering
+	/// at the bound never skips a few frames every callback.
+	#[test]
+	fn without_a_clock_only_a_window_past_the_bound_skips() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(10));
+		let base = prod.base;
+		let window = cons.stretch.as_ref().unwrap().window;
+		let mut out = vec![0.0; 480 * 2];
+		// Fill to `lag` frames past the target, in slices of the tone.
+		let fill = |prod: &mut Producer, cons: &Consumer, lag: i64| {
+			let mut left = (lag - cons.inputs(0).lag) as usize;
+			while left > 0 {
+				let frames = left.min(pcm.len() / 2);
+				assert_eq!(prod.push(&pcm[..frames * 2]), Push::Ok);
+				left -= frames;
+			}
+		};
+		let bound = cons.inputs(0).bound;
+		fill(&mut prod, &cons, bound + window as i64 / 2);
+		assert_eq!(pull(&mut cons, &mut out, base), Read::Ok);
+		assert_eq!(cons.skips(), 0, "within a window past the bound is the stretch's");
+
+		fill(&mut prod, &cons, bound + 2 * window as i64);
+		let read = pull(&mut cons, &mut out, base + Duration::from_millis(10));
+		assert!(matches!(read, Read::Trimmed { .. }), "{read:?}");
+		assert_eq!(cons.skips(), 1);
+		let lag = cons.inputs(0).lag;
+		assert!(
+			(bound - 480..=bound).contains(&lag),
+			"back to the bound {bound}, at {lag}"
+		);
 	}
 
 	/// A reader ahead of the clock within its bound is the stretch's to slow
