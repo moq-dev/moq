@@ -136,15 +136,17 @@ would need a breaking release had it landed right after the cut:
   still waits on it (maintainer, /quest-complete on
   [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768); rejected:
   moving it to m3 and fixing late routing flaws in lite-08).
-- ✅ [The Playwright bump](/quest/m1/playwright-pin.md) moved to m1, so the
-  freeze no longer waits on nixpkgs. In its place, before the rename, run the
-  route key lane (`test/interop/clients/js/route-key.ts`) once with
-  Playwright 1.65.0 or later from npm, which bundles Chromium 158, and put
-  the result in the PR: the freeze still waits for Chromium to prove the
-  exporter the Route Key Parameter signs, as decided 2026-11-06, without
-  waiting for the pinned toolchain. If the tab fails, stop and report it,
-  since only the wire can fix the signed transcript. Rejected: dropping the
-  check; keeping the pin in m2.
+- ✅ [The Playwright bump](/quest/m1/playwright-pin.md) moved to m1 and
+  gates [the release cut](/quest/m3/release/cut.md) instead of this: the cut
+  PR's interop lane runs with `CI_STRICT` (`.github/workflows/interop.yml`),
+  which fails the route key lane on a Chromium below 158, so only the pinned
+  toolchain clears it. As an early signal, before the rename, run the route
+  key lane (`test/interop/clients/js/route-key.ts`) once with Playwright
+  1.65.0 or later from npm, which bundles Chromium 158, and put the result in
+  the PR. If the tab fails, stop and report it, since only the wire can fix
+  the signed transcript. Rejected: keeping the pin in m2, where the freeze
+  waits on nixpkgs as well as the cut; dropping the check, which would find a
+  transcript flaw only after the freeze.
 - ✅ The wire half of group drops split out as
   [its own quest](/quest/m2/group-drops-wire.md), which this waits on in
   place of [the public drop signal](/quest/m2/group-drops.md), an API change

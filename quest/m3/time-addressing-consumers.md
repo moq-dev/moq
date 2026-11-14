@@ -16,7 +16,7 @@ nothing (rejected: m2; splitting a breaking part out, since none is left).
 [The model](/quest/m2/time-addressing/model.md)
 ([moq-dev/moq#8638](https://github.com/moq-dev/moq/pull/8638)) converts the
 Rust consumers whose API named group numbers: `moq fetch --group` and the
-relay's `/fetch?group=` take a start, moq-mux `seek` and reads carry starts,
+relay's `/fetch?group=` keep their names and take a start, moq-mux `seek` and reads carry starts,
 and moq-hls, moq-archive, and moq-transcode key by start. `@moq/hang`'s
 `Read.group` keeps its name and carries whatever `@moq/net` keys by. Dropping
 the markers is no break either: readers already tolerate their absence
@@ -49,9 +49,12 @@ HLS/DASH export, `seek` for GOP-aligned failover in moq-mux, HLS import's
 discontinuity packing, transcode's 1:1 numbering, archive keys and resume,
 relay and CLI `fetch --group`, and player continuity checks in the Rust and
 JS container consumers and `js/watch`. Update the hang draft and the docs
-each one makes stale; rename CLI flags per the repo's CLI rule.
+each one makes stale. Rename no CLI flag: that breaks callers, which m3
+cannot.
 
-Public API: none left; the model renamed the CLI flag and archive keys.
+Public API: none left. The model keeps `moq fetch --group` and the relay's
+`/fetch?group=`, whose value now names the group starting there, and keys
+archives by start.
 Wire: hang drops empty duration frames and discontinuity marker groups, which
 readers already tolerate.
 

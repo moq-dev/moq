@@ -229,8 +229,9 @@ what would need a breaking release had it landed right after the cut:
   breaks ride the model; dropping hang's markers is tolerated by readers);
   [moq-transport time addressing](/quest/m4/ietf-time-addressing.md) to m4
   (low-priority compatibility, no named consumer); and the
-  [Playwright bump](/quest/m1/playwright-pin.md) to m1, with
-  lite07-finalize checking Chromium 158 once by hand instead. The E2EE nonce
+  [Playwright bump](/quest/m1/playwright-pin.md) to m1, which the release
+  cut requires in place of lite07-finalize (its strict interop lane needs
+  Chromium 158), with lite07-finalize checking Chromium 158 once by hand. The E2EE nonce
   quest was removed: the nonce already binds the wire ID, which becomes the
   start, and lite-07 by start rewords the draft. Rejected for each: staying
   in m2.
