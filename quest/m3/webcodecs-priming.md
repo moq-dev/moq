@@ -69,4 +69,4 @@ Decided 2026-11-04 (maintainer, /quest-plan):
 
 - [moq-audio in the browser](/quest/m5/audio-web.md) - its WebCodecs backend's `delay()` reuses this measurement
 - [AudioToolbox encode](/quest/m3/audio-encode-audiotoolbox.md) - the native AAC encoder's delay, folded the same way
-- [Chromium's Opus encoder stamps chunks from their input](/quest/m4/chromium-opus-timestamps.md) - another WebCodecs `AudioEncoder` timestamp bug
+- [Chromium's Opus encoder stamps chunks from their input](/quest/m5/chromium-opus-timestamps.md) - another WebCodecs `AudioEncoder` timestamp bug

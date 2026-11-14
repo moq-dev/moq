@@ -18,14 +18,14 @@ Those are the caller's.
 
 Decided 2026-10-05 in moq.pro's quest audit: vendor-neutral now, not
 NVIDIA-scoped. Reason: the external GPU surface (#4975),
-[Vulkan encode](/quest/m3/vulkan-encode.md), and
-[VA-API import](/quest/m3/vaapi-vulkan-import.md) make AMD and Intel encode
+[Vulkan encode](/quest/m5/vulkan-encode.md), and
+[VA-API import](/quest/m5/vaapi-vulkan-import.md) make AMD and Intel encode
 first-class, so an NVML-shaped API would be rewritten once they land.
 moq.pro's transcode admission and its benchmarks assume NVML today; they
 adopt this instead.
 
 Decided 2026-10-05: one device identity wherever a render node exists, the
-render node's `dev_t`, shared with [VA-API import](/quest/m3/vaapi-vulkan-import.md).
+render node's `dev_t`, shared with [VA-API import](/quest/m5/vaapi-vulkan-import.md).
 NVIDIA's device UUID maps to its node through `VK_EXT_physical_device_drm`.
 The external GPU surface (#4975) carries that identity as
 `frame::vulkan::Device { device_uuid, driver_uuid, render_node: Option<u64> }`.
@@ -103,7 +103,7 @@ Other guidance:
 - A snapshot call, not a callback; cheap enough to poll about once a second.
 - The snapshot is additive and keys by the surface's identity. Publish it
   after the vendor implementations it reports are validated. It does not gate
-  [the multi-vendor release](/quest/m3/gpu-release.md) or the next cut.
+  [the multi-vendor release](/quest/m5/gpu-release.md) or the next cut.
 
 ✅ Decided 2026-10-16, support floor: ship per vendor with every value
 optional. NVIDIA's device-wide adapter lands with the values every vendor has
@@ -130,5 +130,5 @@ Public API: a device capacity and health snapshot in moq-video. Wire: none.
 
 ## Related
 
-- [VA-API encodes an external Vulkan image](/quest/m3/vaapi-vulkan-import.md) - picks a render node by the same `dev_t`
-- [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - the AMD backend whose sessions this counts
+- [VA-API encodes an external Vulkan image](/quest/m5/vaapi-vulkan-import.md) - picks a render node by the same `dev_t`
+- [Vulkan Video encode on AMD](/quest/m5/vulkan-encode.md) - the AMD backend whose sessions this counts

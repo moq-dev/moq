@@ -58,5 +58,5 @@ Public API: none. Wire: none.
 
 ## Related
 
+- [ViSQOL grading](/quest/m5/audio-visqol.md) - adds a quality score to the same harness
 - [Audio playout](/quest/m2/audio-playout/README.md) - the playout rule and estimator whose budgets these rows extend
-- [ViSQOL grading](/quest/m4/audio-visqol.md) - adds a quality score to the same harness
