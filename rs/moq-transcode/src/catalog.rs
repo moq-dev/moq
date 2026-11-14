@@ -371,15 +371,16 @@ pub(crate) fn populate(
 		out.video.insert(&published.rung.name, published.entry.clone())?;
 	}
 
-	let Some(rel) = source_rel else {
-		return Ok(());
-	};
-
-	// The source's renditions are listed too, and they promise only the source's join interval,
-	// so the derivative joins on it unless its own tracks already declared one. Fixed once set.
+	// Every rung mirrors the source's groups one for one, so it promises the source's join
+	// interval, and nothing else measures one for tracks written group by group. An HLS export
+	// numbers segments on it, so the rungs share the source's segment numbers. Fixed once set.
 	if out.media.join.is_none() {
 		out.media.join = source.media.join;
 	}
+
+	let Some(rel) = source_rel else {
+		return Ok(());
+	};
 
 	for (name, config) in &source.video.renditions {
 		if config.broadcast.is_some() {
@@ -1007,19 +1008,28 @@ mod tests {
 		assert_eq!(out.media.clock, Some(clock), "a derivative keeps the child's clock");
 	}
 
-	/// A derivative listing the source's renditions joins on the source's interval, unless its own
-	/// tracks already declared one; one listing only its rungs declares its own.
+	/// A derivative joins on the source's interval, whether it lists only its rungs or the source's
+	/// renditions too, and keeps the first one declared.
 	#[test]
-	fn populate_carries_the_source_interval_with_its_renditions() {
+	fn populate_carries_the_source_interval() {
 		let interval = |secs| hang::catalog::Join::new(std::time::Duration::from_secs(secs));
 		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
-		child.media.join = interval(4);
 		let rel = Relative::new(".").unwrap();
 
+		// The source declares its interval only once it has measured one.
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
-		assert_eq!(out.media.join, None, "only rungs: the derivative measures its own");
+		assert_eq!(out.media.join, None, "nothing to promise yet");
 
+		child.media.join = interval(4);
+		populate(&mut out, &child, &[], None).unwrap();
+		assert_eq!(
+			out.media.join,
+			interval(4),
+			"only rungs: they cut where the source does"
+		);
+
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], Some(&rel)).unwrap();
 		assert_eq!(out.media.join, interval(4));
 
