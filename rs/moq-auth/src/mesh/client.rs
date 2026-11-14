@@ -60,11 +60,8 @@ impl Client {
 	/// name the device already has.
 	pub async fn enroll(&self, key: &str, name: Option<&str>) -> crate::Result<Enrollment> {
 		let proof = self.proof().await?;
-		let request = EnrollRequest {
-			proof,
-			key: key.into(),
-			name: name.map(Into::into),
-		};
+		let mut request = EnrollRequest::new(proof, key);
+		request.name = name.map(Into::into);
 		match self.post("enroll", &request).await {
 			Err(Error::Mesh(refused)) if refused.error == ErrorCode::InvalidGrant => match self.refresh().await {
 				// Not enrolled after all, so the key's refusal is the answer.

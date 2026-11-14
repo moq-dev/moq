@@ -18,6 +18,10 @@
 //! | `POST {base}/refresh` | [`Proof`] | [`Enrollment`] |
 //!
 //! Every refusal is a 4xx with an [`ErrorReply`].
+//!
+//! The request and reply structs are `#[non_exhaustive]` so the contract can gain a field
+//! without a breaking change: build one with its `new` (or [`Proof::sign`]) and set the
+//! optional fields, and match one with `..`.
 
 use std::fmt;
 
@@ -74,6 +78,7 @@ fn audience(base: &url::Url) -> &str {
 /// A fresh, single-use challenge from `POST {base}/challenge`.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Challenge {
 	/// 32 bytes, opaque to the device, base64url without padding.
 	#[serde_as(as = "serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>")]
@@ -83,6 +88,13 @@ pub struct Challenge {
 	pub expires: kio::clock::Wall,
 }
 
+impl Challenge {
+	/// A challenge of `challenge` bytes that stops being accepted at `expires`.
+	pub fn new(challenge: Vec<u8>, expires: kio::clock::Wall) -> Self {
+		Self { challenge, expires }
+	}
+}
+
 /// Proof that the caller holds `endpoint`'s secret key: its signature over a challenge the
 /// coordinator issued and has not yet seen used.
 ///
@@ -90,6 +102,7 @@ pub struct Challenge {
 /// the device addressed it without a trailing slash, a zero byte, then the raw challenge.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Proof {
 	/// The endpoint ID, which is the key that signed.
 	pub endpoint: PublicKey,
@@ -155,6 +168,7 @@ impl Signer for rind::signature::Ed25519KeyPair {
 
 /// `POST {base}/enroll`: join with a pre-authorized enrollment key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EnrollRequest {
 	/// Proof of the endpoint key.
 	#[serde(flatten)]
@@ -167,9 +181,22 @@ pub struct EnrollRequest {
 	pub name: Option<String>,
 }
 
+impl EnrollRequest {
+	/// A request to join with `key`, proving the endpoint key with `proof` and asking for no
+	/// particular name; set [`name`](Self::name) to ask for one.
+	pub fn new(proof: Proof, key: impl Into<String>) -> Self {
+		Self {
+			proof,
+			key: key.into(),
+			name: None,
+		}
+	}
+}
+
 /// What a device needs to join: the relays to dial and the token to present.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Enrollment {
 	/// A JWT granting publish on `mesh/<id>/**` and subscribe on `mesh/**`, rooted at `/`.
 	pub token: String,
@@ -184,8 +211,23 @@ pub struct Enrollment {
 	pub members: Vec<Member>,
 }
 
+impl Enrollment {
+	/// An enrollment of the device `name` presenting `token` until `expires`, with no relays
+	/// and no members; set [`relays`](Self::relays) and [`members`](Self::members).
+	pub fn new(token: impl Into<String>, expires: kio::clock::Wall, name: impl Into<String>) -> Self {
+		Self {
+			token: token.into(),
+			expires,
+			relays: Vec::new(),
+			name: name.into(),
+			members: Vec::new(),
+		}
+	}
+}
+
 /// One enrolled device, as listed in an [`Enrollment`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Member {
 	/// Its endpoint ID.
 	pub endpoint: PublicKey,
@@ -194,6 +236,17 @@ pub struct Member {
 	/// The tags of the enrollment key it joined with.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub tags: Vec<String>,
+}
+
+impl Member {
+	/// A member with `endpoint` and `name` and no tags; set [`tags`](Self::tags).
+	pub fn new(endpoint: PublicKey, name: impl Into<String>) -> Self {
+		Self {
+			endpoint,
+			name: name.into(),
+			tags: Vec::new(),
+		}
+	}
 }
 
 /// Why the coordinator refused, in the shape of an OAuth error response (RFC 6749 §5.2).

@@ -119,8 +119,8 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 - ✅ The relay node takes a credential handle and the application enrolls
   however it likes (rejected: the coordinator issuing certificates;
   deferring). `moq_auth::mesh`'s token enrollment stays one way to get a
-  handle. [Mesh enrollment can grow](/quest/m2/api-mesh-enrollment.md)
-  fences the reply before the cut publishes it.
+  handle. The enrollment reply is `#[non_exhaustive]` before the cut
+  publishes it.
 - ✅ The contract changes land in m2, because the cut publishes
   `moq_auth::mesh` for the first time: the
   [grant shape](/quest/m2/mesh-grant-shape.md) and the

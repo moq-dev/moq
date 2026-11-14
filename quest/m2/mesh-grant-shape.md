@@ -40,4 +40,3 @@ signature does. Wire: none.
 ## Related
 
 - [Mesh enrollment is bounded](/quest/m2/mesh-device-bounds.md) - the other mesh contract change before the cut
-- [Mesh enrollment can grow](/quest/m2/api-mesh-enrollment.md) - fences the enrollment reply
