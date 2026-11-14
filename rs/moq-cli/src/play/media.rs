@@ -268,8 +268,9 @@ impl<O: Output> Media<O> {
 					// Nothing older than the playhead is worth presenting, so the delay
 					// doubles as the staleness budget on the wire.
 					let max_delay = self.args.video_delay();
-					// A decoder and its subscription from `start`, and the live edge it waited for.
-					let open = async |delay: moq_net::track::Delay, start: moq_net::track::Anchor| {
+					// A decoder and its subscription from `start`, and the live edge when `edge` asks
+					// to wait for it.
+					let open = async |delay: moq_net::track::Delay, start: moq_net::track::Anchor, edge: bool| {
 						// The window's renderer refuses a GPU surface it cannot import, so
 						// the decoder downloads those instead, all of them on a device
 						// that imports none.
@@ -296,8 +297,12 @@ impl<O: Output> Media<O> {
 							)
 							.await?;
 						// The live edge is known only once the feed is live: a warm copy still
-						// waiting on its source reports nothing yet. The wait ends with the track.
-						let edge = subscriber.largest().await.map(|largest| largest.group);
+						// waiting on its source reports nothing yet. The wait ends with the track,
+						// and holds up the rest of playback, so only a warmup lane asks for it.
+						let edge = match edge {
+							true => subscriber.largest().await.map(|largest| largest.group),
+							false => None,
+						};
 						let format = catalog::hang::Container::try_from(config)?;
 						// The playout delay is the target latency, and the max how late a group may be.
 						let track =
@@ -309,14 +314,15 @@ impl<O: Output> Media<O> {
 							min: Some(self.args.video_delay()),
 							max: Some(max_delay),
 						};
-						// The live edge, from the groups each hop holds from its live feed, never a warm
-						// copy's backlog, so it names no cached group for the shared publisher
-						// subscription to rewind to.
-						let (track, decoder, edge) = open(delay, moq_net::track::Anchor::Relative(0)).await?;
 						// An intra-refresh rendition also runs a decoder with one more sweep
 						// of budget, joining a group earlier so its pictures stay clean, as
 						// `moq_video::decode::Consumer` does. Both share one upstream request.
 						let warmup = config.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
+						// The live edge, from the groups each hop holds from its live feed, never a warm
+						// copy's backlog, so it names no cached group for the shared publisher
+						// subscription to rewind to.
+						let (track, decoder, edge) =
+							open(delay, moq_net::track::Anchor::Relative(0), !warmup.is_zero()).await?;
 						let refresh = if warmup.is_zero() {
 							None
 						} else {
@@ -332,7 +338,7 @@ impl<O: Output> Media<O> {
 							let start = edge.map_or(moq_net::track::Anchor::Relative(0), |edge| {
 								moq_net::track::Anchor::Time(edge.saturating_sub(1))
 							});
-							let (track, decoder, _) = open(delay, start).await?;
+							let (track, decoder, _) = open(delay, start, false).await?;
 							let interval = config
 								.framerate
 								.filter(|rate| rate.is_finite() && *rate > 0.0)
