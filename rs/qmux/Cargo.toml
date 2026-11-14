@@ -18,6 +18,8 @@ tcp = ["tokio/net"]
 tls = ["tcp", "dep:tokio-rustls", "dep:rustls"]
 uds = ["tokio/net"]
 ws = ["dep:tokio-tungstenite", "dep:futures"]
+# Exposes the `fuzz/` harness's target body and seeds through the `fuzz` module.
+fuzz = ["tcp", "ws", "kio/sim", "tokio/io-util"]
 wss = ["ws", "dep:rustls-native-certs", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
 
 [dependencies]
@@ -45,6 +47,7 @@ libc = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
+kio = { path = "../kio", features = ["sim"] }
 # The last release before this crate moved here, for wire interop tests only.
 qmux06 = { package = "qmux", version = "0.6.3", default-features = false, features = ["tcp", "ws"] }
 # A self-signed identity and the relay's crypto provider, for the bench example's TLS transports.
@@ -55,6 +58,13 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # The 0.6 release's stream API, for driving it in the interop tests.
 web-transport-trait = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
+
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# build skips it.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
 
 [[example]]
 name = "interop-client"

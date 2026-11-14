@@ -1,0 +1,35 @@
+# The libFuzzer harness for qmux's record framing over a byte stream and a WebSocket.
+# `just rs fuzz qmux` drives it, and nightly.yml runs it.
+#
+# A workspace member so it shares the root lockfile, which is the only thing that
+# keeps its resolve from drifting when a sibling it depends on is bumped. It is
+# excluded from every gate that means "all of it" instead: libFuzzer needs a nightly
+# toolchain and sanitizer flags, so nothing in `check` or `test` may compile it.
+#
+# The target body lives in `qmux`'s `fuzz` module, not here: it drives the crate's
+# private transports, and sharing the body is what lets the crate's own tests replay
+# the corpus on stable.
+[package]
+name = "qmux-fuzz"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+publish = false
+edition = "2024"
+autobins = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "qmux"
+path = "fuzz_targets/qmux.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+qmux = { workspace = true, features = ["fuzz"] }
+
+[lints]
+workspace = true

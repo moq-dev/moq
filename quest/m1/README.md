@@ -54,7 +54,7 @@ Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): tests
 that guard what production traffic reaches join m1 ahead of the questline's
 m4 default, so changes are proven before they ship: the
 [QUIC Interop Runner](/quest/m1/quic-interop.md), sim rule checks,
-[relay parser fuzz targets](/quest/m1/fuzz-relay-parsers.md), and from m4
+relay parser fuzz targets (qmux, moq-auth), and from m4
 the relay on the sim (landed),
 mutation testing (#8712), and peer-reachable unsafe. OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on
 google/oss-fuzz.
