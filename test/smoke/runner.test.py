@@ -59,8 +59,11 @@ class Runner(unittest.TestCase):
             with self.subTest(cells=cells), self.assertRaises(ValueError):
                 runner.validate_summary({"runs": cells}, {("a", "b")})
 
-    def run_matrices(self, status):
-        """Run both matrices against a fake runner that gives each pair `status(client, relay)`."""
+    def run_matrices(self, status, unpublished=frozenset()):
+        """Run both matrices against a fake runner that gives each pair `status(client, relay)`.
+
+        Pulling an image in `unpublished` always fails.
+        """
         with tempfile.TemporaryDirectory() as temporary:
             upstream = Path(temporary)
             registry = upstream / "implementations.json"
@@ -82,13 +85,16 @@ class Runner(unittest.TestCase):
                     matrices.append(pairs)
                     failed = any(run["status"] != "pass" for run in runs)
                     return subprocess.CompletedProcess(args, int(failed))
+                if args[:2] == ["docker", "pull"]:
+                    return subprocess.CompletedProcess(args, int(args[2] in unpublished))
                 if args[:2] == ["bash", "generate-report.sh"]:
                     (results / "index.html").write_text("<body></body>")
                     (results / "nightly" / "report.html").write_text("")
                 return subprocess.CompletedProcess(args, 0)
 
             failure = None
-            with patch.object(runner.subprocess, "run", side_effect=command):
+            self.matrices = matrices
+            with patch.object(runner.subprocess, "run", side_effect=command), patch.object(runner.time, "sleep"):
                 try:
                     runner.run(upstream, upstream / "report")
                 except SystemExit as error:
@@ -97,7 +103,8 @@ class Runner(unittest.TestCase):
             self.assertEqual(registry.read_text(), original)
             runs = json.loads((upstream / "report" / "nightly" / "summary.json").read_text())["runs"]
             self.assertEqual(len(runs), sum(len(pairs) for pairs in matrices))
-            self.assertIn("local-adapter", (upstream / "report" / "index.html").read_text())
+            self.index = (upstream / "report" / "index.html").read_text()
+            self.assertIn("local-adapter", self.index)
             return failure
 
     def test_failed_required_pair_reports_every_matrix_then_fails(self):
@@ -113,6 +120,31 @@ class Runner(unittest.TestCase):
             failure = self.run_matrices(status)
         self.assertIsNone(failure)
         self.assertIn("('new', 'moq-dev-rs')", report.call_args.args[0])
+
+    def test_unpublished_third_party_image_drops_only_its_pairs(self):
+        with patch("builtins.print") as report:
+            failure = self.run_matrices(lambda client, relay: "pass", unpublished={"docker.io/new/client"})
+        self.assertIsNone(failure)
+        self.assertEqual(self.matrices[0], runner.REQUIRED)
+        self.assertEqual(self.matrices[1], {("moq-dev-rs", "new"), ("moq-dev-js", "new")})
+        self.assertIn("docker.io/new/client", report.call_args.args[0])
+        self.assertIn("docker.io/new/client (image unavailable)", self.index)
+
+    def test_unpublished_own_client_image_fails_before_any_matrix(self):
+        def command(args, **kwargs):
+            self.assertNotEqual(args[:2], ["bash", "run-interop-tests.sh"])
+            return subprocess.CompletedProcess(args, int(args == ["docker", "pull", "ghcr.io/ours/js"]))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            upstream = Path(temporary)
+            (upstream / "implementations.json").write_text(json.dumps(self.registry))
+            with (
+                patch.object(runner.subprocess, "run", side_effect=command),
+                patch.object(runner.time, "sleep"),
+                self.assertRaises(SystemExit) as failure,
+            ):
+                runner.run(upstream, upstream / "report")
+        self.assertIn("ghcr.io/ours/js", str(failure.exception))
 
     def test_required_pair_the_registry_drops_fails(self):
         self.registry["implementations"]["moq-dev-js"]["draft_versions"] = ["draft-22"]

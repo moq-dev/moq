@@ -18,8 +18,8 @@ RELAY_IMAGE = "moq-interop-relay:local"
 REQUIRED = {(client, "moq-dev-rs") for client in OWN}
 
 
-def matrices(registry):
-    """Keep published images and partition the pairs around our relay and clients."""
+def matrices(registry, missing=frozenset()):
+    """Keep the published images not in `missing` and partition the pairs around our relay and clients."""
     registry = copy.deepcopy(registry)
     implementations = registry["implementations"]
     relay = implementations["moq-dev-rs"]["roles"]["relay"]["docker"]
@@ -33,16 +33,14 @@ def matrices(registry):
                 continue
             image = docker["image"]
             # Local adapter tags need a build even when their base is published.
-            local = bool(docker.get("build")) and "/" not in image
-            inventory.append(
-                {
-                    "implementation": name,
-                    "role": role,
-                    "image": image,
-                    "status": "not run: local build only" if local else "selected",
-                }
-            )
-            if local:
+            if docker.get("build") and "/" not in image:
+                status = "not run: local build only"
+            elif image in missing:
+                status = "not run: image unavailable"
+            else:
+                status = "selected"
+            inventory.append({"implementation": name, "role": role, "image": image, "status": status})
+            if status != "selected":
                 del implementation["roles"][role]["docker"]
     if any("docker" not in implementations[name]["roles"]["client"] for name in OWN):
         raise ValueError("the registry must provide both moq-dev client images")
@@ -85,18 +83,28 @@ def run(upstream, output):
         raise ValueError(f"report destination already exists: {output}")
     registry_file = upstream / "implementations.json"
     original = registry_file.read_text()
-    plans, inventory = matrices(json.loads(original))
+    registry = json.loads(original)
     for command in (["docker", "info"], ["docker", "compose", "version"]):
         subprocess.run(command, check=True)
+    _, inventory = matrices(registry)
+    own = {registry["implementations"][name]["roles"]["client"]["docker"]["image"] for name in OWN}
+    missing = set()
     images = {entry["image"] for entry in inventory if entry["status"] == "selected"}
     for image in sorted(images - {RELAY_IMAGE}):
         # A registry blip would otherwise abort both matrices before any report.
         for attempt in range(1, 4):
             if not subprocess.run(["docker", "pull", image]).returncode:
                 break
-            if attempt == 3:
+            if attempt < 3:
+                time.sleep(attempt * 2)
+            elif image in own:
                 raise SystemExit(f"failed to pull {image}")
-            time.sleep(attempt * 2)
+            else:
+                # A third party's unpublished image only removes its optional pairs, listed under Not run.
+                missing.add(image)
+    if missing:
+        print(f"::warning::images unavailable, their pairs not run: {sorted(missing)}")
+    plans, inventory = matrices(registry, missing)
     subprocess.run(["docker", "image", "inspect", RELAY_IMAGE], check=True)
     subprocess.run(["make", "certs"], cwd=upstream, check=True)
     results = upstream / "results"
@@ -137,7 +145,7 @@ def run(upstream, output):
         if skipped:
             rows = "".join(
                 f"<li>{html.escape(entry['implementation'])} {entry['role']}: "
-                f"{html.escape(entry['image'])} (local build only)</li>"
+                f"{html.escape(entry['image'])} ({html.escape(entry['status'].removeprefix('not run: '))})</li>"
                 for entry in skipped
             )
             index_file = results / "index.html"
