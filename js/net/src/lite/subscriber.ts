@@ -67,12 +67,12 @@ import {
 	AnnounceHistory,
 	AnnounceInit,
 	AnnounceOk,
+	type Refusal as AnnounceRefusal,
 	AnnounceRequest,
 	type Base,
 	decodeAnnounceBroadcastMaybe,
 	encodeAnnounceReply,
 	type Refusable,
-	type Refusal,
 	ROUTE_MAX_HOPS,
 } from "./announce.ts";
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
@@ -1302,7 +1302,7 @@ export class Subscriber {
 
 		// Apply a message whose content, which the peer only forwarded, this node refuses: withdraw
 		// the route or claim it names, and keep the stream. Mirrors rs/moq-net.
-		const refused = (message: Refusable, reason: Refusal) => {
+		const refused = (message: Refusable, reason: AnnounceRefusal) => {
 			switch (message.kind) {
 				case "routeStart":
 					console.warn(`refusing a forwarded route: node=${message.node} reason=${reason}`);
