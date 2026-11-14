@@ -14,4 +14,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Wire fuzz coverage](/quest/m4/wire-fuzz-coverage.md) - fuzzes the cmsg walks this path shares
+- [Wire fuzz coverage](/quest/m1/wire-fuzz-coverage.md) - fuzzes the cmsg walks this path shares
