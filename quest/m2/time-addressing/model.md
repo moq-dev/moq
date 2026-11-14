@@ -235,10 +235,10 @@ starts for the caller.
   It waits up to the playout delay and reports a gap. Rejected: a heuristic
   for older wires.
 
-Taken by the agent under /quest-afk on 2026-11-13, for the maintainer's
-review, from the PR's local reviews:
+Taken by the agent under /quest-afk on 2026-11-13, from the PR's local
+reviews, and accepted by the maintainer on 2026-11-14 (/quest-complete):
 
-- **Own-end reach ships before the wire carries the end.** An origin whose
+- **Own-end reach ships before the wire carries the end: ✅ accepted.** An origin whose
   producer calls `group::Producer::finish(end)` ages a paused track's last
   group out after its span. A relay receives the group with a bare FIN
   (`rs/moq-net/src/recv.rs` closes it), so it still bounds that group by its
@@ -247,7 +247,7 @@ review, from the PR's local reviews:
   ([lite07.md](/quest/m2/time-addressing/lite07.md)). Rejected: carrying the end on the wire in this PR,
   which is lite07's wire, draft, and JS change; holding own-end reach back
   until then, which reverts the 2026-10-26 decision above.
-- **A transcode fill locates a gap through one source read.** A miss reads
+- **A transcode fill locates a gap through one source read: ✅ accepted.** A miss reads
   the source once, in key order, for the groups around it, and drops the span
   between them at once. A source holding no group at all can't place the
   read until it holds one, so a live rung waits for the source's next group,
