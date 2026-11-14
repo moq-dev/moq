@@ -410,6 +410,20 @@ fn a_batch_names_the_claims_it_changed() {
 	assert!(router.changed().is_empty(), "taken once");
 }
 
+/// A claim's own route at a newer floor than the wider route above it is shown from
+/// its own view: the wider one has not caught up with what it knows.
+#[test]
+fn a_narrow_route_at_a_newer_floor_shows_over_a_wider_one() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.connect(2, 2, Link::default()).unwrap();
+	router.route(1, 7, p("live/"), Some(offered(1, 0)), 0);
+	router.route(2, 7, p("live/a"), Some(offered(2, 0)), 0);
+	router.batch(1, 7, p("live/"), vec![(p("live/a"), Some(1))], Some(1), 0);
+	router.batch(2, 7, p("live/a"), vec![(p("live/a"), Some(2))], Some(2), 0);
+	assert_eq!(router.shown()[&(7, p("live/a"))].item, 2);
+}
+
 const CLAIMS: [&str; 6] = ["a/x", "a/y/", "a/", "b/x", "b/y/z", ""];
 const WATCHES: [&str; 5] = ["", "", "a/", "b/", "a/x"];
 const SCOPES: [&str; 2] = ["a/", "b/"];
