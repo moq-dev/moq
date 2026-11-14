@@ -685,6 +685,7 @@ export namespace Time {
 		static unscaled(key: bigint | number): Time.Timestamp;
 		readonly value: number;
 	}
+	export let keyOf: (timestamp: Time.Timestamp) => bigint | undefined;
 }
 
 export interface Timed<T> {
