@@ -254,7 +254,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	let delay = sync.out.delay.peek();
 	const terms = () => ({
-		target: delay.asMillis(),
 		bound: bound({ delay, maxDelay: sync.out.maxDelay.peek(), stretch }).asMillis(),
 	});
 	// The decode gate, and the worklet's ring on the floor it sets, the way `AudioBuffer` drives both.
@@ -322,9 +321,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const step = (QUANTUM / rate) * 1000;
 	const output = new Float32Array(QUANTUM);
 	let next = 0;
-	// The shared clock's reference as the worklet last read it. One that moved earlier jumped the clock
-	// ahead, which the ring skips, the way `AudioBuffer` reports it.
-	let reference: number | undefined;
 
 	// The consumer stamps each arrival on the monotonic clock, which the estimator measures, so a
 	// manual clock reads the trace's time instead until the replay finishes.
@@ -387,10 +383,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			// The worklet reads nothing until startup releases it, then the shared clock as of the
 			// quantum's start, mapped onto its own time.
 			const shared = sync.now();
-			const moved = sync.out.reference.peek();
-			if (reference !== undefined && moved !== undefined && moved < reference)
-				ring.jumped((reference - moved) * 1000);
-			reference = moved;
 			ring.clock(shared !== undefined ? (shared.asMillis() - step) * 1000 : undefined);
 			output.fill(0);
 			if (sync.playing.peek()) ring.read([output]);
