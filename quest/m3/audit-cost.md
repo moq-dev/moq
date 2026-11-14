@@ -116,8 +116,8 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   `rs/moq-quic/README.md` (decided 2026-10-28). Only a
   [vendor sync](/quest/m3/vendor-sync/quinn.md), which reviews the full
   upstream range, advances the recorded upstream commit.
-- Waiting on upstream: [ashpd](/quest/m4/ashpd-maintained.md) and
-  [askama](/quest/m4/askama-maintained.md); the root Bun overrides for glob,
+- Waiting on upstream: [ashpd](/quest/m1/ashpd-maintained.md) and
+  [askama](/quest/m5/askama-maintained.md); the root Bun overrides for glob,
   minimatch, chokidar, postcss-selector-parser, and Vite, each removable once
   its parent allows a safe range; `deny.toml`'s proc-macro-error2 ignore,
   until core-models moves to hax-lib 0.4; paste through tikv-jemalloc-ctl;

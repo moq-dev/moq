@@ -29,7 +29,7 @@ Ported since the fork point:
 - [`aea1e538`](https://github.com/quinn-rs/quinn/commit/aea1e5384927258887119fa1dc4fe3f23f1182c7) ([quinn#2981](https://github.com/quinn-rs/quinn/pull/2981), and [`77a51bdc`](https://github.com/quinn-rs/quinn/commit/77a51bdc5dc8b63bfba30429ab79fbb142bc8e2a) on `0.11.x`): send an MTU probe only on a validated path. A probe is built after the anti-amplification check, so a server probed a migrated peer address beyond three times what it had received from it, spending the budget its `PATH_CHALLENGE` needed.
 
 Dependency bumps are not ported. The `0.11.x` accept refactors are already covered by this fork's split acceptance and CID routing.
-[`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e1314cb9f98502b7323acd5bdd836b582)'s batched datagram API is not carried: the current WebTransport reader consumes one at a time, and the [planned driver lock profile](../../quest/m4/perf/quic-lock-contention.md) measures contention before adding batching.
+[`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e1314cb9f98502b7323acd5bdd836b582)'s batched datagram API is not carried: the current WebTransport reader consumes one at a time, and the [planned driver lock profile](../../quest/m9/perf/quic-lock-contention.md) measures contention before adding batching.
 
 Checked through quinn `main` at [`aea1e538`](https://github.com/quinn-rs/quinn/commit/aea1e5384927258887119fa1dc4fe3f23f1182c7), and the `0.11.x` branch through [`77a51bdc`](https://github.com/quinn-rs/quinn/commit/77a51bdc5dc8b63bfba30429ab79fbb142bc8e2a) (2026-11-03); start the next sync there.
 

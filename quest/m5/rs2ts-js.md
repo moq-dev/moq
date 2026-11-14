@@ -1,39 +1,48 @@
-# [L] Ship JS-only @moq/net from Rust
+# [L] @moq/net runs the Rust model in the browser
 
 ## Goal
 
-`@moq/net` ships the Rust protocol and model implementation as JavaScript
-without requiring a WASM runtime. Publishing and consumption, lite and
-moq-transport, and supported browser transports retain parity. The public
-TypeScript interface is preserved where practical.
+`@moq/net` ships the Rust protocol and model implementation to browsers, Node,
+Bun, and Deno through rust2's WebAssembly export, with a generated TypeScript
+binding. Publishing and consumption, lite and moq-transport, and supported
+browser transports retain parity, and the public TypeScript interface is
+preserved where practical. Translation to plain TypeScript replaces the
+WebAssembly build only for a crate where it measures better.
 
 ## Plan
 
-Decided 2026-10-12: WASM is transitional and JS-only is the final goal.
-Decided 2026-10-31 (maintainer): moq's WASM support is removed, since nobody
-used it and it is being replaced, so no production WASM backend precedes this.
-The evaluation scopes this quest for the chosen backend and adds any required
-research or implementation blockers before it becomes executable. Rejecting
-wasm2js does not automatically select Charon or abandon the JS-only goal.
+Decided with the maintainer on 2026-11-09, in rust2's quest audit
+([rust2-wasm](https://github.com/moq-dev/rust2/blob/main/quest/m2/wasm/README.md)):
+✅ WASM ships, and TypeScript must beat it (rejected: JS-only staying the
+goal with WebAssembly only a baseline; pausing the translator until
+WebAssembly is measured). This supersedes the 2026-10-12 decision here that
+WASM is transitional and JS-only is the final goal. Recorded here 2026-11-12
+(/quest-audit); the wasm2js evaluation and the separate browser report quests
+were deleted, since rust2-wasm's gate replaces both: one report compares the
+same `pub` API through rust2-wasm, through rust2-ts's translation, and
+hand-written `@moq/net`, on CPU time, shipped bytes, and startup, in Chrome
+and Firefox, and the maintainer decides from it.
 
-Compare against the handwritten `@moq/net` in a complete browser workload
-before adoption. Present measured size, startup, CPU,
-memory, and usability tradeoffs for the maintainer to accept; preserve wire
-and correctness. Run the browser suite and `just test interop --all` in CI.
-Ensure shipped output loads without WebAssembly and preserves full-width
-integer values and explicit lifetime/cancellation behavior.
+Still decided 2026-10-31 (maintainer): moq's old wasm-bindgen support stays
+removed; rust2-wasm is the only WebAssembly route.
 
-Pin the generation toolchain and verify reproducible package artifacts.
-Normal JS contributors and consumers should not need that toolchain. Update
-existing API docs and package READMEs for loading, deployment, and regeneration;
-any necessary public API break is proposed separately and migrates consumers.
+- Adopt only after the gate's report, against the handwritten `@moq/net` in a
+  complete browser workload. Preserve wire and correctness, full-width
+  integer values, and explicit lifetime and cancellation behavior. Run the
+  browser suite and `just test interop --all` in CI.
+- Pin the generation toolchain and verify reproducible package artifacts.
+  Normal JS contributors and consumers should not need that toolchain. Update
+  API docs and package READMEs for loading, deployment, and regeneration; any
+  necessary public API break is proposed separately and migrates consumers.
+- Retire the handwritten implementation only after parity and adoption.
+  Preserve shared browser tests.
 
-Retire the handwritten implementation only after JS-only parity and adoption.
-Preserve shared browser tests.
+Public API: `@moq/net` remains; enumerate any approved changes. Wire: none.
 
-Public API: `@moq/net` remains; enumerate any approved changes and obsolete
-unpublished package removals. Wire: none.
+## Waiting
 
-## Required
+- moq-dev/rust2: its rust2-wasm epic reaches its gate, moq-net running in a browser with the three-way report. Check that rust2's `quest/m2/wasm/README.md` has no children left and its report exists.
 
-- [WASM-to-JS evaluation](/quest/m5/rs2ts-wasm2js.md) - the selected route, evidence, and any additional prerequisites
+## Related
+
+- [Keep moq-net's model in rust2-ts's subset](/quest/m4/rs2ts-model-subset.md) - keeps the translation route measurable

@@ -51,12 +51,14 @@ describe("replay", () => {
 		).toBe(0);
 	});
 
+	// Short of the spread, audio about to run out slows down and trails the clock instead, which leaves
+	// the underruns the cap cannot bridge.
 	it("underruns when a flush span outlasts the target, and not when it is covered", async () => {
 		// Five frames held and flushed at once: 80 ms of arrival spread.
 		const trace = paced(10, (i) => 30 + (4 - (i % 5)) * 20);
 		expect(
 			await underruns(trace, { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(10) }),
-		).toBeGreaterThan(50);
+		).toBeGreaterThan(0);
 		expect(
 			await underruns(trace, {
 				rate: RATE,
@@ -160,13 +162,13 @@ async function lag(trace: Arrival[], options: Options, settle: number) {
 }
 
 /**
- * The longest pitch period of the replay's speech, at its 90 Hz floor: a seam moves by one period, so
- * a lag shorter than that may rest uncorrected.
+ * One 10 ms hop of the stretch: it leaves a lag within half a hop alone, and a splice carries the
+ * playhead at most half a hop past the clock.
  */
-const PERIOD = 1000 / 90;
+const HOP = 10;
 
 // Audio and video keep separate clocks that align once the delay covers the arrivals. The ring plays
-// onto the shared clock: in steady state the playhead rests within a pitch period of it, either way.
+// onto the shared clock: in steady state the playhead rests within a hop of it, either way.
 // A buffer that runs low slows playback and leaves it behind the clock, only as far as the stretch
 // allows, which a zero stretch leaves none of.
 describe("replay against the shared clock", () => {
@@ -184,8 +186,8 @@ describe("replay against the shared clock", () => {
 			const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(60) };
 			const { lags, underruns } = await lag(paced(60, lateness), options, 30_000);
 			expect(lags.length).toBeGreaterThan(0);
-			expect(lags[0]).toBeGreaterThanOrEqual(-PERIOD);
-			expect(lags.at(-1)).toBeLessThanOrEqual(PERIOD);
+			expect(lags[0]).toBeGreaterThanOrEqual(-HOP);
+			expect(lags.at(-1)).toBeLessThanOrEqual(HOP);
 			expect(underruns).toBe(0);
 		});
 	}
@@ -279,6 +281,8 @@ describe("recorded frame durations", () => {
 			rate: RATE,
 			config: CONFIG,
 			delay: Duration.millis(20),
+			// Without the stretch, which would slow a lone packet down as it runs out.
+			stretch: 0,
 			duration: 100,
 		}))
 			heard += output.filter((sample) => sample !== 0).length;
@@ -328,7 +332,7 @@ it("plays an advertised flush span past the decoded floor at its delay without a
 	expect(start).toBeLessThan(5040);
 	expect(short).toBe(0);
 	// Then onto the shared clock, which counts that lateness too.
-	expect(Math.abs(lag)).toBeLessThanOrEqual(PERIOD);
+	expect(Math.abs(lag)).toBeLessThanOrEqual(HOP);
 });
 
 // The same rule plays a buffered player onto the clock: its lookahead keeps the level high, so it plays
@@ -376,15 +380,16 @@ describe("buffered replay against the shared clock", () => {
 			lookahead: 500,
 			duration: observed(30),
 		};
-		// NetEq's accelerate takes one pitch period per stretch, at least 4.5 ms of this speech, so it
-		// gains well over 100 ms a second: the stall's lag is gone well before 20 s.
+		// Speeding up at the cap gains 100 ms a second, so the stall's lag is gone well before 20 s.
 		const result = await play(trace, options, (at) => (at >= 2000 && at < 5000) || at >= 20_000);
-		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
-		expect(result.max).toBeLessThanOrEqual(PERIOD);
+		expect(result.min).toBeGreaterThanOrEqual(-HOP);
+		expect(result.max).toBeLessThanOrEqual(HOP);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
 		expect(warn).not.toHaveBeenCalled();
 	});
 
+	// The rate is the lag over 500 ms, so a clock running 1% fast leaves audio trailing it by about 1% of
+	// that, and a splice every second or so: within a 20 ms frame.
 	it("follows a publisher clock running 1% fast at auto", async () => {
 		const trace = paced(60, (i) => 30 - (i * 20) / 101);
 		const options: Options = {
@@ -394,31 +399,33 @@ describe("buffered replay against the shared clock", () => {
 			lookahead: 500,
 			duration: observed(60),
 		};
-		const result = await play(trace, options, (at) => at >= 5000);
-		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
-		expect(result.max).toBeLessThan(23);
+		const result = await play(trace, options, (at) => at >= 10_000);
+		expect(result.min).toBeGreaterThanOrEqual(-HOP);
+		expect(result.max).toBeLessThan(20);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
 		expect(warn).not.toHaveBeenCalled();
 	});
 
 	it("plays every word of an utterance that stalls mid-burst, catching up after", async () => {
-		// Twenty seconds of speech generated four times faster than real time, held for 3.5 s after its
-		// first two seconds, so playback runs dry and resumes about two seconds behind the clock.
-		const trace = paced(20, (i) => (i < 100 ? 30 : 3500) - i * 15);
+		// Forty seconds of speech generated four times faster than real time, held for 3.5 s after its
+		// first two seconds, so playback runs dry and resumes about two seconds behind the clock, inside
+		// the lookahead: at the cap that takes some 20 s to catch up. The utterance's last moments slow
+		// down as it runs out, which no declared end explains.
+		const trace = paced(40, (i) => (i < 100 ? 30 : 3500) - i * 15);
 		const options: Options = {
 			rate: RATE,
 			config: CONFIG,
 			delay: Duration.millis(100),
-			lookahead: 30_000,
-			duration: 22_000,
+			lookahead: 60_000,
+			duration: 42_000,
 		};
-		const result = await play(trace, options, (at) => at >= 15_000);
-		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
-		expect(result.max).toBeLessThanOrEqual(PERIOD);
+		const result = await play(trace, options, (at) => at >= 30_000 && at < 39_000);
+		expect(result.min).toBeGreaterThanOrEqual(-HOP);
+		expect(result.max).toBeLessThanOrEqual(HOP);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
 		// Every frame played: what was heard and what the stretch shortened cover the utterance. A
 		// slow-down only adds to what is heard.
-		expect(Math.round(result.heard + result.accelerated)).toBeGreaterThanOrEqual(20_000);
+		expect(Math.round(result.heard + result.accelerated)).toBeGreaterThanOrEqual(40_000);
 		expect(warn).not.toHaveBeenCalled();
 	});
 });

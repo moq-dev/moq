@@ -24,7 +24,7 @@ can proceed independently; cutting the tag cannot.
   push events), and a rerun of that tag's
   [release-dart run](https://github.com/moq-dev/moq/actions/runs/43107848443)
   published 0.1.1. The next tag shows whether it publishes with no rerun.
-- Raise `dart/moq/pubspec.yaml`'s `moq_ffi` floor to the release the wrapper now needs (the media namespace and codec types), since `^0.4.3` resolves bindings without them.
+- The cut's `just version` raises `dart/moq/pubspec.yaml`'s `moq_ffi` floor from `^0.4.3`, which resolves bindings without the media namespace and codec types (`FFI_REQUIREMENTS` in `sh/version.py`). Check the published `pubspec.yaml` carries the cut's floor.
 - Cut the next `moq-dart-v*` release with the binding breaks and confirm the workflow publishes it.
 - Verify the published `moq_ffi` resolves its native asset from a clean
   machine with no monorepo checkout, since that download path is the one CI
@@ -39,4 +39,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Dart on iOS](/quest/m3/dart-ios.md) - pub.dev already tags `moq_ffi` for iOS, which nobody has run
+- [Dart on iOS](/quest/m4/dart-ios.md) - pub.dev already tags `moq_ffi` for iOS, which nobody has run

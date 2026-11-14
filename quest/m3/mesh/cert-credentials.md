@@ -62,6 +62,6 @@ Added 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and rem
 - Chains are 2 to 4 KB in base64, close to common 8 KB URL limits; cache verified chains by fingerprint, and say in the PR how a long chain is carried.
 - The shared token corpus planned in [moq-dev/moq#8151](https://github.com/moq-dev/moq/pull/8151) includes this credential form.
 
-## Required
+## Related
 
-- [Mesh relay node](/quest/m3/mesh/node.md) - the node that checks these credentials for its LAN peers
+- [Mesh relay node](/quest/m3/mesh/node.md) - checks these credentials for its LAN peers, and only uses them, so this lands first

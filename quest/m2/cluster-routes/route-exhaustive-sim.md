@@ -43,7 +43,7 @@ out.
 - A search that takes seconds joins the merge gate; a larger one runs in
   Nightly.
 
-This sits beside [trace validation](/quest/m1/route-trace-validation.md), which
+This sits beside [trace validation](/quest/m3/route-trace-validation.md), which
 keeps the TLA+ model honest for the design work done on the spec before code exists. It replaces neither
 that nor the seeded sweeps on larger meshes
 (`tests/integration/mesh_sweep.rs`). If the spike shows the
@@ -61,4 +61,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - guards the model against the code; this checks the code itself
+- [Route sweeps are checked against the TLA+ model](/quest/m3/route-trace-validation.md) - guards the model against the code; this checks the code itself

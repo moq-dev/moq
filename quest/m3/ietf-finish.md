@@ -17,8 +17,12 @@ Observed on 2026-10-22 with `just test interop --finish --all --versions ietf`
 - Draft 18: late readers see the finished catalog end empty, a short
   tail, or a refused joining FETCH (`publish done: internal error`). This is
   the pre-draft-22 join after a finish, which
-  [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) fixes for Rust publishers; rerun
-  these drafts.
+  [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) (merged) fixes
+  for Rust publishers. The rerun of these drafts since #7306 is still owed
+  (2026-11-12 audit); start there, and leave whatever still fails with a Rust
+  publisher once the head is held to
+  [the kept join](/quest/m3/ietf-join-pin-head.md), which owns the draft-18
+  `tail` and `finish` cells with a Rust publisher.
 - Draft 22: several readers time out after the withdrawal (C and C++
   on the health broadcast), JS readers see `publish done: internal error`, and
   native JS refuses a "malformed request stream message" from the relay.
