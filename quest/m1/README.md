@@ -28,7 +28,7 @@ no longer gates m2, since takeover, its only wire change, moved to m3.
 Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): tests
 that guard what production traffic reaches join m1 ahead of the questline's
 m4 default, so changes are proven before they ship: the
-[QUIC Interop Runner](/quest/m1/quic-interop.md),
+QUIC Interop Runner (`test/quic-interop`),
 [sim rule checks](/quest/m1/quic-sim-rules.md),
 [relay parser fuzz targets](/quest/m1/fuzz-relay-parsers.md), and from m4
 [the relay on the sim](/quest/m1/quic-sim.md),

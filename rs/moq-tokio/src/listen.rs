@@ -178,8 +178,8 @@ pub struct Config {
 
 	/// IPv4 address advertised as the QUIC preferred_address.
 	///
-	/// Supporting clients (Chrome M131+, this crate) migrate to this address
-	/// shortly after the handshake completes. Typical use: handshake on an
+	/// Supporting clients (Chrome M131+) migrate to this address shortly after
+	/// the handshake completes; moq-quic's own client stays on the first. Typical use: handshake on an
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
 	/// Honored by the QUIC backend. Accept-only, which is why it lives

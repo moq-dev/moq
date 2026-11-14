@@ -27,6 +27,10 @@ name: Nightly
 # exception: deterministic and seconds long, so `just ci` gates every diff that
 # can move them, and audio-quality.yml reruns them here.
 #
+# `quic-interop` runs moq-quic against other QUIC stacks through the QUIC
+# Interop Runner, an hour of simulated links per peer, which only a moq-quic
+# change or a bumped pin moves.
+#
 # `tla` model-checks every TLA+ config: TLC explores every ordering a model
 # allows, which takes minutes per config, and a model only changes when the code
 # it covers does, which review checks (see REVIEW.md). It also fails when an
@@ -64,6 +68,10 @@ jobs:
 
   ietf-conformance:
     uses: ./.github/workflows/ietf-conformance.yml
+    secrets: inherit
+
+  quic-interop:
+    uses: ./.github/workflows/quic-interop.yml
     secrets: inherit
 
   runner-vm:

@@ -602,6 +602,19 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
+          # The QUIC Interop Runner's host tools (`just test quic-interop`): tshark
+          # reads its pcaps, OpenSSL makes its certificates (the dev shell's LibreSSL
+          # has no config for them), and Compose drives Podman where Docker's plugin is
+          # absent. Kept out of the dev shell, which every CI job downloads.
+          quic-interop = pkgs.buildEnv {
+            name = "quic-interop-tools";
+            paths = [
+              pkgs.docker-compose
+              pkgs.openssl
+              pkgs.wireshark-cli
+            ];
+          };
+
           # Nightly's `just rs send-depth` proves native Send futures on it.
           # Pinned so a toolchain release alone never fails that job;
           # bump it on purpose, like the stable toolchain above. Kept out of

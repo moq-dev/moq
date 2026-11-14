@@ -352,13 +352,20 @@ pub(crate) struct PathResponses {
 }
 
 impl PathResponses {
-	pub(crate) fn push(&mut self, packet: u64, token: u64, remote: SocketAddr) {
+	/// Queue the answer to a PATH_CHALLENGE received from `remote` while the current path is to
+	/// `path`
+	///
+	/// RFC 9000 section 8.2.2 answers every challenge, and a peer validating a path may send
+	/// several before we transmit, so each one on the current path is queued. Off it, each answer
+	/// is padded to a full datagram toward an address not yet shown to receive, so only the newest
+	/// per address is kept and a burst of challenges cannot multiply what goes back.
+	pub(crate) fn push(&mut self, packet: u64, token: u64, remote: SocketAddr, path: SocketAddr) {
 		/// Arbitrary permissive limit to prevent abuse
 		const MAX_PATH_RESPONSES: usize = 16;
 		let response = PathResponse { packet, token, remote };
-		let existing = self.pending.iter_mut().find(|x| x.remote == remote);
-		if let Some(existing) = existing {
-			// Update a queued response
+		if remote != path
+			&& let Some(existing) = self.pending.iter_mut().find(|x| x.remote == remote)
+		{
 			if existing.packet <= packet {
 				*existing = response;
 			}
@@ -373,26 +380,17 @@ impl PathResponses {
 		}
 	}
 
+	/// Take the oldest queued answer to a challenge from an address other than `remote`
 	pub(crate) fn pop_off_path(&mut self, remote: SocketAddr) -> Option<(u64, SocketAddr)> {
-		let response = *self.pending.last()?;
-		if response.remote == remote {
-			// We don't bother searching further because we expect that the on-path response will
-			// get drained in the immediate future by a call to `pop_on_path`
-			return None;
-		}
-		self.pending.pop();
+		let index = self.pending.iter().position(|x| x.remote != remote)?;
+		let response = self.pending.remove(index);
 		Some((response.token, response.remote))
 	}
 
+	/// Take the oldest queued answer to a challenge from `remote`
 	pub(crate) fn pop_on_path(&mut self, remote: SocketAddr) -> Option<u64> {
-		let response = *self.pending.last()?;
-		if response.remote != remote {
-			// We don't bother searching further because we expect that the off-path response will
-			// get drained in the immediate future by a call to `pop_off_path`
-			return None;
-		}
-		self.pending.pop();
-		Some(response.token)
+		let index = self.pending.iter().position(|x| x.remote == remote)?;
+		Some(self.pending.remove(index).token)
 	}
 
 	pub(crate) fn is_empty(&self) -> bool {
@@ -442,5 +440,65 @@ impl InFlight {
 	fn remove(&mut self, packet: &SentPacket) {
 		self.bytes -= u64::from(packet.size);
 		self.ack_eliciting -= u64::from(packet.ack_eliciting);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const PATH: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 443);
+	const OTHER: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 4433);
+
+	/// Two challenges on the current path before we transmit, as ngtcp2 sends when validating a
+	/// rebound client, are both answered, oldest first.
+	#[test]
+	fn answers_every_challenge_on_the_path() {
+		let mut responses = PathResponses::default();
+		responses.push(1, 0xa, PATH, PATH);
+		responses.push(2, 0xb, PATH, PATH);
+		assert_eq!(responses.pop_off_path(PATH), None);
+		assert_eq!(responses.pop_on_path(PATH), Some(0xa));
+		assert_eq!(responses.pop_on_path(PATH), Some(0xb));
+		assert!(responses.is_empty());
+	}
+
+	/// Off the path, only the newest challenge per address is answered, however they arrive.
+	#[test]
+	fn answers_the_newest_challenge_off_the_path() {
+		let mut responses = PathResponses::default();
+		responses.push(2, 0xb, OTHER, PATH);
+		responses.push(1, 0xa, OTHER, PATH);
+		responses.push(3, 0xc, OTHER, PATH);
+		assert_eq!(responses.pop_on_path(PATH), None);
+		assert_eq!(responses.pop_off_path(PATH), Some((0xc, OTHER)));
+		assert!(responses.is_empty());
+	}
+
+	/// Each kind drains whatever the other left queued ahead of it.
+	#[test]
+	fn drains_both_kinds_in_any_order() {
+		let mut responses = PathResponses::default();
+		responses.push(1, 0xa, PATH, PATH);
+		responses.push(2, 0xb, OTHER, PATH);
+		responses.push(3, 0xc, PATH, PATH);
+		assert_eq!(responses.pop_on_path(PATH), Some(0xa));
+		assert_eq!(responses.pop_on_path(PATH), Some(0xc));
+		assert_eq!(responses.pop_off_path(PATH), Some((0xb, OTHER)));
+		assert!(responses.is_empty());
+	}
+
+	/// A flood of challenges queues no more than the bound.
+	#[test]
+	fn bounds_the_queue() {
+		let mut responses = PathResponses::default();
+		for n in 0..100 {
+			responses.push(n, n, PATH, PATH);
+		}
+		let mut answered = 0;
+		while responses.pop_on_path(PATH).is_some() {
+			answered += 1;
+		}
+		assert_eq!(answered, 16);
 	}
 }

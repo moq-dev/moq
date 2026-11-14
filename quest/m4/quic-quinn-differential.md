@@ -16,7 +16,7 @@ Decided 2026-11-13 (maintainer, /quest-plan on what testing to add):
   The agent's case against: the fork has diverged (`RESET_STREAM_AT`, receive
   timestamps, probing, congestion control moved to moq-congestion, in-order
   reads only), so only coarse outcomes compare; it adds a quinn-proto
-  dev-dependency; and [the interop runner](/quest/m1/quic-interop.md) already
+  dev-dependency; and the interop runner (`test/quic-interop`) already
   meets quinn as a peer. The spike measures whether that case holds.
 - ✅ m4.
 
