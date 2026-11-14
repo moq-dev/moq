@@ -555,16 +555,22 @@ impl Encoder {
 		};
 		#[cfg(not(target_os = "linux"))]
 		let external = false;
+		// A backend that scales a GPU surface itself writes it straight into its
+		// own input, rather than into a scaled copy made here.
+		let scaled = external
+			|| self.resize.as_ref().is_some_and(|config| {
+				config.output.resolve(&frame.surface) == crate::Output::Native && self.backend.scales(&frame.surface)
+			});
 		let resized;
 		let frame = match &self.resize {
-			Some(config) if !external && frame.size() != self.size => {
+			Some(config) if !scaled && frame.size() != self.size => {
 				resized = frame.resize(self.size, config)?;
 				&resized
 			}
 			_ => frame,
 		};
 		let size = frame.size();
-		if !external && size != self.size {
+		if !scaled && size != self.size {
 			return Err(Error::codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size
@@ -575,7 +581,14 @@ impl Encoder {
 		// standard-definition boundary, where the pixels keep their space but the
 		// encoder was sized into another one, and by a source whose space changes
 		// mid-stream.
-		if let Some(color) = frame.surface.color()
+		// A frame the backend scales keeps its samples' space, and an unlabelled
+		// one means what `Color::infer` guesses for its own size, as
+		// `Frame::resize` would have labelled the copy.
+		let color = match frame.surface.color() {
+			None if scaled && !external && size != self.size => Some(Color::infer(size)),
+			color => color,
+		};
+		if let Some(color) = color
 			&& color != self.color
 		{
 			return Err(Error::ColorMismatch {
@@ -1311,6 +1324,79 @@ mod tests {
 			input: None,
 			_thread_bound: PhantomData,
 		}
+	}
+
+	/// Scales every surface itself, the way NVENC scales CUDA frames into its
+	/// input, and records the size each frame reached it at.
+	struct Scaling {
+		sizes: std::sync::Arc<std::sync::Mutex<Vec<Size>>>,
+	}
+
+	impl Backend for Scaling {
+		fn encode(&mut self, frame: &Frame, _cut: bool) -> Result<(), Error> {
+			self.sizes.lock().unwrap().push(frame.size());
+			Ok(())
+		}
+
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(None)
+		}
+
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn can_cut(&self) -> bool {
+			true
+		}
+
+		fn scales(&self, _surface: &crate::Surface) -> bool {
+			true
+		}
+
+		fn name(&self) -> &'static str {
+			"scaling"
+		}
+	}
+
+	/// A backend that scales the frame itself is handed it at its own size, but
+	/// the frame is held to the space it would have after `Frame::resize`: an
+	/// unlabelled 720p frame is BT.709, which a 480p encoder would label BT.601.
+	#[test]
+	fn a_frame_the_backend_scales_keeps_its_implied_color() {
+		use crate::Color;
+
+		let unlabelled = |size: Size| {
+			let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
+			Frame::new(Surface::I420(i420), moq_net::Timestamp::from_micros(0).unwrap())
+		};
+		let mut config = Config::new(640, 480, crate::FrameRate::new(30, 1).unwrap());
+		config.resize = Some(crate::resize::Config::default());
+		let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let mut encoder = encoder_with(Box::new(Scaling { sizes: sizes.clone() }), &config);
+
+		let err = encoder
+			.encode(&unlabelled(Size::new(1280, 720)))
+			.expect_err("an implied BT.709 frame is refused");
+		assert!(
+			matches!(
+				err,
+				Error::ColorMismatch {
+					frame: Color::BT709,
+					encoder: Color::BT601
+				}
+			),
+			"{err}"
+		);
+
+		// Within the same space, the backend gets the frame unscaled.
+		encoder.encode(&unlabelled(Size::new(704, 576))).unwrap();
+		encoder.encode(&unlabelled(Size::new(640, 480))).unwrap();
+		assert_eq!(*sizes.lock().unwrap(), [Size::new(704, 576), Size::new(640, 480)]);
 	}
 
 	/// Records the cut flag each frame reached the codec with, so a test can
