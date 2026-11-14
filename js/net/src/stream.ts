@@ -264,6 +264,7 @@ export class Reader {
 	#closed?: Promise<void>;
 	// The decode that last ran short and how far, so a retry can wait for those bytes.
 	#short?: { decode: (c: Cursor) => unknown; err: Short };
+	#uncoded = false;
 	version: StreamVersion;
 
 	// Either stream or buffer MUST be provided.
@@ -289,7 +290,9 @@ export class Reader {
 		// Every read of this stream funnels through here, so decoding the peer's reset code
 		// once is enough to keep the raw transport error out of every caller (and every app).
 		const result = await reader.read().catch((err: unknown) => {
-			throw fromTransport(err, { version: asIetf(this.version) });
+			const e = fromTransport(err, { version: asIetf(this.version) });
+			if (!(e instanceof StreamError)) this.#uncoded = true;
+			throw e;
 		});
 
 		if (result.done) {
@@ -500,6 +503,14 @@ export class Reader {
 	async done(): Promise<boolean> {
 		if (this.#buffer.byteLength > 0 || this.#chunked > 0) return false;
 		return !(await this.#fill());
+	}
+
+	/**
+	 * Whether a read failed underneath without a stream code: Firefox reports a reset that lands
+	 * before the page read the stream's data as a bare `TypeError`, dropping the peer's code.
+	 */
+	get uncoded(): boolean {
+		return this.#uncoded;
 	}
 
 	// The transport error is built only while the stream is still open. After a FIN the
