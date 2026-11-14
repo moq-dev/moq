@@ -292,7 +292,6 @@ impl Jwk {
 			encode: Default::default(),
 		})
 	}
-
 }
 
 impl Jwk {
