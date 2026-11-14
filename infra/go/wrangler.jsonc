@@ -1,0 +1,26 @@
+{
+	// Cloudflare Wrangler configuration for the Go module proxy worker.
+	// Serves go.moq.dev, backed by the go-moq-dev R2 bucket.
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "go-moq-dev",
+	"main": "src/worker.ts",
+	"compatibility_date": "2026-11-01",
+	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
+	"workers_dev": false,
+	"route": {
+		"pattern": "go.moq.dev",
+		"custom_domain": true
+	},
+	"r2_buckets": [
+		{
+			"binding": "GO",
+			"bucket_name": "go-moq-dev",
+			"remote": true
+		}
+	],
+	"observability": {
+		"logs": {
+			"enabled": true
+		}
+	}
+}

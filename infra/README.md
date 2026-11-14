@@ -11,9 +11,10 @@ infrastructure.
 | `infra/mbx` |                 | `mbx-moq-dev`   | Private Rust build cache for CI         |
 | `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
 | `infra/corpus` | `corpus.moq.dev` | `corpus-moq-dev`, `corpus-private-moq-dev` | Video-quality corpus |
+| `infra/go`  | `go.moq.dev`    | `go-moq-dev`    | Go module proxy for `moq.dev/moq-ffi`   |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
-small TypeScript handler. The apt and rpm workers proxy GETs out of the R2
+small TypeScript handler. The apt, rpm, and go workers proxy GETs out of the R2
 bucket with appropriate `Content-Type` and `Cache-Control` headers for the
 file kind, and the nix worker does the same across its two buckets. The
 moq.sh worker serves `install.sh` from its bundle at every path, with the
@@ -31,6 +32,7 @@ just infra apt deploy
 just infra rpm deploy
 just infra moq-sh deploy
 just infra nix deploy
+just infra go deploy
 ```
 
 Each recipe runs `bun install` and `bun wrangler deploy`. The
@@ -381,6 +383,79 @@ old one in `flake.nix`. Drop the old key once nothing signed with it matters:
 never for released ones unless they are re-signed, and for CI paths only after
 emptying `nix-ci-moq-dev`, since the refresh keeps the newest cached commit's
 paths, with their old signatures, indefinitely. The next Cache push refills it.
+
+## Bootstrapping the Go module proxy
+
+`go.moq.dev` serves `moq.dev/moq-ffi` in the GOPROXY protocol out of the
+`go-moq-dev` bucket, so its static libraries stay out of git. moq.dev's vanity
+page (`worker/vanity.ts` in moq-dev/moq.dev) points the go command there with
+a `mod` go-import tag, which proxy.golang.org and `GOPROXY=direct` both follow.
+A 404 is final: nothing falls back past this proxy.
+
+`release-go-ffi.yml` publishes each `moq-ffi-v*` tag with `just go publish-ffi`
+from the `publish` Environment, reusing its `R2_ACCESS_KEY_ID` and
+`R2_SECRET_ACCESS_KEY`. Until the cutover below, it reads moq.dev's go-import
+tag (`just go ffi-origin`) and keeps publishing to the moq-dev/moq-go-ffi git
+mirror. sum.golang.org pins the first hash it sees for each version, so the
+upload never replaces an object: a rerun skips identical files and fails on
+different ones.
+
+All of this runs once, by a maintainer, in this order, with no `moq-ffi`
+release in flight between steps 3 and 5.
+
+1. **Create the bucket and deploy the Worker** under your `wrangler login`:
+
+   ```bash
+   just infra go create
+   just infra go deploy
+   curl -fsS https://go.moq.dev/   # prints the proxy's banner
+   ```
+
+2. **Let the `publish` Environment's R2 token write the bucket.** If the token
+   behind `R2_ACCESS_KEY_ID` is scoped to buckets, add `go-moq-dev` with
+   **Object Read & Write** in the dashboard (R2 -> Manage API tokens). Wrangler
+   cannot edit R2 tokens.
+
+3. **Backfill and verify** every published version, with that token in the
+   environment, from the dev shell with rclone added (`nix shell .#packaging`):
+
+   ```bash
+   export R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
+   just infra go backfill
+   just infra go verify
+   ```
+
+   `backfill` copies every version proxy.golang.org lists, byte for byte as
+   `go mod download` checked it against sum.golang.org. `verify` downloads each
+   one through `https://go.moq.dev` from a clean module cache, so the go
+   command checks it against sum.golang.org again, and fails if any listed
+   version is missing.
+
+4. **Cut over moq.dev.** In moq-dev/moq.dev's `worker/vanity.ts`, serve
+   `<meta name="go-import" content="moq.dev/moq-ffi mod https://go.moq.dev">`
+   for `/moq-ffi` and drop its `go-source` tag, since the generated `moq.go`
+   lives in no repository. Once deployed (the page caches for an hour):
+
+   ```bash
+   just go ffi-origin   # prints mod
+   ```
+
+5. **Catch up and verify the paths users take**, from a clean module cache:
+
+   ```bash
+   just infra go backfill   # any release the mirror took before the cutover
+   just infra go verify --proxy direct
+   just infra go verify --proxy https://proxy.golang.org
+   ```
+
+6. **Archive the mirror** once a `moq-ffi` release has published through
+   go.moq.dev (its `Publish to Go module mirror` job runs `Publish to
+   go.moq.dev`). Archiving keeps every tag readable for anyone who imported
+   the old `github.com/moq-dev/moq-go-ffi` path:
+
+   ```bash
+   gh repo archive moq-dev/moq-go-ffi --yes
+   ```
 
 ## Bootstrapping the video corpus
 
