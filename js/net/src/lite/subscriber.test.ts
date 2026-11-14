@@ -4069,6 +4069,67 @@ test("a lite-07 refused route or claim withdraws only itself", async () => {
 	subscriber.close();
 });
 
+// A claim at the session root has the empty path, which is a path all the same: its updates,
+// restarts, and end apply as any other's.
+test("a lite-07 claim at the root updates and ends", async () => {
+	const { subscriber, announced, send } = await routedStream();
+	const root = Path.empty();
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: root, route: 0n, instance: Instance.parse("i") });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start" });
+
+	await send({ status: "restart", id: 0n, instance: Instance.parse("j") });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: root, kind: "restart" });
+
+	await send({ status: "endedId", id: 0n });
+	await send({ status: "floor", id: 0n, revision: 2n });
+	expect(await announced.next()).toMatchObject({ prefix: root, kind: "end" });
+
+	// Its path is free again, so starting it anew is no duplicate.
+	await send({ status: "active", suffix: root, route: 0n, instance: Instance.parse("k") });
+	await send({ status: "floor", id: 0n, revision: 3n });
+	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start" });
+
+	announced.close();
+	subscriber.close();
+});
+
+// A route this subscriber refused is no view of its node: a newer floor on it hides nothing
+// another stream carries, as rs/moq-net's node never holds the route.
+test("a lite-07 refused route's floors hide no other stream's claims", async () => {
+	const { subscriber, announced, send, another } = await routedStream();
+	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const instance = Instance.parse("i");
+	// One varint byte, so the raw message below spells it.
+	const node = 7n;
+
+	await send({ status: "routeStart", node, advert: ADVERT });
+	await send({ status: "active", suffix: Path.from("live/x"), route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/x"), kind: "start" });
+
+	// ROUTE_START to the node with a flag no version defines, then a newer floor without live/x.
+	live.raw([6, 5, 7, 1, 0, 0x80, 42]);
+	await live.send({ status: "floor", id: 0n, revision: 5n });
+	// A claim of another node on that stream shows once it read all of the above.
+	await live.send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("z"), route: 1n, instance });
+	await live.send({ status: "floor", id: 1n, revision: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+
+	// What the first stream shows next is its own new claim, not live/x withdrawn.
+	await send({ status: "active", suffix: Path.from("live/y"), route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/y"), kind: "start" });
+
+	live.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
 // Two streams carry one origin's claims, and a withdrawal reaches one first. Of the floors that
 // certify a claim, the newest decides whether it exists, so the lagging stream's copy is held back
 // rather than selected and refused: also once the newer stream's route ends.

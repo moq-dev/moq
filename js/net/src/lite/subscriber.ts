@@ -1215,7 +1215,8 @@ export class Subscriber {
 			routes.set(id, wire);
 			const started = sample();
 			if (node !== 0n) nodes.add(node);
-			this.#floors.join(node, wire.carrier);
+			// A refused route's floors stay its own, as Rust's node never holds the route.
+			if (advert !== undefined) this.#floors.join(node, wire.carrier);
 			// The link's first read lands before the route's first claims show, as Rust
 			// reads the link before it serves them: a listing reports a path's route when
 			// it turns present and not again for an RTT, so a read landing after would
@@ -1248,6 +1249,21 @@ export class Subscriber {
 			if (claim) change(routeId, named, claim);
 		};
 
+		// The route now reaches its node by `advert`, or undefined while this node refuses what the
+		// peer forwarded. A refused route leaves the node's floors, as an ended one does, and joins
+		// again once usable, with what its last floor certified, as rs/moq-net files it again.
+		const reach = (wire: Route, advert: Advert | undefined) => {
+			const joined = wire.advert !== undefined;
+			// The reserved node names no route, whatever the peer forwards for it.
+			wire.advert = wire.node === 0n ? undefined : advert;
+			if (joined && wire.advert === undefined) this.#floors.leave(wire.node, wire.carrier);
+			if (joined || wire.advert === undefined) return;
+			this.#floors.join(wire.node, wire.carrier);
+			const others = this.#floors.floor(wire.node, wire.carrier);
+			show(wire, new Map(), true);
+			if (others) this.#consumes.revalidate();
+		};
+
 		// Apply a message whose content, which the peer only forwarded, this node refuses: withdraw
 		// the route or claim it names, and keep the stream. Mirrors rs/moq-net.
 		const refused = (message: Refusable, reason: Refusal) => {
@@ -1258,7 +1274,7 @@ export class Subscriber {
 				case "routeUpdate": {
 					const wire = route(message.id);
 					console.warn(`refusing a forwarded route: node=${wire.node} route=${message.id} reason=${reason}`);
-					wire.advert = undefined;
+					reach(wire, undefined);
 					refreshRoute(wire, true);
 					return;
 				}
@@ -1273,7 +1289,7 @@ export class Subscriber {
 						`refusing a forwarded claim: route=${live.route} claim=${message.id} reason=${reason}`,
 					);
 					live.claim = undefined;
-					if (live.path) change(live.route, live.path, undefined);
+					if (live.path !== undefined) change(live.route, live.path, undefined);
 					return;
 				}
 			}
@@ -1299,9 +1315,8 @@ export class Subscriber {
 						break;
 					case "routeUpdate": {
 						const wire = route(msg.id);
-						// The reserved node names no route, whatever the peer forwards for it.
-						wire.advert = wire.node === 0n ? undefined : msg.advert;
 						wire.held = false;
+						reach(wire, msg.advert);
 						refreshRoute(wire, !usable(wire));
 						break;
 					}
@@ -1337,7 +1352,12 @@ export class Subscriber {
 						const wire = route(msg.id);
 						// A floor that certifies less keeps what the route's last one certified.
 						const certified = wire.view.revision;
-						if (certified !== undefined && (msg.revision === undefined || msg.revision < certified))
+						const joined = wire.advert !== undefined;
+						if (
+							joined &&
+							certified !== undefined &&
+							(msg.revision === undefined || msg.revision < certified)
+						)
 							this.#floors.regress(wire.node, wire.carrier);
 						const touched = new Map<Path.Valid, boolean>();
 						for (const [path, claim] of wire.pending) {
@@ -1365,7 +1385,7 @@ export class Subscriber {
 						wire.view.revision = msg.revision;
 						// Every other route to the node is shown anew first; with one, this route's
 						// unchanged claims may change state too.
-						const others = this.#floors.floor(wire.node, wire.carrier);
+						const others = joined && this.#floors.floor(wire.node, wire.carrier);
 						show(wire, touched, others);
 						// Another view of the node may now cover a consumed path differently.
 						if (others) this.#consumes.revalidate();
@@ -1382,7 +1402,7 @@ export class Subscriber {
 					case "update": {
 						const live = claimOf(msg.id);
 						// An update names none of what a refused claim lacks.
-						if (!live.claim || !live.path) break;
+						if (live.claim === undefined || live.path === undefined) break;
 						live.claim = { ...live.claim, cost: msg.cost ?? Cost.zero };
 						change(live.route, live.path, live.claim);
 						break;
@@ -1392,7 +1412,7 @@ export class Subscriber {
 						if (msg.instance === undefined)
 							throw new ProtocolViolation("lite-07 restart without an instance");
 						// A claim without a path stays refused, whatever the peer sends for it.
-						if (!live.path) break;
+						if (live.path === undefined) break;
 						live.claim = { instance: msg.instance, epoch: msg.epoch ?? 0n, cost: msg.cost ?? Cost.zero };
 						change(live.route, live.path, live.claim);
 						break;
@@ -1405,7 +1425,7 @@ export class Subscriber {
 						history.end(msg.id);
 						claims.delete(msg.id);
 						const wire = route(live.route);
-						if (!live.path) {
+						if (live.path === undefined) {
 							wire.unnamed.delete(msg.id);
 							break;
 						}

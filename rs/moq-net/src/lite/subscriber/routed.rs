@@ -232,7 +232,14 @@ impl Routed {
 				let path = decoder.start(Some(suffix))?;
 				let path = self.claim_path(prefix, path);
 				let claim = claim(instance, epoch, cost, hops)?;
-				self.start(decoder.last(), route, path, Some(claim))?;
+				let id = decoder.last();
+				// Fields valid alone can still resolve, or join the prefix, past the path limits.
+				if path.is_none() {
+					let reason = lite::Refusal::Path;
+					tracing::warn!(route, claim = id, %reason, "refusing a forwarded claim");
+					self.stats.refuse_route();
+				}
+				self.start(id, route, path, Some(claim))?;
 			}
 			Msg::Update { id, hops, cost } => {
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;

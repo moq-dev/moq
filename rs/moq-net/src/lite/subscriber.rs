@@ -10386,10 +10386,16 @@ mod tests {
 	/// The body of a lite-07 ANNOUNCE_START under Route ID 0, its path and instance
 	/// written raw.
 	fn start_body(path: &[u8], instance: &[u8]) -> Vec<u8> {
+		based_start_body(0, 0, path, instance)
+	}
+
+	/// An ANNOUNCE_START body on route 0 whose suffix keeps `keep` segments of the claim
+	/// `base` Announce IDs back.
+	fn based_start_body(base: u64, keep: u64, path: &[u8], instance: &[u8]) -> Vec<u8> {
 		let mut body = Vec::new();
 		let w = &mut crate::coding::Encoder::new(&mut body, Version::Lite07.into());
-		w.varint(0).unwrap();
-		w.varint(0).unwrap();
+		w.varint(base).unwrap();
+		w.varint(keep).unwrap();
 		w.bytes(path).unwrap();
 		w.varint(0).unwrap();
 		w.bytes(instance).unwrap();
@@ -10476,6 +10482,38 @@ mod tests {
 		poll(&mut prefix);
 		cursor.assert_next_ended("c");
 		cursor.assert_next_wait();
+	}
+
+	/// Fields valid alone can still resolve past the path limits: that claim is refused
+	/// and counted like any other, and the stream keeps going.
+	#[kio::test]
+	async fn a_claim_resolved_too_deep_is_refused() {
+		let session = crate::lite::test_transport::ScriptedSession::new(two_routes());
+		let log = session.log.clone();
+		let (registry, stats) = counted();
+		let (mut prefix, consumer) = root_prefix_counted(Version::Lite07, session.clone(), stats);
+		let mut cursor = consumer.routes();
+		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+		cursor.assert_next_active("a");
+		cursor.assert_next_active("b");
+
+		// Id 2 sits at the depth limit; id 3 keeps all of it and adds a segment.
+		let deep = vec!["s"; Path::MAX_PARTS].join("/");
+		session.push(&announce_script(
+			Version::Lite07,
+			&[
+				&raw(ANNOUNCE_START, start_body(deep.as_bytes(), b"i")),
+				&raw(ANNOUNCE_START, based_start_body(1, Path::MAX_PARTS as u64, b"z", b"i")),
+				&claim_on(0, "c"),
+				&floor(0, Some(1)),
+			],
+		));
+		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+		assert!(log.closes().is_empty(), "{:?}", log.closes());
+		cursor.assert_next_active(&deep);
+		cursor.assert_next_active("c");
+		cursor.assert_next_wait();
+		assert_eq!(refusals(&registry), 1);
 	}
 
 	/// Only the neighbour's own framing and state close the session: a refused route
