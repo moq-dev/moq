@@ -76,22 +76,47 @@ export function slope(xs: number[], ys: number[]): number | null {
 	return den === 0 ? null : num / den;
 }
 
+/** How far before a disturbance audio's resting point is read from. */
+export const REST_MS = 5000;
+
+/** One codec frame of a row, the tolerance for audio being back where it rested. */
+export const frameMs = (row: Row): Ms => (row.codec === "aac" ? (1024 / row.rate) * 1000 : BUCKET_MS);
+
 /**
- * The longest run of samples spent away from rest, in ms: from the first away sample to the next
- * one back. A run still open at the end lasts to the last sample.
+ * The longest time audio took to return after a disturbance, in ms, or null when it never had a
+ * resting point to leave. Audio rests at the median lag of the {@link REST_MS} before each sample,
+ * leaving out earlier disturbances; one starts at the first sample stalled or more than `frame` off
+ * that rest, either way, and ends at the next sample back within `frame` of it. One still open at
+ * the end lasts to the last sample, so a later one, always shorter, cannot raise the longest. Samples
+ * before `from` only set the rest, so where audio settled during a tune-in is its rest at `from`.
  */
-export function longestAway(samples: { at: Ms; away: boolean }[]): Ms {
-	let longest = 0;
-	let since: Ms | undefined;
-	for (const { at, away } of samples) {
-		if (away) since ??= at;
-		else if (since !== undefined) {
-			longest = Math.max(longest, at - since);
-			since = undefined;
-		}
+export function recovery(
+	samples: { at: Ms; lag: Ms | undefined; stalled: boolean }[],
+	frame: Ms,
+	from: Ms = Number.NEGATIVE_INFINITY,
+): Ms | null {
+	type Point = (typeof samples)[number];
+	// Samples inside a disturbance, which say nothing about where audio rests.
+	const disturbed = new Set<number>();
+	let longest: Ms | null = null;
+	for (let i = samples.findIndex((s) => s.at >= from); i >= 0 && i < samples.length; i++) {
+		const onset = samples[i] as Point;
+		const before = samples.flatMap((s, j) =>
+			s.at >= onset.at - REST_MS && j < i && !disturbed.has(j) && !s.stalled && s.lag !== undefined
+				? [s.lag]
+				: [],
+		);
+		const rest = median(before);
+		if (rest === undefined) continue;
+		longest ??= 0;
+		const back = (s: Point) => !s.stalled && s.lag !== undefined && Math.abs(s.lag - rest) <= frame;
+		if (back(onset) || (onset.lag === undefined && !onset.stalled)) continue;
+		let end = samples.findIndex((s, j) => j > i && back(s));
+		if (end < 0) end = samples.length - 1;
+		for (let j = i; j < end; j++) disturbed.add(j);
+		longest = Math.max(longest, (samples[end] as Point).at - onset.at);
+		i = end;
 	}
-	const end = samples.at(-1)?.at;
-	if (since !== undefined && end !== undefined) longest = Math.max(longest, end - since);
 	return longest;
 }
 
@@ -216,18 +241,17 @@ export function analyze(input: Input): Summary {
 		const lag = lagOf(s);
 		return lag === undefined ? [] : [lag];
 	});
-	// Rest is the window's median lag, not zero: a player may settle a little either side of the clock,
-	// and how far is `av_lag_ms_p50`'s to grade. A stalled ring is off the clock however far it ran.
-	const rest = percentile(behind, 50);
-	const recover =
-		rest === null
-			? null
-			: longestAway(
-					window.map((s) => {
-						const lag = s.stalled ? undefined : lagOf(s);
-						return { at: s.at, away: s.stalled === true || (lag !== undefined && lag > rest + BUCKET_MS) };
-					}),
-				);
+	// Measured against where audio rested before each disturbance, not zero: a player may settle a
+	// little either side of the clock, and how far is `av_lag_ms_p50`'s to grade.
+	// The warmup's last `REST_MS` sets where audio rests going into the window, so a disturbance at its
+	// start is measured too.
+	const recover = recovery(
+		samples
+			.filter((s) => s.at >= t0 - REST_MS && s.at <= t1)
+			.map((s) => ({ at: s.at, lag: s.stalled ? undefined : lagOf(s), stalled: s.stalled === true })),
+		frameMs(row),
+		t0,
+	);
 	const stalledShare = window.length > 0 ? window.filter((s) => s.stalled).length / window.length : null;
 
 	// ── the target ──────────────────────────────────────────────────────────

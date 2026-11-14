@@ -44,8 +44,7 @@ out.
   Nightly.
 
 This sits beside [trace validation](/quest/m1/route-trace-validation.md), which
-keeps the TLA+ model honest for [the inductive invariant](/quest/m1/route-inductive.md)
-and the design work done on the spec before code exists. It replaces neither
+keeps the TLA+ model honest for the design work done on the spec before code exists. It replaces neither
 that nor the seeded sweeps on larger meshes
 (`tests/integration/mesh_sweep.rs`). If the spike shows the
 search covers what a model check does, recommend in the PR what to do with the

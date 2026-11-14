@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, Elapsed, Instant, Manual, timeout } from "@moq/clock";
+import { Duration, Elapsed, Instant, timeout } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";

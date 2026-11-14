@@ -34,7 +34,8 @@ Settled:
   gain and reports the time from 200 ms back to within a frame.
 - Snap: past the threshold, or for a buffered player past the larger of its
   lookahead and the threshold, skip onto the clock when behind and pad
-  silence when ahead. A join snaps.
+  silence when ahead. A join snaps. Both rings already do this on NetEq's
+  controller (`ring-buffer.ts` `read`, `ring.rs` `skip` and `pad`); keep it.
 - Bridge: slow down while the received depth is below a cushion sized from
   the stretch's window and the device read, and the lag is under the
   threshold. The depth, not NetEq's level at arrival, so a batched publisher
@@ -59,10 +60,6 @@ Recommendations:
 
 Public API: `Sink::due` and `bus::Positioned` lose `jumped`; both are
 `main`-only, so nothing published migrates. Wire: none.
-
-## Required
-
-- [Congestion catch-up](/quest/m2/audio-playout/congestion-catch-up.md) - the 200 ms threshold and the snap this controller keeps
 
 ## Related
 

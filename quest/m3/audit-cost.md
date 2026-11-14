@@ -96,9 +96,7 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   closure and normalize hashed filenames.
 - `nm -S -C --defined-only` on the shipped static libraries attributes native
   growth by namespace.
-- Kept: `sorted-btree` (the `@js-sdsl/ordered-map` candidate was slower on
-  ascending and rolling arrivals), and the whole Rust workspace in the Python
-  sdist, minus `test_data`
+- Kept: the whole Rust workspace in the Python sdist, minus `test_data`
   ([moq-dev/moq#6867](https://github.com/moq-dev/moq/pull/6867)).
   `opt-level = "s"` for the bindings needs codec, crypto, and FFI throughput
   measurements first.
@@ -135,7 +133,8 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   `assert_matches`, `cpu-time`, `stats_alloc`, `unsafe-libopus`, the
   QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, UniFFI, and LibAV forks
   ([vendor-sync](/quest/m3/vendor-sync/README.md) ports upstream), and JS's
-  Zod, pako, sorted-btree, and UUIDv7. `moq-gst` keeps its Rust 1.92 floor
+  Zod, pako, and UUIDv7. Replaced: `sorted-btree`, by the ledger's in-tree
+  chunked `Sorted` list (about 5 KB Brotli per bundle). `moq-gst` keeps its Rust 1.92 floor
   for GStreamer.
 
 ## Required

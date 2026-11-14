@@ -241,6 +241,9 @@ for captured frames. `decode::Config::scale_hint` asks a decoder with a hardware
 which pairs that config with the subscription's `start` and `delay`: a
 `decode::Delay` whose `min` is your playout delay, where a cold join starts, and
 whose `max` is how far behind the live edge a stalled group may fall.
+`decode::Consumer::arrival` reports when the access unit behind the latest picture
+arrived, even when the decoder reordered or held it back, so a player can feed a
+playout clock or split latency into network and decode time.
 
 Common feature sets:
 

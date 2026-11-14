@@ -10,8 +10,7 @@
 //!
 //! The first walk of the peer's addresses fails fast: if no address establishes a
 //! session, the policy ends with [`Action::Done`] carrying that walk's error rather than
-//! retrying, so a setup mistake surfaces at once instead of looping. The one exception is
-//! a refused credential the tokens have replaced since, which earns another dial. A client started
+//! retrying, so a setup mistake surfaces at once instead of looping. A client started
 //! before its peer is reachable therefore exits, for its supervisor or app to restart.
 //! Once a session has been established, a later failure backs off and retries under
 //! [`Backoff`], so restarts and redeploys still recover.
@@ -55,8 +54,7 @@ const PROBE_MAX: Duration = Duration::from_secs(300);
 
 /// When to redial after a failure, and when to give up, once a session has been established.
 ///
-/// Before then nothing retries: the first walk ending without a session ends the policy,
-/// unless the peer refused credentials the tokens have replaced since.
+/// Before then nothing retries: the first walk ending without a session ends the policy.
 ///
 /// `initial` and `multiplier` set the wait before each retry, `max` caps it, and
 /// `healthy` decides which sessions count as failed attempts. The delays carry jitter,
@@ -328,15 +326,16 @@ pub enum Action<A, E> {
 	/// Drop the dial or probe in flight: it ran out its deadline, which already counted as
 	/// its failure.
 	Abandon,
-	/// The live session got a GOAWAY and now drains as the [`predecessor`](Reconnect::predecessor)
-	/// while a replacement is dialed.
+	/// The [`predecessor`](Reconnect::predecessor) serves while a replacement is dialed: the
+	/// live session got a GOAWAY and now drains as it, or the replacement closed while it
+	/// still drains.
 	Migrating,
 	/// The predecessor closed or overstayed its handover.
 	Retired,
 	/// Nothing serves anymore: the live session ended with this error, or the predecessor
 	/// retired between sessions. A redial follows.
 	Offline(Option<E>),
-	/// Why the policy is waiting to redial: a walk failed or a session ended too soon.
+	/// Why the policy is waiting to redial: a walk failed, or a session ended.
 	Retrying(E),
 	/// Poll again by this instant, or on a wake.
 	Wait(Option<Instant>),
@@ -508,8 +507,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 	/// Present `tokens` on every dial, through [`Attempt::client`].
 	///
-	/// A refused credential then earns another dial once the tokens change, and an ended
-	/// tokens handle ends the policy at its next walk.
+	/// An ended tokens handle ends the policy at its next walk.
 	pub fn with_tokens(mut self, tokens: auth::Tokens) -> Self {
 		self.tokens = Some(tokens);
 		self
@@ -1006,7 +1004,18 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			return self.done(Err(err));
 		}
 
-		self.queue.push_back(Action::Offline(Some(err.clone())));
+		// A predecessor still draining serves again, so this is no outage: the caller moves
+		// back onto it. One closing gracefully already carries nothing and takes no new work.
+		if self
+			.predecessor
+			.as_ref()
+			.is_some_and(|predecessor| !predecessor.closing)
+		{
+			self.queue.push_back(Action::Migrating);
+			self.queue.push_back(Action::Retrying(err.clone()));
+		} else {
+			self.queue.push_back(Action::Offline(Some(err.clone())));
+		}
 		if healthy {
 			// The window was reset, so a one-off drop reconnects promptly.
 			tracing::warn!(peer = %Shown(url), "session closed, reconnecting");

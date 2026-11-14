@@ -92,8 +92,8 @@ zero underruns (2026-11-08); the target formula and the playout as the
 largest `delay + target` among subscribed renditions; one algorithm with
 shared vectors for both players.
 
-Order: [congestion catch-up](/quest/m2/audio-playout/congestion-catch-up.md)
-gives the stall its snap on today's splices, the
+Order: the 200 ms snap both ways is on `main` on today's splices (the
+congestion catch-up), the
 [lag rule](/quest/m2/audio-playout/lag-rule.md) replaces the controller
 under it, and the [clock step](/quest/m2/audio-playout/clock-step.md) builds
 on the lag rule. [Output latency](/quest/m2/audio-playout/output-latency.md)

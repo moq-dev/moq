@@ -32,6 +32,9 @@ production issues.
   `lite/subscriber.rs`, `tail.rs`) joins once this run's cost is known; say
   in the PR whether it fits.
 
+Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): ✅ m1
+(rejected: staying in m4). These two modules are behind most production issues.
+
 Public API: none. Wire: none.
 
 ## Related

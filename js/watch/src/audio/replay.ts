@@ -16,7 +16,8 @@
  * @internal Test support, not part of the player.
  */
 
-import { Duration, Instant, Manual } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
@@ -216,7 +217,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const track = new Track.Producer("audio");
 	// The subscription's max delay, as the decoder sets it, which the consumer drops aged media at too.
 	const maxDelay = new Derived([sync.out.delay, sync.out.maxDelay], (delay, max) =>
-		audioMaxDelay({ delay, maxDelay: max, stretch }),
+		audioMaxDelay({ delay, maxDelay: max }),
 	);
 	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
 		format: new Container.Legacy.Format("audio"),
