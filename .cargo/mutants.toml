@@ -67,8 +67,10 @@ exclude_re = [
     'replace match guard !same with true in Recover::poll_serving$',
     # A replacement starting at frame 0 already holds the head.
     'replace > with >= in lend_head$',
-    # Each call follows a read of the route in the same poll, so only a write
-    # between the two could tell these apart; the arm guards against that lost wake.
+    # Race-only, not equivalent: each call follows a read of the route in the same
+    # poll, so these differ only when another thread writes the route between that
+    # read and this check, a window no deterministic test can stage. There the
+    # original retries on the new copy and the arm prevents a lost wake.
     'replace \|\| with && in Fetching::poll_moved$',
     ':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
     # The reader list's sweep only bounds memory: a dead entry fails every
@@ -104,9 +106,6 @@ exclude_re = [
     # The full diff it skips holds the same changes in another order, and a source
     # switch has already marked every claim that differs.
     'path\.rs:\d+:80: replace != with == in Router<N, A>::present$',
-    # Something is held only after a route selects none, which also marks the
-    # routes changed, so the forced source refresh only repeats current sources.
-    'path\.rs:\d+:76: delete ! in Router<N, A>::run$',
     # NOT equivalent: Rust lets an ended stream's child wait go where
     # RouteHandoff.tla keeps it. quest/m2/cluster-routes/ended-child-wait.md
     # aligns the two and replaces this with a test.

@@ -15,7 +15,6 @@ jobs:
   mutants:
     name: Mutants (${{ matrix.shard }}/6)
     runs-on: ubuntu-24.04-arm
-    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     # A day of heavy route churn adds about an hour of changed mutants to the rotation's half hour.
     timeout-minutes: 150
     permissions:
@@ -31,10 +30,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/nix
+      # Every mutant's build is a one-off, so the job reads the shared cache
+      # with the repository's key and publishes nothing.
       - uses: ./.github/actions/rust-cache
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          write: false
       # The checkout is thrown away, so mutating it in place keeps the build
       # incremental and cached instead of copying the tree per mutant.
       - name: Mutate

@@ -2443,7 +2443,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 		// Reflected sources must move before old holds ask whether a child answered.
 		let mut sources = Vec::new();
-		for (&peer, answer) in self.answering.iter().filter(|_| route_changed || !held.is_empty()) {
+		for (&peer, answer) in self.answering.iter().filter(|_| route_changed) {
 			let watch = &answer.watch;
 			for &id in &ids {
 				let region = scope.as_ref().filter(|(key, _)| *key == id).map(|(_, prefix)| prefix);

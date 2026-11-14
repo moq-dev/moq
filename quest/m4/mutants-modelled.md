@@ -9,6 +9,8 @@ every edit to them that changes behaviour.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete): ✅ keep in m4 (rejected: drop it).
+
 Split from the route and resume run (#8712, taken by the agent under
 /quest-afk, for the maintainer's review), which measured what these files
 would add. Its quest said they join once its cost was known, and they do not

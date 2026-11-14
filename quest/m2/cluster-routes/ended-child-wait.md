@@ -9,6 +9,8 @@ stream.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete): ✅ keep in m2 (rejected: drop it, move to m3).
+
 Found 2026-11-14 by the mutation run ([moq-dev/moq#8712](https://github.com/moq-dev/moq/pull/8712)),
 which excludes the one mutant it exposes (`&&` to `||` in
 `path::Router::advertise`'s cleanup of ended streams) until this lands.
