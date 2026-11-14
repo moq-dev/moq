@@ -1327,6 +1327,7 @@ impl Producer {
 	}
 
 	/// Write the rest of the frame a copy starts partway into.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn lead(mut self) -> Self {
 		self.lead = true;
 		self

@@ -2129,6 +2129,7 @@ impl Producer {
 	/// opened yet, or when the frame is no larger than that start: a transport answering
 	/// from a byte always has more of the frame to send. A compressed frame never starts
 	/// partway, since its bytes inflate only from its first.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn create_lead(mut self, frame: frame::Header) -> Result<frame::Producer> {
 		let res = self.open_lead(frame);
 		match res {
@@ -2140,6 +2141,7 @@ impl Producer {
 		}
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn open_lead(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf, Option<frame::Admission>)> {
 		let frame = header.info;
 		let timestamp = self.handle.track.rescale(frame.timestamp)?;
@@ -3014,6 +3016,7 @@ impl Handle {
 
 	/// The byte this copy starts frame `index` at, if it holds only the rest of it and
 	/// has not opened it yet (see [`Producer::create_lead`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn lead_at(&self, index: u64) -> Option<u64> {
 		let state = self.state.read();
 		let lead = state.lead.as_deref()?;
@@ -4303,6 +4306,7 @@ impl Consumer {
 	}
 
 	/// Whether the group's track compresses its frames.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn is_compressed(&self) -> bool {
 		self.cursor.compressed
 	}
