@@ -1272,10 +1272,11 @@ mod tests {
 		assert_eq!(metric(outputs(&far)), Some(3));
 		assert_eq!(metric(outputs(&near)), Some(1));
 		far.serving(1, &p("live/x"), &claim(&instance, 0));
-		near.serving(1, &p("live/x"), &claim(&instance, 0));
 
-		// A stream whose route ends lets go, since the other still serves it.
+		// A stream whose route ends lets go only once the other confirms it serves the claim.
 		far.route(1, None);
+		assert!(served(outputs(&far)).is_empty(), "nothing else serves it yet");
+		near.serving(1, &p("live/x"), &claim(&instance, 0));
 		assert_eq!(
 			served(outputs(&far)),
 			[Output::Unserve {
@@ -1516,6 +1517,13 @@ mod tests {
 				hops: [].into(),
 			}))
 		};
+		// An identity that stays, after the churned ones in the node's order.
+		let standing = relay.receive(Link::default(), Path::empty()).unwrap();
+		standing.route(200, advert(0));
+		standing.batch(200, vec![(p("live/s"), Some(claim(&instance, 0)))], Some(1));
+		standing.serving(200, &p("live/s"), &claim(&instance, 0));
+		outputs(&edge);
+		let kept = relay.retained();
 		for origin in 10..110 {
 			let receive = relay.receive(Link::default(), Path::empty()).unwrap();
 			receive.route(origin, advert(0));
@@ -1527,9 +1535,9 @@ mod tests {
 				.filter(|output| matches!(output, Output::Route { id, .. } | Output::Batch { id, .. } if of(*id)))
 				.collect()
 		};
-		let read = of(outputs(&edge), |id| id >= 10);
+		let read = of(outputs(&edge), |id| (10..110).contains(&id));
 		assert_eq!(read, [], "the churned routes");
-		assert_eq!(relay.retained().echoes, 0);
+		assert_eq!(relay.retained(), kept, "nothing of the churned identities is kept");
 
 		// The reader holds a route, which ends, restarts, and ends again unread.
 		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
@@ -1812,8 +1820,24 @@ mod tests {
 			)
 			.unwrap();
 		assert!(outputs(&unmatched).is_empty());
+		// One whose prefix a claim meets only later, after another session closed.
+		let later = publisher
+			.answer(
+				Link {
+					proxy: false,
+					..Link::default()
+				},
+				p("later"),
+			)
+			.unwrap();
 		drop(unmatched);
 		assert!(routes(&second, 9).is_empty());
+
+		// It carries the route from then on, so its close does move a path.
+		publisher.own(p("later/p"), Some(claim(&Instance::random(), 0)));
+		assert_eq!(routes(&later, 9), [1]);
+		drop(later);
+		assert_eq!(routes(&second, 9), [2]);
 	}
 
 	#[test]
@@ -1861,5 +1885,119 @@ mod tests {
 		));
 		receive.route(1, None);
 		assert!(matches!(served(outputs(&receive))[..], [Output::Unserve { .. }]));
+	}
+
+	/// What a stream holds back leaves nothing waiting once it goes, whether withdrawn,
+	/// confirmed, or closed with the stream, so nothing builds up as claims churn.
+	#[test]
+	fn a_held_claim_leaves_nothing_waiting_once_it_goes() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		let waiting = || -> usize {
+			(relay.lock().waiting.values())
+				.flat_map(BTreeMap::values)
+				.map(BTreeSet::len)
+				.sum()
+		};
+
+		let edge = relay.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live"), Some(claim(&instance, 0)));
+		pump(&answer, &receive);
+		assert_eq!(waiting(), 1);
+		receive.serving(1, &p("live"), &claim(&instance, 0));
+		assert_eq!(waiting(), 0, "confirmed");
+
+		// The route stays up through the confirmed claim while the one below churns.
+		origin.own(p("live/a"), Some(claim(&instance, 0)));
+		pump(&answer, &receive);
+		assert_eq!(waiting(), 1);
+		origin.own(p("live/a"), None);
+		pump(&answer, &receive);
+		assert_eq!(waiting(), 0, "withdrawn");
+
+		origin.own(p("live/a"), Some(claim(&instance, 0)));
+		pump(&answer, &receive);
+		assert_eq!(waiting(), 1);
+		drop(edge);
+		assert_eq!(waiting(), 0, "closed");
+	}
+
+	/// A peer's GOAWAY moves the route this node forwards onto another stream at once.
+	#[test]
+	fn a_goaway_moves_the_forwarded_route_to_another_stream() {
+		let instance = Instance::random();
+		let relay = Node::new(2, 2);
+		let edge = relay.answer(Link::default(), Path::empty()).unwrap();
+		let first = relay.receive(Link::default(), Path::empty()).unwrap();
+		let second = relay.receive(Link::default(), Path::empty()).unwrap();
+		for (stream, hop) in [(&first, 10), (&second, 20)] {
+			let advert = Advert {
+				seqno: 0,
+				metric: 1,
+				down_only: false,
+				rtt: None,
+				hops: [hop].into(),
+			};
+			stream.route(5, Some(Reach::Finite(advert)));
+			stream.batch(5, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));
+		}
+		let hops = |stream: &Stream| -> Vec<Vec<Id>> {
+			(outputs(stream).into_iter())
+				.filter_map(|output| match output {
+					Output::Route {
+						id: 5,
+						reach: Some(Reach::Finite(advert)),
+					} => Some(advert.hops.to_vec()),
+					_ => None,
+				})
+				.collect()
+		};
+		assert_eq!(hops(&edge), [vec![10, 2]]);
+
+		first.goaway();
+		assert_eq!(hops(&edge), [vec![20, 2]]);
+	}
+
+	/// Streams dropped while a session's streams close disconnect together, once the
+	/// last guard held over them goes.
+	#[test]
+	fn dropped_streams_disconnect_once_the_last_closing_guard_goes() {
+		let instance = Instance::random();
+		let relay = Node::new(2, 2);
+		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+		receive.route(5, finite(0, 0));
+		receive.batch(5, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));
+		let (outer, inner) = (relay.closing(), relay.closing());
+		drop(receive);
+		drop(inner);
+		assert!(relay.shown().contains_key(&(5, p("live/x"))), "another guard is held");
+		drop(outer);
+		assert!(relay.shown().is_empty());
+	}
+
+	/// The origin declares its hop id, without the qualified marker, or a random
+	/// identity when nothing is left of it.
+	#[test]
+	fn the_origin_declares_its_hop_id_unqualified() {
+		let hop = |id| std::num::NonZeroU64::new(id).unwrap();
+		assert_eq!(Node::origin(hop(5)).declared(), 5);
+		assert_eq!(Node::origin(hop(QUALIFIED | 5)).declared(), 5);
+		let drawn = Node::origin(hop(QUALIFIED)).declared();
+		assert!((1..=GENERATED).contains(&drawn), "{drawn}");
+	}
+
+	/// A declared identity travels as itself on a lite-06 wire, and each qualified key
+	/// as its own hop id within the bits a generated one keeps, so a relay recognizes
+	/// only its own routes coming back.
+	#[test]
+	fn an_identity_travels_as_its_own_hop() {
+		assert_eq!(hop(5).id(), 5);
+		assert_eq!(hop(GENERATED + 1).id(), GENERATED + 1);
+		let hops: BTreeSet<u64> = (0..256).map(|key| hop(QUALIFIED | key).id()).collect();
+		assert_eq!(hops.len(), 256, "one hop per key");
+		assert!(hops.iter().all(|id| (1..=GENERATED).contains(id)), "{hops:?}");
 	}
 }

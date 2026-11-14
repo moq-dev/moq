@@ -1287,6 +1287,30 @@ fn a_scoped_copy_that_crossed_a_relay_is_not_waited_on() {
 	assert_eq!(sim.shows(near, 7, "local/x"), Some(true));
 }
 
+/// A relay files a scoped origin under a qualified key and sends that key on to a
+/// peer, which routes it through the relay and sends it back. The copy extends what
+/// the relay sent under the key, so once the relay's own route goes, it waits for
+/// the peer to hear and move off, as for any identity.
+#[test]
+fn a_scoped_key_sent_back_through_its_relay_is_waited_on() {
+	let (origin, relay, peer) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.link(origin, relay, SimLink::cost(1), SimLink::cost(1).grant(LOCAL));
+	sim.join(relay, peer, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "local/x", 0, None);
+	assert!(sim.run());
+	let key = qualified(LOCAL.subject, 7);
+	assert_eq!(next(&sim, relay, key), Some(origin));
+	assert_eq!(next(&sim, peer, key), Some(relay));
+	assert!(sim.holds(relay, key) && sim.holds(peer, key));
+
+	sim.disconnect(origin, relay);
+	assert!(sim.starved(relay, key), "the peer still routes through the relay");
+	assert!(sim.run());
+	assert!(!sim.holds(relay, key) && !sim.holds(peer, key));
+}
+
 /// The cost of the longest loop-free path from `from` through nodes not yet `seen`,
 /// each hop charged at the receiver's side of the link.
 fn longest(sim: &Sim, from: Node, seen: &mut Vec<Node>) -> Metric {

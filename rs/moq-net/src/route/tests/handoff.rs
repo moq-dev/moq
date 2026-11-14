@@ -217,6 +217,25 @@ fn cancelling_interest_retires_its_region() {
 	sim.check().unwrap();
 }
 
+/// Narrowing to an interest no claim meets ends the route there with no batch
+/// first: the new interest was never sent a claim, so no withdrawal needs a floor.
+#[test]
+fn narrowing_past_every_claim_sends_only_the_routes_end() {
+	let (origin, client) = (0, 1);
+	let mut sim = Sim::new(2);
+	sim.join(origin, client, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/a/x", 0, None);
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/a/x"), Some(true));
+
+	let stats = sim.stats;
+	sim.watch(client, "live/b/");
+	assert!(sim.run());
+	assert!(!sim.holds(client, 7));
+	assert_eq!(sim.stats.claim_msgs, stats.claim_msgs, "no batch");
+}
+
 /// A claim outside a narrowed interest ends unseen. On widening, what was
 /// kept there stays hidden until a floor covering it arrives, rather than
 /// showing a stale Start the next snapshot ends.
