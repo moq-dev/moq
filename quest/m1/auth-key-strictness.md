@@ -3,14 +3,15 @@
 ## Goal
 
 `@moq/auth` and `moq-auth` accept exactly the same JWKs and JWK Sets. Fuzzing the key
-parsers found two kinds of input only `@moq/auth` accepts, and `rs/moq-auth/tests/corpus.json`
-pins each once it is refused.
+parsers found inputs only `@moq/auth` accepts, and `rs/moq-auth/tests/corpus.json` pins each
+once it is refused.
 
 - A JSON object that repeats a member, such as two `x` or `d` fields: `JSON.parse` keeps the
   last one, while serde refuses the key. Which value a key holds should never depend on
   which parser read it.
-- A base64url field `moq-auth`'s decoder refuses, such as `...aqE=` with nonzero trailing
-  bits behind its padding: `decodeBase64Flexible` takes it anyway.
+- A base64url field `moq-auth`'s decoder refuses, which `decodeBase64Flexible` takes anyway:
+  `...aqE=` with nonzero trailing bits behind its padding, surrounding whitespace (it trims),
+  and the standard alphabet's `+` and `/` (it maps them onto base64url).
 
 ## Plan
 
@@ -22,8 +23,8 @@ CLI never repeats a member or pads a field.
   repeated key at any depth, in `Key.parse` and `KeySet.parse`.
 - Base64url: decode key fields exactly as `moq-auth`'s `decode_base64url` does (unpadded,
   or padded with canonical trailing bits), and refuse the rest.
-- Add one corpus case per kind under `jwk` with `"valid": false`, then rerun the
-  differential the fuzz PR describes in `rs/moq-auth/fuzz/README.md`.
+- Add one corpus case per kind under `jwk` with `"valid": false` (duplicate member,
+  nonzero trailing bits, whitespace, standard alphabet); both languages replay the corpus.
 
 Public API: none. Wire: none. Behavior: such keys stop loading in `@moq/auth`.
 
