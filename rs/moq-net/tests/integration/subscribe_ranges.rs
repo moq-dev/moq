@@ -840,7 +840,7 @@ async fn a_relay_with_holes_answers_a_wide_past_range_plus_live() {
 /// [`a_relay_with_holes_answers_a_wide_past_range_plus_live`] over moq-transport, where a
 /// hole in range is never settled and the read stalls once the track ends.
 #[kio::test]
-#[ignore = "stalls on a hole until /quest/m2/ietf-hole-stall.md"]
+#[ignore = "stalls on a hole until /quest/m3/ietf-hole-stall.md"]
 async fn a_relay_with_holes_answers_a_wide_past_range_plus_live_over_moq_transport() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		holes_through_a_relay(version).await;

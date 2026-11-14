@@ -79,4 +79,4 @@ Public API: none. Wire: none (draft-defined messages only).
 
 ## Related
 
-- [moq-transport read ends over a hole](/quest/m2/ietf-hole-stall.md) - settles the holes a refused range leaves
+- [moq-transport read ends over a hole](/quest/m3/ietf-hole-stall.md) - settles the holes a refused range leaves

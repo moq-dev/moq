@@ -37,4 +37,4 @@ ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
 
 # Fails until its quest fixes the bug it reproduces.
-ignore moq-net::subscribe_ranges::a_relay_with_holes_answers_a_wide_past_range_plus_live_over_moq_transport /quest/m2/ietf-hole-stall.md
+ignore moq-net::subscribe_ranges::a_relay_with_holes_answers_a_wide_past_range_plus_live_over_moq_transport /quest/m3/ietf-hole-stall.md
