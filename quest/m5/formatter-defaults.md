@@ -10,6 +10,8 @@ even if the evaluation keeps Biome.
 
 ## Plan
 
+Decided 2026-11-13 (maintainer, /quest-complete): ✅ m5, after `bun-lint-release` (rejected: dropping the link).
+
 Remove style overrides, including indentation, line widths, and quoting, from
 formatter configuration and command flags. Make EditorConfig mirror each
 selected formatter's defaults, including spaces for YAML and Markdown

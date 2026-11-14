@@ -17,6 +17,8 @@ alongside throughput and latency, instead of failing.
 
 ## Plan
 
+Decided 2026-11-13 (maintainer, /quest-complete): ✅ m2, after `group-drops` (rejected: m3; dropping the link).
+
 Moved to m1 2026-11-04 with the maintainer, after
 [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) landed the
 fitting cells: what remains waits on

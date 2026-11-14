@@ -7,7 +7,9 @@ outbound local relays, including priorities, costs, and continuity.
 
 ## Plan
 
-The 2026-10-15 release audit keeps federation guidance in m1. Deferred P2P
+Decided 2026-11-13 (maintainer, /quest-complete): ✅ m2, after `cluster-routing/federation` (rejected: m3; dropping the link).
+
+The 2026-10-15 release audit kept federation guidance in m1 before the 2026-11-13 move to m2. Deferred P2P
 owns the later application-selected peer setup and extends this concept page.
 Every feature PR still fixes docs it makes stale.
 
