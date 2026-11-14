@@ -28,9 +28,9 @@ exclude_re = [
     'replace && with \|\| in Heard<A>::compare$',
     # The test-only `Proof::LEN`.
     'proof\.rs:\d+:\d+: replace \+ with \*$',
-    # At equal revisions both views hold the same claims, so the full merge the
-    # shortcut skips changes nothing.
-    'replace > with (==|>=) in View<A>::outdates$',
+    # The stale-view shortcut only saves work: without it, or at equal revisions,
+    # where both views hold the same claims, the full merge changes nothing.
+    'replace (> with (==|>=) in View<A>::outdates|View<A>::outdates -> bool with false)$',
     # Dropping the cached context more often makes the next pass full, which
     # reaches the same result.
     ':\d+:(25|38): replace && with \|\| in Router<N, A>::recompute$',

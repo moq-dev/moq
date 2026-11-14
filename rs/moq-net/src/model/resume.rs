@@ -6600,6 +6600,31 @@ mod test {
 		assert_eq!(copy.wire(&updated).ranges, ranges);
 	}
 
+	/// A copy that already answered resolves ranges the reader replaced against its cache,
+	/// rather than asking with its resolution of the ranges it was first asked.
+	#[test]
+	fn an_answered_copy_resolves_replaced_ranges() {
+		let routes = Producer::new();
+		let a = copy();
+		for sequence in 0..5 {
+			write(&a, sequence);
+		}
+		routes.serve(a.consume());
+		let sub = routes
+			.consume()
+			.subscribe(kio::Producer::new(Subscription::default()).into());
+		let mut reader = sub.reader.lock().unwrap();
+		let copy = &mut reader.copies[0];
+		copy.floor = Some(0);
+		assert!(copy.poll_ready((0, None), &kio::Waiter::noop()).is_ready());
+		let updated = Subscription::default().with_ranges([track::Range {
+			start: Anchor::Relative(2),
+			end: None,
+		}]);
+		copy.update(&updated);
+		assert_eq!(copy.wire(&updated).ranges[0].start, Anchor::Absolute(2));
+	}
+
 	/// A replacement asked for a range reaching back past where the reader got to, while
 	/// still unanswered, hands out each group the reader lacks below that point once: the
 	/// backfill under its resume point carries them, and nothing comes twice.
