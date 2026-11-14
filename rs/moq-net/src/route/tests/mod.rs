@@ -11,6 +11,7 @@
 
 mod cache;
 mod compare;
+mod flap;
 mod handoff;
 mod paths;
 mod residual;
@@ -26,7 +27,7 @@ use std::{
 
 use kio::clock::Instant;
 
-pub(super) use super::path::{Doubt, Lift};
+pub(super) use super::path::{AtOrigin, Doubt, Lift};
 use super::*;
 
 pub(super) type Node = usize;
@@ -49,6 +50,18 @@ impl Rule {
 	/// The comparison rule lifting doubt once no heard route names the node.
 	pub const EARLY: Self = Self::Path(Doubt {
 		lift: Lift::Unnamed,
+		origin: AtOrigin::Blocked,
+		..Doubt::DEFAULT
+	});
+	/// The replaced rule, where doubt also blocks every route to a doubted publisher.
+	pub const ORIGIN: Self = Self::Path(Doubt {
+		origin: AtOrigin::Blocked,
+		..Doubt::DEFAULT
+	});
+	/// The rejected rule, where doubt never blocks a route to a doubted publisher, even
+	/// on a session to it that opened during the doubt.
+	pub const SPARED: Self = Self::Path(Doubt {
+		origin: AtOrigin::Spared,
 		..Doubt::DEFAULT
 	});
 
@@ -58,7 +71,17 @@ impl Rule {
 			Self::Path(Doubt {
 				lift: Lift::Unnamed, ..
 			}) => "path+early",
-			Self::Path(Doubt { lift: Lift::Timer, .. }) => "path",
+			Self::Path(Doubt {
+				origin: AtOrigin::Blocked,
+				..
+			}) => "path+origin",
+			Self::Path(Doubt {
+				origin: AtOrigin::Spared,
+				..
+			}) => "path+spared",
+			Self::Path(Doubt {
+				origin: AtOrigin::Own, ..
+			}) => "path",
 		}
 	}
 }
