@@ -148,6 +148,26 @@ export class Floors {
 	shows(node: bigint, view: View, path: Path.Valid): Claim | undefined {
 		const claim = view.claims.get(path);
 		if (!claim) return undefined;
+		const best = this.#newest(node, view, path);
+		if (best === undefined || best === view) return claim;
+		const theirs = presented(best, path, path === view.prefix);
+		if (theirs?.instance !== claim.instance || theirs.epoch !== claim.epoch) return undefined;
+		return theirs;
+	}
+
+	/**
+	 * What the newest view certifying `path`, as `shows` picks it for `view`, says of a claim
+	 * there: "absent" when it presents none, "present" when it does, or undefined when none
+	 * certifies the path.
+	 */
+	certified(node: bigint, view: View, path: Path.Valid): "absent" | "present" | undefined {
+		const best = this.#newest(node, view, path);
+		if (best === undefined) return undefined;
+		return presented(best, path, path === view.prefix) === undefined ? "absent" : "present";
+	}
+
+	// The newest view certifying `path` for `view`, under a route to `node`, or undefined when none does.
+	#newest(node: bigint, view: View, path: Path.Valid): View | undefined {
 		const entry = this.#nodes.get(node);
 		// The view itself wins a tie: one revision presents the same claims on every stream.
 		let best: View | undefined = certifies(view, path) ? view : undefined;
@@ -160,27 +180,7 @@ export class Floors {
 		// What an ended or regressed floor said counts only where a live one still certifies, as
 		// Rust's router prunes a merged region no certifier certifies any more.
 		if (best !== undefined) for (const other of entry?.retained ?? []) consider(other);
-		if (best === undefined || best === view) return claim;
-		const theirs = presented(best, path, path === view.prefix);
-		if (theirs?.instance !== claim.instance || theirs.epoch !== claim.epoch) return undefined;
-		return theirs;
-	}
-
-	/**
-	 * What the newest of `view` and the live views of `node` certifying `path` says of a claim
-	 * there: "absent" when it presents none, "present" when it does, or undefined when none
-	 * certifies the path.
-	 */
-	certified(node: bigint, view: View, path: Path.Valid): "absent" | "present" | undefined {
-		// The view itself wins a tie, as in shows().
-		let best: View | undefined = certifies(view, path) ? view : undefined;
-		for (const carrier of this.#nodes.get(node)?.carriers ?? []) {
-			const other = carrier.view;
-			// biome-ignore lint/style/noNonNullAssertion: certifies() checked both revisions.
-			if (certifies(other, path) && (best === undefined || other.revision! > best.revision!)) best = other;
-		}
-		if (best === undefined) return undefined;
-		return presented(best, path, path === view.prefix) === undefined ? "absent" : "present";
+		return best;
 	}
 
 	/**

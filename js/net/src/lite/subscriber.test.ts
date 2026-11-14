@@ -4142,6 +4142,38 @@ test("a lite-07 refused claim another stream still certifies goes offline", asyn
 	subscriber.close();
 });
 
+// What the refusing route's last floor certified still counts against an older floor of another
+// stream: a lagging stream that never had the claim proves no withdrawal of it.
+test("a lite-07 refused claim a lagging stream never had goes offline", async () => {
+	const { subscriber, announced, send, raw, another } = await routedStream();
+	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const x = Path.from("live/x");
+	const instance = Instance.parse("i");
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: x, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 7n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
+	// The second stream lags at revision 5, before live/x existed.
+	await live.send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("y"), route: 0n, instance });
+	await live.send({ status: "floor", id: 0n, revision: 5n });
+	// A claim of another node on that stream shows once it read all of the above.
+	await live.send({ status: "routeStart", node: NODE_B, advert: ADVERT });
+	await live.send({ status: "active", suffix: Path.from("z"), route: 1n, instance });
+	await live.send({ status: "floor", id: 1n, revision: 0n });
+	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+
+	// ANNOUNCE_RESTART of Announce ID 0 to an empty instance.
+	raw([3, 5, 0, 0, 0, 0, 0]);
+	await send({ status: "floor", id: 0n, revision: 8n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "offline" });
+
+	live.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
 // A claim at the session root has the empty path, which is a path all the same: its updates,
 // restarts, and end apply as any other's.
 test("a lite-07 claim at the root updates and ends", async () => {
