@@ -3,7 +3,8 @@
 //! Each [`Track`] folds its arrivals into the clock with [`Track::received`],
 //! and [`Producer::due`] says when media is due. The clock's reference is the earliest
 //! arrival any live track has seen, measured against its timestamp, so it sits
-//! on the wall clock and follows the live edge. Every track presents against
+//! on the wall clock and follows the live edge, moving later only after a lasting
+//! step in path delay (see `doc/concept/audio-jitter.md`). Every track presents against
 //! it, which holds them together in the steady state. One that falls behind,
 //! such as audio stalled by congestion, only arrives late: it never holds or
 //! moves the others. Audio converges on the clock by stretching toward its
@@ -37,6 +38,11 @@ use crate::container::Kind;
 /// One slot per [`Kind`].
 const KINDS: usize = 3;
 
+/// How long a track's arrivals must all trail its anchor before the anchor
+/// follows them later: the estimator's window, so the clock and the target
+/// measure lateness against the same fastest frame.
+const FOLLOW: Duration = Duration::from_secs(2);
+
 struct Clock {
 	state: Mutex<State>,
 	changed: kio::Shared<()>,
@@ -52,6 +58,39 @@ impl Clock {
 
 	fn wake(&self) {
 		*self.changed.lock() = ();
+	}
+}
+
+impl Part {
+	/// Fold `arrival` into the open window, and once it closes move the anchor
+	/// later to the window's earliest arrival if every arrival in it trailed the
+	/// anchor by more than `half`, as after a lasting increase in path delay.
+	fn follow(&mut self, arrival: Anchor, half: Duration) {
+		let Some(mut window) = self.window else {
+			self.window = Some(Window {
+				start: arrival.at,
+				least: arrival,
+			});
+			return;
+		};
+		if arrival.earlier(&window.least) {
+			window.least = arrival;
+		}
+		// The arrival that closes a window counts in it and opens the next.
+		if arrival.at.saturating_duration_since(window.start) < FOLLOW {
+			self.window = Some(window);
+			return;
+		}
+		self.window = Some(Window {
+			start: arrival.at,
+			least: arrival,
+		});
+		let Some(anchor) = self.anchor else { return };
+		let Some(at) = anchor.at.checked_add(half) else { return };
+		let bound = Anchor { at, ..anchor };
+		if bound.earlier(&window.least) {
+			self.anchor = Some(window.least);
+		}
 	}
 }
 
@@ -95,10 +134,20 @@ fn moved(before: Option<Anchor>, after: Option<Anchor>) -> bool {
 /// One track's hold on the clock.
 #[derive(Clone, Copy, Default)]
 struct Part {
-	/// The earliest arrival on this track's current timeline.
+	/// The earliest arrival on this track's current timeline, or the earliest
+	/// of the last window once a whole window trailed it.
 	anchor: Option<Anchor>,
 	/// The delay this track asks playback to hold.
 	target: Option<Duration>,
+	/// The window of arrivals that decides whether the anchor follows a lasting step later.
+	window: Option<Window>,
+}
+
+/// A window of one track's arrivals: when it opened and the earliest schedule among them.
+#[derive(Clone, Copy)]
+struct Window {
+	start: Instant,
+	least: Anchor,
 }
 
 /// The playout clock every track of one broadcast presents against.
@@ -106,8 +155,10 @@ struct Part {
 /// Each track keeps the earliest arrival on its own timeline, and the reference
 /// is the earliest of those. That is what pulls playback toward live: a frame
 /// arriving earlier than the reference predicted re-pins it, while a late
-/// frame only reports that it is late. A track that resets or goes away gives
-/// up its arrivals, so the reference falls back to the earliest track left.
+/// frame only reports that it is late. A lasting step later in the path's
+/// delay moves a track's anchor later once a whole window of its arrivals
+/// trailed it by more than half the delay. A track that resets or goes away
+/// gives up its arrivals, so the reference falls back to the earliest track left.
 struct State {
 	/// How far behind the reference playback runs while no track holds a target.
 	delay: Duration,
@@ -196,10 +247,12 @@ impl State {
 			media: Duration::from(timestamp),
 		};
 		let before = self.reference();
+		let half = self.delay() / 2;
 		let part = &mut self.parts[kind as usize];
 		if part.anchor.is_none_or(|anchor| arrival.earlier(&anchor)) {
 			part.anchor = Some(arrival);
 		}
+		part.follow(arrival, half);
 		self.left = None;
 		moved(before, self.reference())
 	}
@@ -207,7 +260,9 @@ impl State {
 	/// End `kind`'s timeline, reporting whether that moved the schedule.
 	fn reset(&mut self, kind: Kind) -> bool {
 		let before = self.reference();
-		self.parts[kind as usize].anchor = None;
+		let part = &mut self.parts[kind as usize];
+		part.anchor = None;
+		part.window = None;
 		moved(before, self.reference())
 	}
 
@@ -869,6 +924,62 @@ mod tests {
 		let video = Track::new(clock.clone(), Kind::Video);
 		audio.received(ms(10_000), now);
 		(clock, audio, video)
+	}
+
+	#[derive(serde::Deserialize)]
+	struct Case {
+		name: String,
+		delay: u64,
+		runs: Vec<Run>,
+	}
+
+	#[derive(serde::Deserialize)]
+	struct Run {
+		tracks: Vec<String>,
+		start: u64,
+		every: u64,
+		frames: u64,
+		offsets: Vec<u64>,
+		reference: u64,
+	}
+
+	/// Each case plays runs of arrivals and checks where the reference sits after each.
+	#[test]
+	fn the_reference_conforms_to_the_corpus() {
+		// Media starts this far into the track, so it is never negative.
+		const MEDIA: u64 = 100_000;
+		let cases: Vec<Case> =
+			serde_json::from_str(include_str!("../../../doc/concept/audio-jitter/clock/corpus.json")).unwrap();
+		let base = Instant::ZERO.saturating_add(Duration::from_secs(5));
+		for case in cases {
+			let delay = Duration::from_millis(case.delay);
+			let clock = Producer::new(delay);
+			let audio = clock.track(Kind::Audio);
+			let video = clock.track(Kind::Video);
+			for (index, run) in case.runs.iter().enumerate() {
+				for i in 0..run.frames {
+					let arrival = run.start + i * run.every;
+					let offset = run.offsets[(i as usize) % run.offsets.len()];
+					let track = match run.tracks[(i as usize) % run.tracks.len()].as_str() {
+						"audio" => &audio,
+						"video" => &video,
+						other => panic!("unknown track {other}"),
+					};
+					track.received(
+						ms(MEDIA + arrival - offset),
+						base.saturating_add(Duration::from_millis(arrival)),
+					);
+				}
+				// The reference's offset is when media `MEDIA` is due, less the delay, after `base`.
+				let due = clock.due(ms(MEDIA)).unwrap().saturating_sub(delay);
+				assert_eq!(
+					due.duration_since(base),
+					Duration::from_millis(run.reference),
+					"{} run {index}",
+					case.name
+				);
+			}
+		}
 	}
 
 	/// Earlier arrivals pull the reference forward so playback converges on the

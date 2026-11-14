@@ -32,4 +32,4 @@ still run Babel's distance, so what is left waits on the switch:
 
 ## Related
 
-- [A request loop heals once routes settle](/quest/m2/cluster-routes/request-loop.md) - heals the loop a publisher leaving three relays at once can cause
+- [A request loop heals once routes settle](/quest/m3/cluster-routing/request-loop.md) - heals the loop a publisher leaving three relays at once can cause

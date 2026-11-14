@@ -606,19 +606,22 @@ export namespace Socket {
 		acceptTrack(options?: Socket.Options): Promise<Socket.Incoming<Socket.TrackStream>>;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		dialTcp(peer: string, options?: Socket.Options): Promise<Socket.TcpStream>;
+		dialTcp(peer: string, options?: Socket.TcpOptions): Promise<Socket.TcpStream>;
 		dialTrack(peer: string, info?: Track.InfoInit, options?: Socket.Options): Promise<Socket.TrackStream>;
 		readonly id: string;
 		readonly prefix: Path.Valid;
 	}
 	export class Incoming<S extends Socket.TcpStream | Socket.TrackStream> {
-		accept(...args: S extends Socket.TcpStream ? [options?: Socket.Options] : [info?: Track.InfoInit, options?: Socket.Options]): Promise<S>;
+		accept(...args: S extends Socket.TcpStream ? [options?: Socket.TcpOptions] : [info?: Track.InfoInit, options?: Socket.Options]): Promise<S>;
 		readonly peer: string;
 		reject(): void;
 		readonly session: string;
 	}
 	export interface Options {
 		signal?: AbortSignal;
+	}
+	export interface TcpOptions extends Socket.Options {
+		priority?: number;
 	}
 	export class TcpStream {
 		readonly consumer: Group.Consumer;
@@ -742,6 +745,7 @@ export namespace Track {
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
 		readonly start: bigint;
+		readonly time?: Time.Timestamp;
 		unwanted(sequence: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;

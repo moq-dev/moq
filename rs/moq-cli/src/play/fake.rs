@@ -250,6 +250,11 @@ impl Sink for FakeSink {
 		self.next = true;
 	}
 
+	/// A device that has not reported its latency, as before its first callback.
+	fn output_latency(&self) -> Option<Duration> {
+		None
+	}
+
 	fn buffered(&self) -> Duration {
 		if let Some(prime) = self.prime {
 			prime
