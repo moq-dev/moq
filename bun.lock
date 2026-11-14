@@ -374,7 +374,7 @@
     },
     "js/stats": {
       "name": "@moq/stats",
-      "version": "0.1.0",
+      "version": "0.0.1",
       "dependencies": {
         "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",

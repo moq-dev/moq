@@ -28,7 +28,7 @@ depends on it, so a miss fails only its own publish. All five still returned
 
 Decided 2026-10-22 (maintainer): publish a minimal `0.0.0` placeholder
 (README only) per name to claim it, then attach the trusted publisher. The
-cut publishes the real `0.1.0` through the workflow with provenance, so no
+cut publishes the real `0.1.0` (`0.0.1` for `@moq/stats`) through the workflow with provenance, so no
 real version is published by hand. `release.ts` compares against the
 `latest` tag, so the placeholder does not suppress that publish.
 
