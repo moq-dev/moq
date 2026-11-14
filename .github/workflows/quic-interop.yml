@@ -36,6 +36,12 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      # The runner's Compose file names interfaces, which needs Docker Engine 28.1;
+      # the hosted image ships an older one.
+      - uses: docker/setup-docker-action@3f1ab1ab0e29231562e4db4ca600c1a49653bac6 # v5.7.0
+        with:
+          # The engine the runner's own CI uses.
+          version: version=v28.3.0
       # The simulator's IPv6 forwarding needs the host's ip6tables filter table.
       - run: sudo modprobe ip6table_filter
       - name: moq-quic against ${{ matrix.peer }}, both roles
