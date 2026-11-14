@@ -121,8 +121,20 @@ async fn a_single_use_key_enrolls_once() {
 	moved.enroll(&shared, None).await.unwrap();
 	let (other_id, _) = other.split_once('.').unwrap();
 	let devices = mesh.coordinator.devices();
-	assert!(devices.iter().any(|device| device.key == other_id && device.name == "device"));
-	assert_eq!(mesh.coordinator.keys().into_iter().find(|key| key.id == id).unwrap().used, 2);
+	assert!(
+		devices
+			.iter()
+			.any(|device| device.key == other_id && device.name == "device")
+	);
+	assert_eq!(
+		mesh.coordinator
+			.keys()
+			.into_iter()
+			.find(|key| key.id == id)
+			.unwrap()
+			.used,
+		2
+	);
 }
 
 #[tokio::test]
