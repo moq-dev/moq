@@ -18,6 +18,10 @@ pub struct Group {
 }
 
 impl<'a> Message<'a> for Group {
+	/// Three varints of at most 9 bytes each, so a header still arriving holds few bytes at
+	/// its [unidentified](crate::priority::RECV_UNIDENTIFIED) receive rank.
+	const MAX_SIZE: usize = 3 * 9;
+
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;

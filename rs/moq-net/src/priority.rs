@@ -521,10 +521,12 @@ impl PriorityHandle {
 
 /// The receive priority of a control stream, kept over every other stream when the
 /// receive window fills: nothing downstream proceeds without it, and it is small.
-///
-/// A stream not yet identified keeps the transport's default of 0, which every group
-/// stream sits below.
 pub const RECV_CONTROL: i64 = i64::MAX;
+
+/// The receive priority of a stream not yet identified, the transport's default, kept until
+/// a group stream's header is read: above every group stream, since it holds at most a
+/// header's bytes, and stopping it before then hides which group it carried.
+pub const RECV_UNIDENTIFIED: i64 = 0;
 
 /// The receive priority of a group stream held unread until a control message says how to
 /// read it, such as its subscription's TRACK_INFO: below every other stream, so a full
@@ -622,8 +624,8 @@ mod tests {
 			assert!(recv_group(0, u64::MAX, order) < recv_group(1, 0, order));
 			assert!(recv_group(0, 0, order) < recv_group(1, u64::MAX, order));
 			assert!(recv_group(i8::MIN, u64::MAX, order) < recv_group(-1, 0, order));
-			assert!(recv_group(i8::MAX, 0, order) < 0);
-			assert!(recv_group(i8::MAX, u64::MAX, order) < 0);
+			assert!(recv_group(i8::MAX, 0, order) < RECV_UNIDENTIFIED);
+			assert!(recv_group(i8::MAX, u64::MAX, order) < RECV_UNIDENTIFIED);
 			assert!(recv_group(i8::MIN, 0, order) > RECV_PARKED);
 			assert!(recv_group(i8::MIN, u64::MAX, order) > RECV_PARKED);
 		}
