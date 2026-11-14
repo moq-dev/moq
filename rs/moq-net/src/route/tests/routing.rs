@@ -1635,3 +1635,36 @@ fn an_uncertified_claim_comes_from_the_selected_next_hop() {
 		.last();
 	assert_eq!(last, Some((p("live/x"), Some(item(2)))));
 }
+
+/// A relay forwarding a neighbor's seqno request along its route. `close` names the
+/// session that then closes, and whatever it was, nothing is left to ask for: the
+/// relay keeps no request, though nothing else it knows names the identity.
+fn forwarded_request_closes(close: Node) -> usize {
+	let (up, requester) = (0, 1);
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	router.connect(requester, Link::default()).unwrap();
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(9, 0), hop(up, 0)]),
+	};
+	router.route(up, 7, Some(Reach::Finite(advert)));
+	router.request(requester, 7, 1);
+	assert!(router.drain().contains(&Out::Request { to: up, id: 7, seqno: 1 }));
+	assert_eq!(router.retained().pending, 1);
+	router.disconnect([close]);
+	router.retained().pending
+}
+
+#[test]
+fn a_forwarded_request_goes_with_its_requesters_session() {
+	assert_eq!(forwarded_request_closes(1), 0);
+}
+
+#[test]
+fn a_forwarded_request_goes_with_the_route_it_follows() {
+	assert_eq!(forwarded_request_closes(0), 0);
+}
