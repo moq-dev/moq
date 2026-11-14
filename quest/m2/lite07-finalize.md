@@ -34,8 +34,7 @@ to lite-08 migration. Only
 [Routes and announces](/quest/m2/cluster-routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut.
-Reversed 2026-11-14 (the m2 triage, below): they moved to m3 with
-[acceptance](/quest/m3/cluster-routing/acceptance.md). Peer
+Reaffirmed 2026-11-14 (maintainer, the m2 triage, below). Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land. Decided 2026-10-25: no routing identity proof
@@ -125,16 +124,18 @@ moq-net): ✅ the cut waits for the symbolic model of the Route Key Parameter
 routing invariant gating too, which sits behind the mesh model). The signed
 transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 
-Decided 2026-11-14 (the m2 triage before the cut, under /quest-afk, for the
-maintainer's review), applying the maintainer's rule that m2 keeps only what
+Decided 2026-11-14 (the m2 triage before the cut, under /quest-afk; the
+maintainer picked these on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)), applying the maintainer's rule that m2 keeps only what
 would need a breaking release had it landed right after the cut:
 
-- ✅ [Route layer acceptance](/quest/m3/cluster-routing/acceptance.md) and
-  [the request loop](/quest/m3/cluster-routing/request-loop.md) moved to m3
-  and no longer gate this: both are tests and fixes with no wire change.
-  Accepted risk: a flaw they find in lite-07's route rules is fixed in
-  lite-08 or in local timers and configuration. Rejected: keeping them, so
-  the freeze waits on an L of tests.
+- ✅ [The request loop](/quest/m3/cluster-routing/request-loop.md) moved
+  to m3 and no longer gates this: a fixture and a fix with no wire change.
+- ✅ [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) stays
+  in [Routes and announces](/quest/m2/cluster-routes/README.md), so this
+  still waits on it (maintainer, /quest-complete on
+  [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768); rejected:
+  moving it to m3 and fixing late routing flaws in lite-08).
 - ✅ [The Playwright bump](/quest/m1/playwright-pin.md) moved to m1, so the
   freeze no longer waits on nixpkgs. In its place, before the rename, run the
   route key lane (`test/interop/clients/js/route-key.ts`) once with

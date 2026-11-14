@@ -14,6 +14,13 @@ and lite-06 and older and moq-transport are untouched.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768), the m2 triage
+before the cut): ✅ stays in m2, gating lite-07's freeze (rejected: moving the route stream and the
+interest set to lite-08). Without it lite-07 would freeze with one router key per announce
+stream, which the route model doesn't check, and keep the reopen-and-hand-over
+machinery for its lifetime.
+
 Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing).
 
 Why: today a side's requests ride the streams it opened and its answers ride

@@ -168,4 +168,4 @@ Public API: none expected. Wire: lite-07-wip only.
 ## Related
 
 - [Each side says everything about routing on one stream](/quest/m2/cluster-routes/route-stream.md) - moves these messages onto one stream per side afterwards
-- [Route layer acceptance](/quest/m3/cluster-routing/acceptance.md) - proves the switched sessions end to end
+- [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) - proves the switched sessions end to end
