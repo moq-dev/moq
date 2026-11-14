@@ -1,7 +1,7 @@
 {
 	"name": "@moq/stats",
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.0.1",
 	"description": "Read a MoQ relay's published traffic stats: discover nodes and yield typed frames.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {

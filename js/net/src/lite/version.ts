@@ -494,6 +494,23 @@ export function hasAnnounceCompression(version: Version): boolean {
 	}
 }
 
+/** Whether the announce stream carries warm routes (WARM_START, WARM_UPDATE, and WARM_END), and
+ * SUBSCRIBE and SUBSCRIBE_UPDATE say whether each pull joins the publisher's copy. Added in lite-07. */
+export function hasWarm(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group. Added in lite-07.
  * Older peers see a track that never refreshes. */
 export function hasRefresh(version: Version): boolean {

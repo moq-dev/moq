@@ -234,9 +234,10 @@ impl Consumer {
 	/// Pair it with when the picture was read to tell network delay from decode
 	/// delay: it excludes the time the decoder held or reordered the picture.
 	/// A gap or an end leaves it unchanged, as `moq_audio::decode::Consumer::arrival`
-	/// does. `None` before the first picture, and for a picture no access unit
-	/// matches by timestamp, such as one a backend returned at a timestamp it was
-	/// never handed.
+	/// does. `None` before the first picture, and for a picture that no access unit,
+	/// or more than one, matches by timestamp: one a backend returned at a timestamp
+	/// it was never handed, or a stream that repeats a timestamp while the decoder
+	/// holds both.
 	pub fn arrival(&self) -> Option<Instant> {
 		self.selector.arrival()
 	}
@@ -474,16 +475,25 @@ impl Reader {
 				continue;
 			}
 
+			let arrived = self.track.arrival();
 			// A frame with no time has no picture to match an arrival to.
-			if let (Some(arrived), Ok(micros)) = (self.track.arrival(), mux_frame.timestamp.as_micros()) {
+			let queued = arrived.zip(mux_frame.timestamp.as_micros().ok());
+			if let Some((arrived, micros)) = queued {
 				if self.arrivals.len() == ARRIVALS {
 					self.arrivals.pop_front();
 				}
 				self.arrivals.push_back((micros, arrived));
 			}
-			self.decoder
+			let decoded = self
+				.decoder
 				.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
-				.await?;
+				.await;
+			if decoded.is_err() && queued.is_some() {
+				// No picture will come back for a refused access unit, and left queued its
+				// arrival would be reported for a later one at the same timestamp.
+				self.arrivals.pop_back();
+			}
+			decoded?;
 			self.receive()?;
 		}
 	}
@@ -491,8 +501,21 @@ impl Reader {
 	/// Queue every picture the decoder has ready, each with its access unit's arrival.
 	fn receive(&mut self) -> Result<(), Error> {
 		while let Some(picture) = self.decoder.receive()? {
+			// A frame with no time has no picture to match an arrival to.
 			let arrival = picture.timestamp.as_micros().ok().and_then(|at| {
-				let index = self.arrivals.iter().position(|(timestamp, _)| *timestamp == at)?;
+				// A timestamp queued twice is ambiguous: the picture may belong to either access
+				// unit, so it reports none rather than a guess.
+				let index = {
+					let mut matches = self
+						.arrivals
+						.iter()
+						.enumerate()
+						.filter(|(_, (timestamp, _))| *timestamp == at);
+					matches
+						.next()
+						.filter(|_| matches.next().is_none())
+						.map(|(index, _)| index)?
+				};
 				let (_, arrived) = self.arrivals.remove(index)?;
 				// An access unit fed before this one at an earlier time is a picture the
 				// decoder already returned or dropped, whichever order it returns them in.
@@ -1871,5 +1894,117 @@ mod tests {
 			}
 		}
 		panic!("the max-delay decoder's error was swallowed");
+	}
+
+	/// A decoder that refuses an access unit never returns its picture, so a later
+	/// access unit at the same timestamp reports its own arrival, not the refused one's.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_access_unit_does_not_lend_its_arrival() {
+		let (broadcast, track) = live_track();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(None),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
+					..Config::new()
+				},
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		// A group's first frame is its keyframe, and a decoder that refused one drops the
+		// deltas behind it, so each access unit opens a group of its own.
+		let mut landed = Vec::new();
+		for (sequence, payload) in [probe::CORRUPT, b"access unit".as_slice()].into_iter().enumerate() {
+			landed.push(Instant::now());
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence as u64 })
+				.unwrap();
+			wire.write(
+				&mut group,
+				&[moq_mux::container::Frame {
+					// Group starts strictly increase, so each access unit presents a second later.
+					timestamp: Timestamp::from_micros(sequence as u64 * SECOND).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(payload),
+					keyframe: true,
+				}],
+			)
+			.unwrap();
+			group.close().unwrap();
+			tokio::time::advance(std::time::Duration::from_millis(10)).await;
+		}
+		let _track = track.finish().unwrap();
+
+		let Err(err) = consumer.next_frame().await else {
+			panic!("the refused access unit did not fail the read");
+		};
+		assert!(err.to_string().contains("corrupt"), "unexpected error: {err}");
+		consumer
+			.next_frame()
+			.await
+			.unwrap()
+			.expect("the next access unit decodes");
+		assert_eq!(consumer.arrival(), Some(landed[1]));
+		assert_eq!(consumer.reader(Lane::Min).arrivals.len(), 0, "nothing stays queued");
+	}
+
+	/// A timestamp two access units share, both still held by the decoder, matches either
+	/// of them, so the picture reports none rather than a guess.
+	#[tokio::test(start_paused = true)]
+	async fn a_repeated_timestamp_reports_no_arrival() {
+		let (broadcast, track) = live_track();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(None),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::HOLDING_NAME.into()),
+					..Config::new()
+				},
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		for keyframe in [true, false] {
+			wire.write(
+				&mut group,
+				&[moq_mux::container::Frame {
+					timestamp: Timestamp::ZERO,
+					duration: None,
+					payload: Bytes::from_static(b"access unit"),
+					keyframe,
+				}],
+			)
+			.unwrap();
+			tokio::time::advance(std::time::Duration::from_millis(10)).await;
+		}
+		group.close().unwrap();
+		let _track = track.finish().unwrap();
+
+		let mut shown = 0;
+		while consumer.next_frame().await.unwrap().is_some() {
+			assert_eq!(consumer.arrival(), None, "picture {shown} guessed an arrival");
+			shown += 1;
+		}
+		assert!(shown > 0, "the decoder returned no picture");
 	}
 }
