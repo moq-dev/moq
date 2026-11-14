@@ -22,6 +22,10 @@ export const STRETCH = Duration.millis(200);
 /** The most an `"auto"` delay holds, and how far catalog `warmup` reaches back. @internal */
 export const DELAY_MAX = Container.DELAY_MAX;
 
+// How long a track's arrivals must all trail its anchor before the anchor follows them later: the
+// estimator's window, so the clock and the target measure lateness against the same fastest frame.
+const FOLLOW = 2000;
+
 /** Signals the sync reads. */
 export type SyncInput = {
 	/** How far playback trails the live edge. See {@link Delay}. */
@@ -66,7 +70,8 @@ export type SyncOutput = {
 
 	// The earliest time we've received a frame, relative to its timestamp: arrival minus timestamp
 	// in milliseconds, an offset that is negative when the timestamps run ahead of the local clock.
-	// This will keep being updated as we catch up to the live playhead then will be relatively static.
+	// This will keep being updated as we catch up to the live playhead then will be relatively static,
+	// moving later only after a lasting step in path delay (see doc/concept/audio-jitter.md).
 	// Each track holds its own part of it; see `Track.reset()`.
 	reference: Signal<number | undefined>;
 
@@ -107,7 +112,12 @@ export type Part = {
 	anchor?: number;
 	// The furthest playhead this track's own skips jumped to, restored when it takes the reference.
 	floor?: number;
+	// The window of arrivals that decides whether the anchor follows a lasting step later.
+	window?: Window;
 };
+
+/** A window of one track's arrivals: when it opened and the earliest reference among them. @internal */
+export type Window = { start: number; least: number };
 
 /**
  * Where the clock's current timeline stands. `idle` has not played and holds nothing back: it is
@@ -171,11 +181,33 @@ export class Clock {
 		return ref + cap - delay;
 	}
 
+	// Move a track's anchor later once a whole window of its arrivals trailed it by more than half the
+	// delay, as after a lasting increase in path delay. Reports whether the anchor moved.
+	follow(part: Part, at: number, ref: number): boolean {
+		const window = part.window;
+		if (!window) {
+			part.window = { start: at, least: ref };
+			return false;
+		}
+		window.least = Math.min(window.least, ref);
+		if (at - window.start < FOLLOW) return false;
+
+		// The arrival that closes a window counts in it and opens the next.
+		part.window = { start: at, least: ref };
+		if (part.anchor === undefined || window.least - part.anchor <= this.out.delay.peek().asMillis() / 2) {
+			return false;
+		}
+		part.anchor = window.least;
+		return true;
+	}
+
 	received(part: Part, timestamp: Duration, arrival: Instant): boolean {
 		this.out.timestamp.update((current) => (current === undefined || timestamp.gt(current) ? timestamp : current));
 		const ref = millis(arrival) - timestamp.asMillis();
 		const current = this.out.reference.peek();
 		part.anchor = this.fold(part.anchor, ref);
+		// Startup holds the opening still, so only a playing clock follows a step.
+		const followed = this.playing.peek() && this.follow(part, millis(arrival), ref);
 
 		// First frame anchors the reference.
 		if (current === undefined) {
@@ -195,7 +227,12 @@ export class Clock {
 		const late = current - ref + delay < 0;
 
 		const reference = this.fold(current, ref);
-		if (reference === current) return late;
+		if (reference === current) {
+			// The owner's anchor moving later moves the reference to the earliest anchor left, which only
+			// a whole window of every track's arrivals trailing it moves.
+			if (followed && this.owner === part) this.handoff(current);
+			return late;
+		}
 		this.out.reference.set(reference);
 		this.owner = part;
 
@@ -210,19 +247,35 @@ export class Clock {
 		return late;
 	}
 
-	// End one track's timeline: its parked frames drop and it releases its part of the reference.
-	end(part: Part): void {
-		part.epoch.update((epoch) => epoch + 1);
-		part.anchor = undefined;
-		part.floor = undefined;
-		if (this.owner !== part) return;
-
-		// The earliest remaining track holds the reference, else the next frame anchors a new one.
+	// The track with the earliest anchor, which holds the reference.
+	earliest(): Part | undefined {
 		let earliest: Part | undefined;
 		for (const other of this.parts.peek()) {
 			if (other.anchor === undefined) continue;
 			if (earliest?.anchor === undefined || other.anchor < earliest.anchor) earliest = other;
 		}
+		return earliest;
+	}
+
+	// The owner's anchor moved later: the earliest anchor now holds the reference, never earlier than
+	// `current`, since every other track's arrivals already folded into it.
+	handoff(current: number): void {
+		const earliest = this.earliest();
+		if (earliest?.anchor === undefined) return;
+		this.owner = earliest;
+		if (earliest.anchor > current) this.out.reference.set(earliest.anchor);
+	}
+
+	// End one track's timeline: its parked frames drop and it releases its part of the reference.
+	end(part: Part): void {
+		part.epoch.update((epoch) => epoch + 1);
+		part.anchor = undefined;
+		part.floor = undefined;
+		part.window = undefined;
+		if (this.owner !== part) return;
+
+		// The earliest remaining track holds the reference, else the next frame anchors a new one.
+		const earliest = this.earliest();
 		this.owner = earliest;
 		if (earliest?.anchor === undefined) {
 			this.unanchor();
@@ -244,6 +297,7 @@ export class Clock {
 	// Clear the reference so the next frame anchors a new timeline. Every parked frame belongs to
 	// the old one.
 	unanchor(): void {
+		for (const part of this.parts.peek()) part.window = undefined;
 		this.epoch.update((epoch) => epoch + 1);
 		this.floor = undefined;
 		this.owner = undefined;
