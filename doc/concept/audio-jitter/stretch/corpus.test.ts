@@ -12,7 +12,9 @@ import { fileURLToPath } from "node:url";
 import { type Case, cases, type Rule, rules } from "./corpus";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const read = <T>(name: string) => JSON.parse(readFileSync(join(here, name), "utf8")) as T;
+function read<T>(name: string): T {
+	return JSON.parse(readFileSync(join(here, name), "utf8")) as T;
+}
 
 describe("audio stretch corpus", () => {
 	test("the decisions match the checked-in file", () => {
