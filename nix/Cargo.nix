@@ -20999,7 +20999,7 @@ rec {
       };
       "moq-rtsp" = rec {
         crateName = "moq-rtsp";
-        version = "0.1.0";
+        version = "0.0.1";
         edition = "2024";
         src = lib.cleanSourceWith {
           filter = sourceFilter;
