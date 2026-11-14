@@ -1536,6 +1536,12 @@ test("an END_OF_TRACK after the track closed locally leaves the session open", a
 		return open.call(this, sequence);
 	});
 	const ended = Promise.withResolvers<void>();
+	// Restored even when an assertion or a wait below fails, so no other test runs through the spies.
+	onTestFinished(() => {
+		ended.resolve();
+		opening.mockRestore();
+		close.mockRestore();
+	});
 	// A standalone END_OF_TRACK at object 0, whose stream has not ended yet.
 	const readable = new ReadableStream<Uint8Array>({
 		start(controller) {
@@ -1559,11 +1565,8 @@ test("an END_OF_TRACK after the track closed locally leaves the session open", a
 	for (let i = 0; i < 10; i++) await yieldNow();
 	track.close();
 	await handled;
-	ended.resolve();
 
 	expect(close).not.toHaveBeenCalled();
-	close.mockRestore();
-	opening.mockRestore();
 });
 
 test("every object in a chunk reaches the reader before it wakes", async () => {
