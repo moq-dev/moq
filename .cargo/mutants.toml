@@ -70,4 +70,18 @@ exclude_re = [
 	# between the two could tell these apart; the arm guards against that lost wake.
 	'replace \|\| with && in Fetching::poll_moved$',
 	':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
+	# The reader list's sweep only bounds memory: a dead entry fails every
+	# `Weak::upgrade`, and `subscribe` sweeps the list again.
+	'replace > with >= in Producer::serve_from$',
+	'replace == with != in Consumer::subscribe$',
+	# Dead: every write of `until` also writes `since`, so the superseded check
+	# never runs. `ResumeReader.tla` models it, so it goes with the model.
+	'replace >= with < in Copy::retains$',
+	# A run starting at the end clips to an empty range, on which nothing lands
+	# and nothing is missing.
+	'replace < with <= in Copy::retains$',
+	'replace < with <= in Retain<.*>::holds_window$',
+	# Walking again before anything the read parked on fires returns the same
+	# `Pending`, so the idle shortcut only saves work.
+	'replace Subscriber::parked -> bool with false$',
 ]
