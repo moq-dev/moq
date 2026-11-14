@@ -45,7 +45,7 @@ port-reservation lines are negative self-tests in
 `interop/relay-log.test.sh` and `lib/harness.test.sh` that pass.
 Already owned: the intermittent media-matrix timestamp-gap cells
 (`cpp -> js-native-node`, `go -> c`, browser `rust -> js` timeouts) belong to
-[test flakes](/quest/m0/test-flakes-2/README.md). The fallback audio stall
+a test flakes epic. The fallback audio stall
 that hit on `moq-lite-07-wip` in
 [41495461904](https://github.com/moq-dev/moq/actions/runs/41495461904) and
 [41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824) was a

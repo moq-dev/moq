@@ -76,7 +76,7 @@ a tested chain of squash commits ([land](https://github.com/moq-dev/moq/blob/17a
 2026-10-30 (maintainer): it runs as a daemon on the maintainer's host, not as
 a workflow on the self-hosted runner. This supersedes concurrent queue
 entries on a second runner. Batching gains most when failures are rare, so the
-[flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
+flake epic moved to m0 and
 `MIGRATE.md` Unreleased sections, a top source of conflicts, stop being
 written per PR. The batched gate was superseded 2026-11-01, below.
 
