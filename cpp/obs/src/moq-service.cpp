@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "moq-service.h"
+#include "moq-encoder-latency.h"
 #include "moq-settings.h"
 
 // TODO: Define supported codecs.
@@ -39,16 +40,11 @@ void MoQService::Defaults(obs_data_t *settings)
 
 void MoQService::ApplyEncoderSettings(obs_data_t *video_settings, obs_data_t *)
 {
-	/*
-     This function is called to apply custom encoder settings specific to this service.
-     For example, if a service requires a specific keyframe interval, or has a bitrate limit,
-     the settings for the video and audio encoders can be optionally modified
-     if the front-end optionally calls.
-     */
-
-	// Example:
+	// A MoQ group starts at a keyframe, so a viewer joins only as fast as the
+	// keyframe interval, and B-frames or lookahead hold every frame back.
 	if (video_settings) {
 		obs_data_set_bool(video_settings, "repeat_headers", true);
+		ApplyEncoderLatency(video_settings);
 	}
 }
 

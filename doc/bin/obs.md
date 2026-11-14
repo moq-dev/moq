@@ -29,9 +29,14 @@ reconnecting, on a session that carries in-band authorization, which only
 next reconnect or Go Live.
 
 By default the dock tunes the encoder for low latency on this stream only:
-no B-frames or lookahead on the encoders that support turning them off. This
-trades compression for less buffering; it does not guarantee an end-to-end
-delay. Pick **Keep encoder settings** to leave the encoder alone.
+no B-frames or lookahead on the encoders that support turning them off, and a
+keyframe at least every 2 s, since a viewer joins at a keyframe. This trades
+compression for less buffering; it does not guarantee an end-to-end delay.
+Pick **Keep encoder settings** to leave the encoder alone.
+
+OBS's own **Start Streaming** to the MoQ service tunes the same way, except in
+Advanced output mode with **Apply service settings** off, which keeps the
+encoder's settings. A keyframe interval shorter than 2 s stays.
 
 The video bitrate follows the connection's bandwidth estimate, with the
 configured bitrate as the ceiling: it drops as soon as the uplink narrows and
@@ -90,9 +95,11 @@ password the user set there. It puts a MoQ relay, or an RTMP(S) server for a
 stock OBS, in a dedicated **MoQ** profile so the user's other profiles keep
 their settings, follows the stream's state and stats, and adds MoQ Sources.
 
-Over obs-websocket the profile can tune only x264 for low latency (no
-B-frames or lookahead, a 2 s keyframe interval); `configure` names what any
-other encoder keeps at its defaults. The dock's Go Live tunes every encoder.
+The MoQ service tunes the stream encoder for low latency (no B-frames or
+lookahead, a 2 s keyframe interval) on every encoder OBS bundles, though
+VideoToolbox may still buffer. An RTMP(S) server leaves that to the profile,
+which over obs-websocket can tune only x264. `configure` names what the
+encoder keeps at its defaults.
 
 Chrome 147+ and Firefox ask the user before a public page reaches OBS on
 loopback. Safari blocks it from HTTPS pages as mixed content.

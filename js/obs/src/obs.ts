@@ -361,14 +361,16 @@ export class Obs {
 		}
 
 		// OBS reads these on every StartStream.
-		const keyint = Math.round((2 * video.fpsNumerator) / video.fpsDenominator);
-		const options = `tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0 keyint=${keyint}`;
 		const live: [string, string, string][] = [
 			// A stream delay holds every frame back by its length, and OBS applies it per start.
 			["Output", "DelayEnable", "false"],
-			["SimpleOutput", "UseAdvanced", "true"],
-			["SimpleOutput", "x264Settings", options],
 		];
+		// The MoQ service tunes every encoder itself; over RTMP a profile can tune only x264.
+		if (destination.kind === "rtmp") {
+			const keyint = Math.round((2 * video.fpsNumerator) / video.fpsDenominator);
+			const options = `tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0 keyint=${keyint}`;
+			live.push(["SimpleOutput", "UseAdvanced", "true"], ["SimpleOutput", "x264Settings", options]);
+		}
 		if (publish.video?.bitrate !== undefined)
 			live.push(["SimpleOutput", "VBitrate", String(publish.video.bitrate)]);
 		if (publish.audio?.bitrate !== undefined)
@@ -406,8 +408,7 @@ export class Obs {
 		}
 
 		const encoder = (await this.#parameter("SimpleOutput", "StreamEncoder")) ?? "";
-		const ignored: Ignored[] = encoder.startsWith("x264") ? [] : ["bframes", "keyint", "lookahead"];
-		return { profile, encoder, ignored };
+		return { profile, encoder, ignored: ignored(destination.kind, encoder) };
 	}
 
 	/** Starts streaming and resolves once OBS is live, or rejects if the output stops first. */
@@ -581,4 +582,15 @@ function compareVersions(a: string, b: string): number {
 		if (diff !== 0) return diff;
 	}
 	return 0;
+}
+
+// The low-latency settings a Simple output encoder keeps. The MoQ service sets every bundled
+// encoder's keys, and VideoToolbox has no lookahead control; over RTMP only x264 takes them.
+function ignored(destination: Destination["kind"], encoder: string): Ignored[] {
+	if (encoder.startsWith("x264")) return [];
+	if (destination === "moq") {
+		if (["nvenc", "qsv", "amd"].some((prefix) => encoder.startsWith(prefix))) return [];
+		if (encoder.startsWith("apple")) return ["lookahead"];
+	}
+	return ["bframes", "keyint", "lookahead"];
 }
