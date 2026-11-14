@@ -17,7 +17,9 @@ set -euo pipefail
 # Expects the staged Go module tarball under `go-out/`, produced by
 # package-ffi.sh as `moq-ffi-${BUILD_VERSION}-go.tar.gz`. The version's time is
 # the checked-out commit's, so a rerun rebuilds identical files, which the
-# upload skips.
+# upload skips. A version whose .info is already in the bucket (it goes up
+# last) was published by an earlier run, whose native build may differ by a
+# byte, so it is only relisted and verified, not rebuilt over.
 
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
@@ -67,6 +69,22 @@ ls -l "$WORK/proxy/moq.dev/moq-ffi/@v"
 
 if [[ "$DRY_RUN" == true ]]; then
     echo "Dry-run: not uploading."
+    exit 0
+fi
+
+# shellcheck source=infra/go/r2.sh
+source "$INFRA_DIR/r2.sh"
+published=$(rclone lsf --files-only --include "$VERSION.info" "$BUCKET/moq.dev/moq-ffi/@v")
+if [[ -n "$published" ]]; then
+    echo "$VERSION is already in the bucket: relisting and verifying it instead of uploading."
+    # An empty @v directory uploads nothing but still rewrites `list`, in case
+    # the earlier run failed after its .info.
+    mkdir -p "$WORK/relist/moq.dev/moq-ffi/@v"
+    "$INFRA_DIR/upload.sh" "$WORK/relist"
+    # verify.sh checks the version against sum.golang.org, which pinned the
+    # first upload's hash.
+    GOT=$("$INFRA_DIR/verify.sh" --proxy direct "$VERSION")
+    echo "Already published moq.dev/moq-ffi@$VERSION to go.moq.dev: $GOT"
     exit 0
 fi
 
