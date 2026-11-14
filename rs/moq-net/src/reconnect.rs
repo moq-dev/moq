@@ -54,8 +54,7 @@ const PROBE_MAX: Duration = Duration::from_secs(300);
 
 /// When to redial after a failure, and when to give up, once a session has been established.
 ///
-/// Before then nothing retries: the first walk ending without a session ends the policy,
-/// unless the peer refused credentials the tokens have replaced since.
+/// Before then nothing retries: the first walk ending without a session ends the policy.
 ///
 /// `initial` and `multiplier` set the wait before each retry, `max` caps it, and
 /// `healthy` decides which sessions count as failed attempts. The delays carry jitter,
@@ -507,8 +506,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 	/// Present `tokens` on every dial, through [`Attempt::client`].
 	///
-	/// A refused credential then earns another dial once the tokens change, and an ended
-	/// tokens handle ends the policy at its next walk.
+	/// An ended tokens handle ends the policy at its next walk.
 	pub fn with_tokens(mut self, tokens: auth::Tokens) -> Self {
 		self.tokens = Some(tokens);
 		self
