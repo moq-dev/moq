@@ -4,6 +4,6 @@ exclude_globs = ["rs/moq-net/src/route/tests/**"]
 test_tool = "nextest"
 all_features = true
 additional_cargo_args = ["--locked"]
-# The lib's unit tests are what exercise both modules; the integration binary
-# would add a second link per mutant for no extra kills.
-additional_cargo_test_args = ["--lib"]
+# The unit tests, and the integration binary, which drives the route driver
+# (`route/node.rs`) through real sessions.
+additional_cargo_test_args = ["--lib", "--test", "integration"]
