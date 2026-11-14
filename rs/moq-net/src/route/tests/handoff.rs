@@ -1220,6 +1220,18 @@ fn sweep_handoff() {
 	}
 }
 
+/// One churn from [`sweep_handoff`]'s wider runs, pinned so every run has it: a
+/// batch that leaves its neighbor's floors alone still moves the merged view's,
+/// which changes how claims it did not name are presented, so every claim is
+/// checked again.
+#[test]
+fn a_batch_moving_the_merged_floors_rechecks_every_claim() {
+	let mut sim = churn(&mut XorShift(0x0cf6_b4d7_d824_5dd3));
+	assert_eq!(revivals(&sim.events), 0);
+	assert_eq!(false_ends(&sim.events), 0);
+	settled(&mut sim, "pinned churn");
+}
+
 /// Origins sit at `RELAYS` and `RELAYS + 1`, the client at `RELAYS + 2`.
 fn churn(rng: &mut XorShift) -> Sim {
 	let (first, client) = (RELAYS, RELAYS + 2);
