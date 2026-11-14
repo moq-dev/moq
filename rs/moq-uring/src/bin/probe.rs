@@ -5,8 +5,17 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
+	use std::error::Error as _;
+
 	if let Err(err) = moq_uring::Worker::new(Default::default()) {
-		eprintln!("{err}");
+		// An `Io` error's message omits its cause, which is the source.
+		let mut message = err.to_string();
+		let mut source = err.source();
+		while let Some(cause) = source {
+			message = format!("{message}: {cause}");
+			source = cause.source();
+		}
+		eprintln!("{message}");
 		std::process::exit(1);
 	}
 }

@@ -24,8 +24,12 @@
 //!
 //! The session's input format is NV12 (NVENC's native layout). A CPU I420 frame
 //! is interleaved into an NVENC input buffer; a CUDA frame ([`Surface::Cuda`],
-//! NVDEC output, already NV12) is registered as an external resource and encoded
-//! in place, so the NVDEC -> NVENC transcode path never touches the CPU.
+//! NVDEC output, already NV12) is copied, or scaled on the GPU when resizing,
+//! into the session's own [`cuda::Target`], so the NVDEC -> NVENC
+//! transcode path never touches the CPU. The target, the input buffer, and the
+//! output bitstream are each created and registered once per session: those
+//! calls take the driver's per-GPU lock, which every session in every process
+//! on the device contends for, so per frame they cap the whole GPU.
 //!
 //! The hardware sets a floor on the picture: a session narrower than the
 //! driver's minimum is refused at open (145 on an RTX 3070 Ti), so the bottom
@@ -43,7 +47,7 @@ use moq_nvenc::sys::nvEncodeAPI::{
 	NV_ENC_PARAMS_RC_MODE, NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P4_GUID, NV_ENC_PRESET_P7_GUID, NV_ENC_TUNING_INFO,
 	NV_ENC_VUI_COLOR_PRIMARIES, NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
 };
-use moq_nvenc::{Encoder, EncoderInitParams, Session};
+use moq_nvenc::{Bitstream, Buffer, Encoder, EncoderInitParams, RegisteredResource, Session};
 
 use super::super::encoder::{Applied, Codec, Config, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
@@ -79,14 +83,50 @@ fn nvenc_preset(preset: Preset) -> (GUID, &'static str) {
 
 pub(crate) struct Nvenc {
 	session: Session,
+	/// Where CUDA frames are scaled for encoding, created by the first one.
+	target: Option<Target>,
+	/// Where CPU frames are written, created by the first one.
+	input: Option<Buffer>,
+	/// The output of every encode, which completes before the next begins.
+	output: Option<Bitstream>,
 	applied: Applied,
 	// Keep the CUDA context alive for as long as the session uses it.
-	_cuda: Arc<CudaContext>,
+	cuda: Arc<CudaContext>,
 	timestamp: u64,
 	codec: Codec,
 	size: crate::Size,
 	converter: Option<cuda::Converter>,
+	/// Whether CUDA frames are scaled into the target here: only for a resizing
+	/// encoder on a driver that loads the resize kernels, so one that refuses
+	/// them keeps `Frame::resize`'s CPU fallback.
+	scales: bool,
 	ready: VecDeque<Encoded>,
+}
+
+/// The session's CUDA input: one buffer every CUDA frame is copied or scaled into,
+/// registered with the session once and mapped for each encode.
+struct Target {
+	buffer: cuda::Target,
+	resource: RegisteredResource<cuda::Frame>,
+}
+
+impl Target {
+	fn new(session: &Session, ctx: &Arc<CudaContext>, size: crate::Size) -> Result<Self, Error> {
+		let buffer = cuda::Target::new(ctx, size)?;
+		let frame = buffer.frame().clone();
+		// SAFETY: the registration owns a clone of the frame, which keeps the
+		// allocation addressed by the pointer alive until it is unregistered.
+		let resource = unsafe {
+			session.register_generic_resource(
+				frame.clone(),
+				NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
+				frame.device_ptr() as *mut std::ffi::c_void,
+				frame.pitch,
+			)
+		}
+		.map_err(|e| Error::codec(anyhow::anyhow!("NVENC register CUDA input: {e}")))?;
+		Ok(Self { buffer, resource })
+	}
 }
 
 impl Nvenc {
@@ -236,9 +276,13 @@ impl Nvenc {
 				.input
 				.map(|_| cuda::Converter::new(cuda.ordinal(), config.resolved_color(), NonZeroUsize::new(8).unwrap()))
 				.transpose()?,
+			scales: config.resize.is_some() && cuda::scales(&cuda),
+			target: None,
+			input: None,
+			output: None,
 			size: config.size(),
 			ready: VecDeque::new(),
-			_cuda: cuda,
+			cuda,
 			timestamp: 0,
 			codec: config.codec,
 		}))
@@ -247,42 +291,40 @@ impl Nvenc {
 
 impl Backend for Nvenc {
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
-		// The published image shares its full-size conversion across renditions.
-		// Smaller encoders resize that NV12 buffer, so capture converts only once
-		// for each declared color space and never downloads its pixels.
-		let prepared = if let Surface::Vulkan(image) = &frame.surface {
-			let converter = self.converter.as_ref().ok_or_else(|| {
-				Error::Unsupported(format!(
-					"NVENC was not opened for external Vulkan {}",
-					image.image().device
-				))
-			})?;
-			let converted = image.converted(converter.color(), || {
-				// Read before reserving: an exhausted pool must still signal the
-				// producer's timeline, or the unread frame loses its slot.
-				converter.import(image)?;
-				converter
-					.reserve()
-					.ok_or_else(|| Error::Unsupported("CUDA conversion pool exhausted".into()))?
-					.convert(image)
-			})?;
-			let sized = if converted.size() == self.size {
-				converted
-			} else {
-				converter
-					.reserve()
-					.ok_or_else(|| Error::Unsupported("CUDA resize pool exhausted".into()))?
-					.resize(&converted, self.size)?
-			};
-			Some(Frame::new(Surface::Cuda(sized), frame.timestamp))
-		} else {
-			None
+		// The published image shares its full-size conversion across renditions,
+		// so capture converts only once for each declared color space and never
+		// downloads its pixels; each encoder then copies or scales it into its own target.
+		let converted;
+		let gpu = match &frame.surface {
+			Surface::Vulkan(image) => {
+				let converter = self.converter.as_ref().ok_or_else(|| {
+					Error::Unsupported(format!(
+						"NVENC was not opened for external Vulkan {}",
+						image.image().device
+					))
+				})?;
+				converted = image.converted(converter.color(), || {
+					// Read before reserving: an exhausted pool must still signal the
+					// producer's timeline, or the unread frame loses its slot.
+					converter.import(image)?;
+					converter
+						.reserve()
+						.ok_or_else(|| Error::Unsupported("CUDA conversion pool exhausted".into()))?
+						.convert(image)
+				})?;
+				Some(&converted)
+			}
+			Surface::Cuda(cuda) => Some(cuda),
+			_ => None,
 		};
-		let frame = prepared.as_ref().unwrap_or(frame);
-		let output = self
-			.session
-			.create_output_bitstream()
-			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC output bitstream: {e}")))?;
+
+		let output = match self.output.take() {
+			Some(output) => output,
+			None => self
+				.session
+				.create_output_bitstream()
+				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC output bitstream: {e}")))?,
+		};
 
 		let params = moq_nvenc::EncodePictureParams {
 			input_timestamp: self.timestamp,
@@ -290,71 +332,79 @@ impl Backend for Nvenc {
 		};
 		self.timestamp += 1;
 
-		// Each arm drains the output *before* releasing its input (the registered
+		// Each arm drains the output *before* releasing its input (the mapped
 		// resource / input buffer): the synchronous bitstream lock is what
 		// guarantees NVENC is done reading the input, so releasing the input
 		// first would race the encoder.
-		let data = match &frame.surface {
-			// A CUDA frame is already NV12 in device memory (NVDEC output):
-			// register its buffer as an external NVENC resource and encode in
-			// place, no CPU round trip and no GPU copy.
-			Surface::Cuda(cuda) => {
-				// Registration keeps a raw pointer into the frame; the frame
-				// (borrowed) outlives the registration.
-				// SAFETY: the cloned CUDA frame owns the allocation addressed by the
-				// pointer and the registration retains that clone through completion.
-				let resource = unsafe {
-					self.session.register_generic_resource(
-						cuda.clone(),
-						NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
-						cuda.device_ptr() as *mut std::ffi::c_void,
-						cuda.pitch,
-					)
-				}
-				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
-
-				let submission = self
-					.session
-					.encode_picture(resource, output, params)
-					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-				drain_output(submission)?
-			}
+		let data = if let Some(gpu) = gpu {
+			// Held locally and put back only after a clean encode: NVENC may
+			// still read a target whose completion or unmap failed, so any failure
+			// drops it instead and it is never written again (such a registration
+			// leaks its allocation rather than free it). The next frame gets a new
+			// target.
+			let mut target = match self.target.take() {
+				Some(target) => target,
+				None => Target::new(&self.session, &self.cuda, self.size)?,
+			};
+			// Written only while unmapped, and finished before mapping: NVENC
+			// orders only against the default stream, which the target avoids.
+			target.buffer.fill(gpu)?;
+			let mapped = target
+				.resource
+				.map()
+				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC map CUDA input: {e}")))?;
+			let submission = self
+				.session
+				.encode_picture(mapped, output, params)
+				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+			let (data, mapped, output) = drain_output(submission)?;
+			self.output = Some(output);
+			mapped
+				.unmap()
+				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC unmap CUDA input: {e}")))?;
+			self.target = Some(target);
+			data
+		} else {
 			// Everything else goes through a CPU NV12 input buffer.
-			frame => {
-				let mut input = self
+			let mut input = match self.input.take() {
+				Some(input) => input,
+				None => self
 					.session
 					.create_input_buffer()
-					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC input buffer: {e}")))?;
+					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC input buffer: {e}")))?,
+			};
 
-				let i420 = frame.to_i420()?;
+			let i420 = frame.surface.to_i420()?;
 
-				// Interleave the I420 chroma planes into NV12's single UV plane.
-				let (w, h) = (i420.width as usize, i420.height as usize);
-				let mut uv = vec![0u8; w * h / 2];
-				interleave_uv(i420.u(), i420.v(), &mut uv);
+			// Interleave the I420 chroma planes into NV12's single UV plane.
+			let (w, h) = (i420.width as usize, i420.height as usize);
+			let mut uv = vec![0u8; w * h / 2];
+			interleave_uv(i420.u(), i420.v(), &mut uv);
 
-				// Write both planes honoring NVENC's chosen row stride: the
-				// buffer pitch can exceed the width even for aligned widths, so a
-				// flat write would shear the image. NV12 chroma rows are full
-				// width (interleaved U+V) at the luma pitch.
-				let mut lock = input
-					.lock()
-					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC lock input: {e}")))?;
-				let pitch = lock.pitch() as usize;
-				// SAFETY: offsets stay within the pitch*height*3/2 NV12 buffer and
-				// each source plane is exactly row_bytes * rows.
-				unsafe {
-					lock.write_rows(0, pitch, i420.y(), w, h);
-					lock.write_rows(pitch * h, pitch, &uv, w, h / 2);
-				}
-				drop(lock);
-
-				let submission = self
-					.session
-					.encode_picture(input, output, params)
-					.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-				drain_output(submission)?
+			// Write both planes honoring NVENC's chosen row stride: the
+			// buffer pitch can exceed the width even for aligned widths, so a
+			// flat write would shear the image. NV12 chroma rows are full
+			// width (interleaved U+V) at the luma pitch.
+			let mut lock = input
+				.lock()
+				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC lock input: {e}")))?;
+			let pitch = lock.pitch() as usize;
+			// SAFETY: offsets stay within the pitch*height*3/2 NV12 buffer and
+			// each source plane is exactly row_bytes * rows.
+			unsafe {
+				lock.write_rows(0, pitch, i420.y(), w, h);
+				lock.write_rows(pitch * h, pitch, &uv, w, h / 2);
 			}
+			drop(lock);
+
+			let submission = self
+				.session
+				.encode_picture(input, output, params)
+				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+			let (data, input, output) = drain_output(submission)?;
+			self.input = Some(input);
+			self.output = Some(output);
+			data
 		};
 
 		// The bitstream lock above is synchronous, so this is that frame's output.
@@ -388,6 +438,10 @@ impl Backend for Nvenc {
 		true
 	}
 
+	fn scales(&self, surface: &Surface) -> bool {
+		self.scales && matches!(surface, Surface::Cuda(_))
+	}
+
 	fn name(&self) -> &'static str {
 		NAME
 	}
@@ -397,14 +451,14 @@ impl Backend for Nvenc {
 	}
 }
 
-/// Block on the output bitstream and copy it out. The lock returning is also
-/// what guarantees NVENC finished reading the frame's input resource, so call
-/// this while that input is still alive.
-fn drain_output<I>(submission: moq_nvenc::Submission<I>) -> Result<Vec<u8>, Error> {
-	let (data, _input, _output) = submission
+/// Block on the output bitstream and copy it out, handing back both buffers
+/// for the next frame. The lock returning is also what guarantees NVENC
+/// finished reading the frame's input resource, so call this while that input
+/// is still alive.
+fn drain_output<I>(submission: moq_nvenc::Submission<I>) -> Result<(Vec<u8>, I, Bitstream), Error> {
+	submission
 		.finish()
-		.map_err(|e| Error::codec(anyhow::anyhow!("NVENC lock output: {e}")))?;
-	Ok(data)
+		.map_err(|e| Error::codec(anyhow::anyhow!("NVENC lock output: {e}")))
 }
 
 /// Match the declared Vulkan device before allocating an NVENC session.

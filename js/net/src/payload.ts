@@ -73,13 +73,24 @@ export async function sendPayload(
 	write: (chunk: Uint8Array) => Promise<unknown>,
 	closed: Promise<void>,
 ): Promise<void> {
-	for (let sent = 0; ; ) {
+	return sendPayloadFrom(chunks, 0, write, closed);
+}
+
+/** {@link sendPayload}, writing only the bytes from offset `skip` on. */
+export async function sendPayloadFrom(
+	chunks: frame.Consumer,
+	skip: number,
+	write: (chunk: Uint8Array) => Promise<unknown>,
+	closed: Promise<void>,
+): Promise<void> {
+	for (let read = 0; ; ) {
 		const chunk = await hooks.readFrameChunk(chunks, closed);
 		if (!(chunk instanceof Uint8Array)) {
-			if (sent < chunks.size) throw new Error("stream closed mid-frame");
+			if (read < chunks.size) throw new Error("stream closed mid-frame");
 			return;
 		}
-		sent += chunk.byteLength;
-		await write(chunk);
+		const from = Math.max(0, skip - read);
+		read += chunk.byteLength;
+		if (from < chunk.byteLength) await write(chunk.subarray(from));
 	}
 }

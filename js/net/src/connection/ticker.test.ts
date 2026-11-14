@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { tick } from "./ticker.ts";
 
 test("subscribers share one tick and the loop stops with the last", async () => {

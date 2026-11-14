@@ -37,7 +37,7 @@ Previous run, with its per-crate and per-package baselines:
   workflow reaches; the local-only ones are listed in
   `sh/gh/test-inventory.allow` with their owning quests.
 - Sample `fix` commits for regression tests, counting `#[kio::test]`.
-- Whether [interop bindings](/quest/m4/interop-bindings.md) and
+- Whether [interop bindings](/quest/m3/interop-bindings.md) and
   [GPU CI](/quest/m3/gpu-ci.md) landed, before re-auditing the tests they own.
 - Each TLA+ model's `verify-*` skill against the code it covers: run
   `/maintain-formal-verification-skill` on every one whose Coverage files

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, now, Wall, wall } from "@moq/clock";
+import { Duration, now, Wall, wall } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
 import { arrivedAt, Tally } from "./feedback";

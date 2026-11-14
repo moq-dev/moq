@@ -331,9 +331,12 @@ export class RangeFills {
 		for (const sequence of this.#reading.keys())
 			if (!draining.some((run) => run.start <= sequence && sequence < run.end)) this.#reading.delete(sequence);
 		this.#draining = draining;
+		// A run being recovered leaves the subscription, even out of a run kept whole: any later update
+		// reopens its stale drop there, and the publisher would serve it on both.
+		const remaining = this.#recovering.reduce((runs, run) => removeRun(runs, run.start, run.end), groups);
 		// What finishes a stream still asks with what its fills asked.
-		if (this.#held.length === 0 && groups.length > 0) ask.priority = this.ask.priority;
-		ask.groups = groups;
+		if (this.#held.length === 0 && remaining.length > 0) ask.priority = this.ask.priority;
+		ask.groups = remaining;
 		if (ask.priority === this.ask.priority && sameRuns(ask.groups, this.ask.groups))
 			return this.isEmpty() !== empty;
 		this.#retireSkipped(ask.groups);

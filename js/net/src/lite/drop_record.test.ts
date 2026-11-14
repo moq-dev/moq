@@ -3,7 +3,8 @@
 // all on mock transports and a manual clock. Mirrors rs/moq-net/tests/integration/drop_record.rs.
 
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { Duration, Elapsed, type Manual, timeout } from "@moq/clock";
+import { Duration, Elapsed, timeout } from "@moq/clock";
+import type { Manual } from "@moq/clock/test";
 import * as cache from "../cache.ts";
 import { accept, connect } from "../connection/index.ts";
 import { StreamCode, StreamError, TooFarBehind, toStreamCode } from "../error.ts";
