@@ -109,6 +109,8 @@ pub struct Device {
 	pub endpoint: PublicKey,
 	/// Its unique, DNS-safe name.
 	pub name: String,
+	/// The ID of the enrollment key it last enrolled with.
+	pub key: String,
 	/// The tags of the enrollment key it joined with.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub tags: Vec<String>,
@@ -283,7 +285,13 @@ impl Coordinator {
 			));
 		}
 		let endpoint = request.proof.endpoint;
-		let known = inner.store.devices.iter().any(|device| device.endpoint == endpoint);
+		// Only the key that enrolled a device re-enrolls it for free, so an exhausted key
+		// cannot move other devices onto its tags.
+		let known = inner
+			.store
+			.devices
+			.iter()
+			.any(|device| device.endpoint == endpoint && device.key == id);
 		if !known && key.used >= key.uses.get() {
 			return Err(ErrorReply::new(
 				ErrorCode::InvalidGrant,
@@ -294,7 +302,7 @@ impl Coordinator {
 		let id = id.to_string();
 
 		let enrollment = self.commit(&mut inner, |store| {
-			self.admit(store, endpoint, request.name.as_deref(), tags)?;
+			self.admit(store, endpoint, request.name.as_deref(), &id, tags)?;
 			if !known && let Some(key) = store.keys.iter_mut().find(|key| key.id == id) {
 				key.used += 1;
 			}
@@ -461,7 +469,14 @@ impl Coordinator {
 	}
 
 	/// Record `endpoint` as enrolled, or update its name and tags if it already is.
-	fn admit(&self, store: &mut Store, endpoint: PublicKey, name: Option<&str>, tags: Vec<String>) -> Reply<()> {
+	fn admit(
+		&self,
+		store: &mut Store,
+		endpoint: PublicKey,
+		name: Option<&str>,
+		key: &str,
+		tags: Vec<String>,
+	) -> Reply<()> {
 		refuse_revoked(store, endpoint)?;
 		let devices = &mut store.devices;
 		let current = devices.iter().position(|device| device.endpoint == endpoint);
@@ -472,11 +487,13 @@ impl Coordinator {
 		match current {
 			Some(index) => {
 				devices[index].name = name;
+				devices[index].key = key.into();
 				devices[index].tags = tags;
 			}
 			None => devices.push(Device {
 				endpoint,
 				name,
+				key: key.into(),
 				tags,
 				enrolled: kio::clock::wall(),
 				revoked: false,
@@ -716,6 +733,7 @@ mod tests {
 		let device = |byte, name: &str| Device {
 			endpoint: PublicKey::from_bytes([byte; 32]),
 			name: name.into(),
+			key: String::new(),
 			tags: Vec::new(),
 			enrolled: kio::clock::wall(),
 			revoked: false,
