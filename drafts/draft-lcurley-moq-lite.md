@@ -2165,7 +2165,7 @@ A plain absolute index; 0 means the start of the group (default).
 **Start Byte**:
 The offset of the first payload byte to return within the frame at `Frame Start`; 0 means the whole frame (default).
 The first FRAME of the response still states that frame's full size, and carries only its payload from `Start Byte` on; later frames are whole.
-A `Start Byte` past the frame's size is a protocol violation, and so is a non-zero `Start Byte` on a Track whose `Compression` is not none, since a compressed frame inflates only from its first byte, or on a Track carrying a MoqTransport Version under the `ietf` extension, whose object records name whole objects.
+A non-zero `Start Byte` at or past the frame's size is a protocol violation, since the rest of a frame is never empty, and so is a non-zero `Start Byte` on a Track whose `Compression` is not none, since a compressed frame inflates only from its first byte, or on a Track carrying a MoqTransport Version under the `ietf` extension, whose object records name whole objects.
 
 **Frame End**:
 The last frame to return (inclusive), encoded as the absolute frame index + 1.

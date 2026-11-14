@@ -2511,7 +2511,8 @@ export class Publisher {
 			// The first frame states its full size, then carries only the bytes from `byte`.
 			const skip = index === startFrame ? byte : 0;
 			const size = readSize(read);
-			if (skip > size) throw new Error(`fetch start byte ${skip} past the frame's ${size}`);
+			// A non-zero start byte names a byte of the frame, so the rest is never empty.
+			if (skip > 0 && skip >= size) throw new Error(`fetch start byte ${skip} not within the frame's ${size}`);
 			await stream.write(frameHeader(stream.version, delta, read.inflated, size, hasLengthFirst(this.version)));
 			if (read.chunks) await sendPayloadFrom(read.chunks, skip, (chunk) => stream.write(chunk), stream.closed);
 			else if (frame.payload.length > skip) await stream.write(frame.payload.subarray(skip));

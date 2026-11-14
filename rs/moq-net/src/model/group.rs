@@ -4352,7 +4352,7 @@ impl Consumer {
 	/// The next frame, to stream from byte `from` on, which a copy starting partway into
 	/// it (see [`Bounds::byte`]) serves if it starts at or before `from`.
 	///
-	/// [`Error::WrongSize`] when the frame is shorter than `from`.
+	/// [`Error::WrongSize`] when a non-zero `from` is not within the frame.
 	pub(crate) fn poll_next_frame_at(
 		&mut self,
 		from: usize,
@@ -4380,7 +4380,7 @@ impl Consumer {
 		// A lead that stops arriving is judged by the read's budget, as a whole frame is.
 		let lead = ready!(self.poll_expired_if_blocked(waiter, res))?;
 		let frame = match lead {
-			Some((info, _, _)) if from as u64 > info.size => return Poll::Ready(Err(Error::WrongSize)),
+			Some((info, _, _)) if from as u64 >= info.size => return Poll::Ready(Err(Error::WrongSize)),
 			Some((info, buf, base)) => {
 				self.cursor.index += 1;
 				self.stats.frames(1);
@@ -4402,7 +4402,8 @@ impl Consumer {
 				}
 			}
 			None => match ready!(self.poll_next_frame(waiter))? {
-				Some(frame) if from as u64 > frame.size => return Poll::Ready(Err(Error::WrongSize)),
+				// A non-zero start names a byte of the frame, so the rest is never empty.
+				Some(frame) if from > 0 && from as u64 >= frame.size => return Poll::Ready(Err(Error::WrongSize)),
 				Some(frame) => frame.starting_at(0, from),
 				None => return Poll::Ready(Ok(None)),
 			},
@@ -6941,6 +6942,7 @@ mod test {
 		let mut rest = plain.clone().at(1, 4).unwrap();
 		let mut early = plain.clone().at(1, 3).unwrap();
 		let mut past = plain.clone().at(1, 10).unwrap();
+		let mut edge = plain.clone().at(1, 6).unwrap();
 		assert!(next_at(&mut rest, 4).is_none(), "waits for the frame to open");
 
 		let before = handle.cache_size();
@@ -6955,6 +6957,10 @@ mod test {
 		assert!(
 			matches!(next_at(&mut past, 10), Some(Err(Error::WrongSize))),
 			"a byte past the frame's end"
+		);
+		assert!(
+			matches!(next_at(&mut edge, 6), Some(Err(Error::WrongSize))),
+			"the frame's end leaves no rest"
 		);
 		let mut frame = next_at(&mut rest, 4).unwrap().unwrap().unwrap();
 		assert_eq!(frame.size, 6, "it states the frame's full size");
