@@ -789,11 +789,6 @@ where
 	}
 }
 
-/// The error for a race both arms lost.
-///
-/// Auth is terminal only when both arms refused. A WebTransport-only endpoint
-/// answers the fallback with 403 while QUIC is still in flight, and reconnect
-/// treats is_auth() as terminal, so a mixed pair reports the retryable error.
 /// Whether a client on a simulated host can dial `scheme`: only QUIC's, without the `http://`
 /// bootstrap's fetch over TCP.
 #[cfg(all(feature = "sim", feature = "quic"))]
@@ -801,6 +796,11 @@ fn simulated_scheme(scheme: &str) -> bool {
 	matches!(scheme, "https" | "moqt" | "moql")
 }
 
+/// The error for a race both arms lost.
+///
+/// Auth is terminal only when both arms refused. A WebTransport-only endpoint
+/// answers the fallback with 403 while QUIC is still in flight, and reconnect
+/// treats is_auth() as terminal, so a mixed pair reports the retryable error.
 #[cfg(all(feature = "websocket", feature = "quic"))]
 fn race_error(quic: Error, websocket: Error) -> Error {
 	match (quic.is_auth(), websocket.is_auth()) {
