@@ -613,6 +613,8 @@ fn nested(set: &BTreeSet<Path>) -> bool {
 trait Carried<A>: Clone {
 	/// The offer it carries, unless it was ended.
 	fn offered(&self) -> Option<&Offer>;
+	/// Whether it is held: both sides agree, as both change it on the same messages.
+	fn held(&self) -> bool;
 	/// Its claims, unless it was ended.
 	fn view(&mut self) -> Option<&mut View<A>>;
 }
@@ -620,6 +622,10 @@ trait Carried<A>: Clone {
 impl<A: Clone> Carried<A> for Heard<A> {
 	fn offered(&self) -> Option<&Offer> {
 		Some(&self.offer)
+	}
+
+	fn held(&self) -> bool {
+		self.state == State::Held
 	}
 
 	fn view(&mut self) -> Option<&mut View<A>> {
@@ -630,6 +636,10 @@ impl<A: Clone> Carried<A> for Heard<A> {
 impl<A: Clone> Carried<A> for Sent<A> {
 	fn offered(&self) -> Option<&Offer> {
 		self.offer()
+	}
+
+	fn held(&self) -> bool {
+		Sent::held(self)
 	}
 
 	fn view(&mut self) -> Option<&mut View<A>> {
@@ -654,10 +664,15 @@ struct Rekeyed<T> {
 }
 
 /// Whether the sender would reflect `a` rather than `b` to `receiver` under one
-/// key, as [`Router::src`] picks: one not naming the receiver first, then the
-/// better rank. Equals keep `b`. Both sides see the same offers, so both agree.
-fn preferred(a: &Offer, b: &Offer, receiver: Id) -> bool {
-	(names(&a.path, receiver), a.rank()) < (names(&b.path, receiver), b.rank())
+/// key, as [`Router::src`] picks: a live one first, then one not naming the
+/// receiver, then the better rank. Equals keep `b`. Both sides see the same
+/// offers and holds, so both agree.
+fn preferred<A, T: Carried<A>>(a: &T, b: &T, receiver: Id) -> bool {
+	let key = |route: &T| {
+		let offer = route.offered().expect("an offered route");
+		(route.held(), names(&offer.path, receiver), offer.rank())
+	};
+	key(a) < key(b)
 }
 
 /// The routes one stream carries once an edit of its prefixes from `old` to `new`
@@ -725,10 +740,9 @@ fn rekey<A: Clone + Eq, T: Carried<A>>(
 	}
 	let mut moved = Vec::new();
 	for (key, mut routes) in arriving {
-		let offer = |route: &T| route.offered().expect("an offered route").clone();
 		let mut best = 0;
 		for (i, (_, route)) in routes.iter().enumerate().skip(1) {
-			if preferred(&offer(route), &offer(&routes[best].1), receiver) {
+			if preferred(route, &routes[best].1, receiver) {
 				best = i;
 			}
 		}
@@ -739,8 +753,8 @@ fn rekey<A: Clone + Eq, T: Carried<A>>(
 			route.view().expect("a carried route").items.extend(items);
 		}
 		// A route the key already carries stays, unless the sender would reflect this one.
-		let staying = kept.get(&key).and_then(|staying| staying.offered().cloned());
-		if staying.is_some_and(|staying| !preferred(&offer(&route), &staying, receiver)) {
+		let staying = kept.get(&key).filter(|staying| staying.offered().is_some());
+		if staying.is_some_and(|staying| !preferred(&route, staying, receiver)) {
 			continue;
 		}
 		if kept.contains_key(&key) {
@@ -2309,7 +2323,22 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 						}
 						rest += 1;
 					}
-					Want::Keep => rest += 1,
+					Want::Keep => {
+						// The neighbour takes a first DEAD to mean this node holds every route it
+						// did not learn from the neighbour, so what was sent says so too.
+						if first && !sent.held() && !child(&sent.offer().expect("sent").path, self.sessions[&peer].hop)
+						{
+							let sent = self
+								.answering
+								.get_mut(&peer)
+								.expect("answering")
+								.tx
+								.get_mut(key)
+								.expect("sent");
+							sent.hold();
+						}
+						rest += 1;
+					}
 					end @ (Want::End | Want::Empty) => {
 						let batch =
 							(matches!(end, Want::Empty) && self.covering_view(key.0, &key.1).is_some()).then(|| {

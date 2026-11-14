@@ -398,6 +398,9 @@ Report1(n, s, p, hop) ==
                                                               !.held = FALSE, !.src = w[k].src]
                          [] w[k].kind = "hold" -> [t[k] EXCEPT !.held = TRUE]
                          [] w[k].kind = "end" -> NoSent(t[k].src)
+                         \* p takes a first DEAD to mean every route it did not
+                         \* send this node is held, so what was sent says so too.
+                         [] first /\ ~Child(t[k].path, p) -> [t[k] EXCEPT !.held = TRUE]
                          [] OTHER -> t[k]]
         out == IF first \/ (gone /\ ends # {})
                THEN <<DeadMsg(hop, moved, gone)>>
@@ -648,11 +651,14 @@ Recv(n, s, from, msg) ==
          [] OTHER -> Fail(n, s, msg.hop, from, msg.moved, msg.gone)
 
 \* Whether the sender would reflect route `x` rather than `y` to node r under
-\* one key, as `SrcKey` picks: one not naming r first, then the better rank.
-\* Both sides see the same offers, so both agree.
-Reflects(x, y, r) ==
-    \/ ~Names(x.path, r) /\ Names(y.path, r)
-    \/ Names(x.path, r) = Names(y.path, r) /\ Below(Rank(x.path, x.drain), Rank(y.path, y.drain))
+\* one key, as `SrcKey` picks: a live one first, then one not naming r, then
+\* the better rank. `Held(e)` says whether an entry is held. Both sides see the
+\* same offers and holds (`Mirrored`), so both agree.
+Reflects(x, y, r, Held(_)) ==
+    \/ ~Held(x) /\ Held(y)
+    \/ Held(x) = Held(y) /\ ~Names(x.path, r) /\ Names(y.path, r)
+    \/ Held(x) = Held(y) /\ Names(x.path, r) = Names(y.path, r)
+       /\ Below(Rank(x.path, x.drain), Rank(y.path, y.drain))
 
 \* The routes of one stream to node r once an edit of its prefixes from `O` to
 \* `N` takes effect at its marker (path.rs: `rekey`), with `Off(e)` what a gone
@@ -663,30 +669,30 @@ Reflects(x, y, r) ==
 \* is carried, presented at "a", to an added "a", so its floor carries too,
 \* unless the route "a" already carries is the one the sender would reflect
 \* there. The rest go, with no ROUTE_END.
-Carries(O, N, R, r) ==
+Carries(O, N, R, r, Held(_)) ==
     /\ "root" \in O /\ "a" \in N /\ R["root"].on
-    /\ ~R["a"].on \/ Reflects(R["root"], R["a"], r)
+    /\ ~R["a"].on \/ Reflects(R["root"], R["a"], r, Held)
 
-Rekey(O, N, R, Off(_), r) ==
+Rekey(O, N, R, Off(_), r, Held(_)) ==
     [k \in Keys |->
         IF k = "root"
         THEN IF "root" \in O /\ "root" \in N THEN R["root"]
              ELSE IF "a" \in O /\ "root" \in N /\ R["a"].on THEN [R["a"] EXCEPT !.rev = None]
              ELSE Off(R["root"])
-        ELSE IF Carries(O, N, R, r) THEN [R["root"] EXCEPT !.items = Restrict(@, "a")]
+        ELSE IF Carries(O, N, R, r, Held) THEN [R["root"] EXCEPT !.items = Restrict(@, "a")]
              ELSE IF R["a"].on /\ (("root" \in O /\ N # {}) \/ ("a" \in O /\ "a" \in N)) THEN R["a"]
              ELSE Off(R["a"])]
 
 \* The keys `Rekey` moved a route between, as <<from, to>>.
-Moved(O, N, R, r) ==
+Moved(O, N, R, r, Held(_)) ==
     (IF "a" \in O /\ "root" \in N /\ R["a"].on THEN {<<"a", "root">>} ELSE {})
-    \cup (IF Carries(O, N, R, r) THEN {<<"root", "a">>} ELSE {})
+    \cup (IF Carries(O, N, R, r, Held) THEN {<<"root", "a">>} ELSE {})
 
 \* `edit`: m now asks node n for `set`. It takes effect at once, behind the
 \* marker n sends first.
 Answer(s, m, set) ==
     [s EXCEPT !.ans[m] = set,
-              !.tx[m] = Rekey(s.ans[m], set, s.tx[m], LAMBDA e : NoSent(e.src), m)]
+              !.tx[m] = Rekey(s.ans[m], set, s.tx[m], LAMBDA e : NoSent(e.src), m, LAMBDA e : e.held)]
 
 \* `edited`: m's marker for node n's oldest edit in flight. The routes m sent
 \* are rekeyed as m rekeyed them, and a route n used or held through m moves
@@ -694,11 +700,11 @@ Answer(s, m, set) ==
 Marker(n, s, m) ==
     LET old == s.asked[m]
         new == Head(s.edits[m])
-        mv == Moved(old, new, s.rx[m], n)
+        mv == Moved(old, new, s.rx[m], n, LAMBDA e : e.state = "held")
         carry(k) == {x \in mv : x[2] = k /\ s.rt[x[1]].on /\ s.rt[x[1]].next = m /\ ~s.rt[k].on}
     IN [s EXCEPT !.asked[m] = new,
                  !.edits[m] = Tail(@),
-                 !.rx[m] = Rekey(old, new, s.rx[m], LAMBDA e : NoHeard, n),
+                 !.rx[m] = Rekey(old, new, s.rx[m], LAMBDA e : NoHeard, n, LAMBDA e : e.state = "held"),
                  !.rt = [k \in Keys |-> IF carry(k) # {} THEN s.rt[(CHOOSE x \in carry(k) : TRUE)[1]]
                                        ELSE s.rt[k]]]
 
@@ -874,6 +880,17 @@ Truthful ==
         /\ \A m \in Nodes, k \in Keys :
               st[n].rx[m][k].on /\ st[n].rx[m][k].rev >= 0 =>
                   st[n].rx[m][k].items = Restrict(hist[st[n].rx[m][k].rev + 1], k)
+
+\* With nothing in flight from m to n, what m sent n is what n heard from m,
+\* on the same path and held exactly when n holds it, so an edit rekeys both
+\* sides alike.
+Mirrored ==
+    \A d \in Dirs : d[2] # Origin /\ {d[1], d[2]} \in up /\ q[d] = <<>> =>
+        LET t == st[d[1]].tx[d[2]]
+            h == st[d[2]].rx[d[1]]
+        IN \A k \in Keys :
+            /\ t[k].on = h[k].on
+            /\ t[k].on => t[k].path = h[k].path /\ (t[k].held <=> h[k].state = "held")
 
 \* A reader never sees a broadcast start again after it saw it end.
 NoRevival == revivals = 0
