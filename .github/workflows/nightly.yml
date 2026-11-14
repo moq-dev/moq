@@ -434,16 +434,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The largest models get a runner each, and the route model's two
-        # largest configs (about 30 and 15 minutes) share one; the `route`
-        # and `rest` legs take every other config, so a new one is checked
-        # without editing this list. sh/gh/nightly.test.py fails on a path
-        # that no longer exists.
+        # The largest models get a runner each, as do the route model's two
+        # largest configs (Early about 14M distinct states, LagWide about
+        # 4.7M); the `route` and `rest` legs take every other config, so a
+        # new one is checked without editing this list. sh/gh/nightly.test.py
+        # fails on a path that no longer exists.
         include:
           - name: resume
             paths: rs/moq-net/verify/resume
-          - name: route large
-            paths: rs/moq-net/verify/route/Early.cfg rs/moq-net/verify/route/LagWide.cfg
+          - name: route early
+            paths: rs/moq-net/verify/route/Early.cfg
+          - name: route lagwide
+            paths: rs/moq-net/verify/route/LagWide.cfg
           - name: route
             paths: "rs/moq-net/verify/route :!rs/moq-net/verify/route/Early.cfg :!rs/moq-net/verify/route/LagWide.cfg"
           - name: rest
