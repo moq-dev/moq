@@ -11,8 +11,6 @@ an 11.7 s delay, where SRT loses about 0.
 
 ## Plan
 
-Decided 2026-11-13 (maintainer, /quest-complete): ✅ m3, since it requires m2 `lite07-finalize`, which is effectively the cut (rejected: m2; dropping the link).
-
 Decided 2026-11-12 (maintainer, `/quest-import` of
 [moq-dev/moq#8559](https://github.com/moq-dev/moq/issues/8559)):
 ✅ measure Ascending against Descending, then pick (rejected: Ascending for
@@ -40,7 +38,7 @@ The maintainer's reasoning, to keep in view:
 - The right order may depend on the maximum latency.
 
 The starting hypothesis to measure mirrors
-[Buffered playback subscribes in ascending order](/quest/m3/buffered-ascending.md):
+[Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md):
 an export with a nonzero playout delay (`Delay::min`) wants its window from
 the start, and goes Ascending; one that chases the live edge stays
 Descending.

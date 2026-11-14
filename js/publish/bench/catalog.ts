@@ -1,6 +1,7 @@
 /** Sweep tracks x viewers for 1000 estimate rises inside one second. */
 
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Track } from "@moq/net";

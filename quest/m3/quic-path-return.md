@@ -54,5 +54,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Buffered exports pick their group order by measurement](/quest/m3/export-order.md) - the send-order half of the same outage
+- [Buffered exports pick their group order by measurement](/quest/m1/export-order.md) - the send-order half of the same outage
 - [Per-stream and per-datagram deadlines](/quest/m4/quic-deadline.md) - faster recovery below a deadline

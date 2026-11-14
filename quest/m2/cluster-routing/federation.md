@@ -79,4 +79,4 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Related
 
-- [Routing guide](/quest/m2/routing-guide.md) - runnable operator setup after integration
+- [Routing guide](/quest/m1/routing-guide.md) - runnable operator setup after integration

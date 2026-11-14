@@ -16,8 +16,6 @@ ordering for the Python or FFI audio consumers.
 
 ## Plan
 
-Decided 2026-11-13 (maintainer, /quest-complete): ✅ m3, since it requires m2 `lite07-finalize`, which is effectively the cut (rejected: m2; dropping the link).
-
 Motivated by the moq.dev Voice demo: each TTS reply is a fresh track whose
 head arrives newest-first, which shifted Chrome's decoder timeline and
 overflowed the ring (moq-dev/moq#6523), then clipped each reply's opening
@@ -40,11 +38,11 @@ Decided 2026-10-23 by the maintainer:
   max-delay release rules go. Not chosen: delete the hold outright; keep
   #6549's rules unchanged.
 - ✅ The hold stays audio-only. Video's startup hold is the poster quest's.
-- ✅ Required [Finalize moq-lite-07](/quest/m2/lite07-finalize.md):
+- ✅ Placed in m1, requiring [Finalize moq-lite-07](/quest/m2/lite07-finalize.md):
   lite-06 and earlier serve an ascending request newest-first, so this is a
   no-op on default sessions until lite-07 negotiates by default. `release`
   has no `order` field, so it ships in the next minor, not a 0.6.x patch.
-  Not chosen: wiring it now behind the lite-07 gate.
+  Not chosen: m2; wiring it now behind the lite-07 gate.
 
 Implementation:
 

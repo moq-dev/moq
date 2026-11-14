@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { Duration, Instant, Manual } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Container from "@moq/hang/container";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
