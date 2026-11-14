@@ -718,11 +718,11 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64, limit: &
 /// miss is still owed, so the read starts at the fill's first group; ascending, the span below
 /// was already answered, so it starts at the miss.
 ///
-/// A source holding no group at all resolves no time until it holds one, as it would for any
-/// reader of it, so the lookup then waits for the source's next group, its reader leaving, or the
-/// rung retiring. A retired rung's drain can't wait on the source's media, so one whose lookup
-/// can't answer at once drops the miss and refuses the rest of the fill, the way it is being
-/// filled, in one call: nothing says the source lost those.
+/// The miss itself is dropped first. A source holding no group at all resolves no time until it
+/// holds one, as it would for any reader of it, so the lookup for the rest then waits for the
+/// source's next group, the next group's readers leaving, or the rung retiring. A retired rung's
+/// drain can't wait on the source's media, so one whose lookup can't answer at once refuses the
+/// rest of the fill, the way it is being filled, in one call: nothing says the source lost it.
 async fn drop_gap(
 	rung: &Rung,
 	track: &moq_net::track::Consumer,
@@ -732,21 +732,33 @@ async fn drop_gap(
 ) -> Result<(), Error> {
 	use moq_net::track::{Anchor, Delay, Order, Range, Subscription};
 
-	let groups = sequence..sequence + 1;
+	// The miss is the source's answer, so its readers have it at once, whatever the lookup for
+	// the rest of the gap waits on.
+	fill.drop_groups(sequence..sequence + 1);
+
 	let first = fill.start().group;
 	let end = fill.end();
+	let below = matches!(fill.order(), Order::Descending);
+	// The rest of the gap, the way the fill is being filled, starting from the group next to
+	// the miss. A fill with none past it has nothing more to find.
+	let (rest, next) = match below {
+		true => (first..sequence, sequence.checked_sub(1).filter(|next| *next >= first)),
+		false => (sequence + 1..end, Some(sequence + 1).filter(|next| *next < end)),
+	};
+	let Some(next) = next else {
+		return Ok(());
+	};
 	// The source starts that map into the fill, below the miss and from it.
 	let (Some(miss), Some(low)) = (source_from(sequence, scale), source_from(first, scale)) else {
-		fill.drop_groups(sequence..end);
+		fill.drop_groups(rest);
 		return Ok(());
 	};
 	let high = source_from(end, scale).map_or(u64::MAX, |high| high.saturating_sub(1));
-	if high < miss {
+	if !below && high < miss {
 		// No source start maps between the miss and the fill's end.
-		fill.drop_groups(sequence..end);
+		fill.drop_groups(rest);
 		return Ok(());
 	}
-	let below = matches!(fill.order(), Order::Descending);
 	let from = if below { low } else { miss };
 	let subscription = Subscription::default()
 		.with_ranges([Range {
@@ -772,36 +784,27 @@ async fn drop_gap(
 	let mut retire = rung.retire.clone();
 	let (before, after) = tokio::select! {
 		biased;
-		_ = fill.unwanted(sequence) => return abandon(sequence),
+		// Nobody waits on the group next to the miss any more: the fill moves on to what it
+		// still owes, and a miss there looks again.
+		_ = fill.unwanted(next) => return abandon(next),
 		around = around => match around {
 			Ok(around) => around,
-			Err(err) => {
-				fill.refuse_groups(sequence..sequence + 1, err.clone());
-				return Err(err.into());
-			}
+			// The miss is settled; the rest is left to the fill, which asks for it next.
+			Err(err) => return Err(err.into()),
 		},
 		() = retire.fired() => {
-			// The miss is the source's answer. The rest is unknown, so it is refused rather than
-			// named lost: a later reader asks the rung that replaces this one.
-			fill.drop_groups(groups.clone());
-			match below {
-				true => fill.refuse_groups(first..sequence, moq_net::Error::Cancel),
-				false => fill.refuse_groups(sequence + 1..end, moq_net::Error::Cancel),
-			}
+			// Nothing says the source lost the rest, so it is refused rather than named lost: a
+			// later reader asks the rung that replaces this one.
+			fill.refuse_groups(rest, moq_net::Error::Cancel);
 			return Ok(());
 		}
 	};
 
-	let start = match below {
-		true => before
-			.map_or(first, |before| before.saturating_add(1))
-			.clamp(first, sequence),
-		false => sequence,
+	let span = match below {
+		true => before.map_or(first, |before| before.saturating_add(1)).max(first)..sequence,
+		false => rest.start..after.map_or(end, |after| after.min(end)),
 	};
-	// A source group mapping to the miss itself arrived since it was asked: leave it to a
-	// later fetch, dropping only the miss as before.
-	let end = after.map_or(end, |after| after.min(end)).max(sequence + 1);
-	fill.drop_groups(start..end);
+	fill.drop_groups(span);
 	Ok(())
 }
 
@@ -1200,6 +1203,41 @@ mod tests {
 
 	async fn fill_across_a_gap(order: moq_net::track::Order, retired: bool) {
 		fill_across(order, retired, false).await;
+	}
+
+	/// A one-group fetch the source answers with a miss is answered at once, even from a source
+	/// holding nothing to place a gap by: the fill has no other group to look for.
+	#[tokio::test(start_paused = true)]
+	async fn a_missing_group_fetched_alone_is_answered_at_once() {
+		let (rung, source, _retire) = idle_rung();
+		let video = source
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let track = output
+			.create_track("video/120p", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let fills = track.requests();
+		let consumer = track.consume();
+		let fetching = tokio::spawn(async move { consumer.fetch_group(1, None).await.map(drop) });
+		let fill = fills.requested_fill().await.unwrap();
+		assert_eq!((fill.start().group, fill.end()), (1, 2));
+
+		let mut tasks = tokio::task::JoinSet::new();
+		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
+		let wait = std::time::Duration::from_secs(5);
+		let fetched = kio::clock::timeout(wait, fetching)
+			.await
+			.expect("the miss is answered at once")
+			.unwrap();
+		assert!(fetched.is_err(), "the source doesn't have it");
+		kio::clock::timeout(wait, tasks.join_next())
+			.await
+			.expect("the fill is done")
+			.unwrap()
+			.unwrap();
+		drop(video);
 	}
 
 	/// Fill output starts 1 to an hour, with source groups at 0 and an hour, or, when `empty`,

@@ -244,7 +244,7 @@ review, from the PR's local reviews:
   (`rs/moq-net/src/recv.rs` closes it), so it still bounds that group by its
   successor, as main does on every hop. Relays serve nothing main wouldn't, and
   the gap closes when lite-07's GROUP_END carries the end
-  ([lite07.md](lite07.md)). Rejected: carrying the end on the wire in this PR,
+  ([lite07.md](/quest/m2/time-addressing/lite07.md)). Rejected: carrying the end on the wire in this PR,
   which is lite07's wire, draft, and JS change; holding own-end reach back
   until then, which reverts the 2026-10-26 decision above.
 - **A transcode fill locates a gap through one source read.** A miss reads
