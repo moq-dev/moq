@@ -209,7 +209,12 @@ struct Unit {
 	runs: Vec<Run>,
 	/// For a unit of program tables, what they put in force and the PIDs they hold back.
 	tables: Option<Program>,
+	/// The payload of the frames it carries, counted once it has gone out.
+	charges: Vec<Charge>,
 }
+
+/// A frame's payload bytes, counted against its bill once the unit carrying it goes out.
+pub(super) type Charge = (moq_net::stats::Bill, u64);
 
 /// What a unit of program tables puts in force once it has gone out ([`Tables`]).
 struct Program {
@@ -625,6 +630,8 @@ pub(super) struct Schedule {
 	/// The unit held packets last went out in, by `seq`: what is muxed after them waits until it
 	/// has finished, as it rides a lane of its own.
 	deferred: Option<u64>,
+	/// The frames the next unit pushed carries ([`Self::bill`]).
+	charges: Vec<Charge>,
 }
 
 impl Schedule {
@@ -652,6 +659,7 @@ impl Schedule {
 			clocked: 0,
 			unclocked: Vec::new(),
 			deferred: None,
+			charges: Vec::new(),
 		}
 	}
 
@@ -823,6 +831,12 @@ impl Schedule {
 		self.units = units;
 	}
 
+	/// Count a frame's payload once the next unit pushed, which carries it, has gone out. One
+	/// that never goes out, dropped by [`Self::clear`] or with no packets, counts nothing.
+	pub fn bill(&mut self, charge: Charge) {
+		self.charges.push(charge);
+	}
+
 	/// Send the program tables ahead of the next unit pushed, under its deadline. Program
 	/// tables ride one lane, so each version goes out after the one before it, and a revision
 	/// is one boundary: no unit of a stream they add goes out before them, and their clock PID
@@ -884,6 +898,7 @@ impl Schedule {
 		keyframe: bool,
 		mut frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
+		let charges = std::mem::take(&mut self.charges);
 		if let Some(tables) = self.lead.take() {
 			let pmt = self.pmt.context("program tables without a PMT PID")?;
 			let clock = self.psi.as_ref().context("program tables never set")?.clock;
@@ -959,6 +974,7 @@ impl Schedule {
 		unit.keyframe = keyframe;
 		unit.place = place;
 		unit.frames = frames;
+		unit.charges = charges;
 		Ok(())
 	}
 
@@ -989,6 +1005,7 @@ impl Schedule {
 			frames: Vec::new(),
 			runs,
 			tables,
+			charges: Vec::new(),
 		});
 		self.units.back_mut().expect("the unit just pushed")
 	}
@@ -1040,9 +1057,21 @@ impl Schedule {
 				.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
 	}
 
+	/// Move each unit that has gone out whole into its decoder buffer, and count its frames.
+	fn retire(&mut self) {
+		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
+			self.decoding.extend(unit.leaving());
+			for (bill, bytes) in &unit.charges {
+				bill.deliver(*bytes);
+			}
+		}
+		self.units.retain(|unit| unit.remaining() > 0);
+	}
+
 	/// Drop everything queued and start the grid afresh.
 	pub fn clear(&mut self) {
 		self.units.clear();
+		self.charges.clear();
 		self.decoding.clear();
 		self.transport.clear();
 		self.system = None;
@@ -1204,10 +1233,7 @@ impl Schedule {
 		let tables = (0..self.units.len())
 			.filter(|&i| self.units[i].remaining() == 0 && self.enforce(i, index))
 			.count();
-		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
-			self.decoding.extend(unit.leaving());
-		}
-		self.units.retain(|unit| unit.remaining() > 0);
+		self.retire();
 		Ok(Some(Slot {
 			index,
 			discontinuity,
@@ -1574,10 +1600,7 @@ impl Schedule {
 			}) {
 			return Err(self.missed(unit.pid, index, rate));
 		}
-		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
-			self.decoding.extend(unit.leaving());
-		}
-		self.units.retain(|unit| unit.remaining() > 0);
+		self.retire();
 		self.busy_slots = if out.nulls > 0 { 0 } else { self.busy_slots + 1 };
 		Ok(out)
 	}

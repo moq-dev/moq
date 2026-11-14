@@ -291,6 +291,8 @@ struct Queued {
 	description: Option<Bytes>,
 	/// The PES it may share ([`Track::pack_start`]).
 	pes: Option<PesStart>,
+	/// Counts its payload once the unit carrying it goes out.
+	bill: moq_net::stats::Bill,
 }
 
 /// The PES an audio frame may share ([`Track::pack_start`]): the place of its first frame on
@@ -918,6 +920,7 @@ impl Track {
 				dts,
 				description,
 				pes,
+				bill: self.source.bill(),
 			},
 		};
 		if jitter.push(self.key.clone(), arrival)? == Push::Late {
@@ -1270,6 +1273,8 @@ struct Pack {
 	payload: Vec<u8>,
 	/// Each frame's decode nanoseconds and bytes, which leave the decoder buffer as it decodes.
 	frames: Vec<(u128, usize)>,
+	/// What each frame's payload counts once the PES goes out.
+	charges: Vec<schedule::Charge>,
 	/// The frames' samples so far, and their sample rate.
 	samples: u64,
 	rate: u32,
@@ -1576,6 +1581,8 @@ where
 {
 	fn new(mut source: crate::Source, catalog: S, delay: Duration) -> Self {
 		source.isolate();
+		// The jitter buffer drops what a join trims or what arrives late, so only what goes out counts.
+		source.bill();
 		let instance = source.broadcast().info().instance.clone();
 		Self {
 			id: 0,
@@ -3550,8 +3557,10 @@ where
 			dts,
 			description,
 			pes,
+			bill,
 			..
 		} = queued;
+		let charge = (bill, frame.payload.len() as u64);
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let kind = &track.kind;
 		let is_video = matches!(kind, Kind::Video(_));
@@ -3614,6 +3623,7 @@ where
 		// The tables lead the unit that carries this frame, behind whatever went before it.
 		if kind.placed() {
 			self.program.psi_due |= psi;
+			self.program.schedule.bill(charge);
 			return self.place(name, &frame, out);
 		}
 		match es_payload {
@@ -3635,13 +3645,14 @@ where
 				// Only a delay leaves the frames time to wait for the ones after them.
 				let track = self.program.tracks.get(name).context("missing track")?;
 				if let Some((samples, rate)) = track.samples(&es_payload).filter(|_| !self.program.delay.is_zero()) {
-					return self.pack(name, unit, decode, (psi, out), es_payload, (samples, rate, pes));
+					return self.pack(name, unit, decode, (psi, out), (es_payload, charge), (samples, rate, pes));
 				}
 				self.flush(name)?;
 				self.program.psi_due |= psi;
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
+		self.program.schedule.bill(charge);
 		self.push_unit(name, pid, decode, out, keyframe, Vec::new())
 	}
 
@@ -3722,7 +3733,7 @@ where
 		unit: PesUnit,
 		decode: Timestamp,
 		(psi, tables): (bool, Vec<u8>),
-		payload: Vec<u8>,
+		(payload, charge): (Vec<u8>, schedule::Charge),
 		(samples, rate, start): (u64, u32, Option<PesStart>),
 	) -> anyhow::Result<()> {
 		let budget = self.budget().as_nanos();
@@ -3750,10 +3761,12 @@ where
 			start,
 			payload: Vec::new(),
 			frames: Vec::new(),
+			charges: Vec::new(),
 			samples: 0,
 			rate,
 		});
 		pack.frames.push((decode.as_nanos(), payload.len()));
+		pack.charges.push(charge);
 		pack.payload.extend_from_slice(&payload);
 		pack.samples += samples;
 		// The next frame starts a PES of its own anyway.
@@ -3773,10 +3786,14 @@ where
 			decode,
 			payload,
 			frames,
+			charges,
 			..
 		} = pack;
 		let mut out = Vec::new();
 		self.write_pes(&mut out, &unit, &payload)?;
+		for charge in charges {
+			self.program.schedule.bill(charge);
+		}
 		self.push_unit(name, unit.pid, decode, out, unit.keyframe, frames)
 	}
 

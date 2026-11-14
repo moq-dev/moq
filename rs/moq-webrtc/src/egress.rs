@@ -40,6 +40,8 @@ pub struct WriteRequest {
 	pub time: MediaTime,
 	/// Complete encoded media frame.
 	pub payload: Bytes,
+	/// Counts the payload once str0m takes it.
+	pub bill: moq_net::stats::Bill,
 }
 
 /// Maps the shared MoQ presentation timeline to str0m's wallclock.
@@ -514,6 +516,7 @@ impl Pump {
 			pt: format.pt,
 			time: MediaTime::new(ticks, format.clock_rate),
 			payload: frame.payload,
+			bill: frame.bill,
 		};
 		self.tx.send(request).await.is_ok()
 	}
@@ -593,10 +596,12 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 		pt,
 		time,
 		payload,
+		bill,
 		mid: _,
 	} = request;
-	if let Err(err) = writer.write(pt, wallclock.into_std(), time, payload.to_vec()) {
-		tracing::warn!(%err, "egress write rejected by str0m");
+	match writer.write(pt, wallclock.into_std(), time, payload.to_vec()) {
+		Ok(()) => bill.deliver(payload.len() as u64),
+		Err(err) => tracing::warn!(%err, "egress write rejected by str0m"),
 	}
 }
 
@@ -849,13 +854,15 @@ mod tests {
 		}
 	}
 
-	/// The payload of the next write, required without another frame arriving.
+	/// The payload of the next write, required without another frame arriving, counted as
+	/// [`dispatch`] counts what str0m takes.
 	async fn written(writes: &mut mpsc::Receiver<WriteRequest>) -> Bytes {
-		kio::clock::timeout(Duration::from_millis(10), writes.recv())
+		let request = kio::clock::timeout(Duration::from_millis(10), writes.recv())
 			.await
 			.expect("a frame is written")
-			.expect("the pump is alive")
-			.payload
+			.expect("the pump is alive");
+		request.bill.deliver(request.payload.len() as u64);
+		request.payload
 	}
 
 	/// Nothing is written without another frame arriving.
@@ -1041,11 +1048,12 @@ mod tests {
 	}
 
 	/// A switch wins a keyframe time it shares with the current rendition, even when the
-	/// current one keeps sending and delivers that time first.
+	/// current one keeps sending and delivers that time first. What it drops counts nothing.
 	#[tokio::test(start_paused = true)]
 	async fn a_switch_takes_a_shared_keyframe() {
 		let origin = produce_origin();
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let route = origin.route("live", Default::default()).unwrap();
+		let mut broadcast = route.broadcast().clone();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut high = vp8(&mut broadcast, &mut catalog, "high", 1080);
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
@@ -1061,9 +1069,17 @@ mod tests {
 		};
 		set_enabled(&mut catalog, false);
 
-		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
-			.await
-			.unwrap();
+		let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
+		let session = (registry.tier(moq_net::stats::Tier::default()))
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer")));
+		let consumer = origin.consume().with_stats(session);
+		let resolved = consumer.request("live", None).await.unwrap();
+		let billed = || -> u64 {
+			(registry.snapshot().traffic().into_iter())
+				.map(|(_, _, traffic)| traffic.bytes)
+				.sum()
+		};
+		let mut egress = EgressSource::new(moq_mux::Source::new(consumer, resolved)).await.unwrap();
 		let mut writes = egress.take_writes();
 		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
 
@@ -1080,11 +1096,14 @@ mod tests {
 		high.write(frame(33, b"high-1", false)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
 
-		// Both rungs open a group at 66 and the low one arrives first: the high one still wins.
+		// Both rungs open a group at 66 and the low one arrives first: the high one still wins,
+		// and the low one's frame, read and dropped, counts nothing.
+		let before = billed();
 		low.write(frame(66, b"low-2", true)).unwrap();
 		idle(&mut writes).await;
 		high.write(frame(66, b"high-2", true)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"high-2");
+		assert_eq!(billed() - before, b"high-2".len() as u64);
 		low.write(frame(100, b"low-3", false)).unwrap();
 		high.write(frame(100, b"high-3", false)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"high-3");

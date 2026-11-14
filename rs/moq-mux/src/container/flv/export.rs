@@ -171,6 +171,8 @@ struct Tag {
 	/// The codec config record the frame was read under, which a sequence-header tag must
 	/// have announced before it.
 	record: Option<Bytes>,
+	/// Counts its payload once it goes out.
+	bill: moq_net::stats::Bill,
 }
 
 /// A subscribed rendition feeding the muxer.
@@ -309,6 +311,7 @@ impl FlvTrack {
 					timestamp,
 					presentation,
 					record,
+					bill: self.source.bill(),
 				},
 			},
 		)?;
@@ -345,7 +348,9 @@ impl<S: Stream> Export<S> {
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
 	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
-	pub fn new(source: crate::Source, catalog: S) -> Self {
+	pub fn new(mut source: crate::Source, catalog: S) -> Self {
+		// The jitter buffer drops what a join trims or what arrives late, so only what goes out counts.
+		source.bill();
 		Self {
 			source,
 			catalog: Some(catalog),
@@ -795,7 +800,9 @@ impl<S: Stream> Export<S> {
 			timestamp: timestamp_ms,
 			presentation: pts_ms,
 			record,
+			bill,
 		} = tag;
+		bill.deliver(frame.payload.len() as u64);
 		let mut out = BytesMut::with_capacity(TAG_HEADER_LEN + frame.payload.len() + 8);
 		let track = match is_video {
 			true => &self.video[index],

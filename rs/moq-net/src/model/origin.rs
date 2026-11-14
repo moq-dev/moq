@@ -9706,6 +9706,52 @@ mod tests {
 		assert_eq!(bytes(), 5, "the metered handle still counts");
 	}
 
+	/// A billed subscriber counts nothing it reads, whether read whole or in chunks, and
+	/// counts each frame its reader delivers.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_billed_track_counts_only_what_its_reader_delivers() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1).produce();
+		let route = producer.route("room/alice", RouteOptions::default()).unwrap();
+		let track = route
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
+		let consumer = producer.consume().with_stats(
+			registry
+				.tier(stats::Tier::default())
+				.session(crate::stats::SessionInfo::new(crate::Path::from_static("viewer"))),
+		);
+		let broadcast = consumer.request("room/alice", None).await.expect("resolves");
+		let counted = || -> (u64, u64) {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.fold((0, 0), |(frames, bytes), (_, _, traffic)| {
+					(frames + traffic.frames, bytes + traffic.bytes)
+				})
+		};
+
+		let mut subscriber = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
+		let bill = subscriber.bill();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"dropped".as_ref()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"sent".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let mut read = subscriber.recv_group().await.unwrap().expect("a group");
+		let mut chunked = read.clone();
+		assert_eq!(read.read_frame().await.unwrap().expect("a frame").payload.as_ref(), b"dropped");
+		let sent = read.read_frame().await.unwrap().expect("a frame").payload;
+		chunked.next_frame().await.unwrap().expect("a frame").read_all().await.unwrap();
+		assert_eq!(counted(), (0, 0), "a read counts nothing");
+
+		bill.deliver(sent.len() as u64);
+		assert_eq!(counted(), (1, 4), "a delivered frame counts");
+	}
+
 	/// A group a fill answers is ingress like a group the publisher writes live: a relay
 	/// writes what a FETCH brings back through its track's requests.
 	#[kio::test]
