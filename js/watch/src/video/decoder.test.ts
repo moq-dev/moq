@@ -1402,6 +1402,31 @@ it("buffered video holds its poster until its own span reaches the floor", async
 	}
 });
 
+// A buffered player joining a finished track shorter than its floor plays what exists.
+it("buffered video starts on a finished track shorter than its floor, and ends", async () => {
+	const clock = manualAt(1000);
+	const feeds = new Feeds();
+	const playback = await guardedPlayback("legacy", [], [], false, 1000, { feeds, initial: Duration.millis(1000) });
+	try {
+		feeds.push(0, sample(0n, 0), sample(0n, 100_000, false));
+		await microtasks();
+		await clock.advance(100);
+		expect(playback.sync.playing.peek()).toBe(false);
+
+		feeds.push(0, undefined);
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.sync.playing.peek()).toBe(true);
+		for (let i = 0; i < 15; i++) await clock.advance(100);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(100_000);
+		expect(playback.decoder.out.ended.peek()).toBe(true);
+	} finally {
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
 for (const kind of ["legacy", "cmaf"] as const) {
 	it(`${kind} bounds startup across disconnected ranges, then starts on the retained timeline`, async () => {
 		const clock = manualAt(0);

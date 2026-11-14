@@ -174,6 +174,9 @@ export class Decoder {
 
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<Container.BufferedRanges>([]);
+	// The publisher finishing the running rendition: "read" once every frame is decoded, then "played"
+	// once the clock reached the end of its audio.
+	#finish = new Signal<"read" | "played" | undefined>(undefined);
 	#queued = new Signal<Container.BufferedRanges | undefined>(undefined);
 
 	// Audio ring bridging the main thread and the worklet.
@@ -240,8 +243,11 @@ export class Decoder {
 			if (!effect.get(this.in.enabled)) return undefined;
 			if (effect.get(this.source.pending)) return null;
 			if (!effect.get(this.source.out.config)) return undefined;
+			// A rendition the publisher finished grows no further, so its span is ready however short, and
+			// one that finished without audio has nothing to start.
+			const finish = effect.get(this.#finish);
 			const span = effect.get(this.#decodeBuffered)[0];
-			if (!span) return null;
+			if (!span) return finish ? undefined : null;
 			// Deep targets stay encoded, so count the audio queued past the decoded span. Sum it across
 			// holes: a lost packet must not hold startup, and the missing audio is not counted as buffered.
 			let queued = Duration.ZERO;
@@ -249,7 +255,7 @@ export class Decoder {
 				queued = queued.add(range.end.saturatingSub(range.start.max(span.end)));
 			}
 			const hold = ringHold(effect.get(this.sync.out.delay));
-			return { start: span.start, end: span.end.add(queued.min(hold)) };
+			return { start: span.start, end: span.end.add(queued.min(hold)), complete: finish !== undefined };
 		});
 		this.#track = this.sync.track({ target: playout, startup });
 		this.#signals.cleanup(() => this.#track.close());
@@ -271,6 +277,7 @@ export class Decoder {
 		this.#signals.run(this.#runLatency.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
 		this.#signals.run(this.#runStalls.bind(this));
+		this.#signals.run((effect) => this.#out.ended.set(effect.get(this.#finish) === "played"));
 	}
 
 	/**
@@ -604,7 +611,7 @@ export class Decoder {
 
 		effect.run((run) => {
 			attempt = run;
-			run.cleanup(() => this.#out.ended.set(false));
+			run.cleanup(() => this.#finish.set(undefined));
 			const sub = subscribeMedia(run, {
 				broadcast: active,
 				track: Catalog.track(track, identity),
@@ -688,7 +695,7 @@ export class Decoder {
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
 					if (next.kind === "finish") {
-						await this.#finish(effect, decoder, () => written);
+						await this.#onFinish(effect, decoder, () => written);
 						break;
 					}
 					if (this.#onRead(next)) {
@@ -785,7 +792,7 @@ export class Decoder {
 					if (!(await play(order.flush()))) return;
 					if (!next) break;
 					if (next.kind === "finish") {
-						await this.#finish(effect, decoder, () => written);
+						await this.#onFinish(effect, decoder, () => written);
 						break;
 					}
 					if (this.#onRead(next)) {
@@ -964,13 +971,14 @@ export class Decoder {
 	// The publisher finished the track. Decode what the codec still holds, then declare the end where
 	// the written audio stops, so the ring runs dry into silence rather than a stall, and mark the
 	// rendition ended once the clock reaches it.
-	async #finish(effect: Effect, decoder: AudioDecoder, written: () => number | undefined): Promise<void> {
+	async #onFinish(effect: Effect, decoder: AudioDecoder, written: () => number | undefined): Promise<void> {
+		this.#finish.set("read");
 		if (decoder.state === "configured") await decoder.flush();
 		if (effect.abort.aborted) return;
 		const end = written();
 		this.#ring.peek()?.end(end ?? 0);
 		if (end !== undefined) await this.#track.wait(Duration.micros(end), effect.abort);
-		if (!effect.abort.aborted) this.#out.ended.set(true);
+		if (!effect.abort.aborted) this.#finish.set("played");
 	}
 
 	// Place decoded audio, returning where the PCM written ends, in microseconds.

@@ -272,6 +272,8 @@ export class AudioBuffer {
 
 	// Backpressure runs off the playhead the worklet reports in its state messages.
 	#backpressure: Backpressure;
+	// Whether an end was declared since the last reset, which the next audio follows.
+	#declared = false;
 	// Bumped per reset. A state message posted before the worklet saw it reports the ring on the old
 	// timeline, which would open the gate.
 	#epoch = 0;
@@ -453,12 +455,14 @@ export class AudioBuffer {
 	 *
 	 * Used when a new track takes over the timeline: its samples overwrite the slots they land on,
 	 * but the previous track's write-ahead tail would otherwise play once the new audio runs out.
-	 * Unlike `reset()` this keeps playing, so there's no gap at the handover.
+	 * Unlike `reset()` this keeps playing, so there's no gap at the handover. An end the previous
+	 * track declared no longer holds: the new audio follows it like the next utterance.
 	 */
 	truncate(timestamp: number): void {
 		this.#backpressure.truncated(timestamp);
 		const msg: Truncate = { type: "truncate", timestamp };
 		this.#worklet.port.postMessage(msg);
+		if (this.#declared) this.next();
 	}
 
 	/**
@@ -467,6 +471,7 @@ export class AudioBuffer {
 	 * an underrun, until the next audio plays.
 	 */
 	end(timestamp: number): void {
+		this.#declared = true;
 		const msg: End = { type: "end", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}
@@ -486,6 +491,7 @@ export class AudioBuffer {
 	}
 
 	#reset(next: boolean): void {
+		this.#declared = false;
 		this.#epoch++;
 		const msg: Reset = {
 			type: "reset",

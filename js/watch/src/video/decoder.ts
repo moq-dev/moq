@@ -45,6 +45,9 @@ type Selection = { kind: "none" } | { kind: "selected"; rendition: Rendition } |
 // A picture held through the publisher's declared end is no stall either.
 type Playback = "starting" | "playing" | "ended" | "stalled";
 
+// A finished track: every frame read, then its last picture due on the clock.
+type Finish = "read" | "played";
+
 /** Signals the decoder reads. */
 export type DecoderInput = {
 	/** Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output. */
@@ -202,10 +205,13 @@ export class Decoder {
 			if (!effect.get(this.source.out.config)) return undefined;
 			const active = effect.get(this.#active);
 			if (!active) return null;
+			// A track the publisher finished grows no further, so its span is ready however short, and one
+			// that finished without a picture has nothing to start.
+			const finish = effect.get(active.finish);
 			const timestamp = effect.get(active.first);
-			if (timestamp === undefined) return null;
+			if (timestamp === undefined) return finish ? undefined : null;
 			const ranges = effect.get(active.buffered);
-			return startupSpan(ranges, timestamp);
+			return { ...startupSpan(ranges, timestamp), complete: finish !== undefined };
 		});
 		this.#clock = this.sync.track({ target, startup });
 		this.#signals.cleanup(() => this.#clock.close());
@@ -496,7 +502,7 @@ export class Decoder {
 
 	#runEnded(effect: Effect): void {
 		const active = effect.get(this.#active);
-		effect.set(this.#out.ended, active !== undefined && effect.get(active.finished), false);
+		effect.set(this.#out.ended, active !== undefined && effect.get(active.finish) === "played", false);
 	}
 
 	// Count each stall, and how long it lasted, against the rendition on screen. Each active rendition
@@ -647,8 +653,9 @@ class DecoderTrack {
 	// The group the publisher declared the media ends with. It stays in force through holes until a
 	// later group starts a new timeline.
 	readonly ended = new Signal<bigint | undefined>(undefined);
-	// Whether the publisher finished the track and the clock reached the last picture fed to the codec.
-	readonly finished = new Signal<boolean>(false);
+	// The publisher finishing the track: "read" once every frame is fed to the codec, then "played"
+	// once the clock reached the last one.
+	readonly finish = new Signal<Finish | undefined>(undefined);
 
 	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
 	// is only held until the first one opens.
@@ -854,7 +861,7 @@ class DecoderTrack {
 				const next = await nextMedia(consumer, effect.abort);
 				if (!next) break;
 				if (next.kind === "finish") {
-					await this.#finish(effect, decoder, latest);
+					await this.#onFinish(effect, decoder, latest);
 					break;
 				}
 				this.#onRead(next, latest);
@@ -933,7 +940,7 @@ class DecoderTrack {
 				const next = await nextMedia(consumer, effect.abort);
 				if (!next) break;
 				if (next.kind === "finish") {
-					await this.#finish(effect, decoder, latest);
+					await this.#onFinish(effect, decoder, latest);
 					break;
 				}
 				this.#onRead(next, latest);
@@ -1024,12 +1031,13 @@ class DecoderTrack {
 
 	// The publisher finished the track, which ends it like a declared end. Drain the pictures the codec
 	// still holds, and mark it finished once the clock reaches the last one.
-	async #finish(effect: Effect, decoder: VideoDecoder, latest: bigint | undefined): Promise<void> {
+	async #onFinish(effect: Effect, decoder: VideoDecoder, latest: bigint | undefined): Promise<void> {
 		if (this.ended.peek() === undefined) this.ended.set(latest ?? 0n);
+		this.finish.set("read");
 		if (decoder.state === "configured") await decoder.flush();
 		const last = this.#submitted;
 		if (last !== undefined) await this.clock.wait(last, effect.abort);
-		if (!effect.abort.aborted) this.finished.set(true);
+		if (!effect.abort.aborted) this.finish.set("played");
 	}
 
 	// A fresh timeline invalidates parked pictures and its previous decoded span. The held picture
@@ -1283,9 +1291,9 @@ class Rendition {
 		return this.min.ended;
 	}
 
-	// Whether the publisher finished the clock-driving decoder's track and its last picture is due.
-	get finished(): Getter<boolean> {
-		return this.min.finished;
+	// The publisher finishing the clock-driving decoder's track.
+	get finish(): Getter<Finish | undefined> {
+		return this.min.finish;
 	}
 
 	// Show the max-delay picture when it is at or past the min-delay one, so it wins ties, else the

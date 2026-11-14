@@ -263,7 +263,7 @@ function feed() {
 	let currentConsumer: Container.Consumer | undefined;
 	const closed = new WeakSet<Container.Consumer>();
 	const queue: (Read | Error)[] = [];
-	let finished = false;
+	const finished = new WeakSet<Container.Consumer>();
 	let waiter:
 		| { consumer: Container.Consumer; resolve: (read: Read | undefined) => void; reject: (err: Error) => void }
 		| undefined;
@@ -273,7 +273,7 @@ function feed() {
 		if (closed.has(this)) return Promise.resolve(undefined);
 		const read = queue.shift();
 		if (read instanceof Error) return Promise.reject(read);
-		if (read || finished) return Promise.resolve(read);
+		if (read || finished.has(this)) return Promise.resolve(read);
 		return new Promise<Read | undefined>((resolve, reject) => {
 			waiter = { consumer: this, resolve, reject };
 		});
@@ -296,8 +296,9 @@ function feed() {
 		else if (read instanceof Error) current.reject(read);
 		else current.resolve(read);
 	};
+	// Finish the track the current consumer reads.
 	const finish = () => {
-		finished = true;
+		if (currentConsumer) finished.add(currentConsumer);
 		waiter?.resolve(undefined);
 		waiter = undefined;
 	};
@@ -931,6 +932,20 @@ describe("Decoder across a rendition's absence", () => {
 			await microtasks();
 			expect(playback.ended()).toBe(true);
 			expect(playback.stats()).toMatchObject({ underruns: 0, stalls: 0 });
+
+			// A replacement on the same broadcast keeps the ring, but not the finished rendition's end:
+			// running dry is a stall again.
+			playback.restore({ container: { kind: "loc" } });
+			await microtasks();
+			expect(playback.ended()).toBe(false);
+			await playback.play(12);
+			for (const emit of pendingAudio.splice(0)) emit();
+			await microtasks();
+			expect(playback.rings()).toEqual([ring]);
+			expect(drain(ring)).toBeGreaterThan(0);
+			await microtasks();
+			expect(ring.ring?.silent).toBe(false);
+			expect(playback.stalled()).toBe(true);
 		} finally {
 			playback.close();
 			await microtasks();
