@@ -32,5 +32,5 @@ Candidates:
 Judge each by how long the congestion row's target stays raised and by
 underruns on the other rows, in both players, and add corpus cases for the
 pick. A fall is lag like any other under the
-[lag rule](/quest/m2/audio-playout/lag-rule.md), so a fall past the
+[lag rule](https://github.com/moq-dev/moq/pull/8722), so a fall past the
 threshold costs one snap rather than a slow catch-up.

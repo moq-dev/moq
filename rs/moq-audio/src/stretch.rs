@@ -1,302 +1,427 @@
-//! Received-PCM adaptation of WebRTC NetEq's accelerate and preemptive expand.
-//! See doc/concept/audio-jitter.md for the shared floating-point algorithm.
-//!
-//! Copyright (c) 2012 The WebRTC project authors. All Rights Reserved.
-//! Ported from modules/audio_coding/neteq/{time_stretch,accelerate,
-//! preemptive_expand,dsp_helper,audio_vector,decision_logic,buffer_level_filter}.
-//! See WEBRTC-LICENSE and WEBRTC-PATENTS in this crate.
+//! The received-audio time stretch doc/concept/audio-jitter.md specifies for
+//! this crate and `@moq/watch`: a rate proportional to the playhead's lag
+//! behind the shared clock, played as waveform-similarity overlap-add (WSOLA)
+//! splices, whatever the content.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Operation {
-	Hold,
-	Accelerate,
-	Fast,
-	Expand,
-}
+/// The most the stretch speeds up or slows down, as a fraction of real time.
+pub(crate) const CAP: f64 = 0.1;
 
-/// What a window decides on, in frames at the device rate.
+/// The lag, in milliseconds, whose rate reaches the cap: the rate is the lag
+/// over this.
+const GAIN: f64 = 500.0;
+
+/// What a hop boundary decides on, in frames at the device rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Inputs {
-	/// The playout delay the shared clock plays at.
-	pub target: usize,
-	/// How far the playhead trailed the newest received audio when it
-	/// arrived, less what the stretch removed since: the buffer level with
-	/// the publisher's cadence taken out. Filtered before deciding.
-	pub level: f64,
+	/// How far the playhead trails the shared clock: negative when it plays
+	/// ahead of it.
+	pub lag: f64,
 	/// Received audio ahead of the playhead.
-	pub raw: usize,
-	/// How far the playhead trails the shared clock: negative when ahead.
-	pub lag: i64,
-	/// How far behind the clock audio may fall.
-	pub bound: i64,
+	pub depth: f64,
+	/// How far audio may trail the clock before it snaps onto it. Zero turns
+	/// the stretch off.
+	pub bound: f64,
+	/// What the device reads at once.
+	pub read: f64,
 }
 
-/// The shared decision rule on a filtered level, with the most a seam may
-/// change the output by in frames. Accelerating only ever catches a playhead
-/// behind the clock up to it; expanding slows one whose buffer runs low, as
-/// far as `bound` allows, or one ahead of the clock back onto it. A stall
-/// delivers no arrival to lower `level`, so `raw` stops a playhead behind the
-/// clock from speeding into it.
-pub(crate) fn decide(rate: u32, inputs: Inputs, cooldown: usize) -> (Operation, i64) {
+/// How a hop may move the playhead, in frames: a positive shift skips ahead, a
+/// negative one repeats.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+pub(crate) struct Decision {
+	/// The rate the playhead moves at, less real time: positive plays faster,
+	/// zero holds.
+	pub pace: f64,
+	/// The least and most one splice may shift the playhead.
+	pub low: i64,
+	pub high: i64,
+	/// Splice as soon as the cap allows, rather than once the pace adds up to
+	/// a hop, as audio about to run out must.
+	pub urgent: bool,
+}
+
+/// Play as received.
+pub(crate) const HOLD: Decision = Decision {
+	pace: 0.0,
+	low: 0,
+	high: 0,
+	urgent: false,
+};
+
+/// The frames of one hop at `rate`: 10 ms, the crossfade a splice plays and
+/// the spacing of decisions.
+pub(crate) fn hop(rate: u32) -> usize {
+	(rate as usize * 10 / 1000).max(1)
+}
+
+/// The shared decision rule. Audio about to run out, with less received ahead
+/// of the playhead than two hops and a device read, slows down at the cap,
+/// never trailing the clock past the bound. Otherwise a lag past half a hop
+/// moves the playhead toward the clock at a rate proportional to it. A splice
+/// moves the playhead at least half a hop, never carries it more than half a
+/// hop past the clock, and never speeds up into that cushion.
+pub(crate) fn decide(rate: u32, inputs: Inputs) -> Decision {
 	let Inputs {
-		target,
-		level,
-		raw,
 		lag,
+		depth,
 		bound,
+		read,
 	} = inputs;
-	let rate = rate as usize;
-	// NetEq's DecisionLogic limits, with its 85 ms deceleration offset and
-	// 20 ms granularity.
-	let low = (3 * target / 4).max(target.saturating_sub(rate * 85 / 1000));
-	let high = target.max(low + rate * 20 / 1000);
-	let buffer = level.min(raw as f64);
-	if lag > 0 && buffer >= (4 * high) as f64 {
-		(Operation::Fast, lag)
-	} else if cooldown > 0 {
-		(Operation::Hold, 0)
-	} else if lag > 0 && buffer >= high as f64 {
-		(Operation::Accelerate, lag)
-	} else if level < low as f64 && lag < bound {
-		(Operation::Expand, bound - lag)
-	} else if lag < 0 {
-		(Operation::Expand, -lag)
+	if bound <= 0.0 {
+		return HOLD;
+	}
+	let frames = hop(rate) as f64;
+	let cushion = 2.0 * frames + read;
+	let least = (frames / 2.0).floor();
+	if depth < cushion && lag < bound {
+		return Decision {
+			pace: -CAP,
+			low: (lag - bound).ceil() as i64,
+			high: -least as i64,
+			urgent: true,
+		};
+	}
+	if lag.abs() <= least {
+		return HOLD;
+	}
+	let pace = (lag * 1000.0 / (rate as f64 * GAIN)).clamp(-CAP, CAP);
+	if lag > 0.0 {
+		Decision {
+			pace,
+			low: least as i64,
+			high: (lag + least).min(depth - cushion).floor() as i64,
+			urgent: false,
+		}
 	} else {
-		(Operation::Hold, 0)
+		Decision {
+			pace,
+			low: (lag - least).ceil() as i64,
+			high: -least as i64,
+			urgent: false,
+		}
 	}
 }
 
-/// NetEq's buffer-level filter, updated once per window: three of its 10 ms
-/// steps, its factor chosen by the target, less what the stretch changed since
-/// the last update. Unset until the first update after a start or a
-/// [`reset`](Self::reset), which takes the level as it is.
-#[derive(Default)]
-pub(crate) struct Level {
-	filtered: Option<f64>,
-}
-
-impl Level {
-	/// Fold in `level`, after windows whose stretch removed `stretched` frames
-	/// (negative: added).
-	pub fn update(&mut self, rate: u32, target: usize, level: f64, stretched: i64) -> f64 {
-		let Some(filtered) = self.filtered else {
-			self.filtered = Some(level);
-			return level;
-		};
-		// NetEq's BufferLevelFilter factors, in 256ths per 10 ms step, by the
-		// target in milliseconds.
-		let rate = rate as usize;
-		let factor: u64 = if target * 1000 <= 20 * rate {
-			251
-		} else if target * 1000 <= 60 * rate {
-			252
-		} else if target * 1000 <= 140 * rate {
-			253
-		} else {
-			254
-		};
-		let weight = (factor * factor * factor) as f64 / 16_777_216.0;
-		let filtered = (weight * filtered + (1.0 - weight) * level - stretched as f64).max(0.0);
-		self.filtered = Some(filtered);
-		filtered
-	}
-
-	/// Forget the history, so the next update starts from its level.
-	pub fn reset(&mut self) {
-		self.filtered = None;
-	}
-}
-
-/// One bounded block and its seam, allocated before entering the callback.
+/// Received PCM on its way out, with the history and lookahead a splice
+/// searches, allocated before entering the callback.
+///
+/// Output copies the input until a hop boundary decides to splice: the next
+/// hop then crossfades from the input's natural continuation into the stretch
+/// of it most similar to that continuation, a shift of at most `span` either
+/// way, and continues from there.
 pub(crate) struct Stretch {
-	pub input: Vec<f32>,
-	output: Vec<f32>,
 	channels: usize,
-	rate: u32,
+	/// One hop: the crossfade a splice plays, and the output between decisions.
+	pub hop: usize,
+	/// Two hops: the farthest one splice moves the playhead, and the history
+	/// kept behind it.
+	pub span: usize,
+	/// Three hops: the received audio past the playhead a splice can need.
 	pub window: usize,
-	position: usize,
-	length: usize,
-	cooldown: usize,
-	/// What the stretch removed since the last filter update.
-	stretched: i64,
-	pub level: Level,
+
+	/// Interleaved input frames held, and the playhead among them. During a
+	/// crossfade the playhead stays where it started, and moves on past the
+	/// shifted hop once the crossfade ends.
+	input: Vec<f32>,
+	filled: usize,
+	head: usize,
+	/// The crossfade in progress, a zero shift for none, and its frames played.
+	shift: i64,
+	faded: usize,
+	/// How far the pace has moved the playhead that no splice took yet, and
+	/// which way it moves.
+	owed: f64,
+	direction: i8,
+	/// How far splices may still move the playhead: refilled at the cap each
+	/// hop, up to a span.
+	allowance: f64,
+	/// Output frames until the next hop boundary.
+	until: usize,
+
+	/// The crossfade's weights, and the analysis scratch: the channels' sum and
+	/// its running energy.
+	weights: Vec<f64>,
+	mono: Vec<f64>,
+	energy: Vec<f64>,
+	/// The coarse search's stride: every shift on an 8 kHz grid.
+	step: usize,
 }
 
 impl Stretch {
 	pub fn new(rate: u32, channels: usize) -> Self {
-		let window = (rate as usize * 30 / 1000).max(1);
+		let hop = hop(rate);
+		let span = 2 * hop;
+		let window = 3 * hop;
+		let weights = (0..hop)
+			.map(|k| 0.5 - 0.5 * (std::f64::consts::PI * (k + 1) as f64 / (hop + 1) as f64).cos())
+			.collect();
 		Self {
-			input: vec![0.0; window * channels],
-			output: vec![0.0; (window + rate as usize * 15 / 1000) * channels],
 			channels,
-			rate,
+			hop,
+			span,
 			window,
-			position: 0,
-			length: 0,
-			cooldown: rate as usize * 60 / 1000,
-			stretched: 0,
-			level: Level::default(),
+			// The history, the window, and a hop of room to top it up.
+			input: vec![0.0; (span + window + hop) * channels],
+			filled: 0,
+			head: 0,
+			shift: 0,
+			faded: 0,
+			owed: 0.0,
+			direction: 0,
+			allowance: span as f64,
+			until: 0,
+			weights,
+			mono: vec![0.0; 2 * span + hop],
+			energy: vec![0.0; 2 * span + hop + 1],
+			step: (rate as usize / 8000).max(1),
 		}
 	}
 
+	/// Whether a hop boundary is next, so [`next`](Self::next) must decide
+	/// before anything more plays.
+	pub fn due(&self) -> bool {
+		self.until == 0
+	}
+
+	/// Output frames left in what the stretch holds, as no further splice
+	/// changes them.
 	pub fn available(&self) -> usize {
-		self.length - self.position
+		(self.filled as i64 - self.head as i64 - self.shift - self.faded as i64) as usize
 	}
 
-	pub fn discard(&mut self, frames: usize) -> usize {
-		let frames = frames.min(self.available());
-		self.position += frames;
-		frames
+	/// Input frames past where the playhead, or the crossfade it plays, starts.
+	pub fn queued(&self) -> usize {
+		self.filled - self.head
 	}
 
-	pub fn read(&mut self, output: &mut [f32]) -> usize {
-		let frames = (output.len() / self.channels).min(self.available());
-		output[..frames * self.channels]
-			.copy_from_slice(&self.output[self.position * self.channels..(self.position + frames) * self.channels]);
-		self.discard(frames);
-		self.cooldown = self.cooldown.saturating_sub(frames);
-		frames
+	/// Input frames the stretch has room for, keeping its history.
+	pub fn room(&mut self) -> usize {
+		self.compact(self.span);
+		self.input.len() / self.channels - self.filled
 	}
 
-	/// All input is new, received PCM. Short blocks and windows without
-	/// `inputs` cannot stretch, so a finite input never becomes concealment of
-	/// an absent frame.
-	pub fn process(&mut self, frames: usize, inputs: Option<Inputs>) -> Operation {
-		let Some(inputs) = inputs.filter(|_| frames == self.window) else {
-			return self.stage(frames, Operation::Hold, 0);
-		};
-		let level = self
-			.level
-			.update(self.rate, inputs.target, inputs.level, self.stretched);
-		self.stretched = 0;
-		let (operation, allowance) = decide(self.rate, Inputs { level, ..inputs }, self.cooldown);
-		self.stage(frames, operation, allowance)
-	}
-
-	/// Stage the first `frames` of the input as `operation` decides, if a
-	/// pitch period within `allowance` admits it.
-	fn stage(&mut self, frames: usize, operation: Operation, allowance: i64) -> Operation {
-		let lag = if operation == Operation::Hold {
-			0
-		} else {
-			pitch(&self.input, self.channels, self.rate, operation, allowance)
-		};
-		self.position = 0;
-		self.length = frames;
-		if lag == 0 {
-			self.output[..frames * self.channels].copy_from_slice(&self.input[..frames * self.channels]);
-			return operation;
-		}
-
-		let middle = self.rate as usize * 15 / 1000;
-		let (seam, first, second, tail) = match operation {
-			Operation::Expand => {
-				self.length += lag;
-				(middle, middle, middle - lag, middle)
-			}
-			Operation::Accelerate | Operation::Fast => {
-				self.length -= lag;
-				(middle - lag, middle - lag, middle, middle + lag)
-			}
-			Operation::Hold => unreachable!(),
-		};
-		self.stretched += frames as i64 - self.length as i64;
+	/// The interleaved room for the next `frames` input frames, which
+	/// [`commit`](Self::commit) appends once filled. At most [`room`](Self::room).
+	pub fn spare(&mut self, frames: usize) -> &mut [f32] {
 		let channels = self.channels;
-		self.output[..seam * channels].copy_from_slice(&self.input[..seam * channels]);
-		for frame in 0..lag {
-			// NetEq's AudioVector::CrossFade, in floating point. The endpoints
-			// stay inside the seam rather than duplicating either neighbour.
-			let weight = (frame + 1) as f64 / (lag + 1) as f64;
-			for channel in 0..channels {
-				let a = self.input[(first + frame) * channels + channel] as f64;
-				let b = self.input[(second + frame) * channels + channel] as f64;
-				self.output[(seam + frame) * channels + channel] = (a * (1.0 - weight) + b * weight) as f32;
-			}
-		}
-		self.output[(seam + lag) * channels..self.length * channels]
-			.copy_from_slice(&self.input[tail * channels..frames * channels]);
-		self.cooldown = self.rate as usize * 50 / 1000;
-		operation
+		&mut self.input[self.filled * channels..(self.filled + frames) * channels]
 	}
-}
 
-/// Search the first channel at 4 kHz, then validate the full-rate seam,
-/// returning how many frames it changes the output by, or zero. Fast mode
-/// admits a weaker match and takes every whole period that fits before the
-/// middle; the others take one. None takes more than `allowance`.
-fn pitch(input: &[f32], channels: usize, rate: u32, operation: Operation, allowance: i64) -> usize {
-	let fast = operation == Operation::Fast;
-	// NetEq's 48 kHz Q12 FIR. Sampling its taps at fractional positions also
-	// admits native 44.1/96 kHz devices without altering the search domain.
-	const FILTER: [f64; 7] = [1019.0, 390.0, 427.0, 440.0, 427.0, 390.0, 1019.0];
-	let sample = |position: f64| {
-		let last = input.len() / channels - 1;
-		let position = position.clamp(0.0, last as f64);
-		let at = position as usize;
-		let weight = position - at as f64;
-		input[at * channels] as f64 * (1.0 - weight) + input[(at + 1).min(last) * channels] as f64 * weight
-	};
-	let mut down = [0.0; 110];
-	for (index, value) in down.iter_mut().enumerate() {
-		for (tap, coefficient) in FILTER.iter().enumerate() {
-			*value += coefficient * sample((10 + 12 * index - tap) as f64 * rate as f64 / 48_000.0) / 4096.0;
-		}
+	/// Append the first `frames` of the [`spare`](Self::spare) room.
+	pub fn commit(&mut self, frames: usize) {
+		self.filled += frames;
 	}
-	let mut correlation = [0.0; 50];
-	for (index, value) in correlation.iter_mut().enumerate() {
-		let lag = index + 10;
-		for frame in 60..110 {
-			*value += down[frame] * down[frame - lag];
-		}
+
+	/// Drop the history, so no splice reaches back across a boundary in what
+	/// the queue holds.
+	pub fn forget(&mut self) {
+		self.compact(0);
 	}
-	let mut peak = 0;
-	for index in 1..50 {
-		if correlation[index] > correlation[peak] {
-			peak = index;
-		}
+
+	/// Drop everything held, a crossfade in progress included.
+	pub fn clear(&mut self) {
+		self.filled = 0;
+		self.head = 0;
+		self.shift = 0;
+		self.faded = 0;
+		self.owed = 0.0;
+		self.direction = 0;
+		self.allowance = self.span as f64;
+		self.until = 0;
 	}
-	let offset = if peak == 0 {
-		0.0
-	} else {
-		let left = correlation[peak - 1];
-		let center = correlation[peak];
-		let right = correlation.get(peak + 1).copied().unwrap_or(0.0);
-		let denominator = left - 2.0 * center + right;
-		if denominator == 0.0 {
-			0.0
+
+	/// Decide the hop starting now, returning the shift a splice took, or zero.
+	/// The pace adds up until it reaches a hop, or at once when urgent, and a
+	/// splice then takes the most similar shift within a hop of that, inside
+	/// the decision's range, the cap's allowance, and what the stretch holds.
+	pub fn next(&mut self, decision: Decision) -> i64 {
+		let hop = self.hop as f64;
+		let span = self.span as f64;
+		self.until = self.hop;
+		self.allowance = (self.allowance + CAP * hop).min(span);
+		let direction = if decision.pace > 0.0 {
+			1
+		} else if decision.pace < 0.0 {
+			-1
 		} else {
-			(0.5 * (left - right) / denominator).clamp(-0.5, 0.5)
+			0
+		};
+		if direction != self.direction {
+			self.direction = direction;
+			self.owed = 0.0;
 		}
-	};
-	let middle = rate as usize * 15 / 1000;
-	if middle == 0 {
-		return 0;
+		if direction == 0 {
+			return 0;
+		}
+		self.owed = (self.owed + decision.pace * hop).clamp(-span, span);
+		if !decision.urgent && f64::from(direction) * self.owed < hop {
+			return 0;
+		}
+
+		// The crossfade reads a hop of natural continuation and a hop past the shift.
+		let Some(ahead) = self.queued().checked_sub(self.hop) else {
+			return 0;
+		};
+		let allowed = self.allowance.floor() as i64;
+		let mut low = decision.low.max(-allowed).max(-(self.head as i64));
+		let mut high = decision.high.min(allowed).min(ahead as i64);
+		if !decision.urgent {
+			low = low.max(self.owed.ceil() as i64 - self.hop as i64);
+			high = high.min(self.owed.floor() as i64 + self.hop as i64);
+		}
+		let shift = self.search(low, high, direction);
+		if shift == 0 {
+			return 0;
+		}
+		self.shift = shift;
+		self.faded = 0;
+		self.owed = (self.owed - shift as f64).clamp(-span, span);
+		self.allowance -= shift.unsigned_abs() as f64;
+		shift
 	}
-	let lag = (((peak + 10) as f64 + offset) * rate as f64 / 4000.0).round() as usize;
-	let lag = lag.clamp(1, middle.max(1));
-	let mut energy1 = 0.0;
-	let mut energy2 = 0.0;
-	let mut cross = 0.0;
-	for frame in 0..lag {
-		let a = input[(middle - lag + frame) * channels] as f64;
-		let b = input[(middle + frame) * channels] as f64;
-		energy1 += a * a;
-		energy2 += b * b;
-		cross += a * b;
+
+	/// Play up to `output`'s frames from the playhead, stopping at the next hop
+	/// boundary, and return how many.
+	pub fn read(&mut self, output: &mut [f32]) -> usize {
+		self.advance(output.len() / self.channels, Some(output))
 	}
-	// NetEq's uninitialised-background VAD, converted from signed 16-bit PCM.
-	let passive = (energy1 + energy2) / (2 * lag) as f64 <= 8.0 * 75_000.0 / (32768.0 * 32768.0);
-	let threshold = if fast { 8192.0 } else { 14746.0 } / 16384.0;
-	if !passive && cross <= threshold * (energy1 * energy2).sqrt() {
-		return 0;
+
+	/// Drop up to `frames` of output as though played, deciding to hold at
+	/// each hop boundary they cross, and return how many.
+	pub fn discard(&mut self, frames: usize) -> usize {
+		let mut done = 0;
+		loop {
+			done += self.advance(frames - done, None);
+			if done == frames || !self.due() || self.queued() == 0 {
+				return done;
+			}
+			self.next(HOLD);
+		}
 	}
-	let allowance = usize::try_from(allowance).unwrap_or(0);
-	let periods = if fast {
-		(middle / lag).min(allowance / lag)
-	} else {
-		usize::from(allowance >= lag)
-	};
-	periods * lag
+
+	// Play, or drop without `output`, up to `frames` from the playhead,
+	// stopping at the next hop boundary.
+	fn advance(&mut self, frames: usize, mut output: Option<&mut [f32]>) -> usize {
+		let channels = self.channels;
+		let mut done = 0;
+		while done < frames && self.until > 0 {
+			if self.shift != 0 {
+				let count = (frames - done).min(self.until);
+				if let Some(output) = output.as_deref_mut() {
+					let from = self.head + self.faded;
+					let to = (from as i64 + self.shift) as usize;
+					for i in 0..count {
+						let weight = self.weights[self.faded + i];
+						for channel in 0..channels {
+							let a = self.input[(from + i) * channels + channel] as f64;
+							let b = self.input[(to + i) * channels + channel] as f64;
+							output[(done + i) * channels + channel] = (a * (1.0 - weight) + b * weight) as f32;
+						}
+					}
+				}
+				self.faded += count;
+				self.until -= count;
+				done += count;
+				if self.faded == self.hop {
+					self.head = (self.head as i64 + self.shift) as usize + self.hop;
+					self.shift = 0;
+					self.faded = 0;
+				}
+				continue;
+			}
+			let count = (frames - done).min(self.until).min(self.filled - self.head);
+			if count == 0 {
+				break;
+			}
+			if let Some(output) = output.as_deref_mut() {
+				output[done * channels..(done + count) * channels]
+					.copy_from_slice(&self.input[self.head * channels..(self.head + count) * channels]);
+			}
+			self.head += count;
+			self.until -= count;
+			done += count;
+		}
+		done
+	}
+
+	/// Keep at most `history` frames behind the playhead.
+	fn compact(&mut self, history: usize) {
+		let Some(drop) = self.head.checked_sub(history).filter(|&drop| drop > 0) else {
+			return;
+		};
+		let channels = self.channels;
+		self.input.copy_within(drop * channels..self.filled * channels, 0);
+		self.head -= drop;
+		self.filled -= drop;
+	}
+
+	/// The shift in `low..=high` whose hop of the channels' sum best matches the
+	/// natural continuation's, by normalized correlation, nearest first so a tie
+	/// keeps the smaller shift: every shift on the coarse grid, then every one
+	/// within a step of the best. Zero when the range is empty.
+	fn search(&mut self, low: i64, high: i64, direction: i8) -> i64 {
+		if low > high {
+			return 0;
+		}
+		let hop = self.hop;
+		let channels = self.channels;
+		let from = self.head as i64 + low.min(0);
+		let length = (high.max(0) + hop as i64 - low.min(0)) as usize;
+		for i in 0..length {
+			let frame = (from as usize + i) * channels;
+			let mut sum = 0.0;
+			for channel in 0..channels {
+				sum += self.input[frame + channel] as f64;
+			}
+			self.mono[i] = sum;
+			self.energy[i + 1] = self.energy[i] + sum * sum;
+		}
+		let natural = (self.head as i64 - from) as usize;
+		let mono = &self.mono;
+		let energy = &self.energy;
+		let power = energy[natural + hop] - energy[natural];
+		let similarity = |shift: i64| {
+			let at = (natural as i64 + shift) as usize;
+			let mut dot = 0.0;
+			for k in 0..hop {
+				dot += mono[natural + k] * mono[at + k];
+			}
+			let product = power * (energy[at + hop] - energy[at]);
+			if product > 0.0 { dot / product.sqrt() } else { 0.0 }
+		};
+
+		let direction = i64::from(direction);
+		let (near, far) = if direction > 0 { (low, high) } else { (high, low) };
+		let step = self.step as i64;
+		let mut best = near;
+		let mut score = f64::NEG_INFINITY;
+		let mut shift = near;
+		while direction * (far - shift) >= 0 {
+			let value = similarity(shift);
+			if value > score {
+				score = value;
+				best = shift;
+			}
+			shift += direction * step;
+		}
+		let (start, end) = if direction > 0 {
+			(low.max(best - step + 1), high.min(best + step - 1))
+		} else {
+			(high.min(best + step - 1), low.max(best - step + 1))
+		};
+		score = f64::NEG_INFINITY;
+		let mut shift = start;
+		while direction * (end - shift) >= 0 {
+			let value = similarity(shift);
+			if value > score {
+				score = value;
+				best = shift;
+			}
+			shift += direction;
+		}
+		best
+	}
 }
 
 #[cfg(test)]
@@ -305,196 +430,188 @@ mod tests {
 	use serde::Deserialize;
 
 	#[derive(Deserialize)]
-	struct Pcm {
+	struct Rule {
+		name: String,
+		rate: u32,
+		lag: f64,
+		depth: f64,
+		bound: f64,
+		read: f64,
+		decision: Decision,
+	}
+
+	#[derive(Deserialize)]
+	struct Case {
 		name: String,
 		rate: u32,
 		channels: usize,
 		input: Vec<f32>,
-		decision: String,
-		allowance: i64,
-		lag: usize,
+		decisions: Vec<Decision>,
+		shifts: Vec<i64>,
 		output: Vec<f32>,
 	}
 
-	#[derive(Deserialize)]
-	struct Vectors {
-		decisions: Vec<Decision>,
-		filter: Vec<Filter>,
-	}
-
-	#[derive(Deserialize)]
-	struct Decision {
-		name: String,
-		rate: u32,
-		target: usize,
-		level: f64,
-		raw: usize,
-		lag: i64,
-		bound: i64,
-		cooldown: usize,
-		decision: String,
-		allowance: i64,
-	}
-
-	#[derive(Deserialize)]
-	struct Filter {
-		name: String,
-		rate: u32,
-		target: usize,
-		steps: Vec<(f64, i64)>,
-		filtered: Vec<f64>,
-	}
-
-	fn operation(name: &str) -> Operation {
-		match name {
-			"Hold" => Operation::Hold,
-			"Accelerate" => Operation::Accelerate,
-			"Fast" => Operation::Fast,
-			"Expand" => Operation::Expand,
-			_ => panic!("unknown decision {name}"),
-		}
-	}
-
-	fn vectors() -> Vectors {
-		serde_json::from_str(include_str!("../../../doc/concept/audio-jitter/stretch/decisions.json")).unwrap()
-	}
-
-	#[test]
-	fn shared_pcm_vectors() {
-		let vectors: Vec<Pcm> =
-			serde_json::from_str(include_str!("../../../doc/concept/audio-jitter/stretch/corpus.json")).unwrap();
-		for vector in vectors {
-			let mut stretch = Stretch::new(vector.rate, vector.channels);
-			stretch.input.copy_from_slice(&vector.input);
-			stretch.stage(stretch.window, operation(&vector.decision), vector.allowance);
-			assert_eq!(stretch.length.abs_diff(stretch.window), vector.lag, "{}", vector.name);
-			assert_eq!(stretch.length * vector.channels, vector.output.len(), "{}", vector.name);
-			for (index, (&actual, &expected)) in stretch.output[..vector.output.len()]
-				.iter()
-				.zip(&vector.output)
-				.enumerate()
-			{
-				assert!(
-					(actual - expected).abs() <= 0.000001,
-					"{} sample {index}: {actual} != {expected}",
-					vector.name
-				);
+	/// Play interleaved `input` the way the ring does: topped up to a window
+	/// before each hop boundary decides.
+	fn play(stretch: &mut Stretch, channels: usize, input: &[f32], decisions: &[Decision]) -> (Vec<f32>, Vec<i64>) {
+		let frames = input.len() / channels;
+		let mut output = Vec::new();
+		let mut chunk = vec![0.0; stretch.hop * channels];
+		let mut shifts = Vec::new();
+		let mut fed = 0;
+		loop {
+			let count = (frames - fed)
+				.min(stretch.window.saturating_sub(stretch.queued()))
+				.min(stretch.room());
+			stretch
+				.spare(count)
+				.copy_from_slice(&input[fed * channels..(fed + count) * channels]);
+			stretch.commit(count);
+			fed += count;
+			if stretch.due() {
+				if stretch.queued() == 0 {
+					break;
+				}
+				let decision = decisions[shifts.len().min(decisions.len() - 1)];
+				shifts.push(stretch.next(decision));
 			}
+			let played = stretch.read(&mut chunk);
+			if played == 0 {
+				break;
+			}
+			output.extend_from_slice(&chunk[..played * channels]);
 		}
+		(output, shifts)
 	}
 
 	#[test]
 	fn shared_decision_vectors() {
-		for vector in vectors().decisions {
+		let rules: Vec<Rule> =
+			serde_json::from_str(include_str!("../../../doc/concept/audio-jitter/stretch/decisions.json")).unwrap();
+		for rule in rules {
 			let inputs = Inputs {
-				target: vector.target,
-				level: vector.level,
-				raw: vector.raw,
-				lag: vector.lag,
-				bound: vector.bound,
+				lag: rule.lag,
+				depth: rule.depth,
+				bound: rule.bound,
+				read: rule.read,
 			};
-			assert_eq!(
-				decide(vector.rate, inputs, vector.cooldown),
-				(operation(&vector.decision), vector.allowance),
-				"{}",
-				vector.name
-			);
+			assert_eq!(decide(rule.rate, inputs), rule.decision, "{}", rule.name);
 		}
 	}
 
 	#[test]
-	fn shared_filter_vectors() {
-		for vector in vectors().filter {
-			let mut level = Level::default();
-			for (step, (&(value, stretched), &expected)) in vector.steps.iter().zip(&vector.filtered).enumerate() {
-				let actual = level.update(vector.rate, vector.target, value, stretched);
+	fn shared_pcm_vectors() {
+		let cases: Vec<Case> =
+			serde_json::from_str(include_str!("../../../doc/concept/audio-jitter/stretch/corpus.json")).unwrap();
+		for case in cases {
+			let mut stretch = Stretch::new(case.rate, case.channels);
+			let (output, shifts) = play(&mut stretch, case.channels, &case.input, &case.decisions);
+			assert_eq!(shifts, case.shifts, "{}", case.name);
+			assert_eq!(output.len(), case.output.len(), "{}", case.name);
+			for (index, (&actual, &expected)) in output.iter().zip(&case.output).enumerate() {
 				assert!(
-					(actual - expected).abs() <= 1e-9,
-					"{} step {step}: {actual} != {expected}",
-					vector.name
+					(actual - expected).abs() <= 0.000001,
+					"{} sample {index}: {actual} != {expected}",
+					case.name
 				);
 			}
 		}
 	}
 
-	#[test]
-	fn the_filter_takes_out_what_the_stretch_changed() {
-		// 48 kHz at a 100 ms target: a constant signal accelerates by its
-		// shortest period, 120 frames, from a buffer at the high limit.
-		let inputs = Inputs {
-			target: 4800,
-			level: 4800.0,
-			raw: 4800,
-			lag: 120,
-			bound: 0,
-		};
-		let mut stretch = Stretch::new(48_000, 1);
-		stretch.input.fill(0.25);
-		stretch.cooldown = 0;
-		assert_eq!(stretch.process(stretch.window, Some(inputs)), Operation::Accelerate);
-		assert_eq!(stretch.length, stretch.window - 120);
-		assert_eq!(stretch.level.filtered, Some(4800.0), "the first update takes the level");
-		stretch.cooldown = 1;
-		stretch.process(stretch.window, Some(inputs));
-		assert_eq!(
-			stretch.level.filtered,
-			Some(4680.0),
-			"the next takes out the period removed"
-		);
-		stretch.level.reset();
-		stretch.process(stretch.window, Some(inputs));
-		assert_eq!(
-			stretch.level.filtered,
-			Some(4800.0),
-			"a reset starts again from the level"
-		);
+	/// A 100 Hz tone at 8 kHz, whose 80-frame period is exactly one hop.
+	fn tone(frames: usize) -> Vec<f32> {
+		(0..frames)
+			.map(|i| 0.25 * (2.0 * std::f32::consts::PI * i as f32 / 80.0).sin())
+			.collect()
+	}
+
+	fn bridge(rate: u32) -> Decision {
+		decide(
+			rate,
+			Inputs {
+				lag: 0.0,
+				depth: 0.0,
+				bound: rate as f64,
+				read: 128.0,
+			},
+		)
 	}
 
 	#[test]
-	fn a_finite_input_cannot_expand_forever() {
-		for rate in [8_000, 44_100, 48_000, 96_000] {
-			let mut stretch = Stretch::new(rate, 2);
-			stretch.input.fill(0.25);
-			stretch.cooldown = 0;
-			// Ahead of the clock by a second: expand back onto it.
-			let inputs = Some(Inputs {
-				target: rate as usize / 10,
-				level: rate as f64 / 10.0,
-				raw: rate as usize / 10,
-				lag: -(rate as i64),
-				bound: 0,
-			});
-			assert_eq!(stretch.process(stretch.window, inputs), Operation::Expand);
-			assert!(stretch.length > stretch.window);
-			let mut output = vec![0.0; 2 * rate as usize];
-			let (_, allocations) = crate::allocation::measure(|| {
-				assert_eq!(stretch.read(&mut output), stretch.length);
-				assert_eq!(stretch.read(&mut output), 0);
-			});
-			assert_eq!(allocations.operations, 0);
-			stretch.cooldown = 0;
-			stretch.process(stretch.window, None);
-			assert_eq!(stretch.length, stretch.window, "a finished sink drains unchanged");
-			stretch.process(stretch.window / 2, inputs);
-			assert_eq!(stretch.length, stretch.window / 2, "a short block drains unchanged");
+	fn splices_no_faster_than_the_cap_refills_its_allowance() {
+		// A bridge asks to splice every hop: past a burst of one span, any run of
+		// hops repeats at most a tenth of what it plays.
+		let mut stretch = Stretch::new(8000, 1);
+		let (_, shifts) = play(&mut stretch, 1, &tone(8000), &[bridge(8000)]);
+		assert!(shifts.iter().filter(|&&shift| shift != 0).count() > 10);
+		for from in 0..shifts.len() {
+			let mut repeated = 0;
+			for (to, shift) in shifts.iter().enumerate().skip(from) {
+				repeated -= shift;
+				let limit = stretch.span as f64 + 0.1 * (to - from + 1) as f64 * stretch.hop as f64;
+				assert!(repeated as f64 <= limit, "hops {from}..={to} repeated {repeated}");
+			}
 		}
 	}
 
 	#[test]
-	fn a_seam_never_overshoots_the_allowance() {
-		// A constant signal's shortest period is 2.5 ms: 120 frames at 48 kHz.
-		for (operation, allowance, length) in [
-			(Operation::Accelerate, 119, 1440),
-			(Operation::Accelerate, 120, 1320),
-			(Operation::Accelerate, 239, 1320),
-			(Operation::Fast, 360, 1080),
-			(Operation::Expand, 119, 1440),
-			(Operation::Expand, 120, 1560),
-		] {
-			let mut stretch = Stretch::new(48_000, 1);
-			stretch.input.fill(0.25);
-			stretch.stage(stretch.window, operation, allowance);
-			assert_eq!(stretch.length, length, "{operation:?} {allowance}");
-		}
+	fn never_reaches_back_across_a_boundary_it_forgot() {
+		let mut stretch = Stretch::new(8000, 1);
+		let input = tone(2 * stretch.window);
+		let window = stretch.window;
+		stretch.spare(window).copy_from_slice(&input[..window]);
+		stretch.commit(window);
+		stretch.next(HOLD);
+		let mut out = vec![0.0; stretch.hop];
+		stretch.read(&mut out);
+		let hop = stretch.hop;
+		stretch.spare(hop).copy_from_slice(&input[window..window + hop]);
+		stretch.commit(hop);
+		stretch.forget();
+		assert_eq!(
+			stretch.next(bridge(8000)),
+			0,
+			"without history there is nowhere to repeat from"
+		);
+	}
+
+	#[test]
+	fn a_discard_finishes_a_crossfade_and_holds_past_it() {
+		let mut stretch = Stretch::new(8000, 1);
+		let input = tone(stretch.window + stretch.hop);
+		let (window, hop) = (stretch.window, stretch.hop);
+		stretch.spare(window).copy_from_slice(&input[..window]);
+		stretch.commit(window);
+		stretch.next(HOLD);
+		stretch.read(&mut vec![0.0; hop]);
+		stretch.spare(hop).copy_from_slice(&input[window..]);
+		stretch.commit(hop);
+		assert_eq!(stretch.next(bridge(8000)), -80);
+		let available = stretch.available();
+		assert_eq!(stretch.discard(hop / 2), hop / 2);
+		assert_eq!(stretch.available(), available - hop / 2);
+		// Past the crossfade and across the next boundary, to the end of what it holds.
+		assert_eq!(stretch.discard(10 * hop), available - hop / 2);
+		assert_eq!(stretch.available(), 0);
+	}
+
+	#[test]
+	fn plays_without_allocating() {
+		let mut stretch = Stretch::new(48_000, 2);
+		let input = vec![0.25; stretch.window * 2];
+		let mut output = vec![0.0; 2 * stretch.hop];
+		let (_, allocations) = crate::allocation::measure(|| {
+			let window = stretch.window;
+			stretch.spare(window).copy_from_slice(&input);
+			stretch.commit(window);
+			stretch.next(Decision {
+				pace: 0.1,
+				low: 240,
+				high: 480,
+				urgent: true,
+			});
+			stretch.read(&mut output);
+		});
+		assert_eq!(allocations.operations, 0);
 	}
 }

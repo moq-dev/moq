@@ -53,9 +53,10 @@ This README's own work, once every child has merged:
 Only `/quest-delete` ends the recurrence.
 
 The 2026-11-05 scan found two new upstreams, each now a child: WebRTC
-(moq-congestion's GoogCC and moq-audio's NetEq time stretch) and SCReAMv2
-(moq-congestion's `scream`). The NetEq and SCReAMv2 ports recorded no upstream
-commit, so their first runs establish one. moq-congestion's Cubic came from
+(moq-congestion's GoogCC) and SCReAMv2 (moq-congestion's `scream`). The
+SCReAMv2 port recorded no upstream commit, so its first run establishes one.
+moq-audio's NetEq time stretch port, once part of the WebRTC child, was
+replaced by a stretch written from its published description. moq-congestion's Cubic came from
 quinn and stays with the quinn child.
 
 Out of scope: forks moq no longer consumes (moq-dev/quiche, moq-dev/noq,

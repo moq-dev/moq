@@ -162,13 +162,13 @@ async function lag(trace: Arrival[], options: Options, settle: number) {
 }
 
 /**
- * The longest pitch period of the replay's speech, at its 90 Hz floor: a seam moves by one period, so
- * a lag shorter than that may rest uncorrected.
+ * One 10 ms hop of the stretch: it leaves a lag within half a hop alone, and a splice carries the
+ * playhead at most half a hop past the clock.
  */
-const PERIOD = 1000 / 90;
+const HOP = 10;
 
 // Audio and video keep separate clocks that align once the delay covers the arrivals. The ring plays
-// onto the shared clock: in steady state the playhead rests within a pitch period of it, either way.
+// onto the shared clock: in steady state the playhead rests within a hop of it, either way.
 // A buffer that runs low slows playback and leaves it behind the clock, only as far as the stretch
 // allows, which a zero stretch leaves none of.
 describe("replay against the shared clock", () => {
@@ -186,8 +186,8 @@ describe("replay against the shared clock", () => {
 			const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(60) };
 			const { lags, underruns } = await lag(paced(60, lateness), options, 30_000);
 			expect(lags.length).toBeGreaterThan(0);
-			expect(lags[0]).toBeGreaterThanOrEqual(-PERIOD);
-			expect(lags.at(-1)).toBeLessThanOrEqual(PERIOD);
+			expect(lags[0]).toBeGreaterThanOrEqual(-HOP);
+			expect(lags.at(-1)).toBeLessThanOrEqual(HOP);
 			expect(underruns).toBe(0);
 		});
 	}
@@ -332,7 +332,7 @@ it("plays an advertised flush span past the decoded floor at its delay without a
 	expect(start).toBeLessThan(5040);
 	expect(short).toBe(0);
 	// Then onto the shared clock, which counts that lateness too.
-	expect(Math.abs(lag)).toBeLessThanOrEqual(PERIOD);
+	expect(Math.abs(lag)).toBeLessThanOrEqual(HOP);
 });
 
 // The same rule plays a buffered player onto the clock: its lookahead keeps the level high, so it plays
@@ -382,8 +382,8 @@ describe("buffered replay against the shared clock", () => {
 		};
 		// Speeding up at the cap gains 100 ms a second, so the stall's lag is gone well before 20 s.
 		const result = await play(trace, options, (at) => (at >= 2000 && at < 5000) || at >= 20_000);
-		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
-		expect(result.max).toBeLessThanOrEqual(PERIOD);
+		expect(result.min).toBeGreaterThanOrEqual(-HOP);
+		expect(result.max).toBeLessThanOrEqual(HOP);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
 		expect(warn).not.toHaveBeenCalled();
 	});
@@ -400,7 +400,7 @@ describe("buffered replay against the shared clock", () => {
 			duration: observed(60),
 		};
 		const result = await play(trace, options, (at) => at >= 10_000);
-		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
+		expect(result.min).toBeGreaterThanOrEqual(-HOP);
 		expect(result.max).toBeLessThan(20);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
 		expect(warn).not.toHaveBeenCalled();
@@ -420,8 +420,8 @@ describe("buffered replay against the shared clock", () => {
 			duration: 42_000,
 		};
 		const result = await play(trace, options, (at) => at >= 30_000 && at < 39_000);
-		expect(result.min).toBeGreaterThanOrEqual(-PERIOD);
-		expect(result.max).toBeLessThanOrEqual(PERIOD);
+		expect(result.min).toBeGreaterThanOrEqual(-HOP);
+		expect(result.max).toBeLessThanOrEqual(HOP);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
 		// Every frame played: what was heard and what the stretch shortened cover the utterance. A
 		// slow-down only adds to what is heard.

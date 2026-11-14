@@ -103,9 +103,8 @@ export interface Quantum {
 /**
  * A seeded speech-like signal, a pure function of media time so every replay hears the same audio.
  *
- * A constant gives the stretch's pitch search its shortest period everywhere, so catching up removes
- * one 2.5 ms period a window; speech's longer, varying periods and pauses let it catch up as fast as
- * a real talker does. Syllables of 120 to 300 ms glide the fundamental between 90 and 220 Hz under a
+ * A constant matches itself at every shift, so the stretch's similarity search would show nothing;
+ * speech's varying periods and pauses give it what a real talker does. Syllables of 120 to 300 ms glide the fundamental between 90 and 220 Hz under a
  * raised-cosine level, with pauses of 100 to 400 ms between some. The floor stays above the harness's
  * -60 dBFS silence classifier, and no sample is exactly zero, which the output tap reads as missing.
  */
