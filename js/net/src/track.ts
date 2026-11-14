@@ -2230,9 +2230,10 @@ export class Producer {
 		const existing = this.#cached.get(sequence);
 		let kept: Map<TrackState, GroupConsumer> | undefined;
 		const failed = existing?.group.closed.peek() instanceof Error ? existing.group : undefined;
-		if (existing && !failed && fetched && start === 0 && hooks.groupHeadless(existing.group)) {
-			// A fill from frame 0 replaces a copy that can't serve its head, as a bounded reader asked.
-			// A copy still arriving keeps arriving for the readers already holding it, outside the cache.
+		if (existing && !failed && start === 0 && hooks.groupHeadless(existing.group)) {
+			// A copy from frame 0, a fill a bounded reader asked or the feed's own, replaces one that
+			// can't serve its head. One still arriving keeps arriving for the readers already holding
+			// it, outside the cache.
 			this.#unlink(existing);
 			this.#uncache(existing);
 		} else if (existing) {
@@ -3465,6 +3466,8 @@ export class Subscriber {
 	// Resolve this reader's ranges again, as when they are replaced.
 	#resolve(): void {
 		this.#window = new Window(this.#state.update.peek()?.ranges ?? [{}], this.#latestGroup(), this.#holdings());
+		// Leaves the lookups the old ranges asked, which a settled window never reads again.
+		if (this.#lookups.length > 0) this.#lookUp();
 		this.#moved();
 	}
 

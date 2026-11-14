@@ -3,7 +3,7 @@
 // subscription's ranges, as its `RangeFills` does, and on a SUBSCRIBE of its own for what that
 // subscription already delivered, as its `Recovery` does: below where the copy's feed started, by
 // the copy's start rule, and inside the copy, once it evicted what it received.
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Duration, Elapsed, Manual, sleep, timeout } from "@moq/clock";
 import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
@@ -18,6 +18,8 @@ import { Timescale, Timestamp } from "../time.ts";
 import type { Fill, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import * as Lite from "./index.ts";
+import { Publisher as LitePublisher } from "./publisher.ts";
+import { Subscriber as LiteSubscriber } from "./subscriber.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -449,3 +451,101 @@ test("copy fill: a yielded group its subscription's drop names ends", async () =
 		installed.close();
 	}
 });
+
+// A copy holding group 2 from frame 3 only, as one whose subscription started mid-group does, asks
+// its publisher for the head over FETCH once a bounded reader wants the group whole. The publisher
+// refused group 2 to the subscription and has it only once the FETCH asks.
+test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"%s: a bounded reader of a copy's headless group gets it whole over FETCH",
+	async (alpn) => {
+		// The copy the session receives, caught as its subscription starts.
+		let copy: Producer | undefined;
+		const internal = LiteSubscriber.prototype as unknown as {
+			runResponses: (stream: unknown, entry: { track: Producer }) => Promise<void>;
+		};
+		const runResponses = internal.runResponses;
+		const spy = spyOn(internal, "runResponses").mockImplementation(function (
+			this: unknown,
+			stream: unknown,
+			entry: { track: Producer },
+		) {
+			copy ??= entry.track;
+			return runResponses.call(this, stream, entry);
+		});
+		// The groups the publisher serves over FETCH, in order.
+		const fetched: bigint[] = [];
+		const runFetch = LitePublisher.prototype.runFetch;
+		const fetchSpy = spyOn(LitePublisher.prototype, "runFetch").mockImplementation(function (
+			this: LitePublisher,
+			msg,
+			stream,
+		) {
+			fetched.push(msg.group);
+			return runFetch.call(this, msg, stream);
+		});
+
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connectSession({ url, transport: pair.client }),
+			acceptSession({ transport: pair.server, url, publish: origin.consume() }),
+		]);
+		const broadcast = origin.route(Path.from("room")).broadcast;
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		write(track.createGroup(3n), 3n, "live");
+		// The archive has group 2 once `archived`, and never refuses it as lost.
+		let archived = false;
+		const requests = track.requests();
+		void (async () => {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
+					if (sequence !== 2n || !archived) {
+						fill.refuseGroups(sequence, sequence + 1n, new StreamError(StreamCode.NotFound));
+						continue;
+					}
+					const group = fill.accept(sequence);
+					for (let frame = 0; frame < 5; frame++)
+						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
+					group.finish();
+				}
+				fill.close();
+			}
+		})();
+		const remote = wireOf(client).consume(Path.from("room"));
+		try {
+			// Reads from the oldest group, so a bounded reader widens nothing.
+			const open = remote.track("video").subscribe({ delay: { max: null } });
+			expect((await open.recvGroup())?.sequence).toBe(3n);
+			if (!copy) throw new Error("no copy");
+			const tail = hooks.receiveGroup(copy, { sequence: 2n, start: 3 });
+			for (const frame of [3, 4])
+				tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
+			tail.finish();
+			archived = true;
+			const before = fetched.length;
+
+			const bounded = remote.track("video").subscribe({
+				ranges: [{ start: { absolute: 2n }, end: { absolute: 3n } }],
+				delay: { max: null },
+			});
+			const group = await bounded.recvGroup();
+			if (!group) throw new Error("no group");
+			const got: string[] = [];
+			for (let frame = await group.readFrame(); frame; frame = await group.readFrame())
+				got.push(dec.decode(frame.payload));
+			expect(got).toEqual(["c0", "c1", "c2", "c3", "c4"]);
+			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual([2n]);
+			bounded.close();
+			open.close();
+		} finally {
+			spy.mockRestore();
+			fetchSpy.mockRestore();
+			remote.close();
+			requests.close();
+			broadcast.close();
+			client.abort();
+			server.abort();
+			origin.close();
+		}
+	},
+);

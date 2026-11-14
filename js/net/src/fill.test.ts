@@ -1676,3 +1676,22 @@ test("fill: a time start the held groups place asks no lookup", async () => {
 	requests.close();
 	broadcast.close();
 });
+
+test("fill: replacing the ranges withdraws a lookup still out", async () => {
+	const { broadcast, track } = timed();
+	const requests = track.requests();
+	const reader = track.subscribe(fromTime(2500));
+	expect(reader.tryRecvGroup()).toBeUndefined();
+	const lookup = await requests.requestedFill();
+	expect(lookup?.time?.asMillis()).toBe(2500);
+
+	// Its fill follows the readers waiting on it: the ascending one, until it leaves.
+	expect(lookup?.order).toBe("ascending");
+	reader.update({ ranges: [{ start: { absolute: 5n } }], delay: { max: null }, order: "ascending" });
+	expect(reader.tryRecvGroup()?.sequence).toBe(5n);
+	expect(lookup?.order).toBe("descending");
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});

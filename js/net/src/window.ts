@@ -718,8 +718,7 @@ export class Window {
 		if (found.length === 0) return false;
 		const started = group !== undefined && holdings.nextStart(group)?.sequence === group ? group : undefined;
 		const containing = holdings.containing(pts);
-		const start =
-			started ?? (containing !== "before" && containing !== "unknown" ? containing.group : undefined);
+		const start = started ?? (containing !== "before" && containing !== "unknown" ? containing.group : undefined);
 		for (const span of found) {
 			const below = span.looking?.below ?? 0n;
 			span.looking = undefined;

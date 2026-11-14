@@ -164,6 +164,12 @@ class Groups implements Holdings {
 		return this.gones.find((run) => run.start <= sequence && sequence < run.end)?.end;
 	}
 
+	looks = false;
+
+	looksUp() {
+		return this.looks;
+	}
+
 	complete() {
 		return this.done;
 	}
@@ -332,4 +338,37 @@ test("a time anchor needs moq-lite-07, is resolved by the copy, and clamps to it
 	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [])).toEqual([{ start: time(1), end: time(5) }]);
 	expect(rangesOf([{ start: time(1) }])).toEqual([{ start: time(1) }]);
 	expect(() => rangesOf([{ start: { time: 1 } as unknown as Anchor }])).toThrow(TypeError);
+});
+
+test("a time start the held groups can't place is looked up, reading nothing until found", () => {
+	const groups = new Groups([
+		[2n, started(2000)],
+		[5n, started(5000)],
+		[6n, started(6000)],
+	]);
+	groups.looks = true;
+	const at = (millis: number) => Timestamp.fromMillis(millis);
+
+	// Before every start held: looked up below the oldest.
+	let window = new Window([{ start: time(1000) }], 6n, groups);
+	expect(window.lookups()).toEqual([{ pts: at(1000), below: 2n }]);
+	expect([window.contains(2n), window.floor(), window.settled]).toEqual([false, undefined, false]);
+	expect(window.found(at(1000), 0n, groups)).toBe(true);
+	// The answer never started here, so the start reaches back, asking no miss below the oldest.
+	expect([window.lookups(), window.floor(), window.contains(0n)]).toEqual([[], 0n, true]);
+	expect(window.missable(0n, 8n)).toEqual([{ start: 2n, end: 8n }]);
+
+	// Unheld groups above the one containing it, before the next start: one of them may hold it.
+	window = new Window([{ start: time(3000) }], 6n, groups);
+	expect(window.lookups()).toEqual([{ pts: at(3000), below: 5n }]);
+	const answered = new Groups([...groups.held, [3n, started(3000)]]);
+	expect(window.found(at(3000), 3n, answered)).toBe(true);
+	expect([window.floor(), window.resolved()]).toEqual([3n, [{ start: 3n, end: undefined, floored: true }]]);
+
+	// The held groups place it: no lookup.
+	expect(new Window([{ start: time(5500) }], 6n, groups).lookups()).toEqual([]);
+	// No handler to ask: none either, reaching back to the oldest held.
+	groups.looks = false;
+	window = new Window([{ start: time(1000) }], 6n, groups);
+	expect([window.lookups(), window.floor(), window.missable(0n, 4n)]).toEqual([[], 0n, [{ start: 2n, end: 4n }]]);
 });
