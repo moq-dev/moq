@@ -15,6 +15,7 @@ import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { cutRun, insertRun, NO_MAX_DELAY, runGaps, runsFrom } from "./internal.ts";
+import type { Timestamp } from "./time.ts";
 import type { Info, Order } from "./track.ts";
 import { checkEnd, checkSequence, max, min } from "./util/sequence.ts";
 
@@ -37,8 +38,11 @@ export interface FillTrack {
 	 * under that budget in milliseconds: a verdict only on readers no more tolerant.
 	 */
 	drop(start: bigint, end: bigint, hole: { error: Error; stale?: number }): void;
-	/** Whether the track still caches group `sequence`, not failed. */
-	holds(sequence: bigint): boolean;
+	/**
+	 * Whether the track still caches group `sequence`, not failed: `"headless"` for a copy missing
+	 * its first frames, which a fill from frame 0 replaces.
+	 */
+	holds(sequence: bigint): boolean | "headless";
 	/** Whether the track closed, so nothing more can be served. */
 	closed(): boolean;
 	/** Settles once the track closes. */
@@ -95,19 +99,25 @@ class Pending {
 	done = false;
 	// Bumped on every change to what the fill owes, for its handler to wake on.
 	readonly revision = new Signal(0);
+	// The time a lookup asks for, which owes no group.
+	readonly time?: Timestamp;
+	// The first group a lookup's handler accepted.
+	answer?: bigint;
 
-	constructor(start: bigint, end: bigint) {
+	constructor(start: bigint, end: bigint, time?: Timestamp) {
 		this.start = start;
 		this.end = end;
+		this.time = time;
 	}
 
 	bump(): void {
 		this.revision.update((revision) => revision + 1);
 	}
 
-	// The parts of `[start, end)` within the fill still unanswered and not withdrawn.
+	// The parts of `[start, end)` within the fill still unanswered and not withdrawn: none for a
+	// lookup, which owes no group.
 	unresolved(start = this.start, end = this.end): Run[] {
-		if (this.done) return [];
+		if (this.done || this.time !== undefined) return [];
 		return runGaps(this.resolved, max(start, this.start), min(end, this.end)).flatMap((gap) =>
 			runGaps(this.withdrawn, gap.start, gap.end),
 		);
@@ -188,6 +198,25 @@ export class FillState {
 	}
 
 	/**
+	 * Queue a fill looking up `time` among the groups below `end` for `asker`, as the Rust
+	 * `FillState::queue_lookup` does. Undefined while no handler is open to answer it.
+	 */
+	lookup(time: Timestamp, end: bigint, asker: Asker): Lookup | undefined {
+		if (this.#handlers === 0 || this.#track.closed()) return undefined;
+		const pending = new Pending(0n, end, time);
+		pending.askers.add(asker);
+		this.#pending.add(pending);
+		this.#queue.push(pending);
+		this.#queued.update((revision) => revision + 1);
+		return {
+			answer: () => pending.answer,
+			done: () => pending.done,
+			changed: pending.revision,
+			leave: () => this.leave(asker, pending),
+		};
+	}
+
+	/**
 	 * The parts of `[start, end)` a fill `asker` joined still owes it, merged and in order: only what it still
 	 * reads, as the Rust `Join::held` holds, so a wider fill shared with other readers owes it
 	 * nothing outside its own ranges.
@@ -209,9 +238,9 @@ export class FillState {
 		if (run) yield run;
 	}
 
-	/** `asker` left: the fills it alone waited on are withdrawn. */
-	leave(asker: Asker): void {
-		for (const pending of this.#pending) {
+	/** `asker` left `only`, or every fill: the fills it alone waited on are withdrawn. */
+	leave(asker: Asker, only?: Pending): void {
+		for (const pending of only ? [only] : this.#pending) {
 			if (!pending.askers.delete(asker)) continue;
 			this.#judge(pending);
 		}
@@ -291,9 +320,14 @@ export class FillState {
 		}
 	}
 
-	// Withdraw what no reader reads any more for good, and `pending` once that is all of it.
+	// Withdraw what no reader reads any more for good, and `pending` once that is all of it. A
+	// lookup owes no group, so it is withdrawn once nobody waits on it.
 	#judge(pending: Pending): void {
 		if (pending.done) return;
+		if (pending.time !== undefined) {
+			if (pending.askers.size === 0) this.#finish(pending);
+			return;
+		}
 		const owed = pending.owed();
 		const withdrawn: Run[] = [];
 		for (const gap of pending.unresolved()) {
@@ -353,9 +387,16 @@ export class FillState {
 				if (pending.resolved.some((run) => run.start <= sequence && sequence < run.end)) {
 					throw new Error(`group ${sequence} was already answered`);
 				}
-				if (state.#track.holds(sequence)) throw new Error(`duplicate group: sequence=${sequence}`);
+				// A copy missing its head is replaced from frame 0, as a bounded reader asked.
+				if (state.#track.holds(sequence) === true) throw new Error(`duplicate group: sequence=${sequence}`);
 				// Landing in the cache answers it, as `arrived` records.
-				return state.#track.accept(sequence, info);
+				const group = state.#track.accept(sequence, info);
+				// A lookup waits only on its first answer.
+				if (pending.time !== undefined && pending.answer === undefined && !pending.done) {
+					pending.answer = sequence;
+					state.#finish(pending);
+				}
+				return group;
 			},
 			drop: (state, pending, start, end, hole) => {
 				for (const run of pending.owed(start, end)) {
@@ -398,6 +439,22 @@ export let fillChanged: (fill: Fill) => GetPromise<unknown>;
 export interface Judged {
 	budget: number;
 	everyone: boolean;
+}
+
+/**
+ * A reader's time lookup, from {@link FillState.lookup}.
+ *
+ * @internal
+ */
+export interface Lookup {
+	/** The first group its handler accepted, undefined until one is. */
+	answer(): bigint | undefined;
+	/** Whether it is over: answered, or closed unanswered. */
+	done(): boolean;
+	/** Bumped as it changes. */
+	readonly changed: Getter<number>;
+	/** Stop waiting on it, withdrawing it once nobody does. */
+	leave(): void;
 }
 
 /**
@@ -501,6 +558,18 @@ export class Fill {
 	readonly start: bigint;
 	/** The exclusive end group. */
 	readonly end: bigint;
+	/**
+	 * The presentation time a reader's range starts at that no group the cache holds resolves,
+	 * so this fill looks it up: {@link accept} the group containing it, the newest one starting
+	 * at or before it, or the oldest group when every group starts after it. The reader's range
+	 * then starts there, once that group's first frame is written. Mirrors the Rust `Fill::time`.
+	 *
+	 * A lookup owes no group, so {@link wanted} is `undefined` and {@link isWanted} false
+	 * throughout; it waits only on its first accept. Closed unanswered, as a handler that can't
+	 * resolve times does, the reader's range reaches back to the oldest group the cache holds.
+	 * `undefined` for a fill of groups.
+	 */
+	readonly time?: Timestamp;
 
 	#state: FillState;
 	#pending: Pending;
@@ -512,6 +581,7 @@ export class Fill {
 		this.#pending = pending;
 		this.start = pending.start;
 		this.end = pending.end;
+		this.time = pending.time;
 	}
 
 	static {
@@ -595,8 +665,9 @@ export class Fill {
 	/**
 	 * Insert group `sequence` into the track's cache, handing it to the readers waiting on it,
 	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
-	 * if it has none yet. Throws a `RangeError` outside the fill, and an error if the group was
-	 * already answered or cached, or the track is closed.
+	 * if it has none yet. A cached copy missing its first frames, which a reader asked whole, is
+	 * replaced. Throws a `RangeError` outside the fill, and an error if the group was already
+	 * answered or cached whole, or the track is closed.
 	 */
 	accept(sequence: bigint, info?: Info): GroupProducer {
 		checkSequence(sequence);

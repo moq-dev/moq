@@ -884,6 +884,8 @@ export const hooks: {
 	startGroup: (group: GroupProducer, start: number) => void;
 	/** The first absolute frame this source copy began at. Assigned by `group.ts`. */
 	groupOffset: (group: GroupProducer) => number;
+	/** Whether this source copy can no longer serve frame 0: it began past it, or shed it. */
+	groupHeadless: (group: GroupProducer) => boolean;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -936,6 +938,8 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
+	/** Whether this copy begins past frame 0, missing its head. */
+	groupLacksHead: (group: GroupConsumer) => boolean;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -1243,6 +1247,9 @@ export const hooks: {
 	groupOffset: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupHeadless: () => {
+		throw new Error("group.ts not loaded");
+	},
 	startGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1307,6 +1314,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStarted: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupLacksHead: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFate: () => {

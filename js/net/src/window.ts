@@ -357,6 +357,11 @@ export interface Holdings {
 	gone(sequence: bigint): bigint | undefined;
 	/** Whether nothing more can arrive or start here, so a time end has nothing to wait on. */
 	complete(): boolean;
+	/**
+	 * Whether a fill handler can look up a time start the groups held can't place in the track's
+	 * history, as the Rust `Holdings::looks_up` says. Absent for none.
+	 */
+	looksUp?(): boolean;
 }
 
 /**
@@ -509,7 +514,22 @@ type Span = {
 	end: End;
 	/** Whether the start names a group, rather than reaching back to the oldest one. */
 	floored: boolean;
+	/**
+	 * A time start the groups held can't place, looked up from the track's history: the span reads
+	 * nothing until the lookup answers.
+	 */
+	looking?: Lookup;
 };
+
+/**
+ * A time start being looked up: its time, and the exclusive end of the run below every group
+ * held, which holds the group containing it if the track's history does. Mirrors the Rust
+ * `Looking`.
+ */
+export interface Lookup {
+	pts: Timestamp;
+	below: bigint;
+}
 
 /** The exclusive end of the groups a span reads now, {@link UNBOUNDED} for none: an unsettled time end reads up to its cap. */
 function limitOf(span: Span): bigint {
@@ -607,7 +627,7 @@ export class Window {
 
 	/** The lowest group in range, undefined while an anchor waits. Nothing in range floors at group 0. */
 	floor(): bigint | undefined {
-		if (this.#pending || this.#waiting.length > 0) return undefined;
+		if (this.#pending || this.#waiting.length > 0 || this.#looking()) return undefined;
 		return this.#runs[0]?.start ?? 0n;
 	}
 
@@ -616,7 +636,8 @@ export class Window {
 	 * a relative anchor waits on a first group.
 	 */
 	start(): bigint | undefined {
-		if (this.#pending || this.#waiting.length > 0 || this.#spans.some((span) => !span.floored)) return undefined;
+		if (this.#pending || this.#waiting.length > 0 || this.#looking() || this.#spans.some((span) => !span.floored))
+			return undefined;
 		let start: bigint | undefined;
 		for (const span of this.#spans) start = min(start ?? span.start, span.start);
 		return start;
@@ -627,7 +648,7 @@ export class Window {
 	 * time end counts as open: its cap only holds reads back meanwhile. Nothing in range ends at 0.
 	 */
 	end(): bigint | undefined {
-		if (this.#pending || this.#waiting.length > 0) return undefined;
+		if (this.#pending || this.#waiting.length > 0 || this.#looking()) return undefined;
 		if (this.#spans.some((span) => span.end !== "open" && "time" in span.end)) return undefined;
 		const end = this.#runs.at(-1)?.end ?? 0n;
 		return end === UNBOUNDED ? undefined : end;
@@ -658,6 +679,7 @@ export class Window {
 			return { start: (range.start && absolute(range.start)) ?? end, end, floored: true };
 		});
 		for (const span of this.#spans) {
+			if (span.looking) continue;
 			resolved[span.index] = {
 				start: span.start,
 				end: span.end !== "open" && "before" in span.end ? span.end.before : undefined,
@@ -677,6 +699,43 @@ export class Window {
 			const start = max(range.start, from);
 			return range.end === undefined || range.end > start ? start : undefined;
 		});
+	}
+
+	/** The time starts still looked up. Mirrors the Rust `Window::lookups`. */
+	lookups(): Lookup[] {
+		return this.#spans.flatMap((span) => (span.looking ? [span.looking] : []));
+	}
+
+	/**
+	 * The lookup of time start `pts` answered with `group`, the group containing it or the oldest
+	 * group of the history: its spans start there, once that group has started. Undefined, or an
+	 * answer that never started, means the history couldn't tell, so they start where the groups
+	 * held say. Returns whether the groups in range moved. Mirrors the Rust `Window::found`.
+	 */
+	found(pts: Timestamp, group: bigint | undefined, holdings: Holdings = UNHELD): boolean {
+		const found = this.#spans.filter((span) => span.looking && sameTime(span.looking.pts, pts));
+		if (found.length === 0) return false;
+		const started = group !== undefined && holdings.nextStart(group)?.sequence === group ? group : undefined;
+		const containing = holdings.containing(pts);
+		const start =
+			started ?? (containing !== "before" && containing !== "unknown" ? containing.group : undefined);
+		for (const span of found) {
+			span.looking = undefined;
+			span.start = start ?? 0n;
+			span.floored = start !== undefined;
+			if (span.end !== "open" && "time" in span.end) {
+				const time = new TimeEnd(span.end.time.pts, span.start);
+				const end = time.advance(span.start, holdings);
+				span.end = end === undefined ? { time } : { before: end };
+			}
+		}
+		this.#rebuild();
+		return true;
+	}
+
+	// Whether a time start is still looked up.
+	#looking(): boolean {
+		return this.#spans.some((span) => span.looking);
 	}
 
 	// The first run ending past `sequence`.
@@ -718,6 +777,14 @@ export class Window {
 			return false;
 		}
 		let end: End = until === "open" || "before" in until ? until : { time: new TimeEnd(until.pts, start.group) };
+		// A time start the groups held can't place reads nothing until its lookup answers, and its
+		// time end walks from where that puts it.
+		const pts = time(range.start);
+		const below = pts === undefined ? undefined : unresolved(start.group, start.floored, holdings);
+		if (pts !== undefined && below !== undefined) {
+			this.#spans.push({ index, start: start.group, end, floored: start.floored, looking: { pts, below } });
+			return true;
+		}
 		if (end !== "open" && "time" in end) {
 			const settled = end.time.advance(start.group, holdings);
 			if (settled !== undefined) end = { before: settled };
@@ -730,8 +797,9 @@ export class Window {
 		this.#settled =
 			!this.#pending &&
 			this.#waiting.length === 0 &&
-			this.#spans.every((span) => span.end === "open" || !("time" in span.end));
+			this.#spans.every((span) => !span.looking && (span.end === "open" || !("time" in span.end)));
 		const spans = this.#spans
+			.filter((span) => !span.looking)
 			.map((span) => ({ start: span.start, end: limitOf(span) }))
 			.filter((span) => span.end > span.start)
 			.sort((a, b) => order(a.start, b.start));
@@ -775,6 +843,25 @@ function startOf(
 	if (back === undefined) return { group: 0n, floored: false };
 	if (latest === undefined) return undefined;
 	return { group: saturatingSub(latest, back), floored: true };
+}
+
+/**
+ * Where a time start resolved at `start` needs a lookup, as the exclusive end of the run below
+ * every group held that may hold the group containing it, or undefined when the groups held place
+ * it: reaching back past the oldest held, or naming a group with unheld sequences above it before
+ * the next one starting. Mirrors the Rust `unresolved`.
+ */
+function unresolved(start: bigint, floored: boolean, holdings: Holdings): bigint | undefined {
+	if (!holdings.looksUp?.()) return undefined;
+	if (!floored) return holdings.nextStart(0n)?.sequence;
+	const next = start + 1n;
+	const after = holdings.nextStart(next)?.sequence;
+	return after !== undefined && after > next ? after : undefined;
+}
+
+// Whether two times name the same instant, whatever their scales.
+function sameTime(a: Timestamp, b: Timestamp): boolean {
+	return !a.isBefore(b) && !b.isBefore(a);
 }
 
 /**
