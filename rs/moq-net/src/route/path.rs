@@ -21,9 +21,11 @@
 //! session casts doubt on the node at its far end, since a dead relay is reported
 //! one neighbour at a time: no node moves to a route through it until a timer
 //! lifts the doubt. A route that begins at the doubted node is exempt, so a
-//! publisher stays reachable through its other links while one flaps; when it
-//! leaves three or more relays at once, requests can go round them until the
-//! news arrives. There is no distance, seqno, route request, or echo.
+//! publisher stays reachable through its other links while one flaps, except on
+//! a session to it opened since the doubt began: a link that comes back waits
+//! out the timer, which damps its flaps. When a publisher leaves three or more
+//! relays at once, requests can go round them until the news arrives. There is
+//! no distance, seqno, route request, or echo.
 //!
 //! A route covers a prefix: the one its receiver asked for, or a narrower one a
 //! node on its path asked for. A stream answering a prefix carries the sender's
@@ -176,6 +178,19 @@ pub(crate) enum Lift {
 	Timer,
 }
 
+/// What doubt does to a route that begins at the doubted node.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AtOrigin {
+	/// The replaced comparison rule: it blocks the route, as it does one through the node.
+	Blocked,
+	/// The rejected comparison rule: it never blocks the route.
+	Spared,
+	/// It blocks the route only on this node's own session to the node, opened
+	/// since the doubt began.
+	Own,
+}
+
 /// How a closed session's doubt works.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Doubt {
@@ -183,9 +198,8 @@ pub(crate) struct Doubt {
 	pub timer: Duration,
 	#[cfg(test)]
 	pub lift: Lift,
-	/// The replaced comparison rule: doubt also blocks a route that begins at the node.
 	#[cfg(test)]
-	pub origin: bool,
+	pub origin: AtOrigin,
 }
 
 impl Doubt {
@@ -195,7 +209,7 @@ impl Doubt {
 		#[cfg(test)]
 		lift: Lift::Timer,
 		#[cfg(test)]
-		origin: false,
+		origin: AtOrigin::Own,
 	};
 }
 
@@ -259,19 +273,23 @@ impl Death {
 
 /// A node's timed doubt. Tests also represent early collection before the
 /// timer retires.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Suspicion {
-	Doubted(Instant),
+	Doubted {
+		until: Instant,
+		/// The last session this node opened before the doubt began.
+		since: u64,
+	},
 	#[cfg(test)]
 	Lifted(Instant),
 }
 
 impl Suspicion {
-	fn deadline(self) -> Instant {
+	fn deadline(&self) -> Instant {
 		match self {
-			Self::Doubted(at) => at,
+			Self::Doubted { until, .. } => *until,
 			#[cfg(test)]
-			Self::Lifted(at) => at,
+			Self::Lifted(at) => *at,
 		}
 	}
 }
@@ -1303,16 +1321,42 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		path.iter().any(|hop| self.draining.contains(&hop.node))
 	}
 
-	/// Whether `path` crosses a node in doubt. The node a route begins at does not
-	/// count: a route cannot loop through its own end.
-	fn doubts_path(&self, path: &[Hop]) -> bool {
+	/// Whether doubt keeps this node off the route `peer` offered with `path`: one
+	/// through a node in doubt, or the doubted node's own route on a session to it
+	/// that opened since the doubt began. A route cannot loop through its own end, so
+	/// the publisher's other links stay usable while one of them flaps; a link that
+	/// comes back waits out the timer, which damps the flaps, and no other node
+	/// hears it until this one takes it.
+	fn doubts_path(&self, peer: N, path: &[Hop]) -> bool {
+		let doubted = |node: Id| matches!(self.doubted.get(&node), Some(Suspicion::Doubted { .. }));
+		let Some((first, rest)) = path.split_first() else {
+			return false;
+		};
+		if rest.iter().any(|hop| doubted(hop.node)) {
+			return true;
+		}
+		let Some(Suspicion::Doubted { since, .. }) = self.doubted.get(&first.node) else {
+			return false;
+		};
 		#[cfg(test)]
-		let skip = usize::from(!self.doubt.origin);
-		#[cfg(not(test))]
-		let skip = 1;
-		path.iter()
-			.skip(skip)
-			.any(|hop| matches!(self.doubted.get(&hop.node), Some(Suspicion::Doubted(_))))
+		match self.doubt.origin {
+			AtOrigin::Blocked => return true,
+			AtOrigin::Spared => return false,
+			AtOrigin::Own => {}
+		}
+		rest.is_empty() && self.sessions[&peer].number > *since
+	}
+
+	/// Doubt `node` until `at`, or later if it already is. A doubt that begins notes
+	/// the last session opened so far, so a session to `node` opened since waits.
+	fn suspect(&mut self, node: Id, at: Instant) {
+		if let Some(Suspicion::Doubted { until, .. }) = self.doubted.get_mut(&node) {
+			*until = (*until).max(at);
+			return;
+		}
+		let until = self.doubted.get(&node).map_or(at, |state| state.deadline().max(at));
+		let since = self.opened;
+		self.doubted.insert(node, Suspicion::Doubted { until, since });
 	}
 
 	fn hear(&mut self, key: RouteId, from: N, heard: Heard<A>) {
@@ -1404,9 +1448,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if !self.draining.insert(node) {
 			return BTreeSet::new();
 		}
-		let at = now.saturating_add(self.doubt.timer);
-		let at = self.doubted.get(&node).map_or(at, |state| state.deadline().max(at));
-		self.doubted.insert(node, Suspicion::Doubted(at));
+		self.suspect(node, now.saturating_add(self.doubt.timer));
 		self.naming(node)
 	}
 
@@ -1475,9 +1517,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			}
 		}
 		if far != self.hop {
-			let at = now.saturating_add(self.doubt.timer);
-			let at = self.doubted.get(&far).map_or(at, |state| state.deadline().max(at));
-			self.doubted.insert(far, Suspicion::Doubted(at));
+			self.suspect(far, now.saturating_add(self.doubt.timer));
 			// Any route through that node may have become unusable.
 			ids.extend(self.naming(far));
 		}
@@ -1528,7 +1568,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			let Some(metric) = heard.offer.metric.checked_add(session.link.cost) else {
 				continue;
 			};
-			if Some(peer) != using && self.doubts_path(&heard.offer.path) {
+			if Some(peer) != using && self.doubts_path(peer, &heard.offer.path) {
 				// It may come back once the doubt lifts.
 				continue;
 			}
@@ -1644,7 +1684,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			heard.state == State::Live
 				&& !names(&heard.offer.path, self.hop)
 				&& heard.offer.metric.checked_add(self.sessions[peer].link.cost).is_some()
-				&& self.doubts_path(&heard.offer.path)
+				&& self.doubts_path(*peer, &heard.offer.path)
 		})
 	}
 
@@ -2615,7 +2655,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				.doubted
 				.iter()
 				.filter_map(|(node, state)| {
-					(matches!(state, Suspicion::Doubted(_)) && !self.named(*node)).then_some(*node)
+					(matches!(state, Suspicion::Doubted { .. }) && !self.named(*node)).then_some(*node)
 				})
 				.collect();
 			for node in lifted {

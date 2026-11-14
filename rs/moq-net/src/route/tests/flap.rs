@@ -72,6 +72,24 @@ fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
 	assert_eq!(sim.next_hop(r3, 7), Some(r1), "back on the cheaper link");
 }
 
+/// A link that comes back while its publisher is in doubt waits out the timer, so
+/// a flapping link does not pull every relay back and forth with each flap; the
+/// rejected rule that never doubts a route's origin takes it at once.
+#[test]
+fn a_link_that_comes_back_waits_out_the_doubt() {
+	let (origin, r1) = (0, 1);
+	for (rule, back) in [(Rule::PATH, false), (Rule::SPARED, true)] {
+		let mut sim = dual_homed(rule);
+		sim.disconnect(origin, r1);
+		assert!(sim.flow());
+		sim.connect(origin, r1);
+		assert!(sim.flow());
+		assert_eq!(sim.next_hop(r1, 7) == Some(origin), back, "{}", rule.as_str());
+		assert!(sim.run());
+		assert_eq!(sim.next_hop(r1, 7), Some(origin), "{}: after the timer", rule.as_str());
+	}
+}
+
 /// Under the replaced rule, the relays that used the closed link have no route
 /// while the link flaps, though the publisher never left.
 #[test]
@@ -119,7 +137,7 @@ fn ring_of_homes(rule: Rule) -> Sim {
 #[test]
 fn a_publisher_leaving_every_relay_at_once_loops_until_the_news_arrives() {
 	let (origin, r1, r2, r3) = (0, 1, 2, 3);
-	for (rule, loops) in [(Rule::ORIGIN, 0), (Rule::PATH, 3)] {
+	for (rule, loops) in [(Rule::ORIGIN, 0), (Rule::SPARED, 3), (Rule::PATH, 3)] {
 		let mut sim = ring_of_homes(rule);
 		for relay in [r1, r2, r3] {
 			sim.disconnect(origin, relay);
