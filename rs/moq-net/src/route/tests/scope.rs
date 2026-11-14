@@ -1293,3 +1293,193 @@ fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
 		);
 	}
 }
+
+/// A child that replaces its interest owes an answer about the route it learned on
+/// the old stream only until this node sends it the route again. Once it is sent a
+/// wider source instead, losing the narrow route waits on nothing.
+#[test]
+fn resending_a_replaced_stream_releases_its_wait() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
+	let narrow = along(&[(7, 0), (3, 1)], 2);
+	router.route(3, 7, p("a"), Some(path::Reach::Finite(narrow)), 0);
+	router.batch(3, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1), 0);
+	router.peer_interest(2, Some(p(""))).unwrap();
+	// The child extends the narrow route it was sent under "a".
+	let child = along(&[(7, 0), (3, 1), (99, 3), (2, 1)], 3);
+	router.route(2, 7, p("a"), Some(path::Reach::Finite(child)), 0);
+	router.drain();
+	// Asking for "a" alone, it is sent the cheaper covering route there instead.
+	router.peer_interest(2, Some(p("a"))).unwrap();
+	let messages = router.drain();
+	assert!(
+		messages.iter().any(|msg| matches!(msg,
+			path::Out::Route { to: 2, prefix, reach: Some(path::Reach::Finite(offer)), .. }
+			if *prefix == p("a") && offer.path[1].node == 1
+		)),
+		"{messages:?}"
+	);
+	router.route(3, 7, p("a"), None, 0);
+	assert_eq!(router.route_for(7, &p("a")), None);
+	assert!(router.shown()[&(7, p("a/x"))].available);
+}
+
+/// A child that cancelled its stream owes an answer only until it gives one. Once it
+/// holds the route it learned there, offering that path again is no answer this node
+/// waits on, so losing the route lets it go.
+#[test]
+fn an_answered_wait_is_not_renewed() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
+	router.peer_interest(2, Some(p(""))).unwrap();
+	let child = along(&[(7, 0), (1, 1), (99, 1), (2, 1)], 2);
+	router.route(2, 7, p(""), Some(path::Reach::Finite(child.clone())), 0);
+	router.peer_interest(2, None).unwrap();
+	router.route(2, 7, p(""), Some(path::Reach::Held), 0);
+	router.route(2, 7, p(""), Some(path::Reach::Finite(child)), 0);
+	router.disconnect([1], Instant::ZERO);
+	assert_eq!(router.route_for(7, &p("")), None);
+	assert!(router.shown().is_empty());
+}
+
+/// With every covering route crossing the neighbour, a stream still reflects one so
+/// the neighbour can answer its loss: the best ranked, not merely the narrowest.
+#[test]
+fn without_a_usable_path_a_stream_reflects_the_best_ranked_route() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	// Both routes cross node 2, so neither is usable there.
+	for (peer, prefix, metric) in [(1, "", 1), (3, "a", 4)] {
+		let offer = along(&[(7, 0), (2, 1), (peer as Id, 1)], metric);
+		router.route(peer, 7, p(prefix), Some(path::Reach::Finite(offer)), 0);
+		router.batch(peer, 7, p(prefix), vec![(p("a/x"), Some(1))], Some(1), 0);
+	}
+	router.peer_interest(2, Some(p("a"))).unwrap();
+	let messages = router.drain();
+	assert!(
+		messages.iter().any(|msg| matches!(msg,
+			path::Out::Route { to: 2, prefix, reach: Some(path::Reach::Finite(offer)), .. }
+			if *prefix == p("a") && offer.path[2].node == 1
+		)),
+		"{messages:?}"
+	);
+}
+
+/// Routes that dead news left behind can move on together, each with the claims it
+/// learned meanwhile. A view takes the newest floor among them, wherever it is found.
+#[test]
+fn routes_moved_together_show_the_newest_floor() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
+	// Peers 2 and 3 learned their routes over the session node 6 opened to node 4.
+	let hop = path::Hop { node: 4, session: 1 };
+	let through = |peer: Id| along(&[(7, 0), (6, 1), (4, 1), (peer, 1)], 2);
+	for prefix in ["", "a"] {
+		router.route(2, 7, p(prefix), Some(path::Reach::Finite(through(2))), 0);
+		router.batch(2, 7, p(prefix), vec![(p("a/x"), Some(1))], Some(1), 0);
+	}
+	router.route(3, 7, p(""), Some(path::Reach::Finite(through(3))), 0);
+	let closed = |moved| path::Dead::Closed {
+		hop,
+		far: 6,
+		moved,
+		gone: true,
+	};
+	router.dead(3, closed(Vec::new()), Instant::ZERO);
+	// Peer 2 has not heard, and passes on newer claims under each prefix.
+	router.batch(2, 7, p(""), vec![(p("a/x"), Some(2))], Some(2), 0);
+	router.batch(2, 7, p("a"), vec![(p("a/x"), Some(3))], Some(3), 0);
+	assert_eq!(router.shown()[&(7, p("a/x"))].item, 1);
+	let offer = along(&[(7, 0), (5, 1), (2, 1)], 2);
+	let moved = ["", "a"]
+		.map(|prefix| path::Moved {
+			id: 7,
+			prefix: p(prefix),
+			offer: offer.clone(),
+		})
+		.to_vec();
+	router.dead(2, closed(moved), Instant::ZERO);
+	assert_eq!(router.shown()[&(7, p("a/x"))].item, 3);
+}
+
+/// A batch that changes one claim revisits that claim, not every claim the route
+/// carries.
+#[test]
+fn a_batch_revisits_only_the_claims_it_changed() {
+	let work = |claims: usize| {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		router.connect(1, 1, Link::default()).unwrap();
+		router.route(1, 7, p("live"), Some(offered(1, 0)), 0);
+		let changes = (0..claims)
+			.map(|claim| (p(&format!("live/{claim}")), Some(1)))
+			.collect();
+		router.batch(1, 7, p("live"), changes, Some(1), 0);
+		let before = router.work();
+		router.batch(1, 7, p("live"), vec![(p("live/0"), Some(2))], Some(2), 0);
+		router.work() - before
+	};
+	assert_eq!(work(1), work(32));
+}
+
+/// Narrowing the interest forgets the claims it leaves, and keeps those it still
+/// watches.
+#[test]
+fn narrowing_forgets_only_the_claims_it_leaves() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
+	let changes = vec![(p("a/x"), Some(1)), (p("b/x"), Some(1))];
+	router.batch(1, 7, p(""), changes, Some(1), 0);
+	router.events();
+	let interest = router.watch(p("a"));
+	let left = router.events();
+	assert!(
+		left.iter()
+			.any(|event| event.claim == p("b/x") && event.kind == Kind::Unwatched && event.forgot == 1),
+		"{left:?}"
+	);
+	// The replacement stream answers the narrower interest with a newer claim.
+	router.route(1, 7, p("a"), Some(offered(1, 0)), interest);
+	router.batch(1, 7, p("a"), vec![(p("a/x"), Some(2))], Some(2), interest);
+	let kept = router.events();
+	assert!(
+		kept.iter()
+			.any(|event| event.claim == p("a/x") && event.kind == Kind::Update && event.forgot == 0),
+		"{kept:?}"
+	);
+}
+
+/// Losing the only route over a prefix forgets its claims, even while a sibling
+/// prefix is still known.
+#[test]
+fn losing_a_prefix_forgets_its_claims_beside_a_known_sibling() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for (peer, prefix) in [(1, "a"), (2, "b")] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.route(peer, 7, p(prefix), Some(offered(peer as Id, 0)), 0);
+		let claim = p(&format!("{prefix}/x"));
+		router.batch(peer, 7, p(prefix), vec![(claim, Some(1))], Some(1), 0);
+	}
+	router.events();
+	router.route(1, 7, p("a"), None, 0);
+	let events = router.events();
+	assert!(
+		events.iter().any(|event| event.claim == p("a/x") && event.forgot == 1),
+		"{events:?}"
+	);
+	assert!(events.iter().all(|event| event.claim != p("b/x")));
+}
