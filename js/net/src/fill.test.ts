@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { DEFAULT_EXPIRY } from "./cache.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { rejectGroups } from "./fill.ts";
@@ -1646,6 +1647,70 @@ test("fill: a time start no held group resolves is looked up, and the range star
 	reader.close();
 	requests.close();
 	broadcast.close();
+});
+
+test("fill: a lookup answered below the eviction watermark starts the range there", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const broadcast = new BroadcastProducer();
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const requests = track.requests();
+		const times = lookups(requests, (ms) => BigInt(Math.floor(ms / 1000)));
+		for (let n = 0n; n < 3n; n++) {
+			const group = track.createGroup(n);
+			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n) * 1000) });
+			group.finish();
+		}
+		// Idle past the cache window, so the next write evicts every group but the new edge: the
+		// answer and the fills below it land at or below the watermark, unverified.
+		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+		const edge = track.createGroup(5n);
+		edge.writeFrame({ payload: enc.encode("g5"), timestamp: Timestamp.fromMillis(5000) });
+		edge.finish();
+
+		const reader = track.subscribe(fromTime(2500));
+		const ordered = reader.ordered();
+		const got: bigint[] = [];
+		for (let i = 0; i < 4; i++) got.push((await ordered.nextGroup())?.sequence ?? -1n);
+		expect(got).toEqual([2n, 3n, 4n, 5n]);
+		expect(times).toEqual([2.5]);
+
+		reader.close();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
+test("fill: a lookup whose answer leaves the cache unstarted falls back to the groups held", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { broadcast, track } = timed();
+		const requests = track.requests();
+		const reader = track.subscribe(fromTime(2500));
+		const next = reader.ordered().nextGroup();
+		// The handler answers with group 2 but never writes its first frame.
+		const lookup = await requests.requestedFill();
+		expect(lookup?.time?.asMillis()).toBe(2500);
+		lookup?.accept(2n);
+		await yieldNow();
+
+		// Idle past the cache window, so the next write evicts the unstarted answer, and group 5.
+		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+		const edge = track.createGroup(6n);
+		edge.writeFrame({ payload: enc.encode("g6"), timestamp: Timestamp.fromMillis(6000) });
+		edge.finish();
+		expect((await next)?.sequence).toBe(6n);
+
+		reader.close();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
 });
 
 test("fill: a lookup closed unanswered leaves the range reaching back to the oldest group held", async () => {

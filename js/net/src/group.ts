@@ -310,6 +310,10 @@ export class Producer {
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
 		hooks.groupHeadless = (group) => group.#state.start > 0 || headShed(group.#state.frames.peek().first);
+		hooks.groupMayStart = (group) => {
+			const state = group.#state;
+			return state.offset === 0 && state.total.peek() === 0 && state.closed.peek() === undefined;
+		};
 		hooks.holdGroup = (group) => {
 			group.#holds++;
 			let held = true;

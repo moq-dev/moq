@@ -727,6 +727,9 @@ export class Window {
 			span.reach = start === undefined ? (holdings.nextStart(0n)?.sequence ?? below) : undefined;
 			if (span.end !== "open" && "time" in span.end) {
 				const time = new TimeEnd(span.end.time.pts, span.start);
+				// It walks from where the span reaches: a start the history couldn't place asks
+				// nothing below the oldest group held, so none of those may hold the end open.
+				if (span.reach !== undefined) time.held = time.accounted = span.reach;
 				const end = time.advance(span.start, holdings);
 				span.end = end === undefined ? { time } : { before: end };
 			}

@@ -372,3 +372,17 @@ test("a time start the held groups can't place is looked up, reading nothing unt
 	window = new Window([{ start: time(1000) }], 6n, groups);
 	expect([window.lookups(), window.floor(), window.missable(0n, 4n)]).toEqual([[], 0n, [{ start: 2n, end: 4n }]]);
 });
+
+test("a time end after an unanswered lookup walks from the oldest group held", () => {
+	// Only group 5 held, and a handler serving a history that holds nothing below it.
+	const groups = new Groups([[5n, started(5000)]]);
+	groups.looks = true;
+	const at = (millis: number) => Timestamp.fromMillis(millis);
+
+	const window = new Window([{ start: time(2500), end: time(3500) }], 5n, groups);
+	expect(window.lookups()).toEqual([{ pts: at(2500), below: 5n }]);
+	// Unanswered: the start reaches back, asking no miss below group 5, so none of those may hold
+	// the end open, and group 5 starting past it settles an empty read.
+	expect(window.found(at(2500), undefined, groups)).toBe(true);
+	expect([window.settled, window.missable(0n, 8n)]).toEqual([true, []]);
+});

@@ -856,12 +856,26 @@ type CachedGroup = {
 // A group's checked start, kept by sequence.
 type Start = { sequence: bigint; start: Timestamp };
 
+// Insert group `sequence`'s start into `starts`, sorted by sequence.
+function insertStart(starts: Start[], sequence: bigint, start: Timestamp): void {
+	const last = starts.at(-1);
+	if (!last || last.sequence < sequence) starts.push({ sequence, start });
+	else starts.splice(timelineIndex(starts, sequence), 0, { sequence, start });
+}
+
+// Remove group `sequence`'s start from `starts`, if indexed.
+function removeStart(starts: Start[], sequence: bigint): void {
+	const index = timelineIndex(starts, sequence);
+	if (starts[index]?.sequence === sequence) starts.splice(index, 1);
+}
+
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, sequence: bigint, from: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: bigint) => boolean;
-// Whether group `sequence` is cached and still open, so its first frame may still land.
-let cachedOpen: (producer: Producer, sequence: bigint) => boolean;
+// Whether group `sequence` is cached as a copy from frame 0 that has not written it yet, so its
+// start may still land, as the Rust `Slot::may_start` says.
+let cachedMayStart: (producer: Producer, sequence: bigint) => boolean;
 // Whether the producer is a copy a session receives, whose handler fetches by group alone.
 let receivedCopy: (producer: Producer) => boolean;
 // The sequences in `[start, end)` the producer caches, unsorted, costing the smaller of the span
@@ -1094,6 +1108,11 @@ export class Producer {
 	// The cached groups' checked starts, sorted by sequence, so a first frame finds its
 	// neighbors' with a search.
 	#bounds: Start[] = [];
+	// Where each cached group's frame 0 presented, sorted by sequence: what a time anchor resolves
+	// against. The checked starts, plus one accepted below the eviction watermark on a track whose
+	// history a local handler serves, which trusts it since no remote publisher wrote it, as the
+	// Rust `TrackState::starts` holds.
+	#starts: Start[] = [];
 	// The highest-sequence checked start evicted. Eviction is not a sequence prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
@@ -1374,7 +1393,7 @@ export class Producer {
 			);
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
-		startsOf = (producer) => producer.#bounds;
+		startsOf = (producer) => producer.#starts;
 		goneAt = (producer, sequence) => {
 			// Without a declared start, the first arrival stands in for it, as the tail's does.
 			const floor = producer.#wire?.served?.start ?? producer.#arrivals.first() ?? 0n;
@@ -1422,7 +1441,10 @@ export class Producer {
 			const entry = producer.#cached.get(sequence);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
 		};
-		cachedOpen = (producer, sequence) => producer.#cached.get(sequence)?.group.closed.peek() === undefined;
+		cachedMayStart = (producer, sequence) => {
+			const entry = producer.#cached.get(sequence);
+			return entry !== undefined && hooks.groupMayStart(entry.group);
+		};
 		receivedCopy = (producer) => producer.#wire !== undefined;
 		cachedIn = (producer, start, end) => {
 			if (end - start <= BigInt(producer.#cached.size)) {
@@ -1857,28 +1879,30 @@ export class Producer {
 		return late;
 	}
 
-	// Record a cached group's checked start: a bound for its neighbors, or unverified.
+	// Record a cached group's checked start: a bound for its neighbors, or unverified. Either
+	// indexes where it starts, an unverified one only where a local handler serves the history,
+	// as the Rust `index_start` does.
 	#record(entry: CachedGroup, start: Timestamp, late: boolean): void {
+		const sequence = entry.group.sequence;
 		if (late) {
 			entry.unverified = true;
 			for (const mirror of entry.mirrors.values()) hooks.unverifyGroup(mirror);
+			if (!this.#wire && this.#fills.serving) insertStart(this.#starts, sequence, start);
 			return;
 		}
 		entry.bound = start;
-		const sequence = entry.group.sequence;
-		const last = this.#bounds.at(-1);
-		if (!last || last.sequence < sequence) this.#bounds.push({ sequence, start });
-		else this.#bounds.splice(timelineIndex(this.#bounds, sequence), 0, { sequence, start });
+		insertStart(this.#bounds, sequence, start);
+		insertStart(this.#starts, sequence, start);
 	}
 
 	// Drop a group's checked start as it leaves the cache, raising the watermark to it when
 	// it was evicted.
 	#unbound(entry: CachedGroup, evicted = false): void {
+		const sequence = entry.group.sequence;
+		removeStart(this.#starts, sequence);
 		const start = entry.bound;
 		if (start === undefined) return;
-		const sequence = entry.group.sequence;
-		const index = timelineIndex(this.#bounds, sequence);
-		if (this.#bounds[index]?.sequence === sequence) this.#bounds.splice(index, 1);
+		removeStart(this.#bounds, sequence);
 		if (evicted && (this.#evicted === undefined || sequence > this.#evicted.sequence)) {
 			this.#evicted = { sequence, start };
 		}
@@ -3506,7 +3530,12 @@ export class Subscriber {
 			nextHeld: (from) => {
 				const group = state.timeline[timelineIndex(state.timeline, from)];
 				if (!group) return undefined;
-				const started = hooks.groupTimestamp(group);
+				// The start the cache indexed counts too: one accepted unverified, where a local handler
+				// serves the history, starts where its first frame says, as `nextStart` reports.
+				const starts = startsOf(producer);
+				const indexed = starts[timelineIndex(starts, group.sequence)];
+				const started =
+					hooks.groupTimestamp(group) ?? (indexed?.sequence === group.sequence ? indexed.start : undefined);
 				if (started) return { sequence: group.sequence, held: { started } };
 				return { sequence: group.sequence, held: hooks.groupStarted(group) ? "never" : "pending" };
 			},
@@ -3569,7 +3598,7 @@ export class Subscriber {
 				answer !== undefined &&
 				producer &&
 				holdings.nextStart(answer)?.sequence !== answer &&
-				cachedOpen(producer, answer)
+				cachedMayStart(producer, answer)
 			)
 				continue;
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
