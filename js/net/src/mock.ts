@@ -4,7 +4,8 @@
  * Creates paired client/server transports connected by in-memory streams.
  */
 
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import type { Getter } from "@moq/signals";
 import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";

@@ -35,4 +35,4 @@ Public API: none (test harness only). Wire: none.
 
 ## Related
 
-- [QUIC on the sim](/quest/m4/quic-sim.md) - reuses this `Pair` for MoQ sessions
+- [QUIC on the sim](/quest/m1/quic-sim.md) - reuses this `Pair` for MoQ sessions

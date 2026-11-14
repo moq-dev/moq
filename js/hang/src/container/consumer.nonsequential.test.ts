@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { Duration, type Installed, Manual } from "@moq/clock";
+import { Duration, type Installed } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { AudioConfigSchema } from "../catalog/audio.ts";
 import { Consumer } from "./consumer.ts";

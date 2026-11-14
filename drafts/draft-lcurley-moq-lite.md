@@ -162,7 +162,7 @@ The duration before an incomplete group is dropped is determined by the applicat
 
 Every subscription is scoped to a single Track.
 A subscription starts at a configurable Group (defaulting to the latest) and continues until a configurable end Group or until either the publisher or subscriber cancels the subscription.
-Both bounds may be refined to a Frame within their Group, so a subscription can start or stop partway through a Group rather than only on a Group boundary (see [Positions](#positions)).
+A subscription reads whole Groups; a FETCH reads one Group, or a slice of one (see [Positions](#positions)).
 
 The subscriber and publisher both indicate their delivery preference:
 - `Priority` indicates if Track A should be transmitted instead of Track B.
@@ -197,7 +197,7 @@ The contents are opaque to the moq-lite layer.
 
 Frames within a Group are numbered from 0 in the order they were produced.
 This index is not transmitted per frame; it is implied by position within the Group, anchored by the [GROUP](#group) message's `Frame Start`.
-A Group Stream normally starts at frame 0, but MAY start later when the publisher only holds (or was only asked for) part of the Group.
+A Group Stream normally starts at frame 0.
 
 Each frame of a timed Track carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
 A Track without a `Timescale` is untimed: its frames carry no timestamp.
@@ -210,22 +210,16 @@ A relay serves a Track's timestamps on as it received them, including ones it di
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
 Positions order lexicographically: by group first, then by frame within the group.
 
-SUBSCRIBE and FETCH bound their delivery by Position rather than by Group alone.
-A SUBSCRIBE Range's Absolute anchors name Positions (see [SUBSCRIBE](#subscribe)), and FETCH carries a `Frame Start` and `Frame End` within its group; a frame index of 0 at the start, or an absent end frame, is the whole group.
-
-The bounds are chosen so that two subscriptions abut exactly.
-A Range starts at its start Position and stops just before its end Position, so a subscriber that has received frames 0 through `N-1` of group `G` and wants the remainder starts a Range at (`G`, `N`).
-Ending the first subscription's Range at (`G`, `N`) covers exactly the complement with no gap and no overlap: the two requests carry the *same* numbers on the wire.
+SUBSCRIBE reads whole Groups: a Range's Absolute Anchors name Groups (see [SUBSCRIBE](#subscribe)), so a subscription never starts or stops partway through one.
+FETCH reads one Group, or a slice of one: its `Frame Start` and `Frame End` bound the returned frames, and a frame index of 0 at the start, or an absent end frame, is the whole Group.
+A subscriber that has received frames 0 through `N-1` of group `G` and wants the rest FETCHes `G` from frame `N` and subscribes from Group `G+1`, so the two requests cover the Track with no gap and no overlap.
 
 This is what lets a subscriber move a Track to a different publisher partway through a Group instead of waiting for the next Group to start, which matters for Tracks whose current Group may stay open indefinitely.
 A Group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
 
-A partial Group is only ever delivered to a subscriber that asked for one.
-A publisher that cannot serve a Group from the frame the subscription names MUST skip that Group entirely and resolve the subscription to a later one, rather than deliver the part it holds.
-The resolved start is therefore always either exactly the requested Position or the beginning of a later Group, never some third Position the subscriber did not choose.
-
+A partial Group is only ever delivered to a subscriber that asked for one with FETCH, or as the [continuation](#yield) of a paused Group.
+A publisher that holds only part of a Group a subscription covers names it in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
 A Group is the unit of decodability: its earlier Frames may carry a keyframe or compression state the later Frames need.
-A subscriber MAY start a Range at any frame index, whether or not it retains the earlier Frames.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
@@ -892,7 +886,6 @@ A Group MAY contain zero FRAME messages, potentially indicating a gap in the tra
 A frame MAY contain an empty payload, potentially indicating a gap in the group.
 
 The GROUP message's `Frame Start` gives the index of the first FRAME on the stream, so a stream carrying only part of a Group is self-describing.
-It is redundant with the subscription's own start Position in the steady state, and carried anyway because a SUBSCRIBE_UPDATE that moves the bound races the Group Streams already in flight: the two travel on different streams with no ordering between them, so the receiver would otherwise have to guess which bound a given Group Stream was opened under.
 
 A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription, except to re-offer a Group whose stream it reset (see [SUBSCRIBE_DROP](#subscribe-drop)), or to [continue](#yield) one.
 The re-offer can arrive before that reset: a subscriber holds a Group Stream for a sequence whose earlier stream is still arriving unread until that stream ends, then discards it if the earlier stream completed the Group, or reads it if the earlier stream was reset.
@@ -1637,7 +1630,6 @@ Range {
 Anchor {
   Anchor Type (i)
   [Group Sequence (i)]
-  [Frame Index (i)]
   [Groups Back (i)]
   [Timestamp (i)]
 }
@@ -1688,7 +1680,7 @@ Each Range implicitly takes the next Range ID on the stream, starting at 0, whic
 Which fields follow, and what the Anchor names:
 
 - None (0x0): no fields. As a `Start`, the oldest Group (no floor); as an `End`, the live edge (unbounded).
-- Absolute (0x1): `Group Sequence` and `Frame Index`, a Position. A `Start` delivers from it and an `End` stops just before it.
+- Absolute (0x1): `Group Sequence`. A `Start` delivers from that Group and an `End` stops just before it.
 - Relative (0x2): `Groups Back`, the Group that many before the latest, 0 being the latest. Included as an `End`.
 - Time (0x3): `Timestamp`, the Group containing that time: the one whose sequence, its start (see [Group](#group)), is the highest at or below it. Included as an `End`.
 
@@ -1707,9 +1699,7 @@ A subscriber that buffers is then handed the head of what it can still play inst
 A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
-An Absolute `Start` past frame 0 delivers its group from that frame; a start resolved at a later group is always delivered from frame 0.
-A subscriber MAY name any start frame, as described in [Positions](#positions).
-An Absolute `End` past frame 0 delivers its group up to that frame.
+A Range covers whole Groups; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
 
 ## SUBSCRIBE_UPDATE {#subscribe-update}
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
@@ -1740,7 +1730,6 @@ SUBSCRIBE_UPDATE Message {
 
 See [SUBSCRIBE](#subscribe) for information about each field.
 An `Update` no larger than the previous one only confuses the subscriber's own accounting of stale drops; the publisher echoes the latest value it read.
-Moving a `Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; it only bounds what the publisher sends from here on.
 
 **Remove Count** and **Range ID**:
 The live Ranges to retire.
@@ -1982,7 +1971,6 @@ A subscriber takes it as where the live feed is: a relay holding groups from an 
 One per Range of the SUBSCRIBE, in Range ID order: the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
 0 means the Range has no Group to deliver, including one an update retired before the answer.
 The Range's Groups from this one are owed as described in [SUBSCRIBE_DROP](#subscribe-drop); an earlier one is not, though it MAY still arrive.
-A Range whose `Range Start` is its requested start Group begins at the requested frame, and otherwise at frame 0 (see [Positions](#positions)).
 A subscriber MUST treat a `Range Start Count` other than the SUBSCRIBE's `Range Count` as a PROTOCOL_VIOLATION.
 A Range an update adds has its start reported by [SUBSCRIBE_STARTED](#subscribe-started) instead, even one added before SUBSCRIBE_OK.
 
@@ -2331,8 +2319,8 @@ A subscriber MUST handle gaps, potentially caused by congestion.
 **Frame Start**:
 The index of the first FRAME message on this stream within the group (see [Positions](#positions)).
 A plain absolute index; 0 means the stream carries the group from its beginning, which is the common case.
-A non-zero value means the leading frames are not on this stream, either because the subscription started partway into this group or because the publisher only holds part of it.
-The subscriber MUST NOT assume it will receive the missing frames on another stream; they are a gap unless a separate subscription or FETCH covers them, or the stream [continues](#yield) a paused Group.
+A non-zero value means the leading frames are not on this stream.
+The subscriber MUST NOT assume it will receive the missing frames on another stream; they are a gap unless a FETCH covers them, or the stream [continues](#yield) a paused Group.
 
 
 ## FRAME
@@ -2456,10 +2444,10 @@ An application-specific payload.
 
 ### Subscriptions {#changelog-07-subscribe}
 
-- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges. Each end is an Anchor: none, an absolute Position (exclusive as an end), a count of Groups back from the latest, or a presentation time.
+- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none, an absolute Group (exclusive as an end), a count of Groups back from the latest, or a presentation time.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A relay forwards the smallest stated value.
-- SUBSCRIBE may start at any frame, including when the subscriber no longer holds the prefix.
+- FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups: a read starting partway through a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.

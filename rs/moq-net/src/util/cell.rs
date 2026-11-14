@@ -28,7 +28,13 @@ impl<T: Send + Sync> SendCell<T> {
 	}
 }
 
-// SAFETY: the only constructor requires T: Send + Sync. The private
+impl<T: Default + Send + Sync> Default for SendCell<T> {
+	fn default() -> Self {
+		Self(T::default())
+	}
+}
+
+// SAFETY: both constructors require T: Send + Sync. The private
 // field cannot be replaced with another type; cloning preserves T's bounds.
 unsafe impl<T> Send for SendCell<T> {}
 

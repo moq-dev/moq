@@ -67,10 +67,9 @@ import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
-	entriesOf,
 	hasWireTime,
 	LiveRanges,
-	type RangeEntry,
+	rangesOf,
 	requestedRanges,
 	type Subscribe,
 	SubscribeDrop,
@@ -82,6 +81,7 @@ import {
 	SubscribeStarted,
 	SubscribeUpdate,
 	spanOf,
+	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
 import { encodeTracksEvent, type Tracks as TracksMessage } from "./tracks.ts";
@@ -301,7 +301,7 @@ type SubscriptionControlOptions = {
 	/** The SUBSCRIBE's ranges, which each lite-07 update edits. */
 	live: LiveRanges;
 	/** Apply an update, with every live range by Range ID on lite-07. */
-	apply: (update: SubscribeUpdate, live: { id: bigint; entry: RangeEntry }[]) => void;
+	apply: (update: SubscribeUpdate, live: { id: bigint; range: WireRange }[]) => void;
 };
 
 /**
@@ -437,20 +437,15 @@ class SubscriptionControls {
 // nor looks a time start up again in newer holdings. A start reaching back to the oldest group
 // held stays as it was, since an absolute start would turn it into a floor the subscriber never
 // named.
-function pin(entry: RangeEntry, resolved: Resolved | undefined): RangeEntry {
-	if (!resolved) return entry;
-	const range = { ...entry.range };
-	let { from, to } = entry;
-	if (resolved.floored && (range.start?.relative !== undefined || range.start?.time !== undefined)) {
+function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
+	if (!resolved) return asked;
+	const range = { ...asked };
+	if (resolved.floored && (range.start?.relative !== undefined || range.start?.time !== undefined))
 		range.start = { absolute: resolved.start };
-		from = [resolved.start, 0];
-	}
 	// An end resolves once it settles; until then it is reported open.
-	if ((range.end?.relative !== undefined || range.end?.time !== undefined) && resolved.end !== undefined) {
+	if ((range.end?.relative !== undefined || range.end?.time !== undefined) && resolved.end !== undefined)
 		range.end = { absolute: resolved.end };
-		to = [resolved.end, 0];
-	}
-	return { range, from, to };
+	return range;
 }
 
 // The later of two locations, either of which may be unknown.
@@ -1251,7 +1246,7 @@ export class Publisher {
 			}
 
 			// The SUBSCRIBE's ranges, and the Range ID of each range the model holds, in its order.
-			const asked = entriesOf(msg);
+			const asked = rangesOf(msg);
 			// Where each Range ID sits among the model's ranges, as of the last update applied.
 			let positions = new Map(asked.map((_, index) => [BigInt(index), index]));
 			controls = new SubscriptionControls({
@@ -1265,11 +1260,11 @@ export class Publisher {
 					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					if (hasRanges(this.version)) {
 						const resolved = hooks.servingResolved(track);
-						const entries = live.map(({ id, entry }) => {
+						const ranges = live.map(({ id, range }) => {
 							const index = positions.get(id);
-							return index === undefined ? entry : pin(entry, resolved[index]);
+							return index === undefined ? range : pin(range, resolved[index]);
 						});
-						Object.assign(update, spanOf(this.version, entries));
+						Object.assign(update, spanOf(this.version, ranges));
 						positions = new Map(live.map(({ id }, index) => [id, index]));
 					}
 					// Every update restates the wanted group. Past our largest it is a join, which
