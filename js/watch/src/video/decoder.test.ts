@@ -1427,6 +1427,38 @@ it("buffered video starts on a finished track shorter than its floor, and ends",
 	}
 });
 
+// Holes keep coverage short of the floor while the max delay parks the read loop before it reaches the
+// finish, so startup has to learn of it from the subscription.
+it("buffered video starts on a finished track whose holes park it at the max delay, and ends", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true, 1000);
+	if (!playback.track) throw new Error("missing video track");
+	try {
+		const first = playback.track.createGroup(0n);
+		first.writeFrame(legacyFrame(Duration.micros(0)));
+		first.finish();
+		// Group 1 never arrives.
+		const second = playback.track.createGroup(2n);
+		second.writeFrame(legacyFrame(Duration.micros(2_000_000)));
+		second.finish();
+		await microtasks();
+		await clock.advance(100);
+		expect(playback.sync.playing.peek()).toBe(false);
+
+		playback.track.finish();
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.sync.playing.peek()).toBe(true);
+		for (let i = 0; i < 40; i++) await clock.advance(100);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(2_000_000);
+		expect(playback.decoder.out.ended.peek()).toBe(true);
+	} finally {
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
 for (const kind of ["legacy", "cmaf"] as const) {
 	it(`${kind} bounds startup across disconnected ranges, then starts on the retained timeline`, async () => {
 		const clock = manualAt(0);

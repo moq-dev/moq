@@ -211,7 +211,8 @@ export class Decoder {
 			const timestamp = effect.get(active.first);
 			if (timestamp === undefined) return finish ? undefined : null;
 			const ranges = effect.get(active.buffered);
-			return { ...startupSpan(ranges, timestamp), complete: finish !== undefined };
+			const complete = finish !== undefined || effect.get(active.complete);
+			return { ...startupSpan(ranges, timestamp), complete };
 		});
 		this.#clock = this.sync.track({ target, startup });
 		this.#signals.cleanup(() => this.#clock.close());
@@ -656,6 +657,10 @@ class DecoderTrack {
 	// The publisher finishing the track: "read" once every frame is fed to the codec, then "played"
 	// once the clock reached the last one.
 	readonly finish = new Signal<Finish | undefined>(undefined);
+	// Whether the running subscription's media all arrived, its track finished. The read loop reaches
+	// the finish only past #waitStartup, which parks once the max delay is buffered, short of the floor
+	// when holes cut its coverage.
+	readonly complete = new Signal(false);
 
 	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
 	// is only held until the first one opens.
@@ -724,6 +729,10 @@ class DecoderTrack {
 		effect.cleanup(() => consumer.close());
 		this.consumer = consumer;
 		this.#predecessor = undefined;
+		effect.run((inner) => {
+			if (inner.get(consumer.finished)) this.complete.set(true);
+		});
+		effect.cleanup(() => this.complete.set(false));
 		return consumer;
 	}
 
@@ -1294,6 +1303,11 @@ class Rendition {
 	// The publisher finishing the clock-driving decoder's track.
 	get finish(): Getter<Finish | undefined> {
 		return this.min.finish;
+	}
+
+	// Whether the clock-driving decoder's media all arrived.
+	get complete(): Getter<boolean> {
+		return this.min.complete;
 	}
 
 	// Show the max-delay picture when it is at or past the min-delay one, so it wins ties, else the
