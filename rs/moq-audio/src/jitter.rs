@@ -249,6 +249,18 @@ impl History {
 	}
 }
 
+/// Frames stuck behind one outage across several intervals, folded as one observation.
+struct Stall {
+	/// The bucket of the largest delay seen.
+	bucket: usize,
+	/// When the latest stalled frame arrived.
+	late: f64,
+	/// The earliest a stalled frame was due.
+	due: f64,
+	/// Intervals spanned besides the one it folds as.
+	span: f64,
+}
+
 /// Estimates the playout target from arrival timing alone.
 pub(crate) struct Estimator {
 	/// The codec's frame duration, never learned from observed timestamps.
@@ -269,6 +281,15 @@ pub(crate) struct Estimator {
 	peak: f64,
 	/// A declared end precedes the next measured observation, so the silence before it is not idle.
 	ended: bool,
+	/// The earliest a frame stalled in this interval was due.
+	due: f64,
+	/// The latest a frame stalled in this interval arrived.
+	late: f64,
+
+	/// The stall still open, folded once it ends.
+	stall: Option<Stall>,
+	/// Empty intervals before this one, held until it shows whether they belong to a stall.
+	pending: f64,
 
 	histogram: [f64; BUCKETS],
 	/// How much of the histogram is still the prior's rather than evidence.
@@ -286,6 +307,10 @@ impl Estimator {
 			interval: 0.0,
 			peak: 0.0,
 			ended: false,
+			due: f64::INFINITY,
+			late: f64::NEG_INFINITY,
+			stall: None,
+			pending: 0.0,
 			histogram: std::array::from_fn(prior),
 			prior: 1.0,
 		}
@@ -315,6 +340,7 @@ impl Estimator {
 		let Some(origin) = self.origin else {
 			self.origin = Some(arrival);
 			self.peak = delay;
+			self.note(arrival, delay);
 			return;
 		};
 
@@ -322,25 +348,83 @@ impl Estimator {
 		let resumed = std::mem::take(&mut self.ended);
 		if interval <= self.interval {
 			self.peak = self.peak.max(delay);
+			self.note(arrival, delay);
 			return;
 		}
 
-		self.fold(Some(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1)));
+		self.close(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1));
 
 		if resumed {
 			// A silence the publisher declared says nothing about the path, so the
 			// estimate keeps what it had and a fresh interval starts here.
+			self.settle();
 			self.origin = Some(arrival);
 			self.interval = 0.0;
 		} else {
-			// An interval with no arrival relaxes the estimate toward the prior.
-			let idle = f64::min(interval - self.interval - 1.0, IDLE_MAX);
-			for _ in 0..idle as u32 {
-				self.fold(None);
-			}
+			// Held until this interval closes: a stall it holds owns them.
+			self.pending = interval - self.interval - 1.0;
 			self.interval = interval;
 		}
 		self.peak = delay;
+		self.due = f64::INFINITY;
+		self.late = f64::NEG_INFINITY;
+		self.note(arrival, delay);
+	}
+
+	/// A frame later than a whole interval was due in an earlier one, so it is stalled.
+	fn note(&mut self, arrival: f64, delay: f64) {
+		if delay > RESAMPLE {
+			self.due = self.due.min(arrival - delay);
+			self.late = self.late.max(arrival);
+		}
+	}
+
+	/// Folds the interval that just ended. One whose stalled frames were due before the
+	/// open stall's last one arrived is still behind that stall, so it joins it instead
+	/// of counting again: one outage is one observation, as one queue's hundred frames
+	/// are within an interval. Only for a window of due time, since back-to-back
+	/// flushes are a recurring stall, not one.
+	fn close(&mut self, bucket: usize) {
+		let stalled = self.late != f64::NEG_INFINITY;
+		let pending = std::mem::take(&mut self.pending);
+		if stalled
+			&& let Some(stall) = &mut self.stall
+			&& self.due < stall.late
+			&& self.due - stall.due < WINDOW
+		{
+			stall.bucket = stall.bucket.max(bucket);
+			stall.span += pending + 1.0;
+			stall.late = self.late;
+			return;
+		}
+
+		self.settle();
+		if stalled {
+			self.stall = Some(Stall {
+				bucket,
+				late: self.late,
+				due: self.due,
+				span: pending,
+			});
+		} else {
+			for _ in 0..f64::min(pending, IDLE_MAX) as u32 {
+				self.fold(None);
+			}
+			self.fold(Some(bucket));
+		}
+	}
+
+	/// A stall folds once, its largest delay, and every other interval it spanned is
+	/// idle, so the estimate keeps its time constant without the stall taking the
+	/// prior's regained weight.
+	fn settle(&mut self) {
+		let Some(stall) = self.stall.take() else {
+			return;
+		};
+		self.fold(Some(stall.bucket));
+		for _ in 0..f64::min(stall.span, IDLE_MAX) as u32 {
+			self.fold(None);
+		}
 	}
 
 	/// A declared end lies between the previous observation and the next, so the
@@ -446,13 +530,15 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 12] = [
+	const CORPUS: [&str; 14] = [
 		"advertised",
 		"backlog",
+		"batches",
 		"buildup",
 		"fixed",
 		"flush",
 		"idle",
+		"outage",
 		"paced",
 		"reorder",
 		"silence",
@@ -512,7 +598,9 @@ pub(crate) mod tests {
 			target.observe(50.0 + i as f64 * 20.0, i as f64 * 20.0);
 		}
 		let settled = target.millis();
+		// The gap folds once the interval after it closes.
 		target.observe(50.0 + 500.0 * 20.0 + 30_000.0, 500.0 * 20.0 + 30_000.0);
+		target.observe(50.0 + 500.0 * 20.0 + 30_500.0, 500.0 * 20.0 + 30_500.0);
 		assert!(target.millis() > settled);
 	}
 
@@ -527,10 +615,12 @@ pub(crate) mod tests {
 	fn the_measured_term_is_bounded_by_the_histogram() {
 		let mut target = Target::new(Duration::ZERO, true, None);
 		target.set_frame(20.0);
-		// A frame every 20 ms of media arriving a whole second apart: every interval
-		// sees a delay far past the last bucket.
-		for i in 0..200 {
-			target.observe(i as f64 * 1000.0, i as f64 * 20.0);
+		// A publisher flushing 3 s of media at once, every 3 s: each flush is its own
+		// stall, with its first frame later than the last bucket.
+		for batch in 0..200 {
+			for frame in 0..150 {
+				target.observe((batch + 1) as f64 * 3000.0, (batch * 3000 + frame * 20) as f64);
+			}
 		}
 		assert_eq!(target.millis(), BUCKETS as f64 * BUCKET + 20.0);
 	}
