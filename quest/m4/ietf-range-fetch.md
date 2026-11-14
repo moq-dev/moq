@@ -76,7 +76,3 @@ Public API: none. Wire: none (draft-defined messages only).
 ## Closes
 
 - [#8577](https://github.com/moq-dev/moq/issues/8577) - a Standalone FETCH that spans more than one group is refused
-
-## Related
-
-- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - owns the one-group refusal note this narrows

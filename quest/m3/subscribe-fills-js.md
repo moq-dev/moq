@@ -16,7 +16,7 @@ work, and no quest requires one in a later milestone, since a blocker ranks
 by its own milestone. ✅ m3 (rejected: m2, where the cut would wait on it;
 pulling the m2 blocker into m1). It ranks right after m2, when it can start.
 
-Moved to m1 2026-11-12 (maintainer, /quest-audit): additive, so the cut does not wait on it; `Fill` only gains fields and the wire is unchanged. It left the [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) epic, where it was planned on 2026-11-03.
+Moved to m1 2026-11-12 (maintainer, /quest-audit): additive, so the cut does not wait on it; `Fill` only gains fields and the wire is unchanged. It left the Subscribe ranges epic, where it was planned on 2026-11-03.
 
 The maintainer chose to plan these separately from
 [moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696), which landed
