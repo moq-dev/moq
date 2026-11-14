@@ -49,5 +49,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Sim rule checks](/quest/m1/quic-sim-rules.md) - QUIC's rules checked on the same runs
 - [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) - the scripted partition and failover fixtures

@@ -48,5 +48,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Sim rule checks](/quest/m1/quic-sim-rules.md) - the same rules checked on our own seeds
 - [Interop audit](/quest/m3/audit-interop.md) - the MoQ-level matrix; this is the QUIC layer beneath it

@@ -205,6 +205,20 @@ mutation uses `impaired`, where that fault is armed.
 | `fetch-never-sent` | sending a FETCH for an uncached group, at the subscriber and at the edge relay | `bursts_cross_a_cluster::loopback` |
 | `peer-link-never-redialed` | redialing a cluster peer after its link is lost | `bursts_cross_a_flapping_peer::loopback` |
 
+The `quic-` mutations break one of QUIC's rules in moq-quic while data still
+arrives, and require moq-quic's rule checker (`moq_quic::sim::Rules` and the
+congestion window check in its test `Pair`) to fail the test that shows it.
+Their `# package:` and `# target:` headers point the script at moq-quic's unit
+tests instead of the relay drills.
+
+| Mutation | Breaks | Test that must fail |
+|---|---|---|
+| `quic-amplification-full-datagram` | RFC 9000 §8.1: a server sends an unvalidated address at most three times what it received | `tests::long_header_packets_fit_a_large_mtu` |
+| `quic-client-initial-unpadded` | RFC 9000 §14.1: a client pads each datagram carrying an Initial to 1200 bytes | `tests::sim::random_workloads` |
+| `quic-coalesced-cid-mismatch` | RFC 9000 §12.2: coalesced packets share one connection ID | `tests::sim::random_workloads` |
+| `quic-long-header-length-overrun` | RFC 9000 §17.2: every long header parses within its datagram | `tests::sim::random_workloads` |
+| `quic-congestion-window-ignored` | RFC 9002 §7: bytes in flight stay within the congestion window | `tests::sim::random_workloads` |
+
 A mutated tree that fails to compile is a failure of the proof, not a pass: a
 compile error shows the patch touched something, not that the drill was
 watching. So is a drill that fails for a reason other than the one its mutation
@@ -213,7 +227,7 @@ The script runs every drill through nextest, whose process-level timeout also
 terminates a mutation that wedges outside the drill's own Tokio timeouts.
 
 Adding one: write the patch (a `git diff` of the behavior removed), give it the
-two headers, and add a row above.
+two headers (four for a test outside the drills), and add a row above.
 
 ## What is underneath
 

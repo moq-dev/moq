@@ -2,11 +2,16 @@
 //! rate-limited bottleneck queue, then random loss, duplication, jitter, and reordering
 //!
 //! The crate's own tests drive two endpoints across a [`Link`] each way, and drivers that
-//! run QUIC on kio's simulator with no sockets use it too. It tracks the crate's internals, so it can change in any release.
+//! run QUIC on kio's simulator with no sockets use it too. [`Rules`] checks what crosses it
+//! against QUIC's rules. It tracks the crate's internals, so it can change in any release.
 
 use rand::{RngExt, rngs::StdRng};
 
 use crate::{Duration, Instant};
+
+mod rules;
+
+pub use rules::{Rules, Violation};
 
 /// A rate-limited FIFO queue, as at a bottleneck router
 #[derive(Debug, Clone)]
