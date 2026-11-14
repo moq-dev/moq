@@ -390,7 +390,7 @@ function getHashForAlgorithm(alg: Algorithm): "SHA-256" | "SHA-384" | "SHA-512" 
 export const Key = {
 	/** Parse a key from JSON or base64url-encoded JSON. */
 	parse,
-	/** Derive a verify-only copy, dropping the private material. Throws on a symmetric (oct) key, which has no public half. */
+	/** Derive a verify-only copy, dropping the private material. Throws on a symmetric (oct) key, which has no public half, and on a key that cannot verify. */
 	public: toPublic,
 	/** Sign the claims with this key, returning the encoded token. */
 	sign,
