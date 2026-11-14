@@ -811,16 +811,66 @@ mod tests {
 		}
 
 		// Same height, wider pixels: the rung retires and a fresh one needs a probe.
+		// A probe waiting on that session would hang here: the rung holding it retires only
+		// once the probe has resolved the new ladder.
 		source.resize(480, 360);
-		let derived = kio::clock::timeout(
-			std::time::Duration::from_secs(5),
-			await_catalog(&mut catalogs, |snapshot| {
-				!snapshot.video.renditions.contains_key("video/120p")
-			}),
-		)
-		.await
-		.expect("the probe waited on the session its own retiring rung holds");
+		let derived = await_catalog(&mut catalogs, |snapshot| {
+			!snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
 		assert!(derived.video.renditions.contains_key("video/120p.2"));
+
+		transcoder.abort();
+	}
+
+	/// Under a budget, a fetch alone starts no live encode: one would take the only session and
+	/// hold it for as long as the fetch, waiting behind it for that session, stays demand.
+	#[tokio::test]
+	async fn a_fetch_alone_takes_the_only_session() {
+		let source = source_catalog(320, 240);
+		let source_fetches = source._track.requests();
+		let sessions = Sessions::new(std::num::NonZeroUsize::MIN);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			sessions,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		// A past group, the only demand on the rung.
+		let rung = consumer.track("video/120p").unwrap();
+		let fetching = rung.fetch_group(7, None);
+		let request = source_fetches.requested_fill().await.expect("the source track closed");
+		let mut group = request.accept(7, None).unwrap();
+		write_keyframe(&mut group);
+		group.finish().unwrap();
+
+		// A live encode holding the session would hang this.
+		let mut fetched = fetching.await.unwrap();
+		while fetched.read_frame().await.unwrap().is_some() {}
+		assert!(fetched.finished().await.unwrap() > 0, "the fetch produced no frames");
+		assert!(
+			source._track.subscription().is_none(),
+			"the fetch started a live encode"
+		);
 
 		transcoder.abort();
 	}

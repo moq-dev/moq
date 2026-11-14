@@ -130,6 +130,11 @@ impl Sessions {
 		}))
 	}
 
+	/// Whether a budget is set.
+	pub(crate) fn is_set(&self) -> bool {
+		self.0.is_some()
+	}
+
 	/// Wait for a serving session, held until the permit drops; `None` without a budget.
 	pub(crate) async fn serve(&self) -> Option<OwnedSemaphorePermit> {
 		Some(acquire(self.0.as_ref()?.serving.clone()).await)
