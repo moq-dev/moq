@@ -41,6 +41,10 @@ mod protocol;
 mod session;
 mod socket;
 
+/// Test support for the `fuzz/` harness: the target body and its seeds.
+#[cfg(all(any(test, feature = "fuzz"), feature = "tcp", feature = "ws"))]
+pub mod fuzz;
+
 /// The transport abstraction, and the byte-stream implementation.
 pub mod transport;
 

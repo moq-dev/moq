@@ -30,7 +30,7 @@ that guard what production traffic reaches join m1 ahead of the questline's
 m4 default, so changes are proven before they ship: the
 [QUIC Interop Runner](/quest/m1/quic-interop.md),
 [sim rule checks](/quest/m1/quic-sim-rules.md),
-[relay parser fuzz targets](/quest/m1/fuzz-relay-parsers.md), and from m4
+relay parser fuzz targets (qmux, moq-auth), and from m4
 [the relay on the sim](/quest/m1/quic-sim.md),
 [mutation testing](/quest/m1/mutants.md), and
 [peer-reachable unsafe](/quest/m1/wire-fuzz-coverage.md). OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on

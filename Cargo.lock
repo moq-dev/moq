@@ -4223,6 +4223,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-auth-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-auth",
+]
+
+[[package]]
 name = "moq-bench"
 version = "0.1.0"
 dependencies = [
@@ -6717,6 +6725,14 @@ dependencies = [
  "tracing",
  "web-transport-trait",
  "workspace-hack",
+]
+
+[[package]]
+name = "qmux-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "qmux 0.7.0",
 ]
 
 [[package]]

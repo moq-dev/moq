@@ -44,7 +44,8 @@ if ! rustup run nightly rustc --version >/dev/null 2>&1; then
 fi
 
 if [[ "$action" == run ]]; then
-    cargo run --locked -q -p "$crate" --features fuzz --example fuzz-seeds -- "$dir"/seeds
+    # By manifest, since a crate may also depend on its own published release (qmux, moq-auth).
+    cargo run --locked -q --manifest-path rs/"$crate"/Cargo.toml --features fuzz --example fuzz-seeds -- "$dir"/seeds
 fi
 mkdir -p "$dir"/corpus/"$target"
 
