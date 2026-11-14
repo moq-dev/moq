@@ -35,8 +35,8 @@ fixtures!(
 	stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it,
 	holds_retire_once_nothing_can_recover,
 	exhausted_counters_rotate_the_identity,
-	a_quiet_origin_is_reached_by_a_kept_request,
-	sweep_requests_reach_a_quiet_origin,
+	a_quiet_origin_is_reached_once_a_withdrawal_lands,
+	sweep_relays_reach_a_quiet_origin,
 	announcement_cost_follows_sessions_and_live_claims,
 	sweep_scoped_handoff,
 	sweep_handoff,
@@ -50,7 +50,7 @@ fixtures!(
 );
 
 /// An origin reaching a node through two relays, the first preferred and the
-/// second a feasible successor.
+/// second a standby.
 fn two_relays(rule: Rule) -> Sim {
 	let (origin, a, b, node) = (0, 1, 2, 3);
 	let mut sim = Sim::with(rule, 4);
@@ -783,8 +783,8 @@ fn stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it(rule:
 	}
 }
 
-/// Holds follow feasible advertisements only, so they cannot prop each other
-/// up. When the origin dies, every node in a ring goes offline and keeps no
+/// Holds follow only the path they were built on, so they cannot prop each
+/// other up. When the origin dies, every node in a ring goes offline and keeps no
 /// route state, with no timer, and none reports an END the origin did not send.
 fn holds_retire_once_nothing_can_recover(rule: Rule) {
 	let origin = 4;
@@ -852,7 +852,7 @@ fn exhausted_counters_rotate_the_identity(rule: Rule) {
 /// flight. When it lands, b moves to an equal-metric route through y and n
 /// reaches the origin with no request: n's route through b never named z, the
 /// far end of the session it lost.
-fn a_quiet_origin_is_reached_by_a_kept_request(rule: Rule) {
+fn a_quiet_origin_is_reached_once_a_withdrawal_lands(rule: Rule) {
 	let (origin, w, x, y2, y, b, n, z, client) = (0, 1, 2, 3, 4, 5, 6, 7, 8);
 	let mut sim = Sim::with(rule, 9);
 	sim.leaf(origin);
@@ -887,7 +887,7 @@ fn a_quiet_origin_is_reached_by_a_kept_request(rule: Rule) {
 /// Random meshes churn sessions and hold and deliver messages out of step,
 /// then release every hold. Every relay that can still reach a quiet origin
 /// ends with a route to it.
-fn sweep_requests_reach_a_quiet_origin(rule: Rule) {
+fn sweep_relays_reach_a_quiet_origin(rule: Rule) {
 	const RELAYS: usize = 5;
 	let mut stranded = 0;
 	for seed in 0..300u64 {
@@ -1027,7 +1027,7 @@ fn announcement_cost_follows_sessions_and_live_claims(rule: Rule) {
 		let after = sim.state();
 		assert_eq!(after.items, relays * (claims - 1));
 		assert_eq!(after.floors, retained.floors, "no tombstones");
-		assert_eq!(after.pending, 0, "every ROUTE_END echo drained");
+		assert_eq!(after.pending, 0, "every dead hop and doubt collected");
 		sim.check().unwrap();
 
 		// The client cycles through disjoint regions, one with a live claim.
@@ -1582,8 +1582,7 @@ fn mutually_preferred_links_settle(rule: Rule) {
 }
 
 /// A relay leaves a draining neighbour for a costlier path that does not drain,
-/// and that path, not draining itself, is what it offers on. The distance rule
-/// keeps the edge on the draining neighbour until a seqno refresh instead.
+/// and that path, not draining itself, is what it offers on.
 #[test]
 fn goaway_moves_a_relay_to_a_path_that_does_not_drain() {
 	let (origin, near, far, relay, edge) = (0, 1, 2, 3, 4);

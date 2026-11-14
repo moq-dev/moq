@@ -100,8 +100,10 @@ pub struct Config {
 	/// The origin's identity on every wire: the hop id appended to broadcast hop chains
 	/// for loop detection, and the route identity it declares on moq-lite-07, which also
 	/// names it in the hops of each route it forwards there. Random by
-	/// default, so each process is a fresh identity; one reused across a restart has its
-	/// lite-07 routes refused until a seqno request lifts them past the old process's.
+	/// default, so each process is a fresh identity. Set one only if it is fresh per
+	/// process too: a restarted process numbers its lite-07 sessions from 1 again, so a
+	/// peer that still remembers one of the old process's sessions as closed refuses
+	/// the routes through the new one's session of the same number.
 	pub hop: NonZeroU64,
 
 	/// The key this origin proves to every lite-07 peer, which files the routes it sends

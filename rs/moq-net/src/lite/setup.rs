@@ -767,8 +767,8 @@ mod tests {
 		}
 	}
 
-	/// Lite-07 refuses a free link both ways: the feasibility condition relies on every
-	/// link adding at least 1.
+	/// Lite-07 refuses a free link both ways: selection converges only because every
+	/// link adds at least 1.
 	#[test]
 	fn lite07_refuses_a_zero_cost() {
 		let msg = Setup {

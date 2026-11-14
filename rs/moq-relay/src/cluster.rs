@@ -2433,9 +2433,9 @@ async fn lan_discovery(
 /// The param is dial-side configuration, not something the peer reads off the
 /// URL (it rides SETUP instead), so it is stripped before connecting. An
 /// unparseable value is an error rather than a silent default: a mispriced link
-/// skews routing for every broadcast crossing it. So is 0: route selection needs
-/// every link to cost something, or a route could match its own feasibility
-/// distance.
+/// skews routing for every broadcast crossing it. So is 0: route selection
+/// converges only because every link costs something, so extending a route never
+/// leaves it as cheap as the one it came from.
 fn take_cost(url: &mut Url) -> anyhow::Result<Option<u64>> {
 	let Some(value) = url
 		.query_pairs()
