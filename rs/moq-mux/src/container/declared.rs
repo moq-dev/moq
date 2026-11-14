@@ -32,9 +32,9 @@ pub(crate) fn depth(config: &VideoConfig) -> crate::Result<Option<usize>> {
 /// slot, which needs no frame spacing, so a DTS can fall before the timeline's zero. A tick is the
 /// caller's timescale, the finest its container writes: 90 kHz for MPEG-TS, 1 ms for FLV.
 ///
-/// Distinct source timestamps can round onto one tick. The frame presented later then moves up a
-/// tick at a time until its tick is free, so each frame keeps its own presentation slot and order;
-/// identical source timestamps fail, since no order between them is known.
+/// Distinct source timestamps can round onto one tick. A frame then moves up to the tick after
+/// every frame presented before it, so each keeps its own presentation slot and order; identical
+/// source timestamps fail, since no order between them is known.
 ///
 /// A clock lives for one group, so its DTS depends on nothing read before the group, and a frame
 /// reordered deeper than declared fails rather than move the timeline.
@@ -92,14 +92,15 @@ impl<T> DeclaredClock<T> {
 			return Err(ClockError::Undrained.into());
 		}
 		let source = source.as_nanos();
+		// Only `highest` matters: a frame below all of it reorders past the depth.
 		let mut pts = pts;
-		// Only `highest` can hold the tick: the group's ticks are distinct, and one below all of
-		// `highest` reorders past the depth.
-		while let Some(&(_, prior)) = self.highest.iter().find(|&&(tick, _)| tick == pts) {
-			if prior >= source {
-				return Err(ClockError::Tie.into());
+		for &(tick, prior) in &self.highest {
+			if prior < source && tick >= pts {
+				pts = tick.checked_add(1).ok_or(ClockError::Tie)?;
 			}
-			pts = pts.checked_add(1).ok_or(ClockError::Tie)?;
+		}
+		if (self.highest.iter()).any(|&(tick, prior)| prior >= source && tick <= pts) {
+			return Err(ClockError::Tie.into());
 		}
 		if self.reorders_past(pts) {
 			return Err(ClockError::Reordered(self.depth).into());
@@ -255,10 +256,15 @@ mod tests {
 				(182_897, 182_897)
 			]
 		);
-		// A tie moved onto the next frame's tick moves that frame up in turn.
+		// A tie moved onto the next frame's tick moves that frame up in turn, however many share
+		// the tick.
 		assert_eq!(
 			released(0, &[10_000, 10_400, 11_000, 13_000]).unwrap(),
 			[(10, 10), (11, 11), (12, 12), (13, 13)]
+		);
+		assert_eq!(
+			released(0, &[40_000, 40_011, 40_022, 40_033, 80_000]).unwrap(),
+			[(40, 40), (41, 41), (42, 42), (43, 43), (80, 80)]
 		);
 		// Reordered frames tie the same way: the later-presented one moves.
 		assert_eq!(
