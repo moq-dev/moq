@@ -45,11 +45,21 @@ package-ffi *args:
 package-wrapper *args:
     {{ quote(justfile_directory() / "sh/go/package-wrapper.sh") }} "$@"
 
-# Push the staged moq-go-ffi module to the moq-dev/moq-go-ffi mirror.
+# Publish the staged moq.dev/moq-ffi module to the go.moq.dev module proxy.
 [no-cd]
 [positional-arguments]
 publish-ffi *args:
     {{ quote(justfile_directory() / "sh/go/publish-ffi.sh") }} "$@"
+
+# Push the staged moq.dev/moq-ffi module to the moq-dev/moq-go-ffi mirror, until go.moq.dev serves it.
+[no-cd]
+[positional-arguments]
+publish-ffi-mirror *args:
+    {{ quote(justfile_directory() / "sh/go/publish-ffi-mirror.sh") }} "$@"
+
+# Print where moq.dev sends moq.dev/moq-ffi: `git` (the mirror) or `mod` (go.moq.dev).
+ffi-origin:
+    bash ../sh/go/ffi-origin.sh
 
 # Push the staged moq-go wrapper module to the moq-dev/moq-go mirror.
 [no-cd]

@@ -1,7 +1,8 @@
 name: Release Go FFI
 
-# Publishes the raw moq-go-ffi bindings module (uniffi-bindgen-go output +
-# prebuilt native libs) to the moq-dev/moq-go-ffi mirror, lockstep with the
+# Publishes the raw moq.dev/moq-ffi bindings module (uniffi-bindgen-go output +
+# prebuilt native libs) to the go.moq.dev module proxy, or to the
+# moq-dev/moq-go-ffi mirror until moq.dev points there, lockstep with the
 # moq-ffi crate. The ergonomic moq-go wrapper is released separately
 # (release-go.yml), which also auto-bumps its require to each new ffi here.
 
@@ -117,13 +118,15 @@ jobs:
           path: release-out/*
 
   publish:
+    # sh/gh/ffi.py finds the Go publisher by this name.
     name: Publish to Go module mirror
     needs: [ffi, package]
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
-    # The moq-bot key lives in the `bot` Environment, which only protected
-    # refs can deploy to, `moq-ffi-v*` tags among them.
-    environment: bot
+    # The go.moq.dev R2 key, and the moq-bot key for the git mirror, live in the
+    # `publish` Environment, which only protected refs can deploy to,
+    # `moq-ffi-v*` tags among them.
+    environment: publish
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,16 +135,11 @@ jobs:
 
       - uses: ./.github/actions/just
 
-      - name: Generate moq-bot token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
-        id: token
-        with:
-          client-id: ${{ secrets.APP_CLIENT_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: moq-dev
-          repositories: moq-go-ffi
-          # Narrow the minted token to only what publish-ffi.sh needs.
-          permission-contents: write
+      # Publish where moq.dev's vanity tag sends `go get`: the git mirror until
+      # the go.moq.dev cutover. Temporary; the `git` steps go with the mirror.
+      - name: Find the module's origin
+        id: origin
+        run: echo "vcs=$(just go ffi-origin)" >> "$GITHUB_OUTPUT"
 
       - name: Download package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -149,13 +147,46 @@ jobs:
           name: go-package
           path: go-out
 
+      - name: Generate moq-bot token
+        if: steps.origin.outputs.vcs == 'git'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq-go-ffi
+          # Narrow the minted token to only what publish-ffi-mirror.sh needs.
+          permission-contents: write
+
       - name: Publish to moq-dev/moq-go-ffi mirror
+        if: steps.origin.outputs.vcs == 'git'
         env:
           BUILD_VERSION: ${{ needs.ffi.outputs.version }}
           # Token is minted fresh per run, expires in 1 hour, never at rest.
           GO_FFI_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
+        run: just go publish-ffi-mirror
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.origin.outputs.vcs == 'mod'
+        with:
+          go-version-file: sh/go/modzip/go.mod
+          # A release reads nothing from a cache another branch could have written.
+          cache: false
+
+      # rclone, pinned by the flake.
+      - name: Set up packaging tools
+        if: steps.origin.outputs.vcs == 'mod'
+        uses: ./.github/actions/setup-packaging
+
+      - name: Publish to go.moq.dev
+        if: steps.origin.outputs.vcs == 'mod'
+        env:
+          BUILD_VERSION: ${{ needs.ffi.outputs.version }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: just go publish-ffi
 
   publish-dry-run:
@@ -171,13 +202,18 @@ jobs:
 
       - uses: ./.github/actions/just
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: sh/go/modzip/go.mod
+          cache: false
+
       - name: Download package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: go-package
           path: go-out
 
-      - name: Dry-run publish to mirror
+      - name: Dry-run publish to go.moq.dev
         env:
           BUILD_VERSION: ${{ needs.ffi.outputs.version }}
         run: just go publish-ffi --dry-run

@@ -247,14 +247,14 @@ if [[ "$SIZE_CHECK" == true && "${#OVERSIZED[@]}" -gt 0 ]]; then
 fi
 
 # --- 4. Minimal consumer-facing README rewrite ---
-# The full developer README lives in the monorepo; the staged copy
-# (which ends up on moq-dev/moq-go-ffi) gets a thin orientation pointer.
+# The full developer README lives in the monorepo; the published module
+# gets a thin orientation pointer.
 cat >"$PKG_STAGE/README.md" <<EOF
 # moq.dev/moq-ffi (Go module)
 
-Auto-generated mirror of the raw Go bindings for [Media over QUIC](https://github.com/moq-dev/moq). Most callers want the ergonomic [moq.dev/moq](https://pkg.go.dev/moq.dev/moq) wrapper instead.
+Generated raw Go bindings for [Media over QUIC](https://github.com/moq-dev/moq). Most callers want the ergonomic [moq.dev/moq](https://pkg.go.dev/moq.dev/moq) wrapper instead.
 
-Source, issues, and pull requests live in [moq-dev/moq](https://github.com/moq-dev/moq); this repo only carries tagged Go module releases.
+Source, issues, and pull requests live in [moq-dev/moq](https://github.com/moq-dev/moq); this module only carries released bindings and their native libraries.
 
 ## Install
 
