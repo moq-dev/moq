@@ -993,6 +993,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				if node == self.hop || !credited {
 					return;
 				}
+				// A node already draining ranks and is doubted as before: the news only
+				// reaches a neighbour not yet told. Each upstream relays it, so a repeat
+				// must not revisit every route sent through the node.
+				if self.draining.contains(&node) {
+					self.report_draining(node);
+					return;
+				}
 				let ids = self.drains(node, now);
 				self.update(ids, vec![Report::Draining(node)], None);
 				return;
@@ -1595,12 +1602,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let answered: Vec<_> = ids
 			.iter()
 			.flat_map(|id| of(&self.waiting, *id))
-			.flat_map(|(key, waiting)| {
-				waiting
-					.iter()
-					.map(|(peer, prefix)| (key.clone(), *peer, prefix.clone()))
+			.flat_map(|(key, waiting)| waiting.iter().map(move |(peer, prefix)| (key, peer, prefix)))
+			.filter(|(key, peer, prefix)| {
+				self.step();
+				!self.child_pending(key.0, **peer, prefix)
 			})
-			.filter(|(key, peer, prefix)| !self.child_pending(key.0, *peer, prefix))
+			.map(|(key, peer, prefix)| (key.clone(), *peer, prefix.clone()))
 			.collect();
 		for (key, peer, prefix) in answered {
 			let waiting = self.waiting.get_mut(&key).expect("a wait");
@@ -2400,7 +2407,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				(*id, self.prefixes(*id, region))
 			})
 			.collect();
-		self.collect_waiting(&ids);
+		// A claim batch changes no heard path or state, so it answers no wait.
+		if delta.is_none() {
+			self.collect_waiting(&ids);
+		}
 		let mut choices = Vec::new();
 		let mut before = BTreeMap::new();
 		for (&id, prefixes) in &affected {

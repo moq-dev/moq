@@ -255,9 +255,10 @@ fn bench_path_drain(c: &mut Criterion) {
 	for (sessions, streams) in DRAINING {
 		let id = BenchmarkId::from_parameter(format!("{sessions}n_{streams}s"));
 		group.bench_function(id, |b| {
-			b.iter_batched(
+			// Borrowed, so dropping the fixture stays out of the sample.
+			b.iter_batched_ref(
 				|| fuzz::PathRouteDrain::new(sessions, streams),
-				|mut node| node.drain(),
+				|node| node.drain(),
 				BatchSize::PerIteration,
 			);
 		});

@@ -272,10 +272,11 @@ fn teardown_is_linear_in_prefixes_held() {
 }
 
 /// A relay sends each of its downstream neighbours one route through a leaving
-/// node, each over its own session of that node. Hearing the node drain, and any
-/// later update that changes no route, costs work linear in the neighbours: a scan
-/// of the node's sessions for each neighbour would be quadratic. The `cost`s
-/// sweep both axes at once, since there is a session per neighbour.
+/// node, each over its own session of that node. Hearing the node drain, hearing it
+/// again from another upstream, and any later update that changes no route each cost
+/// work linear in the neighbours: a scan of the node's sessions for each neighbour,
+/// or a repeat that revisits every route sent through the node, would be quadratic.
+/// The `cost`s sweep both axes at once, since there is a session per neighbour.
 #[test]
 fn drain_news_is_linear_in_neighbours() {
 	let cost = |peers: usize| {
@@ -327,15 +328,25 @@ fn drain_news_is_linear_in_neighbours() {
 			})
 			.count();
 		assert_eq!(told, peers, "each neighbour hears the drain once");
+		// Every upstream relays the news: a repeat tells no one and revisits no route.
+		let before = router.work();
+		router.dead(1, path::Dead::Draining { node: leaving }, Instant::ZERO);
+		let repeated = router.work() - before;
+		assert!(router.drain().is_empty(), "a repeated drain sends nothing");
+		assert!(
+			repeated <= peers,
+			"a repeat visits each neighbour at most once: {repeated}"
+		);
 		let before = router.work();
 		router.rtt(idle, Some(Duration::from_millis(5)));
-		(drained, router.work() - before)
+		(drained, repeated, router.work() - before)
 	};
-	let costs: Vec<(usize, usize)> = [8, 16, 32].into_iter().map(cost).collect();
+	let costs: Vec<(usize, usize, usize)> = [8, 16, 32].into_iter().map(cost).collect();
 	for pair in costs.windows(2) {
 		// Quadratic work would quadruple.
 		assert!(pair[1].0 <= 5 * pair[0].0 / 2, "hearing the drain: {costs:?}");
-		assert!(pair[1].1 <= 5 * pair[0].1 / 2, "an idle update: {costs:?}");
+		assert!(pair[1].1 <= 5 * pair[0].1 / 2, "hearing it again: {costs:?}");
+		assert!(pair[1].2 <= 5 * pair[0].2 / 2, "an idle update: {costs:?}");
 	}
 }
 
