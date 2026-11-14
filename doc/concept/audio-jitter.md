@@ -37,7 +37,9 @@ frame:
 | Native | `container::Consumer::read()`, awaited by `moq-audio`'s decode consumer |
 
 Both sit below the decoder and above nothing: no reordering, no gap handling, no
-age budget.
+age budget. Except one skip: both consumers close a group below where delivery
+stands unread, so a join's backlog they skip is never observed, and a join
+delayed only by it is measured as lateness.
 
 Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
