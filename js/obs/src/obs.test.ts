@@ -127,7 +127,8 @@ test("puts a MoQ destination in a new profile and reloads it for the layers", as
 		settings: { server: "https://relay.example/anon", key: "me.hang", bearer_token: "jwt" },
 	});
 	expect(fake.video).toMatchObject({ outputWidth: 1280, outputHeight: 720, fpsNumerator: 60, fpsDenominator: 1 });
-	expect(fake.video).toMatchObject({ baseWidth: 1920, baseHeight: 1080 });
+	// The canvas stays the one the scenes were laid out on, not the monitor's.
+	expect(fake.video).toMatchObject({ baseWidth: 1080, baseHeight: 1920 });
 	expect(fake.param("Stream1", "WHIPSimulcastTotalLayers")).toBe("3");
 	expect(fake.param("SimpleOutput", "VBitrate")).toBe("3000");
 	expect(fake.param("SimpleOutput", "ABitrate")).toBe("128");
@@ -140,8 +141,44 @@ test("puts a MoQ destination in a new profile and reloads it for the layers", as
 		.filter((entry) => entry.type === "SetCurrentProfile")
 		.map((entry) => entry.data?.profileName);
 	expect(switches).toEqual(["Untitled", "MoQ"]);
-	expect(types.lastIndexOf("SetProfileParameter")).toBeLessThan(types.indexOf("SetCurrentProfile"));
+	const settings = fake.log.filter((entry) => entry.type === "SetProfileParameter" && entry.data?.parameterValue);
+	expect(fake.log.indexOf(settings[settings.length - 1])).toBeLessThan(types.indexOf("SetCurrentProfile"));
 	expect(fake.layersFresh).toBe(true);
+	// The marker is cleared once the reload is done.
+	const cleared = fake.log.findIndex(
+		(entry) => entry.data?.parameterName === "PendingReload" && entry.data.parameterValue === null,
+	);
+	expect(cleared).toBeGreaterThan(types.lastIndexOf("SetCurrentProfile"));
+	expect(fake.param("MoQ", "PendingReload")).toBeNull();
+	client.close();
+});
+
+test("a new profile starts from the current profile's video", async () => {
+	obs();
+	const before = { ...fake.video };
+	const client = await connect();
+	await client.configure(MOQ);
+	expect(fake.current).toBe("MoQ");
+	expect(fake.video).toEqual(before);
+	client.close();
+});
+
+test("a retry finishes a reload the connection dropped before", async () => {
+	obs({
+		quitAfter: (type, data) => type === "SetProfileParameter" && data?.parameterName === "x264Settings",
+	});
+	const first = await connect();
+	await expect(first.configure(MOQ)).rejects.toThrow();
+	expect(fake.layersFresh).toBe(false);
+
+	// Every setting is already written, so only the marker shows the reload is owed.
+	fake.options.quitAfter = undefined;
+	const client = await connect();
+	fake.log = [];
+	await client.configure(MOQ);
+	expect(fake.log.map((entry) => entry.type)).not.toContain("SetVideoSettings");
+	expect(fake.layersFresh).toBe(true);
+	expect(fake.param("MoQ", "PendingReload")).toBeNull();
 	client.close();
 });
 
@@ -200,7 +237,13 @@ test("refuses to reload without another profile to go through", async () => {
 	fake.profiles = new Map([["MoQ", new Map()]]);
 	fake.current = "MoQ";
 	const client = await connect();
-	await expect(client.configure(MOQ)).rejects.toThrow("restart OBS to apply Stream1.WHIPSimulcastTotalLayers");
+	fake.log = [];
+	await expect(client.configure(MOQ)).rejects.toThrow(
+		'applying Stream1.WHIPSimulcastTotalLayers needs another profile to reload "MoQ" through',
+	);
+	// Nothing is written that a later configure could mistake for applied.
+	const writes = fake.log.filter((entry) => entry.type.startsWith("Set"));
+	expect(writes).toEqual([]);
 	client.close();
 });
 
@@ -276,9 +319,30 @@ test("starts, follows the state, and stops", async () => {
 });
 
 test("a start the output abandons rejects", async () => {
-	obs({ failStart: true });
+	obs({ failStart: "stopped" });
 	const client = await connect();
 	await expect(client.start()).rejects.toThrow("OBS stopped the stream before it went live");
+	client.close();
+});
+
+test("a start OBS fails without an event rejects at the deadline", async () => {
+	obs({ failStart: "silent" });
+	const client = await connect();
+	const failed = client.start().then(
+		() => undefined,
+		(error: unknown) => error,
+	);
+	await clock.advance(Duration.secs(30));
+	expect(String(await failed)).toContain("OBS did not go live within 30 s");
+	expect(client.stream.peek()).toBe("stopped");
+
+	// An output that went live without its event counts as live.
+	const late = client.start();
+	await clock.advance(Duration.ZERO);
+	fake.streaming = true;
+	await clock.advance(Duration.secs(30));
+	await late;
+	expect(client.stream.peek()).toBe("live");
 	client.close();
 });
 

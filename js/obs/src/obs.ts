@@ -18,6 +18,13 @@ const POLL = Duration.secs(1);
 // A profile switch runs on OBS's UI thread after the request returns; it takes milliseconds.
 const SWITCH_TIMEOUT = Duration.secs(10);
 
+// A profile parameter `configure` sets while a reload is owed, so a retry finishes it.
+const PENDING = ["MoQ", "PendingReload"] as const;
+
+// How long `start` waits to hear the stream went live or stopped. A start that fails in OBS
+// before connecting shows an error dialog and emits neither, so this is the only sign of it.
+const START_TIMEOUT = Duration.secs(30);
+
 /** How to reach OBS. */
 export interface ConnectProps {
 	/** The password set in OBS under Tools > WebSocket Server Settings. */
@@ -125,10 +132,12 @@ const InputKinds = z.object({ inputKinds: z.array(z.string()) });
 const Profiles = z.object({ currentProfileName: z.string(), profiles: z.array(z.string()) });
 const Parameter = z.object({ parameterValue: z.nullable(z.string()) });
 const VideoSettings = z.object({
-	fpsNumerator: z.number(),
-	fpsDenominator: z.number(),
+	baseWidth: z.number(),
+	baseHeight: z.number(),
 	outputWidth: z.number(),
 	outputHeight: z.number(),
+	fpsNumerator: z.number(),
+	fpsDenominator: z.number(),
 });
 const Outputs = z.object({ outputs: z.array(z.object({ outputName: z.string(), outputActive: z.boolean() })) });
 const StreamStatus = z.object({
@@ -251,11 +260,69 @@ export class Obs {
 
 		const profile = publish.profile ?? PROFILE;
 		const before = Profiles.parse(await this.#session.request("GetProfileList"));
-		if (!before.profiles.includes(profile)) {
+		const created = !before.profiles.includes(profile);
+		// A new profile's canvas is the monitor's, but the scene collection was laid out on this one.
+		const inherited = created ? VideoSettings.parse(await this.#session.request("GetVideoSettings")) : undefined;
+		if (created) {
 			await this.#activate(profile, () => this.#session.request("CreateProfile", { profileName: profile }));
 		} else if (before.currentProfileName !== profile) {
 			await this.#activate(profile, () => this.#session.request("SetCurrentProfile", { profileName: profile }));
 		}
+
+		// SetVideoSettings resets OBS's video, which leaves the simulcast layers on the old video
+		// until the outputs are rebuilt: OBS 32.2.2 then sends no frames and crashes on stop.
+		// So change it only when it differs, and reload the profile after when layers exist.
+		const current = VideoSettings.parse(await this.#session.request("GetVideoSettings"));
+		const base = inherited ?? current;
+		const size = publish.video?.size;
+		const video: z.infer<typeof VideoSettings> = {
+			baseWidth: base.baseWidth,
+			baseHeight: base.baseHeight,
+			outputWidth: size?.width ?? base.outputWidth,
+			outputHeight: size?.height ?? base.outputHeight,
+			fpsNumerator: fps ?? base.fpsNumerator,
+			fpsDenominator: fps === undefined ? base.fpsDenominator : 1,
+		};
+		const changed = Object.entries(video).some(([key, value]) => current[key as keyof typeof video] !== value);
+
+		// OBS reads these when it builds its outputs, which only a profile load does.
+		const reload: [string, string, string][] = [
+			["Output", "Mode", "Simple"],
+			["Stream1", "WHIPSimulcastTotalLayers", String(layers)],
+			// Enhanced Broadcasting would replace an RTMP destination's encoders with its own.
+			["Stream1", "EnableMultitrackVideo", "false"],
+		];
+		const stale = [];
+		for (const [category, name, value] of reload) {
+			if ((await this.#parameter(category, name)) !== value) stale.push(`${category}.${name}`);
+		}
+		if (changed && layers > 1) stale.push("Video");
+		// Set until a reload finishes, so a retry after a dropped connection still reloads.
+		if ((await this.#parameter(...PENDING)) !== null) stale.push("an interrupted reload");
+
+		const other =
+			before.currentProfileName !== profile
+				? before.currentProfileName
+				: before.profiles.find((p) => p !== profile);
+		if (stale.length > 0 && other === undefined) {
+			throw new Error(
+				`applying ${stale.join(", ")} needs another profile to reload "${profile}" through: add one in OBS's Profile menu`,
+			);
+		}
+
+		// OBS reads these on every StartStream.
+		const keyint = Math.round((2 * video.fpsNumerator) / video.fpsDenominator);
+		const options = `tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0 keyint=${keyint}`;
+		const live: [string, string, string][] = [
+			["SimpleOutput", "UseAdvanced", "true"],
+			["SimpleOutput", "x264Settings", options],
+		];
+		if (publish.video?.bitrate !== undefined)
+			live.push(["SimpleOutput", "VBitrate", String(publish.video.bitrate)]);
+		if (publish.audio?.bitrate !== undefined)
+			live.push(["SimpleOutput", "ABitrate", String(publish.audio.bitrate)]);
+
+		if (stale.length > 0) await this.#setParameter(...PENDING, "true");
 
 		if (destination.kind === "moq") {
 			await this.#session.request("SetStreamServiceSettings", {
@@ -273,63 +340,13 @@ export class Obs {
 				streamServiceSettings: { server: String(destination.server), key: destination.key, use_auth: false },
 			});
 		}
+		if (changed) await this.#session.request("SetVideoSettings", video);
+		for (const [category, name, value] of [...reload, ...live]) await this.#setParameter(category, name, value);
 
-		// SetVideoSettings resets OBS's video, which leaves the simulcast layers on the old video
-		// until the outputs are rebuilt: OBS 32.2.2 then sends no frames and crashes on stop.
-		// So change it only when it differs, and reload the profile after when layers exist.
-		const size = publish.video?.size;
-		let video = VideoSettings.parse(await this.#session.request("GetVideoSettings"));
-		const resize = size && (size.width !== video.outputWidth || size.height !== video.outputHeight);
-		const refps = fps !== undefined && (video.fpsNumerator !== fps || video.fpsDenominator !== 1);
-		if (resize || refps) {
-			await this.#session.request("SetVideoSettings", {
-				...(resize && { outputWidth: size.width, outputHeight: size.height }),
-				...(refps && { fpsNumerator: fps, fpsDenominator: 1 }),
-			});
-			video = VideoSettings.parse(await this.#session.request("GetVideoSettings"));
-		}
-
-		// OBS reads these when it builds its outputs, which only a profile load does.
-		const reload: [string, string, string][] = [
-			["Output", "Mode", "Simple"],
-			["Stream1", "WHIPSimulcastTotalLayers", String(layers)],
-			// Enhanced Broadcasting would replace an RTMP destination's encoders with its own.
-			["Stream1", "EnableMultitrackVideo", "false"],
-		];
-		const stale = [];
-		for (const [category, name, value] of reload) {
-			if ((await this.#parameter(category, name)) !== value) stale.push(`${category}.${name}`);
-		}
-		if ((resize || refps) && layers > 1) stale.push("Video");
-
-		// OBS reads these on every StartStream.
-		const keyint = Math.round((2 * video.fpsNumerator) / video.fpsDenominator);
-		const options = `tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0 keyint=${keyint}`;
-		const live: [string, string, string][] = [
-			["SimpleOutput", "UseAdvanced", "true"],
-			["SimpleOutput", "x264Settings", options],
-		];
-		if (publish.video?.bitrate !== undefined)
-			live.push(["SimpleOutput", "VBitrate", String(publish.video.bitrate)]);
-		if (publish.audio?.bitrate !== undefined)
-			live.push(["SimpleOutput", "ABitrate", String(publish.audio.bitrate)]);
-
-		for (const [parameterCategory, parameterName, parameterValue] of [...reload, ...live]) {
-			await this.#session.request("SetProfileParameter", { parameterCategory, parameterName, parameterValue });
-		}
-
-		if (stale.length > 0) {
-			const other =
-				before.currentProfileName !== profile
-					? before.currentProfileName
-					: before.profiles.find((p) => p !== profile);
-			if (other === undefined) {
-				throw new Error(
-					`restart OBS to apply ${stale.join(", ")}: no other profile to reload "${profile}" through`,
-				);
-			}
+		if (stale.length > 0 && other !== undefined) {
 			await this.#activate(other, () => this.#session.request("SetCurrentProfile", { profileName: other }));
 			await this.#activate(profile, () => this.#session.request("SetCurrentProfile", { profileName: profile }));
+			await this.#setParameter(...PENDING, null);
 		}
 
 		const encoder = (await this.#parameter("SimpleOutput", "StreamEncoder")) ?? "";
@@ -378,6 +395,10 @@ export class Obs {
 		);
 	}
 
+	async #setParameter(parameterCategory: string, parameterName: string, parameterValue: string | null) {
+		await this.#session.request("SetProfileParameter", { parameterCategory, parameterName, parameterValue });
+	}
+
 	async #parameter(parameterCategory: string, parameterName: string): Promise<string | null> {
 		const response = await this.#session.request("GetProfileParameter", { parameterCategory, parameterName });
 		return Parameter.parse(response).parameterValue;
@@ -408,13 +429,35 @@ export class Obs {
 				reject(new Error("OBS stopped the stream before it went live; see the OBS log"));
 			}
 		});
+		const abort = new AbortController();
 		try {
 			await this.#session.request(request);
-			const done = await race([promise.then(() => true as const), this.closed]);
+			const waits: PromiseLike<true | "timeout" | Error | null>[] = [
+				promise.then(() => true as const),
+				this.closed,
+			];
+			if (target === "STARTED") {
+				waits.push(sleep(START_TIMEOUT, { signal: abort.signal }).then(() => "timeout" as const));
+			}
+			const done = await race(waits);
+			if (done === "timeout") return await this.#startTimedOut();
 			if (done !== true) throw done ?? new Error("the OBS connection is closed");
 		} finally {
+			abort.abort();
 			dispose();
 		}
+	}
+
+	// OBS sends no event when a start fails before connecting, so ask whether the output runs.
+	async #startTimedOut() {
+		const status = StreamStatus.parse(await this.#session.request("GetStreamStatus"));
+		if (status.outputActive) {
+			this.#stream.set(status.outputReconnecting ? "reconnecting" : "live");
+			return;
+		}
+		// A start still connecting corrects this with its own event.
+		this.#stream.set("stopped");
+		throw new Error(`OBS did not go live within ${START_TIMEOUT.asSecs()} s; see OBS for the error`);
 	}
 
 	#poll(effect: Effect) {

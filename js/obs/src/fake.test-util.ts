@@ -13,9 +13,31 @@ export interface FakeOptions {
 	refuse?: "unreachable" | "throw";
 	// Open the socket but never send Hello, like a server that is not obs-websocket.
 	silent?: boolean;
-	// StartStream goes STARTING then STOPPED, like a destination that refuses the connection.
-	failStart?: boolean;
+	// How StartStream fails: STARTING then STOPPED, like a destination that refuses the
+	// connection, or STARTING alone, like an encoder that fails before the output connects.
+	failStart?: "stopped" | "silent";
+	// Quit right after replying to a request this matches, like OBS closing mid-configure.
+	quitAfter?: (type: string, data?: Json) => boolean;
 }
+
+type Video = {
+	fpsNumerator: number;
+	fpsDenominator: number;
+	baseWidth: number;
+	baseHeight: number;
+	outputWidth: number;
+	outputHeight: number;
+};
+
+// OBS gives a new profile the monitor's size as its canvas.
+const MONITOR: Video = {
+	fpsNumerator: 30,
+	fpsDenominator: 1,
+	baseWidth: 2560,
+	baseHeight: 1440,
+	outputWidth: 2560,
+	outputHeight: 1440,
+};
 
 /** One request the fake received, in order. */
 export type Logged = { type: string; data?: Json };
@@ -26,14 +48,9 @@ export class FakeObs {
 	profiles = new Map<string, Map<string, string>>([["Untitled", new Map()]]);
 	current = "Untitled";
 	service: { type: string; settings: Json } = { type: "rtmp_common", settings: {} };
-	video = {
-		fpsNumerator: 30,
-		fpsDenominator: 1,
-		baseWidth: 1920,
-		baseHeight: 1080,
-		outputWidth: 1920,
-		outputHeight: 1080,
-	};
+	videos = new Map<string, Video>([
+		["Untitled", { ...MONITOR, baseWidth: 1080, baseHeight: 1920, outputWidth: 1080, outputHeight: 1920 }],
+	]);
 	// Whether the simulcast layers point at the video OBS renders now; a video reset breaks them.
 	layersFresh = true;
 	streaming = false;
@@ -58,6 +75,16 @@ export class FakeObs {
 		};
 		globalThis.WebSocket = Socket as unknown as typeof WebSocket;
 		return { [Symbol.dispose]: () => (globalThis.WebSocket = original) };
+	}
+
+	/** The current profile's video settings. */
+	get video(): Video {
+		let video = this.videos.get(this.current);
+		if (!video) {
+			video = { ...MONITOR };
+			this.videos.set(this.current, video);
+		}
+		return video;
 	}
 
 	param(category: string, name: string): string | null {
@@ -117,6 +144,7 @@ export class FakeObs {
 				const name = String(data.profileName);
 				if (this.profiles.has(name)) throw [601, "exists"];
 				this.profiles.set(name, new Map());
+				this.videos.set(name, { ...MONITOR });
 				// OBS queues the switch to its UI thread and replies first.
 				queueMicrotask(() => this.activate(name));
 				return undefined;
@@ -129,11 +157,16 @@ export class FakeObs {
 			}
 			case "GetProfileParameter":
 				return { parameterValue: this.param(String(data.parameterCategory), String(data.parameterName)) };
-			case "SetProfileParameter":
-				this.profiles
-					.get(this.current)
-					?.set(`${data.parameterCategory}.${data.parameterName}`, String(data.parameterValue));
+			case "SetProfileParameter": {
+				const params = this.profiles.get(this.current);
+				const key = `${data.parameterCategory}.${data.parameterName}`;
+				if (data.parameterValue !== null && data.parameterValue !== undefined) {
+					params?.set(key, String(data.parameterValue));
+				} else if (!params?.delete(key)) {
+					throw [600, "There are no existing instances of that profile parameter."];
+				}
 				return undefined;
+			}
 			case "GetVideoSettings":
 				return { ...this.video };
 			case "SetVideoSettings":
@@ -156,8 +189,8 @@ export class FakeObs {
 				if (this.streaming) throw [500, "output running"];
 				queueMicrotask(() => {
 					this.stream("STARTING", false);
-					if (this.options.failStart) this.stream("STOPPED", false);
-					else this.stream("STARTED", true);
+					if (this.options.failStart === "stopped") this.stream("STOPPED", false);
+					else if (this.options.failStart === undefined) this.stream("STARTED", true);
 				});
 				return undefined;
 			case "StopStream":
@@ -260,6 +293,7 @@ class FakeSocket extends EventTarget {
 			try {
 				const responseData = this.#fake.handle(requestType, requestData);
 				this.#send(7, { requestType, requestId, requestStatus: { result: true, code: 100 }, responseData });
+				if (this.#fake.options.quitAfter?.(requestType, requestData)) this.#fake.quit();
 			} catch (error) {
 				if (!Array.isArray(error)) throw error;
 				const [code, comment] = error;
