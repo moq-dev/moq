@@ -108,6 +108,7 @@ function identity(path: Moq.Path.Valid, track: string): string {
 // Merge each include's usable renditions of one kind into `own`, keyed `<include>/<id>` and rebased
 // so their `broadcast` reference resolves from `base`. Skips one that reads media already listed, such
 // as the source an include relists, and one whose ID is taken, so the root's IDs are never shadowed.
+// `first` is the first include that contributed a rendition.
 function mergeRenditions<T extends Rendition>(
 	own: Record<string, T> | undefined,
 	includes: { include: Included; renditions: Record<string, T> | undefined }[],
@@ -115,8 +116,9 @@ function mergeRenditions<T extends Rendition>(
 	taken: Set<string>,
 	seen: Set<string>,
 	usable: Usable,
-): Record<string, T> {
+): { renditions: Record<string, T>; first?: Included } {
 	const merged: [string, T][] = Object.entries(own ?? {});
+	let first: Included | undefined;
 	for (const { include, renditions } of includes) {
 		for (const [id, config] of Object.entries(renditions ?? {})) {
 			// The include's catalog was checked against its own path, so this always resolves.
@@ -139,12 +141,13 @@ function mergeRenditions<T extends Rendition>(
 			if (instance !== undefined) rebased.instance = instance;
 
 			merged.push([name, rebased]);
+			first ??= include;
 			taken.add(name);
 			seen.add(key);
 		}
 	}
 	// fromEntries defines each ID as its own key, so `__proto__` stays a rendition.
-	return Object.fromEntries(merged);
+	return { renditions: Object.fromEntries(merged), first };
 }
 
 // The root catalog with each read include's usable video and audio renditions beside its own, as one
@@ -186,18 +189,14 @@ function withIncludes(
 		usable,
 	);
 
-	// A root without a section of its own takes the display settings of the first include with one,
-	// once any of its renditions made it in.
-	const videoSection =
-		root.video ??
-		(Object.keys(video).length > 0 ? includes.find((i) => i.catalog.video)?.catalog.video : undefined);
-	const audioSection =
-		root.audio ??
-		(Object.keys(audio).length > 0 ? includes.find((i) => i.catalog.audio)?.catalog.audio : undefined);
+	// A root without a section of its own takes the display settings of the first include whose
+	// renditions made it in, so they describe media actually listed.
+	const videoSection = root.video ?? video.first?.catalog.video;
+	const audioSection = root.audio ?? audio.first?.catalog.audio;
 	return {
 		...root,
-		video: videoSection && { ...videoSection, renditions: video },
-		audio: audioSection && { ...audioSection, renditions: audio },
+		video: videoSection && { ...videoSection, renditions: video.renditions },
+		audio: audioSection && { ...audioSection, renditions: audio.renditions },
 	};
 }
 

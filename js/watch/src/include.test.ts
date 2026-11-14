@@ -572,3 +572,48 @@ it("dedupes an include's rendition only against a usable one", async () => {
 		origin.close();
 	}
 });
+
+it("takes a missing section's display settings from the include whose renditions made it in", async () => {
+	const origin = new Origin.Producer();
+	publish(origin, "room/main.hang");
+	const serve = (path: string, value: Catalog.Root) => {
+		const broadcast = publish(origin, path);
+		new Json.Snapshot.Producer<Catalog.Root>({ track: broadcast.createTrack(Catalog.TRACK), deltas: false }).update(
+			{
+				value,
+			},
+		);
+		return broadcast;
+	};
+	// The first include's only rendition reads a broadcast nobody announced, so none of it is listed.
+	const first = serve(
+		"room/a.hang",
+		Catalog.RootSchema.parse({
+			video: { renditions: { v: { ...video("vp8"), broadcast: "./missing.hang" } }, rotation: 90, flip: true },
+		}),
+	);
+	const second = serve(
+		"room/b.hang",
+		Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") }, rotation: 180 } }),
+	);
+	const parent = new Broadcast({
+		origin,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog: Catalog.RootSchema.parse({
+			include: { a: { broadcast: "./a.hang" }, b: { broadcast: "./b.hang" } },
+		}),
+	});
+	try {
+		await settle();
+		const section = parent.out.catalog.peek()?.video;
+		expect(Object.keys(section?.renditions ?? {})).toEqual(["b/v"]);
+		expect(section?.rotation).toBe(180);
+		expect(section?.flip).toBeUndefined();
+	} finally {
+		parent.close();
+		first.close();
+		second.close();
+		origin.close();
+	}
+});
