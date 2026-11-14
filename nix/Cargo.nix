@@ -20161,7 +20161,10 @@ rec {
           }
         ];
         features = {
-          "fuzz" = [ "dep:arbitrary" ];
+          "fuzz" = [
+            "dep:arbitrary"
+            "sim"
+          ];
           "qlog" = [ "dep:qlog" ];
         };
         resolvedDefaultFeatures = [
@@ -20828,7 +20831,7 @@ rec {
       };
       "moq-rtsp" = rec {
         crateName = "moq-rtsp";
-        version = "0.1.0";
+        version = "0.0.1";
         edition = "2024";
         src = lib.cleanSourceWith {
           filter = sourceFilter;

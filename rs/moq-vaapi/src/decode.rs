@@ -22,14 +22,16 @@
 //! unit's first slice arrives, so the hardware is never left holding a
 //! half-submitted picture between calls.
 //!
-//! H.264 output trails input, and by more than the stream's reorder depth:
-//! C.4.5.3 bumps the DPB only when a new picture needs the slot, so the delay
-//! follows the sequence's reference and reorder limits. A stream coded with
-//! three reference frames trails by three pictures whether or not it uses
-//! B-frames. H.265 bumps by the SPS's reorder limit (C.5.2), so a stream with
-//! no reordering comes out as it decodes. [`Frame`] therefore carries the
-//! timestamp of the access unit it was coded in, and [`Decoder::flush`] is what
-//! releases the tail at the end of a stream.
+//! Output trails input by the reorder depth the SPS declares. H.264 bumps
+//! the DPB when a new picture needs a frame buffer (C.4.5.3), and also lets a
+//! picture out as soon as more pictures wait than the SPS's reorder limit
+//! allows, so a stream that declares no reordering comes out as it decodes
+//! rather than one picture behind. An SPS without `bitstream_restriction`
+//! declares nothing, so E.2.1 infers the DPB size and such a stream still
+//! trails by it. H.265 bumps by the SPS's reorder limit (C.5.2) to the same
+//! effect. A stream with B-frames still holds pictures back, so [`Frame`]
+//! carries the timestamp of the access unit it was coded in, and
+//! [`Decoder::flush`] is what releases the tail at the end of a stream.
 //!
 //! Progressive 8-bit 4:2:0 only: a sequence that is interlaced, deeper than 8
 //! bits, or not 4:2:0 is rejected rather than decoded wrongly. That covers every
@@ -513,14 +515,7 @@ impl H264 {
 		let info = SequenceInfo::new(sps)?;
 		// C.4.5.3: the DPB limits follow the active SPS whether or not the VA
 		// state has to be rebuilt.
-		let max_dpb_frames = sps.max_dpb_frames();
-		let max_num_order_frames = sps.max_num_order_frames() as usize;
-		let max_num_reorder_frames = if max_num_order_frames > max_dpb_frames {
-			0
-		} else {
-			max_num_order_frames
-		};
-		self.dpb.set_limits(max_dpb_frames, max_num_reorder_frames);
+		self.dpb.set_limits(sps.max_dpb_frames(), reorder_limit(sps));
 
 		let format = Format {
 			codec: Codec::H264,
@@ -657,19 +652,10 @@ impl H264 {
 			self.drain();
 		}
 
-		// C.4.5.3 clauses 1, 4, 5, and 6.
-		self.ready.extend(self.dpb.bump_as_needed(&pic).into_iter().flatten());
-
-		// C.4.5.1: a reference picture is bumped until a frame buffer is free,
-		// then stored. C.4.5.2: a non-reference picture is stored if a buffer is
-		// free after bumping, and output directly otherwise.
-		if pic.is_ref() || self.dpb.has_empty_frame_buffer() {
-			self.dpb
-				.store_picture(pic.into_rc(), Some(handle))
-				.map_err(|e| anyhow!("store picture in DPB: {e}"))?;
-		} else {
-			self.ready.push(handle);
-		}
+		// C.4.4 and C.4.5: free what the marking released, then store or output.
+		self.dpb
+			.finish_picture(pic, handle, &mut self.ready)
+			.map_err(|e| anyhow!("store picture in DPB: {e}"))?;
 
 		Ok(())
 	}
@@ -1285,6 +1271,21 @@ fn run(picture: Picture<crate::PictureNew, Handle>) -> anyhow::Result<()> {
 	let picture = picture.end().map_err(|e| anyhow!("picture end: {e:?}"))?;
 	drop(picture.sync::<()>().map_err(|(e, _)| anyhow!("picture sync: {e:?}"))?);
 	Ok(())
+}
+
+/// Returns how many H.264 frames may wait for output before the one with the
+/// lowest order count is due.
+///
+/// The VUI's `max_num_reorder_frames` when the SPS carries it, else the
+/// inference E.2.1 makes from the profile, which is the DPB size for most
+/// streams. An order count derived from `frame_num` (8.2.1.3) makes output
+/// order decoding order, so such a stream reorders nothing whatever its VUI
+/// says. A limit past the DPB size is out of range, and the DPB size bounds it.
+fn reorder_limit(sps: &Sps) -> usize {
+	if sps.pic_order_cnt_type == 2 {
+		return 0;
+	}
+	(sps.max_num_order_frames() as usize).min(sps.max_dpb_frames())
 }
 
 /// Exports a decoded surface as a DRM PRIME descriptor, copying nothing.
@@ -1936,20 +1937,18 @@ mod tests {
 		);
 	}
 
-	/// Every picture fed in comes back out, the last of them only on flush.
+	/// Every picture fed in comes back out, the tail only on flush.
 	///
-	/// C.4.5.3 bumps the DPB when a new picture needs a slot, so a stream that
-	/// simply stops leaves its tail sitting there: one picture for this crate's
-	/// IPPP encoder, three for a stream coded the way x264 does by default. The
-	/// first assertion keeps the test honest, since a decoder that held nothing
-	/// back would satisfy the rest without a flush ever running.
+	/// A stream with B-frames holds pictures in the DPB until later ones come
+	/// out ahead of them, so a stream that simply stops leaves its tail there.
+	/// The first assertion keeps the test honest, since a decoder that held
+	/// nothing back would satisfy the rest without a flush ever running.
 	#[test]
 	fn flush_returns_the_pictures_the_dpb_still_holds() {
-		const PICTURES: u64 = 5;
-		let (width, height) = (320u32, 240u32);
+		const PICTURES: usize = 10;
 
-		let Ok(mut encoder) = crate::encode::Encoder::new(encoder_config(width, height)) else {
-			eprintln!("skipping: no VA-API H.264 encoder");
+		let Some(stream) = software_encode(Codec::H264, (320, 240), PICTURES, true) else {
+			eprintln!("skipping: no ffmpeg that encodes H.264");
 			return;
 		};
 		let Ok(mut decoder) = Decoder::new(Config::new()) else {
@@ -1958,32 +1957,121 @@ mod tests {
 		};
 
 		let mut streamed = Vec::new();
-		for step in 0..PICTURES {
-			let unit = encoder
-				.encode_nv12(&nv12_frame(width, height, step as u32), step == 0)
-				.expect("encode a picture");
-			streamed.extend(decoder.decode(&unit, step).expect("decode a picture"));
+		for (index, unit) in split_access_units(Codec::H264, &stream).iter().enumerate() {
+			streamed.extend(decoder.decode(unit, index as u64).expect("decode a picture"));
 		}
 		assert!(
-			(streamed.len() as u64) < PICTURES,
+			streamed.len() < PICTURES,
 			"the DPB held nothing back, so this test proves nothing"
 		);
 
 		let flushed = decoder.flush().expect("flush the decoder");
-		let timestamps: Vec<u64> = streamed
+		let mut timestamps: Vec<u64> = streamed
 			.iter()
 			.chain(&flushed)
 			.map(|picture| picture.timestamp)
 			.collect();
+		timestamps.sort_unstable();
 		assert_eq!(
 			timestamps,
-			(0..PICTURES).collect::<Vec<_>>(),
+			(0..PICTURES as u64).collect::<Vec<_>>(),
 			"the stream lost pictures at its end"
 		);
 
 		// The bumping process marks what it hands out, so a second flush finds
 		// nothing and a caller that flushes twice never sees a picture twice.
 		assert!(decoder.flush().expect("flush an empty decoder").is_empty());
+	}
+
+	/// An H.264 stream coded without reordering comes out as it decodes, from
+	/// this crate's encoder and from libx264.
+	///
+	/// Both declare one frame buffer, which C.4.5.3 would empty only when the
+	/// next picture needs it, so each picture used to come out one access unit
+	/// late. The two cover both ways a stream rules reordering out: this
+	/// crate's encoder writes `max_num_reorder_frames` 0 in its VUI, and libx264
+	/// without B-frames derives the order count from `frame_num` (type 2).
+	#[test]
+	fn h264_without_reordering_comes_out_as_it_decodes() {
+		const PICTURES: usize = 10;
+		let (width, height) = (320u32, 240u32);
+
+		let mut streams = Vec::new();
+		match crate::encode::Encoder::new(encoder_config(width, height)) {
+			Ok(mut encoder) => {
+				let units = (0..PICTURES)
+					.map(|step| {
+						encoder
+							.encode_nv12(&nv12_frame(width, height, step as u32), step == 0)
+							.expect("encode a picture")
+					})
+					.collect::<Vec<_>>();
+				streams.push(("VA-API", units));
+			}
+			Err(_) => eprintln!("skipping this crate's encoder: no VA-API H.264 encoder"),
+		}
+		match software_encode(Codec::H264, (width, height), PICTURES, false) {
+			Some(stream) => streams.push(("libx264", split_access_units(Codec::H264, &stream))),
+			None => eprintln!("skipping libx264: no ffmpeg that encodes H.264"),
+		}
+
+		for (encoder, units) in streams {
+			let Ok(mut decoder) = Decoder::new(Config::new()) else {
+				eprintln!("skipping: no VA-API H.264 decoder");
+				return;
+			};
+			for (index, unit) in units.iter().enumerate() {
+				let decoded = decoder.decode(unit, index as u64).expect("decode an access unit");
+				let timestamps: Vec<u64> = decoded.iter().map(|picture| picture.timestamp).collect();
+				assert_eq!(
+					timestamps,
+					[index as u64],
+					"{encoder}: access unit {index} was held back"
+				);
+			}
+			assert!(decoder.flush().expect("flush the decoder").is_empty());
+		}
+	}
+
+	/// The reorder limit comes from the VUI, is bounded by the DPB size, and is
+	/// zero whenever the order count follows `frame_num`.
+	#[test]
+	fn the_reorder_limit_follows_the_sps() {
+		let sps = || Sps {
+			level_idc: Level::L3,
+			max_num_ref_frames: 1,
+			..progressive_sps()
+		};
+		// 8100 macroblocks over 300 per picture, capped at 16.
+		assert_eq!(sps().max_dpb_frames(), 16);
+		assert_eq!(
+			reorder_limit(&sps()),
+			16,
+			"without a VUI, the inference is the DPB size"
+		);
+
+		let mut declared = Sps {
+			vui_parameters_present_flag: true,
+			..sps()
+		};
+		declared.vui_parameters.bitstream_restriction_flag = true;
+		declared.vui_parameters.max_num_reorder_frames = 0;
+		declared.vui_parameters.max_dec_frame_buffering = 1;
+		assert_eq!(reorder_limit(&declared), 0, "the VUI's limit applies");
+
+		declared.vui_parameters.max_num_reorder_frames = 5;
+		declared.vui_parameters.max_dec_frame_buffering = 2;
+		assert_eq!(reorder_limit(&declared), 2, "the DPB size bounds the VUI's limit");
+
+		let derived = Sps {
+			pic_order_cnt_type: 2,
+			..sps()
+		};
+		assert_eq!(
+			reorder_limit(&derived),
+			0,
+			"an order count from frame_num reorders nothing"
+		);
 	}
 
 	/// A picture the consumer has let go of is decoded into again rather than

@@ -201,6 +201,11 @@ pub struct Config {
 	/// take its [`webrtc`](crate::quic::demux::Demux::webrtc) feed or read its counters.
 	#[cfg(feature = "quic")]
 	pub demux: crate::quic::demux::Demux,
+
+	/// The simulated host the QUIC endpoint binds on, at the configured bind port, in place of
+	/// a UDP socket. For tests on `kio::clock::sim`; see [`crate::quic::driver::sim`].
+	#[cfg(all(feature = "sim", feature = "quic"))]
+	pub sim: Option<crate::quic::driver::sim::Host>,
 }
 
 impl Config {
@@ -229,6 +234,8 @@ impl Config {
 			stats: self.stats.clone(),
 			admission: self.admission.clone(),
 			demux: self.demux.clone(),
+			#[cfg(feature = "sim")]
+			sim: self.sim.clone(),
 		}
 	}
 }
@@ -283,6 +290,8 @@ impl Server {
 			stats,
 			#[cfg(feature = "quic")]
 			demux,
+			#[cfg(all(feature = "sim", feature = "quic"))]
+			sim,
 		} = config;
 
 		// Refuse here rather than in `init`, so a caller that skipped its own check
@@ -389,6 +398,8 @@ impl Server {
 					member,
 					tls: tls.clone().expect("QUIC needs TLS"),
 					demux: demux.clone(),
+					#[cfg(feature = "sim")]
+					sim: sim.clone(),
 				})
 			})
 			.transpose()?;
@@ -482,7 +493,7 @@ impl Server {
 		}
 		loop {
 			let request = listener.accept().await?;
-			crate::runtime::spawn(crate::panic::isolate(async move {
+			crate::runtime::Spawner::current().spawn(crate::panic::isolate(async move {
 				if let Err(err) = serve_session(request).await {
 					tracing::warn!(%err, "session ended with error");
 				}
@@ -1687,7 +1698,7 @@ impl Request {
 		}
 		let (session, driver) = crate::runtime::scope(handshake.ok()).await?;
 		use tracing::Instrument;
-		crate::runtime::spawn(
+		crate::runtime::Spawner::current().spawn(
 			async move {
 				crate::panic::isolate(async move {
 					let _active = active;
