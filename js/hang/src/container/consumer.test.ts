@@ -587,22 +587,30 @@ function frameOf(read: Read | string | undefined): Frame {
 	return read.frame;
 }
 
-test("Consumer delivers frames from a single group", async () => {
+test("Consumer delivers frames from a single group, finished once it ends", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), {
 		format: new LegacyFormat("data"),
 		delay: { max: Duration.millis(500) },
 	});
 
-	writeGroupWithLegacyFrames(track, 0n, [0, 33_000]);
+	// The end is declared while the group below it is still arriving, and the track stays open
+	// serving its cache: finished waits for the group, not for a release or for the reader.
+	const group = track.createGroup(0n);
+	group.writeFrame({ payload: encodeLegacy(0), timestamp: Time.Timestamp.fromMicros(0) });
 	track.finish();
-	track.close();
+	expect(frameOf(await poll(consumer.next())).timestamp.asMicros()).toBe(0);
+	expect(consumer.finished.peek()).toBe(false);
+	group.writeFrame({ payload: encodeLegacy(33_000), timestamp: Time.Timestamp.fromMicros(33_000) });
+	group.finish();
+	await flush();
+	expect(consumer.finished.peek()).toBe(true);
 
 	const frames = await drainFrames(consumer);
-	expect(frames).toHaveLength(2);
-	expect(frames[0].timestamp).toBe(0);
-	expect(frames[1].timestamp).toBe(33_000);
+	expect(frames).toHaveLength(1);
+	expect(frames[0].timestamp).toBe(33_000);
 	consumer.close();
+	track.close();
 });
 
 test("Consumer forces keyframe true at index 0", async () => {
