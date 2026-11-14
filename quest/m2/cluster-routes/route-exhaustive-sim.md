@@ -54,7 +54,7 @@ Decided 2026-11-12 (maintainer, pick round): the search runs on the `Router`
 after [the router quest](https://github.com/moq-dev/moq/pull/8622)'s rewrite to
 the path rule (`route::path::Router`), so it checks the code that ships and nothing is built twice
 (rejected: today's Babel `Router`, which the rewrite throws away; the test-only
-`paths.rs` prototype). The storm self-check above then runs against a router
+`paths.rs` prototype, since deleted). The storm self-check above then runs against a router
 from before the rewrite.
 
 Public API: none. Wire: none.
