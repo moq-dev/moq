@@ -750,6 +750,9 @@ impl Sim {
 			return false;
 		};
 		let now = self.now;
+		if let Relay::Path(router) = &mut self.nodes[to] {
+			router.clock(now);
+		}
 		match (&mut self.nodes[to], msg) {
 			(Relay::Distance(router), Msg::Route { id, reach }) => router.route(from, id, reach),
 			(
