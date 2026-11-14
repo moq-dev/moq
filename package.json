@@ -46,6 +46,7 @@
 		"js/crypto",
 		"js/json",
 		"js/stats",
+		"js/obs",
 		"js/libav",
 		"js/hang",
 		"js/loc",

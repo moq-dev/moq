@@ -53,13 +53,22 @@ layer `i` at `i/N` of the output size and bitrate. 3 layers on a 1080p
 6000 kbps stream add 720p at 4000 kbps and 360p at 2000 kbps.
 
 OBS's Settings window shows that count only for WHIP and cannot select the
-MoQ service, so set both over obs-websocket:
+MoQ service, so set both over obs-websocket, or let
+[`@moq/obs`](#set-up-from-a-web-page) do it:
 
 1. `SetStreamServiceSettings` with `streamServiceType` `moq_service` and
-   `streamServiceSettings` `{"server": "<relay URL>", "key": "<broadcast path>"}`.
-2. `SetProfileParameter` with `Stream1`, `WHIPSimulcastTotalLayers`, and a
-   count such as `"3"`. OBS applies it on restart or a profile switch.
-3. `StartStream`.
+   `streamServiceSettings` `{"server": "<relay URL>", "key": "<broadcast path>", "bearer_token": ""}`.
+   OBS merges into a service of the same type, so an empty `bearer_token`
+   clears one set earlier.
+2. `SetVideoSettings`, if the output size or frame rate changes.
+3. `SetProfileParameter` with `Stream1`, `WHIPSimulcastTotalLayers`, and a
+   count such as `"3"`.
+4. Switch to another profile and back with `SetCurrentProfile`. OBS builds
+   the layers when it loads a profile, so the count applies only then (or on
+   restart). Loading also follows a `SetVideoSettings`: OBS 32.2.2 leaves
+   existing layers on the old video, then sends no frames and crashes when
+   the stream stops.
+5. `StartStream`.
 
 Saving Settings > Stream afterwards replaces the MoQ service. The dock's Go
 Live publishes one rendition. OBS's Enhanced Broadcasting (multitrack video)
@@ -72,6 +81,21 @@ or uses CQP or CRF, keeps sending. A stopped encoder keeps encoding, since OBS
 cannot pause one encoder of a live output, and resumes at that encoder's next
 keyframe once the estimate recovers. This needs the session to probe for
 bandwidth, which takes moq-quic with BBR3.
+
+## Set up from a web page
+
+[`@moq/obs`](/lib/js/api/obs) runs the steps above from a page through OBS's
+built-in WebSocket server (Tools > WebSocket Server Settings), with the
+password the user set there. It puts a MoQ relay, or an RTMP(S) server for a
+stock OBS, in a dedicated **MoQ** profile so the user's other profiles keep
+their settings, follows the stream's state and stats, and adds MoQ Sources.
+
+Over obs-websocket the profile can tune only x264 for low latency (no
+B-frames or lookahead, a 2 s keyframe interval); `configure` names what any
+other encoder keeps at its defaults. The dock's Go Live tunes every encoder.
+
+Chrome 147+ and Firefox ask the user before a public page reaches OBS on
+loopback. Safari blocks it from HTTPS pages as mixed content.
 
 ## Source quality and moq-transcode
 

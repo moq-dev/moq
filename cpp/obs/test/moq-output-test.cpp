@@ -628,6 +628,26 @@ int main()
 	}
 	printf("publishes, and only CBR hints its bitrate: ok\n");
 
+	// OBS reads the byte total as this stream's, so a stopped output that starts
+	// again counts from zero.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		auto keyframe = TestH264Keyframe();
+		auto video = videoPacket(keyframe, 0);
+		o.Data(&video);
+		CHECK(o.GetTotalBytes() == keyframe.size());
+		o.Stop();
+		CHECK(o.Start());
+		CHECK(o.GetTotalBytes() == 0);
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		o.Stop();
+	}
+	printf("a restart counts bytes from zero: ok\n");
+
 	// Video follows the grant only when the encoder retunes live and the bitrate
 	// drives it; every track reserves either way once the session connects.
 	struct FollowCase {
