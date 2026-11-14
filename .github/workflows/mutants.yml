@@ -1,0 +1,50 @@
+name: Mutants
+
+# cargo-mutants edits the route and resume code one small change at a time
+# (`.cargo/mutants.toml` names the files and the tests), and a job fails on any
+# edit its tests miss. Each mutant costs a rebuild of moq-net's tests, too many
+# for a merge gate, so Nightly runs it.
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+  # TEMPORARY: measures the hosted cost; removed before review.
+  pull_request:
+    paths: [.github/workflows/mutants.yml]
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    name: Mutants (${{ matrix.shard }}/40)
+    runs-on: ubuntu-24.04-arm
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      # The checkout is thrown away, so mutating it in place keeps the build
+      # incremental and cached instead of copying the tree per mutant.
+      - name: Mutate
+        run: nix develop --command just rs mutants --in-place --shard ${{ matrix.shard }}/40
+      - name: Keep the outcomes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: mutants-${{ matrix.shard }}
+          path: target/mutants/mutants.out
+          retention-days: 14

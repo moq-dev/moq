@@ -1,0 +1,9 @@
+# cargo-mutants: Nightly fails on any mutant of these files the tests miss.
+examine_globs = ["rs/moq-net/src/route/**/*.rs", "rs/moq-net/src/model/resume.rs"]
+exclude_globs = ["rs/moq-net/src/route/tests/**"]
+test_tool = "nextest"
+all_features = true
+additional_cargo_args = ["--locked"]
+# The lib's unit tests are what exercise both modules; the integration binary
+# would add a second link per mutant for no extra kills.
+additional_cargo_test_args = ["--lib"]
