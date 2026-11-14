@@ -70,7 +70,7 @@ Renamed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 
 ## Waiting
 
-- Maintainer: what ships while cpal has no release that loads libasound at runtime (RustAudio/cpal#1421 is open; the last release is 0.18.2). (A) Wait: this quest follows [ALSA without a load-time link](/quest/m3/capture-alsa-link.md) into m5. (B) Split: ship `full` now on macOS and Windows, which link no system audio library, and leave only Linux waiting on the cpal release. (C) Linux release binaries take libasound as a load-time requirement. (D) Fork cpal, alsa, and alsa-sys. I recommend B.
+- Maintainer: what ships while cpal has no release that loads libasound at runtime (RustAudio/cpal#1421 is open; the last release is 0.18.2). (A) Wait: this quest stays blocked on [ALSA without a load-time link](/quest/m3/capture-alsa-link.md) until the cpal release ships. (B) Split: ship `full` now on macOS and Windows, which link no system audio library, and leave only Linux waiting on the cpal release. (C) Linux release binaries take libasound as a load-time requirement. (D) Fork cpal, alsa, and alsa-sys. I recommend B.
 
 ## Required
 

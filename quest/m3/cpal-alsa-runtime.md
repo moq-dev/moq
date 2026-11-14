@@ -31,7 +31,7 @@ Decided 2026-10-08: the capture chain (this quest,
 [Ship capture and playback](/quest/m3/cli-packaging.md)) parks until cpal
 ships runtime ALSA loading, with no fork taken meanwhile.
 
-Moved to m5 2026-11-12 (maintainer, /quest-audit): it waits only on an upstream cpal release.
+Moved to m5 2026-11-12 (maintainer, /quest-audit): it waits only on an upstream cpal release. Superseded 2026-11-13: it is back in m3, per the decision above.
 
 Filed 2026-11-02 (maintainer-approved, /quest-unblock): [RustAudio/cpal#1421](https://github.com/RustAudio/cpal/issues/1421), recommending runtime loading first (most naturally in alsa-sys) and an optional ALSA host second. Related, not duplicates: RustAudio/cpal#1404 (FreeBSD-only `alsa` feature), cpal#929, and diwic/alsa-sys#10 (static linking).
 

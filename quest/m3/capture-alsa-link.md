@@ -29,7 +29,7 @@ release offers it, and the in-tree routes are hacks), so this waits on
 enable whatever it needs, and update the moq-audio and moq-cli feature
 comments that call libasound a build-time link.
 
-Moved to m5 2026-11-12 (maintainer, /quest-audit): it waits only on an upstream cpal release.
+Moved to m5 2026-11-12 (maintainer, /quest-audit): it waits only on an upstream cpal release. Superseded 2026-11-13: it is back in m3, per the decision above.
 
 Verify by building in the Nix shell, then running the shipped binary on a
 host without libasound: it starts, lists devices, and captures where a
