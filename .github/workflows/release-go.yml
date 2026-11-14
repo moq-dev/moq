@@ -9,16 +9,16 @@ name: Release Go
 #
 # Triggers:
 #   * push to release     - a wrapper API or VERSION change. The ffi require is
-#                           pinned to the current crate version, whose mirror tag
-#                           already exists in steady state. If it's missing (a
+#                           pinned to the current crate version, which is
+#                           already published in steady state. If it's missing (a
 #                           release is mid-flight) or rs/moq-ffi changed since
 #                           its tag, the job skips: the workflow_run below
 #                           republishes once the ffi lands.
-#   * Release FFI done:      its Go publisher succeeded on the moq-go-ffi mirror.
+#   * Release FFI done:      its Go publisher published moq.dev/moq-ffi.
 #                           Re-cut the wrapper so `moq.dev/moq@latest` floats to
 #                           the newest native core (Go MVS won't float on its own).
-#                           Chaining off the upstream run guarantees the mirror
-#                           tag is already present, so there is nothing to poll.
+#                           Chaining off the upstream run guarantees the ffi
+#                           version is already published, so there is nothing to poll.
 #
 # Stray release pushes are harmless: publish-wrapper.sh skips when the staged tree
 # matches the mirror, so unchanged content never mints an empty patch release.
@@ -153,11 +153,11 @@ jobs:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: just gh release ffi-unreleased "$FFI_VERSION"
 
-      # Skip on unreleased ffi changes, and when the pinned ffi's mirror tag is
-      # missing (release-plz merged but the Go FFI publisher hasn't finished yet):
+      # Skip on unreleased ffi changes, and when the pinned ffi version is
+      # unpublished (release-plz merged but the Go FFI publisher hasn't finished yet):
       # the workflow_run trigger republishes once the ffi lands. One existence
       # check, no polling. workflow_run runs are chained after that publish, so
-      # the tag is guaranteed present and this gate doesn't run for them.
+      # the version is guaranteed present and this gate doesn't run for them.
       - name: Gate on published ffi (push only)
         id: gate
         if: github.event_name == 'push'
@@ -170,35 +170,33 @@ jobs:
             exit 0
           fi
 
-          # Distinguish "tag absent" from a lookup failure: a network error must
-          # fail loudly, not masquerade as "defer" (nothing retries a wrapper-only
-          # push, so a silent skip would drop the release).
-          if ! TAGS=$(git ls-remote --tags https://github.com/moq-dev/moq-go-ffi "refs/tags/v${FFI_VERSION}"); then
-            echo "::error::failed to query the moq-go-ffi mirror for tags"
+          # Ask the origin moq.dev sends `go get` to (temporary: the git mirror
+          # until the go.moq.dev cutover). Distinguish "absent" from a lookup
+          # failure: a network error must fail loudly, not masquerade as "defer"
+          # (nothing retries a wrapper-only push, so a silent skip would drop
+          # the release).
+          ORIGIN=$(just go ffi-origin)
+          case "$ORIGIN" in
+            mod) MOD_URL="https://go.moq.dev/moq.dev/moq-ffi/@v/v${FFI_VERSION}.mod" ;;
+            git) MOD_URL="https://raw.githubusercontent.com/moq-dev/moq-go-ffi/v${FFI_VERSION}/go.mod" ;;
+          esac
+          if ! STATUS=$(curl -sS -o /dev/null -w '%{http_code}' "$MOD_URL"); then
+            echo "::error::failed to query $MOD_URL"
             exit 1
           fi
-          if [[ -z "$TAGS" ]]; then
-            echo "::warning::moq-go-ffi v${FFI_VERSION} not on the mirror yet; deferring to the FFI release chain."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Existing is not the same as usable. The wrapper pins moq.dev/moq-ffi,
-          # so a tag published before the module was renamed still declares
-          # github.com/moq-dev/moq-go-ffi and `go mod tidy` below would abort on
-          # the path mismatch. Defer to the same chain: the next ffi release
-          # republishes the mirror under the new path and re-cuts the wrapper.
-          MOD_URL="https://raw.githubusercontent.com/moq-dev/moq-go-ffi/v${FFI_VERSION}/go.mod"
-          if ! MOD=$(curl -fsSL "$MOD_URL"); then
-            echo "::error::failed to read go.mod from the moq-go-ffi mirror at v${FFI_VERSION}"
-            exit 1
-          fi
-          if grep -qE '^module[[:space:]]+moq\.dev/moq-ffi$' <<< "$MOD"; then
-            echo "moq-go-ffi v${FFI_VERSION} is published and declares moq.dev/moq-ffi; proceeding."
-          else
-            echo "::warning::moq-go-ffi v${FFI_VERSION} predates the module rename; deferring to the FFI release chain."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          fi
+          case "$STATUS" in
+            200)
+              echo "moq.dev/moq-ffi v${FFI_VERSION} is published ($ORIGIN); proceeding."
+              ;;
+            404)
+              echo "::warning::moq.dev/moq-ffi v${FFI_VERSION} is not published yet; deferring to the FFI release chain."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::$MOD_URL answered HTTP $STATUS"
+              exit 1
+              ;;
+          esac
 
       - name: Package wrapper
         if: steps.gate.outputs.skip != 'true'
