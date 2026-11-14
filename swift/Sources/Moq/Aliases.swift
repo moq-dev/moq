@@ -142,7 +142,7 @@ extension Subscription {
     public typealias Range = MoqFFI.MoqRange
     /// Where one end of a `Range` falls: `.oldest` (a start only), `.absolute(group:)`,
     /// `.relative(groups:)` back from the latest group, or `.time(timestamp:)` for the group
-    /// containing it.
+    /// containing an unscaled time in the track's timescale (a scaled one is refused).
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder

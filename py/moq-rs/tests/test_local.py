@@ -1162,7 +1162,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
 
 
 async def test_time_anchor_starts_at_the_group_containing_it():
-    """A time anchor takes a wrapper Timestamp and starts at the group containing that time."""
+    """A time anchor takes an unscaled time in the track's timescale and starts at the group containing it."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("timed", moq.TrackInfo(max_age=None, timescale=1_000))
     for second in range(3):
@@ -1171,7 +1171,7 @@ async def test_time_anchor_starts_at_the_group_containing_it():
         group.write_frame(b"x", moq.Timestamp(second, 1))
         group.finish()
 
-    start = moq.Anchor.TIME(timestamp=moq.Timestamp(1_500, 1_000))
+    start = moq.Anchor.TIME(timestamp=moq.Timestamp.unscaled(1_500))
     consumer = track.consume(
         moq.Subscription(
             delay=moq.Delay(max=timedelta(seconds=10)),

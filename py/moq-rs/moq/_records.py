@@ -191,7 +191,10 @@ class _AnchorRelative(Anchor):
 
 @dataclass(frozen=True)
 class _AnchorTime(Anchor):
-    """The group containing this presentation time. An untimed track refuses it."""
+    """The group containing this time: :meth:`Timestamp.unscaled` in the track's timescale.
+
+    A scaled timestamp is refused, since the subscription can't check its scale against the track.
+    """
 
     timestamp: Timestamp
 

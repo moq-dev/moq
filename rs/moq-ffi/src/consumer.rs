@@ -124,7 +124,8 @@ pub enum MoqAnchor {
 	},
 	/// The group containing this time: the newest one starting at or before it.
 	Time {
-		/// The time, whose `value` is taken in the track's timescale.
+		/// The time in the track's timescale, given [unscaled](MoqTimestamp::unscaled). A scaled
+		/// one is refused with a timestamp mismatch until the bindings convert it.
 		timestamp: MoqTimestamp,
 	},
 	/// The oldest group still around, as far back as the max delay allows. A start only.
@@ -143,18 +144,18 @@ pub enum MoqOrder {
 
 impl MoqAnchor {
 	/// This anchor as a start. A group is named by its start, so an absolute group names
-	/// that time. A time is taken in the track's timescale, whatever `scale` says, though an
-	/// invalid timestamp is still refused.
+	/// that time. A time must be unscaled, in the track's timescale: the timescale is unknown
+	/// here, so a scaled one is refused rather than read in the wrong units.
 	fn start(self) -> Result<moq_net::track::Anchor, MoqError> {
 		use moq_net::track::Anchor;
 		Ok(match self {
 			Self::Oldest => Anchor::Oldest,
 			Self::Absolute { group } => Anchor::Time(group),
 			Self::Relative { groups } => Anchor::Relative(groups),
-			Self::Time { timestamp } => {
-				moq_net::Timestamp::try_from(timestamp)?;
-				Anchor::Time(timestamp.value)
-			}
+			Self::Time { timestamp } => match timestamp.scale {
+				None => Anchor::Time(timestamp.value),
+				Some(_) => return Err(moq_net::Error::TimestampMismatch.into()),
+			},
 		})
 	}
 

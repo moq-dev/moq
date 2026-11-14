@@ -2834,7 +2834,8 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A time anchor starts at the group containing that presentation time.
+/// A time anchor starts at the group containing that presentation time, given unscaled in the
+/// track's timescale.
 #[test]
 fn raw_track_time_anchor() {
 	let origin = id(moq_origin_create());
@@ -2870,7 +2871,11 @@ fn raw_track_time_anchor() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
 			group: 0,
-			timestamp: micros(30_000),
+			timestamp: moq_timestamp {
+				value: 30_000,
+				scale: 0,
+				has_scale: false,
+			},
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
@@ -2922,11 +2927,11 @@ fn raw_track_time_anchor() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// An update with an invalid time anchor is refused at the call, keeping its ranges. On a
-/// scale-less track a time anchor is a group key, so the refusal comes from the timestamp, a
-/// scale of zero. The C API only publishes timed tracks, so the track comes from moq-net.
+/// An update with a scaled time anchor is refused at the call, keeping its ranges: a time
+/// anchor is an unscaled key in the track's timescale, which the call can't check a scale
+/// against. The C API only publishes timed tracks, so the track comes from moq-net.
 #[test]
-fn raw_track_update_refuses_an_invalid_anchor() {
+fn raw_track_update_refuses_a_scaled_time_anchor() {
 	let origin = id(moq_origin_create());
 	let path = b"raw-track-untimed";
 	let broadcast = publish_broadcast(origin, path);
@@ -2969,11 +2974,7 @@ fn raw_track_update_refuses_an_invalid_anchor() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
 			group: 0,
-			timestamp: moq_timestamp {
-				value: 0,
-				scale: 0,
-				has_scale: true,
-			},
+			timestamp: micros(0),
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,

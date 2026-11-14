@@ -247,7 +247,7 @@ typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 
-/** The group containing `timestamp`, a presentation time. */
+/** The group containing `timestamp`, an unscaled time in the track's timescale; a scaled one is refused. */
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */

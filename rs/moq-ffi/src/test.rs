@@ -2199,11 +2199,6 @@ async fn timestamps_are_exact() {
 			matches!(track.write_frame(frame), Err(MoqError::TimeOverflow)),
 			"{invalid:?}"
 		);
-		let range = MoqRange {
-			start: MoqAnchor::Time { timestamp: invalid },
-			end: None,
-		};
-		assert!(matches!(range.resolve(), Err(MoqError::TimeOverflow)));
 	}
 }
 
@@ -9086,7 +9081,8 @@ async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
 }
 
 /// A time anchor starts at the group containing it, and a scale-less track compares it with
-/// bare starts.
+/// bare starts. Its time is unscaled, in the track's timescale: a scaled one is refused rather
+/// than read in units the subscription can't check.
 #[tokio::test]
 async fn time_anchors_start_at_the_containing_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -9113,12 +9109,20 @@ async fn time_anchors_start_at_the_containing_group() {
 		},
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Time {
-				timestamp: us(timestamp_us),
+				timestamp: MoqTimestamp::unscaled(timestamp_us),
 			},
 			end: None,
 		}]),
 		order: Some(MoqOrder::Ascending),
 	};
+	let scaled = MoqRange {
+		start: MoqAnchor::Time { timestamp: us(1_500) },
+		end: None,
+	};
+	assert!(matches!(
+		scaled.resolve(),
+		Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch
+	));
 	let consumer = track.consume(Some(since(1_500))).unwrap();
 	let mut sequences = Vec::new();
 	for _ in 0..2 {

@@ -901,8 +901,8 @@ pub struct moq_anchor {
 	/// groups before the latest one (0 is the latest, and an offset past every group held
 	/// reaches back to the oldest).
 	pub group: u64,
-	/// The time, read only with `MOQ_ANCHOR_TIME`, whose `value` is taken in the track's
-	/// timescale.
+	/// The time, read only with `MOQ_ANCHOR_TIME`: unscaled (`has_scale` false), with `value` in
+	/// the track's timescale. A scaled one is refused with a timestamp mismatch.
 	pub timestamp: moq_timestamp,
 }
 
@@ -933,16 +933,16 @@ pub enum moq_order {
 }
 
 /// `anchor` as a start. A group is named by its start, so an absolute group names that time.
-/// A time is taken in the track's timescale, whatever its scale says, though an invalid
-/// timestamp is still refused.
+/// A time must be unscaled, in the track's timescale: the timescale is unknown here, so a scaled
+/// one is refused rather than read in the wrong units.
 fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
 		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Time(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
-		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => {
-			moq_net::Timestamp::try_from(anchor.timestamp)?;
-			moq_net::track::Anchor::Time(anchor.timestamp.value)
-		}
+		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => match anchor.timestamp.has_scale {
+			false => moq_net::track::Anchor::Time(anchor.timestamp.value),
+			true => return Err(moq_net::Error::TimestampMismatch.into()),
+		},
 		v if v == moq_anchor_kind::MOQ_ANCHOR_OLDEST as u32 => moq_net::track::Anchor::Oldest,
 		_ => return Err(Error::InvalidCode),
 	})
