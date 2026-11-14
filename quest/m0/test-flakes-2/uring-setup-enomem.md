@@ -31,10 +31,11 @@ Open (implementer): confirm the cause, for example by fragmenting memory or
 tracing `io_region_allocate_pages`'s returns while the test loops, before
 changing code. Candidate fixes, in order of preference:
 
-- Size the rings so each region stays at or below order 3, such as
-  `IORING_SETUP_NO_SQARRAY` to drop the SQ array, if that alone brings the CQ
-  region under 32 KiB plus the header. This touches the CQ sizing rationale in
-  `rs/moq-uring/src/worker.rs`.
+- Size the rings so each region stays at or below order 3 (32 KiB). The
+  rings region holds the header and SQ array besides the CQEs, and 2048 CQEs
+  already fill 32 KiB, so `IORING_SETUP_NO_SQARRAY` alone cannot do it: the CQ
+  must shrink too, such as to 1024 entries. This touches the CQ sizing
+  rationale in `rs/moq-uring/src/worker.rs`.
 - Report it upstream if the bulk fallback's partial return is the whole cause.
 
 Never retry setup in the test. `Error::ring`'s message should stop naming
