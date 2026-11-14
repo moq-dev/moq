@@ -105,13 +105,13 @@ pub enum Source {
 	/// `/dev/video0`.
 	Camera(Option<String>),
 
-	/// A whole display. `None` opens the main display.
+	/// A whole display. [`DisplaySelection::default`] opens the main display.
 	///
 	/// The id is the opaque value [`displays`] reports. Linux supports X11
 	/// displays only, including XWayland's `x11:` ids; on Wayland the main
 	/// display and any other id are refused, so ask the system picker with
 	/// [`Source::Portal`] instead.
-	Display(Option<String>),
+	Display(DisplaySelection),
 
 	/// A single window, by the id [`windows`] reports. Supported on macOS,
 	/// Windows, and X11.
@@ -150,8 +150,10 @@ impl Source {
 		match self {
 			Self::Camera(None) => "camera".to_string(),
 			Self::Camera(Some(id)) => format!("camera:{id}"),
-			Self::Display(None) => "display".to_string(),
-			Self::Display(Some(id)) => format!("display:{}", id.strip_prefix("display:").unwrap_or(id)),
+			Self::Display(selection) => match &selection.id {
+				None => "display".to_string(),
+				Some(id) => format!("display:{}", id.strip_prefix("display:").unwrap_or(id)),
+			},
 			Self::Window(id) => format!("window:{}", id.strip_prefix("window:").unwrap_or(id)),
 			Self::App(id) => format!("app:{id}"),
 			#[cfg(all(target_os = "linux", feature = "pipewire"))]
@@ -160,8 +162,28 @@ impl Source {
 	}
 }
 
+/// Which display [`Source::Display`] captures.
+///
+/// `#[non_exhaustive]`: build it with [`DisplaySelection::new`] or
+/// [`DisplaySelection::default`], so a capture option can join it without
+/// breaking callers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DisplaySelection {
+	/// The opaque id [`displays`] reports. `None` selects the main display.
+	pub id: Option<String>,
+}
+
+impl DisplaySelection {
+	/// Select the display with this id, as [`displays`] reports it.
+	pub fn new(id: impl Into<String>) -> Self {
+		Self { id: Some(id.into()) }
+	}
+}
+
 /// A camera reported by [`cameras`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Camera {
 	/// Opaque identifier: pass to [`Source::Camera`].
 	pub id: String,
@@ -199,6 +221,7 @@ impl Mode {
 
 /// A display reported by [`displays`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Display {
 	/// Opaque identifier: pass to [`Source::Display`].
 	pub id: String,
@@ -215,12 +238,13 @@ pub struct Display {
 impl Display {
 	/// The [`Source`] that captures this display.
 	pub fn source(&self) -> Source {
-		Source::Display(Some(self.id.clone()))
+		Source::Display(DisplaySelection::new(self.id.clone()))
 	}
 }
 
 /// A window reported by [`windows`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Window {
 	/// Opaque identifier: pass to [`Source::Window`].
 	pub id: String,
@@ -245,6 +269,7 @@ impl Window {
 
 /// An application reported by [`apps`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct App {
 	/// Bundle identifier: pass to [`Source::App`].
 	pub id: String,
@@ -492,11 +517,11 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 				Err(Error::Unsupported("camera capture".to_string()))
 			}
 		}
-		Source::Display(device) => {
-			let _ = device;
+		Source::Display(selection) => {
+			let _ = selection;
 			#[cfg(target_os = "macos")]
 			{
-				screencapture::open_display(config, device.as_deref()).await
+				screencapture::open_display(config, selection.id.as_deref()).await
 			}
 			#[cfg(target_os = "windows")]
 			{
@@ -504,7 +529,7 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 			}
 			#[cfg(target_os = "linux")]
 			{
-				x11::open_display(config, device.as_deref()).await
+				x11::open_display(config, selection.id.as_deref()).await
 			}
 			#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 			{
@@ -748,15 +773,15 @@ mod tests {
 	fn source_labels_add_the_source_kind() {
 		assert_eq!(Source::Camera(None).label(), "camera");
 		assert_eq!(Source::Camera(Some("camera-id".into())).label(), "camera:camera-id");
-		assert_eq!(Source::Display(None).label(), "display");
-		assert_eq!(Source::Display(Some("0".into())).label(), "display:0");
+		assert_eq!(Source::Display(DisplaySelection::default()).label(), "display");
+		assert_eq!(Source::Display(DisplaySelection::new("0")).label(), "display:0");
 		assert_eq!(Source::Window("123".into()).label(), "window:123");
 		assert_eq!(Source::App("com.example.app".into()).label(), "app:com.example.app");
 	}
 
 	#[test]
 	fn source_labels_preserve_prefixed_display_ids() {
-		assert_eq!(Source::Display(Some("display:0".into())).label(), "display:0");
+		assert_eq!(Source::Display(DisplaySelection::new("display:0")).label(), "display:0");
 	}
 
 	#[test]

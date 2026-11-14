@@ -1168,14 +1168,14 @@ impl CaptureArgs {
 			Source::App(id.clone())
 		} else if let Some(id) = &self.display {
 			match id {
-				Some(id) => Source::Display(Some(id.clone())),
+				Some(id) => Source::Display(moq_video::capture::DisplaySelection::new(id.clone())),
 				// Wayland has no main display to name, so the system picker chooses the screen.
 				#[cfg(all(target_os = "linux", feature = "pipewire"))]
 				None if std::env::var_os("WAYLAND_DISPLAY").is_some() => {
 					use moq_video::capture::portal::{Kind, Selection};
 					Source::Portal(Selection::new(Kind::Screen))
 				}
-				None => Source::Display(None),
+				None => Source::Display(moq_video::capture::DisplaySelection::default()),
 			}
 		} else {
 			Source::Camera(self.camera.clone().flatten())
