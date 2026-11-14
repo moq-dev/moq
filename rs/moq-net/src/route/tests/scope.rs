@@ -164,7 +164,15 @@ fn a_dead_repath_withdraws_its_claims_before_ending_the_sent_route() {
 		router.route(1, 7, p(prefix), Some(path::Reach::Finite(old.clone())));
 		router.batch(1, 7, p(prefix), vec![(p("a/x"), Some(1))], Some(1));
 	}
-	router.edit(3, path::Edit { remove: Vec::new(), add: vec![p("a")] }).unwrap();
+	router
+		.edit(
+			3,
+			path::Edit {
+				remove: Vec::new(),
+				add: vec![p("a")],
+			},
+		)
+		.unwrap();
 	// A child still names this relay, so its newer empty view is not believed yet.
 	let mut child = old;
 	child.path = [
@@ -297,7 +305,15 @@ fn drain_news_is_linear_in_neighbours() {
 			router.connect(down, 2000 + i as Id, Link::default()).unwrap();
 			router.edited(down);
 			let prefix = p(&format!("live/{i}"));
-			router.edit(down, path::Edit { remove: Vec::new(), add: vec![prefix.clone()] }).unwrap();
+			router
+				.edit(
+					down,
+					path::Edit {
+						remove: Vec::new(),
+						add: vec![prefix.clone()],
+					},
+				)
+				.unwrap();
 			let path = [
 				path::Hop { node: 7, session: 0 },
 				path::Hop {
@@ -1045,7 +1061,15 @@ fn an_upstream_stream_uses_a_narrower_exportable_source() {
 	};
 	narrow.metric = 2;
 	router.route(2, 7, p("a"), Some(path::Reach::Finite(narrow)));
-	router.edit(3, path::Edit { remove: Vec::new(), add: vec![p("a")] }).unwrap();
+	router
+		.edit(
+			3,
+			path::Edit {
+				remove: Vec::new(),
+				add: vec![p("a")],
+			},
+		)
+		.unwrap();
 	assert!(router.drain().iter().any(|msg| matches!(msg, path::Out::Route { to: 3, prefix, reach: Some(path::Reach::Finite(offer)), .. } if *prefix == p("a") && !offer.down_only && offer.path[1].node == 2)));
 }
 
@@ -1059,7 +1083,15 @@ fn replacing_a_childs_interest_keeps_the_hold_until_its_answer() {
 		}
 		router.route(1, 7, p(""), Some(offered(1, 0)));
 		router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
-		router.edit(2, path::Edit { remove: Vec::new(), add: vec![p("")] }).unwrap();
+		router
+			.edit(
+				2,
+				path::Edit {
+					remove: Vec::new(),
+					add: vec![p("")],
+				},
+			)
+			.unwrap();
 		let path::Reach::Finite(mut child) = offered(2, 0) else {
 			unreachable!()
 		};
@@ -1114,7 +1146,15 @@ fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
 		offer.metric = 2;
 		router.route(2, 7, p(held), Some(path::Reach::Finite(offer)));
 		router.batch(2, 7, p(held), vec![(p("a/x"), Some(1))], Some(1));
-		router.edit(3, path::Edit { remove: Vec::new(), add: vec![p("a")] }).unwrap();
+		router
+			.edit(
+				3,
+				path::Edit {
+					remove: Vec::new(),
+					add: vec![p("a")],
+				},
+			)
+			.unwrap();
 		let path::Reach::Finite(mut child) = offered(3, 0) else {
 			unreachable!()
 		};

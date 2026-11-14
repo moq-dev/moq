@@ -654,7 +654,11 @@ struct Rekeyed<T> {
 /// claim and the floors certified only the narrower prefix. A route at a removed
 /// prefix is carried, as presented there, to each added prefix inside it that no
 /// route keys, so its floor carries too. The rest go.
-fn rekey<A: Clone + Eq, T: Carried<A>>(old: &BTreeSet<Path>, new: &BTreeSet<Path>, routes: BTreeMap<RouteId, T>) -> Rekeyed<T> {
+fn rekey<A: Clone + Eq, T: Carried<A>>(
+	old: &BTreeSet<Path>,
+	new: &BTreeSet<Path>,
+	routes: BTreeMap<RouteId, T>,
+) -> Rekeyed<T> {
 	let mut kept: BTreeMap<RouteId, T> = BTreeMap::new();
 	let mut gone = Vec::new();
 	let mut moved = Vec::new();
@@ -2015,8 +2019,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			let heard = &self.rx[&route][&peer].view;
 			// A route with no floor yet may hold claims an edit carried to it, which the
 			// view never followed.
-			let follows = delta
-				.filter(|delta| delta.route == route && delta.from == peer && delta.was.is_some() && delta.was == floor);
+			let follows = delta.filter(|delta| {
+				delta.route == route && delta.from == peer && delta.was.is_some() && delta.was == floor
+			});
 			let view = match follows {
 				Some(delta) => {
 					let mut view = base;
@@ -2717,7 +2722,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				for prefix in self.stream(id, peer, prefixes, region) {
 					let key = (id, prefix);
 					if let Some(sent) = answer.tx.get(&key).filter(|sent| sent.offer().is_some()) {
-						sources.push((peer, key.clone(), sent.src.clone(), self.src(id, &key.1, peer, prefixes)));
+						sources.push((
+							peer,
+							key.clone(),
+							sent.src.clone(),
+							self.src(id, &key.1, peer, prefixes),
+						));
 					}
 				}
 			}
@@ -2915,9 +2925,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			"answering sessions"
 		);
 		for (peer, answer) in &self.answering {
-			assert!(!answer.prefixes.is_empty() && !nested(&answer.prefixes), "{peer:?}'s prefixes");
+			assert!(
+				!answer.prefixes.is_empty() && !nested(&answer.prefixes),
+				"{peer:?}'s prefixes"
+			);
 			for (_, prefix) in answer.tx.keys() {
-				assert!(within_any(prefix, &answer.prefixes), "sent {prefix:?} outside {peer:?}'s prefixes");
+				assert!(
+					within_any(prefix, &answer.prefixes),
+					"sent {prefix:?} outside {peer:?}'s prefixes"
+				);
 			}
 		}
 		for (peer, session) in &self.sessions {

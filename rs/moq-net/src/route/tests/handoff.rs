@@ -1825,4 +1825,3 @@ fn a_goaway_two_hops_from_a_ring_never_loops_a_request() {
 	sim.join(leaving, hub, 1);
 	goaway_around_a_ring(&mut sim, hub, leaving);
 }
-

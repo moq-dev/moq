@@ -46,8 +46,8 @@ Settled:
    client must open even when it wants nothing).
 2. ✅ **Its interest is a set of prefixes edited in place**, with a floor per
    prefix, SYNCED per prefix, and swaps that keep what both sets cover:
-   [the interest set](/quest/m2/cluster-routes/interest-set.md)
-   settles and proves those rules, and this puts them on the wire.
+   [the interest set](https://github.com/moq-dev/moq/pull/8728)
+   settled and proved those rules, and this puts them on the wire.
 3. ✅ **A token-scope change is an edit.** The subscriber's set is its local
    interests met with its scope's regions, one prefix per region, so a
    multi-region scope is certifiable. Plan items 16 and 17 of the
@@ -136,7 +136,6 @@ Public API: none expected. Wire: lite-07-wip only.
 
 ## Required
 
-- [The route model and router take an interest as an edited set of prefixes](/quest/m2/cluster-routes/interest-set.md) - the edit rule proven in the model and the router that implements it
 - [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the messages this moves onto one stream, with no echo or route request among them
 
 ## Related

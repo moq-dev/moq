@@ -57,7 +57,9 @@ fn widening_swaps_prefixes_without_resending_what_both_cover() {
 	assert_eq!(sim.stats.claim_items - items, PER, "only live/c is sent");
 	let events = &sim.events[before..];
 	assert!(
-		events.iter().all(|event| event.kind == Kind::Start && event.claim.starts_with("live/c/")),
+		events
+			.iter()
+			.all(|event| event.kind == Kind::Start && event.claim.starts_with("live/c/")),
 		"{events:?}"
 	);
 	assert_eq!(sim.path(client).is_synced(1, &p("live")), Some(true));
@@ -80,7 +82,9 @@ fn narrowing_carries_the_wider_floor() {
 	assert_eq!(sim.stats.claim_items, items, "the floor carries, so nothing is sent");
 	let events = &sim.events[before..];
 	assert!(
-		events.iter().all(|event| event.kind == Kind::Unwatched && event.claim.starts_with("live/c/")),
+		events
+			.iter()
+			.all(|event| event.kind == Kind::Unwatched && event.claim.starts_with("live/c/")),
 		"{events:?}"
 	);
 	// The carried floor still certifies a withdrawal.
@@ -206,7 +210,11 @@ fn each_added_prefix_is_synced_on_its_own() {
 	let router = sim.path(client);
 	assert_eq!(router.is_synced(r1, &p("live/b")), Some(true));
 	assert_eq!(router.is_synced(r2, &p("live/a")), Some(true));
-	assert_eq!(router.is_synced(r2, &p("live/b")), None, "its edit waits behind the marker");
+	assert_eq!(
+		router.is_synced(r2, &p("live/b")),
+		None,
+		"its edit waits behind the marker"
+	);
 	assert_eq!(router.is_synced(r1, &p("live/c")), None);
 	sim.release(r2, client);
 	assert!(sim.run());
@@ -294,5 +302,3 @@ fn a_scope_with_several_regions_asks_for_each() {
 		}]
 	);
 }
-
-
