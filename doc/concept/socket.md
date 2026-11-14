@@ -153,6 +153,11 @@ for what remains, such as browsers, which read without pacing.
 
 Use `tcp` for a byte stream or a log of records that must all arrive in order,
 such as a proxied TCP connection, a file transfer, or a request and its reply.
+Each side's reader subscribes at a priority it picks, which schedules the
+peer's half against its other subscriptions on every hop. In Rust,
+`moq_tokio::socket::TcpStream` reads and writes a `tcp` session as tokio
+`AsyncRead` and `AsyncWrite`, and [`moq tcp`](/bin/cli#tcp) forwards TCP
+connections over them.
 
 ### `track`
 
