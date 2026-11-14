@@ -832,12 +832,15 @@ fn a_route_starved_at_the_last_seqno_requests_nothing() {
 }
 
 /// Each message recomputes only the identity it names, so the work a message
-/// costs does not grow with how many other origins a node routes to.
+/// costs does not grow with how many other origins a node routes to, on either rule.
 #[test]
 fn a_message_recomputes_only_its_identity() {
-	for origins in [1, 50] {
+	for (rule, origins) in [Rule::Distance, Rule::PATH]
+		.into_iter()
+		.flat_map(|rule| [(rule, 1), (rule, 50)])
+	{
 		let (a, b, client) = (0, 1, 2);
-		let mut sim = Sim::new(3 + origins);
+		let mut sim = Sim::with(rule, 3 + origins);
 		sim.join(a, b, 1);
 		sim.leaf(client);
 		sim.join(client, b, 1);
@@ -856,7 +859,7 @@ fn a_message_recomputes_only_its_identity() {
 		assert_eq!(
 			sim.touched() - touched,
 			sim.stats.delivered - delivered + 1,
-			"one identity per message, plus the origin's own change"
+			"{rule:?}: one identity per message, plus the origin's own change"
 		);
 	}
 }
