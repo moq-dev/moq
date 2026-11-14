@@ -211,3 +211,11 @@ quests that require them.
 Decided 2026-11-13 (maintainer, /quest-run): ✅ m2 no longer requires the m1
 stream-credit epic (rejected: keep the gate). It was an ordering rule, not a
 code dependency, and with takeover moved to m3 the epic changes no wire.
+
+Decided 2026-11-13 (maintainer, /quest-plan from an audit of `main`'s audio):
+✅ the [audio playout](/quest/m2/audio-playout/README.md) epic moves here from
+m1, with its calibration in m3 (rejected: calibration here too; only the lag
+rule here). Its lag rule reshapes `main`-only API the cut would publish (the
+`stretch` setting, moq-audio's `Sink::due` and `bus::Positioned`), and the
+cut should not ship the 2026-11-09 stretch model, which lets audio trail
+video by up to 2 s.

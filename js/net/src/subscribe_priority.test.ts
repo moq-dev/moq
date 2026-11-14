@@ -3,7 +3,8 @@
 // relay case lives with the Rust relay (rs/moq-net/tests/integration/subscribe_priority.rs).
 
 import { expect, spyOn, test } from "bun:test";
-import { Manual, yieldNow } from "@moq/clock";
+import { yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { accept, connect, type Session } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import { SubscribeUpdate } from "./ietf/subscribe.ts";

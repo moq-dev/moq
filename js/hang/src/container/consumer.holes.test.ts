@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
@@ -442,11 +443,27 @@ test("a hole is waited for the wait while an arrived group plays up to the max d
 		await clock.advance(Duration.millis(1));
 		expect(reads()).toEqual([0, 500, "gap", 520]);
 
-		// Or at once, when the newest content is already the wait past where the group after it begins.
+		// Content buffered past the wait doesn't skip it early: a burst may still carry the group.
 		write(5n, 700);
 		write(6n, 800);
 		await flush();
+		expect(reads()).toEqual([0, 500, "gap", 520]);
+		await clock.advance(Duration.millis(100));
 		expect(reads()).toEqual([0, 500, "gap", 520, "gap", 700, 800]);
+
+		// It skips at once when the newest content is already the max delay past the group after it.
+		write(8n, 900);
+		write(9n, 1900);
+		await flush();
+		expect(reads()).toEqual([0, 500, "gap", 520, "gap", 700, 800, "gap", 900, 1900]);
+
+		// A burst past the wait that carries the missing group reads with no gap.
+		write(11n, 2000);
+		write(12n, 2200);
+		await flush();
+		write(10n, 1950);
+		await flush();
+		expect(reads()).toEqual([0, 500, "gap", 520, "gap", 700, 800, "gap", 900, 1900, 1950, 2000, 2200]);
 	} finally {
 		consumer.close();
 		track.finish();

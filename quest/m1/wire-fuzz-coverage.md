@@ -20,6 +20,9 @@ Each crate follows moq-net's shape (`rs/moq-net/fuzz/README.md`): the target bod
 
 `moq-sock`'s known overread is fixed: [moq-dev/moq#7394](https://github.com/moq-dev/moq/pull/7394) (merged 2026-11-01) bounds `CMsg::decode` (`rs/moq-sock/src/udp/cmsg/mod.rs`), which now returns `None` for a short message, so neither target waits on anything. `just rs miri` and its nightly job already exist ([moq-dev/moq#7315](https://github.com/moq-dev/moq/pull/7315)); this quest adds its crates to them.
 
+Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): ✅ m1
+(rejected: staying in m4). This unsafe is reachable by any peer.
+
 Public API: none. Wire: none.
 
 ## Related

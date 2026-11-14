@@ -1,20 +1,5 @@
 {
   "nodes": {
-    "crane": {
-      "locked": {
-        "lastModified": 1792350552,
-        "narHash": "sha256-292lvpvxTGKryKxh3/3tcIVi85CwYGdl4oOi113Sob8=",
-        "owner": "ipetkov",
-        "repo": "crane",
-        "rev": "e675a36b7377bebe41d548388a2501cbb16d380d",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ipetkov",
-        "repo": "crane",
-        "type": "github"
-      }
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -77,17 +62,16 @@
         "quest-pinned": "quest-pinned"
       },
       "locked": {
-        "lastModified": 1794541097,
-        "narHash": "sha256-RtReGNTaAHLBHLOgnyu//r9CqEDqWnbAWIUwqpT4TAU=",
+        "lastModified": 1794610816,
+        "narHash": "sha256-m+sEoFeXLsXMUyOdphtd/qCaxxXofD7iRmtmdYOqq+I=",
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "2a80c90206a8136e9e8d86d524d766caa42bc267",
+        "rev": "b30e26f3b45187cb4e4f5049fea26480ce634881",
         "type": "github"
       },
       "original": {
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "2a80c90206a8136e9e8d86d524d766caa42bc267",
         "type": "github"
       }
     },
@@ -109,7 +93,6 @@
     },
     "root": {
       "inputs": {
-        "crane": "crane",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
         "quest": "quest",

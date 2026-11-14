@@ -16,7 +16,8 @@
  * exposes `gc` and fails once a retired route stays reachable. Bun scans its stack conservatively,
  * so a dead reference there can survive a collection.
  */
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import type { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";

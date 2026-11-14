@@ -111,13 +111,21 @@ Abort(sx, s) == IF s # None /\ sx[s].open
 \* `Shared::predecessor`.
 Mirror(p) == spred' = IF lc \in {"live", "offline"} THEN p ELSE spred
 
-\* `Action::Migrating`: publish the predecessor, then `Shared::migrating`.
-\* Leaving the fallback drops the probe in flight.
+\* `Action::Migrating`: `Shared::migrating` with the policy's predecessor. The
+\* mirrored one means the replacement on top of it closed, and the handle
+\* serves on it again; any other is the live session, which got the GOAWAY,
+\* and is mirrored as it. Leaving the fallback drops the probe in flight.
 OnMigrating(p) ==
-    /\ Mirror(p)
-    /\ migrating' = IF lc = "live" THEN TRUE ELSE migrating
+    /\ IF lc = "live" /\ p # None
+       THEN /\ migrating' = TRUE
+            /\ IF spred = p
+               THEN /\ lcSess' = p
+                    /\ UNCHANGED spred
+               ELSE /\ spred' = p
+                    /\ UNCHANGED lcSess
+       ELSE UNCHANGED <<migrating, spred, lcSess>>
     /\ probing' = FALSE
-    /\ UNCHANGED <<lc, lcSess, started, ended>>
+    /\ UNCHANGED <<lc, started, ended>>
 
 OnRetired ==
     /\ Mirror(None)
@@ -279,13 +287,15 @@ EndGoaway(s, uri) ==
          /\ Emit(<<"Migrating">>, s)
          /\ UNCHANGED watch
 
-\* `Reconnect::closed` for a close a retry may repair.
+\* `Reconnect::closed`: every close retries, whatever its error. A predecessor
+\* that is not closing gracefully serves again, so the policy migrates back
+\* onto it; the `Retrying` that follows changes no status, so it is left out.
 EndClosed ==
     /\ live' = None
     /\ phase' = "backoff"
     /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
     /\ probe' = "none"
-    /\ Emit(<<"Offline">>, pred)
+    /\ Emit(IF pred # None /\ ~sess[pred].closing THEN <<"Migrating">> ELSE <<"Offline">>, pred)
     /\ UNCHANGED <<pred, sess, target, watch>>
 
 \* `Phase::Live`: a GOAWAY is checked before the close.
@@ -373,23 +383,24 @@ Connected ==
           ELSE UNCHANGED <<phase, live, watch, queue, probe>>
     /\ UNCHANGED <<pred, target, timer, dialTo, probing, misdials>>
 
-\* A dial failed, with a verdict a retry may repair or one it cannot. Until a
-\* session has been established, any failure ends the policy.
+\* A dial failed. Once a session has been established, every failure retries
+\* whatever its error (an unusable address is out of scope); until then, any
+\* failure ends the policy.
 Failed ==
     /\ dial # "none"
     /\ dial' = "none"
     /\ IF phase # "dialing"
        THEN UNCHANGED <<phase, live, pred, queue, timer, target, callerVars>>
-       ELSE \/ /\ Established
-               /\ phase' = "backoff"
-               /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
-               \* A redirect target that failed its walk is dropped: the next walk
-               \* dials the configured target (`Reconnect::configured`).
-               /\ target' = Start
-               /\ UNCHANGED <<live, pred, queue, callerVars>>
-            \/ /\ Done
-               /\ Emit(Append(queue, "Done"), None)
-               /\ UNCHANGED <<timer, target>>
+       ELSE IF Established
+            THEN /\ phase' = "backoff"
+                 /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+                 \* A redirect target that failed its walk is dropped: the next walk
+                 \* dials the configured target (`Reconnect::configured`).
+                 /\ target' = Start
+                 /\ UNCHANGED <<live, pred, queue, callerVars>>
+            ELSE /\ Done
+                 /\ Emit(Append(queue, "Done"), None)
+                 /\ UNCHANGED <<timer, target>>
     /\ UNCHANGED <<watch, probe, sess, used, dialTo, misdials>>
 
 \* `Reconnect::probed`, and the dial `run` makes of a probe that got through.
@@ -536,9 +547,10 @@ StatusTruthful ==
         /\ (lc = "closed") = (phase = "done")
         /\ lc # "closed" => spred = pred
 
-\* `Action::Offline`: nothing serves anymore.
+\* `Action::Offline`: nothing serves anymore. A predecessor closing gracefully
+\* already carries nothing and takes no new work.
 OfflineMeansNothingServes ==
-    Parked /\ lc = "offline" => ~Open(pred)
+    Parked /\ lc = "offline" => ~Open(pred) \/ sess[pred].closing
 
 \* Every session the policy let go of is closed: one left open holds a
 \* transport and the peer's state with nothing able to reach it.

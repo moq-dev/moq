@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as cache from "./cache.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";

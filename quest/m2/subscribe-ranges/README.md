@@ -1,4 +1,4 @@
-# Subscribe ranges
+# [S] Subscribe ranges
 
 ## Goal
 
@@ -97,6 +97,8 @@ relay bounds a sparse FETCH only if the model can request ranges:
   (maintainer, 09-29).
 - The relay half of fetch-span moves here; #4558 landed only the no-handler
   skip.
+
+Every child has landed, so this is now the quest itself (the audit merged main's deletion of its last child, lite-07 FETCH, [moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616)). Its remaining work is the end-to-end test it owns, below; delete it once `rs/moq-net/tests/integration/subscribe_ranges.rs` covers that.
 
 This line owns the end-to-end test: a relay with a sparse cache answers a
 wide past range plus live in both orders, over lite-07 and moq-transport, with

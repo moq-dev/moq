@@ -50,6 +50,19 @@ epics whole. ✅ m3 (rejected: m2, where the cut would wait on them; pulling
 their 12 breaking m2 blockers into m1). m3 is not gated, and they rank right
 after m2, which is when they can start.
 
+Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): tests
+that guard what production traffic reaches join m1 ahead of the questline's
+m4 default, so changes are proven before they ship: the
+[QUIC Interop Runner](/quest/m1/quic-interop.md),
+[sim rule checks](/quest/m1/quic-sim-rules.md),
+[relay parser fuzz targets](/quest/m1/fuzz-relay-parsers.md), and from m4
+[the relay on the sim](/quest/m1/quic-sim.md),
+[mutation testing](/quest/m1/mutants.md), and
+[peer-reachable unsafe](/quest/m1/wire-fuzz-coverage.md). OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on
+google/oss-fuzz.
+Left in m4 without a pick: Kani, Miri seeds and TSan, the JS corpus, and
+bindings interop.
+
 ## Related
 
 - [A busy js/net serve yields](https://github.com/moq-dev/moq/pull/5289) - js/net's serve loop leaves the browser its event loop under a fast publisher, if it does not already

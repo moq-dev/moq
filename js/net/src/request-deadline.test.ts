@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { SessionCode, SessionError } from "./error.ts";
 import { HopSchema } from "./hop.ts";
 import { NativeSession } from "./ietf/session.ts";

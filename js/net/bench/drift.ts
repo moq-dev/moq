@@ -1,5 +1,6 @@
 /** Sweep publishers, readers, and retained history for a parked frame read's drift check. */
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track } from "@moq/net";
 import { hooks } from "../src/internal.ts";
 

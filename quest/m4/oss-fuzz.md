@@ -45,4 +45,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Wire fuzz coverage](/quest/m4/wire-fuzz-coverage.md) - adds the moq-sock and moq-uring targets OSS-Fuzz would also run
+- [Wire fuzz coverage](/quest/m1/wire-fuzz-coverage.md) - adds the moq-sock and moq-uring targets OSS-Fuzz would also run

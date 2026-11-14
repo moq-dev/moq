@@ -149,20 +149,20 @@ async fn a_refused_credential_redials_with_its_replacement() {
 	assert!(connection.connected());
 }
 
-/// Without a new credential, a refusal ends the connection rather than retrying it.
+/// A refused credential is the tokens' answer while the connection keeps redialing.
 #[tokio::test]
-async fn an_unchanged_refused_credential_is_terminal() {
-	refused_credential_is_terminal(config("moq-lite-07-wip", &["old"])).await;
+async fn a_refused_credential_answers_the_tokens() {
+	refused_credential_answers(config("moq-lite-07-wip", &["old"])).await;
 }
 
 /// Without AUTH, a refusal after the session went live is still the answer, never a grant.
 #[tokio::test]
-async fn an_unchanged_refused_credential_without_auth_is_terminal() {
-	refused_credential_is_terminal(config("moq-lite-05", &["old"])).await;
-	refused_credential_is_terminal(config("moq-transport-22", &["old"])).await;
+async fn a_refused_credential_without_auth_answers_the_tokens() {
+	refused_credential_answers(config("moq-lite-05", &["old"])).await;
+	refused_credential_answers(config("moq-transport-22", &["old"])).await;
 }
 
-async fn refused_credential_is_terminal(config: moq_tokio::connect::Config) {
+async fn refused_credential_answers(config: moq_tokio::connect::Config) {
 	let version = config.version[0].to_string();
 	let mut server = serve(&version, "old").await;
 	let client = config.init(Default::default()).expect("failed to init client");
@@ -175,25 +175,11 @@ async fn refused_credential_is_terminal(config: moq_tokio::connect::Config) {
 		"{seen:?}"
 	);
 	server.release.notify_one();
-	// A lite client is live before the server's answer, so the refusal may close it after.
-	let err = kio::clock::timeout(Duration::from_secs(10), async {
-		match connection.established().await {
-			Ok(connection) => connection.closed().await.expect_err("closed without an error"),
-			Err(err) => err,
-		}
-	})
-	.await
-	.expect("the refusal never ended the connection");
+	let answer = kio::clock::timeout(Duration::from_secs(10), tokens.answered())
+		.await
+		.expect("the refusal never answered the tokens")
+		.expect_err("the refused credential was answered");
 	let unauthorized =
 		|err: &moq_net::Error| matches!(err, moq_net::Error::Session(moq_net::SessionError::Unauthorized));
-	assert!(
-		matches!(&err, moq_tokio::Error::MoqNet(err) if unauthorized(err)),
-		"{err:?}"
-	);
-	// The refusal is the answer to the tokens that dial presented.
-	let answer = tokens
-		.answered()
-		.await
-		.expect_err("the refused credential was answered");
 	assert!(unauthorized(&answer), "{answer:?}");
 }

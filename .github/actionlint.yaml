@@ -1,10 +1,10 @@
 self-hosted-runner:
-  # The host's merge queue runner (kixel-ai/nixos modules/ci-runners.nix).
+  # The host's merge queue runner (kixel-ai/dotfiles nixos/modules/ci-runners.nix).
   labels:
     - moq-queue
 paths:
-  # GitHub's `queue: max` on the shared Pages writers. actionlint learns it in
+  # GitHub's `queue: max` on serialized publishing jobs. actionlint learns it in
   # https://github.com/rhysd/actionlint/pull/661, unreleased after 1.7.12.
-  .github/workflows/{interop,nightly,smoke}.yml:
+  .github/workflows/{interop,nightly,smoke,release-remeasure}.yml:
     ignore:
       - 'unexpected key "queue" for "concurrency" section'

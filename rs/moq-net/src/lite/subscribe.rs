@@ -61,7 +61,8 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it.
+	/// A position: a start delivers from it, and an end stops just before it. Lite-07 names
+	/// only a group, so its frame is 0 there; only lite-06 bounds a range partway through one.
 	Absolute(crate::track::Position),
 	/// The group this many before the latest, included as an end. Lite07+ only, except a
 	/// start of 0 (see [`Range`]).
@@ -120,62 +121,6 @@ impl Range {
 	}
 }
 
-/// Whom a pull serves, which a relay choosing a parent per broadcast prices warm routes by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Serves {
-	/// The subscriber does not say.
-	Unknown,
-	/// Demand of the subscriber's own: a local reader, or pulls tracing back to two or more
-	/// relays.
-	Alone,
-	/// Demand tracing back to the relay with this Node ID alone.
-	Relay(u64),
-}
-
-impl Serves {
-	pub(super) fn encode(self, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
-		match self {
-			Self::Unknown => w.varint(0),
-			Self::Alone => w.varint(1),
-			Self::Relay(0) => Err(EncodeError::InvalidState),
-			Self::Relay(node) => {
-				w.varint(2)?;
-				w.varint(node)
-			}
-		}
-	}
-
-	pub(super) fn decode(r: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-		Ok(match r.varint()? {
-			0 => Self::Unknown,
-			1 => Self::Alone,
-			2 => match r.varint()? {
-				0 => return Err(DecodeError::InvalidValue),
-				node => Self::Relay(node),
-			},
-			_ => return Err(DecodeError::InvalidValue),
-		})
-	}
-}
-
-/// Encode whom a pull serves. This endpoint chooses no parent per broadcast, so it does not
-/// say.
-fn encode_serves(w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-	match version.has_warm() {
-		true => Serves::Unknown.encode(w),
-		false => Ok(()),
-	}
-}
-
-/// Decode whom a pull serves, and ignore it: only a relay choosing a parent per broadcast
-/// prices by it, which this endpoint does not do.
-fn decode_serves(r: &mut Decoder<'_>, version: Version) -> Result<(), DecodeError> {
-	if version.has_warm() {
-		Serves::decode(r)?;
-	}
-	Ok(())
-}
-
 impl Version {
 	/// Whether this version's SUBSCRIBE carries the subscriber's max delay preference.
 	///
@@ -209,7 +154,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			}
 		};
 		let update = decode_update(r, version)?;
-		decode_serves(r, version)?;
 
 		Ok(Self {
 			id,
@@ -245,7 +189,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			}
 		}
 		encode_update(w, version, self.update)?;
-		encode_serves(w, version)?;
 
 		Ok(())
 	}
@@ -393,7 +336,7 @@ fn range_size(range: &Range, form: Form) -> Option<usize> {
 	let size = |value| varint::size(value, form).ok();
 	let anchor = |anchor: Option<Anchor>| match anchor {
 		None => size(0),
-		Some(Anchor::Absolute(position)) => Some(size(1)? + size(position.group)? + size(position.frame)?),
+		Some(Anchor::Absolute(position)) => Some(size(1)? + size(position.group)?),
 		Some(Anchor::Relative(back)) => Some(size(2)? + size(back)?),
 		Some(Anchor::Time(pts)) => Some(size(3)? + size(pts)?),
 	};
@@ -405,24 +348,22 @@ fn range_size(range: &Range, form: Form) -> Option<usize> {
 fn decode_anchor(r: &mut Decoder<'_>) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
-		1 => Some(Anchor::Absolute(crate::track::Position {
-			group: r.varint()?,
-			frame: r.varint()?,
-		})),
+		1 => Some(Anchor::Absolute(crate::track::Position::group(r.varint()?))),
 		2 => Some(Anchor::Relative(r.varint()?)),
 		3 => Some(Anchor::Time(r.varint()?)),
 		_ => return Err(DecodeError::InvalidValue),
 	})
 }
 
-/// Encode the inverse of [`decode_anchor`].
+/// Encode the inverse of [`decode_anchor`]. A range covers whole groups, so a position
+/// partway through one is refused: FETCH reads a slice of a group.
 fn encode_anchor(w: &mut Encoder<'_>, anchor: Option<Anchor>) -> Result<(), EncodeError> {
 	match anchor {
 		None => w.varint(0),
+		Some(Anchor::Absolute(position)) if position.frame != 0 => Err(EncodeError::Version),
 		Some(Anchor::Absolute(position)) => {
 			w.varint(1)?;
-			w.varint(position.group)?;
-			w.varint(position.frame)
+			w.varint(position.group)
 		}
 		Some(Anchor::Relative(back)) => {
 			w.varint(2)?;
@@ -820,7 +761,6 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			true => r.varint()?.checked_sub(1),
 			false => None,
 		};
-		decode_serves(r, version)?;
 
 		Ok(Self {
 			wanted_group,
@@ -861,7 +801,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		if version.has_refresh() {
 			w.varint_opt(self.wanted_group)?;
 		}
-		encode_serves(w, version)
+		Ok(())
 	}
 }
 
@@ -1601,12 +1541,24 @@ mod test {
 			priority: 3,
 			max_delay: std::time::Duration::from_millis(250),
 			min_delay: None,
+			// Groups 7 through 9.
+			ranges: vec![Range {
+				start: absolute(7, 0),
+				end: absolute(10, 0),
+			}],
+			update: 0,
+		}
+	}
+
+	/// The sample bounded partway through its groups, as only lite-06 carries.
+	fn framed_sample() -> Subscribe<'static> {
+		Subscribe {
 			// Group 7 from frame 4, through frame 2 of group 9.
 			ranges: vec![Range {
 				start: absolute(7, 4),
 				end: absolute(9, 3),
 			}],
-			update: 0,
+			..subscribe_sample()
 		}
 	}
 
@@ -1639,7 +1591,7 @@ mod test {
 	/// exclusive position just past it here.
 	#[test]
 	fn subscribe_frame_bounds_roundtrip() {
-		let msg = subscribe_sample();
+		let msg = framed_sample();
 		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, msg.ranges);
 	}
 
@@ -1730,7 +1682,7 @@ mod test {
 	/// a `Frame Start` qualifying the zero floor must survive the round trip.
 	#[test]
 	fn frame_start_may_qualify_group_zero_on_lite06() {
-		let mut msg = subscribe_sample();
+		let mut msg = framed_sample();
 		msg.ranges[0].start = absolute(0, 4);
 		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, msg.ranges);
 	}
@@ -1738,7 +1690,7 @@ mod test {
 	/// Silently widening to the whole group would deliver frames the caller excluded.
 	#[test]
 	fn subscribe_frame_bounds_rejected_before_lite06() {
-		assert!(encode(&subscribe_sample(), Version::Lite05).is_err());
+		assert!(encode(&framed_sample(), Version::Lite05).is_err());
 	}
 
 	/// Frames are numbered per group, so a lite-06 `Frame End` without the `Group End` it
@@ -1770,8 +1722,8 @@ mod test {
 		msg.ranges = vec![
 			Range::OLDEST,
 			Range {
-				start: absolute(7, 4),
-				end: absolute(9, 3),
+				start: absolute(7, 0),
+				end: absolute(9, 0),
 			},
 			Range {
 				start: Some(Anchor::Relative(2)),
@@ -1810,6 +1762,32 @@ mod test {
 			.map(|(_, range)| range)
 			.collect();
 		assert_eq!(resolved, msg.ranges);
+	}
+
+	/// A lite-07 range covers whole groups: an absolute anchor is its type and group alone,
+	/// and one partway through a group is refused, since FETCH reads a slice of a group.
+	#[test]
+	fn lite07_ranges_cover_whole_groups() {
+		let mut msg = framed_sample();
+		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
+		msg.ranges = vec![Range {
+			start: absolute(7, 4),
+			end: None,
+		}];
+		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
+
+		msg.ranges = vec![Range {
+			start: absolute(7, 0),
+			end: absolute(9, 0),
+		}];
+		let whole = encode(&msg, Version::Lite07).unwrap();
+		msg.ranges = vec![Range {
+			start: Some(Anchor::Relative(7)),
+			end: Some(Anchor::Relative(9)),
+		}];
+		// The same bytes but the two types: no frame follows either group.
+		let relative = encode(&msg, Version::Lite07).unwrap();
+		assert_eq!(whole.len(), relative.len());
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,
@@ -1945,10 +1923,10 @@ mod test {
 
 		msg.ranges = vec![Range::OLDEST];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last but for the update number and whom the pull serves: a count of one,
-		// then two anchors of type 0.
-		let at = buf.len() - 5;
-		assert_eq!(&buf[at..], [1, 0, 0, 0, 0]);
+		// The list is last but for the update number: a count of one, then two anchors of
+		// type 0.
+		let at = buf.len() - 4;
+		assert_eq!(&buf[at..], [1, 0, 0, 0]);
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
@@ -1957,7 +1935,7 @@ mod test {
 		));
 
 		let mut buf = encode(&msg, version).unwrap();
-		let last = buf.len() - 3;
+		let last = buf.len() - 2;
 		buf[last] = 4;
 		assert!(matches!(
 			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
@@ -2009,27 +1987,6 @@ mod test {
 			resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 				.is_err()
 		);
-	}
-
-	/// Lite-07 ends SUBSCRIBE with whom the pull serves: this endpoint says Unknown, and reads
-	/// and ignores any well-formed value. An unknown type or a relay named 0 is malformed, and
-	/// older versions carry nothing.
-	#[test]
-	fn serves_trails_subscribe_only_on_lite07() {
-		let msg = subscribe_sample();
-		let lite07 = encode(&msg, Version::Lite07).unwrap();
-		assert_eq!(lite07.last(), Some(&0));
-		let head = &lite07[..lite07.len() - 1];
-		let decode = |serves: &[u8]| {
-			let buf = [head, serves].concat();
-			crate::coding::decode_from(&mut buf.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
-		};
-		for serves in [&[0][..], &[1], &[2, 9]] {
-			decode(serves).unwrap();
-		}
-		for serves in [&[3][..], &[2, 0], &[]] {
-			assert!(decode(serves).is_err(), "{serves:?}");
-		}
 	}
 
 	/// Lite-07 carries `Wanted Group` on SUBSCRIBE_UPDATE; older versions drop it.

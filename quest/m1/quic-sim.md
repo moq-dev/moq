@@ -43,6 +43,9 @@ consumer uses a rate below its media bitrate behind a deep but finite queue,
 and checks that the queue overflowed. A stalled sender that never filled the
 queue is not evidence about congestion loss.
 
+Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): ✅ m1
+(rejected: staying in m4). It is the base for [fault schedules](/quest/m4/cluster-fault-schedules.md).
+
 ## Waiting
 
 - Maintainer: how moq-tokio's `Client` and `Server` take a simulated QUIC socket. Options: (a) extend the `sim`-feature `Client::with_network` path, already documented as tracking internals that can change in any release, to carry `quic::driver::sim::Network`, with a matching hook on `Server`; (b) a new `sim`-only `with_socket(driver::endpoint::Socket)` on each; (c) drop this quest, since the memory network already covers relay hops and reconnects. Recommended: (a) if a failure only real QUIC would show is named, otherwise (c).

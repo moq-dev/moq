@@ -1,0 +1,19 @@
+# Relay config for the stream credit harness: anonymous, a self-signed localhost
+# certificate the browser pins through /certificate.sha256, QUIC and HTTP on
+# 127.0.0.1. run.sh overrides the ports on the command line.
+
+[log]
+level = "info"
+
+[listen]
+bind = "127.0.0.1:4480"
+tls.generate = ["localhost", "127.0.0.1"]
+# The YIELDED reset that pauses a group is lite-07's; lite-06 resets cancel it.
+version = ["moq-lite-07-wip", "moq-lite-06"]
+
+[web.http]
+# The JS publisher's WebSocket, and /certificate.sha256 for the browser's WebTransport.
+listen = "127.0.0.1:4480"
+
+[auth]
+public = "**"

@@ -545,6 +545,10 @@ impl Anchors {
 
 #[derive(Default)]
 pub(crate) struct TrackState {
+	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`] or [`Request`].
+	// Every group written into the track meters against it, whether the publisher wrote
+	// it live or it answers a fill. Empty (no-op) for an untagged broadcast.
+	ingress: stats::Scope,
 	// The publisher's properties, once known; always Some for Subscriber/Producer.
 	// Copied by value into each group it creates.
 	info: Option<Info>,
@@ -2442,6 +2446,12 @@ impl TrackState {
 		!self.outcome.is_released() && Some(sequence) == self.latest_group
 	}
 
+	/// Publishing ended: drop the ingress scope, whose session a reader still draining the
+	/// track must not keep open. The groups already written keep their own meters.
+	fn release_ingress(&mut self) {
+		self.ingress = stats::Scope::default();
+	}
+
 	/// No producer remains: stop protecting the live edge, so the pool's idle expiry
 	/// reclaims every group once readers stop touching it, and a stale consumer can't
 	/// pin the cache (and its frame buffers) forever.
@@ -2463,6 +2473,7 @@ impl TrackState {
 	/// every unfinished copy, cached or not, to abort once the track lock is released, so a
 	/// reader that already pulled one ends with `err` too and its writer fails.
 	fn tear_down(&mut self, err: Error) -> (Option<Position>, OpenGroups) {
+		self.release_ingress();
 		let resume = self.resume_position();
 		let groups = self
 			.lookup
@@ -2582,6 +2593,7 @@ impl TrackState {
 	/// No producer ever wrote to it, so there is nothing to tear down, but a fill answered
 	/// before the refusal may have cached the live edge, which nothing protects anymore.
 	fn reject(&mut self, err: Error, retry: Option<Duration>) {
+		self.release_ingress();
 		let released = self.outcome.is_released();
 		self.outcome = Outcome::Aborted {
 			err,
@@ -3696,7 +3708,8 @@ impl TrackState {
 			self.displace(sequence);
 		}
 
-		let mut group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
+		let mut group =
+			group::Producer::new(group::Info { sequence }, info, self.cache.clone()).with_meter(self.ingress.meter());
 		if let Some(content) = content {
 			group.handle().share_content(content);
 		}
@@ -3755,7 +3768,8 @@ impl TrackState {
 			self.install(info.unwrap_or_else(|| Info::default().with_max_age(None)));
 		}
 		let info = self.info.clone().unwrap();
-		let mut group = group::Producer::new(group::Info { sequence }, info.clone(), self.cache.clone());
+		let mut group = group::Producer::new(group::Info { sequence }, info.clone(), self.cache.clone())
+			.with_meter(self.ingress.meter());
 		// A compressed flight inflates from frame 0 with a decoder of its own, so it keeps
 		// its own content rather than the cached copy's, whose inflated copy is further on.
 		if !info.compressed() {
@@ -4115,10 +4129,6 @@ pub struct Producer {
 	prev_subscription: Option<Subscription>,
 	// Shared with every clone and every `Requests`: its `Drop` is the teardown.
 	alive: Arc<Alive>,
-	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`]. Bumped as
-	// one subscription on tag and closed when the last producer clone drops. Empty
-	// (no-op) for an untagged broadcast.
-	stats: stats::Scope,
 }
 
 /// Bytes a session keeps for a track beside its cache, billed to the track's account as a
@@ -4177,16 +4187,17 @@ impl Producer {
 			broadcast,
 			prev_subscription: None,
 			alive,
-			stats: stats::Scope::default(),
 		}
 	}
 
 	/// Attach the parent broadcast's ingress stats scope, counting this track as one
 	/// ingress subscription (closed when the last producer clone drops). Called by a
 	/// tagged [`broadcast::Producer`] when it creates the track.
-	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
+	pub(super) fn with_stats(self, scope: stats::Scope) -> Self {
 		self.alive.publish(Some(&scope));
-		self.stats = scope;
+		if let Ok(mut state) = self.state.write() {
+			state.ingress = scope;
+		}
 		self
 	}
 
@@ -4273,7 +4284,7 @@ impl Producer {
 		};
 		let track = state.info.clone().unwrap();
 		state.claim_sequence(info.sequence, start)?;
-		let mut group = group::Producer::new(info, track, state.cache.clone()).with_meter(self.stats.meter());
+		let mut group = group::Producer::new(info, track, state.cache.clone()).with_meter(state.ingress.meter());
 		if start != 0 {
 			group.bound(group::Bounds { start, end: None })?;
 		}
@@ -4316,8 +4327,8 @@ impl Producer {
 
 		let track = state.info.clone().unwrap();
 
-		let group =
-			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
+		let group = group::Producer::new(group::Info { sequence }, track, state.cache.clone())
+			.with_meter(state.ingress.meter());
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
 		state.appended(sequence);
@@ -5340,6 +5351,9 @@ impl Drop for Alive {
 		// later one can take its name. It finished if its producer declared its end.
 		let finished = self.state.read().outcome.end().is_some();
 		self.unlist(finished);
+		if let Ok(mut state) = self.state.write() {
+			state.release_ingress();
+		}
 		// A request nobody accepted was never publishing; there's nothing to tear down.
 		if !self.published.load(Ordering::Relaxed) {
 			return;
@@ -10877,9 +10891,12 @@ impl Request {
 		self
 	}
 
-	/// Attach an ingress stats scope, applied to the [`Producer`] on accept. Set by
-	/// a tagged [`broadcast::Producer::reserve_track`].
+	/// Attach an ingress stats scope, which meters every group the track takes, including
+	/// fills answered before accept. Set by a tagged [`broadcast::Producer::reserve_track`].
 	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.ingress = scope.clone();
+		}
 		self.stats = scope;
 		self
 	}
@@ -10988,7 +11005,6 @@ impl Request {
 				state: self.state,
 				prev_subscription: None,
 				alive: self.alive,
-				stats: self.stats,
 			}),
 			_dynamic: self._dynamic,
 		}

@@ -501,38 +501,27 @@ async fn an_unusable_address_ends_only_a_walk_without_hope() {
 	assert_eq!(kio::clock::now(), started, "ended without waiting");
 }
 
-/// A refused credential is terminal, unless the tokens changed since the dial read them.
+/// After a first session, a settled answer such as a refused credential retries with backoff
+/// for as long as it repeats, whether or not the tokens changed.
 #[kio::test]
-async fn a_refusal_retries_only_new_tokens() {
+async fn a_settled_answer_retries_once_established() {
 	let peer = url("tcp://peer:1/");
-	let tokens = auth::Tokens::new(vec!["old".parse().unwrap()]);
-	let mut machine = established(
-		Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
-			.unwrap()
-			.with_tokens(tokens.clone()),
-	);
+	let mut machine =
+		established(Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now()).unwrap());
 
-	let Action::Dial(_) = next(&mut machine).await else {
-		panic!("expected a dial")
-	};
-	tokens.set(vec!["new".parse().unwrap()]);
-	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Refused);
-	assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
-
-	let Action::Dial(_) = next(&mut machine).await else {
-		panic!("expected a redial")
-	};
-	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Refused);
-	assert!(
-		matches!(next(&mut machine).await, Action::Done(Err(TestError::Dial))),
-		"an unchanged credential is refused for good"
-	);
+	for _ in 0..3 {
+		let Action::Dial(_) = next(&mut machine).await else {
+			panic!("expected a dial")
+		};
+		machine.failed(kio::clock::now(), TestError::Dial, Verdict::Settled);
+		assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
+	}
 }
 
-/// A first walk refused for tokens replaced since its dial still earns another dial: the
-/// new tokens are the caller's fix. Unchanged tokens fail fast.
+/// Before any session, a settled answer ends the policy at once, even for tokens replaced
+/// since the dial: the first walk fails fast.
 #[kio::test]
-async fn a_first_refusal_retries_only_new_tokens() {
+async fn a_first_settled_answer_fails_fast() {
 	let peer = url("tcp://peer:1/");
 	let tokens = auth::Tokens::new(vec!["old".parse().unwrap()]);
 	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
@@ -543,17 +532,8 @@ async fn a_first_refusal_retries_only_new_tokens() {
 		panic!("expected a dial")
 	};
 	tokens.set(vec!["new".parse().unwrap()]);
-	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Refused);
-	assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
-
-	let Action::Dial(_) = next(&mut machine).await else {
-		panic!("expected a redial")
-	};
-	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Refused);
-	assert!(
-		matches!(next(&mut machine).await, Action::Done(Err(TestError::Dial))),
-		"an unchanged credential is refused for good"
-	);
+	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Settled);
+	assert!(matches!(next(&mut machine).await, Action::Done(Err(TestError::Dial))));
 }
 
 /// Ending the tokens' handle ends the policy at its next walk, rather than redialing
@@ -812,6 +792,28 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 	assert_eq!(run.events, ["offline"]);
 }
 
+/// A session closed for a protocol violation or a refused credential reconnects like any
+/// other close: the policy does not judge the error's kind.
+#[kio::test]
+async fn a_session_closed_for_any_reason_reconnects() {
+	for reason in [Error::ProtocolViolation, Error::Unauthorized, Error::Expired] {
+		let peer = url("tcp://peer:1/");
+		let mut machine = Reconnect::new(Config::default(), vec![peer.clone()], kio::clock::now()).unwrap();
+		let mut run = Run::default();
+		drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+			!run.accepts.is_empty()
+		})
+		.await;
+
+		run.servers.remove(0).abort(reason);
+		drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+			run.accepts.len() == 2
+		})
+		.await;
+		assert_eq!(run.events, ["offline"]);
+	}
+}
+
 /// A live session on a fallback, ready to probe, with its peer's server side.
 async fn on_fallback(config: Config) -> (Reconnect<Url, TestError>, Session) {
 	let peer = url("https://peer:1/");
@@ -1000,11 +1002,11 @@ async fn busy_handshake() -> (Session, Session, Vec<Box<dyn std::any::Any>>) {
 	)
 }
 
-/// Pins an open finding (`verify-reconnect`, `OfflineMeansNothingServes`): a replacement
-/// that drops while the predecessor still drains reports [`Action::Offline`], whose
-/// promise is that nothing serves, though the predecessor still carries a subscription.
+/// A replacement that drops while the predecessor still serves hands back to it as
+/// [`Action::Migrating`], never [`Action::Offline`]: nothing is down, and the predecessor
+/// still carries a subscription. Only its retirement then takes the connection offline.
 #[kio::test]
-async fn residual_a_dropped_replacement_reports_offline_while_the_predecessor_serves() {
+async fn a_dropped_replacement_migrates_back_to_the_serving_predecessor() {
 	let a = url("tcp://peer:1/");
 	let b = url("tcp://peer:2/");
 	let mut machine: Reconnect<Url, TestError> = Reconnect::new(Config::default(), vec![a], kio::clock::now()).unwrap();
@@ -1024,16 +1026,66 @@ async fn residual_a_dropped_replacement_reports_offline_while_the_predecessor_se
 	drop(replacement_server);
 
 	let action = next(&mut machine).await;
-	assert!(
-		matches!(action, Action::Offline(Some(_))),
-		"the replacement's drop no longer reports offline: flip this test ({action:?})"
-	);
-	let (predecessor, _) = machine.predecessor().expect("the predecessor still drains");
+	assert!(matches!(action, Action::Migrating), "{action:?}");
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Retrying(TestError::Net(_))), "{action:?}");
+	assert!(machine.session().is_none(), "the replacement is gone");
+	let (predecessor, deadline) = machine.predecessor().expect("the predecessor still drains");
 	assert!(predecessor.poll_closed(&kio::Waiter::noop()).is_pending());
 	assert!(
 		predecessor.poll_idle(&kio::Waiter::noop()).is_pending(),
 		"it still serves"
 	);
+
+	// The redial waits out its backoff while the predecessor serves, and its handover still
+	// bounds it: once that ends, nothing serves.
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Retired), "{action:?}");
+	assert!(kio::clock::now() >= deadline);
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Offline(None)), "{action:?}");
+}
+
+/// A replacement that drops while the predecessor closes gracefully, carrying nothing,
+/// leaves nothing serving: it reports [`Action::Offline`].
+#[kio::test]
+async fn a_dropped_replacement_goes_offline_over_a_closing_predecessor() {
+	let a = url("tcp://peer:1/");
+	let mut machine: Reconnect<Url, TestError> =
+		Reconnect::new(Config::default(), vec![a.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(a, Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	let (replacement, replacement_server) = handshake().await;
+	machine.connected(kio::clock::now(), replacement.clone());
+	// The replacement is already closed when the next poll starts the idle predecessor's
+	// graceful close, so its close is seen over a predecessor that is closing, not retired.
+	drop(replacement_server);
+	replacement.closed().await;
+
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Offline(Some(_))), "{action:?}");
+	let (_, deadline) = machine.predecessor().expect("the predecessor is still closing");
+	// The graceful close then ends it well before its handover would.
+	let mut actions = Vec::new();
+	loop {
+		match next(&mut machine).await {
+			Action::Dial(_) => break,
+			Action::Retired => actions.push("retired"),
+			Action::Offline(None) => actions.push("offline"),
+			action => panic!("unexpected {action:?}"),
+		}
+	}
+	assert_eq!(actions, ["retired", "offline"]);
+	assert!(kio::clock::now() < deadline);
 }
 
 /// A target that never reaches the preferred transport keeps its fallback session and
@@ -1220,14 +1272,4 @@ fn pacing_grows_to_the_cap() {
 	assert_eq!(pacing.next(Duration::from_millis(100)), Duration::from_millis(200));
 	assert_eq!(pacing.next(Duration::from_millis(200)), Duration::from_millis(400));
 	assert_eq!(pacing.next(Duration::from_millis(400)), Duration::from_millis(400));
-}
-
-/// Refusals and malformed input settle; everything else from MoQ is worth a retry.
-#[test]
-fn a_moq_error_is_judged_by_its_session_code() {
-	assert_eq!(Verdict::from(&Error::Unauthorized), Verdict::Refused);
-	assert_eq!(Verdict::from(&Error::Expired), Verdict::Refused);
-	assert_eq!(Verdict::from(&Error::ProtocolViolation), Verdict::Fatal);
-	assert_eq!(Verdict::from(&Error::Closed), Verdict::Retry);
-	assert_eq!(Verdict::from(&Error::Transport("reset".into())), Verdict::Retry);
 }

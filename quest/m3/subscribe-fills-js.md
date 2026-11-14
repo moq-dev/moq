@@ -69,10 +69,6 @@ the stale-drop judgment Drop set redefined, finished in
 [moq-dev/moq#8476](https://github.com/moq-dev/moq/pull/8476) (2026-11-12).
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ this also waits for
-[Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md),
+Lite-07 FETCH is single-group only ([moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616)),
 which moves JS multi-group fills in the same `#runFills` onto the
 subscription.
-
-## Required
-
-- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - moves JS multi-group fills onto the subscription in the same `#runFills`

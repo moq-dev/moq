@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Echo as Schema } from "@moq/hang";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";

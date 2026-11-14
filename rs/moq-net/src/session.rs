@@ -207,12 +207,24 @@ pub struct Session {
 	viewers: bandwidth::Viewers,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
+	/// This session's side of `auth`, kept so a close the driver records before the
+	/// reconnect loop reads it still answers the connection credential.
+	link: auth::Link,
 	credential: Option<auth::Credential>,
 	/// The subscriptions and fetches the protocol tasks carry.
 	work: Work,
 	/// What [`Stats::datagrams_unrouted`] reads.
 	datagrams_unrouted: Option<Arc<AtomicU64>>,
 }
+
+/// Two handles are equal when they are clones of the same session.
+impl PartialEq for Session {
+	fn eq(&self, other: &Self) -> bool {
+		self.close.same_channel(&other.close)
+	}
+}
+
+impl Eq for Session {}
 
 impl Session {
 	/// Returns the negotiated protocol version.
@@ -448,6 +460,11 @@ impl Session {
 	pub(crate) fn credential(&self) -> Option<&auth::Credential> {
 		self.credential.as_ref()
 	}
+
+	/// This session's side of its [`auth`](Self::auth) handle.
+	pub(crate) fn link(&self) -> &auth::Link {
+		&self.link
+	}
 }
 
 /// The handles a protocol driver shares with its [`Session`].
@@ -564,6 +581,7 @@ impl Session {
 			viewers,
 			goaway,
 			auth: auth.handle().clone(),
+			link: auth.clone(),
 			credential,
 			work,
 			datagrams_unrouted,

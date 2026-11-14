@@ -44,16 +44,8 @@ fn each_relay_adds_its_link_to_the_sum() {
 	assert_eq!(advertised(&sim, origin, a, 7), ms(0), "the origin's own route");
 	assert_eq!(advertised(&sim, a, b, 7), ms(10));
 	assert_eq!(advertised(&sim, b, c, 7), ms(30));
-	let routes = sim.nodes[c].eligible(7);
-	assert_eq!(
-		routes,
-		[Eligible {
-			next: b,
-			metric: 3,
-			rtt: ms(60),
-			tied: false
-		}]
-	);
+	let routes = sim.nodes[c].routes(7);
+	assert_eq!(routes, [(b, 3, ms(60))]);
 }
 
 /// A shift on one link sends one ROUTE_UPDATE on each stream carrying the route from
@@ -85,7 +77,7 @@ fn an_unknown_link_ends_the_sum() {
 	assert!(sim.run());
 	assert_eq!(advertised(&sim, a, b, 7), ms(10));
 	assert_eq!(advertised(&sim, b, c, 7), None);
-	assert_eq!(sim.nodes[c].eligible(7)[0].rtt, None);
+	assert_eq!(sim.nodes[c].routes(7)[0].2, None);
 }
 
 /// The metric selects; a far lower RTT through a costlier link changes nothing.

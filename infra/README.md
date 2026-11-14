@@ -157,7 +157,7 @@ self-hosted runner `nixos-moq-ci` (label `moq-queue`, with its local caches and
 main ruleset requires its `Queue` context and the merge queue, so only the
 queue (or the administrator bypass) lands on `main`. moq-dev/quest's queue
 watcher, `quest land watch`, runs on the maintainer's NixOS host
-(kixel-ai/nixos, `modules/quest-land.nix`)
+(kixel-ai/dotfiles, `nixos/modules/quest-land.nix`)
 with moq-bot's key: it comments on each PR the queue drops, runs the Codex
 fixer, and re-enqueues the result.
 See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landing.
@@ -272,17 +272,19 @@ merge to `main`, for x86 Linux, ARM Linux, and ARM macOS. It publishes the full
 build closure from `nix develop --profile`, uploading only missing paths, plus
 `moq-libav`, its wasm build, and its downloaded sources, which `bun install`
 builds outside the dev shell. An independent x86 Linux job builds and pushes
-the `moq-relay` and `moq` runtime closures for Smoke's nix channel, which
-reads them without write keys. Their existing Crane `cargoArtifacts` outputs
-are published first so later builds can substitute them when their inputs
-are unchanged; those inputs include the patched `kio` sources. The other
+the `moq-relay`, `moq`, and `moq-boy` closures that Smoke's nix channel and
+demo deploys pin by commit (`just gh cache-rev`), which read them without
+write keys. They build one derivation per crate (`nix/crates.nix`), and the
+crates they link (`.#<package>.deps`) are published first, so a later build
+rebuilds only the crates whose source, features, or dependencies changed. The other
 platforms have no Smoke nix lane. Runtime warms serialize: the active run
 finishes and new pushes replace only the pending run, avoiding duplicate
 builds without starving publication or delaying the dev-shell matrix.
 Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 14 days
 after upload. `nix copy` never re-uploads a path the bucket already has, so a
 path many commits reuse keeps its first upload's age. Each job therefore
-records the store paths it pushed under `roots/<commit>/`, then copies every
+records the store paths it pushed under `roots/<commit>/`, the runtime job its
+dependency crates too, since no runtime closure references them, then copies every
 object in that commit's recorded closures that is over a week old onto itself,
 restarting its age; it fails if any is already gone. The newest cached
 commit, the one Smoke pins, therefore substitutes in full while `main` keeps
