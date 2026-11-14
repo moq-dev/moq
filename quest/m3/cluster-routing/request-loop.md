@@ -13,6 +13,12 @@ no data and no failure.
 
 ## Plan
 
+Moved from m2 to m3 2026-11-14 (the m2 triage before the cut, under
+/quest-afk, for the maintainer's review): ✅ m3, under the cluster-routing
+epic (rejected: m2). A fixture and, if it hangs, a fix to where a relay's
+pending request goes, with no wire field (the hop count was rejected below),
+so it lands after the cut as a bug fix in shipped code.
+
 Decided 2026-11-13 (maintainer, /quest-plan on the BGP failure modes):
 
 - ✅ A fixture on real relays, with no TLA+ (rejected: adding pending
