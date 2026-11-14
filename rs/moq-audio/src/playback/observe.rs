@@ -174,15 +174,6 @@ impl Shared {
 		let _ = self.driver.set(driver);
 	}
 
-	/// How long after a read the device sounds it, as the host last reported,
-	/// or `None` before a host has.
-	pub(super) fn delay(&self) -> Option<Duration> {
-		match self.latency.load(Ordering::Relaxed) {
-			UNKNOWN => None,
-			nanos => Some(Duration::from_nanos(nanos)),
-		}
-	}
-
 	/// The device's output latency: the host's delay plus one device period,
 	/// the most of a buffer that sounds after its read. `None` before a host
 	/// has reported a delay.

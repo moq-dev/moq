@@ -109,6 +109,11 @@ struct Shared {
 	/// Frames of the writer's stream the reader has played or skipped:
 	/// `consumed` before the stretch's length correction.
 	played: AtomicUsize,
+	/// `consumed` as of the last read in the low half, and the frame on the
+	/// clock [`Consumer::read_at_frame`] counts at which that read's last frame
+	/// is heard in the high half, each wrapping at 32 bits. One word, so a
+	/// writer never pairs one read's position with another's end.
+	drained: AtomicU64,
 	/// The writer's end less `played`, at its latest push. Adding the reader's
 	/// `played` less `consumed` gives the depth that push left, less what the
 	/// stretch removed since: the level the stretch decides on.
@@ -469,10 +474,22 @@ impl Producer {
 	}
 
 	/// How much audio is queued ahead of the reader.
+	#[cfg(test)]
 	pub(crate) fn buffered(&self) -> Duration {
 		Duration::from_secs_f64(
 			self.written.wrapping_sub(self.shared.consumed.load(Ordering::Relaxed)) as f64 / self.rate as f64,
 		)
+	}
+
+	/// How long after `now` the last frame written is heard: what is queued,
+	/// plus what the last read took that has yet to sound, since a read is
+	/// placed at the instant its first frame is heard.
+	pub(crate) fn heard_in(&self, now: Instant) -> Duration {
+		let drained = self.shared.drained.load(Ordering::Relaxed);
+		let queued = (self.written as u32).wrapping_sub(drained as u32);
+		let now = (now.saturating_duration_since(self.base).as_secs_f64() * self.rate as f64).round() as usize;
+		let sounding = ((drained >> 32) as u32).wrapping_sub(now as u32) as i32;
+		Duration::from_secs_f64((queued as f64 + sounding.max(0) as f64) / self.rate as f64)
 	}
 }
 
@@ -691,6 +708,15 @@ impl Consumer {
 
 	/// [`read_at`](Self::read_at) on the frame clock [`Producer::due_frame`] counts.
 	pub(crate) fn read_at_frame(&mut self, output: &mut [f32], now: usize, demand: usize) -> Read {
+		let read = self.read_frames(output, now, demand);
+		// Published once the whole read is done: what it consumed sounds by its end.
+		let end = now.wrapping_add(output.len() / self.channels);
+		let drained = (end as u32 as u64) << 32 | self.consumed as u32 as u64;
+		self.shared.drained.store(drained, Ordering::Relaxed);
+		read
+	}
+
+	fn read_frames(&mut self, output: &mut [f32], now: usize, demand: usize) -> Read {
 		self.start();
 		self.demand = demand;
 		self.now = now;
@@ -1941,6 +1967,27 @@ mod tests {
 		let mut out = vec![1.0; 1000 * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Comfort { frames: 0 });
 		assert!(out.iter().all(|&sample| sample == 0.0));
+	}
+
+	/// The last frame written is heard after what is queued and the part of
+	/// the last read still sounding, which shrinks until the next read.
+	#[test]
+	fn the_last_write_is_heard_behind_the_read_still_sounding() {
+		let (mut prod, mut cons) = queue(48_000, 48_000, Duration::from_secs(1));
+		let base = prod.base;
+		let millis = |at: Duration| (at.as_secs_f64() * 1000.0).round() as u64;
+		assert_eq!(prod.push(&[0.1; 4800 * STEREO]), Push::Ok);
+		// The 50 ms opening cushion and 100 ms written, before any read.
+		assert_eq!(millis(prod.heard_in(base)), 150);
+
+		// A 10 ms read the device sounds 20 ms after `base`.
+		let mut out = vec![0.0; 480 * STEREO];
+		pull(&mut cons, &mut out, base + Duration::from_millis(20));
+		assert_eq!(millis(prod.heard_in(base)), 170);
+		assert_eq!(millis(prod.heard_in(base + Duration::from_millis(25))), 145);
+		assert_eq!(millis(prod.heard_in(base + Duration::from_millis(30))), 140);
+		// Past the read's end, only the queue is left.
+		assert_eq!(millis(prod.heard_in(base + Duration::from_millis(40))), 140);
 	}
 
 	/// A next utterance pushed while the end's tail still plays waits behind it,

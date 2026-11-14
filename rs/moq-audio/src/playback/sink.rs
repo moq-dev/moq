@@ -248,8 +248,7 @@ impl Sink {
 	/// climbs when the writer runs ahead, and falls toward the device's delay
 	/// when it falls behind.
 	pub fn buffered(&self) -> Duration {
-		let queued = self.channel.lock().unwrap().prod.buffered();
-		queued + self.shared.observe.delay().unwrap_or_default()
+		self.channel.lock().unwrap().prod.heard_in(crate::ring::host())
 	}
 
 	/// How long the device takes to sound what it reads: the delay its host
