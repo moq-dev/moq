@@ -29,6 +29,8 @@ struct WireRoute {
 	claims: BTreeMap<Path, u64>,
 	/// The Announce IDs of its live claims whose path this node refused.
 	unnamed: BTreeSet<u64>,
+	/// The Announce IDs of its live claims at a path whose content this node refuses.
+	withheld: BTreeSet<u64>,
 	/// How its claims differ from `committed`, by path, so what the stream keeps
 	/// between floors is bounded by its claims rather than the messages it read.
 	pending: BTreeMap<Path, Option<node::Claim>>,
@@ -38,6 +40,12 @@ struct WireRoute {
 }
 
 impl WireRoute {
+	/// Whether its floors may certify its claims: not while this node refuses one, since
+	/// the origin never withdrew it.
+	fn certifies(&self) -> bool {
+		self.unnamed.is_empty() && self.withheld.is_empty()
+	}
+
 	/// The claim at `path` is now `claim`, pending the next floor.
 	fn change(&mut self, path: Path, claim: Option<node::Claim>) {
 		let committed = self.committed.as_ref().and_then(|(claims, _)| claims.get(&path));
@@ -206,6 +214,7 @@ impl Routed {
 			}
 			Msg::Floor { id, revision } => {
 				let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
+				let revision = revision.filter(|_| route.certifies());
 				let changes = std::mem::take(&mut route.pending);
 				let (committed, floor) = route.committed.get_or_insert_default();
 				for (path, claim) in &changes {
@@ -261,6 +270,9 @@ impl Routed {
 				let fresh = self::claim(instance, epoch, cost, hops)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				claim.claim = Some(fresh);
+				if let Some(route) = self.routes.get_mut(&claim.route) {
+					route.withheld.remove(&id);
+				}
 				let change = claim.claim.clone();
 				self.pending(id, change)?;
 			}
@@ -310,6 +322,10 @@ impl Routed {
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				tracing::warn!(route = claim.route, claim = id, %reason, "refusing a forwarded claim");
 				claim.claim = None;
+				if claim.path.is_some() {
+					let route = self.routes.get_mut(&claim.route).ok_or(Error::ProtocolViolation)?;
+					route.withheld.insert(id);
+				}
 				self.pending(id, None)?;
 			}
 			// Warm routes are ignored here anyway, so refusing one changes nothing.
@@ -341,6 +357,7 @@ impl Routed {
 				reach: reach.clone(),
 				claims: BTreeMap::new(),
 				unnamed: BTreeSet::new(),
+				withheld: BTreeSet::new(),
 				pending: BTreeMap::new(),
 				committed: None,
 			},
@@ -405,6 +422,9 @@ impl Routed {
 			Some(path) => {
 				wire.claims.insert(path.clone(), id);
 				wire.change(path.clone(), claim.clone());
+				if claim.is_none() {
+					wire.withheld.insert(id);
+				}
 			}
 			None => {
 				wire.unnamed.insert(id);
@@ -425,6 +445,7 @@ impl Routed {
 		match claim.path {
 			Some(path) => {
 				route.claims.remove(&path);
+				route.withheld.remove(&id);
 				route.change(path, None);
 			}
 			None => {
@@ -955,6 +976,91 @@ mod tests {
 		narrow.outputs(&subscriber);
 		assert_eq!(served(&wide), ["live/a/private/y", "live/a/public/x"]);
 		assert_eq!(served(&narrow), ["live/a/public/x"]);
+	}
+
+	/// A claim this node refuses was not withdrawn by its origin: while its route holds
+	/// one, the route's floors certify nothing, so a relay forwards no withdrawal for it,
+	/// and a usable restart certifies the route again.
+	#[kio::test]
+	async fn a_refused_claim_forwards_no_withdrawal() {
+		use crate::lite::{Refusable, Refusal};
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let edge = routed
+			.node
+			.answer(crate::route::Link::default(), Path::empty())
+			.unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let floor = |revision| Msg::Floor {
+			id: 0,
+			revision: Some(revision),
+		};
+		let refused = |id| Msg::Refused {
+			message: Refusable::Change { id },
+			reason: Refusal::Instance,
+		};
+		let restart = |id| Msg::Restart {
+			id,
+			instance: Some(Instance::random()),
+			epoch: 1,
+			cost: Cost::new(0),
+			hops: Default::default(),
+		};
+		// Each batch the edge would send for node 7: the paths it changes, whether each is
+		// present, and its floor.
+		let batches = |routed: &mut super::Routed| {
+			routed.outputs(&subscriber);
+			let mut batches = Vec::new();
+			while let Some(output) = edge.try_output() {
+				if let crate::route::node::Output::Batch { id: 7, changes, floor } = output {
+					let changes: Vec<_> = (changes.into_iter())
+						.map(|(path, claim)| (path.to_string(), claim.is_some()))
+						.collect();
+					batches.push((changes, floor));
+				}
+			}
+			batches
+		};
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: advert(),
+		};
+		for msg in [route, start("live/a"), start("live/b"), floor(0)] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		assert_eq!(
+			batches(&mut routed),
+			[(vec![("live/a".into(), true), ("live/b".into(), true)], Some(0))]
+		);
+
+		// Refused, live/a goes without a withdrawal certified for it.
+		for msg in [refused(0), floor(1)] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
+		// Nor does live/b's change certify anything, while the route holds the refused claim.
+		let update = Msg::Update {
+			id: 1,
+			hops: Default::default(),
+			cost: Cost::new(5),
+		};
+		for msg in [update, floor(2)] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		assert_eq!(batches(&mut routed), [(vec![("live/b".into(), true)], None)]);
+
+		// A usable restart brings live/a back, certified again.
+		for msg in [restart(0), floor(3)] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		assert_eq!(batches(&mut routed), [(vec![("live/a".into(), true)], Some(3))]);
+
+		// A refused restart withholds it as the update did.
+		for msg in [refused(0), floor(4)] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
 	}
 
 	/// A route the peer ended keeps its announce slot until its ROUTE_END echo is

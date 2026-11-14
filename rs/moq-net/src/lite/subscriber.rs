@@ -10443,7 +10443,8 @@ mod tests {
 		]);
 		poll(&mut prefix);
 		cursor.assert_next_active("c");
-		cursor.assert_next_ended("a");
+		// Refused, not withdrawn by its origin: it goes offline.
+		cursor.assert_next_offline("a");
 		cursor.assert_next_wait();
 		assert_eq!(refusals(&registry), 3);
 
@@ -10469,10 +10470,11 @@ mod tests {
 		// A restart to an empty instance is refused like the update was.
 		push(&[&raw(ANNOUNCE_RESTART, vec![0, 0, 0, 0, 0]), &floor(0, Some(4))]);
 		poll(&mut prefix);
-		cursor.assert_next_ended("a");
+		cursor.assert_next_offline("a");
 		assert_eq!(refusals(&registry), 4);
 
-		// The refused claims end like any other, and `c`'s end still finds it.
+		// The refused claims end like any other, and `c`'s end still finds it, though only
+		// offline: the route still holds the refused `a`, so its floor certifies nothing.
 		push(&[
 			&raw(ANNOUNCE_END, vec![2]),
 			&raw(ANNOUNCE_END, vec![3]),
@@ -10480,7 +10482,16 @@ mod tests {
 			&floor(0, Some(5)),
 		]);
 		poll(&mut prefix);
-		cursor.assert_next_ended("c");
+		cursor.assert_next_offline("c");
+		cursor.assert_next_wait();
+
+		// Once `a` ends too, the route's floors certify again: `e` (id 5) ends.
+		push(&[&raw(ANNOUNCE_END, vec![0]), &claim_on(0, "e"), &floor(0, Some(6))]);
+		poll(&mut prefix);
+		cursor.assert_next_active("e");
+		push(&[&raw(ANNOUNCE_END, vec![5]), &floor(0, Some(7))]);
+		poll(&mut prefix);
+		cursor.assert_next_ended("e");
 		cursor.assert_next_wait();
 	}
 

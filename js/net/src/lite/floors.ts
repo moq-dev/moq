@@ -167,6 +167,17 @@ export class Floors {
 	}
 
 	/**
+	 * Whether `view` or a live view of `node` certifies whether a claim at `path` exists, so a
+	 * claim gone there was withdrawn by its origin rather than let go, as rs/moq-net's router
+	 * tells an end from going offline.
+	 */
+	certified(node: bigint, view: View, path: Path.Valid): boolean {
+		if (certifies(view, path)) return true;
+		for (const carrier of this.#nodes.get(node)?.carriers ?? []) if (certifies(carrier.view, path)) return true;
+		return false;
+	}
+
+	/**
 	 * Whether a claim of `node` at `at` may serve a consume of `path` below it. The newest view
 	 * certifying `path`, the most specific of those alike, certifies what covers it there: a claim
 	 * above that view's region is older knowledge, as `covering` in rs/moq-net's `route/view.rs`.

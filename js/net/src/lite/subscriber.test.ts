@@ -421,7 +421,8 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	await send(async (w) => {
 		await encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, v);
-		await encodeAnnounceBroadcast(w, { status: "floor", id: 0n }, v);
+		// Certified, the claim's origin withdrew it: it ends rather than going offline.
+		await encodeAnnounceBroadcast(w, { status: "floor", id: 0n, revision: 0n }, v);
 	});
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "end" });
 
@@ -4064,6 +4065,52 @@ test("a lite-07 refused route or claim withdraws only itself", async () => {
 	await send({ status: "endedId", id: 3n });
 	await send({ status: "floor", id: 1n, revision: 2n });
 	expect(await announced.next()).toMatchObject({ prefix: c, kind: "end" });
+
+	announced.close();
+	subscriber.close();
+});
+
+// A claim this subscriber refuses was not withdrawn by its origin: it goes offline, and while its
+// route holds one, the route's floors certify nothing, so another claim's end there goes offline
+// too. Mirrors rs/moq-net.
+test("a lite-07 refused claim goes offline, its route certifying nothing meanwhile", async () => {
+	const { subscriber, announced, send, raw } = await routedStream();
+	const [a, b, e] = ["live/a", "live/b", "live/e"].map((path) => Path.from(path));
+	const instance = Instance.parse("i");
+
+	await send({ status: "routeStart", node: NODE_A, advert: ADVERT });
+	await send({ status: "active", suffix: a, route: 0n, instance });
+	await send({ status: "active", suffix: b, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "start" });
+	expect(await announced.next()).toMatchObject({ prefix: b, kind: "start" });
+
+	// ANNOUNCE_RESTART of Announce ID 0 to an empty instance. JS reads no Lite-06 Chain, so an
+	// ANNOUNCE_UPDATE has nothing it could refuse.
+	const refuse = () => raw([3, 5, 0, 0, 0, 0, 0]);
+	refuse();
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "offline" });
+	await send({ status: "endedId", id: 1n });
+	await send({ status: "floor", id: 0n, revision: 2n });
+	expect(await announced.next()).toMatchObject({ prefix: b, kind: "offline" });
+
+	// A usable restart brings it back, and refusing the next takes it offline again.
+	await send({ status: "restart", id: 0n, instance: Instance.parse("j") });
+	await send({ status: "floor", id: 0n, revision: 3n });
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "start" });
+	refuse();
+	await send({ status: "floor", id: 0n, revision: 4n });
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "offline" });
+
+	// Once it ends, the route's floors certify again.
+	await send({ status: "endedId", id: 0n });
+	await send({ status: "active", suffix: e, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 5n });
+	expect(await announced.next()).toMatchObject({ prefix: e, kind: "start" });
+	await send({ status: "endedId", id: 2n });
+	await send({ status: "floor", id: 0n, revision: 6n });
+	expect(await announced.next()).toMatchObject({ prefix: e, kind: "end" });
 
 	announced.close();
 	subscriber.close();

@@ -981,6 +981,8 @@ export class Subscriber {
 			claims: Map<Path.Valid, bigint>;
 			// The Announce IDs of its live claims whose path this node refused.
 			unnamed: Set<bigint>;
+			// The Announce IDs of its live claims at a path whose content this node refuses.
+			withheld: Set<bigint>;
 			// How the claims differ from the view's, applied whole at the next floor.
 			pending: Map<Path.Valid, Claim | undefined>;
 			// The claims as of the last floor, and the revision it certified them at, if any.
@@ -1176,7 +1178,8 @@ export class Subscriber {
 					ids.add(wire.id);
 				}
 				serve(wire, path, restart ?? false);
-				refresh(path, false);
+				// A claim gone where no floor certifies it was let go, not withdrawn by its origin.
+				refresh(path, !now && !this.#floors.certified(wire.node, wire.view, path));
 			}
 		};
 		const refreshRoute = (wire: Route, lost: boolean) => {
@@ -1200,6 +1203,7 @@ export class Subscriber {
 				held: false,
 				claims: new Map(),
 				unnamed: new Set(),
+				withheld: new Set(),
 				pending: new Map(),
 				view,
 				shown: new Map(),
@@ -1247,6 +1251,7 @@ export class Subscriber {
 			claims.set(id, { route: routeId, path: named, claim });
 			wire.claims.set(named, id);
 			if (claim) change(routeId, named, claim);
+			else wire.withheld.add(id);
 		};
 
 		// The route now reaches its node by `advert`, or undefined while this node refuses what the
@@ -1296,7 +1301,9 @@ export class Subscriber {
 						`refusing a forwarded claim: route=${live.route} claim=${message.id} reason=${reason}`,
 					);
 					live.claim = undefined;
-					if (live.path !== undefined) change(live.route, live.path, undefined);
+					if (live.path === undefined) return;
+					route(live.route).withheld.add(message.id);
+					change(live.route, live.path, undefined);
 					return;
 				}
 			}
@@ -1355,16 +1362,14 @@ export class Subscriber {
 						break;
 					}
 					case "floor": {
-						// The batch applies whole, at the revision its floor certifies.
+						// The batch applies whole, at the revision its floor certifies: none while this
+						// node refuses one of the route's claims, which its origin never withdrew.
 						const wire = route(msg.id);
+						const revision = wire.unnamed.size === 0 && wire.withheld.size === 0 ? msg.revision : undefined;
 						// A floor that certifies less keeps what the route's last one certified.
 						const certified = wire.view.revision;
 						const joined = wire.advert !== undefined;
-						if (
-							joined &&
-							certified !== undefined &&
-							(msg.revision === undefined || msg.revision < certified)
-						)
+						if (joined && certified !== undefined && (revision === undefined || revision < certified))
 							this.#floors.regress(wire.node, wire.carrier);
 						const touched = new Map<Path.Valid, boolean>();
 						for (const [path, claim] of wire.pending) {
@@ -1389,7 +1394,7 @@ export class Subscriber {
 							}
 						}
 						wire.pending.clear();
-						wire.view.revision = msg.revision;
+						wire.view.revision = revision;
 						// Every other route to the node is shown anew first; with one, this route's
 						// unchanged claims may change state too.
 						const others = joined && this.#floors.floor(wire.node, wire.carrier);
@@ -1421,6 +1426,7 @@ export class Subscriber {
 						// A claim without a path stays refused, whatever the peer sends for it.
 						if (live.path === undefined) break;
 						live.claim = { instance: msg.instance, epoch: msg.epoch ?? 0n, cost: msg.cost ?? Cost.zero };
+						route(live.route).withheld.delete(msg.id);
 						change(live.route, live.path, live.claim);
 						break;
 					}
@@ -1437,6 +1443,7 @@ export class Subscriber {
 							break;
 						}
 						wire.claims.delete(live.path);
+						wire.withheld.delete(msg.id);
 						change(live.route, live.path, undefined);
 						break;
 					}
