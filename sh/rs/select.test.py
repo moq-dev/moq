@@ -133,6 +133,8 @@ class SelectTest(unittest.TestCase):
                 self.assertEqual(calls[1], "rs media-defaults", calls)
                 self.assertEqual(calls[2], "rs no-async", calls)
                 self.assertEqual(calls[3], "rs send-depth", calls)
+        # The script that runs the proof selects moq-net, so an edit to it is proved too.
+        self.assertIn("rs send-depth", self.selected("sh/rs/send-depth.sh"))
         # Only the lint phase runs it, so the gate compiles it once.
         self.assertNotIn("rs send-depth", self.selected("rs/moq-net/src/lib.rs", action="test"))
         self.assertNotIn("rs send-depth", self.selected("rs/moq-auth/src/lib.rs"))

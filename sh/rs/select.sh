@@ -62,6 +62,8 @@ select_packages() {
         sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
         # moq-relay's tests read its NixOS module.
         sed -n 's|^nix/modules/moq-relay\.nix$|moq-relay|p' "$list"
+        # The gate's Send-depth proof of moq-net's session driver is this script.
+        sed -n 's|^sh/rs/send-depth\.sh$|moq-net|p' "$list"
         jq -r --rawfile list "$list" '
             def resolve: gsub("\\\\"; "/") | reduce split("/")[] as $s ([];
                 if $s == ".." then .[:-1] elif $s == "." then . else . + [$s] end) | join("/");
