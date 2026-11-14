@@ -7,10 +7,9 @@
  */
 
 import * as Moq from "@moq/net";
-import { render } from "solid-js/web";
 import type { GameConfig } from "./game.ts";
 import { Game } from "./game.ts";
-import { BoyUI } from "./ui/element.tsx";
+import { mount } from "./ui/element.tsx";
 
 /** The attributes the element observes. */
 const OBSERVED = ["url", "prefix", "prefix-game"] as const;
@@ -120,7 +119,7 @@ export default class MoqBoy extends HTMLElement {
 
 		// Render the UI into a Shadow DOM (reuse existing on reconnect).
 		const shadow = this.shadowRoot ?? this.attachShadow({ mode: "open" });
-		this.#dispose = render(() => <BoyUI boy={this} />, shadow);
+		this.#dispose = mount(this, shadow);
 	}
 
 	/** Called by the browser when the element leaves its document. */
