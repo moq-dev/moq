@@ -148,12 +148,18 @@ pub(crate) fn output_start(start: u64, scale: Option<moq_net::Timescale>) -> Opt
 /// Exact for a source no finer than microseconds. A finer one maps several starts to each output
 /// start, and only the lowest is found.
 fn source_start(start: u64, scale: Option<moq_net::Timescale>) -> Option<u64> {
+	let source = source_from(start, scale)?;
+	(output_start(source, scale) == Some(start)).then_some(source)
+}
+
+/// The lowest source start that [`output_start`] maps at or after the output start `start`, or
+/// `None` past the source's range.
+fn source_from(start: u64, scale: Option<moq_net::Timescale>) -> Option<u64> {
 	let Some(scale) = scale else {
 		return Some(start);
 	};
 	let micros = u128::from(hang::container::TIMESCALE.as_u64());
-	let source = u64::try_from((u128::from(start) * u128::from(scale.as_u64())).div_ceil(micros)).ok()?;
-	(output_start(source, Some(scale)) == Some(start)).then_some(source)
+	u64::try_from((u128::from(start) * u128::from(scale.as_u64())).div_ceil(micros)).ok()
 }
 
 /// Keeps a cancelled serving future from dropping an unfinished output track.
@@ -639,8 +645,8 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 		},
 	};
 	let Some(start) = source_start(sequence, info.timescale) else {
-		fill.drop_groups(groups);
-		return Err(moq_net::Error::NotFound.into());
+		// No source start maps here: the group can't exist.
+		return drop_gap(rung, &track, fill, sequence, info.timescale).await;
 	};
 	let options = moq_net::group::Fetch::default().with_priority(fill.priority());
 	let mut source = tokio::select! {
@@ -648,10 +654,7 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 		_ = fill.unwanted(sequence) => return abandon(sequence),
 		source = track.fetch_group(start, options) => match source {
 			Ok(source) => source,
-			Err(moq_net::Error::NotFound) => {
-				fill.drop_groups(groups);
-				return Err(moq_net::Error::NotFound.into());
-			}
+			Err(moq_net::Error::NotFound) => return drop_gap(rung, &track, fill, sequence, info.timescale).await,
 			Err(err) => {
 				refuse(err.clone());
 				return Err(err.into());
@@ -696,6 +699,93 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	// bills the rendition once rather than twice.
 	let active = rung.active.attach(&rung.rendition);
 	transcode_group(pipeline, &container, &mut source, Writing(Some(output)), &active).await?;
+	Ok(())
+}
+
+/// Drop the run of output groups around `sequence`, which the source doesn't have, up to the
+/// source groups on either side of it.
+///
+/// Output starts are microseconds, so a source keyed by its media time leaves most of them
+/// empty between two of its groups. Fetching each would cost one request per tick of the gap;
+/// one bounded read of the source, in key order, finds the groups around the miss instead, and
+/// the span between them is dropped at once. Filling in descending order, the span below the
+/// miss is still owed, so the read starts at the fill's first group; ascending, the span below
+/// was already answered, so it starts at the miss.
+///
+/// A source holding no group at all resolves no time until it holds one, as it would for any
+/// reader of it. Once the rung retires, its drain can't wait on that, so it drops the miss alone.
+async fn drop_gap(
+	rung: &Rung,
+	track: &moq_net::track::Consumer,
+	fill: &moq_net::track::Fill,
+	sequence: u64,
+	scale: Option<moq_net::Timescale>,
+) -> Result<(), Error> {
+	use moq_net::track::{Anchor, Delay, Order, Range, Subscription};
+
+	let first = fill.start().group;
+	let end = fill.end();
+	// The source starts that map into the fill, below the miss and from it.
+	let (Some(miss), Some(low)) = (source_from(sequence, scale), source_from(first, scale)) else {
+		fill.drop_groups(sequence..end);
+		return Ok(());
+	};
+	let high = source_from(end, scale).map_or(u64::MAX, |high| high.saturating_sub(1));
+	if high < miss {
+		// No source start maps between the miss and the fill's end.
+		fill.drop_groups(sequence..end);
+		return Ok(());
+	}
+	let below = matches!(fill.order(), Order::Descending);
+	let from = if below { low } else { miss };
+	let subscription = Subscription::default()
+		.with_ranges([Range {
+			start: Anchor::Time(from),
+			end: Some(Anchor::Time(high)),
+		}])
+		.with_order(Order::Ascending)
+		.with_priority(fill.priority())
+		.with_delay(Delay::default().with_max(None));
+
+	let around = async {
+		let mut groups = track.subscribe(subscription).await?.ordered();
+		// The newest source group below the miss, as the output start it maps to.
+		let mut before = None;
+		while let Some(group) = groups.next_group().await? {
+			if group.start >= miss {
+				return Ok::<_, moq_net::Error>((before, output_start(group.start, scale)));
+			}
+			before = output_start(group.start, scale);
+		}
+		Ok((before, None))
+	};
+	let mut retire = rung.retire.clone();
+	let (before, after) = tokio::select! {
+		biased;
+		_ = fill.unwanted(sequence) => return abandon(sequence),
+		() = retire.fired() => {
+			fill.drop_groups(sequence..sequence + 1);
+			return Ok(());
+		}
+		around = around => match around {
+			Ok(around) => around,
+			Err(err) => {
+				fill.refuse_groups(sequence..sequence + 1, err.clone());
+				return Err(err.into());
+			}
+		},
+	};
+
+	let start = match below {
+		true => before
+			.map_or(first, |before| before.saturating_add(1))
+			.clamp(first, sequence),
+		false => sequence,
+	};
+	// A source group mapping to the miss itself arrived since it was asked: leave it to a
+	// later fetch, dropping only the miss as before.
+	let end = after.map_or(end, |after| after.min(end)).max(sequence + 1);
+	fill.drop_groups(start..end);
 	Ok(())
 }
 
@@ -1064,6 +1154,69 @@ mod tests {
 			kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
 			"nothing the fill owed is still wanted"
 		);
+	}
+
+	/// A fill spanning a long stretch without source groups drops it in one go, rather than
+	/// asking the source for every microsecond in it.
+	#[tokio::test(start_paused = true)]
+	async fn a_fill_drops_a_gap_between_source_groups_at_once() {
+		fill_across_a_gap(moq_net::track::Order::Ascending).await;
+	}
+
+	/// Filling newest first, the miss is the gap's top, and the span below it goes at once too.
+	#[tokio::test(start_paused = true)]
+	async fn a_descending_fill_drops_a_gap_between_source_groups_at_once() {
+		fill_across_a_gap(moq_net::track::Order::Descending).await;
+	}
+
+	async fn fill_across_a_gap(order: moq_net::track::Order) {
+		use std::task::Poll;
+		const HOUR: u64 = 3_600_000_000;
+		let (rung, source, _retire) = idle_rung();
+		let video = source
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		video.append_group(0).unwrap().close().unwrap();
+		video.append_group(HOUR).unwrap().close().unwrap();
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let mut track = output
+			.create_track("video/120p", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let fills = track.requests();
+		let mut reader = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(None))
+				.with_ranges([moq_net::track::Range {
+					start: moq_net::track::Anchor::Time(1),
+					end: None,
+				}])
+				.with_order(order),
+		);
+		track.start_at(HOUR).unwrap();
+		track
+			.create_group(moq_net::group::Info { start: HOUR })
+			.unwrap()
+			.close()
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+		let lookup = fills.requested_fill().await.unwrap();
+		assert_eq!(lookup.time(), Some(1));
+		lookup.accept(0, None).unwrap().close().unwrap();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+		let fill = fills.requested_fill().await.unwrap();
+		assert_eq!((fill.start().group, fill.end()), (1, HOUR));
+		assert_eq!(fill.order(), order);
+
+		let mut tasks = tokio::task::JoinSet::new();
+		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
+		kio::clock::timeout(std::time::Duration::from_secs(5), tasks.join_next())
+			.await
+			.expect("the gap is dropped whole")
+			.unwrap()
+			.unwrap();
+		drop(video);
 	}
 
 	/// Retirement's drain finishes a fill whose reader stopped reading: the groups still owed

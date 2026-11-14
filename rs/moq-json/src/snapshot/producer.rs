@@ -418,6 +418,7 @@ impl<T: Serialize> Inner<T> {
 		frame.commit();
 		if self.at.is_none_or(|newest| timestamp > newest) {
 			self.at = Some(timestamp);
+			self.refresh.advanced();
 		}
 
 		Ok(Some(size))
@@ -428,14 +429,20 @@ impl<T: Serialize> Inner<T> {
 		self.open()?;
 		std::task::ready!(self.refresh.poll(self.track.largest, waiter))?;
 
-		let Inner { track, encoder, at, .. } = self;
+		let Inner {
+			track,
+			encoder,
+			at,
+			refresh,
+			..
+		} = self;
 		// Two groups never share a start, so a refresh at the newest group's own start waits for a
 		// later write. Checked before encoding, since a snapshot dropped unwritten resets the encoder.
 		let Some(at) = *at else {
-			return std::task::Poll::Pending;
+			return refresh.park(waiter);
 		};
 		if !crate::starts_past(&track.inner, at) {
-			return std::task::Poll::Pending;
+			return refresh.park(waiter);
 		}
 		// A group was written, so a value was encoded and there is one to restate.
 		let Some(frame) = encoder.snapshot()? else {

@@ -788,7 +788,7 @@ mod test {
 	/// a later edit, then restates the window there.
 	#[test]
 	fn a_refresh_after_older_edits_waits_for_a_later_one() {
-		let waiter = kio::Waiter::noop();
+		let (waiter, woken) = crate::refresh::flagged();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
@@ -800,7 +800,9 @@ mod test {
 			producer.poll_refresh(&waiter).is_pending(),
 			"no group may share the open group's start"
 		);
+		woken.take();
 		producer.push(crate::Timed::new(&rec(4), ms(140))).unwrap();
+		assert!(woken.take(), "the later edit wakes the parked refresh");
 		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
 		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
 			Poll::Ready(Ok(Some(group))) => Some(group),

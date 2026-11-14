@@ -212,6 +212,7 @@ impl<T> Inner<T> {
 		frame.commit();
 		if self.at.is_none_or(|newest| at > newest) {
 			self.at = Some(at);
+			self.refresh.advanced();
 		}
 
 		Ok(())
@@ -222,14 +223,20 @@ impl<T> Inner<T> {
 		self.ensure_open()?;
 		std::task::ready!(self.refresh.poll(self.track.largest, waiter))?;
 
-		let Inner { track, encoder, at, .. } = self;
+		let Inner {
+			track,
+			encoder,
+			at,
+			refresh,
+			..
+		} = self;
 		// Two groups never share a start, so a refresh at the newest group's own start waits for a
 		// later write. Checked before encoding, since a header dropped unwritten resets the encoder.
 		let Some(at) = *at else {
-			return std::task::Poll::Pending;
+			return refresh.park(waiter);
 		};
 		if !crate::starts_past(&track.inner, at) {
-			return std::task::Poll::Pending;
+			return refresh.park(waiter);
 		}
 		let frame = encoder.snapshot()?;
 		track.write(at, &frame)?;
@@ -313,6 +320,7 @@ impl<T: Serialize> Inner<T> {
 		frame.commit();
 		if self.at.is_none_or(|newest| at > newest) {
 			self.at = Some(at);
+			self.refresh.advanced();
 		}
 
 		Ok(())

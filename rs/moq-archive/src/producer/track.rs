@@ -230,6 +230,9 @@ impl<S: ObjectStore> Track<S> {
 			let now = kio::clock::now();
 			match event {
 				Event::Frame(index, read) => self.frame(&mut current, index, read, now)?,
+				// A time start names the containing group, so a resumed read can hand back the group
+				// it last stored whole, keyed below where it resumes: that group is already stored.
+				Event::Next(Ok(Some(group))) if self.next.is_some_and(|next| group.start < next.group) => {}
 				Event::Next(Ok(Some(group))) => {
 					let sequence = group.start;
 					// A resumed group continues after its stored frames. The clamp also starts a

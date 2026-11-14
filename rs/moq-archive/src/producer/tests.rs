@@ -758,6 +758,40 @@ async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 3)));
 }
 
+/// A re-added track that still holds the last group stored whole hands it back, since the next
+/// run asks from one past it and a time start names the group containing that: it is passed
+/// over rather than stored again.
+#[tokio::test(start_paused = true)]
+async fn a_re_added_track_holding_the_last_stored_group_stores_it_once() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let first = broadcast.create_track("video", timed()).unwrap();
+	let task = spawn(&store, &broadcast, config());
+	subscribed(&first).await;
+	group(&first, 0, &[(0, "a")]);
+	group(&first, 1000, &[(1000, "b")]);
+	let first = first.finish().unwrap();
+	settle().await;
+	drop(first);
+	settle().await;
+
+	let second = broadcast.create_track("video", timed()).unwrap();
+	group(&second, 1000, &[(1000, "b")]);
+	subscribed(&second).await;
+	group(&second, 2000, &[(2000, "c")]);
+	settle().await;
+	let _second = second.finish().unwrap();
+	broadcast.close();
+	finished(task).await;
+
+	let frames: Vec<String> = contents(&objects(&store, "video", true).await)
+		.into_iter()
+		.flatten()
+		.flat_map(|(_, frames)| frames)
+		.collect();
+	assert_eq!(frames, ["0/a", "1000/b", "2000/c"]);
+}
+
 /// A track re-added with other properties after it was listed is refused before any of its
 /// frames is stored under the listed properties.
 #[tokio::test(start_paused = true)]

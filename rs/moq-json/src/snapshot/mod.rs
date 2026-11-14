@@ -608,16 +608,16 @@ mod test {
 		}
 
 		let mut late = producer.consume();
+		let (waiter, woken) = crate::refresh::flagged();
 		assert!(
-			producer.poll_refresh(&kio::Waiter::noop()).is_pending(),
+			producer.poll_refresh(&waiter).is_pending(),
 			"no group may share the open group's start"
 		);
+		woken.take();
 
 		producer.update(crate::Timed::new(&json!({ "n": 4 }), ms(140))).unwrap();
-		assert!(matches!(
-			producer.poll_refresh(&kio::Waiter::noop()),
-			Poll::Ready(Ok(()))
-		));
+		assert!(woken.take(), "the later update wakes the parked refresh");
+		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
 		let mut fresh = groups(&mut late).pop().expect("the fresh group");
 		assert_eq!(fresh.start, 140);
 		assert_eq!(frames(&mut fresh), vec![(ms(140), json!({ "n": 4 }))]);
