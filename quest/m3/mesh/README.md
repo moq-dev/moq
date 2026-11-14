@@ -41,7 +41,7 @@ moq library, media included, can point at one.
 
 Decided 2026-10-25 with the maintainer (planning interview), still in force:
 
-- Traffic is app-level [byte streams](/quest/m1/stream/README.md) and named
+- Traffic is app-level byte streams and named
   tracks, never IP packets.
 - The coordinator contract is generic and lives here: enrollment issues a
   relay URL and a token, and self-hosters run it with `moq auth`. A hosted
@@ -108,7 +108,7 @@ the third, and survives a relay restart.
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
-- ✅ (Superseded 2026-11-13: this epic is back in m3, above.) This epic and [byte streams](/quest/m1/stream/README.md) moved to m1
+- ✅ (Superseded 2026-11-13: this epic is back in m3, above.) This epic and byte streams moved to m1
   from the head of m3 (rejected: staying in m3). The cut no longer waits on
   m1, and a downstream application builds on them from `main` now.
 - ✅ The epic no longer lists federation and the stream epic under
