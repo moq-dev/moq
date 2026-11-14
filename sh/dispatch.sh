@@ -218,9 +218,9 @@ module moq_sh '^infra/moq-sh/' \
 # as does a bump of the flake-pinned validator.
 module quest '^(quest/|flake\.lock$|sh/quest\.sh$)' \
     tools='quest'
-# `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
-# nixpkgs, and the last moves on a flake.lock bump alone.
-module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)' \
+# `obs check` compares the OBS pinned in buildspec.json, flake.nix, nixpkgs,
+# and @moq/obs, and nixpkgs moves on a flake.lock bump alone.
+module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$|js/obs/src/obs\.ts$)' \
     tools='clang-format cmake gersemi jq' fix
 # ts.yml's crate filters against the closure test/ts/run.sh builds, which
 # moves only with a manifest, the lockfile, or the harness's packages.

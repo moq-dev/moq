@@ -15,10 +15,12 @@ which finished the OBS multitrack quest as docs only.
 OBS, so the manual run never happened.
 
 Decided 2026-11-13 (maintainer, /quest-plan of `@moq/obs`): ✅ the
-obs-websocket recipe's first live run moved to
-[@moq/obs](/quest/m1/obs-js.md), which drives it from code and fixes the
-doc (rejected: `@moq/obs` waits on this m3 quest). This quest keeps the
-dock.
+obs-websocket recipe's first live run moved to `@moq/obs`, which drives it
+from code and fixes the doc (rejected: `@moq/obs` waits on this m3 quest).
+This quest keeps the dock.
+[moq-dev/moq#8721](https://github.com/moq-dev/moq/pull/8721) ran that
+recipe on OBS 32.2.2 under Xvfb with Mesa's llvmpipe; its Validation has
+the headless setup a live run of the dock can reuse.
 
 - Dock: `MoQDock::CreateVideoEncoder` (`cpp/obs/src/moq-dock.cpp:1050`)
   creates one encoder and attaches it with `obs_output_set_video_encoder`
@@ -36,7 +38,3 @@ dock.
   each rendition advertises its own bitrate in the catalog.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [@moq/obs](/quest/m1/obs-js.md) - runs the obs-websocket simulcast recipe live

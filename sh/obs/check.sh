@@ -24,6 +24,12 @@ if [ "$spec_obs" != "$flake_obs" ]; then
     echo "obs-studio is $spec_obs in buildspec.json but $flake_obs in flake.nix (libobs-headers)" >&2
     exit 1
 fi
+# @moq/obs names this version when a page finds the plugin missing on an older OBS.
+js_obs=$(sed -n 's/^const PLUGIN_OBS = "\([^"]*\)";.*/\1/p' ../../js/obs/src/obs.ts)
+if [ "$spec_obs" != "$js_obs" ]; then
+    echo "obs-studio is $spec_obs in buildspec.json but '$js_obs' as PLUGIN_OBS in js/obs/src/obs.ts" >&2
+    exit 1
+fi
 # And a third: `just obs ci` links against nixpkgs' obs-studio, the one OBS
 # this repo doesn't pick. Without this the released macOS/Windows binaries
 # could be a whole libobs API apart from what CI ever compiles. Patch
