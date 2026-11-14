@@ -1321,7 +1321,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.map(|(hop, death)| (hop, death.far(), death.deadline().map(left)))
 			.collect();
 		let doubted: Vec<_> = (doubted.iter())
-			.map(|(node, state)| (node, matches!(state, Suspicion::Doubted(_)), left(state.deadline())))
+			.map(|(node, state)| {
+				// `since` decides whether a returning link waits, so it is state.
+				let since = match state {
+					Suspicion::Doubted { since, .. } => Some(*since),
+					#[cfg(test)]
+					Suspicion::Lifted(_) => None,
+				};
+				(node, since, left(state.deadline()))
+			})
 			.collect();
 		super::digest(hasher, &(hop, doubt, opened, sessions, answering, origins, rx));
 		super::digest(hasher, &(rx_hops, tx_hops, tx_nodes, reflects, waiting, routes, views));
