@@ -47,8 +47,22 @@ for role in ${roles//,/ }; do
     }
 done
 
-# The runner names its containers and networks, so one host runs one matrix at a time.
-exec {lock}>"${TMPDIR:-/tmp}/moq-quic-interop-$(id -u).lock"
+# The self pair runs in the server pass only.
+others=$(tr , '\n' <<<"$peers" | grep -vx moq-quic | paste -sd , || true)
+passes=()
+for role in ${roles//,/ }; do
+    if [[ "$role" == server || -n "$others" ]]; then
+        passes+=("$role")
+    fi
+done
+if [[ ${#passes[@]} -eq 0 ]]; then
+    echo "nothing to run: the self pair runs as server only, so --roles client needs another peer" >&2
+    exit 2
+fi
+
+# The runner names its containers and networks, so one Docker daemon runs one matrix at a
+# time. The lock sits in /tmp whatever TMPDIR says, since every run shares the daemon.
+exec {lock}>"/tmp/moq-quic-interop-$(id -u).lock"
 if ! flock -n "$lock"; then
     echo "waiting for another quic-interop run on this host" >&2
     flock "$lock"
@@ -58,10 +72,20 @@ system=$(nix eval --impure --raw --expr builtins.currentSystem)
 tools=$(nix build --cores 4 --no-link --print-out-paths "$WORKSPACE#legacyPackages.$system.quic-interop")
 commit=$(python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["runner"]["commit"])' "$DIR/cases.toml")
 
-cargo build --locked --release -p moq-tokio --example quic-interop
-target="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
-[[ "$target" == /* ]] || target="$WORKSPACE/$target"
-binary="$target/release/examples/quic-interop"
+# Cargo names the binary it built, wherever its target directory resolves.
+binary=$(cargo build --locked --release -p moq-tokio --example quic-interop \
+    --manifest-path "$WORKSPACE/Cargo.toml" --message-format=json-render-diagnostics |
+    python3 -I -c '
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("reason") == "compiler-artifact" and message["target"]["name"] == "quic-interop":
+        print(message["executable"])
+')
+[[ -x "$binary" ]] || {
+    echo "cargo built no quic-interop example" >&2
+    exit 1
+}
 
 harness_begin quic-interop "just test quic-interop$(harness_argv "${argv[@]}")"
 
@@ -96,15 +120,11 @@ tests=()
 [[ -z "$cases" ]] || tests=(-t "$cases")
 results=()
 status=0
-# The self pair runs in the server pass only.
-others=$(tr , '\n' <<<"$peers" | grep -vx moq-quic | paste -sd , || true)
-for role in ${roles//,/ }; do
+for role in "${passes[@]}"; do
     if [[ "$role" == server ]]; then
         pair=(-s moq-quic -c "$peers")
-    elif [[ -n "$others" ]]; then
-        pair=(-s "$others" -c moq-quic)
     else
-        continue
+        pair=(-s "$others" -c moq-quic)
     fi
     echo "moq-quic as $role: run.py ${pair[*]}"
     # The runner calls a client that fails every server unsupported unless told not
