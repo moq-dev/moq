@@ -23,6 +23,16 @@ by flights, so this waits on Flights and stays in m2 with its epic.
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the byte offset rides
 FETCH's frame start plus the group header, not a SUBSCRIBE range end.
 
+Decided 2026-11-13 (maintainer, /quest-complete):
+
+- ✅ The byte stays crate-private until a public API needs it (rejected: add
+  `Position::byte` now, about 90 literals across moq-net, moq-archive, and
+  moq-ffi). `Position` also names subscribe ranges and largest locations,
+  where a byte means nothing.
+- ✅ [moq-dev/moq#8699](https://github.com/moq-dev/moq/pull/8699) merges its
+  slice alone, and this quest keeps the rest (rejected: grow that PR to the
+  whole quest).
+
 Landed in [moq-dev/moq#8699](https://github.com/moq-dev/moq/pull/8699), the
 first slice:
 
@@ -77,15 +87,6 @@ What remains:
   joiner reads it whole through a flight, and memory stays near 32 MB per
   copy.
 
-Public API: decide whether `Position` gains a byte field once a public reader
-needs a byte position (see Waiting), and `MAX_CACHE_BYTES` stops capping a
-frame. Wire: a byte offset on the current lite wip's group header.
-
-## Waiting
-
-- Maintainer: the Plan said `Position` gains a byte field. moq-dev/moq#8699
-  kept the byte crate-private, because nothing public reads one yet and
-  `Position` also names subscribe ranges and largest locations, where a byte
-  means nothing. Options: (a) keep it private until a public API needs it, or
-  (b) add `Position::byte` now. Recommendation: (a). Remove this item once
-  answered on that PR.
+Public API: `Position` gains a byte field only once a public reader needs a
+byte position, and `MAX_CACHE_BYTES` stops capping a frame. Wire: a byte
+offset on the current lite wip's group header.
