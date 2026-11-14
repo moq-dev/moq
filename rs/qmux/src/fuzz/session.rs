@@ -709,7 +709,11 @@ impl Peer {
 						written: 0,
 						finished: false,
 						cut: false,
-						echo: Reader::default(),
+						// The echo must carry this stream's tag, so two swapped echoes fail.
+						echo: Reader {
+							tag: Some(self.opened),
+							offset: 0,
+						},
 						echo_fin: false,
 					});
 					self.opened += 1;
