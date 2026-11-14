@@ -338,6 +338,8 @@ export class Reload {
 	// A session the peer sent GOAWAY on, serving its groups in flight while the replacement
 	// dials. Retired when it closes, at its handover cap, or when the sequence ends.
 	#draining: Draining | undefined;
+	// A redirect from the draining fallback's peer, held while a replacement serves.
+	#pending: { connection: Session; next: URL } | undefined;
 
 	// Sessions this loop ended that are still draining, each until its close settles.
 	#ending = new Map<Session, Promise<void>>();
@@ -646,6 +648,7 @@ export class Reload {
 						current = undefined;
 						// A predecessor still draining serves again, so this is no outage.
 						if (this.established.peek() === connection) this.#serve(this.#draining?.serving());
+						this.#applyPending();
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
 					}
@@ -810,14 +813,13 @@ export class Reload {
 
 	/**
 	 * Follow a redirect the peer of `connection`, a fallback session we left for a probe that
-	 * got through, sends while it drains and nothing has replaced it yet: the next dial goes
-	 * where the peer named, and a dial still headed for the leaving peer starts over. A restart
-	 * in place or a refused redirect is ignored, since we are already leaving. No loop scoring:
+	 * got through, sends while it drains: whenever nothing else serves, the next dial goes where
+	 * the peer named, and a dial still headed for the leaving peer starts over. A restart in
+	 * place or a refused redirect is ignored, since we are already leaving. No loop scoring:
 	 * only a probe that got through leads here, and the probe's backoff paces those.
 	 */
 	#follow(connection: Session, dialing: URL, pinned: boolean): void {
 		void connection.draining.then((drain) => {
-			if (this.#draining?.serving() !== connection || this.established.peek() !== connection) return;
 			let next: URL | undefined;
 			try {
 				next = target(this.goaway.redirect ?? "same-host", drain.uri, dialing, pinned);
@@ -825,12 +827,29 @@ export class Reload {
 				return;
 			}
 			if (!next) return;
-			console.info("draining fallback peer redirected; following");
-			this.#redirect.set(next);
-			this.#redirectHref = this.#sequenceHref;
-			// A backoff still paces the next dial, which now goes to the new target.
-			if (this.#dialing) this.#tick.update((prev) => prev + 1);
+			this.#pending = { connection, next };
+			this.#applyPending();
 		});
+	}
+
+	/**
+	 * Apply the pending redirect once its session is the one serving, which a replacement that
+	 * closes hands back to; drop it once that session retires.
+	 */
+	#applyPending(): void {
+		const pending = this.#pending;
+		if (!pending) return;
+		if (this.#draining?.serving() !== pending.connection) {
+			this.#pending = undefined;
+			return;
+		}
+		if (this.established.peek() !== pending.connection) return;
+		this.#pending = undefined;
+		console.info("draining fallback peer redirected; following");
+		this.#redirect.set(pending.next);
+		this.#redirectHref = this.#sequenceHref;
+		// A backoff still paces the next dial, which now goes to the new target.
+		if (this.#dialing) this.#tick.update((prev) => prev + 1);
 	}
 
 	/**
