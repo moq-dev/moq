@@ -1,6 +1,8 @@
 //! Session tests over an in-memory byte stream, on paused tokio time.
 
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -182,6 +184,71 @@ async fn a_stream_is_acknowledged_once_its_bytes_go_out() {
 
 		send.reset(1);
 		assert_eq!(send.acknowledged(), Some(false), "{version:?}");
+	}
+}
+
+/// A byte stream whose room the test can close, as a peer that stops reading does once the
+/// buffers between fill. A closed one never wakes the driver for room again.
+struct Gate {
+	inner: Stream<DuplexStream>,
+	full: Arc<AtomicBool>,
+}
+
+impl Transport for Gate {
+	fn bind(&mut self, config: &Config) {
+		self.inner.bind(config);
+	}
+
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		self.inner.poll_recv(waiter)
+	}
+
+	fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		match self.full.load(Ordering::Relaxed) {
+			true => Poll::Pending,
+			false => self.inner.poll_ready(waiter),
+		}
+	}
+
+	fn send(&mut self, record: Bytes) -> Result<(), Error> {
+		self.inner.send(record)
+	}
+
+	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.inner.poll_flush(waiter)
+	}
+
+	fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.inner.poll_close(waiter)
+	}
+}
+
+/// A stream's bytes count as delivered once the transport takes them, and never while the
+/// transport has no room for them.
+#[tokio::test(start_paused = true)]
+async fn delivery_counts_only_what_the_transport_took() {
+	for &version in Version::ALL {
+		let (client, server) = tokio::io::duplex(PIPE);
+		let full = Arc::new(AtomicBool::new(false));
+		let client = Gate {
+			inner: Stream::new(client),
+			full: full.clone(),
+		};
+		let (client, server) = tokio::join!(
+			Session::connect(client, config(version)),
+			Session::accept(Stream::new(server), config(version))
+		);
+		let (client, _server) = (spawn(client.unwrap()), spawn(server.unwrap()));
+
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		write_all(&mut send, payload(1000, 6)).await;
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		assert_eq!(send.delivered(), Some(1000), "{version:?}: the transport took it");
+
+		full.store(true, Ordering::Relaxed);
+		write_all(&mut send, payload(PIPE, 7)).await;
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		assert_eq!(send.delivered(), Some(1000), "{version:?}: the transport had no room");
 	}
 }
 

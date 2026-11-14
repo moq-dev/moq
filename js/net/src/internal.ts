@@ -661,6 +661,8 @@ export const hooks: {
 	 * by `track.ts`.
 	 */
 	arrivingGroup: (producer: Producer, sequence: bigint) => Arriving | undefined;
+	/** The cached groups of `[start, end)` still arriving, by sequence, costing what the cache holds. Assigned by `track.ts`. */
+	arrivingIn: (producer: Producer, start: bigint, end: bigint) => bigint[];
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -1227,6 +1229,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	arrivingGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	arrivingIn: () => {
 		throw new Error("track.ts not loaded");
 	},
 	succeedGroup: () => {

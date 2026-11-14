@@ -25,7 +25,7 @@ copies fill. JS ranges
 2026-10-27 decision required first, merged.
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
-[Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md),
+Lite-07 FETCH is single-group only ([moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616)),
 which moves JS multi-group fills (`js/net/src/lite/subscriber.ts`
 `#runFills`) onto the subscription this rekeys.
 
@@ -34,4 +34,3 @@ Public API: breaking, mirroring Rust's. Wire: as the lite-07 quest.
 ## Required
 
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - the wire this speaks
-- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - moves the JS fills this rekeys onto the subscription

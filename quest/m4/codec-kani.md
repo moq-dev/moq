@@ -41,4 +41,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Wire fuzz coverage](/quest/m4/wire-fuzz-coverage.md) - the fuzz targets and Miri run beside these proofs
+- [Wire fuzz coverage](/quest/m1/wire-fuzz-coverage.md) - the fuzz targets and Miri run beside these proofs

@@ -36,4 +36,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Shared corpora live in each crate's fixtures/](/quest/m4/corpus-fixtures.md) - where the committed inputs live
+- [Shared corpora live in each crate's fixtures/](/quest/m5/corpus-fixtures.md) - where the committed inputs live

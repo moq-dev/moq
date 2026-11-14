@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { Duration, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { RefusedRedirect } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -123,6 +124,44 @@ test("an empty GOAWAY migrates the follower to the replacement session", async (
 		reload.close();
 		consume.close();
 		broadcast.close();
+		installed.close();
+	}
+});
+
+test("a replacement that closes mid-handover hands back to the draining session", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		delay: { initial: Duration.millis(1) },
+	});
+
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined);
+		const first = reload.established.peek();
+		const drained = dials[0];
+		if (!drained) throw new Error("no first dial");
+		await goaway(drained.server, "");
+		await elapse(clock, () => reload.established.peek() !== first && reload.established.peek() !== undefined);
+		const replacement = dials[1];
+		if (!replacement) throw new Error("no replacement dial");
+
+		replacement.server.close();
+		await elapse(clock, () => replacement.closed);
+		await elapse(clock, () => reload.established.peek() === first || reload.established.peek() === undefined);
+		// Nothing is down: the drained session still serves until its handover ends.
+		expect(reload.established.peek()).toBe(first);
+		expect(reload.status.peek()).toBe("connected");
+		expect(drained.closed).toBe(false);
+
+		// Its handover still bounds it; then a redial serves.
+		await elapse(clock, () => drained.closed);
+		expect(reload.established.peek()).not.toBe(first);
+	} finally {
+		reload.close();
 		installed.close();
 	}
 });

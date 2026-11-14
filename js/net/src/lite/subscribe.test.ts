@@ -188,8 +188,11 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 			new Reader(undefined, await encodeMessage(Version.DRAFT_07, msg), Version.DRAFT_07),
 			Version.DRAFT_07,
 		);
-	const got = await decode(message);
-	expect([got.startGroup, got.startFrame, got.endGroup, got.endFrame]).toEqual([3n, 2, 9n, 4]);
+	// A range covers whole groups: a slice of one is a FETCH.
+	await expect(encodeMessage(Version.DRAFT_07, message)).rejects.toThrow("frame bounds not supported");
+	await expect(encodeMessage(Version.DRAFT_07, new Subscribe({ ...message, startFrame: 0 }))).rejects.toThrow(
+		"frame bounds not supported",
+	);
 	const whole = await decode(new Subscribe({ ...message, startFrame: 0, endFrame: undefined }));
 	expect([whole.startGroup, whole.startFrame, whole.endGroup, whole.endFrame]).toEqual([3n, 0, 9n, undefined]);
 	const open = await decode(
@@ -208,20 +211,19 @@ test("a lite-07 list decodes as the span covering it", async () => {
 			new Reader(undefined, new Uint8Array([body.length, ...body]), Version.DRAFT_07),
 			Version.DRAFT_07,
 		);
-		return { ...got, ...spanOf(Version.DRAFT_07, got.entries ?? []) };
+		return { ...got, ...spanOf(Version.DRAFT_07, got.ranges ?? []) };
 	};
 
-	// Groups 2 through 4 and 7 through frame 1 of group 9.
-	const sparse = await update([2, 1, 2, 0, 1, 5, 0, 1, 7, 0, 1, 9, 2]);
-	expect([sparse.startGroup, sparse.startFrame, sparse.endGroup, sparse.endFrame]).toEqual([2n, 0, 9n, 1]);
-	// The ranges stay whole groups, so an end past frame 0 includes its group.
+	// Groups 2 through 4 and 7 through 9: an absolute anchor is its type and group alone.
+	const sparse = await update([2, 1, 2, 1, 5, 1, 7, 1, 10]);
+	expect([sparse.startGroup, sparse.startFrame, sparse.endGroup, sparse.endFrame]).toEqual([2n, 0, 9n, undefined]);
 	expect(sparse.ranges).toEqual([
 		{ start: { absolute: 2n }, end: { absolute: 5n } },
 		{ start: { absolute: 7n }, end: { absolute: 10n } },
 	]);
 
 	// The span covering a relative start has no floor; the ranges keep it for the serving reader.
-	const relative = await update([2, 2, 3, 1, 5, 0, 1, 7, 0, 1, 9, 0]);
+	const relative = await update([2, 2, 3, 1, 5, 1, 7, 1, 9]);
 	expect([relative.startGroup, relative.endGroup, relative.endFrame]).toEqual([undefined, 8n, undefined]);
 	expect(relative.ranges).toEqual([
 		{ start: { relative: 3n }, end: { absolute: 5n } },
@@ -236,14 +238,14 @@ test("a lite-07 list decodes as the span covering it", async () => {
 	]);
 	expect(() => requestedRanges(timed, undefined)).toThrow(TimestampMismatch);
 
-	// No start reaches back to group 0; one empty partway through group 5 covers no group.
-	const oldest = await update([2, 0, 1, 3, 0, 1, 5, 2, 1, 5, 2]);
+	// No start reaches back to group 0; one ending before group 5 starts covers no group.
+	const oldest = await update([2, 0, 1, 3, 1, 5, 1, 4]);
 	expect(oldest.ranges).toEqual([{ end: { absolute: 3n } }, { start: { absolute: 5n }, end: { absolute: 5n } }]);
 
 	// An update may add no range, retiring some or none.
 	expect((await update([0])).ranges).toEqual([]);
 	await expect(update([1, 4, 0, 0])).rejects.toThrow(ProtocolViolation);
-	await expect(update([1, 0, 1, 0, 0])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, 0, 1, 0])).rejects.toThrow(ProtocolViolation);
 });
 
 test("lite-07 carries every range, relative and time anchors included, and older wires the span alone", async () => {
@@ -556,13 +558,13 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	const live = new LiveRanges(version, [a, b]);
 	const step = async (ranges: WireRange[], remove: bigint[], add: WireRange[]) => {
 		const edit = sent.edit(ranges);
-		expect(edit).toEqual({ remove, add });
+		expect(edit).toEqual({ remove, add, fillIds: [] });
 		const update = new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add });
 		const got = await SubscribeUpdate.decode(
 			new Reader(undefined, await encodeMessage(version, update), version),
 			version,
 		);
-		const resolved = live.apply(got).map(({ id, entry }) => [id, entry.range]);
+		const resolved = live.apply(got).map(({ id, range }) => [id, range]);
 		expect(resolved).toEqual(sent.entries());
 	};
 	await step([b, a], [], []);

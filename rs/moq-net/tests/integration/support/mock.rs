@@ -278,6 +278,14 @@ impl poll::SendStream for MockSendStream {
 		}
 		self.inner.poll_closed(waiter)
 	}
+
+	fn delivered(&self) -> Option<u64> {
+		self.inner.delivered()
+	}
+
+	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.inner.poll_delivered(waiter)
+	}
 }
 
 impl Drop for MockSendStream {

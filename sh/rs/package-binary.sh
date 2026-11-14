@@ -103,7 +103,7 @@ else
     RESULT_LINK="$BUILD_TMP/result"
     nix build "$WORKSPACE_DIR#$BIN" --out-link "$RESULT_LINK"
 
-    # Crane installs to result/bin/<binary>.
+    # The package installs to result/bin/<binary>.
     BIN_FILE="$RESULT_LINK/bin/$BIN"
 fi
 

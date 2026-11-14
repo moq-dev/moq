@@ -58,7 +58,6 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 				config: audio.source.out.config,
 				delay: sync.out.delay,
 				maxDelay: sync.out.maxDelay,
-				stretch: sync.in.stretch,
 			})
 		: undefined;
 

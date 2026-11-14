@@ -16,6 +16,7 @@ PRs into `release` use a merge commit, so their history survives until they land
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - Never commit binaries or build artifacts (`.a`, `.so`, `.dylib`, `.dll`, wheels).
 - Keep other binary files, such as images and fixtures, under 500 KiB; list an unavoidable exception in `sh/large-files.allow` with a reason.
+- `nix/Cargo.nix`, the Nix packages' per-crate build plan, is generated from the manifests and `Cargo.lock`: `just fix` (or `just rs cargo-nix`) regenerates it, and `just check` fails while it is stale. It needs Nix; without it, leave the plan stale and the merge queue's fixer regenerates it, as it does the workspace-hack.
 
 # PRs
 

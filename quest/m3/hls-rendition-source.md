@@ -9,7 +9,7 @@ actual source rather than on the requesting viewer's grants.
 
 ## Plan
 
-Decided 2026-11-03 (maintainer, `/quest-plan`): m2. A downstream HLS cache
+Decided 2026-11-03 (maintainer, `/quest-plan`). A downstream HLS cache
 keys entries on a digest of each viewer's subscribe scope, because it can't
 tell which source a referenced rendition reads. Viewers holding different
 grants for the same broadcast then never share a cached entry. Correctness is

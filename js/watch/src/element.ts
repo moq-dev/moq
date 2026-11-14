@@ -113,7 +113,7 @@ function parseStretch(value: string | null): Duration {
 	if (value === null) return STRETCH;
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
-	throw invalidAttribute("stretch", value, 'a duration like "2s", or "0" to turn it off');
+	throw invalidAttribute("stretch", value, 'a duration like "200ms", or "0" to turn it off');
 }
 
 // Parse the `echo` attribute: the viewer's feedback name, one visible path segment, or undefined when absent.
@@ -218,7 +218,7 @@ export default class MoqWatch extends HTMLElement {
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
 		lookahead: new Signal<Duration>(Duration.ZERO),
-		// How far audio may trail the clock before it skips ahead; zero turns the time stretch off.
+		// How far audio may trail the clock before it skips onto it; zero turns the time stretch off.
 		stretch: new Signal<Duration>(STRETCH),
 		video: {
 			// The desired video rendition (resolution/bitrate cap).
@@ -622,8 +622,8 @@ export default class MoqWatch extends HTMLElement {
 	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up
 	 * future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
 	 * once they would sit further than `delay + lookahead` past the playhead. Audio that falls
-	 * behind, as after a stall, catches up by playing faster, and skips only what trails by more
-	 * than the larger of the lookahead and the {@link stretch}. Call `reset()` at each utterance boundary. Not a jitter buffer: live
+	 * behind, as after a stall, catches up by playing faster, and skips onto the clock only past
+	 * the larger of the lookahead and the {@link stretch}. Call `reset()` at each utterance boundary. Not a jitter buffer: live
 	 * streams leave it at zero and tune `delay`.
 	 */
 	get lookahead(): Duration {
@@ -637,13 +637,12 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	/**
-	 * How far audio may trail the clock before it skips ahead (default: 2 s), mirrored by the
+	 * How far audio may trail the clock before it skips onto it (default: 200 ms), mirrored by the
 	 * `stretch` attribute.
 	 *
-	 * After a stall, audio slows down and falls behind the clock rather than dropping what arrives
-	 * late, then speeds up until it is back on it. A voice app might ask for 200 ms, a sports stream
-	 * for 2 s. Zero turns the time stretch off: received audio plays unaltered and late audio is
-	 * skipped.
+	 * Within it, audio behind the clock, as after a stall, speeds up until it is back on it; past it,
+	 * audio skips onto the clock as video does. Zero turns the time stretch off: received audio plays
+	 * unaltered and late audio is skipped.
 	 */
 	get stretch(): Duration {
 		return this.controls.stretch.peek();

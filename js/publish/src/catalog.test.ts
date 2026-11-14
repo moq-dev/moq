@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Duration, type Installed, Manual, Wall } from "@moq/clock";
+import { Duration, type Installed, Wall } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Track } from "@moq/net";

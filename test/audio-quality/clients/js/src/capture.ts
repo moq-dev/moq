@@ -23,7 +23,6 @@ export type Input = {
 	 */
 	delay: Getter<Duration>;
 	maxDelay: Getter<Duration>;
-	stretch: Getter<Duration>;
 };
 
 /** Record frames on the player's connection with its subscription settings. */
@@ -50,7 +49,6 @@ export class Capture {
 						max: maxDelay({
 							delay: input.delay.peek(),
 							maxDelay: input.maxDelay.peek(),
-							stretch: input.stretch.peek(),
 						}).add(Duration.millis(config.warmup ?? 0)),
 					},
 				});
@@ -66,7 +64,6 @@ export class Capture {
 							max: maxDelay({
 								delay: inner.get(input.delay),
 								maxDelay: inner.get(input.maxDelay),
-								stretch: inner.get(input.stretch),
 							}).add(Duration.millis(inner.get(input.config)?.warmup ?? 0)),
 						},
 					}),

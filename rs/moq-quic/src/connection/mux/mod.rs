@@ -166,8 +166,11 @@ pub struct Connection {
 
 	datagrams: DatagramState,
 
-	/// Draft-00 frames already serialized, one per transport message
-	queued: VecDeque<Bytes>,
+	/// Draft-00 frames already serialized, one per transport message, each with the stream data
+	/// it carries
+	queued: VecDeque<(Bytes, frame::StreamMetaVec)>,
+	/// The stream data of each record handed out, oldest first, until the transport takes it
+	unconfirmed: VecDeque<frame::StreamMetaVec>,
 	/// Where records are serialized. Each one handed out is split off, so the allocation is
 	/// reused once the transport drops the records it holds.
 	out: BytesMut,
@@ -207,6 +210,7 @@ impl Connection {
 			ping_response: None,
 			datagrams: DatagramState::default(),
 			queued: VecDeque::new(),
+			unconfirmed: VecDeque::new(),
 			out: BytesMut::new(),
 		}
 	}
@@ -332,10 +336,11 @@ impl Connection {
 	/// The next record to write, without its Size field, or the next frame on draft-00, or wait
 	/// for one
 	///
-	/// Pending registers `waiter` until the application queues something, as on QUIC. Poll
-	/// again after [`Self::handle_record`] and at [`Self::poll_timeout`].
+	/// Its stream data counts as acknowledged only once [`Self::transmitted`] reports the
+	/// transport took it. Pending registers `waiter` until the application queues something, as
+	/// on QUIC. Poll again after [`Self::handle_record`] and at [`Self::poll_timeout`].
 	pub fn poll_transmit(&mut self, waiter: &kio::Waiter, now: Instant) -> Poll<Bytes> {
-		match self.transmit(now) {
+		match self.take(now) {
 			Some(record) => Poll::Ready(record),
 			None => {
 				self.streams.waits.register_transmit(waiter);
@@ -344,17 +349,54 @@ impl Connection {
 		}
 	}
 
-	/// The next record to write, if any, as [`Self::poll_transmit`] without the wait
+	/// The transport took the oldest record [`Self::poll_transmit`] handed out, so its stream
+	/// data is acknowledged, which a reliable transport delivers
+	///
+	/// A record the transport never takes, as when it fails, stays unacknowledged.
+	pub fn transmitted(&mut self) {
+		let Some(streams) = self.unconfirmed.pop_front() else {
+			return;
+		};
+		let mut queued = false;
+		for meta in streams {
+			let id = meta.id;
+			// A reset held until the peer has the data below its Reliable Size goes out now
+			if let Some(reliable_size) = self.streams.received_ack_of(meta) {
+				self.pending.reset_stream.push((id, reliable_size));
+				queued = true;
+			}
+		}
+		// Freed streams may grant the peer more
+		queued |= self.streams.queue_max_stream_id(&mut self.pending);
+		if queued {
+			self.streams.waits.wake_transmit();
+		}
+	}
+
+	/// The next record to write, if any, as [`Self::poll_transmit`] without the wait, and taken
+	/// by the transport at once
+	#[cfg(test)]
 	pub(crate) fn transmit(&mut self, now: Instant) -> Option<Bytes> {
-		if let Some(frame) = self.queued.pop_front() {
+		let record = self.take(now)?;
+		self.transmitted();
+		Some(record)
+	}
+
+	/// The next record to write, if any, its stream data waiting on [`Self::transmitted`]
+	fn take(&mut self, now: Instant) -> Option<Bytes> {
+		if let Some((frame, streams)) = self.queued.pop_front() {
+			self.unconfirmed.push_back(streams);
 			return Some(frame);
 		}
-		let buf = self.fill(now)?;
+		let (buf, streams) = self.fill(now)?;
 		if self.config.version.uses_records() {
+			self.unconfirmed.push_back(streams);
 			return Some(buf);
 		}
 		self.split(buf);
-		self.queued.pop_front()
+		let (frame, streams) = self.queued.pop_front()?;
+		self.unconfirmed.push_back(streams);
+		Some(frame)
 	}
 
 	/// The instant [`Self::handle_timeout`] should run next
@@ -504,7 +546,7 @@ impl Connection {
 	}
 
 	/// Serialize the next batch of frames, each counted as acknowledged on the spot
-	fn fill(&mut self, now: Instant) -> Option<Bytes> {
+	fn fill(&mut self, now: Instant) -> Option<(Bytes, frame::StreamMetaVec)> {
 		if matches!(self.end, End::Closed(_)) {
 			return None;
 		}
@@ -512,14 +554,15 @@ impl Connection {
 		let mut buf = std::mem::take(&mut self.out);
 		// Reuses the allocation in place once every record split from it was dropped.
 		buf.reserve(budget);
-		let filled = self.fill_into(&mut buf, budget, now);
-		let record = filled.then(|| buf.split().freeze());
+		let streams = self.fill_into(&mut buf, budget, now);
+		let record = streams.map(|streams| (buf.split().freeze(), streams));
 		self.out = buf;
 		record
 	}
 
-	/// Serialize the next batch of frames into the empty `buf`, returning whether it wrote any
-	fn fill_into(&mut self, buf: &mut BytesMut, budget: usize, now: Instant) -> bool {
+	/// Serialize the next batch of frames into the empty `buf`, returning the stream data it
+	/// carries, or `None` if it wrote nothing
+	fn fill_into(&mut self, buf: &mut BytesMut, budget: usize, now: Instant) -> Option<frame::StreamMetaVec> {
 		// The transport parameters go first
 		if !self.params_sent {
 			let mut blob = Vec::new();
@@ -536,10 +579,10 @@ impl Connection {
 			}
 			self.end = End::Closed(error.clone());
 			if buf.is_empty() {
-				return false;
+				return None;
 			}
 			self.timer.on_send(now);
-			return true;
+			return Some(Default::default());
 		}
 
 		if let Some(seq) = self.ping_response.take() {
@@ -564,21 +607,12 @@ impl Connection {
 		// Stream data and datagrams last, so a STREAM frame without a Length field runs to the
 		// end of the record
 		let written = self.streams.write_frames(buf, 0..budget, self.config.send_fairness);
-		for meta in written.streams {
-			let id = meta.id;
-			// A reset held until the peer has the data below its Reliable Size goes out now
-			if let Some(reliable_size) = self.streams.received_ack_of(meta) {
-				self.pending.reset_stream.push((id, reliable_size));
-			}
-		}
-		// Freed streams may grant the peer more
-		self.streams.queue_max_stream_id(&mut self.pending);
 
 		if buf.is_empty() {
-			return false;
+			return None;
 		}
 		self.timer.on_send(now);
-		true
+		Some(written.streams)
 	}
 
 	/// Queue a draft-00 batch one frame per message, each STREAM frame with its Length field
@@ -591,11 +625,9 @@ impl Connection {
 				.expect("not empty");
 			let len = before.len() - buf.len();
 			let stream = match frame {
-				wire::Frame::Quic(frame::Frame::Stream(stream)) | wire::Frame::Continue(stream) if ty & 0x02 == 0 => {
-					stream
-				}
+				wire::Frame::Quic(frame::Frame::Stream(stream)) | wire::Frame::Continue(stream) => stream,
 				_ => {
-					self.queued.push_back(before.slice(..len));
+					self.queued.push_back((before.slice(..len), Default::default()));
 					continue;
 				}
 			};
@@ -604,10 +636,15 @@ impl Connection {
 				offsets: stream.offset..stream.offset + stream.data.len() as u64,
 				fin: stream.fin,
 			};
+			if ty & 0x02 != 0 {
+				self.queued
+					.push_back((before.slice(..len), std::iter::once(meta).collect()));
+				continue;
+			}
 			let mut frame = Vec::with_capacity(len + 2);
 			meta.encode(true, &mut frame);
 			frame.extend_from_slice(&stream.data);
-			self.queued.push_back(frame.into());
+			self.queued.push_back((frame.into(), std::iter::once(meta).collect()));
 		}
 	}
 

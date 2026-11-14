@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Duration, Instant, Manual } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { File as FileSource } from "./file";
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));

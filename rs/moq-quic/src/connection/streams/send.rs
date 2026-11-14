@@ -27,6 +27,9 @@ pub(super) struct Send {
 	pub(super) notify: Option<u64>,
 	/// The application gave up the stream's ID with [`Stream::release`], so its end is not kept
 	pub(super) released: bool,
+	/// The acknowledged prefix past what `pending` still tracks: what was acknowledged before a
+	/// reset truncated it, extended by data sent before the reset and acknowledged after
+	pub(super) truncated_acked: u64,
 }
 
 impl Send {
@@ -41,6 +44,7 @@ impl Send {
 			stop_reason: None,
 			notify: None,
 			released: false,
+			truncated_acked: 0,
 		})
 	}
 
@@ -118,7 +122,7 @@ impl Send {
 		};
 		debug_assert!(reliable_size <= self.pending.offset());
 		let final_size = self.pending.offset();
-		self.pending.truncate(reliable_size);
+		self.truncate(reliable_size);
 		let send = at || self.pending.is_fully_acked();
 		self.state = ResetSent {
 			final_size,
@@ -171,7 +175,7 @@ impl Send {
 		}
 		*reliable_size = 0;
 		*held = false;
-		self.pending.truncate(0);
+		self.truncate(0);
 		Some(0)
 	}
 
@@ -236,7 +240,13 @@ impl Send {
 	/// Returns whether the stream has been finished or reset, and all data it still owes the peer
 	/// has been acknowledged
 	pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
-		self.pending.ack(frame.offsets);
+		self.pending.ack(frame.offsets.clone());
+		// `pending` ignores data a reset truncated, but data sent before the reset was still
+		// delivered. Only a range continuing the prefix extends it, so a reordered one is lost.
+		let acked = self.acked_len();
+		if frame.offsets.start <= acked && frame.offsets.end > acked {
+			self.truncated_acked = frame.offsets.end;
+		}
 		match &mut self.state {
 			SendState::DataSent { finish_acked, .. } => {
 				*finish_acked |= frame.fin;
@@ -290,6 +300,17 @@ impl Send {
 
 	pub(super) fn offset(&self) -> u64 {
 		self.pending.offset()
+	}
+
+	/// The end of the acknowledged prefix, including what a reset discarded after it
+	pub(super) fn acked_len(&self) -> u64 {
+		self.pending.acked().max(self.truncated_acked)
+	}
+
+	/// Drop the data from `end` on, remembering the acknowledged prefix
+	fn truncate(&mut self, end: u64) {
+		self.truncated_acked = self.acked_len();
+		self.pending.truncate(end);
 	}
 
 	pub(super) fn is_pending(&self) -> bool {
@@ -515,6 +536,19 @@ impl<'a> Stream<'a> {
 		}
 	}
 
+	/// How many leading bytes of the stream the peer acknowledged, each counted once
+	///
+	/// Like [`Self::acked`], an acknowledgment only means the peer's QUIC stack holds the data.
+	/// After a reset, the prefix acknowledged before the stream was freed. Zero once the stream
+	/// is gone.
+	pub fn acked_len(&self) -> u64 {
+		match self.state.send.get(&self.id) {
+			Some(Some(stream)) => stream.acked_len(),
+			Some(None) => 0,
+			None => self.state.ends.get(&self.id).map_or(0, |&(_, acked)| acked),
+		}
+	}
+
 	/// Whether the peer acknowledged every byte before `offset`
 	///
 	/// Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack holds the data,
@@ -554,8 +588,7 @@ impl<'a> Stream<'a> {
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
-	#[cfg(test)]
-	pub(crate) fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+	pub fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		match self.acked(offset) {
 			Ok(true) => Poll::Ready(Ok(())),
 			Ok(false) => {

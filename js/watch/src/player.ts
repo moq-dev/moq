@@ -30,7 +30,7 @@ export type PlayerInput = {
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
 	lookahead: Getter<Duration>;
-	/** How far audio may trail the clock before it skips ahead; zero turns the time stretch off. */
+	/** How far audio may trail the clock before it skips onto it; zero turns the time stretch off. */
 	stretch: Getter<Duration>;
 	/** Video rendition and canvas output. */
 	video: {

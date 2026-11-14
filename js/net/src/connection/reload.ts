@@ -644,7 +644,8 @@ export class Reload {
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
 						current = undefined;
-						if (this.established.peek() === connection) this.#serve(undefined);
+						// A predecessor still draining serves again, so this is no outage.
+						if (this.established.peek() === connection) this.#serve(this.#draining?.serving());
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
 					}
@@ -1033,6 +1034,11 @@ class Draining {
 			this.#timer.abort();
 			this.retire();
 		});
+	}
+
+	/** The old session while it still serves, before it retires. */
+	serving(): Session | undefined {
+		return this.#retired ? undefined : this.#connection;
 	}
 
 	/** Stop serving from the old session, returning it the first time for the caller to end. */

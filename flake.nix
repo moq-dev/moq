@@ -24,7 +24,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -43,7 +42,6 @@
       self,
       nixpkgs,
       flake-utils,
-      crane,
       rust-overlay,
       quest,
       ...
@@ -61,7 +59,7 @@
         github-runner-vm = import ./nix/modules/github-runner-vm.nix;
       };
 
-      overlays.default = import ./nix/overlay.nix { inherit crane; };
+      overlays.default = import ./nix/overlay.nix;
     }
     // eachSupportedSystem (
       system:
@@ -738,20 +736,24 @@
 
         # Heavy Rust CI (clippy / doc / test) runs via `just check` and `just
         # test` (see rs/justfile), reaching mbx through the Cargo shim the dev
-        # shell puts on PATH. Neither path goes through crane.
-        # `nix flake check` is kept -- it still validates flake eval + builds the
-        # runner tests. The dispatcher runs it for Nix and packaging inputs;
-        # Rust source changes use the Cargo gate above. Release
-        # artifacts still build via crane `buildPackage` (see `packages` above /
-        # release-*.yml).
+        # shell puts on PATH. `nix flake check` validates flake eval and builds
+        # the checks below; the dispatcher runs it for Nix and packaging
+        # inputs. Release artifacts build per crate (nix/crates.nix).
         #
         # Which compiler cache those runs get is a workflow concern
         # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
-          package-source-assets = pkgs.runCommand "package-source-assets" { } ''
-            test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
-            touch "$out"
-          '';
+          # The per-crate source filter keeps what moq-video embeds.
+          package-source-assets =
+            let
+              moq-video = pkgs.lib.findFirst (
+                crate: crate.crateName == "moq-video"
+              ) (throw "moq-boy links no moq-video") overlayPkgs.moq-boy.completeDeps;
+            in
+            pkgs.runCommand "package-source-assets" { } ''
+                test -f "${moq-video.src}/src/frame/nv12_resize.ptx"
+              touch "$out"
+            '';
         }
         // pkgs.lib.optionalAttrs (system == "x86_64-linux") (
           import ./nix/runner/checks.nix { inherit pkgs; }

@@ -11,7 +11,7 @@ mod result;
 mod session;
 
 pub use api::LoadError;
-pub use buffer::{Bitstream, BitstreamLock, Buffer, BufferLock, EncoderInput, RegisteredResource};
+pub use buffer::{Bitstream, BitstreamLock, Buffer, BufferLock, EncoderInput, MappedResource, RegisteredResource};
 pub use encoder::{Encoder, EncoderInitParams};
 pub use result::{EncodeError, ErrorKind};
 pub use session::{EncodePictureParams, Session, Submission};

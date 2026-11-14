@@ -19,8 +19,6 @@
 //! - `ranges_time_gaps`: time ranges each ending between two groups of a sparsely numbered
 //!   history, so each end waits on the missing sequences of a gap of its own, beside one time
 //!   end past the live edge whose cap moves twice per group, as in `ranges_time_cap`.
-//! - `ranges_frames`: a lite-07 publisher's frame bounds, each range starting and ending
-//!   partway through its own group, looked up for one group as a served group does.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench ranges`.
 
@@ -299,29 +297,6 @@ impl TimeGaps {
 	}
 }
 
-/// A lite-07 publisher's frame bounds; see `ranges_frames`.
-pub(crate) struct Frames {
-	bounds: moq_net::fuzz::FrameBounds,
-	ranges: u64,
-	next: u64,
-}
-
-impl Frames {
-	pub(crate) fn new(ranges: u64) -> Self {
-		Self {
-			bounds: moq_net::fuzz::FrameBounds::new(ranges),
-			ranges,
-			next: 0,
-		}
-	}
-
-	pub(crate) fn step(&mut self) {
-		// Each group in turn, a range's or the one between, so a lookup can't stop early.
-		black_box(self.bounds.serve(self.next % (self.ranges * 2)));
-		self.next += 1;
-	}
-}
-
 fn sweep<S>(c: &mut Criterion, name: &str, new: impl Fn(u64) -> S, step: impl Fn(&mut S)) {
 	let mut group = c.benchmark_group(name);
 	group.throughput(Throughput::Elements(1));
@@ -354,17 +329,12 @@ fn bench_time_gaps(c: &mut Criterion) {
 	sweep(c, "ranges_time_gaps", TimeGaps::new, TimeGaps::step);
 }
 
-fn bench_frames(c: &mut Criterion) {
-	sweep(c, "ranges_frames", Frames::new, Frames::step);
-}
-
 criterion_group!(
 	benches,
 	bench_time_end,
 	bench_time_cap,
 	bench_fills_out,
 	bench_sparse,
-	bench_time_gaps,
-	bench_frames
+	bench_time_gaps
 );
 criterion_main!(benches);

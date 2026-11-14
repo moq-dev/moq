@@ -1,7 +1,7 @@
 import { Duration, Instant, now } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { Peak, ringHold, ringSamples } from "./latency";
-import type { Clock, Data, End, Init, Latency, Playing, Received, Reset, State, Truncate } from "./render";
+import type { Clock, Data, End, Init, Latency, Playing, Reading, Received, Reset, State, Truncate } from "./render";
 
 // The stretch's 30 ms processing window, in microseconds.
 const WINDOW = 30_000;
@@ -291,14 +291,16 @@ export class AudioBuffer {
 	#heard = Duration.ZERO;
 	// What the worklet reported rendering, oldest first, back to what is sounding now.
 	#rendered: { time: number; timestamp: number }[] = [];
+	// The shared clock the ring plays onto, and the reference it plays from.
+	#sync?: { position(): number | undefined; out: { reference: Getter<number | undefined> } };
 	// The shared clock less the context time sounding at the same instant, in microseconds, as last
 	// sent. A browser that reads its output position only once per render callback reports it up to a
 	// callback early, so the greatest offset is the reading taken nearest a callback's start. It falls
 	// only slowly, as drift needs, unless it moves past any callback, as a delay or reference change
 	// moves it.
 	#offset?: number;
-	// The shared clock's reference as last sent, in milliseconds. One that moved earlier jumped the
-	// clock ahead, which the ring skips rather than speeds through, as video skips the frames it passed.
+	// The shared clock's reference as last sent, in milliseconds. One that moved earlier stepped the
+	// clock ahead, which the offset takes whole rather than as where a reading landed.
 	#reference?: number;
 
 	#signals = new Effect();
@@ -327,6 +329,7 @@ export class AudioBuffer {
 		this.channels = channels;
 		this.rate = rate;
 		this.#bound = props.bound ?? Duration.ZERO;
+		this.#sync = clock;
 
 		// The output latency the context already reports, so startup holds only what the ring must.
 		this.#observeOutput();
@@ -337,7 +340,7 @@ export class AudioBuffer {
 			type: "init",
 			channels,
 			rate,
-			...this.#terms(held),
+			...this.#terms(),
 			...(playing && { playing: playing.peek() }),
 		};
 		worklet.port.postMessage(msg);
@@ -362,7 +365,10 @@ export class AudioBuffer {
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
-					if (clock) this.#clock(clock.position(), clock.out.reference.peek(), heard);
+					if (clock) {
+						const msg: Clock = { type: "clock", ...this.#read(clock.position(), clock.out.reference.peek(), heard) };
+						this.#worklet.port.postMessage(msg);
+					}
 				}
 			}
 		});
@@ -381,11 +387,10 @@ export class AudioBuffer {
 		return delay.saturatingSub(this.#heard).max(base.min(delay));
 	}
 
-	// The terms as the worklet takes them, for what the ring holds.
-	#terms(held: Duration): Omit<Latency, "type"> {
+	// The floor and bound as the worklet takes them.
+	#terms(): Omit<Latency, "type" | "clock"> {
 		return {
 			latency: (this.#backpressure.floor / this.rate) * 1000,
-			target: held.asMillis(),
 			bound: this.#bound.asMillis(),
 		};
 	}
@@ -422,38 +427,29 @@ export class AudioBuffer {
 		return Math.max(0, next ? Math.min(projected, next.timestamp) : Math.min(projected, at.timestamp));
 	}
 
-	// Send where the shared clock stands, in the ring's coordinates, against the context time sounding
-	// at the same instant, so the ring renders each sample to sound when the clock says it is due.
-	#clock(position: number | undefined, reference: number | undefined, heard: number | undefined): void {
+	// Where the shared clock stands, in the ring's coordinates, against the context time sounding at
+	// the same instant, so the ring renders each sample to sound when the clock says it is due. The
+	// reading carries the context's time it was taken at, so a late message misplaces neither.
+	#read(position: number | undefined, reference: number | undefined, heard: number | undefined): Reading {
 		const time = this.#context.currentTime;
 		const last = this.#reference;
 		this.#reference = reference;
 		if (position === undefined || heard === undefined) {
 			this.#offset = undefined;
-			const msg: Clock = { type: "clock", time };
-			this.#worklet.port.postMessage(msg);
-			return;
+			return { time };
 		}
-		// A reference move is a step of the clock, not where a reading landed, so the offset takes it
-		// whole. One earlier jumped the clock ahead, which the ring skips rather than speeds through.
+		// A reference move is a step of the clock, not where a reading landed, so the offset takes it whole.
 		const moved = last !== undefined && reference !== undefined ? (last - reference) * 1000 : 0;
-		const jumped = Math.max(0, moved);
 		const offset = position * 1000 - this.#backpressure.offset - heard * 1_000_000;
 		const previous = this.#offset === undefined ? undefined : this.#offset + moved;
 		this.#offset =
 			previous !== undefined && Math.abs(offset - previous) < JUMP ? Math.max(offset, previous - FALL) : offset;
-		const msg: Clock = {
-			type: "clock",
-			timestamp: this.#offset + time * 1_000_000,
-			time,
-			...(jumped > 0 && { jumped }),
-		};
-		this.#worklet.port.postMessage(msg);
+		return { timestamp: this.#offset + time * 1_000_000, time };
 	}
 
 	/**
-	 * Note that a frame arrived whose media ends at `end`, on the decoder's timeline. How far the
-	 * playhead trails it is the level the ring's stretch decides on, decoded or not.
+	 * Note that a frame arrived whose media ends at `end`, on the decoder's timeline. How far it reaches
+	 * past the playhead is the depth the ring slows down to keep, decoded or not.
 	 */
 	received(end: Duration): void {
 		const msg: Received = { type: "received", end: end.asMicros() - this.#backpressure.offset };
@@ -489,18 +485,21 @@ export class AudioBuffer {
 	}
 
 	/**
-	 * Update the target delay, and how far audio may trail the shared clock before the ring skips
-	 * ahead. The ring holds up to a fixed floor of the delay decoded, and the rest stays encoded
-	 * upstream. A moved delay moves the clock, which the ring plays onto by stretching: slower onto a
-	 * rise, faster onto a fall.
+	 * Update the target delay, and how far audio may trail the shared clock before the ring snaps onto
+	 * it. The ring holds up to a fixed floor of the delay decoded, and the rest stays encoded upstream.
+	 * A moved delay moves the clock, which the ring plays onto like any other lag.
 	 */
 	setLatency(delay: Duration, bound: Duration = this.#bound): void {
 		this.#bound = bound;
-		const held = this.held(delay);
-		this.#backpressure.setLatency(held);
-		// The clock moves with the delay, so its offset starts over with the next reading.
+		this.#backpressure.setLatency(this.held(delay));
+		// The clock moves with the delay, so its offset starts over, from a reading sent with the terms.
 		this.#offset = undefined;
-		const msg: Latency = { type: "latency", ...this.#terms(held) };
+		const sync = this.#sync;
+		const msg: Latency = {
+			type: "latency",
+			...this.#terms(),
+			...(sync && { clock: this.#read(sync.position(), sync.out.reference.peek(), this.#sounding()) }),
+		};
 		this.#worklet.port.postMessage(msg);
 	}
 

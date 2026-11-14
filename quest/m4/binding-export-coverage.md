@@ -16,3 +16,11 @@ it against the wrapper's public types, with an explicit allowlist for items
 a wrapper deliberately hides. Kotlin's
 fixed list moves to the shared one. When [the exporter](/quest/m3/ffi-exporter.md) replaces UniFFI,
 the list comes from it.
+
+## Waiting
+
+- Maintainer: when to build the FFI item list: from UniFFI's metadata now,
+  rebuilt once [the exporter](/quest/m3/ffi-exporter.md) lands, or only from
+  the exporter, by making that quest Required here. Recommended: only from
+  the exporter, since its switch keeps every wrapper's API and the UniFFI
+  version would be written twice.

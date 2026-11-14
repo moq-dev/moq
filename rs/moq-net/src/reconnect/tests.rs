@@ -1002,11 +1002,11 @@ async fn busy_handshake() -> (Session, Session, Vec<Box<dyn std::any::Any>>) {
 	)
 }
 
-/// Pins an open finding (`verify-reconnect`, `OfflineMeansNothingServes`): a replacement
-/// that drops while the predecessor still drains reports [`Action::Offline`], whose
-/// promise is that nothing serves, though the predecessor still carries a subscription.
+/// A replacement that drops while the predecessor still serves hands back to it as
+/// [`Action::Migrating`], never [`Action::Offline`]: nothing is down, and the predecessor
+/// still carries a subscription. Only its retirement then takes the connection offline.
 #[kio::test]
-async fn residual_a_dropped_replacement_reports_offline_while_the_predecessor_serves() {
+async fn a_dropped_replacement_migrates_back_to_the_serving_predecessor() {
 	let a = url("tcp://peer:1/");
 	let b = url("tcp://peer:2/");
 	let mut machine: Reconnect<Url, TestError> = Reconnect::new(Config::default(), vec![a], kio::clock::now()).unwrap();
@@ -1026,16 +1026,66 @@ async fn residual_a_dropped_replacement_reports_offline_while_the_predecessor_se
 	drop(replacement_server);
 
 	let action = next(&mut machine).await;
-	assert!(
-		matches!(action, Action::Offline(Some(_))),
-		"the replacement's drop no longer reports offline: flip this test ({action:?})"
-	);
-	let (predecessor, _) = machine.predecessor().expect("the predecessor still drains");
+	assert!(matches!(action, Action::Migrating), "{action:?}");
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Retrying(TestError::Net(_))), "{action:?}");
+	assert!(machine.session().is_none(), "the replacement is gone");
+	let (predecessor, deadline) = machine.predecessor().expect("the predecessor still drains");
 	assert!(predecessor.poll_closed(&kio::Waiter::noop()).is_pending());
 	assert!(
 		predecessor.poll_idle(&kio::Waiter::noop()).is_pending(),
 		"it still serves"
 	);
+
+	// The redial waits out its backoff while the predecessor serves, and its handover still
+	// bounds it: once that ends, nothing serves.
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Retired), "{action:?}");
+	assert!(kio::clock::now() >= deadline);
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Offline(None)), "{action:?}");
+}
+
+/// A replacement that drops while the predecessor closes gracefully, carrying nothing,
+/// leaves nothing serving: it reports [`Action::Offline`].
+#[kio::test]
+async fn a_dropped_replacement_goes_offline_over_a_closing_predecessor() {
+	let a = url("tcp://peer:1/");
+	let mut machine: Reconnect<Url, TestError> =
+		Reconnect::new(Config::default(), vec![a.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(a, Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	let (replacement, replacement_server) = handshake().await;
+	machine.connected(kio::clock::now(), replacement.clone());
+	// The replacement is already closed when the next poll starts the idle predecessor's
+	// graceful close, so its close is seen over a predecessor that is closing, not retired.
+	drop(replacement_server);
+	replacement.closed().await;
+
+	let action = next(&mut machine).await;
+	assert!(matches!(action, Action::Offline(Some(_))), "{action:?}");
+	let (_, deadline) = machine.predecessor().expect("the predecessor is still closing");
+	// The graceful close then ends it well before its handover would.
+	let mut actions = Vec::new();
+	loop {
+		match next(&mut machine).await {
+			Action::Dial(_) => break,
+			Action::Retired => actions.push("retired"),
+			Action::Offline(None) => actions.push("offline"),
+			action => panic!("unexpected {action:?}"),
+		}
+	}
+	assert_eq!(actions, ["retired", "offline"]);
+	assert!(kio::clock::now() < deadline);
 }
 
 /// A target that never reaches the preferred transport keeps its fallback session and

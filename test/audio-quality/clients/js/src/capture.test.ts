@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
 import { Group, Error as NetError, Origin, Path, Time } from "@moq/net";
@@ -90,18 +91,18 @@ test("the observer shares playback demand and closes without ending playback", a
 		} as Catalog.AudioConfig),
 		delay: new Signal(Duration.millis(250)),
 		maxDelay: new Signal(Duration.millis(250)),
-		stretch: new Signal(Duration.ZERO),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
+		// The player's reach: the delay plus the estimator's 2 s ceiling.
 		expect(track.subscription.peek()).toMatchObject({
 			priority: Catalog.PRIORITY.audio,
-			delay: { max: Duration.millis(250) },
+			delay: { max: Duration.millis(2250) },
 		});
 		const player = published
 			.consume()
 			.track("audio")
-			.subscribe({ priority: Catalog.PRIORITY.audio, delay: { max: Duration.millis(250) } });
+			.subscribe({ priority: Catalog.PRIORITY.audio, delay: { max: Duration.millis(2250) } });
 		await capture.close();
 		expect(player.closed.peek()).toBeUndefined();
 		player.close();
@@ -138,7 +139,6 @@ test("the observer asks for the decoder's delay plus its stretch and warmup, not
 		} as Catalog.AudioConfig),
 		delay: new Signal(Duration.millis(100)),
 		maxDelay: new Signal(Duration.millis(100)),
-		stretch: new Signal(Duration.secs(2)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
@@ -169,7 +169,6 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 		} as Catalog.AudioConfig),
 		delay: new Signal(Duration.millis(250)),
 		maxDelay: new Signal(Duration.millis(250)),
-		stretch: new Signal(Duration.ZERO),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();

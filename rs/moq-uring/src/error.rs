@@ -8,8 +8,9 @@ pub enum Error {
 	#[error("unsupported kernel: {0}")]
 	Unsupported(String),
 
-	/// An io_uring or socket operation failed.
-	#[error("io error: {0}")]
+	/// An io_uring or socket operation failed. The message omits the cause, which
+	/// is the source, so `{:#}` and a source chain each show it once.
+	#[error("io error")]
 	Io(#[from] std::io::Error),
 }
 
@@ -51,10 +52,17 @@ mod tests {
 
 	#[test]
 	fn a_ring_enomem_names_the_memlock_limit() {
-		let err = Error::ring(std::io::Error::from_raw_os_error(libc::ENOMEM));
-		assert!(err.to_string().contains("RLIMIT_MEMLOCK"), "{err}");
+		let err = anyhow::Error::new(Error::ring(std::io::Error::from_raw_os_error(libc::ENOMEM)));
+		assert!(format!("{err:#}").contains("RLIMIT_MEMLOCK"), "{err:#}");
 
-		let err = Error::ring(std::io::Error::from_raw_os_error(libc::EBADF));
-		assert!(!err.to_string().contains("RLIMIT_MEMLOCK"), "{err}");
+		let err = anyhow::Error::new(Error::ring(std::io::Error::from_raw_os_error(libc::EBADF)));
+		assert!(!format!("{err:#}").contains("RLIMIT_MEMLOCK"), "{err:#}");
+	}
+
+	#[test]
+	fn an_io_error_names_its_cause_once() {
+		let err = anyhow::Error::new(Error::from(std::io::Error::other("ring refused")));
+		assert_eq!(format!("{err:#}"), "io error: ring refused");
+		assert_eq!(err.chain().count(), 2);
 	}
 }

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Channel } from "./channel.ts";
 import { peers } from "./mock.ts";
 import { Transport } from "./transport.ts";
