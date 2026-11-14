@@ -12,6 +12,7 @@ mod announce_to_serve;
 mod answer_behind_cache;
 mod auth;
 mod broadcast_close;
+mod byte_holes;
 mod catalog_acquisition;
 mod catalog_churn;
 mod catalog_handover;

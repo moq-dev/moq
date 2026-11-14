@@ -307,13 +307,29 @@ alignment`, `gh test-integration`, `test qmux`, `test drill-sensitivity`,
 The sums above leave out the rows marked new or split and `Shipping sizes`,
 which have no comparable baseline.
 
+Evidence checked 2026-11-14, scheduled run
+[43601796176](https://github.com/moq-dev/moq/actions/runs/43601796176)
+(11-14 13:50 UTC, the first after #8631, mbx 1.30.0 at 20 GiB). The
+[Windows workspace build](https://github.com/moq-dev/moq/actions/runs/43601796176/job/132468015187)
+had 621 hits, 156 misses, 390 not looked up and 499 prefetched. It
+downloaded 13.5 GiB and uploaded 600.9 MiB, with no `download budget exceeded`
+warnings, against 92 / 1,062 / 13 at the 10 GiB cap on 11-13. Once the
+budget stopped binding, Windows hit 80% of the keys it looked up, so the
+budget caused its misses. `mbx analyze` still lists all 156 misses as
+"misses with no earlier recording". The 390 not looked up, up from 13, and
+670 `NoSuchKey` lines in the job log are still the expiry wave, so this
+night is not a clean baseline. Posted to
+[jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950#discussioncomment-19616412)
+(Windows recovering once the budget stops binding, and 13.5 GiB already
+over the 10 GiB default that #951's half-budget prefetch cap splits). The
+drafted issue below was not filed and is obsolete.
+
 What the after-#8631 nights must show here, read from the same summaries
 the [failed-puts quest](/quest/m0/ci/mbx-failed-puts.md) already collects for
 its own after-measurement:
 
-- Windows: whether its workspace build hits most looked-up keys once its
-  download stays under 20 GiB with no budget refusals. The first such
-  night settles the upstream report (Waiting).
+- Windows: settled on 11-14 (above). Later nights only need to confirm
+  that the hits hold once the expiry wave passes.
 - Linux: whether full history now raises each job's hits above its depth-1
   range. If the jobs still sit inside it once restores stop failing, plan a
   quest that returns them to `fetch-depth: 1`, since full history then costs
@@ -350,23 +366,6 @@ placeholder with the first night after #8631.
 
 ## Waiting
 
-- GitHub Actions: the first scheduled Nightly after #8631 (expected
-  2026-11-14) settles the Windows upstream report, by its Windows workspace
-  build's `mbx[cache]: object cache` line and any `download budget exceeded`
-  warnings. Record that night's numbers in the Plan, then:
-  - If Windows hits most looked-up keys, or still misses with budget
-    refusals, comment on
-    [jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950)
-    only if the numbers add something it lacks, such as Windows hits
-    recovering once the budget stops binding, or refusals at 20 GiB. Skip it
-    otherwise, and file no issue.
-  - If Windows still misses most looked-up keys with no budget refusals, file
-    the drafted issue (Plan), its placeholder filled from that night.
-
-  The maintainer approved both posts. Each follows mr-boxington's
-  CONTRIBUTING.md and AGENTS.md AI-disclosure rules and ends with the
-  `(Written by <model> with <effort>)` line. Link what was posted, or say
-  nothing was, in the Plan, then drop this item.
 - moq-dev/moq: no earlier than 2026-11-26, an agent on the maintainer's
   desktop collects `mbx-moq-dev`'s size and request counts for the first
   month and checks that the six old oversized manifests expired. Size comes
