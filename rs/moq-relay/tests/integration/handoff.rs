@@ -342,6 +342,66 @@ fn stand_in(dir: &Path, cert: &Path, key: &Path, notify: &Path) -> tokio::proces
 		.expect("start the stand-in")
 }
 
+/// Start a relay process with its config in the environment, serving QUIC on `port`
+/// with a shared reset key, and sessions that outlast the test unless closed.
+fn relay(dir: &Path, cert: &Path, key: &Path, port: u16, notify: &Path) -> tokio::process::Child {
+	tokio::process::Command::new(env!("CARGO_BIN_EXE_moq-relay"))
+		.env_clear()
+		.env("MOQ_LISTEN", format!("127.0.0.1:{port}"))
+		.env("MOQ_LISTEN_TLS_CERT", cert)
+		.env("MOQ_LISTEN_TLS_KEY", key)
+		.env("MOQ_LISTEN_RESET_SECRET", dir.join("reset.key"))
+		.env("MOQ_QUIC_IDLE_TIMEOUT", "600s")
+		.env("MOQ_DRAIN_TIMEOUT", "600s")
+		.env("MOQ_RUNTIME_WORKERS", "2")
+		.env("MOQ_AUTH_PUBLIC", "**")
+		.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
+		.env("NOTIFY_SOCKET", notify)
+		.kill_on_drop(true)
+		.spawn()
+		.expect("start the relay")
+}
+
+/// A new relay killed while the old one drains leaves its clients to the old one,
+/// which takes their packets back and, sharing the reset key, answers them with a
+/// stateless reset, so they reconnect rather than wait out their idle timeout.
+#[tokio::test]
+async fn a_killed_relay_s_clients_are_reset_by_the_one_it_replaced() {
+	kio::clock::host_time(); // real relays in real processes
+	moq_tokio::crypto::install_default().unwrap();
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	std::fs::write(dir.path().join("reset.key"), "ab".repeat(32)).unwrap();
+	let notify_path = dir.path().join("notify");
+	let notify = tokio::net::UnixDatagram::bind(&notify_path).unwrap();
+	let port = std::net::UdpSocket::bind("127.0.0.1:0")
+		.unwrap()
+		.local_addr()
+		.unwrap()
+		.port();
+	let url = format!("https://127.0.0.1:{port}/handoff");
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.idle_timeout = Some(Duration::from_secs(600).into());
+	// Keeps sending, so a reset comes back at once.
+	quic.keep_alive = Some(Duration::from_millis(200).into());
+
+	let _old = relay(dir.path(), &cert, &key, port, &notify_path);
+	ready(&notify).await;
+	// Holds the old relay in its drain once the new one takes over.
+	let _kept = stays(&url, quic.clone()).await;
+
+	let mut new = relay(dir.path(), &cert, &key, port, &notify_path);
+	ready(&notify).await;
+	let mut orphan = stays(&url, quic).await;
+
+	new.kill().await.unwrap();
+	kio::clock::timeout(TIMEOUT, async {
+		while orphan.status().await.unwrap() != moq_tokio::Status::Disconnected {}
+	})
+	.await
+	.expect("the killed relay's client was never reset");
+}
+
 /// Wait for a READY notification on `notify`, as a service manager does.
 async fn ready(notify: &tokio::net::UnixDatagram) {
 	let mut message = [0; 1024];

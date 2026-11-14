@@ -244,7 +244,8 @@ pub struct Reset {
 	/// A server restarted with the same secret resets its predecessor's connections,
 	/// so peers reconnect at once instead of waiting out their idle timeout. Every
 	/// holder can reset every other holder's connections, so share it between live
-	/// servers only behind one address that routes by connection ID (QUIC-LB).
+	/// servers only behind one address that routes by connection ID, as QUIC-LB or a
+	/// handoff's reuseport group does.
 	/// Unset draws a random key per process.
 	#[usage(
 		name = "listen-reset-secret",

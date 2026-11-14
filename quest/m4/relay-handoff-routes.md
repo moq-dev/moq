@@ -1,0 +1,29 @@
+# [L] Keep cluster routes for sessions that stay on a draining relay
+
+## Goal
+
+During a [handoff](/doc/bin/relay/config.md), a session that stays on the old
+relay through its drain, such as a third-party client that ignores GOAWAY,
+keeps reaching the cluster, and the cluster keeps reaching it. Today the
+cluster peers that dialed the old relay redial the new one at once and retire
+their old session once it carries no subscription, or after `goaway.handover`
+(10 s by default). From then on a broadcast published only on the old relay is
+unreachable from the rest of the cluster, and a subscriber left on the old
+relay loses every broadcast it reached through those peers, until the old
+relay's drain ends.
+
+## Plan
+
+- Recommended: link the two relays for the overlap. The handoff connection
+  between them already exists; the new relay runs a moq-lite session to the
+  old one over a socket it carries, and each treats the other as a cluster
+  peer until the old one exits, so routes cross between generations as they
+  cross between nodes. Check first how the route rule treats two processes
+  that share the node's identity, since a shared hop would read each other's
+  routes as loops.
+- Rejected: keep a peer's old session past idle until the old relay closes it.
+  That holds the old relay to its drain deadline again, which is what handoff
+  removes.
+
+Exercise it with a publisher that ignores GOAWAY on the old relay and a
+subscriber on another node, past `goaway.handover`.

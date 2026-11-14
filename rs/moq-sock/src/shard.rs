@@ -75,7 +75,9 @@
 //! or short-header packet carries an ID the server chose and reaches its exact
 //! member while two generations serve ([`Steer::Beside`]), or the newest
 //! generation's member of the same position once the other is gone
-//! ([`Steer::Alone`]), where the connection ID generator refuses it.
+//! ([`Steer::Alone`]), which answers it with a stateless reset (see
+//! [`Shard::generations`]) so its client reconnects rather than waiting out its
+//! idle timeout.
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -97,6 +99,7 @@ use std::os::fd::OwnedFd;
 pub struct Shard {
 	index: u16,
 	count: u16,
+	generations: u16,
 }
 
 impl Shard {
@@ -108,6 +111,14 @@ impl Shard {
 	/// How many sockets share the port.
 	pub fn count(self) -> u16 {
 		self.count
+	}
+
+	/// How many processes' generations split the group evenly: two when bound for a
+	/// [handoff](self#handing-the-port-to-a-successor), else one. A connection ID naming
+	/// this member's position in another generation reaches this member only once that
+	/// generation is gone, so it is this member's to reset.
+	pub fn generations(self) -> u16 {
+		self.generations
 	}
 }
 
@@ -323,6 +334,7 @@ impl Bound {
 		let shard = Shard {
 			index,
 			count: u16::try_from(self.slots.len()).expect("at most 256 members"),
+			generations: self.generations(),
 		};
 		let worker = self.next;
 		self.next += 1;
@@ -982,7 +994,14 @@ mod tests {
 
 		for index in 0..COUNT {
 			let member = group.member().unwrap().expect("a socket per member");
-			assert_eq!(member.shard(), Shard { index, count: COUNT });
+			assert_eq!(
+				member.shard(),
+				Shard {
+					index,
+					count: COUNT,
+					generations: 1
+				}
+			);
 			assert_eq!(member.into_inner().local_addr().unwrap(), addr);
 		}
 		assert!(group.member().unwrap().is_none(), "the group cannot be resized");
@@ -1128,7 +1147,8 @@ mod tests {
 			(0..COUNT)
 				.map(|index| Shard {
 					index,
-					count: COUNT * 2
+					count: COUNT * 2,
+					generations: 2,
 				})
 				.collect::<Vec<_>>(),
 			"the first process serves the first generation, named against both"
@@ -1142,7 +1162,8 @@ mod tests {
 			(COUNT..COUNT * 2)
 				.map(|index| Shard {
 					index,
-					count: COUNT * 2
+					count: COUNT * 2,
+					generations: 2,
 				})
 				.collect::<Vec<_>>(),
 			"the successor serves the generation its predecessor left free"
@@ -1195,7 +1216,7 @@ mod tests {
 			// The predecessor's member at the same position.
 			let stale = Shard {
 				index: shard.index() - COUNT,
-				count: shard.count(),
+				..*shard
 			};
 			for (form, packet) in chosen(cid(stale)) {
 				send(&packet, addr);

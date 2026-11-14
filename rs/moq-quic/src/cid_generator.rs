@@ -43,6 +43,8 @@ pub struct RandomConnectionIdGenerator {
 	cid_len: usize,
 	lifetime: Option<Duration>,
 	shard: Option<Shard>,
+	/// How many equal generations split the shard's group; see [`Self::set_generations`].
+	generations: u16,
 }
 
 impl Default for RandomConnectionIdGenerator {
@@ -51,6 +53,7 @@ impl Default for RandomConnectionIdGenerator {
 			cid_len: 8,
 			lifetime: None,
 			shard: None,
+			generations: 1,
 		}
 	}
 }
@@ -71,10 +74,12 @@ impl Shard {
 		(stride * count + u32::from(self.index)) as u8
 	}
 
-	/// Whether `cid` carries this shard's prefix and the marker.
-	fn owns(self, cid: &[u8]) -> bool {
+	/// Whether `cid` carries the marker and the prefix of this shard's position in any of
+	/// `generations` equal generations of the group.
+	fn owns(self, cid: &[u8], generations: u16) -> bool {
+		let period = self.count / generations;
 		cid.len() > SHARD_MARKER_BYTE
-			&& u16::from(cid[0]) % self.count == self.index
+			&& u16::from(cid[0]) % period == self.index % period
 			&& cid[SHARD_MARKER_BYTE] & SHARD_MARKER == SHARD_MARKER
 	}
 }
@@ -127,7 +132,35 @@ impl RandomConnectionIdGenerator {
 			"a {}-byte CID cannot carry the shard marker",
 			self.cid_len
 		);
+		assert!(
+			count % self.generations == 0,
+			"{count} shards cannot split into {} generations",
+			self.generations
+		);
 		self.shard = Some(Shard { index, count });
+		self
+	}
+
+	/// Also accept the CIDs of the shard at this one's position in each of `generations`
+	/// equal generations of the group, such as the members a predecessor process served.
+	///
+	/// A group shared by successive processes gives each its own generation, so their CIDs
+	/// never collide. A steering filter folds a generation's packets onto the same position of
+	/// the one left once that generation is gone, and [`validate`](ConnectionIdGenerator::validate)
+	/// then accepts them, so the endpoint answers with a stateless reset (verifiable when both
+	/// share a reset key) rather than leaving the client to its idle timeout. Defaults to 1.
+	///
+	/// Panics if `generations` is zero or does not divide the shard count.
+	pub fn set_generations(&mut self, generations: u16) -> &mut Self {
+		assert!(generations > 0, "a group holds at least one generation");
+		if let Some(shard) = self.shard {
+			assert!(
+				shard.count % generations == 0,
+				"{} shards cannot split into {generations} generations",
+				shard.count
+			);
+		}
+		self.generations = generations;
 		self
 	}
 }
@@ -146,7 +179,7 @@ impl ConnectionIdGenerator for RandomConnectionIdGenerator {
 
 	fn validate(&self, cid: ConnectionId) -> Result<(), InvalidCid> {
 		match self.shard {
-			Some(shard) if !shard.owns(&cid) => Err(InvalidCid),
+			Some(shard) if !shard.owns(&cid, self.generations) => Err(InvalidCid),
 			_ => Ok(()),
 		}
 	}
@@ -309,6 +342,35 @@ mod tests {
 		let mut unmarked = sharded(0, 4).generate_cid();
 		unmarked[3] &= !0x18;
 		assert!(first.validate(unmarked).is_err(), "took a CID without the marker");
+	}
+
+	/// Across generations, a shard takes its own position's CIDs from the other generation, which
+	/// reach it only once that generation is gone, and still refuses every other position's.
+	#[test]
+	fn a_generation_takes_its_position_from_the_other() {
+		let mut newer = sharded(5, 8);
+		newer.set_generations(2);
+		for _ in 0..32 {
+			newer.validate(sharded(1, 8).generate_cid()).unwrap();
+			let own = newer.generate_cid();
+			newer.validate(own).unwrap();
+			for other in [0, 2, 3, 4, 6, 7] {
+				assert!(
+					newer.validate(sharded(other, 8).generate_cid()).is_err(),
+					"took position {other}'s CID"
+				);
+			}
+		}
+		// One generation is the default: the same position's CID from the other half is refused.
+		assert!(sharded(5, 8).validate(sharded(1, 8).generate_cid()).is_err());
+	}
+
+	#[test]
+	#[should_panic]
+	fn generations_must_split_the_group_evenly() {
+		RandomConnectionIdGenerator::default()
+			.set_shard(0, 6)
+			.set_generations(4);
 	}
 
 	#[test]

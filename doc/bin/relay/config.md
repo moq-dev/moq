@@ -74,7 +74,8 @@ predecessor's QUIC connections, so clients reconnect at once instead of
 waiting out the idle timeout. Keep it secret, and give it to one relay
 only: any holder resets every other holder's connections, so live relays behind
 one address would reset each other's clients unless the load balancer routes by
-connection ID (`[listen.lb] id`, QUIC-LB). Relays on different addresses gain nothing from sharing
+connection ID (`[listen.lb] id`, QUIC-LB), as the two relays of a
+[handoff](#handoff) do. Relays on different addresses gain nothing from sharing
 it, since a client accepts a reset only from its relay's address.
 Create one with `openssl rand -hex 32 > reset.key`.
 
@@ -456,7 +457,11 @@ afresh. Once the new relay is ready it takes every new QUIC handshake, and the
 old one stops accepting and drains as on SIGTERM ([Shutdown](#shutdown)): its
 sessions stay with it until they leave or `drain_timeout` passes. Cluster peers
 redial once on that GOAWAY and reach the new relay, so the drain does not wait
-on them. Either relay exiting leaves the other's sessions alone.
+on them. A session that stays on the old relay anyway, such as a client that
+ignores GOAWAY, loses the routes it shared with those peers once they leave.
+Either relay exiting leaves the other's sessions alone, and if one dies without
+closing its sessions, the other answers their packets with a stateless reset,
+which their clients accept when both relays share `[listen.reset] secret`.
 
 The QUIC port is handed on as a reuseport group with room for two relays, each
 steering its own connections by connection ID, so handoff needs
