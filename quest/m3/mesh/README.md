@@ -124,7 +124,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 - ✅ The contract changes land in m2, because the cut publishes
   `moq_auth::mesh` for the first time: the
   [grant shape](/quest/m2/mesh-grant-shape.md) and the
-  [key budget](/quest/m2/mesh-device-bounds.md).
+  key budget.
 - The JS enrollment client and the guide are parked in m5: the application
   they were planned for enrolls with certificates and documents itself.
 

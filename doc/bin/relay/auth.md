@@ -462,16 +462,17 @@ moq auth serve --key-dir /etc/moq/keys \
   --mesh-url https://mesh.example.com --mesh-listen 127.0.0.1:4441 \
   --mesh-key /etc/moq/mesh.jwk --mesh-state /var/lib/moq/mesh.json \
   --mesh-relay https://relay.example.com
-moq auth mesh create-key --tag robot --reusable --expires 7d
+moq auth mesh create-key --tag robot --uses 20 --expires 7d
 moq auth mesh revoke <endpoint id>
 ```
 
 Every request proves the endpoint key by signing a fresh, single-use
 challenge bound to `--mesh-url`, so no token is issued for a key the caller
 does not hold. A device joins with an enrollment key, with no human in the
-loop (single-use unless `--reusable`; revoked or expired keys enroll
-nothing). It refreshes its token
-two thirds of the way through `--mesh-token-ttl` (default 1h) by proving
+loop. Each key enrolls at most `--uses` devices (default 1), so a leaked key
+admits no more than its owner allowed; a device it already enrolled may
+enroll again for free, and revoked or expired keys enroll nothing. It refreshes its token
+two thirds of the way through `--mesh-token-ttl` (default 15m) by proving
 the key again, so a revoked device is cut off within one token lifetime. A
 revoked device cannot enroll again. Each enrollment and refresh also returns
 every member's unique, DNS-safe name, defaulting to the device's hostname.

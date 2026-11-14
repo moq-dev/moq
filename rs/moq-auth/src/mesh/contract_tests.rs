@@ -39,9 +39,9 @@ impl Mesh {
 		Client::new(self.base.clone(), signer).unwrap()
 	}
 
-	fn key(&self, reusable: bool) -> String {
+	fn key(&self, uses: u32) -> String {
 		let new = NewKey {
-			reusable,
+			uses: std::num::NonZeroU32::new(uses).unwrap(),
 			tags: vec!["robot".into()],
 			..Default::default()
 		};
@@ -61,7 +61,7 @@ impl Mesh {
 async fn an_enrollment_key_grants_the_endpoints_subtree() {
 	let mesh = Mesh::new().await;
 	let device = mesh.device();
-	let enrollment = device.enroll(&mesh.key(false), Some("Robot 1")).await.unwrap();
+	let enrollment = device.enroll(&mesh.key(1), Some("Robot 1")).await.unwrap();
 
 	assert_eq!(enrollment.name, "robot-1");
 	assert_eq!(
@@ -85,29 +85,62 @@ async fn an_enrollment_key_grants_the_endpoints_subtree() {
 #[tokio::test]
 async fn a_single_use_key_enrolls_once() {
 	let mesh = Mesh::new().await;
-	let key = mesh.key(false);
+	let key = mesh.key(1);
 	let device = mesh.device();
 	let first = device.enroll(&key, Some("pi")).await.unwrap();
 	let err = mesh.device().enroll(&key, None).await.unwrap_err();
 	assert_eq!(Mesh::refused(err), ErrorCode::InvalidGrant);
 
-	// The device it enrolled can retry, as after a lost reply, and keeps its name.
-	let retried = device.enroll(&key, Some("other")).await.unwrap();
+	// The device it enrolled can retry, as after a lost reply, without spending a use.
+	let retried = device.enroll(&key, Some("pi")).await.unwrap();
 	assert_eq!(retried.name, first.name);
 	assert!(mesh.key.verify(&retried.token).is_ok());
 
-	let reusable = mesh.key(true);
-	let first = mesh.device().enroll(&reusable, Some("bot")).await.unwrap();
-	let second = mesh.device().enroll(&reusable, Some("bot")).await.unwrap();
+	let shared = mesh.key(2);
+	let bot = mesh.device();
+	let first = bot.enroll(&shared, Some("bot")).await.unwrap();
+	let second = mesh.device().enroll(&shared, Some("bot")).await.unwrap();
 	assert_eq!(first.name, "bot");
 	assert_eq!(second.name, "bot-2");
 	assert_eq!(second.members.len(), 3);
+
+	// Its budget spent, the key admits no new device, but one it enrolled may return.
+	let err = mesh.device().enroll(&shared, None).await.unwrap_err();
+	assert_eq!(Mesh::refused(err), ErrorCode::InvalidGrant);
+	bot.enroll(&shared, None).await.unwrap();
+	assert_eq!(mesh.coordinator.devices().len(), 3);
+	let (id, _) = shared.split_once('.').unwrap();
+	let info = mesh.coordinator.keys().into_iter().find(|key| key.id == id).unwrap();
+	assert_eq!(info.used, 2);
+
+	// An exhausted key cannot re-enroll a device another key admitted.
+	let other = mesh.key(1);
+	let moved = mesh.device();
+	moved.enroll(&other, None).await.unwrap();
+	// The client falls back to a refresh, which leaves the device on its own key.
+	moved.enroll(&shared, None).await.unwrap();
+	let (other_id, _) = other.split_once('.').unwrap();
+	let devices = mesh.coordinator.devices();
+	assert!(
+		devices
+			.iter()
+			.any(|device| device.key == other_id && device.name == "device")
+	);
+	assert_eq!(
+		mesh.coordinator
+			.keys()
+			.into_iter()
+			.find(|key| key.id == id)
+			.unwrap()
+			.used,
+		2
+	);
 }
 
 #[tokio::test]
 async fn a_revoked_or_unknown_key_enrolls_nothing() {
 	let mesh = Mesh::new().await;
-	let key = mesh.key(true);
+	let key = mesh.key(10);
 	let id = key.split_once('.').unwrap().0;
 	assert!(mesh.coordinator.revoke_key(id).unwrap());
 	let err = mesh.device().enroll(&key, None).await.unwrap_err();
@@ -127,7 +160,7 @@ async fn a_proof_from_the_wrong_key_is_refused() {
 	proof.endpoint = victim.endpoint();
 	let request = EnrollRequest {
 		proof,
-		key: mesh.key(true),
+		key: mesh.key(10),
 		name: None,
 	};
 	assert_eq!(
@@ -166,7 +199,7 @@ async fn refresh_issues_a_new_token_until_revoked() {
 	let err = device.refresh().await.unwrap_err();
 	assert_eq!(Mesh::refused(err), ErrorCode::AccessDenied);
 
-	let enrollment = device.enroll(&mesh.key(true), Some("pi")).await.unwrap();
+	let enrollment = device.enroll(&mesh.key(10), Some("pi")).await.unwrap();
 	let refreshed = device.refresh().await.unwrap();
 	assert_eq!(refreshed.name, "pi");
 	assert!(mesh.key.verify(&refreshed.token).is_ok());
@@ -176,8 +209,8 @@ async fn refresh_issues_a_new_token_until_revoked() {
 	let err = device.refresh().await.unwrap_err();
 	assert_eq!(Mesh::refused(err), ErrorCode::AccessDenied);
 
-	// A reusable key cannot bring a revoked device back.
-	let err = device.enroll(&mesh.key(true), None).await.unwrap_err();
+	// A key with uses left cannot bring a revoked device back.
+	let err = device.enroll(&mesh.key(10), None).await.unwrap_err();
 	assert_eq!(Mesh::refused(err), ErrorCode::AccessDenied);
 }
 
@@ -188,7 +221,7 @@ async fn renew_refreshes_before_expiry() {
 	let ttl = Duration::from_secs(3);
 	let mesh = Mesh::with_ttl(ttl).await;
 	let device = mesh.device();
-	let enrollment = device.enroll(&mesh.key(true), None).await.unwrap();
+	let enrollment = device.enroll(&mesh.key(10), None).await.unwrap();
 	let mut renew = std::pin::pin!(device.renew(&enrollment));
 	// The first poll arms the wait for two thirds of the token's life, before any request.
 	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -206,7 +239,7 @@ async fn only_an_issued_challenge_is_accepted() {
 	let enroll = |challenge: Vec<u8>| {
 		let request = EnrollRequest {
 			proof: Proof::sign(&holder, &mesh.base, challenge),
-			key: mesh.key(true),
+			key: mesh.key(10),
 			name: None,
 		};
 		mesh.coordinator.enroll(&request).unwrap_err().error
@@ -232,7 +265,7 @@ async fn renew_retries_a_transient_refusal() {
 	let mesh = Mesh::with_ttl(Duration::from_secs(3)).await;
 	let signer = Arc::new(Ed25519KeyPair::generate().unwrap());
 	let device = Client::new(mesh.base.clone(), signer.clone()).unwrap();
-	let enrollment = device.enroll(&mesh.key(true), None).await.unwrap();
+	let enrollment = device.enroll(&mesh.key(10), None).await.unwrap();
 	let fresh = device.refresh().await.unwrap();
 
 	// A coordinator that restarts between issuing the challenge and seeing the proof.
@@ -290,11 +323,11 @@ fn a_failed_save_spends_nothing() {
 	let err = coordinator.enroll(&enroll(&coordinator)).unwrap_err();
 	assert_eq!(err.error, ErrorCode::ServerError);
 	assert!(coordinator.devices().is_empty());
-	assert!(!coordinator.keys()[0].used);
+	assert_eq!(coordinator.keys()[0].used, 0);
 
 	std::fs::remove_dir(dir.path().join("mesh.tmp")).unwrap();
 	coordinator.enroll(&enroll(&coordinator)).unwrap();
-	assert!(coordinator.keys()[0].used);
+	assert_eq!(coordinator.keys()[0].used, 1);
 }
 
 #[tokio::test]
