@@ -27,6 +27,10 @@ name: Nightly
 # exception: deterministic and seconds long, so `just ci` gates every diff that
 # can move them, and audio-quality.yml reruns them here.
 #
+# `mutants` edits the route and resume code one change at a time and fails on an
+# edit no test notices; each edit rebuilds moq-net's tests, about 27 runner-hours
+# for the full set, so it rotates (see sh/rs/mutants.sh).
+#
 # `tla` model-checks every TLA+ config: TLC explores every ordering a model
 # allows, which takes minutes per config, and a model only changes when the code
 # it covers does, which review checks (see REVIEW.md). It also fails when an
@@ -68,6 +72,13 @@ jobs:
 
   runner-vm:
     uses: ./.github/workflows/runner-vm.yml
+
+  mutants:
+    uses: ./.github/workflows/mutants.yml
+    secrets: inherit
+    permissions:
+      contents: read
+      actions: read
 
   # The path-filtered gates main PRs skip; release PRs still run them.
   x11:
