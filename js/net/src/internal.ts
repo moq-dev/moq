@@ -856,8 +856,8 @@ export const hooks: {
 	) => Subscriber;
 	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
-	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined) => void;
+	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default, and the frame it asks from. */
+	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined, frameStart?: number) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
@@ -884,6 +884,8 @@ export const hooks: {
 	startGroup: (group: GroupProducer, start: number) => void;
 	/** The first absolute frame this source copy began at. Assigned by `group.ts`. */
 	groupOffset: (group: GroupProducer) => number;
+	/** Whether this source copy can no longer serve frame 0: it began past it, or shed it. */
+	groupHeadless: (group: GroupProducer) => boolean;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -936,6 +938,8 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
+	/** The first frame this copy begins at: past 0 for one missing its head. */
+	groupFirstFrame: (group: GroupConsumer) => number;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -1243,6 +1247,9 @@ export const hooks: {
 	groupOffset: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupHeadless: () => {
+		throw new Error("group.ts not loaded");
+	},
 	startGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1307,6 +1314,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStarted: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupFirstFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFate: () => {

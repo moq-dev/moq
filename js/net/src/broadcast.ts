@@ -306,7 +306,8 @@ async function fetchGroup(
 		priority: options.priority,
 		ranges: [{ start: { absolute: sequence }, end: { absolute: sequence + 1n } }],
 	});
-	hooks.fetchBudget(subscriber, options.maxDelay);
+	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
+	hooks.fetchBudget(subscriber, options.maxDelay, (options as FetchFrom).frameStart);
 	try {
 		// Judged in this turn when the track is known, so a cached group is taken before anything
 		// else can change it. A track requested on demand opens its handler once accepted, so its
@@ -342,6 +343,16 @@ async function fetchGroup(
 		subscriber.close();
 		throw err;
 	}
+}
+
+/**
+ * A FETCH's first frame, which the lite publisher passes to {@link fetchGroup} beside its public
+ * options. An application always fetches a group from frame 0, as in Rust.
+ *
+ * @internal
+ */
+export interface FetchFrom {
+	frameStart?: number;
 }
 
 // Settles once a read of `subscriber` may go differently.

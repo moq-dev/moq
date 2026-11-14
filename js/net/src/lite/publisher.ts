@@ -1400,11 +1400,14 @@ export class Publisher {
 				// A group the track does not cache goes to its request handler at once, written yet
 				// or not, as in Rust; with none open it is NotFound. A pending answer holds this
 				// FETCH's slot until the requester leaves.
-				group = await front.track(msg.track).fetchGroup(msg.group, {
+				const options: track.FetchGroupOptions & broadcast.FetchFrom = {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay === undefined ? undefined : Duration.millis(msg.maxDelay),
 					signal: left.signal,
-				});
+					// A copy holding the frames asked on serves them; one missing them is filled whole.
+					frameStart: msg.startFrame,
+				};
+				group = await front.track(msg.track).fetchGroup(msg.group, options);
 				serving(group);
 				// Revoked while the group resolved: the watch already reset the stream.
 				if (watch.revoked()) {
