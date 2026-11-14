@@ -233,10 +233,10 @@ impl Coordinator {
 		challenge.extend_from_slice(&self.sequence.fetch_add(1, Ordering::Relaxed).to_be_bytes());
 		let tag = self.tag(&challenge);
 		challenge.extend_from_slice(&tag);
-		Challenge {
+		Challenge::new(
 			challenge,
-			expires: kio::clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires)),
-		}
+			kio::clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires)),
+		)
 	}
 
 	/// Enroll with an enrollment key.
@@ -491,22 +491,19 @@ impl Coordinator {
 			.iter()
 			.find(|device| device.endpoint == endpoint)
 			.expect("admitted before it is issued");
-		Ok(Enrollment {
-			token,
-			expires,
-			relays: self.config.relays.clone(),
-			name: device.name.clone(),
-			members: store
-				.devices
-				.iter()
-				.filter(|device| !device.revoked)
-				.map(|device| Member {
-					endpoint: device.endpoint,
-					name: device.name.clone(),
-					tags: device.tags.clone(),
-				})
-				.collect(),
-		})
+		let mut enrollment = Enrollment::new(token, expires, device.name.clone());
+		enrollment.relays = self.config.relays.clone();
+		enrollment.members = store
+			.devices
+			.iter()
+			.filter(|device| !device.revoked)
+			.map(|device| {
+				let mut member = Member::new(device.endpoint, device.name.clone());
+				member.tags = device.tags.clone();
+				member
+			})
+			.collect();
+		Ok(enrollment)
 	}
 
 	/// Write the store atomically: a temporary file beside it, renamed over it.
