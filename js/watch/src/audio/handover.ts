@@ -19,8 +19,11 @@ export class Handover {
 		this.#end = undefined;
 	}
 
-	/** Record an end declared on the ring, which before a replacement's first frame is the replacement's. */
-	declared(end: number): void {
+	/**
+	 * Record an end declared on the ring, which before a replacement's first frame is the replacement's,
+	 * or undefined once the next utterance follows it.
+	 */
+	declared(end: number | undefined): void {
 		if (this.#pending) this.#end = end;
 	}
 

@@ -45,4 +45,14 @@ describe("handover", () => {
 		handover.declared(300);
 		expect(handover.takeover()).toBeUndefined();
 	});
+
+	// The next utterance retires the end before the replacement's first output, so it stays retired.
+	it("drops a replacement's end once its next utterance begins", () => {
+		const handover = new Handover();
+		handover.opened();
+		handover.opened();
+		handover.declared(200);
+		handover.declared(undefined);
+		expect(handover.takeover()).toEqual({ end: undefined });
+	});
 });

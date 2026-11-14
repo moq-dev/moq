@@ -993,6 +993,35 @@ describe("Decoder across a rendition's absence", () => {
 		}
 	});
 
+	// A replacement joining during a mute reads the end, then the next utterance retires it, both
+	// before its first output, so the takeover has no end left to keep.
+	it("drops the end a replacement's next utterance retired before its first output", async () => {
+		const playback = await play(Duration.millis(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			drain(ring);
+
+			playback.restore({ container: { kind: "loc" } });
+			await microtasks();
+			deferAudioOutput = true;
+			playback.push({ kind: "end", group: 0n, end: Duration.micros(frameTimestamp + 20_000) });
+			frameTimestamp += 40_000;
+			for (let i = 0; i < 12; i++) playback.push({ ...frame(), group: 1n });
+			await microtasks();
+			for (const emit of pendingAudio.splice(0)) emit();
+			await microtasks();
+			expect(playback.truncates()).toBe(1);
+			expect(drain(ring)).toBeGreaterThan(0);
+			await microtasks();
+			expect(ring.ring?.silent).toBe(false);
+			expect(playback.stalled()).toBe(true);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
 	// A finished track past the decoded floor yet short of the delay: decoding stops at the floor, so
 	// startup has to learn of the finish from the subscription, not from the decode loop reaching it.
 	it("starts buffered audio on a finished track past its floor and short of its delay, and ends", async () => {

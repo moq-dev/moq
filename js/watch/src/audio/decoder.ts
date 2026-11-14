@@ -1148,7 +1148,10 @@ export class Decoder {
 		// lookahead unflushed, so the ring takes the end that early.
 		if (read.kind === "end") this.#declare(read.end.asMicros() - this.#terminal.delay);
 		if (!this.#terminal.update(read)) return false;
-		if (read.kind === "frame") this.#ring.peek()?.next();
+		if (read.kind === "frame") {
+			this.#ring.peek()?.next();
+			this.#handover.declared(undefined);
+		}
 		return true;
 	}
 
