@@ -13,12 +13,13 @@ additional_cargo_test_args = ["--lib", "--test", "integration"]
 # only where the same function has another such mutant that tests do catch.
 exclude_re = [
 	# Debug output only feeds logs.
-	'<impl (std::)?fmt::Debug for ',
+	'<impl (std::)?fmt::Debug for (Scope|Node|Stream|RouteKey|Proof)>::fmt',
 	# The rotation's xorshift step only picks which fresh identity comes next,
 	# and the guard after it enforces freshness and range.
 	'replace (\^= with \|=|<< with >>|>> with <<) in Router<N, A>::rotate',
-	# Only counts forgets for the tests.
-	'in Router<N, A>::forgot_outside$',
+	# The forget counter only feeds test assertions, which read it per claim of
+	# the identity they forget.
+	'replace && with \|\| in Router<N, A>::forgot_outside$',
 	# An index of a neighbor's interest: `carries()` filters each entry again.
 	'replace Router<N, A>::asked -> Path with Default::default\(\)',
 	# `full(old) == full(new)` is the same with both sides negated.
@@ -48,4 +49,25 @@ exclude_re = [
 	# The nearest home with a slot at or above a presented claim always serves
 	# that claim's instance and epoch, so a looser match picks the same home.
 	'node\.rs:\d+:57: replace && with \|\| in awaits$',
+	# resume.rs: the sweep of handed-out groups only bounds memory, since
+	# `let_go` drops dead entries itself before anything reads `out`.
+	'replace (== with !=|> with >=) in Reader::hand_out$',
+	# Polling a covered or finished copy hands out nothing, so polling it anyway
+	# only costs work.
+	':\d+:36: replace \|\| with && in Reader::poll_lowest$',
+	# A run starting at `until` clips to an empty range, which has no gaps.
+	':\d+:36: replace < with <= in Reader::exhausted$',
+	# `learn_end` just polled the same copy and returned on an `Ok` end.
+	'delete match arm Poll::Ready\(Ok\(fin\)\) in Reader::poll_finished$',
+	# The one extra copy searched is the route's own, which never has an end.
+	':\d+:32: replace - with / in Reader::backfill$',
+	# At the same generation the serving copy is the one that just failed the
+	# group, so it never answers at that index.
+	'replace match guard !same with true in Recover::poll_serving$',
+	# A replacement starting at frame 0 already holds the head.
+	'replace > with >= in lend_head$',
+	# Each call follows a read of the route in the same poll, so only a write
+	# between the two could tell these apart; the arm guards against that lost wake.
+	'replace \|\| with && in Fetching::poll_moved$',
+	':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
 ]

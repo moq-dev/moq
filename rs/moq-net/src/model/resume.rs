@@ -1486,10 +1486,8 @@ impl Reader {
 			// superseded it a full budget ago.
 			// A fully handed-out bounded copy still backs groups being read, but cannot
 			// supply another one. Keep its recovery lease without polling its empty range.
-			if copy.done.is_some()
-				|| copy.end().is_some_and(|end| delivered.covers(groups.0..end))
-				|| copy.expired(budget, waiter)
-			{
+			let spent = copy.done.is_some() || copy.end().is_some_and(|end| delivered.covers(groups.0..end));
+			if spent || copy.expired(budget, waiter) {
 				continue;
 			}
 			loop {
