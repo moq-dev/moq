@@ -5,7 +5,7 @@ describe("handover", () => {
 	it("does not take over for the first subscription", () => {
 		const handover = new Handover();
 		handover.opened();
-		expect(handover.takeover()).toBe(false);
+		expect(handover.takeover()).toBeUndefined();
 	});
 
 	it("takes over on the first frame of a replacement, and only that frame", () => {
@@ -14,9 +14,9 @@ describe("handover", () => {
 		handover.takeover();
 
 		handover.opened();
-		expect(handover.takeover()).toBe(true);
+		expect(handover.takeover()).toEqual({ end: undefined });
 		// The rest of the replacement's audio is its own; only its first frame drops the tail.
-		expect(handover.takeover()).toBe(false);
+		expect(handover.takeover()).toBeUndefined();
 	});
 
 	it("takes over once no matter how many subscriptions came and went", () => {
@@ -27,7 +27,22 @@ describe("handover", () => {
 		handover.opened();
 		handover.opened();
 
-		expect(handover.takeover()).toBe(true);
-		expect(handover.takeover()).toBe(false);
+		expect(handover.takeover()).toEqual({ end: undefined });
+		expect(handover.takeover()).toBeUndefined();
+	});
+
+	// The ring retires a declared end at the takeover, which would drop one the replacement read
+	// before its first output, so only the predecessor's end is lost.
+	it("carries the end the replacement declared before its first frame", () => {
+		const handover = new Handover();
+		handover.opened();
+		handover.declared(100);
+		expect(handover.takeover()).toBeUndefined();
+
+		handover.opened();
+		handover.declared(200);
+		expect(handover.takeover()).toEqual({ end: 200 });
+		handover.declared(300);
+		expect(handover.takeover()).toBeUndefined();
 	});
 });

@@ -218,8 +218,9 @@ export class Backpressure {
 		if (this.#started && playhead !== undefined) return this.#reach(playhead) - playhead < this.#headroom + WINDOW;
 
 		if (!this.#covered(timestamp)) return false;
-		// A live ring is bounded only by its capacity until it starts, so it fills from everything due.
-		if (!this.#buffered) return true;
+		// A live ring holds no more than the hold leaves uncovered, so it fills from everything due. A
+		// finished track covers all of itself, so it fills only to the floor, as a buffered ring does.
+		if (!this.#buffered && !this.#complete) return true;
 
 		// Fill while the PCM in the ring past its playhead, plus the span of frames still decoding, is
 		// short of the floor. The ring starts once it holds the floor, and output the decoder discards

@@ -9,17 +9,30 @@
 export class Handover {
 	#open = false;
 	#pending = false;
+	// An end the replacement declared before its first frame, which its takeover must keep.
+	#end?: number;
 
 	/** Record a subscription opening on the current ring. */
 	opened(): void {
 		if (this.#open) this.#pending = true;
 		this.#open = true;
+		this.#end = undefined;
 	}
 
-	/** Consume one decoded frame and report whether it is the first of a replacement subscription. */
-	takeover(): boolean {
-		const pending = this.#pending;
+	/** Record an end declared on the ring, which before a replacement's first frame is the replacement's. */
+	declared(end: number): void {
+		if (this.#pending) this.#end = end;
+	}
+
+	/**
+	 * Consume one decoded frame. The first of a replacement subscription takes over, carrying any end
+	 * the replacement already declared.
+	 */
+	takeover(): { end?: number } | undefined {
+		if (!this.#pending) return undefined;
 		this.#pending = false;
-		return pending;
+		const end = this.#end;
+		this.#end = undefined;
+		return { end };
 	}
 }

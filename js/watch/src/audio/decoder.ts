@@ -439,7 +439,7 @@ export class Decoder {
 			// An end read before the ring existed, such as a cold join during a mute, still declares
 			// the silence.
 			const end = this.#terminal.end;
-			if (end !== undefined) ring.end(end - this.#terminal.delay);
+			if (end !== undefined) this.#declare(end - this.#terminal.delay, ring);
 			effect.set(this.#ring, ring);
 
 			// Mirror ring state (timestamp/stalled) onto our public signals, until the ring closes.
@@ -994,9 +994,15 @@ export class Decoder {
 		if (decoder.state === "configured") await decoder.flush();
 		if (effect.abort.aborted) return;
 		const end = written();
-		this.#ring.peek()?.end(end ?? 0);
+		this.#declare(end ?? 0);
 		if (end !== undefined) await this.#track.wait(Duration.micros(end), effect.abort);
 		if (!effect.abort.aborted) this.#finish.set("played");
+	}
+
+	// Declare where the publisher's audio ends on the ring, at `end` in microseconds.
+	#declare(end: number, ring = this.#ring.peek()): void {
+		ring?.end(end);
+		this.#handover.declared(end);
 	}
 
 	// Place decoded audio, returning where the PCM written ends, in microseconds.
@@ -1046,8 +1052,12 @@ export class Decoder {
 
 		// A new subscription has taken over the timeline: drop the previous one's write-ahead tail
 		// rather than letting it play out after this frame. See #runDecoder.
-		if (this.#handover.takeover()) {
+		const takeover = this.#handover.takeover();
+		if (takeover) {
 			ring.truncate(timestamp);
+			// The truncate retired the declared end, but one the replacement read before this output is
+			// its own.
+			if (takeover.end !== undefined) ring.end(takeover.end);
 			this.#truncateDecodeBuffered(start);
 		}
 
@@ -1136,7 +1146,7 @@ export class Decoder {
 	#onRead(read: Container.Read): boolean {
 		// Decoded audio stops a pre-skip short of a declared end when the publisher left its codec's
 		// lookahead unflushed, so the ring takes the end that early.
-		if (read.kind === "end") this.#ring.peek()?.end(read.end.asMicros() - this.#terminal.delay);
+		if (read.kind === "end") this.#declare(read.end.asMicros() - this.#terminal.delay);
 		if (!this.#terminal.update(read)) return false;
 		if (read.kind === "frame") this.#ring.peek()?.next();
 		return true;
