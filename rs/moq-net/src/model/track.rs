@@ -1963,12 +1963,13 @@ impl TrackState {
 		self.started_at(self.successor(key, servable)?)
 	}
 
-	/// A key, or a group's end, in presentation time: in the track's timescale, or as
-	/// milliseconds on a scale-less track, whose max age counts bare units.
+	/// A key, or a group's end, in presentation time: in the track's timescale, or unscaled
+	/// on a scale-less track, over the whole key range, whose max age counts bare units as
+	/// milliseconds (see [`PresentationEdge::behind`]).
 	fn presented(&self, value: u64) -> Option<Timestamp> {
 		match self.info.as_ref()?.timescale {
 			Some(scale) => Timestamp::new(value, scale).ok(),
-			None => Timestamp::from_millis(value).ok(),
+			None => Some(Timestamp::unscaled(value)),
 		}
 	}
 
@@ -1993,7 +1994,7 @@ impl TrackState {
 	fn ended_at(&self, key: u64) -> Option<crate::time::Instant> {
 		let slot = self.lookup.get(&key)?;
 		let span = self.presented(slot.group.end()?.checked_sub(key)?)?;
-		slot.arrived.checked_add(Duration::try_from(span).ok()?)
+		slot.arrived.checked_add(age(span)?)
 	}
 
 	/// The group after `key` that bounds it: the first servable one in `servable` whose
@@ -7830,9 +7831,19 @@ struct PresentationEdge {
 impl PresentationEdge {
 	/// Whether a group that can present until `reach` is a full `budget` behind this edge.
 	fn behind(&self, reach: Option<Timestamp>, budget: Duration) -> bool {
-		reach.is_some_and(
-			|reach| matches!(self.timestamp.checked_sub(reach).and_then(Duration::try_from), Ok(age) if age >= budget),
-		)
+		reach
+			.and_then(|reach| self.timestamp.checked_sub(reach).ok())
+			.and_then(age)
+			.is_some_and(|age| age >= budget)
+	}
+}
+
+/// A span of presentation time as a duration: a scale-less track's bare units count as
+/// milliseconds, over the whole key range.
+fn age(span: Timestamp) -> Option<Duration> {
+	match span.scale() {
+		Some(_) => Duration::try_from(span).ok(),
+		None => Some(Duration::from_millis(span.value())),
 	}
 }
 
@@ -24110,6 +24121,27 @@ mod test {
 		write_untimed_group(&producer, 2998);
 		write_untimed_group(&producer, 2500);
 		assert_eq!(drain_groups(&mut subscriber), [2998]);
+	}
+
+	/// A scale-less track's max age counts bare key units as milliseconds over the whole key
+	/// range, so keys past a scaled timestamp's bound age by their distance as low ones do.
+	#[test]
+	fn a_scale_less_track_ages_wide_keys_by_their_distance() {
+		for base in [0, 1u64 << 61, u64::MAX - 30_000] {
+			let producer = track_producer("test", None);
+			for offset in [0, 10_000, 20_000] {
+				write_untimed_group(&producer, base + offset);
+			}
+			// All three arrived at once, so only the keys' distance makes the oldest stale: its
+			// successor starts 10 s behind the edge. The middle one reaches the edge.
+			let mut subscriber = producer
+				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(5))));
+			assert_eq!(
+				drain_groups(&mut subscriber),
+				[base + 10_000, base + 20_000],
+				"from {base}"
+			);
+		}
 	}
 
 	/// An empty successor gives the lowest group above a gap no reach, so media time never
