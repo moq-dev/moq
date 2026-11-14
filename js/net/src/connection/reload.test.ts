@@ -1670,6 +1670,75 @@ test("a WebSocket fallback returns to WebTransport once it is reachable", async 
 	}
 });
 
+// A redirect the fallback's peer sends while it drains, after a probe got through but its
+// handshake failed, still decides where the replacement goes: the redial after the backoff goes
+// where the peer named, not back to the node that is leaving.
+test("a redirect from the draining WebSocket fallback is followed", async () => {
+	using clock = manual();
+	const originalWebTransport = globalThis.WebTransport;
+	const originalStream = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
+	const url = new URL("https://fallback-redirect.example.com/");
+	const elsewhere = new URL("https://fallback-redirect.example.com:4444/");
+
+	let blocked = true;
+	const dialed: string[] = [];
+	const servers: Promise<Session>[] = [];
+	let fallback: WebTransport | undefined;
+	globalThis.WebTransport = function StubWebTransport(to: string | URL) {
+		if (blocked) {
+			const refused = Promise.reject(new Error("UDP blocked"));
+			refused.catch(() => {});
+			return { ready: refused, closed: refused, close() {} };
+		}
+		dialed.push(String(to));
+		// The leaving node answers the probe, but no MoQ version is in common with it.
+		if (new URL(to).port !== elsewhere.port) return createMockTransportPair("h3").client;
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		const server = accept(pair.server, new URL(to));
+		server.catch(() => {});
+		servers.push(server);
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = linkedWebSocketStream((socket, protocol) => {
+		const transport = Qmux.accept(socket, { protocol }) as unknown as WebTransport;
+		fallback = transport;
+		servers.push(transport.ready.then(() => accept(transport, url)));
+	});
+
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Duration.millis(5_000) } });
+	try {
+		for (let i = 0; i < 10 && reload.established.peek()?.transport !== "websocket"; i++) {
+			await clock.advance(Duration.millis(100));
+		}
+		const server = servers[0];
+		if (!server || !fallback) throw new Error("no fallback session");
+
+		blocked = false;
+		// The probe gets through, the fallback tells its peer it is leaving, and the handshake
+		// over the probe fails, so the loop backs off with the fallback still serving.
+		for (let i = 0; i < 20 && dialed.length === 0; i++) await clock.advance(Duration.millis(1_000));
+		expect(await (await server).draining).toEqual({ uri: "" });
+		await clock.advance(Duration.millis(10));
+		expect(reload.established.peek()?.transport).toBe("websocket");
+
+		const stream = await Stream.open(fallback, { version: Lite.Version.DRAFT_06 });
+		await stream.writer.u53(Lite.StreamId.Goaway);
+		await new Lite.Goaway(elsewhere.href).encode(stream.writer, Lite.Version.DRAFT_06);
+		for (let i = 0; i < 100 && reload.established.peek()?.transport !== "webtransport"; i++) {
+			await clock.advance(Duration.millis(100));
+		}
+		expect(reload.established.peek()?.transport).toBe("webtransport");
+		expect(dialed.map((to) => new URL(to).port)).toEqual(["", elsewhere.port]);
+	} finally {
+		reload.close();
+		warned.mockRestore();
+		for (const server of servers) (await server.catch(() => undefined))?.abort();
+		globalThis.WebTransport = originalWebTransport;
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = originalStream;
+	}
+});
+
 // A WebSocket win is provisional: once the session it carried ends, the redial gives
 // WebTransport its head start again, since the outage that lost the race may be over.
 test("a WebSocket session ending restores WebTransport's head start", async () => {

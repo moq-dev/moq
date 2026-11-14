@@ -664,6 +664,7 @@ export class Reload {
 					// backoff already paces it, so its replacement dials at once. A fallback that
 					// served past the healthy bar still earns the healthy reset.
 					if (reached) {
+						this.#follow(connection, at, pinnedTransport(connection.transport, this.#pinned()));
 						if (now().since(connected).ge(this.#pacing().healthy)) {
 							this.#delay = undefined;
 							this.#deadline = undefined;
@@ -766,10 +767,8 @@ export class Reload {
 	 * redirect is refused, which ends the sequence rather than redialing.
 	 */
 	#migrate(connection: Session, dialing: URL, drain: Drain): boolean {
-		const hashes = this.webtransport?.serverCertificateHashes?.length ?? 0;
-		const configured = hashes > 0 || this.webtransport?.serverCertificate !== undefined;
 		// The pin is a WebTransport option. A WebSocket that won the race never used it.
-		const pinned = pinnedTransport(connection.transport, configured);
+		const pinned = pinnedTransport(connection.transport, this.#pinned());
 
 		let next: URL | undefined;
 		try {
@@ -801,6 +800,37 @@ export class Reload {
 		});
 		this.#draining = draining;
 		return true;
+	}
+
+	/** Whether a certificate pin is configured for WebTransport. */
+	#pinned(): boolean {
+		const hashes = this.webtransport?.serverCertificateHashes?.length ?? 0;
+		return hashes > 0 || this.webtransport?.serverCertificate !== undefined;
+	}
+
+	/**
+	 * Follow a redirect the peer of `connection`, a fallback session we left for a probe that
+	 * got through, sends while it drains and nothing has replaced it yet: the next dial goes
+	 * where the peer named, and a dial still headed for the leaving peer starts over. A restart
+	 * in place or a refused redirect is ignored, since we are already leaving. No loop scoring:
+	 * only a probe that got through leads here, and the probe's backoff paces those.
+	 */
+	#follow(connection: Session, dialing: URL, pinned: boolean): void {
+		void connection.draining.then((drain) => {
+			if (this.#draining?.serving() !== connection || this.established.peek() !== connection) return;
+			let next: URL | undefined;
+			try {
+				next = target(this.goaway.redirect ?? "same-host", drain.uri, dialing, pinned);
+			} catch {
+				return;
+			}
+			if (!next) return;
+			console.info("draining fallback peer redirected; following");
+			this.#redirect.set(next);
+			this.#redirectHref = this.#sequenceHref;
+			// A backoff still paces the next dial, which now goes to the new target.
+			if (this.#dialing) this.#tick.update((prev) => prev + 1);
+		});
 	}
 
 	/**
