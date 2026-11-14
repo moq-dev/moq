@@ -155,17 +155,16 @@ pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mut
 
 /// Answer `fill`'s lookup of `pts`, in the track's timescale, with the group containing it: the
 /// newest group starting at or before it, found among the objects whose keys say they may hold
-/// it, or the oldest stored group when every one starts after it. A timed group starts at its
-/// first frame's timestamp, a scale-less one at its key. Left unanswered when the archive holds
-/// no group, or the store fails.
+/// it, or the oldest stored group when every one starts after it. A group starts at its key,
+/// as the live cache resolves it. Left unanswered when the archive holds no group, or the store
+/// fails.
 async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, pts: u64) {
 	let (around, timed) = {
 		let index = index.lock().unwrap();
 		(index.around(pts), index.timed())
 	};
-	let limit = pts;
-
-	// Newest first: only a group whose first frame an object holds says where it starts.
+	// Newest first, skipping a group whose head was pruned, which can't be served from its first
+	// frame.
 	for (start, path) in around {
 		let Some(object) = load(shared, index, start, &path, timed).await else {
 			return;
@@ -176,14 +175,8 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 			.enumerate()
 			.rev()
 			.filter(|(position, _)| *position > 0 || object.frame_start == 0)
-			.find_map(|(_, entry)| {
-				let first = entry.frames.first()?;
-				let at = match timed {
-					true => first.timestamp?,
-					false => entry.sequence,
-				};
-				(at <= limit).then_some(entry.sequence)
-			});
+			.find(|(_, entry)| !entry.frames.is_empty() && entry.sequence <= pts)
+			.map(|(_, entry)| entry.sequence);
 		if let Some(sequence) = found {
 			return serve_group(shared, index, fill, sequence).await;
 		}

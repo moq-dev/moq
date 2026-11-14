@@ -889,6 +889,32 @@ async fn a_continuation_does_not_bound_a_group_start() {
 	assert_eq!(read_range(&broadcast, "video", range).await, [500]);
 }
 
+/// A group starts at its key even when its first frame comes later, as one a seek opened, so
+/// the archive resolves a time to the group the live cache would.
+#[tokio::test(start_paused = true)]
+async fn a_time_resolves_by_key_not_first_frame() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	let frame = |sequence: u64, pts: u64| Frame {
+		timestamp: Some(pts),
+		payload: Bytes::from(format!("{sequence}")),
+	};
+	for (sequence, pts) in [(1_000, 1_000), (2_000, 2_500), (3_000, 3_000)] {
+		let entry = Entry {
+			sequence,
+			frames: vec![frame(sequence, pts)],
+		};
+		archive.object("video", 0, vec![entry]).await;
+	}
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let range = track::Range {
+		start: at(2_200),
+		end: Some(at(2_300)),
+	};
+	assert_eq!(read_range(&broadcast, "video", range).await, [2_000]);
+}
+
 /// A scale-less track's times are bare starts, which the archive looks up by key.
 #[tokio::test(start_paused = true)]
 async fn a_scale_less_track_looks_up_a_time_by_key() {
