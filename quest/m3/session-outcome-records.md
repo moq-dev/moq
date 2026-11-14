@@ -39,22 +39,24 @@ records):
   (count per kind over the interval) instead, and the cumulative counters stay
   exact. Measure the bytes a refusal flood costs with and without the bound.
 - Refusal records go through `moq_net::stats::Handle::refuse`, so a gateway's
-  refusals appear the same way as native ones. It takes only `(label, reason)`
-  today, and the relay's `Refusals::record`/`record_auth`
-  (`rs/moq-relay/src/refusals.rs`) keep only `(tier, root)`, so the record's
-  path and transport have no way in. Make the breaking change: `refuse` takes
-  one struct carrying the label, kind, requested path, and transport, and the
-  relay passes them from the `moq_auth::Request` it holds at every refusal
-  site. A field is optional only where a real caller lacks it.
+  refusals appear the same way as native ones. It takes a `#[non_exhaustive]`
+  `stats::Refusal`, which carries only the label and kind today, and the
+  relay's `Refusals::record`/`record_auth` (`rs/moq-relay/src/refusals.rs`)
+  pass only a kind or the refusal's tier and root, so the record's path and
+  transport have no way in. Add the requested path and transport as fields of
+  `Refusal`, and have the relay pass them from the `moq_auth::Request` it
+  holds at every refusal site. A field is optional only where a real caller
+  lacks it.
 - Abnormal-end records are emitted in `moq-net` where `sessions_failed` is
   bumped today (`SessionInner::drop`, with the kind `Session::end` set), not
   through `refuse`. The stats session therefore learns its path, transport,
-  and start time when created, so `Handle::session` takes them too (the same
-  breaking change; the relay knows `request.transport()` at admission).
+  and start time when created, so they become fields of the
+  `#[non_exhaustive]` `stats::SessionInfo` that `Handle::session` takes (the
+  relay knows `request.transport()` at admission).
 - Rust and JS readers parse the track.
 
 Tests: a refused session and an abnormal end each produce exactly one record
 under the right label; a flood past the rate produces summaries whose counts
 match the counters; an admitted session that ends normally produces none.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8266](https://github.com/moq-dev/moq/pull/8266) makes `stats::Handle::{refuse, session}` take `#[non_exhaustive]` structs before the cut, so the records add fields and are not breaking.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8266](https://github.com/moq-dev/moq/pull/8266), since merged, made `stats::Handle::{refuse, session}` take `#[non_exhaustive]` structs, so the records add fields and are not breaking.

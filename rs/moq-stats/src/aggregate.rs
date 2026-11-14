@@ -357,6 +357,7 @@ impl Mergeable for Presence {
 			|| self.received_bytes < prev.received_bytes
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
+			|| self.routes_refused < prev.routes_refused
 	}
 }
 

@@ -9,7 +9,7 @@
 //
 // `bun js/common/api.ts check <dir>...` checks built packages, as `just check` and `just fix` run it
 // after their builds. A package's own build does not, so a consumer building one from source needs
-// none of this toolchain. TypeDoc comes from moq-doc-api, which pins the TypeScript 6 it needs.
+// none of this toolchain. TypeDoc comes from moq-doc-api and resolves the TypeScript 6 it needs.
 //
 // `bun js/common/api.ts baseline <checkout> <out>` renders every published package of another
 // checkout, such as the release branch, with this renderer, so `sh/api-diff` compares like with like.

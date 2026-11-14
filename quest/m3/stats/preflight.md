@@ -54,4 +54,4 @@ Public API: a preflight check and its report type, and a CLI sink. Wire: none.
 ## Related
 
 - [Publisher timeliness](/quest/m3/qos-publisher-timeliness.md) - the relay's view of the same timestamp lateness and monotonicity
-- [Intra-refresh](/quest/m3/intra-refresh/README.md) - a stream without IDR keyframes, which the sync point checks must not fail
+- [Intra-refresh](/quest/m4/intra-refresh/README.md) - a stream without IDR keyframes, which the sync point checks must not fail
