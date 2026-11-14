@@ -83,6 +83,14 @@ change; faster checkers are separate work.
 
 Run the affected config last, with at most one TLC process at a time. First run what answers in seconds: the router's tests (`quest gate just rs test -p moq-net --lib -E 'test(/route::tests::(handoff|residual|scope|compare)/)'`, with `MOQ_ROUTE_SCENARIOS` raising the sweeps' count), then TLC's simulation mode with raised bounds in a copy of a config, such as `-simulate num=3000 -depth 150`.
 
+## Search the router
+
+`rs/moq-net/src/route/tests/search.rs` searches every order in which `Sim` can deliver, disconnect, connect, collect, fire a timer, and change a claim, on the compiled `path::Router`, depth first with a fingerprint per state. It checks `Truthful` (`Sim::check`), `NoRevival`, `NoFalseEnd`, `NoRegression`, `Stable`, `SimplePaths` (`Sim`'s own assertions on each path sent), `RequestsLoopFree`, `QuietIsSettled`, and `Budget` in every state, and prints a broken rule's path as `Sim` calls. It leaves out `Seen`, `StaleIsChased`, and `NoStaleReturn`, which read state the model names and the router keeps privately. Its timers are the router's own one-second timers, so a doubt raised earlier fires earlier, where the model's `Lift` fires in any order. The gate searches the triangle under `RouteHandoff.cfg`'s bounds; Nightly's `just test route-sweep` searches `RouteHandoff.cfg`'s own mesh, a dear link, nested claims, a scoped relay, a scoped grant, and a six-node mesh.
+
+```sh
+quest gate just rs test -p moq-net --release --run-ignored all -E 'test(/^route::tests::search::/)'
+```
+
 ## Reading a failure
 
 Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on the router with `Sim::with(Rule::PATH, nodes)` (`deliver`, `disconnect`, `connect`, `announce`, `wait`), one call per step, except a timer. `Lift(n, x)` fires one timer on one relay, where `wait(HOP)` moves every relay's clock by one hop of delay: call it until that doubt lifts, and where another doubt lifted with it, the replay took a different path, which is no defect in the model.

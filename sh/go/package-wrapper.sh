@@ -161,7 +161,7 @@ Licensed under MIT OR Apache-2.0.
 EOF
 
 # --- 4. Resolve go.sum and compile (skipped for dry-runs against an unpublished ffi tag) ---
-# GOPROXY=direct fetches the freshly-pushed ffi tag straight from its mirror,
+# GOPROXY=direct fetches the freshly published ffi straight from its origin,
 # dodging proxy.golang.org caching lag right after a release.
 if [[ "$TIDY" == true ]]; then
     (

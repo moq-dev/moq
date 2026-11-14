@@ -3,7 +3,7 @@ import { yieldNow } from "@moq/clock";
 import * as Announce from "./announced.ts";
 import type { Credential } from "./auth.ts";
 import type { Producer as BroadcastProducer } from "./broadcast.ts";
-import { HopSchema, UNKNOWN_HOP, WireRoute } from "./hop.ts";
+import { toHop, UNKNOWN_HOP, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -51,7 +51,7 @@ test("a listing shows a route's facts, never its epoch, hops, credential, or dra
 	const route = WireRoute.normalize({
 		instance,
 		epoch: 3n,
-		hops: [HopSchema.parse(7n), UNKNOWN_HOP],
+		hops: [toHop(7n), UNKNOWN_HOP],
 		cost: 5n,
 		auth: {} as Credential,
 		draining: true,

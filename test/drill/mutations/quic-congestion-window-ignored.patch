@@ -1,0 +1,21 @@
+# drill: tests::sim::random_workloads
+# expect: RFC 9002 §7
+# package: moq-quic
+# target: --lib
+#
+# Removes the congestion window's hold on new data. Pacing still spaces the
+# packets and every byte still arrives, so only the rule checker sees bytes in
+# flight run past the window.
+diff --git a/rs/moq-quic/src/connection/mod.rs b/rs/moq-quic/src/connection/mod.rs
+--- a/rs/moq-quic/src/connection/mod.rs
++++ b/rs/moq-quic/src/connection/mod.rs
+@@ -786,7 +786,8 @@
+ 					debug_assert!(untracked_bytes <= segment_size as u64);
+ 
+ 					let bytes_to_send = segment_size as u64 + untracked_bytes;
+-					if self.path.in_flight.bytes + bytes_to_send > self.path.congestion.window() {
++					// MUTATION: the congestion window never holds a send back.
++					if false && self.path.in_flight.bytes + bytes_to_send > self.path.congestion.window() {
+ 						space_idx += 1;
+ 						send_blocked = true;
+ 						cwnd_blocked = true;
