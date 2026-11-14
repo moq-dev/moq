@@ -52,6 +52,11 @@ mod imp;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
 
+// The control-message walk's fuzz target. Linux only, where the fuzzer runs, and 64-bit, which the
+// reference model's struct layouts assume.
+#[cfg(all(any(test, feature = "fuzz"), target_os = "linux", target_pointer_width = "64"))]
+pub mod fuzz;
+
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod imp;

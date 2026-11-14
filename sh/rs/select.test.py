@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in ("moq-net", "moq-quic", "moq-mux", "moq-rtmp"))
+FUZZ_CRATES = ("moq-net", "moq-quic", "moq-mux", "moq-rtmp", "moq-sock", "moq-uring")
+FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in FUZZ_CRATES)
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
 LINUX = os.uname().sysname == "Linux"
 

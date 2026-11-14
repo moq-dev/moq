@@ -381,7 +381,8 @@ jobs:
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
         recipe: ["gate", "gh test-integration", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-key-model", "test route-sweep", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
-          # Miri interprets kio's and moq-net's in-memory unsafe; too slow for the merge gate.
+          # Miri interprets kio's and moq-net's in-memory unsafe and moq-sock's and moq-uring's
+          # control-message walks; too slow for the merge gate.
           - recipe: rs miri
             nightly: true
             components: miri, rust-src
@@ -817,7 +818,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
+        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0, sock_cmsg, uring_cmsg]
         # A whole session runs at 50 to 90 inputs a second, and its coverage still climbs
         # after five minutes, so it gets fifteen.
         include:

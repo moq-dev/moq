@@ -780,8 +780,13 @@ impl ControlMetadata {
 			}
 			#[cfg(any(target_os = "linux", target_os = "android"))]
 			(libc::SOL_UDP, libc::UDP_GRO) => {
-				if let Some(stride) = unsafe { cmsg.decode::<libc::c_int>() } {
-					self.stride = stride as usize;
+				// A zero stride would split the payload into empty datagrams forever, so it keeps the
+				// datagram's own length, as a negative one does.
+				if let Some(stride) =
+					unsafe { cmsg.decode::<libc::c_int>() }.and_then(|stride| usize::try_from(stride).ok())
+					&& stride > 0
+				{
+					self.stride = stride;
 				}
 			}
 			#[cfg(any(target_os = "linux", target_os = "android"))]

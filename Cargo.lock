@@ -4845,6 +4845,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-sock-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-sock",
+]
+
+[[package]]
 name = "moq-srt"
 version = "0.3.11"
 dependencies = [
@@ -5007,6 +5015,14 @@ dependencies = [
  "url",
  "web-transport-proto",
  "workspace-hack",
+]
+
+[[package]]
+name = "moq-uring-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-uring",
 ]
 
 [[package]]

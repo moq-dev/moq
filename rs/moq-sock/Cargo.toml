@@ -12,6 +12,11 @@ rust-version.workspace = true
 keywords = ["quic", "networking", "reuseport"]
 categories = ["network-programming"]
 
+[features]
+# Exposes the `fuzz/` harness's target body and seeds through the `udp::fuzz` module, on 64-bit
+# Linux. Off by default.
+fuzz = []
+
 [dependencies]
 arc-swap = "1.9"
 core_affinity = "0.8"
@@ -34,6 +39,13 @@ workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 nix = { workspace = true }
+
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# `--all-targets` build skips it rather than failing to find the module.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
 
 [[bench]]
 name = "demux"

@@ -11,7 +11,3 @@ Found by [moq-dev/moq#7543](https://github.com/moq-dev/moq/pull/7543), which mad
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2, matching the receive paths. Walk the cmsgs that fit (the iterator is already bounded by the returned control length), return the decoded entry if one is complete, and warn once through a `Once` as `decode_recv` in `unix.rs` does. Extend the existing mocked `MSG_ERRQUEUE` test (`LinuxError::decode`, about line 309) with a truncated case.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Wire fuzz coverage](/quest/m1/wire-fuzz-coverage.md) - fuzzes the cmsg walks this path shares
