@@ -45,7 +45,7 @@ mod video;
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-boy")]
-#[usage(completion, settings)]
+#[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 pub struct Config {
 	/// Path to the Game Boy ROM file.
 	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("gb", "gbc"))]
@@ -535,7 +535,6 @@ async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
-	moq_tokio::cli::check_env(&[Config::spec()], &[])?;
 
 	#[cfg(feature = "jemalloc")]
 	let jemalloc = moq_tokio::jemalloc::run();
