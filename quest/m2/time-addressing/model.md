@@ -235,6 +235,27 @@ starts for the caller.
   It waits up to the playout delay and reports a gap. Rejected: a heuristic
   for older wires.
 
+Taken by the agent under /quest-afk on 2026-11-13, for the maintainer's
+review, from the PR's local reviews:
+
+- **Own-end reach ships before the wire carries the end.** An origin whose
+  producer calls `group::Producer::finish(end)` ages a paused track's last
+  group out after its span. A relay receives the group with a bare FIN
+  (`rs/moq-net/src/recv.rs` closes it), so it still bounds that group by its
+  successor, as main does on every hop. Relays serve nothing main wouldn't, and
+  the gap closes when lite-07's GROUP_END carries the end
+  ([lite07.md](lite07.md)). Rejected: carrying the end on the wire in this PR,
+  which is lite07's wire, draft, and JS change; holding own-end reach back
+  until then, which reverts the 2026-10-26 decision above.
+- **A transcode fill locates a gap through one source read.** A miss reads
+  the source once, in key order, for the groups around it, and drops the span
+  between them at once. A source holding no group at all can't place the
+  read until it holds one, so a live rung waits for the source's next group,
+  as any time-anchored reader of the source would. A retired rung's drain
+  drops the rest of the fill instead. Rejected: a fetch per microsecond, which
+  costs millions of requests per GOP gap; a moq-net "next group from"
+  primitive, which is new API in every language for one caller.
+
 ### Spike evidence
 
 The spike published groups at their start ticks (2 s GOPs at 1 kHz and at

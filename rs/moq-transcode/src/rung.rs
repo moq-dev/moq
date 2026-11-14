@@ -573,7 +573,8 @@ async fn fetches(
 	Ok(())
 }
 
-/// Spawn one fill, taking a slot of `limit` for each group it transcodes.
+/// Spawn one fill, taking a slot of `limit` for each group it transcodes, once the source
+/// group is in hand: waiting on the source holds no encoder session.
 fn spawn_fill(tasks: &mut tokio::task::JoinSet<()>, rung: Rung, mut fill: moq_net::track::Fill, limit: Arc<Semaphore>) {
 	let mut retire = rung.retire.clone();
 	tasks.spawn(async move {
@@ -593,8 +594,7 @@ fn spawn_fill(tasks: &mut tokio::task::JoinSet<()>, rung: Rung, mut fill: moq_ne
 			};
 			let Some(sequence) = sequence else { break };
 			last = Some(sequence);
-			let _permit = limit.acquire().await.expect("the semaphore stays open");
-			if let Err(err) = fetch(&rung, &fill, sequence).await {
+			if let Err(err) = fetch(&rung, &fill, sequence, &limit).await {
 				tracing::warn!(%err, sequence, "transcode fetch failed");
 			}
 		}
@@ -609,7 +609,7 @@ fn spawn_fill(tasks: &mut tokio::task::JoinSet<()>, rung: Rung, mut fill: moq_ne
 /// instead, releasing the slot for the groups the fill still owes: its last reader
 /// already left it, and accepting afterwards would cache the group a fresh fill is
 /// about to serve.
-async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Result<(), Error> {
+async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64, limit: &Semaphore) -> Result<(), Error> {
 	let groups = sequence..sequence + 1;
 	let refuse = |err: moq_net::Error| fill.refuse_groups(groups.clone(), err);
 	let failed = || refuse(moq_net::Error::Stream(moq_net::StreamError::Internal));
@@ -660,6 +660,12 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 				return Err(err.into());
 			}
 		},
+	};
+
+	let _permit = tokio::select! {
+		biased;
+		_ = fill.unwanted(sequence) => return abandon(sequence),
+		permit = limit.acquire() => permit.expect("the semaphore stays open"),
 	};
 
 	// A fresh pipeline per fetched group: groups are independently decodable,
@@ -713,7 +719,9 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 /// was already answered, so it starts at the miss.
 ///
 /// A source holding no group at all resolves no time until it holds one, as it would for any
-/// reader of it. Once the rung retires, its drain can't wait on that, so it drops the miss alone.
+/// reader of it, so the lookup then waits for the source's next group, its reader leaving, or the
+/// rung retiring. A retired rung's drain can't wait on the source's media, so one whose lookup
+/// can't answer at once drops the rest of the fill, the way it is being filled, in one call.
 async fn drop_gap(
 	rung: &Rung,
 	track: &moq_net::track::Consumer,
@@ -763,10 +771,6 @@ async fn drop_gap(
 	let (before, after) = tokio::select! {
 		biased;
 		_ = fill.unwanted(sequence) => return abandon(sequence),
-		() = retire.fired() => {
-			fill.drop_groups(sequence..sequence + 1);
-			return Ok(());
-		}
 		around = around => match around {
 			Ok(around) => around,
 			Err(err) => {
@@ -774,6 +778,13 @@ async fn drop_gap(
 				return Err(err.into());
 			}
 		},
+		() = retire.fired() => {
+			match below {
+				true => fill.drop_groups(first..sequence + 1),
+				false => fill.drop_groups(sequence..end),
+			}
+			return Ok(());
+		}
 	};
 
 	let start = match below {
@@ -1160,24 +1171,45 @@ mod tests {
 	/// asking the source for every microsecond in it.
 	#[tokio::test(start_paused = true)]
 	async fn a_fill_drops_a_gap_between_source_groups_at_once() {
-		fill_across_a_gap(moq_net::track::Order::Ascending).await;
+		fill_across_a_gap(moq_net::track::Order::Ascending, false).await;
 	}
 
 	/// Filling newest first, the miss is the gap's top, and the span below it goes at once too.
 	#[tokio::test(start_paused = true)]
 	async fn a_descending_fill_drops_a_gap_between_source_groups_at_once() {
-		fill_across_a_gap(moq_net::track::Order::Descending).await;
+		fill_across_a_gap(moq_net::track::Order::Descending, false).await;
 	}
 
-	async fn fill_across_a_gap(order: moq_net::track::Order) {
+	/// A retired rung's drain drops the gap at once too, rather than a microsecond at a time.
+	#[tokio::test(start_paused = true)]
+	async fn a_retired_fill_drops_a_gap_between_source_groups_at_once() {
+		fill_across_a_gap(moq_net::track::Order::Ascending, true).await;
+	}
+
+	/// A fill whose source holds no group yet can't place the gap after a miss, so it waits for
+	/// the source's next group, as any reader of the source would, and then drops the gap.
+	#[tokio::test(start_paused = true)]
+	async fn a_fill_over_an_empty_source_drops_the_gap_once_the_source_has_a_group() {
+		fill_across(moq_net::track::Order::Ascending, false, true).await;
+	}
+
+	async fn fill_across_a_gap(order: moq_net::track::Order, retired: bool) {
+		fill_across(order, retired, false).await;
+	}
+
+	/// Fill output starts 1 to an hour, with source groups at 0 and an hour, or, when `empty`,
+	/// none until the fill has waited on the source.
+	async fn fill_across(order: moq_net::track::Order, retired: bool, empty: bool) {
 		use std::task::Poll;
 		const HOUR: u64 = 3_600_000_000;
-		let (rung, source, _retire) = idle_rung();
+		let (rung, source, retire) = idle_rung();
 		let video = source
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		video.append_group(0).unwrap().close().unwrap();
-		video.append_group(HOUR).unwrap().close().unwrap();
+		if !empty {
+			video.append_group(0).unwrap().close().unwrap();
+			video.append_group(HOUR).unwrap().close().unwrap();
+		}
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let mut track = output
@@ -1209,9 +1241,22 @@ mod tests {
 		assert_eq!((fill.start().group, fill.end()), (1, HOUR));
 		assert_eq!(fill.order(), order);
 
+		if retired {
+			retire.send(true).unwrap();
+		}
 		let mut tasks = tokio::task::JoinSet::new();
 		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
-		kio::clock::timeout(std::time::Duration::from_secs(5), tasks.join_next())
+		let wait = std::time::Duration::from_secs(5);
+		if empty {
+			assert!(
+				kio::clock::timeout(wait, tasks.join_next()).await.is_err(),
+				"nothing places the gap yet"
+			);
+			// As a media producer's first group does, saying nothing came before it.
+			video.skip_groups(0..HOUR + 1);
+			video.append_group(HOUR + 1).unwrap().close().unwrap();
+		}
+		kio::clock::timeout(wait, tasks.join_next())
 			.await
 			.expect("the gap is dropped whole")
 			.unwrap()
@@ -1272,20 +1317,23 @@ mod tests {
 		);
 
 		retire.send(true).unwrap();
-		for sequence in 8..10 {
-			let requested = kio::clock::timeout(wait, source_fills.requested_fill())
-				.await
-				.expect("a retired rung serves what its fill still owes")
-				.unwrap();
-			assert_eq!(requested.start().group, sequence);
-			// The source no longer has it, so the fill drops it and moves on.
-			requested.drop_groups(sequence..sequence + 1);
-		}
+		let requested = kio::clock::timeout(wait, source_fills.requested_fill())
+			.await
+			.expect("a retired rung serves what its fill still owes")
+			.unwrap();
+		assert_eq!(requested.start().group, 8);
+		// The source no longer has it. It holds no group to place the gap after it by, and the
+		// drain can't wait for one, so the rest of the fill goes with it.
+		requested.drop_groups(8..9);
 		kio::clock::timeout(wait, tasks.join_next())
 			.await
 			.expect("the drain finishes")
 			.unwrap()
 			.unwrap();
+		assert!(
+			kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
+			"the rest of the fill is dropped at once, not fetched a group at a time"
+		);
 	}
 
 	/// A restarted source cancels the serving future even while a rung waits for media.
