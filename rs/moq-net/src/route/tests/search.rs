@@ -1,5 +1,5 @@
 //! Every order in which [`Sim`] can deliver, disconnect, connect, collect, fire a
-//! timer, and change a claim on a small mesh, searched breadth-first on the real
+//! timer, and change a claim on a small mesh, searched depth-first on the real
 //! routers, with the route rules checked in every state it reaches.
 //!
 //! This is `RouteHandoff.tla`'s check run on compiled code: there is no model to
@@ -10,7 +10,7 @@
 //! order. A broken rule prints the path to it as `Sim` calls.
 
 use std::{
-	collections::{BTreeSet, HashMap, hash_map::DefaultHasher},
+	collections::{BTreeSet, HashSet, hash_map::DefaultHasher},
 	fmt,
 	hash::Hasher,
 	panic::{AssertUnwindSafe, catch_unwind},
@@ -29,8 +29,6 @@ pub(super) struct Bounds {
 	pub flaps: u32,
 	/// A timer fires only once no news about its node is in flight (`Patient`).
 	pub patient: bool,
-	/// The longest path searched, in steps, if any.
-	pub depth: Option<usize>,
 }
 
 /// One step of a path, printed as the `Sim` call that replays it.
@@ -78,8 +76,6 @@ pub(super) struct Report {
 	pub steps: usize,
 	/// The longest path searched.
 	pub depth: usize,
-	/// Whether some state had a step left past [`Bounds::depth`].
-	pub cut: bool,
 }
 
 /// A broken rule, and the path the search took to it.
@@ -188,16 +184,14 @@ pub(super) fn search(mesh: Mesh, bounds: &Bounds) -> Result<Report, Failure> {
 	search
 		.check(&root, None, &root.sim.shown_all())
 		.map_err(|rule| Failure { rule, path: Vec::new() })?;
-	// The shallowest depth each state was reached at: under a depth bound, one
-	// reached again sooner is searched again, so the search covers every state within it.
-	let mut seen = HashMap::from([(root.fingerprint(), 0)]);
+	let mut seen = HashSet::from([root.fingerprint()]);
 	let next = search.steps(&root);
 	let mut stack = vec![Frame {
 		world: root,
 		by: None,
 		next,
 	}];
-	let (mut steps, mut depth, mut cut) = (0, 0, false);
+	let (mut steps, mut depth) = (0, 0);
 	while let Some(at) = stack.len().checked_sub(1) {
 		let frame = &mut stack[at];
 		depth = depth.max(at);
@@ -205,11 +199,6 @@ pub(super) fn search(mesh: Mesh, bounds: &Bounds) -> Result<Report, Failure> {
 			stack.pop();
 			continue;
 		};
-		if bounds.depth == Some(at) {
-			cut = true;
-			frame.next.clear();
-			continue;
-		}
 		steps += 1;
 		let mut world = frame.world.clone();
 		if let Err(rule) = search.apply(&mut world, &step) {
@@ -218,13 +207,9 @@ pub(super) fn search(mesh: Mesh, bounds: &Bounds) -> Result<Report, Failure> {
 			return Err(Failure { rule, path });
 		}
 		let fp = world.fingerprint();
-		if seen
-			.get(&fp)
-			.is_some_and(|&was| bounds.depth.is_none() || was <= at + 1)
-		{
+		if !seen.insert(fp) {
 			continue;
 		}
-		seen.insert(fp, at + 1);
 		let next = search.steps(&world);
 		stack.push(Frame {
 			world,
@@ -236,7 +221,6 @@ pub(super) fn search(mesh: Mesh, bounds: &Bounds) -> Result<Report, Failure> {
 		states: seen.len(),
 		steps,
 		depth,
-		cut,
 	})
 }
 
@@ -418,7 +402,12 @@ impl Search<'_> {
 						reach: Some(path::Reach::Finite(_)),
 						..
 					}),
-				) => router.hears(*id, prefix, from),
+				) => {
+					// A neighbour publishing under a grant has its routes filed under a qualified key.
+					let grant = sim.links[to][from].and_then(|side| side.grant);
+					let key = grant.map_or(*id, |grant| qualified(grant.subject, *id));
+					router.hears(key, prefix, from)
+				}
 				(_, Some(Msg::Dead(path::Dead::Draining { .. }))) => true,
 				(
 					Relay::Distance(router),
@@ -439,6 +428,7 @@ impl Search<'_> {
 	fn check(&self, world: &World, stable: Option<&[Showing]>, before: &[Showing]) -> Result<(), String> {
 		let sim = &world.sim;
 		sim.check().map_err(|err| format!("Truthful: {err}"))?;
+		self.offered(sim).map_err(|err| format!("Truthful: {err}"))?;
 		let rev = sim.revision(self.id);
 		let now = sim.shown_all();
 		for (node, (was, now)) in before.iter().zip(&now).enumerate() {
@@ -485,6 +475,30 @@ impl Search<'_> {
 		}
 		if world.quiet() && sim.deadline().is_none() {
 			self.settled(sim).map_err(|err| format!("QuietIsSettled: {err}"))?;
+		}
+		Ok(())
+	}
+
+	/// Every floor a node was offered, on a route it heard, is the publisher's claims
+	/// at that revision as a stream answering the route's prefix presents them.
+	fn offered(&self, sim: &Sim) -> Result<(), String> {
+		for (node, relay) in sim.nodes.iter().enumerate() {
+			let Relay::Path(router) = relay else { continue };
+			for ((key, prefix), view) in router.heard() {
+				let Some(id) = sim.source(*key) else { continue };
+				for (region, &rev) in &view.floors {
+					let truth = sim.presented(id, region, rev);
+					let known: BTreeMap<Path, Item> = (view.items.iter())
+						.filter(|(claim, _)| within(claim, region))
+						.map(|(claim, item)| (claim.clone(), *item))
+						.collect();
+					if known != truth {
+						return Err(format!(
+							"node {node} was offered {key}'s {prefix:?} at revision {rev} as {known:?}, where the origin had {truth:?}"
+						));
+					}
+				}
+			}
 		}
 		Ok(())
 	}
@@ -639,13 +653,11 @@ const ONE: Bounds = Bounds {
 	changes: 1,
 	flaps: 1,
 	patient: true,
-	depth: None,
 };
 
 fn run(mesh: Mesh, bounds: &Bounds) -> Report {
 	let report = search(mesh, bounds).unwrap_or_else(|failure| panic!("{failure}"));
 	eprintln!("{report:?}");
-	assert!(!report.cut, "every state within the bounds");
 	report
 }
 
@@ -694,7 +706,11 @@ fn every_order_of_nested_claims_keeps_the_rules() {
 		claims: &["", "a"],
 		..ONE
 	};
-	run(triangle(1, "", None), &nested);
+	// The root claim exists from the start, so the one change may nest `a` inside it
+	// or withdraw it.
+	let mut mesh = triangle(1, "", None);
+	mesh.sim.announce(0, "", 0, None);
+	run(mesh, &nested);
 }
 
 /// Relay 2 asks for `a` alone.
@@ -749,7 +765,6 @@ const BLIND: Bounds = Bounds {
 	changes: 0,
 	flaps: 0,
 	patient: true,
-	depth: None,
 };
 
 /// The search's self-check: on the distance rule, which the path rule replaces,
