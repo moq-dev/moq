@@ -1041,6 +1041,7 @@ class DecoderTrack {
 	// The publisher finished the track, which ends it like a declared end. Drain the pictures the codec
 	// still holds, and mark it finished once the clock reaches the last one.
 	async #onFinish(effect: Effect, decoder: VideoDecoder, latest: bigint | undefined): Promise<void> {
+		if (effect.abort.aborted) return;
 		if (this.ended.peek() === undefined) this.ended.set(latest ?? 0n);
 		this.finish.set("read");
 		if (decoder.state === "configured") await decoder.flush();

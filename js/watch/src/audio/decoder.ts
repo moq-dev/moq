@@ -990,6 +990,8 @@ export class Decoder {
 	// the written audio stops, so the ring runs dry into silence rather than a stall, and mark the
 	// rendition ended once the clock reaches it.
 	async #onFinish(effect: Effect, decoder: AudioDecoder, written: () => number | undefined): Promise<void> {
+		// A cancelled attempt's cleanup already cleared the finish, which a replacement must not inherit.
+		if (effect.abort.aborted) return;
 		this.#finish.set("read");
 		if (decoder.state === "configured") await decoder.flush();
 		if (effect.abort.aborted) return;
