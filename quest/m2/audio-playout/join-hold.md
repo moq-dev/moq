@@ -28,3 +28,6 @@ Candidates, to judge by the Nightly rows as the target fall was:
 - Start measuring at the first frame the player plays.
 
 Recommended: the first, which keeps the cold start's quick convergence.
+
+Decided 2026-11-13 (maintainer, `/quest-complete`): ✅ keep this follow-up
+(rejected: drop it and accept the 20 s hold after every join).
