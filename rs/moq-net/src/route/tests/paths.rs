@@ -1,8 +1,9 @@
-//! A prototype router that keeps a route free of loops by its path alone.
+//! A prototype router that keeps a route free of loops by its path alone, carrying
+//! the warm copies `cache.rs` proves.
 //!
-//! It exists to be measured against [`Router`], which keeps Babel's distance: the
-//! comparison in `compare.rs` runs one script on both. Nothing outside the tests
-//! uses it.
+//! The router comparisons in `compare.rs` run on [`Sim`] and the real
+//! `route::path::Router`, which has no warm copies yet; this prototype exists only
+//! for the copies. Nothing outside the tests uses it.
 //!
 //! A route is one per publisher and names every relay it crossed, each with the
 //! session that relay learned the route on. A relay uses the cheapest route whose
@@ -22,7 +23,7 @@
 //!   and pulls each broadcast it has demand for from the cheapest of its publisher's
 //!   route and the copies offered, which `cache.rs` proves.
 //!
-//! Left out, since the comparison does not need them: scoped grants, qualified
+//! Left out, since the copies do not need them: scoped grants, qualified
 //! keys, interests, priorities, upstream marks, and RTT. GOAWAY only moves
 //! pulls off a neighbour's copy.
 
@@ -444,21 +445,10 @@ impl Relay {
 	}
 
 	pub fn announce(&mut self, claim: Path) {
-		self.change(claim, true);
-	}
-
-	pub fn unannounce(&mut self, claim: Path) {
-		self.change(claim, false);
-	}
-
-	fn change(&mut self, claim: Path, live: bool) {
 		let id = self.own.expect("not a publisher");
 		let route = self.routes.get_mut(&id).unwrap();
 		route.rev += 1;
-		match live {
-			true => route.claims.insert(claim, route.rev),
-			false => route.claims.remove(&claim),
-		};
+		route.claims.insert(claim, route.rev);
 		self.show(id);
 		self.advertise(id);
 	}
@@ -1429,8 +1419,6 @@ pub(super) struct PathStats {
 /// [`Sim`] for the prototype: one [`Relay`] per node, joined by ordered queues.
 pub(super) struct PathSim {
 	pub nodes: Vec<Relay>,
-	rules: Rules,
-	restarts: Vec<u32>,
 	links: Vec<Vec<Option<Metric>>>,
 	up: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
@@ -1438,8 +1426,6 @@ pub(super) struct PathSim {
 	/// each other: true pulls, false cancels.
 	subs: BTreeMap<(Node, Node, Cast, u64), VecDeque<bool>>,
 	held: BTreeSet<(Node, Node)>,
-	/// Nodes whose process is gone and has yet to restart.
-	stopped: BTreeSet<Node>,
 	pub stats: PathStats,
 	/// Copy offers and their ends sent per broadcast.
 	pub warm: BTreeMap<Cast, usize>,
@@ -1450,14 +1436,11 @@ impl PathSim {
 	pub fn new(nodes: usize, rules: Rules) -> Self {
 		Self {
 			nodes: (0..nodes).map(|node| Relay::new(hop(node, 0), rules)).collect(),
-			rules,
-			restarts: vec![0; nodes],
 			links: vec![vec![None; nodes]; nodes],
 			up: BTreeSet::new(),
 			queues: BTreeMap::new(),
 			subs: BTreeMap::new(),
 			held: BTreeSet::new(),
-			stopped: BTreeSet::new(),
 			stats: PathStats::default(),
 			warm: BTreeMap::new(),
 			events: Vec::new(),
@@ -1488,7 +1471,7 @@ impl PathSim {
 		self.up.insert(Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			let cost = self.links[x][y].expect("a configured link");
-			let peer = hop(y, self.restarts[y]);
+			let peer = hop(y, 0);
 			let forwards = !self.nodes[y].leaf;
 			let reads = forwards && !self.nodes[y].legacy;
 			self.nodes[x].connect(y, peer, forwards, reads, cost);
@@ -1511,44 +1494,10 @@ impl PathSim {
 		self.flush();
 	}
 
-	/// `peer` notices its session to `node` closed. `node`, whose process is gone,
-	/// does nothing.
-	pub fn sever(&mut self, node: Node, peer: Node) {
-		self.up.remove(&Self::pair(node, peer));
-		for key in [(node, peer), (peer, node)] {
-			self.queues.remove(&key);
-			self.subs.retain(|(from, to, ..), _| (*from, *to) != key);
-			self.held.remove(&key);
-		}
-		self.nodes[peer].disconnect(node);
-		self.flush();
-	}
-
 	fn peers(&self, node: Node) -> Vec<Node> {
 		(0..self.nodes.len())
 			.filter(|&peer| self.links[node][peer].is_some() && self.connected(node, peer))
 			.collect()
-	}
-
-	/// The process at `node` stops: nothing passes between it and `peer` from now on,
-	/// though `peer` has yet to notice, and no timer of its runs until `kill`.
-	pub fn mute(&mut self, node: Node, peer: Node) {
-		self.held.insert((node, peer));
-		self.held.insert((peer, node));
-		self.stopped.insert(node);
-	}
-
-	/// The process at `node` exits: its sessions close and its state is lost. It says
-	/// nothing on the way out, so each neighbour notices and it does not.
-	pub fn kill(&mut self, node: Node) {
-		for peer in self.peers(node) {
-			self.sever(node, peer);
-		}
-		self.stopped.remove(&node);
-		self.restarts[node] += 1;
-		let leaf = self.nodes[node].leaf;
-		self.nodes[node] = Relay::new(hop(node, self.restarts[node]), self.rules);
-		self.nodes[node].leaf = leaf;
 	}
 
 	pub fn originate(&mut self, node: Node, id: Id) {
@@ -1558,11 +1507,6 @@ impl PathSim {
 
 	pub fn announce(&mut self, node: Node, claim: &str) {
 		self.nodes[node].announce(p(claim));
-		self.flush();
-	}
-
-	pub fn unannounce(&mut self, node: Node, claim: &str) {
-		self.nodes[node].unannounce(p(claim));
 		self.flush();
 	}
 
@@ -1637,20 +1581,14 @@ impl PathSim {
 		true
 	}
 
-	/// One hop of delay passes at every running node. Whether any still waits on a timer.
+	/// One hop of delay passes at every node. Whether any still waits on a timer.
 	pub fn tick(&mut self) -> bool {
 		let mut waiting = false;
-		for (node, relay) in self.nodes.iter_mut().enumerate() {
-			if !self.stopped.contains(&node) {
-				waiting |= relay.tick();
-			}
+		for relay in &mut self.nodes {
+			waiting |= relay.tick();
 		}
 		self.flush();
 		waiting
-	}
-
-	pub fn queued(&self, from: Node, to: Node) -> usize {
-		self.queues.get(&(from, to)).map_or(0, VecDeque::len)
 	}
 
 	/// The queues with a message to deliver that are not held.
@@ -1777,33 +1715,5 @@ fn a_ring_takes_the_other_way_round() {
 			assert_eq!(sim.shows(node, 7, "a"), None, "{rules:?}: node {node}");
 			assert_eq!(sim.nodes[node].retained(), (0, 0), "{rules:?}: node {node}");
 		}
-	}
-}
-
-impl Relay {
-	pub fn dump(&self, id: Id) -> String {
-		let mut out = format!(
-			"hop {} route {:?} dead {:?} epochs {:?} doubt {:?}",
-			self.hop,
-			self.routes.get(&id).map(|r| (r.next, r.path.is_some())),
-			self.dead,
-			self.epochs,
-			self.doubt
-		);
-		for (peer, session) in &self.sessions {
-			out += &format!(
-				"\n    {peer}: rx {:?} tx {:?} told {:?}",
-				session
-					.rx
-					.get(&id)
-					.map(|h| (h.state, h.path.iter().map(|x| (x.node, x.session)).collect::<Vec<_>>())),
-				session
-					.tx
-					.get(&id)
-					.map(|s| (s.held, s.path.iter().map(|x| (x.node, x.session)).collect::<Vec<_>>())),
-				session.told
-			);
-		}
-		out
 	}
 }

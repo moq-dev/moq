@@ -1772,6 +1772,7 @@ impl TrackState {
 			key,
 			group::Bounds {
 				start: frame_start,
+				byte: 0,
 				end: None,
 			},
 		)
@@ -3899,6 +3900,7 @@ impl Boarding {
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<group::Consumer>> {
 		let frames = group::Bounds {
 			start: self.frame,
+			byte: 0,
 			end: None,
 		};
 		let key = self.key;
@@ -4270,7 +4272,11 @@ impl Producer {
 		state.claim_key(info.start, start)?;
 		let mut group = group::Producer::new(info, track, state.cache.clone()).with_meter(state.ingress.meter());
 		if start != 0 {
-			group.bound(group::Bounds { start, end: None })?;
+			group.bound(group::Bounds {
+				start,
+				byte: 0,
+				end: None,
+			})?;
 		}
 		if let Some(content) = content {
 			group.handle().share_content(content);
@@ -6357,6 +6363,7 @@ impl Consumer {
 				|| state.info.as_ref().is_none_or(|info| info.compressed())
 			{
 				request.options.frame_start = 0;
+				request.options.byte_start = 0;
 			}
 			// A compressed stream needs the entire dictionary; an unknown track is conservative
 			// until TRACK_INFO has told the relay which representation it will receive.
@@ -6387,6 +6394,7 @@ impl Consumer {
 				fills,
 				key,
 				frame_start: options.frame_start,
+				byte_start: options.byte_start,
 				frame_end,
 				priority: options.priority,
 				max_delay: options.max_delay,
@@ -6408,6 +6416,7 @@ impl Consumer {
 				fills: state.read().fills.clone(),
 				key,
 				frame_start: options.frame_start,
+				byte_start: options.byte_start,
 				frame_end,
 				priority: options.priority,
 				max_delay: options.max_delay,
@@ -6742,6 +6751,7 @@ fn queue(fills: &kio::Shared<FillState>, key: u64, request: &FetchOptions) -> Op
 			group: key,
 			frame: options.frame_start,
 		},
+		byte: options.byte_start,
 		end,
 		frame_end: request.end,
 		asking: fill::Asking {
@@ -6777,6 +6787,7 @@ pub struct Fetching {
 	// This caller's own start, so a cached group that begins above it is a miss
 	// rather than a short answer.
 	frame_start: u64,
+	byte_start: u64,
 	frame_end: Option<u64>,
 	// This caller's priority, for a fetch that moves to a front's routes.
 	priority: i8,
@@ -6810,6 +6821,7 @@ impl Fetching {
 	) -> Self {
 		let frames = group::Bounds {
 			start: request.options.frame_start,
+			byte: request.options.byte_start,
 			end: request.end,
 		};
 		let (fills, cached) = {
@@ -6831,6 +6843,7 @@ impl Fetching {
 			fills,
 			key,
 			frame_start: request.options.frame_start,
+			byte_start: request.options.byte_start,
 			frame_end: request.end,
 			priority: request.options.priority,
 			max_delay: request.options.max_delay,
@@ -6878,6 +6891,7 @@ impl Fetching {
 				priority: self.priority,
 				max_delay: self.max_delay,
 				frame_start: self.frame_start,
+				byte_start: self.byte_start,
 			};
 			self.resume = Some(Box::new(routes.fetch_group(
 				self.key,
@@ -6934,6 +6948,7 @@ impl Fetching {
 		// error is the channel closing without any of those.
 		let frames = group::Bounds {
 			start: frame_start,
+			byte: self.byte_start,
 			end: self.frame_end,
 		};
 		let cached = |waiter: &kio::Waiter| match state.poll(waiter, |state| state.poll_fetch_cached(key, frames)) {
@@ -6995,6 +7010,7 @@ impl Fetching {
 				priority: self.priority,
 				max_delay: self.max_delay,
 				frame_start: self.frame_start,
+				byte_start: self.byte_start,
 			};
 			self.result = queue(
 				&self.fills,
@@ -8858,6 +8874,7 @@ impl Cursor {
 			}
 			let ask = fill::Ask {
 				start: Position::group(0),
+				byte: 0,
 				end: reach,
 				frame_end: None,
 				asking: *asking,
@@ -9175,6 +9192,7 @@ impl Cursor {
 				priority: asking.priority,
 				max_delay: asking.delay.max,
 				frame_start: 0,
+				byte_start: 0,
 			},
 			end: None,
 		};
@@ -17898,7 +17916,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
+			.insert_group_request(
+				3,
+				group::Bounds {
+					byte: 0,
+					start: 0,
+					end: Some(3),
+				},
+				None,
+			)
 			.unwrap();
 		for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
 			head.write_frame(at(millis), &payload[..]).unwrap();
@@ -17924,7 +17950,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
+			.insert_group_request(
+				3,
+				group::Bounds {
+					byte: 0,
+					start: 0,
+					end: Some(3),
+				},
+				None,
+			)
 			.unwrap();
 		let mut reader = head.consume().with_range(..3);
 		for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
@@ -17970,7 +18004,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(3, group::Bounds { start: 2, end: Some(3) }, None)
+			.insert_group_request(
+				3,
+				group::Bounds {
+					byte: 0,
+					start: 2,
+					end: Some(3),
+				},
+				None,
+			)
 			.unwrap();
 		drop(hold);
 		cut.write_frame(at(302), &b"c"[..]).unwrap();
@@ -18059,7 +18101,15 @@ mod test {
 				.write()
 				.ok()
 				.unwrap()
-				.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
+				.insert_group_request(
+					3,
+					group::Bounds {
+						byte: 0,
+						start: 0,
+						end: Some(3),
+					},
+					None,
+				)
 				.unwrap();
 			for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
 				head.write_frame(at(millis), &payload[..]).unwrap();
@@ -26552,6 +26602,7 @@ mod test {
 					0,
 					group::Bounds {
 						start,
+						byte: 0,
 						end: Some(start + 1),
 					},
 					None,
@@ -26580,7 +26631,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
+			.insert_group_request(
+				0,
+				group::Bounds {
+					byte: 0,
+					start: 0,
+					end: Some(1),
+				},
+				None,
+			)
 			.unwrap();
 		assert!(Arc::ptr_eq(&owner, &refill.handle().content().unwrap()));
 		refill.write_frame(refill.key_time(), b"zero".as_slice()).unwrap();
@@ -26600,7 +26659,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
+			.insert_group_request(
+				0,
+				group::Bounds {
+					byte: 0,
+					start: 0,
+					end: Some(1),
+				},
+				None,
+			)
 			.unwrap();
 		new.write_frame(new.key_time(), b"new zero".as_slice()).unwrap();
 		assert!(!Arc::ptr_eq(&owner, &new.handle().content().unwrap()));
@@ -26637,7 +26704,15 @@ mod test {
 				.write()
 				.ok()
 				.unwrap()
-				.insert_group_request(0, group::Bounds { start: 3, end: Some(5) }, None)
+				.insert_group_request(
+					0,
+					group::Bounds {
+						byte: 0,
+						start: 3,
+						end: Some(5),
+					},
+					None,
+				)
 				.unwrap();
 			second.write_frame(second.key_time(), b"three".as_slice()).unwrap();
 			let mut second_read = second.consume().with_range(4..);
@@ -26746,7 +26821,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(0, group::Bounds { start: 1, end: Some(3) }, None)
+			.insert_group_request(
+				0,
+				group::Bounds {
+					byte: 0,
+					start: 1,
+					end: Some(3),
+				},
+				None,
+			)
 			.unwrap();
 		head.set_wire(wire(90)).unwrap();
 		let head = write(head, 90, b"b");
@@ -26762,7 +26845,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(0, group::Bounds { start: 0, end: Some(2) }, None)
+			.insert_group_request(
+				0,
+				group::Bounds {
+					byte: 0,
+					start: 0,
+					end: Some(2),
+				},
+				None,
+			)
 			.unwrap();
 		earlier.set_wire(wire(90)).unwrap();
 		let earlier = write(earlier, 90, b"b");
@@ -26978,7 +27069,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(0, group::Bounds { start: 3, end: Some(4) }, None)
+			.insert_group_request(
+				0,
+				group::Bounds {
+					byte: 0,
+					start: 3,
+					end: Some(4),
+				},
+				None,
+			)
 			.unwrap();
 		head.write_frame(head.key_time(), b"three".as_slice()).unwrap();
 		head.close().unwrap();
@@ -27001,7 +27100,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(0, group::Bounds { start: 4, end: Some(5) }, None)
+			.insert_group_request(
+				0,
+				group::Bounds {
+					byte: 0,
+					start: 4,
+					end: Some(5),
+				},
+				None,
+			)
 			.unwrap();
 		assert!(Arc::ptr_eq(
 			&identity.upgrade().unwrap(),
@@ -27041,7 +27148,15 @@ mod test {
 			.write()
 			.ok()
 			.unwrap()
-			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
+			.insert_group_request(
+				0,
+				group::Bounds {
+					byte: 0,
+					start: 0,
+					end: Some(1),
+				},
+				None,
+			)
 			.unwrap();
 		head.write_frame(head.key_time(), bytes::Bytes::new()).unwrap();
 		let head = head.close().unwrap();

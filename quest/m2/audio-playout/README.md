@@ -92,12 +92,12 @@ zero underruns (2026-11-08); the target formula and the playout as the
 largest `delay + target` among subscribed renditions; one algorithm with
 shared vectors for both players.
 
-Order: the 200 ms snap both ways is on `main` on today's splices (the
-congestion catch-up), the
-[lag rule](/quest/m2/audio-playout/lag-rule.md) replaces the controller
-under it, and the [clock step](/quest/m2/audio-playout/clock-step.md) builds
-on the lag rule. [Output latency](/quest/m2/audio-playout/output-latency.md)
-and the [join's hold](/quest/m2/audio-playout/join-hold.md) are independent.
+Order: the 200 ms snap both ways and the
+[lag rule](https://github.com/moq-dev/moq/pull/8722), a continuous stretch
+that replaced the NetEq controller and splices under it, are done, and the
+[clock step](/quest/m2/audio-playout/clock-step.md) builds on the lag rule.
+[Output latency](/quest/m2/audio-playout/output-latency.md) and the
+[join's hold](/quest/m2/audio-playout/join-hold.md) are independent.
 The [calibration](/quest/m3/audio-calibrate.md) re-measures every ceiling
 after this epic.
 

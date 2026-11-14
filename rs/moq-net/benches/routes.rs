@@ -23,6 +23,16 @@
 //! - refollow: the same node closes one prefix's stream and opens it again. The claims
 //!   axis is expected to grow, since the stream hears its prefix's claims again; the
 //!   prefixes axis no faster than the prefixes held.
+//! - path/watched, path/unwatched, path/received: the same fan-out grids on the path rule.
+//! - path/follow, path/teardown, path/refollow: the prefix-by-claim grid on the path
+//!   router, including initial following and timer work with a virtual clock.
+//! - path/drain: a relay hears a node it reaches over many sessions send GOAWAY, with
+//!   a route per session sent to each stream it answers. Swept over the leaving
+//!   node's sessions and the streams: both axes are expected to grow, since each
+//!   stream is re-sent each route ranked draining, and no faster than their product.
+//! - path/drained: after the drain, an RTT change on a session with no routes. Swept
+//!   over the same grid: the streams axis is expected to grow, since each stream's
+//!   DRAIN notice is kept; the sessions axis is not.
 //!
 //! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
@@ -42,6 +52,10 @@ const HELD: [(usize, usize); 4] = [(10, 10), (10_000, 10), (10, 100), (10_000, 1
 
 /// `(prefixes, claims)` shapes for a node following one origin per prefix.
 const FOLLOWED: [(usize, usize); 4] = [(16, 1), (1_024, 1), (16, 16), (1_024, 16)];
+
+/// `(sessions, streams)` shapes for a relay hearing a node it reaches over many
+/// sessions drain.
+const DRAINING: [(usize, usize); 4] = [(4, 4), (128, 4), (4, 128), (128, 128)];
 
 /// `(claims, lag)` shapes for a relay hearing a stream that lags another.
 const LAGGING: [(usize, usize); 4] = [(100, 1), (10_000, 1), (100, 100), (10_000, 10_000)];
@@ -150,6 +164,125 @@ fn bench_refollow(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_path_teardown(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/teardown");
+	for (prefixes, claims) in FOLLOWED {
+		let id = BenchmarkId::from_parameter(format!("{prefixes}p_{claims}c"));
+		group.bench_function(id, |b| {
+			b.iter_batched(
+				|| fuzz::PathRouteFollower::new(prefixes, claims),
+				fuzz::PathRouteFollower::teardown,
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
+fn bench_path_follow(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/follow");
+	for (prefixes, claims) in FOLLOWED {
+		let id = BenchmarkId::from_parameter(format!("{prefixes}p_{claims}c"));
+		group.bench_function(id, |b| {
+			b.iter_batched(
+				|| (),
+				|()| fuzz::PathRouteFollower::new(prefixes, claims),
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
+fn bench_path(c: &mut Criterion, name: &str, interest: fn(usize) -> String, sent: usize) {
+	let mut group = c.benchmark_group(format!("routes/path/{name}"));
+	for (claims, streams) in SHAPES {
+		let id = BenchmarkId::from_parameter(format!("{claims}c_{streams}s"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let node = fixture.get_or_insert_with(|| {
+				let interests: Vec<String> = (0..streams).map(interest).collect();
+				let interests: Vec<&str> = interests.iter().map(String::as_str).collect();
+				fuzz::PathRouteNode::new(claims, &interests)
+			});
+			b.iter(|| {
+				node.own("live/extra", true);
+				assert_eq!(node.drain(), sent * streams);
+				node.own("live/extra", false);
+				assert_eq!(node.drain(), sent * streams);
+			});
+		});
+	}
+	group.finish();
+}
+
+fn bench_path_watched(c: &mut Criterion) {
+	bench_path(c, "watched", |_| String::new(), 1);
+}
+
+fn bench_path_unwatched(c: &mut Criterion) {
+	bench_path(c, "unwatched", |i| format!("other/{i}"), 0);
+}
+
+fn bench_path_received(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/received");
+	for (claims, changes) in RECEIVED {
+		let id = BenchmarkId::from_parameter(format!("{claims}c_{changes}d"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let relay = fixture.get_or_insert_with(|| fuzz::PathRouteRelay::new(claims));
+			b.iter(|| assert_eq!(relay.change(changes), (1, changes)));
+		});
+	}
+	group.finish();
+}
+
+fn bench_path_refollow(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/refollow");
+	for (prefixes, claims) in FOLLOWED {
+		let id = BenchmarkId::from_parameter(format!("{prefixes}p_{claims}c"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let follower = fixture.get_or_insert_with(|| fuzz::PathRouteFollower::new(prefixes, claims));
+			b.iter(|| follower.refollow());
+		});
+	}
+	group.finish();
+}
+
+fn bench_path_drain(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/drain");
+	for (sessions, streams) in DRAINING {
+		let id = BenchmarkId::from_parameter(format!("{sessions}n_{streams}s"));
+		group.bench_function(id, |b| {
+			// Borrowed, so dropping the fixture stays out of the sample.
+			b.iter_batched_ref(
+				|| fuzz::PathRouteDrain::new(sessions, streams),
+				|node| node.drain(),
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
+fn bench_path_drained(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/drained");
+	for (sessions, streams) in DRAINING {
+		let id = BenchmarkId::from_parameter(format!("{sessions}n_{streams}s"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let node = fixture.get_or_insert_with(|| {
+				let mut node = fuzz::PathRouteDrain::new(sessions, streams);
+				node.drain();
+				node
+			});
+			b.iter(|| node.idle());
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_watched,
@@ -158,6 +291,14 @@ criterion_group!(
 	bench_lagging,
 	bench_confirmed,
 	bench_teardown,
-	bench_refollow
+	bench_refollow,
+	bench_path_follow,
+	bench_path_watched,
+	bench_path_unwatched,
+	bench_path_received,
+	bench_path_teardown,
+	bench_path_refollow,
+	bench_path_drain,
+	bench_path_drained
 );
 criterion_main!(benches);

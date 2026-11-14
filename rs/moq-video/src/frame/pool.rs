@@ -1,11 +1,16 @@
-//! A bounded pool of device allocations for the GPU frame path.
+//! A pool of device allocations for the GPU frame path.
 //!
-//! Every frame the GPU conversion or resize produces draws its buffer from
-//! here, so the memory a stream can hold at once is a fixed number of buffers
-//! rather than however many frames an encoder falls behind by. A buffer goes
-//! back when its last frame drops, and a later frame of the same or a smaller
-//! size reuses it; `cuMemFree` synchronizes the whole device, so recycling
-//! also keeps a free off the per-frame path.
+//! Every CUDA frame draws its buffer from here. A buffer goes back when its
+//! last frame drops, and a later frame of the same or a smaller size reuses
+//! it: `cuMemAlloc` and `cuMemFree` go through the driver's per-GPU lock, which
+//! every process on the device shares, and `cuMemFree` also synchronizes the
+//! device, so neither belongs on the per-frame path.
+//!
+//! A bounded pool caps the buffers a stream holds at once, so a producer
+//! that outruns its encoder is refused rather than handed unbounded device
+//! memory. An unbounded one serves a decoder, which cannot refuse a picture:
+//! its consumers bound how many frames stay alive, and the pool keeps at most
+//! as many buffers as were ever alive together.
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -24,7 +29,8 @@ pub(crate) trait Alloc {
 
 pub(crate) struct Pool<A: Alloc> {
 	alloc: A,
-	capacity: usize,
+	/// The most buffers held at once, live and idle together; `None` never refuses.
+	capacity: Option<NonZeroUsize>,
 	state: Mutex<State<A::Buffer>>,
 }
 
@@ -36,11 +42,12 @@ struct State<B> {
 }
 
 impl<A: Alloc> Pool<A> {
-	/// A pool holding at most `capacity` buffers, live and idle together.
-	pub(crate) fn new(alloc: A, capacity: NonZeroUsize) -> Self {
+	/// A pool holding at most `capacity` buffers, live and idle together, or
+	/// any number for `None`.
+	pub(crate) fn new(alloc: A, capacity: Option<NonZeroUsize>) -> Self {
 		Self {
 			alloc,
-			capacity: capacity.get(),
+			capacity,
 			state: Mutex::new(State {
 				live: 0,
 				idle: Vec::new(),
@@ -48,16 +55,17 @@ impl<A: Alloc> Pool<A> {
 		}
 	}
 
-	/// The most buffers this pool holds at once.
-	pub(crate) fn capacity(&self) -> usize {
+	/// The most buffers this pool holds at once, or `None` when unbounded.
+	pub(crate) fn capacity(&self) -> Option<NonZeroUsize> {
 		self.capacity
 	}
 
-	/// Hold one of the pool's buffers, or `None` while every one is live. The
-	/// buffer itself is picked by [`Reservation::fill`], once its size is known.
+	/// Hold one of the pool's buffers, or `None` while a bounded pool's every
+	/// one is live. The buffer itself is picked by [`Reservation::fill`], once
+	/// its size is known.
 	pub(crate) fn reserve(self: &Arc<Self>) -> Option<Reservation<A>> {
 		let mut state = self.state.lock().expect("GPU frame pool poisoned");
-		if state.live >= self.capacity {
+		if self.capacity.is_some_and(|capacity| state.live >= capacity.get()) {
 			return None;
 		}
 		state.live += 1;
@@ -73,9 +81,9 @@ pub(crate) struct Reservation<A: Alloc>(Held<A>);
 
 impl<A: Alloc> Reservation<A> {
 	/// A buffer of at least `len` bytes: the smallest idle one that fits, else a
-	/// fresh allocation while under capacity, else an idle one too small for the
-	/// job freed to make room. Only a failed allocation is an error, and it
-	/// releases the reservation.
+	/// fresh allocation replacing the smallest idle one, all too small for the
+	/// job, so the pool never holds more buffers than were ever live at once.
+	/// Only a failed allocation is an error, and it releases the reservation.
 	pub(crate) fn fill(self, len: usize) -> Result<Lease<A>, Error> {
 		let mut held = self.0;
 		let pool = &held.pool;
@@ -90,17 +98,14 @@ impl<A: Alloc> Reservation<A> {
 		let buffer = match fits {
 			Some(index) => state.idle.swap_remove(index),
 			None => {
-				// `live` counts this reservation, so an idle buffer exists
-				// whenever the two together exceed capacity.
-				if state.live + state.idle.len() > pool.capacity {
-					let smallest = state
-						.idle
-						.iter()
-						.enumerate()
-						.min_by_key(|(_, (have, _))| *have)
-						.map(|(index, _)| index)
-						.expect("an idle buffer exists past capacity");
-					state.idle.swap_remove(smallest);
+				let smallest = state
+					.idle
+					.iter()
+					.enumerate()
+					.min_by_key(|(_, (have, _))| *have)
+					.map(|(index, _)| index);
+				if let Some(index) = smallest {
+					state.idle.swap_remove(index);
 				}
 				(len, pool.alloc.alloc(len)?)
 			}
@@ -162,10 +167,7 @@ mod tests {
 	}
 
 	fn pool(capacity: usize) -> Arc<Pool<Counting>> {
-		Arc::new(Pool::new(
-			Counting(AtomicUsize::new(0)),
-			NonZeroUsize::new(capacity).unwrap(),
-		))
+		Arc::new(Pool::new(Counting(AtomicUsize::new(0)), NonZeroUsize::new(capacity)))
 	}
 
 	fn take(pool: &Arc<Pool<Counting>>, len: usize) -> Lease<Counting> {
@@ -175,7 +177,7 @@ mod tests {
 	#[test]
 	fn reserve_yields_capacity_places_then_none() {
 		let pool = pool(2);
-		assert_eq!(pool.capacity(), 2);
+		assert_eq!(pool.capacity(), NonZeroUsize::new(2));
 		let a = pool.reserve().unwrap();
 		let _b = pool.reserve().unwrap();
 		assert!(pool.reserve().is_none(), "a full pool refuses rather than grows");
@@ -223,6 +225,20 @@ mod tests {
 	}
 
 	#[test]
+	fn an_unbounded_pool_replaces_buffers_it_outgrows() {
+		let pool = Arc::new(Pool::new(Counting(AtomicUsize::new(0)), None));
+		let _live = take(&pool, 10);
+		for len in 11..100 {
+			drop(take(&pool, len));
+		}
+		assert_eq!(
+			pool.state.lock().unwrap().idle.len(),
+			1,
+			"one buffer was ever idle at once"
+		);
+	}
+
+	#[test]
 	fn an_idle_buffer_too_small_is_replaced_within_capacity() {
 		let pool = pool(2);
 		let _live = take(&pool, 10);
@@ -234,6 +250,22 @@ mod tests {
 		assert_eq!(*big, 100);
 		assert_eq!(pool.alloc.0.load(Ordering::Relaxed), 3);
 		assert!(pool.reserve().is_none(), "both buffers are live now");
+	}
+
+	#[test]
+	fn an_unbounded_pool_recycles_instead_of_refusing() {
+		let pool = Arc::new(Pool::new(Counting(AtomicUsize::new(0)), None));
+		let live: Vec<_> = (0..20).map(|_| take(&pool, 100)).collect();
+		drop(live);
+		assert_eq!(pool.alloc.0.load(Ordering::Relaxed), 20);
+
+		// A steady stream at that depth allocates nothing more.
+		for _ in 0..100 {
+			let frames: Vec<_> = (0..20).map(|_| take(&pool, 100)).collect();
+			drop(frames);
+		}
+		assert_eq!(pool.alloc.0.load(Ordering::Relaxed), 20, "held buffers are reused");
+		assert_eq!(pool.state.lock().unwrap().idle.len(), 20);
 	}
 
 	#[test]
@@ -252,7 +284,7 @@ mod tests {
 			}
 		}
 
-		let pool = Arc::new(Pool::new(Flaky(AtomicBool::new(true)), NonZeroUsize::new(1).unwrap()));
+		let pool = Arc::new(Pool::new(Flaky(AtomicBool::new(true)), NonZeroUsize::new(1)));
 		assert!(matches!(pool.reserve().unwrap().fill(8), Err(Error::Codec(_))));
 		assert_eq!(pool.state.lock().unwrap().live, 0);
 		pool.reserve()

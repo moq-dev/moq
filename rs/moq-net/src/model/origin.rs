@@ -8692,20 +8692,26 @@ impl Routes {
 
 	/// The next update must be a retraction at `expected`.
 	pub fn assert_next_ended(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
+		self.assert_next_gone(RouteKind::End, expected);
+	}
+
+	/// The next update must be `expected` let go of here, not retracted by its origin.
+	pub fn assert_next_offline(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
+		self.assert_next_gone(RouteKind::Offline, expected);
+	}
+
+	fn assert_next_gone(&mut self, kind: RouteKind, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
 		match kio::wait(|waiter| self.poll_next(waiter))
 			.now_or_never()
 			.expect("next blocked")
 			.expect("no next")
 		{
-			RouteEvent {
-				kind: RouteKind::End,
-				announce,
-			} => assert_eq!(
+			RouteEvent { kind: got, announce } if got == kind => assert_eq!(
 				announce.prefix,
 				expected.try_into().expect("expected path"),
 				"wrong prefix"
 			),
-			other => panic!("should be a retraction: got {other:?}"),
+			other => panic!("should be {kind:?}: got {other:?}"),
 		}
 	}
 

@@ -70,6 +70,7 @@ A Group Stream, FETCH response, or datagram is read with the Version of its trac
 # Group Streams {#group}
 When the extension is negotiated, a Group Stream carries a Group State after the GROUP message, and an Object Record before each FRAME.
 A FETCH response carries the same, with the Group State first.
+A FETCH for a track with a Version MUST NOT set a non-zero `Start Byte`, since an Object Record names a whole object; a publisher MUST reset the response with a PROTOCOL_VIOLATION otherwise.
 
 ~~~
 Group Stream {
@@ -265,6 +266,7 @@ A high, distinctive value is used to avoid collisions with the low values {{moql
 
 ## Since draft-lcurley-moq-ietf-00 (in progress)
 
+- A FETCH for a track with a Version never starts partway into a frame.
 - A relay never restates the Max Age as MAX_CACHE_DURATION, and a sealed MAX_CACHE_DURATION is advisory.
 - Preserve relayed track timestamps and their unchecked MoQ Transport provenance across negotiated hops. Without the extension a relay serves them as native moq-lite timestamps rather than untimed.
 - Initial version.
