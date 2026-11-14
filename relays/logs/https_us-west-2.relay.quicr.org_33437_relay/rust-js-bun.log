@@ -2,32 +2,17 @@ https://us-west-2.relay.quicr.org:33437/relay connected via WebTransport
 https://us-west-2.relay.quicr.org:33437/relay negotiated ALPN: moqt-18
 connected version=moq-transport-18
 subscribe_namespace written: requestId=0
-announced: broadcast=smoke-rust-4246-1030.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4246-1030.hang track=catalog.json
+announced: broadcast=smoke-rust-4047-23576.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4047-23576.hang track=catalog.json
 announced: broadcast=metrics/us-west-2.relay.public active=true
-subscribe written: id=2 broadcast=smoke-rust-4246-1030.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4246-1030.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4246-1030.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4246-1030.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4246-1030.hang track=0.avc3
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 1
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 3
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 5
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 7
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 9
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 11
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 13
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 15
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 17
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 19
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 21
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 23
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 25
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 27
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 30
-received 7230 bytes from smoke-rust-4246-1030.hang
+subscribe written: id=2 broadcast=smoke-rust-4047-23576.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4047-23576.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4047-23576.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4047-23576.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4047-23576.hang track=0.avc3
+received 6709 bytes from smoke-rust-4047-23576.hang
 subscribe_namespace error: connection error: closed (source=session)
-announced: broadcast=smoke-rust-4246-1030.hang active=false
+announced: broadcast=smoke-rust-4047-23576.hang active=false
 announced: broadcast=metrics/us-west-2.relay.public active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
@@ -62,5 +47,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=4 broadcast=smoke-rust-4246-1030.hang track=0.avc3 error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-rust-4246-1030.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4047-23576.hang track=0.avc3 error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4047-23576.hang track=catalog.json error=remote error: 0 (connection error: closed)

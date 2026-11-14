@@ -1,13 +1,12 @@
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
 [page] announce: prefix=
-[page] announced: broadcast=sc-6f135254c8a3963ea30d5bf9dde336b2 active=true
-[page] announced: broadcast=sc-8508f2f58413c0f9b9955c4c9748618b active=true
-[page] announced: broadcast=smoke-rust-4246-2012.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-rust-4246-2012.hang track=catalog.json
+[page] announced: broadcast=smoke-rust-4047-8030.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-rust-4047-8030.hang track=catalog.json
 [page] announced: broadcast=sp-blume-town-test active=true
-[page] subscribe ok: id=0 broadcast=smoke-rust-4246-2012.hang track=catalog.json
-[page] received catalog hang smoke-rust-4246-2012.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-rust-4246-2012.hang track=0.avc3
-[page] subscribe ok: id=1 broadcast=smoke-rust-4246-2012.hang track=0.avc3
-decoded 16 frames from smoke-rust-4246-2012.hang (vite)
+[page] announced: broadcast=vs-3ec3c809f198a9cd6fa810402a193c04 active=true
+[page] subscribe ok: id=0 broadcast=smoke-rust-4047-8030.hang track=catalog.json
+[page] received catalog hang smoke-rust-4047-8030.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-rust-4047-8030.hang track=0.avc3
+[page] subscribe ok: id=1 broadcast=smoke-rust-4047-8030.hang track=0.avc3
+decoded 20 frames from smoke-rust-4047-8030.hang (vite)

@@ -1,12 +1,215 @@
 [page] negotiated protocol: moqt-18
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4246-1030.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4246-1030.hang track=catalog.json
+[page] announced: broadcast=smoke-rust-4047-23576.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4047-23576.hang track=catalog.json
 [page] announced: broadcast=metrics/us-west-2.relay.public active=true
-[page] subscribe written: id=2 broadcast=smoke-rust-4246-1030.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4246-1030.hang track=catalog.json
-[page] received catalog hang smoke-rust-4246-1030.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4246-1030.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4246-1030.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4246-1030.hang track=0.avc3
-decoded 5 frames from smoke-rust-4246-1030.hang (vite)
+[page] subscribe written: id=2 broadcast=smoke-rust-4047-23576.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4047-23576.hang track=catalog.json
+[page] received catalog hang smoke-rust-4047-23576.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4047-23576.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4047-23576.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4047-23576.hang track=0.avc3
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 1
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 2
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 3
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 4
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 5
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 6
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 7
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 8
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 9
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 10
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 11
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 12
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 13
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 14
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 15
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 16
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 17
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 18
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 19
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 20
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 21
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 22
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 23
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 24
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 25
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 26
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 27
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 28
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 30
+    at e.decode (http://localhost:46549/assets/index-DuWorxF6.js:1:177134)
+    at a (http://localhost:46549/assets/index-DuWorxF6.js:1:225354)
+    at #f (http://localhost:46549/assets/index-DuWorxF6.js:1:99907)
+    at ys.tryDecode (http://localhost:46549/assets/index-DuWorxF6.js:1:99438)
+    at vf.handleGroup (http://localhost:46549/assets/index-DuWorxF6.js:1:225414)
+    at async #g (http://localhost:46549/assets/index-DuWorxF6.js:1:229903)
+decoded 8 frames from smoke-rust-4047-23576.hang (vite)

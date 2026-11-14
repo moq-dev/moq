@@ -1,17 +1,16 @@
-publishing smoke-js-web-4246-14228.hang (fake camera, vite) to https://aiomoqt-relay.marzresearch.net:4443/
+publishing smoke-js-web-4047-24684.hang (fake camera, vite) to https://aiomoqt-relay.marzresearch.net:4443/
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=g5-1779a07a active=true
-[page] announced: broadcast=openmoq/ffmpeg/artemis active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
 [page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
 [page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
-[page] announced: broadcast=gm/srt/passthrough active=true
-[page] announced: broadcast=gm/abr/cymedia active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/ffmpeg/artemis active=true
 [page] announced: broadcast=gm/abr/cmaf active=true
-[page] announced: broadcast=smoke-js-web-4246-14228.hang active=true
-[page] publish ok: broadcast=smoke-js-web-4246-14228.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4246-14228.hang track=video
+[page] announced: broadcast=gm/abr/cymedia active=true
+[page] announced: broadcast=gm/srt/passthrough active=true
+[page] announced: broadcast=smoke-js-web-4047-24684.hang active=true
+[page] publish ok: broadcast=smoke-js-web-4047-24684.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4047-24684.hang track=video

@@ -2,37 +2,39 @@ https://moqx-main.ci.openmoq.org:4433/moq-relay connected via WebTransport
 https://moqx-main.ci.openmoq.org:4433/moq-relay negotiated ALPN: moqt-16
 connected version=moq-transport-16
 subscribe_namespace written: requestId=0
+announced: broadcast=g5-c23eba37 active=true
 announced: broadcast=ipc-media/sigtest active=true
 announced: broadcast=openmoq/ffmpeg/artemis active=true
 announced: broadcast=com/wowza/techdemos/moqrelay/relay1 active=true
-announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
-announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
-announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
 announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
+announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
+announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
+announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
 announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
 announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
-announced: broadcast=smoke-js-web-4246-27903.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4246-27903.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4246-27903.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4246-27903.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-js-web-4246-27903.hang track=video
-subscribe written: id=4 broadcast=smoke-js-web-4246-27903.hang track=video
-subscribe ok: id=4 broadcast=smoke-js-web-4246-27903.hang track=video
-received 7046 bytes from smoke-js-web-4246-27903.hang
+announced: broadcast=smoke-js-web-4047-6590.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4047-6590.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4047-6590.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4047-6590.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4047-6590.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4047-6590.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4047-6590.hang track=video
+received 7366 bytes from smoke-js-web-4047-6590.hang
 adapter: close() called
-subscribe error: id=2 broadcast=smoke-js-web-4246-27903.hang track=catalog.json error=subscribe stream ended without PUBLISH_DONE
-subscribe error: id=4 broadcast=smoke-js-web-4246-27903.hang track=video error=subscribe stream ended without PUBLISH_DONE
+subscribe error: id=2 broadcast=smoke-js-web-4047-6590.hang track=catalog.json error=subscribe stream ended without PUBLISH_DONE
+subscribe error: id=4 broadcast=smoke-js-web-4047-6590.hang track=video error=subscribe stream ended without PUBLISH_DONE
 subscribe_namespace error: remote error: 386759528
+announced: broadcast=g5-c23eba37 active=false
 announced: broadcast=ipc-media/sigtest active=false
 announced: broadcast=openmoq/ffmpeg/artemis active=false
 announced: broadcast=com/wowza/techdemos/moqrelay/relay1 active=false
-announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=false
-announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=false
-announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=false
 announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=false
+announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=false
+announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=false
+announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=false
 announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=false
 announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=false
-announced: broadcast=smoke-js-web-4246-27903.hang active=false
+announced: broadcast=smoke-js-web-4047-6590.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. Stream: remote error: 386759528
  code: 0,
 
