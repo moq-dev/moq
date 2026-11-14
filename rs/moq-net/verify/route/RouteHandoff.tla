@@ -20,7 +20,8 @@
 (*   neighbour that learned the route from it has answered.               *)
 (* - A closed session casts doubt on the node at its far end: no relay     *)
 (*   moves to a route through it until a timer lifts the doubt. The timer  *)
-(*   is the step `Lift`, which may fire at any moment.                    *)
+(*   is the step `Lift`, which may fire at any moment. `Exempt` compares   *)
+(*   letting a relay move sooner onto some routes through a doubted node.  *)
 (*                                                                         *)
 (* Each node's every entry point is one atomic step ending in `Update`,    *)
 (* as in the router. Messages travel on one FIFO per direction. A          *)
@@ -44,7 +45,9 @@ CONSTANTS
     Narrow,       \* the claims inside prefix "a"
     MaxRev,       \* the publisher's claim changes
     MaxFlaps,     \* session opens and closes
-    Patient       \* TRUE: a doubt lifts only once no news about its node is in flight
+    Patient,      \* TRUE: a doubt lifts only once no news about its node is in flight
+    Exempt        \* which routes doubt does not keep a relay off (`Exempted`):
+                  \* "none", the router's rule, or a comparison rule
 
 Relays == Nodes \ {Origin}
 
@@ -163,6 +166,25 @@ Live(r) == r.on /\ ~r.held
 (* Selection on node n's state s (path.rs: `select`, `pending`, `hopes`). *)
 
 Doubted(s, path) == \E i \in DOMAIN path : path[i][1] \in s.doubt
+
+\* The route neighbour m offered for key k is m's own: its path names m alone.
+\* Sessions authenticate their peer, so only m can offer it on m's session.
+Own(s, m, k) == Len(s.rx[m][k].path) = 1 /\ s.rx[m][k].path[1][1] = m
+
+\* Doubt does not keep this node off the route m offered for key k. "fresh":
+\* m's own route, on a session m opened while this node doubted it, so m was
+\* alive after the news that cast the doubt. The comparison rules each drop one
+\* of those conditions: "own" takes m's own route on any session, and "session"
+\* any route on a session opened while this node doubted any node.
+Exempted(s, m, k) ==
+    CASE Exempt = "fresh" -> Own(s, m, k) /\ m \in s.fresh
+      [] Exempt = "own" -> Own(s, m, k)
+      [] Exempt = "session" -> m \in s.fresh
+      [] OTHER -> FALSE
+
+\* Only doubt keeps this node off the route m offered for key k.
+Barred(s, m, k) == Doubted(s, s.rx[m][k].path) /\ ~Exempted(s, m, k)
+
 \* The path crosses a node this node knows sent GOAWAY.
 Drains(s, path) == \E i \in DOMAIN path : path[i][1] \in s.draining
 
@@ -199,7 +221,7 @@ Pending(n, s, k) ==
         /\ s.tx[p][j].src = k
 
 \* A neighbour offers a route that only doubt keeps this node off.
-Hopes(n, s, k) == \E m \in Nodes : Usable(n, s, m, k) /\ Doubted(s, s.rx[m][k].path)
+Hopes(n, s, k) == \E m \in Nodes : Usable(n, s, m, k) /\ Barred(s, m, k)
 
 \* `select` for one key: the best-ranked usable route, staying on the next hop
 \* among equals, then the lowest key. Doubt keeps a node from moving to a route,
@@ -208,7 +230,7 @@ SelectKey(n, s, k, gens) ==
     LET was == s.rt[k]
         current == IF was.on THEN was.next ELSE None
         using == IF Live(was) THEN was.next ELSE None
-        C == {m \in Nodes : Usable(n, s, m, k) /\ (m = using \/ ~Doubted(s, s.rx[m][k].path))}
+        C == {m \in Nodes : Usable(n, s, m, k) /\ (m = using \/ ~Barred(s, m, k))}
         Path(m) == Append(s.rx[m][k].path, <<n, m, gens[{n, m}]>>)
         Drain(m) == s.rx[m][k].drain \/ m \in s.drain \/ Drains(s, s.rx[m][k].path)
         R(m) == Rank(Path(m), Drain(m))
@@ -502,6 +524,7 @@ InitNode == [
     expiry |-> {}, \* Pending timers belong to individual dead hops.
     drain |-> {},  \* the neighbours that sent GOAWAY on the session open to them
     draining |-> {}, \* nodes known to have sent GOAWAY, while named or doubted
+    fresh |-> {},  \* neighbours whose session opened while this node doubted them
     tx |-> [m \in Nodes |-> [k \in Keys |-> NoSent(k)]],
     told |-> [m \in Nodes |-> {}],
     toldDrain |-> [m \in Nodes |-> {}],
@@ -623,7 +646,9 @@ Deliver(d) ==
 \* the news to cross the mesh.
 Lift(n, x) ==
     LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ {x}, !.wait = @ \ {x},
-                                     !.expiry = {h \in @ : h[2] # x}],
+                                     !.expiry = {h \in @ : h[2] # x},
+                                     \* A later doubt of x postdates its session.
+                                     !.fresh = IF Exempt = "fresh" THEN @ \ {x} ELSE @],
                                      OV, up, gen, ended[n], NoReport, TRUE)]
     IN /\ x \in st[n].wait
        /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] :
@@ -665,14 +690,22 @@ Closed(s, y) ==
               !.tx[y] = [k \in Keys |-> NoSent(k)],
               !.told[y] = {},
               !.toldDrain[y] = {},
-              !.drain = @ \ {y}]
+              !.drain = @ \ {y},
+              !.fresh = @ \ {y}]
+
+\* A session to y opens, fresh as `Exempted` says. Only a comparison rule tracks
+\* it, so the router's rule keeps the state space it had.
+Opened(s, y) ==
+    IF \/ Exempt = "fresh" /\ y \in s.doubt
+       \/ Exempt = "session" /\ s.doubt # {}
+    THEN [s EXCEPT !.fresh = @ \cup {y}] ELSE s
 
 Connect(l) ==
     LET up1 == up \cup {l}
         gen1 == [gen EXCEPT ![l] = @ + 1]
         rs == [x \in l |->
                  LET y == CHOOSE y \in l : y # x
-                 IN Update(x, Closed(st[x], y), OV, up1, gen1, ended[x], NoReport, FALSE)]
+                 IN Update(x, Opened(Closed(st[x], y), y), OV, up1, gen1, ended[x], NoReport, FALSE)]
     IN /\ l \notin up
        /\ flaps < MaxFlaps
        /\ up' = up1

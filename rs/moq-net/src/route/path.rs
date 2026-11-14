@@ -180,6 +180,10 @@ pub(crate) struct Doubt {
 	pub timer: Duration,
 	#[cfg(test)]
 	pub lift: Lift,
+	/// The comparison rule exempting a doubted node's own route, offered on a
+	/// session it opened after the doubt began.
+	#[cfg(test)]
+	pub fresh: bool,
 }
 
 impl Doubt {
@@ -188,6 +192,8 @@ impl Doubt {
 		timer: Duration::from_secs(1),
 		#[cfg(test)]
 		lift: Lift::Timer,
+		#[cfg(test)]
+		fresh: false,
 	};
 }
 
@@ -511,6 +517,10 @@ pub(crate) struct Router<N, A> {
 	dead: BTreeMap<Hop, Death>,
 	/// Each node's doubt and deadline.
 	doubted: BTreeMap<Id, Suspicion>,
+	/// For each doubted node, the sessions opened when the doubt began: a later one
+	/// is fresh for [`Doubt::fresh`].
+	#[cfg(test)]
+	since: BTreeMap<Id, u64>,
 	/// Nodes that sent GOAWAY, kept while a heard route names one or it is in doubt.
 	draining: BTreeSet<Id>,
 	watch: Path,
@@ -584,6 +594,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			filed: BTreeMap::new(),
 			dead: BTreeMap::new(),
 			doubted: BTreeMap::new(),
+			#[cfg(test)]
+			since: BTreeMap::new(),
 			draining: BTreeSet::new(),
 			watch: Path::empty(),
 			interest: 0,
@@ -1066,6 +1078,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let mut ids = BTreeSet::new();
 		for node in due {
 			self.doubted.remove(&node);
+			#[cfg(test)]
+			self.since.remove(&node);
 			ids.extend(self.naming(node));
 		}
 		for hop in expired {
@@ -1301,6 +1315,30 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.any(|hop| matches!(self.doubted.get(&hop.node), Some(Suspicion::Doubted(_))))
 	}
 
+	/// Whether doubt keeps this node from moving onto `path`, which `peer` offered.
+	fn barred(&self, peer: N, path: &[Hop]) -> bool {
+		#[cfg(test)]
+		if self.fresh(peer, path) {
+			return false;
+		}
+		#[cfg(not(test))]
+		let _ = peer;
+		self.doubts_path(path)
+	}
+
+	/// [`Doubt::fresh`]: `path` is `peer`'s own route, offered on a session opened
+	/// after this node began doubting it.
+	#[cfg(test)]
+	fn fresh(&self, peer: N, path: &[Hop]) -> bool {
+		let session = &self.sessions[&peer];
+		self.doubt.fresh
+			&& matches!(path, [hop] if hop.node == session.hop)
+			&& self
+				.since
+				.get(&session.hop)
+				.is_some_and(|since| session.number > *since)
+	}
+
 	fn hear(&mut self, key: RouteId, from: N, heard: Heard<A>) {
 		self.scopes.entry(key.0).or_default().insert(key.1.clone());
 		for hop in heard.offer.path.iter() {
@@ -1390,10 +1428,19 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if !self.draining.insert(node) {
 			return BTreeSet::new();
 		}
+		self.suspect(node, now);
+		self.naming(node)
+	}
+
+	/// Doubt `node` until the timer fires from `now`, or later if it already runs.
+	fn suspect(&mut self, node: Id, now: Instant) {
 		let at = now.saturating_add(self.doubt.timer);
 		let at = self.doubted.get(&node).map_or(at, |state| state.deadline().max(at));
+		#[cfg(test)]
+		if !matches!(self.doubted.get(&node), Some(Suspicion::Doubted(_))) {
+			self.since.insert(node, self.opened);
+		}
 		self.doubted.insert(node, Suspicion::Doubted(at));
-		self.naming(node)
 	}
 
 	/// The session `hop` names closed. `from` reported it, with what became of its own
@@ -1461,9 +1508,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			}
 		}
 		if far != self.hop {
-			let at = now.saturating_add(self.doubt.timer);
-			let at = self.doubted.get(&far).map_or(at, |state| state.deadline().max(at));
-			self.doubted.insert(far, Suspicion::Doubted(at));
+			self.suspect(far, now);
 			// Any route through that node may have become unusable.
 			ids.extend(self.naming(far));
 		}
@@ -1514,7 +1559,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			let Some(metric) = heard.offer.metric.checked_add(session.link.cost) else {
 				continue;
 			};
-			if Some(peer) != using && self.doubts_path(&heard.offer.path) {
+			if Some(peer) != using && self.barred(peer, &heard.offer.path) {
 				// It may come back once the doubt lifts.
 				continue;
 			}
@@ -1630,7 +1675,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			heard.state == State::Live
 				&& !names(&heard.offer.path, self.hop)
 				&& heard.offer.metric.checked_add(self.sessions[peer].link.cost).is_some()
-				&& self.doubts_path(&heard.offer.path)
+				&& self.barred(*peer, &heard.offer.path)
 		})
 	}
 

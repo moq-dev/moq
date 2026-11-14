@@ -51,6 +51,12 @@ impl Rule {
 		lift: Lift::Unnamed,
 		..Doubt::DEFAULT
 	});
+	/// The comparison rule exempting a doubted publisher's own route on a session it
+	/// opened after the doubt began.
+	pub const FRESH: Self = Self::Path(Doubt {
+		fresh: true,
+		..Doubt::DEFAULT
+	});
 
 	pub fn as_str(self) -> &'static str {
 		match self {
@@ -58,6 +64,7 @@ impl Rule {
 			Self::Path(Doubt {
 				lift: Lift::Unnamed, ..
 			}) => "path+early",
+			Self::Path(Doubt { fresh: true, .. }) => "path+fresh",
 			Self::Path(Doubt { lift: Lift::Timer, .. }) => "path",
 		}
 	}
