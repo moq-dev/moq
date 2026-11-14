@@ -125,7 +125,20 @@ class Trends(unittest.TestCase):
             previous = row("2026-10-10", 106) | {"revision": "a" * 40}
             failed, retained = run(previous)
             self.assertEqual(failed.returncode, 1, failed.stderr)
+            # The log ends with the regression, after the build-time table.
+            regression = "artifact: 106 > 100 bytes + 5% (previous: 2026-10-09)\n"
+            self.assertTrue(failed.stderr.endswith(regression), failed.stderr)
             self.assertEqual(retained[-1], previous)
+            # Through one pipe, as the job's log is, the regression still comes last.
+            earlier = root / "earlier.json"
+            earlier.write_text(json.dumps([row("2026-09-10"), row("2026-10-09")]))
+            merged = subprocess.run(
+                [sys.executable, str(Path(report.__file__)), str(root), "--history", str(earlier)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            self.assertTrue(merged.stdout.endswith(regression), merged.stdout)
 
             # A stable next report compares against the failed point, not the last success.
             current = row("2026-10-11", 106) | {"revision": "b" * 40}
