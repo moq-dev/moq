@@ -986,6 +986,8 @@ impl Consumer {
 		let primed = self.prime > 0;
 		let stretching =
 			!primed && !self.shared.finished.load(Ordering::Relaxed) && !self.declared() && self.stretching();
+		// The ring's length before the resume, as `resume` requires.
+		let occupied = self.ring.occupied_len() / channels;
 		let resume = self.resume().map(|(ahead, _)| ahead);
 		let stretch = self.stretch.as_mut().expect("feeding the stretch");
 		if primed != self.staged_prime {
@@ -996,7 +998,7 @@ impl Consumer {
 			self.staged_prime = primed;
 		}
 		let want = if stretching { stretch.window } else { need };
-		let mut frames = (self.ring.occupied_len() / channels)
+		let mut frames = occupied
 			.min(want.saturating_sub(stretch.queued()))
 			.min(stretch.room());
 		if primed {
@@ -1073,7 +1075,8 @@ impl Consumer {
 			}
 		}
 		while left > 0 {
-			let mut take = left;
+			// The ring's length before the resume, as `resume` requires.
+			let mut take = left.min(self.ring.occupied_len() / self.channels);
 			if let Some((ahead, _)) = self.resume() {
 				if ahead == 0 {
 					left -= self.cushion(None, left);
