@@ -583,10 +583,8 @@ fn as_sdp(session: &Session, params: AsSdpParams) -> Sdp {
 		let mut lines = v
 			.iter()
 			.map(|m| {
-				// Candidates should only be in the first BUNDLE mid
-				let include_candidates = m.index() == 0;
-
-				let attrs = params.media_attributes(include_candidates);
+				// Candidates go on the first accepted line, added below.
+				let attrs = params.media_attributes(false);
 
 				// Already made send stream SSRCs
 				let mut ssrcs = session.streams.ssrcs_tx(m.mid());
@@ -604,6 +602,14 @@ fn as_sdp(session: &Session, params: AsSdpParams) -> Sdp {
 
 		if let Some(pending) = params.pending {
 			pending.apply_to(&mut lines);
+		}
+
+		// Candidates belong in the first BUNDLE mid, which is the first accepted line: a
+		// rejected line ahead of it, such as an offered data channel, is out of the group.
+		let first = lines.iter().position(|l| !l.disabled).unwrap_or(0);
+		if let Some(line) = lines.get_mut(first) {
+			let candidates = params.candidates.iter().map(|c| MediaAttribute::Candidate(c.clone()));
+			line.attrs.splice(0..0, candidates);
 		}
 
 		// Mids go into the session part of the SDP.
@@ -1664,6 +1670,43 @@ mod test {
 			"{answer}"
 		);
 		assert!(answer.contains(&format!("a=group:BUNDLE {audio}\r\n")), "{answer}");
+	}
+
+	/// An offer that puts its data channel first still gets the answer's candidates on the
+	/// accepted media, since the rejected data channel line is out of the BUNDLE group.
+	#[test]
+	fn candidates_skip_a_rejected_first_line() {
+		crate::vendor::str0m::init_crypto_default();
+
+		let now = Instant::now();
+		let mut offerer = Rtc::new(now);
+		let mut change = offerer.sdp_api();
+		let audio = change.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+		let (offer, _) = change.apply().unwrap();
+		let offer = offer.to_sdp_string();
+		let (session, media) = offer.split_at(offer.find("m=audio").unwrap());
+		let session = session.replace(
+			&format!("a=group:BUNDLE {audio}\r\n"),
+			&format!("a=group:BUNDLE dc {audio}\r\n"),
+		);
+		let offer = format!(
+			"{session}m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+			c=IN IP4 0.0.0.0\r\n\
+			a=mid:dc\r\n\
+			a=sctp-port:5000\r\n{media}"
+		);
+		let offer = SdpOffer::from_sdp_string(&offer).expect("offer with a data channel first");
+
+		let mut answerer = Rtc::new(now);
+		let candidate = Candidate::host((std::net::Ipv4Addr::new(1, 1, 1, 1), 1000).into(), "udp").unwrap();
+		answerer.add_local_candidate(candidate).unwrap();
+		let answer = answerer.sdp_api().accept_offer(offer).unwrap();
+
+		let has_candidate = |m: &MediaLine| m.attrs.iter().any(|a| matches!(a, MediaAttribute::Candidate(_)));
+		assert!(answer.media_lines[0].disabled, "the data channel was accepted");
+		assert!(!has_candidate(&answer.media_lines[0]), "a candidate sits on the rejected line");
+		assert_eq!(answer.media_lines[1].mid(), audio);
+		assert!(has_candidate(&answer.media_lines[1]), "the accepted audio has no candidate");
 	}
 
 	#[test]
