@@ -33,9 +33,9 @@ released. They stay out of m1 and m2 so the cut does not wait on them; each
 starts as soon as its prerequisites (sockets, fastest-reader pacing, outbound
 federation) land. Superseded 2026-11-12 (maintainer, /quest-audit): both moved
 to [m1](/quest/m1/README.md), since the cut no longer waits on m1. The mesh
-libraries came back 2026-11-13, below; byte streams stay in m1. Both left
-moq for Kixel on 2026-11-14 (maintainer): moq keeps what a large live-media
-platform would use.
+libraries came back 2026-11-13, below; byte streams stay in m1. The mesh
+libraries left moq for Kixel on 2026-11-14 (maintainer): moq keeps what a
+large live-media platform would use.
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut), from a read of
 every quest against the code and the downstream quest trees:
