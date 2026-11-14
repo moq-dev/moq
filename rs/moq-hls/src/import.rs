@@ -2414,7 +2414,11 @@ mod tests {
 				Poll::Ready(Err(error)) => return (out, Some(error)),
 				other => panic!("reading a published group's first frame: {other:?}"),
 			};
-			assert_eq!(group.start, frame.timestamp.value(), "a group starts at its first frame");
+			assert_eq!(
+				group.start,
+				frame.timestamp.value(),
+				"a group starts at its first frame"
+			);
 			out.push(frame.timestamp.as_micros().unwrap());
 		}
 		(out, None)

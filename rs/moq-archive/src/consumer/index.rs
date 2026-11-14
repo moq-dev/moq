@@ -156,9 +156,7 @@ pub(super) async fn list<S: ObjectStore>(
 		match Name::parse(filename, timed)? {
 			Name::Info => {}
 			Name::End => found = Some(meta.location),
-			Name::Object(start) => listed
-				.objects
-				.push(((start.group, start.frame), meta.location)),
+			Name::Object(start) => listed.objects.push(((start.group, start.frame), meta.location)),
 		}
 	}
 	listed.objects.sort();
