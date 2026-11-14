@@ -53,8 +53,10 @@ highest bitrate) in a codec it advertised, and one audio rendition, the highest
 bitrate (then sample rate, then channels) in a codec it advertised. A push
 carries the best of each.
 
-Implemented in pure Rust (no librtmp). The CLI speaks plaintext `rtmp://`
-only, so stream keys cross the network unencrypted. The library adds RTMPS on
-the same port when the embedder supplies a TLS config, and can refuse plaintext
+Implemented in pure Rust (no librtmp). `--connect` dials `rtmp://` or
+`rtmps://` (port 443 by default, trusting the system's root certificates), and
+advertises a `tcUrl` of the URL's scheme, host, port, and app, never the stream
+key. `--listen` speaks plaintext `rtmp://` only; the library adds RTMPS on the
+same port when the embedder supplies a TLS config, and can refuse plaintext
 there. FLAC enhanced-audio payloads are dropped because the FLV import does not
 map them. MP3 works in both legacy and enhanced audio tags.
