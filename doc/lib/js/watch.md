@@ -34,7 +34,7 @@ in sync at the latency you ask for.
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive, at most 10 s; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
 | `lookahead` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
-| `stretch` | How far audio may trail the clock before it skips ahead: a duration like `"2s"` (the default), or `"0"` to turn the time stretch off; see [catching up](#catching-up). |
+| `stretch` | How far audio may trail the clock before it skips onto it: a duration like `"200ms"` (the default), or `"0"` to turn the time stretch off; see [catching up](#catching-up). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
@@ -224,11 +224,10 @@ leave the connection's estimate unclaimed. Without a claim, video selects the be
 After a stall, video shows each late frame as it arrives and is live again at
 once. Audio cannot skip without losing what arrives late, so it slows down
 slightly when the audio received ahead of it runs low, falls behind the clock,
-and speeds back up once it recovers until it is back on it. `stretch` bounds
-how far it may trail: only audio later than that is skipped, and the audio
-subscription waits on a stalled group for `delay + stretch`, so the late audio
-still arrives. A voice app might ask for `stretch="200ms"`, a sports stream for
-the default 2 s, whether `delay` is `auto` or fixed.
+and speeds back up once it recovers until it is back on it. Audio that trails
+by more than `stretch`, 200 ms by default, skips onto the clock as video does,
+so a long stall costs one skip instead of seconds of lag, and audio that leads
+it by as much, as when the delay rises, waits for it in silence.
 
 `stretch="0"` turns the time stretch off, for content where a pitch-period
 splice is audible, such as music: received audio plays unaltered, late audio
