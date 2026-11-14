@@ -177,6 +177,9 @@ export class Decoder {
 	// The publisher finishing the running rendition: "read" once every frame is decoded, then "played"
 	// once the clock reached the end of its audio.
 	#finish = new Signal<"read" | "played" | undefined>(undefined);
+	// Whether the running subscription finished cleanly, so it holds every frame it will deliver. The
+	// decode loop reads the finish only past the frames admission holds back, which wait on startup.
+	#complete = new Signal(false);
 	#queued = new Signal<Container.BufferedRanges | undefined>(undefined);
 
 	// Audio ring bridging the main thread and the worklet.
@@ -255,7 +258,8 @@ export class Decoder {
 				queued = queued.add(range.end.saturatingSub(range.start.max(span.end)));
 			}
 			const hold = ringHold(effect.get(this.sync.out.delay));
-			return { start: span.start, end: span.end.add(queued.min(hold)), complete: finish !== undefined };
+			const complete = finish !== undefined || effect.get(this.#complete);
+			return { start: span.start, end: span.end.add(queued.min(hold)), complete };
 		});
 		this.#track = this.sync.track({ target: playout, startup });
 		this.#signals.cleanup(() => this.#track.close());
@@ -941,11 +945,17 @@ export class Decoder {
 			if (arrived !== undefined) ring.received(arrived);
 		});
 
-		// A finished track queued everything it will send, so admission stops waiting for more behind a
-		// frame. The decode loop learns of the finish only past the frames it holds.
+		// A finished track queued everything it will send, so neither admission nor startup waits for
+		// more. The decode loop learns of the finish only past the frames admission holds, which a
+		// buffered ring releases only once startup does.
+		effect.run((inner) => {
+			if (inner.get(sub.closed) !== null) return;
+			this.#complete.set(true);
+			inner.cleanup(() => this.#complete.set(false));
+		});
 		effect.run((inner) => {
 			const ring = inner.get(this.#ring);
-			if (!ring || inner.get(sub.closed) !== null) return;
+			if (!ring || !inner.get(this.#complete)) return;
 			ring.complete(true);
 			inner.cleanup(() => ring.complete(false));
 		});

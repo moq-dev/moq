@@ -324,6 +324,11 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	let producer = new Moq.Broadcast.Producer();
 	let consumer = producer.consume();
 	const relativeBroadcast = mock(() => consumer);
+	// Published, so finishing it settles the decoder's subscription as a publisher's FIN does. The
+	// reads themselves come from `feed`.
+	const publish = () =>
+		producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
+	let track = publish();
 	let audio = Catalog.AudioConfigSchema.parse({
 		codec: "opus",
 		container: { kind: "legacy" },
@@ -381,7 +386,14 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		stretch,
 		sync,
 		push,
-		finish,
+		// Finish the track the decoder reads, publishing a fresh one for the next subscription.
+		finish: () => {
+			finish();
+			track.finish();
+			track.close();
+			producer.removeTrack("audio");
+			track = publish();
+		},
 		queued,
 		enabled,
 		decoding,
@@ -415,6 +427,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			producer.close();
 			producer = new Moq.Broadcast.Producer();
 			consumer = producer.consume();
+			track = publish();
 			frameTimestamp = 0;
 		},
 		// The resolved playout target.
@@ -946,6 +959,30 @@ describe("Decoder across a rendition's absence", () => {
 			await microtasks();
 			expect(ring.ring?.silent).toBe(false);
 			expect(playback.stalled()).toBe(true);
+		} finally {
+			playback.close();
+			await microtasks();
+			installed.close();
+		}
+	});
+
+	// A finished track past the decoded floor yet short of the delay: decoding stops at the floor, so
+	// startup has to learn of the finish from the subscription, not from the decode loop reaching it.
+	it("starts buffered audio on a finished track past its floor and short of its delay, and ends", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const playback = await play(Duration.millis(1000), true);
+		try {
+			await playback.play(30);
+			playback.finish();
+			await microtasks();
+			const [ring] = playback.rings();
+			expect(await playOut(ring)).toBe(30 * 960);
+			expect(playback.stalled()).toBe(false);
+
+			await clock.advance(Duration.millis(2000));
+			await microtasks();
+			expect(playback.ended()).toBe(true);
 		} finally {
 			playback.close();
 			await microtasks();
