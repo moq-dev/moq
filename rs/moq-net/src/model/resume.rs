@@ -27,7 +27,8 @@
 //!
 //! A group carries on across the switch through its [`Recover`]: once its copy stalls while
 //! a newer route serves, it continues from the serving route's copy of the same group at the
-//! same frame (and byte), found in that copy's cache or fetched from it. Once its copy fails,
+//! same frame (and byte), found in that copy's cache or fetched from it, which over lite-07
+//! asks only for the bytes of a frame past those already read. Once its copy fails,
 //! any other copy still holding the group continues it first, since a group's name fixes its
 //! content.
 //!

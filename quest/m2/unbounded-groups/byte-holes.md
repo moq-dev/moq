@@ -22,12 +22,30 @@ by flights, so this waits on Flights and stays in m2 with its epic.
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the byte offset rides
 FETCH's frame start plus the group header, not a SUBSCRIBE range end.
-SUBSCRIBE ranges are whole groups since 2026-11-03
-(Lite-07 FETCH is single-group only,
-[moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616) and
-[moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675)), and flights
-ride lite FETCH since [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944).
-This waits for that quest.
+
+Landed in [moq-dev/moq#8699](https://github.com/moq-dev/moq/pull/8699), the
+first slice:
+
+- Lite-07 FETCH carries a `Start Byte` after `Frame Start`, in Rust, JS, and the
+  lite draft. The response's first frame states its full size and carries only
+  its bytes from there. A FETCH response has no header, so this needed no
+  group-header field.
+- A group copy can start partway into a frame: `group::Bounds::byte` keeps the
+  rest of that frame aside as the copy's `Lead`, outside the frame log. Every
+  whole-frame read finds that frame missing (`Lagged`). Only
+  `group::Consumer::at` with `poll_next_frame_at` reads it, from a byte at or
+  past the copy's start.
+- Route failover mid-frame (`frame::Consumer`'s `Recover`) asks for only the
+  missing suffix by byte. Its integration regression is
+  `rs/moq-net/tests/integration/byte_holes.rs`, with a 5 MiB frame. A frame
+  larger than the 32 MB tail waits on the frame cap below.
+- Rust readers already had a chunked payload read
+  (`frame::Consumer::read_chunk`), so nothing was added.
+- The byte stays crate-private (`group::Fetch::byte_start`, the fill's start).
+  Public `Position` did not gain a field, since nothing public reads a byte
+  position yet.
+
+What remains:
 
 - Segments are `frame::SEGMENT` (1 MiB) long, so segment `i` always holds
   bytes from `i * SEGMENT`, and a completed chain is `frame::Payload::Chain`.
@@ -36,36 +54,38 @@ This waits for that quest.
   stays one `Bytes` at any size, so evicting part of it needs it split into
   segment slices, whose memory frees only once every slice drops, or copied
   into segments.
-
-- `Position` gains a byte offset within the frame. A lite FETCH carries it
-  beside its `frame_start`, and so does a group stream header. A
-  stream that starts mid-frame still states the frame's full size. Older
-  lite versions and moq-transport start flights only at frame or object
-  boundaries. A reader inside a shed object refreshes or is `Evicted` there.
 - Every sealed segment is evictable under the same policy as front frames,
   including one a reader is on. A reader keeps its current segment alive
   through its own reference, as prefetched frames are today. That memory
-  is bounded by readers times one segment, not by the cache. Only the
-  writer's open segment stays resident. A reader at a shed segment boards
-  a flight that starts at its `(frame, byte)`.
-- Route failover mid-frame (`frame::Consumer`'s `Recover`) requests only
-  the missing suffix by byte, instead of refetching the frame from its
-  start. Cover it with a regression: a route fails partway through a frame
-  larger than the 32 MB tail.
-- Update `drafts/draft-lcurley-moq-lite.md` and run `just drafts check`.
-  Also drop the 32 MiB interop cap in `drafts/draft-lcurley-moq-e2ee.md` if
-  it no longer follows from a model limit.
-- Rust readers get a chunked payload read, so a frame larger than memory
-  never has to be collected whole. [moq-dev/moq#6628](https://github.com/moq-dev/moq/pull/6628)
-  kept its segments internal. JS already has its chunked read
-  (`nextFrame` and `readChunk`, from
-  [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)); its wire
-  half is in [JS byte holes](/quest/m2/unbounded-groups/js-byte-holes.md).
+  is bounded by readers times one segment, not by the cache. A reader holding
+  a `Payload::Chain` holds every segment through its `Arc<[Bytes]>` today, so
+  the chain has to hand a reader one segment at a time. Only the writer's open
+  segment stays resident. A reader at a shed segment boards a flight that
+  starts at its `(frame, byte)`: `FillState::fly` and `group::Bounds` already
+  carry the byte, and the flight's copy starts with a `Lead`.
+- A group stream that starts mid-frame (a relay holding only a group's tail,
+  once segments shed) carries the byte offset in the lite wip GROUP header
+  beside `Frame Start`, and still states the frame's full size. Older lite
+  versions and moq-transport start only at frame or object boundaries. A
+  reader inside a shed object refreshes or is `Evicted` there.
+- `MAX_CACHE_BYTES` stops capping a frame (`group::Producer::open_frame` and
+  `open_lead` refuse a larger one today). Then extend the failover regression
+  to a frame larger than the 32 MB tail.
+- Drop the 32 MiB interop cap in `drafts/draft-lcurley-moq-e2ee.md` if it no
+  longer follows from a model limit, and run `just drafts check`.
 - Test a frame several times the 32 MB tail through a relay chain: a late
   joiner reads it whole through a flight, and memory stays near 32 MB per
   copy.
 
-Public API: `Position` gains a byte field, frames gain a chunked read, and
-`MAX_CACHE_BYTES` stops capping a frame.
-Wire: a byte offset on the current lite wip's FETCH frame start and group
-header.
+Public API: decide whether `Position` gains a byte field once a public reader
+needs a byte position (see Waiting), and `MAX_CACHE_BYTES` stops capping a
+frame. Wire: a byte offset on the current lite wip's group header.
+
+## Waiting
+
+- Maintainer: the Plan said `Position` gains a byte field. moq-dev/moq#8699
+  kept the byte crate-private, because nothing public reads one yet and
+  `Position` also names subscribe ranges and largest locations, where a byte
+  means nothing. Options: (a) keep it private until a public API needs it, or
+  (b) add `Position::byte` now. Recommendation: (a). Remove this item once
+  answered on that PR.
