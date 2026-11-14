@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Duration, type Installed, Instant, now, yieldNow } from "@moq/clock";
-import { Manual } from "@moq/clock/test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Duration, type Installed, Instant, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 
 // A monotonic instant `ms` after the clock origin.
 const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));
@@ -684,7 +684,8 @@ describe("clock corpus", () => {
 	for (const { name, delay, runs } of cases) {
 		it(`follows the corpus reference: ${name}`, async () => {
 			const sync = new Sync({ delay: Duration.millis(delay) });
-			const tracks = { audio: sync.track({ target: target() }), video: sync.track({ target: target() }) };
+			const held = () => ({ target: new Signal<Duration | undefined>(undefined) });
+			const tracks = { audio: sync.track(held()), video: sync.track(held()) };
 			await flush();
 			for (const [index, run] of runs.entries()) {
 				for (let i = 0; i < run.frames; i++) {
@@ -698,9 +699,5 @@ describe("clock corpus", () => {
 			}
 			sync.close();
 		});
-	}
-
-	function target() {
-		return new Signal<Duration | undefined>(undefined);
 	}
 });
