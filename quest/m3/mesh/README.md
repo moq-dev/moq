@@ -72,7 +72,7 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   2026-11-03 when sockets became endpoints, 2026-11-06 when endpoints split
   into server and client roles, and 2026-11-07 when member and service
   paths were scoped apart; the [Endpoint API](/quest/m3/mesh/endpoint.md)
-  changes the shipped `mesh/<id>/**` grant). Relays need no new check. Membership is the coordinator's
+  builds on the `mesh/node/<id>/**` and `mesh/service/*` grant). Relays need no new check. Membership is the coordinator's
   token only; a Tailnet-Lock analog was declined.
 - Protection is per broadcast, with levels that nest: identity (the token
   only), authentication (per-frame Ed25519 signatures, the default), and
@@ -123,7 +123,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   fences the reply before the cut publishes it.
 - ✅ The contract changes land in m2, because the cut publishes
   `moq_auth::mesh` for the first time: the
-  [grant shape](/quest/m2/mesh-grant-shape.md) and the
+  grant shape (landed) and the
   [key budget](/quest/m2/mesh-device-bounds.md).
 - The JS enrollment client and the guide are parked in m5: the application
   they were planned for enrolls with certificates and documents itself.

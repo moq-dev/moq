@@ -536,10 +536,17 @@ fn refuse_revoked(store: &Store, endpoint: PublicKey) -> Reply<()> {
 	Ok(())
 }
 
-/// The grant every mesh token carries: publish under its own ID, subscribe to the mesh.
+/// The grant every mesh token carries: publish its own node subtree and its own end of
+/// any service, subscribe to the mesh. Nodes and services live under separate prefixes,
+/// so a service named after another member cannot answer as that member.
 fn claims(endpoint: PublicKey, issued: kio::clock::Wall, expires: Option<kio::clock::Wall>) -> Claims {
+	let pattern = |p: String| p.parse::<Pattern>().expect("a z-base-32 segment is a valid path");
 	Claims::default()
-		.with_publish([Pattern::subtree(&format!("mesh/{endpoint}")).expect("a z-base-32 segment is a valid path")])
+		.with_publish([
+			pattern(format!("mesh/node/{endpoint}/**")),
+			pattern(format!("mesh/service/*/.server/{endpoint}")),
+			pattern(format!("mesh/service/*/.client/{endpoint}")),
+		])
 		.with_subscribe([Pattern::subtree("mesh").expect("a valid path")])
 		.with_issued(issued)
 		.with_expires(expires)

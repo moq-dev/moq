@@ -3,7 +3,8 @@
 //! A device proves it holds its Ed25519 endpoint key by signing a fresh challenge from
 //! the coordinator, and presents an enrollment key the mesh owner created, so enrollment
 //! needs no human in the loop. The coordinator answers with an
-//! [`Enrollment`]: the relays to dial and a JWT granting publish on `mesh/<id>/**` and
+//! [`Enrollment`]: the relays to dial and a JWT granting publish on `mesh/node/<id>/**`,
+//! `mesh/service/*/.server/<id>`, and `mesh/service/*/.client/<id>`, and
 //! subscribe on `mesh/**`. The device refreshes it before it expires by proving its key
 //! again, so revoking a device makes its next refresh fail.
 //!
@@ -171,7 +172,8 @@ pub struct EnrollRequest {
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Enrollment {
-	/// A JWT granting publish on `mesh/<id>/**` and subscribe on `mesh/**`, rooted at `/`.
+	/// A JWT granting publish on `mesh/node/<id>/**`, `mesh/service/*/.server/<id>`, and
+	/// `mesh/service/*/.client/<id>`, and subscribe on `mesh/**`, rooted at `/`.
 	pub token: String,
 	/// When the token expires, unix seconds. Refresh before then.
 	#[serde_as(as = "kio::clock::serde::UnixSeconds")]

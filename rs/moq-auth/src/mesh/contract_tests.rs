@@ -74,11 +74,30 @@ async fn an_enrollment_key_grants_the_endpoints_subtree() {
 	let id = enrollment.members[0].endpoint;
 	let claims = mesh.key.verify(&enrollment.token).unwrap();
 	assert_eq!(claims.expires, Some(enrollment.expires));
-	let own = claims.authorize(&format!("mesh/{id}/ssh")).unwrap();
-	assert!(!own.publish.is_empty());
-	let other = claims.authorize("mesh/someone").unwrap();
-	assert!(other.publish.is_empty());
-	assert!(!other.subscribe.is_empty());
+	let publishes = |path: &str| !claims.authorize(path).unwrap().publish.is_empty();
+	assert!(publishes(&format!("mesh/node/{id}/ssh")));
+	assert!(publishes(&format!("mesh/service/ssh/.server/{id}")));
+	assert!(publishes(&format!("mesh/service/ssh/.client/{id}")));
+	// A service named after another member cannot answer as that member.
+	let others = mesh
+		.device()
+		.enroll(&mesh.key(false), Some("other"))
+		.await
+		.unwrap()
+		.members;
+	let other = others
+		.iter()
+		.map(|m| m.endpoint)
+		.find(|e| *e != id)
+		.unwrap()
+		.to_string();
+	assert!(!publishes(&format!("mesh/node/{other}/ssh")));
+	assert!(!publishes(&format!("mesh/service/{id}/.server/{other}")));
+	assert!(!publishes(&format!("mesh/service/ssh/.server/{other}")));
+	assert!(!publishes(&format!("mesh/{id}/ssh")));
+	let someone = claims.authorize("mesh/someone").unwrap();
+	assert!(someone.publish.is_empty());
+	assert!(!someone.subscribe.is_empty());
 	assert!(claims.authorize("elsewhere").is_err());
 }
 

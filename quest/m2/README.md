@@ -38,7 +38,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   offset goes on the wire version after lite-07 (rejected for each: staying
   in m2). The padding and JS rung disable quests are parked in m5.
 - ✅ Joined m2, each a small break the cut would otherwise freeze: the mesh
-  [grant shape](/quest/m2/mesh-grant-shape.md) and
+  grant shape (landed) and
   [key budget](/quest/m2/mesh-device-bounds.md), since `moq_auth::mesh`
   publishes for the first time at this cut;
   [auth key validation](/quest/m2/auth-key-validation.md); the

@@ -35,7 +35,7 @@ import { Path } from "@moq/net";
 const { Broadcast, SecretKey } = Sign;
 
 const key = await SecretKey.generate();
-const path = Path.from(`mesh/${key.public}/agent`);
+const path = Path.from(`mesh/node/${key.public}/agent`);
 const route = origin.route(path, { hidden: true });
 // Signs under the route's instance, which readers verify against.
 const signed = new Broadcast.Producer(route.broadcast, key, { path, instance: route.instance });

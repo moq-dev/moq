@@ -342,7 +342,7 @@ async fn broadcast_under_another_key_is_refused() {
 	let impostor = SecretKey::generate();
 	let victim = SecretKey::generate();
 	// The impostor publishes at the victim's path, signing with its own key.
-	let published = publish(&impostor, &format!("mesh/{}/ssh", victim.public()));
+	let published = publish(&impostor, &format!("mesh/node/{}/ssh", victim.public()));
 	let track = published.signed.create_track("stream", None).unwrap();
 	let consumer = published.consume(victim.public()).await;
 	let mut subscribed = subscribe(&consumer, "stream").await;
@@ -471,7 +471,7 @@ fn sign_interop() {
 	let mut seed = Zeroizing::new([0u8; 32]);
 	rind::rand::fill(seed.as_mut()).unwrap();
 	let key = SecretKey::from_seed(&seed);
-	let path = moq_net::Path::new(&format!("mesh/{}/agent", key.public())).unwrap();
+	let path = moq_net::Path::new(&format!("mesh/node/{}/agent", key.public())).unwrap();
 	let instance = moq_net::Instance::random();
 
 	let payloads: [&[u8]; 3] = [b"zero", b"", &[0xff; 300]];
