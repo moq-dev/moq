@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Prove native downstream futures at the default recursion limit on the
-# flake's pinned nightly, so only a pin bump changes the compiler it checks.
+# Prove the session driver and native downstream futures Send at the default
+# recursion limit on the flake's pinned nightly, so only a pin bump changes the
+# compiler it checks. `async` is off by default, and without it the lib has no
+# driver and the `send` test compiles to nothing.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -32,4 +34,4 @@ export RUSTDOC="$send_sysroot/bin/rustdoc"
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D recursion_depth_exceeding_limit"
 rustc --version
 cargo --version
-cargo check --locked -p moq-net --test send
+cargo check --locked -p moq-net --features async --lib --test send
