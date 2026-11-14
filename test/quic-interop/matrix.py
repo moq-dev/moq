@@ -5,13 +5,15 @@
     matrix.py check RESULTS.json...
 
 `prepare` points the runner at moq-quic's image and the pinned peers and
-simulator, and `peers` lists the peers. `check` fails on every cell whose result differs from the one
-cases.toml expects, including a known failure that now passes.
+simulator, and `peers` lists the peers. `check` fails on every cell whose
+result differs from the one cases.toml expects, including a known failure that
+now passes, and deletes the runner's logs of every other cell.
 """
 
 import argparse
 import json
 import re
+import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -101,6 +103,10 @@ def check(args):
             want, why = expected(config, client, server, case)
             if result != want:
                 mismatches.append((client, server, case, result, want, why))
+            else:
+                # Keep the logs and pcaps of a mismatch only: every cell keeps them, and a
+                # full matrix's would bury the one that matters.
+                shutil.rmtree(Path(results["log_dir"]) / f"{server}_{client}" / case, ignore_errors=True)
     if seen == 0:
         sys.exit("no results: the runner ran no cell")
     for client, server, case, result, want, why in mismatches:

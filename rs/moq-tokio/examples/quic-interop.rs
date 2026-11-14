@@ -4,7 +4,7 @@
 //! The runner's container sets `ROLE`, `TESTCASE`, `REQUESTS`, and `SSLKEYLOGFILE`, mounts the
 //! runner's certificates at `/certs`, the files to serve at `/www`, and the download target at
 //! `/downloads`. A case this endpoint does not support exits 127, which the runner reports as
-//! unsupported; `test/quic-interop/README.md` says why for each one.
+//! unsupported; `test/quic-interop/cases.toml` says why for each one.
 
 use std::{
 	net::{Ipv6Addr, SocketAddr, UdpSocket},
@@ -224,14 +224,11 @@ async fn fetch_all(fetch: Fetch) -> anyhow::Result<()> {
 		.next()
 		.with_context(|| format!("{host} does not resolve"))?;
 
-	let mut roots = rustls::RootCertStore::empty();
-	for cert in CertificateDer::pem_file_iter("/certs/ca.pem").context("open /certs/ca.pem")? {
-		roots.add(cert?)?;
-	}
-	let mut tls = rustls::ClientConfig::builder_with_provider(moq_tokio::crypto::provider()?)
-		.with_protocol_versions(&[&rustls::version::TLS13])?
-		.with_root_certificates(roots)
-		.with_no_client_auth();
+	// The runner tests QUIC, not the PKI: `amplificationlimit` serves a chain deeper than
+	// webpki verifies. The handshake signature is still checked.
+	let mut connect = moq_tokio::tls::Connect::default();
+	connect.insecure = Some(true);
+	let mut tls = connect.build()?;
 	tls.alpn_protocols = vec![ALPN.to_vec()];
 	tls.key_log = Arc::new(rustls::KeyLogFile::new());
 	// One config for every connection, so the second `resumption` dial finds the first's ticket.

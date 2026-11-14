@@ -15,7 +15,8 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
 
-peers=$(python3 -I "$DIR/matrix.py" peers)
+# `moq-quic` among the peers is the self pair.
+peers="moq-quic,$(python3 -I "$DIR/matrix.py" peers)"
 cases=""
 roles="server,client"
 argv=("$@")
@@ -77,23 +78,27 @@ python3 -I "$DIR/matrix.py" prepare "$runner" "$image" ${podman[@]+"${podman[@]}
 
 uv venv --quiet --python 3.12 "$HARNESS_RUN/venv"
 uv pip install --quiet --python "$HARNESS_RUN/venv" -r "$DIR/requirements.txt"
+cp "$DIR/sitecustomize.py" "$("$HARNESS_RUN/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/"
 
 tests=()
 [[ -z "$cases" ]] || tests=(-t "$cases")
 results=()
 status=0
+# The self pair runs in the server pass only.
+others=$(tr , '\n' <<<"$peers" | grep -vx moq-quic | paste -sd , || true)
 for role in ${roles//,/ }; do
     if [[ "$role" == server ]]; then
-        # moq-quic against itself runs here, so the client pass skips it.
-        pair=(-s moq-quic -c "moq-quic,$peers")
+        pair=(-s moq-quic -c "$peers")
+    elif [[ -n "$others" ]]; then
+        pair=(-s "$others" -c moq-quic)
     else
-        pair=(-s "$peers" -c moq-quic)
+        continue
     fi
-    echo "moq-quic as $role against $peers"
+    echo "moq-quic as $role: run.py ${pair[*]}"
     # The runner calls a client that fails every server unsupported unless told not
     # to, which would hide a moq-quic regression that breaks against every peer.
     (cd "$runner" && env -u PYTHONPATH PATH="$tools/bin:$PATH" "$HARNESS_RUN/venv/bin/python" run.py \
-        "${pair[@]}" ${tests[@]+"${tests[@]}"} -n "moq-quic,$peers" \
+        "${pair[@]}" ${tests[@]+"${tests[@]}"} -n "moq-quic${others:+,$others}" \
         -l "$HARNESS_RUN/logs/$role" -j "$HARNESS_RUN/$role.json" -m) || true
     if [[ ! -s "$HARNESS_RUN/$role.json" ]]; then
         echo "the runner wrote no results for moq-quic as $role" >&2

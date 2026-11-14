@@ -1,0 +1,56 @@
+name: QUIC interop
+
+# moq-quic against the pinned peers in test/quic-interop/cases.toml through the
+# QUIC Interop Runner. Nightly only: a full peer's matrix takes tens of minutes of
+# simulated network time, and only a change to moq-quic or the pins moves it.
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+  # TEMPORARY: run on this PR while the matrix is measured; removed before review.
+  pull_request:
+    paths:
+      - .github/workflows/quic-interop.yml
+
+jobs:
+  peer:
+    name: moq-quic and ${{ matrix.peer }}
+    # Hosted, so each peer gets its own Docker host: the runner's containers and
+    # networks have fixed names and addresses.
+    runs-on: ubuntu-24.04
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # `moq-quic` is the self pair.
+        peer: [moq-quic, quic-go, ngtcp2, quiche, quinn]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      # The simulator's IPv6 forwarding needs the host's ip6tables filter table.
+      - run: sudo modprobe ip6table_filter
+      - name: moq-quic against ${{ matrix.peer }}, both roles
+        run: nix develop --command just test quic-interop --peers "$PEER"
+        env:
+          PEER: ${{ matrix.peer }}
+          HARNESS_RUNS: ${{ runner.temp }}/quic-interop
+          HARNESS_KEEP: 1
+      - name: Keep the runner's logs, pcaps, and key logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: quic-interop-${{ matrix.peer }}
+          path: |
+            ${{ runner.temp }}/quic-interop/*/logs/
+            ${{ runner.temp }}/quic-interop/*/*.json
+          retention-days: 7
+          if-no-files-found: ignore
