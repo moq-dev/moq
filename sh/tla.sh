@@ -4,13 +4,14 @@
 # a rule (a deadlock, invariant, property, or assertion), so a fix that should
 # promote its rule is noticed; every other config must pass. A config with a
 # `\* Simulate:` line is too large to exhaust: TLC samples it at random with the
-# arguments that line gives.
+# arguments that line gives. A `trace/` directory holds a trace spec, which
+# checks recorded runs rather than exploring (`sh/tla-trace.py`).
 set -euo pipefail
 shopt -s nullglob
 cd "$(git rev-parse --show-toplevel)"
 
 [ $# -ne 0 ] || set -- rs js
-mapfile -t configs < <(git ls-files --cached --others --exclude-standard -- "$@" | grep -E '^(rs|js)/.*/verify/.*\.cfg$' || true)
+mapfile -t configs < <(git ls-files --cached --others --exclude-standard -- "$@" | grep -E '^(rs|js)/.*/verify/.*\.cfg$' | grep -v '/trace/' || true)
 if [ ${#configs[@]} -eq 0 ]; then
     echo "error: no TLA+ config under: $*" >&2
     exit 1

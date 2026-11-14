@@ -17,6 +17,7 @@ mod residual;
 mod routing;
 mod rtt;
 mod scope;
+mod trace;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -174,7 +175,7 @@ impl Relay {
 
 /// A claim's attributes, plus the revision its life began at so fixtures can
 /// tell a revival from a fresh announcement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Item {
 	pub seed: Metric,
 	pub epoch: Option<u32>,
@@ -365,6 +366,12 @@ pub(super) struct Sim {
 	/// The work of routers a restart replaced.
 	spent: usize,
 	pub events: Vec<SimEvent>,
+	/// Under the path rule, each node's session number for a hop, as the neighbour and
+	/// the link's generation: how many times it opened before.
+	numbers: BTreeMap<(Node, u64), (Node, u32)>,
+	generations: BTreeMap<(Node, Node), u32>,
+	/// The run being recorded as a trace of `RouteHandoff.tla`.
+	trace: Option<trace::Recorder>,
 }
 
 impl Sim {
@@ -398,6 +405,9 @@ impl Sim {
 			stats: Stats::default(),
 			spent: 0,
 			events: Vec::new(),
+			numbers: BTreeMap::new(),
+			generations: BTreeMap::new(),
+			trace: None,
 		}
 	}
 
@@ -475,6 +485,13 @@ impl Sim {
 	pub fn connect(&mut self, a: Node, b: Node) {
 		assert!(!self.connected(a, b), "{a}-{b} already up");
 		self.up.insert(Self::pair(a, b));
+		let generation = match self.generations.get_mut(&Self::pair(a, b)) {
+			Some(generation) => {
+				*generation += 1;
+				*generation
+			}
+			None => *self.generations.entry(Self::pair(a, b)).or_default(),
+		};
 		for (x, y) in [(a, b), (b, a)] {
 			let link = self.config(x, y);
 			let named = hop(y, self.restarts[y]);
@@ -483,11 +500,16 @@ impl Sim {
 				Relay::Path(router) => router.connect(y, named, link),
 			}
 			.expect("a positive cost");
+			if let Relay::Path(router) = &self.nodes[x] {
+				let number = router.session(y).expect("a session");
+				self.numbers.insert((x, number), (y, generation));
+			}
 		}
 		for (x, y) in [(a, b), (b, a)] {
 			self.ask(y, x);
 		}
 		self.flush();
+		self.note_link("connect", a, b);
 	}
 
 	/// `node` asks `peer` for announcements under its interest. Under the path rule a
@@ -534,10 +556,12 @@ impl Sim {
 			}
 		}
 		self.flush();
+		self.note_link("disconnect", a, b);
 	}
 
 	/// Every session of `node` closes at once, as a node shutting down closes them.
 	pub fn isolate(&mut self, node: Node) {
+		self.untraced("isolate");
 		let peers: Vec<Node> = self.peers(node).collect();
 		for &peer in &peers {
 			self.up.remove(&Self::pair(node, peer));
@@ -560,6 +584,7 @@ impl Sim {
 
 	/// The process at `node` exits: its sessions close and its state is lost.
 	pub fn kill(&mut self, node: Node) {
+		self.untraced("kill");
 		let peers: Vec<Node> = self.peers(node).collect();
 		for peer in peers {
 			self.disconnect(node, peer);
@@ -671,9 +696,14 @@ impl Sim {
 		let id = router.declared().unwrap();
 		let rev = router.revision().unwrap();
 		if self.declared[node] == Some(id) {
-			self.history.entry(id).or_default().push(Change { rev, claim, item });
+			self.history.entry(id).or_default().push(Change {
+				rev,
+				claim: claim.clone(),
+				item,
+			});
 		}
 		self.flush();
+		self.note_claim(node, claim, item, rev);
 	}
 
 	/// The prefix `node` asks its neighbors for announcements under; each
@@ -690,6 +720,8 @@ impl Sim {
 			self.ask(node, peer);
 		}
 		self.flush();
+		let peers: Vec<Node> = self.peers(node).collect();
+		self.note_skip(&peers);
 	}
 
 	pub fn watching(&self, node: Node) -> &Path {
@@ -704,8 +736,10 @@ impl Sim {
 				Relay::Distance(router) => router.goaway(node),
 				Relay::Path(router) => router.goaway(node, now),
 			}
+			// One step per node that hears it, as the model takes them.
+			self.flush();
+			self.note_goaway(peer, node);
 		}
-		self.flush();
 	}
 
 	pub fn collect(&mut self, node: Node, id: Id) {
@@ -714,6 +748,7 @@ impl Sim {
 			Relay::Path(router) => router.collect(id),
 		}
 		self.flush();
+		self.note_skip(&[node]);
 	}
 
 	/// `node` measures its link to `peer` at `ms`, or nothing.
@@ -749,6 +784,7 @@ impl Sim {
 		let Some(msg) = self.queues.get_mut(&(from, to)).and_then(VecDeque::pop_front) else {
 			return false;
 		};
+		let modeled = !matches!(msg, Msg::Synced { .. });
 		let now = self.now;
 		match (&mut self.nodes[to], msg) {
 			(Relay::Distance(router), Msg::Route { id, reach }) => router.route(from, id, reach),
@@ -787,6 +823,7 @@ impl Sim {
 		}
 		self.stats.delivered += 1;
 		self.flush();
+		self.note_deliver(from, to, modeled);
 		true
 	}
 
@@ -889,11 +926,15 @@ impl Sim {
 	/// Fire every doubt timer due by now.
 	fn tick(&mut self) {
 		let now = self.now;
-		for relay in &mut self.nodes {
-			if let Relay::Path(router) = relay
+		for node in 0..self.nodes.len() {
+			if let Relay::Path(router) = &mut self.nodes[node]
 				&& router.deadline().is_some_and(|at| at <= now)
 			{
+				let due = router.due(now);
 				router.timeout(now);
+				// One step per node, as the model takes them.
+				self.flush();
+				self.note_timeout(node, due);
 			}
 		}
 		self.flush();
@@ -1051,6 +1092,7 @@ impl Sim {
 					(to, Msg::Synced { interest })
 				}
 			};
+			self.note_sent(node, to, &msg);
 			self.queues.entry((node, to)).or_default().push_back(msg);
 		}
 	}

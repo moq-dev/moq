@@ -20,7 +20,7 @@
 (*   neighbour that learned the route from it has answered.               *)
 (* - A closed session casts doubt on the node at its far end: no relay     *)
 (*   moves to a route through it until a timer lifts the doubt. The timer  *)
-(*   is the step `Lift`, which may fire at any moment.                    *)
+(*   is the step `Timeout`, which may fire at any moment.                 *)
 (*                                                                         *)
 (* Each node's every entry point is one atomic step ending in `Update`,    *)
 (* as in the router. Messages travel on one FIFO per direction. A          *)
@@ -93,7 +93,9 @@ NoHeard == [on |-> FALSE, path |-> <<>>, drain |-> FALSE, state |-> "live", rev 
 \* route's, and `next` is the neighbour it holds under, or None on its own account.
 NoRoute == [on |-> FALSE, held |-> FALSE, next |-> None, path |-> <<>>, drain |-> FALSE]
 \* What a node last sent a neighbour for a key (`Sent`). `src` is the key of
-\* the node's own route the offer reflects, kept after an end.
+\* the node's own route the offer reflects, kept after an end while the
+\* neighbour's route there may be a child yet to answer; NoSrc once forgotten.
+NoSrc == "none"
 NoSent(k) == [on |-> FALSE, held |-> FALSE, path |-> <<>>, drain |-> FALSE, rev |-> None, items |-> NoItems, src |-> k]
 NotShown == [item |-> None, avail |-> FALSE]
 
@@ -290,33 +292,56 @@ ShownNow(s) ==
 -----------------------------------------------------------------------------
 (* What a node sends (path.rs: `want`, `advertise`, `report`).            *)
 
+\* `covering_view`: the keys of the narrowest view at or above k, at most one.
+CoverKey(s, k) == IF s.view[k].floor # Absent THEN {k}
+                  ELSE IF s.view["root"].floor # Absent THEN {"root"}
+                  ELSE {}
+
+\* `meets`: whether this node presents any claim at k.
+Meets(s, k) == \E ck \in CoverKey(s, k) : \E c \in Claims : Covers(k, c) /\ s.view[ck].items[c] # None
+
 \* What this node wants a neighbour p to hold for key k: a path, a hold, an
 \* end, or to keep what it was sent while the next hop this node holds under
-\* waits for those behind it.
+\* waits for those behind it. A route goes to a stream only while a claim meets
+\* it: a path that meets none is "empty", which withdraws the claims sent and
+\* then ends the route.
 Want(n, s, k, p) ==
     LET src == SrcKey(s, p, k)
         r == s.rt[src]
-    IN IF ~r.on THEN [kind |-> "end", path |-> <<>>, drain |-> FALSE, src |-> src]
-       ELSE IF ~r.held THEN [kind |-> "path", path |-> r.path, drain |-> r.drain, src |-> src]
+        End == [kind |-> "end", path |-> <<>>, drain |-> FALSE, src |-> src]
+    IN IF ~r.on THEN End
+       ELSE IF ~r.held THEN [kind |-> IF Meets(s, k) THEN "path" ELSE "empty",
+                             path |-> r.path, drain |-> r.drain, src |-> src]
        ELSE IF r.next = p
-            THEN [kind |-> IF Pending(n, s, src) \/ Hopes(n, s, src) THEN "keep" ELSE "end",
-                  path |-> <<>>, drain |-> FALSE, src |-> src]
+            THEN [End EXCEPT !.kind = IF Pending(n, s, src) \/ Hopes(n, s, src) THEN "keep" ELSE "end"]
        \* A hold names no path, so a stream holds only the path it last sent.
-       ELSE IF s.tx[p][k].on /\ s.tx[p][k].path # r.path
-            THEN [kind |-> "end", path |-> <<>>, drain |-> FALSE, src |-> src]
-       ELSE [kind |-> "hold", path |-> <<>>, drain |-> FALSE, src |-> src]
+       ELSE IF s.tx[p][k].on /\ s.tx[p][k].path # r.path THEN End
+       ELSE [End EXCEPT !.kind = IF Meets(s, k) THEN "hold" ELSE "end"]
+
+\* The view a stream for k presents from, empty while there is none.
+Presented(s, k) == IF s.view[k].floor = Absent THEN EmptyView ELSE s.view[k]
+
+\* The batch that withdraws what was sent t for k before an "empty" ends it:
+\* sent whenever there is a view, unless it would say nothing at all.
+Withdraw(s, k, t) ==
+    LET v == Presented(s, k)
+    IN IF s.view[k].floor # Absent /\ (v.floor # None \/ t.items # v.items)
+       THEN <<ClaimsMsg(k, v)>> ELSE <<>>
 
 \* `advertise` for one key on the stream to p.
 Advertise1(n, s, p, k) ==
     LET t == s.tx[p][k]
         w == Want(n, s, k, p)
-        v == IF s.view[k].floor = Absent THEN EmptyView ELSE s.view[k]
+        v == Presented(s, k)
     IN CASE k \notin Streams(p) \/ w.kind = "keep" -> [tx |-> t, out |-> <<>>]
          [] w.kind = "hold" ->
               IF t.on /\ ~t.held THEN [tx |-> [t EXCEPT !.held = TRUE], out |-> <<HoldMsg(k)>>]
               ELSE [tx |-> t, out |-> <<>>]
          [] w.kind = "end" ->
               IF t.on THEN [tx |-> NoSent(t.src), out |-> <<EndMsg(k)>>]
+              ELSE [tx |-> t, out |-> <<>>]
+         [] w.kind = "empty" ->
+              IF t.on THEN [tx |-> NoSent(t.src), out |-> Withdraw(s, k, t) \o <<EndMsg(k)>>]
               ELSE [tx |-> t, out |-> <<>>]
          [] OTHER ->
               LET offer == ~t.on \/ t.held \/ t.path # w.path \/ t.drain # w.drain
@@ -351,17 +376,20 @@ Report1(n, s, p, hop) ==
         \* The neighbour this node learned the route from takes silence to mean
         \* it holds under it, so it is told outright.
         parents == {k \in holds : Child(t[k].path, p)}
-        ends == {k \in through : w[k].kind = "end"}
-        gone == \A k \in through : w[k].kind \in {"path", "end"}
+        ends == {k \in through : w[k].kind \in {"end", "empty"}}
+        gone == \A k \in through : w[k].kind \in {"path", "end", "empty"}
         first == hop \notin s.told[p]
         tx1 == [k \in Keys |->
                   IF k \notin through THEN t[k]
                   ELSE CASE w[k].kind = "path" -> [t[k] EXCEPT !.path = w[k].path, !.drain = w[k].drain,
                                                               !.held = FALSE, !.src = w[k].src]
                          [] w[k].kind = "hold" -> [t[k] EXCEPT !.held = TRUE]
-                         [] w[k].kind = "end" -> NoSent(t[k].src)
+                         [] w[k].kind \in {"end", "empty"} -> NoSent(t[k].src)
                          [] OTHER -> t[k]]
-        out == IF first \/ (gone /\ ends # {})
+        \* An "empty" route's withdrawal goes out at once, before the news.
+        withdrawn == Each({k \in through : w[k].kind = "empty"}, LAMBDA k : Withdraw(s, k, t[k]))
+        out == withdrawn \o
+               IF first \/ (gone /\ ends # {})
                THEN <<DeadMsg(hop, moved, gone)>>
                     \o (IF gone THEN <<>>
                         ELSE Each(parents, LAMBDA k : <<HoldMsg(k)>>) \o Each(ends, LAMBDA k : <<EndMsg(k)>>))
@@ -388,10 +416,15 @@ ReportDrain(n, s, ups, x) ==
         out |-> [p \in Nodes |-> IF p \in tell THEN <<DrainMsg(x)>> ELSE <<>>]]
 
 \* `collect`: forget each dead hop no route names once its timer has fired,
-\* and each told hop no sent route names. Doubt lasts until Lift fires.
-Collect(s) ==
+\* and each told hop no sent route names. Doubt lasts until its timer fires.
+\* An ended stream forgets what it reflected unless the neighbour's route there
+\* extends this node's, as `advertise` drops such an entry.
+Collect(n, s) ==
     LET heard == {s.rx[x[1]][x[2]].path : x \in {y \in Nodes \X Keys : s.rx[y[1]][y[2]].on}}
+        Kept(m, k) == s.tx[m][k].on \/ (s.rx[m][k].on /\ s.rx[m][k].state # "held" /\ Child(s.rx[m][k].path, n))
     IN [s EXCEPT
+          !.tx = [m \in Nodes |-> [k \in Keys |->
+                     IF Kept(m, k) THEN s.tx[m][k] ELSE NoSent(NoSrc)]],
           !.dead = {h \in s.dead : h \in s.expiry \/ \E p \in heard : HasHop(p, h)},
           !.draining = {x \in s.draining : x \in s.doubt \/ \E p \in heard : Names(p, x)},
           !.told = [m \in Nodes |-> {h \in s.told[m] :
@@ -438,7 +471,7 @@ Update(n, s0, ov, ups, gens, eb, rep, quiet) ==
              ELSE IF rep.node # None THEN ReportDrain(n, s2, ups, rep.node)
              ELSE [s |-> s2, out |-> [p \in Nodes |-> <<>>]]
         a == Advertise(n, r.s, ups)
-        s3 == Collect(a.s)
+        s3 == Collect(n, a.s)
         now == IF n = Origin THEN [c \in Claims |-> NotShown] ELSE ShownNow(s3)
         ev == Events(s0, s3, s0.shown, now, ov, eb, quiet)
     IN [s |-> [s3 EXCEPT !.shown = now],
@@ -502,7 +535,7 @@ InitNode == [
     expiry |-> {}, \* Pending timers belong to individual dead hops.
     drain |-> {},  \* the neighbours that sent GOAWAY on the session open to them
     draining |-> {}, \* nodes known to have sent GOAWAY, while named or doubted
-    tx |-> [m \in Nodes |-> [k \in Keys |-> NoSent(k)]],
+    tx |-> [m \in Nodes |-> [k \in Keys |-> NoSent(NoSrc)]],
     told |-> [m \in Nodes |-> {}],
     toldDrain |-> [m \in Nodes |-> {}],
     shown |-> [c \in Claims |-> NotShown]
@@ -617,28 +650,23 @@ Deliver(d) ==
        /\ Internal(Sent(rs))
        /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
 
-\* The timer node n started on x fires: the doubt on x lifts, and the dead hops
-\* whose session ended at x may be forgotten. With `Patient`, only once no DEAD
-\* about such a hop, and no DRAIN of x, is in flight: a timer long enough for
-\* the news to cross the mesh.
-Lift(n, x) ==
-    LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ {x}, !.wait = @ \ {x},
-                                     !.expiry = {h \in @ : h[2] # x}],
+\* `timeout`: the timers on node n that come due together fire in one update.
+\* Each doubt in X lifts, and the dead hops whose session ended there may be
+\* forgotten; each hop in H expires on its own timer, which can fire before a
+\* later failure's timer on the same far node, so a new DEAD cannot extend every
+\* old hop's retention indefinitely. With `Patient`, a timer fires only once no
+\* DEAD about its hop, and no DRAIN of its node, is in flight: a timer long
+\* enough for the news to cross the mesh.
+Timeout(n, X, H) ==
+    LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ X, !.wait = @ \ X,
+                                     !.expiry = {h \in @ : h \notin H /\ h[2] \notin X}],
                                      OV, up, gen, ended[n], NoReport, TRUE)]
-    IN /\ x \in st[n].wait
+    IN /\ X \subseteq st[n].wait
+       /\ H \subseteq st[n].expiry
+       /\ X # {} \/ H # {}
        /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] :
-                        ~(q[d][i].t = "dead" /\ q[d][i].hop[2] = x) /\ ~(q[d][i].t = "drain" /\ q[d][i].node = x)
-       /\ Commit(rs, q)
-       /\ Internal(Sent(rs))
-       /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
-
-\* A hop's own timer can fire before a later failure's timer on the same far
-\* node. A new DEAD cannot extend every old hop's retention indefinitely.
-Expire(n, hop) ==
-    LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.expiry = @ \ {hop}],
-                                     OV, up, gen, ended[n], NoReport, TRUE)]
-    IN /\ hop \in st[n].expiry
-       /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] : ~(q[d][i].t = "dead" /\ q[d][i].hop = hop)
+                        /\ ~(q[d][i].t = "dead" /\ (q[d][i].hop[2] \in X \/ q[d][i].hop \in H))
+                        /\ ~(q[d][i].t = "drain" /\ q[d][i].node \in X)
        /\ Commit(rs, q)
        /\ Internal(Sent(rs))
        /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
@@ -662,7 +690,7 @@ GoAway(n, m) ==
 \* A closed session: everything learned or sent on it goes.
 Closed(s, y) ==
     [s EXCEPT !.rx[y] = [k \in Keys |-> NoHeard],
-              !.tx[y] = [k \in Keys |-> NoSent(k)],
+              !.tx[y] = [k \in Keys |-> NoSent(NoSrc)],
               !.told[y] = {},
               !.toldDrain[y] = {},
               !.drain = @ \ {y}]
@@ -711,8 +739,7 @@ Done ==
 Next ==
     \/ \E c \in Claims : Announce(c) \/ Unannounce(c)
     \/ \E d \in Dirs : Deliver(d)
-    \/ \E n \in Relays, x \in Nodes : Lift(n, x)
-    \/ \E n \in Relays : \E hop \in st[n].expiry : Expire(n, hop)
+    \/ \E n \in Relays : \E X \in SUBSET st[n].wait, H \in SUBSET st[n].expiry : Timeout(n, X, H)
     \/ \E l \in Links : Connect(l) \/ Disconnect(l)
     \/ \E n \in Relays, m \in Leaving : GoAway(n, m)
     \/ Done
