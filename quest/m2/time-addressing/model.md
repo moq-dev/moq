@@ -251,10 +251,14 @@ review, from the PR's local reviews:
   the source once, in key order, for the groups around it, and drops the span
   between them at once. A source holding no group at all can't place the
   read until it holds one, so a live rung waits for the source's next group,
-  as any time-anchored reader of the source would. A retired rung's drain
-  drops the rest of the fill instead. Rejected: a fetch per microsecond, which
-  costs millions of requests per GOP gap; a moq-net "next group from"
-  primitive, which is new API in every language for one caller.
+  as any time-anchored reader of the source would, holding no encoder slot.
+  A retired rung's drain drops the miss and refuses the rest of the fill
+  instead, since nothing says the source lost it. Rejected: a fetch per
+  microsecond, which costs millions of requests per GOP gap; dropping the rest
+  when the read can't answer at once, which loses groups a remote or
+  handler-served source has. The long-term answer is moq-net serving a fill
+  from another track's range (or an at-or-after fetch), as a relay serves one
+  upstream: new API in every language, so a follow-up rather than this PR.
 
 ### Spike evidence
 

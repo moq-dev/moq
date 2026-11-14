@@ -721,7 +721,8 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64, limit: &
 /// A source holding no group at all resolves no time until it holds one, as it would for any
 /// reader of it, so the lookup then waits for the source's next group, its reader leaving, or the
 /// rung retiring. A retired rung's drain can't wait on the source's media, so one whose lookup
-/// can't answer at once drops the rest of the fill, the way it is being filled, in one call.
+/// can't answer at once drops the miss and refuses the rest of the fill, the way it is being
+/// filled, in one call: nothing says the source lost those.
 async fn drop_gap(
 	rung: &Rung,
 	track: &moq_net::track::Consumer,
@@ -731,6 +732,7 @@ async fn drop_gap(
 ) -> Result<(), Error> {
 	use moq_net::track::{Anchor, Delay, Order, Range, Subscription};
 
+	let groups = sequence..sequence + 1;
 	let first = fill.start().group;
 	let end = fill.end();
 	// The source starts that map into the fill, below the miss and from it.
@@ -779,9 +781,12 @@ async fn drop_gap(
 			}
 		},
 		() = retire.fired() => {
+			// The miss is the source's answer. The rest is unknown, so it is refused rather than
+			// named lost: a later reader asks the rung that replaces this one.
+			fill.drop_groups(groups.clone());
 			match below {
-				true => fill.drop_groups(first..sequence + 1),
-				false => fill.drop_groups(sequence..end),
+				true => fill.refuse_groups(first..sequence, moq_net::Error::Cancel),
+				false => fill.refuse_groups(sequence + 1..end, moq_net::Error::Cancel),
 			}
 			return Ok(());
 		}
@@ -1323,7 +1328,7 @@ mod tests {
 			.unwrap();
 		assert_eq!(requested.start().group, 8);
 		// The source no longer has it. It holds no group to place the gap after it by, and the
-		// drain can't wait for one, so the rest of the fill goes with it.
+		// drain can't wait for one, so the rest of the fill is refused with it, not named lost.
 		requested.drop_groups(8..9);
 		kio::clock::timeout(wait, tasks.join_next())
 			.await
@@ -1332,7 +1337,7 @@ mod tests {
 			.unwrap();
 		assert!(
 			kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
-			"the rest of the fill is dropped at once, not fetched a group at a time"
+			"the rest of the fill is refused at once, not fetched a group at a time"
 		);
 	}
 
