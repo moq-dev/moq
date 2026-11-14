@@ -1581,9 +1581,6 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		{
 			self.touched += ids.len();
 		}
-		for &id in &ids {
-			self.reader.touch(id);
-		}
 		for id in ids {
 			if prune {
 				self.prune(id);

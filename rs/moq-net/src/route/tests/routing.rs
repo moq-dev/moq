@@ -2020,3 +2020,30 @@ fn a_dead_alternative_does_not_keep_a_lost_route_held() {
 	assert_eq!(router.route_for(7, &p("")), None);
 	assert!(router.shown().is_empty());
 }
+
+/// A driver hears of every identity whose routes were recomputed, even when no shown
+/// claim changed, so it can serve those claims through the routes it has now.
+#[test]
+fn a_route_change_alone_names_its_identity() {
+	let up = 0;
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	let interest = router.interest();
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(0, 0)]),
+	};
+	router.route(up, 7, Some(Reach::Finite(advert.clone())));
+	let item = Item {
+		seed: 1,
+		epoch: None,
+		since: 1,
+	};
+	router.batch(up, 7, vec![(p("live/a"), Some(item))], Some(1), interest);
+	assert!(router.changed()[&7].contains(&p("live/a")));
+	router.route(up, 7, Some(Reach::Finite(Advert { metric: 2, ..advert })));
+	assert_eq!(router.changed(), BTreeMap::from([(7, BTreeSet::new())]));
+}
