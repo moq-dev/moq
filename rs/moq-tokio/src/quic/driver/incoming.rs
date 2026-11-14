@@ -54,7 +54,6 @@ impl Incoming {
 	pub(super) fn remote_address(&self) -> SocketAddr {
 		self.0.as_ref().unwrap().inner.remote_address()
 	}
-
 }
 
 impl Drop for Incoming {

@@ -974,7 +974,9 @@ async fn retry_after_rebind() {
 		assert!(incoming.validate_address().is_none(), "a first dial is unvalidated");
 
 		let incoming = server.accept().await.unwrap();
-		let incoming = incoming.validate_address().expect("the Retry token validates the redial");
+		let incoming = incoming
+			.validate_address()
+			.expect("the Retry token validates the redial");
 		let (accepted, connected) = join!(incoming.accept().unwrap(), connecting);
 		let _server_connection = accepted.unwrap();
 		let _client_connection = connected.unwrap();

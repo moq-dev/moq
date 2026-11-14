@@ -36,7 +36,9 @@ to the runner's Compose file, which the harness applies when `docker` is
 Podman: no interface names, no memlock limit, and no SELinux labels on the
 bind mounts.
 
-Nightly runs one job per peer (`.github/workflows/quic-interop.yml`). A failed
+Nightly runs one job per peer (`.github/workflows/quic-interop.yml`), and a
+branch that changes moq-quic can run the same workflow by hand:
+`gh workflow run quic-interop.yml --ref <branch>`. A failed
 cell keeps the runner's logs, pcaps, TLS key logs, and moq-quic's own log in
 the job's artifact; cells that read as expected drop theirs.
 

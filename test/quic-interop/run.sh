@@ -22,9 +22,18 @@ roles="server,client"
 argv=("$@")
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --peers) peers="$2"; shift 2 ;;
-        --cases) cases="$2"; shift 2 ;;
-        --roles) roles="$2"; shift 2 ;;
+        --peers)
+            peers="$2"
+            shift 2
+            ;;
+        --cases)
+            cases="$2"
+            shift 2
+            ;;
+        --roles)
+            roles="$2"
+            shift 2
+            ;;
         *)
             echo "usage: run.sh [--peers A,B] [--cases A,B] [--roles server,client]" >&2
             exit 2
@@ -32,7 +41,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 for role in ${roles//,/ }; do
-    [[ "$role" == server || "$role" == client ]] || { echo "unknown role: $role" >&2; exit 2; }
+    [[ "$role" == server || "$role" == client ]] || {
+        echo "unknown role: $role" >&2
+        exit 2
+    }
 done
 
 # The runner names its containers and networks, so one host runs one matrix at a time.

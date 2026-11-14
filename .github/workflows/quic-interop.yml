@@ -9,10 +9,8 @@ permissions:
 
 on:
   workflow_call:
-  # TEMPORARY: run on this PR while the matrix is measured; removed before review.
-  pull_request:
-    paths:
-      - .github/workflows/quic-interop.yml
+  # A branch that changes moq-quic can run the matrix before it merges.
+  workflow_dispatch:
 
 jobs:
   peer:

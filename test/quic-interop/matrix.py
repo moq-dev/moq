@@ -15,8 +15,9 @@ import json
 import re
 import shutil
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 CONFIG = Path(__file__).with_name("cases.toml")
 SELF = "moq-quic"
