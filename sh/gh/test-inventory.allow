@@ -35,6 +35,3 @@ ignore moq-video::frame::tests::d3d11_resize_defaults_to_the_gpu /quest/m5/video
 ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
-
-# Flaked under load; disabled until fixed at its cause.
-recipe test::stream-credit /quest/m1/stream-credit/browser-resets.md

@@ -153,21 +153,41 @@ try {
 	const reading = page.evaluate(() => window.report());
 	// Left pending if the drain times out, and rejected once the browser closes.
 	reading.catch(() => {});
-	// Every track keeps one group open: the previous one finishes as the next one starts.
-	let open: Moq.Group.Producer[] = [];
-	const write = (sequence: number, frame: number) => {
-		for (const [i, group] of open.entries())
-			group.writeFrame({ payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, frame)) });
+	// Every track keeps one group open: the previous one finishes as the next one starts. The top
+	// tier starts its groups half an interval after the rest, while their streams hold every
+	// credit, so the relay must pause a lower group to make room rather than hand out credit in
+	// priority order as all the groups start at once.
+	const open = new Map<number, { group: Moq.Group.Producer; sequence: number }>();
+	const step = (offset: boolean, half: number) => {
+		for (const [i, track] of tracks.entries()) {
+			if (tierOf.get(plan.tracks[i].name)?.every !== offset) continue;
+			const current = open.get(i);
+			// The first half of the interval starts a group, the second writes its second frame.
+			if (half === 0) {
+				current?.group.finish();
+				const sequence = current ? current.sequence + 1 : 0;
+				if (sequence === GROUPS) {
+					open.delete(i);
+					continue;
+				}
+				const group = track.appendGroup();
+				open.set(i, { group, sequence });
+				group.writeFrame({ payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, 0)) });
+			} else if (current) {
+				current.group.writeFrame({
+					payload: new TextEncoder().encode(payload(plan.tracks[i], current.sequence, 1)),
+				});
+			}
+		}
 	};
-	for (let sequence = 0; sequence < GROUPS; sequence++) {
-		for (const group of open) group.finish();
-		open = tracks.map((track) => track.appendGroup());
-		write(sequence, 0);
+	for (let sequence = 0; sequence <= GROUPS; sequence++) {
+		step(false, 0);
+		if (sequence > 0) step(true, 1);
 		await sleep(INTERVAL_MS / 2);
-		write(sequence, 1);
+		if (sequence < GROUPS) step(false, 1);
+		step(true, 0);
 		await sleep(INTERVAL_MS / 2);
 	}
-	for (const group of open) group.finish();
 	for (const track of tracks) track.finish();
 	log(`published ${GROUPS} groups on each track`);
 
