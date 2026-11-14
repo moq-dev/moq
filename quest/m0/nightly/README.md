@@ -54,7 +54,7 @@ more children, all in m0. Owned elsewhere: the fuzz build
 ([moq-dev/moq#8657](https://github.com/moq-dev/moq/pull/8657)), the Python
 audit ([moq-dev/moq#8648](https://github.com/moq-dev/moq/pull/8648)), the size
 report's output ([moq-dev/moq#8654](https://github.com/moq-dev/moq/pull/8654)),
-the firefox resume ([resume sync](/quest/m0/interop-green/resume-sync.md)),
+the firefox resume ([moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)),
 and the chromium `av_lag` rows
 ([output latency](/quest/m2/audio-playout/output-latency.md)).
 

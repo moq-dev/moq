@@ -1,76 +1,18 @@
-# Accept crane as argument to the overlay.
-{ crane }:
 final: prev:
 let
-  # Pin crane to the same build toolchain as rust-toolchain.toml / flake.nix so
-  # `nix build` uses what `nix develop` does and release artifacts build with
-  # the version CI verifies. Without an explicit toolchain, crane falls back to
-  # `final.rustc`/`final.cargo`, which nixpkgs resolves to its own default Rust.
-  #
-  rustToolchain = final.rust-bin.stable."1.98.1".default;
-  craneLib = (crane.mkLib final).overrideToolchain rustToolchain;
+  # Pin the build toolchain to rust-toolchain.toml's and flake.nix's so `nix
+  # build` uses what `nix develop` does and release artifacts build with the
+  # version CI verifies. `minimal`: a build needs no docs or rustfmt.
+  rustToolchain = final.rust-bin.stable."1.98.1".minimal;
 
-  # Helper function to get crate info from Cargo.toml
-  crateInfo = cargoTomlPath: craneLib.crateNameFromCargoToml { cargoToml = cargoTomlPath; };
-
-  # moq-video embeds PTX and moq-webrtc embeds crypto validation data at compile
-  # time, so packages must preserve these alongside Cargo's sources.
-  filterCargoSources =
-    path: type:
-    (final.lib.hasSuffix ".ptx" path)
-    || (
-      (final.lib.hasInfix "/rs/moq-webrtc/src/vendor/dimpl/crypto/validation/" path)
-      && ((final.lib.hasSuffix ".der" path) || (final.lib.hasSuffix ".bin" path))
-    )
-    || (craneLib.filterCargoSources path type);
-  cleanCargoSource = final.lib.cleanSourceWith {
-    src = ../.;
-    name = "source";
-    filter = filterCargoSources;
+  crates = import ./crates.nix {
+    pkgs = final;
+    inherit rustToolchain;
   };
 
-  # Keep the patched registry dependency and its macro implementation together.
-  dependencySources =
-    final.lib.mapAttrs
-      (
-        path: src:
-        final.lib.cleanSourceWith {
-          inherit src;
-          name = "${baseNameOf path}-source";
-          filter = filterCargoSources;
-        }
-      )
-      {
-        "rs/kio" = ../rs/kio/src;
-        "rs/kio/macros" = ../rs/kio/macros/src;
-      };
-
-  # `[patch.crates-io] kio = { path = "rs/kio" }` in the root Cargo.toml points
-  # registry crates (the moq-auth 0.2.1 fixture) at the workspace
-  # member. crane's dependency-only stage stubs every workspace crate down to an
-  # empty lib.rs, so those registry crates no longer find kio's API and fail to
-  # compile. Put kio and its macro crate back into the dummy tree, but keep crane's
-  # cleaned manifest: the real one inherits `workspace.lints`, which the dummy
-  # root manifest drops.
-  #
-  # Skip crane's check phase: `cargo test` runs a binary's tests as threads of
-  # one process, so tests that pass CI's nextest (a process per test) can
-  # interfere here, and CI already gates every commit.
-  buildPackage =
-    args:
-    craneLib.buildPackage (
-      args
-      // {
-        doCheck = false;
-        extraDummyScript = final.lib.concatStringsSep "\n" (
-          final.lib.mapAttrsToList (path: source: ''
-            rm -rf "$out/${path}/src"
-            cp -r ${source} --no-target-directory "$out/${path}/src"
-            chmod -R +w "$out/${path}/src"
-          '') dependencySources
-        );
-      }
-    );
+  # Frame pointers, so profiles of the deployed binaries resolve complete call
+  # stacks (negligible overhead on x86_64). nix.moq.dev caches these builds.
+  framePointers = [ "-C force-frame-pointers=yes" ];
 
   # rustls-platform-verifier reads the system CA bundle. A scratch image has
   # no /etc/ssl, so the package output references cacert and the image links
@@ -81,43 +23,11 @@ let
     ln -s ${final.cacert}/etc/ssl/certs/ca-bundle.crt "$out/etc/ssl/certs/ca-certificates.crt"
   '';
 
-  moqRelayArgs = crateInfo ../rs/moq-relay/Cargo.toml // {
-    src = cleanCargoSource;
-    cargoExtraArgs = "-p moq-relay --features jemalloc";
-    # Enable frame pointers for profiling support (negligible overhead on x86_64).
-    # This also ensures the CDN build matches what nix.moq.dev caches.
-    RUSTFLAGS = "-C force-frame-pointers=yes";
-    # jemalloc's configure uses -O0 test builds, which conflict with
-    # Nix's _FORTIFY_SOURCE hardening (requires -O).
-    hardeningDisable = [ "fortify" ];
-    postInstall = caBundle;
-  };
-
-  moqCliArgs = crateInfo ../rs/moq-cli/Cargo.toml // {
-    src = cleanCargoSource;
-    cargoExtraArgs = "-p moq-cli --features jemalloc";
-    # Enable frame pointers so jemalloc profiles resolve complete call stacks.
-    RUSTFLAGS = "-C force-frame-pointers=yes";
-    # jemalloc's configure uses -O0 test builds, which conflict with
-    # Nix's _FORTIFY_SOURCE hardening (requires -O).
-    hardeningDisable = [ "fortify" ];
-    # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
-    meta.mainProgram = "moq";
-    postInstall = caBundle;
-  };
-
-  moqBenchArgs = crateInfo ../rs/moq-bench/Cargo.toml // {
-    src = cleanCargoSource;
-    cargoExtraArgs = "-p moq-bench";
-  };
-
-  moqCInfo = crateInfo ../rs/moq-c/Cargo.toml;
-
   # The native libraries an external linker must pass alongside libmoq.a.
   # rs/moq-c/native-libs/ is the single source: rs/moq-c/CMakeLists.txt reads
-  # it for in-tree consumers, and this installPhase substitutes it into the
-  # moq-c.pc and find_package templates directly rather than running CMake, so
-  # format it the way each expects: `Libs.private` flags, and CMakeLists.txt's
+  # it for in-tree consumers, and moq-c below substitutes it into the moq-c.pc
+  # and find_package templates directly rather than running CMake, so format
+  # it the way each expects: `Libs.private` flags, and CMakeLists.txt's
   # MOQ_NATIVE_LIBS_QUOTED.
   moqCNativeLibs =
     let
@@ -142,36 +52,72 @@ let
       ) entries;
     };
 
-  moqCArgs = moqCInfo // {
-    src = cleanCargoSource;
-    # Releases carry the OpenH264 software fallback, which is opt-in.
-    cargoExtraArgs = "-p moq-c --features openh264";
-    nativeBuildInputs = with final; [
-      pkg-config
-    ];
+  # Releases carry the OpenH264 software fallback, which is opt-in.
+  moqCCrate = crates.build {
+    root = "moq-c";
+    features = [ "openh264" ];
+    # Cargo.toml's `[lib] name`, which crate2nix drops for a staticlib-only
+    # crate, so the archive would be libmoq_c.
+    rootAttrs.libName = "moq";
+  };
 
-    # moq-c is a staticlib; crane's default install phase only handles
-    # binaries. Lay out the artifact tree the way release tarballs and
-    # downstream `find_package(moq-c)` consumers already expect.
+  moqGstCrate = crates.build { root = "moq-gst"; };
+in
+{
+  moq-relay = crates.build {
+    root = "moq-relay";
+    features = [ "jemalloc" ];
+    rustflags = framePointers;
+    rootAttrs.postInstall = caBundle;
+  };
+
+  moq-cli = crates.build {
+    root = "moq-cli";
+    features = [ "jemalloc" ];
+    rustflags = framePointers;
+    rootAttrs = {
+      postInstall = caBundle;
+      # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
+      meta.mainProgram = "moq";
+    };
+  };
+
+  moq-bench = crates.build { root = "moq-bench"; };
+
+  moq-boy = crates.build {
+    root = "moq-boy";
+    # moq-boy encodes 160x144, below every hardware encoder's minimum.
+    features = [
+      "jemalloc"
+      "openh264"
+    ];
+    rustflags = framePointers;
+  };
+
+  # Lay out the artifact tree the way release tarballs and downstream
+  # `find_package(moq-c)` consumers already expect.
+  moq-c = final.stdenv.mkDerivation {
+    pname = "moq-c";
+    inherit (moqCCrate) version;
+    dontUnpack = true;
+    nativeBuildInputs = [ final.pkg-config ];
+    passthru = { inherit (moqCCrate) deps; };
+
     installPhase = ''
       runHook preInstall
 
       mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq-c
 
-      # Ask cargo's build log where it put things instead of reconstructing the
-      # paths, which a cross --target build moves. build.rs writes the header
-      # to include/ under its OUT_DIR.
-      jq=${final.lib.getExe final.jq}
-      lib=$($jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' "$cargoBuildLog")
-      gen=$($jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/moq-c#")) | .out_dir' "$cargoBuildLog")
-      cp "$lib" $out/lib/
-      cp "$gen/include/moq.h" $out/include/
+      # buildRustCrate suffixes the archive with the crate's metadata hash, and
+      # keeps build.rs's OUT_DIR, where it writes the header.
+      cp ${moqCCrate.lib}/lib/libmoq-*.a $out/lib/libmoq.a
+      cp ${moqCCrate.lib}/lib/moq-c.out/include/moq.h $out/include/
 
       # Rendered here rather than by build.rs: the template's paths are relative
       # to the .pc, which only holds once libmoq.a sits beside pkgconfig/.
       pc=$out/lib/pkgconfig/moq-c.pc
       substitute ${../rs/moq-c/moq-c.pc.in} "$pc" \
-        --subst-var-by VERSION "${moqCInfo.version}" \
+        --subst-var-by VERSION "$version" \
         --subst-var-by LIBS_PRIVATE ${final.lib.escapeShellArg moqCNativeLibs.pc}
       if grep -nE '@[A-Z_]+@' "$pc"; then
         echo "unsubstituted placeholder in moq-c.pc (see above)" >&2
@@ -187,132 +133,75 @@ let
         fi
       done
 
-      major_version="$(echo "${moqCInfo.version}" | cut -d. -f1)"
       substitute ${../rs/moq-c/cmake/moq-c-config.cmake.in} \
         $out/lib/cmake/moq-c/moq-c-config.cmake \
         --subst-var-by LIB_FILE libmoq.a \
-        --subst-var-by VERSION "${moqCInfo.version}" \
+        --subst-var-by VERSION "$version" \
         --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg moqCNativeLibs.cmake}
       substitute ${../rs/moq-c/cmake/moq-c-config-version.cmake.in} \
         $out/lib/cmake/moq-c/moq-c-config-version.cmake \
-        --subst-var-by VERSION "${moqCInfo.version}" \
-        --subst-var-by MAJOR_VERSION "$major_version"
+        --subst-var-by VERSION "$version" \
+        --subst-var-by MAJOR_VERSION "''${version%%.*}"
 
       runHook postInstall
     '';
   };
 
-  moqGstPluginArgs = crateInfo ../rs/moq-gst/Cargo.toml // {
-    src = cleanCargoSource;
-    cargoExtraArgs = "-p moq-gst";
+  # moq-gst is a cdylib GStreamer plugin. Install into lib/gstreamer-1.0
+  # so gst_all_1.gstreamer's nixpkgs setup-hook (which scans every input
+  # for that subdir) appends us to GST_PLUGIN_SYSTEM_PATH_1_0. Then
+  #   nix shell .#moq-gst .#gst_all_1.gstreamer --command gst-inspect-1.0 moq
+  # discovers moqsink/moqsrc without any env-var fiddling.
+  moq-gst-plugin = final.stdenv.mkDerivation {
+    pname = "moq-gst-plugin";
+    inherit (moqGstCrate) version;
+    dontUnpack = true;
+    passthru = { inherit (moqGstCrate) deps; };
 
-    nativeBuildInputs = with final; [ pkg-config ];
-    buildInputs = with final; [
-      gst_all_1.gstreamer
-      gst_all_1.gst-plugins-base
-    ];
-
-    # moq-gst is a cdylib GStreamer plugin. Install into lib/gstreamer-1.0
-    # so gst_all_1.gstreamer's nixpkgs setup-hook (which scans every input
-    # for that subdir) appends us to GST_PLUGIN_SYSTEM_PATH_1_0. Then
-    #   nix shell .#moq-gst .#gst_all_1.gstreamer --command gst-inspect-1.0 moq
-    # discovers moqsink/moqsrc without any env-var fiddling. Crane's
-    # default install phase only handles binaries, so we copy by hand.
     installPhase = ''
       runHook preInstall
-
-      # A cross --target build puts the cdylib under target/<triple>/.
-      tdir="target''${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}"
       mkdir -p $out/lib/gstreamer-1.0
-      if [ -f "$tdir/release/libgstmoq.dylib" ]; then
-        cp "$tdir/release/libgstmoq.dylib" $out/lib/gstreamer-1.0/
-      else
-        cp "$tdir/release/libgstmoq.so" $out/lib/gstreamer-1.0/
-      fi
-
+      cp ${moqGstCrate.lib}/lib/libgstmoq-*${final.stdenv.hostPlatform.extensions.sharedLibrary} \
+        $out/lib/gstreamer-1.0/libgstmoq${final.stdenv.hostPlatform.extensions.sharedLibrary}
       runHook postInstall
     '';
 
     # The flake output is meant to load against nix's GStreamer (in a
     # `nix shell .#moq-gst` / binary-cache-pulled context). `/nix/store` refs
     # are correct there. The only thing we fix is the rustc-emitted
-    # self-reference to /nix/var/nix/builds/.../libgstmoq.dylib (the
-    # cargo build dir, gone post-build) which would break loading even
-    # inside nix. rs/moq-gst/scrub.sh handles tarball / homebrew
-    # portability separately. The `[ -f ]` guard skips crane's
-    # deps-only stage, whose $out has no plugin.
+    # self-reference to the build directory's libgstmoq dylib (gone
+    # post-build), which would break loading even inside nix.
+    # rs/moq-gst/scrub.sh handles tarball / homebrew portability separately.
     postFixup = final.lib.optionalString final.stdenv.hostPlatform.isDarwin ''
       dylib="$out/lib/gstreamer-1.0/libgstmoq.dylib"
-      if [ -f "$dylib" ]; then
-        install_name_tool -id "@rpath/libgstmoq.dylib" "$dylib"
+      install_name_tool -id "@rpath/libgstmoq.dylib" "$dylib"
 
-        # The rustc self-ref is the only LC_LOAD_DYLIB whose basename
-        # matches our own and isn't already @rpath-prefixed. Rewriting
-        # it to @rpath/libgstmoq.dylib matches LC_ID_DYLIB, so dyld
-        # dedupes the load against the already-mapped image.
-        otool -L "$dylib" \
-          | tail -n +2 \
-          | awk '{print $1}' \
-          | { grep -E '/libgstmoq\.dylib$' || true; } \
-          | { grep -v '^@' || true; } \
-          | while read -r self_ref; do
-              install_name_tool -change "$self_ref" "@rpath/libgstmoq.dylib" "$dylib"
-            done
+      # The rustc self-ref is the only LC_LOAD_DYLIB whose basename
+      # matches our own and isn't already @rpath-prefixed. Rewriting
+      # it to @rpath/libgstmoq.dylib matches LC_ID_DYLIB, so dyld
+      # dedupes the load against the already-mapped image.
+      otool -L "$dylib" \
+        | tail -n +2 \
+        | awk '{print $1}' \
+        | { grep -E '/libgstmoq(-[0-9a-f]+)?\.dylib$' || true; } \
+        | { grep -v '^@' || true; } \
+        | while read -r self_ref; do
+            install_name_tool -change "$self_ref" "@rpath/libgstmoq.dylib" "$dylib"
+          done
 
-        # Assert no build-sandbox paths leaked. /nix/store refs are
-        # fine here, see top comment.
-        bad="$(otool -L "$dylib" \
-          | tail -n +2 \
-          | awk '{print $1}' \
-          | { grep '^/nix/var/' || true; })"
-        if [ -n "$bad" ]; then
-          echo "ERROR: $dylib has /nix/var build-sandbox LC_LOAD_DYLIB entries:" >&2
-          echo "$bad" >&2
-          exit 1
-        fi
+      # Assert no build-sandbox paths leaked. /nix/store refs are
+      # fine here, see top comment.
+      bad="$(otool -L "$dylib" \
+        | tail -n +2 \
+        | awk '{print $1}' \
+        | { grep -E '^/(nix/var|private)/' || true; })"
+      if [ -n "$bad" ]; then
+        echo "ERROR: $dylib has build-sandbox LC_LOAD_DYLIB entries:" >&2
+        echo "$bad" >&2
+        exit 1
       fi
     '';
   };
-
-  # CI checks run via `just ci` (lints, docs, and nextest), not
-  # through crane/`nix flake check`. It reaches mbx through the Cargo shim the
-  # dev shell puts on PATH, so nothing spells a wrapper out. Which compiler
-  # cache backs those runs is a workflow concern
-  # (`.github/actions/rust-cache`), not configured here.
-  # ./target stays per-job -- the persistent CARGO_TARGET_DIR growth that the old
-  # crane checks were introduced to fix doesn't recur.
-  # Release artifacts build via crane `buildPackage` below, which skips tests.
-in
-{
-  moq-relay = buildPackage moqRelayArgs;
-
-  moq-cli = buildPackage moqCliArgs;
-
-  moq-bench = buildPackage moqBenchArgs;
-
-  moq-boy = buildPackage (
-    crateInfo ../rs/moq-boy/Cargo.toml
-    // {
-      src = cleanCargoSource;
-      # moq-boy encodes 160x144, below every hardware encoder's minimum.
-      cargoExtraArgs = "-p moq-boy --features jemalloc,openh264";
-      nativeBuildInputs = with final; [
-        pkg-config
-        clang
-      ];
-      buildInputs = with final; [ ffmpeg ];
-      LIBCLANG_PATH = "${final.libclang.lib}/lib";
-      # Enable frame pointers for profiling support (negligible overhead on x86_64).
-      RUSTFLAGS = "-C force-frame-pointers=yes";
-      # jemalloc's configure uses -O0 test builds, which conflict with
-      # Nix's _FORTIFY_SOURCE hardening (requires -O).
-      hardeningDisable = [ "fortify" ];
-    }
-  );
-
-  moq-c = buildPackage moqCArgs;
-
-  moq-gst-plugin = buildPackage moqGstPluginArgs;
 
   # User-facing flake output. Bundles the plugin with wrapped gstreamer
   # tools so a single `nix shell .#moq-gst` gives you gst-inspect-1.0 /

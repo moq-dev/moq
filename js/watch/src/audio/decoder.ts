@@ -576,21 +576,26 @@ export class Decoder {
 		});
 
 		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring and a
-		// clock anchored on the previous one would discard as already played. A return to the same
-		// instance keeps the anchor, so the relay's redelivered last group is still dropped as old.
+		// clock anchored on the previous one would discard as already played.
 		// Every handle to one instance shares `closed`, so it identifies the instance where the
 		// handle itself does not.
 		if (this.#instance !== undefined && this.#instance !== active.closed) {
 			this.sync.reset();
 			this.reset();
+		} else if (this.#instance !== undefined && phase.kind === "stopped") {
+			// The picture returns at the live edge. Re-join audio to that clock immediately,
+			// rather than stretching the retained ring's lag back over several seconds. A
+			// running rendition swap keeps its seamless handover.
+			this.reset();
 		}
 		this.#instance = active.closed;
 
 		// The ring outlives this effect (it's keyed on the sample rate, channel count, and mode), so a
-		// replacement subscription on the same broadcast (a rendition swap, a return from an absence)
-		// inherits whatever its predecessor decoded. Samples are timestamp indexed, so the replacement
-		// overwrites the slots it lands on, but a publisher writing ahead of real-time leaves seconds
-		// of tail beyond them. Drop that once the replacement's first frame says where it starts.
+		// replacement subscription on the same broadcast (a rendition swap, or a fallback that stays
+		// running) inherits whatever its predecessor decoded; a return from an absence was reset above.
+		// Samples are timestamp indexed, so the replacement overwrites the slots it lands on, but a
+		// publisher writing ahead of real-time leaves seconds of tail beyond them. Drop that once the
+		// replacement's first frame says where it starts.
 		this.#handover.opened();
 
 		effect.run((run) => {
