@@ -57,22 +57,47 @@ both fixes reach release.
 Recurs once per cut (decided 2026-10-19 as once per major release; per cut,
 in three kinds, 2026-11-09). The kinds, what each publishes, and which checks
 each runs are in [Releases](/RELEASE.md#releases). This run is the
-`0.22.0` cut: it still waits on all of m2. Once it merges into `release` and
+`0.22.0` cut: it still waits on all of m2, and it ends this cycle like a wire
+cut. Once it merges into `release` and
 release-plz has published every package it bumps (the API diff's baselines), a
 PR on `main` sets `phase` in `version.json` to `additive` (the cut PR keeps
 the old phase, so its API diff only reports its breaks) and performs the re-split the root
 [questline](/quest/README.md) describes. This epic's remaining publication and
 adoption quests move to a release epic in m0, m3's other quests sort by kind
 into m1 (additive), m2 (API breaks) and m3 (wire changes), m4 stays, m5 moves
-to m6 and m5 starts empty, each milestone README's Goal is rewritten for its
-new role, and each audit's recurrence names m4 instead of m3.
+to m6 with its `Required` and a new empty m5 requires the wire cut too, each
+milestone README's Goal is rewritten for its new role, and each audit's
+recurrence names m4 and the wire cut instead of m3 and this path.
 
-Every cut's PR removes this path from every `Required`, which releases the
-audits waiting on it, rewrites every link to a moved path, and re-creates this
-quest as `/quest/m0/release/cut.md`, in m0's release epic (created if the
-cut moved nothing there), keeping its Goal and this paragraph, with no `Required` and a `## Waiting` item for the
-maintainer's instruction naming the next cut and its kind. Each later run
-follows that kind:
+Every cut's PR removes its own path from every `Required`, which releases the
+quests waiting on it, and rewrites every link to a moved path. Each cut
+recurs as one of two quests, which keep their Goal, these recurrence
+paragraphs, and the cut gate template with its decision:
+
+- **The on-demand cut**, `/quest/m0/release/cut.md` in m0's release epic
+  (created if the cut moved nothing there): the next additive or API cut. It
+  has no `Required` and a `## Waiting` item for the maintainer's instruction
+  naming the cut and its kind. Any quest that waits only for the next
+  publication requires it. Every cut's PR, the wire cut's included, removes
+  this path from every `Required` and re-creates it.
+- **The wire cut**, `/quest/m4/wire-cut.md`: the cut that ends the cycle. It
+  requires `/quest/m2/README.md` and `/quest/m3/README.md`, so it becomes
+  ready once the cycle's API breaks, wire changes, and the cut gate in m3
+  have merged, and it has no `## Waiting`, since the maintainer opens the
+  wire phase before that. [m5](/quest/m5/README.md) and m6 require it: the
+  gate that holds later work while m9's lab stays open. The hygiene audits
+  and the vendor sync's children recur behind it in m4. Its PR re-creates it
+  at the same path and keeps the m5 and m6 links, so the gate holds the next
+  cycle too; m5's quests reach m4 in the shift, which is when they can start.
+
+The wire cut lives in m4 because no quest requires one in a later milestone,
+so it sits in or after m3, the last milestone it waits on; m3 can't hold it,
+since a quest can't require the milestone that holds it. A milestone can't
+require the cut it holds either, so m4 stays open and the gate covers the
+milestones after it. The on-demand cut waits on no milestone, so it stays in
+m0, where its publication follow-ups live and anything can require it.
+
+Each run follows its kind:
 
 - **Additive**: the readiness checks, with the API diff refusing any break.
   Changed JS packages and binding wrappers take patch bumps on `main` first;
@@ -81,21 +106,22 @@ follows that kind:
   review](/quest/m3/release/api-review.md), the [feature
   review](/quest/m3/release/feature-review.md), the [Cargo feature
   review](/quest/m3/release/feature-flags.md), and the [migration
-  audit](/quest/m3/release/migrate-audit.md) beside it in m0's release
+  audit](/quest/m3/release/migrate-audit.md) in m0's release
   epic, each keeping
   its Goal and recurrence paragraph, scoped to what changed since the last
-  breaking cut and requiring nothing, and add them to this quest's
+  breaking cut and requiring nothing, and add them to the cut's
   `Required`. Then advance the shared minor with `just version`.
-- **Wire**, which ends the cycle: also require `/quest/m2/README.md` and
-  `/quest/m3/README.md`, which the cut can wait on because it lives in m0,
-  not m3; finalize the cycle's wire version, then, once it merges
-  into `release` and its packages are published, set `phase` back to `additive` on `main`, and shift the milestones: remaining publication and adoption
-  quests to m0, m4's quests by kind into m1, m2 and m3, m5's to m4, and m6
-  stays the deferred bucket.
+- **Wire**, which ends the cycle: finalize the cycle's wire version, then,
+  once it merges into `release` and its packages are published, set `phase`
+  back to `additive` on `main`, and shift the milestones: remaining
+  publication and adoption quests to m0, m4's quests other than the wire cut
+  by kind into m1, m2 and m3, m5's to m4, and m6 stays the deferred bucket.
 
-The `0.22.0` cut and each wire cut also re-create the cut gate in m3 from the
+The `0.22.0` cut re-creates both quests, points m5's `Required` at the wire
+cut in place of this path, and drops m4's, so m4 opens. It and each wire cut
+also re-create the cut gate in m3 from the
 template below; a recurring cut-gate child that the last run re-created in
-the later-work milestone, such as the [vendor
+m4, such as the [vendor
 sync](/quest/m3/vendor-sync/README.md), moves under it.
 Only `/quest-delete` ends the recurrence.
 
@@ -114,16 +140,20 @@ merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
   [retired names](/quest/m3/release/retired-names.md) publishes the pointer
   above 0.0.25, with the other names this cut stops publishing.
 
-Open as of 2026-11-13 (maintainer, /quest-plan): where the next cycle's cuts
-live. The steps above place them in m0's release epic and have the wire cut
-require m2 and m3, but no quest may require one in a later milestone, and
-[m4](/quest/m4/README.md) and [m5](/quest/m5/README.md) now require this cut
-until it lands, a gate each cycle should re-create. [Cut
-placement](/quest/m0/cut-placement.md) settles both before this cut
-re-creates its successor.
+Decided 2026-11-14 ([cut placement](https://github.com/moq-dev/moq/pull/8736),
+taken by the agent under /quest-afk, for the maintainer's review): ✅ the
+wire cut lives in m4 and gates m5 and m6 every cycle, while additive and API
+cuts recur in m0. Rejected: one cut quest in m0 that requires m2 and m3 for
+a wire cut (breaks the 2026-11-13 rule); the wire cut in m3 requiring each m3
+entry by hand (a list nobody keeps current, like the hand-kept m2 list
+rejected 2026-11-09); one cut quest in m4 for every kind (additive and API
+cuts would rank last, nothing in m0 to m3 could require one, and every
+additive cut would have to pick which links to keep); lifting the gate between
+cycles (nothing marks a moment to lift it, and m5's work reaches m4 at each
+shift anyway).
 
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
-decision below). The gate is an epic in m3 for the checks the cut needs that
+decision below). The gate is an epic in m3, `/quest/m3/cut-gate/`, for the checks the cut needs that
 break nothing: `main` is no slower than `release`, vendored code has the
 upstream fixes it needs, and the hand-written `moq-c` is at parity with
 moq-ffi. It has no work of its own and completes when every child merges. It
@@ -173,7 +203,6 @@ with the suites above.
 
 ## Required
 
-- [Cut placement](/quest/m0/cut-placement.md) - where this cut re-creates its successor, and the gate it re-creates
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
