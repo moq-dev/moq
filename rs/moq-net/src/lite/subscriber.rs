@@ -13714,9 +13714,11 @@ impl kio::Task for FetchServeRun {
 					};
 
 					// Only the rest of a frame a reader got partway through, which a compressed
-					// frame cannot start at: it inflates only from its first byte.
+					// frame cannot start at: it inflates only from its first byte. Nor can a
+					// moq-transport track's, whose object records name whole objects.
+					let whole_objects = matches!(self.info.peek(), Some(Ok(info)) if info.ietf().is_some());
 					let byte_start = match self.serve.subscriber.version.has_byte_start() {
-						true if plain && frame_start == request.frame_start() => request.byte_start(),
+						true if plain && !whole_objects && frame_start == request.frame_start() => request.byte_start(),
 						_ => 0,
 					};
 

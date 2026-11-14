@@ -924,10 +924,18 @@ impl GroupState {
 		payload + fields
 	}
 
-	/// The bytes the live tail holds: every committed frame, their fields, and the
-	/// in-flight frame at its declared size.
+	/// The bytes the live tail holds: every committed frame, their fields, the rest of a
+	/// frame the copy started partway into, and the in-flight frame at its declared size.
 	fn tail(&self) -> u64 {
-		self.cache + self.relay.as_ref().map_or(0, |relay| relay.bytes) + self.unwritten()
+		self.cache + self.relay.as_ref().map_or(0, |relay| relay.bytes) + self.lead_bytes() + self.unwritten()
+	}
+
+	/// The bytes written of the frame the copy started partway into.
+	fn lead_bytes(&self) -> u64 {
+		self.lead
+			.as_deref()
+			.and_then(|lead| lead.open.as_ref())
+			.map_or(0, |(_, buf)| buf.content_size())
 	}
 
 	/// The frame slots the tail holds beyond the log's first segment, so a group of empty
@@ -1019,6 +1027,12 @@ impl GroupState {
 		let mut slots = self.slots();
 		if tail.saturating_add(slots) <= MAX_CACHE_BYTES {
 			return true;
+		}
+		// The lead is the oldest frame, so it goes first. Only a later frame trims, once the
+		// lead is written; its readers keep the bytes they hold.
+		if self.lead.as_deref().is_some_and(|lead| lead.open.is_some()) {
+			tail -= self.lead_bytes();
+			self.lead = None;
 		}
 		let mut end = self.held();
 		while tail.saturating_add(slots) > MAX_CACHE_BYTES
@@ -6913,6 +6927,50 @@ mod test {
 
 		let read = plain.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(read.payload, b"g"[..], "whole reads skip the frame held in part");
+	}
+
+	/// The rest of a frame the copy started partway into counts toward the live tail, and
+	/// is the first frame a later one sheds past it; a reader already holding it keeps it.
+	#[test]
+	fn a_lead_is_shed_first_past_the_live_tail() {
+		let half = MAX_CACHE_BYTES / 2;
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.bound(Bounds {
+				start: 0,
+				byte: 1,
+				end: None,
+			})
+			.unwrap();
+		let handle = producer.handle();
+		let mut holding = producer.consume().at(0, 1).unwrap();
+		let mut late = producer.consume().at(0, 1).unwrap();
+
+		let mut lead = producer.create_lead(sized(half + 1).into()).unwrap();
+		lead.write(Bytes::from(vec![1u8; half as usize])).unwrap();
+		let mut producer = lead.finish().unwrap();
+		let mut frame = match holding.poll_next_frame_at(1, &kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(frame))) => frame,
+			_ => panic!("the lead is readable"),
+		};
+		assert!(handle.cache_size() >= half);
+
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from(vec![2u8; (half + half / 2) as usize]))
+			.unwrap();
+		assert!(handle.cache_size() < MAX_CACHE_BYTES, "the lead was not shed");
+		assert!(
+			matches!(
+				late.poll_next_frame_at(1, &kio::Waiter::noop()),
+				Poll::Ready(Err(Error::Lagged))
+			),
+			"a reader that had not taken the lead finds it gone"
+		);
+		assert_eq!(
+			frame.read_all().now_or_never().unwrap().unwrap().len() as u64,
+			half,
+			"a reader holding the lead keeps it"
+		);
 	}
 
 	/// A declared size costs the peer nothing, so the pool is charged as the bytes
