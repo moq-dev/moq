@@ -40,7 +40,7 @@ peers do. Amend that sentence of the docs with the mesh exception.
 Tests: namespaces with multicast off take the direct path; a forged hint
 (signed by another key) is never dialed; a colliding private address fails the
 pin and falls back to the relay; a peer that stops answering is backed off.
-Update `doc/bin/relay/cluster.md` and the [guide](/quest/m3/mesh/guide.md)
+Update `doc/bin/relay/cluster.md` and the [guide](/quest/m5/mesh-guide.md)
 if it exists.
 
 ## Required

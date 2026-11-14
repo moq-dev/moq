@@ -80,13 +80,13 @@ describe("AudioBuffer", () => {
 			buffer.reset();
 			await received;
 			expect(messages).toEqual([
-				{ type: "init", channels: 2, rate: 48_000, latency: 100, target: 100, bound: 0 },
+				{ type: "init", channels: 2, rate: 48_000, latency: 100, bound: 0 },
 				{
 					type: "data",
 					timestamp: 500_000,
 					data: [new Float32Array([1, 2, 3]), new Float32Array([4, 5, 6])],
 				},
-				{ type: "latency", latency: 200, target: 200, bound: 0 },
+				{ type: "latency", latency: 200, bound: 0 },
 				{ type: "truncate", timestamp: 502_000 },
 				{ type: "reset", epoch: 1 },
 			]);
@@ -491,9 +491,9 @@ describe("AudioBuffer steering", () => {
 			buffer.setLatency(Duration.millis(1500));
 			buffer.setLatency(Duration.millis(200), Duration.millis(1800));
 			expect(sent).toEqual([
-				{ type: "init", channels: 1, rate: 1000, latency: 500, target: 1000, bound: 1000 },
-				{ type: "latency", latency: 500, target: 1500, bound: 1000 },
-				{ type: "latency", latency: 200, target: 200, bound: 1800 },
+				{ type: "init", channels: 1, rate: 1000, latency: 500, bound: 1000 },
+				{ type: "latency", latency: 500, bound: 1000 },
+				{ type: "latency", latency: 200, bound: 1800 },
 			]);
 		} finally {
 			buffer.close();
@@ -536,10 +536,10 @@ describe("AudioBuffer steering", () => {
 			report(1.5, 1500);
 			// A delay change moved the clock 50 ms.
 			report(1.75, 1800);
-			// The reference moved 5 ms earlier: a jump the offset takes whole, under the filter's.
+			// The reference moved 5 ms earlier: the offset takes it whole, under the filter's.
 			reference.set(-5);
 			report(2, 2055);
-			// A later reference is no jump.
+			// A later reference rises only as fast as the filter does.
 			reference.set(0);
 			report(2.25, 2300);
 			report(2.5, undefined);
@@ -548,7 +548,7 @@ describe("AudioBuffer steering", () => {
 				{ type: "clock", timestamp: 1_250_100, time: 1.25 },
 				{ type: "clock", timestamp: 1_500_000, time: 1.5 },
 				{ type: "clock", timestamp: 1_800_000, time: 1.75 },
-				{ type: "clock", timestamp: 2_055_000, time: 2, jumped: 5000 },
+				{ type: "clock", timestamp: 2_055_000, time: 2 },
 				{ type: "clock", timestamp: 2_300_000, time: 2.25 },
 				{ type: "clock", time: 2.5 },
 			]);

@@ -35,7 +35,7 @@ stays in moq-quic's README.
 
 Ruled out: quinn's batched `read_datagrams`
 ([`2697de1e`](https://github.com/quinn-rs/quinn/commit/2697de1e1314cb9f98502b7323acd5bdd836b582))
-waits on the [driver lock profile](/quest/m4/perf/quic-lock-contention.md).
+waits on the [driver lock profile](/quest/m9/perf/quic-lock-contention.md).
 
 Public API: none expected; a ported fix that changes one says so. Wire: QUIC
 behavior follows upstream's fixes.

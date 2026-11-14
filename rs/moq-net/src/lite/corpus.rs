@@ -4,8 +4,10 @@
 //!
 //! Each case is one complete wire input at a negotiated `version` (its handshake name), with
 //! the outcome both must reach: `decoded`, where our own encoding of the decoded value must
-//! equal the input, so a case also pins the value, or `refused`, where the input is rejected
-//! without asking for more bytes. A fuzz crash on a single moq-lite message belongs here
+//! equal the input, so a case also pins the value, `refused`, where the input is rejected
+//! without asking for more bytes, or `withdrawn`, where a lite-07 route message decodes but its
+//! forwarded content is refused, so the receiver withdraws the route or claim and keeps the
+//! session. A fuzz crash on a single moq-lite message belongs here
 //! rather than in `fuzz/regressions/`, so JS replays it too.
 
 use crate::coding::{Decode, DecodeError, Decoder, Encode, Form};
@@ -45,6 +47,7 @@ enum Message {
 enum Expect {
 	Decoded,
 	Refused,
+	Withdrawn,
 }
 
 /// What a decode came to: our own encoding of what it decoded, as hex, or why it did not.
@@ -72,7 +75,10 @@ fn run(case: &Case, data: &[u8]) -> String {
 	};
 	let decoder = || Decoder::new(data, version.into());
 	match case.message {
-		Message::Announce => outcome(data, version, super::AnnounceBroadcast::decode_slice(data, version)),
+		Message::Announce => match super::AnnounceBroadcast::decode_slice(data, version) {
+			Ok((super::AnnounceBroadcast::Refused { .. }, used)) if used == data.len() => "withdrawn".to_string(),
+			decoded => outcome(data, version, decoded),
+		},
 		Message::AnnounceReply => outcome(data, version, super::AnnounceReply::decode_slice(data, version)),
 		Message::AnnounceInit => {
 			let mut r = decoder();
@@ -114,6 +120,7 @@ fn corpus() {
 		let want = match case.expect {
 			Expect::Decoded => case.hex.clone(),
 			Expect::Refused => "refused".to_string(),
+			Expect::Withdrawn => "withdrawn".to_string(),
 		};
 		let got = run(case, &unhex(&case.hex));
 		if got != want {

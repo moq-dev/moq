@@ -13,7 +13,7 @@ this quest and every `Required` entry that links it.
 moq.pro's lite-07 rollout waits on [Finalize moq-lite-07](/quest/m2/lite07-finalize.md), so this
 condition cannot clear before a release carries the final version.
 
-Decided 2026-10-05: [Cluster routing](/quest/m2/cluster-routing/README.md)'s
+Decided 2026-10-05: [Cluster routing](/quest/m3/cluster-routing/README.md)'s
 route layer lands in lite-07, so the final lite-07 carries ROUTE and
 path-less ANNOUNCE instead of native hop lists (a temporary lite-06
 compatibility chain rides until lite-08), and loses the `Hop Base`/`Hop Keep`

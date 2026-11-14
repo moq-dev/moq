@@ -15,7 +15,7 @@ might forward too, honestly it would be lit to have P2P meshes for browsers
 on the local network so please plan that."
 
 - ✅ The forwarding engine is the Rust router, run in the tab through the
-  [Rust-to-TypeScript port](/quest/m5/rs2ts-js.md) (rejected: handwriting
+  [Rust model in the browser](/quest/m5/rs2ts-js.md), WebAssembly first since 2026-11-09, (rejected: handwriting
   the forwarding rule in `js/net`, which was feasibility, route requests,
   holds, and echoes when this was decided and is paths, withdrawals, holds,
   and the doubt since the
@@ -28,7 +28,7 @@ on the local network so please plan that."
 
 This lifts three statements once it lands: the P2P epic's "A browser never
 carries another peer's traffic", the
-[cluster routing](/quest/m2/cluster-routing/README.md) plan's browser tabs
+[cluster routing](/quest/m3/cluster-routing/README.md) plan's browser tabs
 keeping `proxy` off, and `js/net`'s non-transit
 tab. Until then each stays true.
 
@@ -60,5 +60,5 @@ relay does.
 
 ## Required
 
-- [Ship JS-only @moq/net from Rust](/quest/m5/rs2ts-js.md) - the Rust router and model running in the tab
+- [@moq/net runs the Rust model in the browser](/quest/m5/rs2ts-js.md) - the Rust router and model running in the tab
 - [P2P](/quest/m4/p2p/README.md) - direct browser sessions, their signaling, and `Peers`

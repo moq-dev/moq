@@ -41,11 +41,11 @@ Approved to file (search for an existing report first):
   for the next codec.
 - **Biome:** filed 2026-10-31 as
   [biomejs/biome#12796](https://github.com/biomejs/biome/issues/12796)
-  (open): `useMathMinMax` flags comparisons of `bigint` operands, and its
-  autofix to `Math.min`/`Math.max` throws `TypeError` on bigints. #7305
-  suppressed the 9 sites in `js/qmux` and `js/net/src/hop.ts`; their
-  `biome-ignore` comments don't link the report yet, so add the link, and
-  remove them once it is fixed. The string and `Date` cases were fixed
+  (open, checked 2026-11-12): `useMathMinMax` flags comparisons of `bigint`
+  operands, and its autofix to `Math.min`/`Math.max` throws `TypeError` on
+  bigints. #7305 suppressed the sites in `js/qmux` and `js/net/src/hop.ts`;
+  link the report from their 8 `biome-ignore` comments, then remove them once
+  it is fixed. The string and `Date` cases were fixed
   upstream ([biomejs/biome#12624](https://github.com/biomejs/biome/issues/12624),
   [biomejs/biome#10272](https://github.com/biomejs/biome/issues/10272)).
 
@@ -57,3 +57,7 @@ Not to be filed:
   [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md) fixes it there.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: which of the reports with no recorded approval may be posted: the GStreamer `faad` frame drop, retina 0.4.21's idle `Pending`, and the mr-boxington eviction (which [Mbx R2 verify](/quest/m0/ci/mbx-r2-verify.md)'s upstream threads may already cover). Options: (a) approve some or all, each after reading that project's AI policy and searching for an existing report; (b) drop all three and keep the approved Chromium and Firefox reports. Recommended: (b), since each workaround already works and none blocks other work.

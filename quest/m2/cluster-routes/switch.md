@@ -60,19 +60,31 @@ else, the model wins:
 
 - ROUTE_START and ROUTE_UPDATE carry the path as hops, each a Node ID and
   the session that node learned the route on, and the prefix the route
-  covers as the model settled it. The seqno and the down-only bit go. The
+  covers as the model settled it. The seqno goes. The down-only flag stays as
+  a route attribute beside the path (epic Plan item 29, decided 2026-11-12:
+  set when a route is learned over an `upstream` link, never cleared, never
+  sent over one), which amends this quest's first draft, where it went. The
   metric stays as the cost that ranks routes, and no longer decides which
   are safe. The hop limit stays the wire's 32.
 - One message names a dead hop. A relay sends it once per session it loses,
   to every neighbour, covering every publisher, and it lists the routes that
   moved to another path, as the prototype has it. The same message carries DRAIN
-  entries, each naming a node that sent GOAWAY, covering every publisher.
+  entries, each naming a node that sent GOAWAY, covering every publisher. On a
+  scoped session it applies only to the routes heard on that session and casts
+  no doubt (epic Plan item 30), so a peer cannot drop routes it only read in a
+  path.
 - The answer that ends a hold rides the publisher half: the stream that
   carries the answering side's routes to the relay that waits. It is then
   ordered behind every route its sender sent first, on today's streams. A
   relay waits only on a neighbour it listens to, since no other can hand a
-  stale route back.
+  stale route back. A neighbour that has not answered by a deadline counts
+  as answering with nothing, and a session whose announce stream has stopped
+  draining for a set time is closed (epic Plan item 30); a hold protects
+  presence, not loop freedom, so either is safe.
 - ROUTE_HOLD stays as the model has it (epic Plan items 14 and 19).
+- `RouteHandoff.tla` gains the down-only flag and its export rule (epic Plan
+  item 29), which the router already has, so the model checks the rule the
+  wire carries.
 - ROUTE_REQUEST and the echo are removed with their types. The Node ID a
   request names (epic Plan item 2) stays.
 - The doubt is local: nothing on the wire carries it. Its timer is the
@@ -135,7 +147,9 @@ Work:
   and no relay moves onto a route through it early; a hold ends behind a
   neighbour that answers and behind one whose session closes; an unknown
   hop named in a withdrawal changes nothing; a path at the hop limit is
-  refused.
+  refused; a scoped peer's dead-hop message leaves routes heard on other
+  sessions alone; a hold ends at its deadline behind a neighbour that never
+  answers; and a peer that stops reading its announce stream is closed.
 - Measure route and claim messages per change with
   `rs/moq-net/tests/integration/mesh_sweep.rs`'s benchmark before and after,
   and put both in the PR.
@@ -146,9 +160,8 @@ by misparse, not by version. Relays pinned to `main` roll together, as each
 earlier lite-07 wire change did.
 
 A relay refuses a route its neighbour only forwarded by withdrawing that
-route, not by closing the session
-([refuse-route](/quest/m1/refuse-route.md)). If that rule has landed, the
-rewritten codec and the path router keep it; if not, it follows this switch.
+route, not by closing the session (the draft's Refused Content section). The
+rewritten codec and the path router keep that rule.
 
 Public API: none expected. Wire: lite-07-wip only.
 

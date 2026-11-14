@@ -411,7 +411,7 @@ should prefer the canonical name and fall back to the legacy one.
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
-    "wire_tx": 2048, "wire_rx": 1024
+    "wire_tx": 2048, "wire_rx": 1024, "routes_refused": 0
   }
 }
 ```
@@ -480,6 +480,12 @@ its QUIC `max_streams`, which bounds them. In a bucket's `labels` a peak never
 goes down while the label has a session; in the totals and presence tracks it
 never goes down while the track lives. Summing
 nodes or labels takes the largest.
+
+`routes_refused` counts the routes and claims that the label's moq-lite-07
+sessions forwarded and the relay refused, such as a route with a flag this
+release does not know. The relay withdraws each one and keeps the session, so a
+neighbour on a newer release costs only that route. A rising count during a
+rollout means the releases disagree on route content.
 
 ### Counters
 
