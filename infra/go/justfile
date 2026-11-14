@@ -1,0 +1,20 @@
+set fallback
+
+# Deploy the go.moq.dev worker.
+deploy:
+    bun install --frozen-lockfile
+    bun wrangler deploy
+
+# Create the go-moq-dev R2 bucket. Run once.
+create:
+    bun install --frozen-lockfile
+    bun wrangler r2 bucket create go-moq-dev --update-config=false
+
+# Copy every moq.dev/moq-ffi version proxy.golang.org lists into the bucket, as sum.golang.org pinned it.
+backfill:
+    ./backfill.sh
+
+# Check moq.dev/moq-ffi versions resolve through a module proxy and match sum.golang.org.
+[positional-arguments]
+verify *args:
+    ./verify.sh "$@"

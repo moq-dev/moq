@@ -35,6 +35,10 @@ if [[ -n "$UNFORMATTED" ]]; then
     exit 1
 fi
 
+# The release's module zip tool needs only go too.
+echo "go check: go vet modzip..."
+(cd "$SCRIPT_DIR/modzip" && GOWORK=off go vet ./...)
+
 if ! command -v cargo >/dev/null 2>&1; then
     echo "go check: no cargo on PATH, skipping" >&2
     exit 0
