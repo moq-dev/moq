@@ -205,6 +205,9 @@ pub struct Consumer<F: Container> {
 
 	// When the wire frame behind the last frame read landed in this node's cache.
 	arrived: Option<Instant>,
+
+	// When the latest group dropped without delivering all of it landed.
+	skipped: Option<Instant>,
 }
 
 /// Whether a [`Consumer`] still reads its subscription.
@@ -419,6 +422,7 @@ impl<F: Container> Consumer<F> {
 			next: None,
 			group: 0,
 			arrived: None,
+			skipped: None,
 		}
 	}
 
@@ -439,6 +443,16 @@ impl<F: Container> Consumer<F> {
 	/// packed into one wire frame, as a CMAF fragment packs its samples, share its arrival.
 	pub fn arrival(&self) -> Option<Instant> {
 		self.arrived
+	}
+
+	/// When the latest group this reader dropped without delivering all of it landed in this
+	/// node's cache, or `None` before the first.
+	///
+	/// Its frames were never read, so a caller timing [`arrival`](Self::arrival)s learns when a
+	/// join's backlog finished arriving even when the reader skipped it: one that arrived below
+	/// the cursor, or below the start, or that a skip passed over.
+	pub fn skipped(&self) -> Option<Instant> {
+		self.skipped
 	}
 
 	/// The group sequence of the last event read.
@@ -567,7 +581,14 @@ impl<F: Container> Consumer<F> {
 				(floor, served) => floor.or(served),
 			};
 			if let Some(start) = start {
-				self.pending.retain(|group| group.sequence >= start);
+				let skipped = &mut self.skipped;
+				self.pending.retain(|group| {
+					let keep = group.sequence >= start;
+					if !keep {
+						*skipped = (*skipped).max(Some(group.group.arrived()));
+					}
+					keep
+				});
 				self.current = start;
 				self.startup = Startup::Started;
 			}
@@ -1119,6 +1140,7 @@ impl<F: Container> Consumer<F> {
 
 			if sequence < self.current {
 				tracing::debug!(old = ?sequence, current = ?self.current, "skipping old group");
+				self.skipped = self.skipped.max(Some(reader.group.arrived()));
 				continue;
 			}
 
@@ -1167,15 +1189,18 @@ impl<F: Container> Consumer<F> {
 	fn discard(&mut self, mut pick: impl FnMut(&mut GroupBuffer<F>) -> bool) -> Result<(), F::Error> {
 		let start = self.start;
 		let mut fault = None;
+		let mut skipped = self.skipped;
 		self.pending.retain_mut(|group| {
 			if !pick(group) {
 				return true;
 			}
+			skipped = skipped.max(Some(group.group.arrived()));
 			if fault.is_none() {
 				fault = Self::discard_fault(start, group);
 			}
 			false
 		});
+		self.skipped = skipped;
 		self.discarded(fault)
 	}
 
@@ -1185,6 +1210,7 @@ impl<F: Container> Consumer<F> {
 		let start = self.start;
 		let mut fault = None;
 		for mut group in self.pending.drain(..count) {
+			self.skipped = self.skipped.max(Some(group.group.arrived()));
 			if fault.is_none() {
 				fault = Self::discard_fault(start, &mut group);
 			}
@@ -1992,6 +2018,29 @@ mod tests {
 		marker.finish().unwrap();
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::End { group: 2, .. })));
 		assert_eq!(reader.arrival(), Some(second), "an end carries no arrival of its own");
+	}
+
+	/// A group that arrives below the cursor is dropped unread, and the reader reports when it
+	/// landed, so a caller timing arrivals knows when the backlog it never saw arrived.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_below_the_cursor_reports_when_it_landed() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
+
+		write_group(&mut track, 5, &[ts(100_000)]);
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { group: 5, .. })));
+		assert_eq!(reader.skipped(), None, "nothing dropped yet");
+
+		tokio::time::advance(Duration::from_millis(30)).await;
+		let below = kio::clock::now();
+		write_group(&mut track, 2, &[ts(40_000)]);
+		tokio::time::advance(Duration::from_millis(30)).await;
+		write_group(&mut track, 6, &[ts(120_000)]);
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { group: 6, .. })));
+		assert_eq!(reader.skipped(), Some(below));
 	}
 
 	/// The holes a source left behind when it stopped expire together, a budget after the groups

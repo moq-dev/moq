@@ -32,6 +32,12 @@ const RESAMPLE: f64 = 500.0;
 /// The most weight one observation takes, so a lone one holds the quantile for one half-life at most.
 const FRESH_MAX: f64 = 0.1;
 
+/// Milliseconds after the first arrival a skipped group can still extend the join. A
+/// skip carries no timestamp, so a path dropping a late group every interval from the
+/// start would otherwise hold the join open, and the estimate unmeasured, for as long
+/// as it lasts.
+const JOIN_MAX: f64 = 2000.0;
+
 /// Idle intervals folded at once, purely to bound the work.
 const IDLE_MAX: f64 = 1024.0;
 
@@ -74,6 +80,14 @@ impl Target {
 	pub(crate) fn end(&mut self) {
 		if let Self::Auto(estimator) = self {
 			estimator.end();
+		}
+	}
+
+	/// A frame produced before the subscription, which arrived at `arrival` but was
+	/// skipped unread. A fixed target ignores it.
+	pub(crate) fn backlog(&mut self, arrival: f64) {
+		if let Self::Auto(estimator) = self {
+			estimator.backlog(arrival);
 		}
 	}
 
@@ -290,6 +304,8 @@ pub(crate) struct Estimator {
 	start: Option<f64>,
 	/// The latest a frame produced before the subscription arrived, starting at `start`.
 	joined: f64,
+	/// Every interval closed so far measured the join, so a skipped backlog can still extend it.
+	open: bool,
 	/// A declared end precedes the next measured observation, so the silence before it is not idle.
 	ended: bool,
 	/// The earliest a frame stalled in this interval was due.
@@ -320,6 +336,7 @@ impl Estimator {
 			oldest: 0.0,
 			start: None,
 			joined: 0.0,
+			open: true,
 			ended: false,
 			due: f64::INFINITY,
 			late: f64::NEG_INFINITY,
@@ -385,6 +402,7 @@ impl Estimator {
 		if self.joining() {
 			self.pending += 1.0;
 		} else {
+			self.open = false;
 			self.close(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1));
 		}
 
@@ -470,6 +488,19 @@ impl Estimator {
 		}
 	}
 
+	/// A frame produced before the subscription, skipped unread, so the join lasts
+	/// until it arrived as if it had been observed.
+	fn backlog(&mut self, arrival: f64) {
+		// Before any observation the join has not started, and starts later than this. Once
+		// an interval measured the path the join is over, and a skip is an outage's.
+		if let Some(start) = self.start
+			&& self.open
+			&& arrival < start + JOIN_MAX
+		{
+			self.joined = self.joined.max(arrival);
+		}
+	}
+
 	/// A declared end lies between the previous observation and the next, so the
 	/// silence it declares does not relax the estimate the way an unexplained gap
 	/// does. Called before observing the first frame after the end, not at the
@@ -535,6 +566,9 @@ pub(crate) mod tests {
 		/// Indices of the frames observed right after a declared end.
 		#[serde(default)]
 		pub ends: Vec<usize>,
+		/// Indices of the frames skipped unread, reported by arrival instead of observed.
+		#[serde(default)]
+		pub skipped: Vec<usize>,
 		pub target: Vec<(usize, f64)>,
 	}
 
@@ -573,7 +607,7 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 15] = [
+	const CORPUS: [&str; 16] = [
 		"advertised",
 		"backlog",
 		"batches",
@@ -586,6 +620,7 @@ pub(crate) mod tests {
 		"paced",
 		"reorder",
 		"silence",
+		"skipped",
 		"spike",
 		"straggler",
 		"tunein",
@@ -607,7 +642,10 @@ pub(crate) mod tests {
 				if case.ends.contains(&index) {
 					target.end();
 				}
-				target.observe(arrival, media);
+				match case.skipped.contains(&index) {
+					true => target.backlog(arrival),
+					false => target.observe(arrival, media),
+				}
 				let actual = target.millis();
 				assert!(
 					(actual - series[index]).abs() <= 1e-6,
@@ -616,6 +654,41 @@ pub(crate) mod tests {
 				);
 			}
 		}
+	}
+
+	/// Every frame of `outage` from its second interval on also reported as a skipped
+	/// group's arrival once observed, as a consumer closing groups below its cursor
+	/// would. Taken as backlog, each would make its interval fold nothing: the prior
+	/// would linger, and the outages that raise the target would go unmeasured.
+	#[test]
+	fn leaves_the_join_where_it_ended_once_an_interval_measured_the_path() {
+		let case = case("outage");
+		let mut plain = Target::new(Duration::ZERO, true, None);
+		let mut reported = Target::new(Duration::ZERO, true, None);
+		for (&arrival, &media) in case.arrival.iter().zip(&case.media) {
+			plain.observe(arrival, media);
+			reported.observe(arrival, media);
+			if arrival >= case.arrival[0] + RESAMPLE {
+				reported.backlog(arrival);
+			}
+			assert_eq!(reported.millis(), plain.millis());
+		}
+	}
+
+	/// A skip reported ahead of every frame of `outage` keeps each interval measuring
+	/// the join, but only for its first 2 s: the outages after it are still measured.
+	#[test]
+	fn ends_a_join_that_skips_hold_open() {
+		let case = case("outage");
+		let mut plain = Target::new(Duration::ZERO, true, None);
+		let mut reported = Target::new(Duration::ZERO, true, None);
+		for (&arrival, &media) in case.arrival.iter().zip(&case.media) {
+			plain.observe(arrival, media);
+			reported.backlog(arrival);
+			reported.observe(arrival, media);
+		}
+		assert!(plain.millis() > Target::new(Duration::ZERO, true, None).millis());
+		assert_eq!(reported.millis(), plain.millis());
 	}
 
 	/// The #3517 regression, without the corpus: a stale frame then paced audio far

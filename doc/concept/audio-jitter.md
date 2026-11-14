@@ -38,8 +38,9 @@ frame:
 
 Both sit below the decoder and above nothing: no reordering, no gap handling, no
 age budget. Except one skip: both consumers close a group below where delivery
-stands unread, so a join's backlog they skip is never observed, and a join
-delayed only by it is measured as lateness.
+stands unread, so its frames are never observed. They report its arrival
+instead, which ends a [join](#the-joins-backlog) as late as its observed backlog
+would.
 
 Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
@@ -125,8 +126,8 @@ observe(arrival, media):
 
     if oldest + fastest < joined:       # the join, not the path: folds nothing
         pending += 1
-    else:
-        close(bucket of peak)
+    else:                               # open starts true
+        open = false; close(bucket of peak)
     if resumed:                         # a declared silence folds nothing
         settle(); origin = arrival; index = 0
     else:                               # held until this interval closes
@@ -152,6 +153,10 @@ close(bucket):                          # pending starts at 0 and is spent here
 settle():                               # a stall is one observation
     if a stall is open:
         fold(stall.bucket); fold(nothing) min(stall.span, IDLE_MAX) times; close it
+
+backlog(arrival):                       # a group skipped unread arrived
+    if not first observation and open and arrival < start + JOIN_MAX:
+        joined = max(joined, arrival)
 
 end():                                  # a declared end precedes the next observation
     if not first observation: ended = true
@@ -323,6 +328,18 @@ produced after the subscription began, and a publisher flushing seconds at once
 is measured from its first flush past the backlog. A first frame slower than the
 path after it is itself backlog, so most subscriptions skip their first interval,
 which leaves the prior 500 ms later.
+
+A backlog the consumer skips unread carries no timestamp to test, only its
+arrival, which `backlog` reports. It extends the join only while the join is
+**open**, before any interval has measured the path: after that, a skipped group
+is an outage's, whose frames queued behind it belong to the stall rule. On
+`relay-mic-rtt40` the browser closes 267 groups 5 to 6 s old, arriving 1.0 to
+1.3 s in, and the live frames queued behind them are up to 300 ms late; observed
+or reported, they fold nothing, where unreported they held the target at 320 ms
+for a 20 s half-life. A skip that lands before an interval closes keeps that
+interval measuring the join, so a path dropping a late group every interval
+would hold the join open for good: a skip extends it only `JOIN_MAX` past the
+start, after which the estimator measures what it observes.
 
 ### The histogram
 
@@ -656,6 +673,7 @@ The exceptions are marked.
 | `FRESH_MAX` | 0.1 | Ours, twice the quantile's tail. NetEq ramps the forget factor from a start weight of 2 instead; see [the histogram](#the-histogram) |
 | `PRIOR[i]` | `0.5^(i+1)` | NetEq's histogram seed |
 | `IDLE_MAX` | 1024 intervals | Ours. A work bound with no effect on output |
+| `JOIN_MAX` | 2000 ms | Ours. How long after the first arrival a skipped group can extend the join; see [the join's backlog](#the-joins-backlog) |
 | `MAX_HISTORY` | 8192 arrivals | Ours. Bounds a rate the publisher chooses; see [Bounding the history](#bounding-the-history) |
 | Out-of-range delays | clamped, not dropped | Ours. See [the histogram](#the-histogram) |
 
@@ -696,8 +714,10 @@ directly, so neither is graded against the other.
 `arrival` and `media` are parallel arrays in **delivery order**, the order the
 receiver observes them, so `media` is deliberately out of order in the
 `reorder` and `backlog` cases. `advertised` and `delay` are present only where the case uses
-them, as is `ends`: the indices, ascending, of the frames observed right after a
-[declared end](#declared-silence), each of which calls `end()` before it is observed. `target` lists `[frame index, target]` at every frame where the target
+them, as are `ends`: the indices, ascending, of the frames observed right after a
+[declared end](#declared-silence), each of which calls `end()` before it is observed,
+and `skipped`: the indices, ascending, of the frames a consumer closed unread, each
+reported with `backlog(arrival)` instead of observed. `target` lists `[frame index, target]` at every frame where the target
 differs from the previous frame's, starting at frame 0, so an implementation
 folds the trace one frame at a time and compares its target at each listed
 index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
@@ -711,6 +731,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `reorder` | A run delivered after a newer one is measured against the frames before it, so the target covers waiting for it |
 | `backlog` | A backlog delivered newest first behind the live edge is not measured, so its media span never reaches the target |
 | `join` | A recorded join whose backlog arrives interleaved with the live edge, and delays the live frames queued behind it, folds nothing, so the target leaves the prior for the path's own |
+| `skipped` | The `join` recording with the stale backlog a consumer closes below its cursor reported rather than observed still folds nothing for the join, so the target follows `join`'s |
 | `idle` | A 30 s gap relaxes the histogram toward the prior |
 | `silence` | A declared 60 s silence and a declared pause leave the target where it was, and a later undeclared gap still relaxes it |
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |

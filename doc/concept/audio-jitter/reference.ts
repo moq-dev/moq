@@ -30,6 +30,9 @@ export const FRESH_MAX = 0.1;
 /** Idle intervals folded at once, purely to bound the work. */
 export const IDLE_MAX = 1024;
 
+/** Milliseconds after the first arrival a skipped group can still extend the join. */
+export const JOIN_MAX = 2000;
+
 /** The cold-start distribution, which is also what an idle receiver relaxes back to. */
 export function prior(): Float64Array {
 	const out = new Float64Array(BUCKETS);
@@ -79,6 +82,8 @@ export class Estimator {
 	#start?: number;
 	/** The latest a frame produced before the subscription arrived, starting at `#start`. */
 	#joined = 0;
+	/** Every interval closed so far measured the join, so a skipped backlog can still extend it. */
+	#open = true;
 	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
 	#ended = false;
 	/** The earliest a frame stalled in this interval was due. */
@@ -167,7 +172,10 @@ export class Estimator {
 		// join, not the path: those frames queued behind the backlog, and the player skipped onto
 		// the clock past all of it. It folds nothing, like an interval with no arrival.
 		if (this.#oldest + this.#fastest() < this.#joined) this.#pending += 1;
-		else this.#close(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
+		else {
+			this.#open = false;
+			this.#close(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
+		}
 
 		if (resumed) {
 			// The publisher declared the silence, so it is not evidence of anything: the
@@ -242,6 +250,15 @@ export class Estimator {
 			this.#fold(undefined);
 		}
 		this.#stall = undefined;
+	}
+
+	/** A frame produced before the subscription arrived at `arrival` but was skipped unread. */
+	backlog(arrival: number): void {
+		// Before any observation the join has not started, and starts later than this.
+		// Once an interval measured the path the join is over, and a skip is an outage's.
+		if (this.#start !== undefined && this.#open && arrival < this.#start + JOIN_MAX) {
+			this.#joined = Math.max(this.#joined, arrival);
+		}
 	}
 
 	/** A declared end lies between the previous observation and the next. */

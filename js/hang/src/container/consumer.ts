@@ -317,6 +317,9 @@ export class Consumer {
 				// gap that moved the cursor, or was never read. Mirrors Rust's consumer. While the start
 				// still waits for a group covering its reach, it starts at the lowest that arrived.
 				if (!this.#starting && consumer.sequence < this.#active) {
+					// Its frames go unobserved, so the estimator learns when they arrived: a join's backlog
+					// still has to end before the join's intervals count.
+					this.#jitter.backlog(consumer.arrived.since(Instant.ZERO).asMillis());
 					consumer.close();
 					continue;
 				}

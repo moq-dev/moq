@@ -648,6 +648,12 @@ impl Consumer {
 						Encoded::Gap { .. } if self.declared.take().is_some() => self.target.end(),
 						_ => {}
 					}
+					// A group the container dropped unread is never observed, so the estimator
+					// learns when it arrived instead: a join lasts until its skipped backlog has.
+					if let Some(skipped) = self.track.skipped() {
+						self.target
+							.backlog(jitter::millis(skipped.duration_since(self.origin)));
+					}
 					// Every packet the container hands over is an arrival, including one the
 					// decoder will refuse, so it is observed before anything can fail.
 					match &read {
@@ -2687,6 +2693,91 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// Replay a join through the whole decode path, one PCM packet per group written at
+	/// its arrival, and return the delay once it has settled. Observed backlog opens the
+	/// join and the live edge queues behind it, then 15 stale groups land 1.0 to 1.3 s
+	/// in, after the cursor waited out their sequences, and the live packets produced
+	/// meanwhile queue behind them. Without `delivered`, those groups never reach this
+	/// node, though the live packets still queued behind them.
+	async fn join_delay(delivered: bool) -> f64 {
+		use moq_mux::container::Container as _;
+
+		// `(arrival, group, media)` in ms.
+		let mut events: Vec<(u64, u64, u64)> = Vec::new();
+		for i in 0..=40 {
+			events.push((10 * i, 100 + i, 90_000 + 20 * i));
+		}
+		if delivered {
+			// Produced before the subscription, within the transport's budget.
+			for s in 0..15 {
+				events.push((1000 + 20 * s, 141 + s, 99_700 + 20 * s));
+			}
+		}
+		let (mut opening, mut held, mut last) = (0, 0, 0);
+		for k in 0..300 {
+			let mut at = 20 * k + 40;
+			if at <= 400 {
+				opening += 1;
+				at = 400 + 2 * opening;
+			} else if (1000..1300).contains(&at) {
+				held += 1;
+				at = 1300 + 2 * held;
+			}
+			// A queue drains in order, so nothing overtakes the packets still in it.
+			at = at.max(last);
+			last = at;
+			events.push((at, 156 + k, 100_000 + 20 * k));
+		}
+		events.sort_by_key(|&(at, sequence, _)| (at, sequence));
+
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		// The estimate's 2 s ceiling past the delay, as `moq play` subscribes.
+		let options = Options {
+			delay: Delay {
+				max: Some(Duration::from_secs(2)),
+				..Delay::default()
+			},
+			estimate: true,
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", options).await.unwrap();
+
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let start = kio::clock::now();
+		for (at, sequence, media) in events {
+			tokio::time::advance(Duration::from_millis(at).saturating_sub(start.elapsed())).await;
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let frame = moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(media * 1000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			};
+			container.write(&mut group, &[frame]).unwrap();
+			group.finish().unwrap();
+			if !(141..156).contains(&sequence) {
+				next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
+			}
+		}
+		crate::jitter::millis(consumer.delay())
+	}
+
+	/// A join's backlog that arrives below the cursor is dropped unread, yet the target
+	/// still learns when it arrived: the live packets queued behind it measured the join,
+	/// not the path, so they fold nothing rather than a 300 ms stall.
+	#[tokio::test(start_paused = true)]
+	async fn a_join_backlog_skipped_below_the_cursor_folds_nothing() {
+		// The path's own 40 ms plus the frame, where an unseen backlog folds the stall.
+		assert_eq!(join_delay(true).await, 60.0);
+		assert_eq!(join_delay(false).await, 340.0);
 	}
 
 	/// A group lost between a declared end and what resumes leaves the end declared, as the
