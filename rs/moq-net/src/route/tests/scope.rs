@@ -379,6 +379,22 @@ fn following_a_prefix_does_not_revisit_its_siblings() {
 	}
 }
 
+/// A driver learns which shown claims changed, by publisher, and each only once.
+#[test]
+fn a_batch_names_the_claims_it_changed() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	let prefix = p("live/");
+	router.connect(1, 1, Link::default()).unwrap();
+	router.route(1, 7, prefix.clone(), Some(offered(1, 0)), 0);
+	let changes = vec![(p("live/a"), Some(1)), (p("live/b"), Some(1))];
+	router.batch(1, 7, prefix, changes, Some(1), 0);
+	assert_eq!(
+		router.changed(),
+		BTreeMap::from([(7, BTreeSet::from([p("live/a"), p("live/b")]))])
+	);
+	assert!(router.changed().is_empty(), "taken once");
+}
+
 const CLAIMS: [&str; 6] = ["a/x", "a/y/", "a/", "b/x", "b/y/z", ""];
 const WATCHES: [&str; 5] = ["", "", "a/", "b/", "a/x"];
 const SCOPES: [&str; 2] = ["a/", "b/"];
