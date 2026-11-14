@@ -91,4 +91,11 @@ exclude_re = [
     # A path-rule identity nothing holds has no route left, and the update that
     # removed its last one already dropped its views, so `collect` changes nothing.
     'path\.rs:\d+:\d+: replace Router<N, A>::collect with \(\)$',
+    # Tied candidates share a floor, so by the identity rule they present the
+    # same content at the prefix.
+    'path\.rs:\d+:\d+: replace > with >= in Router<N, A>::know$',
+    # A route's change updates every view it covers, so a batch's only newer
+    # candidate is its own route and peer: these only turn off the incremental
+    # presentation, which the test build asserts equals the full one.
+    'path\.rs:\d+:(51|74): replace == with != in Router<N, A>::know$',
 ]

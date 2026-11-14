@@ -15,19 +15,9 @@ fn offered(via: Id, session: u64) -> path::Reach {
 	})
 }
 
-/// An offer along `hops`, the publisher first and the sender last.
-fn along(hops: &[(Id, u64)]) -> path::Reach {
-	path::Reach::Finite(path::Offer {
-		path: hops
-			.iter()
-			.map(|&(node, session)| path::Hop { node, session })
-			.collect(),
-		draining: false,
-		priority: i8::MAX,
-		metric: 1,
-		down_only: false,
-		rtt: None,
-	})
+/// A path rule offer along `hops`, the publisher first and the sender last.
+fn reach(hops: &[(Id, u64)]) -> path::Reach {
+	path::Reach::Finite(along(hops, 1))
 }
 
 /// Whether `router` uses a live route for publisher 7 through `via`.
@@ -964,7 +954,7 @@ fn holds_never_close_a_cycle() {
 #[test]
 fn an_offer_through_a_dead_hop_stays_dead() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
-	let through = |peer: usize| along(&[(7, 0), (6, 1), (4, 1), (peer as Id, 1)]);
+	let through = |peer: usize| reach(&[(7, 0), (6, 1), (4, 1), (peer as Id, 1)]);
 	for peer in [1, 2] {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
 		router.route(peer, 7, p(""), Some(through(peer)), 0);
@@ -992,7 +982,7 @@ fn a_closed_sessions_far_node_is_doubted_until_its_timer() {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
 	}
 	router.disconnect([3], Instant::ZERO);
-	router.route(2, 7, p(""), Some(along(&[(7, 0), (3, 4), (2, 1)])), 0);
+	router.route(2, 7, p(""), Some(reach(&[(7, 0), (3, 4), (2, 1)])), 0);
 	assert!(unrouted(&router), "moved onto the doubted node");
 	router.timeout(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
 	assert!(live(&router, 2));
@@ -1008,7 +998,7 @@ fn a_draining_node_is_doubted_then_ranked_then_forgotten() {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
 	}
 	router.goaway(1, Instant::ZERO);
-	router.route(2, 7, p(""), Some(along(&[(7, 0), (1, 5), (2, 1)])), 0);
+	router.route(2, 7, p(""), Some(reach(&[(7, 0), (1, 5), (2, 1)])), 0);
 	assert!(unrouted(&router), "moved onto a stale offer through the draining node");
 	router.timeout(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
 	assert!(live(&router, 2));
@@ -1026,7 +1016,7 @@ fn an_unrelated_drain_is_ignored() {
 	router.connect(1, 1, Link::default()).unwrap();
 	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
 	// A path naming this node, so the drain would be credited if it named another.
-	router.route(1, 7, p("a"), Some(along(&[(7, 0), (99, 1), (1, 1)])), 0);
+	router.route(1, 7, p("a"), Some(reach(&[(7, 0), (99, 1), (1, 1)])), 0);
 	for node in [5, 99] {
 		router.dead(1, path::Dead::Draining { node }, Instant::ZERO);
 	}
@@ -1039,7 +1029,7 @@ fn an_unrelated_drain_is_ignored() {
 fn an_unusable_heard_route_is_still_held() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 	router.connect(1, 1, Link::default()).unwrap();
-	router.route(1, 7, p(""), Some(along(&[(7, 0), (99, 1), (1, 1)])), 0);
+	router.route(1, 7, p(""), Some(reach(&[(7, 0), (99, 1), (1, 1)])), 0);
 	assert!(router.routes(7).next().is_none());
 	assert!(router.holds(7));
 }
@@ -1117,7 +1107,7 @@ fn route_paths_obey_the_hop_limit() {
 		router.connect(1, 1, Link::default()).unwrap();
 		router.route(1, 7, p(""), Some(offered(1, 0)), 0);
 		let hops: Vec<(Id, u64)> = (0..length).map(|i| (100 + i as Id, 1)).collect();
-		router.route(1, 7, p(""), Some(along(&hops)), 0);
+		router.route(1, 7, p(""), Some(reach(&hops)), 0);
 		assert_eq!(!unrouted(&router), length == MAX_HOPS - 1, "path length {length}");
 	}
 }
