@@ -313,14 +313,18 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
 	});
 
-	it("starts a stalled ring only once the queued media covers the hold", () => {
-		const gate = new Backpressure(1000, true, Duration.millis(2000));
-		const wait = gate.wait(ms(0), new AbortController().signal);
-		gate.queued(ms(1499));
-		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.queued(ms(1500));
-		expect(Bun.peek.status(wait)).toBe("fulfilled");
-	});
+	// A finished track shorter than the hold has queued everything it will send.
+	for (const finished of [false, true]) {
+		it(`starts a stalled ring only once the queued media covers the hold${finished ? ", or its track finished" : ""}`, () => {
+			const gate = new Backpressure(1000, true, Duration.millis(2000));
+			const wait = gate.wait(ms(0), new AbortController().signal);
+			gate.queued(ms(1499));
+			expect(Bun.peek.status(wait)).toBe("pending");
+			if (finished) gate.complete(true);
+			else gate.queued(ms(1500));
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
+		});
+	}
 
 	// The ring un-stalls only once the decoder's output reaches it, so covered media released
 	// outright would overflow the fixed ring before the worklet reports it playing.

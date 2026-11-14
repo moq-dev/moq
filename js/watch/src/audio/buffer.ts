@@ -50,6 +50,8 @@ export class Backpressure {
 
 	// The newest media timestamp queued ahead of the decoder, unset while none is.
 	#queued?: number;
+	// Whether the publisher finished the track, so the queue holds all the media it will send.
+	#complete = false;
 
 	// The ring as last observed. The playhead is undefined until one is known on the current timeline.
 	#playhead?: number;
@@ -108,6 +110,12 @@ export class Backpressure {
 	/** Note the newest media timestamp queued ahead of the decoder, or undefined once none is. */
 	queued(newest: number | undefined): void {
 		this.#queued = newest;
+		this.#release();
+	}
+
+	/** Note whether the publisher finished the track being decoded, so nothing more will queue. */
+	complete(complete: boolean): void {
+		this.#complete = complete;
 		this.#release();
 	}
 
@@ -193,9 +201,9 @@ export class Backpressure {
 		});
 	}
 
-	// Whether the queued media reaches the hold past `timestamp`.
+	// Whether the queued media reaches the hold past `timestamp`, or is all a finished track has.
 	#covered(timestamp: number): boolean {
-		if (this.#hold === 0) return true;
+		if (this.#hold === 0 || this.#complete) return true;
 		return this.#queued !== undefined && this.#queued >= timestamp + this.#hold;
 	}
 
@@ -448,6 +456,11 @@ export class AudioBuffer {
 	 */
 	queued(newest: number | undefined): void {
 		this.#backpressure.queued(newest);
+	}
+
+	/** Note whether the publisher finished the track being decoded, so nothing more will queue. */
+	complete(complete: boolean): void {
+		this.#backpressure.complete(complete);
 	}
 
 	/**

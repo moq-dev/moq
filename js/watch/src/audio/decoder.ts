@@ -941,6 +941,15 @@ export class Decoder {
 			if (arrived !== undefined) ring.received(arrived);
 		});
 
+		// A finished track queued everything it will send, so admission stops waiting for more behind a
+		// frame. The decode loop learns of the finish only past the frames it holds.
+		effect.run((inner) => {
+			const ring = inner.get(this.#ring);
+			if (!ring || inner.get(sub.closed) !== null) return;
+			ring.complete(true);
+			inner.cleanup(() => ring.complete(false));
+		});
+
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target
 		// holds until the replacement takes over; see #retire.
 		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));

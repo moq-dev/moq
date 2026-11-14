@@ -231,12 +231,14 @@ export class AudioRingBuffer {
 
 	// Un-stall once the buffer holds the floor to start on, or after running dry, one stretch window
 	// and a read: the least that resumes without running dry again at once, and never more than the
-	// floor. Slowing down then rebuilds the level rather than a wait in silence.
+	// floor. Slowing down then rebuilds the level rather than a wait in silence. Audio up to a declared
+	// end plays however short, since nothing more is coming to fill it.
 	#resume(): void {
-		if (!this.#stalled) return;
+		if (!this.#stalled || this.length <= 0) return;
 		const cushion = Math.min(this.#latencySamples, this.#stretch.window + this.#period);
 		const need = this.#started ? cushion : this.#latencySamples;
-		if (this.length < need) return;
+		const complete = this.#end !== undefined && this.#writeIndex >= this.#end;
+		if (this.length < need && !complete) return;
 		this.#stalled = false;
 		this.#started = true;
 		this.#stretch.level.reset();
@@ -374,6 +376,7 @@ export class AudioRingBuffer {
 	end(timestamp: number): void {
 		this.#end = Math.round((timestamp / 1_000_000) * this.rate);
 		this.#snapEnd();
+		this.#resume();
 		// The end can arrive after the playhead already ran out at it, or before any audio, as for a
 		// listener that joins during a mute.
 		if (!this.#anchored || (this.#stalled && this.length <= 0 && this.#ended())) this.#silent = true;
