@@ -110,30 +110,24 @@ const connection = await Moq.Connection.connect({
     publish: origin.consume(), consume: origin,
 });
 const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer");
-const session = await endpoint.dialTcp("server", { signal: abort.signal });
-session.producer.writeFrame({ payload: new TextEncoder().encode("hello") });
-session.producer.finish(); // FIN in this direction; the peer may still reply.
-for (let frame = await session.consumer.readFrame(); frame; frame = await session.consumer.readFrame()) {
+const session = await endpoint.dialTrack("server", undefined, { signal: abort.signal });
+session.producer.writeFrame({ payload: new TextEncoder().encode("hello") }); // One message, one group.
+session.producer.finish(); // Ends this direction; the peer may still reply.
+const reader = session.consumer.ordered();
+for (let frame = await reader.readFrame(); frame; frame = await reader.readFrame()) {
     receive(frame.payload);
 }
 endpoint.close();
 connection.close();
 ```
 
-A server takes `await endpoint.acceptTcp()`, then accepts or rejects that incoming dial.
+A server takes `await endpoint.acceptTrack()`, then accepts or rejects that incoming dial.
 The incoming peer and session are unverified claims; `accept()` can fail if the original
 dial has closed. A pending dial waits for acceptance until it is cancelled or the endpoint
 or session closes, with no acceptance timeout.
-TCP and track dials have independent accept queues. For independent messages, use
-`dialTrack` / `acceptTrack`: the stream exposes a track producer and an already subscribed
-consumer in ascending order until updated. It skips groups that never arrive whole,
-including refused, dropped, or evicted groups; a cut group is never a complete message.
-TCP joins its one group live, recovering the head with a joining FETCH or fill over
-moq-transport. Both stream types expose `peer` and
-`session`; read and write through their producer and consumer handles.
-
-JS TCP currently reads without fastest-reader pacing. A reader that falls behind the
-group's bounded tail fails with an eviction error, so keeping up is required for lossless
-delivery. Finishing a producer is FIN; aborting, closing the endpoint, or releasing a TCP
-reader early resets the session. Close endpoints explicitly, and use `AbortSignal` to
-cancel pending dials and accepts. Keep session ids secret.
+The stream exposes a track producer, where each group is one message, and an already
+subscribed consumer in ascending order until updated, plus `peer` and `session`. It skips
+groups that never arrive whole, including refused, dropped, or evicted groups; a cut group
+is never a complete message. Finishing a producer ends that direction; aborting it or
+closing the endpoint resets the session. Close endpoints explicitly, and use `AbortSignal`
+to cancel pending dials and accepts. Keep session ids secret.

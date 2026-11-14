@@ -245,10 +245,11 @@ subscriber's `yieldNow()`, and is re-enabled by
 [moq-dev/moq#8357](https://github.com/moq-dev/moq/pull/8357).
 
 Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
-moq-rs's Python socket test `test_tcp_rst_and_endpoint_close_are_errors`, whose
+moq-rs's Python socket test `test_abort_and_endpoint_close_are_errors` (then
+`test_tcp_rst_and_endpoint_close_are_errors`, on a `tcp` session), whose
 reader got `Unroutable` after the endpoint closed during
 [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
-It is quarantined with `pytest.mark.skip` until its child fixes it.
+No `pytest.mark.skip` was ever applied, so it still runs until its child fixes it.
 
 Added 2026-11-09 (maintainer's standing rule that flakes join this epic): the
 Go wrapper's `TestRecvGroupCancelKeepsConsumer`, whose `RecvGroup` after a
