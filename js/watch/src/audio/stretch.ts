@@ -98,9 +98,8 @@ export class Stretch {
 	// Output frames until the next hop boundary.
 	#until = 0;
 
-	// The crossfade's weights, and the analysis scratch: the channels' sum and its running energy.
+	// The crossfade's weights, and the analysis scratch: the running energy across every channel.
 	readonly #weights: Float64Array;
-	readonly #mono: Float64Array;
 	readonly #energy: Float64Array;
 	// The coarse search's stride: every shift on an 8 kHz grid.
 	readonly #step: number;
@@ -115,7 +114,6 @@ export class Stretch {
 		this.#weights = new Float64Array(this.hop);
 		for (let k = 0; k < this.hop; k++)
 			this.#weights[k] = 0.5 - 0.5 * Math.cos((Math.PI * (k + 1)) / (this.hop + 1));
-		this.#mono = new Float64Array(2 * this.span + this.hop);
 		this.#energy = new Float64Array(2 * this.span + this.hop + 1);
 		this.#step = Math.max(1, Math.floor(rate / 8000));
 	}
@@ -261,28 +259,31 @@ export class Stretch {
 		this.#filled -= drop;
 	}
 
-	// The shift in [low, high] whose hop of the channels' sum best matches the natural continuation's, by
-	// normalized correlation, nearest first so a tie keeps the smaller shift: every shift on the coarse
-	// grid, then every one within a step of the best. Zero when the range is empty.
+	// The shift in [low, high] whose hop best matches the natural continuation, by normalized correlation
+	// over every channel's samples together, so channels in opposite phase never cancel. Nearest first,
+	// so a tie keeps the smaller shift: every shift on the coarse grid, then every one within a step of
+	// the best. Zero when the range is empty.
 	#search(low: number, high: number, direction: number): number {
 		if (low > high) return 0;
 		const hop = this.hop;
+		const input = this.#input;
 		const from = this.#head + Math.min(low, 0);
 		const length = Math.max(high, 0) + hop - Math.min(low, 0);
-		const mono = this.#mono;
 		const energy = this.#energy;
 		for (let i = 0; i < length; i++) {
 			let sum = 0;
-			for (const channel of this.#input) sum += channel[from + i];
-			mono[i] = sum;
-			energy[i + 1] = energy[i] + sum * sum;
+			for (const channel of input) sum += channel[from + i] * channel[from + i];
+			energy[i + 1] = energy[i] + sum;
 		}
-		const natural = this.#head - from;
+		const head = this.#head;
+		const natural = head - from;
 		const power = energy[natural + hop] - energy[natural];
 		const similarity = (shift: number) => {
 			const at = natural + shift;
 			let dot = 0;
-			for (let k = 0; k < hop; k++) dot += mono[natural + k] * mono[at + k];
+			for (let k = 0; k < hop; k++) {
+				for (const channel of input) dot += channel[head + k] * channel[head + shift + k];
+			}
 			const product = power * (energy[at + hop] - energy[at]);
 			return product > 0 ? dot / Math.sqrt(product) : 0;
 		};

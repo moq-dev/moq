@@ -797,27 +797,30 @@ An empty range, or a zero shift, splices nothing. A splice subtracts its shift
 from `owed`, clamped to ±`span`, and its size from the allowance, so past one
 span the stretch never moves the playhead faster than the cap.
 
-The search sums the channels into one `f64` signal `x`, so a channel silent in
-one place never decides alone. With `p` the playhead, a shift `s` scores the
-normalized correlation of the hop at `p` (the natural continuation) with the
-hop at `p + s`:
+The search scores every channel's samples together in `f64`, so channels in
+opposite phase never cancel and a channel silent in one place never decides
+alone. With `x[c][i]` channel `c`'s sample at frame `i` and `p` the playhead, a
+shift `s` scores the normalized correlation of the hop at `p` (the natural
+continuation) with the hop at `p + s`:
 
 ```
-score(s) = sum(x[p+k] * x[p+s+k]) / sqrt(sum(x[p+k]^2) * sum(x[p+s+k]^2)),  k in [0, hop)
+score(s) = sum(x[c][p+k] * x[c][p+s+k]) / sqrt(sum(x[c][p+k]^2) * sum(x[c][p+s+k]^2)),
+           summed over k in [0, hop) and every channel c
 ```
 
 or zero when either energy is zero. It first scores every shift from the near
 end of the range toward the far end, the near end being `low` when speeding up
 and `high` when slowing down, in steps of `max(1, floor(R / 8000))`; then every
 single shift within one step less a frame of the best, in the same direction.
-Each pass keeps the first highest score, so a tie keeps the nearer shift. Energies
-come from running prefix sums in that `f64`.
+Each pass keeps the first highest score, so a tie keeps the nearer shift.
+Energies come from running prefix sums, in frame order, of each frame's squares
+summed over its channels.
 
 A splice then plays one hop crossfading from the natural continuation into the
 shifted input, every channel alike, with `w = 0.5 - 0.5 * cos(pi * (k + 1) / (hop + 1))`:
 
 ```
-out[p+k] = f32(x[p+k] * (1 - w) + x[p+s+k] * w),  k in [0, hop)
+out[c][p+k] = f32(x[c][p+k] * (1 - w) + x[c][p+s+k] * w),  k in [0, hop)
 ```
 
 and continues from `p + s + hop`. Output is unchanged until a splice, so a
@@ -884,8 +887,8 @@ interleaved output PCM. The input is fed as a player does, topped up to a
 window before each boundary. Compare shifts exactly and output within 1e-6
 absolute sample amplitude. It covers a hold, speeding up and slowing down on
 a voiced signal, a bridge through its allowance and the refill after, a pace
-that turns around, a narrow range, music, noise, silence, linked stereo, and
-splices at 8, 16, 44.1, and 48 kHz.
+that turns around, a narrow range, music, noise, silence, linked stereo,
+stereo in opposite phase, and splices at 8, 16, 44.1, and 48 kHz.
 
 `stretch/reference.ts` generated both, from this page and not from either
 implementation, and `stretch/corpus.ts` regenerates them; the same rules as the

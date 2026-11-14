@@ -319,10 +319,24 @@ export const cases: Case[] = [
 	),
 	stretch(
 		"stereo-linked",
-		"Both channels splice at the shift their sum matches best.",
+		"Both channels splice at the shift their samples together match best.",
 		8000,
 		2,
 		interleave(voiced(8000, ms(8000, 200), 180, 220, 13), white(ms(8000, 200), 17)),
+		[behind(8000)],
+	),
+	stretch(
+		"stereo-opposite",
+		"Channels in opposite phase, whose sum is silent, still splice at a matching period.",
+		8000,
+		2,
+		(() => {
+			const left = voiced(8000, ms(8000, 200), 100, 120, 23);
+			return interleave(
+				left,
+				left.map((sample) => -sample),
+			);
+		})(),
 		[behind(8000)],
 	),
 	stretch(

@@ -73,12 +73,6 @@ export function play(
 	const frames = input.length / channels;
 	const weight = (k: number) => 0.5 - 0.5 * Math.cos((Math.PI * (k + 1)) / (h + 1));
 	const sample = (frame: number, channel: number) => input[frame * channels + channel];
-	// The channels' sum, in channel order, at double precision.
-	const mono = (frame: number) => {
-		let sum = 0;
-		for (let channel = 0; channel < channels; channel++) sum += sample(frame, channel);
-		return sum;
-	};
 
 	const out: number[] = [];
 	const shifts: number[] = [];
@@ -134,18 +128,20 @@ export function play(
 	}
 	return { output: Float32Array.from(out), shifts };
 
-	// Normalized correlation of the hop at the playhead with the hop at `shift`, from energies summed
-	// directly over each hop.
+	// Normalized correlation of the hop at the playhead with the hop at `shift`, every channel's samples
+	// together, so channels in opposite phase never cancel, from energies summed directly over each hop.
 	function similarity(shift: number): number {
 		let dot = 0;
 		let a = 0;
 		let b = 0;
 		for (let k = 0; k < h; k++) {
-			const x = mono(playhead + k);
-			const y = mono(playhead + shift + k);
-			dot += x * y;
-			a += x * x;
-			b += y * y;
+			for (let channel = 0; channel < channels; channel++) {
+				const x = sample(playhead + k, channel);
+				const y = sample(playhead + shift + k, channel);
+				dot += x * y;
+				a += x * x;
+				b += y * y;
+			}
 		}
 		const product = a * b;
 		return product > 0 ? dot / Math.sqrt(product) : 0;

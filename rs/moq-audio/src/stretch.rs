@@ -139,10 +139,9 @@ pub(crate) struct Stretch {
 	/// Output frames until the next hop boundary.
 	until: usize,
 
-	/// The crossfade's weights, and the analysis scratch: the channels' sum and
-	/// its running energy.
+	/// The crossfade's weights, and the analysis scratch: the running energy
+	/// across every channel.
 	weights: Vec<f64>,
-	mono: Vec<f64>,
 	energy: Vec<f64>,
 	/// The coarse search's stride: every shift on an 8 kHz grid.
 	step: usize,
@@ -172,7 +171,6 @@ impl Stretch {
 			allowance: span as f64,
 			until: 0,
 			weights,
-			mono: vec![0.0; 2 * span + hop],
 			energy: vec![0.0; 2 * span + hop + 1],
 			step: (rate as usize / 8000).max(1),
 		}
@@ -356,10 +354,11 @@ impl Stretch {
 		self.filled -= drop;
 	}
 
-	/// The shift in `low..=high` whose hop of the channels' sum best matches the
-	/// natural continuation's, by normalized correlation, nearest first so a tie
-	/// keeps the smaller shift: every shift on the coarse grid, then every one
-	/// within a step of the best. Zero when the range is empty.
+	/// The shift in `low..=high` whose hop best matches the natural
+	/// continuation, by normalized correlation over every channel's samples
+	/// together, so channels in opposite phase never cancel. Nearest first, so a
+	/// tie keeps the smaller shift: every shift on the coarse grid, then every
+	/// one within a step of the best. Zero when the range is empty.
 	fn search(&mut self, low: i64, high: i64, direction: i8) -> i64 {
 		if low > high {
 			return 0;
@@ -371,21 +370,22 @@ impl Stretch {
 		for i in 0..length {
 			let frame = (from as usize + i) * channels;
 			let mut sum = 0.0;
-			for channel in 0..channels {
-				sum += self.input[frame + channel] as f64;
+			for &sample in &self.input[frame..frame + channels] {
+				sum += sample as f64 * sample as f64;
 			}
-			self.mono[i] = sum;
-			self.energy[i + 1] = self.energy[i] + sum * sum;
+			self.energy[i + 1] = self.energy[i] + sum;
 		}
 		let natural = (self.head as i64 - from) as usize;
-		let mono = &self.mono;
+		let input = &self.input;
+		let head = self.head * channels;
 		let energy = &self.energy;
 		let power = energy[natural + hop] - energy[natural];
 		let similarity = |shift: i64| {
 			let at = (natural as i64 + shift) as usize;
+			let shifted = (head as i64 + shift * channels as i64) as usize;
 			let mut dot = 0.0;
-			for k in 0..hop {
-				dot += mono[natural + k] * mono[at + k];
+			for i in 0..hop * channels {
+				dot += input[head + i] as f64 * input[shifted + i] as f64;
 			}
 			let product = power * (energy[at + hop] - energy[at]);
 			if product > 0.0 { dot / product.sqrt() } else { 0.0 }

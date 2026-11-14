@@ -312,12 +312,7 @@ export class AudioRingBuffer {
 		if (target < this.#writeIndex) {
 			// What the stretch holds runs the read index ahead of the playhead. Return it so the successor
 			// replaces whatever of it is still unplayed, resuming the ring at the sample now playing.
-			const stretch = this.#stretch;
-			if (target < this.#readIndex && stretch.available > 0) {
-				const capacity = this.#buffer[0].length;
-				this.#readIndex = Math.max(Math.round(this.#playhead()), this.#writeIndex - capacity);
-				stretch.clear();
-			}
+			if (target < this.#readIndex) this.#rewind();
 			// Never retreat past the playhead: those samples are already due.
 			this.#writeIndex = Math.max(target, this.#readIndex);
 			this.#pauses = this.#pauses.filter((pause) => pause.start < this.#writeIndex);
@@ -355,15 +350,27 @@ export class AudioRingBuffer {
 		if (this.#anchored && this.#end !== undefined && this.#contiguous(this.#end)) this.#end = this.#writeIndex;
 	}
 
-	// Move the read index forward to `index`, dropping any queued audio it passes, what the stretch
-	// holds included, and the front of the incoming chunk at `start` when `index` lies past it. The
-	// caller counts the skip; an empty ring only re-anchors over a gap it never held, so the trim does
-	// not move, as in moq-audio.
+	// Return what the stretch holds past the playhead to the ring, so the read index is the playhead.
+	#rewind(): void {
+		const stretch = this.#stretch;
+		if (stretch.available === 0) return;
+		this.#readIndex = Math.max(Math.round(this.#playhead()), this.#writeIndex - this.capacity);
+		stretch.clear();
+	}
+
+	// Move the playhead forward to `index`, dropping any queued audio it passes, what the stretch holds
+	// included, and the front of the incoming chunk at `start` when `index` lies past it. The caller
+	// counts the skip; an empty ring only re-anchors over a gap it never held, so the trim does not
+	// move, as in moq-audio.
 	#skip(index: number, start: number): void {
-		if (index > this.#readIndex && this.length > 0) this.#trimmed += this.#discarded(index, start);
+		// An index within what the stretch holds returns that to the ring first, so the skip moves on
+		// from the playhead rather than back from the read index.
+		if (index <= this.#readIndex) this.#rewind();
+		if (index <= this.#readIndex) return;
+		if (this.length > 0) this.#trimmed += this.#discarded(index, start);
 		// What the stretch holds lies behind the new index, so it is dropped with the rest, as
 		// moq-audio's skip discards it first.
-		if (index > this.#readIndex) this.#stretch.clear();
+		this.#stretch.clear();
 		this.#readIndex = index;
 		this.#prune();
 	}
@@ -522,9 +529,10 @@ export class AudioRingBuffer {
 
 	// Whether the playhead is in audio before a declared end: a finite tail, which drains as received,
 	// since the next utterance re-anchors the ring anyway and its depth says nothing about the clock.
+	// The playhead rather than the read index, since the stretch may already hold the whole tail.
 	#ending(): boolean {
 		const end = this.#previous ?? this.#end;
-		return end !== undefined && this.#readIndex < end;
+		return end !== undefined && this.#playhead() < end;
 	}
 
 	// Whether what the stretch plays may stretch: received audio, short of a declared end, on a clock,
@@ -558,6 +566,8 @@ export class AudioRingBuffer {
 				this.#readIndex = Math.min(pause.end, this.#writeIndex, this.#readIndex + lag);
 				this.#prune();
 				pause = this.#pauses[0];
+				// The audio past the silence never followed what played before it.
+				stretch.forget();
 			}
 		}
 

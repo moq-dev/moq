@@ -849,8 +849,7 @@ describe("time stretch", () => {
 		expect(buffer.length).toBe(0);
 	});
 
-	// 48 kHz: 30 ms windows of 1440 frames, and a constant signal stretches by its shortest pitch
-	// period, 2.5 ms or 120 frames.
+	// 48 kHz: 10 ms hops of 480 frames, and 30 ms windows of 1440.
 	const RATE = 48000;
 	const QUANTUM = 128;
 	const live = (latency: number, terms: { bound?: number } = {}) =>
@@ -1076,6 +1075,80 @@ describe("time stretch", () => {
 		expect(output.slice(staged + frames(40)).every((sample) => sample === 0.5)).toBe(true);
 		expect(buffer.skips).toBe(0);
 		expect(buffer.trimmed).toBe(0);
+	});
+
+	// A lag past the whole declared silence skips it, and the next utterance never splices back into
+	// the one before it.
+	it("never splices across a declared silence the lag skipped whole", () => {
+		const buffer = live(100, { bound: 1000 });
+		write(buffer, 0, frames(120), { value: 0.25 });
+		while (buffer.timestamp / 1000 <= 90) {
+			buffer.clock(buffer.timestamp);
+			read(buffer, QUANTUM, 1);
+		}
+		// The next utterance lands 80 ms after the last, 10 ms long, so it bridges at once, with the
+		// playhead 150 ms behind: past the silence, inside the bound.
+		buffer.next();
+		write(buffer, 200, frames(10), { value: 0.5 });
+		buffer.clock(buffer.timestamp + 150_000);
+		const [output] = read(buffer, frames(80), 1);
+
+		const first = output.findIndex((sample) => sample !== 0.25);
+		expect(first).toBeGreaterThan(0);
+		expect(output.length).toBeGreaterThanOrEqual(first + frames(10));
+		expect(output.slice(first).every((sample) => Math.abs(sample - 0.5) < 1e-6)).toBe(true);
+	});
+
+	// An end declared once the stretch already holds the whole tail still plays that tail as received.
+	it("drains a tail the stretch already holds when its end arrives", () => {
+		const buffer = live(100, STRETCHING);
+		write(buffer, 0, frames(100), { value: 0.5 });
+		let played = 0;
+		while (buffer.length > frames(25)) {
+			buffer.clock(buffer.timestamp);
+			played += read(buffer, QUANTUM, 1)[0].length;
+		}
+		buffer.end(100_000);
+		for (;;) {
+			buffer.clock(buffer.timestamp);
+			const [output] = read(buffer, QUANTUM, 1);
+			played += output.length;
+			if (output.length < QUANTUM) break;
+		}
+		expect(played).toBe(frames(100));
+		expect(buffer.underruns).toBe(0);
+	});
+
+	// Right after a splice repeats audio, the stretch holds more than a window past the playhead, so a
+	// snap past a short bound can land inside it: it still moves forward onto the clock.
+	it("snaps forward onto the clock from inside what the stretch holds", () => {
+		// A 50 Hz tone, whose 20 ms period is where a slowdown splices.
+		const tone = (from: number, count: number) => {
+			const data = new Float32Array(count);
+			for (let i = 0; i < count; i++) data[i] = 0.5 * Math.sin((2 * Math.PI * 50 * (from + i)) / RATE);
+			return data;
+		};
+		for (let jump = 0; jump < 150; jump++) {
+			const buffer = live(100, { bound: 30 });
+			buffer.write(0, [tone(0, frames(1000))]);
+			buffer.clock(buffer.timestamp);
+			buffer.read([new Float32Array(QUANTUM)]);
+			// Then 25 ms ahead of the clock: slowing down, under the snap.
+			let clock = buffer.timestamp - 25_000;
+			for (let i = 0; i < jump; i++) {
+				buffer.clock(clock);
+				buffer.read([new Float32Array(QUANTUM)]);
+				clock += QUANTUM_US;
+			}
+			// Then 35 ms behind it: past the 30 ms bound and window.
+			const before = buffer.timestamp;
+			clock = before + 35_000;
+			buffer.clock(clock);
+			buffer.read([new Float32Array(QUANTUM)]);
+			expect(buffer.timestamp).toBeGreaterThan(before);
+			expect(Math.abs(clock + QUANTUM_US - buffer.timestamp)).toBeLessThan(5_000);
+			expect(buffer.skips).toBe(1);
+		}
 	});
 
 	// A clock moved ahead within the bound, however it moved, is caught up by speeding up.
