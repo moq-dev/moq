@@ -24,9 +24,13 @@ What remains:
   (`crate::bind::udp`), so a sim test cannot reach them yet. Pick how a
   caller hands either one a `driver::endpoint::Socket`, such as a
   documented `sim`-only hook (`just check` bans `#[doc(hidden)]`). That API
-  choice belongs to the maintainer.
-- Route the session-level spawns that `server.rs`, `connection.rs`, and
-  `origin.rs` still send through `crate::runtime::spawn` through
+  choice belongs to the maintainer (see Waiting). `Client::with_network`
+  (`rs/moq-tokio/src/sim.rs`) already gives a client an in-memory network
+  under the `sim` feature, and the relay's integration tests run hops and
+  reconnects over it (`rs/moq-relay/tests/integration/memory.rs`), though
+  not over QUIC.
+- Route the session-level spawns that `server.rs` and `origin.rs` still
+  send through `crate::runtime::spawn` through
   `runtime::Spawner`, as `transport.rs` and the WebTransport session already
   do.
 - Then run `moq_relay` between a publisher and a subscriber, and between two
@@ -42,7 +46,6 @@ queue is not evidence about congestion loss.
 Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): ✅ m1
 (rejected: staying in m4). It is the base for [fault schedules](/quest/m4/cluster-fault-schedules.md).
 
-Check first: `moq_tokio::Client::with_network` and the relay's
-`cluster::Config::network` already exist under `sim`, so say which of "What
-remains" has landed, and whether that `Network` carries QUIC or the in-memory
-transport, before picking the server's hook.
+## Waiting
+
+- Maintainer: how moq-tokio's `Client` and `Server` take a simulated QUIC socket. Options: (a) extend the `sim`-feature `Client::with_network` path, already documented as tracking internals that can change in any release, to carry `quic::driver::sim::Network`, with a matching hook on `Server`; (b) a new `sim`-only `with_socket(driver::endpoint::Socket)` on each; (c) drop this quest, since the memory network already covers relay hops and reconnects. Recommended: (a) if a failure only real QUIC would show is named, otherwise (c).

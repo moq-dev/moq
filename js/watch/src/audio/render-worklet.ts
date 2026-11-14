@@ -1,5 +1,5 @@
 import { ComfortNoise } from "./comfort";
-import type { Clock, Message, State } from "./render";
+import type { Message, Reading, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 
 // Samples to fade over when playback stops or resumes short of a full quantum. A shortfall
@@ -17,7 +17,7 @@ class Render extends AudioWorkletProcessor {
 	// Whether the previous quantum ended short, so the next one fades back in.
 	#short = false;
 	// The shared clock's latest reading, which the ring plays onto.
-	#clock?: Clock;
+	#clock?: Reading;
 
 	constructor() {
 		super();
@@ -37,11 +37,10 @@ class Render extends AudioWorkletProcessor {
 				this.#ring?.received(msg.end);
 			} else if (msg.type === "clock") {
 				this.#clock = msg;
-				if (msg.jumped) this.#ring?.jumped(msg.jumped);
 			} else if (msg.type === "latency") {
 				this.#ring?.setLatency(msg.latency, msg);
-				// The clock moves with the delay, so a reading from before it would misplace audio.
-				this.#clock = undefined;
+				// The clock moves with the delay, so the terms carry where it stands under them.
+				this.#clock = msg.clock;
 			} else if (msg.type === "end") {
 				this.#ring?.end(msg.timestamp);
 			} else if (msg.type === "truncate") {

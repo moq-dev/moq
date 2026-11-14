@@ -37,10 +37,19 @@ in several owners, which must be kept in agreement by hand:
 - route failure versus content verdict: 39eacc807a, 109235732c, eb6ac57cb7, 5c31208409
 - end agreement and budget/expiry: 25532eacc8, a602360c99, 097dc1ee62, f52848d634, b59fcefde3, e33fe24cc3
 
+The churn continues: `resume.rs` took 28 commits from 2026-11-01 to
+2026-11-12, 9 of them fixes (for example e419224dc, f3edb0b8d). Since this
+was written, `rs/moq-net/verify/resume/ResumeReader.tla` and
+`rs/moq-net/verify/failover/FailoverChain.tla` model the per-reader path; a
+redesign replaces or re-maps them (the `verify-resume` and `verify-failover`
+skills name the code each covers).
+
 Every `track::Consumer`/`Subscriber` method has two implementations (26
-`Inner::Resume` arms, 11 `serving()` delegations), so each feature (ranges,
+`Inner::Resume` arms and 11 `serving()` delegations then; 45 arms and 26
+`serving()` calls in `track.rs` at 4bf501b535), so each feature (ranges,
 anchors, fills, compression, largest, drops, start, live) is written twice
-and drifts. `js/net/src/resume.ts` (1,786 lines) mirrors it, and the resume floor fix
+and drifts. `js/net/src/resume.ts` (1,786 lines then, 2,296 at 4bf501b535)
+mirrors it, and the resume floor fix
 [moq-dev/moq#6759](https://github.com/moq-dev/moq/pull/6759), the resumed JS drops fix
 [moq-dev/moq#6758](https://github.com/moq-dev/moq/pull/6758), and the compress check
 [moq-dev/moq#6460](https://github.com/moq-dev/moq/pull/6460) are each a place the two
@@ -73,7 +82,7 @@ b9398f7459, 68c73349a3). Session copies under a front must stop caching for
 themselves and only feed the logical track.
 
 Land it in Rust first, then mirror `js/net` unless
-[JS-only @moq/net](/quest/m5/rs2ts-js.md) has replaced it. Extend
+[the Rust model in the browser](/quest/m5/rs2ts-js.md) has replaced it. Extend
 `benches/origin.rs` with the reader times flap sweep before starting, to
 measure the change.
 
@@ -87,6 +96,10 @@ closed, so a closed copy that still holds groups keeps picking under the
 reader's old `delay.max` after an update. It was found by review and not
 reproduced. The redesign's tests must cover a preference update after the
 serving copy's upstream closed, followed by a read.
+
+## Waiting
+
+- Maintainer: whether this goes before [resume trace validation](/quest/m4/resume-trace-validation.md) and [mutation testing](/quest/m1/mutants.md), and whether it moves to m3 once the cut ships. Options: (a) redesign first, giving both of those `Required` on this quest (or limiting mutants to `route/`), and move this to m3 after the cut as the root fix for the resume path's recurring bugs in shipped code; (b) validate and mutate the current path first, keeping this in m4; (c) redesign first but keep it in m4. Recommended: (a), since the other two would spend their effort on the per-reader path this deletes.
 
 ## Required
 

@@ -224,15 +224,15 @@ leave the connection's estimate unclaimed. Without a claim, video selects the be
 After a stall, video shows each late frame as it arrives and is live again at
 once. Audio cannot skip without losing what arrives late, so it slows down
 slightly when the audio received ahead of it runs low, falls behind the clock,
-and speeds back up once it recovers until it is back on it. Audio that trails
+and speeds back up once it recovers until it is back on it, never more than 10%
+off real time, whatever the content. Audio that trails
 by more than `stretch`, 200 ms by default, skips onto the clock as video does,
 so a long stall costs one skip instead of seconds of lag, and audio that leads
 it by as much, as when the delay rises, waits for it in silence.
 
-`stretch="0"` turns the time stretch off, for content where a pitch-period
-splice is audible, such as music: received audio plays unaltered, late audio
-is skipped, an underrun is silence, and drift between the publisher's clock
-and the device's is corrected by a small skip or pad.
+`stretch="0"` turns the time stretch off: received audio plays unaltered, late
+audio is skipped, an underrun is silence, and drift between the publisher's
+clock and the device's is corrected by a small skip or pad.
 
 ## Buffered playback
 

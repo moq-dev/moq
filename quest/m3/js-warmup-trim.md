@@ -11,7 +11,7 @@ and a short finished track is not empty.
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
-[moq-dev/moq#7384](https://github.com/moq-dev/moq/pull/7384): m2, as
+[moq-dev/moq#7384](https://github.com/moq-dev/moq/pull/7384), as
 recommended.
 
 [moq-dev/moq#7384](https://github.com/moq-dev/moq/pull/7384) (merged) stopped `moq_audio::decode::Consumer` from arming the warmup when

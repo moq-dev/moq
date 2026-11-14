@@ -25,7 +25,7 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
   `connect` dials with the caller's own endpoint ID, and `accept` reads the
   remote ID from the dial, which the socket's answer check proves and the
   grant pins (publish `.server/<id>` and `.client/<id>` only).
-- Streams are [byte streams](/quest/m3/stream/rust.md) at the protection
+- Streams are [byte streams](/quest/m1/stream/rust.md) at the protection
   level the service declares: identity reads `moq-net` directly, and
   authentication, the mesh default, reads through `moq_crypto::sign` against the
   `PublicKey` parsed from the peer's endpoint id, which names the endpoint
@@ -34,7 +34,8 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 - A mesh daemon (Kixel's, outside this repository, decided 2026-11-02) is
   built on this API, so a process either embeds an `Endpoint` or talks to a
   local [mesh relay node](/quest/m3/mesh/node.md).
-- Write a short porting note into the [guide](/quest/m3/mesh/guide.md).
+- Write a short porting note into `doc/` beside the Endpoint's own page; the
+  mesh [guide](/quest/m5/mesh-guide.md) is parked.
 
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): one socket endpoint per service, with a grant to publish on it under the member's own id, so `moq_net::socket` ships unchanged and needs no service field.
 
@@ -51,26 +52,13 @@ member A put `.server/B` under A's own grant, so A could answer as B; the
 one path segment, validated when the `Endpoint` is built, so `*` in the
 grant covers it (`video/h264` would fall outside).
 
-Member grants change shape, which breaks every enrolled device's paths:
-
-- `moq_auth::mesh`'s coordinator issues publish `mesh/node/<id>/**` and the
-  two service patterns (`rs/moq-auth/src/mesh/coordinator.rs`), with its
-  docs (`rs/moq-auth/src/mesh/mod.rs`), and contract tests; the PR's Impact section
-  replaces the `Pattern::subtree(&format!("mesh/{endpoint}"))` migration note
-  (`MIGRATE.md` is written at the release cut).
-- `doc/bin/relay/auth.md`'s mesh enrollment section names the new grant.
-- moq-crypto's and `@moq/crypto`'s sign examples and tests that use
-  `mesh/<key>/agent` paths move to `mesh/node/<key>/agent`, so the examples
-  match the grant.
-- A hosted coordinator implementing the JSON contract issues the same
-  grant; the PR's Impact section says so.
-- Rollout: an old client with a new grant, or a new client with an old
-  grant, can't publish. Open, for whoever starts this, with the maintainer:
-  recommended, the coordinator issues both the old and new patterns for one
-  release while clients upgrade and refresh their tokens, then drops the old
-  one, with the PR's Impact section giving that order; the old pattern keeps the
-  service-name collision open until it is dropped.
+The grant change itself is its own quest, in m2, so it lands before the cut
+publishes `moq_auth::mesh` (split 2026-11-12, maintainer, /quest-audit):
+[mesh grants scope nodes and services apart](/quest/m2/mesh-grant-shape.md).
+This quest builds the `Endpoint` on the new grant, and the dual-grant rollout
+question it carried is gone, since no release ever issued the old shape.
 
 ## Required
 
-- [Rust byte streams](/quest/m3/stream/rust.md) - the stream this API returns
+- [Rust byte streams](/quest/m1/stream/rust.md) - the stream this API returns
+- [Mesh grant shape](/quest/m2/mesh-grant-shape.md) - the grant that lets a member publish its service endpoints

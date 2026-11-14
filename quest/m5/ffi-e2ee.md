@@ -9,11 +9,14 @@ and typed authentication failures as Rust and JS.
 
 ## Plan
 
-Decided 2026-10-28 with the maintainer (moq.pro T3 planning interview): this
+Decided 2026-10-28 with the maintainer (a downstream planning interview): this
 is the quest the [encrypted consumer](/quest/m5/e2ee/consumer.md) defers FFI
-to, adding both halves. The named consumer is moq.pro's
-[T3 Code over MoQ](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/t3/README.md)
-mobile app, which receives its credential in a pairing link.
+to, adding both halves.
+
+No named consumer remains (checked 2026-11-12, /quest-audit). It was planned
+for a downstream application's mobile client, which has since decided on no
+end-to-end encryption and on a transport that does not go through moq-ffi.
+It stays parked here until a binding user asks for encrypted broadcasts.
 
 Wrap `moq-crypto`'s producer and consumer entry points without new crypto in
 the binding layer, and keep the encrypting publisher's refusal of a shared or

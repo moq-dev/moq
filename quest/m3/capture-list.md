@@ -161,6 +161,16 @@ Tests, sized to what each runner has:
 Public API: breaking for `capture::{Camera, Display, Window, App}` and the
 listing calls. Wire: none.
 
+Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ this quest
+stays after the cut, and
+[capture listings and selections can grow](/quest/m2/api-capture-fences.md)
+fences the listing structs it adds fields to in m2 (rejected: pulling this quest into m2; a second moq-video
+break). What this adds is then additive.
+
+## Required
+
+- [Capture listings and selections can grow](/quest/m2/api-capture-fences.md) - the fenced structs this adds fields to
+
 ## Related
 
 - [macOS capture listing futures are Send](/quest/m3/capture-shareable-send.md) - the ScreenCaptureKit listing this rewrites; whatever replaces it stays `Send`

@@ -24,6 +24,11 @@ coordinator cannot extend, and Windows.
 
 ## Plan
 
+Moved from m1 to m3 2026-11-13 (maintainer, /quest-plan): it waits on m2
+work, and no quest requires one in a later milestone, since a blocker ranks
+by its own milestone. ✅ m3 (rejected: m2, where the cut would wait on it;
+pulling the m2 blocker into m1). It ranks right after m2, when it can start.
+
 Decided 2026-11-02 with the maintainer (Kixel's planning interview, which
 moved moq.pro's hosted mesh and T3 Code lines to Kixel): **moq for
 libraries, Kixel for the binary and UI.** This epic keeps the `Endpoint` API,
@@ -36,7 +41,7 @@ moq library, media included, can point at one.
 
 Decided 2026-10-25 with the maintainer (planning interview), still in force:
 
-- Traffic is app-level [byte streams](/quest/m3/stream/README.md) and named
+- Traffic is app-level [byte streams](/quest/m1/stream/README.md) and named
   tracks, never IP packets.
 - The coordinator contract is generic and lives here: enrollment issues a
   relay URL and a token, and self-hosters run it with `moq auth`. A hosted
@@ -78,7 +83,7 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   proving its key. A hosted coordinator may put its own sign-in in front of
   minting that key.
 - The API is iroh-shaped (not wire-compatible with iroh).
-- It builds on [outbound federation](/quest/m2/cluster-routing/federation.md):
+- It builds on [outbound federation](/quest/m3/cluster-routing/federation.md):
   a node's local relay dials its relays as `upstream` links and ranks LAN
   peers above them.
 
@@ -101,13 +106,32 @@ only, enrolled through `moq auth`; an `Endpoint` on each dials the others'
 services, taking the LAN path between the first two and the relay path to
 the third, and survives a relay restart.
 
-## Required
+Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
-- [Outbound federation](/quest/m2/cluster-routing/federation.md) - a local relay dials its relays and prefers LAN peers
-- [Byte streams](/quest/m3/stream/README.md) - lossless TCP-level streams over MoQ
+- ✅ (Superseded 2026-11-13: this epic is back in m3, above.) This epic and [byte streams](/quest/m1/stream/README.md) moved to m1
+  from the head of m3 (rejected: staying in m3). The cut no longer waits on
+  m1, and a downstream application builds on them from `main` now.
+- ✅ The epic no longer lists federation and the stream epic under
+  `Required` (rejected: keeping them). An epic's `Required` holds back every
+  child, so certificate credentials and the Endpoint waited on federation and
+  on JS streams they do not use. The relay node and the Endpoint each list
+  their own blocker.
+- ✅ The relay node takes a credential handle and the application enrolls
+  however it likes (rejected: the coordinator issuing certificates;
+  deferring). `moq_auth::mesh`'s token enrollment stays one way to get a
+  handle. [Mesh enrollment can grow](/quest/m2/api-mesh-enrollment.md)
+  fences the reply before the cut publishes it.
+- ✅ The contract changes land in m2, because the cut publishes
+  `moq_auth::mesh` for the first time: the
+  [grant shape](/quest/m2/mesh-grant-shape.md) and the
+  [key budget](/quest/m2/mesh-device-bounds.md).
+- The JS enrollment client and the guide are parked in m5: the application
+  they were planned for enrolls with certificates and documents itself.
 
 ## Related
 
+- [Outbound federation](/quest/m3/cluster-routing/federation.md) - the relay node requires it; the other children do not
+- [Rust byte streams](/quest/m1/stream/rust.md) - the Endpoint requires it; the other children do not
 - [P2P](/quest/m4/p2p/README.md) - internet peer sessions, which the m3 mesh does not use
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - deferred direct paths between mesh nodes on different networks
 - [End-to-end encryption](/quest/m5/e2ee/README.md) - the AEAD the encryption level will reuse

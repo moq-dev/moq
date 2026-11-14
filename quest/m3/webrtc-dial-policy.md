@@ -41,7 +41,7 @@ Today:
 - moq-rtmp has no gap yet, only because it never resolves a name:
   `Client::connect` takes a `SocketAddr` and `Client::with_stream` a
   finished stream, so the caller picks the address. The
-  [rtmps:// quest](/quest/m3/rtmp-rtmps-tcurl.md) makes it dial a URL, and
+  [rtmps:// quest](/quest/m2/rtmp-rtmps-tcurl.md) makes it dial a URL, and
   from then on it has the same gap, which is why this waits on it.
 
 Guidance:
@@ -56,6 +56,10 @@ Guidance:
 - moq-srt's client takes a `SocketAddr` like moq-rtmp does today. It is out
   of scope until it dials a URL.
 
+## Waiting
+
+- Maintainer: where the one dial-policy type lives. (a) A plain value type with no I/O in moq-net, which moq-webrtc and moq-rtmp both already depend on, each crate checking it at connect time; (b) moq-tokio, beside its own dial dispatch, though moq-rtmp uses moq-tokio only as a dev-dependency today; (c) a crate of its own. Recommended: (a), with the moq-webrtc half added through its `#[non_exhaustive]` `client::Config`, and the rtmps quest's new `connect` taking a `#[non_exhaustive]` options value so this lands without a second break.
+
 ## Required
 
-- [moq-rtmp dials rtmps:// and always advertises a tcUrl](/quest/m3/rtmp-rtmps-tcurl.md) - the URL dial in moq-rtmp that the policy covers
+- [moq-rtmp dials rtmps:// and always advertises a tcUrl](/quest/m2/rtmp-rtmps-tcurl.md) - the URL dial in moq-rtmp that the policy covers

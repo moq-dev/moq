@@ -8,8 +8,8 @@ Existing plaintext commands remain the default; an explicit application credenti
 
 ## Plan
 
-Make `moq-crypto` publishable with this CLI consumer; the crate currently sets
-`publish = false` while it is workspace-only.
+`moq-crypto` is already publishable: its manifest (`rs/moq-crypto/Cargo.toml`)
+no longer sets `publish = false`.
 
 - Hand the [trait-generic CLI paths](/quest/m5/net-wrap/cli.md) an encrypted broadcast for publication and playback. Keep codec, capture, playback, and synchronization logic outside the crypto layer.
 - Accept the credential through a dedicated file descriptor, otherwise-unused stdin, or a permission-checked file (`0600` on Unix), never a command argument or environment variable. Redact errors and tracing, zeroize owned secret bytes, and document shell-safe invocation.
