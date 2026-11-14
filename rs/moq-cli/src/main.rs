@@ -23,6 +23,7 @@ mod rtmp;
 mod rtsp;
 mod srt;
 mod subscribe;
+mod tcp;
 #[cfg(feature = "transcode")]
 mod transcode;
 mod web;
@@ -368,12 +369,14 @@ async fn run() -> anyhow::Result<()> {
 		}
 	}
 
-	// `fetch` and `announced` only dial, so an ambient listener or cluster setting they
+	// `fetch`, `announced`, and `tcp` only dial, so an ambient listener or cluster setting they
 	// never use is not validated either.
 	if let [Command::Fetch(_)] = stages.as_slice() {
 		cli.dial_only("fetch", &["--broadcast"])?;
 	} else if let [Command::Announced(_)] = stages.as_slice() {
 		cli.dial_only("announced", &[])?;
+	} else if let [Command::Tcp(_)] = stages.as_slice() {
+		cli.dial_only("tcp", &[])?;
 	} else {
 		cli.unserved()?;
 		cli.moq.validate()?;
@@ -395,6 +398,7 @@ async fn run() -> anyhow::Result<()> {
 			match stages.remove(0) {
 				Command::Fetch(args) => return fetch::run(cli.moq, args, net).await,
 				Command::Announced(args) => return announced::run(cli.moq, args, net).await,
+				Command::Tcp(args) => return tcp::run(cli.moq, args, net).await,
 				#[cfg(feature = "play")]
 				Command::Play(args) => return run_play(cli.moq, args, net).await,
 				#[cfg(feature = "transcode")]

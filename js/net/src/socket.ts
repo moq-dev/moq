@@ -92,6 +92,12 @@ export interface Options {
 	signal?: AbortSignal;
 }
 
+/** How a TCP dial or accept reads the peer's half. */
+export interface TcpOptions extends Options {
+	/** Schedules the peer's half against the origin's other subscriptions, as a track subscription's priority: -128 to 127, 0 by default. */
+	priority?: number;
+}
+
 let makeTcp: (parts: Parts, producer: Group.Producer, consumer: Group.Consumer) => TcpStream;
 let makeTrack: (parts: Parts) => TrackStream;
 let makeIncoming: <S extends Stream>(endpoint: Endpoint, protocol: Protocol, request: Track.Request) => Incoming<S>;
@@ -100,7 +106,7 @@ let accept: (
 	protocol: Protocol,
 	request: Track.Request,
 	info: Track.InfoInit,
-	options?: Options,
+	options?: TcpOptions,
 ) => Promise<Stream>;
 
 /** A TCP session's one group each way; finish is FIN, and abort is RST. */
@@ -179,14 +185,14 @@ export class Incoming<S extends TcpStream | TrackStream> {
 
 	/** Accept while the original dial stays open; track accepts may describe their outgoing half. */
 	accept(
-		...args: S extends TcpStream ? [options?: Options] : [info?: Track.InfoInit, options?: Options]
+		...args: S extends TcpStream ? [options?: TcpOptions] : [info?: Track.InfoInit, options?: Options]
 	): Promise<S> {
 		const request = this.#request;
 		this.#request = undefined;
 		if (!request) return Promise.reject(cancelled());
 		const [info, options] =
 			this.#protocol === "tcp"
-				? [{}, args[0] as Options | undefined]
+				? [{}, args[0] as TcpOptions | undefined]
 				: [(args[0] as Track.InfoInit) ?? { maxAge: null }, args[1]];
 		return accept(this.#endpoint, this.#protocol, request, info, options) as Promise<S>;
 	}
@@ -269,7 +275,7 @@ export class Endpoint {
 	}
 
 	/** Dial the server peer in a TCP session; waits for its announcement and acceptance until cancelled. */
-	dialTcp(peer: string, options?: Options): Promise<TcpStream> {
+	dialTcp(peer: string, options?: TcpOptions): Promise<TcpStream> {
 		return this.#dial("tcp", peer, {}, options) as Promise<TcpStream>;
 	}
 	/** Dial the server peer in a track session; omitted info keeps every message with no publisher max age. */
@@ -369,6 +375,7 @@ export class Endpoint {
 		peer: string,
 		name: string,
 		signal: AbortSignal,
+		priority: number,
 		hold: (following: Origin.Following) => void,
 	): Promise<{ consumer: Track.Subscriber; peer: GetPromise<Error | null> }> {
 		const following = this.#origin.follow(endpointPath(this.prefix, role, peer));
@@ -383,6 +390,7 @@ export class Endpoint {
 			return {
 				consumer: broadcast.track(name).subscribe({
 					...reliable,
+					priority,
 					ranges: protocol === "track" ? [{ start: { absolute: 0n } }] : undefined,
 				}),
 				peer: broadcast.closed,
@@ -392,7 +400,7 @@ export class Endpoint {
 		}
 	}
 
-	async #dial(protocol: Protocol, peer: string, info: Track.InfoInit, options?: Options): Promise<Stream> {
+	async #dial(protocol: Protocol, peer: string, info: Track.InfoInit, options?: TcpOptions): Promise<Stream> {
 		segment(peer);
 		if (peer === this.id) throw new Error("dialing the same socket endpoint is unsupported");
 		const abort = new AbortController();
@@ -407,9 +415,17 @@ export class Endpoint {
 		let stop: Dispose = () => {};
 		const unreached = this.#reachable(abort);
 		try {
-			const remote = await this.#remote(protocol, "server", peer, name, signal, (value) => {
-				following = value;
-			});
+			const remote = await this.#remote(
+				protocol,
+				"server",
+				peer,
+				name,
+				signal,
+				options?.priority ?? 0,
+				(value) => {
+					following = value;
+				},
+			);
 			consumer = remote.consumer;
 			stop = hooks.watchSubscriberError(consumer, (error) => abort.abort(error));
 			const serving = waitFor(hooks.requestWanted(answer), (wanted) => wanted, signal).then(() => {
@@ -435,7 +451,7 @@ export class Endpoint {
 		protocol: Protocol,
 		request: Track.Request,
 		info: Track.InfoInit,
-		options?: Options,
+		options?: TcpOptions,
 	): Promise<Stream> {
 		const name = parse(request.name);
 		if (!name) throw cancelled();
@@ -454,9 +470,17 @@ export class Endpoint {
 		try {
 			check();
 			signal.throwIfAborted();
-			const remote = await this.#remote(protocol, "client", name.dialer, request.name, signal, (value) => {
-				following = value;
-			});
+			const remote = await this.#remote(
+				protocol,
+				"client",
+				name.dialer,
+				request.name,
+				signal,
+				options?.priority ?? 0,
+				(value) => {
+					following = value;
+				},
+			);
 			consumer = remote.consumer;
 			stopError = hooks.watchSubscriberError(consumer, (error) => abort.abort(error));
 			await untilAborted(consumer.info(), signal);

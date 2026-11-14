@@ -38,6 +38,7 @@ install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
 | `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
+| `tcp` | `dial <peer>`, `accept <id>` | Forward TCP connections through a relay. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
 | `repair` | `mp4 <file>` | Finish an `export mp4` recording that was cut short. |
 | `devices` | | List capture sources and their ids. |
@@ -50,6 +51,8 @@ moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
 moq <MoQ side> announced [prefix] [options]
 moq <MoQ side> fetch <track> [options]
+moq <MoQ side> tcp dial <peer> --local <addr> [options]
+moq <MoQ side> tcp accept <id> --local <addr> [options]
 ```
 
 The **MoQ side** goes first and attaches the process to the network:
@@ -319,6 +322,28 @@ stdout over MoQ: the counterpart of the relay's HTTP `/fetch`. It exits
 non-zero when the broadcast or group is not found. [Inspect a
 relay](/bin/inspect) walks through `announced` and `fetch` next to their `curl`
 equivalents.
+
+## TCP
+
+```bash
+# On the server's host: accept sessions as `ssh` and connect each to the local SSH server.
+moq --connect https://relay.example.com/anon tcp accept ssh --local 127.0.0.1:22
+
+# On the client's host: listen locally and dial `ssh` for each connection.
+moq --connect https://relay.example.com/anon tcp dial ssh --local 127.0.0.1:2222
+ssh -p 2222 user@127.0.0.1
+```
+
+Forwards TCP connections through a relay, so an unmodified client and server
+talk without either being reachable from the other. Each connection is a
+[socket](/concept/socket) `tcp` session: bytes arrive in order with nothing
+lost, a FIN is passed on as a FIN, and a reset as a reset. `tcp accept` connects
+to `--local` before it accepts a dial, so a refused connection refuses the dial.
+`--prefix` names where the two ends meet under the connection path, and
+`--priority` schedules the bytes this end receives against the relay's other
+traffic. Every hop must carry hidden broadcasts, so unless `--connect-version`
+says otherwise it offers only `moq-lite-07-wip` and moq-transport, and the
+relay must accept one of them.
 
 ## Archive
 

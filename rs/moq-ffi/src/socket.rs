@@ -54,7 +54,7 @@ impl MoqSocketEndpoint {
 	pub async fn dial_tcp(&self, peer: String) -> Result<Arc<MoqSocketTcpStream>, MoqError> {
 		self.driver
 			.watch(async {
-				let stream = self.inner.dial_tcp(&peer)?.await?;
+				let stream = self.inner.dial_tcp(&peer, 0)?.await?;
 				Ok(Arc::new(MoqSocketTcpStream::new(stream, self.driver.clone())))
 			})
 			.await
@@ -137,7 +137,7 @@ impl MoqSocketIncomingTcp {
 	pub async fn accept(&self) -> Result<Arc<MoqSocketTcpStream>, MoqError> {
 		self.driver.check()?;
 		let (incoming, answering) = self.inner.take()?;
-		let accepting = Polled::new(incoming.accept()).supervised(self.driver.clone());
+		let accepting = Polled::new(incoming.accept(0)).supervised(self.driver.clone());
 		let stream = accepting
 			.wait(|inner, waiter| Poll::Ready(Ok(ready!(inner.poll_ok(waiter))?)))
 			.await;

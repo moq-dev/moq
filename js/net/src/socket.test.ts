@@ -313,6 +313,32 @@ test("an endpoint announces only the roles it takes, and its client answers only
 	expect(await failure).toBeInstanceOf(Error);
 });
 
+test("a TCP dial and accept each read the peer's half at the priority they ask", async () => {
+	const { origin, a, b } = setup();
+	// Bob's server endpoint, played by hand, sees the priority Alice dials with.
+	const server = origin.route(Path.from("room", ".server", "bob"));
+	const dialing = a.dialTcp("bob", { priority: 5 });
+	void dialing.catch(() => {});
+	const dial = await wireOf(server.broadcast).requested();
+	expect(dial?.priority).toBe(5);
+	dial?.reject(new NotFound("socket session"));
+	server.close();
+
+	// Alice's client endpoint, played by hand, sees the priority Bob accepts with.
+	const client = origin.route(Path.from("room", ".client", "carol"));
+	const incoming = b.acceptTcp();
+	const subscriber = await raw(origin, ".server", "bob", "tcp/carol/bob/0123456789abcdef0123456789abcdef");
+	const accepting = (await incoming).accept({ priority: -3 });
+	void accepting.catch(() => {});
+	const answer = await wireOf(client.broadcast).requested();
+	expect(answer?.priority).toBe(-3);
+	answer?.reject(new NotFound("socket session"));
+	subscriber.close();
+	client.close();
+	a.close();
+	b.close();
+});
+
 test("unknown and unaccepted protocols reset without entering the other queue", async () => {
 	const { origin, b } = setup();
 	const hold = new AbortController();

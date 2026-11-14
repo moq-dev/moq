@@ -147,11 +147,11 @@ enum Role {
 /// Dial `acceptor` from `dialer` in a `tcp` session while `acceptor` accepts, returning
 /// both ends.
 async fn connect_tcp(dialer: &Endpoint, acceptor: &Endpoint) -> (TcpStream, TcpStream) {
-	let dial = dialer.dial_tcp(acceptor.id()).expect("dial");
+	let dial = dialer.dial_tcp(acceptor.id(), 0).expect("dial");
 	let accept = async {
 		let incoming = acceptor.accept_tcp().await?;
 		assert_eq!(incoming.peer(), dialer.id());
-		incoming.accept().await
+		incoming.accept(0).await
 	};
 	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
 		.await
@@ -257,7 +257,7 @@ async fn a_forged_dial_never_connects() {
 	let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
 	let (_mallory, mallory_origin, _mallory_session) = fixture.endpoint(Role::Client, "mallory", LITE).await;
 	// Alice dials elsewhere, so her client endpoint is there to reset the forged accept.
-	let _elsewhere = alice.dial_tcp("carol").expect("dial");
+	let _elsewhere = alice.dial_tcp("carol", 0).expect("dial");
 
 	// Bob's first accept announces his server endpoint.
 	assert!(bob.poll_accept_tcp(&kio::Waiter::noop()).is_pending());
@@ -275,7 +275,7 @@ async fn a_forged_dial_never_connects() {
 			.subscribe(None);
 		let incoming = bob.accept_tcp().await.expect("accept");
 		assert_eq!(incoming.peer(), "alice");
-		let (accepted, forged) = futures::join!(incoming.accept(), forged);
+		let (accepted, forged) = futures::join!(incoming.accept(0), forged);
 		assert!(accepted.is_err(), "bob connected to a forged dial");
 		assert!(forged.is_err(), "mallory read bob's half");
 	};
@@ -305,7 +305,7 @@ async fn a_client_grant_neither_serves_nor_reads_clients() {
 	};
 
 	// Alice dials, which announces her client endpoint.
-	let _alice_dial = alice.dial_tcp("carol").expect("dial");
+	let _alice_dial = alice.dial_tcp("carol", 0).expect("dial");
 	carried(".client/alice").await;
 
 	// Mallory, a client, can't read it.
@@ -322,7 +322,7 @@ async fn a_client_grant_neither_serves_nor_reads_clients() {
 	// Mallory accepts as a server would, then dials, announcing her client endpoint after
 	// her server one on the same session: once it is carried, the relay decided both.
 	assert!(mallory.poll_accept_tcp(&kio::Waiter::noop()).is_pending());
-	let _mallory_dial = mallory.dial_tcp("bob").expect("dial");
+	let _mallory_dial = mallory.dial_tcp("bob", 0).expect("dial");
 	carried(".client/mallory").await;
 
 	// So no dial can reach her.

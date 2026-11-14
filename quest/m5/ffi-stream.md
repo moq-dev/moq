@@ -20,13 +20,13 @@ application's mobile module now wraps a WebTransport binding rather than
 moq-ffi, and carries its traffic in groups rather than byte streams. It stays
 parked here until a binding user asks for byte streams.
 
-Wrap the [Rust surface](/quest/m1/stream/rust.md) in `moq-ffi` with the same
-path layout and priority knob, and surface it through the generated Swift and
+Wrap the Rust surface, `moq_tokio::socket::TcpStream`, in `moq-ffi` with the same
+path layout and priority knob (`dial_tcp` and `accept` take a `priority`, which
+`moq-ffi` and `moq-c` pass as 0 until then), and surface it through the generated Swift and
 Kotlin packages. Use an async read and write shape that matches how the
 bindings already expose frames; report the choice. Add a Kotlin or Swift
 binding test against a JS peer to the interop suite.
 
 ## Required
 
-- [Rust byte streams](/quest/m1/stream/rust.md) - the surface these bindings wrap
 - [JS byte streams](/quest/m4/stream-js.md) - the peer the interop test runs against
