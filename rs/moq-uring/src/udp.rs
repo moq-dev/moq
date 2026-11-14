@@ -140,11 +140,12 @@ impl Default for Config {
 			gro: true,
 			gso: true,
 			multishot: true,
-			// 16 MiB and 64 MiB of headroom at the default buffer lengths,
-			// reached only by a socket that actually starves for them.
+			// 16 MiB and 32 MiB of headroom at the default buffer lengths,
+			// reached only by a socket that actually starves for them. Their
+			// sum stays under the worker's CQ, which can grow no further.
 			rx_buffers_max: 256,
 			rx_buffer_len: MAX_RECV + RECV_OVERHEAD,
-			tx_buffers_max: 1024,
+			tx_buffers_max: 512,
 			tx_buffer_len: 64 * 1024,
 		}
 	}

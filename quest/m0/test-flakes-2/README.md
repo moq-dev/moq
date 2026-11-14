@@ -31,8 +31,8 @@ This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. Done 2026-11-13 on fedora
 (32 cores, load average 4 to 14 from other agents' sessions): three runs all
 passed. The one failure seen on that host the same day, moq-relay's
-io_uring `ENOMEM` at ring setup, is planned in
-[uring-setup-enomem](/quest/m0/test-flakes-2/uring-setup-enomem.md).
+io_uring `ENOMEM` at ring setup, was fixed by shrinking the CQ so the rings
+region stays within order 3.
 Decided 2026-11-13 (maintainer, `/quest-complete`): that child stays in m0
 under this epic, so the epic stays open until it lands (rejected: moving it to
 m1, moving it to m3). The epic completes when that child lands.
