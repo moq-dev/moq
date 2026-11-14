@@ -40,6 +40,22 @@ impl Group {
 			.map(frame::Producer::cancel_on_drop)
 	}
 
+	/// The byte the copy starts frame `index` at, if it holds only the rest of that frame
+	/// (see [`group::Producer::create_lead`]).
+	pub fn lead_at(&self, index: u64) -> Option<u64> {
+		self.handle.lead_at(index)
+	}
+
+	/// Move the writer and cancellation cleanup into the rest of the frame the copy starts
+	/// partway into.
+	pub fn create_lead(&mut self, frame: frame::Header) -> Result<frame::Producer, Error> {
+		self.writer
+			.take()
+			.expect("group writer is available between frames")
+			.create_lead(frame)
+			.map(frame::Producer::cancel_on_drop)
+	}
+
 	/// Poll until the writer may admit the frame `header` opens, its payload and metadata,
 	/// within `window` bytes past its fastest reader, so admitting it sheds no byte that
 	/// reader has yet to take; see [`group::Producer::poll_paced`].

@@ -83,13 +83,13 @@ pub(super) fn encode_route(
 	w.varint(epoch)
 }
 
-/// Decode the instance and epoch an announcement serves; see [`encode_route`].
-pub(super) fn decode_route(r: &mut Decoder<'_>, version: Version) -> Result<(Option<Instance>, u64), DecodeError> {
-	if !version.has_instance() {
-		return Ok((None, 0));
-	}
-	let instance = decode(r.bytes()?, r.bool()?)?;
-	Ok((Some(instance), r.varint()?))
+/// Decode lite-07's instance and epoch, `None` when they are well framed but the
+/// instance is not one this node can use, which withdraws only the claim naming it;
+/// see [`encode_route`].
+pub(super) fn decode_forwarded(r: &mut Decoder<'_>) -> Result<Option<(Instance, u64)>, DecodeError> {
+	let instance = decode(r.bytes()?, r.bool()?).ok();
+	let epoch = r.varint()?;
+	Ok(instance.map(|instance| (instance, epoch)))
 }
 
 /// Encode the instance of a copy a warm route names, which is never none.
@@ -97,9 +97,10 @@ pub(super) fn encode_copy(w: &mut Encoder<'_>, instance: &Instance) -> Result<()
 	encode(w, instance)
 }
 
-/// Decode the instance of a copy a warm route names; see [`encode_copy`].
-pub(super) fn decode_copy(r: &mut Decoder<'_>) -> Result<Instance, DecodeError> {
-	decode(r.bytes()?, r.bool()?)
+/// Decode the instance of a copy a warm route names, `None` when it is well framed but
+/// not one this node can use; see [`encode_copy`].
+pub(super) fn decode_copy(r: &mut Decoder<'_>) -> Result<Option<Instance>, DecodeError> {
+	Ok(decode(r.bytes()?, r.bool()?).ok())
 }
 
 fn encode(w: &mut Encoder<'_>, instance: &Instance) -> Result<(), EncodeError> {
@@ -175,13 +176,11 @@ mod test {
 		)
 		.unwrap();
 		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
-		assert_eq!(
-			decode_route(&mut decoder, Version::Lite07).unwrap(),
-			(Some(instance), 7)
-		);
+		assert_eq!(decode_forwarded(&mut decoder).unwrap(), Some((instance, 7)));
 		assert!(decoder.is_empty());
 
-		// Every lite-07 route names one: none is refused both ways.
+		// Every lite-07 route names one: none is never sent, and a receiver refuses an
+		// invalid one without failing the stream.
 		assert!(
 			encode_route(
 				&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()),
@@ -196,7 +195,9 @@ mod test {
 		w.bytes(&[]).unwrap();
 		w.bool(false);
 		w.varint(0).unwrap();
-		assert!(decode_route(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07).is_err());
+		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
+		assert_eq!(decode_forwarded(&mut decoder).unwrap(), None);
+		assert!(decoder.is_empty());
 	}
 
 	#[test]

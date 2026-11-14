@@ -11,7 +11,7 @@ the broadcast over, exactly as one built through `Server::broadcaster` does.
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
 [moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399): a separate S
-quest in m2 for the `moq_mux::Source` API, alongside reporting stalled
+quest for the `moq_mux::Source` API, alongside reporting stalled
 segments.
 
 [moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399) (merged) detects takeover in the server's follower (`Followed::start`

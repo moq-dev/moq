@@ -82,6 +82,9 @@
 //!   [`Registry::report`] and [`Registry::snapshot`] read each registered [`Wire`]
 //!   without polling the session. A retag flushes its old tier and label; dropping the guard flushes
 //!   its final nonnegative delta. Unsupported transports contribute zero.
+//! * `routes_refused` ([`Presence`]): cumulative routes and claims that lite-07
+//!   sessions under the label forwarded and this node refused, each withdrawn while
+//!   the session stays open.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the label held
 //!   at once, to compare against what bounds them. A peak never
@@ -298,6 +301,7 @@ struct SessionCounters {
 	sessions_ended: AtomicU64,
 	announces_peak: AtomicU64,
 	subscriptions_peak: AtomicU64,
+	routes_refused: AtomicU64,
 	/// Payload bytes of the sessions recording here. One lock covers the folded totals
 	/// and the live sessions, so a readout never goes down when a session leaves.
 	bytes: Mutex<SessionBytes>,
@@ -339,6 +343,7 @@ impl SessionCounters {
 			received_bytes,
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
+			routes_refused: self.routes_refused.load(Ordering::Relaxed),
 		};
 		(presence, activity, empty)
 	}
@@ -719,6 +724,9 @@ pub struct Presence {
 	pub wire_tx: u64,
 	/// Cumulative transport bytes received, including transport framing.
 	pub wire_rx: u64,
+	/// Cumulative routes, warm routes, and claims a lite-07 session forwarded that this
+	/// node refused, withdrawing each and keeping the session.
+	pub routes_refused: u64,
 }
 
 #[derive(Serialize)]
@@ -736,6 +744,7 @@ struct PresenceSer {
 	subscriptions_peak: u64,
 	wire_tx: u64,
 	wire_rx: u64,
+	routes_refused: u64,
 }
 
 impl From<Presence> for PresenceSer {
@@ -754,6 +763,7 @@ impl From<Presence> for PresenceSer {
 			received_bytes: p.received_bytes,
 			announces_peak: p.announces_peak,
 			subscriptions_peak: p.subscriptions_peak,
+			routes_refused: p.routes_refused,
 		}
 	}
 }
@@ -776,6 +786,7 @@ struct PresenceDe {
 	wire_tx: u64,
 	#[serde(default)]
 	wire_rx: u64,
+	routes_refused: u64,
 }
 
 impl From<PresenceDe> for Presence {
@@ -792,6 +803,7 @@ impl From<PresenceDe> for Presence {
 			received_bytes: d.received_bytes,
 			announces_peak: d.announces_peak,
 			subscriptions_peak: d.subscriptions_peak,
+			routes_refused: d.routes_refused,
 		}
 	}
 }
@@ -822,6 +834,7 @@ impl Presence {
 		self.received_bytes += other.received_bytes;
 		self.announces_peak = self.announces_peak.max(other.announces_peak);
 		self.subscriptions_peak = self.subscriptions_peak.max(other.subscriptions_peak);
+		self.routes_refused += other.routes_refused;
 	}
 
 	/// Sessions currently connected.
@@ -1863,6 +1876,15 @@ impl Session {
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(presence) = &current.presence else { return };
 		presence.peak(cap).fetch_max(held, Ordering::Relaxed);
+	}
+
+	/// Count a route or claim the peer forwarded that this node refused.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse_route(&self) {
+		let Some(inner) = &self.inner else { return };
+		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
+		let Some(presence) = &current.presence else { return };
+		presence.routes_refused.fetch_add(1, Ordering::Relaxed);
 	}
 
 	/// Egress (publisher / reads) scope for a broadcast path. The path is the

@@ -2,12 +2,12 @@
 
 ## Goal
 
-`@moq/clock`, `@moq/libav`, `@moq/ui`, and `@moq/video` exist on npm, each with trusted
+`@moq/clock`, `@moq/libav`, `@moq/stats`, `@moq/ui`, and `@moq/video` exist on npm, each with trusted
 publishing attached to `moq-dev/moq` and the `npm` Environment. The cut's release workflow can then publish
 their real versions. A maintainer does this by hand. Delete this quest once
 the checks pass:
 
-- `npm view @moq/<name>` resolves for all four, and the package settings show
+- `npm view @moq/<name>` resolves for all five, and the package settings show
   the `moq-dev/moq` trusted publisher with Environment `npm`.
 
 ## Plan
@@ -20,7 +20,11 @@ publish fails on these names and still publishes dependents that can't
 install. [moq-dev/moq#6243](https://github.com/moq-dev/moq/pull/6243) raised
 it for `@moq/libav` alone. `@moq/ui`, which `@moq/watch` and `@moq/publish`
 keep external, joined the list on 2026-11-06, when the final API audit found
-it still returned 404.
+it still returned 404. `@moq/stats` joined on 2026-11-12 (/quest-audit):
+[moq-dev/moq#8502](https://github.com/moq-dev/moq/pull/8502) added `js/stats`
+at 0.1.0 with a release script, and the name returns 404. Nothing published
+depends on it, so a miss fails only its own publish. All five still returned
+404 on 2026-11-12.
 
 Decided 2026-10-22 (maintainer): publish a minimal `0.0.0` placeholder
 (README only) per name to claim it, then attach the trusted publisher. The

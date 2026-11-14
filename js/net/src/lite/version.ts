@@ -311,6 +311,12 @@ export function hasRanges(version: Version): boolean {
 	}
 }
 
+/** Whether FETCH carries a Start Byte within its first frame, so a reader cut off partway
+ * through a frame asks for only the rest of it. Added in lite-07. */
+export function hasByteStart(version: Version): boolean {
+	return hasFetchMaxDelay(version);
+}
+
 /** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
  * fetch is bounded by the publisher's max age alone. */
 export function hasFetchMaxDelay(version: Version): boolean {

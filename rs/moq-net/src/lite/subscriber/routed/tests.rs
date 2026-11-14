@@ -408,3 +408,196 @@ async fn pending_changes_net_out() {
 	}
 	assert_eq!(pending(&routed), 0, "claims started and ended between floors");
 }
+
+/// A claim this node refuses was not withdrawn by its origin: while its route holds
+/// one, the route's floors certify nothing, so a relay forwards no withdrawal for it,
+/// and a usable restart certifies the route again.
+#[kio::test]
+async fn a_refused_claim_forwards_no_withdrawal() {
+	use crate::lite::{Refusable, Refusal};
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let prefix = Path::empty();
+	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	let peer = crate::route::node::Peer { tag: u64::MAX, node: 9 };
+	let edge = (routed.node)
+		.answer(peer, crate::route::Link::default(), Path::empty())
+		.unwrap();
+	let mut decoder = AnnounceDecoder::default();
+	let floor = |revision| Msg::Floor {
+		id: 0,
+		revision: Some(revision),
+	};
+	let refused = |id| Msg::Refused {
+		message: Refusable::Change { id },
+		reason: Refusal::Instance,
+	};
+	let restart = |id| Msg::Restart {
+		id,
+		instance: Some(Instance::random()),
+		epoch: 1,
+		cost: Cost::new(0),
+		hops: Default::default(),
+	};
+	// Each batch the edge would send for node 7: the paths it changes, whether each is
+	// present, and its floor.
+	let batches = |routed: &mut super::Routed| {
+		routed.outputs(&subscriber);
+		let mut batches = Vec::new();
+		while let Some(output) = edge.try_output() {
+			if let crate::route::node::Output::Batch {
+				id: 7, changes, floor, ..
+			} = output
+			{
+				let changes: Vec<_> = (changes.into_iter())
+					.map(|(path, claim)| (path.to_string(), claim.is_some()))
+					.collect();
+				batches.push((changes, floor));
+			}
+		}
+		batches
+	};
+	let route = Msg::RouteStart {
+		node: 7,
+		suffix: Path::empty(),
+		offer: offer(),
+	};
+	for msg in [route, start("live/a"), start("live/b"), floor(0)] {
+		routed.receive(&prefix, msg, &mut decoder).unwrap();
+	}
+	assert_eq!(
+		batches(&mut routed),
+		[(vec![("live/a".into(), true), ("live/b".into(), true)], Some(0))]
+	);
+
+	// Refused, live/a goes without a withdrawal certified for it.
+	for msg in [refused(0), floor(1)] {
+		routed.receive(&prefix, msg, &mut decoder).unwrap();
+	}
+	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
+	// Nor does live/b's change certify anything, while the route holds the refused claim.
+	let update = Msg::Update {
+		id: 1,
+		hops: Default::default(),
+		cost: Cost::new(5),
+	};
+	for msg in [update, floor(2)] {
+		routed.receive(&prefix, msg, &mut decoder).unwrap();
+	}
+	assert_eq!(batches(&mut routed), [(vec![("live/b".into(), true)], None)]);
+
+	// A usable restart brings live/a back, certified again.
+	for msg in [restart(0), floor(3)] {
+		routed.receive(&prefix, msg, &mut decoder).unwrap();
+	}
+	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), true)], Some(3))]);
+
+	// A refused restart withholds it as the update did.
+	for msg in [refused(0), floor(4)] {
+		routed.receive(&prefix, msg, &mut decoder).unwrap();
+	}
+	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
+}
+
+/// A route this node refuses still follows a DEAD naming a hop on its path, so both
+/// ends agree on which routes live: the closed session it crossed ends it, its claims
+/// with it, and the peer may start it over. A refused moved offer withdraws the route
+/// it names until a usable offer comes.
+#[kio::test]
+async fn a_refused_route_still_follows_a_dead() {
+	use crate::lite::{Dead, Refusable, Refusal, Unusable};
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let prefix = Path::empty();
+	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	let mut decoder = AnnounceDecoder::default();
+	let path = |session| -> std::sync::Arc<[Hop]> {
+		[Hop { node: 7, session: 0 }, Hop { node: 5, session }].into()
+	};
+	let floor = |id| Msg::Floor { id, revision: Some(0) };
+	let claim = |route, path: &'static str| Msg::Active {
+		suffix: PathRef::literal(Path::from_static(path)),
+		route,
+		instance: Some(Instance::random()),
+		epoch: 0,
+		hops: Default::default(),
+		cost: Cost::new(0),
+	};
+	let closed = |session, gone, moved| {
+		Msg::Dead(Dead::Closed {
+			hop: Hop { node: 5, session },
+			far: 7,
+			gone,
+			moved,
+		})
+	};
+
+	// Refused for a flag this node does not know: its claim is held, never served.
+	let refused = Msg::Refused {
+		message: Refusable::RouteStart {
+			node: 7,
+			suffix: Some(Path::empty()),
+			path: path(3),
+		},
+		reason: Refusal::Flags(8),
+	};
+	for msg in [refused, claim(0, "live/a"), floor(0)] {
+		routed.receive(&prefix, msg, &mut decoder).unwrap();
+	}
+	routed.outputs(&subscriber);
+	assert!(served(&routed).is_empty());
+
+	// The session it crossed closed for good: it ends, and its Announce ID retires.
+	routed.receive(&prefix, closed(3, true, Vec::new()), &mut decoder).unwrap();
+	assert!(routed.routes.is_empty() && routed.claims.is_empty() && routed.named.is_empty());
+	assert!(routed.receive(&prefix, Msg::EndedId { id: 0 }, &mut decoder).is_err());
+
+	// So the peer starts the route over, usably.
+	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	let usable = |session| Offer {
+		path: path(session),
+		..offer()
+	};
+	let route = |session| Msg::RouteStart {
+		node: 7,
+		suffix: Path::empty(),
+		offer: usable(session),
+	};
+	for msg in [
+		Msg::Refused {
+			message: Refusable::RouteStart {
+				node: 7,
+				suffix: Some(Path::empty()),
+				path: path(3),
+			},
+			reason: Refusal::Flags(8),
+		},
+		claim(0, "live/a"),
+		closed(3, true, Vec::new()),
+		route(4),
+		claim(1, "live/b"),
+		floor(1),
+	] {
+		routed.receive(&prefix, msg, &mut decoder).unwrap();
+	}
+	routed.outputs(&subscriber);
+	assert_eq!(served(&routed), ["live/b"]);
+
+	// It moved to an offer this node refuses: withdrawn, though the peer still holds it.
+	let moved = vec![(
+		1,
+		Err(Unusable {
+			path: path(5),
+			reason: Refusal::Flags(8),
+		}),
+	)];
+	routed.receive(&prefix, closed(4, false, moved), &mut decoder).unwrap();
+	routed.outputs(&subscriber);
+	assert!(served(&routed).is_empty());
+	assert!(routed.routes[&1].reach().is_none());
+
+	// A usable offer files it again with its last floor's claims.
+	let update = Msg::RouteUpdate { id: 1, offer: usable(6) };
+	routed.receive(&prefix, update, &mut decoder).unwrap();
+	assert!(routed.routes[&1].reach().is_some());
+	assert_eq!(routed.routes[&1].committed.as_ref().map(|(claims, _)| claims.len()), Some(1));
+}

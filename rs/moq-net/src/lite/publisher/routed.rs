@@ -537,7 +537,7 @@ impl Answer {
 			.collect();
 		told.sort_unstable();
 		if !told.is_empty() {
-			let wired = |key: &RouteKey| Some((self.routes[key].wire.as_ref()?.id, moves.get(key)?.clone()));
+			let wired = |key: &RouteKey| Some((self.routes[key].wire.as_ref()?.id, Ok(moves.get(key)?.clone())));
 			let (moved, ends) = match single {
 				true => (told.iter().filter_map(wired).collect(), gone),
 				false => (Vec::new(), false),

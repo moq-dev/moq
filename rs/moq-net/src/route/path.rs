@@ -228,6 +228,8 @@ struct Heard<A> {
 	interest: u32,
 	/// Its claims as presented at its prefix, with one floor or none yet.
 	view: View<A>,
+	/// Whether its sender closed a batch of claims yet, so `view` is what it carries.
+	batched: bool,
 }
 
 /// A dead hop keeps its own deadline; another failure of the far node cannot extend it.
@@ -1018,9 +1020,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		match reach {
 			// A path a node could not extend is refused, as if ended.
 			Some(Reach::Finite(offer)) if offer.extendable() => {
-				let view = match same {
-					true => self.rx[&key][&from].view.clone(),
-					false => View::default(),
+				let (view, batched) = match same {
+					true => {
+						let heard = &self.rx[&key][&from];
+						(heard.view.clone(), heard.batched)
+					}
+					false => (View::default(), false),
 				};
 				if entry.is_some() {
 					self.forget_heard(&key, from);
@@ -1034,6 +1039,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					state,
 					interest,
 					view,
+					batched,
 				};
 				self.hear(key.clone(), from, heard);
 				if id != named {
@@ -1107,6 +1113,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let claims: Vec<Path> = changes.iter().map(|(claim, _)| claim.clone()).collect();
 		let floors = floor.map(|rev| BTreeMap::from([(prefix, rev)])).unwrap_or_default();
 		heard.view.apply(changes, floors);
+		heard.batched = true;
 		let delta = Delta {
 			route: key.clone(),
 			from,
@@ -1931,14 +1938,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// What the live route this node selected covering `prefix` carries there, with
-	/// nothing certified, or `None` while it has none or does not believe it.
+	/// nothing certified, or `None` while it has none, does not believe it, or its sender
+	/// has not yet closed a batch of its claims.
 	fn carried(&self, id: Id, prefix: &Path) -> Option<View<A>> {
 		let (above, next) = ancestors(prefix).rev().find_map(|above| match self.routes.get(&(id, above.clone()))? {
 			Route::Live { next, .. } => Some((above, *next)),
 			_ => None,
 		})?;
 		let heard = self.rx.get(&(id, above))?.get(&next)?;
-		if !self.believed(next, heard) {
+		if !heard.batched || !self.believed(next, heard) {
 			return None;
 		}
 		let mut view = heard.view.present(prefix);
@@ -1967,7 +1975,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// Bring every view of `id` up to date: each prefix within the interest that a route
 	/// covers keeps the newest floor a believed route covering it gave, kept whole while
-	/// a route covers it. Returns whether the views changed shape, and marks changed
+	/// a route covers it, or what the selected live route carries while none certifies it. Returns whether the views changed shape, and marks changed
 	/// claims in `dirty`.
 	fn know(&mut self, id: Id, keys: &BTreeSet<Path>, delta: Option<&Delta<N>>, dirty: &mut Dirty) {
 		if self.origins.contains_key(&id) {
@@ -2001,8 +2009,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			};
 			self.scopes.entry(id).or_default().insert(prefix.clone());
 			let floor = base.floors.get(prefix).copied();
-			// The newest floor any believed route covering this prefix gave.
+			// The newest floor any believed route covering this prefix gave, and whether
+			// any gave one at all.
 			let mut best: Option<(Rev, RouteId, N)> = None;
+			let mut floored = false;
 			for above in ancestors(prefix) {
 				let route = (id, above);
 				for (&peer, heard) in self.rx.get(&route).into_iter().flatten() {
@@ -2010,7 +2020,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					let Some(&rev) = heard.view.floors.get(&route.1) else {
 						continue;
 					};
-					if !self.believed(peer, heard) || Some(rev) <= floor {
+					if !self.believed(peer, heard) {
+						continue;
+					}
+					floored = true;
+					if Some(rev) <= floor {
 						continue;
 					}
 					if best.as_ref().is_none_or(|(best, ..)| rev > *best) {
@@ -2019,12 +2033,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 			}
 			let Some((_, route, peer)) = best else {
-				// A view no floor ever certified shows what the live route this node
-				// selected for the prefix carries: a sender that cannot vouch for its
-				// whole interest still shows its claims, uncertified.
-				let view = match floor {
-					Some(_) => None,
-					None => self.carried(id, prefix),
+				// While no believed route certifies the prefix, it shows what the live
+				// route this node selected carries there: a sender that cannot vouch for
+				// its whole interest, such as one refusing a claim it was sent, still
+				// shows its claims, uncertified.
+				let view = match floored {
+					true => None,
+					false => self.carried(id, prefix),
 				};
 				let view = match view {
 					Some(view) => {

@@ -1267,8 +1267,8 @@ pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
 }
 
 /// Decode and resolve an announce stream, as [`encode_announces`] writes it, stopping
-/// at the first message that fails to decode or resolve: a subscriber closes the
-/// session there.
+/// at the first message that fails to decode or resolve, where a subscriber closes the
+/// session, or that it refuses.
 pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	let version = announce_version(compress);
 	let mut data = Decoder::new(data, version.into());
@@ -1277,8 +1277,11 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	while let Ok(msg) = lite::AnnounceBroadcast::decode(&mut data, version) {
 		let announced = match msg {
 			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
-				.start(suffix)
+				.start(Some(suffix))
+				.and_then(|suffix| suffix.ok_or(crate::Error::ProtocolViolation))
 				.map(|suffix| Announced::Start(suffix, hops.into_ids())),
+			// A refused message assigns ids this harness does not model.
+			lite::AnnounceBroadcast::Refused { .. } => break,
 			lite::AnnounceBroadcast::Update { id, hops, .. } => {
 				decoder.get(id).map(|_| Announced::Update(id, hops.into_ids()))
 			}
@@ -2000,12 +2003,13 @@ const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
 	(30, &[8, 0, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 8, 1, 0, 0, 0x80, 1, 1, 1, 0]),
-	(5, &[7, 7, 0, 0, 0x80, 1, 1, 1, 0]),
+	(5, &[6, 8, 1, 0, 1, 1, 0, 0, 0x80, 1]),
+	(5, &[7, 7, 0, 1, 1, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),
 	(5, &[15, 6, 0, 1, 1, 2, 0, 0]),
+	(5, &[15, 14, 0, 1, 1, 2, 1, 1, 0, 6, 1, 1, 1, 0, 0x80, 1]),
 	(5, &[15, 2, 1, 1]),
 ];
 

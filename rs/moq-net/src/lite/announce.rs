@@ -140,6 +140,64 @@ pub enum AnnounceBroadcast {
 	WarmUpdate { id: u64, warm: Warm },
 	/// WARM_END (lite-07+): the sender withdrew the warm route with this id.
 	WarmEnd { id: u64 },
+	/// A route message (lite-07+) whose content, which the sender only forwarded, this
+	/// node refuses. The receiver withdraws what it names and keeps the session. Decoded
+	/// only as far as keeps the stream's ids in step; never sent.
+	Refused { message: Refusable, reason: Refusal },
+}
+
+/// What a refused route message still tells the receiver, so the ids that follow it
+/// resolve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Refusable {
+	/// ROUTE_START: assigns the next Route ID to the publisher `node`, covering the
+	/// requested prefix joined with `suffix`, or no prefix when the suffix itself was
+	/// refused, along `path`.
+	RouteStart {
+		node: route::Id,
+		suffix: Option<Path>,
+		path: Arc<[route::path::Hop]>,
+	},
+	/// ROUTE_UPDATE of the route with this Route ID, now along `path`.
+	RouteUpdate { id: u64, path: Arc<[route::path::Hop]> },
+	/// ANNOUNCE_START under the route with Route ID `route`: assigns the next Announce
+	/// ID, to `suffix`, or to no path when the path itself was refused.
+	Start { route: u64, suffix: Option<PathRef> },
+	/// ANNOUNCE_UPDATE or ANNOUNCE_RESTART of the claim with this Announce ID.
+	Change { id: u64 },
+	/// WARM_START under the route with Route ID `route`: assigns the next Warm ID.
+	WarmStart { route: u64 },
+	/// WARM_UPDATE of the warm route with this id.
+	WarmUpdate { id: u64 },
+}
+
+/// Why a node refuses content a peer forwarded: well framed, but nothing it can use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum Refusal {
+	#[error("the reserved node")]
+	Node,
+	#[error("unknown flags {0:#04x}")]
+	Flags(u8),
+	#[error("{0} hops, past the limit")]
+	Hops(u64),
+	#[error("a carrier not among its hops")]
+	Carrier,
+	#[error("an invalid path")]
+	Path,
+	#[error("an invalid instance")]
+	Instance,
+	#[error("an invalid lite-06 chain")]
+	Chain,
+}
+
+/// Content a peer forwarded: `Ok(Err(..))` when it is well framed but refused.
+type Content<T> = Result<Result<T, Refusal>, DecodeError>;
+
+/// Refuse the content at `r`, skipping the rest of its message's body: the refused field
+/// is always the body's last, or leaves what follows unreadable.
+fn refuse<T>(r: &mut Decoder<'_>, reason: Refusal) -> Content<T> {
+	r.rest();
+	Ok(Err(reason))
 }
 
 /// A copy of a broadcast a warm route offers.
@@ -170,18 +228,30 @@ fn encode_warm(w: &mut Encoder<'_>, warm: &Warm) -> Result<(), EncodeError> {
 	Ok(())
 }
 
-fn decode_warm(r: &mut Decoder<'_>) -> Result<Warm, DecodeError> {
+fn decode_warm(r: &mut Decoder<'_>) -> Content<Warm> {
 	let cost = r.varint()?;
 	let carrier = r.varint()?;
 	let count = r.varint()?;
 	if count > route::MAX_HOPS as u64 {
-		return Err(DecodeError::TooMany);
+		return refuse(r, Refusal::Hops(count));
 	}
 	if carrier >= count {
-		return Err(DecodeError::InvalidValue);
+		return refuse(r, Refusal::Carrier);
 	}
 	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
-	Ok(Warm { cost, carrier, hops })
+	Ok(Ok(Warm { cost, carrier, hops }))
+}
+
+/// Decode a WARM_START's body after its Route ID.
+fn decode_warm_start(r: &mut Decoder<'_>) -> Content<(Path, Instance, Warm)> {
+	let suffix = match decode_path(r)? {
+		Ok(suffix) => suffix,
+		Err(reason) => return refuse(r, reason),
+	};
+	let Some(instance) = super::instance::decode_copy(r)? else {
+		return refuse(r, Refusal::Instance);
+	};
+	Ok(decode_warm(r)?.map(|warm| (suffix, instance, warm)))
 }
 
 /// Route Offer flag: an upstream link is on the path, so the route is down-only.
@@ -202,17 +272,34 @@ pub(crate) enum Dead {
 		hop: route::path::Hop,
 		far: route::Id,
 		gone: bool,
-		moved: Vec<(u64, Offer)>,
+		moved: Vec<(u64, Heard)>,
 	},
 	/// DRAIN: `node` sent GOAWAY, so every path through it ranks as draining.
 	Drain { node: route::Id },
 }
 
-/// Encode a Route Offer: flags, priority, metric, RTT in milliseconds, and the path. No
-/// node offers an empty path or one past the hop limit, nor names Node ID 0 in one.
+/// A Route Offer off the wire: usable, or refused with the path it still names.
+pub(crate) type Heard = Result<Offer, Unusable>;
+
+/// A Route Offer this node refuses: the path it names, which a later DEAD may match, and
+/// why. The offer is the route's, so refusing it refuses the route, not the session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unusable {
+	pub path: Arc<[route::path::Hop]>,
+	pub reason: Refusal,
+}
+
+/// Encode a Route Offer: the path, then flags, priority, metric, and RTT in
+/// milliseconds. No node offers an empty path or one past the hop limit, nor names Node
+/// ID 0 in one.
 fn encode_offer(w: &mut Encoder<'_>, offer: &Offer) -> Result<(), EncodeError> {
 	if offer.path.is_empty() || offer.path.len() > route::MAX_HOPS || offer.path.iter().any(|hop| hop.node == 0) {
 		return Err(EncodeError::InvalidState);
+	}
+	w.varint(offer.path.len() as u64)?;
+	for hop in offer.path.iter() {
+		w.varint(hop.node)?;
+		w.varint(hop.session)?;
 	}
 	// A sum past the field's range, which only a peer's absurd value reaches, is unknown.
 	let rtt = offer.rtt.and_then(|rtt| u64::try_from(rtt.as_millis()).ok());
@@ -232,18 +319,47 @@ fn encode_offer(w: &mut Encoder<'_>, offer: &Offer) -> Result<(), EncodeError> {
 	if let Some(rtt) = rtt {
 		w.varint(rtt)?;
 	}
-	w.varint(offer.path.len() as u64)?;
-	for hop in offer.path.iter() {
-		w.varint(hop.node)?;
-		w.varint(hop.session)?;
-	}
 	Ok(())
 }
 
-fn decode_offer(r: &mut Decoder<'_>) -> Result<Offer, DecodeError> {
+/// Decode a Route Offer. Its path comes first, so a node refusing the rest still learns
+/// the path a later DEAD may name. An empty path is the sender's own error, since it
+/// names itself last. Hops past the limit, a hop naming Node ID 0, and a flag this node
+/// does not know refuse the offer: a newer flag may change what the route means, or add
+/// a field after the ones this node reads, so a refusal skips the rest of `r`.
+fn decode_offer(r: &mut Decoder<'_>) -> Result<Heard, DecodeError> {
+	let count = r.varint()?;
+	if count == 0 {
+		return Err(DecodeError::InvalidValue);
+	}
+	// Each hop takes at least two bytes, so the body bounds the count.
+	if count > (r.remaining() / 2) as u64 {
+		return Err(DecodeError::TooMany);
+	}
+	let path: Arc<[route::path::Hop]> = (0..count)
+		.map(|_| {
+			Ok(route::path::Hop {
+				node: r.varint()?,
+				session: r.varint()?,
+			})
+		})
+		.collect::<Result<_, DecodeError>>()?;
+	let refuse = |r: &mut Decoder<'_>, reason| {
+		r.rest();
+		Ok(Err(Unusable {
+			path: path.clone(),
+			reason,
+		}))
+	};
+	if count > route::MAX_HOPS as u64 {
+		return refuse(r, Refusal::Hops(count));
+	}
+	if path.iter().any(|hop| hop.node == 0) {
+		return refuse(r, Refusal::Node);
+	}
 	let flags = r.u8()?;
 	if flags & !(DOWN_ONLY | RTT | DRAINING) != 0 {
-		return Err(DecodeError::InvalidValue);
+		return refuse(r, Refusal::Flags(flags));
 	}
 	let priority = super::priority::from_wire(r.u8()?);
 	let metric = r.varint()?;
@@ -251,33 +367,14 @@ fn decode_offer(r: &mut Decoder<'_>) -> Result<Offer, DecodeError> {
 		0 => None,
 		_ => Some(std::time::Duration::from_millis(r.varint()?)),
 	};
-	let count = r.varint()?;
-	if count == 0 {
-		return Err(DecodeError::InvalidValue);
-	}
-	if count > route::MAX_HOPS as u64 {
-		return Err(DecodeError::TooMany);
-	}
-	let path = (0..count)
-		.map(|_| {
-			let node = r.varint()?;
-			if node == 0 {
-				return Err(DecodeError::InvalidValue);
-			}
-			Ok(route::path::Hop {
-				node,
-				session: r.varint()?,
-			})
-		})
-		.collect::<Result<_, DecodeError>>()?;
-	Ok(Offer {
+	Ok(Ok(Offer {
 		path,
 		draining: flags & DRAINING != 0,
 		priority,
 		metric,
 		down_only: flags & DOWN_ONLY != 0,
 		rtt,
-	})
+	}))
 }
 
 fn encode_dead(w: &mut Encoder<'_>, dead: &Dead) -> Result<(), EncodeError> {
@@ -293,8 +390,15 @@ fn encode_dead(w: &mut Encoder<'_>, dead: &Dead) -> Result<(), EncodeError> {
 			w.u8(u8::from(*gone));
 			w.varint(moved.len() as u64)?;
 			for (id, offer) in moved {
+				// A refused offer is decode-only: this node never forwards one.
+				let Ok(offer) = offer else {
+					return Err(EncodeError::Unsupported);
+				};
 				w.varint(*id)?;
+				// Sized, so a receiver refusing one offer still reads the next.
+				let prefix = w.prefix_varint();
 				encode_offer(w, offer)?;
+				w.fill(prefix)?;
 			}
 		}
 		Dead::Drain { node } => {
@@ -331,7 +435,17 @@ fn decode_dead(r: &mut Decoder<'_>) -> Result<Dead, DecodeError> {
 				return Err(DecodeError::TooMany);
 			}
 			let moved = (0..count)
-				.map(|_| Ok((r.varint()?, decode_offer(r)?)))
+				.map(|_| {
+					let id = r.varint()?;
+					let size = usize::try_from(r.varint()?).map_err(|_| DecodeError::TooMany)?;
+					let mut offer = r.sub(size)?;
+					let heard = decode_offer(&mut offer)?;
+					// A usable offer fills its size; a refused one was skipped to its end.
+					if !offer.is_empty() {
+						return Err(DecodeError::Long);
+					}
+					Ok((id, heard))
+				})
 				.collect::<Result<_, DecodeError>>()?;
 			Dead::Closed { hop, far, gone, moved }
 		}
@@ -340,6 +454,25 @@ fn decode_dead(r: &mut Decoder<'_>) -> Result<Dead, DecodeError> {
 		},
 		_ => return Err(DecodeError::InvalidValue),
 	})
+}
+
+/// Decode a path a peer forwarded, refusing one this node cannot hold.
+fn decode_path(r: &mut Decoder<'_>) -> Content<Path> {
+	let bytes = r.bytes()?;
+	let path = std::str::from_utf8(bytes).ok().and_then(|path| Path::new(path).ok());
+	Ok(path
+		.filter(|path| path.parts().count() <= Path::MAX_PARTS)
+		.ok_or(Refusal::Path))
+}
+
+/// Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded.
+fn decode_suffix(r: &mut Decoder<'_>) -> Content<PathRef> {
+	let base = r.varint()?;
+	let keep = r.varint()?;
+	if base == 0 && keep != 0 {
+		return Err(DecodeError::InvalidValue);
+	}
+	Ok(decode_path(r)?.map(|rest| PathRef { base, keep, rest }))
 }
 
 /// Encode an ANNOUNCE_FLOOR body: the revision plus one, or 0 to certify nothing.
@@ -415,14 +548,6 @@ fn encode_route_id(w: &mut Encoder<'_>, version: Version, route: u64) -> Result<
 	}
 }
 
-/// Decode the Route ID a claim travels under, 0 on a version without one.
-fn decode_route_id(r: &mut Decoder<'_>, version: Version) -> Result<u64, DecodeError> {
-	match version.has_routes() {
-		true => r.varint(),
-		false => Ok(0),
-	}
-}
-
 /// Encode a lite-06 announcement's hop chain, which lite-07 replaces with its Route ID.
 fn encode_chain(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Result<(), EncodeError> {
 	match version.has_routes() {
@@ -448,17 +573,97 @@ fn encode_lite06_chain(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Re
 	}
 }
 
+/// A lite-07 ANNOUNCE_START: its suffix, Route ID, instance and epoch, cost, and
+/// Lite-06 Chain.
+fn decode_start(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadcast, DecodeError> {
+	let suffix = decode_suffix(r)?;
+	let route = r.varint()?;
+	let refused = |r: &mut Decoder<'_>, suffix, reason| {
+		r.rest();
+		AnnounceBroadcast::Refused {
+			message: Refusable::Start { route, suffix },
+			reason,
+		}
+	};
+	let suffix = match suffix {
+		Ok(suffix) => suffix,
+		Err(reason) => return Ok(refused(r, None, reason)),
+	};
+	let Some((instance, epoch)) = super::instance::decode_forwarded(r)? else {
+		return Ok(refused(r, Some(suffix), Refusal::Instance));
+	};
+	let cost = Cost::decode(r, version)?;
+	Ok(match decode_lite06_chain(r)? {
+		Ok(hops) => AnnounceBroadcast::Active {
+			suffix,
+			route,
+			instance: Some(instance),
+			epoch,
+			hops,
+			cost,
+		},
+		Err(reason) => refused(r, Some(suffix), reason),
+	})
+}
+
+/// A lite-07 ANNOUNCE_UPDATE: its Announce ID, cost, and Lite-06 Chain.
+fn decode_update(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadcast, DecodeError> {
+	let id = r.varint()?;
+	let cost = Cost::decode(r, version)?;
+	Ok(match decode_lite06_chain(r)? {
+		Ok(hops) => AnnounceBroadcast::Update { id, hops, cost },
+		Err(reason) => AnnounceBroadcast::Refused {
+			message: Refusable::Change { id },
+			reason,
+		},
+	})
+}
+
+/// A lite-07 ANNOUNCE_RESTART: its Announce ID, instance and epoch, cost, and Lite-06
+/// Chain.
+fn decode_restart(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadcast, DecodeError> {
+	let id = r.varint()?;
+	let refused = |r: &mut Decoder<'_>, reason| {
+		r.rest();
+		AnnounceBroadcast::Refused {
+			message: Refusable::Change { id },
+			reason,
+		}
+	};
+	let Some((instance, epoch)) = super::instance::decode_forwarded(r)? else {
+		return Ok(refused(r, Refusal::Instance));
+	};
+	let cost = Cost::decode(r, version)?;
+	Ok(match decode_lite06_chain(r)? {
+		Ok(hops) => AnnounceBroadcast::Restart {
+			id,
+			instance: Some(instance),
+			epoch,
+			cost,
+			hops,
+		},
+		Err(reason) => refused(r, reason),
+	})
+}
+
 /// Decode lite-07's trailing Lite-06 Chain: present only when bytes remain, and never
-/// empty, so an empty chain has one spelling.
-fn decode_lite06_chain(r: &mut Decoder<'_>, version: Version) -> Result<Hops, DecodeError> {
-	if !version.has_routes() || r.is_empty() {
-		return Ok(Hops::default());
+/// empty, so an empty chain has one spelling. A chain no lite-06 relay would send, empty,
+/// too long, or revisiting a hop, is refused.
+fn decode_lite06_chain(r: &mut Decoder<'_>) -> Content<Hops> {
+	if r.is_empty() {
+		return Ok(Ok(Hops::default()));
 	}
-	let hops = Hops::decode(r, version)?;
-	match hops.is_empty() {
-		true => Err(DecodeError::InvalidValue),
-		false => Ok(hops),
+	let count = r.varint()?;
+	if count == 0 {
+		return refuse(r, Refusal::Chain);
 	}
+	let mut hops = Hops::new();
+	for _ in 0..count {
+		if hops.push(Hop::decode(r, ())?).is_err() {
+			return refuse(r, Refusal::Chain);
+		}
+	}
+	Ok(Ok(hops))
 }
 
 impl Encode<Version> for Cost {
@@ -526,8 +731,8 @@ impl Encode<Version> for AnnounceBroadcast {
 				| Self::WarmEnd { .. } => return Err(EncodeError::Version),
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
-				// Decode-only: an unknown type is never sent.
-				Self::Skipped => return Err(EncodeError::Unsupported),
+				// Decode-only: an unknown type or refused content is never sent.
+				Self::Skipped | Self::Refused { .. } => return Err(EncodeError::Unsupported),
 			};
 			w.varint(typ)?;
 
@@ -599,7 +804,7 @@ impl Encode<Version> for AnnounceBroadcast {
 					encode_warm(w, warm)?;
 				}
 				Self::WarmEnd { id } => w.varint(*id)?,
-				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
+				Self::Ended { .. } | Self::Skipped | Self::Refused { .. } => unreachable!("refused above"),
 			}
 			if w.since(&prefix) > MAX_MESSAGE_SIZE {
 				w.discard(prefix);
@@ -637,6 +842,7 @@ impl Encode<Version> for AnnounceBroadcast {
 			| Self::Update { .. }
 			| Self::Restart { .. }
 			| Self::Skipped
+			| Self::Refused { .. }
 			| Self::Synced
 			| Self::RouteStart { .. }
 			| Self::RouteUpdate { .. }
@@ -668,21 +874,21 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 			let mut body = buf.sub(size)?;
 			let msg = (|| {
 				Ok(match typ {
+					// Lite-07's claims and routes carry what the sender forwarded, which
+					// a receiver may refuse without failing the stream.
+					ANNOUNCE_START if version.has_routes() => decode_start(&mut body, version)?,
+					ANNOUNCE_UPDATE if version.has_routes() => decode_update(&mut body, version)?,
+					ANNOUNCE_RESTART if version.has_announce_restart() => decode_restart(&mut body, version)?,
 					ANNOUNCE_START => {
 						let suffix = PathRef::decode(&mut body, version)?;
-						let route = decode_route_id(&mut body, version)?;
-						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
 						let hops = decode_chain(&mut body, version)?;
 						let cost = Cost::decode(&mut body, version)?;
 						Self::Active {
 							suffix,
-							route,
-							instance,
-							epoch,
-							hops: match version.has_routes() {
-								true => decode_lite06_chain(&mut body, version)?,
-								false => hops,
-							},
+							route: 0,
+							instance: None,
+							epoch: 0,
+							hops,
 							cost,
 						}
 					}
@@ -692,53 +898,72 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						let id = body.varint()?;
 						let hops = decode_chain(&mut body, version)?;
 						let cost = Cost::decode(&mut body, version)?;
-						Self::Update {
-							id,
-							hops: match version.has_routes() {
-								true => decode_lite06_chain(&mut body, version)?,
-								false => hops,
-							},
-							cost,
-						}
-					}
-					ANNOUNCE_RESTART if version.has_announce_restart() => {
-						let id = body.varint()?;
-						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
-						Self::Restart {
-							id,
-							instance,
-							epoch,
-							cost: Cost::decode(&mut body, version)?,
-							hops: decode_lite06_chain(&mut body, version)?,
-						}
+						Self::Update { id, hops, cost }
 					}
 					ROUTE_START if version.has_routes() => {
 						let node = body.varint()?;
-						if node == 0 {
-							return Err(DecodeError::InvalidValue);
+						// The suffix is sized, so the offer's path reads even when it is refused.
+						let suffix = decode_path(&mut body)?;
+						let heard = decode_offer(&mut body)?;
+						match (node, suffix, heard) {
+							(1.., Ok(suffix), Ok(offer)) => Self::RouteStart { node, suffix, offer },
+							(node, suffix, heard) => {
+								let reason = match (node, &suffix, &heard) {
+									(0, _, _) => Refusal::Node,
+									(_, Err(reason), _) => *reason,
+									(_, _, Err(unusable)) => unusable.reason,
+									_ => unreachable!("matched above"),
+								};
+								Self::Refused {
+									message: Refusable::RouteStart {
+										node,
+										suffix: suffix.ok(),
+										path: heard.map_or_else(|unusable| unusable.path, |offer| offer.path),
+									},
+									reason,
+								}
+							}
 						}
-						let suffix = Path::decode(&mut body, version)?;
-						let offer = decode_offer(&mut body)?;
-						Self::RouteStart { node, suffix, offer }
 					}
-					ROUTE_UPDATE if version.has_routes() => Self::RouteUpdate {
-						id: body.varint()?,
-						offer: decode_offer(&mut body)?,
-					},
+					ROUTE_UPDATE if version.has_routes() => {
+						let id = body.varint()?;
+						match decode_offer(&mut body)? {
+							Ok(offer) => Self::RouteUpdate { id, offer },
+							Err(Unusable { path, reason }) => Self::Refused {
+								message: Refusable::RouteUpdate { id, path },
+								reason,
+							},
+						}
+					}
 					DEAD if version.has_routes() => Self::Dead(decode_dead(&mut body)?),
 					ROUTE_HOLD if version.has_routes() => Self::RouteHold { id: body.varint()? },
 					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
 					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body)?,
-					WARM_START if version.has_warm() => Self::WarmStart {
-						route: body.varint()?,
-						suffix: Path::decode(&mut body, version)?,
-						instance: super::instance::decode_copy(&mut body)?,
-						warm: decode_warm(&mut body)?,
-					},
-					WARM_UPDATE if version.has_warm() => Self::WarmUpdate {
-						id: body.varint()?,
-						warm: decode_warm(&mut body)?,
-					},
+					WARM_START if version.has_warm() => {
+						let route = body.varint()?;
+						decode_warm_start(&mut body)?.map_or_else(
+							|reason| Self::Refused {
+								message: Refusable::WarmStart { route },
+								reason,
+							},
+							|(suffix, instance, warm)| Self::WarmStart {
+								route,
+								suffix,
+								instance,
+								warm,
+							},
+						)
+					}
+					WARM_UPDATE if version.has_warm() => {
+						let id = body.varint()?;
+						decode_warm(&mut body)?.map_or_else(
+							|reason| Self::Refused {
+								message: Refusable::WarmUpdate { id },
+								reason,
+							},
+							|warm| Self::WarmUpdate { id, warm },
+						)
+					}
 					WARM_END if version.has_warm() => Self::WarmEnd { id: body.varint()? },
 					// Unknown types are skipped by length so an earlier Lite06 build
 					// negotiating the same ALPN does not kill the announce stream.
@@ -1365,7 +1590,8 @@ mod tests {
 		}
 	}
 
-	/// A warm route's carrier is one of its hops, of which there are at most 32.
+	/// A warm route's carrier is one of its hops, of which there are at most 32. A
+	/// receiver refuses one that breaks either, without failing the stream.
 	#[test]
 	fn lite07_warm_route_names_its_carrier_among_its_hops() {
 		let outside = AnnounceBroadcast::WarmUpdate {
@@ -1384,14 +1610,23 @@ mod tests {
 		let decode = |wire: &[u8]| {
 			crate::coding::decode_buf(&mut &wire[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v))
 		};
-		assert!(decode(&[13, 4, 7, 4, 0, 0]).is_err(), "no hops, so no carrier");
-		assert!(
-			decode(&[13, 7, 7, 4, 3, 3, 5, 9, 6]).is_err(),
+		let refused = |reason| AnnounceBroadcast::Refused {
+			message: Refusable::WarmUpdate { id: 7 },
+			reason,
+		};
+		assert_eq!(
+			decode(&[13, 4, 7, 4, 0, 0]).unwrap(),
+			refused(Refusal::Carrier),
+			"no hops"
+		);
+		assert_eq!(
+			decode(&[13, 7, 7, 4, 3, 3, 5, 9, 6]).unwrap(),
+			refused(Refusal::Carrier),
 			"a carrier past the hops"
 		);
 		let mut long = vec![13, 37, 7, 4, 0, 33];
 		long.extend([1; 33]);
-		assert!(decode(&long).is_err(), "33 hops");
+		assert_eq!(decode(&long).unwrap(), refused(Refusal::Hops(33)));
 		long[1] = 36;
 		long[5] = 32;
 		long.pop();
@@ -1443,10 +1678,28 @@ mod tests {
 			assert_eq!(broadcast_round_trip(msg, Version::Lite07), *msg);
 		}
 
-		// An ANNOUNCE_UPDATE whose chain is present but empty.
-		let mut empty: &[u8] = &[2, 3, 7, 6, 0];
-		let res = crate::coding::decode_buf(&mut empty, Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v));
-		assert!(res.is_err(), "{res:?}");
+		// A chain present but empty, or revisiting a hop, is refused, as is the claim it
+		// came with.
+		let decode = |mut wire: &[u8]| {
+			crate::coding::decode_buf(&mut wire, Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v)).unwrap()
+		};
+		let refused = AnnounceBroadcast::Refused {
+			message: Refusable::Change { id: 7 },
+			reason: Refusal::Chain,
+		};
+		assert_eq!(decode(&[2, 3, 7, 6, 0]), refused);
+		assert_eq!(decode(&[2, 5, 7, 6, 2, 9, 9]), refused);
+		assert_eq!(decode(&[3, 9, 7, 1, b'a', 0, 5, 6, 2, 9, 9]), refused);
+		assert_eq!(
+			decode(&[0, 13, 0, 0, 1, b'c', 3, 1, b'a', 0, 5, 6, 2, 9, 9]),
+			AnnounceBroadcast::Refused {
+				message: Refusable::Start {
+					route: 3,
+					suffix: Some(PathRef::literal(Path::from_static("c"))),
+				},
+				reason: Refusal::Chain,
+			}
+		);
 	}
 
 	/// Only lite-07 carries a Route ID: a non-zero one has nowhere to go earlier, and an
@@ -1874,7 +2127,7 @@ mod tests {
 				hop: route::path::Hop { node: 4, session: 0 },
 				far: route::MAX,
 				gone: true,
-				moved: vec![(0, offer(&[(1, 0), (5, 1)], 3, false)), (7, offer(&[(1, 0)], 0, true))],
+				moved: vec![(0, Ok(offer(&[(1, 0), (5, 1)], 3, false))), (7, Ok(offer(&[(1, 0)], 0, true)))],
 			}),
 			AnnounceBroadcast::Dead(Dead::Drain { node: 4 }),
 			AnnounceBroadcast::Floor {
@@ -1904,8 +2157,9 @@ mod tests {
 		};
 		msg.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
-		// Type, length, Route ID, flags, then the priority byte.
-		assert_eq!(buf[4], 0x7f);
+		// Type, length, Route ID, the one hop's count, node, and session, flags, then the
+		// priority byte.
+		assert_eq!(buf[7], 0x7f);
 	}
 
 	/// A peer's largest RTT plus a link goes past the field: it is forwarded as
@@ -2014,17 +2268,19 @@ mod tests {
 			assert!(matches!(res, Err(EncodeError::InvalidState)), "{msg:?}");
 		}
 
-		// An offer with these flags, and `count` hops naming `named` of them, each on session 0.
+		// An offer whose path counts `count` hops and names `named` of them, from Node ID
+		// `first` up, each on session 0, then these flags, the default priority, and a
+		// metric of 1.
 		let path = |flags: u8, count: u64, named: u64, first: u64| {
 			move |w: &mut Encoder<'_>| {
-				w.u8(flags);
-				w.u8(0x80);
-				w.varint(1u64).unwrap();
 				w.varint(count).unwrap();
 				for hop in 0..named {
 					w.varint(first + hop).unwrap();
 					w.varint(0u64).unwrap();
 				}
+				w.u8(flags);
+				w.u8(0x80);
+				w.varint(1u64).unwrap();
 			}
 		};
 		let start = |node: u64, offer: Box<dyn FnOnce(&mut Encoder<'_>)>| {
@@ -2034,23 +2290,115 @@ mod tests {
 				offer(w);
 			})
 		};
+		let hops = |count: u64, first: u64| -> Arc<[route::path::Hop]> {
+			(first..first + count)
+				.map(|node| route::path::Hop { node, session: 0 })
+				.collect()
+		};
+		let named = |node, path| Refusable::RouteStart {
+			node,
+			suffix: Some(Path::empty()),
+			path,
+		};
 		let over = route::MAX_HOPS as u64 + 1;
+		// What the sender only forwarded is refused, the message decoded all the same and
+		// its path with it, so the receiver withdraws the route and keeps the stream.
+		let refused = [
+			(
+				start(1, Box::new(path(0, over, over, 1))),
+				named(1, hops(over, 1)),
+				Refusal::Hops(over),
+			),
+			(start(1, Box::new(path(0, 1, 1, 0))), named(1, hops(1, 0)), Refusal::Node),
+			(start(0, Box::new(path(0, 1, 1, 1))), named(0, hops(1, 1)), Refusal::Node),
+			// A flag no version defines, which may change what follows it.
+			(start(1, Box::new(path(8, 1, 1, 1))), named(1, hops(1, 1)), Refusal::Flags(8)),
+			(
+				start(1, Box::new(path(0x86, 1, 1, 1))),
+				named(1, hops(1, 1)),
+				Refusal::Flags(0x86),
+			),
+			// A suffix no path spells.
+			(
+				forge(ROUTE_START, |w| {
+					w.varint(1u64).unwrap();
+					w.bytes(b"x//y").unwrap();
+					path(0, 1, 1, 1)(w);
+				}),
+				Refusable::RouteStart {
+					node: 1,
+					suffix: None,
+					path: hops(1, 1),
+				},
+				Refusal::Path,
+			),
+			(
+				forge(ROUTE_UPDATE, |w| {
+					w.varint(0u64).unwrap();
+					path(8, 1, 1, 1)(w);
+				}),
+				Refusable::RouteUpdate { id: 0, path: hops(1, 1) },
+				Refusal::Flags(8),
+			),
+		];
+		for (wire, message, reason) in refused {
+			assert_eq!(
+				decode_broadcast(&wire, Version::Lite07).unwrap(),
+				AnnounceBroadcast::Refused { message, reason },
+				"{wire:?}"
+			);
+		}
+
+		// A DEAD's moved offer is sized, so one refused leaves the next readable.
+		let wire = forge(DEAD, |w| {
+			for field in [DEAD_CLOSED, 1, 1, 2] {
+				w.varint(field).unwrap();
+			}
+			w.u8(1);
+			w.varint(2u64).unwrap();
+			for (id, flags) in [(4u64, 8u8), (5, 0)] {
+				w.varint(id).unwrap();
+				let prefix = w.prefix_varint();
+				path(flags, 1, 1, 3)(w);
+				w.fill(prefix).unwrap();
+			}
+		});
+		let AnnounceBroadcast::Dead(Dead::Closed { moved, .. }) = decode_broadcast(&wire, Version::Lite07).unwrap()
+		else {
+			panic!("a DEAD");
+		};
+		assert_eq!(
+			moved.iter().map(|(id, heard)| (*id, heard.is_ok())).collect::<Vec<_>>(),
+			[(4, false), (5, true)]
+		);
+		assert_eq!(moved[0].1, Err(Unusable { path: hops(1, 3), reason: Refusal::Flags(8) }));
+
 		let malformed = [
-			// More hops than a route may cross, none at all, hops missing, and one too many.
-			start(1, Box::new(path(0, over, over, 1))),
+			// No hops at all, and fewer than it counts.
 			start(1, Box::new(path(0, 0, 0, 1))),
-			start(1, Box::new(path(0, 2, 1, 1))),
-			start(1, Box::new(path(0, 1, 2, 1))),
-			// A hop naming Node ID 0, and a route to Node ID 0.
-			start(1, Box::new(path(0, 1, 1, 0))),
-			start(0, Box::new(path(0, 1, 1, 1))),
-			// A flag no version defines, and an RTT flag without its field.
-			start(1, Box::new(path(8, 1, 1, 1))),
+			start(1, Box::new(path(0, 3, 1, 1))),
+			// An RTT flag without its field, and a byte past a usable offer.
 			forge(ROUTE_UPDATE, |w| {
 				w.varint(0u64).unwrap();
-				w.u8(RTT);
-				w.u8(0x80);
+				path(RTT, 1, 1, 1)(w);
+			}),
+			forge(ROUTE_UPDATE, |w| {
+				w.varint(0u64).unwrap();
+				path(0, 1, 1, 1)(w);
+				w.u8(0);
+			}),
+			// A moved offer short of its size.
+			forge(DEAD, |w| {
+				for field in [DEAD_CLOSED, 1, 1, 2] {
+					w.varint(field).unwrap();
+				}
+				w.u8(1);
 				w.varint(1u64).unwrap();
+				w.varint(4u64).unwrap();
+				let prefix = w.prefix_varint();
+				path(0, 1, 1, 3)(w);
+				w.u8(0);
+				w.fill(prefix).unwrap();
 			}),
 			// A hold carries only its Route ID.
 			forge(ROUTE_HOLD, |w| {

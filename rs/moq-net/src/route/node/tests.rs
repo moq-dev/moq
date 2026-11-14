@@ -338,3 +338,52 @@ fn the_doubt_timer_fires_on_the_origins_clock() {
 	relay.timeout();
 	assert_eq!(relay.poll_deadline(Some(at), &waiter), Poll::Ready(None));
 }
+
+/// A route that already crossed as many nodes as one may is not forwarded, since this
+/// node's hop would take it past what any peer can decode, so a session never fails to
+/// encode one. One hop fewer forwards at exactly the limit.
+#[test]
+fn a_route_at_the_hop_limit_is_not_forwarded() {
+	use crate::route::MAX_HOPS;
+	for (hops, forwarded) in [(MAX_HOPS - 1, Some(MAX_HOPS)), (MAX_HOPS, None)] {
+		let relay = Node::new(2, 2, clock());
+		let from_a = relay.receive(peer(1, 100 + hops as Id - 1), Link::default()).unwrap();
+		let to_b = relay.answer(peer(2, 3), Link::default(), Path::empty()).unwrap();
+		let offer = Offer {
+			path: (0..hops as Id)
+				.map(|i| super::super::path::Hop {
+					node: 100 + i,
+					session: 1,
+				})
+				.collect(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+		};
+		from_a.route(100, Path::empty(), Some(Reach::Finite(offer)));
+		// A route goes on the wire only with a claim it shows, once that is served.
+		let live = claim(&Instance::random(), 0);
+		from_a.batch(100, Path::empty(), vec![(p("live"), Some(live.clone()))], Some(0));
+		from_a.serving(100, &p("live"), &Path::empty(), &live);
+		let sent: Vec<Offer> = (outputs(&to_b).into_iter())
+			.filter_map(|output| match output {
+				Output::Route {
+					reach: Some(Reach::Finite(offer)),
+					..
+				} => Some(offer),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(sent.iter().map(|offer| offer.path.len()).max(), forwarded, "{hops} hops");
+		for offer in sent {
+			let start = crate::lite::AnnounceBroadcast::RouteStart {
+				node: 100,
+				suffix: Path::empty(),
+				offer,
+			};
+			crate::coding::Encode::encode_bytes(&start, crate::lite::Version::Lite07).unwrap();
+		}
+	}
+}
