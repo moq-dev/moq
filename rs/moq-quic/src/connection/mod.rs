@@ -580,6 +580,12 @@ impl Connection {
 		// packets, this can be earlier than the start of the current QUIC packet.
 		let mut datagram_start = 0;
 		let mut segment_size = usize::from(self.path.current_mtu());
+		// No datagram may outgrow what the anti-amplification limit has left (RFC 9000 §8.1). A
+		// smaller one still goes out, so a path MTU past the whole budget cannot stall the
+		// handshake.
+		if let Some(budget) = self.path.anti_amplification_budget() {
+			segment_size = segment_size.min(usize::try_from(budget).unwrap_or(usize::MAX));
+		}
 		// The peer's maximum UDP payload size can reduce the path MTU below our configured minimum.
 		let min_mtu = Ord::min(self.config.min_mtu, self.path.current_mtu());
 
@@ -747,18 +753,26 @@ impl Connection {
 					break;
 				}
 
-				// Anti-amplification is only based on `total_sent`, which gets
-				// updated at the end of this method. Therefore we pass the amount
-				// of bytes for datagrams that are already created, as well as 1 byte
-				// for starting another datagram. If there is any anti-amplification
-				// budget left, we always allow a full MTU to be sent
-				// (see https://github.com/quinn-rs/quinn/issues/1082)
-				if self
-					.path
-					.anti_amplification_blocked(segment_size as u64 * (num_datagrams as u64) + 1)
-				{
+				// Anti-amplification counts `total_sent`, which this method updates only at its
+				// end, so the datagrams it already built count too: each is one segment. A
+				// client's Initial, and a server's ack-eliciting one, is padded to `min_mtu`
+				// (RFC 9000 §14.1); when the budget cannot carry that, a later space may still
+				// fit.
+				let padded = space_id == SpaceId::Initial && (self.side.is_client() || ack_eliciting);
+				let datagram = segment_size.max(min_packet_space(space_id) + tag_len);
+				let built = (segment_size * num_datagrams) as u64;
+				if self.path.anti_amplification_blocked(built + datagram as u64) {
 					trace!("blocked by anti-amplification");
 					break;
+				}
+				if padded
+					&& self
+						.path
+						.anti_amplification_blocked(built + datagram.max(usize::from(min_mtu)) as u64)
+				{
+					trace!("Initial blocked by anti-amplification");
+					space_idx += 1;
+					continue;
 				}
 
 				// Congestion control and pacing checks
@@ -811,7 +825,7 @@ impl Connection {
 				// Finish current packet
 				if let Some(mut builder) = builder_storage.take() {
 					if pad_datagram {
-						builder.pad_to(min_mtu);
+						builder.pad_to(min_mtu.min((buf_capacity - datagram_start) as u16));
 					}
 
 					if num_datagrams > 1 || pad_datagram_to_mtu {
@@ -925,7 +939,7 @@ impl Connection {
 				}
 			}
 
-			debug_assert!(buf_capacity - buf.len() >= MIN_PACKET_SPACE);
+			debug_assert!(buf_capacity - buf.len() >= min_packet_space(space_id));
 
 			//
 			// From here on, we've determined that a packet will definitely be sent.
@@ -1074,14 +1088,7 @@ impl Connection {
 				});
 			}
 
-			let sent = self.populate_packet(
-				now,
-				space_id,
-				buf,
-				builder.max_size,
-				builder.exact_number,
-				bandwidth_probe,
-			);
+			let sent = self.populate_packet(now, space_id, buf, builder, bandwidth_probe);
 			debug_assert!(buf.len() <= builder.max_size, "frames overflowed the packet");
 
 			// ACK-only packets should only be sent when explicitly allowed. If we write them due to
@@ -1115,8 +1122,11 @@ impl Connection {
 
 		// Finish the last packet
 		if let Some(mut builder) = builder_storage {
+			// Only a datagram the anti-amplification limit shrank is smaller than `min_mtu`, and
+			// RFC 9000 §8.2.1 exempts it from padding: padding past its end would run into frames
+			// written to fill it.
 			if pad_datagram {
-				builder.pad_to(min_mtu);
+				builder.pad_to(min_mtu.min((buf_capacity - datagram_start) as u16));
 			}
 
 			// If this datagram is a loss probe and `segment_size` is larger than `min_mtu`,
@@ -2533,6 +2543,8 @@ impl Connection {
 		space.crypto = None;
 		space.time_of_last_ack_eliciting_packet = None;
 		space.loss_time = None;
+		// Its probes can never be sent, and one left owed would read as a probe in flight
+		space.loss_probes = 0;
 		let sent_packets = mem::take(&mut space.sent_packets);
 		for packet in sent_packets.into_values() {
 			self.remove_in_flight(&packet);
@@ -3486,10 +3498,10 @@ impl Connection {
 		now: Instant,
 		space_id: SpaceId,
 		buf: &mut Vec<u8>,
-		max_size: usize,
-		pn: u64,
+		builder: &PacketBuilder,
 		bandwidth_probe: bool,
 	) -> SentFrames {
+		let (max_size, pn) = (builder.max_size, builder.exact_number);
 		let mut sent = SentFrames::default();
 		let space = &mut self.spaces[space_id];
 		space.pending_acks.maybe_ack_non_eliciting();
@@ -3566,6 +3578,13 @@ impl Connection {
 				&mut self.stats,
 				max_size,
 			);
+		}
+
+		// A packet planned as ACK-only skipped the congestion window, so it must stay that way
+		// (RFC 9002 §7): a frame that rides along, such as the challenge an unvalidated path
+		// repeats, waits for a packet the window let through.
+		if !builder.ack_eliciting {
+			return sent;
 		}
 
 		// PATH_CHALLENGE
@@ -4017,6 +4036,18 @@ impl Connection {
 		self.path.remove_in_flight(&packet);
 	}
 
+	/// What a test's observer reads to check that bytes in flight stay within the congestion
+	/// window
+	#[cfg(test)]
+	pub(crate) fn window_state(&self) -> WindowState {
+		WindowState {
+			window: self.path.congestion.window(),
+			in_flight: self.path.in_flight.bytes,
+			probing: SpaceId::iter().any(|space| self.spaces[space].loss_probes > 0),
+			probes: self.stats.path.sent_plpmtud_probes + self.stats.path.sent_bandwidth_probes,
+		}
+	}
+
 	/// Number of bytes worth of non-ack-only packets that may be sent
 	#[cfg(test)]
 	pub(crate) fn congestion_window(&self) -> u64 {
@@ -4086,6 +4117,7 @@ impl Connection {
 	/// See also `self.space(SpaceId::Data).can_send()`
 	fn can_send_1rtt(&self, max_size: usize) -> bool {
 		self.streams.can_send_frames(max_size)
+			|| self.streams.owes_streams_blocked()
 			|| self.path.challenge.is_some_and(|challenge| challenge.pending)
 			|| self
 				.prev_path
@@ -4457,6 +4489,18 @@ struct EarlyPacket {
 	packet: Packet,
 }
 
+/// A connection's congestion window as a test's observer sees it
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WindowState {
+	pub(crate) window: u64,
+	pub(crate) in_flight: u64,
+	/// Whether a loss probe is owed, which may cross the window
+	pub(crate) probing: bool,
+	/// The MTU and bandwidth probes sent so far, which the window does not bound
+	pub(crate) probes: u64,
+}
+
 /// Minimal remaining size to allow packet coalescing, excluding cryptographic tag
 ///
 /// This must be at least as large as the header for a well-formed empty packet to be coalesced,
@@ -4465,6 +4509,20 @@ struct EarlyPacket {
 /// datagram (because we coalesce in ascending packet space order and the only reason to split a
 /// packet is when packet space changes).
 const MIN_PACKET_SPACE: usize = MAX_HANDSHAKE_HEADER_SIZE + 32;
+
+/// [`MIN_PACKET_SPACE`] for a 1-RTT packet starting its own datagram, whose short header leaves
+/// the same room for frames
+///
+/// An unvalidated path's datagram may be this small, as one answering a migrated peer's PING.
+const MIN_SHORT_PACKET_SPACE: usize = 1 + MAX_CID_SIZE + 4 + 32;
+
+/// The least room a packet in `space` needs, excluding its tag
+fn min_packet_space(space: SpaceId) -> usize {
+	match space {
+		SpaceId::Data => MIN_SHORT_PACKET_SPACE,
+		SpaceId::Initial | SpaceId::Handshake => MIN_PACKET_SPACE,
+	}
+}
 
 /// Largest amount of space that could be occupied by a Handshake packet's header
 ///

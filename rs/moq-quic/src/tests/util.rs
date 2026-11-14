@@ -21,10 +21,10 @@ use tracing::{debug_span, trace};
 
 use super::crypto::rustls::QuicServerConfig;
 use super::*;
-pub(super) use crate::sim::{Bottleneck, Link, QueueStats};
+pub(super) use crate::sim::{Bottleneck, Link, QueueStats, Rules};
 use crate::{
 	Duration, Instant,
-	connection::{Datagrams, Streams},
+	connection::{Datagrams, Streams, WindowState},
 	entropy,
 };
 
@@ -58,6 +58,8 @@ pub(super) struct Pair {
 	rng: StdRng,
 	/// The next port [`Self::next_port`] hands out
 	port: u16,
+	/// Judges every datagram either side sends, failing the test on the first that breaks a rule
+	pub(super) rules: Rules,
 }
 
 impl Pair {
@@ -102,6 +104,7 @@ impl Pair {
 			to_client: Link::default(),
 			rng: StdRng::from_rng(&mut entropy::rng()),
 			port: 44434,
+			rules: Rules::new(),
 		};
 		pair.server.bind();
 		pair.client.bind();
@@ -181,6 +184,9 @@ impl Pair {
 			if let Some(socket) = &self.client.socket {
 				socket.send_to(&buffer, packet.remote).unwrap();
 			}
+			if let Err(violation) = self.rules.sent(self.time, self.client.addr, packet.remote, &buffer) {
+				panic!("{violation}");
+			}
 			if self.server.addr == packet.remote {
 				let (marked, arrivals) = self
 					.to_server
@@ -189,6 +195,7 @@ impl Pair {
 					.rewrite_ecn
 					.unwrap_or_else(|| set_congestion_experienced(packet.ecn, self.congestion_experienced || marked));
 				for arrival in arrivals {
+					self.rules.received(arrival, self.client.addr, packet.remote, &buffer);
 					self.server.receive(arrival, ecn, &buffer);
 				}
 			}
@@ -208,6 +215,9 @@ impl Pair {
 			if let Some(socket) = &self.server.socket {
 				socket.send_to(&buffer, packet.remote).unwrap();
 			}
+			if let Err(violation) = self.rules.sent(self.time, self.server.addr, packet.remote, &buffer) {
+				panic!("{violation}");
+			}
 			if self.client.addr == packet.remote {
 				let (marked, arrivals) = self
 					.to_client
@@ -216,6 +226,7 @@ impl Pair {
 					.rewrite_ecn
 					.unwrap_or_else(|| set_congestion_experienced(packet.ecn, self.congestion_experienced || marked));
 				for arrival in arrivals {
+					self.rules.received(arrival, self.server.addr, packet.remote, &buffer);
 					self.client.receive(arrival, ecn, &buffer);
 				}
 			}
@@ -472,7 +483,12 @@ impl TestEndpoint {
 				while let Some(event) = conn.poll_endpoint_events() {
 					endpoint_events.push((ch, event));
 				}
-				while let Some(transmit) = conn.transmit(now, MAX_DATAGRAMS, &mut buf) {
+				loop {
+					let before = conn.window_state();
+					let Some(transmit) = conn.transmit(now, MAX_DATAGRAMS, &mut buf) else {
+						break;
+					};
+					check_congestion_window(before, conn.window_state());
 					let size = transmit.size;
 					self.outbound.extend(split_transmit(transmit, &buf[..size]));
 					buf.clear();
@@ -619,6 +635,24 @@ impl ::std::ops::Deref for TestEndpoint {
 impl ::std::ops::DerefMut for TestEndpoint {
 	fn deref_mut(&mut self) -> &mut Endpoint {
 		&mut self.endpoint
+	}
+}
+
+/// RFC 9002 §7: "An endpoint MUST NOT send a packet if it would cause bytes_in_flight ... to be
+/// larger than the congestion window, unless the packet is sent on a PTO timer expiration"
+///
+/// A transmit that added bytes in flight must leave them within the window, unless a loss probe
+/// was owed or it carried an MTU or bandwidth probe.
+fn check_congestion_window(before: WindowState, after: WindowState) {
+	if after.in_flight > before.in_flight
+		&& after.in_flight > after.window
+		&& !before.probing
+		&& after.probes == before.probes
+	{
+		panic!(
+			"QUIC rule broken: RFC 9002 §7: bytes in flight stay within the congestion window: {} in flight, from {}, past a window of {}",
+			after.in_flight, before.in_flight, after.window
+		);
 	}
 }
 

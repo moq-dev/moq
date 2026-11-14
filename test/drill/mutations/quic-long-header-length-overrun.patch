@@ -1,0 +1,20 @@
+# drill: tests::sim::random_workloads
+# expect: RFC 9000 §17.2
+# package: moq-quic
+# target: --lib
+#
+# Writes each long header's Length one byte past the packet it covers, so the
+# last packet of a datagram claims a byte the datagram does not have.
+diff --git a/rs/moq-quic/src/packet.rs b/rs/moq-quic/src/packet.rs
+--- a/rs/moq-quic/src/packet.rs
++++ b/rs/moq-quic/src/packet.rs
+@@ -459,7 +459,8 @@
+ 		};
+ 
+ 		let pn_pos = header_len - pn_len;
+-		let len = buf.len() - pn_pos;
++		// MUTATION: the Length claims one byte more than the packet holds.
++		let len = buf.len() - pn_pos + 1;
+ 		let mut slice = &mut buf[pn_pos - len_size..pn_pos];
+ 		match len_size {
+ 			0 => {}
