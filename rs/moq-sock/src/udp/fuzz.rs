@@ -68,8 +68,8 @@ pub struct Message {
 
 impl Message {
 	/// A message carrying `value`'s bytes: a padding-free C struct or integer, as the kernel
-	/// writes.
-	pub fn new<T: Copy>(level: c_int, kind: c_int, value: T) -> Self {
+	/// writes. Private, since a safe caller could pass a padded type.
+	fn new<T: Copy>(level: c_int, kind: c_int, value: T) -> Self {
 		Self {
 			level,
 			kind,
