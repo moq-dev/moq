@@ -25,7 +25,7 @@ struct Books {
 	peak: usize,
 }
 
-/// A global allocator that counts what [`charge`] allocates, for [`measure`].
+/// A global allocator that counts what the session under test allocates.
 pub struct Counting;
 
 impl Counting {

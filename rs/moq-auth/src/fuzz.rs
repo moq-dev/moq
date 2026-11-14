@@ -30,7 +30,7 @@ const KEYS: &[&str] = &[
 	r#"{"alg":"RS256","key_ops":["sign","verify"],"kty":"RSA","n":"p2nsYkS2yzIvhdcez-PS9Sew7aN7fZlGwbyOJrzzfhYKj1lcKEnlc1UCnTvIuqVqAMZ2H2W0flT7dP6oYETN0mDxJMTrccAUcB9GvMIc0774y5mXSNMDD2cF7M6m7FDYo1xFk8GMUhIFJXewknY9g_SVy2OUIgEET6hqGJmhgfiw9o6WVKAKAgewHjUi2KPJcvKYwUMTLvMPnIpsGZmJBH3CU85RnkmYEg91ZJsDuJXlPv9WOrWMmeo9kkj_dFElwANxhA5-Mlzzmzz6up-skzonpMknYaCUsruYI3GheenRMWIu6Blzm-acgDgsJjwkwN_xW9qBSdfMAqW1mcmaKw","e":"AQAB","d":"C7NrCpk732rUCHo3FJebRHgwNQPCm04ttFe95bY6HHtk5Iz91HEJwOxVoPCvQGBUTtaQJfShT10YMB6mXQgiDIyq_gNnY01mAEonUwUMJ76GvBAxkyzwX1C3iMwOvaCO66gE0uVprcjFpE8_v5TVCtZ667q7fT7t8rVWKP7_20oN-AP5ei0MjdNAZlIcyMZsAbyzKkOxVUqkov33mNaERlUqgZr7Y6yADtEXq6T08K4JPRfuWFkl35DYZSPbmfGZIj630YTa7-u6FpABLvWSmqP58qXAVYicMut4v4p6wbjHqgg5ShjmxZm7yrSj8YUw5yjSXNx6jaVvJp_iOi1AgQ","p":"2NeGjrclLhNQXA464tFAaFu5hZ5HeNq9D5hg6hQXIyos_gl7xzKzO49rzdO09QomDGO0aLsshlXcZIOwB1DwTdFI3fHVjbOYoBd1uxq98QMJvDMbKYDeQyl-DekMr0Y5LeYwAibOQtpBO2d8-KB8XAl57_ATeegdDWaFxGT0Fqs","q":"xaVdLVwdvCqj3cwLLbtBd35MgG4Fmf6XFVu8C0vIlpi0e14p6N03TxtugTZ9rgN5Nowk7TQAZCXHJn3_kXP8tr5A2LFXyuwa0GkkWJS-2rWhXdsowM2ewpHzFhcA-MkbgRJ5jh-1KdqgzWm_DJ1a0x7AtloKoagYM9V-NRu2ioE","dp":"HDrS1bmaKYlyKMnheK3tSKjIWlDk1SMFAgbAdzjuWjGfceMiLii3lMVzL3SkVlJf6bUBQ7E6drKu4pcST6GF51ubtOlK-Autjwn-1cEBgWL33Xx5yMlyJiQ8uOriL99gik0xatZKfAGWBHnQlz2tcv341ffXUUOapKf4Oj06Wck","dq":"f5qr9cUrTXkaIvDBptzm_4cDTUe7Rhkg4iE_3usmrlQY8i1xUW7Bbsl_Jt1PdzG26IjCroKMXhwl36wpfHcuCa37n-ufitu01CmN1cLzFbF-ZWJBhXk7rtMb5n8jmXv9ze9nm2LNTCBjATvspPBS20tXkGPByW0FczG7Mf6adAE","qi":"utxsd7Bxcmjyp16suwnTtZWXTPtxwrL8dpA5lgFia3QjLWX3AC7JUEsoH10RN2a1-pW7HnqjYE__xw6P2AePWJCrF9gXTR_5GDXu-_2vceqlGqflt7UgyWkXWC4__34UVezRjkNBa0BexXDhLR3c3vC_9KHUx5IFqCBqeTUcMzI","kid":"fuzz-rs256"}"#,
 ];
 
-/// The keys behind [`KEYS`].
+/// The fixed keys, parsed.
 fn keys() -> &'static [Key] {
 	static KEYS_: OnceLock<Vec<Key>> = OnceLock::new();
 	KEYS_.get_or_init(|| {
@@ -56,7 +56,7 @@ fn claims() -> Vec<Claims> {
 	]
 }
 
-/// A token a key in [`KEYS`] signed.
+/// A token one of the fixed keys signed.
 struct Issued {
 	key: usize,
 	token: String,
@@ -70,7 +70,7 @@ impl Issued {
 	}
 }
 
-/// Everything [`KEYS`] signed: each key over each of [`claims`].
+/// Everything the fixed keys signed: each key over each of [`claims`].
 fn issued() -> &'static [Issued] {
 	static ISSUED: OnceLock<Vec<Issued>> = OnceLock::new();
 	ISSUED.get_or_init(|| {
@@ -89,7 +89,7 @@ fn issued() -> &'static [Issued] {
 	})
 }
 
-/// The verify-only halves of [`KEYS`] as one set, as `moq auth serve` loads a JWK Set.
+/// The verify-only halves of the fixed keys as one set, as `moq auth serve` loads a JWK Set.
 fn set() -> &'static KeySet {
 	static SET: OnceLock<KeySet> = OnceLock::new();
 	SET.get_or_init(|| KeySet {
@@ -181,7 +181,7 @@ fn payload(json: &str) -> bool {
 /// A JWK, or with a leading odd byte, a JWK Set.
 ///
 /// - A key that parses encodes to a key that parses back the same.
-/// - It verifies a token [`KEYS`] signed only when it holds the signer's key material.
+/// - It verifies a token the fixed keys signed only when it holds the signer's key material.
 /// - What it signs, its public half verifies, to the same claims.
 pub fn jwk(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
@@ -280,8 +280,8 @@ pub struct Seed {
 	pub data: Vec<u8>,
 }
 
-/// The starting corpus: every token [`KEYS`] signed and a few altered ones, every payload,
-/// key, and set in the corpus `js/auth` shares, and [`KEYS`] themselves alone and as sets.
+/// The starting corpus: every token the fixed keys signed and a few altered ones, every payload,
+/// key, and set in the corpus `js/auth` shares, and the fixed keys themselves alone and as sets.
 pub fn seeds() -> Vec<Seed> {
 	let mut seeds = Vec::new();
 	let mut push = |target, selector: u8, text: &str| {
