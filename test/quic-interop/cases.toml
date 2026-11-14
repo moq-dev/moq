@@ -123,6 +123,20 @@ result = "failed"
 why = "moq-quic's client never moves to a server's preferred address (quest/m4/quic-preferred-address.md), and ngtcp2's server fails this against every client on interop.seemann.io."
 
 [[known]]
+client = "moq-quic"
+server = "moq-quic"
+case = "handshakeloss"
+result = "failed"
+why = "Either side abandons a handshake after 10 s without hearing from the other, shorter than a retransmission gap under 30% loss (quest/m1/quic-handshake-loss.md)."
+
+[[known]]
+client = "moq-quic"
+server = "moq-quic"
+case = "handshakecorruption"
+result = "failed"
+why = "As handshakeloss (quest/m1/quic-handshake-loss.md)."
+
+[[known]]
 client = "quinn"
 server = "moq-quic"
 case = "handshakeloss"

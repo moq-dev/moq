@@ -5,9 +5,9 @@
 A moq-quic server completes a handshake that a mature client keeps
 retrying under heavy loss or corruption, so a relay does not shed clients on
 bad networks that other servers serve. The QUIC Interop Runner's
-`handshakeloss` and `handshakecorruption` cases pass with quinn's and
-quiche's clients against moq-quic's server, and their `known` entries in
-`test/quic-interop/cases.toml` are gone.
+`handshakeloss` and `handshakecorruption` cases pass with quinn's,
+quiche's, and moq-quic's own clients against moq-quic's server, and their
+`known` entries in `test/quic-interop/cases.toml` are gone.
 
 ## Plan
 
@@ -19,7 +19,9 @@ which saw two causes in its first matrix:
   msquic's `HandshakeIdleTimeoutMs`) abandons a handshake that has heard
   nothing for 10 s. Under the runner's 30% loss, quinn's client backed its
   probes off to gaps of 13.2 s and 12.9 s, and the server logged
-  "handshake timed out" three times in one run. Pick a bound that outlasts a
+  "handshake timed out" three times in one run. The self pair hits it too:
+  on a later run, both moq-quic endpoints gave up 10 s after their last
+  progress. Pick a bound that outlasts a
   client's probe backoff without letting half-open handshakes pin server
   state, for example the idle timeout, or a server bound counted from the
   last packet that made progress. Recommendation: the idle timeout (30 s),
