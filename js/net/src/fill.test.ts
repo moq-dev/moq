@@ -1475,7 +1475,8 @@ function headless(): { broadcast: BroadcastProducer; track: Producer } {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
 	const tail = hooks.receiveGroup(track, { sequence: 2n, start: 3 });
-	for (const frame of ["c3", "c4"]) tail.writeFrame({ payload: enc.encode(frame), timestamp: Timestamp.unscaled(2n) });
+	for (const frame of ["c3", "c4"])
+		tail.writeFrame({ payload: enc.encode(frame), timestamp: Timestamp.unscaled(2n) });
 	tail.finish();
 	const next = track.createGroup(3n);
 	next.writeFrame({ payload: enc.encode("d0"), timestamp: Timestamp.unscaled(3n) });
