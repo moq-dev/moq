@@ -1,11 +1,17 @@
 import { For, Show } from "solid-js";
+import { render } from "solid-js/web";
 import type MoqBoy from "../element";
 import GameCard from "./components/GameCard";
 import BoyUIContextProvider from "./context";
 import { useBoyUI } from "./hooks/use-boy-ui";
 import styles from "./styles/index.css?inline";
 
-export function BoyUI(props: { boy: MoqBoy }) {
+/** Render the UI for `boy` into `root`, returning the function that removes it. */
+export function mount(boy: MoqBoy, root: ShadowRoot): () => void {
+	return render(() => <BoyUI boy={boy} />, root);
+}
+
+function BoyUI(props: { boy: MoqBoy }) {
 	return (
 		<BoyUIContextProvider boy={props.boy}>
 			<style>{styles}</style>

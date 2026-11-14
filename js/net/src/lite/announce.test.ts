@@ -424,7 +424,7 @@ test("the route layer round-trips on draft-07", async () => {
 	).rejects.toThrow();
 });
 
-test("the route layer refuses the last seqno and Node ID 0", async () => {
+test("the route layer refuses the last seqno, Node ID 0, unknown flags, and too many hops", async () => {
 	const v = Version.DRAFT_07;
 	const last = { seqno: ROUTE_MAX, metric: 0n, downOnly: false, rtt: undefined, hops: [] };
 	await expect(
@@ -453,24 +453,35 @@ test("the route layer refuses the last seqno and Node ID 0", async () => {
 		await w.u62(0n);
 		await w.u8(0);
 	});
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, zero, v), v)).rejects.toThrow(ProtocolViolation);
+	// What the sender only forwarded is refused, the message decoded all the same, so the receiver
+	// withdraws the route and keeps the stream.
+	const decode = (wire: Uint8Array) => decodeAnnounceBroadcast(new Reader(undefined, wire, v), v);
+	expect(await decode(zero)).toEqual({
+		status: "refused",
+		message: { kind: "routeStart", node: 0n },
+		reason: "node",
+	});
 	const maxed = await forged(async (w) => {
 		await w.u62(1n);
 		await w.u62(ROUTE_MAX);
 		await w.u62(0n);
 		await w.u8(0);
 	});
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, maxed, v), v)).rejects.toThrow(ProtocolViolation);
-	// A flag no version defines, and the RTT flag without its field.
-	for (const flags of [4, 2]) {
-		const flagged = await forged(async (w) => {
+	expect(await decode(maxed)).toEqual({
+		status: "refused",
+		message: { kind: "routeStart", node: 1n },
+		reason: "seqno",
+	});
+	// A flag no version defines is refused, and the RTT flag without its field is malformed.
+	const flagged = (flags: number) =>
+		forged(async (w) => {
 			await w.u62(1n);
 			await w.u62(0n);
 			await w.u62(0n);
 			await w.u8(flags);
 		});
-		await expect(decodeAnnounceBroadcast(new Reader(undefined, flagged, v), v)).rejects.toThrow();
-	}
+	expect(await decode(await flagged(4))).toMatchObject({ status: "refused", reason: "flags" });
+	await expect(decode(await flagged(2))).rejects.toThrow();
 	// More hops than a route may carry, refused before reading them.
 	const overHops = await forged(async (w) => {
 		await w.u62(1n);
@@ -479,7 +490,7 @@ test("the route layer refuses the last seqno and Node ID 0", async () => {
 		await w.u8(0);
 		await w.u53(ROUTE_MAX_HOPS + 1);
 	});
-	await expect(decodeAnnounceBroadcast(new Reader(undefined, overHops, v), v)).rejects.toThrow(ProtocolViolation);
+	expect(await decode(overHops)).toMatchObject({ status: "refused", reason: "hops" });
 });
 
 test("the subscriber's replies round-trip on draft-07", async () => {
@@ -532,23 +543,25 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 test("AnnounceHistory keeps segments split at an escaped slash", () => {
 	const history = new AnnounceHistory();
 	history.start({ suffix: Path.from("a\\/b") });
-	// The kept `a\` is half an escape, which the rest completes or nothing does.
+	// The kept `a\` is half an escape, which the rest completes, or nothing does and the path is
+	// refused, its id assigned all the same.
 	const suffix = history.start({ suffix: Path.from("c"), pathBase: { distance: 1n, keep: 1 } });
 	expect(suffix).toBe(Path.from("a\\/c"));
-	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 1n, keep: 1 } })).toThrow(
-		ProtocolViolation,
-	);
+	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 1n, keep: 1 } })).toBeUndefined();
+	expect(history.next).toBe(3n);
 });
 
-test("AnnounceHistory rejects a resolved path past the byte limit", () => {
+test("AnnounceHistory refuses a resolved path past the byte limit", () => {
 	const history = new AnnounceHistory();
 	history.start({ suffix: Path.from("x".repeat(Path.MAX_BYTES - 2)) });
-	// `head/y` is exactly the limit, and one byte more is refused.
+	// `head/y` is exactly the limit, and one byte more is refused as content: the id is assigned,
+	// a base naming it is refused too, and its end is no violation.
 	const suffix = history.start({ suffix: Path.from("y"), pathBase: { distance: 1n, keep: 1 } });
-	expect(suffix.length).toBe(Path.MAX_BYTES);
-	expect(() => history.start({ suffix: Path.from("yz"), pathBase: { distance: 1n, keep: 1 } })).toThrow(
-		ProtocolViolation,
-	);
+	expect(suffix?.length).toBe(Path.MAX_BYTES);
+	expect(history.start({ suffix: Path.from("yz"), pathBase: { distance: 1n, keep: 1 } })).toBeUndefined();
+	expect(history.start({ suffix: Path.from("z"), pathBase: { distance: 1n, keep: 1 } })).toBeUndefined();
+	expect(history.end(2n)).toBeUndefined();
+	expect(() => history.end(2n)).toThrow(ProtocolViolation);
 });
 
 test("a keep without a base is a violation on draft-07", async () => {

@@ -36,4 +36,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Drop kio's epoch fence](/quest/m4/crossbeam-pin-fence.md) - the ordering in kio's log these runs watch
+- [Drop kio's epoch fence](/quest/m5/crossbeam-pin-fence.md) - the ordering in kio's log these runs watch

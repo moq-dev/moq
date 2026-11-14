@@ -501,6 +501,11 @@ mod tests {
 		/// The channel runs at the device rate so no resampling sits between the
 		/// pushed samples and the assertions.
 		fn add(&mut self, gain: Arc<Gain>) -> (u64, ring::Producer) {
+			self.add_corrected(gain, ring::Correction::Fixed { pad: true, trim: true })
+		}
+
+		/// [`add`](Self::add) a sink corrected as `correction` says.
+		fn add_corrected(&mut self, gain: Arc<Gain>, correction: ring::Correction) -> (u64, ring::Producer) {
 			let (prod, cons) = ring::channel(
 				self.channels,
 				RATE,
@@ -508,8 +513,7 @@ mod tests {
 				ring::Config {
 					latency: Duration::from_millis(10),
 					capacity: Duration::from_secs(1),
-					pad: true,
-					trim: true,
+					correction,
 					comfort: true,
 				},
 			);
@@ -562,14 +566,16 @@ mod tests {
 			for sinks in [1, 8, 32, MAX_SINKS] {
 				for frames in [128, 480, 1024, 2048] {
 					let mut harness = Harness::with_depth(Layout::Stereo, MAX_SINKS);
-					let mut prods: Vec<_> = (0..sinks).map(|_| harness.add(Arc::new(Gain::new())).1).collect();
+					let correction = if stretch {
+						ring::Correction::Stretch
+					} else {
+						ring::Correction::Fixed { pad: true, trim: true }
+					};
+					let mut prods: Vec<_> = (0..sinks)
+						.map(|_| harness.add_corrected(Arc::new(Gain::new()), correction).1)
+						.collect();
 					let mut out = vec![0.0; frames * STEREO];
 					harness.fill(&mut out);
-					if stretch {
-						for entry in &mut harness.mixer.entries {
-							entry.cons.stretch(RATE);
-						}
-					}
 					let pcm = vec![0.25 / sinks as f32; frames * STEREO];
 					for prod in &mut prods {
 						prod.push(&vec![0.25 / sinks as f32; 4800 * STEREO]);
@@ -604,19 +610,17 @@ mod tests {
 	#[test]
 	fn each_chunk_of_a_callback_reads_the_clock_where_it_starts() {
 		let mut harness = Harness::new(Layout::Stereo);
-		let (mut prod, mut cons) = ring::channel(
+		let (mut prod, cons) = ring::channel(
 			STEREO,
 			RATE,
 			RATE,
 			ring::Config {
 				latency: Duration::from_millis(10),
 				capacity: Duration::from_secs(2),
-				pad: false,
-				trim: false,
+				correction: ring::Correction::Stretch,
 				comfort: true,
 			},
 		);
-		cons.stretch(RATE);
 		harness
 			.commands
 			.send(Command::Add {
@@ -641,7 +645,7 @@ mod tests {
 		// goes, so none of them restarts the clock.
 		let callback = 4 * CHUNK;
 		let mut now = start + Duration::from_millis(10);
-		prod.due(now + prod.buffered(), Duration::from_secs(2), Duration::ZERO);
+		prod.due(now + prod.buffered(), Duration::from_secs(2));
 
 		let period = Duration::from_secs_f64(callback as f64 / RATE as f64);
 		let mut out = vec![0i16; callback * STEREO];
@@ -897,8 +901,7 @@ mod tests {
 			ring::Config {
 				latency: Duration::from_millis(20),
 				capacity: Duration::from_millis(200),
-				pad: true,
-				trim: true,
+				correction: ring::Correction::Fixed { pad: true, trim: true },
 				comfort: true,
 			},
 		)

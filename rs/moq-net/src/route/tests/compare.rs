@@ -1,7 +1,8 @@
-//! One script on two routers: [`Router`], which keeps Babel's distance, and the
-//! prototype in `paths.rs`, which keeps a route loop-free by its path alone.
+//! One script on both rules: [`Router`], which keeps Babel's distance, and
+//! [`path::Router`], which keeps its doubt until the timer fires. The ignored
+//! benchmarks also compare the rejected early-collection policy.
 //!
-//! A [`Lab`] builds the same mesh on either, applies one change at a time, and
+//! A [`Lab`] builds the same mesh on each, applies one change at a time, and
 //! delivers in rounds: every message queued when a round starts crosses its link
 //! in that round, so a round is one hop of delay. After each delivery it follows
 //! every relay's next hops, and after each round it counts the relays whose route
@@ -10,8 +11,13 @@
 
 use std::collections::BTreeSet;
 
-use super::paths::{PathSim, Rules};
 use super::*;
+
+/// The production router and its accepted replacement, checked in ordinary CI.
+const RULES: [Rule; 2] = [Rule::Distance, Rule::PATH];
+
+/// The rules compared, in the report's order.
+pub(super) const COMPARED: [Rule; 3] = [Rule::Distance, Rule::EARLY, Rule::PATH];
 
 /// A queue of messages, or of echoed ROUTE_ENDs, from one node to another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,10 +81,6 @@ pub(super) trait Net {
 	fn tick(&mut self) -> bool {
 		false
 	}
-	/// What `node` holds for `id`, for a failure report.
-	fn dump(&self, _node: Node, _id: Id) -> String {
-		String::new()
-	}
 	/// The neighbour `node` routes `id` through: `Some(None)` at the publisher.
 	fn next(&self, node: Node, id: Id) -> Option<Option<Node>>;
 	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool>;
@@ -123,14 +125,7 @@ impl Net for Sim {
 	}
 
 	fn sever(&mut self, node: Node, peer: Node) {
-		self.up.remove(&Self::pair(node, peer));
-		for key in [(node, peer), (peer, node)] {
-			self.queues.remove(&key);
-			self.acks.remove(&key);
-			self.held.remove(&key);
-		}
-		self.nodes[peer].disconnect([node]);
-		self.flush();
+		Sim::sever(self, node, peer);
 		self.closed(peer);
 	}
 
@@ -165,8 +160,13 @@ impl Net for Sim {
 		};
 	}
 
+	fn tick(&mut self) -> bool {
+		self.wait(HOP);
+		self.deadline().is_some()
+	}
+
 	fn next(&self, node: Node, id: Id) -> Option<Option<Node>> {
-		self.route(node, id).map(|route| route.next)
+		self.toward(node, id)
 	}
 
 	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool> {
@@ -177,7 +177,7 @@ impl Net for Sim {
 		let (offline, unavailable, starts) = tally(self.events.iter().map(|event| event.kind));
 		Sent {
 			msgs: self.stats.route_msgs + self.stats.requests,
-			items: self.stats.route_msgs + self.stats.requests,
+			items: self.stats.route_items + self.stats.requests,
 			claims: self.stats.claim_items,
 			offline,
 			unavailable,
@@ -189,146 +189,10 @@ impl Net for Sim {
 impl Sim {
 	/// A publisher advances its seqno when a session its route went out on closes,
 	/// as `route::Node` has it do. A new session lengthens no path, so it does not.
+	/// The path rule has no seqno.
 	fn closed(&mut self, node: Node) {
-		if self.declared[node].is_some() {
+		if self.declared[node].is_some() && !self.paths() {
 			self.bump(node);
-		}
-	}
-}
-
-impl Net for PathSim {
-	fn client(&mut self, node: Node) {
-		self.leaf(node);
-	}
-
-	fn join(&mut self, a: Node, b: Node, cost: Metric) {
-		PathSim::join(self, a, b, cost);
-	}
-
-	fn open(&mut self, a: Node, b: Node) {
-		self.connect(a, b);
-	}
-
-	fn close(&mut self, a: Node, b: Node) {
-		self.disconnect(a, b);
-	}
-
-	fn mute(&mut self, node: Node, peer: Node) {
-		PathSim::mute(self, node, peer);
-	}
-
-	fn sever(&mut self, node: Node, peer: Node) {
-		PathSim::sever(self, node, peer);
-	}
-
-	fn reset(&mut self, node: Node) {
-		self.kill(node);
-	}
-
-	fn publish(&mut self, node: Node, id: Id) {
-		self.originate(node, id);
-	}
-
-	fn claim(&mut self, node: Node, claim: &str, live: bool) {
-		match live {
-			true => self.announce(node, claim),
-			false => self.unannounce(node, claim),
-		}
-	}
-
-	fn ready(&self) -> Vec<(Chan, usize)> {
-		(self.busy().into_iter())
-			.map(|(from, to)| (Chan::Msg(from, to), self.queued(from, to)))
-			.collect()
-	}
-
-	fn dump(&self, node: Node, id: Id) -> String {
-		self.nodes[node].dump(id)
-	}
-
-	fn step(&mut self, chan: Chan) {
-		let Chan::Msg(from, to) = chan else {
-			unreachable!("the prototype echoes nothing");
-		};
-		self.deliver(from, to);
-	}
-
-	fn tick(&mut self) -> bool {
-		PathSim::tick(self)
-	}
-
-	fn next(&self, node: Node, id: Id) -> Option<Option<Node>> {
-		PathSim::next(self, node, id)
-	}
-
-	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool> {
-		self.shows(node, id, claim)
-	}
-
-	fn sent(&self) -> Sent {
-		let (offline, unavailable, starts) = tally(self.events.iter().map(|(.., kind)| *kind));
-		Sent {
-			msgs: self.stats.route_msgs,
-			items: self.stats.route_items,
-			claims: self.stats.claim_items,
-			offline,
-			unavailable,
-			starts,
-		}
-	}
-}
-
-/// The routers compared, by the name the report gives each.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum Rule {
-	/// Today's router: Babel's distance, seqno requests, holds, and echoes.
-	Distance,
-	/// Paths and nothing else.
-	Paths,
-	/// Paths, and a withdrawal that names the hop that died.
-	Causes,
-	/// Causes, one message per cause and session, and holds.
-	Holds,
-	/// Holds, and no move to a route through a node in doubt for 4 hops of delay.
-	Wait4,
-	/// The same for 32 hops of delay.
-	Wait32,
-	/// Holds, and no move to a route through a node in doubt until it advances its epoch.
-	Epochs,
-}
-
-impl Rule {
-	pub const ALL: [Self; 7] = [
-		Self::Distance,
-		Self::Paths,
-		Self::Causes,
-		Self::Holds,
-		Self::Wait4,
-		Self::Wait32,
-		Self::Epochs,
-	];
-
-	pub fn as_str(self) -> &'static str {
-		match self {
-			Self::Distance => "distance",
-			Self::Paths => "paths",
-			Self::Causes => "paths+cause",
-			Self::Holds => "paths+cause+hold",
-			Self::Wait4 => "paths+cause+hold+wait4",
-			Self::Wait32 => "paths+cause+hold+wait32",
-			Self::Epochs => "paths+cause+hold+epoch",
-		}
-	}
-
-	pub fn net(self, nodes: usize) -> Box<dyn Net> {
-		match self {
-			Self::Distance => Box::new(Sim::new(nodes)),
-			Self::Paths => Box::new(PathSim::new(nodes, Rules::BARE)),
-			Self::Causes => Box::new(PathSim::new(nodes, Rules::CAUSES)),
-			Self::Holds => Box::new(PathSim::new(nodes, Rules::HOLDS)),
-			Self::Wait4 => Box::new(PathSim::new(nodes, Rules::waits(4))),
-			Self::Wait32 => Box::new(PathSim::new(nodes, Rules::waits(32))),
-			Self::Epochs => Box::new(PathSim::new(nodes, Rules::EPOCHS)),
 		}
 	}
 }
@@ -345,6 +209,36 @@ pub(super) struct Mesh {
 }
 
 impl Mesh {
+	/// A deterministic cheapest-path tree, shared by every rule when choosing
+	/// which link or transit relay to fail. Ties use the next relay's number.
+	fn tree(&self) -> Vec<Option<Node>> {
+		let home = self.homes[0];
+		let mut best = vec![None; self.relays];
+		best[home] = Some((0, home));
+		let mut pending = BTreeSet::from([(0, home)]);
+		while let Some((cost, at)) = pending.pop_first() {
+			if best[at].is_none_or(|(best, _)| cost != best) {
+				continue;
+			}
+			for &(a, b, link) in &self.links {
+				let peer = match at {
+					_ if at == a => b,
+					_ if at == b => a,
+					_ => continue,
+				};
+				let candidate = (cost + link, at);
+				if best[peer].is_none_or(|best| candidate < best) {
+					best[peer] = Some(candidate);
+					pending.insert((candidate.0, peer));
+				}
+			}
+		}
+		best.into_iter()
+			.enumerate()
+			.map(|(node, best)| best.and_then(|(_, next)| (node != home).then_some(next)))
+			.collect()
+	}
+
 	/// A ring, the publisher on relay 0.
 	pub fn ring(relays: usize) -> Self {
 		let links = (0..relays).map(|a| (a, (a + 1) % relays, 1)).collect();
@@ -423,6 +317,8 @@ pub(super) struct Cost {
 	pub stale: usize,
 	/// Relays, summed over rounds, with no route while a path to the publisher existed.
 	pub dark: usize,
+	/// Hops of delay until every relay's route led to the publisher for good.
+	pub right: usize,
 	/// Whether it settled at all.
 	pub settled: bool,
 }
@@ -432,6 +328,8 @@ pub(super) struct Lab {
 	pub mesh: Mesh,
 	/// Open links, relay to relay and publisher to relay.
 	up: BTreeSet<(Node, Node)>,
+	/// Links opened beyond the mesh's own.
+	linked: BTreeSet<(Node, Node)>,
 	down: BTreeSet<Node>,
 	order: XorShift,
 	cost: Cost,
@@ -446,9 +344,10 @@ impl Lab {
 	pub fn new(rule: Rule, mesh: &Mesh) -> Self {
 		let nodes = mesh.relays + mesh.homes.len();
 		let mut lab = Self {
-			net: rule.net(nodes),
+			net: Box::new(Sim::with(rule, nodes)),
 			mesh: mesh.clone(),
 			up: BTreeSet::new(),
+			linked: BTreeSet::new(),
 			down: BTreeSet::new(),
 			order: XorShift(0x5eed_0001),
 			cost: Cost::default(),
@@ -585,10 +484,18 @@ impl Lab {
 			self.net.tick();
 		}
 		self.cost.rounds += 1;
+		self.note();
+		true
+	}
+
+	/// Count the relays left wrong as the latest round ends.
+	fn note(&mut self) {
 		let (_, stale, dark) = self.wrong();
 		self.cost.stale += stale;
 		self.cost.dark += dark;
-		true
+		if stale + dark > 0 {
+			self.cost.right = self.cost.rounds + 1;
+		}
 	}
 
 	/// Deliver in rounds until nothing is left. False if that never happens.
@@ -607,9 +514,7 @@ impl Lab {
 		self.cost = Cost::default();
 		change(self);
 		// What the change left wrong before any message moved.
-		let (_, stale, dark) = self.wrong();
-		self.cost.stale += stale;
-		self.cost.dark += dark;
+		self.note();
 		self.cost.settled = self.settle();
 		self.cost.sent = self.net.sent() - before;
 		self.cost
@@ -622,6 +527,15 @@ impl Lab {
 
 	pub fn mend(&mut self, a: Node, b: Node) {
 		self.net.open(a, b);
+		self.up.insert(pair(a, b));
+	}
+
+	/// Open a link the mesh does not have, configuring it the first time.
+	pub fn attach(&mut self, a: Node, b: Node) {
+		match self.linked.insert(pair(a, b)) {
+			true => self.net.join(a, b, 1),
+			false => self.net.open(a, b),
+		}
 		self.up.insert(pair(a, b));
 	}
 
@@ -708,15 +622,12 @@ impl Lab {
 	/// The link of a publisher's cheapest-path tree that the most relays route
 	/// over, among those whose loss leaves every relay a path (`detour`) or cuts
 	/// some off.
-	pub fn tree_link(&self, index: usize, detour: bool) -> Option<(Node, Node)> {
-		let (_, id) = self.mesh.publisher(index);
+	fn tree_link(&self, index: usize, detour: bool, tree: &[Option<Node>]) -> Option<(Node, Node)> {
 		let mut uses: BTreeMap<(Node, Node), usize> = BTreeMap::new();
 		for relay in 0..self.mesh.relays {
 			let mut at = relay;
-			while let Some(Some(next)) = self.net.next(at, id) {
-				if next < self.mesh.relays {
-					*uses.entry(pair(at, next)).or_default() += 1;
-				}
+			while let Some(next) = tree[at] {
+				*uses.entry(pair(at, next)).or_default() += 1;
 				at = next;
 			}
 		}
@@ -752,6 +663,10 @@ pub(super) enum Change {
 	Home,
 	/// The publisher's session closes.
 	Leave,
+	/// The publisher's session closes and it reconnects to the same relay at once.
+	Rejoin,
+	/// The publisher's session closes and it reconnects at once through another relay.
+	Move,
 	/// The publisher withdraws one claim.
 	Withdraw,
 }
@@ -768,6 +683,8 @@ impl Change {
 			Self::Restart => "relay_restarts",
 			Self::Home => "home_relay_dies",
 			Self::Leave => "publisher_leaves",
+			Self::Rejoin => "publisher_rejoins",
+			Self::Move => "publisher_moves",
 			Self::Withdraw => "claim_withdrawn",
 		}
 	}
@@ -778,6 +695,7 @@ impl Change {
 pub(super) fn run(rule: Rule, mesh: &Mesh) -> Vec<(Change, Cost)> {
 	let mut out = Vec::new();
 	let mut lab = Lab::new(rule, mesh);
+	let tree = mesh.tree();
 	let mut apply = |lab: &mut Lab, change: Change, apply: &dyn Fn(&mut Lab)| {
 		let cost = lab.measure(apply);
 		assert!(cost.settled, "{}: {change:?} never settles on {mesh:?}", rule.as_str());
@@ -792,26 +710,44 @@ pub(super) fn run(rule: Rule, mesh: &Mesh) -> Vec<(Change, Cost)> {
 	let home = mesh.homes[last];
 	apply(&mut lab, Change::Leave, &|lab| lab.cut(node, home));
 	apply(&mut lab, Change::Arrive, &|lab| lab.mend(node, home));
+	apply(&mut lab, Change::Rejoin, &|lab| {
+		lab.cut(node, home);
+		lab.mend(node, home);
+	});
+	// A relay next to its home, so the publisher's new route takes a detour no longer
+	// than the old one did.
+	let next = (mesh.links.iter()).find_map(|&(a, b, _)| match home {
+		_ if a == home => Some(b),
+		_ if b == home => Some(a),
+		_ => None,
+	});
+	if let Some(next) = next {
+		apply(&mut lab, Change::Move, &|lab| {
+			lab.cut(node, home);
+			lab.attach(node, next);
+		});
+		lab.cut(node, next);
+		lab.mend(node, home);
+		assert!(lab.settle());
+	}
 
 	for (detour, down, up) in [
 		(true, Change::Detour, Change::Shortcut),
 		(false, Change::Cut, Change::Mend),
 	] {
-		if let Some((a, b)) = lab.tree_link(0, detour) {
+		if let Some((a, b)) = lab.tree_link(0, detour, &tree) {
 			apply(&mut lab, down, &|lab| lab.cut(a, b));
 			apply(&mut lab, up, &|lab| lab.mend(a, b));
 		}
 	}
 
 	// The relay the most others route through, the publisher's own aside.
-	let (node, id) = mesh.publisher(0);
+	let (node, _) = mesh.publisher(0);
 	let mut through = vec![0; mesh.relays];
 	for relay in 0..mesh.relays {
 		let mut at = relay;
-		while let Some(Some(next)) = lab.net.next(at, id) {
-			if next < mesh.relays {
-				through[next] += 1;
-			}
+		while let Some(next) = tree[at] {
+			through[next] += 1;
 			at = next;
 		}
 	}
@@ -907,11 +843,7 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 		}
 		assert!(lab.settle(), "{}: case {case} never settles on {mesh:?}", rule.as_str());
 		if let Err(err) = lab.check() {
-			let (_, id) = mesh.publisher(0);
-			let dump: Vec<String> = (0..=relays)
-				.map(|node| format!("{node}: {}", lab.net.dump(node, id)))
-				.collect();
-			panic!("{}: case {case} on {mesh:?}: {err}\n{}", rule.as_str(), dump.join("\n"));
+			panic!("{}: case {case} on {mesh:?}: {err}", rule.as_str());
 		}
 		let sent = lab.net.sent() - before;
 		total.sent = Sent {
@@ -930,10 +862,10 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 /// never loops, even for a step.
 #[test]
 fn every_rule_settles_after_churn() {
-	for rule in Rule::ALL {
-		let churn = churn(rule, 0..60);
+	for rule in RULES {
+		let cost = churn(rule, 0..60);
 		if rule == Rule::Distance {
-			assert_eq!(churn.loops, 0);
+			assert_eq!(cost.loops, 0);
 		}
 	}
 }
@@ -947,7 +879,7 @@ fn benchmark_route_churn() {
 	// message on the wire.
 	println!("rule,route_messages,claim_messages");
 	eprintln!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
-	for rule in Rule::ALL {
+	for rule in COMPARED {
 		let churn = churn(rule, 0..400);
 		let (rule, steps, sent) = (rule.as_str(), churn.steps, churn.sent);
 		println!("{rule},{},{}", sent.msgs, sent.claims);
@@ -966,57 +898,29 @@ fn every_rule_converges_on_every_shape() {
 	let mut meshes = vec![Mesh::ring(6), Mesh::clique(6, 1), Mesh::clique(4, 3)];
 	meshes.extend((0..8).map(|_| Mesh::sparse(6, &mut rng)));
 	for mesh in &meshes {
-		for rule in Rule::ALL {
+		for rule in RULES {
 			run(rule, mesh);
 		}
 	}
 }
 
-/// What the report's table shows, pinned on six relays.
+/// Path changes carry no claim changes; a claim withdrawal changes no route.
+/// Counts and recovery times are measurements in the benchmarks below.
 #[test]
-fn the_rules_differ_as_reported() {
-	let cost = |rule: Rule, mesh: &Mesh, change: Change| {
-		let costs = run(rule, mesh);
-		costs.into_iter().find(|(found, _)| *found == change).unwrap().1
-	};
-
-	// The publisher leaves a clique. A bare path hunts through every stale path;
-	// naming the hop that died ends them all at once, in fewer messages and hops of
-	// delay than the distance takes.
-	let clique = Mesh::clique(6, 1);
-	let bare = cost(Rule::Paths, &clique, Change::Leave);
-	let cause = cost(Rule::Causes, &clique, Change::Leave);
-	let distance = cost(Rule::Distance, &clique, Change::Leave);
-	assert!(bare.loops > 0 && bare.sent.msgs > 5 * cause.sent.msgs, "{bare:?}");
-	assert_eq!(cause.loops, 0);
-	assert!(cause.sent.msgs < distance.sent.msgs && cause.rounds < distance.rounds);
-
-	// A link of a ring closes, and the way round runs through relays that routed
-	// through the one that lost it. The distance waits for the publisher's next
-	// seqno. Without a hold the relay lets its claims go and they are sent again.
-	let ring = Mesh::ring(6);
-	let distance = cost(Rule::Distance, &ring, Change::Detour);
-	let holds = cost(Rule::Holds, &ring, Change::Detour);
-	assert!(holds.rounds < distance.rounds && holds.dark < distance.dark);
-	assert_eq!((holds.sent.claims, holds.sent.offline), (0, 0));
-	assert!(cost(Rule::Causes, &ring, Change::Detour).sent.claims > 0);
-
-	// The publisher's relay dies, and each neighbour reports its own session. A relay
-	// told of one takes a route through another for a moment, unless the dead relay
-	// itself is in doubt: until it advances its epoch, or for a while by the clock,
-	// which costs no message.
-	assert!(cost(Rule::Holds, &ring, Change::Home).loops > 0);
-	assert_eq!(cost(Rule::Epochs, &ring, Change::Home).loops, 0);
-	let wait = cost(Rule::Wait32, &ring, Change::Home);
-	assert_eq!(wait.loops, 0);
-	assert!(wait.sent.msgs <= cost(Rule::Epochs, &ring, Change::Home).sent.msgs);
-	// The clock's price: a detour through the far end of the closed link waits it out.
-	let (wait, epochs) = (
-		cost(Rule::Wait32, &clique, Change::Detour),
-		cost(Rule::Epochs, &clique, Change::Detour),
-	);
-	assert!(wait.rounds > 32 && epochs.rounds < 8 && wait.sent.msgs < epochs.sent.msgs);
-	assert_eq!(cost(Rule::Distance, &ring, Change::Home).loops, 0);
+fn path_changes_keep_claims_and_withdrawals_keep_routes() {
+	for mesh in [Mesh::clique(6, 1), Mesh::ring(6)] {
+		let costs = RULES.map(|rule| run(rule, &mesh).into_iter().collect::<BTreeMap<_, _>>());
+		for costs in &costs {
+			assert!(costs.values().all(|cost| cost.settled && cost.loops == 0));
+		}
+		for path in &costs[1..] {
+			for change in [Change::Leave, Change::Detour, Change::Home] {
+				assert_eq!(path[&change].sent.claims, 0);
+			}
+			assert_eq!(path[&Change::Detour].sent.offline, 0, "a detour keeps claims");
+			assert_eq!(path[&Change::Withdraw].sent.msgs, 0, "claims alone change no route");
+		}
+	}
 }
 
 /// Per change, mesh size, and rule, over fixed seeds: the mean of what converging cost.
@@ -1025,8 +929,8 @@ fn the_rules_differ_as_reported() {
 fn benchmark_route_rules() {
 	// As above: message counts to stdout for the report, which keeps the largest mesh
 	// alone, and the whole table to stderr.
-	println!("shape,relays,change,rule,route_messages,claim_messages,loop_messages");
-	eprintln!("shape,relays,change,rule,msgs,items,claims,rounds,stale,dark,loops,offline,unavailable");
+	println!("shape,relays,change,rule,route_messages,claim_messages,loop_messages,reroute_ms");
+	eprintln!("shape,relays,change,rule,msgs,items,claims,rounds,right,stale,dark,loops,offline,unavailable");
 	for relays in [3, 6, 12, 24] {
 		let mut rng = XorShift(0x6d6f_7100 + relays as u64);
 		let mut shapes = vec![
@@ -1036,12 +940,7 @@ fn benchmark_route_rules() {
 		shapes.push(("clique_8_publishers", vec![Mesh::clique(relays, 8)]));
 		shapes.push(("sparse", (0..16).map(|_| Mesh::sparse(relays, &mut rng)).collect()));
 		for (shape, meshes) in &shapes {
-			for rule in Rule::ALL {
-				// A bare path hunts through every stale path of a clique: 65,219 messages
-				// for one publisher leaving twelve relays, and it grows as the factorial.
-				if rule == Rule::Paths && shape.starts_with("clique") && (relays > 12 || meshes[0].homes.len() > 1) {
-					continue;
-				}
+			for rule in COMPARED {
 				let mut all: BTreeMap<Change, Vec<Cost>> = BTreeMap::new();
 				for mesh in meshes {
 					for (change, cost) in run(rule, mesh) {
@@ -1054,18 +953,20 @@ fn benchmark_route_rules() {
 					let (change, rule) = (change.as_str(), rule.as_str());
 					if relays == 24 {
 						println!(
-							"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1}",
+							"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1},{:.1}",
 							mean(|cost| cost.sent.msgs),
 							mean(|cost| cost.sent.claims),
 							mean(|cost| cost.loops),
+							mean(|cost| cost.right) * HOP.as_secs_f64() * 1000.0,
 						);
 					}
 					eprintln!(
-						"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
+						"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
 						mean(|cost| cost.sent.msgs),
 						mean(|cost| cost.sent.items),
 						mean(|cost| cost.sent.claims),
 						mean(|cost| cost.rounds),
+						mean(|cost| cost.right),
 						mean(|cost| cost.stale),
 						mean(|cost| cost.dark),
 						mean(|cost| cost.loops),

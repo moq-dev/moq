@@ -2,8 +2,7 @@ import { expect, mock, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 
 // The UI renders into a shadow root, which the test runner has no DOM for.
-mock.module("solid-js/web", () => ({ render: () => () => {} }));
-mock.module("./ui/element.tsx", () => ({ BoyUI: () => null }));
+mock.module("./ui/element.tsx", () => ({ mount: () => () => {} }));
 // Bun cannot load the blob-URL worklet import used by the audio decoder. Mock it here rather than
 // relying on game.test.ts, since that mock only applies when its file happens to run first.
 mock.module("../../../js/watch/src/audio/render-worklet.ts?worklet", () => ({
