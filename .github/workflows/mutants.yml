@@ -19,7 +19,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # TEMPORARY: the full set once, to find every survivor; removed before review.
+  sweep:
+    if: github.event_name == 'pull_request'
+    name: Mutants sweep (${{ matrix.shard }}/20)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - run: nix develop --command just rs mutants --in-place --shard ${{ matrix.shard }}/20
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: sweep-${{ matrix.shard }}
+          path: target/mutants/run/mutants.out
+          retention-days: 7
+
   mutants:
+    if: github.event_name != 'pull_request'
     name: Mutants (${{ matrix.shard }}/6)
     runs-on: ubuntu-24.04-arm
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
