@@ -315,6 +315,9 @@ impl tokio::io::AsyncWrite for Stream {
 impl moq_net::transport::poll::SendStream for Stream {
 	type Error = Error;
 	type Group = send::Group;
+	type Offset = ();
+
+	fn offset(&self) -> Self::Offset {}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		self.poll_write_buf(waiter, &mut buf)

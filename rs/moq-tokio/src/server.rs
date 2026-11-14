@@ -2362,6 +2362,9 @@ mod tests {
 	impl moq_net::transport::poll::SendStream for ScriptedSend {
 		type Error = ScriptedError;
 		type Group = moq_net::transport::poll::Ungrouped;
+		type Offset = ();
+
+		fn offset(&self) -> Self::Offset {}
 		fn poll_write(&mut self, _: &kio::Waiter, buf: &[u8]) -> std::task::Poll<Result<usize, ScriptedError>> {
 			if self.stalled {
 				return std::task::Poll::Pending;

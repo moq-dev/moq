@@ -529,6 +529,9 @@ impl SendStream {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = SendGroup;
+	type Offset = ();
+
+	fn offset(&self) -> Self::Offset {}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
 		self.poll_write_buf(waiter, &mut buf)

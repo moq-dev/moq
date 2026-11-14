@@ -467,6 +467,9 @@ mod tests {
 	impl crate::transport::poll::SendStream for Stopped {
 		type Error = Self;
 		type Group = crate::transport::poll::Ungrouped;
+		type Offset = ();
+
+		fn offset(&self) -> Self::Offset {}
 
 		fn poll_write(&mut self, _: &kio::Waiter, _: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			Poll::Ready(Err(self.clone()))
@@ -575,6 +578,9 @@ mod tests {
 	impl crate::transport::poll::SendStream for Acked {
 		type Error = Stopped;
 		type Group = crate::transport::poll::Ungrouped;
+		type Offset = ();
+
+		fn offset(&self) -> Self::Offset {}
 
 		fn poll_write(&mut self, _: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			Poll::Ready(Ok(buf.len()))
