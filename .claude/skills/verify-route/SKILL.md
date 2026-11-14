@@ -18,7 +18,7 @@ Each rule is an INVARIANT; the harm says why it matters.
 | `NoRevival` | A reader never sees START for an item it saw END for, unless it forgot it since. | An ended broadcast comes back. |
 | `NoFalseEnd` | A reader sees END only once the publisher withdrew that item. | A live broadcast is reported as ended rather than offline. |
 | `NoRegression` | A reader never sees an UPDATE to an older item. | A stale announcement replaces a newer one. |
-| `Stable` | A step that only changes a route's path, lifts a doubt, or applies an interest edit (its ask or its marker) changes a shown claim only to a newer floor, or lets go of one it held unavailable. | A detour flaps claims, as a seqno advance did under the distance, or an edit that swaps prefixes ends or re-sends a claim both sets cover. |
+| `Stable` | A step that only changes a route's path, lifts a doubt, or applies an interest edit (its ask, or its marker for the claims both of the edit's sets cover) changes a shown claim only to a newer floor, or lets go of one it held unavailable. | A detour flaps claims, as a seqno advance did under the distance, or an edit that swaps prefixes ends or re-sends a claim both sets cover. |
 | `SimplePaths` | Every route held or in flight names a loop-free path from the publisher to its sender. | A relay took back a route that crossed it. |
 | `LoopsAreStale` | A request that loops crosses a relay whose route names a closed session. | Routing loops with every relay up to date. |
 | `StaleIsChased` | Every stale route a relay may use has the news that ends it on its way: queued toward the relay, or toward the neighbour it came from, and so on back. | A stale route, and any loop through it, lasts for good. |

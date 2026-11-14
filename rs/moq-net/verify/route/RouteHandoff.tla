@@ -449,9 +449,10 @@ DrainReport(x) == [NoReport EXCEPT !.node = x]
 \* The reader's events: changes to `ended` and the counters. A claim leaving
 \* while the node still holds a covering route and watches it is an END, else
 \* it went offline or is no longer watched, and the reader forgets it.
-\* `quiet` marks a step that only changed a path or lifted a doubt: in one, a
-\* claim the reader sees changes only to what a newer floor says, or goes
-\* offline after it was held unavailable.
+\* `quiet` holds the claims a step leaves alone but for their paths: one that
+\* only changed a path, lifted a doubt, or applied an edit to what both its
+\* sets cover. A claim in it the reader sees changes only to what a newer floor
+\* says, or goes offline after it was held unavailable.
 Events(s0, s, old, now, ov, eb, quiet) ==
     LET present(c) == Presence(s, KeyOf(c)) /\ Watched(s, KeyOf(c))
         isEnd(c) == old[c].item # None /\ now[c].item = None /\ present(c)
@@ -467,8 +468,7 @@ Events(s0, s, old, now, ov, eb, quiet) ==
         revivals |-> Cardinality({c \in Claims : isStart(c) /\ eb[c] = now[c].item}),
         falseEnds |-> Cardinality({c \in Claims : isEnd(c) /\ ov.items[c] = old[c].item}),
         regressions |-> Cardinality({c \in Claims : isUpdate(c) /\ now[c].item < old[c].item}),
-        unstable |-> IF ~quiet THEN 0
-                     ELSE Cardinality({c \in Claims : old[c].item # now[c].item /\ before(c) /\ ~newer(c) /\ ~release(c)})]
+        unstable |-> Cardinality({c \in quiet : old[c].item # now[c].item /\ before(c) /\ ~newer(c) /\ ~release(c)})]
 
 Update(n, s0, ov, ups, gens, eb, rep, quiet) ==
     LET s1 == Select(n, s0, gens)
@@ -556,7 +556,7 @@ InitNode(n) == [
 OV0 == [rev |-> 0, items |-> NoItems]
 Gen0 == [l \in Links |-> 0]
 Start == Update(Origin, [InitNode(Origin) EXCEPT !.rt = OwnRoutes], OV0, Links, Gen0,
-                [c \in Claims |-> None], NoReport, FALSE)
+                [c \in Claims |-> None], NoReport, {})
 
 Init ==
     /\ up = Links
@@ -585,7 +585,7 @@ OV == [rev |-> rev, items |-> own]
 ChangeClaim(c, item) ==
     LET own1 == [own EXCEPT ![c] = item]
         ov1 == [rev |-> rev + 1, items |-> own1]
-        rs == [n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, gen, ended[Origin], NoReport, FALSE)]
+        rs == [n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, gen, ended[Origin], NoReport, {})]
     IN /\ rev' = rev + 1
        /\ own' = own1
        /\ hist' = Append(hist, own1)
@@ -647,47 +647,58 @@ Recv(n, s, from, msg) ==
          [] msg.t = "drain" -> IF Credited(s, from, msg.node) THEN MarkDrain(n, s, msg.node) ELSE s
          [] OTHER -> Fail(n, s, msg.hop, from, msg.moved, msg.gone)
 
-\* The routes of one stream once an edit of its prefixes from `O` to `N` takes
-\* effect at its marker (path.rs: `rekey`), with `Off(r)` what a gone entry
-\* becomes. Both sides apply it alike, to what was sent and what was heard. A
-\* key within N stays, unless it sits at a removed prefix. The route at a
-\* removed "a" moves to an added "root" with its offer and state, and without
-\* its floor, which certified only "a". The route at a removed "root" is
-\* carried, presented at "a", to an added "a" no route keys, so its floor
-\* carries too. The rest go, with no ROUTE_END.
-Rekey(O, N, R, Off(_)) ==
+\* Whether the sender would reflect route `x` rather than `y` to node r under
+\* one key, as `SrcKey` picks: one not naming r first, then the better rank.
+\* Both sides see the same offers, so both agree.
+Reflects(x, y, r) ==
+    \/ ~Names(x.path, r) /\ Names(y.path, r)
+    \/ Names(x.path, r) = Names(y.path, r) /\ Below(Rank(x.path, x.drain), Rank(y.path, y.drain))
+
+\* The routes of one stream to node r once an edit of its prefixes from `O` to
+\* `N` takes effect at its marker (path.rs: `rekey`), with `Off(e)` what a gone
+\* entry becomes. Both sides apply it alike, to what was sent and what was
+\* heard. A key within N stays, unless it sits at a removed prefix. The route
+\* at a removed "a" moves to an added "root" with its offer and state, and
+\* without its floor, which certified only "a". The route at a removed "root"
+\* is carried, presented at "a", to an added "a", so its floor carries too,
+\* unless the route "a" already carries is the one the sender would reflect
+\* there. The rest go, with no ROUTE_END.
+Carries(O, N, R, r) ==
+    /\ "root" \in O /\ "a" \in N /\ R["root"].on
+    /\ ~R["a"].on \/ Reflects(R["root"], R["a"], r)
+
+Rekey(O, N, R, Off(_), r) ==
     [k \in Keys |->
         IF k = "root"
         THEN IF "root" \in O /\ "root" \in N THEN R["root"]
              ELSE IF "a" \in O /\ "root" \in N /\ R["a"].on THEN [R["a"] EXCEPT !.rev = None]
              ELSE Off(R["root"])
-        ELSE IF R["a"].on /\ (("root" \in O /\ N # {}) \/ ("a" \in O /\ "a" \in N)) THEN R["a"]
-             ELSE IF "root" \in O /\ "a" \in N /\ R["root"].on /\ ~R["a"].on
-                  THEN [R["root"] EXCEPT !.items = Restrict(@, "a")]
+        ELSE IF Carries(O, N, R, r) THEN [R["root"] EXCEPT !.items = Restrict(@, "a")]
+             ELSE IF R["a"].on /\ (("root" \in O /\ N # {}) \/ ("a" \in O /\ "a" \in N)) THEN R["a"]
              ELSE Off(R["a"])]
 
 \* The keys `Rekey` moved a route between, as <<from, to>>.
-Moved(O, N, R) ==
+Moved(O, N, R, r) ==
     (IF "a" \in O /\ "root" \in N /\ R["a"].on THEN {<<"a", "root">>} ELSE {})
-    \cup (IF "root" \in O /\ "a" \in N /\ R["root"].on /\ ~R["a"].on THEN {<<"root", "a">>} ELSE {})
+    \cup (IF Carries(O, N, R, r) THEN {<<"root", "a">>} ELSE {})
 
 \* `edit`: m now asks node n for `set`. It takes effect at once, behind the
 \* marker n sends first.
 Answer(s, m, set) ==
     [s EXCEPT !.ans[m] = set,
-              !.tx[m] = Rekey(s.ans[m], set, s.tx[m], LAMBDA r : NoSent(r.src))]
+              !.tx[m] = Rekey(s.ans[m], set, s.tx[m], LAMBDA e : NoSent(e.src), m)]
 
 \* `edited`: m's marker for node n's oldest edit in flight. The routes m sent
 \* are rekeyed as m rekeyed them, and a route n used or held through m moves
 \* with the route it heard, so a hold carries over rather than letting go.
-Marker(s, m) ==
+Marker(n, s, m) ==
     LET old == s.asked[m]
         new == Head(s.edits[m])
-        mv == Moved(old, new, s.rx[m])
+        mv == Moved(old, new, s.rx[m], n)
         carry(k) == {x \in mv : x[2] = k /\ s.rt[x[1]].on /\ s.rt[x[1]].next = m /\ ~s.rt[k].on}
     IN [s EXCEPT !.asked[m] = new,
                  !.edits[m] = Tail(@),
-                 !.rx[m] = Rekey(old, new, s.rx[m], LAMBDA r : NoHeard),
+                 !.rx[m] = Rekey(old, new, s.rx[m], LAMBDA e : NoHeard, n),
                  !.rt = [k \in Keys |-> IF carry(k) # {} THEN s.rt[(CHOOSE x \in carry(k) : TRUE)[1]]
                                        ELSE s.rt[k]]]
 
@@ -700,11 +711,14 @@ Deliver(d) ==
                  [] msg.t = "drain" /\ msg.node # n /\ Credited(st[n], m, msg.node) -> DrainReport(msg.node)
                  [] OTHER -> NoReport
         \* Only the route's path, or how it ranks, changed; or an edit took effect,
-        \* which changes no claim both sets cover.
-        quiet == \/ msg.t = "offer" /\ st[n].rx[m][msg.k].on
-                 \/ msg.t \in {"drain", "ask", "edited"}
+        \* which changes no claim both its sets cover.
+        quiet == CASE \/ msg.t = "offer" /\ st[n].rx[m][msg.k].on
+                      \/ msg.t \in {"drain", "ask"} -> Claims
+                   [] msg.t = "edited" ->
+                        {c \in Claims : CoversSet(st[n].asked[m], c) /\ CoversSet(Head(st[n].edits[m]), c)}
+                   [] OTHER -> {}
         s1 == CASE msg.t = "ask" -> Answer(st[n], m, msg.set)
-                [] msg.t = "edited" -> Marker(st[n], m)
+                [] msg.t = "edited" -> Marker(n, st[n], m)
                 [] OTHER -> Recv(n, st[n], m, msg)
         u == Update(n, s1, OV, up, gen, ended[n], rep, quiet)
         \* The marker goes before anything the edit sends.
@@ -723,7 +737,7 @@ Deliver(d) ==
 Lift(n, x) ==
     LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ {x}, !.wait = @ \ {x},
                                      !.expiry = {h \in @ : h[2] # x}],
-                                     OV, up, gen, ended[n], NoReport, TRUE)]
+                                     OV, up, gen, ended[n], NoReport, Claims)]
     IN /\ x \in st[n].wait
        /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] :
                         ~(q[d][i].t = "dead" /\ q[d][i].hop[2] = x) /\ ~(q[d][i].t = "drain" /\ q[d][i].node = x)
@@ -735,7 +749,7 @@ Lift(n, x) ==
 \* node. A new DEAD cannot extend every old hop's retention indefinitely.
 Expire(n, hop) ==
     LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.expiry = @ \ {hop}],
-                                     OV, up, gen, ended[n], NoReport, TRUE)]
+                                     OV, up, gen, ended[n], NoReport, Claims)]
     IN /\ hop \in st[n].expiry
        /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] : ~(q[d][i].t = "dead" /\ q[d][i].hop = hop)
        /\ Commit(rs, q)
@@ -751,7 +765,7 @@ Expire(n, hop) ==
 \* neighbour it sent a route through m.
 GoAway(n, m) ==
     LET rs == [x \in {n} |-> Update(n, MarkDrain(n, [st[n] EXCEPT !.drain = @ \cup {m}], m),
-                                     OV, up, gen, ended[n], DrainReport(m), TRUE)]
+                                     OV, up, gen, ended[n], DrainReport(m), Claims)]
     IN /\ {n, m} \in up
        /\ m \notin st[n].drain
        /\ Commit(rs, q)
@@ -781,7 +795,7 @@ Connect(l) ==
         rs == [x \in l |->
                  LET y == CHOOSE y \in l : y # x
                      a == Asks(Closed(st[x], y), y)
-                     u == Update(x, a.s, OV, up1, gen1, ended[x], NoReport, FALSE)
+                     u == Update(x, a.s, OV, up1, gen1, ended[x], NoReport, {})
                  IN [u EXCEPT !.out[y] = a.out \o @]]
     IN /\ l \notin up
        /\ flaps < MaxFlaps
@@ -801,9 +815,9 @@ Disconnect(l) ==
                      hop == <<x, y, gen[l]>>
                      s == Closed(st[x], y)
                  IN IF x = Origin
-                    THEN Update(x, s, OV, up1, gen, ended[x], NoReport, FALSE)
+                    THEN Update(x, s, OV, up1, gen, ended[x], NoReport, {})
                     ELSE Update(x, Fail(x, s, hop, None, {}, FALSE), OV, up1, gen, ended[x],
-                                DeadReport(hop), FALSE)]
+                                DeadReport(hop), {})]
     IN /\ l \in up
        /\ flaps < MaxFlaps
        /\ up' = up1
@@ -819,7 +833,7 @@ Watch(n, w) ==
         peers == Peers(n, up)
         a == [p \in peers |-> Asks(s0, p)]
         s1 == [s0 EXCEPT !.edits = [p \in Nodes |-> IF p \in peers THEN a[p].s.edits[p] ELSE @[p]]]
-        u == Update(n, s1, OV, up, gen, ended[n], NoReport, FALSE)
+        u == Update(n, s1, OV, up, gen, ended[n], NoReport, {})
         rs == [x \in {n} |-> [u EXCEPT !.out = [p \in Nodes |->
                                   IF p \in peers THEN a[p].out \o u.out[p] ELSE u.out[p]]]]
     IN /\ n \in Editors

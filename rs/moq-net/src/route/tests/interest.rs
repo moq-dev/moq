@@ -190,6 +190,55 @@ fn an_edit_crossing_a_dead_hop_and_a_hold_settles() {
 	}
 }
 
+/// A narrowing whose stream carried a route at the added prefix that the receiver
+/// cannot use, here one the relay learned through the receiver's own dead session,
+/// keeps the covering route the receiver used there instead, as the sender would
+/// reflect it, so the claim stays available across the marker. Found by TLC
+/// (`EditSmall.cfg`).
+#[test]
+fn narrowing_keeps_the_route_the_sender_would_reflect() {
+	let (origin, r1, client) = (0, 1, 2);
+	let mut sim = Sim::with(Rule::PATH, 3);
+	sim.leaf(origin);
+	sim.join(origin, r1, 1);
+	sim.join(origin, client, 1);
+	sim.join(r1, client, 1);
+	sim.watch_all(client, &["live/a"]);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/a/x", 0, None);
+	assert!(sim.run());
+	assert_eq!(sim.next_hop(client, 7), Some(origin));
+
+	// The relay answers the widening first. The client takes its root route, and
+	// hears the one the relay learned through the client only once that session
+	// closed, so it lets go of its own route there.
+	sim.hold(origin, client);
+	sim.hold(r1, client);
+	sim.watch(client, "live");
+	assert!(sim.run());
+	while sim.path(client).heard_offer(7, &p("live"), r1).is_none() {
+		assert!(sim.deliver(r1, client));
+	}
+	assert!(sim.path(client).heard_offer(7, &p("live/a"), r1).is_none());
+	sim.watch_all(client, &["live/a"]);
+	assert!(sim.run());
+	sim.disconnect(origin, client);
+	assert!(sim.run());
+	assert_eq!(sim.next_hop(client, 7), Some(r1));
+	assert!(sim.queued(r1, client) > 0, "the relay's marker waits");
+	while sim.deliver(r1, client) {
+		assert!(sim.shows(client, 7, "live/a/x").is_some(), "{:?}", life(&sim, client, "live/a/x"));
+	}
+	sim.release(r1, client);
+	assert!(sim.run());
+	let life = life(&sim, client, "live/a/x");
+	assert!(
+		life.iter().all(|kind| !matches!(kind, Kind::End | Kind::Offline)),
+		"{life:?}"
+	);
+	sim.check().unwrap();
+}
+
 /// Each added prefix is SYNCED on its own: one waiting behind a held stream is
 /// not, while the other neighbour's already is.
 #[test]

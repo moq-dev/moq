@@ -611,17 +611,27 @@ fn nested(set: &BTreeSet<Path>) -> bool {
 
 /// What a stream carries for a route, as [`rekey`] moves it.
 trait Carried<A>: Clone {
+	/// The offer it carries, unless it was ended.
+	fn offered(&self) -> Option<&Offer>;
 	/// Its claims, unless it was ended.
 	fn view(&mut self) -> Option<&mut View<A>>;
 }
 
 impl<A: Clone> Carried<A> for Heard<A> {
+	fn offered(&self) -> Option<&Offer> {
+		Some(&self.offer)
+	}
+
 	fn view(&mut self) -> Option<&mut View<A>> {
 		Some(&mut self.view)
 	}
 }
 
 impl<A: Clone> Carried<A> for Sent<A> {
+	fn offered(&self) -> Option<&Offer> {
+		self.offer()
+	}
+
 	fn view(&mut self) -> Option<&mut View<A>> {
 		match &mut self.state {
 			SentState::Live(sent) | SentState::Held(sent) => {
@@ -637,61 +647,67 @@ impl<A: Clone> Carried<A> for Sent<A> {
 /// What [`rekey`] leaves of a stream's routes.
 struct Rekeyed<T> {
 	routes: BTreeMap<RouteId, T>,
-	/// The keys it no longer carries a route under.
+	/// The keys whose route it no longer carries there.
 	gone: Vec<RouteId>,
 	/// Each route that moved, with its offer, to another key: from, to.
 	moved: Vec<(RouteId, RouteId)>,
 }
 
+/// Whether the sender would reflect `a` rather than `b` to `receiver` under one
+/// key, as [`Router::src`] picks: one not naming the receiver first, then the
+/// better rank. Equals keep `b`. Both sides see the same offers, so both agree.
+fn preferred(a: &Offer, b: &Offer, receiver: Id) -> bool {
+	(names(&a.path, receiver), a.rank()) < (names(&b.path, receiver), b.rank())
+}
+
 /// The routes one stream carries once an edit of its prefixes from `old` to `new`
 /// takes effect at its marker. Both sides apply it alike to what was sent and what
 /// was heard, so they stay in step and nothing both sets cover is sent again.
+/// `receiver` names the stream's receiving node.
 ///
 /// A route inside a prefix the new set covers stays. A route at a removed prefix
-/// that an added prefix widens moves to the wider prefix: the first by key keeps
-/// its offer and state, the rest give only their claims, and the claim presented
-/// at the removed prefix goes with every floor, since it may stand for a broader
-/// claim and the floors certified only the narrower prefix. A route at a removed
-/// prefix is carried, as presented there, to each added prefix inside it that no
-/// route keys, so its floor carries too. The rest go.
+/// that an added prefix widens moves to the wider prefix, with the claim presented
+/// at the removed prefix and every floor gone, since that claim may stand for a
+/// broader one and the floors certified only the narrower prefix. A route at a
+/// removed prefix is carried, as presented there, to each added prefix inside it,
+/// so its floor carries too. The rest go.
+///
+/// Where several routes reach one key, the key keeps the offer and state of the one
+/// the sender would reflect there ([`preferred`]), the narrowest or first by key
+/// among equals, and the claims of every route that widened into it. Keeping
+/// another could leave the receiver no usable route until the sender's next offer
+/// for the key, and its claims offline in between.
 fn rekey<A: Clone + Eq, T: Carried<A>>(
 	old: &BTreeSet<Path>,
 	new: &BTreeSet<Path>,
 	routes: BTreeMap<RouteId, T>,
+	receiver: Id,
 ) -> Rekeyed<T> {
 	let mut kept: BTreeMap<RouteId, T> = BTreeMap::new();
 	let mut gone = Vec::new();
-	let mut moved = Vec::new();
-	for (key, mut route) in routes.iter().map(|(key, route)| (key.clone(), route.clone())) {
-		let (id, prefix) = &key;
+	// The routes moving to each key, as from where and what they carry there.
+	let mut arriving: BTreeMap<RouteId, Vec<(RouteId, T)>> = BTreeMap::new();
+	for (key, route) in &routes {
+		let (id, prefix) = key;
 		let Some(region) = ancestors(prefix).find(|above| old.contains(above)) else {
-			gone.push(key);
+			gone.push(key.clone());
 			continue;
 		};
 		if within_any(prefix, new) && (new.contains(&region) || *prefix != region) {
-			kept.insert(key, route);
+			kept.insert(key.clone(), route.clone());
 			continue;
 		}
+		gone.push(key.clone());
+		let mut route = route.clone();
 		if let Some(wider) = ancestors(&region).find(|above| new.contains(above)) {
-			// At the removed prefix, an added one widens it.
-			gone.push(key.clone());
 			let Some(view) = route.view() else {
 				continue;
 			};
 			view.items.remove(prefix);
 			view.floors.clear();
-			let items = std::mem::take(&mut view.items);
-			match kept.get_mut(&(*id, wider.clone())) {
-				Some(first) => first.view().expect("a carried route").items.extend(items),
-				None => {
-					route.view().expect("a carried route").items = items;
-					moved.push((key.clone(), (*id, wider.clone())));
-					kept.insert((*id, wider), route);
-				}
-			}
+			arriving.entry((*id, wider)).or_default().push((key.clone(), route));
 			continue;
 		}
-		gone.push(key.clone());
 		if *prefix != region {
 			continue;
 		}
@@ -699,15 +715,36 @@ fn rekey<A: Clone + Eq, T: Carried<A>>(
 			continue;
 		};
 		for inside in within_set(new, &region) {
-			let key = (*id, inside.clone());
-			if routes.contains_key(&key) {
-				continue;
-			}
 			let mut copy = route.clone();
 			*copy.view().expect("a carried route") = view.present(inside);
-			moved.push(((*id, region.clone()), key.clone()));
-			kept.insert(key, copy);
+			arriving.entry((*id, inside.clone())).or_default().push((key.clone(), copy));
 		}
+	}
+	let mut moved = Vec::new();
+	for (key, mut routes) in arriving {
+		let offer = |route: &T| route.offered().expect("an offered route").clone();
+		let mut best = 0;
+		for (i, (_, route)) in routes.iter().enumerate().skip(1) {
+			if preferred(&offer(route), &offer(&routes[best].1), receiver) {
+				best = i;
+			}
+		}
+		let (from, mut route) = routes.remove(best);
+		// The claims of the rest stay, though no floor certifies them.
+		for (_, mut other) in routes {
+			let items = std::mem::take(&mut other.view().expect("a carried route").items);
+			route.view().expect("a carried route").items.extend(items);
+		}
+		// A route the key already carries stays, unless the sender would reflect this one.
+		let staying = kept.get(&key).and_then(|staying| staying.offered().cloned());
+		if staying.is_some_and(|staying| !preferred(&offer(&route), &staying, receiver)) {
+			continue;
+		}
+		if kept.contains_key(&key) {
+			gone.push(key.clone());
+		}
+		moved.push((from, key.clone()));
+		kept.insert(key, route);
 	}
 	Rekeyed {
 		routes: kept,
@@ -863,7 +900,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 				self.unreflect(neighbor, key, &sent.src);
 			}
-			let rekeyed = rekey(&old, &new, tx.clone());
+			let rekeyed = rekey(&old, &new, tx.clone(), self.sessions[&neighbor].hop);
 			// A child that learned a route this stream no longer carries under its key
 			// may still owe an answer to the route it reflected.
 			for key in rekeyed.gone {
@@ -1265,7 +1302,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		for key in &keys {
 			self.forget_heard(key, from);
 		}
-		let rekeyed = rekey(&old, &new, heard);
+		let rekeyed = rekey(&old, &new, heard, self.hop);
 		for (key, heard) in rekeyed.routes {
 			self.hear(key, from, heard);
 		}
