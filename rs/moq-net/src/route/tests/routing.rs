@@ -1558,3 +1558,80 @@ fn a_batch_replacing_a_streams_only_claim_keeps_its_route() {
 		floor: Some(2),
 	}));
 }
+
+/// A relay sends a route only to a stream whose interest one of its claims meets,
+/// and records a feasibility distance only for a route it sends. Here no stream's
+/// interest meets the claim, so the relay commits to nothing it never advertised.
+#[test]
+fn a_route_no_interest_meets_records_no_distance() {
+	let (origin, a, b) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.watch(origin, "other/");
+	sim.watch(b, "other/");
+	// The relay's own interest certifies nothing over theirs.
+	sim.watch(a, "live/");
+	sim.join(origin, a, 1);
+	sim.join(a, b, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/x", 0, None);
+	assert!(sim.run());
+	assert_eq!(next(&sim, a, 7), Some(origin));
+	assert_eq!(sim.sent(a, b, 7), None);
+	assert!(!sim.remembers(a, 7));
+}
+
+/// Two neighbors with feasible routes carry different uncertified attributes for one
+/// claim: the relay shows and forwards its selected next hop's, whichever neighbor
+/// sorts first.
+#[test]
+fn an_uncertified_claim_comes_from_the_selected_next_hop() {
+	let (near, far, down) = (5, 0, 1);
+	let item = |seed| Item {
+		seed,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	// Both routes stay feasible: each sender's metric is below any this relay advertises.
+	router
+		.connect(
+			far,
+			Link {
+				cost: 5,
+				..Link::default()
+			},
+		)
+		.unwrap();
+	router.connect(near, Link::default()).unwrap();
+	router.connect(down, Link::default()).unwrap();
+	router.peer_interest(down, Path::empty()).unwrap();
+	let interest = router.interest();
+	for (from, seed) in [(far, 1), (near, 2)] {
+		let advert = Advert {
+			seqno: 0,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+			hops: Arc::from([hop(9, 0), hop(from, 0)]),
+		};
+		router.route(from, 7, Some(Reach::Finite(advert)));
+		// No floor: the claim lives only while the stream carries it.
+		router.batch(from, 7, vec![(p("live/x"), Some(item(seed)))], None, interest);
+	}
+	assert_eq!(router.selected(7).and_then(|route| route.next), Some(near));
+	assert_eq!(router.shown()[&(7, p("live/x"))].item, item(2));
+	// Echo any end the relay sent downstream meanwhile, so it starts the route again.
+	let mut out = router.drain();
+	router.echo(down, 7);
+	out.extend(router.drain());
+	let last = (out.into_iter())
+		.filter_map(|out| match out {
+			Out::Batch { to, changes, .. } if to == down => Some(changes),
+			_ => None,
+		})
+		.flatten()
+		.filter(|(claim, _)| *claim == p("live/x"))
+		.last();
+	assert_eq!(last, Some((p("live/x"), Some(item(2)))));
+}
