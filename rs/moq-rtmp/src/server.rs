@@ -171,7 +171,8 @@ fn advertised_connect_properties() -> HashMap<String, Amf0Value> {
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
-/// A connection accepted by [`Server`]: plaintext RTMP, or RTMPS over TLS.
+/// An RTMP connection accepted by [`Server`] or dialed by [`crate::Client::connect`]:
+/// plaintext RTMP, or RTMPS over TLS.
 ///
 /// This is the stream type behind a [`Server`]-produced [`Request`] (hence
 /// `Request<Conn>`). Bring-your-own-transport callers using [`accept_stream`]
@@ -181,10 +182,11 @@ pub enum Conn {
 	/// A plaintext TCP connection (`rtmp://`).
 	Plain(TcpStream),
 
-	/// A TLS connection (`rtmps://`), sniffed and terminated by [`Server::with_tls`]. Boxed
-	/// because a `TlsStream` is large relative to a bare `TcpStream`.
+	/// A TLS connection (`rtmps://`): terminated by [`Server::with_tls`], or dialed with
+	/// [`crate::Connect::with_tls`]. Boxed because a `TlsStream` is large relative to a
+	/// bare `TcpStream`.
 	#[cfg(feature = "tls")]
-	Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
+	Tls(Box<tokio_rustls::TlsStream<TcpStream>>),
 }
 
 impl AsyncRead for Conn {
@@ -382,7 +384,8 @@ impl Server {
 											kio::clock::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
 												.await
 												.map_err(|_| anyhow::anyhow!("RTMPS handshake timed out"))?
-												.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?,
+												.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?
+												.into(),
 										)),
 										_ if !plaintext => {
 											tracing::warn!(%peer, "refusing plaintext RTMP: this listener requires TLS (rtmps://)");

@@ -19,13 +19,12 @@
 //! this module only drives the RTMP client transport. It reuses the same
 //! [`crate::flv`] tag framing and moq-mux import/export plumbing as the server.
 //!
-//! Transport: [`Client::connect`] dials plaintext TCP (`rtmp://`). To reach an
-//! `rtmps://` endpoint, or any other transport, establish the stream yourself
-//! (e.g. a `tokio_rustls` client stream) and hand it to [`Client::with_stream`];
-//! everything here is generic over the [`crate::Stream`] trait.
+//! Transport: [`Client::connect`] dials an `rtmp://` or `rtmps://` URL itself.
+//! For any other transport, establish the stream yourself and hand it to
+//! [`Client::with_stream`] with the URL it reaches; everything here is generic
+//! over the [`crate::Stream`] trait.
 
 use std::collections::VecDeque;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::rml::handshake::{Handshake, HandshakeProcessResult, PeerType};
@@ -41,7 +40,8 @@ use tokio::net::TcpStream;
 
 use crate::Result;
 use crate::flv;
-use crate::server::Stream;
+use crate::server::{Conn, Stream};
+use url::Url;
 
 /// Read buffer size for pulling RTMP chunk-stream bytes off the socket.
 const READ_BUFFER: usize = 16 * 1024;
@@ -49,18 +49,17 @@ const READ_BUFFER: usize = 16 * 1024;
 /// A connected RTMP client, ready to publish a MoQ broadcast to the remote or pull
 /// a remote stream into an origin.
 ///
-/// Build it with [`connect`](Self::connect) (plaintext `rtmp://`) or
-/// [`with_stream`](Self::with_stream) (bring your own transport, e.g. `rtmps://`).
+/// Build it with [`connect`](Self::connect) (dial `rtmp://` or `rtmps://`) or
+/// [`with_stream`](Self::with_stream) (bring your own transport).
 /// Both run the RTMP handshake and the `connect` command for the given app, so the
 /// returned client is connected and idle. Then pick a direction:
 ///
 /// - [`publish`](Self::publish): MoQ broadcast -> remote (push / restream).
 /// - [`pull`](Self::pull): remote stream -> MoQ origin (ingest).
 ///
-/// `S` is the underlying stream: a [`tokio::net::TcpStream`] from
-/// [`connect`](Self::connect), or your own transport via
-/// [`with_stream`](Self::with_stream).
-pub struct Client<S = TcpStream> {
+/// `S` is the underlying stream: a [`Conn`] from [`connect`](Self::connect), or
+/// your own transport via [`with_stream`](Self::with_stream).
+pub struct Client<S = Conn> {
 	stream: S,
 	session: ClientSession,
 	/// Session results queued during connect, drained by the first publish/pull.
@@ -74,20 +73,133 @@ pub struct Client<S = TcpStream> {
 	metadata: crate::metadata::Dropped,
 }
 
-impl Client<TcpStream> {
-	/// Dial `addr` over plaintext TCP and complete the RTMP handshake + `connect`
-	/// for `app` (the `<app>` in `rtmp://host/<app>/<key>`).
-	///
-	/// For `rtmps://` or any other transport, establish the stream yourself and use
-	/// [`with_stream`](Self::with_stream) instead.
-	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
+/// Where [`Client::connect`] dials, and the TLS it uses for `rtmps://`.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Connect {
+	/// `rtmp://host[:1935]/<app>` or `rtmps://host[:443]/<app>`, without the stream key.
+	pub url: Url,
+
+	/// The TLS client configuration for `rtmps://`, which requires one.
+	#[cfg(feature = "tls")]
+	pub tls: Option<std::sync::Arc<rustls::ClientConfig>>,
+}
+
+impl Connect {
+	/// Dial `url` (`rtmp://host[:port]/<app>` or `rtmps://...`), without TLS until
+	/// [`with_tls`](Self::with_tls) supplies it.
+	pub fn new(url: Url) -> Self {
+		Self {
+			url,
+			#[cfg(feature = "tls")]
+			tls: None,
+		}
+	}
+
+	/// Use `tls` to dial `rtmps://`; it decides which server certificates to trust.
+	#[cfg(feature = "tls")]
+	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ClientConfig>>>) -> Self {
+		self.tls = tls.into();
+		self
+	}
+}
+
+/// What an RTMP URL names: whether it is RTMPS, the host and port to dial, the app,
+/// and the `tcUrl` to advertise.
+struct Target {
+	secure: bool,
+	host: url::Host<String>,
+	port: u16,
+	app: String,
+	tc_url: String,
+}
+
+impl Target {
+	/// Parse `rtmp[s]://host[:port]/<app>`. The path holds the app alone, so a stream
+	/// key passed by mistake is refused instead of leaking into the `tcUrl`.
+	fn parse(url: &Url) -> Result<Self> {
+		let secure = match url.scheme() {
+			"rtmp" => false,
+			"rtmps" => true,
+			other => return Err(anyhow::anyhow!("rtmp url must use rtmp:// or rtmps://, not {other}://").into()),
+		};
+		let host = url
+			.host()
+			.ok_or_else(|| anyhow::anyhow!("rtmp url is missing a host"))?
+			.to_owned();
+		if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+			return Err(anyhow::anyhow!(
+				"rtmp url must be scheme://host[:port]/<app>, with no credentials, query, or fragment"
+			)
+			.into());
+		}
+		let app = url.path().trim_start_matches('/');
+		if app.is_empty() || app.contains('/') {
+			return Err(anyhow::anyhow!(
+				"rtmp url path must be the app alone, without the stream key: scheme://host[:port]/<app>"
+			)
+			.into());
+		}
+		let port = url.port().unwrap_or(if secure { 443 } else { 1935 });
+		let tc_url = match url.port() {
+			Some(port) => format!("{}://{host}:{port}/{app}", url.scheme()),
+			None => format!("{}://{host}/{app}", url.scheme()),
+		};
+		Ok(Self {
+			secure,
+			host,
+			port,
+			app: app.to_string(),
+			tc_url,
+		})
+	}
+}
+
+impl Client<Conn> {
+	/// Dial `connect.url`, completing the TLS handshake against its host for
+	/// `rtmps://`, then the RTMP handshake and `connect` for its app, advertising a
+	/// `tcUrl` of its scheme, host, port if it names one, and app.
+	pub async fn connect(connect: Connect) -> Result<Self> {
 		moq_crypto::cpu::check()?;
+		let target = Target::parse(&connect.url)?;
+		#[cfg(feature = "tls")]
+		let tls = match (target.secure, connect.tls) {
+			(true, None) => return Err(anyhow::anyhow!("rtmps:// needs a TLS client configuration").into()),
+			(true, Some(tls)) => Some(tokio_rustls::TlsConnector::from(tls)),
+			(false, _) => None,
+		};
+		#[cfg(not(feature = "tls"))]
+		if target.secure {
+			return Err(anyhow::anyhow!("rtmps:// needs moq-rtmp's `tls` feature").into());
+		}
+
 		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
-			let stream = TcpStream::connect(addr).await?;
-			crate::server::configure_socket(&stream, addr);
-			// Advertise a tcUrl derived from the dial target: several ingest servers
-			// (YouTube, Twitch, some nginx-rtmp configs) reject a connect without one.
-			Self::with_stream_config(stream, app, Some(format!("rtmp://{addr}/{app}"))).await
+			let stream = match &target.host {
+				url::Host::Domain(name) => TcpStream::connect((name.as_str(), target.port)).await?,
+				url::Host::Ipv4(ip) => TcpStream::connect((*ip, target.port)).await?,
+				url::Host::Ipv6(ip) => TcpStream::connect((*ip, target.port)).await?,
+			};
+			crate::server::configure_socket(&stream, stream.peer_addr()?);
+			#[cfg(feature = "tls")]
+			let conn = match tls {
+				Some(connector) => {
+					let name = match &target.host {
+						url::Host::Domain(name) => rustls::pki_types::ServerName::try_from(name.clone())
+							.map_err(|e| anyhow::anyhow!("rtmps host is not a valid TLS name: {e}"))?,
+						url::Host::Ipv4(ip) => rustls::pki_types::ServerName::from(std::net::IpAddr::from(*ip)),
+						url::Host::Ipv6(ip) => rustls::pki_types::ServerName::from(std::net::IpAddr::from(*ip)),
+					};
+					let tls = connector
+						.connect(name, stream)
+						.await
+						.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?;
+					Conn::Tls(Box::new(tls.into()))
+				}
+				None => Conn::Plain(stream),
+			};
+			#[cfg(not(feature = "tls"))]
+			let conn = Conn::Plain(stream);
+			Self::with_stream_config(conn, &target.app, target.tc_url).await
 		})
 		.await
 		.map_err(|_| anyhow::anyhow!("RTMP connection timed out"))?
@@ -95,28 +207,30 @@ impl Client<TcpStream> {
 }
 
 impl<S: Stream> Client<S> {
-	/// Complete the RTMP handshake and `connect` for `app` over an
-	/// already-established byte stream.
+	/// Complete the RTMP handshake and `connect` over an already-established byte
+	/// stream that reaches `url` (`rtmp[s]://host[:port]/<app>`), which names the app
+	/// and the `tcUrl` to advertise.
 	///
-	/// The bring-your-own-transport entry point: establish the connection (and, for
-	/// `rtmps://`, the TLS handshake) yourself, then hand the stream here.
-	pub async fn with_stream(stream: S, app: &str) -> Result<Self> {
+	/// The bring-your-own-transport entry point: establish the connection (and any
+	/// TLS) yourself, then hand the stream here.
+	pub async fn with_stream(stream: S, url: &Url) -> Result<Self> {
 		moq_crypto::cpu::check()?;
+		let target = Target::parse(url)?;
 		kio::clock::timeout(
 			crate::server::REQUEST_TIMEOUT,
-			Self::with_stream_config(stream, app, None),
+			Self::with_stream_config(stream, &target.app, target.tc_url),
 		)
 		.await
 		.map_err(|_| anyhow::anyhow!("RTMP connect request timed out"))?
 	}
 
-	async fn with_stream_config(mut stream: S, app: &str, tc_url: Option<String>) -> Result<Self> {
+	async fn with_stream_config(mut stream: S, app: &str, tc_url: String) -> Result<Self> {
 		let remaining = kio::clock::timeout(crate::server::HANDSHAKE_TIMEOUT, client_handshake(&mut stream))
 			.await
 			.map_err(|_| anyhow::anyhow!("RTMP handshake timed out"))??;
 
 		let mut config = ClientSessionConfig::new();
-		config.tc_url = tc_url;
+		config.tc_url = Some(tc_url);
 		let (mut session, initial) =
 			ClientSession::new(config).map_err(|e| anyhow::anyhow!("rtmp client init: {e:?}"))?;
 		let mut work: VecDeque<ClientSessionResult> = VecDeque::from(initial);
@@ -612,11 +726,105 @@ mod tests {
 
 	use super::*;
 
+	fn live_url() -> Url {
+		"rtmp://127.0.0.1/live".parse().unwrap()
+	}
+
+	#[test]
+	fn target_derives_tc_url_without_the_key() {
+		let parse = |url: &str| Target::parse(&url.parse().unwrap());
+		let t = parse("rtmps://ingest.example.com/live2").unwrap();
+		assert!(t.secure);
+		assert_eq!((t.port, t.app.as_str()), (443, "live2"));
+		assert_eq!(t.tc_url, "rtmps://ingest.example.com/live2");
+		let t = parse("rtmp://[::1]:1936/live").unwrap();
+		assert_eq!(t.port, 1936);
+		assert_eq!(t.tc_url, "rtmp://[::1]:1936/live");
+		assert_eq!(parse("rtmp://h/live").unwrap().port, 1935);
+		for bad in [
+			"rtmp://h/live/key",
+			"rtmp://h/",
+			"http://h/live",
+			"rtmp://u:p@h/live",
+			"rtmp://h/live?k=v",
+		] {
+			assert!(parse(bad).is_err(), "{bad}");
+		}
+	}
+
+	/// Serve RTMPS on `localhost` with a fresh identity, returning the listener and
+	/// that identity's fingerprint.
+	#[cfg(feature = "tls")]
+	async fn rtmps_server() -> (Server, String) {
+		let identity = moq_tokio::tls::Identity::generate(["localhost"]).unwrap();
+		let fingerprint = identity.fingerprint().to_string();
+		let mut listen = moq_tokio::tls::Listen::default();
+		listen.identity = Some(identity);
+		let config = listen.server_config(vec![]).unwrap();
+		let server = Server::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_tls(config);
+		(server, fingerprint)
+	}
+
+	#[cfg(feature = "tls")]
+	fn pinned(fingerprint: String) -> std::sync::Arc<rustls::ClientConfig> {
+		let mut tls = moq_tokio::tls::Connect::default();
+		tls.fingerprint = vec![fingerprint];
+		std::sync::Arc::new(tls.build().unwrap())
+	}
+
+	#[cfg(feature = "tls")]
+	#[tokio::test]
+	async fn connect_dials_rtmps_and_advertises_tc_url() {
+		let (mut server, fingerprint) = rtmps_server().await;
+		let port = server.local_addr().unwrap().port();
+		let url: Url = format!("rtmps://localhost:{port}/live").parse().unwrap();
+		// The server yields a request at play, so the dial goes on to pull.
+		let dial = tokio::spawn(async move {
+			let client = Client::connect(Connect::new(url).with_tls(pinned(fingerprint))).await?;
+			let origin = moq_tokio::origin::spawn();
+			client
+				.pull("cam0", &origin, moq_net::Path::from_static("cam0"), &Default::default())
+				.await
+		});
+
+		let request = tokio::select! {
+			request = server.accept() => request.unwrap(),
+			result = dial => panic!("dial ended first: {:?}", result.unwrap()),
+		};
+		assert_eq!(
+			request.tc_url(),
+			Some(format!("rtmps://localhost:{port}/live").as_str())
+		);
+		drop(request);
+	}
+
+	#[cfg(feature = "tls")]
+	#[tokio::test]
+	async fn connect_refuses_an_untrusted_certificate() {
+		let (mut server, _) = rtmps_server().await;
+		let port = server.local_addr().unwrap().port();
+		let url: Url = format!("rtmps://localhost:{port}/live").parse().unwrap();
+		let other = moq_tokio::tls::Identity::generate(["localhost"]).unwrap();
+		let dial = Client::connect(Connect::new(url.clone()).with_tls(pinned(other.fingerprint().to_string())));
+		let accept = async { kio::clock::timeout(Duration::from_secs(5), server.accept()).await };
+		tokio::select! {
+			result = dial => assert!(result.is_err()),
+			_ = accept => panic!("an untrusted dial reached the RTMP connect"),
+		}
+		assert!(
+			Client::connect(Connect::new(url)).await.is_err(),
+			"rtmps:// without TLS config"
+		);
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn client_handshakes_and_requests_have_finite_budgets() {
 		let (stream, _peer) = tokio::io::duplex(4096);
 		let start = kio::clock::Instant::now();
-		assert!(Client::with_stream(stream, "live").await.is_err());
+		assert!(Client::with_stream(stream, &live_url()).await.is_err());
 		assert_eq!(start.elapsed(), crate::server::HANDSHAKE_TIMEOUT);
 
 		for direction in [Direction::Publish, Direction::Play] {
@@ -770,7 +978,7 @@ mod tests {
 			});
 			let origin = upstream.consume();
 			let client = tokio::spawn(async move {
-				let client = Client::with_stream(client_io, "live").await.unwrap();
+				let client = Client::with_stream(client_io, &live_url()).await.unwrap();
 				match push {
 					true => client.publish("cam0", exported(origin).await).await.unwrap(),
 					false => client
@@ -828,7 +1036,7 @@ mod tests {
 			});
 
 			let upstream = moq_tokio::origin::spawn();
-			let client = Client::with_stream(client_io, "live").await.unwrap();
+			let client = Client::with_stream(client_io, &live_url()).await.unwrap();
 			let err = match push {
 				true => {
 					let (_broadcast, _catalog, _importer) = source(&upstream);
@@ -909,7 +1117,7 @@ mod tests {
 		});
 		let origin = upstream.consume();
 		let pushed = tokio::spawn(async move {
-			let client = Client::with_stream(client_io, "live").await.unwrap();
+			let client = Client::with_stream(client_io, &live_url()).await.unwrap();
 			client.publish("cam0", exported(origin).await).await
 		});
 
@@ -997,6 +1205,7 @@ mod tests {
 		let consumer = server_origin.consume();
 		let server_task = tokio::spawn(async move {
 			let request = server.accept().await.expect("a request");
+			assert_eq!(request.tc_url(), Some(format!("rtmp://{addr}/live").as_str()));
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
@@ -1010,7 +1219,8 @@ mod tests {
 		let announced = client_origin.consume();
 		let pull_origin = client_origin.clone();
 		let pull = tokio::spawn(async move {
-			let client = Client::connect(addr, "live").await.unwrap();
+			let url = format!("rtmp://{addr}/live").parse().unwrap();
+			let client = Client::connect(Connect::new(url)).await.unwrap();
 			client
 				.pull(
 					"cam0",

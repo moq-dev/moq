@@ -4776,6 +4776,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-test",
+ "url",
  "workspace-hack",
 ]
 

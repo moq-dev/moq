@@ -54,6 +54,7 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"
 # `rustls::ServerConfig`, so no default crypto feature is needed here.
 tokio-rustls = { workspace = true, optional = true }
 tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }

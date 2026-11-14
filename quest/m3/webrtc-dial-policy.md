@@ -38,11 +38,9 @@ Today:
   `reqwest::Client` with default settings and POSTs the offer to whatever
   URL `publish` or `subscribe` is handed. reqwest resolves the host and
   follows redirects, and nothing checks the answer's candidates.
-- moq-rtmp has no gap yet, only because it never resolves a name:
-  `Client::connect` takes a `SocketAddr` and `Client::with_stream` a
-  finished stream, so the caller picks the address. The
-  [rtmps:// quest](/quest/m2/rtmp-rtmps-tcurl.md) makes it dial a URL, and
-  from then on it has the same gap, which is why this waits on it.
+- moq-rtmp's `Client::connect` dials a URL itself (`moq_rtmp::Connect`),
+  resolving the host with nothing checking the address, so it has the same
+  gap.
 
 Guidance:
 
@@ -58,8 +56,5 @@ Guidance:
 
 ## Waiting
 
-- Maintainer: where the one dial-policy type lives. (a) A plain value type with no I/O in moq-net, which moq-webrtc and moq-rtmp both already depend on, each crate checking it at connect time; (b) moq-tokio, beside its own dial dispatch, though moq-rtmp uses moq-tokio only as a dev-dependency today; (c) a crate of its own. Recommended: (a), with the moq-webrtc half added through its `#[non_exhaustive]` `client::Config`, and the rtmps quest's new `connect` taking a `#[non_exhaustive]` options value so this lands without a second break.
+- Maintainer: where the one dial-policy type lives. (a) A plain value type with no I/O in moq-net, which moq-webrtc and moq-rtmp both already depend on, each crate checking it at connect time; (b) moq-tokio, beside its own dial dispatch, though moq-rtmp uses moq-tokio only as a dev-dependency today; (c) a crate of its own. Recommended: (a), with the moq-webrtc half added through its `#[non_exhaustive]` `client::Config`, and moq-rtmp's through its `#[non_exhaustive]` `Connect`, so neither needs a second break.
 
-## Required
-
-- [moq-rtmp dials rtmps:// and always advertises a tcUrl](/quest/m2/rtmp-rtmps-tcurl.md) - the URL dial in moq-rtmp that the policy covers
