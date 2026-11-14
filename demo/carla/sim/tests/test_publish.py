@@ -208,9 +208,13 @@ class Session:
             raise frame
         return frame
 
-    def write_frame(self, payload: bytes) -> None:
+    def largest(self):
+        return SimpleNamespace(group=len(self.replies) - 1) if self.replies else None
+
+    def write_frame(self, payload: bytes, timestamp) -> None:
         if self.finished:
             raise moq.Error("session closed")
+        assert timestamp == moq.Timestamp.unscaled(len(self.replies)), "a reply keys the next group"
         self.replies.append(json.loads(payload))
 
     def finish(self) -> None:

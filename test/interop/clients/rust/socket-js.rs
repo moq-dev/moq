@@ -46,7 +46,10 @@ async fn main() -> anyhow::Result<()> {
 	// Probe refusal before data sessions can generate late queries for closed halves.
 	if dial {
 		if tcp {
-			ensure!(endpoint.dial_tcp("acceptor")?.await.is_err(), "rejected dial connected");
+			ensure!(
+				endpoint.dial_tcp("acceptor", 0)?.await.is_err(),
+				"rejected dial connected"
+			);
 		} else {
 			ensure!(
 				endpoint.dial_track("acceptor", None)?.await.is_err(),
@@ -62,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 	let peer: u8 = if dial { 32 } else { 16 };
 	let _hold: Box<dyn std::any::Any> = if tcp {
 		let mut stream = if dial {
-			endpoint.dial_tcp("acceptor")?.await?
+			endpoint.dial_tcp("acceptor", 0)?.await?
 		} else {
 			accepted_tcp(&endpoint).await?
 		};
@@ -109,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
 	eprintln!("socket data verified {} {}", args[4], args[1]);
 	if tcp {
 		let mut reset = if dial {
-			endpoint.dial_tcp("acceptor")?.await?
+			endpoint.dial_tcp("acceptor", 0)?.await?
 		} else {
 			accepted_tcp(&endpoint).await?
 		};
@@ -182,7 +185,7 @@ fn send(track: &moq_net::track::Producer, payload: Vec<u8>) -> anyhow::Result<()
 async fn accepted_tcp(endpoint: &moq_net::socket::Endpoint) -> anyhow::Result<moq_net::socket::TcpStream> {
 	loop {
 		let incoming = endpoint.accept_tcp().await?;
-		if let Ok(stream) = incoming.accept().await {
+		if let Ok(stream) = incoming.accept(0).await {
 			return Ok(stream);
 		}
 	}

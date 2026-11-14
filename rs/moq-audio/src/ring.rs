@@ -111,6 +111,9 @@ pub(crate) enum Read {
 /// before it exists.
 #[derive(Default)]
 struct Shared {
+	/// Frames the device delays a read by before it sounds. Reads are placed
+	/// where they are heard, so the queue holds the target less this.
+	heard: AtomicUsize,
 	pushed: AtomicBool,
 	read: AtomicBool,
 	/// Effective input frames played or discarded, including stretch's length
@@ -120,6 +123,11 @@ struct Shared {
 	/// Frames of the writer's stream the reader has played or skipped:
 	/// `consumed` before the stretch's length correction.
 	played: AtomicUsize,
+	/// `consumed` as of the last read in the low half, and the frame on the
+	/// clock [`Consumer::read_at_frame`] counts at which that read's last frame
+	/// is heard in the high half, each wrapping at 32 bits. One word, so a
+	/// writer never pairs one read's position with another's end.
+	drained: AtomicU64,
 	/// The writer's end less `played`, at its latest push. Adding the reader's
 	/// `played` less `consumed` gives the depth that push left, less what the
 	/// stretch removed since: the level the stretch decides on.
@@ -144,6 +152,16 @@ struct Shared {
 	/// plays there before the next utterance. Written only while none is pending.
 	resume_at: AtomicUsize,
 	resume_frames: AtomicUsize,
+}
+
+impl Shared {
+	/// What the queue holds of the target: the rest is the device's delay
+	/// after a read, which the target counts.
+	fn queue(&self) -> usize {
+		self.target
+			.load(Ordering::Relaxed)
+			.saturating_sub(self.heard.load(Ordering::Relaxed))
+	}
 }
 
 /// Set in [`Shared::resume`] while a resume waits for the reader.
@@ -191,6 +209,7 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		.then(|| Box::new(crate::stretch::Stretch::new(output_rate, channels)));
 	let shared = Arc::new(Shared {
 		target: AtomicUsize::new(latency),
+		heard: AtomicUsize::new(0),
 		level: AtomicUsize::new(latency),
 		..Default::default()
 	});
@@ -297,7 +316,7 @@ impl Producer {
 		}
 		self.declared = false;
 		let queued = self.written.wrapping_sub(self.shared.consumed.load(Ordering::Relaxed));
-		let frames = self.shared.target.load(Ordering::Relaxed).saturating_sub(queued);
+		let frames = self.shared.queue().saturating_sub(queued);
 		let ends = self.shared.ends.load(Ordering::Relaxed);
 		let mut state = self.shared.resume.load(Ordering::Acquire);
 		while state & PENDING != 0 {
@@ -367,7 +386,7 @@ impl Producer {
 
 		if let Some(pad) = self.pad {
 			let queued = self.ring.occupied_len();
-			let target = self.shared.target.load(Ordering::Relaxed) * self.channels;
+			let target = self.shared.queue() * self.channels;
 			if queued <= pad && queued < target {
 				let samples = self.ring.push_iter(std::iter::repeat_n(0.0, target - queued));
 				self.written = self.written.wrapping_add(samples / self.channels);
@@ -465,10 +484,22 @@ impl Producer {
 	}
 
 	/// How much audio is queued ahead of the reader.
+	#[cfg(test)]
 	pub(crate) fn buffered(&self) -> Duration {
 		Duration::from_secs_f64(
 			self.written.wrapping_sub(self.shared.consumed.load(Ordering::Relaxed)) as f64 / self.rate as f64,
 		)
+	}
+
+	/// How long after `now` the last frame written is heard: what is queued,
+	/// plus what the last read took that has yet to sound, since a read is
+	/// placed at the instant its first frame is heard.
+	pub(crate) fn heard_in(&self, now: Instant) -> Duration {
+		let drained = self.shared.drained.load(Ordering::Relaxed);
+		let queued = (self.written as u32).wrapping_sub(drained as u32);
+		let now = (now.saturating_duration_since(self.base).as_secs_f64() * self.rate as f64).round() as usize;
+		let sounding = ((drained >> 32) as u32).wrapping_sub(now as u32) as i32;
+		Duration::from_secs_f64((queued as f64 + sounding.max(0) as f64) / self.rate as f64)
 	}
 }
 
@@ -653,6 +684,12 @@ pub(crate) struct Consumer {
 }
 
 impl Consumer {
+	/// Note that the device sounds what is read `frames` after the read, which
+	/// the target counts and the queue therefore does not hold.
+	pub(crate) fn heard(&mut self, frames: usize) {
+		self.shared.heard.store(frames, Ordering::Relaxed);
+	}
+
 	/// Fill `output` with queued interleaved frames, and silence past them.
 	pub(crate) fn read(&mut self, output: &mut [f32]) -> Read {
 		let demand = output.len() / self.channels;
@@ -669,6 +706,15 @@ impl Consumer {
 
 	/// [`read_at`](Self::read_at) on the frame clock [`Producer::due_frame`] counts.
 	pub(crate) fn read_at_frame(&mut self, output: &mut [f32], now: usize, demand: usize) -> Read {
+		let read = self.read_frames(output, now, demand);
+		// Published once the whole read is done: what it consumed sounds by its end.
+		let end = now.wrapping_add(output.len() / self.channels);
+		let drained = (end as u32 as u64) << 32 | self.playhead() as u32 as u64;
+		self.shared.drained.store(drained, Ordering::Relaxed);
+		read
+	}
+
+	fn read_frames(&mut self, output: &mut [f32], now: usize, demand: usize) -> Read {
 		self.start();
 		self.demand = demand;
 		self.now = now;
@@ -747,7 +793,12 @@ impl Consumer {
 			let lag = clock.wrapping_add(self.now + elapsed).wrapping_sub(playhead) as isize;
 			return (lag as i64, (anchor >> 32) as i64);
 		}
-		let target = self.shared.target.load(Ordering::Relaxed);
+		// The target counts the device's delay, which the queue does not hold,
+		// though it still holds at least the callback being read.
+		let target = self
+			.shared
+			.queue()
+			.max(self.demand.min(self.shared.target.load(Ordering::Relaxed)));
 		let level = self
 			.shared
 			.level
@@ -1759,6 +1810,27 @@ mod tests {
 		assert!(cons.lag(0).0 <= 0);
 	}
 
+	/// Reads are placed where they sound, so the queue holds the target less
+	/// the device's delay, though never less than the callback being read.
+	#[test]
+	fn the_device_delay_comes_off_the_target_the_queue_holds() {
+		let rate = 48_000;
+		let (mut prod, mut cons, pcm) = tone(rate, Duration::from_millis(100));
+		let base = prod.base;
+		assert_eq!(prod.push(&pcm), Push::Ok);
+		let mut out = vec![0.0; 480 * 2];
+		// The unclocked bound is three quarters of the headroom above the target.
+		let capacity = cons.ring.capacity().get() / 2;
+		cons.heard(1_440);
+		pull(&mut cons, &mut out, base);
+		assert_eq!(cons.lag(0).1, ((capacity - (4_800 - 1_440)) * 3 / 4) as i64);
+		// A resume tops the queue up to as much, so the next utterance sounds one target out.
+		assert_eq!(prod.shared.queue(), 4_800 - 1_440);
+		cons.heard(48_000);
+		pull(&mut cons, &mut out, base);
+		assert_eq!(cons.lag(0).1, ((capacity - 480) * 3 / 4) as i64);
+	}
+
 	#[test]
 	fn staged_audio_is_buffered_and_finish_drains_it() {
 		let (mut prod, mut cons) = channel(
@@ -1974,6 +2046,27 @@ mod tests {
 		let mut out = vec![1.0; 1000 * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Comfort { frames: 0 });
 		assert!(out.iter().all(|&sample| sample == 0.0));
+	}
+
+	/// The last frame written is heard after what is queued and the part of
+	/// the last read still sounding, which shrinks until the next read.
+	#[test]
+	fn the_last_write_is_heard_behind_the_read_still_sounding() {
+		let (mut prod, mut cons) = queue(48_000, 48_000, Duration::from_secs(1));
+		let base = prod.base;
+		let millis = |at: Duration| (at.as_secs_f64() * 1000.0).round() as u64;
+		assert_eq!(prod.push(&[0.1; 4800 * STEREO]), Push::Ok);
+		// The 50 ms opening cushion and 100 ms written, before any read.
+		assert_eq!(millis(prod.heard_in(base)), 150);
+
+		// A 10 ms read the device sounds 20 ms after `base`.
+		let mut out = vec![0.0; 480 * STEREO];
+		pull(&mut cons, &mut out, base + Duration::from_millis(20));
+		assert_eq!(millis(prod.heard_in(base)), 170);
+		assert_eq!(millis(prod.heard_in(base + Duration::from_millis(25))), 145);
+		assert_eq!(millis(prod.heard_in(base + Duration::from_millis(30))), 140);
+		// Past the read's end, only the queue is left.
+		assert_eq!(millis(prod.heard_in(base + Duration::from_millis(40))), 140);
 	}
 
 	/// A next utterance pushed while the end's tail still plays waits behind it,

@@ -12,6 +12,13 @@ replace are retired.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)): ✅ stays in
+m2 and gates the cut, per lite07-finalize's 2026-10-13 rule that routes'
+tier and partition tests run before the cut (rejected: moving it to m3 and
+fixing late routing flaws in lite-08). A flaw found here is fixed on
+lite-07-wip before it freezes.
+
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): acceptance is of the path rule
 ([epic](/quest/m2/cluster-routes/README.md) Plan item 27), on the

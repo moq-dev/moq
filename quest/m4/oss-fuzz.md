@@ -24,7 +24,7 @@ maintainer's account once the maintainer has reviewed its draft files and PR
 text (rejected: waiting to decide). The maintainer accepts OSS-Fuzz's 90-day
 disclosure deadline.
 
-Nightly gives each of its 22 codec targets five minutes and the two
+Nightly gives each of its 24 codec targets five minutes and the two
 whole-session targets (`session_lite`, `session_ietf`) fifteen. That finds
 shallow bugs and replays the corpus; it rarely reaches deep states, and the
 session targets' coverage still climbs when their run ends.
@@ -42,7 +42,3 @@ session targets' coverage still climbs when their run ends.
   handled: reproduce, fix on `main`, commit the input, backport when serious.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Wire fuzz coverage](/quest/m1/wire-fuzz-coverage.md) - adds the moq-sock and moq-uring targets OSS-Fuzz would also run

@@ -15,6 +15,13 @@ carries it.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768), the m2 triage
+before the cut): ✅ stays in m2 (rejected: moving the route stream and the
+interest set to lite-08). It changes no wire or API on its own, but
+[the route stream](/quest/m2/cluster-routes/route-stream.md) needs it, and
+no quest requires one in a later milestone.
+
 Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing). The model
 goes first because the set's edit rule is the one new rule in this redesign,
 and every earlier routing bug was an ordering nobody had enumerated.

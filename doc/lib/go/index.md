@@ -163,4 +163,4 @@ A catalog that needs a newer moq-hang draft than this build reads raises `moq.Er
 
 - API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally
-- Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)
+- Published wrapper source: the [moq-dev/moq-go](https://github.com/moq-dev/moq-go) mirror. The raw bindings and static libraries it requires, `moq.dev/moq-ffi`, need no extra step: `go get` fetches them through proxy.golang.org or with `GOPROXY=direct`

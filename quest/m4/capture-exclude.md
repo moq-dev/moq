@@ -75,7 +75,7 @@ Recommendations for the PR:
   game or browser. The Goal holds either way.
 - **Shape.** The exclusion belongs to the display selection, not to a
   `Config` field every other source ignores, as `cursor` is by cameras. It
-  is a breaking change to `Source::Display` if it lands there.
+  is additive, since `DisplaySelection` is fenced.
 
 Tests:
 
@@ -88,18 +88,15 @@ Tests:
   the same for a second window the app opens later, for an app started after
   the capture, and for an app added to the set mid-capture.
 
-Public API: breaking if the exclusion joins `Source::Display`, additive
-otherwise. Wire: none.
+Public API: additive, as the exclusion joins the fenced `DisplaySelection`. Wire: none.
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ this quest
-stays after the cut, and
-[capture listings and selections can grow](/quest/m2/api-capture-fences.md)
-fences the display selection the exclusion joins in m2 (rejected: pulling this quest into m2; a second moq-video
-break). What this adds is then additive.
+stays after the cut, and the m2 fence made `Source::Display` take a `#[non_exhaustive]`
+`capture::DisplaySelection` for the exclusion to join (rejected: pulling this
+quest into m2; a second moq-video break). The exclusion is then additive.
 
 ## Required
 
-- [Capture listings and selections can grow](/quest/m2/api-capture-fences.md) - the fenced structs this adds fields to
 - [A capture listing a picker can draw](/quest/m3/capture-list.md) - the app identity an exclusion names
 
 ## Related
