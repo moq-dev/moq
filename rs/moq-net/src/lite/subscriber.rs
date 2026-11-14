@@ -13,6 +13,7 @@ use crate::{
 	coding::{Decode as _, Reader, Stream},
 	lite,
 	track::{Anchor, Position, Subscription},
+	util::SendCell,
 };
 
 use super::Version;
@@ -178,10 +179,13 @@ struct TrackEntry {
 	/// Where the subscription's groups go, once its TRACK_INFO says how to read them. A
 	/// SUBSCRIBE sent alongside its TRACK registers before.
 	copy: Option<Accepted>,
+	// Parked and paused groups hold group and frame writers, which reach the whole track
+	// model: the cells prove `Send` once here, so the session driver's proof stays within
+	// the default recursion limit.
 	/// The group streams that arrived before the copy, while any wait.
-	parked: Option<kio::Producer<Parked>>,
+	parked: Option<SendCell<kio::Producer<Parked>>>,
 	/// Lite-07: the groups a YIELDED reset paused, once one did or a stream waits on one.
-	paused: Option<kio::Producer<Paused>>,
+	paused: Option<SendCell<kio::Producer<Paused>>>,
 	/// Lite-07: the groups a stream that a YIELDED reset would pause is reading, one per
 	/// stream, so stream credit bounds them.
 	yielding: BTreeMap<u64, Yielding>,
