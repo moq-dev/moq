@@ -37,7 +37,9 @@ frame:
 | Native | `container::Consumer::read()`, awaited by `moq-audio`'s decode consumer |
 
 Both sit below the decoder and above nothing: no reordering, no gap handling, no
-age budget.
+age budget. Except one skip: both consumers close a group below where delivery
+stands unread, so a join's backlog they skip is never observed, and a join
+delayed only by it is measured as lateness.
 
 Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
@@ -101,25 +103,35 @@ observe(arrival, media):
         if MAX_HISTORY entries are held: drop the oldest
         push (arrival, media) onto history
 
+    fastest = min over history of (entry.arrival - entry.media)
+    if first observation: start = arrival; joined = arrival
+    elif media + fastest < start:       # produced before the subscription: backlog
+        joined = max(joined, arrival)
+
     ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media),
           the oldest on a tie
     if there is none: return            # older than the whole window, not measured
     delay = max(0, (arrival - ref.arrival) - (media - ref.media))
 
     if first observation:
-        origin = arrival; interval = 0; peak = delay; note(arrival, delay); return
+        origin = arrival; interval = 0; peak = delay; oldest = media
+        note(arrival, delay); return
 
     index = floor((arrival - origin) / RESAMPLE)
     resumed = ended; ended = false
     if index <= interval:
-        peak = max(peak, delay); note(arrival, delay); return
+        peak = max(peak, delay); oldest = min(oldest, media)
+        note(arrival, delay); return
 
-    close(bucket of peak)
+    if oldest + fastest < joined:       # the join, not the path: folds nothing
+        pending += 1
+    else:
+        close(bucket of peak)
     if resumed:                         # a declared silence folds nothing
         settle(); origin = arrival; index = 0
     else:                               # held until this interval closes
-        pending = index - interval - 1
-    interval = index; peak = delay; due = +inf; late = -inf
+        pending += index - interval - 1
+    interval = index; peak = delay; oldest = media; due = +inf; late = -inf
     note(arrival, delay)
 
 note(arrival, delay):                   # due and late start at +inf and -inf
@@ -208,14 +220,13 @@ and the receiver runs dry and refills on every flush. That is the re-stall loop
 the nightly harness measured on AAC under bursty delivery, where most frames
 arrived reordered.
 
-It is measured only against earlier frames because of what a subscription's
-start delivers: its live edge first, then the backlog behind it, newest first.
-Measured against the live edge, a backlog frame's whole media-time distance would
-be *added* to its delay, which is exactly the failure this design exists to
-avoid. The backlog is older than every frame in the history, so it has no
-reference and is not measured, the same as a frame the window already pruned.
-An in-order frame gets the same rule for free, since every entry before it is
-older.
+It is measured only against earlier frames because a newer reference would add
+the media-time distance between them to the frame's delay, which is exactly the
+failure this design exists to avoid. A frame older than every frame in the
+history has no reference and is not measured, the same as a frame the window
+already pruned. An in-order frame gets the same rule for free, since every entry
+before it is older. A subscription's backlog is the [join's](#the-joins-backlog)
+to discount.
 
 It never joins the history because it can never be a reference worth having: it
 arrived after a newer frame, so it is never the fastest. Keeping it out is also
@@ -285,6 +296,33 @@ how long the estimate goes without evidence. Only a publisher repeating an old
 timestamp holds them still, since a frame more than `WINDOW` behind the newest
 is not measured, and that holds its own stall open: it freezes its own
 broadcast's estimate, at no cost beyond the four numbers.
+
+### The join's backlog
+
+A subscription opens with the backlog its relay holds, delivered faster than real
+time and interleaved with the live edge, and the live frames produced meanwhile
+queue behind it. Measured, the backlog frames read late against the older backlog
+before them and the queued live frames late against the edge: 250 to 760 ms on
+the nightly and recorded joins. The cold start would fold that at `FRESH_MAX` and
+hold the target, and video with it, there for a 20 s half-life after every
+join. The player never waits for any of it, since a join skips onto the clock.
+
+`fastest`, the window's smallest `arrival - media`, is the fastest path seen, so
+`media + fastest` is when a frame was due. A frame due before `start`, the first
+arrival, was produced before the subscription began: it is **backlog**. `joined`
+is the latest arrival of a backlog frame, `start` until one arrives. An interval
+holding a frame due before `joined` measured the join, not the path: its frames
+are backlog or queued behind it, so it folds nothing, as if it held no arrival.
+
+The test runs when the interval closes, not per frame, because a join reveals
+itself late: the fastest path moves earlier as the backlog drains, 1.3 to 2 s
+over the first 400 to 800 ms of the nightly joins, so a frame punctual against
+the backlog before it can turn out to be due before `start`. Only backlog moves
+`joined`, so lateness after the join never extends it: an outage's frames were
+produced after the subscription began, and a publisher flushing seconds at once
+is measured from its first flush past the backlog. A first frame slower than the
+path after it is itself backlog, so most subscriptions skip their first interval,
+which leaves the prior 500 ms later.
 
 ### The histogram
 
@@ -476,7 +514,7 @@ reference window restarts, so the new track's frames are measured against its
 own fastest. Its opening backlog would read as seconds late against the old
 track's arrivals. What the outgoing track measured but has not folded, its
 interval in progress and any open stall, folds into the continued histogram as
-if that interval closed at the switch: a switch most often follows an outage,
+if that interval closed at the switch, judged by the outgoing track's join: a switch most often follows an outage,
 and would otherwise drop the outage's one observation.
 
 ## Rise, fall, startup, and the ceiling
@@ -672,6 +710,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `buildup` | A queue filling at 2 ms per frame is measured against the fastest recent arrival |
 | `reorder` | A run delivered after a newer one is measured against the frames before it, so the target covers waiting for it |
 | `backlog` | A backlog delivered newest first behind the live edge is not measured, so its media span never reaches the target |
+| `join` | A recorded join whose backlog arrives interleaved with the live edge, and delays the live frames queued behind it, folds nothing, so the target leaves the prior for the path's own |
 | `idle` | A 30 s gap relaxes the histogram toward the prior |
 | `silence` | A declared 60 s silence and a declared pause leave the target where it was, and a later undeclared gap still relaxes it |
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
