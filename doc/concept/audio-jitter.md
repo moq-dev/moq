@@ -436,8 +436,9 @@ and speaker. The output latency is the most the device reported over the last
 | Browser | `getOutputTimestamp()`, the context time sounding at a page instant, against which the clock is paired at the greatest offset, falling 0.1 ms a report | `baseLatency` plus the peak `outputLatency` |
 | Native | the callback's playback timestamp | the host's reported delay plus one device period |
 
-A fixed browser delay is still taken literally. A fixed native delay is floored
-at the output latency, since audio cannot sound sooner.
+A fixed browser delay is still taken literally: one shorter than the jitter plus
+the output latency underruns rather than letting audio trail video. A fixed
+native delay is floored at the output latency, since audio cannot sound sooner.
 
 ## Rise, fall, startup, and the ceiling
 
