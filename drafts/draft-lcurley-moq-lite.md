@@ -607,7 +607,7 @@ A relay with no local reader that has a neighbor's SUBSCRIBE pulls through its b
 A carrier MUST NOT join a warm route whose carrier ranks above its own by the Rendezvous Hash of the broadcast's path and the carrier's Hop ID, as defined in [Resolution](#resolution), so two carriers never join each other.
 Each SUBSCRIBE says in `Warm` whether it joins the copy the publisher offered or follows the subscriber's route.
 A relay that serves a SUBSCRIBE from a relay following its route MUST pull along its own route, so a pull that follows routes reaches the origin node.
-A relay with no local reader gets the copy it pulls to each neighbor whose subscription it serves, so it MUST pull along its own route unless, for each of them, what it pulls is the warm route it offered that neighbor or a copy whose carrier ranks below that warm route's carrier.
+A relay with no local reader gets the copy it pulls to each neighbor whose subscription it serves, so it MUST pull along its own route unless, for each of them it offered a warm route, what it pulls is that warm route or a copy whose carrier ranks below that warm route's carrier; a neighbor it offered none, such as one whose SUBSCRIBE crossed a WARM_END, bounds nothing.
 A relay MUST NOT join a copy of another Instance.
 
 Once the warm routes and subscriptions in flight are delivered, the pulls of a broadcast are free of loops.

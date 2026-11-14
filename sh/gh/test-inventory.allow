@@ -38,5 +38,3 @@ ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_expo
 
 # Flaked under load; disabled until fixed at its cause.
 recipe test::stream-credit /quest/m1/stream-credit/browser-resets.md
-
-# Too slow for the merge gate; the quest runs it nightly once every scenario settles.
