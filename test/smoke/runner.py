@@ -117,6 +117,9 @@ def run(upstream, output):
             registry_file.write_text(json.dumps(plan))
             expected = expected_pairs(plan)
             if not expected:
+                # Unpublished images can empty the optional matrix; the registry alone must not.
+                if missing:
+                    continue
                 raise ValueError(f"runner matrix {index} has no compatible pairs")
             # The runner exits nonzero on any red pair; the validated summary decides instead.
             subprocess.run(["bash", "run-interop-tests.sh", "--docker-only"], cwd=upstream)

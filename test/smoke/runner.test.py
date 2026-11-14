@@ -99,7 +99,6 @@ class Runner(unittest.TestCase):
                     runner.run(upstream, upstream / "report")
                 except SystemExit as error:
                     failure = error
-            self.assertEqual(len(matrices), 2)
             self.assertEqual(registry.read_text(), original)
             runs = json.loads((upstream / "report" / "nightly" / "summary.json").read_text())["runs"]
             self.assertEqual(len(runs), sum(len(pairs) for pairs in matrices))
@@ -110,6 +109,7 @@ class Runner(unittest.TestCase):
     def test_failed_required_pair_reports_every_matrix_then_fails(self):
         required = ("moq-dev-js", "moq-dev-rs")
         failure = self.run_matrices(lambda client, relay: "timeout" if (client, relay) == required else "pass")
+        self.assertEqual(len(self.matrices), 2)
         self.assertIn(str(required), str(failure))
 
     def test_failed_optional_pairs_are_reported_but_pass(self):
@@ -129,6 +129,12 @@ class Runner(unittest.TestCase):
         self.assertEqual(self.matrices[1], {("moq-dev-rs", "new"), ("moq-dev-js", "new")})
         self.assertIn("docker.io/new/client", report.call_args.args[0])
         self.assertIn("docker.io/new/client (image unavailable)", self.index)
+
+    def test_unpublished_last_third_party_relay_skips_the_optional_matrix(self):
+        with patch("builtins.print"):
+            failure = self.run_matrices(lambda client, relay: "pass", unpublished={"docker.io/new/relay"})
+        self.assertIsNone(failure)
+        self.assertEqual(self.matrices, [runner.REQUIRED | {("new", "moq-dev-rs")}])
 
     def test_unpublished_own_client_image_fails_before_any_matrix(self):
         def command(args, **kwargs):
