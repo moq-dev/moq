@@ -442,7 +442,14 @@ struct Migrating {
 
 /// The policy's draining predecessor and its handover deadline, so [`Connection::close`] drains it
 /// too without overstaying that window. Boxed: only a migration holds one, and only briefly.
-type Predecessor = Box<(moq_net::Session, kio::clock::Instant)>;
+type Predecessor = Box<Draining>;
+
+/// A session draining after a GOAWAY, which serves again if its replacement drops first.
+struct Draining {
+	session: moq_net::Session,
+	deadline: kio::clock::Instant,
+	transport: crate::Transport,
+}
 
 impl Lifecycle {
 	/// What [`Connection::status`] reports: `None` before the first connect and once closed.
@@ -541,29 +548,56 @@ impl Shared {
 		}
 	}
 
-	/// The session in [`State`] keeps serving while its replacement comes up, so
-	/// only the status moves.
-	fn migrating(&self) {
-		if let Ok(mut state) = self.state.write() {
-			state.revision += 1;
-			if let Lifecycle::Live(live) = &mut state.lifecycle {
-				live.migrating = Some(Migrating::default());
+	/// The policy's predecessor, `session` draining until `deadline`, serves while a
+	/// replacement comes up.
+	///
+	/// Either the live session got the GOAWAY and is that predecessor, so only the status
+	/// moves, or the replacement serving on top of the mirrored predecessor closed, and the
+	/// handle serves on the predecessor again rather than on a closed session.
+	fn migrating(&self, session: &moq_net::Session, deadline: kio::clock::Instant) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		state.revision += 1;
+		// Only a live session migrates: a GOAWAY or a probe needs one, and so does a
+		// replacement closing on top of a predecessor.
+		let Lifecycle::Live(live) = &mut state.lifecycle else {
+			return;
+		};
+		live.migrating = Some(Migrating::default());
+		match live
+			.predecessor
+			.as_ref()
+			.filter(|predecessor| predecessor.session == *session)
+		{
+			Some(predecessor) => {
+				live.session = predecessor.session.clone();
+				live.transport = predecessor.transport;
+				// The closed replacement's estimates are gone, and the predecessor's no
+				// longer forward, so freeze on its latest like any handover does.
+				let _ = self.send_bw.set(session.send_bandwidth().and_then(|bw| bw.peek()));
+				let _ = self.recv_bw.set(session.recv_bandwidth().and_then(|bw| bw.peek()));
+			}
+			None => {
+				live.predecessor = Some(Box::new(Draining {
+					session: session.clone(),
+					deadline,
+					transport: live.transport,
+				}));
 			}
 		}
 	}
 
-	/// Mirror the policy's draining predecessor, for [`Connection::close`].
-	fn predecessor(&self, predecessor: Option<(&moq_net::Session, kio::clock::Instant)>) {
+	/// The policy's predecessor retired, so [`Connection::close`] no longer drains it.
+	fn retired(&self) {
 		// A write wakes every watcher, so skip one that changes nothing.
-		if predecessor.is_none() && self.state.read().lifecycle.predecessor().is_none() {
+		if self.state.read().lifecycle.predecessor().is_none() {
 			return;
 		}
-		let predecessor = predecessor.map(|(session, deadline)| Box::new((session.clone(), deadline)));
 		if let Ok(mut state) = self.state.write() {
 			match &mut state.lifecycle {
-				Lifecycle::Live(live) => live.predecessor = predecessor,
-				Lifecycle::Offline { predecessor: slot, .. } => *slot = predecessor,
-				// Only a session that connected can drain, and nothing drains once the loop ends.
+				Lifecycle::Live(live) => live.predecessor = None,
+				Lifecycle::Offline { predecessor, .. } => *predecessor = None,
 				Lifecycle::Connecting { .. } | Lifecycle::Closed(_) => {}
 			}
 		}
@@ -1033,7 +1067,11 @@ impl Connection {
 			*closed = Some(moq_net::Error::Cancel);
 			let state = self.state.read();
 			let session = state.lifecycle.live().map(|live| live.session.clone());
-			(session, state.lifecycle.predecessor().cloned())
+			let predecessor = state.lifecycle.predecessor();
+			(
+				session,
+				predecessor.map(|predecessor| (predecessor.session.clone(), predecessor.deadline)),
+			)
 		};
 		self.task.handle.abort();
 		let session = async move {
@@ -1043,7 +1081,7 @@ impl Connection {
 			}
 		};
 		let predecessor = async move {
-			let Some((session, deadline)) = predecessor.map(|predecessor| *predecessor) else {
+			let Some((session, deadline)) = predecessor else {
 				return Ok(());
 			};
 			let abort = session.clone();
@@ -1185,12 +1223,13 @@ impl Connection {
 					#[cfg(all(feature = "websocket", feature = "quic"))]
 					left_fallback(&mut probe, &mut fallback);
 					forward = None;
-					// After the predecessor is published, so a close woken by this status
-					// finds it and honors its handover deadline.
-					shared.predecessor(policy.predecessor());
-					shared.migrating();
+					// One write publishes the predecessor with this status, so a close woken by
+					// it finds the predecessor and honors its handover deadline.
+					if let Some((session, deadline)) = policy.predecessor() {
+						shared.migrating(session, deadline);
+					}
 				}
-				Action::Retired => shared.predecessor(None),
+				Action::Retired => shared.retired(),
 				Action::Offline(failure) => {
 					#[cfg(all(feature = "websocket", feature = "quic"))]
 					left_fallback(&mut probe, &mut fallback);
@@ -1222,7 +1261,7 @@ impl Connection {
 				Action::Done(res) => {
 					#[cfg(all(feature = "websocket", feature = "quic"))]
 					left_fallback(&mut probe, &mut fallback);
-					shared.predecessor(None);
+					shared.retired();
 					return res;
 				}
 				Action::Wait(_) => unreachable!("handled while polling"),
@@ -2738,6 +2777,110 @@ mod tests {
 			accepted_a.try_recv().is_err(),
 			"a cached resolve redialed the drained relay"
 		);
+	}
+
+	/// A replacement that drops while the drained session still serves leaves the handle
+	/// on that session, reporting Migrating rather than a Disconnected that would claim
+	/// nothing serves. Its subscription keeps delivering through the handover.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_dropped_replacement_hands_back_to_the_draining_session() {
+		kio::clock::host_time(); // real TCP sockets
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let origin = crate::origin::spawn();
+		let broadcast = origin.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		let (addr_a, mut accepted_a, _task_a) = serve(origin.clone()).await;
+		let (addr_b, mut accepted_b, _task_b) = serve(origin.clone()).await;
+
+		// Unique to this test: the table is process-wide.
+		const HOST: &str = "dropped-replacement.test";
+		crate::resolve::hosts::point(HOST, [addr_a]);
+
+		let subscriber = crate::origin::spawn();
+		let mut config = crate::connect::Config::default();
+		// Long enough that only the replacement's drop can change what serves.
+		config.goaway.handover = Some((WAIT * 3).into());
+		config.backoff.initial = Some((FAST).into());
+		config.backoff.healthy = Some((FAST).into());
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(subscriber.clone());
+		let connection = client.connect(url(&format!("tcp://{HOST}:1/")));
+		let monitor = connection.monitor();
+		let session_a = kio::clock::timeout(WAIT, accepted_a.recv()).await.unwrap().unwrap();
+
+		let cam = kio::clock::timeout(WAIT, subscriber.consume().follow("cam", None).unwrap().available())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
+		group.finish().unwrap();
+		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(g0.sequence, 0);
+
+		crate::resolve::hosts::point(HOST, [addr_b]);
+		session_a.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		let session_b = kio::clock::timeout(WAIT, accepted_b.recv()).await.unwrap().unwrap();
+		let mut state = monitor.state();
+		while !matches!(state.phase, Phase::Connected { .. }) || state.connects < 2 {
+			state = kio::clock::timeout(WAIT, monitor.state_changed(state.revision))
+				.await
+				.unwrap()
+				.unwrap();
+		}
+
+		// The redial after B's drop fails, so no new session can replace the handed-back one
+		// before the checks read it; a failed redial still reports Migrating.
+		let dead = dead().await;
+		let dead = dead.socket_addrs(|| None).unwrap();
+		crate::resolve::hosts::point(HOST, dead);
+		session_b.abort(moq_net::Error::Cancel);
+		let state = kio::clock::timeout(WAIT, monitor.state_changed(state.revision))
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(
+			matches!(
+				state.phase,
+				Phase::Migrating {
+					transport: crate::Transport::Tcp,
+					..
+				}
+			),
+			"{:?}",
+			state.phase
+		);
+		assert!(
+			matches!(connection.poll_established(&kio::Waiter::noop()), Poll::Ready(Ok(()))),
+			"the handle dropped the serving session"
+		);
+		assert!(
+			connection
+				.draining()
+				.is_some_and(|goaway| matches!(goaway.poll(&kio::Waiter::noop()), Poll::Ready(Ok(_)))),
+			"the handle serves on a session other than the drained one"
+		);
+		assert!(monitor.stats().is_some());
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
+		group.finish().unwrap();
+		let g1 = kio::clock::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(g1.sequence, 1, "the drained session stopped delivering");
 	}
 
 	/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps

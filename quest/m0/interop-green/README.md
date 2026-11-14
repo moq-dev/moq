@@ -1,4 +1,4 @@
-# Interop and Video pass on main
+# [XS] Interop and Video pass on main
 
 ## Goal
 
@@ -11,7 +11,7 @@ so it only needs to stay green.
 ## Waiting
 
 - moq-dev/moq: the next scheduled Interop run on `main` passes, once the
-  [resumed-audio child](/quest/m0/interop-green/resume-sync.md) lands
+  [resumed-audio fix](https://github.com/moq-dev/moq/pull/8635) lands
   ([moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572), the max-age
   fix, merged 2026-11-12). Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
@@ -184,7 +184,7 @@ Scheduled run
   picture by about 1.7 s. [moq-dev/moq#8507](https://github.com/moq-dev/moq/pull/8507)
   keeps audio that trails the clock up to its 2 s stretch bound and plays it
   faster, and a resume keeps the ring it had. Fixed by the child
-  [resumed audio snaps to the clock](/quest/m0/interop-green/resume-sync.md),
+  [resumed audio snaps to the clock](https://github.com/moq-dev/moq/pull/8635),
   decided 2026-11-12 (maintainer) to snap to the live picture rather than
   stretch the lag back.
 

@@ -15,12 +15,8 @@ Decided 2026-11-13 (maintainer, /quest-run follow-up from
 Unverified. A scratch test during #8643 gave a demand of `[{}]` for that pair,
 which looks like an open live range with no floor. Start from a test that
 pins the demand the pair should produce, and compare with Rust's equivalent.
-[Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md)
-rewrites how JS keeps fill and demand ranges apart (`LiveRanges.edit`), so
-this starts after it lands.
+[moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616) (lite-07 FETCH
+single-group only) rewrote how JS keeps fill and demand ranges apart
+(`LiveRanges.edit`), so check against that code.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - rewrites the JS fill and demand ranges this checks
