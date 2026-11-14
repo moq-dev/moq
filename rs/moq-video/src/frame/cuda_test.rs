@@ -156,6 +156,16 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert!(max_diff(actual.v(), expected.v()) <= 1, "v differs from the reference");
 
 	let ctx = CudaContext::new(0).expect("CUDA device 0");
+	// At the same size the fill is a copy, which must be exact.
+	let mut same = Target::new(&ctx, size).expect("CUDA target");
+	same.fill(&converted).expect("GPU copy");
+	let copied = same.frame().download_i420().unwrap();
+	assert!(
+		copied.y() == actual.y() && copied.u() == actual.u() && copied.v() == actual.v(),
+		"a same-size fill changed the samples"
+	);
+	drop(same);
+
 	let mut target = Target::new(&ctx, sd).expect("CUDA target");
 	target.fill(&converted).expect("GPU resize");
 	let scaled = target.frame().clone();
