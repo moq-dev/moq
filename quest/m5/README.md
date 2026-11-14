@@ -19,7 +19,7 @@ every cycle; m5's quests start once the shift brings them into m4.
 
 Current rule: until the `0.22.0` cut, m5 is the deferred bucket, as below.
 That cut moves it, with its `Required`, to m6, and the new m5 starts empty as
-later work of lower priority, required by the wire cut like m6; each wire
+later work of lower priority, requiring the wire cut like m6; each wire
 cut's shift moves m5's quests to m4, and m6 stays the deferred bucket. The
 entries below are history.
 
