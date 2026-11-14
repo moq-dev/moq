@@ -7,7 +7,7 @@
 // `fetches` reports how many downstream FETCHes the relay forwarded upstream.
 import assert from "node:assert/strict";
 import { createInterface } from "node:readline";
-import { Manual } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Session } from "@moq/qmux";
 import { DEFAULT_EXPIRY } from "../../js/net/src/cache.ts";
 import { connect } from "../../js/net/src/connection/connect.ts";

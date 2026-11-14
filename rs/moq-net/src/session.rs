@@ -217,6 +217,15 @@ pub struct Session {
 	datagrams_unrouted: Option<Arc<AtomicU64>>,
 }
 
+/// Two handles are equal when they are clones of the same session.
+impl PartialEq for Session {
+	fn eq(&self, other: &Self) -> bool {
+		self.close.same_channel(&other.close)
+	}
+}
+
+impl Eq for Session {}
+
 impl Session {
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {

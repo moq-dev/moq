@@ -384,8 +384,11 @@ export class FillState {
 
 /** The still-wanted runs of a fill, in ascending order. @internal */
 export let wantedRuns: (fill: Fill) => Run[];
-/** Wait for a change to the groups or readers of a fill. @internal */
-export let fillChanged: (fill: Fill) => Promise<unknown>;
+/**
+ * Wait for a change to the groups or readers of a fill, which a lost {@link race} releases.
+ * @internal
+ */
+export let fillChanged: (fill: Fill) => GetPromise<unknown>;
 /**
  * The budget in milliseconds an OLD answer was judged under, and whether that is the publisher's
  * max age, which binds every reader, rather than the request's own budget.
@@ -514,7 +517,7 @@ export class Fill {
 	static {
 		makeFill = (state, pending) => new Fill(state, pending);
 		wantedRuns = (fill) => fill.#pending.owed();
-		fillChanged = (fill) => Promise.resolve(fill.#pending.revision.changed());
+		fillChanged = (fill) => Signal.race(fill.#pending.revision);
 		rejectGroups = (fill, start, end, error, judged) => {
 			if (toStreamCode(error) !== StreamCode.Old) {
 				fill.refuseGroups(start, end, error);

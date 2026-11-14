@@ -1,9 +1,11 @@
 // A received copy asks its publisher for the groups its readers miss, over lite FETCH, as the Rust
-// lite subscriber's `FillServeRun` does, or on lite-07 for a reader with no budget, by run on a
-// SUBSCRIBE of its own, as its `Recovery` does: below where the copy's feed started, by the copy's
-// start rule, and inside the copy, once it evicted what it received.
+// lite subscriber's `FillServeRun` does, or on lite-07 for more than one group, through its
+// subscription's ranges, as its `RangeFills` does, and on a SUBSCRIBE of its own for what that
+// subscription already delivered, as its `Recovery` does: below where the copy's feed started, by
+// the copy's start rule, and inside the copy, once it evicted what it received.
 import { expect, test } from "bun:test";
-import { Duration, Elapsed, Manual, sleep, timeout } from "@moq/clock";
+import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { StreamCode, StreamError } from "../error.ts";
@@ -127,10 +129,11 @@ test("copy fill: lite-07 fills below a start resolved from the budget, as far as
 		expect((await narrow.recvGroup())?.sequence).toBe(3n);
 		const before = peer.fetches();
 
-		// The copy cannot tell which budget picked its start, so it fills what this one reaches.
+		// The copy cannot tell which budget picked its start, so it fills what this one reaches,
+		// through its subscription's ranges rather than a stream of its own.
 		const wide = peer.remote.track("video").subscribe(WIDE);
 		expect(sorted(await take(wide, 5))).toEqual(ALL);
-		expect(peer.fetches()).toBeGreaterThan(before);
+		expect(peer.fetches()).toBe(before);
 		narrow.close();
 		wide.close();
 	} finally {
@@ -370,10 +373,10 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	}
 });
 
-// Lite-07: a filled group whose stream the publisher yielded, then gave up, ends with the fill's
-// drop naming it with the group's own error, as one on a subscription does, rather than waiting
-// paused on a continuation that never comes.
-test("copy fill: a yielded group the fill's drop names ends", async () => {
+// Lite-07: a filled group whose stream the publisher yielded, then gave up, ends with the drop the
+// copy's subscription, which the fill rides, names it with: the group's own error, rather than
+// waiting paused on a continuation that never comes.
+test("copy fill: a yielded group its subscription's drop names ends", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
@@ -384,8 +387,9 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 	]);
 	const publication = origin.route(Path.from("room"));
 	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	write(track.createGroup(1n), 1n, "live");
-	// The archive answers group 0 with one frame and keeps it open, so its stream is still open.
+	write(track.createGroup(2n), 2n, "live");
+	// The archive answers group 0 with one frame and keeps it open, so its stream is still open, and
+	// group 1 whole.
 	const requests = track.requests();
 	const fills: Fill[] = [];
 	const archived = (async () => {
@@ -394,32 +398,36 @@ test("copy fill: a yielded group the fill's drop names ends", async () => {
 		fills.push(fill);
 		const group = fill.accept(0n);
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
+		write(fill.accept(1n), 1n, "old");
 		return group;
 	})();
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
 		const live = await reader.ordered().nextGroup();
-		expect(live?.sequence).toBe(1n);
-		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 1");
+		expect(live?.sequence).toBe(2n);
+		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 2");
 		expect(await live?.readFrame()).toBeUndefined();
 		live?.close();
+		// Two groups, so the fill rides the subscription's ranges.
 		const history = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
 		const group = await history.recvGroup();
 		expect(group?.sequence).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
 		const source = await archived;
 
 		// The session resets the group's stream to make room, and the group is gone before a new
-		// stream could continue it, so the publisher drops it on the fill's subscription.
-		// The live stream has finished. The archive may be served on both the fill and
-		// the copy's expanded feed, so reset every stream still serving it.
+		// stream could continue it, so the publisher drops it on the subscription the fill rides.
+		const one = await history.recvGroup();
+		expect(one?.sequence).toBe(1n);
+		while (await one?.readFrame());
+		// The live stream has finished, so the archived group's is the only one still open.
 		await clock.advance(Duration.ZERO);
 		const open = lines(pair.server).streams.list();
-		expect(open.length).toBeGreaterThan(0);
-		for (const stream of open) stream.preempt();
+		expect(open.length).toBe(1);
+		open[0]?.preempt();
 		source.abort(new StreamError(StreamCode(70), { message: "gone" }));
 
 		// Still paused without it, which the deadline, fired once every pending task settled,

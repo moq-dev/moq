@@ -7,7 +7,6 @@ import {
 	type Installed,
 	Instant,
 	interval,
-	Manual,
 	MissedTickBehavior,
 	now,
 	origin,
@@ -19,7 +18,7 @@ import {
 	wall,
 	yieldNow,
 } from "./index.ts";
-import { hostTime } from "./test.ts";
+import { hostTime, Manual } from "./test.ts";
 
 const installs: Installed[] = [];
 afterEach(() => {

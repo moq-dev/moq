@@ -766,10 +766,11 @@ jobs:
           retention-days: 45
 
   # The merge gate's own build and test cost under fixed scenarios, for the
-  # benchmark history (see bench/README.md). On the merge queue's runner VMs,
-  # whose KVM guests see the host's PMU (`-cpu host`), because hosted VMs expose
-  # no hardware counters; NixOS keeps the kernel's perf_event_paranoid of 2,
-  # which allows user-space ones. No Rust cache, which would replay compilations
+  # benchmark history (see bench/README.md). On the merge queue's runners,
+  # because hosted VMs expose no hardware counters. Those runners are
+  # systemd-nspawn containers on the maintainer's NixOS host, which share its
+  # PMU but must allow perf_event_open, which nspawn's seccomp filter denies by
+  # default. No Rust cache, which would replay compilations
   # rather than measure them, and checkout's clean leaves an empty target
   # directory. The scenarios run every module in turn, cold and then after a
   # moq-net edit, so they take hours.
