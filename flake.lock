@@ -63,11 +63,11 @@
         "token-max": "token-max"
       },
       "locked": {
-        "lastModified": 1794627687,
-        "narHash": "sha256-fB9uFSyF4o7IXFKRv+OezhgIFnF5jzU0PsfI0IQ4ztk=",
+        "lastModified": 1794682729,
+        "narHash": "sha256-8pTvkOuHtGmqSFHREU6+V+MffFGsUNKI/4a5IuHLkxA=",
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "33f46293a3d785c3c0240e0d9306bc7ccfeae3da",
+        "rev": "45c7be6c6c957ab689945749e3328fc3319d6494",
         "type": "github"
       },
       "original": {
@@ -79,11 +79,11 @@
     "quest-pinned": {
       "flake": false,
       "locked": {
-        "lastModified": 1794155982,
-        "narHash": "sha256-KuQQ8ykYgTd0kJ76PA8Jao/UQcoxn7X9uZCj3lV8alE=",
+        "lastModified": 1794627687,
+        "narHash": "sha256-fB9uFSyF4o7IXFKRv+OezhgIFnF5jzU0PsfI0IQ4ztk=",
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "7fe979312b792108a8911a0b38dfc3fd2bb38774",
+        "rev": "33f46293a3d785c3c0240e0d9306bc7ccfeae3da",
         "type": "github"
       },
       "original": {
