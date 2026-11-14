@@ -65,7 +65,9 @@ route.announce();
 Examples:
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
-[server-side](/lib/js/#server-side). Path patterns are on the
+[server-side](/lib/js/#server-side). The WebSocket fallback and the moq-transport stack load
+on demand as separate chunks, so a session over WebTransport and moq-lite never downloads them.
+Path patterns are on the
 [concept page](/concept/moq-lite#path-patterns).
 
 Groups retain a 32 MiB live tail without limiting their lifetime or frame count.

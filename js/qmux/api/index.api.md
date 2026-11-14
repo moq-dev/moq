@@ -58,6 +58,7 @@ export class Session implements WebTransport {
 	readonly ready: Promise<void>;
 	get reliability(): "reliable-only";
 	setSendBufferSize(bytes: number): void;
+	readonly transport: "websocket";
 }
 
 export class SessionError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {

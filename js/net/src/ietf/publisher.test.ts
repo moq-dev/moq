@@ -15,7 +15,7 @@ import {
 	Stream as StreamError,
 	unauthorized,
 } from "../error.ts";
-import { type Hop, HopSchema } from "../hop.ts";
+import { type Hop, toHop } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, SessionBroadcast, settlesWithin } from "../mock.ts";
@@ -1537,9 +1537,9 @@ test("closing the session ends the unsolicited announce loop", async () => {
  * not read ours either, so sending it the parameters would be a protocol violation.
  */
 test("an advertisement carries our hop id once the peer declared one", async () => {
-	const self: Hop = HopSchema.parse(7n);
+	const self: Hop = toHop(7n);
 
-	for (const peer of [HopSchema.parse(9n), undefined]) {
+	for (const peer of [toHop(9n), undefined]) {
 		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
 		publish(origin, Path.from("mine"));
@@ -1631,8 +1631,8 @@ async function readUpdate(stream: Stream): Promise<Cluster.Update> {
 function clustered(requiresSolicitation = false, auth?: Tokens) {
 	const clock = new Manual();
 	const installed = clock.install();
-	const self: Hop = HopSchema.parse(7n);
-	const peer: Hop = HopSchema.parse(9n);
+	const self: Hop = toHop(7n);
+	const peer: Hop = toHop(9n);
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer }, requiresSolicitation, auth });
 	const streams = accepted(pair.client);
@@ -1643,9 +1643,9 @@ function clustered(requiresSolicitation = false, auth?: Tokens) {
 	return { clock, self, pair, pub, origin, streams, close };
 }
 
-const VIA: Hop = HopSchema.parse(3n);
-const MID: Hop = HopSchema.parse(4n);
-const OTHER: Hop = HopSchema.parse(5n);
+const VIA: Hop = toHop(3n);
+const MID: Hop = toHop(4n);
+const OTHER: Hop = toHop(5n);
 
 /**
  * A reprice is a REQUEST_UPDATE on the request that already carries the namespace, with
@@ -2165,11 +2165,11 @@ test("an unanswered update drops the request and re-offers the namespace fresh",
  * the peer cannot see must not withdraw and advertise the namespace again.
  */
 test.each([
-	["an unchanged price with Cluster", HopSchema.parse(9n)],
+	["an unchanged price with Cluster", toHop(9n)],
 	["any re-price without Cluster", undefined],
 ])("%s sends nothing", async (_, peer) => {
 	using clock = manual();
-	const self: Hop = HopSchema.parse(7n);
+	const self: Hop = toHop(7n);
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
 	const broadcast = origin.route(Path.from("mine"), { cost: 4n });

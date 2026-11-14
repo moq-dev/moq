@@ -4,7 +4,7 @@ import { getter, Once, race, Signal } from "@moq/signals";
 import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { type Cost, HopSchema, WireRoute } from "./hop.ts";
+import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { chainHash, compareRouteCandidates, presented, rendezvousHash, spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
@@ -22,7 +22,7 @@ function publish(origin: Producer, path: Path.Valid) {
 }
 
 /** A peer's hop, for a route that is not local. */
-const PEER = HopSchema.parse(10n);
+const PEER = toHop(10n);
 // One publisher instance, so a local broadcast and a remote route compete on cost alone.
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 
@@ -2117,7 +2117,7 @@ test("a lite-07 and a lite-06 route beneath one prefix rank by each one's own ke
 	const job = Path.from("pool/job");
 	const pool = Path.from("pool");
 	const claim = { ...WireRoute.default, instance: Instance.parse("a"), node: 0x7an, cost: 1n };
-	const legacy = { ...WireRoute.default, instance: Instance.parse("b"), hops: [HopSchema.parse(11n)], cost: 1n };
+	const legacy = { ...WireRoute.default, instance: Instance.parse("b"), hops: [toHop(11n)], cost: 1n };
 	expect(rendezvousHash(job, 0x7an)).toBe(0xc376be7bf47aebbfn);
 	expect(spreadHash(job, "b")).toBe(0xd16a3821c67a2d25n);
 	expect(compareRouteCandidates(job, pool, claim, legacy)).toBeLessThan(0);
@@ -2148,7 +2148,7 @@ test("the spread hash matches rs/moq-net byte for byte", () => {
 });
 
 test("an equal-cost pool spreads its paths the same way on every node", async () => {
-	const workers = [10n, 11n, 12n, 13n].map((id) => HopSchema.parse(id));
+	const workers = [10n, 11n, 12n, 13n].map((id) => toHop(id));
 	const paths = Array.from({ length: 64 }, (_, i) => Path.from(`pool/job-${i}`));
 
 	// The worker each path resolves to on an origin whose pool arrived in `order`.
@@ -2193,7 +2193,7 @@ test("an equal-cost replacement at its own path wins whatever its hop", async ()
 	for (const order of [
 		[11n, 10n],
 		[10n, 11n],
-	].map((hops) => hops.map((id) => HopSchema.parse(id)))) {
+	].map((hops) => hops.map((id) => toHop(id)))) {
 		const origin = new Producer();
 		const served: bigint[] = [];
 		const handles = order.map((hop) => {

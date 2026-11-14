@@ -22,7 +22,7 @@ import {
 	toTransport,
 } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
-import { type Hop, HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } from "../hop.ts";
+import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks, rendezvousHash } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -71,7 +71,7 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 			writable: new WritableStream<Uint8Array>(),
 		}),
 	} as unknown as WebTransport;
-	const subscriber = new Subscriber(quic, Version.DRAFT_03, HopSchema.parse(1n), new Signal<ProbeStats>({}));
+	const subscriber = new Subscriber(quic, Version.DRAFT_03, toHop(1n), new Signal<ProbeStats>({}));
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 	try {
@@ -125,7 +125,7 @@ function announceHarness(version: Version, origin = 1n) {
 		},
 	} as unknown as WebTransport;
 
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(origin));
+	const subscriber = new Subscriber(quic, version, toHop(origin));
 
 	const send = async (f: (w: Writer) => Promise<void>) => {
 		const written: Uint8Array[] = [];
@@ -183,10 +183,10 @@ function announceHarness(version: Version, origin = 1n) {
 	};
 }
 
-const PUBLISHER_A = HopSchema.parse(7n);
-const PUBLISHER_B = HopSchema.parse(8n);
-const PUBLISHER_C = HopSchema.parse(9n);
-const PEER = HopSchema.parse(2n);
+const PUBLISHER_A = toHop(7n);
+const PUBLISHER_B = toHop(8n);
+const PUBLISHER_C = toHop(9n);
+const PEER = toHop(2n);
 
 // Lite-07 origin nodes, and the route a peer advertises to each.
 const NODE_A = 0x7an;
@@ -234,7 +234,7 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 			};
 		},
 	} as unknown as WebTransport;
-	const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_06, toHop(1n));
 
 	const announced = subscriber.routes(Path.Pattern.subtree(Path.from("room")));
 	announced.close();
@@ -255,7 +255,7 @@ test("a max-length chain plus withheld responder is dropped", async () => {
 	const announced = subscriber.routes();
 	await settle();
 
-	const hops = Array.from({ length: MAX_HOPS }, (_, i) => HopSchema.parse(BigInt(i + 1)));
+	const hops = Array.from({ length: MAX_HOPS }, (_, i) => toHop(BigInt(i + 1)));
 	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
 	await send((w) =>
 		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("full"), hops }, Version.DRAFT_06),
@@ -509,7 +509,7 @@ test("a lite-05 duplicate announce follows the same update rule", async () => {
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
-	const active = (hops: ReturnType<typeof HopSchema.parse>[]) => (w: Writer) =>
+	const active = (hops: Hop[]) => (w: Writer) =>
 		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops }, Version.DRAFT_05);
 
 	await send(active([PUBLISHER_A]));
@@ -591,7 +591,7 @@ async function runProbeScript(version: Version, probes: Probe[], initial: ProbeS
 	} as unknown as WebTransport;
 
 	const signal = new Signal<ProbeStats>(initial);
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n), signal);
+	const subscriber = new Subscriber(quic, version, toHop(1n), signal);
 	const running = subscriber.runProbe();
 
 	await Promise.resolve();
@@ -646,7 +646,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), hops: [HopSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), hops: [toHop(SELF)] },
 			Version.DRAFT_06,
 		),
 	);
@@ -687,7 +687,7 @@ test("an update replaces an announce that was skipped as a reflected loop", asyn
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), hops: [HopSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), hops: [toHop(SELF)] },
 			Version.DRAFT_06,
 		),
 	);
@@ -717,7 +717,7 @@ test("retiring an id whose announce was skipped ends nothing", async () => {
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), hops: [HopSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), hops: [toHop(SELF)] },
 			Version.DRAFT_06,
 		),
 	);
@@ -782,7 +782,7 @@ test("a duplicate start is reported even when its own route reflects", async () 
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), hops: [HopSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), hops: [toHop(SELF)] },
 			Version.DRAFT_06,
 		),
 	);
@@ -1068,7 +1068,7 @@ test.each([
 	["a stream slot for the FETCH", "open", undefined],
 ] as const)("closing the subscriber rejects a fetch waiting on %s", async (_, stage, cause) => {
 	const { quic, streams, opened } = fakeSession(stage === "open" ? [1] : []);
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 
 	let settled = false;
 	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n).then(
@@ -1117,7 +1117,7 @@ test.each([
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await opened(0);
@@ -1155,7 +1155,7 @@ test("a lite subscribe waiting on a stream slot for the SUBSCRIBE outlasts the d
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession([1]);
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await opened(0);
@@ -1180,7 +1180,7 @@ test("a lite subscribe waiting on a stream slot for the SUBSCRIBE outlasts the d
 // for it goes unused to the next open, rather than being reset.
 test("a lite SUBSCRIBE open given up leaves its stream to the next open", async () => {
 	const { quic, streams, opened } = fakeSession([1]);
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	try {
 		// Closing the broadcast retires the setup while its SUBSCRIBE waits for a stream.
@@ -1209,7 +1209,7 @@ test("a lite SUBSCRIBE open given up leaves its stream to the next open", async 
 // Leaving during SUBSCRIBE setup releases its TRACK bridge while the broadcast stays live.
 test.each(["credit", "answer"] as const)("abandoning SUBSCRIBE during %s releases TRACK", async (stage) => {
 	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
-	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const room = subscriber.consume(Path.from("room"));
 	try {
@@ -1242,7 +1242,7 @@ test.each(["credit", "answer"] as const)("abandoning SUBSCRIBE during %s release
 // the stream admitted for it goes unused to the next open.
 test("a lite subscribe whose readers leave while it waits for a stream gives up the wait", async () => {
 	const { quic, streams, opened } = fakeSession([0]);
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const room = subscriber.consume(Path.from("room"));
 	try {
@@ -1271,7 +1271,7 @@ test("a lite subscribe abandoned while its SUBSCRIBE write stalls closes its TRA
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession([], [1]);
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await opened(0);
@@ -1300,7 +1300,7 @@ test.each(
 )("$name: a subscribe goes out with its track (forced yields: $forced)", async ({ version, forced }) => {
 	const yielding = forced ? spyOn(Budget.prototype, "poll").mockImplementation(() => yieldNow()) : undefined;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
@@ -1343,7 +1343,7 @@ test.each(
 test("a group that beats its track info waits for it", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
@@ -1405,7 +1405,7 @@ function handStream(version: Version) {
 test.each([false, true])("a yielded group continues without loss (overtakes: %p)", async (overtakes) => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
@@ -1469,7 +1469,7 @@ test.each([false, true])("a yielded group continues without loss (overtakes: %p)
 test("a group yielded twice continues without loss", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
@@ -1519,7 +1519,7 @@ test("a group yielded twice continues without loss", async () => {
 test("a yielded group a drop named ends", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
@@ -1564,7 +1564,7 @@ test("a yielded group a drop named ends", async () => {
 test("a yielded group pauses once an update supersedes its stale drop", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
@@ -1611,7 +1611,7 @@ test("a yielded group pauses once an update supersedes its stale drop", async ()
 test("a yielded group pauses once an update supersedes a stale drop before its header", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
@@ -1660,7 +1660,7 @@ test.each(["zero length", "resized", "unfinished", "past held"] as const)(
 	async (fault) => {
 		const version = Version.DRAFT_07;
 		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const subscriber = new Subscriber(quic, version, toHop(1n));
 		const track = subscriber
 			.consume(Path.from("room"))
 			.track("video")
@@ -1716,7 +1716,7 @@ test.each(["zero length", "resized", "unfinished", "past held"] as const)(
 test("a lite-06 group reset with YIELDED ends", async () => {
 	const version = Version.DRAFT_06;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
@@ -1747,7 +1747,7 @@ test("a lite-06 group reset with YIELDED ends", async () => {
 test.each([false, true])("a duplicate of an arriving copy waits for it to settle (first fails: %p)", async (fails) => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
@@ -1850,7 +1850,7 @@ test.each([false, true])("a duplicate of an arriving copy waits for it to settle
 test("a reset track rejects the subscription and resets its subscribe", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
@@ -1867,7 +1867,7 @@ test("a reset track rejects the subscription and resets its subscribe", async ()
 
 test("a fetch started after the subscriber closes rejects without opening a stream", async () => {
 	const { quic, streams } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	subscriber.close();
 
 	const err = await subscriber.fetchGroup(Path.from("room"), "video", 0n).catch((err: unknown) => err);
@@ -1884,15 +1884,7 @@ test("a grant that shrinks while the subscription sets up refuses it", async () 
 		subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
 	});
 	const grant = new Signal<Grant | undefined>(scoped("room"));
-	const subscriber = new Subscriber(
-		quic,
-		Version.DRAFT_05,
-		HopSchema.parse(1n),
-		undefined,
-		undefined,
-		undefined,
-		grant,
-	);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
 
 	const track = subscriber.consume(Path.from("room/cam")).track("video").subscribe().ordered();
 	const next = track.nextGroup().catch((err: unknown) => err);
@@ -1913,7 +1905,7 @@ test("a grant that shrinks while the subscription sets up refuses it", async () 
 
 test("an already-aborted fetch rejects without opening a stream", async () => {
 	const { quic, streams } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	const cause = new Error("gone");
 
 	const err = await subscriber
@@ -1927,7 +1919,7 @@ test("an already-aborted fetch rejects without opening a stream", async () => {
 // and its response is read only once TRACK_INFO says the timescale.
 test("the first FETCH goes out before TRACK_INFO answers", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 
 	let fetched: GroupConsumer | undefined;
 	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n).then((group) => {
@@ -1951,7 +1943,7 @@ test("the first FETCH goes out before TRACK_INFO answers", async () => {
 
 test("a failed TRACK_INFO fails the FETCH sent alongside it", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 
 	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n).catch((err: unknown) => err);
 	await opened(0);
@@ -1969,7 +1961,7 @@ test("a failed TRACK_INFO fails the FETCH sent alongside it", async () => {
 // stream is cancelled once the last sharer leaves, before its FETCH is sent if it can be.
 test("one of two fetch sharers aborting leaves the other's fetch", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 
 	const controller = new AbortController();
 	const a = subscriber.fetchGroup(Path.from("room"), "video", 0n, { signal: controller.signal });
@@ -2002,7 +1994,7 @@ test.each([
 	["the FETCH", "fetch"],
 ] as const)("the last fetch sharer aborting during %s cancels it", async (_, stage) => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 
 	const first = new AbortController();
 	const second = new AbortController();
@@ -2042,7 +2034,7 @@ test.each([
 test("a fetch after the last sharer left is never failed with the cancelled one", async () => {
 	for (let depth = 0; depth < 32; depth++) {
 		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+		const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 
 		const controller = new AbortController();
 		const a = subscriber.fetchGroup(Path.from("room"), "video", 0n, { signal: controller.signal });
@@ -2081,7 +2073,7 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 // old one's, even while the old FETCH is still open.
 test("a fresh consume never joins a fetch an earlier one opened", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	const room = Path.from("room");
 
 	const old = subscriber.consume(room);
@@ -2111,7 +2103,7 @@ test("a fresh consume never joins a fetch an earlier one opened", async () => {
 // must not end clean, as a FIN would make it read whole.
 test("the last reader leaving mid-response cancels the fetch", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 
 	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n);
 	await opened(0);
@@ -2140,15 +2132,7 @@ test.each(["initial", "track", "fetch", "body"] as const)(
 			subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
 		});
 		const grant = new Signal<Grant | undefined>(scoped(stage === "initial" ? "other" : "room"));
-		const subscriber = new Subscriber(
-			quic,
-			Version.DRAFT_05,
-			HopSchema.parse(1n),
-			undefined,
-			undefined,
-			undefined,
-			grant,
-		);
+		const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
 		let result: unknown;
 		const pending = subscriber.fetchGroup(Path.from("room/cam"), "video", 0n).then(
 			(group) => {
@@ -2201,7 +2185,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	"a retired handle on a wire without instances refuses new metadata on %s",
 	async (version) => {
 		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const subscriber = new Subscriber(quic, version, toHop(1n));
 		const announced = subscriber.routes();
 		await opened(0);
 		const send = async (encode: (writer: Writer) => Promise<void>) => {
@@ -2321,7 +2305,7 @@ test.each([
 ] as const)("an unpinned SUBSCRIBE %s at a replacement or withdrawal", async (_, version, outcome) => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const announced = subscriber.routes();
 	try {
 		await opened(0);
@@ -2372,7 +2356,7 @@ test("a withdrawal while the subscribe opens closes the answered track", async (
 	const version = Version.DRAFT_06;
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession([2]);
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const announced = subscriber.routes();
 	try {
 		await opened(0);
@@ -2418,7 +2402,7 @@ test("a listing whose readers leave as its token settles never reaches the wire"
 	const subscriber = new Subscriber(
 		quic,
 		Version.DRAFT_07,
-		HopSchema.parse(1n),
+		toHop(1n),
 		undefined,
 		undefined,
 		undefined,
@@ -2441,7 +2425,7 @@ test.each(["track", "fetch", "open"] as const)(
 	"retirement settles coalesced fetches during %s setup",
 	async (stage) => {
 		const { quic, streams, opened } = fakeSession(stage === "open" ? [1] : []);
-		const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
+		const subscriber = new Subscriber(quic, Version.DRAFT_06, toHop(1n));
 		const retired = new AbortController();
 		const consumed = { id: 1, valid: retired.signal };
 		const path = Path.from("room");
@@ -2474,7 +2458,7 @@ test.each(["track", "fetch", "open"] as const)(
 
 test("retirement preserves an accepted fetch and its coalesced reads", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_06, toHop(1n));
 	const retired = new AbortController();
 	const consumed = { id: 1, valid: retired.signal };
 	const path = Path.from("room");
@@ -2499,7 +2483,7 @@ test("retirement preserves an accepted fetch and its coalesced reads", async () 
 test("consumes resolve the serving prefix and pin its instance", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const announced = subscriber.routes();
 	await opened(0);
 	const peer = new Writer(
@@ -2588,7 +2572,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	"pending metadata cancels on selection change and a live fallback can request again on %s",
 	async (version) => {
 		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const subscriber = new Subscriber(quic, version, toHop(1n));
 		const announced = subscriber.routes();
 		await opened(0);
 		const peer = new Writer(
@@ -2642,7 +2626,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 test("a cancelled queued PROBE open sends no request and leaves its slot to the next open", async () => {
 	const { quic, streams, opened } = fakeSession([0]);
 	const signal = new Signal<ProbeStats>({});
-	const subscriber = new Subscriber(quic, Version.DRAFT_03, HopSchema.parse(1n), signal);
+	const subscriber = new Subscriber(quic, Version.DRAFT_03, toHop(1n), signal);
 	const abort = new AbortController();
 	const probing = subscriber.runProbe(abort.signal);
 	await opened(0);
@@ -2678,7 +2662,7 @@ function drainReactions(): Promise<void> {
 
 test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const responseTask = Promise.withResolvers<void>();
 	const outcome = responseTask.promise.then(
 		() => undefined,
@@ -2758,7 +2742,7 @@ test.each(
 	),
 )("subscription waits release losing signal listeners on %s after %s", async (version, stop) => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const counters: ReturnType<typeof countChanges>[] = [];
 	// Observe the accepted producer before its update loop starts, without exporting a test hook.
 	const internal = subscriber as unknown as {
@@ -2811,7 +2795,7 @@ test.each(
 test.each([0, 5, 9000])("a received group numbers its frames from transport offset %s", async (frameStart) => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const consumer = broadcast.track("video");
 	const early = consumer.subscribe();
@@ -2872,7 +2856,7 @@ async function groupStream(timestamp: number, version: Version = Version.DRAFT_0
 // of order is accepted with its timestamp.
 test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received timestamps through", async (version) => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	// Old enough to keep every group, however far behind the newest start.
 	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(60_000) } });
@@ -2909,7 +2893,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 test("a lite-07 rewind is refused", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(60_000) } });
 	try {
@@ -2931,7 +2915,7 @@ test("a lite-07 rewind is refused", async () => {
 
 test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscription", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 	try {
@@ -2953,7 +2937,7 @@ test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscripti
 // Our SUBSCRIBE carries one range, so a lite-07 SUBSCRIBE_START with any other count is malformed.
 test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the protocol", async (starts) => {
 	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 	try {
@@ -2977,7 +2961,7 @@ test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the
 test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
 	try {
@@ -3010,7 +2994,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 test("a group wins over its stale drop on lite-07", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	type Entry = {
 		track: Producer;
 		tail: { covers(start: bigint, end: bigint): boolean; open(sequence: bigint): () => void };
@@ -3094,7 +3078,7 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	type Entry = {
 		track: Producer;
 		tail: {
@@ -3188,7 +3172,7 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 test("a skip or final drop replaces an earlier stale one on lite-07", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	type Entry = { track: Producer; tail: { covers(start: bigint, end: bigint): boolean } };
 	let entry: Entry | undefined;
 	const internal = subscriber as unknown as {
@@ -3250,7 +3234,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 test("a skip replaces a final drop but not a cached group on lite-07", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	type Entry = { track: Producer; tail: { covers(start: bigint, end: bigint): boolean } };
 	let entry: Entry | undefined;
 	const internal = subscriber as unknown as {
@@ -3328,7 +3312,7 @@ test.each(
 	const clock = new Manual();
 	const installed = clock.install();
 	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 	try {
@@ -3367,7 +3351,7 @@ test.each([
 ] as const)("a session death before the tail settles: %s", async (_, version, settled) => {
 	const installed = new Manual().install();
 	const { quic, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 	const died = new Error("session died");
@@ -3420,7 +3404,7 @@ test.each([
 	["lite-07 reset", Version.DRAFT_07, "reset"],
 ] as const)("an update the publisher stopped reading defers to its %s", async (_, version, end) => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 	try {
@@ -3468,7 +3452,7 @@ test.each([
 // track. Lite-05 sends the start group plus one, past the largest u62 here.
 test("an update whose bound the wire can't carry fails the track", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 	try {
@@ -3489,7 +3473,7 @@ test("an update whose bound the wire can't carry fails the track", async () => {
 test("a lite-07 drop naming an unsent update closes the session", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 	try {
@@ -3521,7 +3505,7 @@ test("a lite-07 drop naming an unsent update closes the session", async () => {
 
 test("an unknown subscribe response type closes the session", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 	try {
@@ -3542,7 +3526,7 @@ test("an unknown subscribe response type closes the session", async () => {
 
 test("closing a broadcast while TRACK_INFO is pending leaves no unhandled rejection", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const unhandled: unknown[] = [];
 	const onUnhandled = (reason: unknown) => unhandled.push(reason);
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -3664,7 +3648,7 @@ test.each(["answer", "credit"] as const)("FETCH waiting for %s ends with its cal
 	const clock = new Manual();
 	const installed = clock.install();
 	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
-	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const cancel = new AbortController();
 	let failure: unknown;
 	const fetch = subscriber
@@ -3747,7 +3731,7 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 		}),
 	} as unknown as WebTransport;
 	const peerSetup = new Signal<Setup | undefined>(new Setup({ probe: level }));
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n), new Signal<ProbeStats>({}), peerSetup);
+	const subscriber = new Subscriber(quic, version, toHop(1n), new Signal<ProbeStats>({}), peerSetup);
 	return {
 		subscriber,
 		sent,
@@ -3904,7 +3888,7 @@ test("an interleaved replacement mints a fresh instance", () => {
 // Reader demand applies inside a frame too, including when its peer never sends another byte.
 test("a FETCH stops a stalled frame only after its last coalesced reader leaves", async () => {
 	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n));
 	try {
 		const a = subscriber.fetchGroup(Path.from("room"), "video", 0n);
 		const b = subscriber.fetchGroup(Path.from("room"), "video", 0n);
@@ -3950,7 +3934,7 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 	const subscriber = new Subscriber(
 		quic,
 		version,
-		HopSchema.parse(1n),
+		toHop(1n),
 		undefined,
 		undefined,
 		undefined,
@@ -3993,7 +3977,7 @@ async function routedStream(options?: RouteOptions, getStats?: () => Promise<unk
 	const version = Version.DRAFT_07;
 	const { quic, opened } = fakeSession();
 	if (getStats) Object.assign(quic, { getStats });
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const another = async (index: number, scope?: Path.Pattern) => {
 		const announced = subscriber.routes(scope, options);
 		const stream = await opened(index);

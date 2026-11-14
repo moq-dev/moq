@@ -8,7 +8,7 @@ import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
-import { type Hop, HopSchema, randomHop } from "../hop.ts";
+import { type Hop, randomHop, toHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { hooks } from "../internal.ts";
 import { lines } from "../open.ts";
@@ -213,7 +213,7 @@ export class Connection implements Session {
 		lines(quic).probe = this.#probe;
 
 		this.#own = publish && wireOf(publish).own;
-		this.hop = hasRoutes(version) && this.#own ? HopSchema.parse(this.#own.hop) : randomHop();
+		this.hop = hasRoutes(version) && this.#own ? toHop(this.#own.hop) : randomHop();
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
 		this.#auth = new AuthSession({
@@ -439,7 +439,7 @@ export class Connection implements Session {
 			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
 			await new Setup({
 				probe,
-				hop: hasRoutes(this.#version) ? this.#own && HopSchema.parse(this.#own.node) : this.hop,
+				hop: hasRoutes(this.#version) ? this.#own && toHop(this.#own.node) : this.hop,
 				token: this.#token,
 				implementation: this.#implementation,
 				routeKey,

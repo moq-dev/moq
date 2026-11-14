@@ -1,5 +1,5 @@
 import { ProtocolViolation } from "../error.ts";
-import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "../hop.ts";
+import { type Cost, type Hop, MAX_HOPS, toHop, UNKNOWN_HOP, wireHop } from "../hop.ts";
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -204,7 +204,7 @@ async function decodeHops(r: Reader, version: Version): Promise<Hop[]> {
 			if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
 			const hops: Hop[] = [];
 			for (let i = 0; i < count; i++) {
-				hops.push(HopSchema.parse(await r.u62()));
+				hops.push(toHop(await r.u62()));
 			}
 			checkHops(hops);
 			return hops;
@@ -619,7 +619,7 @@ export class AnnounceRequest {
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceRequest> {
 		const prefix = Path.decode(await r.string());
-		const excludeHop = hasExcludeHop(version) ? HopSchema.parse(await r.u62()) : UNKNOWN_HOP;
+		const excludeHop = hasExcludeHop(version) ? toHop(await r.u62()) : UNKNOWN_HOP;
 		const hidden = hasHidden(version) ? await r.bool() : false;
 		return new AnnounceRequest(prefix, excludeHop, hidden);
 	}
@@ -721,7 +721,7 @@ export class AnnounceOk {
 		// The draft reserves 0 for "unknown": the responder was never assigned an id, or
 		// withholds it to obscure its routing. It names nobody, so callers must not stamp
 		// it onto a hop chain, but it is a legal message and not grounds to drop the stream.
-		const origin = HopSchema.parse(await r.u62());
+		const origin = toHop(await r.u62());
 		const active = hasSynced(version) ? 0 : await r.u53();
 		return new AnnounceOk(origin, active);
 	}

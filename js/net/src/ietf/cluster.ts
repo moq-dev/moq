@@ -25,7 +25,7 @@
  */
 
 import { ProtocolViolation, reason } from "../error.ts";
-import { type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
+import { type Hop, MAX_HOPS, toHop, UNKNOWN_HOP } from "../hop.ts";
 import * as Varint from "../varint.ts";
 // Type-only: SETUP loads eagerly and must not pull in the message parameter codec.
 import type { Parameters } from "./parameters.ts";
@@ -93,7 +93,7 @@ export function fromSetup(params: SetupOptions): Hop | undefined {
 	// 0 is legal: the peer speaks the extension but withholds its identity.
 	const value = params.getVarint(SetupOption.HopId);
 	if (value === undefined) return undefined;
-	return HopSchema.parse(value);
+	return toHop(value);
 }
 
 /**
@@ -233,7 +233,7 @@ function decodeHops(value: Uint8Array): Hop[] {
 	while (rest.length > 0) {
 		// A short read here means the entries did not exactly fill the length.
 		const [hop, remain] = Varint.decodeLeadingOnes(rest);
-		hops.push(HopSchema.parse(hop));
+		hops.push(toHop(hop));
 		rest = remain;
 
 		// Bail before the buffer does: a hostile length would otherwise cost us one
