@@ -746,8 +746,6 @@ impl Relay {
 				}
 			}
 		};
-		// No group to run, so this leg never resolves and the shared accept loop
-		// below decides the `select!` on its own.
 
 		let has_workers = workers.is_some();
 

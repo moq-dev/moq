@@ -2975,6 +2975,19 @@ mod tests {
 		}
 	}
 
+	/// A server with no stream listener reports nothing. QUIC multiplexes over one UDP
+	/// socket and never calls `accept`, so a zero counter would be a watch that cannot fire.
+	#[tokio::test]
+	async fn accept_health_is_empty_without_a_stream_listener() {
+		let mut config = crate::listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			..Default::default()
+		};
+		config.tls.generate = vec!["localhost".into()];
+		let server = config.init(Default::default()).expect("quic server");
+		assert!(server.accept_health().is_empty());
+	}
+
 	/// `certificates()` must stay readable with no runtime entered (no guard
 	/// escapes to the caller).
 	#[tokio::test]
