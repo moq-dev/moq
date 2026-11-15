@@ -7,6 +7,8 @@ reached, so `Shipping sizes` still runs on those nights.
 
 ## Plan
 
+Cleared 2026-11-15 (/quest-complete): the pin file is on `main` from [moq-dev/moq#8784](https://github.com/moq-dev/moq/pull/8784), and the publishing [run 43664475166](https://github.com/moq-dev/moq/actions/runs/43664475166) built linux/amd64 and linux/arm64.
+
 On 11-11 an apt DNS failure (`Temporary failure resolving
 'security.ubuntu.com'`) failed both `moq-gst / Build tarball` jobs and both
 `Package .deb/.rpm` jobs at their apt step, and so skipped `Shipping sizes`.
@@ -41,6 +43,3 @@ The other release-build failures from 11-11 to 11-12 are fixed: armv7 by
 cross toolchain by
 [moq-dev/moq#8668](https://github.com/moq-dev/moq/pull/8668).
 
-## Waiting
-
-- moq-dev/moq: the pin file `.github/docker/gstreamer/image` is on `main`, from moq-bot's `chore(ci): pin the newest GStreamer CI image` PR, which the first `gstreamer-ci.yml` run on `main` opens; check that run published both amd64 and arm64
