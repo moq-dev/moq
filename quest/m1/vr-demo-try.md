@@ -16,8 +16,11 @@ moq.dev with a looping VR180 broadcast once it plays well in a headset
 The harness (`just test vr`) proves the layout in headless Chromium on a
 desktop view only; a headset's per-eye render, recentre, and HRTF audio have
 had no human check. Run it with `just relay`, the `moq import fmp4` command in
-`doc/bin/demo.md#vr`, and `just vr serve`, then open the page on the headset
-(it needs a secure context, so serve it over HTTPS or tunnel to localhost).
+`doc/bin/demo.md#vr`, and `just vr serve`, then open the page on the headset.
+It needs a secure context, so serve it over HTTPS or tunnel it to the
+headset's localhost, and make the relay reachable too: `localhost:4443` on the
+headset is the headset itself, so forward that port as well or point the page
+at the relay with `?url=`.
 
 ## Waiting
 

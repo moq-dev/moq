@@ -77,7 +77,8 @@ desktop tab. It lays a broadcast out by the catalog's
 [spatial fields](/concept/hang#catalog): an equirectangular `projection` wraps
 the picture on a sphere spanning its field of view, `stereo` crops each eye
 from a packed frame, and an `ambisonic` audio layout decodes the sound field
-around the viewer's head. Without them it shows a flat screen with the sound
+around the viewer's head, at first order: a higher order plays only its first
+four channels. Without them it shows a flat screen with the sound
 coming from it.
 
 ```bash
