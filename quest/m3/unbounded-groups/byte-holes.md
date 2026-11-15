@@ -36,27 +36,16 @@ Decided 2026-11-13 (maintainer, /quest-complete):
   slice alone, and this quest keeps the rest (rejected: grow that PR to the
   whole quest).
 
-Landed in [moq-dev/moq#8699](https://github.com/moq-dev/moq/pull/8699), the
-first slice:
-
-- Lite-07 FETCH carries a `Start Byte` after `Frame Start`, in Rust, JS, and the
-  lite draft. The response's first frame states its full size and carries only
-  its bytes from there. A FETCH response has no header, so this needed no
-  group-header field.
-- A group copy can start partway into a frame: `group::Bounds::byte` keeps the
-  rest of that frame aside as the copy's `Lead`, outside the frame log. Every
-  whole-frame read finds that frame missing (`Lagged`). Only
-  `group::Consumer::at` with `poll_next_frame_at` reads it, from a byte at or
-  past the copy's start.
-- Route failover mid-frame (`frame::Consumer`'s `Recover`) asks for only the
-  missing suffix by byte. Its integration regression is
-  `rs/moq-net/tests/integration/byte_holes.rs`, with a 5 MiB frame. A frame
-  larger than the 32 MB tail waits on the frame cap below.
-- Rust readers already had a chunked payload read
-  (`frame::Consumer::read_chunk`), so nothing was added.
-- The byte stays crate-private (`group::Fetch::byte_start`, the fill's start).
-  Public `Position` did not gain a field, since nothing public reads a byte
-  position yet.
+[moq-dev/moq#8699](https://github.com/moq-dev/moq/pull/8699) landed a first
+slice: a lite-07 FETCH `Start Byte`, a group copy starting partway into a frame
+(`group::Bounds::byte` and a `Lead` outside the frame log), and `Recover`
+asking only for a half-read frame's rest. Decided 2026-11-14 (maintainer, on
+[moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ back it out
+of lite-07, since frames are capped at 32 MiB and only a chunk reader saved at
+most one frame's prefix per failover. The
+[backout](https://github.com/moq-dev/moq/pull/8837) restored refetch-and-skip;
+reverting it brings the slice back. This quest does not start until a consumer of frames
+over 32 MiB is named.
 
 What remains:
 
@@ -67,6 +56,7 @@ What remains:
   stays one `Bytes` at any size, so evicting part of it needs it split into
   segment slices, whose memory frees only once every slice drops, or copied
   into segments.
+- Restore the start-byte slice above on the current lite wip version.
 - Every sealed segment is evictable under the same policy as front frames,
   including one a reader is on. A reader keeps its current segment alive
   through its own reference, as prefetched frames are today. That memory
@@ -74,16 +64,16 @@ What remains:
   a `Payload::Chain` holds every segment through its `Arc<[Bytes]>` today, so
   the chain has to hand a reader one segment at a time. Only the writer's open
   segment stays resident. A reader at a shed segment boards a flight that
-  starts at its `(frame, byte)`: `FillState::fly` and `group::Bounds` already
-  carry the byte, and the flight's copy starts with a `Lead`.
+  starts at its `(frame, byte)`: `FillState::fly` and `group::Bounds` carry
+  the byte, and the flight's copy starts with a `Lead`.
 - A group stream that starts mid-frame (a relay holding only a group's tail,
   once segments shed) carries the byte offset in the lite wip GROUP header
   beside `Frame Start`, and still states the frame's full size. Older lite
   versions and moq-transport start only at frame or object boundaries. A
   reader inside a shed object refreshes or is `Evicted` there.
-- `MAX_CACHE_BYTES` stops capping a frame (`group::Producer::open_frame` and
-  `open_lead` refuse a larger one today). Then extend the failover regression
-  to a frame larger than the 32 MB tail.
+- `MAX_CACHE_BYTES` stops capping a frame (`group::Producer::open_frame` refuses a
+  larger one today). Then test failover mid-frame on a frame
+  larger than the 32 MB tail.
 - Drop the 32 MiB interop cap in `drafts/draft-lcurley-moq-e2ee.md` if it no
   longer follows from a model limit, and run `just drafts check`.
 - Test a frame several times the 32 MB tail through a relay chain: a late
@@ -93,3 +83,7 @@ What remains:
 Public API: `Position` gains a byte field only once a public reader needs a
 byte position, and `MAX_CACHE_BYTES` stops capping a frame. Wire: a byte
 offset on the current lite wip's group header.
+
+## Waiting
+
+- Maintainer: name a consumer of frames over 32 MiB, since the frame cap makes this work save little until one exists (an agent cannot pick a product need). Check: this quest's Plan names it.

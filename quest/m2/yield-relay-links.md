@@ -15,8 +15,8 @@ Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md).
 offers the `ietf` extension on both its listen and connect sides
 (`rs/moq-relay/src/config.rs`), so every relay-to-relay session negotiates it
 and no group yields there: a preempted group is reset with TooFarBehind and
-lost. Decide per track instead, the way Start Byte refuses only tracks that
-carry a MoqTransport Version; narrow the lite draft's YIELDED rule to match,
+lost. Decide per track instead, by whether the track carries a MoqTransport
+Version; narrow the lite draft's YIELDED rule to match,
 mirror it in `js/net` if it has the same check, add a test, and run
 `/verify-subscribe`.
 
