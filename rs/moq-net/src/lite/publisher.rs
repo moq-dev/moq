@@ -29,7 +29,7 @@ use crate::{
 
 use super::Version;
 
-mod routed;
+pub(super) mod routed;
 
 pub(super) struct PublisherConfig {
 	/// The runtime that arms the publisher's timers.
@@ -306,15 +306,16 @@ impl Publisher {
 	}
 }
 
-impl Drop for Publisher {
-	fn drop(&mut self) {
-		// Every announce stream closes with the session: disconnect them together.
-		let _closing = self.shared.origin.route_closing(self.shared.peer_setup.tag());
-		self.children = kio::Tasks::new();
-	}
-}
-
 impl Publisher {
+	/// What the session's route layer answers the peer from (lite-07).
+	pub fn route_publish(&self) -> super::subscriber::route_stream::Publish {
+		super::subscriber::route_stream::Publish {
+			origin: self.shared.origin.clone(),
+			auth: self.shared.auth.clone(),
+			withdrawal: self.shared.withdrawal.clone(),
+		}
+	}
+
 	/// The peer's latest PROBE target, or zero while it asks for none.
 	pub fn peer_target(&self) -> kio::Consumer<crate::bandwidth::Rate> {
 		self.shared.peer_target.consume()
@@ -447,6 +448,8 @@ impl Control {
 					// PROBE is lite-03+, GOAWAY lite-04+, the Track Stream and FETCH lite-05+, and the
 					// Auth and Tracks Streams lite-07+.
 					let kind = kind.filter(|kind| match kind {
+						// Lite-07 says everything about routing on a unidirectional stream.
+						lite::ControlType::Announce => !version.has_routes(),
 						lite::ControlType::Probe => !matches!(version, Version::Lite01 | Version::Lite02),
 						lite::ControlType::Goaway => version.has_goaway(),
 						lite::ControlType::Fetch | lite::ControlType::Track => version.has_track_stream(),
@@ -993,19 +996,6 @@ impl AnnounceServe {
 			stream.reader.poll_decode::<lite::AnnounceRequest>(waiter)
 		})?;
 		let prefix: crate::Path = interest.prefix.clone();
-		let hidden: bool = interest.hidden;
-		// Lite-07 answers from the origin's route node instead of the route table.
-		let answer: Option<routed::Answer> = self.shared.version.has_routes().then(|| {
-			routed::Answer::new(
-				self.shared.origin.clone(),
-				prefix.clone(),
-				hidden,
-				self.shared.auth.clone(),
-			)
-			.with_peer_setup(self.shared.peer_setup.clone())
-			.with_session(self.shared.session.clone(), self.shared.runtime.clone())
-		});
-
 		// The identity whose routes we filter out. Lite-04/05 carry it per
 		// announce stream; lite-06+ reads the session-wide SETUP Hop
 		// parameter, the same identity the subscribe path excludes. A peer that
@@ -1025,33 +1015,16 @@ impl AnnounceServe {
 			Some(hop) => Poll::Ready(*hop),
 			None => self.shared.peer_setup.poll_hop(waiter).map(|hop| hop.unwrap_or(*assigned)),
 		});
-		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) = match answer.is_some() {
-			// The route table goes unread.
-			true => {
-				let origin = self.shared.origin.empty();
-				let announced = origin.routes();
-				(
-					origin,
-					announced,
-					AnnounceRun::new(prefix, exclude_hop, self.shared.version),
-				)
-			}
-			false => self.start(prefix, exclude_hop, hidden),
-		};
+		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) = self.start(prefix, exclude_hop);
 
 		// Streaming announce updates.
 		wait!(Run => {
 			let stream = self.stream.as_mut().expect("stream present");
 			let withdrawing = self.shared.withdrawal.poll(waiter).is_ready();
-			let res = match answer {
-				Some(answer) => ready!(answer.poll(stream, withdrawing, waiter)),
-				None => {
-					if withdrawing {
-						run.withdraw(stream, origin, announced)?;
-					}
-					ready!(run.poll(stream, origin, announced, waiter))
-				}
-			};
+			if withdrawing {
+				run.withdraw(stream, origin, announced)?;
+			}
+			let res = ready!(run.poll(stream, origin, announced, waiter));
 			if let Err(err) = res {
 				Self::abort(&mut self.stream, origin.root(), err);
 			}
@@ -1077,12 +1050,7 @@ impl AnnounceServe {
 		stream.take().expect("stream present").writer.abort(&err);
 	}
 
-	fn start(
-		&self,
-		prefix: crate::Path,
-		exclude_hop: Hop,
-		hidden: bool,
-	) -> (origin::Consumer, origin::Routes, AnnounceRun) {
+	fn start(&self, prefix: crate::Path, exclude_hop: Hop) -> (origin::Consumer, origin::Routes, AnnounceRun) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -1109,12 +1077,6 @@ impl AnnounceServe {
 		let origin = match self.shared.version {
 			Version::Lite01 | Version::Lite02 => origin,
 			_ => origin.forwardable(),
-		};
-		// Hidden routes are left out unless the peer opted in. A publish origin that
-		// already opted in (the caller's choice for this peer) keeps them either way.
-		let origin = match hidden {
-			true => origin.with_hidden(true),
-			false => origin,
 		};
 		let announced = origin.routes();
 		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
@@ -1212,7 +1174,7 @@ impl AnnounceRun {
 		if let Some(remaining) = &mut self.initial {
 			*remaining = remaining.saturating_sub(1);
 			if *remaining == 0 {
-				stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+				stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 				self.initial = None;
 			}
 		}
@@ -1555,7 +1517,7 @@ impl AnnounceRun {
 			self.retract(stream, suffix.clone(), &origin.root().rejoin(&suffix))?;
 		}
 		if self.initial.take().is_some() {
-			stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+			stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 		}
 		self.phase = AnnouncePhase::Withdrawing;
 		Ok(())
@@ -1621,13 +1583,13 @@ impl AnnounceRun {
 				return Poll::Ready(res);
 			}
 			if self.initial == Some(0) {
-				stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+				stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 				self.initial = None;
 				continue;
 			}
 			let Poll::Ready(next) = announced.poll_next(waiter) else {
 				if self.initial.take().is_some() {
-					stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+					stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 					continue;
 				}
 				return Poll::Pending;
@@ -1648,7 +1610,7 @@ impl AnnounceRun {
 				}) => (update, false, false),
 				None => {
 					if self.initial.take().is_some() {
-						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+						stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 						continue;
 					}
 					// The buffer is empty (flushed at the loop top), so FIN now and
@@ -3720,7 +3682,7 @@ mod announce_test {
 		};
 		assert!(answer.poll(&mut stream, false, &kio::Waiter::noop()).is_pending());
 		wire.take_ok();
-		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Synced]);
+		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Synced { prefix: 0 }]);
 	}
 
 	/// A lite-07 peer sends nothing after its request: a byte more on the stream is a
@@ -3795,7 +3757,7 @@ mod announce_test {
 		wire.take_ok();
 		assert_eq!(
 			wire.take_announces(),
-			[lite::AnnounceBroadcast::Synced],
+			[lite::AnnounceBroadcast::Synced { prefix: 0 }],
 			"nothing shown"
 		);
 
@@ -3970,7 +3932,7 @@ mod announce_test {
 		assert!(
 			matches!(&messages[0], lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "z/retained")
 		);
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced);
+		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced { prefix: 0 });
 		assert!(!messages.iter().any(
 			|msg| matches!(msg, lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "z/removed")
 		));
@@ -4018,7 +3980,7 @@ mod announce_test {
 		wire.take_ok();
 		let messages = wire.take_announces();
 		assert!(matches!(&messages[1], lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "b"));
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced);
+		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced { prefix: 0 });
 		assert_eq!(messages[3], lite::AnnounceBroadcast::EndedId { id: 0 });
 	}
 
@@ -4072,11 +4034,11 @@ mod announce_test {
 			})
 			.collect();
 		assert_eq!(initial, std::collections::BTreeSet::from(["a", "b"]));
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced);
+		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced { prefix: 0 });
 		assert_eq!(
 			messages
 				.iter()
-				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Synced))
+				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Synced { prefix: 0 }))
 				.count(),
 			1
 		);
@@ -4120,7 +4082,7 @@ mod announce_test {
 			[
 				lite::AnnounceBroadcast::Active { .. },
 				lite::AnnounceBroadcast::EndedId { id: 0 },
-				lite::AnnounceBroadcast::Synced
+				lite::AnnounceBroadcast::Synced { prefix: 0 }
 			]
 		));
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
@@ -4157,7 +4119,7 @@ mod announce_test {
 				.is_pending()
 		);
 		wire.take_ok();
-		assert_eq!(wire.take_announces(), vec![lite::AnnounceBroadcast::Synced]);
+		assert_eq!(wire.take_announces(), vec![lite::AnnounceBroadcast::Synced { prefix: 0 }]);
 	}
 
 	/// The hops stamped on every harness route.
@@ -4313,7 +4275,7 @@ mod announce_test {
 		);
 		let mut initial = wire.take_announces();
 		if version.has_synced() {
-			assert_eq!(initial.pop(), Some(lite::AnnounceBroadcast::Synced));
+			assert_eq!(initial.pop(), Some(lite::AnnounceBroadcast::Synced { prefix: 0 }));
 		}
 		match initial.as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {

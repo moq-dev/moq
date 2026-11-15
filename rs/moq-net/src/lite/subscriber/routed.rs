@@ -1,10 +1,12 @@
-//! Lite-07: an announce stream this session asked for, feeding the origin's route node.
+//! Lite-07: what the peer sends on its Announce Stream as a publisher, feeding the
+//! origin's route node.
 //!
-//! The peer's routes, its DEADs, and its claims go to the [`route::Node`] as they arrive,
-//! a route's claim changes in one batch closed by its ANNOUNCE_FLOOR. The node decides
-//! which of its routes serve each claim it shows, and this stream puts the ones it is
-//! handed into the origin, minting a source per request that names the claim's publisher
-//! and the route it follows.
+//! The session asks the peer for a set of prefixes, edited in place as what the origin
+//! wants and what the session's permit allows change. The peer's routes, its DEADs, and
+//! its claims go to the [`route::Node`] as they arrive, a route's claim changes in one
+//! batch closed by its ANNOUNCE_FLOOR. The node decides which of its routes serve each
+//! claim it shows, and the session puts the ones it is handed into the origin, minting a
+//! source per request that names the claim's publisher and the route it follows.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap},
@@ -14,7 +16,7 @@ use std::{
 
 use crate::{
 	Error, Path,
-	lite::{self},
+	lite::{self, rekey},
 	route::{
 		self, node,
 		path::{Dead, Hop, Moved, Offer, Reach},
@@ -24,18 +26,38 @@ use crate::{
 
 use super::{AnnouncedRoute, Subscriber};
 
-/// One route the peer sent on the stream, by its Route ID.
-/// The parts of a DEAD read so far, which apply as one once its last arrives.
-struct Continued {
+/// A DEAD whose ROUTE_UPDATEs are still arriving: it applies with its last.
+struct Moving {
 	hop: Hop,
 	far: route::Id,
 	gone: bool,
-	/// The new offer of each route its parts moved, by Route ID.
+	/// How many ROUTE_UPDATEs are still to come.
+	left: u64,
+	/// The new offer of each route it moved, by Route ID.
 	offers: HashMap<u64, Result<Offer, Arc<[Hop]>>>,
 }
 
+/// A prefix this session asked the peer for, by its Prefix ID.
+struct Asked {
+	/// Absolute.
+	path: Path,
+	/// The peer answered the ANNOUNCE_REQUEST adding it, so its stream may name it.
+	live: bool,
+	/// The peer sent its initial set.
+	synced: bool,
+}
+
+/// The ANNOUNCE_REQUEST the peer has not answered yet.
+struct Editing {
+	remove: Vec<u64>,
+	add: Vec<u64>,
+}
+
+/// One route the peer sent on the stream, by its Route ID.
 struct WireRoute {
 	node: route::Id,
+	/// The requested prefix it lies in, absolute.
+	region: Path,
 	/// The prefix it covers, absolute, or `None` when this node refused the suffix the
 	/// peer forwarded, which leaves the route refused for good.
 	prefix: Option<Path>,
@@ -120,13 +142,11 @@ struct ServedClaim {
 /// A served claim's identity, its path, and the prefix of the route it is served along.
 type ServedKey = (route::Id, Path, Path);
 
-/// The route layer one lite-07 announce stream feeds.
-pub(super) struct Routed {
+/// The route layer a lite-07 session's peer feeds.
+pub(in crate::lite) struct Routed {
 	node: node::Node,
-	stream: node::Stream,
-	/// The session the stream belongs to.
-	peer: node::Peer,
-	/// The link the stream filed under, its scope aside.
+	stream: Arc<node::Stream>,
+	/// The link the session filed under, its scope and interest aside.
 	link: route::Link,
 	/// The permit it filed under. The node holds only the peer's claims its limit
 	/// admits; the regions alone can be wider.
@@ -135,28 +155,35 @@ pub(super) struct Routed {
 	peer_setup: crate::lite::PeerSetup,
 	/// Files them instead while the peer proved none: this session's own.
 	session_key: [u8; 32],
-	/// The requested prefix, absolute.
-	prefix: Path,
 	root: Path,
 	/// The session's origin handle, whose exclusions and mounts also gate the claims.
 	origin: crate::origin::Producer,
+	/// The prefixes the origin wants of the peer, relative to the root, each holding the
+	/// origin's readers unsynced until the peer's initial set for it is in.
+	wants: BTreeMap<Path, Option<crate::model::Snapshot>>,
+	/// The prefixes asked of the peer.
+	asked: BTreeMap<u64, Asked>,
+	next_prefix: u64,
+	editing: Option<Editing>,
+	/// The peer finished its stream: it answers nothing more.
+	finished: bool,
+	/// This side finished its stream: it asks for nothing more.
+	silent: bool,
 	routes: HashMap<u64, WireRoute>,
 	/// The live Route ID of each publisher and prefix: the stream carries at most one.
 	named: HashMap<(route::Id, Path), u64>,
 	next_route: u64,
 	claims: HashMap<u64, WireClaim>,
+	decoder: lite::AnnounceDecoder,
 	/// The session's announce cap: one slot per live route and claim.
 	slots: crate::session::Slots,
 	held: Vec<crate::session::Slot>,
 	served: HashMap<ServedKey, ServedClaim>,
-	/// What the stream served before it filed again, while the new one takes it up.
-	previous: HashMap<ServedKey, ServedClaim>,
 	/// Served claims whose request queue woke since the last pass.
 	ready: kio::Queue<ServedKey>,
 	/// The peer sent a GOAWAY: every claim served here ranks last.
 	drained: bool,
-	/// A DEAD whose next part the peer sends next.
-	continued: Option<Continued>,
+	moving: Option<Moving>,
 	/// The link's min RTT, which the peer's routes add.
 	rtt: route::LinkRtt,
 	/// When to read the link's RTT next, or `None` once it stopped reading.
@@ -168,23 +195,26 @@ pub(super) struct Routed {
 }
 
 impl Routed {
-	/// File a stream asking the peer for `prefix` (relative to the session's root).
-	pub(super) fn new(
+	/// File the session with the origin's node. `answering` is the handle the session
+	/// answers the peer from when it is on the same node: the two directions then share
+	/// one key, whose link also says what the peer is sent.
+	pub(in crate::lite) fn new(
 		subscriber: &Subscriber,
-		prefix: &Path,
 		link_cost: u64,
 		permit: &crate::auth::Permit,
+		answering: Option<&crate::origin::Consumer>,
 	) -> Result<Self, Error> {
 		let root = subscriber.origin.root().clone();
-		let prefix = root.join(prefix)?;
 		let link = route::Link {
 			// A zero-cost link never reaches here: SETUP refuses it on lite-07.
 			cost: link_cost.max(1),
 			priority: subscriber.origin.preference().value(),
-			upstream: subscriber.origin.link() == crate::origin::Link::Upstream,
-			// Only a stream this node answers is sent routes.
-			proxy: false,
+			upstream: subscriber.origin.link() == crate::origin::Link::Upstream
+				|| answering.is_some_and(|origin| origin.upstream()),
+			// Only a session that answers the peer here sends it routes.
+			proxy: answering.is_some_and(|origin| origin.proxy()),
 			scope: None,
+			interest: BTreeSet::new(),
 			// The node files the stream under its session.
 			..Default::default()
 		};
@@ -199,31 +229,35 @@ impl Routed {
 			node: peer_setup.node().map_or(0, |node| node.get()),
 		};
 		let key = peer_setup.route_key().unwrap_or(session_key);
-		let stream = (node.receive(peer, scoped(&link, &root, permit, key)))
+		let stream = (node.connect(peer, scoped(&link, &root, permit, key)))
 			.map_err(refused)?
 			.with_clock(subscriber.runtime.clone());
 		Ok(Self {
 			node,
-			stream,
-			peer,
+			stream: Arc::new(stream),
 			link,
 			permit: permit.clone(),
 			peer_setup,
 			session_key,
-			prefix,
 			root,
 			origin: subscriber.origin.clone(),
+			wants: BTreeMap::new(),
+			asked: BTreeMap::new(),
+			next_prefix: 0,
+			editing: None,
+			finished: false,
+			silent: false,
 			routes: HashMap::new(),
 			named: HashMap::new(),
 			next_route: 0,
 			claims: HashMap::new(),
+			decoder: Default::default(),
 			slots: subscriber.announces.clone(),
 			held: Vec::new(),
 			served: HashMap::new(),
-			previous: HashMap::new(),
 			ready: Default::default(),
 			drained: false,
-			continued: None,
+			moving: None,
 			rtt: Default::default(),
 			read_rtt: None,
 			sampling: false,
@@ -231,20 +265,355 @@ impl Routed {
 		})
 	}
 
-	/// Apply one message the peer sent on the stream.
-	pub(super) fn receive(
-		&mut self,
-		prefix: &Path,
-		announce: lite::AnnounceBroadcast,
-		decoder: &mut lite::AnnounceDecoder,
-	) -> Result<(), Error> {
-		use lite::AnnounceBroadcast as Msg;
-		// The parts of a DEAD arrive back to back.
-		if self.continued.is_some() && !matches!(announce, Msg::Dead(lite::Dead::Closed { .. })) {
+	/// The session's key on the node.
+	pub(in crate::lite) fn stream(&self) -> Arc<node::Stream> {
+		self.stream.clone()
+	}
+
+	/// The origin wants `prefix` of the peer, holding `snapshot` until its initial set is in.
+	pub(in crate::lite) fn want(&mut self, prefix: Path, snapshot: crate::model::Snapshot) {
+		self.wants.insert(prefix, Some(snapshot));
+		self.relink(false);
+	}
+
+	/// The origin no longer wants `prefix` of the peer.
+	pub(in crate::lite) fn unwant(&mut self, prefix: &Path) {
+		self.wants.remove(prefix);
+		self.relink(false);
+	}
+
+	/// The link the session files under now: what the origin wants, confined to what the
+	/// peer granted, and the scope the permit sets on the peer.
+	fn linked(&self) -> route::Link {
+		let granted = self.permit.granted_regions();
+		let mut interest = BTreeSet::new();
+		for want in self.wants.keys() {
+			let regions = match &granted {
+				// Whichever of the two lies within the other.
+				Some(regions) => (regions.iter())
+					.filter_map(|region| match () {
+						_ if region.has_prefix(want) => Some(region.clone()),
+						_ if want.has_prefix(region) => Some(want.clone()),
+						_ => None,
+					})
+					.collect(),
+				None => vec![want.clone()],
+			};
+			interest.extend(regions.iter().filter_map(|region| self.root.join(region).ok()));
+		}
+		let key = self.peer_setup.route_key().unwrap_or(self.session_key);
+		let link = route::Link {
+			interest,
+			..self.link.clone()
+		};
+		scoped(&link, &self.root, &self.permit, key)
+	}
+
+	/// File the session under its link as it stands now. With `refile`, the scope may
+	/// file the peer's routes differently, so each goes to the node again.
+	fn relink(&mut self, refile: bool) {
+		// The node refuses only a zero-cost link, which this one never is.
+		let _ = self.stream.relink(self.linked(), refile);
+		if !refile {
+			return;
+		}
+		let mut ids: Vec<_> = self.routes.keys().copied().collect();
+		ids.sort_unstable();
+		for id in &ids {
+			file_route(&self.stream, &self.routes[id]);
+		}
+		for id in &ids {
+			self.refile(*id);
+		}
+		self.stream.relinked();
+	}
+
+	/// Hand the node the claims of the route's last floor again: what the limit admits,
+	/// and the end of what it does not.
+	fn refile(&self, id: u64) {
+		let route = &self.routes[&id];
+		let prefix = route.prefix.as_ref().filter(|_| route.reach().is_some());
+		if let (Some(prefix), Some((claims, floor))) = (prefix, &route.committed) {
+			let changes = (claims.iter())
+				.map(|(path, claim)| {
+					let admitted = admits(&self.origin, &self.root, &self.permit, path);
+					(path.clone(), admitted.then(|| claim.clone()))
+				})
+				.collect();
+			self.stream.batch(route.node, prefix.clone(), changes, *floor);
+		}
+	}
+
+	/// Let the origin's readers see each prefix synced whose answer is in: the peer
+	/// answered every request, and sent the initial set of each prefix asked for it.
+	/// The caller serves what the node queued first.
+	pub(in crate::lite) fn release(&mut self) {
+		if self.wants.values().all(|snapshot| snapshot.is_none()) {
+			return;
+		}
+		if !self.finished && !self.silent {
+			let asked: BTreeSet<Path> = self.asked.values().map(|asked| asked.path.clone()).collect();
+			if self.editing.is_some() || self.stream.asks() != asked {
+				return;
+			}
+		}
+		for (want, snapshot) in &mut self.wants {
+			if snapshot.is_none() {
+				continue;
+			}
+			let Ok(want) = self.root.join(want) else {
+				*snapshot = None;
+				continue;
+			};
+			let mut answers = (self.asked.values())
+				.filter(|asked| route::within(&asked.path, &want) || route::within(&want, &asked.path));
+			if self.finished || self.silent || answers.all(|asked| asked.synced) {
+				*snapshot = None;
+			}
+		}
+	}
+
+	/// The peer finished its stream: it is leaving, and answers nothing more.
+	pub(in crate::lite) fn finish(&mut self) -> Result<(), Error> {
+		if self.moving.is_some() {
 			return Err(Error::ProtocolViolation);
 		}
+		self.finished = true;
+		let mut ids: Vec<_> = self.routes.keys().copied().collect();
+		ids.sort_unstable();
+		for id in ids {
+			let route = self.end_route(id)?;
+			if let (Some(_), Some(prefix)) = (route.reach(), route.prefix) {
+				self.stream.route(route.node, prefix, None);
+			}
+		}
+		Ok(())
+	}
+
+	/// This side finished its stream: the prefixes asked of the peer stay as they are.
+	pub(in crate::lite) fn silence(&mut self) {
+		self.silent = true;
+	}
+
+	/// The node asks the peer for other prefixes: the ANNOUNCE_REQUEST to send, if any.
+	fn ask(&mut self, edit: route::path::Edit) -> Option<lite::AnnounceBroadcast> {
+		// The node sends one edit at a time.
+		if self.editing.is_some() || self.finished || self.silent {
+			return None;
+		}
+		let mut editing = Editing {
+			remove: Vec::new(),
+			add: Vec::new(),
+		};
+		for path in &edit.remove {
+			let id = (self.asked.iter()).find(|(_, asked)| asked.live && asked.path == *path);
+			if let Some((id, _)) = id {
+				editing.remove.push(*id);
+			}
+		}
+		let mut add = Vec::new();
+		for path in edit.add {
+			// Asked for within the root, so named beneath it.
+			let Some(relative) = path.strip_prefix(&self.root) else {
+				continue;
+			};
+			let id = self.next_prefix;
+			self.next_prefix += 1;
+			let asked = Asked {
+				path,
+				live: false,
+				synced: false,
+			};
+			self.asked.insert(id, asked);
+			editing.add.push(id);
+			// Hidden claims too: the session mirrors the peer into the origin, and each
+			// local reader opts in on its own.
+			add.push((relative, true));
+		}
+		let request = lite::AnnounceBroadcast::Request {
+			remove: editing.remove.clone(),
+			add,
+		};
+		self.editing = Some(editing);
+		Some(request)
+	}
+
+	/// ANNOUNCE_OK: the last edit takes effect on the peer's stream. Its live routes
+	/// carry over as [`rekey::plan`] says, which the peer applies alike.
+	fn ok(&mut self) -> Result<(), Error> {
+		let editing = self.editing.take().ok_or(Error::ProtocolViolation)?;
+		// The marker lies between batches.
+		if self.routes.values().any(|route| !route.pending.is_empty()) {
+			return Err(Error::ProtocolViolation);
+		}
+		let old: BTreeSet<Path> = (self.asked.values())
+			.filter(|asked| asked.live)
+			.map(|asked| asked.path.clone())
+			.collect();
+		for id in &editing.remove {
+			self.asked.remove(id);
+		}
+		let mut added = Vec::new();
+		for id in &editing.add {
+			let asked = self.asked.get_mut(id).expect("an added prefix");
+			asked.live = true;
+			added.push(asked.path.clone());
+		}
+		let new: BTreeSet<Path> = self.asked.values().map(|asked| asked.path.clone()).collect();
+
+		let own = self.node.hop();
+		let table: BTreeMap<u64, rekey::Route> = (self.routes.iter())
+			.map(|(id, route)| {
+				let route = rekey::Route {
+					node: route.node,
+					prefix: route.prefix.clone().unwrap_or_else(|| route.region.clone()),
+					region: route.region.clone(),
+					order: rekey::order(route.held, route.offer.as_ref().map_err(|path| &**path), own),
+					claims: route.claims.clone(),
+				};
+				(*id, route)
+			})
+			.collect();
+		let plan = rekey::plan(&old, &new, &added, &table, self.next_route, self.decoder.next());
+		let routes = std::mem::take(&mut self.routes);
+		let claims = std::mem::take(&mut self.claims);
+		let mut moved = Vec::new();
+		for carried in plan.routes {
+			let source = &routes[&carried.from];
+			let mut route = WireRoute {
+				node: source.node,
+				region: carried.region,
+				prefix: source.prefix.as_ref().map(|_| carried.prefix.clone()),
+				offer: source.offer.clone(),
+				held: source.held,
+				claims: BTreeMap::new(),
+				unnamed: BTreeSet::new(),
+				withheld: BTreeSet::new(),
+				pending: BTreeMap::new(),
+				committed: None,
+			};
+			let mut committed = BTreeMap::new();
+			for (path, claim) in &carried.claims {
+				let held = claims[&claim.from].claim.clone();
+				if claim.id != claim.from {
+					let relative = path.strip_prefix(&self.root).unwrap_or_default();
+					let assigned = self.decoder.insert(relative);
+					debug_assert_eq!(assigned, claim.id, "both ends assign the same id");
+				}
+				match &held {
+					Some(held) => {
+						committed.insert(path.clone(), held.clone());
+					}
+					None => {
+						route.withheld.insert(claim.id);
+					}
+				}
+				route.claims.insert(path.clone(), claim.id);
+				let claim_route = carried.id;
+				self.claims.insert(
+					claim.id,
+					WireClaim {
+						route: claim_route,
+						path: Some(path.clone()),
+						claim: held,
+					},
+				);
+			}
+			// A claim without a path stays with the route it was sent under.
+			if carried.id == carried.from {
+				for id in &source.unnamed {
+					route.unnamed.insert(*id);
+					self.claims.insert(
+						*id,
+						WireClaim {
+							route: carried.id,
+							path: None,
+							claim: None,
+						},
+					);
+				}
+			}
+			route.committed = match (carried.kind, &source.committed) {
+				(rekey::Kind::Stays, committed) => committed.clone(),
+				// The floors certified only the narrower prefix.
+				(rekey::Kind::Widens, _) => Some((committed, None)),
+				(rekey::Kind::Narrows, source) => Some((committed, source.as_ref().and_then(|(_, floor)| *floor))),
+			};
+			if carried.kind != rekey::Kind::Stays {
+				moved.push(carried.id);
+			}
+			self.routes.insert(carried.id, route);
+		}
+		self.next_route = plan.next_route;
+		for id in claims.keys() {
+			if !self.claims.contains_key(id) {
+				self.decoder.end(*id)?;
+			}
+		}
+		self.named = (self.routes.iter())
+			.filter(|(_, route)| route.node != 0)
+			.filter_map(|(id, route)| Some(((route.node, route.prefix.clone()?), *id)))
+			.collect();
+		let holding = self.routes.len() + self.claims.len();
+		self.held.truncate(holding);
+		while self.held.len() < holding {
+			self.held.push(self.slots.acquire()?);
+		}
+
+		// The node carries what it holds over the same way. A route this node refused
+		// is not there to carry, so each route that moved is filed as it now stands.
+		self.stream.edited();
+		moved.sort_unstable();
+		for id in moved {
+			file_route(&self.stream, &self.routes[&id]);
+			self.refile(id);
+		}
+		Ok(())
+	}
+
+	/// Apply one message the peer sent on its stream as a publisher.
+	pub(in crate::lite) fn receive(&mut self, announce: lite::AnnounceBroadcast) -> Result<(), Error> {
+		use lite::AnnounceBroadcast as Msg;
+		// A DEAD's ROUTE_UPDATEs arrive back to back.
+		if let Some(moving) = &mut self.moving {
+			let (id, offer) = match announce {
+				Msg::RouteUpdate { id, offer } => (id, Ok(offer)),
+				Msg::Refused {
+					message: lite::Refusable::RouteUpdate { id, path },
+					reason,
+				} => {
+					tracing::warn!(route = id, %reason, "refusing a forwarded route");
+					self.stats.refuse_route();
+					(id, Err(path))
+				}
+				_ => return Err(Error::ProtocolViolation),
+			};
+			// Each names a live route through the hop, once.
+			let through = (self.routes.get(&id)).is_some_and(|route| route.path().contains(&moving.hop));
+			if !through || moving.offers.insert(id, offer).is_some() {
+				return Err(Error::ProtocolViolation);
+			}
+			moving.left -= 1;
+			if moving.left == 0 {
+				let moving = self.moving.take().expect("matched above");
+				self.apply_dead(moving)?;
+			}
+			return Ok(());
+		}
 		match announce {
-			Msg::RouteStart { node, suffix, offer } => self.route_start(node, Some(suffix), Ok(offer))?,
+			Msg::Ok => self.ok()?,
+			Msg::Synced { prefix } => {
+				let asked = (self.asked.get_mut(&prefix)).filter(|asked| asked.live && !asked.synced);
+				asked.ok_or(Error::ProtocolViolation)?.synced = true;
+			}
+			// The peer's own requests go to the half answering them.
+			Msg::Request { .. } => return Err(Error::ProtocolViolation),
+			Msg::RouteStart {
+				node,
+				prefix,
+				suffix,
+				offer,
+			} => self.route_start(node, prefix, Some(suffix), Ok(offer))?,
 			Msg::RouteUpdate { id, offer } => self.offer(id, Ok(offer))?,
 			Msg::RouteHold { id } => {
 				let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
@@ -253,12 +622,12 @@ impl Routed {
 				self.sync(id, before);
 			}
 			Msg::RouteEnd { id } => {
-				let route = self.end_route(id, decoder)?;
+				let route = self.end_route(id)?;
 				if let (Some(_), Some(prefix)) = (route.reach(), route.prefix) {
 					self.stream.route(route.node, prefix, None);
 				}
 			}
-			Msg::Dead(dead) => self.dead(dead, decoder)?,
+			Msg::Dead(dead) => self.dead(dead)?,
 			Msg::Floor { id, revision } => {
 				let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				let revision = revision.filter(|_| route.certifies());
@@ -285,11 +654,11 @@ impl Routed {
 				hops,
 				cost,
 			} => {
-				let path = decoder.start(Some(suffix))?;
-				let path = self.claim_path(prefix, path);
+				let path = self.decoder.start(Some(suffix))?;
+				let path = self.claim_path(path);
 				let claim = claim(instance, epoch, cost, hops)?;
-				let id = decoder.last();
-				// Fields valid alone can still resolve, or join the prefix, past the path limits.
+				let id = self.decoder.last();
+				// Fields valid alone can still resolve, or join the root, past the path limits.
 				if path.is_none() {
 					let reason = lite::Refusal::Path;
 					tracing::warn!(route, claim = id, %reason, "refusing a forwarded claim");
@@ -324,31 +693,37 @@ impl Routed {
 				self.pending(id, change)?;
 			}
 			Msg::EndedId { id } => {
-				decoder.end(id)?;
+				self.decoder.end(id)?;
 				self.end(id)?;
 			}
-			Msg::Refused { message, reason } => self.refused(prefix, message, reason, decoder)?,
+			Msg::Refused { message, reason } => self.refused(message, reason)?,
 			// Lite-07 ends a claim by its Announce ID only.
 			Msg::Ended { .. } => return Err(Error::ProtocolViolation),
 			// Only a relay choosing a parent per broadcast uses warm routes, which this
 			// endpoint does not do.
 			Msg::WarmStart { .. } | Msg::WarmUpdate { .. } | Msg::WarmEnd { .. } => {}
-			Msg::Skipped | Msg::Synced => {}
+			Msg::Skipped => {}
 		}
 		Ok(())
 	}
 
-	/// The peer started a route to `node` with the next Route ID, covering the stream's
-	/// prefix joined with `suffix`, along `offer`, or along the path of an offer this
-	/// node refuses. A route with no suffix, or to the reserved node, stays refused.
+	/// The peer started a route to `node` with the next Route ID, covering the requested
+	/// prefix `asked` joined with `suffix`, along `offer`, or along the path of an offer
+	/// this node refuses. A route with no suffix, or to the reserved node, stays refused.
 	fn route_start(
 		&mut self,
 		node: route::Id,
+		asked: u64,
 		suffix: Option<Path>,
 		offer: Result<Offer, Arc<[Hop]>>,
 	) -> Result<(), Error> {
+		// The peer names a prefix in effect on its stream.
+		let region = (self.asked.get(&asked).filter(|asked| asked.live))
+			.ok_or(Error::ProtocolViolation)?
+			.path
+			.clone();
 		// Fields valid alone can still join the prefix past the path limits.
-		let prefix = suffix.and_then(|suffix| self.prefix.join(&suffix).ok());
+		let prefix = suffix.and_then(|suffix| region.join(&suffix).ok());
 		let key = prefix.clone().filter(|_| node != 0).map(|prefix| (node, prefix));
 		// The peer keeps one route per publisher and prefix.
 		if key.as_ref().is_some_and(|key| self.named.contains_key(key)) {
@@ -362,6 +737,7 @@ impl Routed {
 		}
 		let route = WireRoute {
 			node,
+			region,
 			prefix,
 			offer,
 			held: false,
@@ -410,7 +786,7 @@ impl Routed {
 	}
 
 	/// End the route with Route ID `id` and every claim under it, as ROUTE_END does.
-	fn end_route(&mut self, id: u64, decoder: &mut lite::AnnounceDecoder) -> Result<WireRoute, Error> {
+	fn end_route(&mut self, id: u64) -> Result<WireRoute, Error> {
 		let route = self.routes.remove(&id).ok_or(Error::ProtocolViolation)?;
 		if let Some(prefix) = &route.prefix
 			&& self.named.get(&(route.node, prefix.clone())) == Some(&id)
@@ -418,7 +794,7 @@ impl Routed {
 			self.named.remove(&(route.node, prefix.clone()));
 		}
 		for claim in route.claims.values().chain(&route.unnamed) {
-			decoder.end(*claim)?;
+			self.decoder.end(*claim)?;
 			self.claims.remove(claim);
 			self.held.pop();
 		}
@@ -428,9 +804,10 @@ impl Routed {
 
 	/// A DEAD: the stream's routes through the hop it names carry on as it says, which the
 	/// node is told as the peer's news. A route this node refuses still follows it, so
-	/// the two ends agree on which routes live. A DEAD in parts applies with its last.
-	fn dead(&mut self, dead: lite::Dead, decoder: &mut lite::AnnounceDecoder) -> Result<(), Error> {
-		let (hop, far, gone, more, moved) = match dead {
+	/// the two ends agree on which routes live. One that moves routes applies with the
+	/// last of the ROUTE_UPDATEs following it.
+	fn dead(&mut self, dead: lite::Dead) -> Result<(), Error> {
+		let moving = match dead {
 			lite::Dead::Drain { node } => {
 				// The node ranks a scoped peer's routes through `node` draining by their
 				// offers alone, so the offers keep it for a new limit to file again.
@@ -446,44 +823,43 @@ impl Routed {
 				self.stream.dead(Dead::Draining { node });
 				return Ok(());
 			}
-			lite::Dead::Closed {
+			lite::Dead::Closed { hop, far, gone, moved } => Moving {
 				hop,
 				far,
 				gone,
-				more,
-				moved,
-			} => (hop, far, gone, more, moved),
+				left: moved,
+				offers: HashMap::new(),
+			},
 		};
-		let mut parts = self.continued.take().unwrap_or(Continued {
+		// It moves only routes through the hop, so what its updates hold stays within
+		// the stream's routes.
+		let through = self.routes.values().filter(|route| route.path().contains(&moving.hop));
+		if moving.left > through.count() as u64 {
+			return Err(Error::ProtocolViolation);
+		}
+		match moving.left {
+			0 => self.apply_dead(moving),
+			_ => {
+				self.moving = Some(moving);
+				Ok(())
+			}
+		}
+	}
+
+	/// Apply a DEAD and the offers its ROUTE_UPDATEs gave as one.
+	fn apply_dead(&mut self, moving: Moving) -> Result<(), Error> {
+		let Moving {
 			hop,
 			far,
 			gone,
-			offers: HashMap::new(),
-		});
-		if (parts.hop, parts.far, parts.gone) != (hop, far, gone) {
-			return Err(Error::ProtocolViolation);
-		}
-		// Each part names live routes, so what the parts hold stays within the stream's.
-		for (id, heard) in moved {
-			if !self.routes.contains_key(&id) {
-				return Err(Error::ProtocolViolation);
-			}
-			let heard = heard.map_err(|refused| {
-				tracing::warn!(route = id, reason = %refused.reason, "refusing a forwarded route");
-				self.stats.refuse_route();
-				refused.path
-			});
-			parts.offers.insert(id, heard);
-		}
-		if more {
-			self.continued = Some(parts);
-			return Ok(());
-		}
+			offers,
+			..
+		} = moving;
 		// The node applies only a DEAD it credits. One it drops still changes the stream's
 		// routes, as the peer applies it to what it sent, so the node then hears each
 		// change as the peer's own end, hold, or update, and both keep the same routes.
 		let credited = self.stream.credits(hop, far);
-		let mut offers = parts.offers;
+		let mut offers = offers;
 		let mut ids: Vec<u64> = (self.routes.iter())
 			.filter(|(_, route)| route.path().contains(&hop))
 			.map(|(id, _)| *id)
@@ -525,7 +901,7 @@ impl Routed {
 			}
 		}
 		for id in ended {
-			let route = self.end_route(id, decoder)?;
+			let route = self.end_route(id)?;
 			if let (false, Some(_), Some(prefix)) = (credited, route.reach(), route.prefix) {
 				self.stream.route(route.node, prefix, None);
 			}
@@ -551,18 +927,17 @@ impl Routed {
 
 	/// Apply a message whose content, which the peer only forwarded, this node refuses:
 	/// withdraw the route or claim it names, and keep the stream.
-	fn refused(
-		&mut self,
-		prefix: &Path,
-		message: lite::Refusable,
-		reason: lite::Refusal,
-		decoder: &mut lite::AnnounceDecoder,
-	) -> Result<(), Error> {
+	fn refused(&mut self, message: lite::Refusable, reason: lite::Refusal) -> Result<(), Error> {
 		use lite::Refusable;
 		match message {
-			Refusable::RouteStart { node, suffix, path } => {
+			Refusable::RouteStart {
+				node,
+				prefix,
+				suffix,
+				path,
+			} => {
 				tracing::warn!(node, %reason, "refusing a forwarded route");
-				self.route_start(node, suffix, Err(path))?;
+				self.route_start(node, prefix, suffix, Err(path))?;
 			}
 			Refusable::RouteUpdate { id, path } => {
 				let node = self.routes.get(&id).ok_or(Error::ProtocolViolation)?.node;
@@ -570,9 +945,9 @@ impl Routed {
 				self.offer(id, Err(path))?;
 			}
 			Refusable::Start { route, suffix } => {
-				let path = decoder.start(suffix)?;
-				let path = self.claim_path(prefix, path);
-				let id = decoder.last();
+				let path = self.decoder.start(suffix)?;
+				let path = self.claim_path(path);
+				let id = self.decoder.last();
 				tracing::warn!(route, claim = id, %reason, "refusing a forwarded claim");
 				self.start(id, route, path, None)?;
 			}
@@ -613,11 +988,10 @@ impl Routed {
 		self.stream.batch(node, prefix, changes, revision);
 	}
 
-	/// The absolute path of a claim under the stream's prefix, or `None` when it, or the
-	/// suffix it joins, is no path this node can hold.
-	fn claim_path(&self, prefix: &Path, suffix: Option<Path>) -> Option<Path> {
-		let path = prefix.join(&suffix?).ok()?;
-		self.root.join(&path).ok()
+	/// The absolute path of a claim the peer named `path`, or `None` when it is no path
+	/// this node can hold.
+	fn claim_path(&self, path: Option<Path>) -> Option<Path> {
+		self.root.join(&path?).ok()
 	}
 
 	/// A claim the peer started under `route`, assigned Announce ID `id`, at `path` unless
@@ -677,20 +1051,8 @@ impl Routed {
 		Ok(())
 	}
 
-	/// Move what the stream holds onto a budget of its own with the session's cap, while a
-	/// request replacing it takes the same claims over on the session's. The session's
-	/// count is then the replacement's alone, and a peer flooding this stream fails it
-	/// on its own budget: at most twice the cap, during one handover.
-	pub(super) fn hand_over(&mut self) {
-		let slots = self.slots.split();
-		for slot in self.held.iter_mut() {
-			*slot = slots.hold();
-		}
-		self.slots = slots;
-	}
-
 	/// The peer sent a GOAWAY: its routes rank below every other. Idempotent.
-	pub(super) fn goaway(&mut self, subscriber: &Subscriber) {
+	pub(in crate::lite) fn goaway(&mut self) {
 		if self.drained {
 			return;
 		}
@@ -699,66 +1061,40 @@ impl Routed {
 		for served in self.served.values_mut() {
 			served.route.drain();
 		}
-		self.outputs(subscriber);
 	}
 
-	/// The session's permit changed. A new limit files the stream again, the peer's
-	/// routes and the claims the limit admits replayed before the old stream lets go:
-	/// it may change the scope, the claims admitted, the claims the node may serve
-	/// here, and what the floors certify. The peer still holds each claim either way.
-	pub(super) fn limit(&mut self, subscriber: &Subscriber, permit: &crate::auth::Permit) -> Result<(), Error> {
+	/// The session's permit changed. A new limit files the peer's routes and the claims
+	/// it admits again, under the scope it sets: it may change the scope, the claims
+	/// admitted, the claims the node may serve here, and what the floors certify. What
+	/// the peer granted changes the prefixes asked of it. The peer still holds each
+	/// claim either way.
+	pub(in crate::lite) fn limit(&mut self, permit: &crate::auth::Permit) {
 		let same = permit.same_limit(&self.permit);
+		let asks = permit.granted_regions() == self.permit.granted_regions();
 		self.permit = permit.clone();
-		if same {
-			return Ok(());
+		if !same || !asks {
+			self.relink(!same);
 		}
-		let key = self.peer_setup.route_key().unwrap_or(self.session_key);
-		let stream = self
-			.node
-			.receive(self.peer, scoped(&self.link, &self.root, permit, key))
-			.map_err(refused)?
-			.with_clock(subscriber.runtime.clone());
-		stream.rtt(self.rtt.reported());
-		// What the old stream served stays in the origin until the new one serves it
-		// again, or lets go after.
-		let previous = std::mem::take(&mut self.served);
-		let mut ids: Vec<_> = self.routes.keys().copied().collect();
-		ids.sort_unstable();
-		for id in &ids {
-			file_route(&stream, &self.routes[id]);
-		}
-		for id in &ids {
-			let route = &self.routes[id];
-			let prefix = route.prefix.as_ref().filter(|_| route.reach().is_some());
-			if let (Some(prefix), Some((claims, floor))) = (prefix, &route.committed) {
-				let changes = (claims.iter())
-					.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
-					.map(|(path, claim)| (path.clone(), Some(claim.clone())));
-				stream.batch(route.node, prefix.clone(), changes.collect(), *floor);
+	}
+
+	/// Act on what the node queued for this half of the session: serve the claims it
+	/// hands over, and return the ANNOUNCE_REQUEST asking the peer for what it now wants.
+	pub(in crate::lite) fn output(
+		&mut self,
+		subscriber: &Subscriber,
+		output: node::Output,
+	) -> Option<lite::AnnounceBroadcast> {
+		self.sample(subscriber);
+		match output {
+			node::Output::Ask(edit) => self.ask(edit),
+			output => {
+				self.served(subscriber, output);
+				None
 			}
 		}
-		if self.drained {
-			stream.goaway();
-		}
-		// The old stream retires once the new one carries what it did.
-		drop(std::mem::replace(&mut self.stream, stream));
-		self.previous = previous;
-		self.outputs(subscriber);
-		// What the new stream no longer serves is let go here, not ended by its origin.
-		self.previous.clear();
-		Ok(())
 	}
 
-	/// Act on everything the node queued for the stream: serve the claims it hands
-	/// over.
-	pub(super) fn outputs(&mut self, subscriber: &Subscriber) {
-		self.sample(subscriber);
-		while let Some(output) = self.stream.try_output() {
-			self.output(subscriber, output);
-		}
-	}
-
-	fn output(&mut self, subscriber: &Subscriber, output: node::Output) {
+	fn served(&mut self, subscriber: &Subscriber, output: node::Output) {
 		match output {
 			node::Output::Serve {
 				id,
@@ -780,8 +1116,8 @@ impl Routed {
 					served.route.dynamic.withdrawn();
 				}
 			}
-			// A stream this node asked for is never sent routes.
-			node::Output::Route { .. } | node::Output::Batch { .. } | node::Output::Dead(_) => {}
+			// What the peer is sent goes to the half answering it.
+			_ => {}
 		}
 	}
 
@@ -821,7 +1157,7 @@ impl Routed {
 			|| hops.len() > self.origin.max_hops().get()
 		{
 			tracing::debug!(route = %subscriber.log_path(&path), node = id, "dropping looped claim");
-			for entry in self.previous.remove(&key).into_iter().chain(self.served.remove(&key)) {
+			if let Some(entry) = self.served.remove(&key) {
 				entry.route.dynamic.withdrawn();
 			}
 			return;
@@ -845,9 +1181,6 @@ impl Routed {
 			.with_draining(self.drained || served.draining)
 			.with_available(served.available)
 			.with_rtt(served.rtt);
-		if let Some(entry) = self.previous.remove(&key) {
-			self.served.insert(key.clone(), entry);
-		}
 		if let Some(entry) = self.served.get_mut(&key) {
 			let same = entry.route.route.instance == route.instance && entry.route.route.epoch == route.epoch;
 			if same {
@@ -913,15 +1246,12 @@ impl Routed {
 	}
 
 	/// Serve requests on every claim whose queue woke.
-	pub(super) fn poll(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) -> Result<(), Error> {
+	pub(in crate::lite) fn poll(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) {
 		self.sample(subscriber);
 		while let Some(read_rtt) = &mut self.read_rtt
 			&& read_rtt.poll(waiter).is_ready()
 		{
 			self.read_link(subscriber);
-		}
-		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
-			self.output(subscriber, output);
 		}
 		while let Poll::Ready(Ok(key)) = self.ready.poll_pop(waiter) {
 			let Some(entry) = self.served.get_mut(&key) else {
@@ -929,7 +1259,6 @@ impl Routed {
 			};
 			super::mint_sources(subscriber, &mut entry.route, (entry.named, entry.depth));
 		}
-		Ok(())
 	}
 }
 

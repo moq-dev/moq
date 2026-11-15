@@ -409,6 +409,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		)?;
 	}
 
+	let route_publish = publisher.route_publish();
 	let driver = Driver {
 		auth: Present {
 			stats: stats.clone(),
@@ -428,7 +429,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
 		ended: None,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber, early, client),
+		subscriber: SubscriberDriver::new(subscriber, early, client, route_publish),
 		session,
 		withholding,
 	};

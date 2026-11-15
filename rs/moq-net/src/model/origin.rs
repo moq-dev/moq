@@ -2408,13 +2408,6 @@ impl Producer {
 		self.consume().route_node()
 	}
 
-	/// See [`Consumer::route_closing`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
-		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing(tag))
-	}
-
 	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
 	/// session created the route node: a relay translating this node's claims for a
 	/// lite-06 peer starts their chain with it. It is this origin's own hop until the
@@ -7486,16 +7479,6 @@ impl Consumer {
 			None => crate::route::node::declared_for(self.hop),
 		};
 		id.and_then(NonZeroU64::new)
-	}
-
-	/// Hold back the disconnect of every route stream of the session `tag` dropped until
-	/// the guard is released, so the session closing costs the route layer one recompute
-	/// and reports its hops dead; `None` while no session created the route node, which
-	/// then has no streams.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
-		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The route layer node every lite-07 session on this origin shares, created on

@@ -104,6 +104,20 @@ impl AnnounceDecoder {
 		Ok(suffix)
 	}
 
+	/// The next unassigned id.
+	pub fn next(&self) -> u64 {
+		self.live.next
+	}
+
+	/// Assign the next id to a claim at `path` that no ANNOUNCE_START carries: an edit of
+	/// the stream's prefixes presents a live claim there.
+	pub fn insert(&mut self, path: Path) -> u64 {
+		let id = self.live.next;
+		self.live.next += 1;
+		self.live.suffixes.insert(id, path);
+		id
+	}
+
 	/// The id the last start assigned.
 	pub fn last(&self) -> u64 {
 		self.live.next.saturating_sub(1)
@@ -232,6 +246,21 @@ impl AnnounceEncoder {
 		self.heads.insert(suffix.parts(), id);
 		self.live.suffixes.insert(id, suffix);
 		(Some(id), path)
+	}
+
+	/// The next unassigned id.
+	pub fn next(&self) -> u64 {
+		self.live.next
+	}
+
+	/// Assign the next id to a claim at `path` without an ANNOUNCE_START: an edit of the
+	/// stream's prefixes presents a live claim there.
+	pub fn insert(&mut self, path: Path) -> u64 {
+		let id = self.live.next;
+		self.live.next += 1;
+		self.heads.insert(path.parts(), id);
+		self.live.suffixes.insert(id, path);
+		id
 	}
 
 	/// An ANNOUNCE_END for a live `id`.
