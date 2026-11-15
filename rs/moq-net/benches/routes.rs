@@ -35,11 +35,12 @@
 //!   DRAIN notice is kept; the sessions axis is not.
 //! - path/repath: a relay hears one publisher's route move onto another path, and
 //!   answers streams the route misses. Swept over the claims behind the route and those
-//!   streams: neither axis is expected to grow.
+//!   streams: neither axis is expected to grow, though the streams axis does today
+//!   (`route::tests::cost::residual_a_route_change_visits_every_unrelated_stream`).
 //! - path/relink: the RTT of the link every route arrives on changes. Swept over the
 //!   publishers behind the link and the streams their routes miss: the publishers axis
-//!   is expected to grow, since each route changes; the streams axis is not, though today
-//!   it does (`route::tests::cost::residual_a_link_update_visits_every_unrelated_stream`).
+//!   is expected to grow, since each route changes; the streams axis is not, though it
+//!   does today, as above.
 //!
 //! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
