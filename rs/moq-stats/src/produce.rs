@@ -3192,7 +3192,10 @@ mod tests {
 				first = Some(first.map_or(start, |first: u64| first.min(start)));
 			}
 			let first = first.expect("a run's first group is listed");
-			assert!(track.is_skipped(0..first), "a run says nothing precedes its first group");
+			assert!(
+				track.is_skipped(0..first),
+				"a run says nothing precedes its first group"
+			);
 			(name, Some(first))
 		};
 
