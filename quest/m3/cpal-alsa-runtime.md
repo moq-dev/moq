@@ -64,8 +64,10 @@ fall-through goal, so prefer it.
 
 Fallback if upstream declines: fork `cpal`, `alsa`, and `alsa-sys` as
 published crates, as moq-v4l was. It is the only in-tree route that reaches
-`cargo install moq-cli`, at the cost of carrying three forks for one library;
-the maintainer decides if it comes to that.
+`cargo install moq-cli`, at the cost of carrying three forks for one library.
+Decided 2026-11-15 (maintainer, /quest-complete, on
+[cli-packaging](/quest/m3/cli-packaging.md)): keep waiting, and take the
+fork only once the wait becomes a blocker.
 
 Rejected in-tree routes, for whoever retries this: a `[patch.crates-io]` fork
 of `alsa-sys` does not reach `cargo install moq-cli` or crates.io consumers

@@ -550,10 +550,11 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-Firefox's replacement case is quarantined from the default run after intermittent
-audio-tone failures. Investigate the missing tone samples alongside
-[the audio playout work](https://github.com/moq-dev/moq/pull/8058), then restore it.
-Run it explicitly with `just test media --media-engines firefox --media-cases replacement`;
+The replacement case is quarantined from the default run on every engine: under CPU
+load it intermittently leaves the audio stalled past the switch bound after a route
+switch or fallback (the viewer logs `skipping missing groups` on the audio track first),
+and Firefox also showed intermittent missing tone samples. Run it explicitly with
+`just test media --media-cases replacement`, or `--media-cases replacement --media-engines firefox` for Firefox;
 its content, sync, switch, and fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with

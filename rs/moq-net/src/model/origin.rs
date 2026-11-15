@@ -519,10 +519,6 @@ pub struct RouteInfo {
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
 	pub(crate) available: bool,
-
-	/// The round trip to the route's origin node; see [`Self::rtt`]. Never forwarded:
-	/// each node measures its own link.
-	pub(crate) rtt: Option<Duration>,
 }
 
 impl RouteInfo {
@@ -541,14 +537,14 @@ impl RouteInfo {
 			lane: Lane::default(),
 			draining: false,
 			available: true,
-			rtt: None,
 		}
 	}
 }
 
 /// Which of the lite-07 route layer's routes to a publisher a route follows: one per
 /// prefix covering the claim. Only the narrowest live one is primary, which a reader
-/// here follows; a request a peer forwards follows the one it names.
+/// here follows, falling back on a wider one only while none is; a request a peer
+/// forwards follows the one it names.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Lane {
 	/// How many segments the route's prefix has, absolute.
@@ -608,17 +604,6 @@ impl RouteInfo {
 	/// and finally the most recently announced route. See [`Cost`].
 	pub fn cost(&self) -> Cost {
 		self.cost
-	}
-
-	/// The round trip to the route's origin node over moq-lite-07, informational: it
-	/// never ranks or selects a route.
-	///
-	/// Each link on the path adds its min RTT, the lowest smoothed RTT it measured over
-	/// the last 30 seconds, this session's own link included. `None` on any other wire,
-	/// on a route this origin serves itself, and while any link on the path has no
-	/// measurement.
-	pub fn rtt(&self) -> Option<Duration> {
-		self.rtt
 	}
 
 	/// Whether a usable path reaches the route's origin. An unavailable route is held:
@@ -694,13 +679,6 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_available(mut self, available: bool) -> Self {
 		self.available = available;
-		self
-	}
-
-	/// Set the round trip to the route's origin node; see [`Self::rtt`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn with_rtt(mut self, rtt: Option<Duration>) -> Self {
-		self.rtt = rtt;
 		self
 	}
 
@@ -857,10 +835,14 @@ impl<'a> Epochs<'a> {
 }
 
 /// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]).
-/// Lower wins: first a route that is neither draining (see [`RouteInfo::draining`]) nor
-/// unavailable (see [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held
-/// route ranks below every other eligible route and serves only as a last resort. Then the higher link [`Preference`], so metrics from different operators
-/// are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
+/// Lower wins: first the route layer's narrowest route covering the claim, so a wider
+/// lite-07 route ranks below every narrowest one, even a draining or unavailable one, and
+/// serves only while a closing session leaves no narrowest route. Then a route that is
+/// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
+/// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
+/// every other eligible route and serves only as a last resort. Then the route layer's
+/// selected route ahead of its alternates. Then the higher link [`Preference`], so
+/// metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
 /// of the instance and `path`, so every node converges on the same winner, then, among
@@ -885,6 +867,10 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		None => (entry.is_anonymous(), entry.hops.len()),
 	};
 	(
+		// The route layer's narrowest route ahead of a wider one covering the claim. The
+		// wider one serves only between a closing session taking the narrowest away and the
+		// node promoting the next, so a reader fails over then rather than seeing an end.
+		!entry.lane.primary,
 		entry.draining || !entry.available,
 		// The route layer's selected route ahead of its alternates.
 		!entry.lane.selected,
@@ -914,6 +900,7 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 type RouteOrder = (
 	bool,
 	bool,
+	bool,
 	Reverse<Preference>,
 	bool,
 	Cost,
@@ -923,7 +910,7 @@ type RouteOrder = (
 	Reverse<u64>,
 );
 
-/// The `(hops, cost, source, instance, epoch, auth, node, available, rtt)` metadata
+/// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata
 /// an announce cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
@@ -934,7 +921,6 @@ type RouteMeta = (
 	Option<crate::auth::Credential>,
 	Option<u64>,
 	bool,
-	Option<Duration>,
 );
 
 /// The earlier of two optional deadlines.
@@ -1340,7 +1326,6 @@ impl OriginConsumerState {
 				node: meta.6,
 				draining: false,
 				available: meta.7,
-				rtt: meta.8,
 				lane: Lane::default(),
 			},
 		};
@@ -1386,8 +1371,6 @@ struct RouteEntry {
 	draining: bool,
 	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
 	available: bool,
-	/// The round trip to the route's origin node; see [`RouteInfo::rtt`].
-	rtt: Option<Duration>,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Claim`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -1456,13 +1439,12 @@ impl RouteEntry {
 			self.auth.clone(),
 			self.node,
 			self.available,
-			self.rtt,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available, rtt) = meta;
+		let (hops, cost, source, instance, epoch, auth, node, available) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1471,7 +1453,6 @@ impl RouteEntry {
 			&& *auth == self.auth
 			&& *node == self.node
 			&& *available == self.available
-			&& *rtt == self.rtt
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -1588,7 +1569,8 @@ struct Horizon {
 /// through that node's routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum NodeFilter {
-	/// Every route, of the route layer's only the primary ones (see [`Lane`]).
+	/// Every route. Of the route layer's, the primary ones rank first (see [`Lane`]), so
+	/// a wider covering route serves only while no narrower one does.
 	#[default]
 	Any,
 	/// Only the routes this node serves itself.
@@ -1605,7 +1587,7 @@ pub(crate) enum NodeFilter {
 impl NodeFilter {
 	fn admits(self, node: Option<u64>, lane: &Lane) -> bool {
 		match self {
-			Self::Any => node.is_none() || lane.primary,
+			Self::Any => true,
 			Self::Own => node.is_none(),
 			Self::Route { node: id, depth } => node == Some(id) && lane.depth == depth,
 		}
@@ -3069,7 +3051,6 @@ impl Announcing {
 				lane: route.lane.clone(),
 				draining: route.draining,
 				available: route.available,
-				rtt: route.rtt,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -3695,7 +3676,6 @@ impl AnnounceProducer {
 			entry.lane = route.lane.clone();
 			entry.draining = route.draining;
 			entry.available = route.available;
-			entry.rtt = route.rtt;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
@@ -3758,7 +3738,6 @@ impl AnnounceProducer {
 			lane: entry.lane.clone(),
 			draining: entry.draining,
 			available: entry.available,
-			rtt: entry.rtt,
 		})
 	}
 

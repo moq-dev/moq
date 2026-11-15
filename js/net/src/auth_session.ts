@@ -62,22 +62,15 @@ export class Duplicate extends Error {
 export const RETRY_INITIAL = Duration.millis(1000);
 const RETRY_MAX = Duration.millis(30_000);
 
-// Whether a refusal is the acceptor failing to decide rather than its verdict on the token,
-// such as an unreachable auth server or a full verification queue.
-function transient(err: Error | null): boolean {
-	return (
-		err instanceof SessionError &&
-		(err.code === SessionCode.Internal ||
-			err.code === SessionCode.TooManyRequests ||
-			err.code === SessionCode.Timeout)
-	);
+// Whether a token's stream ending with `result` is the peer's verdict on it: a final refusal,
+// Unsupported, or a clean close after a grant. Anything else left the token undecided.
+function isVerdict(refused: Refused | undefined, granted: boolean, result: Error | null): boolean {
+	return refused === "final" || result instanceof Unsupported || (result === null && granted);
 }
 
-// Whether a token's stream ending with `result` is the peer's verdict on it: a refusal that will
-// not pass, Unsupported, or a clean close after a grant. Anything else left the token undecided.
-function isVerdict(refused: boolean, granted: boolean, result: Error | null): boolean {
-	return (refused && !transient(result)) || result instanceof Unsupported || (result === null && granted);
-}
+// How the peer refused the last attempt with a reply: "undecided" when its code says the acceptor
+// failed to decide, so the token is presented again, or "final".
+type Refused = "final" | "undecided";
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
 export interface WireGrant {
@@ -86,8 +79,11 @@ export interface WireGrant {
 	expires?: number;
 }
 
-/** One reply read off a presented token's stream. @internal */
-export type WireReply = { grant: WireGrant } | { refused: Error };
+/**
+ * One reply read off a presented token's stream. A refusal is `undecided` when its code says the
+ * acceptor failed to decide, so the token is presented again after a backoff. @internal
+ */
+export type WireReply = { grant: WireGrant } | { refused: Error; undecided: boolean };
 
 /**
  * How one wire carries AUTH, AUTH_OK, and AUTH_ERROR, so moq-lite and moq-transport share
@@ -875,14 +871,14 @@ export class AuthSession {
 		let result: Error | null = null;
 		let closed = false;
 		// The peer refused the last attempt with a reply, rather than losing its stream.
-		let refused = false;
+		let refused: Refused | undefined;
 		// The peer granted the token, so a clean close ends the grant. A retry clears it.
 		let granted = false;
 		// The peer replied to an earlier attempt, so it knows AUTH.
 		let replied = false;
 		let delay: Duration | undefined;
 		for (;;) {
-			refused = false;
+			refused = undefined;
 			// Whether the peer answered this token, so a close is not the peer predating AUTH:
 			// a grant on this stream, or a reply to an earlier one that this retry follows.
 			let answered = replied;
@@ -927,14 +923,11 @@ export class AuthSession {
 					}
 					console.warn("auth token refused", reply.refused);
 					// A refused setup token leaves an empty union, not an unknown (unrestricted)
-					// one. A grant the acceptor could not tell, or never judged, is unknown, not empty.
-					const goingAway =
-						reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway;
-					if (!goingAway && !(reply.refused instanceof Unsupported)) this.#replied = true;
+					// one. A grant the acceptor could not tell is unknown, not empty.
+					if (!(reply.refused instanceof Unsupported)) this.#replied = true;
 					result = reply.refused;
 					replied = true;
-					// A peer going away judged nothing, so the successor presents the token instead.
-					refused = !goingAway;
+					refused = reply.undecided ? "undecided" : "final";
 					stream.close();
 					break;
 				}
@@ -970,7 +963,7 @@ export class AuthSession {
 				presented.withdrawn ||
 				presented.ended ||
 				result instanceof ProtocolViolation ||
-				(!refused && this.#state.own)
+				(refused === undefined && this.#state.own)
 			)
 				break;
 			presented.grant = undefined;
@@ -984,13 +977,13 @@ export class AuthSession {
 			await sleep(delay, { signal: presented.retry.signal }).catch(() => void 0);
 			presented.retry = undefined;
 			if (this.#closed || presented.withdrawn || presented.ended) {
-				refused = false;
+				refused = undefined;
 				result = null;
 				break;
 			}
 			// After a GOAWAY the peer must not see new streams: the successor presents it.
 			if (this.#draining()) {
-				refused = false;
+				refused = undefined;
 				result = new StreamError(StreamCode.GoingAway);
 				break;
 			}

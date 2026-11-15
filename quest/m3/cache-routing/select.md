@@ -1,65 +1,56 @@
-# [XL] Warm routes and per-broadcast parent selection
+# [XL] Relays pull each broadcast from the cheapest copy
 
 ## Goal
 
-Relays send warm routes as the
-[epic](/quest/m3/cache-routing/README.md) decides. Each relay pulls every
-demanded broadcast through its cheapest eligible neighbor, and moves an
-existing copy when a cheaper eligible one appears or its warm parent
-withdraws. A peer that never sends warm routes sees only cold routes and
-behaves as it does today. Relays export how many upstream copies they hold
-and how many moves warm routes caused.
+Relays learn of warm copies the way
+[warmth](/quest/m2/multicast/warmth.md) picked, and each pulls every demanded
+broadcast from the cheapest copy of its Instance, moving an existing pull
+only when the route it uses gets worse or ends, or another is strictly
+cheaper in summed cost. A peer that sends no warm signal is treated as cold
+and behaves as it does today. Relays export how many upstream copies they
+hold and how many moves a warm copy caused.
 
 ## Plan
 
-- Implement the rule the [epic](/quest/m3/cache-routing/README.md)'s item 14
-  records ([moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732)) by
-  moving `decide` and `offer_from` out of `rs/moq-net/src/route/tests/cache.rs`
-  into production code that the fixtures and sweep then drive, the way `Sim`
-  drives `path::Router`: today they test the rule against itself and pass
-  without touching the session. Add a check of the Goal's efficiency to
-  `steady()`, copies held against a cold-routing baseline, since a rule that
-  never offered a copy passes the sweep now. The rule covers the
-  warm messages and SUBSCRIBE's `Warm` byte (which return to the wire with
-  it, below), warm state derived from each front's demand, and the choice of
-  what to pull. The long sweep already runs nightly from
-  `test/route-sweep.sh`.
+Rewritten 2026-11-15 (maintainer, /quest-plan on
+[cache-aware multicast](/quest/m2/multicast/README.md)): the rule this was
+to build, item 14 of the [epic](/quest/m3/cache-routing/README.md)'s earlier
+Plan, is replaced. The warmth quest's PR fills in the mechanism here once
+the maintainer has picked it.
+
+What holds whichever is picked:
+
+- A warm link costs its warm price and a cold one its cold price, both at
+  least 1, summed from the source along the path the data takes.
 - Extend today's selection rather than adding a second selector.
   `route_order` in `rs/moq-net/src/model/origin.rs` already hashes equal
   routes per path, and a front already moves to a better route of its own
-  instance and resplices (`rs/moq-net/src/model/front.rs`).
-- A warm route names the origin and instance it carries, and a front moves
-  only to a copy of its own instance.
-- Bound the warm state a peer can make a relay hold by design, as
-  announcements are bounded.
-- Each pull sets SUBSCRIBE's `Warm` byte, which #8732 put in place of the
-  `Serves` field; `js/net`, which forwards nothing, sends 0 (follow the
-  route) and skips the warm types as unknown.
-- Export upstream copies held, warm routes sent and received, and moves by
-  cause through the relay's existing metrics.
+  Instance and resplices (`rs/moq-net/src/model/front.rs`). A front moves
+  only to a copy of its own Instance.
+- The rule runs in production code that the fixtures and sweeps drive. The
+  stripped rule lived only in a test simulator that checked it against
+  itself, so a rule that never offered a copy passed.
+- Check the Goal's efficiency: copies held against plain path routing.
+- Bound the warm state a peer can make a relay hold by design.
+- Export upstream copies held and moves by cause through the relay's
+  existing metrics.
 - `rs/moq-net/AGENTS.md` says a relay behaves the same warm or cold. That
-  covers answers to requests; warm routes change only which neighbor a
-  request goes to. If the rule's wording contradicts warm routes, bring a
-  rewording to the maintainer.
+  covers answers to requests; this changes which neighbour a request goes
+  to. Bring a rewording to the maintainer if the two contradict.
 
-Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)):
-✅ lite-07 freezes without the warm wire
-([moq-dev/moq#8840](https://github.com/moq-dev/moq/pull/8840) stripped it),
-so this quest re-adds WARM_START, WARM_UPDATE, WARM_END, and SUBSCRIBE's
-`Warm` byte in the then-current wip version, and first measures copies and
-relays crossed against plain path routing on an edge/core topology: if the
-only gain is LAN siblings with their own uplinks, the maintainer reopens
-moving the epic downstream. The merge gate no longer runs
-`sweep_cache_routing`; only the nightly `sweep_cache_routing_long` does.
+Decided 2026-11-14 (maintainer, pick on
+[moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ lite-07
+freezes without a warm wire, so whatever wire the pick needs lands in the
+then-current wip version with this.
 
-Public API: report any relay configuration added for warm routes. Wire: the
-warm messages and the `Warm` byte return in the then-current wip version,
-with the draft's Warm Routes section, which the freeze deleted: restore its
-text and the codecs in `rs/moq-net/src/lite/announce.rs`,
-`rs/moq-net/src/lite/subscribe.rs`, and `js/net/src/lite/subscribe.ts` from
-commit `250a13a17`.
+Public API: report any relay configuration added, such as a warm cost per
+link. Wire: whatever the pick needs, in the then-current wip version.
+
+## Required
+
+- [Warmth](/quest/m2/multicast/warmth.md) - picks the mechanism this builds
+- [The switch](/quest/m2/multicast/switch.md) - the route layer it ranks on
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer driving lite-07 sessions since [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023); its switch to path routes deletes the feasibility distances this rule once read
-- [Transient cycles](/quest/m3/cache-routing/transient-cycles.md) - lowers the churn-time pull cycles the rule allows
+- [Route health](/quest/m3/route-health/README.md) - its metadata-only subscription is the query if the pick is to ask on subscribe

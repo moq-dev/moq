@@ -115,7 +115,7 @@ Timestamp provenance landed in
 timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): Required names every quest that may still change lite-07 bytes.
-The explicit `Oldest` anchor rides [time addressing's model](/quest/m2/time-addressing/model.md),
+The explicit `Oldest` anchor rides [time addressing's model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md),
 whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries.
 
 Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about
@@ -129,8 +129,9 @@ maintainer picked these on
 [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)), applying the maintainer's rule that m2 keeps only what
 would need a breaking release had it landed right after the cut:
 
-- ✅ [The request loop](/quest/m3/cluster-routing/request-loop.md) moved
+- ✅ [The request loop](/quest/m2/multicast/requests.md) moved
   to m3 and no longer gates this: a fixture and a fix with no wire change.
+  It returned to m2 on 2026-11-15 and still does not gate this.
 - ✅ [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) stays
   in [Routes and announces](/quest/m2/cluster-routes/README.md), so this
   still waits on it (maintainer, /quest-complete on
@@ -154,16 +155,22 @@ would need a breaking release had it landed right after the cut:
   both publishers already name a Group Stream the subscriber stopped in
   SUBSCRIBE_DROP, which the draft now states, even after a reliable reset.
 
+Decided 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅
+lite-07 carries the redesigned route layer of
+[cache-aware multicast](/quest/m2/multicast/README.md), and the cut waits
+for it (rejected: freezing lite-07 with the path rule and redesigning in
+lite-08; freezing lite-07 with no route layer). That redesign removes the
+Route Key Parameter, so the 2026-11-10 wait on its symbolic model and the
+route key lane's early signal above end when
+[the switch](/quest/m2/multicast/switch.md) lands.
+
 ## Required
 
+- [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [ROUTE's RTT](/quest/m2/route-rtt.md) - removes ROUTE's informational RTT
-- [FETCH Start Byte](/quest/m2/fetch-start-byte.md) - removes FETCH's byte offset into a half-read frame
-- [Yield on relay links](/quest/m2/yield-relay-links.md) - narrows YIELDED from `ietf` sessions to tracks carrying moq-transport records
 - [Subscriber Min Age](/quest/m2/subscriber-min-age.md) - removes SUBSCRIBE's minimum age, which nothing reads
-- [AUTH_ERROR retries](/quest/m2/auth-retry-codes.md) - writes down which refusal codes a presenter retries
 
 ## Related
 

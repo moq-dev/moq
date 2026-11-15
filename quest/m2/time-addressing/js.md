@@ -7,7 +7,7 @@ model, lite-07 wire, and legacy mapping, with the same names.
 
 ## Plan
 
-Mirror [the model](/quest/m2/time-addressing/model.md) and
+Mirror [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md) and
 [the lite-07 wire](/quest/m2/time-addressing/lite07.md), including strictly
 increasing starts, the three group ends, reach from a group's own end, and
 `Relative(n)` counting groups. The gap machinery that assumes `sequence + 1`

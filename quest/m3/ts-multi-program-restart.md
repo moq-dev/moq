@@ -23,8 +23,11 @@ restart path, so a changed `transport_stream_id` still ends the whole
 import.
 
 - Reuse #7780's step judgement and its "carry nothing" rule rather than a
-  second mechanism; decide whether the switch restarts every program or only
-  the ones whose identity or clock changed, and say why in the PR.
+  second mechanism, and the single-program `ts::Republish`
+  (`rs/moq-mux/src/container/ts/republish.rs`) for minting each program's next
+  instance with its measured mux rate, rather than a fourth copy; decide
+  whether the switch restarts every program or only the ones whose identity or
+  clock changed, and say why in the PR.
 - Keep the [MPEG-TS guide](/doc/bin/ts.md#programs-and-changes)'s
   rules for PAT changes that aren't a source switch (a moved PMT PID, a
   program added or removed) as they are.

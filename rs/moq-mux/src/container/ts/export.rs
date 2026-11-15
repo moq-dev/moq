@@ -211,6 +211,14 @@ where
 	/// none and the output is unpadded ([`Schedule`]).
 	mux_rate: Option<u64>,
 	mux_rate_override: Option<u64>,
+	/// The newest catalog snapshot while the export waits for the rate a TS import has yet to
+	/// measure: the tracks are subscribed once it ends, so the export joins the media as it is
+	/// then, not on frames that went stale during the wait.
+	held_catalog: Option<Catalog<S::Ext>>,
+	/// Until when that wait lasts, set by the first snapshot that records no rate.
+	rate_until: Option<kio::clock::Instant>,
+	rate_wait: Duration,
+	rate_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
 	/// the stream.
@@ -1639,6 +1647,10 @@ where
 			trimmed: 0,
 			mux_rate: None,
 			mux_rate_override: None,
+			held_catalog: None,
+			rate_until: None,
+			rate_wait: super::mux_rate::WAIT,
+			rate_timer: None,
 		}
 	}
 }
@@ -1710,6 +1722,13 @@ where
 		self.program.mux_rate_override = Some(mux_rate);
 		self.program.mux_rate = sanitize_mux_rate(mux_rate);
 		self.program.schedule.set_rate(self.program.mux_rate);
+		self
+	}
+
+	/// Start at once on a catalog that records no rate, for a test whose clock a wait would move.
+	#[cfg(test)]
+	pub(super) fn without_rate_wait(mut self) -> Self {
+		self.program.rate_wait = Duration::ZERO;
 		self
 	}
 
@@ -2132,13 +2151,20 @@ where
 			match catalog.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => {
 					self.program.cataloged = true;
-					self.update_catalog(snapshot)?
+					self.program.held_catalog = Some(snapshot);
 				}
 				Poll::Ready(None) => {
 					self.program.feed = Feed::Ended;
 					break;
 				}
 				Poll::Pending => break,
+			}
+		}
+		if let Some(mut snapshot) = self.program.held_catalog.take() {
+			if self.awaiting_rate(&mut snapshot, waiter) {
+				self.program.held_catalog = Some(snapshot);
+			} else {
+				self.update_catalog(snapshot)?;
 			}
 		}
 
@@ -2230,6 +2256,45 @@ where
 		}
 
 		Ok(true)
+	}
+
+	/// Whether the first catalog waits for the rate a TS import is still measuring, which only a
+	/// padded output reads. The wait ends with the rate or at its deadline, whichever comes first.
+	fn awaiting_rate(&mut self, catalog: &mut Catalog<S::Ext>, waiter: &kio::Waiter) -> bool {
+		let program = &mut self.program;
+		// A catalog that ended gains no rate.
+		if program.mux_rate_override.is_some()
+			|| program.psi.is_some()
+			|| !program.tracks.is_empty()
+			|| !matches!(program.feed, Feed::Live)
+		{
+			return false;
+		}
+		// A catalog without the section came from no TS import.
+		let measuring = catalog
+			.ext
+			.mpegts_mut()
+			.is_some_and(|mpegts| mpegts.mux_rate.is_none() && !mpegts.is_empty());
+		if !measuring {
+			program.rate_timer = None;
+			return false;
+		}
+		let until = *program
+			.rate_until
+			.get_or_insert_with(|| kio::clock::now().saturating_add(program.rate_wait));
+		if kio::clock::now() >= until {
+			program.rate_timer = None;
+			return false;
+		}
+		let timer = program
+			.rate_timer
+			.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(until)));
+		// An elapsed deadline is ready on this first poll, so a wait never ends without a waker.
+		if waiter.poll_future(timer.as_mut()).is_ready() {
+			program.rate_timer = None;
+			return false;
+		}
+		true
 	}
 
 	/// The program playing failed with `err`. Only a publisher that left is survivable: its
@@ -3003,6 +3068,7 @@ where
 		self.next_program += 1;
 		next.replay = self.program.replay;
 		next.mux_rate_override = self.program.mux_rate_override;
+		next.rate_wait = self.program.rate_wait;
 		next
 	}
 
