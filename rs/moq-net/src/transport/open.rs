@@ -651,7 +651,7 @@ mod tests {
 		let credit = Mutex::new(Credit::default());
 		// Live subscriptions in their own groups, numbering their groups far apart.
 		let groups = [("early", 10), ("late", 1_000_000)]
-			.map(|(name, sequence)| (name, sequence, session.send_group(0).expect("the sink opens groups")));
+			.map(|(name, key)| (name, key, session.send_group(0).expect("the sink opens groups")));
 		let waiter = kio::Waiter::noop();
 		let mut order = Vec::new();
 		for round in 0..4 {
@@ -659,10 +659,10 @@ mod tests {
 			// up a group once its successor exists.
 			let mut opens: Vec<_> = groups
 				.iter()
-				.map(|(name, sequence, group)| {
+				.map(|(name, key, group)| {
 					let options = SendOptions {
 						group: Some(group),
-						priority: sequence + round,
+						priority: key + round,
 					};
 					(*name, options, Open::default())
 				})

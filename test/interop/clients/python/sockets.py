@@ -33,7 +33,7 @@ async def exchange(stream: socket.TrackStream) -> None:
     for _ in range(3):
         group = stream.producer.append_group()
         for payload in PAYLOADS:
-            group.write_frame(payload)
+            group.write_frame(payload, moq.Timestamp.unscaled(group.sequence))
         group.finish()
     stream.producer.finish()
     received = [(group.sequence, [frame.payload async for frame in group]) async for group in stream.consumer]

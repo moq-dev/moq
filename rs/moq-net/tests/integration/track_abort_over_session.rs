@@ -4,6 +4,8 @@
 //! subscriber on the far side of one session.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
@@ -49,8 +51,8 @@ async fn after_abort(version: &str, hops: u32) {
 		.unwrap()
 		.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-	let mut open = track.append_group().unwrap();
-	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
+	let mut open = track.append_next().unwrap();
+	open.write_frame(open.at_start(), b"head".as_ref()).unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"head".as_ref());
 	track.abort(moq_net::Error::Cancel).unwrap();
@@ -90,14 +92,14 @@ async fn recreate(finish: bool) {
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	let remote = origin.consume().request("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-	let mut open = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
-	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
+	let mut open = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
+	open.write_frame(open.at_start(), b"head".as_ref()).unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
-	assert_eq!(group.sequence, 2);
+	assert_eq!(group.start, 2);
 	group.read_frame().await.unwrap().unwrap();
 	track.abort(moq_net::Error::Cancel).unwrap();
 	let fresh = broadcast.broadcast().create_track("video", timed()).unwrap();
-	let mut next = fresh.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
+	let mut next = fresh.create_group(moq_net::group::Info { start: 3 }).unwrap();
 	next.write_frame(Timestamp::from_millis(1).unwrap(), b"next".as_ref())
 		.unwrap();
 	drop(open);
@@ -112,7 +114,7 @@ async fn recreate(finish: bool) {
 	.expect("group-only failover hung");
 	assert!(result.is_err());
 	let next = sub.recv_group().await.unwrap().unwrap();
-	assert_eq!(next.sequence, 3);
+	assert_eq!(next.start, 3);
 }
 
 #[kio::test]

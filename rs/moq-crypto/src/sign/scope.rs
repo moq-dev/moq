@@ -34,16 +34,12 @@ impl Scope {
 	/// The message signed for `payload` at frame `frame` of group `group`, presented at `timestamp`.
 	///
 	/// The timestamp is its value at the track's timescale, so a frame keeps its signature only
-	/// on a hop that carries both unchanged. An untimed frame binds zero for both, which no
-	/// timescale can be.
-	pub(crate) fn message(
-		&self,
-		group: u64,
-		frame: u64,
-		timestamp: Option<moq_net::Timestamp>,
-		payload: &[u8],
-	) -> Vec<u8> {
-		let (timescale, value) = timestamp.map_or((0, 0), |at| (at.scale().as_u64(), at.value()));
+	/// on a hop that carries both unchanged. A scale-less frame's timestamp is its group key,
+	/// which `group` already binds, so it binds zero for both, which no timescale can be.
+	pub(crate) fn message(&self, group: u64, frame: u64, timestamp: moq_net::Timestamp, payload: &[u8]) -> Vec<u8> {
+		let (timescale, value) = timestamp
+			.scale()
+			.map_or((0, 0), |scale| (scale.as_u64(), timestamp.value()));
 		let mut message = Vec::with_capacity(self.prefix.len() + 32 + payload.len());
 		message.extend_from_slice(&self.prefix);
 		for field in [group, frame, timescale, value] {
@@ -59,7 +55,7 @@ impl Scope {
 		key: &SecretKey,
 		group: u64,
 		frame: u64,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 		payload: &[u8],
 	) -> Bytes {
 		let signature = key.sign(&self.message(group, frame, timestamp, payload));
@@ -75,7 +71,7 @@ impl Scope {
 		key: &PublicKey,
 		group: u64,
 		frame: u64,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 		body: Bytes,
 	) -> Result<Bytes> {
 		let split = body.len().checked_sub(SIGNATURE_LEN).ok_or(Error::Signature)?;

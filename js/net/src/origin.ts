@@ -300,10 +300,21 @@ interface RouteEntry {
 	readonly originated: boolean;
 	readonly server?: ServeState;
 	/**
+	 * Whether the entry may serve a request for `path` strictly beneath its prefix, asked per
+	 * request; unset when it serves its whole subtree. A lite-07 claim covers only what its origin
+	 * node's newest floor still certifies there, which its announcement cannot say.
+	 */
+	readonly covers?: (path: Path.Valid) => boolean;
+	/**
 	 * Set as a received route leaves because its session lost it, rather than its announcer
 	 * ending it: readers then see it go offline, not end.
 	 */
 	lost: boolean;
+}
+
+/** Whether `entry`, at `prefix`, may serve a request for `path`. */
+function admits(entry: RouteEntry, prefix: Path.Valid, path: Path.Valid): boolean {
+	return entry.scope.matches(path) && (prefix === path || entry.covers === undefined || entry.covers(path));
 }
 
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
@@ -965,7 +976,7 @@ class OriginState {
 		for (const [prefix, entries] of this.routes.peek()) {
 			if (!Path.hasPrefix(prefix, path)) continue;
 			for (const entry of entries) {
-				if (!entry.server || !entry.scope.matches(path) || entry.route.peek().instance !== instance) continue;
+				if (!entry.server || !admits(entry, prefix, path) || entry.route.peek().instance !== instance) continue;
 				if (matches(entry.identity)) return true;
 			}
 		}
@@ -1138,7 +1149,7 @@ class OriginState {
 				path,
 				prefix,
 				entries,
-				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
+				(candidate) => !admits(candidate, prefix, path) || (skip?.(candidate) ?? false),
 				prefix === path && local ? [local] : [],
 			);
 			if (entry) return entry;
@@ -1355,7 +1366,7 @@ export class Producer implements Table {
 	constructor() {
 		const thisProducer = this;
 		registerWire(this, {
-			receive: (prefix, route) => this.#receive(prefix, route),
+			receive: (prefix, route, covers) => this.#receive(prefix, route, covers),
 			interests: (listener) => {
 				if (this.#borrowed?.closed) return () => {};
 				// What the listener currently wants, so a derived handle's close can retract it
@@ -1613,12 +1624,30 @@ export class Producer implements Table {
 		return this.#serving(prefix, info, true, true, !options.hidden);
 	}
 
-	/** Land a route a peer announced, taken as given. Not originated, so a session never announces it back. */
-	#receive(prefix: Path.Valid, route?: Partial<WireRoute>): Claim {
-		return this.#serving(prefix, WireRoute.normalize(route), false, false, true);
+	/**
+	 * Land a route a peer announced, taken as given. Not originated, so a session never announces it
+	 * back. `covers` asks, per request, whether it serves a path beneath `prefix`, both as the
+	 * session names them.
+	 */
+	#receive(prefix: Path.Valid, route?: Partial<WireRoute>, covers?: (path: Path.Valid) => boolean): Claim {
+		const at = this.#scope.prefix(prefix);
+		const below =
+			covers &&
+			((path: Path.Valid) => {
+				const suffix = Path.stripPrefix(at, path);
+				return suffix === null || covers(Path.join(prefix, suffix));
+			});
+		return this.#serving(prefix, WireRoute.normalize(route), false, false, true, below);
 	}
 
-	#serving(prefix: Path.Valid, route: WireRoute, originated: boolean, publishes: boolean, visible: boolean): Claim {
+	#serving(
+		prefix: Path.Valid,
+		route: WireRoute,
+		originated: boolean,
+		publishes: boolean,
+		visible: boolean,
+		covers?: (path: Path.Valid) => boolean,
+	): Claim {
 		prefix = this.#scope.prefix(prefix);
 		// A route that names no instance serves one of its own, and a claim hands that one to its jobs.
 		const minted = route.instance === undefined;
@@ -1633,6 +1662,7 @@ export class Producer implements Table {
 			route: new Signal(route),
 			originated,
 			server,
+			covers,
 			lost: false,
 		};
 		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
@@ -2101,7 +2131,7 @@ export class Consumer implements Reader {
 			local: (path, instance) => this.#local(scope.path(path), instance),
 			demand: (path, instance, signal) => this.#demand(scope.path(path), instance, signal),
 			own: state.own,
-			covers: (prefix) => scope.covers(prefix),
+			covers: (prefix: Path.Valid) => scope.covers(prefix),
 		});
 	}
 

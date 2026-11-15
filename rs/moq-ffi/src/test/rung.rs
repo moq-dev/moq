@@ -166,7 +166,7 @@ async fn shaped_uplink_disables_and_resumes() {
 						let mut payload = if idr { h264_init() } else { Vec::new() };
 						payload.extend_from_slice(&[0, 0, 0, 1, if idr { 0x65 } else { 0x41 }, 0x88, 0x84, 0x21]);
 						payload.resize((bitrate_bps / 8 / 30) as usize, 0xff);
-						track.write_frame(MoqFrame { payload, timestamp: Some(us(timestamp)) }).unwrap();
+						track.write_frame(MoqFrame { payload, timestamp: us(timestamp) }).unwrap();
 						keyframe[i] = false;
 						sent[i] += 1;
 					}

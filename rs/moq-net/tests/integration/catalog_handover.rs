@@ -12,6 +12,7 @@
 //! no catalog.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -23,6 +24,9 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long any one read may take, in virtual time.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a lite-07 relay doubts the far end of a closed session.
+const DOUBT: Duration = Duration::from_secs(1);
 
 /// Short readers in each burst, re-reading the catalog and leaving.
 const BURST: usize = 4;
@@ -109,7 +113,7 @@ impl Topology {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
 		broadcast.announce().unwrap();
-		let group = track.append_group().unwrap();
+		let group = track.append_next().unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a, None).await;
 		let p_to_b = link(version, &publisher, &relay_b, None).await;
@@ -150,7 +154,12 @@ impl Topology {
 	async fn trigger(&mut self, trigger: Trigger) {
 		match trigger {
 			Trigger::Disconnect => abort(self.a_to_r.take().unwrap()),
-			Trigger::Unannounce => abort(self.p_to_a.take().unwrap()),
+			Trigger::Unannounce => {
+				abort(self.p_to_a.take().unwrap());
+				// `P` is the far end of `A`'s closed session, and `B`'s route crosses it too:
+				// on lite-07 `R` holds the claim until the doubt lifts, then moves to `B`.
+				kio::clock::sleep(DOUBT).await;
+			}
 			Trigger::BetterRoute => {
 				let direct = link(self.version, &self.publisher, &self.subscriber, None).await;
 				self.links.push(direct);
@@ -160,6 +169,9 @@ impl Topology {
 				settle().await;
 				let a_to_r = link(self.version, &self.relay_a, &self.subscriber, None).await;
 				self.a_to_r = Some(a_to_r);
+				// `R` doubts `A` for a second after its session closed, so the routes the
+				// new session carries count only once that lifts.
+				kio::clock::sleep(DOUBT).await;
 			}
 		}
 		settle().await;
@@ -210,12 +222,12 @@ impl Reader {
 					let sent = match group.read_frame().await {
 						Ok(Some(frame)) => tx.unbounded_send(Ok(format!(
 							"{}:{}",
-							group.sequence,
+							group.start,
 							String::from_utf8_lossy(&frame.payload)
 						))),
 						Ok(None) => break,
 						Err(err) => {
-							let _ = tx.unbounded_send(Err(format!("group {} frame: {err}", group.sequence)));
+							let _ = tx.unbounded_send(Err(format!("group {} frame: {err}", group.start)));
 							break;
 						}
 					};
@@ -348,7 +360,7 @@ enum Before {
 	Resume,
 }
 
-/// The minimal sequences the release-line splice left a late reader stuck on: it
+/// The minimal keys the release-line splice left a late reader stuck on: it
 /// subscribes, and nothing ever arrives.
 async fn late_reader(version: &str, before: Before) {
 	let version: Version = version.parse().unwrap();

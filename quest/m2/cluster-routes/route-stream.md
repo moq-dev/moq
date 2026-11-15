@@ -32,7 +32,7 @@ session. This removes the ordering hazard as a class and makes a
 token-scope change an edit.
 
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
-Babel): ✅ [the switch](/quest/m2/cluster-routes/switch.md) to the
+Babel): ✅ [the switch](https://github.com/moq-dev/moq/pull/8731) to the
 path rule lands first, on today's streams, and this follows (rejected: this
 first, which builds the echo and ROUTE_REQUEST on the new stream and then
 deletes them; one wire change for both, which joins two XL quests). The path
@@ -53,8 +53,8 @@ Settled:
    client must open even when it wants nothing).
 2. ✅ **Its interest is a set of prefixes edited in place**, with a floor per
    prefix, SYNCED per prefix, and swaps that keep what both sets cover:
-   [the interest set](/quest/m2/cluster-routes/interest-set.md)
-   settles and proves those rules, and this puts them on the wire.
+   [the interest set](https://github.com/moq-dev/moq/pull/8728)
+   settled and proved those rules, and this puts them on the wire.
 3. ✅ **A token-scope change is an edit.** The subscriber's set is its local
    interests met with its scope's regions, one prefix per region, so a
    multi-region scope is certifiable. Plan items 16 and 17 of the
@@ -63,6 +63,45 @@ Settled:
    reopened requests that could hold three times the announce cap
    ([moq-dev/moq#8375](https://github.com/moq-dev/moq/pull/8375)'s open
    review finding) cannot occur.
+4. ✅ **A DEAD has a fixed size, and the routes it moves follow it as its own
+   ROUTE_UPDATEs** (decided 2026-11-14 by the maintainer on
+   [moq-dev/moq#8731](https://github.com/moq-dev/moq/pull/8731)'s decision
+   22, [the comment](https://github.com/moq-dev/moq/pull/8731#issuecomment-6889336680)'s
+   B; rejected: A, the parts with a More byte that the switch ships, where
+   each part repeats the header and the sender splits by encoded size; C, a
+   DEAD that holds every route through the hop with the moves after it as
+   ordinary messages, which brings churn on every failure that moves routes
+   and changes the model). A DEAD Closed is `Closed {Hop, Far, Gone, Moved
+   Count}`, and the next Moved Count messages on the stream are ROUTE_UPDATEs,
+   one per moved route. The receiver holds the DEAD until they arrive and
+   then applies everything as one step, the route model's `Fail`, so
+   `RouteHandoff.tla` and its configs are unchanged. A refused move is a
+   refused ROUTE_UPDATE: the route ends, and its path still credits the DEAD.
+   These are PROTOCOL_VIOLATIONs, so a DEAD always completes or ends the
+   session:
+   - any other message between the DEAD and its last update, whichever
+     prefix it answers;
+   - an update for a route that isn't live or doesn't cross the hop;
+   - a count above the stream's routes through the hop.
+
+   It replaces the parts in the same PR:
+   - the DEAD codec (`rs/moq-net/src/lite/announce.rs`,
+     `js/net/src/lite/announce.ts`): Moved Count in place of More and the
+     moved list, and `Dead::split` goes;
+   - `buffer_dead` (`rs/moq-net/src/lite/publisher/routed.rs`) writes the
+     DEAD and then its updates, with nothing between them and no size split;
+   - both receivers' reassembly (`Continued` in
+     `rs/moq-net/src/lite/subscriber/routed.rs`, `continued` in
+     `js/net/src/lite/subscriber.ts`) counts the updates instead of the
+     parts;
+   - the shared corpus (`rs/moq-net/fixtures/lite.json` and the fuzz seeds in
+     `rs/moq-net/src/fuzz.rs`) drops the More cases and pins a DEAD with its
+     updates and each violation;
+   - the draft's DEAD section and Dead Hops describe the count.
+
+   Test that a DEAD and its updates apply as one, in Rust and `js/net`, each
+   failing when an update applies on its own, and that each violation
+   closes the session.
 
 Recommended wire, for the implementer to confirm or improve in the PR; each
 departure is a choice to list there:
@@ -77,7 +116,7 @@ departure is a choice to list there:
   sends as a publisher: one ANNOUNCE_OK per edit it applied, the marker where
   the edit takes effect, then ROUTE_START, UPDATE, HOLD, and END, the
   withdrawal that names a dead hop and the hold answer as
-  [the switch](/quest/m2/cluster-routes/switch.md) shaped them, the
+  [the switch](https://github.com/moq-dev/moq/pull/8731) shaped them, the
   ANNOUNCE messages, ANNOUNCE_FLOOR with a Prefix ID, and SYNCED with a
   Prefix ID. ANNOUNCE_START names the Prefix ID its suffix is relative to,
   and a compression base shares it.
@@ -109,11 +148,48 @@ Code this replaces, for lite-07 only:
 - `Routed` (`lite/subscriber/routed.rs`) and `Answer`
   (`lite/publisher/routed.rs`) become one per session, holding the prefixes.
   `Answer` already reads several node streams (one per mount).
-- `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
+- `Router::admit` (`rs/moq-net/src/route/path.rs`) files a scoped
+  neighbour's route that is wider than the scope's regions at each region
+  inside it, because a stream for a scope with several regions asks for a
+  prefix above them all ([the switch](https://github.com/moq-dev/moq/pull/8731)
+  added this). Two routes of one node at nested prefixes then both file at
+  a region inside both, so one overwrites the other and an end of either
+  drops the route there until the other sends again. With one prefix per
+  region in the set, the peer answers at the region and nothing narrows, so
+  the narrowing goes. Test a two-region scope behind a peer that holds a
+  broad and a narrow route of one node, ending each in turn: the region
+  inside both stays online through whichever route still lives, and goes
+  offline only once both have ended. Decided 2026-11-14 (maintainer, on
+  [moq-dev/moq#8731](https://github.com/moq-dev/moq/pull/8731)'s decision
+  12): ✅ deferred here (rejected: tracking per filed slot which wire routes
+  file into it in #8731, state this quest deletes).
+- `route::Node::closing` and the quiet retire of a stream dropped outside
+  it (`route/node.rs`), for lite-07: with each side's stream living as long
+  as its session, every drop of one is a session close. Today a session's
+  receive stream lands under the guard only because `Publisher::poll`
+  returns the transport error before `poll_protocol` reaches the
+  subscriber, which [#8731](https://github.com/moq-dev/moq/pull/8731)'s
+  review flagged as resting on poll order. A guard taken on every poll
+  would lock the node on each session wake, so the stream's lifetime is
+  the fix.
+- `route::Node` registers one neighbour per session for both directions,
+  carrying [the interest set](https://github.com/moq-dev/moq/pull/8728)'s
+  edits on it: `Out::Ask`, `Out::Edited` and `edited`, and SYNCED per
+  prefix. Today `receive` and `answer` each take a fresh key
+  (`route/node.rs`), so one session is two neighbours in the router, and
+  each key's one edit is the prefix its stream opened with:
+  `State::register` applies it at once and `flush` drops the router's asks
+  and markers. A scoped peer's route wider than its regions is filed at each
+  region inside it (`path::Router::admit`) rather than asked for per region.
 - `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic
   `Discovery` has. Its route layer keeps per-stream state, so this PR changes `js/net`
-  too.
+  too. A floor that changes what a claim covers, with no route change, also
+  re-runs admission for the open requests it affects: `forwardAnnounced`
+  (`js/net/src/connection/forward.ts`) asks `session.covers` only when a
+  request is admitted, so a request can stay on a node that no longer
+  covers it until something else refreshes it (flagged in
+  [#8731](https://github.com/moq-dev/moq/pull/8731)'s review).
 
 Also touching the same files, to merge around:
 [moq-dev/moq#8458](https://github.com/moq-dev/moq/pull/8458) (its
@@ -140,11 +216,6 @@ by misparse, not by version. Relays pinned to `main` roll together, as each
 earlier lite-07 wire change did.
 
 Public API: none expected. Wire: lite-07-wip only.
-
-## Required
-
-- [The route model and router take an interest as an edited set of prefixes](/quest/m2/cluster-routes/interest-set.md) - the edit rule proven in the model and the router that implements it
-- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the messages this moves onto one stream, with no echo or route request among them
 
 ## Related
 

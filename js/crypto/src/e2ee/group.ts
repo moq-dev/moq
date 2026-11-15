@@ -10,8 +10,11 @@ import { MAX_GROUPED_PAYLOAD, TAG_LEN } from "./limits.ts";
 
 /** A decrypted grouped frame. */
 export interface Frame {
-	/** Presentation timestamp, or `undefined` when untimed. Not authenticated. */
-	timestamp?: Time.Timestamp;
+	/**
+	 * Presentation timestamp, or on a scale-less track {@link Time.Timestamp.unscaled} at the
+	 * group's key. Not authenticated.
+	 */
+	timestamp: Time.Timestamp;
 	/** Decrypted application bytes. */
 	plaintext: Uint8Array;
 }
@@ -57,16 +60,16 @@ export class Producer {
 	 * since its transport index could no longer match the nonce. Rejects with {@link Failure}
 	 * `oversize`, `exhausted`, or `identity`, or a net error.
 	 */
-	async writeFrame(timestamp: Time.Timestamp | undefined, plaintext: Uint8Array): Promise<void> {
+	async writeFrame(timestamp: Time.Timestamp, plaintext: Uint8Array): Promise<void> {
 		if (this.#closed || this.#writer.closed)
 			throw this.#aborted ?? this.#writer.aborted ?? new Error("group is closed");
 		if (plaintext.byteLength + TAG_LEN > MAX_GROUPED_PAYLOAD) throw new Failure("oversize");
-		const at = NetDatagram.rescale(this.#writer.track, timestamp);
+		const at = NetDatagram.rescaleIn(this.#writer.track, timestamp, this.sequence);
 		const owned = plaintext.slice();
 		return this.#writer.pump.run(() => this.#write(at, owned));
 	}
 
-	async #write(timestamp: Time.Timestamp | undefined, plaintext: Uint8Array<ArrayBuffer>): Promise<void> {
+	async #write(timestamp: Time.Timestamp, plaintext: Uint8Array<ArrayBuffer>): Promise<void> {
 		this.#check();
 		const frame = this.#next;
 		const iv = this.#writer.key.admitSeal(this.sequence, frame, plaintext.byteLength, MAX_GROUPED_PAYLOAD);

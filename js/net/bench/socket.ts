@@ -2,7 +2,7 @@
 import { yieldNow } from "@moq/clock";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
-import { Origin, Path, Socket } from "../src/index.ts";
+import { Origin, Path, Socket, Time } from "../src/index.ts";
 import * as Lite from "../src/lite/index.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 
@@ -50,7 +50,10 @@ for (const mode of ["local", "lite07"] as const)
 				const opened = performance.now();
 				await Promise.all(
 					pairs.map(async ([local, remote]) => {
-						local.producer.writeFrame({ payload: new Uint8Array(1024) });
+						local.producer.writeFrame({
+							payload: new Uint8Array(1024),
+							timestamp: Time.Timestamp.unscaled(0n),
+						});
 						const frame = await remote.consumer.ordered().readFrame();
 						if (frame?.payload.length !== 1024) throw new Error("missing socket payload");
 					}),

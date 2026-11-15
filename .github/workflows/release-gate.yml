@@ -125,6 +125,8 @@ jobs:
               - "test/interop/**"
               - "test/max-age/**"
               - "test/portrait/**"
+              - "test/vr/**"
+              - "demo/vr/**"
               - "rs/moq-tokio/tests/integration/max_age.rs"
               - "test/datagram-tracks/**"
               - "rs/moq-tokio/tests/integration/datagram_tracks.rs"

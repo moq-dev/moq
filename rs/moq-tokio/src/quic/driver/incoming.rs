@@ -27,11 +27,20 @@ impl Incoming {
 		state.endpoint.refuse(state.inner);
 	}
 
-	/// Retry an incoming connection in driver tests.
-	#[cfg(test)]
-	pub(super) fn retry(mut self) -> Result<(), moq_quic::endpoint::RetryError> {
+	/// Send a Retry unless the peer has already proven it receives at its address
+	///
+	/// Returns the incoming to accept when the address is validated, by a token from an earlier
+	/// Retry or connection; otherwise the peer is asked to dial again with a Retry token and this
+	/// attempt ends. A Retry costs the client a round trip, and spares the server the
+	/// handshake state and the three-times amplification budget a spoofed address would get.
+	pub fn validate_address(mut self) -> Option<Self> {
+		let state = self.0.as_ref().unwrap();
+		if state.inner.remote_address_validated() {
+			return Some(self);
+		}
 		let state = self.0.take().unwrap();
-		state.endpoint.retry(state.inner)
+		state.endpoint.retry(state.inner);
+		None
 	}
 
 	/// The local IP address which was used when the peer established the connection
@@ -44,16 +53,6 @@ impl Incoming {
 	#[cfg(test)]
 	pub(super) fn remote_address(&self) -> SocketAddr {
 		self.0.as_ref().unwrap().inner.remote_address()
-	}
-
-	/// Whether the socket address that is initiating this connection has been validated
-	///
-	/// This means that the sender of the initial packet has proved that they can receive traffic
-	/// sent to `self.remote_address()`.
-	///
-	#[cfg(test)]
-	pub(super) fn remote_address_validated(&self) -> bool {
-		self.0.as_ref().unwrap().inner.remote_address_validated()
 	}
 }
 

@@ -1502,12 +1502,14 @@ export class Epochs {
 
 /**
  * Prefer a route that is neither draining (a peer that sent GOAWAY) nor unavailable (held),
- * which rank below every other, then identified publishers, then lower static cost.
+ * which rank below every other, then the highest priority on its path, then identified
+ * publishers, then lower static cost.
  */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
 	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
 	return (
 		last(a) - last(b) ||
+		(b.priority ?? 0) - (a.priority ?? 0) ||
 		Number(a.node === undefined && isAnonymous(a)) - Number(b.node === undefined && isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
 	);

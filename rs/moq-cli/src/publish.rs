@@ -1820,7 +1820,7 @@ pub(crate) mod tests {
 				let first = kio::clock::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
 				(track, first)
 			};
-			// Each group's sequence and frames, read until the track ends. A read cut off as
+			// Each group's start and frames, read until the track ends. A read cut off as
 			// stale leaves `None` for that group's frames, and a marker leaves none.
 			let read = |(mut track, first): (moq_net::track::Subscriber, Option<moq_net::group::Consumer>)| {
 				tokio::spawn(kio::clock::timeout(WAIT, async move {
@@ -1844,10 +1844,10 @@ pub(crate) mod tests {
 								Err(err) => panic!("{err}"),
 							}
 						}
-						groups.push((group.sequence, frames));
+						groups.push((group.start, frames));
 						next = track.recv_group().await.unwrap();
 					}
-					groups.sort_by_key(|(sequence, _)| *sequence);
+					groups.sort_by_key(|(start, _)| *start);
 					groups
 				}))
 			};
@@ -1865,9 +1865,9 @@ pub(crate) mod tests {
 			let recording: Vec<_> = recording
 				.await
 				.unwrap()
-				.expect("the recording ends with the track")
+				.unwrap_or_else(|err| panic!("{version}: the recording ends with the track: {err}"))
 				.into_iter()
-				.map(|(sequence, frames)| (sequence, frames.expect("the recording reads every group whole")))
+				.map(|(start, frames)| (start, frames.expect("the recording reads every group whole")))
 				.collect();
 			let output = recording
 				.iter()
@@ -1880,24 +1880,30 @@ pub(crate) mod tests {
 				"{version}: byte-identical from the first group"
 			);
 			let media: Vec<_> = recording.iter().filter(|(_, frames)| !frames.is_empty()).collect();
-			let first = |frames: &[hang::container::Frame]| frames[0].timestamp.as_micros();
+			let first = |frames: &[hang::container::Frame]| frames[0].timestamp.as_micros().unwrap();
 			let jump = media
 				.windows(2)
 				.find(|pair| first(&pair[1].1) > first(&pair[0].1) + 10_000_000)
 				.map(|pair| pair[1].0)
 				.unwrap_or_else(|| panic!("{version}: no jump crossed"));
-			let last = recording.last().unwrap().0;
-			assert_eq!(
-				recording.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(),
-				(recording[0].0..=last).collect::<Vec<_>>(),
-				"{version}: no group missing"
+			// Groups are keyed by their starts, so a missing one shows in the bytes above rather than
+			// in the keys, which only have to rise.
+			let starts: Vec<u64> = recording.iter().map(|(start, _)| *start).collect();
+			assert!(
+				starts.windows(2).all(|pair| pair[0] < pair[1]),
+				"{version}: groups in start order: {starts:?}"
 			);
+			let at = starts.iter().position(|start| *start == jump).unwrap();
 			let markers: Vec<u64> = recording
 				.iter()
 				.filter(|(_, frames)| frames.is_empty())
-				.map(|(sequence, _)| *sequence)
+				.map(|(start, _)| *start)
 				.collect();
-			assert_eq!(markers, [jump - 1], "{version}: the break marker precedes the jump");
+			assert_eq!(
+				markers,
+				[starts[at - 1]],
+				"{version}: the break marker precedes the jump"
+			);
 
 			// Joining once every group is out, with a budget half the jump, reads every group
 			// after it past the marker, and none of the groups the jump left more than
@@ -1917,14 +1923,14 @@ pub(crate) mod tests {
 				let whole: Vec<u64> = late
 					.iter()
 					.filter(|(_, frames)| frames.is_some())
-					.map(|(sequence, _)| *sequence)
+					.map(|(start, _)| *start)
 					.collect();
 				assert!(
-					whole.ends_with(&(jump..=last).collect::<Vec<_>>()),
+					whole.ends_with(&starts[at..]),
 					"{version}: a late subscriber reads every group from the jump on: {whole:?}"
 				);
 				assert!(
-					whole.iter().all(|sequence| *sequence + 2 >= jump),
+					whole.iter().all(|start| *start >= starts[at - 2]),
 					"{version}: only the group the jump follows is in budget before it: {whole:?}"
 				);
 			}
@@ -1966,7 +1972,7 @@ pub(crate) mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 		let first = next_frame(&mut Consumer::new(track, container)).await.timestamp;
 		assert!(
-			first.as_micros() < Duration::from_secs(5).as_micros(),
+			first.as_micros().unwrap() < Duration::from_secs(5).as_micros(),
 			"the feed's own PTS: {first:?}"
 		);
 		// The PES that anchors the mapping need not be this frame: the mux spaces them apart.
@@ -2415,8 +2421,11 @@ pub(crate) mod tests {
 		// Its first group is already out with the catalog.
 		let (name, _) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let mut track = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
-		let group = track.recv_group().await.unwrap().expect("the first group");
-		assert_eq!(group.sequence, 0, "the new instance's first group");
+		track
+			.recv_group()
+			.await
+			.unwrap()
+			.expect("the new instance's first group");
 		drop(stdin);
 		import.await.unwrap();
 	}

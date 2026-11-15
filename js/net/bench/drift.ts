@@ -34,9 +34,10 @@ export async function run(): Promise<void> {
 			for (const publishers of [1, 4])
 				for (const readers of [1, 8])
 					for (const mode of [0, 1, 2]) {
-						const stamp = (ms: number, index: number) =>
+						// A scale-less frame carries its group's key instead of a time.
+						const stamp = (ms: number, index: number, key: bigint) =>
 							mode === 0
-								? undefined
+								? Time.Timestamp.unscaled(key)
 								: mode === 2 && index % 2 !== 0
 									? Time.Timestamp.fromMicros(ms * 1000)
 									: Time.Timestamp.fromMillis(ms);
@@ -56,7 +57,7 @@ export async function run(): Promise<void> {
 									const group = track.appendGroup();
 									group.writeFrame({
 										payload,
-										timestamp: stamp(sequence * 100, sequence),
+										timestamp: stamp(sequence * 100, sequence, BigInt(sequence)),
 									});
 									group.finish();
 								}
@@ -98,6 +99,7 @@ export async function run(): Promise<void> {
 										Math.floor(iteration / offsets.length) * 100 +
 										offsets[iteration % offsets.length],
 									iteration,
+									BigInt(retained),
 								);
 								for (const source of sources) source.writeFrame({ payload, timestamp });
 								for (const reader of waiting)
@@ -105,7 +107,9 @@ export async function run(): Promise<void> {
 								for (const frame of await Promise.all(pending))
 									if (
 										frame?.payload[0] !== 7 ||
-										frame.timestamp?.asMillis() !== timestamp?.asMillis()
+										(timestamp.scale === undefined
+											? frame.timestamp.value !== timestamp.value
+											: frame.timestamp.asMillis() !== timestamp.asMillis())
 									)
 										throw new Error("frame missing or reordered");
 							}

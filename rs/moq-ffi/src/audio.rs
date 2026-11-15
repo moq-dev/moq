@@ -237,7 +237,7 @@ impl From<moq_audio::decode::Read> for MoqAudioRead {
 			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
 			moq_audio::decode::Read::Gap { timestamp, duration } => Self::Gap {
 				timestamp: timestamp.into(),
-				duration: crate::ffi::duration(duration.into()),
+				duration: crate::ffi::gap(duration),
 			},
 			moq_audio::decode::Read::End { end } => Self::End { end: end.into() },
 		}
@@ -820,7 +820,10 @@ mod tests {
 			// A partial codec frame makes finish publish the final packet and lookahead.
 			audio
 				.write(MoqAudioFrame {
-					timestamp: MoqTimestamp { value: 0, scale: 1 },
+					timestamp: MoqTimestamp {
+						value: 0,
+						scale: Some(1),
+					},
 					data: vec![0.1_f32; 860].into_iter().flat_map(f32::to_ne_bytes).collect(),
 				})
 				.unwrap();

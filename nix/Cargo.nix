@@ -20400,6 +20400,11 @@ rec {
             ];
           }
           {
+            name = "libc";
+            packageId = "libc";
+            target = { target, features }: ("linux" == target."os" or null);
+          }
+          {
             name = "moq-auth";
             packageId = "moq-auth";
             features = [
@@ -20425,7 +20430,6 @@ rec {
           {
             name = "moq-sock";
             packageId = "moq-sock";
-            optional = true;
             target = { target, features }: ("linux" == target."os" or null);
           }
           {
@@ -20679,7 +20683,6 @@ rec {
         ];
         features = {
           "_uring" = [
-            "dep:moq-sock"
             "dep:moq-uring"
             "dep:web-transport-proto"
           ];

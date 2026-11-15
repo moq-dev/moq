@@ -63,17 +63,17 @@ async fn a_half_read_frame_continues_from_its_byte() {
 	let mut sub = remote.track("file").unwrap().subscribe(prefs).await.unwrap();
 
 	let payload = pattern(SIZE);
-	let group0 = track.append_group().unwrap();
+	let group0 = track.append_group(0).unwrap();
 	let mut writing = group0
 		.create_frame(frame::Info {
 			size: SIZE as u64,
-			timestamp: Some(Timestamp::ZERO),
+			timestamp: Timestamp::ZERO,
 		})
 		.unwrap();
 	writing.write(payload[..HALF].to_vec()).unwrap();
 
 	let mut read0 = sub.recv_group().await.unwrap().unwrap();
-	assert_eq!(read0.sequence, 0);
+	assert_eq!(read0.start, 0);
 	let mut reading = read0.next_frame().await.unwrap().unwrap();
 	let mut got = Vec::new();
 	while got.len() < HALF {
@@ -81,11 +81,13 @@ async fn a_half_read_frame_continues_from_its_byte() {
 	}
 	assert_eq!(got, payload[..HALF]);
 
-	let mut group1 = track.append_group().unwrap();
-	group1.write_frame(Timestamp::ZERO, b"next".to_vec()).unwrap();
-	group1.finish().unwrap();
+	let mut group1 = track.append_group(1).unwrap();
+	group1
+		.write_frame(Timestamp::from_millis(1).unwrap(), b"next".to_vec())
+		.unwrap();
+	group1.close().unwrap();
 	let mut read1 = sub.recv_group().await.unwrap().unwrap();
-	assert_eq!(read1.sequence, 1);
+	assert_eq!(read1.start, 1);
 	assert_eq!(&read1.read_frame().await.unwrap().unwrap().payload[..], b"next");
 
 	// The cheaper route through `B` wins, metered so its egress shows what it sent `E`.
@@ -103,13 +105,15 @@ async fn a_half_read_frame_continues_from_its_byte() {
 	settle().await;
 
 	writing.write(payload[HALF..].to_vec()).unwrap();
-	writing.finish().unwrap().finish().unwrap();
+	writing.finish().unwrap().close().unwrap();
 
 	while let Some(chunk) = reading.read_chunk().await.unwrap() {
 		got.extend_from_slice(&chunk);
 	}
 	assert!(got == payload, "the frame continues at its byte");
 
+	// A publisher bills what the transport acknowledged, which trails what `E` read.
+	settle().await;
 	let rest = (SIZE - HALF) as u64;
 	let sent = sent(&registry);
 	assert!(sent >= rest, "{sent} bytes cannot carry the {rest} left");

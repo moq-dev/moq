@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use super::Encoder;
-use moq_net::Timed;
+use crate::Timed;
 
 use crate::Result;
 
@@ -69,8 +69,8 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// The log accepts appends for its track's life. A record larger than a frame may be is refused
 	/// with [`moq_net::Error::FrameTooLarge`] before anything is written, leaving the log intact. A
-	/// timestamp that doesn't match the track's timescale (missing on a timed track, present on an
-	/// untimed one, or beyond what its scale can hold) is refused with
+	/// timestamp that doesn't match the track's timescale (unscaled on a timed track, scaled on a
+	/// scale-less one, or beyond what its scale can hold) is refused with
 	/// [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append carries on.
 	///
 	/// Any other failure ends the track. A log missing a record is not the lossless log a stream
@@ -80,11 +80,11 @@ impl<T: Serialize> Producer<T> {
 	/// complete. Every later append fails on the ended track.
 	///
 	/// Returns the encoded size of the frame written.
-	pub fn append<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<usize>
+	pub fn append<'a>(&mut self, value: Timed<&'a T>) -> Result<usize>
 	where
 		T: 'a,
 	{
-		self.inner.lock().unwrap().append(value.into())
+		self.inner.lock().unwrap().append(value)
 	}
 
 	/// Finish the track, closing the group, and return the [`Finished`] log.
@@ -185,7 +185,7 @@ impl<T: Serialize> Inner<T> {
 			}
 		};
 
-		let opened = track.open();
+		let opened = track.open(at);
 		let published = opened.is_ok();
 		let result = match opened {
 			Ok(()) => track.write(at, record.payload()),
@@ -230,10 +230,11 @@ struct Track {
 }
 
 impl Track {
-	/// Open the log's group if it isn't already.
-	fn open(&mut self) -> std::result::Result<(), moq_net::Error> {
+	/// Open the log's group if it isn't already, starting at its first record's `timestamp`.
+	fn open(&mut self, timestamp: moq_net::Timestamp) -> std::result::Result<(), moq_net::Error> {
 		if self.group.is_none() {
-			self.group = Some(self.inner.append_group()?);
+			let start = timestamp.value();
+			self.group = Some(self.inner.append_group(start)?);
 		}
 		Ok(())
 	}
@@ -241,11 +242,11 @@ impl Track {
 	/// Append one encoded record to the log's group at `timestamp`.
 	fn write(
 		&mut self,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 		payload: &bytes::Bytes,
 	) -> std::result::Result<(), moq_net::Error> {
 		let group = self.group.as_mut().expect("a group is open");
-		group.write_frame(timestamp, payload.clone())
+		group.write_frame(crate::frame_time(group, timestamp), payload.clone())
 	}
 
 	/// End the track with an error, so a consumer sees the failure rather than a clean end.
@@ -272,7 +273,7 @@ impl Track {
 		// would leave the track open with `group` already taken, so a later append would open a
 		// second group. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
-			Some(group) => group.finish().map(drop),
+			Some(group) => group.close().map(drop),
 			None => Ok(()),
 		};
 		// This shared state keeps its own clone, whose appends the end refuses.

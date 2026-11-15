@@ -30,7 +30,7 @@ import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Timescale, type Timestamp } from "../time.ts";
+import { received, Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -2006,10 +2006,6 @@ export class Subscriber {
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
 					await last();
-					// Our own unsubscribe can release the track while its marker is in flight. A
-					// released track has no end left to declare, and the publisher did nothing wrong,
-					// so refusing it would close the session and every other subscription with it.
-					if (hooks.trackReleased(track).peek() !== undefined && !hooks.trackFinished(track)) return;
 					const end = { group: group.groupId, frame: nextObject + frame.idDelta };
 					producer?.finish();
 					try {
@@ -2032,7 +2028,11 @@ export class Subscriber {
 						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
 					});
 				}
-				if (frame.payload) open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				if (frame.payload)
+					open().writeFrame({
+						payload: frame.payload,
+						timestamp: received(frame.timestamp, open().sequence),
+					});
 				else if (
 					!(await receiveFrame(stream, open(), { size: frame.streamed ?? 0, timestamp: frame.timestamp }))
 				)
@@ -2190,7 +2190,11 @@ export class Subscriber {
 						continue;
 					}
 				}
-				if (object.payload) producer?.writeFrame({ payload: object.payload, timestamp: object.timestamp });
+				if (object.payload)
+					producer?.writeFrame({
+						payload: object.payload,
+						timestamp: received(object.timestamp, join.sequence),
+					});
 				else if (producer && !(await receiveFrame(stream, producer, object))) break;
 				join.wrote();
 				next += 1;
@@ -2316,7 +2320,7 @@ export class Subscriber {
 		try {
 			binding.producer.insert({
 				sequence: datagram.groupId,
-				timestamp,
+				timestamp: received(timestamp, datagram.groupId),
 				payload: datagram.body.payload,
 			});
 		} catch (err) {

@@ -24,6 +24,9 @@ pub struct Tracks {
 	/// The Node ID of the origin that serves the request, or 0 for whichever the
 	/// publisher selects.
 	pub node: u64,
+	/// How many leading segments of the broadcast path make up the prefix of the route
+	/// the request follows (lite-07); 0 with no node named.
+	pub depth: u64,
 }
 
 impl<'a> Message<'a> for Tracks {
@@ -34,11 +37,12 @@ impl<'a> Message<'a> for Tracks {
 		}
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		let node = super::instance::decode_node(r, version)?;
+		let (node, depth) = super::instance::decode_node(r, version, &broadcast)?;
 		Ok(Self {
 			broadcast,
 			instance,
 			node,
+			depth,
 		})
 	}
 
@@ -48,7 +52,7 @@ impl<'a> Message<'a> for Tracks {
 		}
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node)
+		super::instance::encode_node(w, version, self.node, self.depth)
 	}
 }
 
@@ -220,6 +224,7 @@ mod test {
 			broadcast: Path::from_static("room/alice"),
 			instance: Some(instance.clone()),
 			node: 0x7a3f,
+			depth: 0,
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
 		let (got, _) = Tracks::decode_slice(&buf, Version::Lite07).unwrap();
@@ -234,6 +239,7 @@ mod test {
 			broadcast: Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 		};
 		assert!(msg.encode_bytes(Version::Lite06).is_err());
 		assert!(TracksEvent::Synced.encode_bytes(Version::Lite06).is_err());

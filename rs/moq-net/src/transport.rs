@@ -145,8 +145,9 @@ impl Metrics for Untracked {}
 ///
 /// A session's ingest stops reading a group's stream while the group's fastest reader is far
 /// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
-/// `stream` bytes counted against the shared `connection` window, so the session pauses only
-/// as many streams as fit in half of it; the rest keep reading. See
+/// `stream` bytes it has not read, plus what it read of a frame's unsealed segment, counted
+/// against the shared `connection` window, so the session pauses only as many streams as fit
+/// in half of it; the rest keep reading. See
 /// [`poll::Session::receive_window`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -631,12 +632,18 @@ pub mod poll {
 	/// Boxing is what compiles the session code once per binary rather than once per
 	/// transport.
 	pub trait Boxable:
-		Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
+		Session<SendStream: Send + Sync + SendStream<Group: Send + Sync, Offset: Send + Sync>, RecvStream: Send + Sync>
+		+ Send
+		+ Sync
 	{
 	}
 
 	impl<S> Boxable for S where
-		S: Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
+		S: Session<
+				SendStream: Send + Sync + SendStream<Group: Send + Sync, Offset: Send + Sync>,
+				RecvStream: Send + Sync,
+			> + Send
+			+ Sync
 	{
 	}
 
@@ -691,6 +698,16 @@ pub mod poll {
 		}
 	}
 
+	/// What [`SendStream::poll_acked`] learned about the bytes below an offset.
+	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	#[non_exhaustive]
+	pub enum Acked {
+		/// The peer acknowledged every byte below the offset.
+		Delivered,
+		/// The transport cannot see acknowledgments, so delivery is unknown, never assumed.
+		Unsupported,
+	}
+
 	/// An outgoing stream with partial writes, priorities, and reset codes.
 	pub trait SendStream: 'static {
 		/// The error type for every operation on this stream.
@@ -698,6 +715,24 @@ pub mod poll {
 
 		/// The transport's send group, [`Ungrouped`] for a transport without them.
 		type Group: SendGroup;
+
+		/// A position in the stream, minted only by [`offset`](Self::offset), for
+		/// [`poll_acked`](Self::poll_acked). `()` for a transport that cannot see acknowledgments.
+		type Offset: 'static;
+
+		/// The position just past every byte written so far.
+		fn offset(&self) -> Self::Offset;
+
+		/// Poll until the peer acknowledged every byte below `offset`.
+		///
+		/// Errors once those bytes can never be acknowledged: the stream was reset by either
+		/// side or the session closed. A transport that cannot see acknowledgments is ready
+		/// with [`Acked::Unsupported`] immediately, the default, on every stream, so a caller
+		/// can decide once per session. An offset minted by another stream may panic.
+		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<Acked, Self::Error>> {
+			let _ = (waiter, offset);
+			Poll::Ready(Ok(Acked::Unsupported))
+		}
 
 		/// Poll to write some of the buffer to the stream, returning how many bytes were
 		/// written. See [`poll_write_buf`](Self::poll_write_buf) for the partial-write

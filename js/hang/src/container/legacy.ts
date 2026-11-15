@@ -5,17 +5,55 @@ export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
 import { Duration } from "@moq/clock";
 import type { AudioConfig, VideoConfig } from "../catalog";
+import * as Aac from "../util/aac";
+import * as Opus from "../util/opus";
 import type { Format as ContainerFormat } from "./format";
 import type { Frame } from "./types";
+
+/**
+ * How long each packet of an audio track plays, as its codec states. Legacy frames carry no duration,
+ * and the hang draft leaves it to the codec. Knowing it, a reader tells a group that ends where the next
+ * one starts from one followed by lost audio, which sparse group sequences can't say. Mirrors Rust's
+ * `legacy::Audio`. Undefined when a packet doesn't state its duration without decoding it.
+ */
+export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => Duration | undefined) | undefined {
+	const rate = config.sampleRate;
+	if (!(rate > 0)) return undefined;
+	if (config.codec === "opus") {
+		return (payload) => {
+			const samples = Opus.packetSamples(payload);
+			return samples === undefined ? undefined : Duration.micros((samples * 1_000_000) / 48_000);
+		};
+	}
+	// AAC-LC codes 1024 samples per packet. SBR and PS packets decode to twice that, at a rate the
+	// catalog may or may not double, so they state nothing here.
+	if (Aac.objectType(config.codec) === 2) {
+		const duration = Duration.micros((1024 * 1_000_000) / rate);
+		return (payload) => (payload.byteLength > 0 ? duration : undefined);
+	}
+	// Interleaved 32-bit samples, so the payload's length says.
+	if (config.codec === "pcm" && config.numberOfChannels > 0) {
+		const frameBytes = 4 * config.numberOfChannels;
+		return (payload) => {
+			if (payload.byteLength === 0 || payload.byteLength % frameBytes !== 0) return undefined;
+			return Duration.micros(((payload.byteLength / frameBytes) * 1_000_000) / rate);
+		};
+	}
+	return undefined;
+}
 
 /** The legacy hang container: a microsecond timestamp varint followed by the raw codec payload. */
 export class Format implements ContainerFormat {
 	/** Configure the format for the track's media kind. */
 	readonly kind: "audio" | "video" | "data";
 
-	/** Configure the format from a catalog entry or an explicit media kind. */
+	// How long each audio packet plays, when built from a catalog entry whose codec states it.
+	readonly #duration?: (payload: Uint8Array) => Duration | undefined;
+
+	/** Configure the format from a catalog entry or an explicit media kind. Only an audio entry states its packets' durations. */
 	constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data") {
 		this.kind = typeof config === "string" ? config : "sampleRate" in config ? "audio" : "video";
+		if (typeof config !== "string" && "sampleRate" in config) this.#duration = packetDuration(config);
 	}
 
 	/** Write the final video frame's end timestamp before the group closes. */
@@ -36,7 +74,8 @@ export class Format implements ContainerFormat {
 	decode(frame: Uint8Array): Frame[] {
 		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const [timestamp, data] = Moq.Varint.decode(frame);
-		return [{ payload: data, timestamp: Duration.micros(timestamp), keyframe: false }];
+		const duration = data.byteLength > 0 ? this.#duration?.(data) : undefined;
+		return [{ payload: data, timestamp: Duration.micros(timestamp), keyframe: false, duration }];
 	}
 }
 

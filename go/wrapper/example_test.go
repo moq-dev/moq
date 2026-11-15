@@ -100,8 +100,8 @@ func ExampleClient_Route() {
 	_ = route.Announce()
 
 	// 20 ms in, counted on the Opus 48 kHz sample clock.
-	pts := moq.Timestamp{Value: 960, Scale: 48_000}
-	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {
+	pts := moq.TimestampFromScale(960, 48_000)
+	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: pts}); err != nil {
 		log.Fatal(err)
 	}
 

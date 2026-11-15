@@ -21,8 +21,11 @@ Compression is the track's: create it with `compression: "deflate"`, which JSON 
 from, and readers see plain frames either way. Producers take
 a `Timed` value, `{ value, at }`, where `at` is the capture time written as
 the frame timestamp, and the snapshot and stream consumers return the same
-shape. Nothing fills in now: a timed track needs `at` on every write, and
-an untimed track (no `timescale`) takes none and reads back without one.
+shape. Nothing fills in now: every write takes `at`. On an untimed track (no
+`timescale`) it is `Time.Timestamp.unscaled(key)`: a snapshot or window
+restatement opens its group at that key, which must pass every group the
+track holds, and a delta or op rides the open group, so it reads back with
+that group's key.
 
 ```ts
 import { Snapshot } from "@moq/json";

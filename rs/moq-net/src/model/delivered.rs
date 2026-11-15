@@ -1,34 +1,34 @@
-//! The group sequences a reader handed out, so it never hands one out twice.
+//! The group keys a reader handed out, so it never hands one out twice.
 
 use std::collections::BTreeMap;
 
-/// The group sequences a reader handed out, as runs of consecutive sequences.
+/// The group keys a reader handed out, as runs of consecutive keys.
 ///
 /// A reader stops expecting a group once it is past its budget, and counts everything
 /// below it as handed out (see [`Self::forget_below`]). The run starting at 0 is that
 /// floor, so only the gaps above it cost memory. It never holds the reserved group
-/// sequence `u64::MAX`, so one past any run fits.
+/// key `u64::MAX`, so one past any run fits.
 #[derive(Default)]
 pub(super) struct Delivered {
-	/// First to last sequence, inclusive, never adjacent to each other.
+	/// First to last key, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
 }
 
 impl Delivered {
-	/// Whether `sequence` was handed out, or is below the floor.
-	pub fn contains(&self, sequence: u64) -> bool {
+	/// Whether `key` was handed out, or is below the floor.
+	pub fn contains(&self, key: u64) -> bool {
 		self.runs
-			.range(..=sequence)
+			.range(..=key)
 			.next_back()
-			.is_some_and(|(_, last)| sequence <= *last)
+			.is_some_and(|(_, last)| key <= *last)
 	}
 
-	/// The first sequence above the handed-out prefix.
+	/// The first key above the handed-out prefix.
 	pub fn floor(&self) -> u64 {
 		self.runs.get(&0).map_or(0, |last| last + 1)
 	}
 
-	/// Whether every sequence in `groups` was handed out, or is below the floor.
+	/// Whether every key in `groups` was handed out, or is below the floor.
 	pub fn covers(&self, groups: std::ops::Range<u64>) -> bool {
 		groups.is_empty()
 			|| self
@@ -38,28 +38,28 @@ impl Delivered {
 				.is_some_and(|(_, last)| groups.end - 1 <= *last)
 	}
 
-	/// Record `sequence` as handed out; `false` when it already was.
-	pub fn insert(&mut self, sequence: u64) -> bool {
-		if self.contains(sequence) {
+	/// Record `key` as handed out; `false` when it already was.
+	pub fn insert(&mut self, key: u64) -> bool {
+		if self.contains(key) {
 			return false;
 		}
-		let first = sequence
+		let first = key
 			.checked_sub(1)
 			.and_then(|below| self.runs.range(..=below).next_back())
-			.filter(|(_, last)| **last + 1 == sequence)
-			.map_or(sequence, |(first, _)| *first);
-		let last = self.runs.remove(&(sequence + 1)).unwrap_or(sequence);
+			.filter(|(_, last)| **last + 1 == key)
+			.map_or(key, |(first, _)| *first);
+		let last = self.runs.remove(&(key + 1)).unwrap_or(key);
 		self.runs.insert(first, last);
 		true
 	}
 
-	/// Record every sequence in `groups` as handed out, joining the runs it touches.
+	/// Record every key in `groups` as handed out, joining the runs it touches.
 	pub fn insert_run(&mut self, groups: std::ops::Range<u64>) {
 		let Some(mut last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
 		};
 		let mut first = groups.start;
-		// A run ending at or just below the first sequence joins it.
+		// A run ending at or just below the first key joins it.
 		if let Some((&start, &end)) = self.runs.range(..=first).next_back()
 			&& end + 1 >= first
 		{
@@ -109,7 +109,7 @@ impl Delivered {
 		gaps
 	}
 
-	/// Count every sequence below `floor` as handed out.
+	/// Count every key below `floor` as handed out.
 	pub fn forget_below(&mut self, floor: u64) {
 		let Some(below) = floor.checked_sub(1) else {
 			return;
@@ -122,7 +122,7 @@ impl Delivered {
 		self.runs.insert(0, last);
 	}
 
-	/// The lowest sequence handed out above a gap: once it is past the reader's budget,
+	/// The lowest key handed out above a gap: once it is past the reader's budget,
 	/// so is the gap, since a timed track refuses a group whose start rewinds.
 	pub fn above_gap(&self) -> Option<u64> {
 		let mut runs = self.runs.keys();
@@ -132,17 +132,17 @@ impl Delivered {
 		}
 	}
 
-	/// The last run starting below `sequence`.
-	pub fn last_before(&self, sequence: u64) -> Option<u64> {
-		self.runs.range(..sequence).next_back().map(|(start, _)| *start)
+	/// The last run starting below `key`.
+	pub fn last_before(&self, key: u64) -> Option<u64> {
+		self.runs.range(..key).next_back().map(|(start, _)| *start)
 	}
 
-	/// One past the last sequence of the run holding `sequence`, if it was handed out.
-	pub fn run_end(&self, sequence: u64) -> Option<u64> {
+	/// One past the last key of the run holding `key`, if it was handed out.
+	pub fn run_end(&self, key: u64) -> Option<u64> {
 		self.runs
-			.range(..=sequence)
+			.range(..=key)
 			.next_back()
-			.filter(|(_, last)| sequence <= **last)
+			.filter(|(_, last)| key <= **last)
 			.map(|(_, last)| last + 1)
 	}
 
@@ -163,8 +163,8 @@ mod test {
 	#[test]
 	fn gaps_are_what_no_run_covers() {
 		let mut delivered = Delivered::default();
-		for sequence in [2, 4, 5, 9] {
-			delivered.insert(sequence);
+		for key in [2, 4, 5, 9] {
+			delivered.insert(key);
 		}
 		assert_eq!(delivered.gaps(0..12), [0..2, 3..4, 6..9, 10..12]);
 		assert_eq!(delivered.gaps(4..6), []);
@@ -196,8 +196,8 @@ mod test {
 	#[test]
 	fn insert_run_joins_every_run_it_touches() {
 		let mut delivered = Delivered::default();
-		for sequence in [2, 5, 6, 9, 14] {
-			delivered.insert(sequence);
+		for key in [2, 5, 6, 9, 14] {
+			delivered.insert(key);
 		}
 		delivered.insert_run(3..5);
 		assert_eq!(runs(&delivered), [(2, 6), (9, 9), (14, 14)], "adjacent on both sides");
@@ -212,7 +212,7 @@ mod test {
 	}
 
 	#[test]
-	fn the_extremes_are_sequences_too() {
+	fn the_extremes_are_keys_too() {
 		let mut delivered = Delivered::default();
 		assert!(delivered.insert(0));
 		assert!(delivered.insert(u64::MAX - 1));
@@ -226,8 +226,8 @@ mod test {
 	#[test]
 	fn forget_below_closes_the_gaps_under_the_floor() {
 		let mut delivered = Delivered::default();
-		for sequence in [3, 5, 6, 9, 12] {
-			delivered.insert(sequence);
+		for key in [3, 5, 6, 9, 12] {
+			delivered.insert(key);
 		}
 		assert_eq!(delivered.above_gap(), Some(3));
 		assert_eq!(delivered.last_before(0), None);

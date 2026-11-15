@@ -13,6 +13,7 @@ import {
 } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Session } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
+import { appendFrame } from "./frame.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
 import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
@@ -491,7 +492,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 		const broadcastRoute = origin.route(Path.from("room/x"));
 		const broadcast = broadcastRoute.broadcast;
 		const published = broadcast.createTrack("video");
-		published.appendGroup().writeFrame({ payload: new Uint8Array([1]) });
+		appendFrame(published, new Uint8Array([1]));
 		const { client, server } = await connect({ serverPublish: origin, protocol });
 		const requests = server.auth.requests();
 		await wireOf(client).auth.ready(Path.from("room/x"), "subscribe");
@@ -516,10 +517,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 			const renewing = answered(client.auth.add("renewal"));
 			const renewal = await requests.next();
 			if (!renewal) throw new Error("missing renewal");
-			broadcast
-				.createTrack("audio")
-				.appendGroup()
-				.writeFrame({ payload: new Uint8Array([3]) });
+			appendFrame(broadcast.createTrack("audio"), new Uint8Array([3]));
 			const covered = wireOf(client).consume(Path.from("room/x")).track("audio").subscribe();
 			expect(await covered.recvGroup()).toBeDefined();
 			covered.close();
@@ -528,7 +526,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 			first.close();
 			await yieldNow();
 			expect(track.closed.peek()).toBeUndefined();
-			published.appendGroup().writeFrame({ payload: new Uint8Array([2]) });
+			appendFrame(published, new Uint8Array([2]));
 			expect(await track.recvGroup()).toBeDefined();
 			track.close();
 			renewed.close();
@@ -623,7 +621,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 			const broadcastRoute = origin.route(Path.from("room/x"));
 			const broadcast = broadcastRoute.broadcast;
 			const published = broadcast.createTrack("video");
-			published.appendGroup().writeFrame({ payload: new Uint8Array([7]) });
+			appendFrame(published, new Uint8Array([7]));
 			const { client, server } = await connect({ serverPublish: origin, protocol });
 			const requests = server.auth.requests();
 			const setup = await requests.next();
@@ -658,10 +656,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(Path.from("room/x"));
 		const broadcast = broadcastRoute.broadcast;
-		broadcast
-			.createTrack("video")
-			.appendGroup()
-			.writeFrame({ payload: new Uint8Array([1]) });
+		appendFrame(broadcast.createTrack("video"), new Uint8Array([1]));
 
 		const { client, server } = await connect({ serverPublish: origin, protocol });
 		await waitFor(client.auth.grant, (g) => g !== undefined && g.subscribe.size > 0);
@@ -1090,10 +1085,7 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room/x"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast
-		.createTrack("video")
-		.appendGroup()
-		.writeFrame({ payload: new Uint8Array([1]) });
+	appendFrame(broadcast.createTrack("video"), new Uint8Array([1]));
 	const { client, server, transport } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
 	const requests = server.auth.requests();
 	const setup = await requests.next();
@@ -1170,10 +1162,7 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(Path.from("room/x"));
 		const broadcast = broadcastRoute.broadcast;
-		broadcast
-			.createTrack("video")
-			.appendGroup()
-			.writeFrame({ payload: new Uint8Array([7]) });
+		appendFrame(broadcast.createTrack("video"), new Uint8Array([7]));
 		const { client, server } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
 		const requests = server.auth.requests();
 		const setup = await requests.next();
@@ -1312,9 +1301,8 @@ test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 	})();
 	await waitFor(client.auth.grant, (g) => g !== undefined && g.subscribe.size > 0);
 
-	const frame = { payload: new Uint8Array([1]) };
-	downTrack.appendGroup().writeFrame(frame);
-	upTrack.appendGroup().writeFrame(frame);
+	appendFrame(downTrack, new Uint8Array([1]));
+	appendFrame(upTrack, new Uint8Array([1]));
 
 	// The client subscribes to the server, and the server to the client.
 	const downSub = wireOf(client).consume(Path.from("room/x")).track("video").subscribe().ordered();

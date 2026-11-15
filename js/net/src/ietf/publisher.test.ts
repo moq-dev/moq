@@ -2983,7 +2983,8 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 	);
 	try {
 		const group = track.createGroup(5n);
-		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		for (let i = 0; i < 5; i++)
+			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.sequence) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
 		const reader = new Reader(uni.value, undefined, V22);
@@ -3050,7 +3051,8 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 	);
 	try {
 		const group = track.createGroup(5n);
-		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		for (let i = 0; i < 5; i++)
+			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.sequence) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
 		const reader = new Reader(uni.value, undefined, V22);
@@ -3740,14 +3742,14 @@ test("a paused relay subscription reacquires its upstream datagrams", async () =
 		await RequestOk.decode(client.reader, V22);
 	};
 	try {
-		datagrams.append(undefined, Uint8Array.of(1));
+		datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(1));
 		expect((await received.read()).done).toBe(false);
 		await forward(2n, false);
 		while (track.subscription.peek() !== undefined) await track.subscription.changed();
 		const before = upstream.client.sendStreams.bidi.length;
 		await forward(4n, true);
 		expect(upstream.client.sendStreams.bidi.length).toBe(before + 1);
-		datagrams.append(undefined, Uint8Array.of(2));
+		datagrams.append(Timestamp.unscaled(1n), Uint8Array.of(2));
 		const next = await received.read();
 		if (!next.value) throw new Error("no resumed relay datagram");
 		expect((await ObjectDatagram.decode(next.value, V22)).body).toEqual({ payload: Uint8Array.of(2) });
@@ -3786,7 +3788,7 @@ test.each(["writable", "createWritable"] as const)(
 				clients.push(client);
 			}
 			for (const [i, producer] of producers.entries()) {
-				producer.append(undefined, Uint8Array.of(i));
+				producer.append(Timestamp.unscaled(0n), Uint8Array.of(i));
 				const next = await received.read();
 				if (!next.value) throw new Error("missing concurrent datagram");
 				const decoded = await ObjectDatagram.decode(next.value, V22);
@@ -3827,7 +3829,7 @@ test("a paused IETF subscription leaves a blocked datagram write", async () => {
 		}),
 	);
 	try {
-		datagrams.append(undefined, Uint8Array.of(1));
+		datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(1));
 		await started.promise;
 		const parameters = new Parameters();
 		parameters.forward = false;
@@ -3870,14 +3872,14 @@ test("a datagram-only SUBSCRIBE releases demand on pause and resumes", async () 
 		};
 		try {
 			if (!startPaused) {
-				datagrams.append(undefined, Uint8Array.of(1));
+				datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(1));
 				expect((await received.read()).done).toBe(false);
 				await forward(2n, false);
 			}
 			while (datagrams.priority.peek() !== undefined) await datagrams.priority.changed();
-			datagrams.append(undefined, Uint8Array.of(2));
+			datagrams.append(Timestamp.unscaled(1n), Uint8Array.of(2));
 			await forward(4n, true);
-			datagrams.append(undefined, Uint8Array.of(3));
+			datagrams.append(Timestamp.unscaled(2n), Uint8Array.of(3));
 			const next = await received.read();
 			if (!next.value) throw new Error("no resumed datagram");
 			const decoded = await ObjectDatagram.decode(next.value, V22);

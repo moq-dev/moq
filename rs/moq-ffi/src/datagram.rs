@@ -119,10 +119,13 @@ impl MoqDatagramProducer {
 			.ok_or(MoqError::Closed)
 	}
 
-	/// Append a datagram, returning its assigned sequence; its timestamp must match the track.
-	pub fn append(&self, timestamp: Option<MoqTimestamp>, payload: Vec<u8>) -> Result<u64, MoqError> {
+	/// Append a datagram, returning its sequence; its timestamp must match the track.
+	///
+	/// A scale-less track has no time, so there the timestamp is the
+	/// [unscaled](MoqTimestamp::unscaled) sequence to write.
+	pub fn append(&self, timestamp: MoqTimestamp, payload: Vec<u8>) -> Result<u64, MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = timestamp.map(TryInto::try_into).transpose()?;
+		let timestamp = timestamp.try_into()?;
 		Ok(self
 			.inner
 			.peek_mut(|producer| producer.append(timestamp, payload))
@@ -134,7 +137,7 @@ impl MoqDatagramProducer {
 		let _guard = crate::ffi::enter();
 		let datagram = moq_net::datagram::Datagram {
 			sequence: datagram.sequence,
-			timestamp: datagram.timestamp.map(TryInto::try_into).transpose()?,
+			timestamp: datagram.timestamp.try_into()?,
 			payload: datagram.payload.into(),
 		};
 		Ok(self
@@ -230,7 +233,7 @@ impl MoqDatagramConsumer {
 			.wait(|consumer, waiter| {
 				Poll::Ready(Ok(ready!(consumer.poll_recv(waiter))?.map(|datagram| MoqDatagram {
 					sequence: datagram.sequence,
-					timestamp: datagram.timestamp.map(Into::into),
+					timestamp: datagram.timestamp.into(),
 					payload: datagram.payload.to_vec(),
 				})))
 			})

@@ -206,11 +206,11 @@ test("the node serving an instance follows its routes even when another instance
 	const c = {};
 	cache.announce(path, a, { ...WireRoute.default, instance: x, node: 1n });
 	cache.announce(path, b, { ...WireRoute.default, instance: x, node: 2n, cost: 5n });
-	expect(cache.node(path, x)).toBe(1n);
+	expect(cache.node(path, x)).toEqual({ node: 1n, depth: 0 });
 	cache.withdraw(path, a);
 	cache.announce(path, c, { ...WireRoute.default, instance: Instance.random(), node: 3n });
 	expect(cache.instance(path).route.node).toBe(3n);
-	expect(cache.node(path, x)).toBe(2n);
+	expect(cache.node(path, x)).toEqual({ node: 2n, depth: 0 });
 	cache.withdraw(path, b);
 	expect(cache.node(path, x)).toBeUndefined();
 });

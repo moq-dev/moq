@@ -157,9 +157,9 @@ impl Import {
 		self.track.discontinuity()
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.track.seek(sequence)?;
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 

@@ -43,6 +43,12 @@ pub struct Args {
 	#[usage(long, default = "native")]
 	frames: OutputArg,
 
+	/// Encoder sessions that may serve viewers at once, across live rungs and fetched
+	/// groups; one more opens briefly to probe a new rung. Hardware encoders cap sessions
+	/// per device, so leave room for this plus one. Unlimited by default.
+	#[usage(long)]
+	encoder_sessions: Option<std::num::NonZeroUsize>,
+
 	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
 	/// first that encodes, decodes, and scales.
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
@@ -122,6 +128,9 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
 	config.resize.output = args.frames.0;
+	if let Some(serving) = args.encoder_sessions {
+		config.sessions = moq_transcode::Sessions::new(serving);
+	}
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	{
 		config.vaapi = args.vaapi_device.clone();

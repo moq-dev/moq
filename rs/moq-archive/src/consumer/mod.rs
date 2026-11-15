@@ -7,8 +7,8 @@
 //! demand from the store through [`track::Requests`](moq_net::track::Requests) fills.
 //!
 //! A reader's time start older than the newest group is looked up from the object keys, each of
-//! which carries its first frame's timestamp, so the range starts at the stored group containing
-//! it however old, and a time end stops just past the group containing it.
+//! which carries where its group starts, so the range starts at the stored group containing it
+//! however old, and a time end stops just past the group containing it.
 //!
 //! A growing archive is followed: every [`Config::refresh`], one delimiter LIST of the prefix
 //! finds added tracks, and one LIST per track after its newest key finds new objects. Once the
@@ -333,14 +333,7 @@ async fn refresh<S: ObjectStore>(shared: Arc<Shared<S>>, mut tracks: Vec<Snapsho
 
 		let (objects, from) = match track.started {
 			// Everything new, in order.
-			true => (
-				listed
-					.objects
-					.into_iter()
-					.map(|(start, _, path)| (start, path))
-					.collect(),
-				0,
-			),
+			true => (listed.objects, 0),
 			// Only the newest sequence: fills serve the rest.
 			false => {
 				let Some((start, path)) = track.index.lock().unwrap().newest() else {
