@@ -10,3 +10,8 @@ The UniFFI core every non-Rust binding is generated from (proc macros, no `.udl`
 - UniFFI ignores `#[cfg]` inside an export impl; gate at the module.
 - Default argument values don't reach Go; resolve defaults in Rust.
 - Go handles must be released from the goroutine that ran the call.
+
+# Tests
+
+- Assert native timing and decoding once, in moq-ffi's Rust tests. A wrapper test covers only the code that wrapper owns: record mapping, cancellation, async adapters, and lifetimes.
+- A test that reads decoded media passes no max delay (`None`, `max: nil`, `MaxUnlimited`, and so on). A max of zero skips a group by the native wall clock, so a read that starts late under load never returns.
