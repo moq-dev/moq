@@ -11,36 +11,63 @@
 
 use std::collections::BTreeSet;
 
-use super::multi::{Broadcast, MultiSim, Suspect, Tie};
+use super::multi::{Broadcast, MultiSim, Suspect, Tie, Tune};
 use super::*;
 
 /// A router under comparison: today's rule, or the multicast epic's prototype.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Arm {
 	Path(Rule),
-	Multi(Suspect),
+	Multi(Tune),
 }
 
 impl Arm {
 	/// Today's rule as it ships.
 	pub const TODAY: Self = Self::Path(Rule::PATH);
 	/// The epic's rule as written.
-	pub const PLAIN: Self = Self::Multi(Suspect::Never);
-	/// The epic's rule ranking routes through the far end of a closed session as draining.
-	pub const SUSPECT: Self = Self::Multi(Suspect::FarEnd);
+	pub const PLAIN: Self = Self::Multi(Tune {
+		suspect: Suspect::Never,
+		quiet: false,
+		batch: false,
+		agree: false,
+		drain: false,
+	});
+	/// The epic's rule with what the bake-off found worth adding.
+	pub const TUNED: Self = Self::Multi(Tune {
+		suspect: Suspect::Flagged,
+		quiet: true,
+		batch: true,
+		agree: false,
+		drain: true,
+	});
 
-	pub fn as_str(self) -> &'static str {
-		match self {
-			Self::Path(rule) => rule.as_str(),
-			Self::Multi(Suspect::Never) => "multi",
-			Self::Multi(Suspect::FarEnd) => "multi+suspect",
-		}
+	/// The epic's rule with `tune` changed from how it is written.
+	pub fn with(tune: impl FnOnce(&mut Tune)) -> Self {
+		let mut out = Tune::default();
+		tune(&mut out);
+		Self::Multi(out)
+	}
+
+	pub fn name(self) -> String {
+		let tune = match self {
+			Self::Path(rule) => return rule.as_str().into(),
+			Self::Multi(tune) => tune,
+		};
+		let parts = [
+			(tune.suspect == Suspect::Flagged, "+suspect"),
+			(tune.suspect == Suspect::Local, "+local"),
+			(tune.quiet, "+quiet"),
+			(tune.batch, "+batch"),
+			(tune.agree, "+agree"),
+			(tune.drain, "+drain"),
+		];
+		(parts.into_iter().filter(|(on, _)| *on)).fold("multi".to_string(), |name, (_, part)| name + part)
 	}
 
 	fn net(self, nodes: usize) -> Box<dyn Net> {
 		match self {
 			Self::Path(rule) => Box::new(Sim::with(rule, nodes)),
-			Self::Multi(suspect) => Box::new(MultiSim::new(suspect, nodes)),
+			Self::Multi(tune) => Box::new(MultiSim::new(tune, nodes)),
 		}
 	}
 }
@@ -362,6 +389,11 @@ impl Net for MultiSim {
 		self.deliver(from, to);
 	}
 
+	fn tick(&mut self) -> bool {
+		self.flush();
+		false
+	}
+
 	fn chase(&self, from: Node, id: Id) -> Option<(Vec<Node>, bool)> {
 		MultiSim::chase(self, from, &(id, p(&Mesh::claim(0))))
 	}
@@ -545,6 +577,9 @@ pub(super) struct Lab {
 	down: BTreeSet<Node>,
 	order: XorShift,
 	cost: Cost,
+	/// Look for loops once a round rather than after every delivery, on meshes too
+	/// large to walk that often.
+	pub coarse: bool,
 }
 
 fn pair(a: Node, b: Node) -> (Node, Node) {
@@ -563,10 +598,15 @@ impl Lab {
 			down: BTreeSet::new(),
 			order: XorShift(0x5eed_0001),
 			cost: Cost::default(),
+			coarse: false,
 		};
 		for &(a, b, cost) in &mesh.links {
-			let tie = mesh.ties.get(&(a, b)).copied().unwrap_or(Tie::Peer);
-			lab.net.link(a, b, cost, tie);
+			// A tie is keyed from the relay that marks the link.
+			match (mesh.ties.get(&(a, b)), mesh.ties.get(&(b, a))) {
+				(Some(&tie), _) => lab.net.link(a, b, cost, tie),
+				(None, Some(&tie)) => lab.net.link(b, a, cost, tie),
+				(None, None) => lab.net.link(a, b, cost, Tie::Peer),
+			}
 			lab.up.insert(pair(a, b));
 		}
 		lab.settle();
@@ -702,7 +742,7 @@ impl Lab {
 		for (chan, count) in ready {
 			for _ in 0..count {
 				self.net.step(chan);
-				self.cost.loops += usize::from(self.looping());
+				self.cost.loops += usize::from(!self.coarse && self.looping());
 			}
 		}
 		if !idle {
@@ -715,7 +755,8 @@ impl Lab {
 
 	/// Count the relays left wrong as the latest round ends.
 	fn note(&mut self) {
-		let (_, stale, dark) = self.wrong();
+		let (loops, stale, dark) = self.wrong();
+		self.cost.loops += usize::from(self.coarse && loops > 0);
 		self.cost.stale += stale;
 		self.cost.dark += dark;
 		if stale + dark > 0 {
@@ -780,6 +821,53 @@ impl Lab {
 			self.round();
 		}
 		self.net.reset(relay);
+	}
+
+	/// Let `rounds` hops of delay pass, delivering whatever is queued in each.
+	pub fn pass(&mut self, rounds: usize) {
+		for _ in 0..rounds {
+			if !self.round() {
+				self.cost.rounds += 1;
+				self.note();
+			}
+		}
+	}
+
+	/// The process at `relay` exits, and its neighbours notice spread evenly over
+	/// `rounds` hops of delay, as an idle timeout leaves them.
+	pub fn crash_over(&mut self, relay: Node, rounds: usize) {
+		let mut peers = self.peers(relay);
+		for &peer in &peers {
+			self.net.mute(relay, peer);
+		}
+		for i in (1..peers.len()).rev() {
+			peers.swap(i, self.order.next(i as u64 + 1) as usize);
+		}
+		self.down.insert(relay);
+		let gap = rounds / peers.len().max(2).saturating_sub(1);
+		for (i, peer) in peers.into_iter().enumerate() {
+			if i > 0 {
+				self.pass(gap);
+			}
+			self.net.sever(relay, peer);
+			self.up.remove(&pair(relay, peer));
+		}
+		self.net.reset(relay);
+	}
+
+	/// Every node `node` has an open link to.
+	pub fn links_of(&self, node: Node) -> Vec<Node> {
+		self.peers(node)
+	}
+
+	/// The hops every relay's request crosses to each publisher, summed: what the
+	/// settled routes cost to use.
+	pub fn hops(&self) -> usize {
+		(0..self.mesh.homes.len())
+			.flat_map(|index| (0..self.mesh.relays).map(move |relay| (relay, index)))
+			.filter_map(|(relay, index)| self.net.chase(relay, self.mesh.publisher(index).1))
+			.map(|(hops, _)| hops.len())
+			.sum()
 	}
 
 	/// `relay` starts again with no state, and its links and publishers reconnect.
@@ -855,7 +943,7 @@ impl Lab {
 	/// The link of a publisher's cheapest-path tree that the most relays route
 	/// over, among those whose loss leaves every relay a path (`detour`) or cuts
 	/// some off.
-	fn tree_link(&self, index: usize, detour: bool, tree: &[Option<Node>]) -> Option<(Node, Node)> {
+	pub fn tree_link(&self, index: usize, detour: bool, tree: &[Option<Node>]) -> Option<(Node, Node)> {
 		let mut uses: BTreeMap<(Node, Node), usize> = BTreeMap::new();
 		for relay in 0..self.mesh.relays {
 			let mut at = relay;
@@ -932,9 +1020,9 @@ pub(super) fn run(arm: impl Into<Arm>, mesh: &Mesh) -> Vec<(Change, Cost)> {
 	let tree = mesh.tree();
 	let mut apply = |lab: &mut Lab, change: Change, apply: &dyn Fn(&mut Lab)| {
 		let cost = lab.measure(apply);
-		assert!(cost.settled, "{}: {change:?} never settles on {mesh:?}", rule.as_str());
+		assert!(cost.settled, "{}: {change:?} never settles on {mesh:?}", rule.name());
 		if let Err(err) = lab.check() {
-			panic!("{}: after {change:?} on {mesh:?}: {err}", rule.as_str());
+			panic!("{}: after {change:?} on {mesh:?}: {err}", rule.name());
 		}
 		out.push((change, cost));
 	};
@@ -1089,9 +1177,9 @@ pub(super) fn churn(arm: impl Into<Arm>, cases: std::ops::Range<usize>, two_home
 			total.stale += stale;
 			total.dark += dark;
 		}
-		assert!(lab.settle(), "{}: case {case} never settles on {mesh:?}", rule.as_str());
+		assert!(lab.settle(), "{}: case {case} never settles on {mesh:?}", rule.name());
 		if let Err(err) = lab.check() {
-			panic!("{}: case {case} on {mesh:?}: {err}", rule.as_str());
+			panic!("{}: case {case} on {mesh:?}: {err}", rule.name());
 		}
 		let sent = lab.net.sent() - before;
 		total.sent = Sent {

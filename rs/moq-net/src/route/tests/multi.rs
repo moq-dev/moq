@@ -26,14 +26,37 @@ pub(super) type Instance = Id;
 /// What a reader asks for: an Instance at a path.
 pub(super) type Broadcast = (Instance, Path);
 
-/// What a closed session says about the node at its far end.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a closed session says about the node at its far end: every route through
+/// it ranks as draining until that node's own word about the session arrives, or a
+/// newer session to it shows on a path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Suspect {
-	/// Nothing: the epic's plain rule.
+	/// Nothing: the epic's rule as written.
+	#[default]
 	Never,
-	/// Every route through the far end ranks as draining until that node's own word
-	/// about the session arrives, or a newer session to it shows on a path.
-	FarEnd,
+	/// The rank travels in the offer, as a drain does.
+	Flagged,
+	/// Each node ranks by what it heard itself, and offers say nothing of it.
+	Local,
+}
+
+/// What the prototype adds to the epic's rule as written, each measured on its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Tune {
+	pub suspect: Suspect,
+	/// A node that knows a closed session sends no route until every neighbour that
+	/// offered one through it has said so too: it uses its new routes at once and
+	/// advertises them once the news has settled around it.
+	pub quiet: bool,
+	/// A node advertises once it has read everything delivered to it, not after
+	/// every message.
+	pub batch: bool,
+	/// A route through a neighbour is refused while that neighbour's own route to
+	/// the same node says otherwise.
+	pub agree: bool,
+	/// A node that sent GOAWAY is named once per neighbour, as a closed session is,
+	/// so every route through it ranks as draining at once.
+	pub drain: bool,
 }
 
 /// One node on a route's path, and the session it learned the route on. The
@@ -75,6 +98,8 @@ impl Offer {
 pub(super) struct Claim {
 	/// From the announcing node to the publisher: 0 for its own endpoint.
 	pub cost: Metric,
+	/// The lowest link priority between the two.
+	pub priority: i8,
 	/// The nodes that announced it again across a scoped grant, the first first.
 	pub chain: Vec<Id>,
 }
@@ -101,6 +126,8 @@ pub(super) enum Msg {
 	},
 	/// The session `hop` names closed. `far` is the node at its other end.
 	Dead { hop: Hop, far: Id },
+	/// `node` sent GOAWAY.
+	Drain { node: Id },
 	/// Claims from an endpoint, or across a scoped grant: no route comes with them.
 	Foreign { changes: Vec<(Broadcast, Change)> },
 }
@@ -139,6 +166,9 @@ struct Peer {
 #[derive(Clone, Debug)]
 struct Heard {
 	offer: Offer,
+	/// The neighbour named a closed session on this path, which ends the route until
+	/// it offers another.
+	ended: bool,
 	floor: Rev,
 	items: BTreeMap<Broadcast, Claim>,
 }
@@ -148,6 +178,15 @@ struct Heard {
 struct Best<N> {
 	via: N,
 	offer: Offer,
+	/// It crosses a node this node suspects, which no offer says.
+	suspect: bool,
+}
+
+impl<N> Best<N> {
+	fn rank(&self) -> (bool, Reverse<i8>, Metric) {
+		let (draining, priority, cost) = self.offer.rank();
+		(draining || self.suspect, priority, cost)
+	}
 }
 
 /// A forwarding node's claims as this node knows them, complete as of `floor`.
@@ -210,7 +249,7 @@ pub(super) struct Kept {
 #[derive(Clone, Debug)]
 pub(super) struct Router<N> {
 	me: Id,
-	suspect: Suspect,
+	tune: Tune,
 	sessions: u64,
 	peers: BTreeMap<N, Peer>,
 	heard: BTreeMap<Id, BTreeMap<N, Heard>>,
@@ -218,8 +257,14 @@ pub(super) struct Router<N> {
 	dead: BTreeMap<Hop, Id>,
 	/// Nodes at the far end of a closed session, by the near ends that said so.
 	suspects: BTreeMap<Id, BTreeSet<Hop>>,
+	/// Nodes named as draining that some heard route still crosses.
+	draining: BTreeSet<Id>,
+	/// Forwarding nodes whose route changed since the neighbours were last told.
+	stale: BTreeSet<Id>,
 	best: BTreeMap<Id, Best<N>>,
-	sent: BTreeMap<N, BTreeMap<Id, Offer>>,
+	/// What each neighbour was offered: `None` once a closed session this node named
+	/// to it ended the route, until the next offer or its explicit end.
+	sent: BTreeMap<N, BTreeMap<Id, Option<Offer>>>,
 	known: BTreeMap<Id, Known<N>>,
 	/// This node's revision of its own claims.
 	rev: Rev,
@@ -242,15 +287,17 @@ pub(super) struct Router<N> {
 }
 
 impl<N: Key> Router<N> {
-	pub fn new(me: Id, suspect: Suspect) -> Self {
+	pub fn new(me: Id, tune: Tune) -> Self {
 		let mut router = Self {
 			me,
-			suspect,
+			tune,
 			sessions: 0,
 			peers: BTreeMap::new(),
 			heard: BTreeMap::new(),
 			dead: BTreeMap::new(),
 			suspects: BTreeMap::new(),
+			draining: BTreeSet::new(),
+			stale: BTreeSet::new(),
 			best: BTreeMap::new(),
 			sent: BTreeMap::new(),
 			known: BTreeMap::new(),
@@ -270,8 +317,31 @@ impl<N: Key> Router<N> {
 		router
 	}
 
+	/// What to send, with every route as it stands now.
 	pub fn drain(&mut self) -> Vec<(N, Msg)> {
+		self.advertise();
 		std::mem::take(&mut self.out)
+	}
+
+	/// Tell every neighbour of each route that changed.
+	fn advertise(&mut self) {
+		if self.tune.quiet && !self.dead.is_empty() {
+			return;
+		}
+		let peers: Vec<N> = self.peers.keys().copied().collect();
+		while let Some(origin) = self.stale.pop_first() {
+			for &peer in &peers {
+				self.advertise_to(origin, peer);
+			}
+		}
+	}
+
+	/// An input is done: advertise unless a burst is read first, and show readers.
+	fn done(&mut self) {
+		if !self.tune.batch {
+			self.advertise();
+		}
+		self.refresh();
 	}
 
 	pub fn events(&mut self) -> Vec<Event> {
@@ -310,10 +380,8 @@ impl<N: Key> Router<N> {
 		}
 		match port.role {
 			Role::Routing => {
-				let origins: Vec<Id> = self.best.keys().copied().chain([self.me]).collect();
-				for origin in origins {
-					self.advertise_to(origin, peer);
-				}
+				let me = self.me;
+				self.stale.extend(self.best.keys().copied().chain([me]));
 			}
 			Role::Scoped => {
 				let broadcasts: Vec<Broadcast> = self.shown.keys().cloned().collect();
@@ -323,7 +391,7 @@ impl<N: Key> Router<N> {
 			}
 			Role::Endpoint => {}
 		}
-		self.refresh();
+		self.done();
 	}
 
 	pub fn disconnect(&mut self, peer: N) {
@@ -357,16 +425,38 @@ impl<N: Key> Router<N> {
 			),
 			Role::Scoped | Role::Endpoint => {}
 		}
-		self.refresh();
+		self.done();
 	}
 
 	/// `peer` sent GOAWAY: every route through it ranks as draining.
 	pub fn goaway(&mut self, peer: N) {
-		if let Some(peer) = self.peers.get_mut(&peer) {
-			peer.draining = true;
+		let Some(peer) = self.peers.get_mut(&peer) else {
+			return;
+		};
+		peer.draining = true;
+		let node = peer.id;
+		match self.tune.drain {
+			true => self.drains(node, None),
+			false => self.reselect_all(),
 		}
+		self.done();
+	}
+
+	/// `node` is draining: `from` said so, or its own GOAWAY when `None`.
+	fn drains(&mut self, node: Id, from: Option<N>) {
+		self.work += 1;
+		if !self.draining.insert(node) {
+			return;
+		}
+		let tell: Vec<N> = (self.sent.iter())
+			.filter(|(peer, sent)| Some(**peer) != from && sent.values().flatten().any(|offer| offer.names(node)))
+			.map(|(&peer, _)| peer)
+			.collect();
+		for peer in tell {
+			self.out.push((peer, Msg::Drain { node }));
+		}
+		self.forget();
 		self.reselect_all();
-		self.refresh();
 	}
 
 	pub fn recv(&mut self, from: N, msg: Msg) {
@@ -378,11 +468,12 @@ impl<N: Key> Router<N> {
 			Msg::Route { origin, offer } if role == Role::Routing => self.route(from, origin, offer),
 			Msg::Claims { origin, changes, floor } if role == Role::Routing => self.claims(from, origin, changes, floor),
 			Msg::Dead { hop, far } if role == Role::Routing => self.closed(hop, far, Some(from)),
+			Msg::Drain { node } if role == Role::Routing => self.drains(node, Some(from)),
 			Msg::Foreign { changes } if role != Role::Routing => self.adopt(from, changes),
 			// A neighbour sends only what its role allows; anything else would close the session.
 			other => panic!("{other:?} from a {role:?} neighbour"),
 		}
-		self.refresh();
+		self.done();
 	}
 
 	fn route(&mut self, from: N, origin: Id, offer: Option<Offer>) {
@@ -395,12 +486,16 @@ impl<N: Key> Router<N> {
 				self.vouch(&offer);
 				let offers = self.heard.entry(origin).or_default();
 				match offers.get_mut(&from) {
-					Some(heard) => heard.offer = offer,
+					Some(heard) => {
+						heard.offer = offer;
+						heard.ended = false;
+					}
 					None => {
 						offers.insert(
 							from,
 							Heard {
 								offer,
+								ended: false,
 								floor: 0,
 								items: BTreeMap::new(),
 							},
@@ -555,7 +650,7 @@ impl<N: Key> Router<N> {
 	/// Claims from an endpoint or across a scoped grant become this node's own.
 	fn adopt(&mut self, from: N, changes: Vec<(Broadcast, Change)>) {
 		let peer = &self.peers[&from];
-		let (cost, scoped) = (peer.port.cost, peer.port.role == Role::Scoped);
+		let (cost, priority, scoped) = (peer.port.cost, peer.port.priority, peer.port.role == Role::Scoped);
 		for (broadcast, change) in changes {
 			self.work += 1;
 			let change = match change {
@@ -563,6 +658,7 @@ impl<N: Key> Router<N> {
 				Change::Live(claim) if claim.chain.contains(&self.me) => Change::Lost,
 				Change::Live(mut claim) => {
 					claim.cost += cost;
+					claim.priority = claim.priority.min(priority);
 					if scoped {
 						claim.chain.push(self.me);
 					}
@@ -590,7 +686,7 @@ impl<N: Key> Router<N> {
 	fn restate(&mut self, broadcast: Broadcast, cause: Change) {
 		let cheapest = (self.local.iter())
 			.filter_map(|(&peer, claims)| Some((claims.get(&broadcast)?, peer)))
-			.min_by_key(|(claim, peer)| (claim.cost, claim.chain.len(), *peer))
+			.min_by_key(|(claim, peer)| (Reverse(claim.priority), claim.cost, claim.chain.len(), *peer))
 			.map(|(claim, peer)| (claim.clone(), peer));
 		let me = self.me;
 		let was = self.known.entry(me).or_default().items.get(&broadcast).cloned();
@@ -620,11 +716,19 @@ impl<N: Key> Router<N> {
 	/// A session closed: this node's own when `from` is `None`.
 	fn closed(&mut self, hop: Hop, far: Id, from: Option<N>) {
 		self.work += 1;
+		// The neighbour's word ends every route it offered through the session.
+		if let Some(from) = from {
+			for heard in self.heard.values_mut().filter_map(|offers| offers.get_mut(&from)) {
+				heard.ended |= heard.offer.path.contains(&hop);
+			}
+		}
 		let named = (self.heard.values())
 			.flat_map(BTreeMap::values)
-			.any(|heard| heard.offer.path.contains(&hop));
+			.any(|heard| !heard.ended && heard.offer.path.contains(&hop));
 		let tell: Vec<N> = (self.sent.iter())
-			.filter(|(peer, sent)| Some(**peer) != from && sent.values().any(|offer| offer.path.contains(&hop)))
+			.filter(|(peer, sent)| {
+				Some(**peer) != from && sent.values().flatten().any(|offer| offer.path.contains(&hop))
+			})
 			.map(|(&peer, _)| peer)
 			.collect();
 		// The far end's own word about a session lifts what its near end cast on it.
@@ -641,9 +745,14 @@ impl<N: Key> Router<N> {
 			}
 			for peer in tell {
 				self.out.push((peer, Msg::Dead { hop, far }));
+				for offer in self.sent.get_mut(&peer).into_iter().flat_map(BTreeMap::values_mut) {
+					if offer.as_ref().is_some_and(|offer| offer.path.contains(&hop)) {
+						*offer = None;
+					}
+				}
 			}
 			let answered = self.dead.iter().any(|(word, about)| word.node == far && *about == hop.node);
-			if self.suspect == Suspect::FarEnd && !answered {
+			if self.tune.suspect != Suspect::Never && !answered {
 				self.suspects.entry(far).or_default().insert(hop);
 			}
 		}
@@ -653,12 +762,12 @@ impl<N: Key> Router<N> {
 
 	/// Forget each dead hop and suspected node no heard route names.
 	fn forget(&mut self) {
-		if self.dead.is_empty() && self.suspects.is_empty() {
+		if self.dead.is_empty() && self.suspects.is_empty() && self.draining.is_empty() {
 			return;
 		}
 		let mut hops = BTreeSet::new();
 		let mut nodes = BTreeSet::new();
-		for heard in self.heard.values().flat_map(BTreeMap::values) {
+		for heard in self.heard.values().flat_map(BTreeMap::values).filter(|heard| !heard.ended) {
 			for hop in &heard.offer.path {
 				hops.insert(*hop);
 				nodes.insert(hop.node);
@@ -667,6 +776,7 @@ impl<N: Key> Router<N> {
 		self.work += hops.len();
 		self.dead.retain(|hop, _| hops.contains(hop));
 		self.suspects.retain(|node, _| nodes.contains(node));
+		self.draining.retain(|node| nodes.contains(node));
 	}
 
 	fn reselect_all(&mut self) {
@@ -686,22 +796,34 @@ impl<N: Key> Router<N> {
 				continue;
 			};
 			let offer = &heard.offer;
+			if heard.ended {
+				continue;
+			}
 			if offer.names(self.me) || offer.path.len() >= MAX_HOPS || offer.path.iter().any(|hop| self.dead.contains_key(hop)) {
 				continue;
 			}
-			let suspected = offer.path.iter().any(|hop| self.suspects.contains_key(&hop.node));
-			let mine = Offer {
-				path: offer.path.clone(),
-				draining: offer.draining || peer.draining || suspected,
-				priority: offer.priority.min(peer.port.priority),
-				cost: offer.cost + peer.port.cost,
-				marked: offer.marked || peer.port.upstream,
+			if self.tune.agree && !self.agrees(origin, via, offer) {
+				continue;
+			}
+			let named = |nodes: &dyn Fn(&Id) -> bool| offer.path.iter().any(|hop| nodes(&hop.node));
+			let suspect = named(&|node| self.suspects.contains_key(node));
+			let flagged = suspect && self.tune.suspect == Suspect::Flagged;
+			let mine = Best {
+				via,
+				offer: Offer {
+					path: offer.path.clone(),
+					draining: offer.draining || peer.draining || flagged || named(&|node| self.draining.contains(node)),
+					priority: offer.priority.min(peer.port.priority),
+					cost: offer.cost + peer.port.cost,
+					marked: offer.marked || peer.port.upstream,
+				},
+				suspect,
 			};
 			let (draining, priority, cost) = mine.rank();
 			// Among equal ranks a node stays on its next hop.
-			let key = (draining, priority, cost, current != Some(via), mine.path.len(), via);
+			let key = (draining, priority, cost, current != Some(via), mine.offer.path.len(), via);
 			if pick.as_ref().is_none_or(|(_, best)| key < *best) {
-				pick = Some((Best { via, offer: mine }, key));
+				pick = Some((mine, key));
 			}
 		}
 		let pick = pick.map(|(best, _)| best);
@@ -709,7 +831,7 @@ impl<N: Key> Router<N> {
 			return;
 		}
 		let (was, now) = (self.best.contains_key(&origin), pick.is_some());
-		let moved = self.best.get(&origin).map(|best| best.offer.rank()) != pick.as_ref().map(|best| best.offer.rank());
+		let moved = self.best.get(&origin).map(Best::rank) != pick.as_ref().map(Best::rank);
 		match pick {
 			Some(best) => self.best.insert(origin, best),
 			None => self.best.remove(&origin),
@@ -721,10 +843,23 @@ impl<N: Key> Router<N> {
 			self.work += known.items.len();
 			self.dirty.extend(known.items.keys().cloned());
 		}
-		let peers: Vec<N> = self.peers.keys().copied().collect();
-		for peer in peers {
-			self.advertise_to(origin, peer);
-		}
+		self.stale.insert(origin);
+	}
+
+	/// Whether `offer`, heard from `via`, crosses no other neighbour whose own route
+	/// to `origin` differs: a neighbour's word about its route is newer than anyone's
+	/// copy of it.
+	fn agrees(&self, origin: Id, via: N, offer: &Offer) -> bool {
+		let Some(offers) = self.heard.get(&origin) else {
+			return true;
+		};
+		(offers.iter()).filter(|(peer, own)| **peer != via && !own.ended).all(|(peer, own)| {
+			let id = self.peers[peer].id;
+			match offer.path.iter().position(|hop| hop.node == id) {
+				Some(at) => offer.path[..=at] == own.offer.path[..],
+				None => true,
+			}
+		})
 	}
 
 	/// What `peer` should hear of `origin` now.
@@ -762,12 +897,13 @@ impl<N: Key> Router<N> {
 		}
 		let offer = self.offer_for(origin, peer);
 		let sent = self.sent.entry(peer).or_default();
-		if sent.get(&origin) == offer.as_ref() {
+		let was = sent.get(&origin);
+		if was.is_none_or(|was| was.is_some()) && was.and_then(Option::as_ref) == offer.as_ref() {
 			return;
 		}
-		let fresh = !sent.contains_key(&origin);
+		let fresh = was.is_none();
 		match &offer {
-			Some(offer) => sent.insert(origin, offer.clone()),
+			Some(offer) => sent.insert(origin, Some(offer.clone())),
 			None => sent.remove(&origin),
 		};
 		let started = fresh && offer.is_some();
@@ -803,10 +939,10 @@ impl<N: Key> Router<N> {
 			.filter_map(|&origin| {
 				let claim = self.known.get(&origin)?.items.get(broadcast)?;
 				let rank = match origin == self.me {
-					true => (false, Reverse(i8::MAX), claim.cost),
+					true => (false, Reverse(claim.priority), claim.cost),
 					false => {
-						let (draining, priority, cost) = self.best.get(&origin)?.offer.rank();
-						(draining, priority, cost + claim.cost)
+						let (draining, Reverse(priority), cost) = self.best.get(&origin)?.rank();
+						(draining, Reverse(priority.min(claim.priority)), cost + claim.cost)
 					}
 				};
 				Some(((rank, claim.chain.len(), origin), claim))
@@ -881,13 +1017,17 @@ impl<N: Key> Router<N> {
 	/// from that neighbour.
 	fn export(&mut self, broadcast: &Broadcast, peer: N) {
 		let claim = self.closest(broadcast).and_then(|(origin, claim)| {
-			let cost = match origin == self.me {
+			let (cost, priority) = match origin == self.me {
 				true if self.sources.get(broadcast) == Some(&peer) => return None,
-				true => claim.cost,
-				false => claim.cost + self.best[&origin].offer.cost,
+				true => (claim.cost, claim.priority),
+				false => {
+					let offer = &self.best[&origin].offer;
+					(claim.cost + offer.cost, claim.priority.min(offer.priority))
+				}
 			};
 			Some(Claim {
 				cost,
+				priority,
 				chain: claim.chain.clone(),
 			})
 		});
@@ -925,7 +1065,7 @@ impl<N: Key> Router<N> {
 			items: self.known.values().map(|known| known.items.len()).sum(),
 			heard: heard().map(|heard| heard.items.len()).sum(),
 			foreign: self.foreign.values().map(BTreeMap::len).sum(),
-			pending: self.dead.len() + self.suspects.len(),
+			pending: self.dead.len() + self.suspects.len() + self.draining.len(),
 		}
 	}
 }
@@ -963,7 +1103,7 @@ pub(super) struct Seen {
 /// A network of [`Router`]s and endpoints, with [`Sim`]'s queues.
 #[derive(Clone)]
 pub(super) struct MultiSim {
-	suspect: Suspect,
+	tune: Tune,
 	spots: Vec<Spot>,
 	restarts: Vec<u32>,
 	ports: BTreeMap<(Node, Node), Port>,
@@ -977,11 +1117,11 @@ pub(super) struct MultiSim {
 }
 
 impl MultiSim {
-	pub fn new(suspect: Suspect, nodes: usize) -> Self {
+	pub fn new(tune: Tune, nodes: usize) -> Self {
 		Self {
-			suspect,
+			tune,
 			spots: (0..nodes)
-				.map(|node| Spot::Relay(Box::new(Router::new(hop(node, 0), suspect))))
+				.map(|node| Spot::Relay(Box::new(Router::new(hop(node, 0), tune))))
 				.collect(),
 			restarts: vec![0; nodes],
 			ports: BTreeMap::new(),
@@ -1055,6 +1195,7 @@ impl MultiSim {
 					.map(|path| {
 						let claim = Claim {
 							cost: 0,
+							priority: i8::MAX,
 							chain: Vec::new(),
 						};
 						((id.expect("a publisher"), path.clone()), Change::Live(claim))
@@ -1101,7 +1242,7 @@ impl MultiSim {
 		self.restarts[node] += 1;
 		if let Spot::Relay(router) = &self.spots[node] {
 			self.spent += router.work();
-			self.spots[node] = Spot::Relay(Box::new(Router::new(hop(node, self.restarts[node]), self.suspect)));
+			self.spots[node] = Spot::Relay(Box::new(Router::new(hop(node, self.restarts[node]), self.tune)));
 		}
 	}
 
@@ -1139,6 +1280,7 @@ impl MultiSim {
 				*self.lives.entry(broadcast.clone()).or_default() += 1;
 				Change::Live(Claim {
 					cost: 0,
+					priority: i8::MAX,
 					chain: Vec::new(),
 				})
 			}
@@ -1158,7 +1300,7 @@ impl MultiSim {
 
 	fn send(&mut self, from: Node, to: Node, msg: Msg) {
 		match &msg {
-			Msg::Route { .. } | Msg::Dead { .. } => {
+			Msg::Route { .. } | Msg::Dead { .. } | Msg::Drain { .. } => {
 				self.stats.route_msgs += 1;
 				self.stats.route_items += 1;
 			}
@@ -1189,7 +1331,11 @@ impl MultiSim {
 			router.recv(from, msg);
 		}
 		self.stats.delivered += 1;
-		self.flush();
+		// A relay that reads a burst first answers when the round ends.
+		match self.tune.batch {
+			true => self.show(),
+			false => self.flush(),
+		}
 		true
 	}
 
@@ -1216,16 +1362,25 @@ impl MultiSim {
 		})
 	}
 
-	fn flush(&mut self) {
+	/// Move every router's output onto the queues and log its reader events.
+	pub fn flush(&mut self) {
 		for node in 0..self.spots.len() {
 			let Some(router) = self.relay(node) else {
 				continue;
 			};
-			let (outs, events) = (router.drain(), router.events());
-			for (to, msg) in outs {
+			for (to, msg) in router.drain() {
 				self.send(node, to, msg);
 			}
-			for event in events {
+		}
+		self.show();
+	}
+
+	fn show(&mut self) {
+		for node in 0..self.spots.len() {
+			let Some(router) = self.relay(node) else {
+				continue;
+			};
+			for event in router.events() {
 				let seen = Seen {
 					node,
 					live: self.live(&event.broadcast),
