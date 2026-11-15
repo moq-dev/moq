@@ -342,25 +342,36 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
 	});
 
-	it("starts a stalled ring only once the queued media covers the hold", () => {
-		const gate = new Backpressure(1000, true, Duration.millis(2000));
-		const wait = gate.wait(ms(0), new AbortController().signal);
-		gate.queued(ms(1499));
-		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.queued(ms(1500));
-		expect(Bun.peek.status(wait)).toBe("fulfilled");
-	});
+	// A finished track shorter than the hold has queued everything it will send.
+	for (const finished of [false, true]) {
+		it(`starts a stalled ring only once the queued media covers the hold${finished ? ", or its track finished" : ""}`, () => {
+			const gate = new Backpressure(1000, true, Duration.millis(2000));
+			const wait = gate.wait(ms(0), new AbortController().signal);
+			gate.queued(ms(1499));
+			expect(Bun.peek.status(wait)).toBe("pending");
+			if (finished) gate.complete(true);
+			else gate.queued(ms(1500));
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
+		});
+	}
 
 	// The ring un-stalls only once the decoder's output reaches it, so covered media released
-	// outright would overflow the fixed ring before the worklet reports it playing.
-	it("refills a covered buffered ring only to its floor", () => {
-		const gate = new Backpressure(1000, true, Duration.millis(2000));
-		gate.queued(ms(60_000));
-		const signal = new AbortController().signal;
-		expect(Bun.peek.status(gate.wait(ms(0), signal))).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(500), signal))).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("pending");
-	});
+	// outright would overflow the fixed ring before the worklet reports it playing. A finished track
+	// covers all of itself, live or buffered.
+	for (const [name, buffered, finished] of [
+		["buffered", true, false],
+		["finished live", false, true],
+	] as const) {
+		it(`refills a covered ${name} ring only to its floor`, () => {
+			const gate = new Backpressure(1000, buffered, Duration.millis(2000));
+			if (finished) gate.complete(true);
+			else gate.queued(ms(60_000));
+			const signal = new AbortController().signal;
+			expect(Bun.peek.status(gate.wait(ms(0), signal))).toBe("fulfilled");
+			expect(Bun.peek.status(gate.wait(ms(500), signal))).toBe("fulfilled");
+			expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("pending");
+		});
+	}
 
 	// A warmup longer than the floor discards everything the refill releases toward it, so the ring
 	// would never anchor and report the playhead the gate waits on.
