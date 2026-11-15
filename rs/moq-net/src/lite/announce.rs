@@ -1389,12 +1389,12 @@ mod tests {
 	#[test]
 	fn synced_marks_lite07s_initial_set() {
 		let mut bytes = Vec::new();
-		AnnounceBroadcast::Synced
+		AnnounceBroadcast::Synced { prefix: 3 }
 			.encode(&mut Encoder::new(&mut bytes, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
-		assert_eq!(bytes, vec![4, 0]);
+		assert_eq!(bytes, vec![4, 1, 3]);
 		assert!(matches!(
-			AnnounceBroadcast::Synced.encode(
+			AnnounceBroadcast::Synced { prefix: 3 }.encode(
 				&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()),
 				Version::Lite06
 			),
@@ -1990,40 +1990,62 @@ mod tests {
 		AnnounceRequest {
 			prefix: got.prefix.clone(),
 			exclude_hop: got.exclude_hop,
-			hidden: got.hidden,
 		}
 	}
 
-	// Lite07 carries the hidden opt-in; every earlier version decodes as not opted in.
+	// Lite-07 edits a set of prefixes on its one stream instead of opening a stream per
+	// prefix.
 	#[test]
-	fn announce_request_carries_hidden_from_lite07() {
-		for hidden in [false, true] {
-			let msg = AnnounceRequest {
-				prefix: Path::from_static("room"),
-				exclude_hop: Hop::UNKNOWN,
-				hidden,
-			};
-			assert_eq!(request_round_trip(&msg, Version::Lite07).hidden, hidden);
-			assert!(!request_round_trip(&msg, Version::Lite06).hidden);
+	fn announce_request_edits_a_set_on_lite07() {
+		let msg = AnnounceRequest {
+			prefix: Path::from_static("room"),
+			exclude_hop: Hop::UNKNOWN,
+		};
+		let res = msg.encode(&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()), Version::Lite07);
+		assert!(matches!(res, Err(EncodeError::Version)));
+
+		let edit = AnnounceBroadcast::Request {
+			remove: vec![0, 7],
+			add: vec![(Path::from_static("room"), true), (Path::empty(), false)],
+		};
+		assert_eq!(broadcast_round_trip(&edit, Version::Lite07), edit);
+		let mut bytes = Vec::new();
+		edit.encode(&mut Encoder::new(&mut bytes, Version::Lite07.into()), Version::Lite07)
+			.unwrap();
+		// Type, length, the removed Prefix IDs, then each added prefix with its Hidden.
+		assert_eq!(bytes, [&[16, 11, 2, 0, 7, 2, 4][..], b"room", &[1, 0, 0]].concat());
+		assert_eq!(broadcast_round_trip(&AnnounceBroadcast::Ok, Version::Lite07), AnnounceBroadcast::Ok);
+		for msg in [edit, AnnounceBroadcast::Ok] {
+			let res = msg.encode(&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()), Version::Lite06);
+			assert!(matches!(res, Err(EncodeError::Version)), "{msg:?}");
 		}
 	}
 
-	// A flag byte other than 0 or 1 is malformed, not a future extension.
+	// A flag byte other than 0 or 1 is malformed, not a future extension, and a count
+	// the body cannot hold is refused before anything is allocated for it.
 	#[test]
-	fn announce_request_rejects_a_bad_hidden_flag() {
-		let mut buf = Vec::new();
-		let mut body = Vec::new();
-		Path::from_static("room")
-			.encode(&mut Encoder::new(&mut body, Version::Lite07.into()), Version::Lite07)
-			.unwrap();
-		body.push(2);
-		Encoder::new(&mut buf, Version::Lite07.into())
-			.varint(body.len() as u64)
-			.unwrap();
-		buf.extend_from_slice(&body);
-		assert!(
-			crate::coding::decode_buf(&mut &buf[..], Version::Lite07, |r, v| AnnounceRequest::decode(r, v)).is_err()
-		);
+	fn announce_request_rejects_a_bad_body() {
+		let bad_flag = forge(ANNOUNCE_REQUEST, |w| {
+			w.varint(0u64).unwrap();
+			w.varint(1u64).unwrap();
+			Path::from_static("room").encode(w, Version::Lite07).unwrap();
+			w.u8(2);
+		});
+		assert!(decode_broadcast(&bad_flag, Version::Lite07).is_err());
+		let overcount = forge(ANNOUNCE_REQUEST, |w| {
+			w.varint(u64::MAX >> 2).unwrap();
+		});
+		assert!(decode_broadcast(&overcount, Version::Lite07).is_err());
+	}
+
+	// The whole set has to fit the Adds of one message.
+	#[test]
+	fn a_request_set_fits_one_message() {
+		let long = Path::new(&"a".repeat(1000)).unwrap();
+		let fits: Vec<Path> = vec![long.clone(); 65];
+		assert!(request_fits(fits.iter(), Version::Lite07));
+		let over: Vec<Path> = vec![long; 66];
+		assert!(!request_fits(over.iter(), Version::Lite07));
 	}
 
 	// Lite04/05 carry the subscriber's origin id so the publisher can skip reflected
@@ -2033,7 +2055,6 @@ mod tests {
 		let msg = AnnounceRequest {
 			prefix: Path::from_static("room"),
 			exclude_hop: Hop::new(42).unwrap(),
-			hidden: false,
 		};
 		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop.id(), 42);
 	}
@@ -2045,7 +2066,6 @@ mod tests {
 		let msg = AnnounceRequest {
 			prefix: Path::from_static("room"),
 			exclude_hop: Hop::new(42).unwrap(),
-			hidden: false,
 		};
 		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, Hop::UNKNOWN);
 
@@ -2163,11 +2183,13 @@ mod tests {
 		for msg in [
 			AnnounceBroadcast::RouteStart {
 				node: 0x7a3f,
+				prefix: 0,
 				suffix: Path::empty(),
 				offer: offer(&[(0x7a3f, 0)], 0, false),
 			},
 			AnnounceBroadcast::RouteStart {
 				node: route::QUALIFIED | 9,
+				prefix: 0,
 				suffix: Path::from_static("room/a"),
 				offer: offer(&[(9, 0), (4, u64::MAX >> 2)], route::MAX, true),
 			},
@@ -2181,6 +2203,7 @@ mod tests {
 			},
 			AnnounceBroadcast::RouteStart {
 				node: 0x7a40,
+				prefix: 0,
 				suffix: Path::empty(),
 				offer: Offer {
 					rtt: Some(std::time::Duration::ZERO),
@@ -2201,18 +2224,13 @@ mod tests {
 				hop: route::path::Hop { node: 4, session: 2 },
 				far: 9,
 				gone: false,
-				more: true,
-				moved: Vec::new(),
+				moved: 0,
 			}),
 			AnnounceBroadcast::Dead(Dead::Closed {
 				hop: route::path::Hop { node: 4, session: 0 },
 				far: route::MAX,
 				gone: true,
-				more: false,
-				moved: vec![
-					(0, Ok(offer(&[(1, 0), (5, 1)], 3, false))),
-					(7, Ok(offer(&[(1, 0)], 0, true))),
-				],
+				moved: 2,
 			}),
 			AnnounceBroadcast::Dead(Dead::Drain { node: 4 }),
 			AnnounceBroadcast::Floor {
@@ -2284,6 +2302,7 @@ mod tests {
 		for msg in [
 			AnnounceBroadcast::RouteStart {
 				node: 1,
+				prefix: 0,
 				suffix: Path::empty(),
 				offer: offer(&[(1, 0)], 0, false),
 			},
@@ -2318,11 +2337,13 @@ mod tests {
 		let refused = [
 			AnnounceBroadcast::RouteStart {
 				node: 0,
+				prefix: 0,
 				suffix: Path::empty(),
 				offer: offer(&[(1, 0)], 1, false),
 			},
 			AnnounceBroadcast::RouteStart {
 				node: 1,
+				prefix: 0,
 				suffix: Path::empty(),
 				offer: offer(&[], 1, false),
 			},
@@ -2339,8 +2360,7 @@ mod tests {
 				hop: route::path::Hop { node: 1, session: 1 },
 				far: 0,
 				gone: false,
-				more: false,
-				moved: Vec::new(),
+				moved: 0,
 			}),
 			// The last revision has no room for the offset.
 			AnnounceBroadcast::Floor {
@@ -2372,6 +2392,8 @@ mod tests {
 		let start = |node: u64, offer: Box<dyn FnOnce(&mut Encoder<'_>)>| {
 			forge(ROUTE_START, move |w| {
 				w.varint(node).unwrap();
+				// Prefix ID 0, and an empty suffix.
+				w.varint(0u64).unwrap();
 				w.varint(0u64).unwrap();
 				offer(w);
 			})
@@ -2383,6 +2405,7 @@ mod tests {
 		};
 		let named = |node, path| Refusable::RouteStart {
 			node,
+			prefix: 0,
 			suffix: Some(Path::empty()),
 			path,
 		};
@@ -2426,11 +2449,13 @@ mod tests {
 			(
 				forge(ROUTE_START, |w| {
 					w.varint(1u64).unwrap();
+					w.varint(5u64).unwrap();
 					w.bytes(b"x//y").unwrap();
 					path(0, 1, 1, 1)(w);
 				}),
 				Refusable::RouteStart {
 					node: 1,
+					prefix: 5,
 					suffix: None,
 					path: hops(1, 1),
 				},
@@ -2456,34 +2481,21 @@ mod tests {
 			);
 		}
 
-		// A DEAD's moved offer is sized, so one refused leaves the next readable.
+		// A DEAD has a fixed size: it counts the ROUTE_UPDATEs following it.
 		let wire = forge(DEAD, |w| {
 			for field in [DEAD_CLOSED, 1, 1, 2] {
 				w.varint(field).unwrap();
 			}
 			w.u8(1);
-			w.u8(0);
 			w.varint(2u64).unwrap();
-			for (id, flags) in [(4u64, 8u8), (5, 0)] {
-				w.varint(id).unwrap();
-				let prefix = w.prefix_varint();
-				path(flags, 1, 1, 3)(w);
-				w.fill(prefix).unwrap();
-			}
 		});
-		let AnnounceBroadcast::Dead(Dead::Closed { moved, .. }) = decode_broadcast(&wire, Version::Lite07).unwrap()
-		else {
-			panic!("a DEAD");
-		};
 		assert_eq!(
-			moved.iter().map(|(id, heard)| (*id, heard.is_ok())).collect::<Vec<_>>(),
-			[(4, false), (5, true)]
-		);
-		assert_eq!(
-			moved[0].1,
-			Err(Unusable {
-				path: hops(1, 3),
-				reason: Refusal::Flags(8)
+			decode_broadcast(&wire, Version::Lite07).unwrap(),
+			AnnounceBroadcast::Dead(Dead::Closed {
+				hop: route::path::Hop { node: 1, session: 1 },
+				far: 2,
+				gone: true,
+				moved: 2,
 			})
 		);
 

@@ -734,7 +734,7 @@ impl Sim {
 					(to, Msg::Dead(dead))
 				}
 				path::Out::Ask { to, edit } => (to, Msg::Ask(edit)),
-				path::Out::Edited { to } => (to, Msg::Edited),
+				path::Out::Edited { to, .. } => (to, Msg::Edited),
 				path::Out::Synced { to, prefix } => (to, Msg::Synced { prefix }),
 			};
 			self.queues.entry((node, to)).or_default().push_back(msg);

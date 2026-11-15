@@ -1344,4 +1344,47 @@ fn scoped(link: &route::Link, root: &Path, permit: &crate::auth::Permit, key: [u
 }
 
 #[cfg(test)]
+impl Routed {
+	/// A session that asked the peer for `prefix`, which the peer answered.
+	fn asking(
+		subscriber: &Subscriber,
+		prefix: &Path,
+		link_cost: u64,
+		permit: &crate::auth::Permit,
+	) -> Result<Self, Error> {
+		// Each is a session of its own to the node.
+		let mut subscriber = subscriber.clone();
+		subscriber.peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		let subscriber = &subscriber;
+		let mut routed = Self::new(subscriber, link_cost, permit, None)?;
+		routed.want(prefix.clone(), subscriber.origin.snapshot(prefix.as_str()));
+		routed.answered(subscriber)?;
+		Ok(routed)
+	}
+
+	/// Act on everything the node queued, returning the requests it sends the peer.
+	fn outputs(&mut self, subscriber: &Subscriber) -> Vec<lite::AnnounceBroadcast> {
+		let mut requests = Vec::new();
+		while let Some(output) = self.stream.try_output() {
+			requests.extend(self.output(subscriber, output));
+		}
+		requests
+	}
+
+	/// Send the peer what the node asks for, and have it answer each request at once.
+	fn answered(&mut self, subscriber: &Subscriber) -> Result<(), Error> {
+		while !self.outputs(subscriber).is_empty() {
+			self.receive(lite::AnnounceBroadcast::Ok)?;
+		}
+		Ok(())
+	}
+
+	/// Apply a new permit, the peer answering whatever it changes of the request.
+	fn relimit(&mut self, subscriber: &Subscriber, permit: &crate::auth::Permit) -> Result<(), Error> {
+		self.limit(permit);
+		self.answered(subscriber)
+	}
+}
+
+#[cfg(test)]
 mod tests;

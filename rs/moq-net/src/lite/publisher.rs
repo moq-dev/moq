@@ -3666,66 +3666,87 @@ mod announce_test {
 			.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
 			.unwrap();
 		let prefix = crate::Path::new(&"p".repeat(crate::Path::MAX_BYTES - 50)).unwrap();
-		let mut answer = super::routed::Answer::new(consumer, prefix, true, crate::auth::Link::new(false));
+		let mut answer = super::routed::Answer::alone(consumer);
 		let log = Log::default();
 		let mut wire = Wire {
 			writes: log.writes.clone(),
 			cursor: 0,
 			version: Version::Lite07,
 		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
 		};
-		assert!(answer.poll(&mut stream, false, &kio::Waiter::noop()).is_pending());
-		wire.take_ok();
-		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Synced { prefix: 0 }]);
+		answer.request(Vec::new(), vec![(prefix, true)]).unwrap();
+		assert_eq!(
+			sent(&mut answer),
+			[
+				lite::AnnounceBroadcast::Ok,
+				lite::AnnounceBroadcast::Synced { prefix: 0 }
+			]
+		);
 	}
 
-	/// A lite-07 peer sends nothing after its request: a byte more on the stream is a
-	/// protocol violation.
+	/// A lite-07 peer edits one request at a time, names only prefixes in effect, and
+	/// asks for no prefix at or below another: each is a protocol violation.
 	#[test]
-	fn a_lite07_peer_writing_after_its_request_violates_the_stream() {
-		/// A peer that keeps writing.
-		struct Chatty;
-		impl crate::transport::poll::Chunks for Chatty {
-			type Error = SinkError;
-			fn poll_read_chunk(
-				&mut self,
-				_: &kio::Waiter,
-				_: usize,
-			) -> std::task::Poll<Result<Option<bytes::Bytes>, SinkError>> {
-				std::task::Poll::Ready(Ok(Some(bytes::Bytes::from_static(&[0x01]))))
-			}
-			fn stop(&mut self, _: u32) {}
+	fn a_lite07_request_out_of_turn_or_nested_is_a_violation() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let answer = || super::routed::Answer::alone(origin.consume());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+
+		// A second edit before the first is answered.
+		let mut first = answer();
+		first.request(Vec::new(), vec![(path("a"), false)]).unwrap();
+		let again = first.request(Vec::new(), vec![(path("b"), false)]);
+		assert!(matches!(again, Err(Error::ProtocolViolation)), "{again:?}");
+
+		// Answered, the next edit goes.
+		assert_eq!(sent(&mut first)[0], lite::AnnounceBroadcast::Ok);
+		first.request(vec![0], vec![(path("b"), false)]).unwrap();
+		assert_eq!(sent(&mut first)[0], lite::AnnounceBroadcast::Ok);
+
+		// A prefix that is not in effect, one asked for twice, and one below another.
+		for (remove, add) in [
+			(vec![0], Vec::new()),
+			(Vec::new(), vec![path("b")]),
+			(Vec::new(), vec![path("b/c")]),
+			(Vec::new(), vec![path("")]),
+			(Vec::new(), vec![path("x"), path("x/y")]),
+		] {
+			let add: Vec<_> = add.into_iter().map(|path| (path, false)).collect();
+			let refused = first.request(remove.clone(), add.clone());
+			assert!(matches!(refused, Err(Error::ProtocolViolation)), "{remove:?} {add:?}");
 		}
 
-		let origin = Hop::new(1).unwrap().produce();
-		let mut answer = super::routed::Answer::new(
-			origin.consume(),
-			crate::Path::empty(),
-			true,
-			crate::auth::Link::new(false),
-		);
-		let log = Log::default();
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(
-				crate::transport::boxed::RecvStream::new(crate::transport::poll::Buffered::new(Chatty)),
-				Version::Lite07,
-			),
-		};
-		let polled = answer.poll(&mut stream, false, &kio::Waiter::noop());
-		assert!(
-			matches!(polled, std::task::Poll::Ready(Err(Error::ProtocolViolation))),
-			"{polled:?}"
-		);
+		// A set past one message.
+		let mut wide = answer();
+		let long = "p".repeat(crate::Path::MAX_BYTES - 8);
+		let add: Vec<_> = (0..80).map(|i| (path(&format!("{i:02}/{long}")), false)).collect();
+		let refused = wide.request(Vec::new(), add);
+		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
 	}
 
 	/// A lite-07 stream holds a route on the wire only while it shows one of the
@@ -3736,41 +3757,42 @@ mod announce_test {
 	async fn a_lite07_route_goes_only_with_a_shown_claim() {
 		let origin = Hop::new(1).unwrap().produce();
 		let _stats = origin.announce(".stats/node", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut answer =
-			super::routed::Answer::new(consumer, crate::Path::empty(), false, crate::auth::Link::new(false));
+		let mut answer = super::routed::Answer::alone(origin.consume());
 		let log = Log::default();
 		let mut wire = Wire {
 			writes: log.writes.clone(),
 			cursor: 0,
 			version: Version::Lite07,
 		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		wire.take_ok();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		answer.request(Vec::new(), vec![(crate::Path::empty(), false)]).unwrap();
 		assert_eq!(
-			wire.take_announces(),
-			[lite::AnnounceBroadcast::Synced { prefix: 0 }],
+			sent(&mut answer),
+			[
+				lite::AnnounceBroadcast::Ok,
+				lite::AnnounceBroadcast::Synced { prefix: 0 }
+			],
 			"nothing shown"
 		);
 
 		let shown = origin.announce("x", origin::RouteInfo::new()).unwrap();
 		// The origin feeds its node from a task.
 		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		let announces = wire.take_announces();
+		let announces = sent(&mut answer);
 		assert!(
 			matches!(
 				announces.as_slice(),
 				[
-					lite::AnnounceBroadcast::RouteStart { .. },
+					lite::AnnounceBroadcast::RouteStart { prefix: 0, .. },
 					lite::AnnounceBroadcast::Active { route: 0, .. },
 					lite::AnnounceBroadcast::Floor { id: 0, .. },
 				]
@@ -3780,8 +3802,7 @@ mod announce_test {
 
 		drop(shown);
 		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		let announces = wire.take_announces();
+		let announces = sent(&mut answer);
 		assert!(
 			matches!(
 				announces.as_slice(),
@@ -3796,100 +3817,18 @@ mod announce_test {
 
 		let _again = origin.announce("y", origin::RouteInfo::new()).unwrap();
 		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		let announces = wire.take_announces();
+		let announces = sent(&mut answer);
 		assert!(
 			matches!(
 				announces.as_slice(),
 				[
-					lite::AnnounceBroadcast::RouteStart { .. },
+					lite::AnnounceBroadcast::RouteStart { prefix: 0, .. },
 					lite::AnnounceBroadcast::Active { route: 1, .. },
 					lite::AnnounceBroadcast::Floor { id: 1, .. },
 				]
 			),
 			"{announces:?}"
 		);
-	}
-
-	/// A DEAD whose moved routes outgrow one message goes in consecutive parts, each
-	/// fitting one and all but the last with More set, which list its moved routes in
-	/// order, so failing over many routes at once never fails the stream; one that fits
-	/// goes whole.
-	#[test]
-	fn a_lite07_dead_past_one_message_goes_in_parts() {
-		use crate::route::path::{Hop, Offer};
-		let offer = Offer {
-			// The longest path, of the widest Hop IDs.
-			path: (0..crate::route::MAX_HOPS as u64)
-				.map(|session| Hop {
-					node: crate::route::GENERATED - session,
-					session,
-				})
-				.collect(),
-			draining: false,
-			priority: 0,
-			metric: 1,
-			down_only: false,
-			rtt: None,
-		};
-		let dead = |moved: std::ops::Range<u64>, more| lite::Dead::Closed {
-			hop: Hop { node: 7, session: 1 },
-			far: 8,
-			gone: true,
-			more,
-			moved: moved.map(|id| (id, Ok(offer.clone()))).collect(),
-		};
-		let encodes = |msg: &lite::AnnounceBroadcast| {
-			crate::coding::Encode::encode(
-				msg,
-				&mut crate::coding::Encoder::new(&mut Vec::new(), Version::Lite07.into()),
-				Version::Lite07,
-			)
-			.is_ok()
-		};
-		// Past three times 65,535 bytes at about 300 a route.
-		let many = 700;
-		assert!(!encodes(&lite::AnnounceBroadcast::Dead(dead(0..many, false))));
-
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let waiter = kio::Waiter::noop();
-		super::routed::buffer_dead(&mut stream, dead(0..2, false)).unwrap();
-		assert!(stream.writer.poll_flush(&waiter).is_ready());
-		assert_eq!(
-			wire.take_announces(),
-			[lite::AnnounceBroadcast::Dead(dead(0..2, false))]
-		);
-
-		super::routed::buffer_dead(&mut stream, dead(0..many, false)).unwrap();
-		assert!(stream.writer.poll_flush(&waiter).is_ready());
-		let sent = wire.take_announces();
-		assert!(sent.len() >= 3, "{} parts", sent.len());
-		let mut next = 0;
-		for (i, part) in sent.iter().enumerate() {
-			let lite::AnnounceBroadcast::Dead(lite::Dead::Closed { moved, .. }) = part else {
-				panic!("a DEAD part: {part:?}");
-			};
-			let end = next + moved.len() as u64;
-			assert!(end > next, "part {i} lists no route");
-			assert_eq!(
-				*part,
-				lite::AnnounceBroadcast::Dead(dead(next..end, i + 1 < sent.len()))
-			);
-			next = end;
-		}
-		assert_eq!(next, many);
 	}
 
 	#[test]

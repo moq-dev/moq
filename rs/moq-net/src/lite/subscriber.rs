@@ -4715,7 +4715,7 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
-		let mut driver = SubscriberDriver::new(subscriber.clone(), Vec::new(), false);
+		let mut driver = SubscriberDriver::new(subscriber.clone(), Vec::new(), false, route_stream::Publish::idle());
 		let producer = datagram::Info::default().produce("datagrams");
 		let mut received = producer.consume();
 		subscriber.datagrams.lock().insert(
@@ -7264,7 +7264,7 @@ mod tests {
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
-			let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false);
+			let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false, route_stream::Publish::idle());
 			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
 			kio::clock::sleep(std::time::Duration::from_secs(20)).await;
 			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
@@ -9974,9 +9974,13 @@ mod tests {
 		script
 	}
 
-	/// An ANNOUNCE_OK counting `active` starts into the initial set.
+	/// An ANNOUNCE_OK counting `active` starts into the initial set, or a lite-07 one
+	/// answering the root's request.
 	fn announce_ok(version: Version, active: u64) -> impl Fn(&mut crate::coding::Encoder<'_>) {
 		move |w| {
+			if version.has_routes() {
+				return lite::AnnounceBroadcast::Ok.encode(w, version).unwrap();
+			}
 			lite::AnnounceOk {
 				origin: crate::Hop::new(9).unwrap(),
 				active,
@@ -10015,6 +10019,7 @@ mod tests {
 			};
 			lite::AnnounceBroadcast::RouteStart {
 				node,
+				prefix: 0,
 				suffix: Path::empty(),
 				offer,
 			}
@@ -10032,11 +10037,34 @@ mod tests {
 		}
 	}
 
+	/// What reads a peer's announces of the root: its stream, or from lite-07 the
+	/// session's route layer.
+	enum Announcing {
+		Prefix(AnnouncePrefix),
+		Routes(Box<route_stream::RouteStream>),
+	}
+
+	impl Announcing {
+		fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+			match self {
+				Self::Prefix(prefix) => prefix.poll(waiter),
+				Self::Routes(routes) => routes.poll(waiter).map(Err),
+			}
+		}
+
+		fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+			match self {
+				Self::Prefix(prefix) => prefix.poll_run(waiter),
+				Self::Routes(routes) => routes.poll_run(waiter),
+			}
+		}
+	}
+
 	/// The announce stream for the root of a fresh origin, its peer replaying `session`.
 	fn root_prefix(
 		version: Version,
 		session: crate::lite::test_transport::ScriptedSession,
-	) -> (AnnouncePrefix, origin::Consumer) {
+	) -> (Announcing, origin::Consumer) {
 		root_prefix_counted(version, session, Default::default())
 	}
 
@@ -10045,7 +10073,7 @@ mod tests {
 		version: Version,
 		session: crate::lite::test_transport::ScriptedSession,
 		stats: crate::stats::Session,
-	) -> (AnnouncePrefix, origin::Consumer) {
+	) -> (Announcing, origin::Consumer) {
 		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 			.produce()
 			.with_stats(stats);
@@ -10062,14 +10090,18 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
-		(
-			AnnouncePrefix::new(
-				subscriber.clone(),
-				Path::from_static(""),
-				subscriber.origin.snapshot(""),
-			),
-			consumer,
-		)
+		let snapshot = subscriber.origin.snapshot("");
+		if !version.has_routes() {
+			let prefix = AnnouncePrefix::new(subscriber.clone(), Path::from_static(""), snapshot);
+			return (Announcing::Prefix(prefix), consumer);
+		}
+		// The peer's SETUP arrived, and it opened its Announce Stream.
+		subscriber.peer_setup.set(lite::Setup::default()).unwrap();
+		let recv = crate::transport::boxed::RecvStream::new(session.recv());
+		let _ = subscriber.announce_streams.try_push(route_stream::Reader::new(recv, version));
+		let mut routes = route_stream::RouteStream::new(subscriber, route_stream::Publish::idle());
+		routes.want(Path::empty(), snapshot);
+		(Announcing::Routes(Box::new(routes)), consumer)
 	}
 
 	/// A peer streaming announces gets a budget of them read per poll, so the session's
@@ -10151,7 +10183,11 @@ mod tests {
 	#[kio::test]
 	async fn an_empty_initial_set_catches_up_at_once() {
 		const VERSION: Version = Version::Lite07;
-		let synced = |w: &mut crate::coding::Encoder<'_>| lite::AnnounceBroadcast::Synced.encode(w, VERSION).unwrap();
+		let synced = |w: &mut crate::coding::Encoder<'_>| {
+			lite::AnnounceBroadcast::Synced { prefix: 0 }
+				.encode(w, VERSION)
+				.unwrap()
+		};
 		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &synced]);
 		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
 		let cursor = consumer.routes();
@@ -10304,7 +10340,7 @@ mod tests {
 			let (registry, stats) = counted();
 			let (mut prefix, consumer) = root_prefix_counted(Version::Lite07, session.clone(), stats);
 			let mut cursor = consumer.routes();
-			let poll = |prefix: &mut AnnouncePrefix| {
+			let poll = |prefix: &mut Announcing| {
 				assert!(prefix.poll(&kio::Waiter::noop()).is_pending(), "{what}");
 				assert!(log.closes().is_empty(), "{what}: {:?}", log.closes());
 			};
@@ -10374,7 +10410,7 @@ mod tests {
 			let log = session.log.clone();
 			let (mut prefix, consumer) = root_prefix(Version::Lite07, session.clone());
 			let mut cursor = consumer.routes();
-			let poll = |prefix: &mut AnnouncePrefix| {
+			let poll = |prefix: &mut Announcing| {
 				assert!(prefix.poll(&kio::Waiter::noop()).is_pending(), "{what}");
 				assert!(log.closes().is_empty(), "{what}: {:?}", log.closes());
 			};
@@ -10445,7 +10481,7 @@ mod tests {
 		let (registry, stats) = counted();
 		let (mut prefix, consumer) = root_prefix_counted(Version::Lite07, session.clone(), stats);
 		let mut cursor = consumer.routes();
-		let poll = |prefix: &mut AnnouncePrefix| {
+		let poll = |prefix: &mut Announcing| {
 			assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
 			assert!(log.closes().is_empty(), "{:?}", log.closes());
 		};
@@ -10587,7 +10623,11 @@ mod tests {
 	#[kio::test]
 	async fn a_duplicate_synced_is_refused() {
 		const VERSION: Version = Version::Lite07;
-		let synced = |w: &mut crate::coding::Encoder<'_>| lite::AnnounceBroadcast::Synced.encode(w, VERSION).unwrap();
+		let synced = |w: &mut crate::coding::Encoder<'_>| {
+			lite::AnnounceBroadcast::Synced { prefix: 0 }
+				.encode(w, VERSION)
+				.unwrap()
+		};
 		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &synced, &synced]);
 		let (mut prefix, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
 		let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();

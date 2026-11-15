@@ -1,4 +1,4 @@
-use crate::lite::{AnnounceBroadcast as Msg, AnnounceDecoder, PathRef, test_transport::SinkSession};
+use crate::lite::{AnnounceBroadcast as Msg, PathRef, test_transport::SinkSession};
 use crate::{
 	Instance, Path,
 	auth::Permit,
@@ -49,27 +49,27 @@ async fn the_limit_admits_each_claim() {
 	let everything = limited("live/**");
 	assert_eq!(public.regions(), everything.regions(), "the limits share their regions");
 
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &public).unwrap();
-	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &public).unwrap();
 	let floor = Msg::Floor {
 		id: 0,
 		revision: Some(0),
 	};
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: offer(),
 	};
 	for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	routed.outputs(&subscriber);
 	assert_eq!(served(&routed), ["live/a/public/x"]);
 
-	routed.limit(&subscriber, &everything).unwrap();
+	routed.relimit(&subscriber, &everything).unwrap();
 	assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
 
-	routed.limit(&subscriber, &public).unwrap();
+	routed.relimit(&subscriber, &public).unwrap();
 	assert_eq!(served(&routed), ["live/a/public/x"]);
 }
 
@@ -89,14 +89,14 @@ async fn an_excluded_claim_never_enters_the_node() {
 	.exclude(".stats")
 	.unwrap();
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let floor = Msg::Floor {
 		id: 0,
 		revision: Some(0),
 	};
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: offer(),
 	};
@@ -107,7 +107,7 @@ async fn an_excluded_claim_never_enters_the_node() {
 		start(".stats/node/evil"),
 		floor,
 	] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	let shown = |routed: &super::Routed| -> Vec<String> {
 		routed.node.shown().keys().map(|(_, path)| path.to_string()).collect()
@@ -118,11 +118,11 @@ async fn an_excluded_claim_never_enters_the_node() {
 
 	// A narrower limit certifies nothing, so widening it again replays every
 	// committed claim into a fresh view; only the replay filter keeps `.stats` out.
-	routed.limit(&subscriber, &limited("live/**")).unwrap();
+	routed.relimit(&subscriber, &limited("live/**")).unwrap();
 	assert_eq!(shown(&routed), ["live"]);
 	assert_eq!(served(&routed), ["live"]);
 
-	routed.limit(&subscriber, &Default::default()).unwrap();
+	routed.relimit(&subscriber, &Default::default()).unwrap();
 	assert_eq!(shown(&routed), ["live"]);
 	assert_eq!(served(&routed), ["live"]);
 }
@@ -133,27 +133,27 @@ async fn an_excluded_claim_never_enters_the_node() {
 async fn a_new_scope_certifies_against_its_own_regions() {
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let floor = Msg::Floor {
 		id: 0,
 		revision: Some(0),
 	};
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: offer(),
 	};
 	for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	routed.outputs(&subscriber);
 	assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
 
-	routed.limit(&subscriber, &limited("live/*/public/**")).unwrap();
+	routed.relimit(&subscriber, &limited("live/*/public/**")).unwrap();
 	assert_eq!(served(&routed), ["live/a/public/x"]);
 
-	routed.limit(&subscriber, &limited("live/**")).unwrap();
+	routed.relimit(&subscriber, &limited("live/**")).unwrap();
 	assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
 }
 
@@ -165,24 +165,24 @@ async fn a_claim_is_served_only_where_the_limit_admits_it() {
 	let prefix = Path::empty();
 	let everything = limited("live/**");
 	let public = limited("live/*/public/**");
-	let mut wide = super::Routed::new(&subscriber, &prefix, 1, &everything).unwrap();
-	let mut narrow = super::Routed::new(&subscriber, &prefix, 1, &everything).unwrap();
+	let mut wide = super::Routed::asking(&subscriber, &prefix, 1, &everything).unwrap();
+	let mut narrow = super::Routed::asking(&subscriber, &prefix, 1, &everything).unwrap();
 	narrow.session_key = wide.session_key;
-	narrow.limit(&subscriber, &public).unwrap();
+	narrow.relimit(&subscriber, &public).unwrap();
 
 	for routed in [&mut wide, &mut narrow] {
-		let mut decoder = AnnounceDecoder::default();
 		let floor = Msg::Floor {
 			id: 0,
 			revision: Some(0),
 		};
 		let route = Msg::RouteStart {
 			node: 7,
+			prefix: 0,
 			suffix: Path::empty(),
 			offer: offer(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
-			routed.receive(&prefix, msg, &mut decoder).unwrap();
+			routed.receive(msg).unwrap();
 		}
 	}
 	wide.outputs(&subscriber);
@@ -191,88 +191,19 @@ async fn a_claim_is_served_only_where_the_limit_admits_it() {
 	assert_eq!(served(&narrow), ["live/a/public/x"]);
 }
 
-/// The route and claims a peer sends one stream, its Route ID 0.
-fn feed(routed: &mut super::Routed, decoder: &mut AnnounceDecoder, paths: &[&'static str]) -> Result<(), crate::Error> {
-	let prefix = Path::empty();
+/// The route and claims a peer sends, its Route ID 0.
+fn feed(routed: &mut super::Routed, paths: &[&'static str]) -> Result<(), crate::Error> {
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: offer(),
 	};
-	routed.receive(&prefix, route, decoder)?;
+	routed.receive(route)?;
 	for path in paths {
-		routed.receive(&prefix, start(path), decoder)?;
+		routed.receive(start(path))?;
 	}
 	Ok(())
-}
-
-/// A request handed over keeps what it holds on a budget of its own, so the claims
-/// arriving on both it and its replacement during the handover count once against the
-/// session's cap: a session that fits its claims stays open.
-#[kio::test]
-async fn a_handover_counts_the_replacement_alone() {
-	let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	// One route and three claims.
-	subscriber.announces = crate::session::Slots::new(4);
-	let prefix = Path::empty();
-	let mut old = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut old_decoder = AnnounceDecoder::default();
-	feed(&mut old, &mut old_decoder, &["x", "y"]).unwrap();
-
-	old.hand_over();
-	assert_eq!(
-		subscriber.announces.available(),
-		4,
-		"the session's count is the replacement's"
-	);
-	let mut new = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut new_decoder = AnnounceDecoder::default();
-	feed(&mut new, &mut new_decoder, &["x", "y"]).unwrap();
-
-	// A claim the peer starts during the handover reaches both requests.
-	old.receive(&prefix, start("z"), &mut old_decoder)
-		.expect("the old request fits it on its own budget");
-	new.receive(&prefix, start("z"), &mut new_decoder)
-		.expect("the session fits it");
-	assert_eq!(subscriber.announces.available(), 0);
-
-	drop(old);
-	assert_eq!(
-		subscriber.announces.available(),
-		0,
-		"the old request held none of the session's"
-	);
-	drop(new);
-	assert_eq!(subscriber.announces.available(), 4);
-}
-
-/// A peer flooding a request handed over fails it on its own budget, the session's cap,
-/// so the session holds at most twice the cap during one handover.
-#[kio::test]
-async fn a_handover_caps_the_old_request() {
-	let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	subscriber.announces = crate::session::Slots::new(3);
-	let prefix = Path::empty();
-	let mut old = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut old_decoder = AnnounceDecoder::default();
-	feed(&mut old, &mut old_decoder, &["x"]).unwrap();
-
-	old.hand_over();
-	let mut new = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut new_decoder = AnnounceDecoder::default();
-	feed(&mut new, &mut new_decoder, &["x", "y"]).unwrap();
-	assert_eq!(subscriber.announces.available(), 0);
-
-	old.receive(&prefix, start("y"), &mut old_decoder)
-		.expect("the old request's budget has room for one more");
-	assert!(
-		old.receive(&prefix, start("z"), &mut old_decoder).is_err(),
-		"the old request is capped on its own budget"
-	);
-	assert!(
-		new.receive(&prefix, start("z"), &mut new_decoder).is_err(),
-		"the replacement is capped on the session's"
-	);
 }
 
 /// A transport that reports its first RTT only after the stream opened, such as
@@ -282,19 +213,18 @@ async fn a_late_rtt_is_still_read() {
 	let session = SinkSession::new(Default::default());
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
-	feed(&mut routed, &mut decoder, &[]).unwrap();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	feed(&mut routed, &[]).unwrap();
 	let waiter = kio::Waiter::noop();
-	routed.poll(&subscriber, &waiter).unwrap();
+	routed.poll(&subscriber, &waiter);
 	kio::clock::sim::advance(crate::route::LinkRtt::INTERVAL).await;
-	routed.poll(&subscriber, &waiter).unwrap();
+	routed.poll(&subscriber, &waiter);
 	assert_eq!(routed.rtt.reported(), None);
 
 	let rtt = std::time::Duration::from_millis(20);
 	session.set_stats(crate::lite::test_transport::SinkStats::default().with_rtt(rtt));
 	kio::clock::sim::advance(crate::route::LinkRtt::INTERVAL).await;
-	routed.poll(&subscriber, &waiter).unwrap();
+	routed.poll(&subscriber, &waiter);
 	assert_eq!(routed.rtt.reported(), Some(rtt));
 }
 
@@ -307,10 +237,10 @@ async fn the_first_claims_served_carry_the_rtt() {
 	let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session);
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: Offer {
 			rtt: Some(ms(5)),
@@ -322,7 +252,7 @@ async fn the_first_claims_served_carry_the_rtt() {
 		revision: Some(0),
 	};
 	for msg in [route, start("live"), floor] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	routed.outputs(&subscriber);
 	let rtts: Vec<_> = routed.served.values().map(|entry| entry.route.route.rtt()).collect();
@@ -338,26 +268,26 @@ async fn a_pause_restarts_the_window() {
 	let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let waiter = kio::Waiter::noop();
-	feed(&mut routed, &mut decoder, &[]).unwrap();
-	routed.poll(&subscriber, &waiter).unwrap();
+	feed(&mut routed, &[]).unwrap();
+	routed.poll(&subscriber, &waiter);
 	assert_eq!(routed.rtt.reported(), Some(ms(10)));
 
-	routed.receive(&prefix, Msg::RouteEnd { id: 0 }, &mut decoder).unwrap();
-	routed.poll(&subscriber, &waiter).unwrap();
+	routed.receive(Msg::RouteEnd { id: 0 }).unwrap();
+	routed.poll(&subscriber, &waiter);
 	assert!(routed.read_rtt.is_none(), "no route, no timer");
 	session.set_stats(SinkStats::default().with_rtt(ms(100)));
 	kio::clock::sim::advance(std::time::Duration::from_secs(60)).await;
 
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: offer(),
 	};
-	routed.receive(&prefix, route, &mut decoder).unwrap();
-	routed.poll(&subscriber, &waiter).unwrap();
+	routed.receive(route).unwrap();
+	routed.poll(&subscriber, &waiter);
 	assert_eq!(routed.rtt.reported(), Some(ms(100)));
 }
 
@@ -367,19 +297,19 @@ async fn a_pause_restarts_the_window() {
 async fn pending_changes_net_out() {
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let floor = Msg::Floor {
 		id: 0,
 		revision: Some(0),
 	};
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: offer(),
 	};
 	for msg in [route, start("room/host"), floor] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	let pending = |routed: &super::Routed| routed.routes[&0].pending.len();
 	assert_eq!(pending(&routed), 0);
@@ -390,7 +320,7 @@ async fn pending_changes_net_out() {
 			hops: Default::default(),
 			cost: Cost::new(cost),
 		};
-		routed.receive(&prefix, update, &mut decoder).unwrap();
+		routed.receive(update).unwrap();
 	}
 	assert_eq!(pending(&routed), 1, "updates to one claim");
 
@@ -399,13 +329,13 @@ async fn pending_changes_net_out() {
 		hops: Default::default(),
 		cost: Cost::new(0),
 	};
-	routed.receive(&prefix, back, &mut decoder).unwrap();
+	routed.receive(back).unwrap();
 	assert_eq!(pending(&routed), 0, "an update back to the committed claim");
 
 	for _ in 0..100 {
-		routed.receive(&prefix, start("room/guest"), &mut decoder).unwrap();
-		let id = decoder.last();
-		routed.receive(&prefix, Msg::EndedId { id }, &mut decoder).unwrap();
+		routed.receive(start("room/guest")).unwrap();
+		let id = routed.decoder.last();
+		routed.receive(Msg::EndedId { id }).unwrap();
 	}
 	assert_eq!(pending(&routed), 0, "claims started and ended between floors");
 }
@@ -418,12 +348,11 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 	use crate::lite::{Refusable, Refusal};
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let peer = crate::route::node::Peer { tag: u64::MAX, node: 9 };
 	let edge = (routed.node)
 		.answer(peer, crate::route::Link::default(), Path::empty())
 		.unwrap();
-	let mut decoder = AnnounceDecoder::default();
 	let floor = |revision| Msg::Floor {
 		id: 0,
 		revision: Some(revision),
@@ -459,11 +388,12 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 	};
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: offer(),
 	};
 	for msg in [route, start("live/a"), start("live/b"), floor(0)] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	assert_eq!(
 		batches(&mut routed),
@@ -472,7 +402,7 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 
 	// Refused, live/a goes without a withdrawal certified for it.
 	for msg in [refused(0), floor(1)] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
 	// Nor does live/b's change certify anything, while the route holds the refused claim.
@@ -482,28 +412,29 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 		cost: Cost::new(5),
 	};
 	for msg in [update, floor(2)] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	assert_eq!(batches(&mut routed), [(vec![("live/b".into(), true)], None)]);
 
 	// A usable restart brings live/a back, certified again.
 	for msg in [restart(0), floor(3)] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), true)], Some(3))]);
 
 	// A refused restart withholds it as the update did.
 	for msg in [refused(0), floor(4)] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
 }
 
-/// A DEAD in parts applies as one with its last: an earlier part changes nothing, the
-/// last moves what any part listed and ends the rest, and another message between them,
-/// or a part naming another hop, is a violation.
+/// A DEAD and the ROUTE_UPDATEs it counts apply as one: nothing changes before the
+/// last update, which moves what they named and ends the rest. Another message
+/// between them, an update of a route that is not live, not through the hop, or named
+/// twice, and a count above the routes through the hop are each a violation.
 #[kio::test]
-async fn a_dead_in_parts_applies_with_its_last() {
+async fn a_dead_and_its_updates_apply_as_one() {
 	use crate::lite::Dead;
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 	let prefix = Path::empty();
@@ -517,59 +448,77 @@ async fn a_dead_in_parts_applies_with_its_last() {
 		..offer()
 	};
 	let start = || {
-		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-		let mut decoder = AnnounceDecoder::default();
+		let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 		for node in [7, 8] {
 			let start = Msg::RouteStart {
 				node,
+				prefix: 0,
 				suffix: Path::empty(),
 				offer: through(node, 3),
 			};
-			routed.receive(&prefix, start, &mut decoder).unwrap();
+			routed.receive(start).unwrap();
 		}
-		(routed, decoder)
+		// A route that does not cross the hop.
+		let aside = Msg::RouteStart {
+			node: 9,
+			prefix: 0,
+			suffix: Path::empty(),
+			offer: Offer {
+				path: [Hop { node: 9, session: 0 }].into(),
+				..offer()
+			},
+		};
+		routed.receive(aside).unwrap();
+		routed
 	};
-	let part = |session, more, moved| {
+	let dead = |moved| {
 		Msg::Dead(Dead::Closed {
-			hop: hop(session),
+			hop: hop(3),
 			far: 7,
 			gone: true,
-			more,
 			moved,
 		})
 	};
+	let update = |id, session| Msg::RouteUpdate {
+		id,
+		offer: through(7, session),
+	};
 
-	let (mut routed, mut decoder) = start();
-	routed
-		.receive(&prefix, part(3, true, vec![(0, Ok(through(7, 4)))]), &mut decoder)
-		.unwrap();
-	assert_eq!(routed.routes.len(), 2);
-	assert!(routed.routes[&0].path().contains(&hop(3)));
-	routed
-		.receive(&prefix, part(3, false, Vec::new()), &mut decoder)
-		.unwrap();
-	assert_eq!(routed.routes.keys().collect::<Vec<_>>(), [&0]);
+	let mut routed = start();
+	routed.receive(dead(1)).unwrap();
+	assert_eq!(routed.routes.len(), 3);
+	assert!(routed.routes[&0].path().contains(&hop(3)), "nothing applies before the last update");
+	routed.receive(update(0, 4)).unwrap();
+	let mut live: Vec<_> = routed.routes.keys().copied().collect();
+	live.sort_unstable();
+	assert_eq!(live, [0, 2], "the route it did not move ended");
 	assert!(routed.routes[&0].path().contains(&hop(4)));
 
-	let (mut routed, mut decoder) = start();
-	routed
-		.receive(&prefix, part(3, true, Vec::new()), &mut decoder)
-		.unwrap();
+	// Another message between the DEAD and its updates.
+	let mut routed = start();
+	routed.receive(dead(1)).unwrap();
 	let floor = Msg::Floor {
 		id: 0,
 		revision: Some(0),
 	};
-	assert!(routed.receive(&prefix, floor, &mut decoder).is_err());
+	assert!(routed.receive(floor).is_err());
 
-	let (mut routed, mut decoder) = start();
-	routed
-		.receive(&prefix, part(3, true, Vec::new()), &mut decoder)
-		.unwrap();
-	assert!(
-		routed
-			.receive(&prefix, part(4, false, Vec::new()), &mut decoder)
-			.is_err()
-	);
+	// An update of a route that is not live, and of one not through the hop.
+	for id in [9, 2] {
+		let mut routed = start();
+		routed.receive(dead(1)).unwrap();
+		assert!(routed.receive(update(id, 4)).is_err(), "route {id}");
+	}
+
+	// A route named twice.
+	let mut routed = start();
+	routed.receive(dead(2)).unwrap();
+	routed.receive(update(0, 4)).unwrap();
+	assert!(routed.receive(update(0, 5)).is_err());
+
+	// More updates than the stream has routes through the hop.
+	let mut routed = start();
+	assert!(routed.receive(dead(3)).is_err());
 }
 
 /// A route this node refuses still follows a DEAD naming a hop on its path, so both
@@ -578,11 +527,10 @@ async fn a_dead_in_parts_applies_with_its_last() {
 /// it names until a usable offer comes.
 #[kio::test]
 async fn a_refused_route_still_follows_a_dead() {
-	use crate::lite::{Dead, Refusable, Refusal, Unusable};
+	use crate::lite::{Dead, Refusable, Refusal};
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let path = |session| -> std::sync::Arc<[Hop]> { [Hop { node: 7, session: 0 }, Hop { node: 5, session }].into() };
 	let floor = |id| Msg::Floor { id, revision: Some(0) };
 	let claim = |route, path: &'static str| Msg::Active {
@@ -598,7 +546,6 @@ async fn a_refused_route_still_follows_a_dead() {
 			hop: Hop { node: 5, session },
 			far: 7,
 			gone,
-			more: false,
 			moved,
 		})
 	};
@@ -607,33 +554,34 @@ async fn a_refused_route_still_follows_a_dead() {
 	let refused = Msg::Refused {
 		message: Refusable::RouteStart {
 			node: 7,
+			prefix: 0,
 			suffix: Some(Path::empty()),
 			path: path(3),
 		},
 		reason: Refusal::Flags(8),
 	};
 	for msg in [refused, claim(0, "live/a"), floor(0)] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	routed.outputs(&subscriber);
 	assert!(served(&routed).is_empty());
 
 	// The session it crossed closed for good: it ends, and its Announce ID retires.
 	routed
-		.receive(&prefix, closed(3, true, Vec::new()), &mut decoder)
+		.receive(closed(3, true, 0))
 		.unwrap();
 	assert!(routed.routes.is_empty() && routed.claims.is_empty() && routed.named.is_empty());
-	assert!(routed.receive(&prefix, Msg::EndedId { id: 0 }, &mut decoder).is_err());
+	assert!(routed.receive(Msg::EndedId { id: 0 }).is_err());
 
 	// So the peer starts the route over, usably.
-	let mut decoder = AnnounceDecoder::default();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let usable = |session| Offer {
 		path: path(session),
 		..offer()
 	};
 	let route = |session| Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: usable(session),
 	};
@@ -641,31 +589,30 @@ async fn a_refused_route_still_follows_a_dead() {
 		Msg::Refused {
 			message: Refusable::RouteStart {
 				node: 7,
+				prefix: 0,
 				suffix: Some(Path::empty()),
 				path: path(3),
 			},
 			reason: Refusal::Flags(8),
 		},
 		claim(0, "live/a"),
-		closed(3, true, Vec::new()),
+		closed(3, true, 0),
 		route(4),
 		claim(1, "live/b"),
 		floor(1),
 	] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	routed.outputs(&subscriber);
 	assert_eq!(served(&routed), ["live/b"]);
 
 	// It moved to an offer this node refuses: withdrawn, though the peer still holds it.
-	let moved = vec![(
-		1,
-		Err(Unusable {
-			path: path(5),
-			reason: Refusal::Flags(8),
-		}),
-	)];
-	routed.receive(&prefix, closed(4, false, moved), &mut decoder).unwrap();
+	let moved = Msg::Refused {
+		message: Refusable::RouteUpdate { id: 1, path: path(5) },
+		reason: Refusal::Flags(8),
+	};
+	routed.receive(closed(4, false, 1)).unwrap();
+	routed.receive(moved).unwrap();
 	routed.outputs(&subscriber);
 	assert!(served(&routed).is_empty());
 	assert!(routed.routes[&1].reach().is_none());
@@ -675,7 +622,7 @@ async fn a_refused_route_still_follows_a_dead() {
 		id: 1,
 		offer: usable(6),
 	};
-	routed.receive(&prefix, update, &mut decoder).unwrap();
+	routed.receive(update).unwrap();
 	assert!(routed.routes[&1].reach().is_some());
 	assert_eq!(
 		routed.routes[&1].committed.as_ref().map(|(claims, _)| claims.len()),
@@ -698,10 +645,10 @@ async fn an_uncredited_dead_keeps_the_node_in_step() {
 			.collect()
 	};
 	for gone in [true, false] {
-		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-		let mut decoder = AnnounceDecoder::default();
+		let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 		let route = Msg::RouteStart {
 			node: 7,
+			prefix: 0,
 			suffix: Path::empty(),
 			offer: Offer {
 				path: [Hop { node: 7, session: 0 }, Hop { node: 5, session: 3 }].into(),
@@ -713,7 +660,7 @@ async fn an_uncredited_dead_keeps_the_node_in_step() {
 			revision: Some(0),
 		};
 		for msg in [route, start("live"), floor] {
-			routed.receive(&prefix, msg, &mut decoder).unwrap();
+			routed.receive(msg).unwrap();
 		}
 		routed.outputs(&subscriber);
 		assert_eq!(shown(&routed), [("live".to_string(), true)], "gone: {gone}");
@@ -723,10 +670,9 @@ async fn an_uncredited_dead_keeps_the_node_in_step() {
 			hop: Hop { node: 5, session: 3 },
 			far: 9,
 			gone,
-			more: false,
-			moved: Vec::new(),
+			moved: 0,
 		});
-		routed.receive(&prefix, dead, &mut decoder).unwrap();
+		routed.receive(dead).unwrap();
 		routed.outputs(&subscriber);
 		match gone {
 			true => {
@@ -750,23 +696,23 @@ async fn a_scoped_drain_survives_a_new_limit() {
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 	let prefix = Path::empty();
 	for (permit, scoped) in [(limited("live/**"), true), (Permit::default(), false)] {
-		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &permit).unwrap();
-		let mut decoder = AnnounceDecoder::default();
+		let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &permit).unwrap();
 		let route = Msg::RouteStart {
 			node: 9,
+			prefix: 0,
 			suffix: Path::empty(),
 			offer: Offer {
 				path: [Hop { node: 9, session: 0 }, Hop { node: 7, session: 1 }].into(),
 				..offer()
 			},
 		};
-		routed.receive(&prefix, route, &mut decoder).unwrap();
+		routed.receive(route).unwrap();
 		routed
-			.receive(&prefix, Msg::Dead(Dead::Drain { node: 9 }), &mut decoder)
+			.receive(Msg::Dead(Dead::Drain { node: 9 }))
 			.unwrap();
 		let draining = |routed: &super::Routed| routed.routes[&0].offer.as_ref().unwrap().draining;
 		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");
-		routed.limit(&subscriber, &limited("live/a/**")).unwrap();
+		routed.relimit(&subscriber, &limited("live/a/**")).unwrap();
 		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");
 	}
 }
@@ -779,8 +725,7 @@ async fn a_route_shortened_from_the_hop_limit_files_its_claims() {
 	use crate::route::MAX_HOPS;
 	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 	let along = |hops: usize| Offer {
 		path: (0..hops as u64)
 			.map(|i| Hop {
@@ -795,6 +740,7 @@ async fn a_route_shortened_from_the_hop_limit_files_its_claims() {
 	};
 	let route = Msg::RouteStart {
 		node: 7,
+		prefix: 0,
 		suffix: Path::empty(),
 		offer: along(MAX_HOPS),
 	};
@@ -803,7 +749,7 @@ async fn a_route_shortened_from_the_hop_limit_files_its_claims() {
 		revision: Some(0),
 	};
 	for msg in [route, start("live"), floor] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
+		routed.receive(msg).unwrap();
 	}
 	routed.outputs(&subscriber);
 	assert!(shown(&routed).is_empty(), "no room for this node's hop");
@@ -812,7 +758,7 @@ async fn a_route_shortened_from_the_hop_limit_files_its_claims() {
 		id: 0,
 		offer: along(MAX_HOPS - 1),
 	};
-	routed.receive(&prefix, update, &mut decoder).unwrap();
+	routed.receive(update).unwrap();
 	routed.outputs(&subscriber);
 	assert_eq!(shown(&routed), ["live"]);
 }

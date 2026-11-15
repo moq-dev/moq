@@ -155,7 +155,7 @@ impl RouteStream {
 		}
 	}
 
-	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub(super) fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
 			match &mut self.state {
 				State::Opening => {
@@ -252,10 +252,6 @@ impl RouteStream {
 
 impl Running {
 	fn poll(&mut self, subscriber: &Subscriber, publish: &Publish, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		// What the peer sends is read whether or not it reads this side's stream, so two
-		// peers that both fell behind never wait on each other.
-		self.poll_receive(subscriber, waiter)?;
-
 		// A draining peer usually stops announcing, so react to the GOAWAY itself.
 		// Idempotent, since the signal stays set.
 		if subscriber.going_away.poll(waiter).is_ready() {
@@ -266,6 +262,27 @@ impl Running {
 			self.routed.limit(&permit);
 		}
 
+		// What the node queued goes out before the peer's next messages are read, and
+		// what those queue is served before the machine rests. The peer's stream is
+		// read whether or not it reads this side's, so two peers that both fell behind
+		// never wait on each other.
+		loop {
+			if let Poll::Ready(Err(err)) = self.poll_send(subscriber, publish, waiter) {
+				return Poll::Ready(Err(err));
+			}
+			if !self.poll_receive(subscriber, waiter)? {
+				break;
+			}
+		}
+		// Serve the claims whose request queue woke. Each parks on its own waker, so
+		// the rest cost nothing.
+		self.routed.poll(subscriber, waiter);
+		Poll::Pending
+	}
+
+	/// Send what the node queued for the peer, and serve what it queued for the origin.
+	/// Ready only with an error.
+	fn poll_send(&mut self, subscriber: &Subscriber, publish: &Publish, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
 			ready!(self.budget.poll_yield(waiter));
 			match self.sending {
@@ -338,15 +355,12 @@ impl Running {
 				}
 			}
 		}
-		// Serve the claims whose request queue woke. Each parks on its own waker, so
-		// the rest cost nothing.
-		self.routed.poll(subscriber, waiter);
 		Poll::Pending
 	}
 
 	/// Read the peer's stream: its requests go to the half answering them, everything
-	/// else to the half that asked.
-	fn poll_receive(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) -> Result<(), Error> {
+	/// else to the half that asked. Returns whether it read anything.
+	fn poll_receive(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) -> Result<bool, Error> {
 		while let Poll::Ready(Ok(reader)) = subscriber.announce_streams.poll_pop(waiter) {
 			// The peer opens one stream for the session.
 			if self.reader.replace(reader).is_some() {
@@ -354,12 +368,17 @@ impl Running {
 			}
 		}
 		let Some(reader) = self.reader.as_mut().filter(|_| !self.finished) else {
-			return Ok(());
+			return Ok(false);
 		};
 		// Each message goes into the node, so a peer streaming them must not hold the
 		// session's other tasks.
+		let mut read = false;
 		let mut budget = kio::coop::Budget::new(32);
-		while budget.poll_yield(waiter).is_ready() {
+		loop {
+			// Out of budget: the yield wakes the machine, which sends before it reads on.
+			if budget.poll_yield(waiter).is_pending() {
+				return Ok(false);
+			}
 			match reader.poll_decode_maybe::<Msg>(waiter) {
 				Poll::Ready(Ok(Some(Msg::Request { remove, add }))) => self.answer.request(remove, add)?,
 				Poll::Ready(Ok(Some(announce))) => self.routed.receive(announce)?,
@@ -367,14 +386,29 @@ impl Running {
 				Poll::Ready(Ok(None)) => {
 					self.finished = true;
 					self.routed.finish()?;
-					break;
+					return Ok(true);
 				}
 				// A reset stream ends the session, as the peer's messages are lost.
 				Poll::Ready(Err(Error::Stream(_))) => return Err(Error::ProtocolViolation),
 				Poll::Ready(Err(err)) => return Err(err),
-				Poll::Pending => break,
+				Poll::Pending => return Ok(read),
 			}
+			read = true;
 		}
-		Ok(())
+	}
+}
+
+#[cfg(test)]
+impl Publish {
+	/// A session with nothing of its own to answer the peer from.
+	pub(in crate::lite) fn idle() -> Self {
+		use crate::model::ProduceTest as _;
+		Self {
+			origin: crate::origin::Config::new(std::num::NonZeroU64::new(0x7e57).unwrap())
+				.produce()
+				.consume(),
+			auth: crate::auth::Link::new(false),
+			withdrawal: Default::default(),
+		}
 	}
 }

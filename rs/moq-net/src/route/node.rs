@@ -1078,6 +1078,30 @@ impl Node {
 		})
 	}
 
+	/// A session whose peer asks for `prefix` and is asked for nothing.
+	#[cfg(test)]
+	pub fn answer(&self, peer: Peer, link: Link, prefix: Path) -> Result<Stream, Error> {
+		let link = Link {
+			interest: BTreeSet::new(),
+			..link
+		};
+		let stream = self.connect(peer, link)?;
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![prefix],
+		};
+		stream.edit(edit)?;
+		Ok(stream)
+	}
+
+	/// A session whose peer answered what `link` asks it for, and asks for nothing.
+	#[cfg(test)]
+	pub fn receive(&self, peer: Peer, link: Link) -> Result<Stream, Error> {
+		let stream = self.connect(peer, link)?;
+		stream.edited();
+		Ok(stream)
+	}
+
 	/// Where a request for `claim` of `id` that the session `tag`'s peer sent goes, naming
 	/// the route this node offered it covering `prefix`: here, along this node's route
 	/// covering a prefix, or `None` when that route is gone or would lead back to the peer.
@@ -1173,6 +1197,14 @@ impl Stream {
 			false => Poll::Pending,
 		};
 		self.queue.poll(waiter, overrun).map(|_| ())
+	}
+
+	/// The next route message or serving change queued, leaving out the session's own
+	/// edits and their markers.
+	#[cfg(test)]
+	pub fn try_wire(&self) -> Option<Output> {
+		std::iter::from_fn(|| self.try_output())
+			.find(|output| !matches!(output, Output::Ask(_) | Output::Edited { .. } | Output::Synced(_)))
 	}
 
 	/// The next output already queued, without waiting.
@@ -1373,8 +1405,13 @@ impl Drop for Stream {
 		match self.main {
 			// The session closed: every key of it goes together.
 			true => {
-				let session = state.sessions.remove(&tag).expect("a registered key's session");
-				let keys = std::iter::once(session.main).chain(session.mounts).collect();
+				// A later session under the same tag keeps its own keys.
+				let own = state.sessions.get(&tag).is_some_and(|session| session.main == self.key);
+				let mounts = match own {
+					true => state.sessions.remove(&tag).map(|session| session.mounts),
+					false => None,
+				};
+				let keys = std::iter::once(self.key).chain(mounts.unwrap_or_default()).collect();
 				state.close(keys, true);
 			}
 			false => state.close(vec![self.key], false),

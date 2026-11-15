@@ -927,6 +927,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 	}
 
+	/// How many neighbours are connected.
+	#[cfg(test)]
+	pub fn neighbors(&self) -> usize {
+		self.sessions.len()
+	}
+
 	/// The link to `neighbor`.
 	pub fn link(&self, neighbor: N) -> Option<Link> {
 		self.sessions.get(&neighbor).map(|session| session.link.clone())

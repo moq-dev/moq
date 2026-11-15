@@ -24,7 +24,7 @@ fn peer(tag: u64, node: Id) -> Peer {
 }
 
 fn outputs(stream: &Stream) -> Vec<Output> {
-	std::iter::from_fn(|| stream.try_output()).collect()
+	std::iter::from_fn(|| stream.try_wire()).collect()
 }
 
 /// Deliver everything `from` would send on the wire to the stream receiving it,
@@ -169,8 +169,9 @@ fn a_forwarded_request_follows_the_route_it_names() {
 	);
 }
 
-/// A stream that ends while its session stays up ends its routes quietly; one that ends
-/// with its session reports the hop dead to every neighbour sent a route through it.
+/// A session's key lives as long as the session, so dropping it is the session
+/// closing: the hop is reported dead to every neighbour sent a route through it. A
+/// mount's key dropped while its session stays up ends its routes quietly.
 #[test]
 fn only_a_closed_session_reports_its_hop_dead() {
 	for closed in [false, true] {
@@ -201,9 +202,12 @@ fn only_a_closed_session_reports_its_hop_dead() {
 		pump(&down, &up);
 		outputs(&up);
 
-		let guard = closed.then(|| relay.closing(1));
-		drop(receive);
-		drop(guard);
+		// A mount of the session answers the leaf nothing new, and goes quietly.
+		let mount = down.mount(p("elsewhere")).unwrap();
+		match closed {
+			true => drop(receive),
+			false => drop(mount),
+		}
 		let sent = wire(outputs(&down));
 		let dead = sent
 			.iter()
@@ -498,9 +502,7 @@ fn the_doubt_timer_fires_on_the_origins_clock() {
 	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
 	origin.own(p("live/x"), Some(claim(&instance, 0)));
 	pump(&answer, &receive);
-	let guard = relay.closing(1);
 	drop(receive);
-	drop(guard);
 	let waiter = kio::Waiter::noop();
 	let Poll::Ready(Some(at)) = relay.poll_deadline(None, &waiter) else {
 		panic!("a doubt is timed");
@@ -560,6 +562,7 @@ fn a_route_at_the_hop_limit_is_not_forwarded() {
 		);
 		for offer in sent {
 			let start = crate::lite::AnnounceBroadcast::RouteStart {
+				prefix: 0,
 				node: 100,
 				suffix: Path::empty(),
 				offer,
@@ -662,34 +665,25 @@ fn a_goaway_moves_the_forwarded_route_to_another_stream() {
 	assert_eq!(paths(&edge), [vec![5, 20, 2]]);
 }
 
-/// Streams dropped while a session's streams close disconnect together, once the
-/// last guard held over them goes.
+/// A session's mounts go with it: dropping its key disconnects them together, and a
+/// mount dropped after that has nothing left to retire.
 #[test]
-fn dropped_streams_disconnect_once_the_last_closing_guard_goes() {
+fn a_closed_session_takes_its_mounts() {
 	let instance = Instance::random();
 	let relay = Node::new(2, 2, clock());
-	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
-	let offer = Offer {
-		path: [Hop { node: 1, session: 0 }].into(),
-		draining: false,
-		priority: i8::MAX,
-		metric: 0,
-		down_only: false,
-		rtt: None,
-	};
-	receive.route(1, Path::empty(), Some(Reach::Finite(offer)));
-	receive.batch(
-		1,
-		Path::empty(),
-		vec![(p("live/x"), Some(claim(&instance, 0)))],
-		Some(1),
+	relay.own(p("live/x"), Some(claim(&instance, 0)));
+	let session = relay.answer(peer(1, 3), Link::default(), p("other")).unwrap();
+	let mount = session.mount(p("live")).unwrap();
+	assert!(
+		wire(outputs(&mount))
+			.iter()
+			.any(|output| matches!(output, Output::Batch { .. })),
+		"the mount is sent what its target holds"
 	);
-	let (outer, inner) = (relay.closing(1), relay.closing(1));
-	drop(receive);
-	drop(inner);
-	assert!(relay.shown().contains_key(&(1, p("live/x"))), "another guard is held");
-	drop(outer);
-	assert!(relay.shown().is_empty());
+	drop(session);
+	assert_eq!(relay.lock().router.neighbors(), 0, "the mount's key went with the session");
+	drop(mount);
+	assert_eq!(relay.lock().router.neighbors(), 0);
 }
 
 /// The origin declares its hop id, without the qualified marker, or a random

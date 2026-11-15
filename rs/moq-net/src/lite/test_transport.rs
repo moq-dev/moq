@@ -1173,6 +1173,16 @@ impl ScriptedSession {
 
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Wakes readers only with [`Self::with_read_wakes`]; otherwise re-poll them manually.
+	/// A stream the peer sends the shared script on.
+	pub fn recv(&self) -> ScriptedRecv {
+		poll::Buffered::new(Script {
+			wake: self.wake.clone(),
+			script: self.script.clone(),
+			close: self.close.clone(),
+			log: self.log.clone(),
+		})
+	}
+
 	pub fn push(&self, bytes: &[u8]) {
 		self.script.lock().unwrap().extend_from_slice(bytes);
 		if let Some(wake) = &self.wake {

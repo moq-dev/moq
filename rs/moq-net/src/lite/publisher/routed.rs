@@ -1014,3 +1014,36 @@ impl Answer {
 		}
 	}
 }
+
+#[cfg(test)]
+impl Answer {
+	/// An answer on a session of its own to the origin's node, whose peer asked for
+	/// nothing yet.
+	pub(in crate::lite) fn alone(origin: origin::Consumer) -> Self {
+		let peer = node::Peer {
+			tag: lite::session_tag(),
+			node: 0,
+		};
+		let link = route::Link {
+			cost: 1,
+			..Default::default()
+		};
+		let main = origin.route_node().connect(peer, link).unwrap();
+		Self::new(origin, crate::auth::Link::new(false), Arc::new(main), false)
+	}
+
+	/// Act on everything the node queued for the peer.
+	pub(in crate::lite) fn drain(&mut self, writer: &mut Writer) -> Result<(), Error> {
+		let waiter = kio::Waiter::noop();
+		loop {
+			if let Some(output) = self.main.try_output() {
+				self.output(writer, output)?;
+				continue;
+			}
+			match self.poll_mounts(writer, &waiter) {
+				Poll::Ready(res) => res?,
+				Poll::Pending => return Ok(()),
+			}
+		}
+	}
+}
