@@ -32,6 +32,13 @@ published API. `main` needs no change.
   `Cargo.toml` and `Cargo.lock`. `bun.lock` moves `@moq/qmux` to 0.3.5, and
   `@moq/net` requires `^0.3.5`, so a fresh install of the next `@moq/net` can't
   resolve a leaky version.
+- ✅ Done in [moq-dev/moq#8808](https://github.com/moq-dev/moq/pull/8808) on
+  `release`: the pins, the `@moq/net` 0.4.8 bump (it also ships the two
+  unpublished `@moq/net` backports merged since 0.4.7, #8035 and #8346), the
+  audit, and the relay validation (the publisher direction fails on 0.5.3 after
+  7 to 9 cancels and passes 120 on 0.5.4; the viewer direction is shown by
+  `@moq/qmux`'s own credit tests, failing on 0.3.3 and passing on 0.3.5, since
+  loopback never leaves data in flight after a cancel).
 - ✅ Audit before cutting (maintainer, 2026-11-14). The PR audits everything the
   next release ships since each package's last published version, not only this
   bump: anything else merged to `release` since moq-relay 0.17.16 and the JS
@@ -54,10 +61,13 @@ published API. `main` needs no change.
 
 ## Waiting
 
-- moq-dev/web-transport: `qmux` 0.5.4 on crates.io and `@moq/qmux` 0.3.5 on
-  npm. Check `cargo info qmux@0.5.4` (run outside a workspace) and
-  `npm view @moq/qmux@0.3.5 version`. Their quests are web-transport's
-  `quest/a0/qmux-05-recv-credit.md` and `quest/a0/qmux-js-release.md`.
+- Maintainer: merge [moq-dev/moq#8808](https://github.com/moq-dev/moq/pull/8808)
+  into `release` (its merge publishes `@moq/net` 0.4.8, which requires
+  `@moq/qmux` `^0.3.5`), then merge the release-plz PR it triggers for `qmux`
+  0.5.4's dependents (`moq-tokio`, `moq-relay`, and theirs). Check
+  `npm view @moq/net@0.4.8 version` and that `cargo info moq-relay` names a
+  version newer than 0.17.16. Finish this quest then by deleting it with
+  `quest rm`. Not an agent step: a merge to `release` publishes.
 
 ## Related
 
