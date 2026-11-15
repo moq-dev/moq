@@ -310,12 +310,10 @@ export interface Range {
 export interface Delay {
 	/**
 	 * The target latency, the playout or jitter-buffer delay held behind the live edge. Omitted
-	 * means `0`; `null` means not stated, which only a peer whose wire cannot carry it (moq-lite
-	 * before 07, moq-transport) sends. A media consumer reads an unstated minimum as `0`.
+	 * means `0`; `null` means not stated. A media consumer reads an unstated minimum as `0`.
 	 *
-	 * The aggregate across subscribers is the smallest stated one, so an unstated minimum never
-	 * pulls it to zero, and it is forwarded upstream as is. A publisher may use it, such as to
-	 * start a cold join that far back; nothing reads it there yet.
+	 * A local setting: it never crosses the wire, so a publisher never sees it, and the
+	 * aggregate across subscribers leaves it unstated.
 	 */
 	min?: Duration | null;
 	/**
@@ -424,13 +422,6 @@ function orderOf(order: Order | undefined): Order {
 	return order;
 }
 
-// The smaller of two minimums, ignoring one that went unstated (`null`).
-function smallest(a: Duration | null | undefined, b: Duration | null | undefined): Duration | null {
-	if (a === null || a === undefined) return b ?? null;
-	if (b === null || b === undefined) return a;
-	return a.min(b);
-}
-
 // Aggregate the preferences of `states`, matching Rust's Subscription::poll_combined.
 function combineSubscriptions(states: Iterable<TrackState>): Subscription | undefined {
 	let combined: Subscription | undefined;
@@ -445,8 +436,7 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.delay = {
 			max: Duration.millis(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
-			// Only stated minimums count, so one that went unstated never pulls the smallest to zero.
-			min: smallest(combined.delay?.min, subscription.delay?.min),
+			min: null,
 		};
 		// One live subscriber held behind another's backlog is worse than a backlog sent late.
 		combined.order =
@@ -455,7 +445,11 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		// A range above the live edge never hides the latest group from a merged live subscriber.
 		combined.ranges = [...(combined.ranges ?? []), ...(subscription.ranges ?? [])];
 	}
-	if (combined) combined.ranges = union(combined.ranges ?? []);
+	if (combined) {
+		// `delay.min` is local: the aggregate leaves it unstated.
+		combined.delay = { ...combined.delay, min: null };
+		combined.ranges = union(combined.ranges ?? []);
+	}
 	return combined;
 }
 

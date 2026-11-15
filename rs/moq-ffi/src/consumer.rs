@@ -26,9 +26,8 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
 	/// where a cold join starts, or null to leave it unstated. A media consumer plays an
-	/// unstated minimum as zero, while the subscription keeps it unstated, so it never pulls
-	/// the aggregate across subscribers to zero. moq-lite-07 sends it upstream. A `min` past
-	/// `max` starts at `max`, since the publisher serves nothing older.
+	/// unstated minimum as zero. It is local: it never crosses the wire. A `min` past `max`
+	/// starts at `max`, since the publisher serves nothing older.
 	pub min: Option<Duration>,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, or null
 	/// for no subscriber limit, leaving the publisher's max age alone to bound it. `0` skips

@@ -36,7 +36,6 @@ import {
 	insertDrop,
 	insertRun,
 	maxDelayOf,
-	minDelayOf,
 	type Run,
 	removeRun,
 	runGaps,
@@ -111,7 +110,6 @@ import {
 	hasInstance,
 	hasLengthFirst,
 	hasMediaTime,
-	hasMinDelay,
 	hasOrder,
 	hasProbeRtt,
 	hasRanges,
@@ -2169,7 +2167,6 @@ export class Subscriber {
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
 			maxDelay: maxDelayOf(subscription),
-			minDelay: minDelayOf(subscription),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
 		});
@@ -3487,7 +3484,7 @@ export class Subscriber {
 			order: msg.order,
 			delay: {
 				max: Duration.millis(msg.maxDelay),
-				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
+				min: null,
 			},
 			ranges: entry.asked,
 		};
@@ -3581,7 +3578,6 @@ export class Subscriber {
 				priority,
 				order: current.order,
 				maxDelay: maxDelayOf(current),
-				minDelay: minDelayOf(current),
 				startGroup: span.start,
 				endGroup: inclusiveGroupEnd(span.end),
 				ranges: edit?.add,
@@ -3680,14 +3676,7 @@ export class Subscriber {
 		}
 		// A wire without `Group Order` cannot carry a change to it.
 		const sameOrder = !hasOrder(this.version) || (a.order ?? "descending") === (b.order ?? "descending");
-		return (
-			(a.priority ?? 0) === (b.priority ?? 0) &&
-			sameOrder &&
-			maxDelayOf(a) === maxDelayOf(b) &&
-			// A wire without `Subscriber Min Age` cannot carry a change to it.
-			(!hasMinDelay(this.version) || minDelayOf(a) === minDelayOf(b)) &&
-			rangesEqual
-		);
+		return (a.priority ?? 0) === (b.priority ?? 0) && sameOrder && maxDelayOf(a) === maxDelayOf(b) && rangesEqual;
 	}
 
 	/**

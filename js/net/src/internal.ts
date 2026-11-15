@@ -52,13 +52,6 @@ export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
 	return max?.asMillis() ?? 0;
 }
 
-/** A subscription's {@link Delay.min} in milliseconds as the wire carries it: undefined when not stated, omitted for zero. */
-export function minDelayOf(subscription: Pick<Subscription, "delay">): number | undefined {
-	const min = subscription.delay?.min;
-	if (min === null) return undefined;
-	return min?.asMillis() ?? 0;
-}
-
 /** Normalize public group bounds into an inclusive start and exclusive end. */
 export function groupBounds(groups: Groups = {}): { start: bigint; end?: bigint } {
 	const bound = (value: Groups["start"] | undefined, start: boolean): bigint | undefined => {

@@ -1086,7 +1086,7 @@ export class Publisher {
 			order: msg.order,
 			delay: {
 				max: servingMaxDelay(this.version, msg.maxDelay),
-				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
+				min: null,
 			},
 			ranges,
 		});
@@ -1249,7 +1249,7 @@ export class Publisher {
 						order: update.order,
 						delay: {
 							max: servingMaxDelay(this.version, update.maxDelay),
-							min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
+							min: null,
 						},
 						ranges: requestedRanges(update, info.timescale ?? undefined),
 					});

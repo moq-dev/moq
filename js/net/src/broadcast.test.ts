@@ -334,7 +334,7 @@ test("a request exposes the aggregate subscription options", async () => {
 	const request = await pendingRequest(consumer);
 	expect(request?.subscription).toEqual({
 		priority: 7,
-		delay: { min: Duration.ZERO, max: Duration.millis(250) },
+		delay: { min: null, max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 0n }, end: { absolute: 30n } }],
 	});

@@ -1622,13 +1622,12 @@ mod read_tests {
 	}
 
 	/// A catalog rendition's warmup survives conversion and widens the raw subscription past the
-	/// caller's max delay, keeping the min delay as asked.
+	/// caller's max delay.
 	#[tokio::test]
 	async fn raw_media_catalog_warmup_widens_the_subscription() {
 		for video in [false, true] {
 			let (_broadcast, track, _reader, _) = subscribe_warmup(video).await;
 			let subscription = track.subscription().unwrap();
-			assert_eq!(subscription.delay.min, Some(DELAY), "video={video}");
 			assert_eq!(subscription.delay.max, Some(DELAY + WARMUP), "video={video}");
 		}
 	}

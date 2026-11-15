@@ -1002,14 +1002,14 @@ mod tests {
 			},
 		));
 		// The open waits for the live edge with its subscription open, so the first aggregate
-		// the publisher sees is the request itself.
+		// the publisher sees is the request itself, less the local min delay.
 		let first = tokio::select! {
 			opened = &mut open => panic!("the open finished with no live edge (ok: {})", opened.is_ok()),
 			first = track.subscription_changed() => first.unwrap(),
 		};
 		assert_eq!(
 			first.map(|sub| sub.delay),
-			Some(delay.with_max(Duration::from_millis(600)))
+			Some(delay.with_min(None).with_max(Duration::from_millis(600)))
 		);
 	}
 

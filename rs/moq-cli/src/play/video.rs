@@ -1074,10 +1074,11 @@ mod tests {
 		assert_eq!(
 			source.subscription().map(|subscription| subscription.delay),
 			Some(moq_net::track::Delay {
-				min: Some(min + held),
+				// The local min never reaches the aggregate.
+				min: None,
 				max: Some(max + held),
 			}),
-			"the subscription's budgets grow with the shared delay"
+			"the subscription's max grows with the shared delay"
 		);
 		let _finished = producer.finish().unwrap();
 		task.await.unwrap().unwrap();

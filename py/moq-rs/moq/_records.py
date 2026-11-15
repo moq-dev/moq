@@ -229,8 +229,7 @@ class Delay:
 
     ``min`` is the target latency: the playout or jitter-buffer delay held behind the
     live edge, and where a cold join starts. ``None`` leaves it unstated, which a decoder
-    plays as zero while the subscription keeps it unstated, so it never pulls the
-    aggregate across subscribers to zero. A ``min`` past ``max`` starts at ``max``.
+    plays as zero. It is local: it never crosses the wire. A ``min`` past ``max`` starts at ``max``.
     ``max`` is how far a non-latest group may fall behind before it is skipped; zero
     skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
     alone to bound it, and it caps every range.

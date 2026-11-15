@@ -202,10 +202,10 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 });
 
 test("a lite-07 list decodes as the span covering it", async () => {
-	// Priority, order, max delay, and an unstated min delay as SubscribeUpdate writes them,
+	// Priority, order, and max delay as SubscribeUpdate writes them,
 	// then no Range ID to retire, the ranges it adds, the update number, an absent wanted group, and
 	// a pull that follows the subscriber's route.
-	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [] }))).slice(1, 5);
+	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [] }))).slice(1, 4);
 	const update = async (ranges: number[]) => {
 		const body = [...head, 0, ...ranges, 0, 0, 0];
 		const got = await SubscribeUpdate.decode(
@@ -477,36 +477,6 @@ test.each([Version.DRAFT_03, Version.DRAFT_05, Version.DRAFT_06])(
 		expect(decoded.order).toBe("descending");
 	},
 );
-
-test("min delay survives lite-07 and decodes as not stated on legacy wires", async () => {
-	for (const version of [Version.DRAFT_03, Version.DRAFT_06, Version.DRAFT_07]) {
-		for (const minDelay of [undefined, 0, 250, Number.MAX_SAFE_INTEGER]) {
-			const expected = version === Version.DRAFT_07 ? minDelay : undefined;
-			const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, minDelay };
-			const subscribe = await encodeMessage(version, new Subscribe(props));
-			const got = await Subscribe.decode(new Reader(undefined, subscribe, version), version);
-			expect(got.minDelay).toBe(expected);
-
-			const update = await encodeMessage(version, new SubscribeUpdate({ priority: 3, minDelay, ranges: [] }));
-			const decoded = await SubscribeUpdate.decode(new Reader(undefined, update, version), version);
-			expect(decoded.minDelay).toBe(expected);
-		}
-	}
-});
-
-test("optional subscriber milliseconds reject unsafe budgets", async () => {
-	for (const minDelay of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
-		await expect(
-			encodeMessage(
-				Version.DRAFT_07,
-				new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, minDelay }),
-			),
-		).rejects.toThrow(RangeError);
-		await expect(encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 3, minDelay }))).rejects.toThrow(
-			RangeError,
-		);
-	}
-});
 
 test("wanted group survives lite-07 and disappears on legacy wires", async () => {
 	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {

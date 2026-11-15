@@ -1471,7 +1471,10 @@ mod test {
 		let consumer = producer.consume().track("catalog").unwrap();
 		let waiter = kio::Waiter::new(std::task::Waker::from(serve.clone()));
 		assert!(serve.dynamic.lock().unwrap().poll_requested_track(&waiter).is_pending());
-		let expected = track::Subscription::default().with_priority(3);
+		// The aggregate leaves the local `Delay::min` unstated.
+		let expected = track::Subscription::default()
+			.with_priority(3)
+			.with_delay(track::Delay::default().with_min(None));
 		let _pending = consumer.subscribe(expected.clone());
 		assert_eq!(*serve.subscription.lock().unwrap(), Some(Some(expected)));
 	}
@@ -1504,7 +1507,10 @@ mod test {
 			} else {
 				inspect.track.consume()
 			};
-			let expected = track::Subscription::default().with_priority(3);
+			// The aggregate leaves the local `Delay::min` unstated.
+			let expected = track::Subscription::default()
+				.with_priority(3)
+				.with_delay(track::Delay::default().with_min(None));
 			let _pending = consumer.subscribe(expected.clone());
 			assert_eq!(*inspect.seen.lock().unwrap(), Some(Some(expected)), "lookup: {lookup}");
 		}

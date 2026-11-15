@@ -815,8 +815,7 @@ pub struct moq_delay {
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
 	pub max_unlimited: bool,
-	/// Leave the minimum unstated. A media consumer plays it as zero, while the subscription
-	/// keeps it unstated, so it never pulls the aggregate across subscribers to zero.
+	/// Leave the minimum unstated. A media consumer plays it as zero.
 	pub min_unstated: bool,
 }
 

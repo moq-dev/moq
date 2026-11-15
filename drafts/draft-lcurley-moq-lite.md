@@ -1731,7 +1731,6 @@ SUBSCRIBE Message {
   Subscriber Priority (8)
   Group Order (8)
   Subscriber Max Age (i)
-  Subscriber Min Age (i)
   Range Count (i)
   Range (..) ...
   Update (i)
@@ -1776,12 +1775,6 @@ Applies only to non-latest groups; the latest group is never dropped on stalenes
 A value of `0` means the subscriber wants only the latest group in live delivery (older groups are immediately stale once a newer group arrives).
 This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions (see `Publisher Max Age` in [TRACK_INFO](#track-info)).
 See the [Expiration](#expiration) section for more information.
-
-**Subscriber Min Age**:
-The subscriber's target latency behind the live edge, in milliseconds plus one: the playout or jitter-buffer delay it holds.
-A value of `0` means the subscriber did not state one, which is distinct from a stated zero (`1`).
-It is a hint that asks for nothing: a publisher MAY use it, for example to start a cold join that far back, and MAY ignore it.
-A relay forwarding an aggregate of several subscriptions SHOULD carry the smallest stated value, and not stated when none is, so a subscription that did not state one never pulls the aggregate to zero.
 
 **Range Count**:
 The number of Ranges that follow.
@@ -1838,7 +1831,6 @@ SUBSCRIBE_UPDATE Message {
   Subscriber Priority (8)
   Group Order (8)
   Subscriber Max Age (i)
-  Subscriber Min Age (i)
   Remove Count (i)
   Range ID (i) ...
   Range Count (i)
@@ -2584,7 +2576,6 @@ An application-specific payload.
 
 - Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none, an absolute Group (exclusive as an end), a count of Groups back from the latest, or a presentation time.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
-- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A relay forwards the smallest stated value.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups: a read starting partway through a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
 - Added `Start Byte` to FETCH, after `Frame Start`: the response's first frame states its full size and carries only its payload from that byte, so a frame read partway on one publisher continues on another from where it stopped.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.

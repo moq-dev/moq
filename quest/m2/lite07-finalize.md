@@ -163,7 +163,6 @@ would need a breaking release had it landed right after the cut:
 - [ROUTE's RTT](/quest/m2/route-rtt.md) - removes ROUTE's informational RTT
 - [FETCH Start Byte](/quest/m2/fetch-start-byte.md) - removes FETCH's byte offset into a half-read frame
 - [Yield on relay links](/quest/m2/yield-relay-links.md) - narrows YIELDED from `ietf` sessions to tracks carrying moq-transport records
-- [Subscriber Min Age](/quest/m2/subscriber-min-age.md) - removes SUBSCRIBE's minimum age, which nothing reads
 - [AUTH_ERROR retries](/quest/m2/auth-retry-codes.md) - writes down which refusal codes a presenter retries
 
 ## Related

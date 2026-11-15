@@ -449,7 +449,7 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	// The initial options are available before the request is accepted or put on the wire.
 	expect(producer.subscription.peek()).toEqual({
 		priority: 0,
-		delay: { min: Duration.millis(0), max: Duration.millis(0) },
+		delay: { min: null, max: Duration.millis(0) },
 		order: "descending",
 		ranges: [{ start: { absolute: 0n } }],
 	});
@@ -464,7 +464,7 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	});
 	expect(await next).toEqual({
 		priority: 7,
-		delay: { min: Duration.millis(0), max: Duration.millis(250) },
+		delay: { min: null, max: Duration.millis(250) },
 		order: "ascending",
 		ranges: [{ start: { absolute: 2n }, end: { absolute: 9n } }],
 	});
@@ -512,9 +512,6 @@ test("a fractional delay is rounded up before the wire sees it", async () => {
 	const next = producer.subscription.changed();
 	track.update({ delay: { max: Duration.millis(500.25) } });
 	expect((await next)?.delay?.max).toEqual(Duration.millis(501));
-	const min = producer.subscription.changed();
-	track.update({ delay: { min: Duration.millis(99.5) } });
-	expect((await min)?.delay?.min).toEqual(Duration.millis(100));
 
 	// The publisher half of the budget lands on the wire through TRACK_INFO, with the same hazard.
 	producer.accept({ maxAge: Duration.millis(1000.5) });
@@ -610,7 +607,6 @@ test("multiple subscriber options aggregate like Rust", async () => {
 		delay: { min: Duration.millis(50), max: Duration.millis(250) },
 		ranges: [{ start: { absolute: 5n } }],
 	});
-	// A minimum that went unstated, as a legacy peer's does, never pulls the smallest to zero.
 	const legacy = producer.subscribe({
 		delay: { min: null, max: Duration.millis(0) },
 		ranges: [{ start: { absolute: 5n } }],
@@ -620,7 +616,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	// behind another's backlog.
 	expect(producer.subscription.peek()).toEqual({
 		priority: 7,
-		delay: { min: Duration.millis(50), max: Duration.millis(250) },
+		delay: { min: null, max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 5n } }],
 	});
@@ -630,7 +626,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	live.close();
 	expect(await narrowed).toEqual({
 		priority: 2,
-		delay: { min: Duration.millis(400), max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 		order: "ascending",
 		ranges: [{ start: { absolute: 10n }, end: { absolute: 20n } }],
 	});
@@ -918,10 +914,11 @@ test("an untimed track or a moq-transport copy refuses a time anchor", () => {
 	expect(() => copy.subscribe({ ranges }).tryRecvGroup()).toThrow("moq-transport");
 });
 
-test("only unstated minimums aggregate to an unstated one", () => {
+test("the aggregate leaves a local minimum unstated", () => {
 	const producer = new TrackProducer("test");
-	producer.subscribe({ delay: { min: null } });
-	producer.subscribe({ delay: { min: null, max: Duration.millis(250) } });
+	producer.subscribe({ delay: { min: Duration.millis(400) } });
+	expect(producer.subscription.peek()?.delay).toEqual({ min: null, max: Duration.ZERO });
+	producer.subscribe({ delay: { min: Duration.millis(50), max: Duration.millis(250) } });
 	expect(producer.subscription.peek()?.delay).toEqual({ min: null, max: Duration.millis(250) });
 });
 

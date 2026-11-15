@@ -3074,7 +3074,7 @@ impl SubscribeServe {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
 			delay: track::Delay {
-				min: msg.min_delay,
+				min: None,
 				max: serving_max_delay(shared.version, msg.max_delay),
 			},
 			order: msg.order,
@@ -5304,7 +5304,7 @@ impl TrackRun {
 		if let Err(err) = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
 			delay: crate::track::Delay {
-				min: upd.min_delay,
+				min: None,
 				max: serving_max_delay(self.ctx.version, upd.max_delay),
 			},
 			order: upd.order,
@@ -7983,7 +7983,6 @@ mod serve_group_test {
 			wanted_group,
 			priority: 0,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			order: Order::Descending,
 			update: 0,
@@ -8145,7 +8144,6 @@ mod serve_group_test {
 			order: Order::Ascending,
 			priority: 7,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
 		});
@@ -8303,7 +8301,6 @@ mod serve_group_test {
 			wanted_group: None,
 			priority: 0,
 			max_delay: Duration::from_secs(3600),
-			min_delay: None,
 			ranges,
 			order: Order::Descending,
 			update: 0,
@@ -8759,7 +8756,6 @@ mod serve_group_test {
 			wanted_group: None,
 			priority: 1,
 			max_delay: budget,
-			min_delay: None,
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
 			update: 1,
@@ -8800,7 +8796,6 @@ mod serve_group_test {
 			wanted_group: None,
 			priority: 1,
 			max_delay: Duration::from_secs(3600),
-			min_delay: None,
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
 			update: 1,
@@ -8846,7 +8841,6 @@ mod serve_group_test {
 					wanted_group: None,
 					priority: 0,
 					max_delay: if widen { Duration::from_secs(10) } else { budget },
-					min_delay: None,
 					ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 					order: Order::Descending,
 					update: 1,
@@ -8891,7 +8885,6 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 5,
 				max_delay: if widen { Duration::from_secs(10) } else { budget },
-				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update: 1,
@@ -8937,7 +8930,6 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 1,
 				max_delay: Duration::from_secs(3600),
-				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update: 1,
@@ -8974,7 +8966,6 @@ mod serve_group_test {
 			wanted_group: None,
 			priority: 0,
 			max_delay,
-			min_delay: None,
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
 			update,
@@ -9043,7 +9034,6 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 0,
 				max_delay: if widen { Duration::from_secs(10) } else { budget },
-				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				order: Order::Descending,
 				update: 1,
@@ -9093,7 +9083,6 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 0,
 				max_delay: Duration::from_secs(10),
-				min_delay: None,
 				ranges: vec![(id, lite::Range::span(start, 0, None, None))],
 				order: Order::Descending,
 				update,
@@ -9151,7 +9140,6 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 0,
 				max_delay,
-				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update,
@@ -9187,7 +9175,6 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 1,
 				max_delay: Duration::from_secs(3600),
-				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update,
@@ -9229,7 +9216,6 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 0,
 				max_delay,
-				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update,
@@ -9425,7 +9411,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
-			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
 		});
@@ -9852,7 +9837,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
-			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
 		});
@@ -9894,7 +9878,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(1),
-			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
 		});
@@ -9941,7 +9924,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(1),
-			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
 			update: 0,
 		};
@@ -9988,7 +9970,6 @@ mod serve_group_test {
 			order: crate::track::Order::Ascending,
 			priority: 0,
 			max_delay: Duration::from_secs(10),
-			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
 			update: 0,
 		};
@@ -10035,7 +10016,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
 		});
@@ -10128,7 +10108,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
 		});
@@ -10265,7 +10244,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(30),
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
 		});
@@ -10296,7 +10274,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(30),
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
 		});
@@ -10324,7 +10301,6 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			ranges: vec![lite::Range::span(Some(7), 0, None, None)],
 			update: 0,
 		};
@@ -11196,7 +11172,6 @@ mod tests {
 						track: "video".into(),
 						priority: 0,
 						max_delay: Duration::ZERO,
-						min_delay: None,
 						ranges: vec![lite::Range::span(None, 0, None, None)],
 						update: 0,
 					};
@@ -11262,7 +11237,6 @@ mod tests {
 				track: "video".into(),
 				priority: 0,
 				max_delay: Duration::ZERO,
-				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
 			}
@@ -11418,7 +11392,6 @@ mod tests {
 			track: "events".into(),
 			priority,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
 		}
@@ -11763,7 +11736,6 @@ mod tests {
 						track: "video".into(),
 						priority: 0,
 						max_delay: Duration::from_secs(60),
-						min_delay: None,
 						ranges: vec![lite::Range::span(start, 0, None, None)],
 						update: 0,
 					};
@@ -11899,7 +11871,6 @@ mod tests {
 			track: "video".into(),
 			priority: 1,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			// A relay asks from its cached group, so the SUBSCRIBE is not a live-edge join.
 			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
 			update: 0,
@@ -11925,7 +11896,6 @@ mod tests {
 			order: crate::track::Order::Descending,
 			priority,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			ranges: lite::RangeEdit::Edit {
 				remove: Vec::new(),
 				add: Vec::new(),
@@ -11988,7 +11958,6 @@ mod tests {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(3600),
-			min_delay: None,
 			ranges: lite::RangeEdit::Edit {
 				remove: Vec::new(),
 				add: Vec::new(),
@@ -12033,7 +12002,6 @@ mod tests {
 			track: "video".into(),
 			priority: 0,
 			max_delay: Duration::from_secs(3600),
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
 		}
@@ -12649,7 +12617,6 @@ mod tests {
 				track: "video".into(),
 				priority: 0,
 				max_delay: Duration::ZERO,
-				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
 			};
@@ -12766,7 +12733,6 @@ mod tests {
 				track: "video".into(),
 				priority: 0,
 				max_delay: Duration::ZERO,
-				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
 			};
@@ -12907,7 +12873,6 @@ mod tests {
 			track: track.into(),
 			priority,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
 		};

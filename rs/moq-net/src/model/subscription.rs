@@ -58,13 +58,9 @@ pub struct Delay {
 	/// The target latency, the playout or jitter-buffer delay held behind the live edge, or
 	/// `None` when the subscriber did not state one.
 	///
-	/// Only a peer whose wire cannot carry it leaves it unstated: moq-lite before 07 and
-	/// moq-transport. A media consumer reads an unstated minimum as zero. The aggregate
-	/// across subscribers is the smallest stated one, so an unstated minimum never pulls it
-	/// to zero, and a relay forwards it upstream as is. A publisher may use it, such as to
-	/// start a cold join that far back; nothing reads it there yet.
-	///
-	/// This is the `Subscriber Min Age` on the moq-lite-07 wire, in milliseconds.
+	/// A local setting: it never crosses the wire, so a publisher never sees it, and the
+	/// aggregate across subscribers leaves it unstated. A media consumer reads an unstated
+	/// minimum as zero.
 	pub min: Option<Duration>,
 	/// How long a superseded group stays worth delivering to this subscriber, or `None`
 	/// for as long as the publisher keeps it.
@@ -550,10 +546,6 @@ impl Combined {
 			(Some(a), Some(b)) => Some(a.max(b)),
 			_ => None,
 		};
-		combined.delay.min = match (combined.delay.min, sub.delay.min) {
-			(Some(a), Some(b)) => Some(a.min(b)),
-			(a, b) => a.or(b),
-		};
 		combined.ranges.extend_from_slice(&sub.ranges);
 		// Key-first prioritization is enabled only when every subscriber wants it.
 		if let Order::Descending = sub.order {
@@ -566,6 +558,7 @@ impl Combined {
 	pub(super) fn finish(self) -> Option<Subscription> {
 		let mut combined = self.0?;
 		combined.ranges = union(std::mem::take(&mut combined.ranges));
+		combined.delay.min = None;
 		Some(combined)
 	}
 }

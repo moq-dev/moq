@@ -20,8 +20,6 @@ pub(super) struct Subscriptions {
 	priority: BTreeMap<i8, usize>,
 	// Keyed by budget, so `None` counts as the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
-	// Only stated minimums count, so an unstated one never pulls the smallest to zero.
-	min_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
@@ -65,7 +63,7 @@ impl Subscriptions {
 			(
 				*self.priority.last_key_value().unwrap().0,
 				Delay {
-					min: self.min_delay.first_key_value().map(|(min, _)| *min),
+					min: None,
 					max: Some(*self.max_delay.last_key_value().unwrap().0).filter(|budget| *budget != Duration::MAX),
 				},
 				if self.descending == 0 {
@@ -143,9 +141,6 @@ impl Subscriptions {
 		if let Some(new) = new {
 			add(&mut self.priority, new.priority);
 			add(&mut self.max_delay, new.budget());
-			if let Some(min) = new.delay.min {
-				add(&mut self.min_delay, min);
-			}
 			if moved {
 				for range in &new.ranges {
 					reshaped |= self.ranges.add(*range);
@@ -158,9 +153,6 @@ impl Subscriptions {
 		if let Some(old) = old {
 			remove(&mut self.priority, old.priority);
 			remove(&mut self.max_delay, old.budget());
-			if let Some(min) = old.delay.min {
-				remove(&mut self.min_delay, min);
-			}
 			if moved {
 				for range in &old.ranges {
 					reshaped |= self.ranges.remove(*range);

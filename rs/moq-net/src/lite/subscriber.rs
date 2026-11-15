@@ -3767,7 +3767,6 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -3929,7 +3928,6 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Duration::ZERO,
-				min_delay: None,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -4404,7 +4402,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -4521,7 +4518,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			start: Some(4),
 			priority: 0,
 			requested: Some(4),
@@ -4590,7 +4586,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
-			min_delay: None,
 			start: Some(4),
 			priority: 0,
 			requested: Some(4),
@@ -6410,7 +6405,6 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: budget,
-			min_delay: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -11050,7 +11044,6 @@ struct SubStream {
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
 	max_delay: Duration,
-	min_delay: Option<Duration>,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
 	start: Option<u64>,
@@ -11738,7 +11731,6 @@ impl TrackServe {
 						active.priority = subscription.priority;
 						active.order = subscription.order;
 						active.max_delay = wire_max_delay(subscription.delay.max);
-						active.min_delay = subscription.delay.min;
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
 						// restarts.
@@ -12113,7 +12105,6 @@ fn buffer_update(
 		wanted_group: active.wanted,
 		priority: active.priority,
 		max_delay: active.max_delay,
-		min_delay: active.min_delay,
 		ranges,
 		order: active.order,
 		update: active.update,
@@ -12182,7 +12173,6 @@ impl Establish {
 			track: self.serve.name.as_str().into(),
 			priority: self.subscription.priority,
 			max_delay: wire_max_delay(self.subscription.delay.max),
-			min_delay: self.subscription.delay.min,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
 			update: 0,
@@ -12227,7 +12217,6 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: wire_max_delay(self.subscription.delay.max),
-			min_delay: self.subscription.delay.min,
 			start: self.subscription.start(),
 			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
 			demand: self.demand.clone(),
