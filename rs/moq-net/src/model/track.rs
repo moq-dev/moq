@@ -5315,8 +5315,8 @@ impl Requests {
 	/// The next run of groups readers miss, as a [`Fill`] to serve via [`Fill::accept`]
 	/// and [`Fill::drop_groups`].
 	///
-	/// A relay fetches the run upstream; an origin already has its groups cached, so
-	/// nothing reaches here. Errors once the track is aborted.
+	/// A relay fetches the run upstream; an origin serves the groups its cache evicted
+	/// from its own store, as `moq-archive` does. Errors once the track is aborted.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested_fill(&self, waiter: &kio::Waiter) -> Poll<Result<Fill>> {
 		fill::poll_requested(&self.state, &self.fills, waiter)
