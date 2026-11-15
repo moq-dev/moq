@@ -146,6 +146,8 @@ class NightlyTest(unittest.TestCase):
                     "#!/usr/bin/env bash\n"
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
                     'printf "%s\n" "${BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
+                    "[[ -z ${BENCH_LABEL:-} ]] ||\n"
+                    '    printf "%s %s\n" "$BENCH_KEEP_BUILDS" "$BENCH_BASE_BUILDS" >> "$NIGHTLY_CALLS.builds"\n'
                     # Nextest's bench profile writes a JUnit report with a case per filtered test,
                     # unless the test withholds the report or one test.
                     'if [[ ${NEXTEST_PROFILE:-} == bench && "$*" != "$NIGHTLY_NO_JUNIT" ]]; then\n'
@@ -160,10 +162,17 @@ class NightlyTest(unittest.TestCase):
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )
                 stub.chmod(0o755)
-            # Answers `gh run list` by applying its --jq filter to NIGHTLY_RUNS.
+            # Answers `gh run list` by applying its --jq filter to NIGHTLY_RUNS, and `gh run
+            # download` by logging it and failing unless NIGHTLY_KEPT is set.
             gh = scratch / "gh"
             gh.write_text(
-                "#!/usr/bin/env bash\nwhile [[ $1 != --jq ]]; do shift; done\n"
+                "#!/usr/bin/env bash\n"
+                "if [[ $2 == download ]]; then\n"
+                '    echo "$*" >> "$NIGHTLY_CALLS.download"\n'
+                "    [[ -n ${NIGHTLY_KEPT:-} ]]\n"
+                "    exit\n"
+                "fi\n"
+                "while [[ $1 != --jq ]]; do shift; done\n"
                 'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n'
             )
             gh.chmod(0o755)
@@ -185,6 +194,11 @@ class NightlyTest(unittest.TestCase):
             raw = scratch / "results" / "raw"
             self.raw = sorted(path.name for path in raw.iterdir()) if raw.exists() else []
             self.bases = set(Path(f"{calls}.base").read_text().splitlines()) if calls.exists() else set()
+            builds = Path(f"{calls}.builds")
+            lines = builds.read_text().splitlines() if builds.exists() else []
+            self.builds = [line.split(" ") for line in lines]
+            download = Path(f"{calls}.download")
+            self.downloads = download.read_text().splitlines() if download.exists() else []
             return result, calls.read_text().splitlines() if calls.exists() else []
 
     def test_paired_base_is_the_previous_scheduled_nightly(self):
@@ -214,6 +228,41 @@ class NightlyTest(unittest.TestCase):
                 "rust-uring", cwd=repo, BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2", NIGHTLY_RUNS=runs
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.bases, {head})
+            # Each label keeps its executables; with no artifact named, none are fetched.
+            self.assertEqual(self.downloads, [])
+            self.assertEqual(len(self.builds), 7)
+            for keep, base in self.builds:
+                self.assertRegex(keep, r"/target/bench/builds/rust-uring/uring-\w+$")
+                self.assertEqual(base, "")
+            # The previous run's kept executables serve as each label's base.
+            result, _ = self.run_group(
+                "rust-uring",
+                cwd=repo,
+                BENCH_BASE="previous-nightly",
+                BENCH_BUILDS_ARTIFACT="builds-bench-rust-uring",
+                GITHUB_RUN_ID="2",
+                NIGHTLY_RUNS=runs,
+                NIGHTLY_KEPT="1",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(self.downloads), 1)
+            self.assertRegex(self.downloads[0], r"^run download 1 --name builds-bench-rust-uring --dir \S+$")
+            for keep, base in self.builds:
+                label = keep.rsplit("/", 1)[1]
+                self.assertTrue(base.endswith(f"/target/bench/base-builds/rust-uring/rust-uring/{label}"), base)
+            # A previous run that kept none builds the base instead.
+            result, _ = self.run_group(
+                "rust-uring",
+                cwd=repo,
+                BENCH_BASE="previous-nightly",
+                BENCH_BUILDS_ARTIFACT="builds-bench-rust-uring",
+                GITHUB_RUN_ID="2",
+                NIGHTLY_RUNS=runs,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("kept no builds-bench-rust-uring; building the base", result.stderr)
+            self.assertEqual({base for _, base in self.builds}, {""})
             self.assertEqual(self.bases, {head})
             # A named revision reaches the runner as its commit.
             result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="HEAD~1")
