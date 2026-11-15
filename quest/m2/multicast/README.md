@@ -98,7 +98,7 @@ Settled:
    dead hop remembered past the routes that name it. Routing state is a
    hint. A request is confirmed only once its upstream is, data is identified
    by Instance, track, group, and frame, and a stale or stalled route is left
-   on evidence ([requests](/quest/m2/multicast/requests.md),
+   on evidence ([requests](https://github.com/moq-dev/moq/pull/8881),
    [route health](/quest/m3/route-health/README.md)). What a hold protected,
    a claim flickering while routes settle, becomes a reader's local debounce
    from unavailable to offline, never on the wire. This reverses items 19 and
@@ -147,7 +147,7 @@ flagged as costly, on
     has no path, chain, or Instance, so a moq-transport relay announcing
     back a name it learned from us cannot be told from a nearer publisher.
     That is unsupported: it must cost bounded work and touch no other
-    broadcast ([requests](/quest/m2/multicast/requests.md)), and nothing
+    broadcast ([requests](https://github.com/moq-dev/moq/pull/8881)), and nothing
     detects it (rejected: ignoring a claim for a name already announced to
     that session, which also hides a real second publisher behind it).
 11. ✅ **Redundant ingest is one Instance from synchronized encoders.** Two
