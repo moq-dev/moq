@@ -74,12 +74,12 @@ pub struct Config {
 }
 
 /// The flag that runs a stand-in, which its relay must not see again.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 const SUPERVISE_FLAG: &str = "--handoff-supervise";
 
 /// The arguments a stand-in starts its relay with: its own, but for the flag that
 /// made it a stand-in.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 fn relay_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
 	let mut positional = false;
 	args.into_iter()
@@ -177,7 +177,10 @@ struct Group {
 }
 
 /// What a serving [`Handoff`] tells the rest of the relay.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+	not(target_os = "linux"),
+	expect(dead_code, reason = "off Linux no Handoff exists to read them")
+)]
 pub(crate) struct Events {
 	/// Set once a successor took over: stop accepting and drain.
 	pub handed: tokio::sync::watch::Sender<bool>,
