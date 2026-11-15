@@ -366,7 +366,7 @@ fn cmaf_receive(c: &mut Criterion) {
 			}
 			.encode(&mut data)
 			.unwrap();
-			let frame = moq_net::frame::Frame::new(None, Bytes::from(data));
+			let frame = moq_net::frame::Frame::new(moq_net::Timestamp::unscaled(0), Bytes::from(data));
 			assert_eq!(wire.decode(frame.clone()).unwrap().len(), samples);
 			group.throughput(Throughput::Elements(samples as u64));
 			group.bench_function(BenchmarkId::new(samples.to_string(), size), |b| {

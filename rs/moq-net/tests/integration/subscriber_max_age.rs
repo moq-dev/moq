@@ -4,8 +4,10 @@
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version, origin, track};
+use moq_net::{Version, origin, track};
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use crate::support::harness::{peer, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
@@ -49,9 +51,9 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 				track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = source.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
-		group.finish().unwrap();
+		let mut group = source.append_next().unwrap();
+		group.write_frame(group.at_start(), b"catalog").unwrap();
+		group.close().unwrap();
 		broadcast.announce().unwrap();
 		let consumer = viewer.consume();
 		let remote = consumer
@@ -77,7 +79,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		budget(&mut source, 10, version).await;
 		// A quiet catalog survives far longer than the budget because it has no successor.
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		assert_eq!(snapshot.sequence, 0, "{version}");
+		assert_eq!(snapshot.start, 0, "{version}");
 		assert_eq!(
 			snapshot.read_frame().await.unwrap().unwrap().payload,
 			b"catalog".as_slice()
@@ -124,9 +126,9 @@ async fn relay_forwards_the_smallest_stated_min_delay() {
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = source.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
-	group.finish().unwrap();
+	let mut group = source.append_next().unwrap();
+	group.write_frame(group.at_start(), b"catalog").unwrap();
+	group.close().unwrap();
 	broadcast.announce().unwrap();
 
 	let cache = |origin: &origin::Producer| {

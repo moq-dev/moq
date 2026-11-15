@@ -94,10 +94,10 @@ test("frames roundtrip signed, timestamps included", async () => {
 	expect(second?.timestamp?.value).toBe(2);
 	expect(second?.timestamp?.scale).toBe(Time.Timescale.MILLI);
 
-	// An untimed frame on a timed track is refused before it is signed, so it spends no index.
-	await expect(group.writeFrame(undefined, encoder.encode("untimed"))).rejects.toBeInstanceOf(
-		NetError.TimestampMismatch,
-	);
+	// An unscaled frame on a timed track is refused before it is signed, so it spends no index.
+	await expect(
+		group.writeFrame(Time.Timestamp.unscaled(group.sequence), encoder.encode("untimed")),
+	).rejects.toBeInstanceOf(NetError.TimestampMismatch);
 	await group.writeFrame(Time.Timestamp.fromMillis(3), encoder.encode("late"));
 	group.finish();
 	expect(await payload(received)).toBe("late");
@@ -119,15 +119,15 @@ test("a forged frame delivers nothing and ends only its group", async () => {
 
 	// A relay's forgery: unsigned frames the length of a signed one.
 	const forged = raw.appendGroup();
-	forged.writeFrame({ payload: new Uint8Array(80) });
-	forged.writeFrame({ payload: new Uint8Array(80) });
+	forged.writeFrame({ payload: new Uint8Array(80), timestamp: Time.Timestamp.unscaled(forged.sequence) });
+	forged.writeFrame({ payload: new Uint8Array(80), timestamp: Time.Timestamp.unscaled(forged.sequence) });
 	forged.finish();
 	const group = await track.recvGroup();
 	await expect(group?.readFrame()).rejects.toEqual(new Failure("signature"));
 	await expect(group?.readFrame()).rejects.toEqual(new Failure("signature"));
 
 	const next = signed.createGroup(1n);
-	await next.writeFrame(undefined, encoder.encode("after"));
+	await next.writeFrame(Time.Timestamp.unscaled(next.sequence), encoder.encode("after"));
 	next.finish();
 	expect(await payload(await track.recvGroup())).toBe("after");
 
@@ -147,7 +147,7 @@ test("a frame replayed into another group or track is refused", async () => {
 	const readB = consumer.subscribe("b", subscription);
 
 	const group = a.signed.appendGroup();
-	await group.writeFrame(undefined, encoder.encode("original"));
+	await group.writeFrame(Time.Timestamp.unscaled(group.sequence), encoder.encode("original"));
 	group.finish();
 	const body = (await (await tap.recvGroup())?.readFrame())?.payload;
 	if (!body) throw new Error("expected the signed body");
@@ -155,13 +155,13 @@ test("a frame replayed into another group or track is refused", async () => {
 
 	// Group 1 of the same track.
 	const replay = a.raw.appendGroup();
-	replay.writeFrame({ payload: body });
+	replay.writeFrame({ payload: body, timestamp: Time.Timestamp.unscaled(replay.sequence) });
 	replay.finish();
 	await expect((await readA.recvGroup())?.readFrame()).rejects.toEqual(new Failure("signature"));
 
 	// The same group and index of another track.
 	const moved = b.raw.createGroup(0n);
-	moved.writeFrame({ payload: body });
+	moved.writeFrame({ payload: body, timestamp: Time.Timestamp.unscaled(moved.sequence) });
 	moved.finish();
 	await expect((await readB.recvGroup())?.readFrame()).rejects.toEqual(new Failure("signature"));
 
@@ -176,7 +176,7 @@ test("a group sequence is never signed twice", async () => {
 	const published = await publish(key, Path.from("mesh/node/ssh"));
 	const track = published.signed.createTrack("stream");
 	const group = track.appendGroup();
-	await group.writeFrame(undefined, encoder.encode("first"));
+	await group.writeFrame(Time.Timestamp.unscaled(group.sequence), encoder.encode("first"));
 	group.abort(new Error("retry"));
 
 	// Net would serve the aborted sequence again, but frames of both incarnations would verify,
@@ -205,7 +205,7 @@ test("a broadcast signed under another key is refused", async () => {
 	const published = await publish(impostor, path);
 	const stream = published.signed.createTrack("stream");
 	const group = stream.appendGroup();
-	await group.writeFrame(undefined, encoder.encode("hello"));
+	await group.writeFrame(Time.Timestamp.unscaled(group.sequence), encoder.encode("hello"));
 	group.finish();
 
 	const track = (await published.consume(victim.public)).subscribe("stream", subscription);

@@ -26,6 +26,7 @@ import { createMockTransportPair } from "../src/mock.ts";
 import { Producer as OriginProducer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Front } from "../src/resume.ts";
+import { Timestamp } from "../src/time.ts";
 import { wireOf } from "../src/wire.ts";
 
 const PAYLOAD = 4096;
@@ -226,7 +227,7 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 		for (const name of all) {
 			const track = broadcast.createTrack(name);
 			const group = track.appendGroup();
-			group.writeFrame({ payload });
+			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 			group.finish();
 		}
 	}

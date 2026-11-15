@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
 import * as Broadcast from "./broadcast.ts";
+import { Timescale, Timestamp } from "./time.ts";
+
+/** A scale-less datagram's timestamp: its sequence. */
+const seq = (sequence: bigint) => Timestamp.unscaled(sequence);
 
 test("a broadcast keeps same-name datagram and stream tracks independent", async () => {
 	const broadcast = new Broadcast.Producer();
@@ -7,7 +11,7 @@ test("a broadcast keeps same-name datagram and stream tracks independent", async
 	const datagrams = broadcast.createDatagrams("audio");
 	const reader = broadcast.consume().datagrams("audio");
 	expect(streams.appendGroup().sequence).toBe(0n);
-	expect(datagrams.append(undefined, new Uint8Array([1]))).toBe(0n);
+	expect(datagrams.append(seq(0n), new Uint8Array([1]))).toBe(0n);
 	expect(streams.appendGroup().sequence).toBe(1n);
 	expect((await reader.recv())?.sequence).toBe(0n);
 	reader.close();
@@ -19,14 +23,13 @@ test("a broadcast keeps same-name datagram and stream tracks independent", async
 import * as Datagram from "./datagram.ts";
 import { StreamCode, StreamError, TimestampMismatch } from "./error.ts";
 import { hooks } from "./internal.ts";
-import { Timescale, Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
 
 test("datagram readers start live, clone their cursor, and drain only an existing finish", async () => {
 	const track = new Datagram.Producer("test").accept();
-	track.append(undefined, new Uint8Array([0]));
+	track.append(seq(0n), new Uint8Array([0]));
 	const reader = track.consume();
-	track.append(undefined, new Uint8Array([1]));
+	track.append(seq(1n), new Uint8Array([1]));
 	track.finish();
 	const cloned = reader.clone();
 	expect((await reader.recv())?.sequence).toBe(1n);
@@ -44,7 +47,7 @@ test("a shared datagram buffer bounds both count and bytes for stalled readers",
 		const slow = track.consume();
 		const fast = track.consume();
 		for (let i = 0; i < 70; i++) {
-			track.append(undefined, new Uint8Array(size));
+			track.append(seq(BigInt(i)), new Uint8Array(size));
 			expect((await fast.recv())?.sequence).toBe(BigInt(i));
 		}
 		track.finish();
@@ -56,13 +59,15 @@ test("a shared datagram buffer bounds both count and bytes for stalled readers",
 });
 
 test("datagram inserts preserve repeats and reordering, and append past the high water mark", async () => {
-	const track = new Datagram.Producer("test").accept();
+	// Timed, so `append` picks the sequence: a scale-less timestamp names its own.
+	const track = new Datagram.Producer("test").accept({ timescale: Timescale.MILLI });
 	const reader = track.consume();
-	for (const sequence of [10n, 3n, 10n]) track.insert({ sequence, payload: new Uint8Array() });
-	expect(track.append(undefined, new Uint8Array())).toBe(11n);
+	for (const sequence of [10n, 3n, 10n])
+		track.insert({ sequence, timestamp: Timestamp.fromMillis(Number(sequence)), payload: new Uint8Array() });
+	expect(track.append(Timestamp.fromMillis(11), new Uint8Array())).toBe(11n);
 	for (const sequence of [10n, 3n, 10n, 11n]) expect((await reader.recv())?.sequence).toBe(sequence);
-	track.insert({ sequence: (1n << 64n) - 1n, payload: new Uint8Array() });
-	expect(() => track.append(undefined, new Uint8Array())).toThrow(RangeError);
+	track.insert({ sequence: (1n << 64n) - 1n, timestamp: Timestamp.fromMillis(0), payload: new Uint8Array() });
+	expect(() => track.append(Timestamp.fromMillis(1), new Uint8Array())).toThrow(RangeError);
 	track.finish();
 	reader.close();
 });
@@ -70,7 +75,7 @@ test("datagram inserts preserve repeats and reordering, and append past the high
 test("refused datagram writes spend neither sequences nor buffer space", async () => {
 	const track = new Datagram.Producer("test").accept({ timescale: Timescale.MILLI });
 	const reader = track.consume();
-	expect(() => track.append(undefined, new Uint8Array())).toThrow(TimestampMismatch);
+	expect(() => track.append(seq(0n), new Uint8Array())).toThrow(TimestampMismatch);
 	expect(() => track.append(Timestamp.fromMillis(1), new Uint8Array(65536))).toThrow();
 	expect(track.append(Timestamp.fromMicros(1234), new Uint8Array([7]))).toBe(0n);
 	expect((await reader.recv())?.timestamp).toEqual(Timestamp.fromMillis(1));
@@ -78,10 +83,26 @@ test("refused datagram writes spend neither sequences nor buffer space", async (
 	reader.close();
 });
 
+test("a scale-less datagram's timestamp names its sequence", async () => {
+	const track = new Datagram.Producer("test").accept();
+	const reader = track.consume();
+	expect(() => track.append(Timestamp.fromMillis(1), new Uint8Array())).toThrow(TimestampMismatch);
+	// Another key than the sequence is a mismatch.
+	expect(() => track.insert({ sequence: 4n, timestamp: seq(5n), payload: new Uint8Array() })).toThrow(
+		TimestampMismatch,
+	);
+	expect(track.append(seq(4n), new Uint8Array())).toBe(4n);
+	const received = await reader.recv();
+	expect(received?.sequence).toBe(4n);
+	expect(received?.timestamp).toEqual(seq(4n));
+	track.finish();
+	reader.close();
+});
+
 test("an abort or local close wakes datagram reads with its exact result", async () => {
 	const track = new Datagram.Producer("test").accept();
 	const reader = track.consume();
-	track.append(undefined, new Uint8Array([1]));
+	track.append(seq(0n), new Uint8Array([1]));
 	const cause = new StreamError(StreamCode.Unauthorized);
 	track.abort(cause);
 	await expect(reader.recv()).rejects.toBe(cause);
@@ -100,8 +121,8 @@ test("each datagram reader owns its copy, and edits never reach the shared byte 
 	const second = track.consume();
 	// Two of these fit the 64 KiB bound; a third evicts exactly one.
 	const size = 30_000;
-	track.append(undefined, new Uint8Array(size).fill(5));
-	track.append(undefined, new Uint8Array(size).fill(6));
+	track.append(seq(0n), new Uint8Array(size).fill(5));
+	track.append(seq(1n), new Uint8Array(size).fill(6));
 
 	const edited = await first.recv();
 	if (!edited) throw new Error("missing datagram");
@@ -114,7 +135,7 @@ test("each datagram reader owns its copy, and edits never reach the shared byte 
 
 	// Replacing a returned payload must not change what eviction subtracts.
 	edited.payload = new Uint8Array(0);
-	track.append(undefined, new Uint8Array(size).fill(7));
+	track.append(seq(2n), new Uint8Array(size).fill(7));
 	expect((await second.recv())?.payload[0]).toBe(6);
 	expect((await second.recv())?.payload[0]).toBe(7);
 	first.close();
@@ -148,7 +169,7 @@ test("abandoned datagram requests leave neither a queued request nor a name clai
 	expect(request?.name).toBe("test");
 	if (!request) throw new Error("missing request");
 	const track = request.accept();
-	track.append(undefined, new Uint8Array([1]));
+	track.append(seq(0n), new Uint8Array([1]));
 	expect((await next.recv())?.payload).toEqual(new Uint8Array([1]));
 	track.finish();
 	next.close();
@@ -164,7 +185,7 @@ test("creating a datagram track in the turn its queued request closes serves the
 	left.close();
 	const track = broadcast.createDatagrams("test");
 	const next = consumer.datagrams("test");
-	track.append(undefined, new Uint8Array([2]));
+	track.append(seq(0n), new Uint8Array([2]));
 	expect((await next.recv())?.payload).toEqual(new Uint8Array([2]));
 	track.finish();
 	next.close();
@@ -200,7 +221,7 @@ test("passive forwarding drains a finished track without adding demand", async (
 	expect(producer.priority.peek()).toBe(-7);
 	reader.close();
 	expect(producer.priority.peek()).toBeUndefined();
-	producer.append(undefined, Uint8Array.of(1));
+	producer.append(seq(0n), Uint8Array.of(1));
 	producer.finish();
 	for (const consumer of [observer, copy]) {
 		expect((await consumer.recv())?.payload).toEqual(Uint8Array.of(1));

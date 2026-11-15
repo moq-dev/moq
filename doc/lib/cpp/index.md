@@ -131,7 +131,8 @@ anywhere, so a raw byte stream needs no other importer.
 `moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample.
 Media times are exact `moq::Timestamp{value, scale}` records, `value` units at `scale` units
 per second, and read back at the track's timescale, so a 90 kHz tick republishes unchanged.
-A raw `moq::Frame` with `std::nullopt` is untimed.
+An untimed track has no time: its frames carry `moq::Timestamp{key, std::nullopt}`, the
+frame's group key (a datagram's sequence), and every write takes one.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.

@@ -11,6 +11,7 @@ import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { Producer as GroupProducer } from "../src/group.ts";
 import { hooks } from "../src/internal.ts";
 import { Front } from "../src/resume.ts";
+import { Timestamp } from "../src/time.ts";
 import type { Subscriber } from "../src/track.ts";
 
 const readerCounts = [1, 4, 16];
@@ -49,7 +50,7 @@ async function measure(readers: number, swaps: number | undefined, fork = false)
 		// Every route's copy holds the same groups under the same sequences.
 		const write = () => {
 			const group = track.createGroup(sequence);
-			group.writeFrame({ payload });
+			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 			group.finish();
 		};
 		sources.push({ broadcast, write });
@@ -145,7 +146,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	const tracks = sources.map((source) => source.createTrack("seq"));
 	const groups = tracks.map((track) => {
 		const group = track.appendGroup();
-		group.writeFrame({ payload });
+		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 		return group;
 	});
 	front.serve(handles[0]);
@@ -193,10 +194,10 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 	const producer = new GroupProducer(0n);
 	const replacement = new GroupProducer(0n);
 	for (let index = 0; index < replayed; index++) {
-		producer.writeFrame({ payload });
-		replacement.writeFrame({ payload });
+		producer.writeFrame({ payload, timestamp: Timestamp.unscaled(producer.sequence) });
+		replacement.writeFrame({ payload, timestamp: Timestamp.unscaled(replacement.sequence) });
 	}
-	replacement.writeFrame({ payload });
+	replacement.writeFrame({ payload, timestamp: Timestamp.unscaled(replacement.sequence) });
 	const consumers = Array.from({ length: readers }, () => producer.mirror());
 	for (const consumer of consumers) {
 		for (let index = 0; index < replayed; index++) {

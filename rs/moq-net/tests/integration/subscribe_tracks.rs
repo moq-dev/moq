@@ -5,13 +5,15 @@
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use futures::StreamExt;
 
+use moq_net::Version;
 use moq_net::transport::poll::{RecvStream as _, SendStream as _, Session as _};
-use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -93,9 +95,9 @@ async fn setup(version: Version) -> Setup {
 }
 
 async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
-	let mut group = setup.track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, payload).unwrap();
-	group.finish().unwrap();
+	let mut group = setup.track.append_next().unwrap();
+	group.write_frame(group.at_start(), payload).unwrap();
+	group.close().unwrap();
 	let got = kio::clock::timeout(TIMEOUT, setup.frames.next())
 		.await
 		.expect("frame timed out")

@@ -564,13 +564,14 @@ impl Backend for V4l2 {
 				})?;
 		}
 
+		// Ahead of taking a buffer, so a timestamp with no time leaves none claimed.
+		let key = key(frame.timestamp)?;
 		let i420 = frame.surface.to_i420()?;
 		// Also reclaims finished input buffers, so the codec is drained even when
 		// the caller never asks for output.
 		let index = self.free_buffer()?;
 		self.planes.write(&mut self.raw, index, &i420)?;
 
-		let key = key(frame.timestamp);
 		let bytesused: Vec<u32> = self.raw.format().planes.iter().map(|plane| plane.sizeimage).collect();
 		self.raw.queue(&self.device, index, &bytesused, key)?;
 		self.pending.queued(key, frame.timestamp);
@@ -622,9 +623,10 @@ impl Backend for V4l2 {
 /// A key rather than the timestamp itself: the buffer carries whole
 /// microseconds, and a [`Timestamp`] is an instant at its own scale, which a
 /// round trip through microseconds would change. So the frame is looked up by
-/// this and answered with the timestamp it arrived with.
-fn key(timestamp: Timestamp) -> Duration {
-	Duration::from_micros(timestamp.as_micros() as u64)
+/// this and answered with the timestamp it arrived with. Refused for an
+/// [unscaled](Timestamp::unscaled) timestamp, which has no time to carry.
+fn key(timestamp: Timestamp) -> Result<Duration, moq_net::TimeOverflow> {
+	Ok(Duration::from_micros(timestamp.as_micros()? as u64))
 }
 
 /// Which frame each coded buffer answers, and what to do with one that answers
@@ -986,7 +988,7 @@ mod tests {
 
 	/// Queue a frame the way [`Backend::encode`] does, keyed on its timestamp.
 	fn queue(pending: &mut Pending, timestamp: Timestamp) {
-		pending.queued(key(timestamp), timestamp);
+		pending.queued(key(timestamp).unwrap(), timestamp);
 	}
 
 	/// The level has to clear the resolution, or bcm2835-codec refuses the format
@@ -1111,12 +1113,15 @@ mod tests {
 	fn the_answer_carries_the_frame_timestamp_unchanged() {
 		let ninety_khz = moq_net::Timescale::new(90_000).unwrap();
 		let timestamp = Timestamp::new(3003, ninety_khz).unwrap();
-		assert_ne!(Timestamp::from_micros(timestamp.as_micros() as u64).unwrap(), timestamp);
+		assert_ne!(
+			Timestamp::from_micros(timestamp.as_micros().unwrap() as u64).unwrap(),
+			timestamp
+		);
 
 		let mut pending = Pending::default();
 		queue(&mut pending, timestamp);
 		let (_, answered) = pending
-			.matched(key(timestamp), Bytes::from_static(&[0, 0, 0, 1, 0x65]))
+			.matched(key(timestamp).unwrap(), Bytes::from_static(&[0, 0, 0, 1, 0x65]))
 			.unwrap();
 		assert_eq!(answered, timestamp);
 	}

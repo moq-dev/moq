@@ -20,6 +20,7 @@ mod config;
 mod connection;
 mod critical;
 mod fetch;
+pub mod handoff;
 mod http_client;
 mod incoming;
 pub mod internal;
@@ -32,8 +33,6 @@ pub mod runtime;
 pub mod session;
 pub mod shutdown;
 pub mod stats;
-#[cfg(any(feature = "stun", test))]
-pub mod stun;
 #[cfg(feature = "test-support")]
 mod test_support;
 #[cfg(all(target_os = "linux", feature = "_uring"))]

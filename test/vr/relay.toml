@@ -1,0 +1,15 @@
+# Private loopback relay for the VR projection harness.
+[log]
+level = "info"
+
+[listen]
+bind = "127.0.0.1:4443"
+tls.generate = ["localhost", "127.0.0.1"]
+# The CLI publisher negotiates lite-07; Chromium offers lite-06.
+version = ["moq-lite-07-wip", "moq-lite-06"]
+
+[web.http]
+listen = "127.0.0.1:4443"
+
+[auth]
+public = "**"

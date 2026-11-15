@@ -20,12 +20,15 @@ fn reads_skip_an_owed_hole() {
 		let mut latest = snapshot::Consumer::<Value>::new(track.consume(), Default::default());
 		let mut next = snapshot::Consumer::<Value>::new(track.consume(), Default::default());
 		let waiter = kio::Waiter::noop();
-		let put = |sequence: u64| {
-			let mut group = track.create_group(group::Info { sequence }).unwrap();
+		let put = |start: u64| {
+			let mut group = track.create_group(group::Info { start }).unwrap();
 			group
-				.write_frame(None, serde_json::to_vec(&json!({ "n": sequence })).unwrap())
+				.write_frame(
+					moq_net::Timestamp::unscaled(start),
+					serde_json::to_vec(&json!({ "n": start })).unwrap(),
+				)
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 
 		put(0);

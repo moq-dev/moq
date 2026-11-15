@@ -74,6 +74,25 @@ const DECODER_RESET: DECODING_STATE = dsOutOfMemory | dsRefListNullPtrs;
 /// growing without bound.
 const MAX_PENDING: usize = 32;
 
+/// An outstanding access unit's timestamp, ordered by time.
+///
+/// [`Timestamp`] has no [`Ord`], since an unscaled one orders against no scaled
+/// one. `decode` refuses an unscaled timestamp, and scaled ones order totally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pending(Timestamp);
+
+impl Ord for Pending {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+	}
+}
+
+impl PartialOrd for Pending {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
 pub(crate) struct Openh264 {
 	decoder: Decoder,
 	/// The timestamps of access units whose picture has not come out yet.
@@ -84,7 +103,7 @@ pub(crate) struct Openh264 {
 	/// A conforming decoder never releases a picture before every picture that
 	/// displays ahead of it has been fed in, so the oldest timestamp still
 	/// outstanding always belongs to the next picture out.
-	pending: BinaryHeap<Reverse<Timestamp>>,
+	pending: BinaryHeap<Reverse<Pending>>,
 	/// Access units the decoder has refused since the last picture came out, so
 	/// a run of them logs once rather than once per picture.
 	lost: u64,
@@ -169,7 +188,7 @@ impl Openh264 {
 			// timestamp in the heap when access units arrive in decode order.
 			let mut removed = false;
 			self.pending.retain(|pending| {
-				if !removed && pending.0 == timestamp {
+				if !removed && pending.0.0 == timestamp {
 					removed = true;
 					false
 				} else {
@@ -197,12 +216,12 @@ impl Openh264 {
 			tracing::info!(decoder = NAME, lost = self.lost, "picture recovered");
 			self.lost = 0;
 		}
-		self.pending.pop().map(|Reverse(timestamp)| timestamp)
+		self.pending.pop().map(|Reverse(Pending(timestamp))| timestamp)
 	}
 
 	/// Remembers `timestamp` as belonging to a picture still to come.
 	fn picture_in(&mut self, timestamp: Timestamp) {
-		self.pending.push(Reverse(timestamp));
+		self.pending.push(Reverse(Pending(timestamp)));
 		if self.pending.len() > MAX_PENDING {
 			// Preserve the oldest timestamps, which are the pictures the decoder
 			// could still hand out next, and discard the newest. Only a stream that
@@ -282,6 +301,10 @@ fn picture(yuv: &impl YUVSource, timestamp: Timestamp) -> Result<Frame, Error> {
 
 impl Backend for Openh264 {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
+		// Video is timed: pictures are reordered by time, which an unscaled one lacks.
+		if timestamp.scale().is_none() {
+			return Err(moq_net::TimeOverflow.into());
+		}
 		self.picture_in(timestamp);
 
 		// `None` means the decoder took the access unit but has no picture yet:
@@ -448,14 +471,14 @@ mod tests {
 		let mut timestamps = Vec::new();
 		for (index, (payload, keyframe)) in access_units().into_iter().enumerate() {
 			for frame in decoder.decode_all(payload, at(index), keyframe).expect("decodes") {
-				timestamps.push(frame.timestamp.as_micros());
+				timestamps.push(frame.timestamp.as_micros().unwrap());
 			}
 		}
 		for frame in decoder.flush_all().expect("the drain works") {
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 		}
 
-		let expected: Vec<u128> = (0..PICTURES).map(|i| at(i).as_micros()).collect();
+		let expected: Vec<u128> = (0..PICTURES).map(|i| at(i).as_micros().unwrap()).collect();
 		assert_eq!(timestamps, expected, "pictures came out mis-stamped");
 	}
 

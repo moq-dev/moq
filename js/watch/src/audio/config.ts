@@ -51,6 +51,27 @@ export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity 
 	};
 }
 
+const OPUS_HEAD = new TextEncoder().encode("OpusHead");
+
+/**
+ * The description to configure WebCodecs with: the catalog's, or the init segment's when it has none.
+ *
+ * An Opus stream past stereo cannot decode without its OpusHead's channel mapping, but Chromium then
+ * trims the header's pre-skip itself, again after every flush. The decoder's Terminal owns that trim,
+ * gap resumes included, so WebCodecs gets a copy with the pre-skip zeroed. WebCodecs reads only a
+ * signed OpusHead, so a dOps or an unsigned header stays dropped, as before.
+ */
+export function decoderDescription(codec: string, description: Uint8Array | undefined): Uint8Array | undefined {
+	if (!description || codec !== "opus") return description;
+	if (!OPUS_HEAD.every((byte, index) => description[index] === byte)) return undefined;
+	// Validates the header's length.
+	Util.Opus.preSkip(description);
+	const copy = description.slice();
+	// The two little-endian bytes after the version and channel count.
+	copy.fill(0, OPUS_HEAD.length + 2, OPUS_HEAD.length + 4);
+	return copy;
+}
+
 /**
  * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it.
  *

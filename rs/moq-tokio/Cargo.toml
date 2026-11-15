@@ -42,7 +42,7 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["qmux", "watch", "dep:dns-lookup", "dep:httparse", "dep:tokio-rustls", "dep:tokio-tungstenite"]
 # Qmux over TCP: plaintext `tcp://`, and `tls://`. Server-side and client-side.
 tcp = ["qmux", "dep:dns-lookup", "dep:tokio-rustls"]
-# MoQ over a qmux session established elsewhere, such as moq-webrtc's data channel:
+# MoQ over a qmux session established elsewhere, such as over a WebRTC data channel:
 # `Client::connect_with` and `Listener::accept_with`. Every qmux transport turns it on.
 qmux = ["_transport", "dep:qmux"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
@@ -164,6 +164,11 @@ required-features = ["net"]
 [[example]]
 name = "clock"
 required-features = ["net"]
+
+# The QUIC Interop Runner endpoint (`test/quic-interop`), on the driver alone.
+[[example]]
+name = "quic-interop"
+required-features = ["driver"]
 
 [[test]]
 name = "integration"

@@ -71,7 +71,7 @@ impl<F> Read<F> {
 		Ok(Self::Gap(moq_decode_gap {
 			timestamp: timestamp.into(),
 			duration_us: duration
-				.as_micros()
+				.as_micros()?
 				.try_into()
 				.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))?,
 		}))

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 /// Names one continuous stream at a path.
 ///
-/// Within an instance, group sequences never restart and never name two different groups,
+/// Within an instance, group keys never restart and never name two different groups,
 /// so a reader continues across every route that shares it. Different instances are
 /// independent streams, never stitched together.
 ///

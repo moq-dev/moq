@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "moq-service.h"
+#include "moq-encoder-latency.h"
 #include "moq-settings.h"
+#include "logger.h"
+
+#ifdef MOQ_FRONTEND_API
+#include <obs-frontend-api.h>
+#include <util/config-file.h>
+#endif
+#include <cstring>
 
 // TODO: Define supported codecs.
 const char *audio_codecs[] = {"aac", "opus", nullptr};
@@ -37,19 +45,37 @@ void MoQService::Defaults(obs_data_t *settings)
 	MoQSettings::Defaults(settings);
 }
 
+// The stream encoder the profile configures. OBS never says which encoder the settings it
+// hands a service are for; its stream outputs, the only callers that encode with them on a
+// MoQ service, build them for this one.
+static std::string ProfileStreamEncoderId()
+{
+#ifndef MOQ_FRONTEND_API
+	return {};
+#else
+	config_t *config = obs_frontend_get_profile_config();
+	if (!config)
+		return {};
+	const char *mode = config_get_string(config, "Output", "Mode");
+	if (mode && strcmp(mode, "Advanced") == 0) {
+		const char *id = config_get_string(config, "AdvOut", "Encoder");
+		return id ? id : "";
+	}
+	return SimpleVideoEncoderId(config_get_string(config, "SimpleOutput", "StreamEncoder"));
+#endif
+}
+
 void MoQService::ApplyEncoderSettings(obs_data_t *video_settings, obs_data_t *)
 {
-	/*
-     This function is called to apply custom encoder settings specific to this service.
-     For example, if a service requires a specific keyframe interval, or has a bitrate limit,
-     the settings for the video and audio encoders can be optionally modified
-     if the front-end optionally calls.
-     */
-
-	// Example:
-	if (video_settings) {
-		obs_data_set_bool(video_settings, "repeat_headers", true);
-	}
+	if (!video_settings)
+		return;
+	obs_data_set_bool(video_settings, "repeat_headers", true);
+	// A MoQ group starts at a keyframe, so a viewer joins only as fast as the
+	// keyframe interval, and B-frames or lookahead hold every frame back.
+	const std::string id = ProfileStreamEncoderId();
+	obs_video_info ovi = {};
+	const double fps = obs_get_video_info(&ovi) && ovi.fps_den ? (double)ovi.fps_num / ovi.fps_den : 0;
+	LOG_INFO("Service encoder %s: %s", id.c_str(), ApplyEncoderLatency(id, video_settings, fps));
 }
 
 const char *MoQService::GetConnectInfo(enum obs_service_connect_info type)

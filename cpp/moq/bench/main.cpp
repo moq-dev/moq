@@ -90,8 +90,7 @@ Reader read(Case c, std::shared_ptr<moq::TrackConsumer> consumer, const std::vec
 	require(group != nullptr);
 	for (int f = 0; f < c.frames(); ++f) {
 		auto frame = ok(co_await group->read_frame());
-		require(frame && frame->payload == payload && frame->timestamp &&
-			frame->timestamp->value == n * c.frames() + f);
+		require(frame && frame->payload == payload && frame->timestamp.value == n * c.frames() + f);
 	}
 }
 

@@ -194,10 +194,10 @@ impl Object {
 			1 => self.frame_start,
 			_ => 0,
 		};
-		Ok(Position {
-			group: last.sequence,
-			frame: first.checked_add(last.frames.len() as u64).ok_or(Error::Overflow)?,
-		})
+		Ok(Position::new(
+			last.sequence,
+			first.checked_add(last.frames.len() as u64).ok_or(Error::Overflow)?,
+		))
 	}
 
 	/// The version, the first frame index, then each entry's sequence (the first absolute, the
@@ -468,13 +468,13 @@ mod tests {
 				pts: Some(10)
 			}
 		);
-		assert_eq!(object.end().unwrap(), Position { group: 7, frame: 1 });
+		assert_eq!(object.end().unwrap(), Position::new(7, 1));
 
 		let split = Object {
 			frame_start: 4,
 			entries: vec![object.entries[0].clone()],
 		};
-		assert_eq!(split.end().unwrap(), Position { group: 3, frame: 6 });
+		assert_eq!(split.end().unwrap(), Position::new(3, 6));
 	}
 
 	#[test]

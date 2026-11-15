@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 	let input = child.stdin.as_mut().context("stdin")?;
 	for sequence in 0..2 {
 		let mut group = track.recv_group().await?.context("reader ended during GOAWAY")?;
-		ensure!(group.sequence == sequence, "wrong group after migration");
+		ensure!(group.start == sequence, "wrong group after migration");
 		ensure!(
 			group.read_frame().await?.context("empty group")?.payload.as_ref() == [sequence as u8; 32],
 			"corrupt group"

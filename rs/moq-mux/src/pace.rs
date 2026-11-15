@@ -95,8 +95,13 @@ impl Pacer {
 	/// `now` by more than the configured lead (see the type docs). The result is
 	/// never later than `now + lead + delay`, but may be arbitrarily far in the
 	/// past for a frame that arrived late.
+	///
+	/// An [unscaled](Timestamp::unscaled) `ts` has no media time to pace, so it goes out at
+	/// `now + delay` and leaves the anchor alone.
 	pub fn pace(&mut self, ts: Timestamp, now: Instant) -> Instant {
-		let nanos = ts.as_nanos();
+		let Ok(nanos) = ts.as_nanos() else {
+			return self.delayed(now);
+		};
 		let (anchor, base) = *self.anchor.get_or_insert((now, nanos));
 
 		// The lead is compared against the undelayed instant. Folding the delay in
@@ -121,10 +126,11 @@ impl Pacer {
 	/// and folds that arrival into the anchor. This is the read-only form, for a
 	/// player that queues frames on arrival and asks again at presentation time:
 	/// the anchor may have moved since, and a stale instant would present the
-	/// whole queue late by however far it moved.
+	/// whole queue late by however far it moved. `None` too for an
+	/// [unscaled](Timestamp::unscaled) `ts`, which has no media time.
 	pub fn due(&self, ts: Timestamp) -> Option<Instant> {
 		let (anchor, base) = self.anchor?;
-		Some(self.delayed(send_at(anchor, base, ts.as_nanos())?))
+		Some(self.delayed(send_at(anchor, base, ts.as_nanos().ok()?)?))
 	}
 
 	/// Hold an undelayed instant for the configured delay, saturating at the far
@@ -170,9 +176,13 @@ impl Pacer {
 	/// `pace`'s. A sleeping sink's sleeps push the `now` it paces with forward, so
 	/// a backlog can stay within the lead of every individual call while total
 	/// delivery lag grows; such a caller measures lag against when the frame could
-	/// have arrived and hurries when that overshoots.
+	/// have arrived and hurries when that overshoots. An [unscaled](Timestamp::unscaled) `ts`
+	/// has no media time to pin, so the anchor stays.
 	pub fn hurry(&mut self, ts: Timestamp, now: Instant) -> Instant {
-		self.anchor = Some((now, ts.as_nanos()));
+		let Ok(nanos) = ts.as_nanos() else {
+			return self.delayed(now);
+		};
+		self.anchor = Some((now, nanos));
 		// A fresh pin has no lag absorbed into it yet, so the budget starts over.
 		self.slack = Duration::ZERO;
 		// `now` is the live edge, and the delay is measured from it: a re-anchor

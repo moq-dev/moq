@@ -33,7 +33,7 @@
 //! `session_delivery_datagram` writes to a datagram track per broadcast instead of groups:
 //! one datagram per track per round across publisher and viewer axes, then larger payloads
 //! and cadences, on moq-lite and moq-transport-22. Throughput counts delivered datagrams,
-//! each checked for its sequence and payload, so a lost one fails.
+//! each checked for its key and payload, so a lost one fails.
 //! Delivery uses expiry-only pools: history expires between rounds outside timing,
 //! so byte pressure cannot shed unread frames during a batch.
 //! `SESSION_EXPIRY_ONLY=1` advances the cache clock by a second instead of the 30s
@@ -516,13 +516,35 @@ impl MeasurementClock {
 	}
 }
 
-fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
-	let mut group = track.append_group().unwrap();
-	for _ in 0..frames {
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+/// Append the next group on a [`timed`] track, one millisecond past its largest start or at
+/// 0 on an empty track, so groups keep the key order a counter would give them.
+fn append_next(track: &track::Producer) -> group::Producer {
+	track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.unwrap()
+}
+
+/// Where a group on a [`timed`] track starts, as its frames' timestamp.
+fn at(group: &group::Producer) -> Timestamp {
+	Timestamp::from_millis(group.start).unwrap()
+}
+
+/// The groups from the one starting at `key` onward.
+fn from(key: u64) -> track::Range {
+	track::Range {
+		start: track::Anchor::Time(key),
+		end: None,
 	}
-	let group = group.finish().unwrap();
-	group.sequence
+}
+
+fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
+	let mut group = append_next(track);
+	let timestamp = at(&group);
+	for _ in 0..frames {
+		group.write_frame(timestamp, payload.clone()).unwrap();
+	}
+	let group = group.close().unwrap();
+	group.start
 }
 
 /// Read one whole group, returning its payload bytes so skipped work can't look
@@ -1044,8 +1066,8 @@ impl<B: Backend> Room<B> {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
 						let newest = newest[*broadcast];
-						for sequence in newest + 1 - burst..=newest {
-							let mut group = track.fetch_group(sequence, None).await.unwrap();
+						for key in newest + 1 - burst..=newest {
+							let mut group = track.fetch_group(key, None).await.unwrap();
 							while let Some(frame) = group.read_frame().await.unwrap() {
 								bytes += frame.payload.len();
 							}
@@ -1085,7 +1107,7 @@ impl<B: Backend> Room<B> {
 		}
 	}
 
-	/// Line every viewer up on the same next sequence before the strict rounds.
+	/// Line every viewer up on the same next key before the strict rounds.
 	///
 	/// A consumer is live once its track's info arrives, but on lite-05/06 the SUBSCRIBE
 	/// that carries the datagrams follows that answer, so a datagram may still miss it.
@@ -1167,10 +1189,10 @@ impl<B: Backend> Room<B> {
 		self.written += 1;
 
 		for (writing, &broadcast) in self.writing.iter_mut().zip(&self.watched) {
-			let group = writing.get_or_insert_with(|| self.cluster.tracks[broadcast].append_group().unwrap());
-			group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
+			let group = writing.get_or_insert_with(|| append_next(&self.cluster.tracks[broadcast]));
+			group.write_frame(at(group), self.payload.clone()).unwrap();
 			if last {
-				writing.take().expect("written above").finish().unwrap();
+				writing.take().expect("written above").close().unwrap();
 			}
 		}
 		if last {
@@ -1377,7 +1399,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								&[TRACK],
 								Some(
 									track::Subscription::default()
-										.with_range(span..)
+										.with_ranges([from(span)])
 										.with_delay(track::Delay::default().with_max(None)),
 								),
 							)
@@ -1397,7 +1419,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								viewer.subscribers[0]
 									.update(
 										track::Subscription::default()
-											.with_range(future..)
+											.with_ranges([from(future)])
 											.with_delay(track::Delay::default().with_max(None)),
 									)
 									.unwrap();
@@ -1407,9 +1429,10 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 									assert!(viewer.subscribers[0].poll_recv_group(waiter).is_pending());
 								}
 								loop {
-									if cluster.tracks[0].subscription().is_some_and(|subscription| {
-										subscription.ranges == [track::Range::groups(future..)]
-									}) {
+									if cluster.tracks[0]
+										.subscription()
+										.is_some_and(|subscription| subscription.ranges == [from(future)])
+									{
 										return std::task::Poll::Ready(());
 									}
 									if cluster.tracks[0].poll_subscription_changed(waiter).is_pending() {
@@ -1418,15 +1441,15 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								}
 							})
 							.await;
-							for sequence in next..future {
-								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), sequence);
+							for key in next..future {
+								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), key);
 							}
 							let started = Instant::now();
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
 									.update(
 										track::Subscription::default()
-											.with_range(future - 1..)
+											.with_ranges([from(future - 1)])
 											.with_delay(track::Delay::default().with_max(None)),
 									)
 									.unwrap();
@@ -1461,14 +1484,14 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 						let cluster = Cluster::<B>::new(version, *shape, false).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
-							for sequence in 0..shape.history {
-								let mut group = track.append_group().unwrap();
+							for key in 0..shape.history as u64 {
+								let mut group = track.append_group(key).unwrap();
 								for _ in 0..shape.group_frames {
 									group
-										.write_frame(Timestamp::from_millis(sequence as u64).unwrap(), payload.clone())
+										.write_frame(Timestamp::from_millis(key).unwrap(), payload.clone())
 										.unwrap();
 								}
-								group.finish().unwrap();
+								group.close().unwrap();
 							}
 						}
 						cluster

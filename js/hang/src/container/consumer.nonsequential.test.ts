@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track, Varint } from "@moq/net";
+import { AudioConfigSchema } from "../catalog/audio.ts";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
@@ -129,6 +130,45 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 	await clock.advance(Duration.ZERO);
 	const next = await poll(consumer.next());
 	expect(next).toMatchObject({ kind: "frame", group: 20n });
+
+	consumer.close();
+	track.finish();
+	track.close();
+});
+
+// Legacy frames carry no duration, so an audio reader reads each packet's from its codec. One-packet
+// groups sequenced by their starts, as a Rust publisher numbers them, then run back to back without
+// waiting on the sequences between them, while a missing one is still a gap.
+test("Consumer reads one-packet Opus groups at sparse sequences back to back", async () => {
+	const track = new Track.Producer("test");
+	const config = AudioConfigSchema.parse({
+		codec: "opus",
+		container: { kind: "legacy" },
+		sampleRate: 48_000,
+		numberOfChannels: 2,
+	});
+	const consumer = new Consumer(track.subscribe(), {
+		format: new LegacyFormat(config),
+		delay: { max: Duration.millis(5000) },
+	});
+	// One 20 ms CELT packet per group, each read before the next lands. The group starting at 40 ms
+	// never arrives.
+	const packet = new Uint8Array([31 << 3, 0]);
+	const publish = (start: number) => {
+		const group = track.createGroup(BigInt(start));
+		group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.now() });
+		group.finish();
+	};
+
+	publish(0);
+	expect(await poll(consumer.next())).toMatchObject({ kind: "frame", group: 0n });
+	const next = consumer.next();
+	publish(20_000);
+	expect(await poll(next)).toMatchObject({ kind: "frame", group: 20_000n });
+	// Nothing proves the timeline unbroken past 40 ms, so the reader waits on the missing group.
+	const after = consumer.next();
+	publish(60_000);
+	expect(await poll(after)).toBe("pending");
 
 	consumer.close();
 	track.finish();

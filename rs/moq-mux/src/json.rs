@@ -80,7 +80,7 @@
 
 use std::task::{Poll, ready};
 
-use moq_net::Timed;
+use moq_json::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -218,7 +218,7 @@ impl<T: Serialize> Snapshot<T> {
 	/// The value is written at that timestamp and measures the entry's `jitter` and `delay`; one
 	/// ahead of now measures as zero delay. An unchanged value writes nothing and measures nothing.
 	pub fn update(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
-		match self.inner.update(Timed::from(value).at(timestamp))? {
+		match self.inner.update(Timed::new(value, timestamp))? {
 			Some(size) => self.listing.record(size, Some(timestamp)),
 			None => Ok(()),
 		}
@@ -299,7 +299,7 @@ impl<T: Serialize> Stream<T> {
 	/// error publishing the measured bitrate is returned after the record was written, so the track
 	/// stays open and a retry would duplicate it.
 	pub fn append(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
-		let size = match self.inner.append(Timed::from(value).at(timestamp)) {
+		let size = match self.inner.append(Timed::new(value, timestamp)) {
 			Ok(size) => size,
 			// Refused before anything was written, so the log and its entry carry on.
 			Err(
@@ -633,13 +633,13 @@ mod test {
 			let mut stamps = Vec::new();
 			while let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) {
 				while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-					stamps.push(frame.timestamp.unwrap().as_millis());
+					stamps.push(frame.timestamp.as_millis().unwrap());
 				}
 			}
 			assert_eq!(stamps.len(), 1);
 			assert!(
 				// The track stores milliseconds.
-				first.as_millis() <= stamps[0] && stamps[0] <= after.as_millis(),
+				first.as_millis().unwrap() <= stamps[0] && stamps[0] <= after.as_millis().unwrap(),
 				"{first:?} {stamps:?} {after:?}"
 			);
 		}
@@ -664,9 +664,12 @@ mod test {
 
 		let mut full_track = full.consume();
 		let mut delta_track = delta.consume();
-		for value in [json!({ "n": 1 }), json!({ "n": 2 })] {
-			full.update(&value, catalog.clock().now()).unwrap();
-			delta.update(&value, catalog.clock().now()).unwrap();
+		// A millisecond apart: a group starts at its value's time, and starts strictly increase.
+		let now = catalog.clock().now();
+		for (ms, value) in [json!({ "n": 1 }), json!({ "n": 2 })].into_iter().enumerate() {
+			let at = moq_net::Timestamp::from_micros(now.as_micros().unwrap() as u64 + ms as u64 * 1_000).unwrap();
+			full.update(&value, at).unwrap();
+			delta.update(&value, at).unwrap();
 		}
 		full.finish().unwrap();
 		delta.finish().unwrap();

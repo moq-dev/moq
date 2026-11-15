@@ -49,7 +49,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// Get the next record and its exact frame timestamp, or `None` once the track ends.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		loop {
 			if self.rolled {
 				return Poll::Ready(Err(crate::Error::Rolled));
@@ -74,7 +74,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => {
-					return Poll::Ready(Ok(Some(moq_net::Timed {
+					return Poll::Ready(Ok(Some(crate::Timed {
 						value: self.decoder.decode(&frame.payload)?,
 						at: frame.timestamp,
 					})));
@@ -124,9 +124,9 @@ mod timestamps {
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
 				producer
-					.append(moq_net::Timed {
+					.append(crate::Timed {
 						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
-						at: Some(at),
+						at,
 					})
 					.unwrap();
 			}
@@ -136,9 +136,9 @@ mod timestamps {
 					panic!("missing state {n}")
 				};
 				assert_eq!(value.value["n"].as_u64().unwrap(), n as u64);
-				let at = value.at.unwrap();
+				let at = value.at;
 				assert_eq!(at.value(), ticks);
-				assert_eq!(at.scale(), scale);
+				assert_eq!(at.scale(), Some(scale));
 			}
 			assert!(matches!(
 				consumer.poll_next(&kio::Waiter::noop()),

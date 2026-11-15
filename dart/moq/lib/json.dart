@@ -48,7 +48,7 @@ typedef StreamProducer = MoqJsonStreamProducer;
 typedef StreamConsumer = MoqJsonStreamConsumer;
 
 /// A JSON string read from a track, with the timestamp of the frame that
-/// carried it, or null when untimed.
+/// carried it, or its unscaled group key on a scale-less track.
 typedef Value = MoqJsonValue;
 
 /// Publishes a sliding window of JSON records on a track it takes over, pushed
@@ -75,6 +75,6 @@ typedef WindowEventPop = PopMoqJsonWindowEvent;
 /// The records in `[start, end)` will never be delivered to this reader.
 typedef WindowEventSkip = SkipMoqJsonWindowEvent;
 
-/// A [WindowEvent] and the timestamp of the frame that carried it, or null
-/// when untimed.
+/// A [WindowEvent] and the timestamp of the frame that carried it, or its
+/// unscaled group key on a scale-less track.
 typedef WindowTimed = MoqJsonWindowTimed;

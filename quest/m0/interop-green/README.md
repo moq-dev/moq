@@ -10,10 +10,10 @@ so it only needs to stay green.
 
 ## Waiting
 
-- moq-dev/moq: the next scheduled Interop run on `main` passes, once the
-  [resumed-audio fix](https://github.com/moq-dev/moq/pull/8635) lands
-  ([moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572), the max-age
-  fix, merged 2026-11-12). Check
+- moq-dev/moq: the next scheduled Interop run on `main` passes, now that
+  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) (max age,
+  2026-11-12) and [moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)
+  (resumed audio, 2026-11-14) have landed. Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
@@ -45,7 +45,7 @@ port-reservation lines are negative self-tests in
 `interop/relay-log.test.sh` and `lib/harness.test.sh` that pass.
 Already owned: the intermittent media-matrix timestamp-gap cells
 (`cpp -> js-native-node`, `go -> c`, browser `rust -> js` timeouts) belong to
-[test flakes](/quest/m0/test-flakes-2/README.md). The fallback audio stall
+a test flakes epic. The fallback audio stall
 that hit on `moq-lite-07-wip` in
 [41495461904](https://github.com/moq-dev/moq/actions/runs/41495461904) and
 [41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824) was a
@@ -189,6 +189,41 @@ Scheduled run
   stretch the lag back.
 
 The 11-11 run, before #8507, passed all three steps.
+
+Scheduled runs
+[43457651679](https://github.com/moq-dev/moq/actions/runs/43457651679)
+(2026-11-13, at c748c0d47) and
+[43606836954](https://github.com/moq-dev/moq/actions/runs/43606836954)
+(2026-11-14, at bd617cc1e) show the media step moving on, and the matrix going green:
+
+- 11-13 Media: the pause case's audio after resume, fixed by
+  [moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635), merged
+  2026-11-14 after that run.
+- 11-13 Interop (full matrix) and Interop (moq-transport): `js -> cpp`,
+  `js -> python`, and `js -> rust` each failed once with `audio gap`, a
+  different cell per matrix, with no repeat on 11-14, where both steps passed.
+  This is the intermittent audio gap
+  [moq-dev/moq#8633](https://github.com/moq-dev/moq/pull/8633) and
+  [moq-dev/moq#8611](https://github.com/moq-dev/moq/pull/8611) track, not a
+  new cause.
+- 11-14 Media: only `live incumbent fallback plays` on `moq-transport-22`
+  failed. The viewer's session closed with `invalid END_OF_TRACK: track is
+  closed` and reconnected, so the fallback took more than its 1039 ms bound.
+  The JS subscriber refused the END_OF_TRACK of a withdrawn route after its own
+  unsubscribe had released the track, and a protocol violation closes the whole
+  session.
+  [moq-dev/moq#8769](https://github.com/moq-dev/moq/pull/8769) tolerated the marker on a released track,
+  and [moq-dev/moq#8754](https://github.com/moq-dev/moq/pull/8754) moved that into the track's wire end, so a
+  late PUBLISH_DONE or FETCH_OK keeps the session too.
+  That is not the whole case: since [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443)
+  dropped the Chromium quarantine, `just test media --media-cases replacement`
+  at `ce616b52c` failed 4 of 14 local runs (host at load 50), as `live incumbent
+  fallback plays` on `moq-lite-06` and `moq-transport-22` or the fallback audio
+  tone, with no END_OF_TRACK violation in the log kept. Both failing logs show
+  `skipping missing groups` on the audio track before the stall, so the audio
+  stalls past the 1039 ms bound after the route falls back. Still open:
+  root-cause that hole before the next scheduled run, or quarantine `replacement`
+  on Chromium again, as on Firefox, until it is.
 
 Public API: none. Wire: none.
 

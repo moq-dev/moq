@@ -24,10 +24,10 @@ so a raw byte stream needs no other importer.
 `ContainerFormat.FMP4` splits each fragment into one frame per sample.
 Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz tick survives a read and republish.
 `Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
-A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
+Every write takes a timestamp, and the library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
 and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowEventPush`, `WindowEventPop`, or `WindowEventSkip`.
-Raw tracks with a `None` timescale are untimed on both publish and receive.
+A raw track with a `None` timescale is untimed: each frame carries `moq.Timestamp.unscaled(key)`, its group's key, whose `scale` is `None`.
 `TrackInfo(compression=moq.Compression.DEFLATE)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `update`, `append`, `push`, and `pop` require a `timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
@@ -95,7 +95,7 @@ async def main():
 
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
-        events.write_frame(b'{"cmd": "ready"}')
+        events.write_frame(b'{"cmd": "ready"}', moq.Timestamp.unscaled(0))  # untimed: the first group's key
         status_track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE))
         status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42}, catalog_producer.now())
@@ -170,11 +170,12 @@ async def socket_client():
     versions = ["moq-lite-07-wip"]
     async with moq.Client("https://cdn.moq.dev/anon", versions=versions, publish=origin, consume=origin):
         async with moq.socket.Endpoint(origin, "room", "client") as endpoint:
-            stream = await endpoint.dial_tcp("server")
-            stream.producer.write_frame(b"command")
-            stream.producer.finish()  # FIN; abort(error_code) sends RST instead.
-            async for frame in stream.consumer:
-                print(frame.payload)
+            stream = await endpoint.dial_track("server")
+            stream.producer.write_frame(b"command", moq.Timestamp.unscaled(0))  # One message, the first group: key 0.
+            stream.producer.finish()  # abort(error_code) ends it with an error instead.
+            async for group in stream.consumer:
+                async for frame in group:
+                    print(frame.payload)
 
 asyncio.run(socket_client())
 ```
@@ -183,16 +184,11 @@ Sockets need lite-07 or moq-transport on every hop, so the example opts into
 `moq-lite-07-wip`. No client offers it by default while its wire format is a
 work in progress, and the relay must accept it too.
 
-A server awaits `endpoint.accept_tcp()`, then calls `await incoming.accept()`
+A server awaits `endpoint.accept_track()`, then calls `await incoming.accept()`
 or `incoming.reject()`. Accepting verifies that the claimed peer really dialed.
-`TcpStream` exposes group `producer` and `consumer` handles, plus `peer` and
-`session`. Keep the session id private. Its bounded cache reports eviction if a
-reader falls behind; it never skips bytes.
-
-Use `dial_track(peer, info=None)` and `accept_track()` for independent groups of
-messages. `TrackStream` exposes a track producer and a reliably subscribed,
-ascending consumer. Omitted `info` keeps messages without a publisher age limit;
-update the consumer's subscription to change delivery. The protocols have
-separate accept queues. Cancelling a dial or acceptance resets that dial;
+`TrackStream` exposes a track producer and a reliably subscribed, ascending
+consumer, plus `peer` and `session`; each message is a group. Keep the session
+id private. Omitted `info` keeps messages without a publisher age limit; update
+the consumer's subscription to change delivery. Cancelling a dial or acceptance resets that dial;
 closing the endpoint resets all its sessions. See [Sockets](/concept/socket)
 for routing and authorization.

@@ -64,17 +64,18 @@ arrive without one.
 
 `bind` is the relay's one UDP port. Beside QUIC it carries WebRTC media for an
 [embedder](/bin/relay/#embed) that takes it; otherwise that traffic is dropped,
-as are STUN Binding queries ([`[stun]`](#stun) has its own port) and anything
-else. `/metrics` counts the drops in `moq_relay_demux_dropped_total` by `reason`:
-`unclaimed` (WebRTC with no embedder), `overflow`, `stun`, and `unknown`. Not
-with `runtime.io_uring`, which serves QUIC alone.
+as are STUN Binding queries and anything else. `/metrics` counts the drops in
+`moq_relay_demux_dropped_total` by `reason`: `unclaimed` (WebRTC with no
+embedder), `overflow`, `stun`, and `unknown`. Not with `runtime.io_uring`, which
+serves QUIC alone.
 
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
 waiting out the idle timeout. Keep it secret, and give it to one relay
 only: any holder resets every other holder's connections, so live relays behind
 one address would reset each other's clients unless the load balancer routes by
-connection ID (`[listen.lb] id`, QUIC-LB). Relays on different addresses gain nothing from sharing
+connection ID (`[listen.lb] id`, QUIC-LB), as the two relays of a
+[handoff](#handoff) do. Relays on different addresses gain nothing from sharing
 it, since a client accepts a reset only from its relay's address.
 Create one with `openssl rand -hex 32 > reset.key`.
 
@@ -255,35 +256,6 @@ keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
 
 See [HTTP endpoints](/bin/relay/http).
 
-## \[stun]
-
-Build with `cargo install moq-relay --features stun` to use the relay as an
-explicitly selected STUN server for WebRTC ICE. This feature is off by default.
-The listener has its own UDP port and is disabled unless configured:
-
-```toml
-[stun]
-bind = "[::]:3478"                  # Or --stun-bind / MOQ_STUN_BIND.
-```
-
-List `stun:relay.example.com:3478` in the application's ICE servers. Clients
-never infer a STUN server from their relay session. This provides Binding
-responses with the sender's mapped address, without TURN relaying or ICE
-signaling. It is plain STUN over UDP, so it needs no TLS certificate;
-`stuns:` (STUN over TLS) is not served.
-
-The private limits are 10 requests/second per source IP with a burst of 20,
-and 1000/second globally with a burst of 2000. The source table retains at most
-4096 IPs; an idle entry can be replaced once its two-second bucket has refilled.
-Excess, malformed, unsupported, and non-Binding datagrams receive no reply.
-The internal `/metrics` endpoint reports `moq_relay_stun_replies_total` and
-`moq_relay_stun_dropped_total` with `reason` values `source`, `global`,
-`capacity`, `invalid`, and `io`, only when this listener is configured.
-`io` counts replies that could not be sent; `moq_relay_stun_io_errors_total`
-also counts asynchronous peer errors reported while receiving. Peer network
-errors and interrupted calls leave the listener running; other local socket
-failures stop the relay.
-
 ## \[auth]
 
 ```toml
@@ -439,6 +411,45 @@ An embedder's drain alert can page on the `forced` count returned by
 Its `ending` count distinguishes sessions already closed before the deadline
 but still reporting their end. The live tally separates open sessions from
 that cleanup, and the summary's elapsed time stays the same for late observers.
+
+## \[handoff]
+
+```toml
+[handoff]
+socket = "/run/moq-relay/handoff.sock"   # Hand every socket to the relay that replaces this one. Linux only.
+supervise = false                        # Run under a stand-in main process, for a systemd restart.
+```
+
+With `socket` set, a starting relay first connects to it. When a relay already
+serves there, the new one takes over every listening socket the old one holds
+instead of binding its own: the QUIC port, `[listen.tcp]`, `[listen.unix]`,
+`[web]`, and `[internal]`. A listener whose address changed binds
+afresh. Once the new relay is ready it takes every new QUIC handshake, and the
+old one stops accepting and drains as on SIGTERM ([Shutdown](#shutdown)): its
+sessions stay with it until they leave or `drain_timeout` passes. Cluster peers
+redial once on that GOAWAY and reach the new relay, so the drain does not wait
+on them. A session that stays on the old relay anyway, such as a client that
+ignores GOAWAY, loses the routes it shared with those peers once they leave.
+Either relay exiting leaves the other's sessions alone, and if one dies without
+closing its sessions, the other answers their packets with a stateless reset,
+which their clients accept when both relays share `[listen.reset] secret`.
+
+The QUIC port is handed on as a reuseport group with room for two relays, each
+steering its own connections by connection ID, so handoff needs
+`[runtime] workers` (tokio or io\_uring) and halves the most workers a relay
+runs to 128. The new relay serves the old one's worker count, logging a warning
+when the config asks for another. A relay still serving beside the one it
+replaced refuses a third until that one exits. A relay dialing static or API
+cluster peers needs `[connect] bind` on port 0: their shared dial socket on a
+fixed port is bound at startup and not handed on. Packets on the QUIC port that
+are not QUIC, such as WebRTC, go to the newest relay, so a WebRTC session on the old
+relay ends at the handoff.
+
+Both relays name the same node while the old one drains. Each counts the
+sessions it serves, and the new one holds back its [stats](#stats) broadcast
+until the old one exits. Both must run as the same user. Memory and file
+descriptors double while both run. [Production](/setup/prod#upgrades) shows the
+systemd unit settings that make a restart a handoff.
 
 ## \[log]
 

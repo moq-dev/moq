@@ -14,8 +14,9 @@ fn origin(hop: u64) -> origin::Producer {
 /// complete snapshot.
 #[kio::test]
 async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
+	use moq_json::Timed;
 	use moq_json::snapshot;
-	use moq_net::{Timed, Timescale, Timestamp};
+	use moq_net::{Timescale, Timestamp};
 	use serde_json::{Value, json};
 
 	for ratio in [1, 2] {
@@ -57,21 +58,23 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		subscribed(&track).await;
 
 		let at = |n| Timestamp::from_millis(100 + n).unwrap();
+		// A group starts at its first frame's time, in the track's milliseconds.
+		let key = |n| 100 + n;
 		let value = |n| json!({ "n": n, "p": "" });
-		let snapshot_bytes = producer.update(Timed::from(&value(0)).at(at(0))).unwrap().unwrap();
+		let snapshot_bytes = producer.update(Timed::new(&value(0), at(0))).unwrap().unwrap();
 		let mut original = baseline.recv_group().await.unwrap().unwrap();
-		assert_eq!(original.sequence, 0);
+		assert_eq!(original.start, key(0));
 		let first = original.read_frame().await.unwrap().unwrap();
-		assert_eq!(first.timestamp, Some(at(0)));
+		assert_eq!(first.timestamp, at(0));
 		assert_eq!(first.payload.len(), snapshot_bytes);
 		assert_eq!(serde_json::from_slice::<Value>(&first.payload).unwrap(), value(0));
 
 		let mut delta_bytes = 0;
 		let mut joins = Vec::new();
 		for n in 1..=2 * u64::from(ratio) {
-			delta_bytes += producer.update(Timed::from(&value(n)).at(at(n))).unwrap().unwrap();
+			delta_bytes += producer.update(Timed::new(&value(n), at(n))).unwrap().unwrap();
 			let delta = original.read_frame().await.unwrap().unwrap();
-			assert_eq!(delta.timestamp, Some(at(n)));
+			assert_eq!(delta.timestamp, at(n));
 			assert_eq!(
 				serde_json::from_slice::<Value>(&delta.payload).unwrap(),
 				json!({ "n": n })
@@ -79,7 +82,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			if n == 1 || n == 2 * u64::from(ratio) {
 				let mut join = snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 				let received = join.latest().await.unwrap().unwrap();
-				assert_eq!((received.value, received.at), (value(n), Some(at(n))));
+				assert_eq!((received.value, received.at), (value(n), at(n)));
 				assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
 				assert_eq!(track.demand().wanted(), Some(0));
 				joins.push(join);
@@ -92,7 +95,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		);
 
 		let n = 2 * u64::from(ratio) + 1;
-		delta_bytes += producer.update(Timed::from(&value(n)).at(at(n))).unwrap().unwrap();
+		delta_bytes += producer.update(Timed::new(&value(n), at(n))).unwrap().unwrap();
 		original.read_frame().await.unwrap().unwrap();
 		assert!(delta_bytes > ratio as usize * snapshot_bytes);
 		// Simulated time passing cannot roll a group, even with deltas over the ratio.
@@ -114,7 +117,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		})
 		.await
 		.unwrap();
-		assert_eq!(cached.sequence, 0, "the cached group is not withheld");
+		assert_eq!(cached.start, key(0), "the cached group is not withheld");
 		let mut cached_bytes = 0;
 		for _ in 0..=n {
 			cached_bytes += cached.read_frame().await.unwrap().unwrap().payload.len();
@@ -124,24 +127,24 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			producer.poll_refresh(&kio::Waiter::noop()).is_pending(),
 			"answered once"
 		);
-		assert_eq!(fresh.sequence, 1, "new content gets a new group identity");
+		assert_eq!(fresh.start, key(n), "new content gets a new group identity");
 		let frame = fresh.read_frame().await.unwrap().unwrap();
-		assert_eq!(frame.timestamp, Some(at(n)), "refresh preserves the newest source time");
+		assert_eq!(frame.timestamp, at(n), "refresh preserves the newest source time");
 		assert_eq!(serde_json::from_slice::<Value>(&frame.payload).unwrap(), value(n));
 		assert_eq!(frame.payload.len(), snapshot_bytes);
 		assert!(fresh.poll_read_frame(&kio::Waiter::noop()).is_pending());
-		assert_eq!(baseline.recv_group().await.unwrap().unwrap().sequence, 1);
+		assert_eq!(baseline.recv_group().await.unwrap().unwrap().start, key(n));
 
-		producer.update(Timed::from(&value(n + 1)).at(at(n + 1))).unwrap();
+		producer.update(Timed::new(&value(n + 1), at(n + 1))).unwrap();
 		let delta = fresh.read_frame().await.unwrap().unwrap();
-		assert_eq!(delta.timestamp, Some(at(n + 1)));
+		assert_eq!(delta.timestamp, at(n + 1));
 		assert_eq!(
 			serde_json::from_slice::<Value>(&delta.payload).unwrap(),
 			json!({ "n": n + 1 })
 		);
 		let mut current = snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 		let received = current.latest().await.unwrap().unwrap();
-		assert_eq!((received.value, received.at), (value(n + 1), Some(at(n + 1))));
+		assert_eq!((received.value, received.at), (value(n + 1), at(n + 1)));
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
 		let _finished = producer.finish().unwrap();
 		drop((current, fresh, late, joins, original, baseline, links));
@@ -180,16 +183,16 @@ async fn ratio_joins_cross_two_relays() {
 		let mut baseline = remote.subscribe(None).await.unwrap();
 		assert_eq!(baseline.info().refresh, (name == "moq-lite-07-wip").then_some(1));
 		crate::support::harness::subscribed(&producer).await;
-		let mut group = producer.append_group().unwrap();
-		group.write_frame(None, &b"key"[..]).unwrap();
-		group.write_frame(None, &b"abc"[..]).unwrap();
+		let mut group = producer.append_group(0).unwrap();
+		group.write_frame(moq_net::Timestamp::unscaled(0), &b"key"[..]).unwrap();
+		group.write_frame(moq_net::Timestamp::unscaled(0), &b"abc"[..]).unwrap();
 		let mut received = baseline.recv_group().await.unwrap().unwrap();
 		assert_eq!(received.read_frame().await.unwrap().unwrap().payload.len(), 3);
 		assert_eq!(received.read_frame().await.unwrap().unwrap().payload.len(), 3);
 		let mut under = remote.subscribe(None).await.unwrap();
 		let _under_group = under.recv_group().await.unwrap().unwrap();
 		assert_eq!(producer.demand().wanted(), Some(0), "ratio equality does not refresh");
-		group.write_frame(None, &b"d"[..]).unwrap();
+		group.write_frame(moq_net::Timestamp::unscaled(0), &b"d"[..]).unwrap();
 		assert_eq!(received.read_frame().await.unwrap().unwrap().payload.len(), 1);
 		let mut joins = Vec::new();
 		for _ in 0..8 {

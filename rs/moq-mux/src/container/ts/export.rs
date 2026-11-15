@@ -255,6 +255,8 @@ struct Tally {
 	units: Vec<u16>,
 	/// The last program tables to finish in the frame.
 	tables: Option<Laid>,
+	/// The payload of the frames whose units finish in the frame, counted once it goes out.
+	charges: Vec<schedule::Charge>,
 }
 
 /// A video frame waiting on a decode clock, with the codec config it was read under.
@@ -291,6 +293,8 @@ struct Queued {
 	description: Option<Bytes>,
 	/// The PES it may share ([`Track::pack_start`]).
 	pes: Option<PesStart>,
+	/// Counts its payload once the unit carrying it goes out.
+	bill: moq_net::stats::Bill,
 }
 
 /// The PES an audio frame may share ([`Track::pack_start`]): the place of its first frame on
@@ -578,7 +582,9 @@ impl Track {
 			pending.restart += 1;
 			pending.skip += 1;
 		}
-		let high = high.filter(|_| !stepped).map_or(pts, |high| high.max(pts));
+		let high = high
+			.filter(|_| !stepped)
+			.map_or(pts, |high| crate::container::later(high, pts));
 		self.high = Some((pending.restart, high));
 	}
 
@@ -613,6 +619,11 @@ impl Track {
 					if (input.waiting_for_header || !self.listed) && !self.source.header_ready() {
 						*input.trimmed += 1;
 						continue;
+					}
+					// Media is timed: a scale-less track's unscaled key has no time to mux at. Refused
+					// here, so every frame the exporter holds has one (see [`nanos`]).
+					if frame.timestamp.scale().is_none() {
+						return Err(moq_net::Error::TimestampMismatch.into());
 					}
 					let mut pending = Pending {
 						frame,
@@ -775,7 +786,7 @@ impl Track {
 		frame: &Frame,
 	) -> anyhow::Result<(Timestamp, Option<PesStart>)> {
 		let lead = delay.saturating_sub(self.ahead(delay));
-		let key = Duration::from(decode)
+		let key = Duration::try_from(decode)?
 			.checked_add(lead)
 			.context("MPEG-TS decode time past the end of the timeline")?;
 		let mut key = Timestamp::try_from(key)?;
@@ -785,7 +796,7 @@ impl Track {
 		{
 			key = match start.is_some() && shared == start {
 				true => previous,
-				false => key.max(previous),
+				false => crate::container::later(key, previous),
 			};
 		}
 		self.released = Some((decode, key, start));
@@ -896,7 +907,7 @@ impl Track {
 		// sent ahead by its send-ahead: judged as arriving that much earlier, as a live source
 		// sends it, every track's first frames are on the clock whichever anchors it.
 		let ahead = match jitter.replaying() {
-			true => (Duration::from(decode) + jitter.delay()).saturating_sub(Duration::from(key)),
+			true => (Duration::try_from(decode)? + jitter.delay()).saturating_sub(Duration::try_from(key)?),
 			false => Duration::ZERO,
 		};
 		// Logical clocks can begin at zero. Shift both readings by the same representable amount so
@@ -906,7 +917,7 @@ impl Track {
 		let arrival = Arrival {
 			arrived: arrived.saturating_sub(ahead),
 			read: read.saturating_sub(ahead),
-			decode: key.into(),
+			decode: key.try_into()?,
 			restart,
 			sync,
 			leading,
@@ -918,6 +929,7 @@ impl Track {
 				dts,
 				description,
 				pes,
+				bill: self.source.bill(),
 			},
 		};
 		if jitter.push(self.key.clone(), arrival)? == Push::Late {
@@ -1270,6 +1282,8 @@ struct Pack {
 	payload: Vec<u8>,
 	/// Each frame's decode nanoseconds and bytes, which leave the decoder buffer as it decodes.
 	frames: Vec<(u128, usize)>,
+	/// What each frame's payload counts once the PES goes out.
+	charges: Vec<schedule::Charge>,
 	/// The frames' samples so far, and their sample rate.
 	samples: u64,
 	rate: u32,
@@ -1279,7 +1293,7 @@ impl Pack {
 	/// When the frame after the last presents, in microseconds, if the frames run on without
 	/// a gap.
 	fn end(&self) -> u128 {
-		self.unit.timestamp.as_micros() + u128::from(self.samples) * 1_000_000 / u128::from(self.rate)
+		nanos(self.unit.timestamp) / 1_000 + u128::from(self.samples) * 1_000_000 / u128::from(self.rate)
 	}
 }
 
@@ -1486,7 +1500,10 @@ impl SiTrack {
 			let (promote, drop_pending) = match group.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
 					snapshot.apply(&frame.payload);
-					*timestamp = (*timestamp).max(frame.timestamp.unwrap_or(Timestamp::ZERO));
+					// A scale-less track's frames carry no time, so its revision stays at zero.
+					if frame.timestamp.scale().is_some() {
+						*timestamp = crate::container::later(*timestamp, frame.timestamp);
+					}
 					(false, false)
 				}
 				Poll::Ready(Ok(None)) => (true, false),
@@ -1528,9 +1545,7 @@ impl SiTrack {
 			self.poll(&kio::Waiter::noop());
 			let Some(revision) = &self.future else { break };
 			if !interval.is_zero() {
-				let stamped = Duration::from(revision.timestamp)
-					.as_nanos()
-					.div_ceil(interval.as_nanos());
+				let stamped = nanos(revision.timestamp).div_ceil(interval.as_nanos());
 				let at = revision
 					.after
 					.map_or(stamped, |after| stamped.max(slot(after, interval) + 1));
@@ -1544,7 +1559,10 @@ impl SiTrack {
 			self.dirty |= snapshot != self.active;
 			self.active = snapshot;
 		}
-		self.position = Some(self.position.map_or(timestamp, |position| position.max(timestamp)));
+		self.position = Some(
+			self.position
+				.map_or(timestamp, |position| crate::container::later(position, timestamp)),
+		);
 	}
 
 	/// Take a due snapshot, keeping revisions and repeats on their respective cadence.
@@ -1565,7 +1583,10 @@ impl SiTrack {
 		self.dirty = false;
 		// A zero interval can emit on a reordered PTS. Keep the anchor ahead of it,
 		// or raising the interval later could credit that reorder span as elapsed time.
-		self.last_emit = Some(self.last_emit.map_or(timestamp, |last| last.max(timestamp)));
+		self.last_emit = Some(
+			self.last_emit
+				.map_or(timestamp, |last| crate::container::later(last, timestamp)),
+		);
 		Some(self.active.sections().cloned().collect())
 	}
 }
@@ -1576,6 +1597,8 @@ where
 {
 	fn new(mut source: crate::Source, catalog: S, delay: Duration) -> Self {
 		source.isolate();
+		// The jitter buffer drops what a join trims or what arrives late, so only what goes out counts.
+		source.bill();
 		let instance = source.broadcast().info().instance.clone();
 		Self {
 			id: 0,
@@ -1889,8 +1912,8 @@ where
 				self.jitter.discard(&ready);
 			} else {
 				self.program.last_timestamp = Some(ready.item.frame.timestamp);
-				let decode = ready.item.decode.as_nanos();
-				self.lay_before(ready.item.key.as_nanos())?;
+				let decode = nanos(ready.item.decode);
+				self.lay_before(nanos(ready.item.key))?;
 				match self.list(&name)? {
 					true => self.mux(&name, ready.item)?,
 					false => self
@@ -2036,6 +2059,9 @@ where
 		self.program.liveness.written_pcr(pcr);
 		for pid in tally.units {
 			self.program.liveness.delivered(pid, 1);
+		}
+		for (bill, bytes) in tally.charges {
+			bill.deliver(bytes);
 		}
 		Some(out)
 	}
@@ -3014,7 +3040,7 @@ where
 		if matches!(kind, Kind::Video(_)) {
 			if self.program.video_out.is_none() {
 				self.program.video_out = Some(queued.key);
-				self.program.video_start = Some(start.max(queued.frame.timestamp));
+				self.program.video_start = Some(crate::container::later(start, queued.frame.timestamp));
 			}
 			return false;
 		}
@@ -3033,9 +3059,9 @@ where
 			.filter_map(|(_, track)| self.jitter.peek(&track.key))
 			.map(|next| match placed {
 				true => next.key,
-				false => next.frame.timestamp.max(start),
+				false => crate::container::later(next.frame.timestamp, start),
 			})
-			.min();
+			.reduce(crate::container::earlier);
 		let at = match placed {
 			true => queued.key,
 			false => queued.frame.timestamp,
@@ -3104,7 +3130,7 @@ where
 			.values()
 			.filter(|t| matches!(t.kind, Kind::Video(_)))
 			.filter_map(|t| t.pending.as_ref().map(|p| p.frame.timestamp))
-			.min()
+			.reduce(crate::container::earlier)
 	}
 
 	/// Whether `pid`'s next packet is its first since a switch to another instance, so it has
@@ -3447,7 +3473,9 @@ where
 			.iter()
 			.filter_map(|(name, track)| Some((track.parked.front()?.key, name, track.pid)))
 			.collect();
-		waiting.sort();
+		waiting.sort_by(|a, b| {
+			(a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)).then_with(|| (a.1, a.2).cmp(&(b.1, b.2)))
+		});
 		let mut claimed: Vec<u16> = self
 			.program
 			.tracks
@@ -3550,8 +3578,10 @@ where
 			dts,
 			description,
 			pes,
+			bill,
 			..
 		} = queued;
+		let charge = (bill, frame.payload.len() as u64);
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let kind = &track.kind;
 		let is_video = matches!(kind, Kind::Video(_));
@@ -3614,15 +3644,10 @@ where
 		// The tables lead the unit that carries this frame, behind whatever went before it.
 		if kind.placed() {
 			self.program.psi_due |= psi;
-			return self.place(name, &frame, out);
+			return self.place(name, (&frame, charge), out);
 		}
 		match es_payload {
-			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
-			// carry the bytes verbatim.
-			None => {
-				self.program.psi_due |= psi;
-				self.write_section(&mut out, pid, &frame.payload)?;
-			}
+			None => unreachable!("only a placed track carries no elementary payload"),
 			Some(es_payload) => {
 				let unit = PesUnit {
 					pid,
@@ -3635,13 +3660,21 @@ where
 				// Only a delay leaves the frames time to wait for the ones after them.
 				let track = self.program.tracks.get(name).context("missing track")?;
 				if let Some((samples, rate)) = track.samples(&es_payload).filter(|_| !self.program.delay.is_zero()) {
-					return self.pack(name, unit, decode, (psi, out), es_payload, (samples, rate, pes));
+					return self.pack(
+						name,
+						unit,
+						decode,
+						(psi, out),
+						(es_payload, charge),
+						(samples, rate, pes),
+					);
 				}
 				self.flush(name)?;
 				self.program.psi_due |= psi;
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
+		self.program.schedule.bill(charge);
 		self.push_unit(name, pid, decode, out, keyframe, Vec::new())
 	}
 
@@ -3653,7 +3686,13 @@ where
 	/// unit that begins in it, so each one after counts on from there and leaves at its own time.
 	/// The bytes ahead of the first end a frame an earlier PES began; they leave with it,
 	/// which only overstates what the buffer holds. A PES without a PTS holds nothing there.
-	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
+	/// The frame's `charge` counts once the unit goes out, unless it was dropped as malformed.
+	fn place(
+		&mut self,
+		name: &str,
+		(frame, charge): (&Frame, schedule::Charge),
+		tables: Vec<u8>,
+	) -> anyhow::Result<()> {
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let pes = match track.kind {
 			Kind::PesPacket { stream_type } => Some(
@@ -3664,7 +3703,7 @@ where
 			_ => unreachable!("a placed track"),
 		};
 		let pid = track.pid;
-		let place = frame.timestamp.as_nanos();
+		let place = nanos(frame.timestamp);
 		// Its first access unit decodes at the DTS, which a reordered picture carries ahead of its PTS.
 		let decode = pes
 			.as_ref()
@@ -3682,10 +3721,13 @@ where
 		let prefix = match pes {
 			Some(_) => {
 				self.write_pes_packet(&mut out, pid, &frame.payload)?;
+				self.program.schedule.bill(charge);
 				0
 			}
 			None => {
-				self.write_section(&mut out, pid, &frame.payload)?;
+				if self.write_section(&mut out, pid, &frame.payload)? {
+					self.program.schedule.bill(charge);
+				}
 				1
 			}
 		};
@@ -3722,7 +3764,7 @@ where
 		unit: PesUnit,
 		decode: Timestamp,
 		(psi, tables): (bool, Vec<u8>),
-		payload: Vec<u8>,
+		(payload, charge): (Vec<u8>, schedule::Charge),
 		(samples, rate, start): (u64, u32, Option<PesStart>),
 	) -> anyhow::Result<()> {
 		let budget = self.budget().as_nanos();
@@ -3735,8 +3777,8 @@ where
 				pack.start == start
 					&& pack.rate == rate
 					&& pack.payload.len() + payload.len() <= size
-					&& decode.as_nanos().saturating_sub(pack.decode.as_nanos()) <= budget
-					&& pack.end().abs_diff(unit.timestamp.as_micros()) <= 12
+					&& nanos(decode).saturating_sub(nanos(pack.decode)) <= budget
+					&& pack.end().abs_diff(nanos(unit.timestamp) / 1_000) <= 12
 			});
 		if !joins {
 			self.flush(name)?;
@@ -3750,10 +3792,12 @@ where
 			start,
 			payload: Vec::new(),
 			frames: Vec::new(),
+			charges: Vec::new(),
 			samples: 0,
 			rate,
 		});
-		pack.frames.push((decode.as_nanos(), payload.len()));
+		pack.frames.push((nanos(decode), payload.len()));
+		pack.charges.push(charge);
 		pack.payload.extend_from_slice(&payload);
 		pack.samples += samples;
 		// The next frame starts a PES of its own anyway.
@@ -3773,10 +3817,14 @@ where
 			decode,
 			payload,
 			frames,
+			charges,
 			..
 		} = pack;
 		let mut out = Vec::new();
 		self.write_pes(&mut out, &unit, &payload)?;
+		for charge in charges {
+			self.program.schedule.bill(charge);
+		}
 		self.push_unit(name, unit.pid, decode, out, unit.keyframe, frames)
 	}
 
@@ -3789,11 +3837,11 @@ where
 			.iter()
 			.filter_map(|(name, track)| {
 				let pack = track.pack.as_ref()?;
-				let by = pack.decode.as_nanos().saturating_sub(track.drain().as_nanos());
+				let by = nanos(pack.decode).saturating_sub(track.drain().as_nanos());
 				done(track, schedule::slot(by)).then(|| (pack.decode, name.clone()))
 			})
 			.collect();
-		due.sort();
+		due.sort_by(|a, b| (a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)).then_with(|| a.1.cmp(&b.1)));
 		for (_, name) in due {
 			self.flush(&name)?;
 		}
@@ -3837,13 +3885,13 @@ where
 				PCR_INTERVAL * u32::try_from(slots).unwrap_or(u32::MAX),
 			);
 		}
-		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
+		let by = nanos(decode).saturating_sub(track.drain().as_nanos());
 		self.lead_tables()?;
 		self.program.schedule.push_frames(
 			pid,
 			super::schedule::Timing {
 				by,
-				decode: decode.as_nanos(),
+				decode: nanos(decode),
 			},
 			out,
 			keyframe,
@@ -3866,6 +3914,7 @@ where
 		let (known, settled) = self.slot_settled()?;
 		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
 		// The tail of the generation still going out keeps its own clock after the next is acquired.
+		let settled = jitter::Decode::try_from(settled).ok()?;
 		Some((known, self.jitter.at(self.program.generation, settled)?))
 	}
 
@@ -4028,6 +4077,7 @@ where
 				pcr: (slot.pcr, discontinuity),
 				units: slot.units,
 				tables,
+				charges: slot.charges,
 			};
 			self.program.queue.push_back((frame, tally));
 			if !spent.is_empty() {
@@ -4072,18 +4122,20 @@ where
 		whole_pes_packets(out, pid, pes, flag)
 	}
 
-	/// Packetize a complete PSI or private section verbatim ([`section_packets`]).
-	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<()> {
+	/// Packetize a complete PSI or private section verbatim ([`section_packets`]), returning
+	/// whether it did rather than drop the section as malformed.
+	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<bool> {
 		// The verbatim track is public; a non-importer producer could publish a frame
 		// that isn't a complete section. Drop it (with a warning) rather than emit a
 		// malformed section a downstream demuxer would choke on. One bad section must
 		// not abort a live export, so this skips instead of erroring.
 		if !is_complete_section(section) {
 			tracing::warn!(pid, len = section.len(), "dropping malformed private section on export");
-			return Ok(());
+			return Ok(false);
 		}
 		let flag = self.breaks(pid);
-		section_packets(out, pid, section, flag)
+		section_packets(out, pid, section, flag)?;
+		Ok(true)
 	}
 }
 
@@ -4411,7 +4463,7 @@ fn si_due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> 
 	};
 	// Reordered (B-frame) timestamps step backwards; saturate rather than wrap so a
 	// dip never counts as elapsed time (a zero interval still means "every frame").
-	Duration::from(timestamp).saturating_sub(Duration::from(last)) >= interval
+	nanos(timestamp).saturating_sub(nanos(last)) >= interval.as_nanos()
 }
 
 /// DVB's TDT and TOT: tables whose content is the current time, so a repeat of an
@@ -4426,7 +4478,7 @@ fn is_clock_table(table_id: u8) -> bool {
 /// takes before it gets here. Coarser units would floor a sub-unit interval to zero and
 /// divide by it.
 fn slot(timestamp: Timestamp, interval: Duration) -> u128 {
-	Duration::from(timestamp).as_nanos() / interval.as_nanos()
+	nanos(timestamp) / interval.as_nanos()
 }
 
 /// A repetition slot's boundary as a media timestamp.
@@ -4466,7 +4518,7 @@ fn adaptation_size(af: &AdaptationField) -> usize {
 /// AAC's 1,024 samples at 48 kHz.
 fn place(timestamp: Timestamp, samples: u64, rate: u32) -> u128 {
 	let frame = 1_000_000 * u128::from(samples);
-	(timestamp.as_micros() * u128::from(rate) + frame / 2) / frame
+	(nanos(timestamp) / 1_000 * u128::from(rate) + frame / 2) / frame
 }
 
 /// The 33-bit wire timestamp field (90 kHz). DTS and PTS both wrap into it.
@@ -4476,7 +4528,16 @@ const TS_TIMESTAMP_MASK: u64 = (1 << 33) - 1;
 /// this domain so it never wraps mid-stream (the source timestamps are already unwrapped);
 /// [`to_ts_timestamp`] masks to the 33-bit wire field only at emission.
 fn to_ticks(timestamp: Timestamp) -> u64 {
-	(timestamp.as_micros() * 90_000 / 1_000_000) as u64
+	(nanos(timestamp) / 1_000 * 90_000 / 1_000_000) as u64
+}
+
+/// A media timestamp in nanoseconds.
+///
+/// Every timestamp the exporter holds has a scale: a track refuses an unscaled frame as it reads
+/// one ([`Track::fill`]), an SI revision keeps none, and the rest are stamped here. Zero stands in
+/// for one that can't reach here rather than a panic.
+fn nanos(timestamp: Timestamp) -> u128 {
+	timestamp.as_nanos().unwrap_or_default()
 }
 
 fn to_ts_timestamp(timestamp: Timestamp) -> anyhow::Result<TsTimestamp> {
@@ -5397,9 +5458,9 @@ mod tests {
 			assert!(jitter.poll_next(&waiter).is_pending());
 			// The last available audio frame, including its scheduling lead, anchors both orders.
 			let (decode, key, _) = tracks[1].released.unwrap();
-			assert_eq!(decode.as_micros(), 800_000);
+			assert_eq!(decode.as_micros().unwrap(), 800_000);
 			assert_eq!(
-				jitter.at(0, key),
+				jitter.at(0, key.try_into().unwrap()),
 				Some(start.saturating_add(Duration::from_millis(500))),
 				"{order:?}"
 			);
@@ -5410,7 +5471,7 @@ mod tests {
 			})
 			.find(|ready| ready.track.name == "video")
 			.expect("a video start");
-			assert_eq!(video.item.frame.timestamp.as_micros(), 600_000, "{order:?}");
+			assert_eq!(video.item.frame.timestamp.as_micros().unwrap(), 600_000, "{order:?}");
 		}
 	}
 
@@ -5826,7 +5887,10 @@ mod tests {
 
 		// One table per slot the stream covers, however often the reorder revisits a boundary.
 		let first = slot(stamps[0], PSI_INTERVAL);
-		let last = slot(*stamps.iter().max().unwrap(), PSI_INTERVAL);
+		let last = slot(
+			stamps.iter().copied().reduce(crate::container::later).unwrap(),
+			PSI_INTERVAL,
+		);
 		assert_eq!(run_cadence(&stamps, PSI_INTERVAL), (last - first + 1) as usize);
 	}
 

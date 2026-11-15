@@ -11,6 +11,7 @@ questions to a harness. For builds and CI selection, see the
 | [interop](interop/README.md) | `just test interop --all` | clients built from this checkout interoperate; without `--all`, only Rust runs |
 | [wire compatibility](interop/README.md) | `just test wire-compat` | this checkout exchanges data with published versions |
 | [IETF conformance](ietf-conformance/README.md) | `just test ietf-conformance` | pinned Moxygen sections 1-7, under the relay conformance profile, preserve subgroup-zero objects through one relay |
+| [QUIC interop](quic-interop/README.md) | `just test quic-interop` | moq-quic, as server and client, passes the QUIC Interop Runner against pinned quic-go, ngtcp2, quiche, and quinn |
 | [registry smoke](smoke/README.md) | `just test smoke` | published packages install and interoperate; see the guide for matrix selection |
 | [browser media](interop/README.md) | `just test media` | browser capture and playback deliver video and audio through publication lifecycle changes |
 | [failure drills](drill/README.md) | `just test drill` | relay and transport failures terminate or recover as expected |
@@ -20,6 +21,7 @@ questions to a harness. For builds and CI selection, see the
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 | [stream-credit](stream-credit/README.md) | `just test stream-credit` | a browser tab reads 300 live tracks past its ~100-stream WebTransport cap, the highest priority first, and nothing hangs |
 | qmux | `just test qmux` | `@moq/qmux`, as client and as server, interoperates with the Rust qmux 0.6.3 release on every QMux draft |
+| vr | `just test vr` | a VR180 left-right MP4 with ambisonic Opus keeps its catalog projection, stereo, and layout through import and a relay, and `demo/vr` lays out each eye and turns the sound field with the head |
 | video | `just test video` | the `@moq/video` renderer paints through WebGPU and falls back to Canvas2D after losing the GPU |
 | [json-properties](json-properties.md) | `just test json-properties` | both Snapshot codecs reconstruct, and both Window codecs emit the exact events for, random JSON sequences with replayable seeds |
 

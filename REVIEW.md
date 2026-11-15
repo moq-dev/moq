@@ -42,7 +42,8 @@ The fix makes the bad combination unrepresentable; a check that rejects it is no
 
 Flag a unit test that waits on the real clock, in any language, even when the timer goes through `kio::clock` or `@moq/clock`, whose timers still wait in real time until the test installs a paused, simulated, or `Manual` clock.
 The fix is a mocked clock or an awaited event, never a shorter or longer real wait or a looser budget, and the same fix lands in every language's sibling test.
-The exception is a test that drives real sockets, devices, or processes, which may wait on the real clock and opts out with `host_time()` or `hostTime()`; that opt-out belongs nowhere else.
+The exception is a test that drives real sockets, devices, or processes, which may wait on the real clock and opts out with `host_time()` or `hostTime()`.
+The opt-out belongs nowhere else, except in a transport adapter where it binds a real socket, such as moq-tokio's QUIC `wrap_udp_socket` and moq-webrtc's ICE `Socket::new`.
 The runtime guards fail Rust and bun tests only when a timer fires on the host clock, so they miss Go and Python tests, elapsed-time assertions, and any wait that bypasses those clocks; and Rust's `host_time()` lasts for the whole process, so it hides other tests' waits outside nextest's one-test-per-process runs.
 
 # Models

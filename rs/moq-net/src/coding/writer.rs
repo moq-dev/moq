@@ -193,6 +193,11 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		Poll::Ready(Ok(()))
 	}
 
+	/// How many bytes the stream took through this writer.
+	pub fn written(&self) -> u64 {
+		self.written
+	}
+
 	/// Whether every buffered byte has hit the stream, so a FIN would not cut a message short.
 	pub fn is_flushed(&self) -> bool {
 		self.buffer.is_empty()
@@ -467,6 +472,9 @@ mod tests {
 	impl crate::transport::poll::SendStream for Stopped {
 		type Error = Self;
 		type Group = crate::transport::poll::Ungrouped;
+		type Offset = ();
+
+		fn offset(&self) -> Self::Offset {}
 
 		fn poll_write(&mut self, _: &kio::Waiter, _: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			Poll::Ready(Err(self.clone()))
@@ -575,6 +583,9 @@ mod tests {
 	impl crate::transport::poll::SendStream for Acked {
 		type Error = Stopped;
 		type Group = crate::transport::poll::Ungrouped;
+		type Offset = ();
+
+		fn offset(&self) -> Self::Offset {}
 
 		fn poll_write(&mut self, _: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			Poll::Ready(Ok(buf.len()))
@@ -744,6 +755,7 @@ mod tests {
 				broadcast: crate::Path::from_static("test"),
 				instance: None,
 				node: 0,
+				depth: 0,
 				track: "video".into(),
 			})
 			.unwrap();

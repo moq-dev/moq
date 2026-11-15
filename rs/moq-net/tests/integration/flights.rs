@@ -15,6 +15,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::{Version, cache, frame, group, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -33,10 +34,11 @@ fn number(frame: &frame::Frame) -> u32 {
 	u32::from_le_bytes(frame.payload[..4].try_into().unwrap())
 }
 
+/// The header admission weighs: only its size.
 fn info(payload: &Bytes) -> frame::Info {
 	frame::Info {
 		size: payload.len() as u64,
-		timestamp: None,
+		timestamp: moq_net::Timestamp::unscaled(0),
 	}
 }
 
@@ -57,10 +59,10 @@ async fn write_paced(
 	demand: &mut group::Demand,
 	payload: Option<Bytes>,
 ) -> bool {
-	let sequence = group.sequence;
+	let key = group.start;
 	let room = kio::wait(|waiter| {
 		while let Poll::Ready(Ok(_)) = demand.poll_wanted_changed(waiter) {}
-		if fill.poll_unwanted(sequence, waiter).is_ready() && !demand.wanted() {
+		if fill.poll_unwanted(key, waiter).is_ready() && !demand.wanted() {
 			return Poll::Ready(false);
 		}
 		match &payload {
@@ -69,7 +71,11 @@ async fn write_paced(
 		}
 	})
 	.await;
-	room && payload.is_some_and(|payload| group.write_frame(None, payload).is_ok())
+	room && payload.is_some_and(|payload| {
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.is_ok()
+	})
 }
 
 /// The origin's handler: serves each fill from the frame it starts at, paced by its riders,
@@ -86,7 +92,7 @@ fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU6
 				for index in start.frame as u32.. {
 					let payload = (index < FRAMES).then(|| numbered(index));
 					if payload.is_none() && finish {
-						group.finish().expect("finish");
+						group.close().expect("finish");
 						break;
 					}
 					if !write_paced(&mut group, &fill, &mut demand, payload).await {
@@ -158,11 +164,13 @@ async fn moq_transport_relays_a_cold_finished_group() {
 	route.announce().unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
 	serve(track.requests(), written, ended, true);
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	for index in 0..FRAMES {
-		group.write_frame(None, numbered(index)).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), numbered(index))
+			.unwrap();
 	}
-	group.finish().unwrap();
+	group.close().unwrap();
 
 	let mut options = MockConnectOptions::new(version_parsed);
 	options.server_publish = Some(publisher.consume());
@@ -237,7 +245,7 @@ async fn chain(version: &str, replay: Replay) {
 		.expect("an instance");
 	let subscription = || {
 		track::Subscription::default()
-			.with_range(0..)
+			.with_ranges([crate::support::keys(0..)])
 			.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
 	};
 	let mut live_sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription()))
@@ -246,8 +254,9 @@ async fn chain(version: &str, replay: Replay) {
 		.expect("subscribe");
 
 	// The live reader at the bottom of the chain keeps up with the publisher.
-	let mut live = track.append_group().unwrap();
-	live.write_frame(None, numbered(0)).unwrap();
+	let mut live = track.append_next().unwrap();
+	live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(0))
+		.unwrap();
 	let mut reader = kio::clock::timeout(TIMEOUT, live_sub.recv_group())
 		.await
 		.expect("group timeout")
@@ -256,12 +265,13 @@ async fn chain(version: &str, replay: Replay) {
 	assert_eq!(next(&mut reader, version, 0).await, 0);
 	for index in 1..FRAMES {
 		kio::wait(|waiter| live.poll_ready(waiter, &info(&numbered(index)))).await;
-		live.write_frame(None, numbered(index)).unwrap();
+		live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(index))
+			.unwrap();
 		assert_eq!(next(&mut reader, version, index).await, index, "{version}: live");
 	}
 
 	if replay == Replay::Finished {
-		live.finish().unwrap();
+		live.close().unwrap();
 		assert!(
 			next_end(&mut reader, version).await,
 			"{version}: the live reader sees the end"

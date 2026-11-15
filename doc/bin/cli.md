@@ -38,7 +38,6 @@ install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
 | `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
-| `tcp` | `dial <peer>`, `accept <id>` | Forward TCP connections through a relay. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
 | `repair` | `mp4 <file>` | Finish an `export mp4` recording that was cut short. |
 | `devices` | | List capture sources and their ids. |
@@ -51,8 +50,6 @@ moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
 moq <MoQ side> announced [prefix] [options]
 moq <MoQ side> fetch <track> [options]
-moq <MoQ side> tcp dial <peer> --local <addr> [options]
-moq <MoQ side> tcp accept <id> --local <addr> [options]
 ```
 
 The **MoQ side** goes first and attaches the process to the network:
@@ -297,6 +294,11 @@ instance at the same output path. A clean end waits for the source to return;
 stop the command to finish following. A refused source request or an encoding
 failure ends the command.
 
+Hardware encoders cap open sessions per device, and a device shared with other work
+refuses one sooner. `--encoder-sessions N` lets at most N encoders serve at once, across
+live rungs and fetched groups, plus one that opens briefly to probe a new rung; past N, an
+encoder waits for one to close. Without it, every rung and fetch opens its own.
+
 ## Announced
 
 ```bash
@@ -314,36 +316,14 @@ starting with `.` stays hidden unless `prefix` names it.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang fetch catalog.json | jq
-moq ... fetch video/hd --group 42 --json
+moq ... fetch video/hd --group 42000 --json
 ```
 
-Writes one group of a track (the newest unless `--group` says otherwise) to
-stdout over MoQ: the counterpart of the relay's HTTP `/fetch`. It exits
-non-zero when the broadcast or group is not found. [Inspect a
+Writes one group of a track to stdout over MoQ, the counterpart of the relay's
+HTTP `/fetch`: the newest, or the one that starts at `--group` in the track's
+timescale. It exits non-zero when the broadcast or group is not found. [Inspect a
 relay](/bin/inspect) walks through `announced` and `fetch` next to their `curl`
 equivalents.
-
-## TCP
-
-```bash
-# On the server's host: accept sessions as `ssh` and connect each to the local SSH server.
-moq --connect https://relay.example.com/anon tcp accept ssh --local 127.0.0.1:22
-
-# On the client's host: listen locally and dial `ssh` for each connection.
-moq --connect https://relay.example.com/anon tcp dial ssh --local 127.0.0.1:2222
-ssh -p 2222 user@127.0.0.1
-```
-
-Forwards TCP connections through a relay, so an unmodified client and server
-talk without either being reachable from the other. Each connection is a
-[socket](/concept/socket) `tcp` session: bytes arrive in order with nothing
-lost, a FIN is passed on as a FIN, and a reset as a reset. `tcp accept` connects
-to `--local` before it accepts a dial, so a refused connection refuses the dial.
-`--prefix` names where the two ends meet under the connection path, and
-`--priority` schedules the bytes this end receives against the relay's other
-traffic. Every hop must carry hidden broadcasts, so unless `--connect-version`
-says otherwise it offers only `moq-lite-07-wip` and moq-transport, and the
-relay must accept one of them.
 
 ## Archive
 
@@ -414,9 +394,9 @@ Each run of `moq` announces under a fresh random
 [instance](/concept/moq-lite#publisher-instances), kept across reconnects.
 The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
 rtsp` one per RTSP session, and `import ts --program all` one per program.
-No importer continues its group sequences across a restart, so `moq` has no
+No importer continues its timeline across a restart, so `moq` has no
 flag to set a stable instance and refuses one. A publisher that does continue
-them sets it on its route in a library, such as `RouteOptions::with_instance` in Rust
+its timeline sets one on its route in a library, such as `RouteOptions::with_instance` in Rust
 or `origin.route(path, { instance: { id, epoch } })` in JavaScript; see
 [identity and recovery](/concept/identity).
 

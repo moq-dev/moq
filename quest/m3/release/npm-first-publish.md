@@ -41,10 +41,6 @@ published to npm yet` install failure on every run (noted 2026-11-03 from
 [run 41591680387](https://github.com/moq-dev/moq/actions/runs/41591680387));
 it clears with the same publication.
 
-`@moq/p2p` is out of scope: it is private with no release script, so the cut
-does not publish it. [Watch opts in](/quest/m4/p2p/watch.md) owns its first
-publication, including claiming its names.
-
 Decided 2026-11-06 (maintainer, /quest-unblock): JSR is dropped (every `@moq` JSR
 package was archived on 2026-11-07), so no JSR names are claimed.
 

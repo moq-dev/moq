@@ -11,11 +11,13 @@
 //! is a virtual sleep.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Timestamp, Version, origin};
+use moq_net::{Error, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -70,7 +72,7 @@ fn outcome(result: &Result<moq_net::broadcast::Consumer, String>) -> String {
 /// group's frames and then how the subscription ended. Read continuously, as a
 /// real subscriber would, so the subscription is driven the whole time.
 async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::UnboundedReceiver<String> {
-	let subscription = moq_net::track::Subscription::default().with_range(0..);
+	let subscription = moq_net::track::Subscription::default().with_ranges([support::keys(0..)]);
 	let mut sub = broadcast
 		.track(name)
 		.unwrap()
@@ -112,9 +114,9 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<String>) -> String {
 }
 
 fn write_group(track: &moq_net::track::Producer, payload: &'static str) {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, payload.as_bytes()).unwrap();
-	group.finish().unwrap();
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), payload.as_bytes()).unwrap();
+	group.close().unwrap();
 }
 
 /// Walk one broadcast through its whole announce lifecycle and record what the

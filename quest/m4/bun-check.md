@@ -10,7 +10,7 @@ Every package with a `bench/` typechecks it in its `check` script, so a
 removed export breaks the build, not Nightly. On `main` at c681b7a09, `clock`,
 `qmux`, `signals`, and `watch` have bench sources and no `bench/tsconfig.json`,
 and `json` and `publish` typecheck theirs only in the nightly bench recipes
-(`js/justfile`), while `net`, `crypto`, `hang`, `p2p`, and `pattern` already
+(`js/justfile`), while `net`, `crypto`, `hang`, and `pattern` already
 check theirs (added 2026-11-12 by /quest-plan, from moq's trimmed Pullfrog
 learnings).
 

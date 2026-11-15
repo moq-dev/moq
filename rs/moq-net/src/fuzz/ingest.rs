@@ -24,7 +24,7 @@ const MAX_VARINT: usize = 9;
 /// One frame as a relay reads it back out of the group.
 #[derive(Debug, PartialEq)]
 struct Seen {
-	timestamp: Option<crate::Timestamp>,
+	timestamp: crate::Timestamp,
 	payload: Bytes,
 	/// The Object ID and property block the frame kept, if it was not plain.
 	fields: Option<(u64, Option<Bytes>)>,
@@ -133,7 +133,7 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 	let mut payload = 0;
 	for (index, frame) in ingested.frames.iter().enumerate() {
 		assert_eq!(
-			frame.timestamp.is_some(),
+			frame.timestamp.scale().is_some(),
 			info.timescale.is_some(),
 			"frame {index} does not match its track's timeline"
 		);
@@ -219,7 +219,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 			frame_start,
 		} => {
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
-			let producer = track.append_group().ok()?;
+			let producer = track.append_next().ok()?;
 			let consumer = producer.consume();
 			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);
@@ -235,11 +235,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
 			let mut reader = reader(Bytes::copy_from_slice(&body[used..]), chunk, version);
-			let producer = track
-				.create_group(group::Info {
-					sequence: header.group_id,
-				})
-				.ok()?;
+			let producer = track.create_group(group::Info { start: header.group_id }).ok()?;
 			producer
 				.set_wire(group::Wire {
 					sparse: false,

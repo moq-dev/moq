@@ -80,12 +80,13 @@ impl State {
 		self.done && self.queue.is_empty()
 	}
 
-	/// The first queued picture's timestamp, and when it was decoded.
+	/// The first queued picture's timestamp, and when it was decoded; `None` when it has no time.
 	fn held(&self) -> Option<(Duration, Instant)> {
-		self.queue.iter().find_map(|queued| match &queued.read {
-			Read::Frame(frame) => Some((Duration::from(frame.timestamp), queued.at)),
+		let (frame, at) = self.queue.iter().find_map(|queued| match &queued.read {
+			Read::Frame(frame) => Some((frame, queued.at)),
 			_ => None,
-		})
+		})?;
+		Some((time(frame.timestamp)?, at))
 	}
 }
 
@@ -175,15 +176,16 @@ impl Selector {
 			.take_while(|queued| !matches!(queued, Read::Frame(_)));
 		match &read {
 			Read::Frame(frame) => {
-				let timestamp = Duration::from(frame.timestamp);
-				if lane == Lane::Min
-					&& self.measured
-					&& let Some(step) = state.newest.and_then(|newest| timestamp.checked_sub(newest))
-					&& !step.is_zero()
-				{
-					self.interval = Some(self.interval.map_or(step, |interval| interval.min(step)));
+				if let Some(timestamp) = time(frame.timestamp) {
+					if lane == Lane::Min
+						&& self.measured && let Some(step) =
+						state.newest.and_then(|newest| timestamp.checked_sub(newest))
+						&& !step.is_zero()
+					{
+						self.interval = Some(self.interval.map_or(step, |interval| interval.min(step)));
+					}
+					state.newest = Some(state.newest.map_or(timestamp, |newest| newest.max(timestamp)));
 				}
-				state.newest = Some(state.newest.map_or(timestamp, |newest| newest.max(timestamp)));
 				state.pictures += 1;
 			}
 			Read::Gap { timestamp, duration } => {
@@ -259,14 +261,22 @@ impl Selector {
 				Read::Frame(frame) => {
 					source.pictures -= 1;
 					self.arrival = arrival;
-					if self.dual {
-						self.last = Some(Duration::from(frame.timestamp));
+					if self.dual
+						&& let Some(timestamp) = time(frame.timestamp)
+					{
+						self.last = Some(timestamp);
 					}
 				}
 				Read::Gap { timestamp, duration } if self.dual => {
-					self.resumed = Some(Duration::from(*timestamp) + Duration::from(*duration));
+					if let Some(resume) = resumes(*timestamp, *duration) {
+						self.resumed = Some(resume);
+					}
 				}
-				Read::End { end } if self.dual => self.ended = Some(Duration::from(*end)),
+				Read::End { end } if self.dual => {
+					if let Some(end) = time(*end) {
+						self.ended = Some(end);
+					}
+				}
 				_ => {}
 			}
 			return Next::Read(read);
@@ -287,22 +297,19 @@ impl Selector {
 	}
 
 	/// Drop what the output already moved past, so a cutover never repeats or
-	/// rewinds a picture, and never returns an end or a loss twice.
+	/// rewinds a picture, and never returns an end or a loss twice. What has no
+	/// time orders against nothing, so it stays.
 	fn prune(&mut self) {
 		let (last, resumed, ended) = (self.last, self.resumed, self.ended);
 		for state in &mut self.lanes {
 			state.queue.retain(|queued| match &queued.read {
-				Read::Frame(frame) => last.is_none_or(|last| Duration::from(frame.timestamp) > last),
+				Read::Frame(frame) => time(frame.timestamp).is_none_or(|at| last.is_none_or(|last| at > last)),
 				// Lost by this lane, but the output already reached where it resumes.
-				Read::Gap { timestamp, duration } => {
-					let resume = Duration::from(*timestamp) + Duration::from(*duration);
-					last.max(resumed).is_none_or(|reached| resume > reached)
-				}
+				Read::Gap { timestamp, duration } => resumes(*timestamp, *duration)
+					.is_none_or(|resume| last.max(resumed).is_none_or(|reached| resume > reached)),
 				// Returned from the other lane, or stale behind pictures shown past it.
-				Read::End { end } => {
-					let end = Duration::from(*end);
-					ended.is_none_or(|ended| end > ended) && last.is_none_or(|last| end >= last)
-				}
+				Read::End { end } => time(*end)
+					.is_none_or(|end| ended.is_none_or(|ended| end > ended) && last.is_none_or(|last| end >= last)),
 			});
 			state.pictures = state
 				.queue
@@ -313,6 +320,17 @@ impl Selector {
 	}
 }
 
+/// A timestamp's time since its track's zero, or `None` when it is
+/// [unscaled](moq_net::Timestamp::unscaled) and has no time to order by.
+fn time(timestamp: moq_net::Timestamp) -> Option<Duration> {
+	Duration::try_from(timestamp).ok()
+}
+
+/// Where a gap resumes, or `None` when it has no time.
+fn resumes(timestamp: moq_net::Timestamp, duration: moq_net::Timestamp) -> Option<Duration> {
+	Some(time(timestamp)? + time(duration)?)
+}
+
 /// One gap covering two with no picture between them, or the newer alone if their
 /// scales differ.
 fn merge(
@@ -320,10 +338,11 @@ fn merge(
 	second: (moq_net::Timestamp, moq_net::Timestamp),
 ) -> (moq_net::Timestamp, moq_net::Timestamp) {
 	let merged = || {
-		let start = first.0.min(second.0);
+		let start = if second.0 < first.0 { second.0 } else { first.0 };
 		let earlier = first.0.checked_add(first.1).ok()?;
 		let later = second.0.checked_add(second.1).ok()?;
-		Some((start, earlier.max(later).checked_sub(start).ok()?))
+		let end = if earlier > later { earlier } else { later };
+		Some((start, end.checked_sub(start).ok()?))
 	};
 	merged().unwrap_or(second)
 }
@@ -362,9 +381,13 @@ mod tests {
 		let mut out = Vec::new();
 		while let Next::Read(read) = selector.next(now) {
 			out.push(match read {
-				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_millis()),
-				Read::Gap { timestamp, duration } => format!("gap {}+{}", timestamp.as_millis(), duration.as_millis()),
-				Read::End { end } => format!("end {}", end.as_millis()),
+				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_millis().unwrap()),
+				Read::Gap { timestamp, duration } => format!(
+					"gap {}+{}",
+					timestamp.as_millis().unwrap(),
+					duration.as_millis().unwrap()
+				),
+				Read::End { end } => format!("end {}", end.as_millis().unwrap()),
 			});
 		}
 		out
@@ -377,7 +400,7 @@ mod tests {
 			let Read::Frame(frame) = read else {
 				panic!("expected only pictures");
 			};
-			out.push(frame.timestamp.as_millis());
+			out.push(frame.timestamp.as_millis().unwrap());
 		}
 		out
 	}
@@ -408,6 +431,53 @@ mod tests {
 		selector.push(Lane::Max, picture(1066), now);
 		assert_eq!(drain(&mut selector, now), [1066]);
 		assert_eq!(selector.source, Lane::Max);
+	}
+
+	/// A read with no time, such as a frame a player built at an unscaled key,
+	/// orders against nothing: it passes through rather than panicking or being
+	/// pruned, and moves neither lane's clock.
+	#[tokio::test]
+	async fn an_unscaled_read_passes_through() {
+		tokio::time::pause();
+		let now = Instant::now();
+		let mut selector = selector();
+		let i420 = crate::I420::new(crate::Size::new(2, 2), vec![0x80; 6]).unwrap();
+		let unscaled = || {
+			Read::Frame(crate::Frame::new(
+				crate::Surface::I420(i420.clone()),
+				Timestamp::unscaled(7),
+			))
+		};
+
+		selector.push(Lane::Min, picture(1000), now);
+		assert_eq!(drain(&mut selector, now), [1000]);
+		selector.push(Lane::Min, unscaled(), now);
+		selector.push(Lane::Max, unscaled(), now);
+		selector.push(
+			Lane::Min,
+			Read::Gap {
+				timestamp: Timestamp::unscaled(7),
+				duration: Timestamp::unscaled(1),
+			},
+			now,
+		);
+		selector.push(
+			Lane::Min,
+			Read::End {
+				end: Timestamp::unscaled(8),
+			},
+			now,
+		);
+
+		let mut out = Vec::new();
+		while let Next::Read(read) = selector.next(now) {
+			out.push(match read {
+				Read::Frame(frame) => format!("frame {:?}", frame.timestamp),
+				Read::Gap { timestamp, duration } => format!("gap {timestamp:?}+{duration:?}"),
+				Read::End { end } => format!("end {end:?}"),
+			});
+		}
+		assert_eq!(out, ["frame #7", "gap #7+#1", "end #8"]);
 	}
 
 	/// The arrival handed out is the one pushed with the picture returned, from

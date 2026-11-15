@@ -53,10 +53,14 @@ fn bench_sign(c: &mut Criterion) {
 		group.throughput(Throughput::Bytes(size as u64));
 		group.bench_function(format!("write_{}k", size / 1024), |b| {
 			let (producer, _inner) = produce(&key);
+			let mut start = 0;
 			b.iter(|| {
-				let mut group = producer.append_group().unwrap();
-				group.write_frame(None, black_box(&payload)).unwrap();
-				group.finish().unwrap();
+				let mut group = producer.append_group(start).unwrap();
+				start += 1;
+				group
+					.write_frame(moq_net::Timestamp::unscaled(start), black_box(&payload))
+					.unwrap();
+				group.close().unwrap();
 			});
 		});
 		group.bench_function(format!("roundtrip_{}k", size / 1024), |b| {
@@ -66,10 +70,14 @@ fn bench_sign(c: &mut Criterion) {
 				.unwrap();
 			let (producer, mut consumer, _origin) = runtime.block_on(roundtrip(&key));
 			let waiter = kio::Waiter::noop();
+			let mut start = 0;
 			b.iter(|| {
-				let mut group = producer.append_group().unwrap();
-				group.write_frame(None, black_box(&payload)).unwrap();
-				group.finish().unwrap();
+				let mut group = producer.append_group(start).unwrap();
+				start += 1;
+				group
+					.write_frame(moq_net::Timestamp::unscaled(start), black_box(&payload))
+					.unwrap();
+				group.close().unwrap();
 				let Poll::Ready(Ok(Some(mut group))) = consumer.poll_recv_group(&waiter) else {
 					panic!("the group is delivered in-process");
 				};

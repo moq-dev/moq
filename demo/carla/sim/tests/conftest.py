@@ -33,6 +33,7 @@ moq.Compression = SimpleNamespace(DEFLATE="deflate")
 # Tests that run a truck's endpoint script it in place of this.
 moq.socket = ModuleType("moq.socket")
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
+moq.Timestamp.unscaled = lambda key: SimpleNamespace(value=key, scale=None)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
 moq_json = ModuleType("moq.json")

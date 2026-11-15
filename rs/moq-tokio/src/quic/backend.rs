@@ -750,7 +750,8 @@ impl Server {
 			);
 			endpoint_config.cid_generator = Some(Arc::new(move || {
 				let mut cids = moq_quic::RandomConnectionIdGenerator::default();
-				cids.set_shard(shard.index(), shard.count());
+				cids.set_shard(shard.index(), shard.count())
+					.set_generations(shard.generations());
 				Box::new(cids)
 			}));
 		} else if let Some(load_balancer) = load_balancer {

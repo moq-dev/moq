@@ -91,7 +91,7 @@ impl<T> DeclaredClock<T> {
 		if self.held.len() > self.depth {
 			return Err(ClockError::Undrained.into());
 		}
-		let source = source.as_nanos();
+		let source = source.as_nanos()?;
 		// Only `highest` matters: a frame below all of it reorders past the depth.
 		let mut pts = pts;
 		for &(tick, prior) in &self.highest {
@@ -236,7 +236,7 @@ mod tests {
 			let mut out = Vec::new();
 			for &source in read {
 				let source = micros(source);
-				clock.push((), source.as_millis() as u64, source)?;
+				clock.push((), source.as_millis().unwrap() as u64, source)?;
 				while let Some(((), dts, pts)) = clock.pop(false)? {
 					out.push((dts, pts));
 				}

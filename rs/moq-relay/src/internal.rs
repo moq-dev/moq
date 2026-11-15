@@ -98,8 +98,6 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
-	#[cfg(any(feature = "stun", test))]
-	stun: Option<crate::stun::Counters>,
 	#[cfg(feature = "_quic")]
 	demux: Option<moq_tokio::quic::demux::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
@@ -115,8 +113,6 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
-	#[cfg(any(feature = "stun", test))]
-	stun: Option<crate::stun::Counters>,
 	#[cfg(feature = "_quic")]
 	demux: Option<moq_tokio::quic::demux::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
@@ -146,20 +142,12 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
-			#[cfg(any(feature = "stun", test))]
-			stun: None,
 			#[cfg(feature = "_quic")]
 			demux: None,
 			shutdown: None,
 			listener: None,
 			addr: None,
 		}
-	}
-
-	#[cfg(feature = "stun")]
-	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
-		self.stun = counters;
-		self
 	}
 
 	#[cfg(feature = "_quic")]
@@ -171,6 +159,19 @@ impl Internal {
 	pub(crate) fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
 		self.timeout = timeout;
 		self
+	}
+
+	/// Serve `listener`, already bound, in place of binding `internal.listen`.
+	pub(crate) fn with_bound(mut self, listener: Option<net::TcpListener>) -> anyhow::Result<Self> {
+		if let Some(listener) = listener {
+			self.addr = Some(
+				listener
+					.local_addr()
+					.context("failed to resolve internal bind address")?,
+			);
+			self.listener = Some(listener);
+		}
+		Ok(self)
 	}
 
 	/// Bind the configured listener now, so [`addr`](Self::addr) reports an ephemeral port before serving.
@@ -281,8 +282,6 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
-				#[cfg(any(feature = "stun", test))]
-				stun: self.stun.clone(),
 				#[cfg(feature = "_quic")]
 				demux: self.demux.clone(),
 				shutdown: self.shutdown.clone(),
@@ -450,10 +449,6 @@ async fn serve_health() -> Response {
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut scrape = Scrape::new(state.stats.snapshot(), &state.listeners, &state.uring);
-	#[cfg(any(feature = "stun", test))]
-	{
-		scrape.stun = state.stun;
-	}
 	#[cfg(feature = "_quic")]
 	{
 		scrape.demux = state.demux;
@@ -590,8 +585,6 @@ struct Scrape {
 	stats: moq_net::stats::Snapshot,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
-	#[cfg(any(feature = "stun", test))]
-	stun: Option<crate::stun::Counters>,
 	#[cfg(feature = "_quic")]
 	demux: Option<moq_tokio::quic::demux::Counters>,
 	draining: Option<usize>,
@@ -620,8 +613,6 @@ impl Scrape {
 			stats,
 			listeners: listeners.to_vec(),
 			uring: uring.to_vec(),
-			#[cfg(any(feature = "stun", test))]
-			stun: None,
 			#[cfg(feature = "_quic")]
 			demux: None,
 			draining: None,
@@ -639,10 +630,6 @@ impl Scrape {
 		self.encode_sessions(encoder)?;
 		encode_accepts(encoder, &self.listeners)?;
 		encode_uring(encoder, &self.uring)?;
-		#[cfg(any(feature = "stun", test))]
-		if let Some(stun) = &self.stun {
-			stun.encode(encoder)?;
-		}
 		#[cfg(feature = "_quic")]
 		if let Some(demux) = &self.demux {
 			encode_demux(encoder, demux)?;
@@ -1267,30 +1254,6 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
-	async fn stun_metrics_are_present_only_for_a_configured_listener() {
-		for stun in [None, Some(crate::stun::Counters::default())] {
-			let configured = stun.is_some();
-			let state = InternalState {
-				stats: moq_net::stats::Registry::disabled(),
-				nodes: None,
-				refusals: None,
-				sessions: crate::session::Registry::new(),
-				listeners: Vec::new(),
-				uring: Vec::new(),
-				stun,
-				#[cfg(feature = "_quic")]
-				demux: None,
-				shutdown: None,
-			};
-			let response = serve_metrics(State(state)).await;
-			let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-			let body = std::str::from_utf8(&body).unwrap();
-			assert_eq!(body.contains("moq_relay_stun_replies_total"), configured);
-			assert_eq!(body.contains("moq_relay_stun_dropped_total"), configured);
-		}
-	}
-
 	/// Every drop reason renders from zero, and only for a relay whose QUIC port
 	/// runs the demux.
 	#[cfg(feature = "_quic")]
@@ -1310,7 +1273,6 @@ mod tests {
 				sessions: crate::session::Registry::new(),
 				listeners: Vec::new(),
 				uring: Vec::new(),
-				stun: None,
 				demux,
 				shutdown: None,
 			};
@@ -1639,8 +1601,6 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
-			#[cfg(any(feature = "stun", test))]
-			stun: None,
 			#[cfg(feature = "_quic")]
 			demux: None,
 			shutdown: None,
@@ -1661,8 +1621,6 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
-			#[cfg(any(feature = "stun", test))]
-			stun: None,
 			#[cfg(feature = "_quic")]
 			demux: None,
 			shutdown: None,
@@ -1873,26 +1831,38 @@ mod tests {
 		let bc = egress.request(update.prefix.clone(), None).await.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
-			let mut group = pub_track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, vec![0u8; 12]).unwrap();
-			group.write_frame(Timestamp::ZERO, vec![0u8; 34]).unwrap();
-			group.finish().unwrap();
+			let mut group = pub_track
+				.append_group(pub_track.largest().map_or(0, |largest| largest.group + 1))
+				.unwrap();
+			group
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 12])
+				.unwrap();
+			group
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 34])
+				.unwrap();
+			group.close().unwrap();
 		}
 		{
-			let mut group = pub_track.append_group().unwrap();
+			let mut group = pub_track
+				.append_group(pub_track.largest().map_or(0, |largest| largest.group + 1))
+				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(10_000).unwrap(), vec![0u8; 1234])
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let mut group = egress_sub.recv_group().await.unwrap().unwrap();
 		while group.read_frame().await.unwrap().is_some() {}
 
 		// Write 56 ingress bytes into the regional-tier broadcast.
 		{
-			let mut group = sub_track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, vec![0u8; 56]).unwrap();
-			group.finish().unwrap();
+			let mut group = sub_track
+				.append_group(sub_track.largest().map_or(0, |largest| largest.group + 1))
+				.unwrap();
+			group
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 56])
+				.unwrap();
+			group.close().unwrap();
 		}
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
@@ -1927,7 +1897,6 @@ mod tests {
 	/// Two plain egress sessions reading one compressed group share a single inflate.
 	#[tokio::test(start_paused = true)]
 	async fn metrics_count_one_inflate_per_group() {
-		use moq_net::Timestamp;
 		use moq_net::stats::{Registry, Tier};
 
 		let stats = Registry::new(Default::default());
@@ -1953,9 +1922,13 @@ mod tests {
 			let bc = egress.request("demo/x", None).await.unwrap();
 			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
 		}
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-		group.finish().unwrap();
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
+			.unwrap();
+		group.close().unwrap();
 		for reader in &mut readers {
 			let mut group = reader.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, payload.as_bytes());
@@ -2058,7 +2031,6 @@ mod tests {
 			uring: vec![moq_uring::metrics::Metrics::default()],
 			#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 			uring: Vec::new(),
-			stun: Some(crate::stun::Counters::default()),
 			#[cfg(feature = "_quic")]
 			demux: Some(moq_tokio::quic::demux::Counters::default()),
 			shutdown: Some(shutdown),
@@ -2110,9 +2082,6 @@ mod tests {
 # TYPE moq_relay_stale_bytes_total counter
 # TYPE moq_relay_stale_frames_total counter
 # TYPE moq_relay_stale_groups_total counter
-# TYPE moq_relay_stun_dropped_total counter
-# TYPE moq_relay_stun_io_errors_total counter
-# TYPE moq_relay_stun_replies_total counter
 # TYPE moq_relay_subscriptions_closed_total counter
 # TYPE moq_relay_subscriptions_opened_total counter
 # TYPE moq_relay_viewers_closed_total counter
@@ -2157,13 +2126,6 @@ counter moq_relay_stale_frames_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_frames_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stale_groups_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_groups_total{role="subscriber",tier="edge"} 0
-counter moq_relay_stun_dropped_total{reason="capacity"} 0
-counter moq_relay_stun_dropped_total{reason="global"} 0
-counter moq_relay_stun_dropped_total{reason="invalid"} 0
-counter moq_relay_stun_dropped_total{reason="io"} 0
-counter moq_relay_stun_dropped_total{reason="source"} 0
-counter moq_relay_stun_io_errors_total{} 0
-counter moq_relay_stun_replies_total{} 0
 counter moq_relay_subscriptions_closed_total{role="publisher",tier="edge"} 0
 counter moq_relay_subscriptions_closed_total{role="subscriber",tier="edge"} 0
 counter moq_relay_subscriptions_opened_total{role="publisher",tier="edge"} 0

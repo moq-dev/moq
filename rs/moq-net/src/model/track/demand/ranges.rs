@@ -1,11 +1,12 @@
 //! The union of every subscriber's ranges, kept current per change rather than refolded.
 //!
-//! Absolute ranges become signed boundaries over groups, +1 where one starts and -1
-//! where it ends, so a group is covered while the running sum stays above zero. A treap
-//! keeps each subtree's sum and lowest running sum, so a change touches two boundaries and
-//! asks one range-minimum question, whatever else the audience holds. Ranges anchored to
-//! the latest group or to a time can't be placed on that line and are counted by value
-//! instead.
+//! Time ranges become signed boundaries over group starts, +1 where one starts and -1
+//! past where it ends, so a start is covered while the running sum stays above zero. A
+//! start between groups stands for the group containing it, which a range starting at or
+//! before it covers too, so spans merge as they do over starts. A treap keeps each
+//! subtree's sum and lowest running sum, so a change touches two boundaries and asks one
+//! range-minimum question, whatever else the audience holds. Ranges anchored to the
+//! latest group can't be placed on that line and are counted by value instead.
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
@@ -19,7 +20,8 @@ use super::{add, remove};
 pub(super) struct Ranges {
 	/// Holders of [`Range::oldest`], which covers every other range.
 	oldest: usize,
-	absolute: Coverage,
+	/// Time ranges, as spans of starts.
+	time: Coverage,
 	/// Open relative ranges by how far back they start: only the farthest matters.
 	relative: BTreeMap<u64, usize>,
 	/// Ranges with one relative end, or a bounded relative span, kept as they are.
@@ -32,7 +34,8 @@ pub(super) struct Ranges {
 enum Shape {
 	Empty,
 	Oldest,
-	Absolute(u64, Option<u64>),
+	/// A time range, as the exclusive span of starts it covers.
+	Time(u64, Option<u64>),
 	Relative(u64),
 	Mixed,
 }
@@ -42,8 +45,9 @@ impl Shape {
 		match (range.start, range.end) {
 			_ if range.is_empty() => Self::Empty,
 			(Anchor::Oldest, None) => Self::Oldest,
-			(Anchor::Absolute(start), None) => Self::Absolute(start, None),
-			(Anchor::Absolute(start), Some(Anchor::Absolute(end))) => Self::Absolute(start, Some(end)),
+			(Anchor::Time(start), None) => Self::Time(start, None),
+			// An end at the last start covers every group, as an open one does.
+			(Anchor::Time(start), Some(Anchor::Time(end))) => Self::Time(start, end.checked_add(1)),
 			(Anchor::Relative(back), None) => Self::Relative(back),
 			_ => Self::Mixed,
 		}
@@ -59,9 +63,9 @@ impl Ranges {
 				self.oldest += 1;
 				self.oldest == 1
 			}
-			Shape::Absolute(start, end) => {
-				let uncovered = self.absolute.min(start, end) == 0;
-				self.absolute.add(start, end, 1);
+			Shape::Time(start, end) => {
+				let uncovered = self.time.min(start, end) == 0;
+				self.time.add(start, end, 1);
 				uncovered && self.oldest == 0
 			}
 			Shape::Relative(back) => {
@@ -82,9 +86,9 @@ impl Ranges {
 				self.oldest -= 1;
 				self.oldest == 0
 			}
-			Shape::Absolute(start, end) => {
-				self.absolute.add(start, end, -1);
-				self.oldest == 0 && self.absolute.min(start, end) == 0
+			Shape::Time(start, end) => {
+				self.time.add(start, end, -1);
+				self.oldest == 0 && self.time.min(start, end) == 0
 			}
 			Shape::Relative(back) => {
 				let farthest = self.farthest();
@@ -114,12 +118,13 @@ impl Ranges {
 			return vec![Range::oldest()];
 		}
 		let mut union: Vec<Range> = self
-			.absolute
+			.time
 			.runs()
 			.into_iter()
 			.map(|(start, end)| Range {
-				start: Anchor::Absolute(start),
-				end: end.map(Anchor::Absolute),
+				start: Anchor::Time(start),
+				// A run past its start ends at or past one more.
+				end: end.map(|end| Anchor::Time(end - 1)),
 			})
 			.collect();
 		union.extend(self.mixed.keys().filter(|range| !self.covered(range)));
@@ -138,17 +143,16 @@ impl Ranges {
 	/// Whether an open range already delivers everything a mixed `range` could.
 	fn covered(&self, range: &Range) -> bool {
 		match range.start {
-			Anchor::Absolute(start) => self.absolute.tail().is_some_and(|tail| tail <= start),
+			// The group containing a start at or before this one's comes no later.
+			Anchor::Time(start) => self.time.tail().is_some_and(|tail| tail <= start),
 			Anchor::Relative(back) => self.farthest().is_some_and(|farthest| back <= farthest),
 			// Only the open oldest range, which hides every other, covers the oldest group.
 			Anchor::Oldest => false,
-			// Where a time falls among the groups is the serving hop's to say.
-			Anchor::Time(_) => false,
 		}
 	}
 }
 
-/// Signed boundary counts over groups: the coverage of the absolute ranges.
+/// Signed boundary counts over group starts: the coverage of the time ranges.
 #[derive(Default)]
 struct Coverage {
 	root: Link,
@@ -357,7 +361,7 @@ mod tests {
 		let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..6) {
 			0 => Anchor::Relative(rng.random_range(0..4)),
 			1 => Anchor::Oldest,
-			_ => Anchor::Absolute(rng.random_range(0..12)),
+			_ => Anchor::Time(rng.random_range(0..12)),
 		};
 		let mut ranges = Ranges::default();
 		let mut held: Vec<Range> = Vec::new();

@@ -132,12 +132,12 @@ async fn decode(
 			// moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
 			moq_audio::decode::Read::Gap { timestamp, duration } => anyhow::bail!(
 				"{name}: audio gap after {decoded} samples, at {}us for {duration:?}",
-				timestamp.as_micros()
+				timestamp.as_micros()?
 			),
 			moq_audio::decode::Read::End { .. } => anyhow::bail!("{name}: audio track ended early"),
 		};
 		let samples = frame.data.len() as u64 / (4 * channels as u64);
-		writeln!(log, "{} {samples}", frame.timestamp.as_micros())?;
+		writeln!(log, "{} {samples}", frame.timestamp.as_micros()?)?;
 		pcm.write_all(&frame.data)?;
 		decoded += samples;
 	}

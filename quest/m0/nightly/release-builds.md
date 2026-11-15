@@ -7,6 +7,8 @@ reached, so `Shipping sizes` still runs on those nights.
 
 ## Plan
 
+Cleared 2026-11-15 (/quest-complete): the pin file is on `main` from [moq-dev/moq#8784](https://github.com/moq-dev/moq/pull/8784), and the publishing [run 43664475166](https://github.com/moq-dev/moq/actions/runs/43664475166) built linux/amd64 and linux/arm64.
+
 On 11-11 an apt DNS failure (`Temporary failure resolving
 'security.ubuntu.com'`) failed both `moq-gst / Build tarball` jobs and both
 `Package .deb/.rpm` jobs at their apt step, and so skipped `Shipping sizes`.
@@ -17,8 +19,9 @@ GStreamer headers. Nix can't stand in for either.
 Decided 2026-11-13 (maintainer, /quest-complete): ✅ the Linux jobs take the
 distro GStreamer from a weekly-published ghcr.io image with the packages
 preinstalled (rejected: accepting a mirror outage as a real failure).
-[The GStreamer CI image](/quest/m0/nightly/gst-image.md) publishes it and the
-digest pin, `.github/docker/gstreamer/image`.
+`gstreamer-ci.yml` publishes it as `ghcr.io/moq-dev/gstreamer-ci` and has
+moq-bot propose the digest pin, `.github/docker/gstreamer/image`, from the
+`gstreamer-ci/pin` branch.
 
 - Tarball job: on Linux, run `just rs gst-smoke` over the extracted tarball
   inside the pinned image with `docker run`, instead of apt-installing
@@ -40,6 +43,3 @@ The other release-build failures from 11-11 to 11-12 are fixed: armv7 by
 cross toolchain by
 [moq-dev/moq#8668](https://github.com/moq-dev/moq/pull/8668).
 
-## Required
-
-- [GStreamer CI image](/quest/m0/nightly/gst-image.md) - publishes the image and the pin file this reads

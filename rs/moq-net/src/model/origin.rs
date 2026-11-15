@@ -100,8 +100,10 @@ pub struct Config {
 	/// The origin's identity on every wire: the hop id appended to broadcast hop chains
 	/// for loop detection, and the route identity it declares on moq-lite-07, which also
 	/// names it in the hops of each route it forwards there. Random by
-	/// default, so each process is a fresh identity; one reused across a restart has its
-	/// lite-07 routes refused until a seqno request lifts them past the old process's.
+	/// default, so each process is a fresh identity. Set one only if it is fresh per
+	/// process too: a restarted process numbers its lite-07 sessions from 1 again, so a
+	/// peer that still remembers one of the old process's sessions as closed refuses
+	/// the routes through the new one's session of the same number.
 	pub hop: NonZeroU64,
 
 	/// The key this origin proves to every lite-07 peer, which files the routes it sends
@@ -503,6 +505,9 @@ pub struct RouteInfo {
 	/// peer that names no node.
 	pub(crate) node: Option<u64>,
 
+	/// Which of the route layer's routes to [`Self::node`] it follows; see [`Lane`].
+	pub(crate) lane: Lane,
+
 	/// The session it arrived on is going away (the peer sent a GOAWAY): it ranks below
 	/// every other eligible route, whatever its preference or cost, yet still serves when
 	/// nothing else does.
@@ -533,9 +538,41 @@ impl RouteInfo {
 			via: Hop::UNKNOWN,
 			source: Source::Local,
 			node: None,
+			lane: Lane::default(),
 			draining: false,
 			available: true,
 			rtt: None,
+		}
+	}
+}
+
+/// Which of the lite-07 route layer's routes to a publisher a route follows: one per
+/// prefix covering the claim. Only the narrowest live one is primary, which a reader
+/// here follows; a request a peer forwards follows the one it names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Lane {
+	/// How many segments the route's prefix has, absolute.
+	pub depth: u64,
+	pub primary: bool,
+	/// The one the route layer selected for its prefix, ranked ahead of the alternates
+	/// a reader fails over to at once when it goes.
+	pub selected: bool,
+	/// The Node IDs of the origin nodes the route's path crosses: a request from one of
+	/// them never follows it.
+	pub path: std::sync::Arc<[u64]>,
+	/// The lowest priority of a link on the route's path, which ranks the route where a
+	/// session's preference does, or `None` for a route the route layer did not select.
+	pub priority: Option<i8>,
+}
+
+impl Default for Lane {
+	fn default() -> Self {
+		Self {
+			depth: 0,
+			primary: true,
+			selected: true,
+			path: std::sync::Arc::new([]),
+			priority: None,
 		}
 	}
 }
@@ -558,7 +595,7 @@ pub enum Source {
 
 impl RouteInfo {
 	/// The stream the route serves: routes with one instance serve one continuous
-	/// sequence space, so a subscription resumes from one to another. Pass it to
+	/// key space, so a subscription resumes from one to another. Pass it to
 	/// [`Consumer::request`] to pin this stream.
 	pub fn instance(&self) -> &Instance {
 		self.instance.as_ref().expect("a delivered route has an instance")
@@ -636,6 +673,13 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_node(mut self, node: Option<u64>) -> Self {
 		self.node = node;
+		self
+	}
+
+	/// Follow the route layer's route `lane`; see [`Self::lane`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_lane(mut self, lane: Lane) -> Self {
+		self.lane = lane;
 		self
 	}
 
@@ -723,10 +767,10 @@ impl RouteOptions {
 
 	/// Serve a stable `instance` at `epoch`, in place of a freshly minted one.
 	///
-	/// Only for a publisher that continues the instance's sequence space across restarts,
+	/// Only for a publisher that continues the instance's key space across restarts,
 	/// announcing a higher `epoch` each time, such as a counter persisted on disk. Readers
 	/// stitch every route of one instance together, so a publisher that restarts its
-	/// group sequences under an old instance splices unrelated groups into their tracks.
+	/// group keys under an old instance splices unrelated groups into their tracks.
 	/// The highest epoch wins over every older one of the instance, cheaper or not.
 	/// Naming an instance grants nothing: publishing still needs the path's grant.
 	pub fn with_instance(mut self, instance: Instance, epoch: u64) -> Self {
@@ -842,7 +886,13 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 	};
 	(
 		entry.draining || !entry.available,
-		Reverse(entry.preference),
+		// The route layer's selected route ahead of its alternates.
+		!entry.lane.selected,
+		// A lite-07 route ranks by the lowest preference of any link on its path.
+		Reverse(match entry.lane.priority {
+			Some(priority) => entry.preference.min(Preference::new(priority)),
+			None => entry.preference,
+		}),
 		anonymous,
 		entry.cost,
 		!entry.local,
@@ -862,6 +912,7 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 
 /// The key [`route_order`] ranks an entry by: lower wins.
 type RouteOrder = (
+	bool,
 	bool,
 	Reverse<Preference>,
 	bool,
@@ -935,7 +986,7 @@ enum Held {
 /// bounded by the number of distinct prefixes. A metadata change on a live route
 /// overwrites the pending `Announce` (or is delivered as another active update),
 /// a pending `Restart` stays one until delivered whatever metadata follows it,
-/// and `UnannounceAnnounce` preserves a real retract-then-announce sequence.
+/// and `UnannounceAnnounce` preserves a real retract-then-announce key.
 type AnnounceMeta = (RouteMeta, Option<Vec<Pattern>>);
 
 enum PendingUpdate {
@@ -1290,6 +1341,7 @@ impl OriginConsumerState {
 				draining: false,
 				available: meta.7,
 				rtt: meta.8,
+				lane: Lane::default(),
 			},
 		};
 		(RouteEvent { kind, announce }, owed)
@@ -1327,6 +1379,8 @@ struct RouteEntry {
 	link: Link,
 	/// The origin node serving the route; see [`RouteInfo::node`].
 	node: Option<u64>,
+	/// The route layer's route it follows; see [`RouteInfo::lane`].
+	lane: Lane,
 	/// Whether the route ranks last; see [`RouteInfo::draining`]. Local selection state,
 	/// so never part of [`Self::meta`].
 	draining: bool,
@@ -1433,7 +1487,9 @@ impl RouteEntry {
 	/// appears in the chain. Hop 0 identifies nobody, so it is never excluded.
 	fn visible_to(&self, exclude: Option<Hop>) -> bool {
 		match exclude {
-			Some(peer) if peer != Hop::UNKNOWN => self.via != peer && !self.hops.contains(&peer),
+			Some(peer) if peer != Hop::UNKNOWN => {
+				self.via != peer && !self.hops.contains(&peer) && !self.lane.path.contains(&peer.id())
+			}
 			_ => true,
 		}
 	}
@@ -1532,25 +1588,26 @@ struct Horizon {
 /// through that node's routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum NodeFilter {
-	/// Every route.
+	/// Every route, of the route layer's only the primary ones (see [`Lane`]).
 	#[default]
 	Any,
 	/// Only the routes this node serves itself.
 	Own,
-	/// Only the routes the route layer selected toward this origin node.
+	/// Only the route layer's route toward the origin node `node` whose prefix has
+	/// `depth` segments, absolute.
 	#[cfg_attr(
 		not(feature = "async"),
 		allow(dead_code, reason = "only the async session names a node")
 	)]
-	Is(u64),
+	Route { node: u64, depth: u64 },
 }
 
 impl NodeFilter {
-	fn admits(self, node: Option<u64>) -> bool {
+	fn admits(self, node: Option<u64>, lane: &Lane) -> bool {
 		match self {
-			Self::Any => true,
+			Self::Any => node.is_none() || lane.primary,
 			Self::Own => node.is_none(),
-			Self::Is(id) => node == Some(id),
+			Self::Route { node: id, depth } => node == Some(id) && lane.depth == depth,
 		}
 	}
 }
@@ -1561,7 +1618,7 @@ impl Horizon {
 		self.admits_link(entry.link)
 			&& entry.visible_to(self.exclude)
 			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
-			&& self.node.admits(entry.node)
+			&& self.node.admits(entry.node, &entry.lane)
 	}
 
 	/// Whether routes arriving on `link` may be observed through this horizon.
@@ -2225,12 +2282,6 @@ pub struct Producer {
 }
 
 impl Producer {
-	/// A handle that queues work on this origin's [`Driver`] without keeping the origin
-	/// alive: work queued once the driver is gone is dropped.
-	pub(super) fn tasks(&self) -> crate::util::TasksWeak {
-		self.tasks.downgrade()
-	}
-
 	/// Build a producer from a [`Config`] (identity + cache pool) with no scoped
 	/// prefix and no pre-existing broadcasts, paired with the [`Driver`] that runs
 	/// the origin's lifecycle work.
@@ -2315,6 +2366,10 @@ impl Producer {
 	/// operators rank by this instead of comparing their metrics. Hand each CDN's
 	/// session its own rank to use the primary while it has a route and fail over to
 	/// the next.
+	///
+	/// A moq-lite-07 route ranks by the lowest preference of any link on its path, so
+	/// two relays never prefer each other's paths forever. A link promoted above the
+	/// links before it gains nothing there: demote the fallbacks instead.
 	pub fn with_preference(mut self, preference: Preference) -> Self {
 		self.preference = preference;
 		self
@@ -2355,9 +2410,9 @@ impl Producer {
 
 	/// See [`Consumer::route_closing`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self) -> Option<crate::route::node::Closing> {
+	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
 		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing())
+		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
@@ -2438,8 +2493,8 @@ impl Producer {
 	/// This is how local content enters an origin. Fill the broadcast through
 	/// [`Route::broadcast`]. The route serves a fresh random instance, minted here and
 	/// kept for its lifetime, across [`Route::withdraw`] and [`Route::announce`], since
-	/// its sequences continue: a new route is a new stream that never splices into an
-	/// old one. A publisher that continues one sequence space across restarts may name
+	/// its keys continue: a new route is a new stream that never splices into an
+	/// old one. A publisher that continues one key space across restarts may name
 	/// a stable instance instead ([`RouteOptions::with_instance`]).
 	///
 	/// Announced at once unless created [`RouteOptions::hidden`]. A hidden route exists
@@ -2707,7 +2762,7 @@ impl Producer {
 	/// routes answering its requests, so a reader that resolved a path through it
 	/// continues on that path's answer rather than restarting. Once an exact route holding
 	/// the lent instance stops serving it (withdrawn, closed, or renamed), this route moves
-	/// to a fresh instance, as a restarted job's sequences are another stream: see
+	/// to a fresh instance, as a restarted job's keys are another stream: see
 	/// [`Claim::instance`]. A claim naming a stable instance lends nothing, and its
 	/// answers each mint their own.
 	///
@@ -3011,6 +3066,7 @@ impl Announcing {
 				local: self.local,
 				link: self.link,
 				node: route.node,
+				lane: route.lane.clone(),
 				draining: route.draining,
 				available: route.available,
 				rtt: route.rtt,
@@ -3058,7 +3114,7 @@ struct Serving {
 ///
 /// A route mints its instance when it is created and keeps it for its lifetime, across
 /// [`withdraw`](Self::withdraw), [`announce`](Self::announce) and reconnects, since it
-/// owns the same broadcast and its sequences continue. A new run is a new route.
+/// owns the same broadcast and its keys continue. A new run is a new route.
 ///
 /// ```
 /// # fn run(origin: moq_net::origin::Producer) -> Result<(), moq_net::Error> {
@@ -3636,6 +3692,7 @@ impl AnnounceProducer {
 			entry.auth = route.auth.clone();
 			entry.via = route.via;
 			entry.node = route.node;
+			entry.lane = route.lane.clone();
 			entry.draining = route.draining;
 			entry.available = route.available;
 			entry.rtt = route.rtt;
@@ -3698,6 +3755,7 @@ impl AnnounceProducer {
 			via: entry.via,
 			source: entry.entered(),
 			node: entry.node,
+			lane: entry.lane.clone(),
 			draining: entry.draining,
 			available: entry.available,
 			rtt: entry.rtt,
@@ -3844,6 +3902,38 @@ impl kio::Task for FeedOwnClaims {
 			return Poll::Ready(());
 		}
 		claims.poll(waiter)
+	}
+}
+
+/// The driver's task firing the route node's timers on the origin's clock: a doubt
+/// lifting, a dead hop expiring, a hold reaching its deadline. It ends once nothing owns
+/// the origin.
+struct RouteTimer {
+	node: crate::route::Node,
+	deadline: crate::time::Deadline,
+	origin: TasksWeak,
+}
+
+impl kio::Task for RouteTimer {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.origin.poll_orphaned(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		loop {
+			if let Poll::Ready(at) = self.node.poll_deadline(self.deadline.deadline(), waiter) {
+				self.deadline.set(at);
+				continue;
+			}
+			ready!(self.deadline.poll(waiter));
+			// Firing moves the deadline past now, which the next pass arms.
+			self.node.timeout();
+			if self.node.poll_deadline(self.deadline.deadline(), waiter).is_pending() {
+				// It stayed put: wait for it to move rather than fire it again.
+				return Poll::Pending;
+			}
+		}
 	}
 }
 
@@ -4435,7 +4525,7 @@ impl kio::Task for FrontServeRun {
 }
 
 /// The route a front may serve from. `resolved` is the instance the front first
-/// resolved, once it has. Its routes serve one continuous sequence space, so any of them
+/// resolved, once it has. Its routes serve one continuous key space, so any of them
 /// at its newest epoch may take over. The front stays until those routes go, even once
 /// another instance wins the path: its subscriptions are sticky, and new requests
 /// resolve the winner on a fresh front.
@@ -4780,7 +4870,7 @@ impl FrontServe {
 							Err(Error::Cancel)
 						}
 					};
-					let delivered = copy.latest_sequence().is_some();
+					let delivered = copy.latest_key().is_some();
 					return Some(FrontStep::Ended(name.clone(), *source, result, delivered));
 				}
 				// Watch the demand edge in whichever direction is unmet. Only `Pending`
@@ -5275,7 +5365,7 @@ impl kio::Task for FrontServe {
 					// nothing is a refusal, which leaves a draining incumbent serving.
 					let result = match result {
 						Ok(info) => match asked.copy.poll_complete(&kio::Waiter::noop()) {
-							Poll::Ready(Err(err)) if asked.copy.latest_sequence().is_none() => Err(err),
+							Poll::Ready(Err(err)) if asked.copy.latest_key().is_none() => Err(err),
 							_ => Ok(info),
 						},
 						Err(err) => Err(err),
@@ -6632,9 +6722,9 @@ impl OriginState {
 	/// A job's route carrying `spent`, the instance it took from the prefix route `id` at
 	/// `prefix`, stopped serving it: that prefix route moves to a fresh instance.
 	///
-	/// One instance is one stream at each path, and the job's sequences end with it. Were the
+	/// One instance is one stream at each path, and the job's keys end with it. Were the
 	/// prefix route to keep the instance, its next answer for the path, a restarted job,
-	/// would splice a new sequence space into everything that holds the old one, and nothing
+	/// would splice a new key space into everything that holds the old one, and nothing
 	/// short of remembering every path it ever answered could tell. Under the table's lock,
 	/// with the job's retraction, so no request resolves the path through the old instance
 	/// in between. A prefix route already past `spent` has nothing to do.
@@ -6896,7 +6986,7 @@ impl Request {
 	/// continues on this answer; a prefix route that lends nothing has the route mint its
 	/// own. Ending the route withdraws only this path, and moves a prefix route that lent
 	/// its instance to a fresh one, so a job that ends and restarts beneath the same prefix
-	/// is a new stream for its restarted sequences. The prefix route keeps answering later
+	/// is a new stream for its restarted keys. The prefix route keeps answering later
 	/// requests. Created visible, the route announces now and answers the requesters
 	/// waiting on its path. Created [`RouteOptions::hidden`], they wait until
 	/// [`Route::announce`], so the job can fill its catalog first; dropping the route
@@ -6915,7 +7005,7 @@ impl Request {
 	/// Serve a held broadcast under this prefix route without announcing an exact route.
 	///
 	/// The answer belongs to the prefix route's instance at this path: every answer for
-	/// that path must continue the same sequence space and bytes. Start a new prefix
+	/// that path must continue the same key space and bytes. Start a new prefix
 	/// route to serve different content there. For a job that may restart independently,
 	/// use [`Self::route`]: its end moves the prefix route to another instance.
 	pub fn serve(self, broadcast: impl Consume<broadcast::Consumer>) {
@@ -7398,13 +7488,14 @@ impl Consumer {
 		id.and_then(NonZeroU64::new)
 	}
 
-	/// Hold back the disconnect of every route stream dropped until the guard is
-	/// released, so a session closing its streams costs the route layer one recompute;
-	/// `None` while no session created the route node, which then has no streams.
+	/// Hold back the disconnect of every route stream of the session `tag` dropped until
+	/// the guard is released, so the session closing costs the route layer one recompute
+	/// and reports its hops dead; `None` while no session created the route node, which
+	/// then has no streams.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self) -> Option<crate::route::node::Closing> {
+	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
 		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing())
+		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The route layer node every lite-07 session on this origin shares, created on
@@ -7455,7 +7546,7 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		let node = crate::route::Node::origin(self.hop());
+		let node = crate::route::Node::origin(self.hop(), self.timers.clone());
 		let claims = OwnClaims {
 			routes: own(false).routes(),
 			downstream: own(true).routes(),
@@ -7476,6 +7567,11 @@ impl Consumer {
 		drop(shared);
 		self.tasks.push(FeedOwnClaims {
 			claims,
+			origin: self.tasks.clone(),
+		});
+		self.tasks.push(RouteTimer {
+			node: created.0.clone(),
+			deadline: crate::time::Deadline::new(&self.timers),
 			origin: self.tasks.clone(),
 		});
 		created
@@ -7542,6 +7638,13 @@ impl Consumer {
 		self.scope.allowed.contains(&subtree)
 			&& !self.scope.excluded.iter().any(overlaps)
 			&& !self.scope.mounts.iter().any(|mount| overlaps(&mount.at))
+	}
+
+	/// Where `path`, relative to this handle's root, lies on the origin: past its mount,
+	/// if any. `None` when it does not fit the wire limits there.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn resolve(&self, path: &Path) -> Option<Path> {
+		self.scope.resolve(&self.root.join(path).ok()?)
 	}
 
 	/// A clone that sees only the routes `node` admits: a request naming an origin
@@ -7950,7 +8053,7 @@ impl Consumer {
 	///
 	/// When its serving source dies or a better route of the same instance appears,
 	/// including a higher epoch, the front switches to it, invisibly to subscribers: the
-	/// instance promises one continuous sequence space. Its routes retracting with no
+	/// instance promises one continuous key space. Its routes retracting with no
 	/// replacement ends the broadcast, and the next request re-serves the path;
 	/// tracks already in flight carry on to their own end. The broadcast also ends
 	/// once no handle holds it and none of its tracks has been read for a linger,
@@ -8893,9 +8996,9 @@ mod tests {
 
 		// The query is already in flight when metadata and the abort arrive together.
 		let track = track.accept(track::Info::timed());
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"history".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"history".as_ref()).unwrap();
+		group.close().unwrap();
 		track.abort(Error::App(7)).unwrap();
 		driver.poll(now, &waiter).unwrap();
 		let Poll::Ready(Ok(mut subscriber)) = subscribing.poll_ok(&waiter) else {
@@ -8923,8 +9026,8 @@ mod tests {
 			let broadcast = Arc::new(broadcast::Info::default());
 			let source = track::Producer::new(broadcast.clone(), "catalog.json", crate::track::Info::timed());
 			let mut group = source.create_group(7u64.into()).unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.write_frame(group.key_time(), b"snapshot".as_ref()).unwrap();
+			group.close().unwrap();
 			let source = source.finish().unwrap();
 
 			let routes = crate::model::resume::Producer::new();
@@ -8950,7 +9053,7 @@ mod tests {
 			io.end(Ok(()), None);
 
 			let mut group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
-			assert_eq!(group.sequence, 7);
+			assert_eq!(group.start, 7);
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(frame.payload.as_ref(), b"snapshot");
 			assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
@@ -9687,9 +9790,9 @@ mod tests {
 			.await
 			.unwrap();
 		let mut metered = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"frame".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"frame".as_ref()).unwrap();
+		group.close().unwrap();
 
 		let mut read = unmetered.recv_group().await.unwrap().expect("a group");
 		assert_eq!(
@@ -9704,6 +9807,62 @@ mod tests {
 			b"frame"
 		);
 		assert_eq!(bytes(), 5, "the metered handle still counts");
+	}
+
+	/// A billed subscriber counts nothing it reads, whether read whole or in chunks, and
+	/// counts each frame its reader delivers.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_billed_track_counts_only_what_its_reader_delivers() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1).produce();
+		let route = producer.route("room/alice", RouteOptions::default()).unwrap();
+		let track = route
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
+		let consumer = producer.consume().with_stats(
+			registry
+				.tier(stats::Tier::default())
+				.session(crate::stats::SessionInfo::new(crate::Path::from_static("viewer"))),
+		);
+		let broadcast = consumer.request("room/alice", None).await.expect("resolves");
+		let counted = || -> (u64, u64) {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.fold((0, 0), |(frames, bytes), (_, _, traffic)| {
+					(frames + traffic.frames, bytes + traffic.bytes)
+				})
+		};
+
+		let mut subscriber = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
+		let bill = subscriber.bill();
+		let mut group = track.append_group(0).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"dropped".as_ref()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"sent".as_ref()).unwrap();
+		group.close().unwrap();
+
+		let mut read = subscriber.recv_group().await.unwrap().expect("a group");
+		let mut chunked = read.clone();
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"dropped"
+		);
+		let sent = read.read_frame().await.unwrap().expect("a frame").payload;
+		chunked
+			.next_frame()
+			.await
+			.unwrap()
+			.expect("a frame")
+			.read_all()
+			.await
+			.unwrap();
+		assert_eq!(counted(), (0, 0), "a read counts nothing");
+
+		bill.deliver(sent.len() as u64);
+		assert_eq!(counted(), (1, 4), "a delivered frame counts");
 	}
 
 	/// A group a fill answers is ingress like a group the publisher writes live: a relay
@@ -9733,9 +9892,10 @@ mod tests {
 				.sum()
 		};
 
-		let mut live = track.create_group(crate::group::Info { sequence: 1 }).unwrap();
-		live.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
-		live.finish().unwrap();
+		let mut live = track.create_group(crate::group::Info { start: 1 }).unwrap();
+		live.write_frame(crate::Timestamp::from_millis(1).unwrap(), b"live".as_ref())
+			.unwrap();
+		live.close().unwrap();
 		assert_eq!(ingress(), 4);
 
 		let fetch = track.consume().fetch_group(0, None);
@@ -9744,7 +9904,7 @@ mod tests {
 		fetched
 			.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref())
 			.unwrap();
-		fetched.finish().unwrap();
+		fetched.close().unwrap();
 		fetch.await.unwrap();
 		assert_eq!(ingress(), 4 + 7, "the fetched group counts as well");
 
@@ -10469,6 +10629,37 @@ mod tests {
 		);
 	}
 
+	/// A lite-07 route ranks by the lowest priority of any link on its path, so one that
+	/// crossed a demoted link further on loses to a dearer one that crossed none.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn request_avoids_a_path_through_a_demoted_link_even_when_cheaper() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let route = |node, priority, cost| {
+			let lane = Lane {
+				priority: Some(priority),
+				..Lane::default()
+			};
+			RouteInfo::new()
+				.with_hops(hops(&[node]))
+				.with_node(Some(node))
+				.with_lane(lane)
+				.with_cost(cost)
+		};
+
+		let demoted = producer.forward("room", route(10, -10, 1)).unwrap();
+		let unranked = producer.forward("room", route(11, 0, 5)).unwrap();
+
+		let _pending = consumer.request("room/alice", None);
+		let request = queued(&unranked).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		assert!(
+			demoted.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"the cheaper path through a demoted link must not serve"
+		);
+	}
+
 	/// A draining route ranks below every other eligible one, even on a preferred link
 	/// against a demoted one, whatever the costs say.
 	#[kio::test]
@@ -11033,7 +11224,10 @@ mod tests {
 			proxy: true,
 			..Default::default()
 		};
-		let stream = producer.route_node().answer(link, Path::empty()).unwrap();
+		let stream = producer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		assert!(
 			matches!(
 				stream.try_output(),
@@ -11090,7 +11284,10 @@ mod tests {
 			proxy: true,
 			..Default::default()
 		};
-		let stream = producer.route_node().answer(link, Path::empty()).unwrap();
+		let stream = producer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		let reenter = Arc::new(Reenter {
 			consumer: producer.consume(),
 			reentered: AtomicUsize::new(0),
@@ -11239,9 +11436,9 @@ mod tests {
 				.await;
 
 				let source = request.accept(crate::track::Info::timed());
-				let mut group = source.append_group().unwrap();
-				group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
-				group.finish().unwrap();
+				let mut group = source.append_next().unwrap();
+				group.write_frame(group.key_time(), b"late".as_ref()).unwrap();
+				group.close().unwrap();
 				let source = source.finish().unwrap();
 
 				let mut subscription = subscribing.await.expect("subscribe survives the retraction");
@@ -11286,16 +11483,12 @@ mod tests {
 			.expect("request");
 		let source = request.request_start(None).accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.write_frame(group.key_time(), b"snapshot".as_ref()).unwrap();
+		group.close().unwrap();
 		let source = source.finish().unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		assert_eq!(
-			next_group(&mut subscription)
-				.await
-				.unwrap()
-				.expect("the catalog")
-				.sequence,
+			next_group(&mut subscription).await.unwrap().expect("the catalog").start,
 			0
 		);
 		assert!(next_group(&mut subscription).await.unwrap().is_none());
@@ -11305,11 +11498,7 @@ mod tests {
 		// Within the linger, a returning reader gets the finished track from the front.
 		let mut subscription = resolved.track("catalog").unwrap().subscribe(None).await.unwrap();
 		assert_eq!(
-			next_group(&mut subscription)
-				.await
-				.unwrap()
-				.expect("the catalog")
-				.sequence,
+			next_group(&mut subscription).await.unwrap().expect("the catalog").start,
 			0
 		);
 		assert!(next_group(&mut subscription).await.unwrap().is_none());
@@ -11345,8 +11534,8 @@ mod tests {
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
 		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
-		let mut group = source.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
+		let mut group = source.append_next().unwrap();
+		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
 
 		let counts = || {
 			let table = producer.shared.lock();
@@ -11424,8 +11613,8 @@ mod tests {
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
 		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
-		let mut group = source.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
+		let mut group = source.append_next().unwrap();
+		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
 		let fronts = || producer.shared.lock().fronts.len();
 
 		let pending = consumer.request("room/alice", None);
@@ -11557,8 +11746,8 @@ mod tests {
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
 		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
-		let mut group = source.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
+		let mut group = source.append_next().unwrap();
+		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
 		let fronts = || producer.shared.lock().fronts.len();
 
 		let pending = producer.consume().request("room/alice", None);
@@ -11668,8 +11857,8 @@ mod tests {
 			.unwrap()
 			.accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"b".as_ref()).unwrap();
+		group.write_frame(group.key_time(), b"a".as_ref()).unwrap();
+		group.write_frame(group.key_time(), b"b".as_ref()).unwrap();
 		let mut subscription = subscribing.await.unwrap().unwrap();
 		let mut reading = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(read(&mut reading).await, b"a");
@@ -11716,7 +11905,7 @@ mod tests {
 			while let Ok(request) = fetches.requested_fill_group().await {
 				let mut group = request.accept(crate::track::Info::timed()).unwrap();
 				for frame in [b"a", b"b", b"c"] {
-					group.write_frame(crate::Timestamp::ZERO, frame.as_ref()).unwrap();
+					group.write_frame(group.key_time(), frame.as_ref()).unwrap();
 				}
 				serving.lock().unwrap().push(group);
 			}
@@ -11725,14 +11914,14 @@ mod tests {
 		next.start_at(0).unwrap();
 		let mut next_group = next.create_group(0u64.into()).unwrap();
 		next_group.start_at(2).unwrap();
-		next_group.write_frame(crate::Timestamp::ZERO, b"c".as_ref()).unwrap();
+		next_group.write_frame(next_group.key_time(), b"c".as_ref()).unwrap();
 		assert_eq!(read(&mut reading).await, b"c", "dies_first={dies_first}");
 
 		// A preempted route still owns its open group: its writer and other readers carry
 		// on, and its copy of the frame the replacement already wrote is a duplicate.
 		if let Some((group, ..)) = &mut first {
 			let mut independent = group.consume();
-			group.write_frame(crate::Timestamp::ZERO, b"c".as_ref()).unwrap();
+			group.write_frame(group.key_time(), b"c".as_ref()).unwrap();
 			for expect in [b"a", b"b", b"c"] {
 				assert_eq!(read(&mut independent).await, expect);
 			}
@@ -11749,7 +11938,7 @@ mod tests {
 			.unwrap_or_else(|_| panic!("dies_first={dies_first}: the later reader never got the group"))
 			.unwrap()
 			.expect("track ended");
-		assert_eq!(late.sequence, 0);
+		assert_eq!(late.start, 0);
 		for expect in [b"a", b"b", b"c"] {
 			assert_eq!(read(&mut late).await, expect, "dies_first={dies_first}");
 		}
@@ -11759,7 +11948,7 @@ mod tests {
 				.await
 				.expect("the reader joining mid-outage never got the group")
 				.unwrap();
-			assert_eq!(group.sequence, 0);
+			assert_eq!(group.start, 0);
 			for expect in [b"a", b"b", b"c"] {
 				assert_eq!(read(&mut group).await, expect);
 			}
@@ -11775,16 +11964,16 @@ mod tests {
 		);
 
 		// The continuation still flows to both.
-		next_group.write_frame(crate::Timestamp::ZERO, b"d".as_ref()).unwrap();
+		next_group.write_frame(next_group.key_time(), b"d".as_ref()).unwrap();
 		for group in fetched.lock().unwrap().iter_mut() {
-			group.write_frame(crate::Timestamp::ZERO, b"d".as_ref()).unwrap();
+			group.write_frame(group.key_time(), b"d".as_ref()).unwrap();
 		}
 		assert_eq!(read(&mut reading).await, b"d");
 		assert_eq!(read(&mut late).await, b"d");
 		if let Some((_, group)) = &mut joined {
 			assert_eq!(read(group).await, b"d");
 		}
-		next_group.finish().unwrap();
+		next_group.close().unwrap();
 		drop((
 			joined,
 			reading,
@@ -11816,9 +12005,9 @@ mod tests {
 			.expect("the front asked the source")
 			.expect("request");
 		let source = request.accept(crate::track::Info::timed());
-		let mut group = source.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = source.append_next().unwrap();
+		group.write_frame(group.key_time(), b"cached".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		subscription.recv_group().await.unwrap().expect("the cached group");
 		drop(subscription);
@@ -11843,8 +12032,8 @@ mod tests {
 		// A fresh source copy numbers groups past what the cache already delivered.
 		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.create_group(1u64.into()).unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.write_frame(group.key_time(), b"late".as_ref()).unwrap();
+		group.close().unwrap();
 		let _source = source.finish().unwrap();
 
 		let mut subscription = subscribing.await.unwrap().expect("subscribe survives the retraction");
@@ -13505,7 +13694,7 @@ mod tests {
 
 		let front = producer.consume().request("room", None).await.unwrap();
 		let mut reader = front.datagrams("audio").unwrap();
-		datagrams.append(None, "x").unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		let datagram = reader.recv().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(datagram.sequence, 0);
 		assert!(matches!(front.datagrams("video"), Err(Error::NotFound)));
@@ -13523,9 +13712,9 @@ mod tests {
 		let source = broadcast::Info::new().produce();
 		for name in ["a", "b"] {
 			let track = source.create_track(name, crate::track::Info::timed()).unwrap();
-			let mut group = track.append_group().unwrap();
-			group.write_frame(crate::Timestamp::ZERO, name.as_bytes()).unwrap();
-			group.finish().unwrap();
+			let mut group = track.append_next().unwrap();
+			group.write_frame(group.key_time(), name.as_bytes()).unwrap();
+			group.close().unwrap();
 			// The producer stays alive: the track is open, like a live SI track.
 			std::mem::forget(track);
 		}
@@ -13856,9 +14045,9 @@ mod tests {
 			let request = queued(&server).await;
 			let source = broadcast::Info::new().produce();
 			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
-			let mut group = track.append_group().unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-			group.finish().unwrap();
+			let mut group = track.append_next().unwrap();
+			group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+			group.close().unwrap();
 			request.serve(&source);
 
 			let resolved = pending.await.expect("resolves");
@@ -13911,14 +14100,14 @@ mod tests {
 		let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 		// The same content: group 0 was already delivered through the old route,
 		// so the track resumes at group 1.
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+		group.close().unwrap();
 		request.serve(&replacement);
 
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"resumed".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"resumed".as_ref()).unwrap();
+		group.close().unwrap();
 
 		let mut group = rig
 			.subscription
@@ -13932,7 +14121,7 @@ mod tests {
 
 	/// Only an instance's highest epoch is eligible: a costlier route at a higher epoch
 	/// takes the front over from the cheaper older one still standing, and the reader
-	/// continues across the epoch change without a seam, since the instance's sequences
+	/// continues across the epoch change without a seam, since the instance's keys
 	/// continue. A new request joins the same broadcast.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -14048,9 +14237,9 @@ mod tests {
 	/// Write one single-frame group and read it back through `subscription`.
 	#[cfg(feature = "async")]
 	async fn deliver(track: &track::Producer, subscription: &mut track::Subscriber, payload: &'static [u8]) {
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, payload).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), payload).unwrap();
+		group.close().unwrap();
 		let mut group = next_group(subscription).await.unwrap().expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], payload);
 	}
@@ -14442,9 +14631,9 @@ mod tests {
 			let request = queued(&standby_server).await;
 			let successor = broadcast::Info::new().produce();
 			let track = successor.create_track("video", replacement).unwrap();
-			let mut group = track.append_group().unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-			group.finish().unwrap();
+			let mut group = track.append_next().unwrap();
+			group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+			group.close().unwrap();
 			request.serve(&successor);
 			rig.incumbent_track.clone().abort(Error::Dropped).unwrap();
 
@@ -14490,11 +14679,11 @@ mod tests {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 		let mut group = rig
 			.incumbent_track
-			.create_group(crate::group::Info { sequence: 5 })
+			.create_group(crate::group::Info { start: 5 })
 			.unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"five".as_ref()).unwrap();
-		group.finish().unwrap();
-		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().sequence, 5);
+		group.write_frame(group.key_time(), b"five".as_ref()).unwrap();
+		group.close().unwrap();
+		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().start, 5);
 		let standby = rig.standby(&[10, 20]);
 		drop(incumbent);
 		drop(source);
@@ -14522,9 +14711,9 @@ mod tests {
 			let standby = rig.standby(&[10, 20]);
 			server.update(RouteInfo::new().with_hops(hops(&[11]))).unwrap();
 
-			let mut group = rig.incumbent_track.append_group().unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"after".as_ref()).unwrap();
-			group.finish().unwrap();
+			let mut group = rig.incumbent_track.append_next().unwrap();
+			group.write_frame(group.key_time(), b"after".as_ref()).unwrap();
+			group.close().unwrap();
 			let mut group = next_group(&mut rig.subscription)
 				.await
 				.expect("the subscription survives the update")
@@ -14571,9 +14760,9 @@ mod tests {
 			let request = queued(&incumbent).await;
 			let source = broadcast::Info::new().produce();
 			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
-			let mut group = track.append_group().unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-			group.finish().unwrap();
+			let mut group = track.append_next().unwrap();
+			group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+			group.close().unwrap();
 			request.serve(&source);
 
 			let resolved = pending.await.expect("resolves through the incumbent");
@@ -14599,13 +14788,13 @@ mod tests {
 					let request = queued(&echo).await;
 					let replacement = broadcast::Info::new().produce();
 					let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
-					let mut group = track.append_group().unwrap();
-					group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-					group.finish().unwrap();
+					let mut group = track.append_next().unwrap();
+					group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+					group.close().unwrap();
 					request.serve(&replacement);
-					let mut group = track.append_group().unwrap();
-					group.write_frame(crate::Timestamp::ZERO, b"resumed".as_ref()).unwrap();
-					group.finish().unwrap();
+					let mut group = track.append_next().unwrap();
+					group.write_frame(group.key_time(), b"resumed".as_ref()).unwrap();
+					group.close().unwrap();
 
 					let mut group = next_group(&mut subscription).await.unwrap().expect("resumed group");
 					assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"resumed");
@@ -14637,9 +14826,9 @@ mod tests {
 		let request = queued(&server_a).await;
 		let source_a = broadcast::Info::new().produce();
 		let track_a = source_a.create_track("video", crate::track::Info::timed()).unwrap();
-		let mut group = track_a.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"from-a".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track_a.append_next().unwrap();
+		group.write_frame(group.key_time(), b"from-a".as_ref()).unwrap();
+		group.close().unwrap();
 		request.serve(&source_a);
 
 		let resolved_a = pending.await.expect("resolves");
@@ -14689,9 +14878,9 @@ mod tests {
 		let request = queued(&server_b).await;
 		let source_b = broadcast::Info::new().produce();
 		let track_b = source_b.create_track("video", crate::track::Info::timed()).unwrap();
-		let mut group = track_b.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"from-b".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track_b.append_next().unwrap();
+		group.write_frame(group.key_time(), b"from-b".as_ref()).unwrap();
+		group.close().unwrap();
 		request.serve(&source_b);
 
 		let resolved_b = pending.await.expect("B's front is served immediately");
@@ -14729,9 +14918,9 @@ mod tests {
 			.unwrap();
 
 		let track = source.create_track("audio", crate::track::Info::timed()).unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"steady".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"steady".as_ref()).unwrap();
+		group.close().unwrap();
 
 		let mut audio = rig
 			.resolved
@@ -14880,9 +15069,9 @@ mod tests {
 			.await
 			.expect("subscribe");
 		// A textbook clean end, innermost first: the group, the track, the broadcast.
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"tail".as_ref()).unwrap();
+		group.close().unwrap();
 		let track = track.finish().unwrap();
 		drop(track);
 		broadcast.broadcast().close();
@@ -14934,9 +15123,9 @@ mod tests {
 		source.close();
 		drop(server);
 		settle(|| resolved.is_closed()).await;
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"tail".as_ref()).unwrap();
+		group.close().unwrap();
 		let track = track.finish().unwrap();
 		drop(track);
 
@@ -14990,9 +15179,9 @@ mod tests {
 			.broadcast()
 			.create_track("video", crate::track::Info::timed())
 			.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"cached".as_ref()).unwrap();
+		group.close().unwrap();
 
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
@@ -15033,9 +15222,9 @@ mod tests {
 			.expect("returning reader re-splices the source")
 			.expect("source closed");
 
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = kio::clock::timeout(Duration::from_secs(1), again.recv_group())
 			.await
 			.expect("groups past the cached edge come from the re-splice")
@@ -15061,15 +15250,15 @@ mod tests {
 		let resolved = pending.await.unwrap();
 
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut writing = track.append_group().unwrap();
-		writing.write_frame(crate::Timestamp::ZERO, b"head".as_ref()).unwrap();
+		let mut writing = track.append_next().unwrap();
+		writing.write_frame(writing.key_time(), b"head".as_ref()).unwrap();
 		let mut reading = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"head");
 
 		drop(subscription);
 		kio::clock::sleep(Duration::from_millis(10)).await;
-		writing.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
-		writing.finish().unwrap();
+		writing.write_frame(writing.key_time(), b"tail".as_ref()).unwrap();
+		writing.close().unwrap();
 
 		let tail = kio::clock::timeout(Duration::from_secs(1), reading.read_frame())
 			.await
@@ -15100,8 +15289,8 @@ mod tests {
 		let resolved = producer.consume().request("live", None).await.unwrap();
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let mut aborted = track.append_group().unwrap();
-		aborted.write_frame(crate::Timestamp::ZERO, b"head".as_ref()).unwrap();
+		let mut aborted = track.append_next().unwrap();
+		aborted.write_frame(aborted.key_time(), b"head".as_ref()).unwrap();
 		let mut reading = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"head");
 		aborted.abort(Error::Cancel).unwrap();
@@ -15110,9 +15299,9 @@ mod tests {
 		assert!(matches!(end, Ok(Err(_))), "the group should fail: {end:?}");
 
 		// The track carries on.
-		let mut next = track.append_group().unwrap();
-		next.write_frame(crate::Timestamp::ZERO, b"next".as_ref()).unwrap();
-		next.finish().unwrap();
+		let mut next = track.append_next().unwrap();
+		next.write_frame(next.key_time(), b"next".as_ref()).unwrap();
+		next.close().unwrap();
 		let mut group = kio::clock::timeout(Duration::from_secs(1), subscription.recv_group())
 			.await
 			.expect("the next group")
@@ -15135,9 +15324,9 @@ mod tests {
 			.broadcast()
 			.create_track("video", crate::track::Info::timed())
 			.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"cached".as_ref()).unwrap();
+		group.close().unwrap();
 
 		// The leaf's front view, which the next front serves from.
 		let leaf_front = leaf_consumer.request("room/alice", None).await.expect("resolves");
@@ -15183,9 +15372,9 @@ mod tests {
 			.await
 			.expect("resubscribe should reach the leaf")
 			.expect("source open");
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 		drop(group);
@@ -15201,9 +15390,9 @@ mod tests {
 
 		// A group the leaf produced while every front was parked: the fetch re-splices
 		// each hop to reach the leaf.
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"fetched".as_ref()).unwrap();
+		group.close().unwrap();
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
@@ -15241,9 +15430,9 @@ mod tests {
 			.subscribe(None)
 			.await
 			.expect("subscribe");
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -15260,9 +15449,9 @@ mod tests {
 		}
 
 		// Still spliced to the incumbent, still delivering.
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
 
@@ -15289,9 +15478,9 @@ mod tests {
 		queued(&server).await.serve(&upstream);
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		(producer, server, upstream, old, subscription)
@@ -15347,9 +15536,9 @@ mod tests {
 			kio::clock::sim::yield_now().await;
 		}
 
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15390,9 +15579,9 @@ mod tests {
 		queued(&server).await.serve(&upstream);
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -15413,9 +15602,9 @@ mod tests {
 			kio::clock::sim::yield_now().await;
 		}
 
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"last".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15425,7 +15614,7 @@ mod tests {
 		let _old = old.finish().unwrap();
 		let end = next_group(&mut subscription)
 			.await
-			.map(|group| group.map(|group| group.sequence));
+			.map(|group| group.map(|group| group.start));
 		assert!(matches!(end, Ok(None)), "the incumbent's clean end, not {end:?}");
 	}
 
@@ -15455,9 +15644,9 @@ mod tests {
 			kio::clock::sim::yield_now().await;
 		}
 
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15489,9 +15678,9 @@ mod tests {
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"last".as_ref()).unwrap();
+		group.close().unwrap();
 		let _old = old.finish().unwrap();
 		replacement.abort(Error::App(7)).unwrap();
 
@@ -15504,26 +15693,27 @@ mod tests {
 	}
 
 	/// The incumbent finishes and the newcomer aborts before its first group: a reader whose
-	/// range starts past the end, and one joining while the newcomer is awaited, end cleanly.
+	/// range starts past the last group, which contains its start, and one joining while the
+	/// newcomer is awaited, each read that group and end cleanly.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn readers_owed_nothing_below_the_incumbents_end_end_cleanly() {
 		let (producer, _server, _upstream, old, _subscription) = remote_front().await;
 		let resolved = producer.consume().request("room/alice", None).await.unwrap();
 		let video = resolved.track("video").unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"last".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut later = video
 			.subscribe(crate::track::Subscription {
 				ranges: vec![crate::track::Range {
-					start: crate::track::Anchor::Absolute(3),
+					start: crate::track::Anchor::Time(3),
 					end: None,
 				}],
 				..Default::default()
 			})
 			.await
 			.unwrap();
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
-		group.finish().unwrap();
 
 		let newcomer = producer
 			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
@@ -15545,13 +15735,14 @@ mod tests {
 		let _old = old.finish().unwrap();
 		replacement.abort(Error::App(7)).unwrap();
 
-		assert!(matches!(next_group(&mut later).await, Ok(None)));
-		let mut group = next_group(&mut joiner)
-			.await
-			.expect("the incumbent's latest group")
-			.expect("track open");
-		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
-		assert!(matches!(next_group(&mut joiner).await, Ok(None)));
+		for reader in [&mut later, &mut joiner] {
+			let mut group = next_group(reader)
+				.await
+				.expect("the incumbent's latest group")
+				.expect("track open");
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"last");
+			assert!(matches!(next_group(reader).await, Ok(None)));
+		}
 	}
 
 	/// While the front waits for the newcomer's first group, a reader changing its
@@ -15683,9 +15874,9 @@ mod tests {
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"draining".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"draining".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("draining group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"draining");
 		drop(group);
@@ -15704,9 +15895,9 @@ mod tests {
 		}
 
 		let mut again = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = old.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"after".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = old.append_next().unwrap();
+		group.write_frame(group.key_time(), b"after".as_ref()).unwrap();
+		group.close().unwrap();
 		let outcome = kio::clock::timeout(Duration::from_secs(5), async {
 			loop {
 				match again.recv_group().await {
@@ -15733,8 +15924,8 @@ mod tests {
 	async fn a_parked_track_serves_whole_groups_from_its_copy() {
 		let (producer, _server, _upstream, old, subscription) = remote_front().await;
 		let resolved = producer.consume().request("room/alice", None).await.unwrap();
-		let mut open = old.append_group().unwrap();
-		open.write_frame(crate::Timestamp::ZERO, b"open".as_ref()).unwrap();
+		let mut open = old.append_next().unwrap();
+		open.write_frame(open.key_time(), b"open".as_ref()).unwrap();
 		drop(subscription);
 		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
 			.await
@@ -15754,7 +15945,7 @@ mod tests {
 			(&mut fetching).now_or_never().is_none(),
 			"an open group needs the route"
 		);
-		open.finish().unwrap();
+		open.close().unwrap();
 		let mut group = fetching.await.unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"open");
 	}
@@ -15807,9 +15998,9 @@ mod tests {
 			.unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -15851,9 +16042,9 @@ mod tests {
 			.unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		drop(group);
@@ -15873,13 +16064,13 @@ mod tests {
 		second.withdraw();
 		settle(|| resolved.is_closed()).await;
 
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
+		group.close().unwrap();
 		for payload in [b"wrong0".as_ref(), b"wrong1".as_ref()] {
-			let mut group = incompatible.append_group().unwrap();
-			group.write_frame(crate::Timestamp::ZERO, payload).unwrap();
-			group.finish().unwrap();
+			let mut group = incompatible.append_next().unwrap();
+			group.write_frame(group.key_time(), payload).unwrap();
+			group.close().unwrap();
 		}
 
 		let mut group = next_group(&mut subscription)
@@ -15911,9 +16102,9 @@ mod tests {
 			.unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
+		group.close().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		drop(group);
@@ -15932,9 +16123,9 @@ mod tests {
 		second.withdraw();
 		settle(|| resolved.is_closed()).await;
 
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
+		group.close().unwrap();
 		request.reject(Error::NotFound);
 
 		let mut group = next_group(&mut subscription)
@@ -16063,7 +16254,10 @@ mod tests {
 		};
 		let consumer = producer.consume();
 		let alice = producer.announce("room/alice", RouteInfo::new()).unwrap();
-		let stream = consumer.route_node().answer(link, Path::empty()).unwrap();
+		let stream = consumer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		assert!(
 			driver.poll(Instant::now(), &waiter).is_ok(),
 			"the producer owns the origin"
@@ -16623,9 +16817,9 @@ mod tests {
 			.broadcast()
 			.create_track("video", crate::track::Info::timed())
 			.unwrap();
-		let mut written = track.append_group().unwrap();
-		written.write_frame(crate::Timestamp::ZERO, b"frame".as_ref()).unwrap();
-		written.finish().unwrap();
+		let mut written = track.append_next().unwrap();
+		written.write_frame(written.key_time(), b"frame".as_ref()).unwrap();
+		written.close().unwrap();
 		let _track = track.finish().unwrap();
 		let mut reader = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = reader.recv_group().await.unwrap().unwrap();
@@ -16712,12 +16906,12 @@ mod tests {
 			.create_track("video", crate::track::Info::timed())
 			.unwrap();
 
-		let mut stalled = track.append_group().unwrap();
-		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		let mut stalled = track.append_next().unwrap();
+		stalled.write_frame(stalled.key_time(), b"x".as_slice()).unwrap();
 		// A successor, so the stalled group is not the protected live edge. Its
 		// timestamp is inside the max age, so the stalled group stays fresh and
 		// subscription expiry never skips it: only reclamation can bound it.
-		let _successor = track.append_group().unwrap();
+		let _successor = track.append_next().unwrap();
 
 		let mut reading = stalled.consume();
 		assert!(reading.read_frame().await.unwrap().is_some());
@@ -16748,9 +16942,9 @@ mod tests {
 			.create_track("video", crate::track::Info::timed())
 			.unwrap();
 
-		let mut stalled = track.append_group().unwrap();
-		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
-		let _successor = track.append_group().unwrap();
+		let mut stalled = track.append_next().unwrap();
+		stalled.write_frame(stalled.key_time(), b"x".as_slice()).unwrap();
+		let _successor = track.append_next().unwrap();
 
 		let mut reading = stalled.consume();
 		assert!(reading.read_frame().await.unwrap().is_some());

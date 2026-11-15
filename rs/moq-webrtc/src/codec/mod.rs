@@ -199,6 +199,9 @@ pub struct PacketizedFrame {
 	pub payload: Bytes,
 	/// The frame opens a group, so a peer can start decoding the rendition here.
 	pub keyframe: bool,
+	/// The payload as read and what counts it once written to the peer: the parameter sets
+	/// a conversion prepends are not the rendition's, as no other egress counts them.
+	pub charge: (moq_net::stats::Bill, u64),
 }
 
 /// A subscribed moq-mux track, normalized to the bitstream shape str0m's
@@ -210,6 +213,8 @@ pub struct PacketizedFrame {
 pub struct Track {
 	consumer: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	convert: TrackConvert,
+	/// Counts each frame's payload once written, so what a switch or an unready peer drops counts nothing.
+	bill: moq_net::stats::Bill,
 }
 
 /// Codec-specific per-frame transform.
@@ -228,20 +233,23 @@ enum TrackConvert {
 
 impl Track {
 	/// Audio track for an Opus rendition, from a subscribed `track` read in `config`'s container.
-	pub fn opus(track: moq_net::track::Subscriber, config: &AudioConfig) -> Result<Self> {
+	pub fn opus(mut track: moq_net::track::Subscriber, config: &AudioConfig) -> Result<Self> {
 		let container: moq_mux::catalog::hang::Container = config.try_into()?;
+		let bill = track.bill();
 		let consumer = moq_mux::container::Consumer::new(track, container);
 		Ok(Self {
 			consumer,
 			convert: TrackConvert::Passthrough,
+			bill,
 		})
 	}
 
 	/// Video track from a subscribed `track` consumer. Codec inferred from
 	/// `config.codec`; for H.264 / H.265 the bitstream shape (inline vs out-of-band
 	/// parameter sets) is inferred from `config.description` (avc1/hvc1 vs avc3/hev1).
-	pub fn video(track: moq_net::track::Subscriber, config: &VideoConfig) -> Result<Self> {
+	pub fn video(mut track: moq_net::track::Subscriber, config: &VideoConfig) -> Result<Self> {
 		let container: moq_mux::catalog::hang::Container = config.try_into()?;
+		let bill = track.bill();
 		let consumer = moq_mux::container::Consumer::new(track, container);
 
 		let convert = match &config.codec {
@@ -253,7 +261,11 @@ impl Track {
 			other => return Err(crate::Error::UnsupportedCodec(format!("{other:?}"))),
 		};
 
-		Ok(Self { consumer, convert })
+		Ok(Self {
+			consumer,
+			convert,
+			bill,
+		})
 	}
 
 	/// Pull the next RTP-ready frame. Returns `None` when the track ends.
@@ -265,6 +277,7 @@ impl Track {
 				Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
 				None => return Ok(None),
 			};
+			let read = frame.payload.len() as u64;
 			let payload = match &self.convert {
 				TrackConvert::Passthrough => frame.payload,
 				TrackConvert::LengthPrefixed {
@@ -280,9 +293,10 @@ impl Track {
 				continue;
 			}
 			return Ok(Some(PacketizedFrame {
-				timestamp_us: frame.timestamp.as_micros() as u64,
+				timestamp_us: frame.timestamp.as_micros().map_err(moq_mux::Error::from)? as u64,
 				payload,
 				keyframe: frame.keyframe,
+				charge: (self.bill.clone(), read),
 			}));
 		}
 	}

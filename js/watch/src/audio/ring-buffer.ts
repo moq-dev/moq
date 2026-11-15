@@ -202,12 +202,14 @@ export class AudioRingBuffer {
 
 	// Un-stall once the buffer holds the floor to start on, or after running dry, one stretch window
 	// and a read: the least that resumes without running dry again at once, and never more than the
-	// floor. Slowing down then rebuilds the depth rather than a wait in silence.
+	// floor. Slowing down then rebuilds the depth rather than a wait in silence. Audio up to a declared
+	// end plays however short, since nothing more is coming to fill it.
 	#resume(): void {
-		if (!this.#stalled) return;
+		if (!this.#stalled || this.length <= 0) return;
 		const cushion = Math.min(this.#latencySamples, this.#stretch.window + this.#period);
 		const need = this.#started ? cushion : this.#latencySamples;
-		if (this.length < need) return;
+		const complete = this.#end !== undefined && this.#writeIndex >= this.#end;
+		if (this.length < need && !complete) return;
 		this.#stalled = false;
 		this.#started = true;
 	}
@@ -333,6 +335,7 @@ export class AudioRingBuffer {
 	end(timestamp: number): void {
 		this.#end = Math.round((timestamp / 1_000_000) * this.rate);
 		this.#snapEnd();
+		this.#resume();
 		// The end can arrive after the playhead already ran out at it, or before any audio, as for a
 		// listener that joins during a mute.
 		if (!this.#anchored || (this.#stalled && this.length <= 0 && this.#ended())) this.#silent = true;
@@ -465,19 +468,18 @@ export class AudioRingBuffer {
 		// Snap onto the clock past the bound, or one window when that is larger: skip what trails it, and
 		// pad silence ahead of a playhead that leads it until the clock arrives. Less than that is the
 		// stretch's to play onto. Nothing was heard off the clock before a join, so a join snaps onto it
-		// past the hop the stretch leaves alone, whichever way it is off. A finite tail plays as received.
+		// past the hop the stretch leaves alone, whichever way it is off. A finite tail is never skipped,
+		// since all of it is heard, but it still waits for the clock rather than playing early.
 		let skip = 0;
 		let pad = 0;
 		if (this.#clock !== undefined) {
 			const lag = this.#clock - this.#playhead();
 			const threshold = this.#joined ? Math.max(this.#bound, this.#stretch.window) : this.#stretch.hop;
 			this.#joined = true;
-			if (!this.#ending()) {
-				if (lag > threshold) skip = lag;
-				const lead = Math.round(-lag);
-				this.#padding = lead > (this.#padding ? 0 : threshold);
-				if (this.#padding) pad = Math.min(lead, output[0].length);
-			}
+			if (!this.#ending() && lag > threshold) skip = lag;
+			const lead = Math.round(-lag);
+			this.#padding = lead > (this.#padding ? 0 : threshold);
+			if (this.#padding) pad = Math.min(lead, output[0].length);
 		}
 		if (skip > 0) {
 			const index = Math.min(this.#writeIndex, Math.ceil(this.#playhead() + skip));
@@ -527,8 +529,9 @@ export class AudioRingBuffer {
 		return samples;
 	}
 
-	// Whether the playhead is in audio before a declared end: a finite tail, which drains as received,
-	// since the next utterance re-anchors the ring anyway and its depth says nothing about the clock.
+	// Whether the playhead is in audio before a declared end: a finite tail, which is never skipped or
+	// stretched, since the next utterance re-anchors the ring anyway and its depth says nothing about
+	// the clock.
 	// The playhead rather than the read index, since the stretch may already hold the whole tail.
 	#ending(): boolean {
 		const end = this.#previous ?? this.#end;

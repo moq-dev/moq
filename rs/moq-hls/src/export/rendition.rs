@@ -33,7 +33,7 @@ const MIN_SEGMENT_GROUPS: u64 = 1024;
 
 /// The most groups one segment request ever fetches, whatever interval the catalog declares: see
 /// [`Rendition::max_groups`]. 20 ms audio groups fill it in about 22 minutes.
-const MAX_SEGMENT_GROUPS: u64 = 1 << 16;
+pub(crate) const MAX_SEGMENT_GROUPS: u64 = 1 << 16;
 
 /// DASH timelines are in milliseconds.
 const TIMESCALE: u32 = 1000;
@@ -107,7 +107,9 @@ struct Run {
 	epoch: u64,
 }
 
-/// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
+/// The rendition's normalized catalog config: what its [tag](segments::tag) hashes and every
+/// [`Muxer`] it builds reads, so a segment URL names the same bytes on every edge, whenever the
+/// edge built the rendition. The publisher's live estimates never reach the bytes.
 #[allow(
 	clippy::large_enum_variant,
 	reason = "one per rendition, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
@@ -634,7 +636,7 @@ impl Rendition {
 		self.enabled.load(Ordering::Relaxed)
 	}
 
-	/// The latest catalog bitrate, preserving `None` for muxer-specific fallback behavior.
+	/// The latest catalog bitrate, preserving `None` for the per-kind default.
 	fn bitrate(&self) -> Option<u64> {
 		*self.bitrate.read().expect("bitrate lock poisoned")
 	}
@@ -661,8 +663,9 @@ impl Rendition {
 		let track = config.track(&name);
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
 		let media = Media::bind(source, config, track, fanout.lazy)?;
+		let normalized = normalize_video(config);
 		Ok(Self {
-			tag: tag(track, interval, &normalize_video(config)),
+			tag: tag(track, interval, &normalized),
 			container,
 			name,
 			kind: Kind::Video,
@@ -672,7 +675,7 @@ impl Rendition {
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
-			config: Config::Video(config.clone()),
+			config: Config::Video(normalized),
 			target_duration: target_duration(grid::segment_length(interval)),
 			overruns: AtomicU64::new(0),
 			interval,
@@ -703,8 +706,9 @@ impl Rendition {
 		let track = config.track(&name);
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
 		let media = Media::bind(source, config, track, fanout.lazy)?;
+		let normalized = normalize_audio(config);
 		Ok(Self {
-			tag: tag(track, interval, &normalize_audio(config)),
+			tag: tag(track, interval, &normalized),
 			container,
 			name,
 			kind: Kind::Audio,
@@ -714,7 +718,7 @@ impl Rendition {
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
-			config: Config::Audio(config.clone()),
+			config: Config::Audio(normalized),
 			target_duration: target_duration(grid::segment_length(interval)),
 			overruns: AtomicU64::new(0),
 			interval,
@@ -897,7 +901,12 @@ impl Rendition {
 		let window = self.fanout.window();
 		while trimmed < inherited {
 			let rest = match rows.get(1) {
-				Some((_, second)) => rows.back().expect("two rows").1.end.saturating_sub(second.pts.into()),
+				Some((_, second)) => rows
+					.back()
+					.expect("two rows")
+					.1
+					.end
+					.saturating_sub(super::span(second.pts)),
 				None => Duration::ZERO,
 			};
 			if !segments::evicts(window, rows.len(), rest) {
@@ -1334,8 +1343,8 @@ impl Rendition {
 			.iter()
 			.filter(|row| !row.stop)
 			.map(|row| {
-				let t = row.pts.as_millis() as u64;
-				let d = row.end.saturating_sub(row.pts.into()).as_millis() as u64;
+				let t = super::span(row.pts).as_millis() as u64;
+				let d = row.end.saturating_sub(super::span(row.pts)).as_millis() as u64;
 				(t, d)
 			})
 			// A zero-duration segment cannot be requested by DASH timing.
@@ -1385,23 +1394,16 @@ impl Rendition {
 		clock.wall_clock(pts).ok()
 	}
 
-	/// A muxer at the timescale this rendition's config chose, with the latest bitrate.
+	/// A muxer for this rendition's normalized config.
 	///
-	/// Each segment times its last sample from its own row, so no catalog estimate changes
-	/// the media bytes.
+	/// No catalog estimate reaches it: an estimated framerate would pick the timescale and an
+	/// estimated bitrate the AAC descriptor, so edges that built the rendition before and after
+	/// an estimate would serve different bytes under one URL. Each segment times its last sample
+	/// from its own row instead.
 	pub(crate) fn muxer(&self) -> Result<Muxer> {
-		let bitrate = self.bitrate();
 		Ok(match &self.config {
-			Config::Video(config) => {
-				let mut config = config.clone();
-				config.bitrate = bitrate;
-				Muxer::video(&config)?
-			}
-			Config::Audio(config) => {
-				let mut config = config.clone();
-				config.bitrate = bitrate;
-				Muxer::audio(&config)?
-			}
+			Config::Video(config) => Muxer::video(config)?,
+			Config::Audio(config) => Muxer::audio(config)?,
 		})
 	}
 
@@ -1534,12 +1536,12 @@ impl Rendition {
 	/// [generation](super::Broadcaster::set_generation), since a restart reuses segment numbers
 	/// and another run's URL would name different bytes.
 	pub async fn segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
-		// A predecessor's segments still listed are muxed under its config. A config that returns
-		// gets its tag back, but the instances' segment numbers never overlap.
+		// A predecessor's segments still listed, its cut among them, are muxed under its config. A
+		// config that returns gets its tag back, but the instances' segment numbers never overlap.
 		let owner = self
 			.lineage()
 			.into_iter()
-			.find(|rendition| *rendition.tag == *id.tag && rendition.live.holds(&id.tag, id.at));
+			.find(|rendition| rendition.live.holds(&id.tag, id.at));
 		let owner = owner.as_deref().unwrap_or(self);
 		let Some(mut fetch) = owner.fetch_own(id)? else {
 			return Ok(None);
@@ -1604,8 +1606,8 @@ enum Fetching {
 		/// every group (its real successor lives in the next group), audible on audio segments
 		/// that span many groups.
 		frames: Vec<moq_mux::container::Frame>,
-		/// The group being read, and the ones after it.
-		groups: std::ops::Range<u64>,
+		/// The group being read, and the ones after it, by start.
+		groups: std::vec::IntoIter<u64>,
 		group: Option<GroupRead>,
 	},
 	Done,
@@ -1703,7 +1705,7 @@ impl Fetch {
 					// publisher grouping far finer than its interval), 404 rather than silently
 					// truncating it to a segment shorter than its advertised duration. The live window
 					// lists such a segment as a gap instead, so only a row from elsewhere reaches this.
-					if row.groups.end.saturating_sub(row.groups.start) > rendition.max_groups() {
+					if row.groups.len() as u64 > rendition.max_groups() {
 						tracing::warn!(
 							groups = ?row.groups,
 							"segment spans more groups than one request fetches; refusing to truncate"
@@ -1724,7 +1726,7 @@ impl Fetch {
 						track,
 						muxer: rendition.muxer()?,
 						frames: Vec::new(),
-						groups: row.groups.clone(),
+						groups: row.groups.starts(),
 						group: None,
 					};
 				}
@@ -2133,7 +2135,7 @@ impl Follow {
 		// A group's place is its first frame's pts: the transport's stamp, or the container's own
 		// where the session carries none.
 		let Some(first) = first.and_then(|frame| first_frame(&self.container, frame, self.probe.as_mut())) else {
-			tracing::warn!(track = %self.track, group = group.sequence, "skipping a group without a timed first frame");
+			tracing::warn!(track = %self.track, group = group.start, "skipping a group without a timed first frame");
 			return None;
 		};
 		let (slots, read, size) = match first {
@@ -2141,12 +2143,12 @@ impl Follow {
 			// grid numbers what resumes by its own timestamps, as every edge does.
 			First::Marker(at) => {
 				self.latest = None;
-				(self.grid.stop(at), (group.sequence, None), None)
+				(self.grid.stop(at), (group.start, None), None)
 			}
 			First::Media(pts, reach, declared) => {
-				let sequence = group.sequence;
+				let sequence = group.start;
 				if let Some((_, previous, _)) = &self.latest {
-					self.spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(self.spacing);
+					self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
 				}
 				self.latest = Some((group, pts, reach));
 				(self.grid.group(sequence, pts), (sequence, Some(pts)), declared)
@@ -2183,10 +2185,10 @@ impl Follow {
 		// the segments and gaps before the first holding one, and its own part of that one, then
 		// stops there.
 		let boundary = claim.boundary;
-		let theirs = |groups: &std::ops::Range<u64>| boundary.is_none_or(|boundary| groups.end > boundary + 1);
+		let theirs = |last: Option<u64>| boundary.is_none_or(|boundary| last.is_some_and(|last| last > boundary));
 		if claim.retired
 			&& let Some((sequence, Some(pts))) = read
-			&& theirs(&(sequence..sequence + 1))
+			&& theirs(Some(sequence))
 		{
 			claim.theirs_at = claim.theirs_at.or(Some(pts));
 		}
@@ -2209,13 +2211,13 @@ impl Follow {
 					pts,
 					start,
 					..
-				} if claim.retired && theirs(&groups) => match (boundary, theirs_at) {
+				} if claim.retired && theirs(groups.last()) => match (boundary, theirs_at) {
 					// The replacement can't list this segment's number again, so this instance
 					// lists the groups it had read, ending where the replacement's media starts.
-					(Some(boundary), Some(at)) if groups.start <= boundary => {
+					(Some(boundary), Some(at)) if groups.first().is_some_and(|first| first <= boundary) => {
 						let slot = grid::Slot::Media {
 							segment,
-							groups: groups.start..boundary + 1,
+							groups: groups.through(boundary),
 							pts,
 							start,
 							end: at,
@@ -2230,7 +2232,9 @@ impl Follow {
 			if !*whole {
 				// The first segment listed holds only this instance's groups, and starts whole.
 				let own = match &slot {
-					grid::Slot::Media { groups, .. } => after.is_none_or(|after| groups.start > after),
+					grid::Slot::Media { groups, .. } => {
+						after.is_none_or(|after| groups.first().is_some_and(|first| first > after))
+					}
 					_ => false,
 				};
 				if !own || !grid.starts(&slot) {
@@ -2242,17 +2246,18 @@ impl Follow {
 				*whole = true;
 			}
 			claim.next = segment + 1;
-			rendition.push(row(&rendition, slot, *broken));
+			let mut row = row(&rendition, slot, *broken);
+			if last {
+				// Where it stopped reading is this edge's own, so the cut gets a URL of its own.
+				row.tag = segments::cut(&row.tag, row.groups.last(), row.end).into();
+			}
+			rendition.push(row);
 			*broken = false;
 			if last {
 				return Some(Ok(()));
 			}
 		}
-		if claim.retired
-			&& grid
-				.open_groups()
-				.is_some_and(|groups| theirs(&(groups.start..groups.start + 1)))
-		{
+		if claim.retired && grid.open_groups().is_some_and(|groups| theirs(groups.first())) {
 			return Some(Ok(()));
 		}
 		if let Some((sequence, _)) = read {
@@ -2469,14 +2474,17 @@ impl Reach {
 	/// Count every sample `frames` decodes to.
 	fn add(&mut self, frames: Vec<moq_mux::container::Frame>) {
 		for frame in frames {
+			// A sample with no time can't reach anywhere on the grid.
+			let Ok(pts) = frame.timestamp.as_nanos() else {
+				continue;
+			};
 			if frame.payload.is_empty() {
 				self.marker = Some(frame.timestamp);
 				continue;
 			}
-			let pts = frame.timestamp.as_nanos();
 			self.stamps.push(pts);
-			if let Some(duration) = frame.duration {
-				self.ends = self.ends.max(Some(pts + duration.as_nanos()));
+			if let Some(Ok(duration)) = frame.duration.map(moq_net::Timestamp::as_nanos) {
+				self.ends = self.ends.max(Some(pts + duration));
 			}
 		}
 	}
@@ -2535,7 +2543,14 @@ fn first_frame(
 	let stamp = frame.timestamp;
 	let decoded = container.decode(frame).ok()?;
 	let first = decoded.first()?;
-	let pts = stamp.unwrap_or(first.timestamp);
+	// A scale-less session carries the group key, not a time, so the container's own is used.
+	let pts = if stamp.scale().is_some() {
+		stamp
+	} else {
+		first.timestamp
+	};
+	// The grid places only times.
+	pts.scale()?;
 	if first.payload.is_empty() {
 		return Some(First::Marker(pts));
 	}
@@ -2555,14 +2570,14 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 			start,
 			end,
 			..
-		} if groups.end.saturating_sub(groups.start) > rendition.max_groups() => {
+		} if groups.len() as u64 > rendition.max_groups() => {
 			tracing::warn!(
 				rendition = rendition.name,
 				segment,
 				?groups,
 				"a segment holds more groups than one request fetches; listing it as a gap"
 			);
-			(segment, 0..0, start, end, None, true)
+			(segment, Default::default(), start, end, None, true)
 		}
 		// Timed from where its EXTINF starts, which a group resuming past its line puts at the line.
 		grid::Slot::Media {
@@ -2573,11 +2588,11 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 			content,
 			..
 		} => (segment, groups, start, end, content, false),
-		grid::Slot::Gap { segment, pts, end } => (segment, 0..0, pts, end, None, true),
+		grid::Slot::Gap { segment, pts, end } => (segment, Default::default(), pts, end, None, true),
 		grid::Slot::Reset => unreachable!("a reset lists no row"),
 	};
-	let start = Duration::from(pts);
-	let end = Duration::from(end).max(start);
+	let start = super::span(pts);
+	let end = super::span(end).max(start);
 	let duration = end - start;
 	// RFC 8216 4.3.3.1 requires every EXTINF, rounded to the nearest second, to fit the target
 	// duration. A group overrunning the interval is listed anyway: refusing it loses content, and
@@ -2598,7 +2613,7 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 		stop,
 		// Listed once a later segment started or the track ended, so its groups are all complete.
 		complete: !stop,
-		content: content.map(Duration::from),
+		content: content.map(super::span),
 	}
 }
 
@@ -2885,7 +2900,7 @@ mod tests {
 			index: 0,
 			segment: 0,
 			tag: rendition.tag.clone(),
-			groups: 0..1,
+			groups: grid::Groups::one(0),
 			duration: Duration::from_secs(1),
 			pts: moq_net::Timestamp::ZERO,
 			end: Duration::from_secs(1),
@@ -2941,8 +2956,12 @@ mod tests {
 				let Poll::Ready(Ok(request)) = self.poll() else {
 					return;
 				};
-				let mut track = request.accept(moq_net::track::Info::default());
-				track.write_frame(None, Bytes::from_static(b"retained")).unwrap();
+				let track = request.accept(moq_net::track::Info::default());
+				let mut group = track.append_group(0).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::unscaled(0), Bytes::from_static(b"retained"))
+					.unwrap();
+				group.close().unwrap();
 				self.broadcast.close();
 				*self.track.lock().unwrap() = Some(track);
 			}
@@ -3074,7 +3093,10 @@ mod tests {
 	}
 
 	fn millis(reach: (Option<moq_net::Timestamp>, Option<moq_net::Timestamp>)) -> (Option<u128>, Option<u128>) {
-		(reach.0.map(|t| t.as_millis()), reach.1.map(|t| t.as_millis()))
+		(
+			reach.0.map(|t| t.as_millis().unwrap()),
+			reach.1.map(|t| t.as_millis().unwrap()),
+		)
 	}
 
 	// A fragment carrying all its samples in one frame reaches as far as its samples say, however

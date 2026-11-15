@@ -52,8 +52,11 @@ impl Backpressure {
 	}
 
 	/// Note that media at `timestamp`, on the consumer's timeline, sounds at `at`.
+	/// An unscaled timestamp carries no time, so it is ignored.
 	pub fn observe(&self, timestamp: moq_net::Timestamp, at: Instant) {
-		self.update(|state| state.playhead = Some((Duration::from(timestamp), at)));
+		if let Ok(timestamp) = Duration::try_from(timestamp) {
+			self.update(|state| state.playhead = Some((timestamp, at)));
+		}
 	}
 
 	fn update(&self, f: impl FnOnce(&mut State)) {

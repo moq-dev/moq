@@ -214,8 +214,6 @@ enum RawControl {
 	Pending(Option<moq_net::track::Subscription>),
 	/// Subscribed: updates apply at once, so a refusal reaches the caller.
 	Live(moq_net::track::Control),
-	/// A socket's `tcp` half: one group, with no subscription to update.
-	Group,
 }
 
 /// Outcome of polling a raw track source alongside its control channels.
@@ -228,31 +226,31 @@ enum RawStep<T> {
 	Stop,
 }
 
-/// A buffered read plus the timestamp C borrows through a pointer, `None` when untimed.
+/// A buffered read plus the timestamp C borrows through a pointer.
 ///
 /// Boxed because the slab moves its entries as it grows, and the pointer must stay valid
 /// until the read is freed.
 struct Timed<T> {
 	item: T,
-	timestamp: Option<Box<moq_timestamp>>,
+	timestamp: Box<moq_timestamp>,
 }
 
 impl<T> Timed<T> {
-	fn new(item: T, timestamp: Option<moq_net::Timestamp>) -> Self {
+	fn new(item: T, timestamp: moq_net::Timestamp) -> Self {
 		Self {
 			item,
-			timestamp: timestamp.map(|timestamp| Box::new(timestamp.into())),
+			timestamp: Box::new(timestamp.into()),
 		}
 	}
 
-	/// The timestamp pointer handed to C, NULL when untimed.
+	/// The timestamp pointer handed to C, never NULL.
 	fn timestamp(&self) -> *const moq_timestamp {
-		self.timestamp.as_deref().map_or(std::ptr::null(), std::ptr::from_ref)
+		std::ptr::from_ref(&*self.timestamp)
 	}
 }
 
 /// A JSON value pre-serialized to a string, with its frame timestamp.
-fn json_value(value: moq_net::Timed<serde_json::Value>) -> Result<Timed<String>, Error> {
+fn json_value(value: moq_json::Timed<serde_json::Value>) -> Result<Timed<String>, Error> {
 	Ok(Timed::new(serde_json::to_string(&value.value)?, value.at))
 }
 
@@ -266,7 +264,7 @@ struct JsonWindowEvent {
 
 impl JsonWindowEvent {
 	/// Pre-serialize an event, keeping its frame timestamp.
-	fn new(event: moq_net::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Timed<Self>, Error> {
+	fn new(event: moq_json::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Timed<Self>, Error> {
 		use moq_json::window::Event;
 
 		let (kind, range, json) = match event.value {
@@ -714,7 +712,7 @@ impl Consume {
 				read = track.read() => match read? {
 					Some(moq_mux::container::Read::Frame { frame, .. }) => {
 						let timestamp = frame.timestamp;
-						Read::Frame(Timed::new(frame, Some(timestamp)))
+						Read::Frame(Timed::new(frame, timestamp))
 					}
 					Some(moq_mux::container::Read::Gap { timestamp, duration }) => Read::gap(timestamp, duration)?,
 					Some(moq_mux::container::Read::End { end, .. }) => Read::end(end),
@@ -936,34 +934,22 @@ impl Consume {
 		}
 	}
 
-	/// Read a socket stream's peer half as a raw track reader: `track` for a `track` session,
-	/// or the one group of a `tcp` session.
+	/// Read a socket stream's peer half as a raw track reader.
 	///
-	/// The `track` half keeps the reliable, oldest-first subscription the socket opened it with
-	/// until [`Self::raw_track_update`] changes it.
+	/// It keeps the reliable, oldest-first subscription the socket opened it with until
+	/// [`Self::raw_track_update`] changes it.
 	pub(crate) fn socket_read(
 		&mut self,
-		half: crate::socket::Half,
+		half: moq_net::track::Subscriber,
 		driver: crate::ffi::Background,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let (task, mut close) = Task::new(on_frame);
-		let control = match &half {
-			crate::socket::Half::Track(track) => RawControl::Live(track.control()),
-			crate::socket::Half::Group(_) => RawControl::Group,
-		};
+		let (task, close) = Task::new(on_frame);
+		let control = RawControl::Live(half.control());
 		let id = self.raw_task.insert(RawTaskEntry { task, control })?;
 
 		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				match half {
-					crate::socket::Half::Track(track) => Self::run_raw(on_frame, (*track).ordered(), close).await,
-					crate::socket::Half::Group(mut group) => {
-						Self::run_group(on_frame, &mut group, &mut close).await.map(drop)
-					}
-				}
-			}))
-			.await;
+			let res = crate::ffi::run(driver.watch(Self::run_raw(on_frame, half.ordered(), close))).await;
 
 			let entry = State::lock().consume.raw_task.remove(id);
 			if let Some(entry) = entry {
@@ -984,9 +970,6 @@ impl Consume {
 		match &mut entry.control {
 			RawControl::Pending(pending) => *pending = Some(subscription),
 			RawControl::Live(control) => Self::update_raw(control, subscription)?,
-			RawControl::Group => {
-				return Err(Error::Unsupported("a tcp socket stream has no subscription".into()));
-			}
 		}
 		Ok(())
 	}
@@ -1489,7 +1472,7 @@ mod read_tests {
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
 		let write = |sequence, us, payload: bytes::Bytes| {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			format()
 				.write(
 					&mut group,
@@ -1501,7 +1484,7 @@ mod read_tests {
 					}],
 				)
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		let mut ids = Vec::<i32>::new();
 		let callback = unsafe { OnStatus::new((&mut ids as *mut Vec<i32>).cast(), Some(received)) }.unwrap();
@@ -1521,6 +1504,7 @@ mod read_tests {
 		let micros = |value| moq_timestamp {
 			value,
 			scale: 1_000_000,
+			has_scale: true,
 		};
 		let mut read = std::mem::MaybeUninit::<crate::moq_media_read>::uninit();
 		for (index, id) in ids.into_iter().enumerate() {
@@ -1638,14 +1622,17 @@ mod tests {
 		}
 
 		fn write(&mut self, sequence: u64, micros: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		async fn frame(&self) -> Option<u128> {
@@ -1659,7 +1646,7 @@ mod tests {
 			let Read::Frame(frame) = read else {
 				panic!("expected a frame");
 			};
-			Some(frame.item.timestamp.as_micros())
+			Some(frame.item.timestamp.as_micros().unwrap())
 		}
 
 		async fn cancel(self) {

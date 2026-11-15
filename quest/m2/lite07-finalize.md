@@ -89,7 +89,7 @@ only on lite-07. Lite-07 now defines the padding datagram type and both receiver
 discard it.
 The `Time(pts)` range end rides in the subscribe-ranges children already Required.
 
-Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m2/subscribe-ranges/README.md),
+Decided 2026-10-27 (maintainer): of Subscribe ranges,
 only the children that change the lite-07 wire gate the cut:
 Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872)),
 JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), and
@@ -147,17 +147,24 @@ would need a breaking release had it landed right after the cut:
   the signed transcript. Rejected: keeping the pin in m2, where the freeze
   waits on nixpkgs as well as the cut; dropping the check, which would find a
   transcript flaw only after the freeze.
-- ✅ The wire half of group drops split out as
-  [its own quest](/quest/m2/group-drops-wire.md), which this waits on in
-  place of [the public drop signal](/quest/m2/group-drops.md), an API change
-  that doesn't touch the wire.
+- ✅ The wire half of group drops split out as its own quest, which this
+  waited on in place of [the public drop signal](/quest/m2/group-drops.md),
+  an API change that doesn't touch the wire. It settled without a
+  wire-format change ([moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774)):
+  both publishers already name a Group Stream the subscriber stopped in
+  SUBSCRIBE_DROP, which the draft now states, even after a reliable reset.
 
 ## Required
 
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [A moq-lite subscriber always learns which group it abandoned](/quest/m2/group-drops-wire.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
+- [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - removes WARM_* and SUBSCRIBE's `Warm` byte from lite-07
+- [ROUTE's RTT](/quest/m2/route-rtt.md) - removes ROUTE's informational RTT
+- [FETCH Start Byte](/quest/m2/fetch-start-byte.md) - removes FETCH's byte offset into a half-read frame
+- [Yield on relay links](/quest/m2/yield-relay-links.md) - narrows YIELDED from `ietf` sessions to tracks carrying moq-transport records
+- [Subscriber Min Age](/quest/m2/subscriber-min-age.md) - removes SUBSCRIBE's minimum age, which nothing reads
+- [AUTH_ERROR retries](/quest/m2/auth-retry-codes.md) - writes down which refusal codes a presenter retries
 
 ## Related
 

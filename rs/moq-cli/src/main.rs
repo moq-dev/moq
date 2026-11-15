@@ -23,7 +23,6 @@ mod rtmp;
 mod rtsp;
 mod srt;
 mod subscribe;
-mod tcp;
 #[cfg(feature = "transcode")]
 mod transcode;
 mod web;
@@ -369,14 +368,12 @@ async fn run() -> anyhow::Result<()> {
 		}
 	}
 
-	// `fetch`, `announced`, and `tcp` only dial, so an ambient listener or cluster setting they
+	// `fetch` and `announced` only dial, so an ambient listener or cluster setting they
 	// never use is not validated either.
 	if let [Command::Fetch(_)] = stages.as_slice() {
 		cli.dial_only("fetch", &["--broadcast"])?;
 	} else if let [Command::Announced(_)] = stages.as_slice() {
 		cli.dial_only("announced", &[])?;
-	} else if let [Command::Tcp(_)] = stages.as_slice() {
-		cli.dial_only("tcp", &[])?;
 	} else {
 		cli.unserved()?;
 		cli.moq.validate()?;
@@ -398,7 +395,6 @@ async fn run() -> anyhow::Result<()> {
 			match stages.remove(0) {
 				Command::Fetch(args) => return fetch::run(cli.moq, args, net).await,
 				Command::Announced(args) => return announced::run(cli.moq, args, net).await,
-				Command::Tcp(args) => return tcp::run(cli.moq, args, net).await,
 				#[cfg(feature = "play")]
 				Command::Play(args) => return run_play(cli.moq, args, net).await,
 				#[cfg(feature = "transcode")]
@@ -1305,11 +1301,11 @@ mod tests {
 					.unwrap();
 				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 				let track = broadcast.broadcast().create_track("status", info).unwrap();
-				let mut group = track.append_group().unwrap();
+				let mut group = track.append_group(0).unwrap();
 				group
 					.write_frame(moq_net::Timestamp::ZERO, b"admitted".as_ref())
 					.unwrap();
-				group.finish().unwrap();
+				group.close().unwrap();
 				let (auth, admissions) = moq_relay::auth::Auth::embedded("test-cli");
 				let (trigger, observer) = moq_relay::shutdown::Observer::new(TIMEOUT);
 				let serving = Serving {
@@ -1506,9 +1502,9 @@ mod tests {
 			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.broadcast().create_track("live", info).unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"live".as_ref()).unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 
 		let reader = relay.consume();
 		let mut live = reader

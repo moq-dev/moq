@@ -30,6 +30,9 @@ mod corpus;
 mod crypto;
 mod error;
 mod fs;
+/// Test support for the `fuzz/` harness: the target bodies and their seeds.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz;
 mod generate;
 mod grant;
 mod key;

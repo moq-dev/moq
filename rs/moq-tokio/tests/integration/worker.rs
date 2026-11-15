@@ -869,3 +869,23 @@ fn shutting_down_outside_a_runtime_joins_the_workers() {
 	futures::executor::block_on(workers.split().shutdown());
 	assert!(owned.is_disjoint(&open_sockets()), "the group left the port bound");
 }
+
+/// A group whose member was taken before it was served would leave that member's
+/// share of the port to nobody, so serving it is refused.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_group_missing_a_member_is_refused() {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	for taken in [1, 2] {
+		let mut group = moq_sock::shard::bind("127.0.0.1:0".parse().unwrap(), 2).unwrap();
+		for _ in 0..taken {
+			group.member().unwrap().expect("a member");
+		}
+		let mut server = moq_tokio::server::Config::default();
+		server.listen = listen_config(&cert, &key, 0);
+		Workers::from_group(server, group, false).expect_err("served a group missing a member");
+	}
+}

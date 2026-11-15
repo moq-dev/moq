@@ -724,7 +724,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let frame = decoder.read_frame().await.unwrap().expect("the good frame");
-	assert_eq!(frame.timestamp.as_millis(), 10);
+	assert_eq!(frame.timestamp.as_millis().unwrap(), 10);
 }
 
 #[tokio::test(start_paused = true)]
@@ -767,7 +767,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let frame = decoder.read_frame().await.unwrap().expect("a video frame");
-	assert_eq!(frame.timestamp.as_millis(), 17);
+	assert_eq!(frame.timestamp.as_millis().unwrap(), 17);
 }
 
 #[tokio::test(start_paused = true)]

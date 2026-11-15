@@ -3,14 +3,16 @@
 //! An endpoint linked to two CDNs uses its preferred one and fails over to the next.
 //!
 //! A publisher `P` pushes one broadcast, under one instance, to CDN relays `A` and `B`. A
-//! subscriber `S` links to both, ranking `A` first with
+//! subscriber `S` links to both, ranking `A` first by demoting `B` with
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
-//! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
+//! preference puts `A` ahead. A lite-07 route ranks by the lowest preference on its path,
+//! and `P`'s links to both CDNs are neutral, so promoting `A` instead would gain nothing. Losing `A` moves `S` to `B`, and `A` returning moves it
 //! back. Between lite-07 routes, which carry the instance, each move resumes the
 //! subscription. A moq-transport `B` carries none, so `S` mints one for it, and the move
 //! onto it is a restart that ends the subscription rather than stitching onto it.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -82,7 +84,7 @@ fn timestamp(group: u64, frame: u64) -> Timestamp {
 }
 
 /// A frame as the reader saw it.
-type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
+type Delivery = (u64, moq_net::Result<(Timestamp, Vec<u8>)>);
 
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
@@ -101,7 +103,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 				match group.read_frame().await {
 					Ok(Some(frame)) => {
 						if tx
-							.unbounded_send((group.sequence, Ok((frame.timestamp, frame.payload.to_vec()))))
+							.unbounded_send((group.start, Ok((frame.timestamp, frame.payload.to_vec()))))
 							.is_err()
 						{
 							return;
@@ -109,7 +111,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 					}
 					Ok(None) => break,
 					Err(err) => {
-						let _ = tx.unbounded_send((group.sequence, Err(err)));
+						let _ = tx.unbounded_send((group.start, Err(err)));
 						break;
 					}
 				}
@@ -120,7 +122,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 }
 
 /// The next frame the reader reports, failing on an error or a hang.
-async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
+async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Timestamp, Vec<u8>) {
 	let (group, frame) = kio::clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
@@ -155,7 +157,7 @@ struct Topology {
 	_pushes: Vec<MockPair>,
 	s_to_a: Option<MockPair>,
 	s_to_b: MockPair,
-	sequence: u64,
+	key: u64,
 }
 
 impl Topology {
@@ -178,8 +180,8 @@ impl Topology {
 			push(lite, &publisher, &cdn_a).await,
 			push(secondary, &publisher, &cdn_b).await,
 		];
-		let s_to_a = dial(lite, &cdn_a, &subscriber, 1, A_COST).await;
-		let s_to_b = dial(secondary, &cdn_b, &subscriber, 0, 1).await;
+		let s_to_a = dial(lite, &cdn_a, &subscriber, 0, A_COST).await;
+		let s_to_b = dial(secondary, &cdn_b, &subscriber, -1, 1).await;
 		settle().await;
 
 		Self {
@@ -192,7 +194,7 @@ impl Topology {
 			_pushes: pushes,
 			s_to_a: Some(s_to_a),
 			s_to_b,
-			sequence: 0,
+			key: 0,
 		}
 	}
 
@@ -205,26 +207,21 @@ impl Topology {
 
 	/// Write one full group, returning what the reader should see.
 	fn group(&mut self) -> Vec<(u64, Vec<u8>)> {
-		let sequence = self.sequence;
-		self.sequence += 1;
-		let mut group = self.track.append_group().unwrap();
+		let key = self.key;
+		self.key += 1;
+		let mut group = self.track.append_next().unwrap();
 		let mut written = Vec::new();
 		for frame in 0..FRAMES {
-			group
-				.write_frame(timestamp(sequence, frame), payload(sequence, frame))
-				.unwrap();
-			written.push((sequence, payload(sequence, frame)));
+			group.write_frame(timestamp(key, frame), payload(key, frame)).unwrap();
+			written.push((key, payload(key, frame)));
 		}
-		group.finish().unwrap();
+		group.close().unwrap();
 		written
 	}
 
 	/// Write a group while `B` holds back everything it sends `S`: it arrives only if
 	/// `A` serves it.
-	async fn group_through_a(
-		&mut self,
-		rx: &mut mpsc::UnboundedReceiver<Delivery>,
-	) -> Vec<(u64, Vec<u8>, Option<Timestamp>)> {
+	async fn group_through_a(&mut self, rx: &mut mpsc::UnboundedReceiver<Delivery>) -> Vec<(u64, Vec<u8>, Timestamp)> {
 		self.s_to_b.server_transport.hold_unis();
 		let written = self.group();
 		let mut seen = Vec::new();
@@ -237,10 +234,7 @@ impl Topology {
 	}
 
 	/// Write a group and read it back, whichever CDN serves it.
-	async fn group_anywhere(
-		&mut self,
-		rx: &mut mpsc::UnboundedReceiver<Delivery>,
-	) -> Vec<(u64, Vec<u8>, Option<Timestamp>)> {
+	async fn group_anywhere(&mut self, rx: &mut mpsc::UnboundedReceiver<Delivery>) -> Vec<(u64, Vec<u8>, Timestamp)> {
 		let written = self.group();
 		let mut seen = Vec::new();
 		for _ in &written {
@@ -257,23 +251,20 @@ impl Topology {
 
 	async fn restore_a(&mut self) {
 		let lite: Version = "moq-lite-07-wip".parse().unwrap();
-		self.s_to_a = Some(dial(lite, &self.cdn_a, &self.subscriber, 1, A_COST).await);
+		self.s_to_a = Some(dial(lite, &self.cdn_a, &self.subscriber, 0, A_COST).await);
 		settle().await;
 	}
 }
 
 /// Every frame once, in order, with no timestamp rewinding.
-fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
+fn assert_continuous(seen: &[(u64, Vec<u8>, Timestamp)], groups: u64) {
 	let expected: Vec<_> = (0..groups)
 		.flat_map(|group| (0..FRAMES).map(move |frame| (group, payload(group, frame))))
 		.collect();
 	let frames: Vec<_> = seen.iter().map(|(group, frame, _)| (*group, frame.clone())).collect();
 	assert_eq!(frames, expected);
 	for pair in seen.windows(2) {
-		assert!(
-			pair[0].2.expect("timed") < pair[1].2.expect("timed"),
-			"timestamp rewound at {pair:?}"
-		);
+		assert!(pair[0].2 < pair[1].2, "timestamp rewound at {pair:?}");
 	}
 }
 
@@ -376,8 +367,8 @@ async fn restarts_across_protocols(secondary: &str) {
 			"the old route did not end its track: {rest:?}"
 		);
 		let mut fresh = topology.subscribe().await;
-		let (sequence, _, bytes) = next(&mut fresh).await;
-		assert_eq!(sequence, 1, "the fresh subscription joins the current group");
+		let (key, _, bytes) = next(&mut fresh).await;
+		assert_eq!(key, 1, "the fresh subscription joins the current group");
 		assert_eq!(bytes, payload(1, 0));
 		drop((topology.publisher, topology.cdn_b));
 	})

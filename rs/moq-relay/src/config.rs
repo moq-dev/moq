@@ -78,12 +78,6 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
-	/// Optional public STUN Binding listener, available with the `stun` feature.
-	#[cfg(feature = "stun")]
-	#[usage(flatten)]
-	#[serde(default)]
-	pub stun: crate::stun::Config,
-
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -100,6 +94,12 @@ pub struct Config {
 	#[usage(flatten)]
 	#[serde(default)]
 	pub internal: internal::Config,
+
+	/// Handing this relay's sockets to the relay that replaces it, so an upgrade
+	/// serves the new process beside the old one. Disabled unless `handoff.socket` is set.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub handoff: crate::handoff::Config,
 
 	/// How long accepted sessions may keep running after a shutdown signal, e.g.
 	/// "10s" or "500ms". The first signal sends every session a GOAWAY and waits
@@ -266,12 +266,6 @@ impl Config {
 		env: &usage_rs::config::EnvLayer,
 		file: Option<moq_tokio::cli::FileSource<'_>>,
 	) -> anyhow::Result<()> {
-		#[cfg(not(feature = "stun"))]
-		anyhow::ensure!(
-			env.get("MOQ_STUN_BIND").is_none(),
-			"MOQ_STUN_BIND requires a moq-relay build with the stun feature"
-		);
-
 		let mut deprecated = self.deprecated();
 		let (merged, resolved) = moq_tokio::cli::Merge {
 			registry: crate::settings(),
@@ -333,6 +327,7 @@ impl Config {
 		// is checked by `Cluster::new`, which embedders call directly.
 		self.quic.validate().context("invalid [quic]")?;
 		self.check_runtime()?;
+		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
 		#[cfg(feature = "cluster-lan")]
 		self.check_lan()?;
@@ -380,6 +375,34 @@ impl Config {
 		anyhow::ensure!(
 			io_uring || !workers,
 			"runtime.workers needs moq-relay built with the `quic` feature"
+		);
+		Ok(())
+	}
+
+	/// Refuse a handoff this relay could not carry out.
+	fn check_handoff(&self) -> anyhow::Result<()> {
+		// A stand-in whose relay cannot take over would leave the old relay serving
+		// after every restart, and the new one failing to bind beside it.
+		anyhow::ensure!(
+			!self.handoff.supervise || self.handoff.socket.is_some(),
+			"handoff.supervise needs handoff.socket"
+		);
+		if self.handoff.socket.is_none() {
+			return Ok(());
+		}
+		#[cfg(not(target_os = "linux"))]
+		anyhow::bail!("handoff.socket is Linux-only");
+		// Static and API peers share one dial socket on a fixed port, bound at startup and
+		// not handed on: a successor could not bind it beside the relay it replaces.
+		anyhow::ensure!(
+			!self.cluster.dials_statics() || self.connect.resolve().bind.port() == 0,
+			"handoff.socket cannot hand on the cluster's dial socket: give --connect-bind port 0"
+		);
+		// The QUIC port is handed on as a reuseport group with room for a successor,
+		// which only a worker group binds.
+		anyhow::ensure!(
+			self.runtime.workers().is_some() || self.runtime.io_uring() || !self.listen.serves_quic(),
+			"handoff.socket requires runtime.workers: the QUIC port is handed on as a worker group"
 		);
 		Ok(())
 	}
@@ -505,48 +528,6 @@ mod tests {
 		assert!(config.listen.extensions.solicit);
 		assert!(!config.connect.extensions.solicit);
 		assert!(!config.connect.extensions.ietf);
-	}
-
-	#[cfg(feature = "stun")]
-	#[test]
-	fn stun_binding_merges_file_and_cli() {
-		if !test_env::Env::without(&["MOQ_STUN_BIND"]).isolate() {
-			return;
-		}
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("stun.toml");
-		std::fs::write(&path, "[stun]\nbind = \"127.0.0.1:3478\"\n").unwrap();
-		let file = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
-		assert_eq!(file.stun.bind, Some("127.0.0.1:3478".parse().unwrap()));
-		let cli = Config::parse_and_merge([
-			std::ffi::OsString::from("moq-relay"),
-			path.into(),
-			"--stun-bind=127.0.0.1:3479".into(),
-		])
-		.unwrap();
-		assert_eq!(cli.stun.bind, Some("127.0.0.1:3479".parse().unwrap()));
-		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
-	}
-
-	#[cfg(not(feature = "stun"))]
-	#[test]
-	fn a_stun_listener_requires_the_feature() {
-		assert!(toml::from_str::<Config>("[stun]\nbind = \"127.0.0.1:3478\"").is_err());
-		assert!(Config::parse_and_merge(["moq-relay", "--stun-bind=127.0.0.1:3478"]).is_err());
-		let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
-		let env = usage_rs::config::EnvLayer::new([("MOQ_STUN_BIND".to_string(), "127.0.0.1:3478".to_string())]);
-		let error = Config::default().merge_into(&cli, &env, None).unwrap_err();
-		assert!(error.to_string().contains("MOQ_STUN_BIND requires"), "{error}");
-	}
-
-	#[cfg(feature = "stun")]
-	#[test]
-	fn stun_binding_merges_the_environment() {
-		if !test_env::Env::default().set("MOQ_STUN_BIND", "[::1]:3478").isolate() {
-			return;
-		}
-		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
-		assert_eq!(config.stun.bind, Some("[::1]:3478".parse().unwrap()));
 	}
 
 	#[test]
@@ -920,6 +901,44 @@ root = ["ca.pem"]
 			"[runtime]\nworkers = 1\nio_uring = true\n",
 			"runtime.io_uring requires listen.bind",
 		);
+
+		// A stand-in with no relay to hand over to would leave the old one serving.
+		refuse(
+			"[handoff]\nsupervise = true\n",
+			"handoff.supervise needs handoff.socket",
+		);
+		#[cfg(all(target_os = "linux", feature = "_quic"))]
+		{
+			// The QUIC port is handed on as a worker group, which the shared listener is not.
+			let quic = "[listen]\nbind = \"127.0.0.1:0\"\n";
+			let handoff = "[handoff]\nsocket = \"/run/moq-relay/handoff.sock\"\nsupervise = true\n";
+			refuse(&format!("{quic}{handoff}"), "handoff.socket requires runtime.workers");
+			resolve(&format!("{quic}[runtime]\nworkers = 1\n{handoff}"));
+			// With no QUIC listener there is no group to hand on.
+			resolve(&format!("[listen.tcp]\nbind = \"127.0.0.1:0\"\n{handoff}"));
+			// Static and API peers dial from one socket on a fixed port, which a successor
+			// could not bind beside its predecessor; an ephemeral port is bound per session.
+			let quic = format!("{quic}[runtime]\nworkers = 1\n{handoff}");
+			for peers in [
+				"[cluster]\nconnect = [\"https://b.example\"]\n",
+				"[cluster.api]\nurl = \"https://api.example/peers\"\n",
+			] {
+				refuse(
+					&format!("{quic}{peers}[connect]\nbind = \"0.0.0.0:4444\"\n"),
+					"cannot hand on the cluster's dial socket",
+				);
+				resolve(&format!("{quic}{peers}[connect]\nbind = \"0.0.0.0:0\"\n"));
+			}
+			// A list naming only this relay dials nothing.
+			resolve(&format!(
+				"{quic}[cluster]\nnode = \"https://a.example\"\nconnect = [\"https://a.example\"]\n[connect]\nbind = \"0.0.0.0:4444\"\n"
+			));
+		}
+		#[cfg(not(target_os = "linux"))]
+		refuse(
+			"[handoff]\nsocket = \"/run/moq-relay/handoff.sock\"\n",
+			"handoff.socket is Linux-only",
+		);
 	}
 
 	/// LAN discovery needs a QUIC port and an identity to advertise.
@@ -978,7 +997,8 @@ root = ["ca.pem"]
 				if path.extension().is_none_or(|ext| ext != "toml")
 					|| matches!(
 						path.file_name().and_then(|name| name.to_str()),
-						Some("Cargo.toml" | "rust-toolchain.toml" | "bunfig.toml")
+						// `cases.toml` holds test/quic-interop's expected results.
+						Some("Cargo.toml" | "rust-toolchain.toml" | "bunfig.toml" | "cases.toml")
 					) {
 					continue;
 				}

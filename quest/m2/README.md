@@ -41,11 +41,10 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   publishes for the first time at this cut (both dropped 2026-11-14, when
   `moq_auth::mesh` left moq for Kixel);
   auth key validation; the
-  [RTMPS connect](/quest/m2/rtmp-rtmps-tcurl.md) signature;
-  usage's derived settings; and three
-  API fences: mesh enrollment (dropped with it),
-  the capture selections, and
-  [the acknowledgment hook's trait](/quest/m2/api-ack-hook-trait.md). None
+  RTMPS connect signature;
+  usage's derived settings; and two
+  API fences: mesh enrollment (dropped with it) and
+  the capture selections. None
   is on the routes chain, which stays the critical path.
 - ✅ Under the path rule a route keeps one sticky down-only flag beside its
   path; see the [routes epic](/quest/m2/cluster-routes/README.md).
@@ -236,7 +235,7 @@ what would need a breaking release had it landed right after the cut:
   start, and lite-07 by start rewords the draft. Rejected for each: staying
   in m2.
 - ✅ Stayed in m2 though not breaking itself:
-  [the interest set](/quest/m2/cluster-routes/interest-set.md), because
+  [the interest set](https://github.com/moq-dev/moq/pull/8728), because
   [the route stream](/quest/m2/cluster-routes/route-stream.md) needs it.
   The route stream stays because lite-07 would otherwise freeze with one
   router key per announce stream, which the route model doesn't check, and
@@ -247,8 +246,9 @@ what would need a breaking release had it landed right after the cut:
   tier and partition tests run before it (maintainer; rejected: moving it to
   m3 and fixing late routing flaws in lite-08).
 - ✅ [Group drops](/quest/m2/group-drops.md) split: its lite-07 wire question
-  is [its own quest](/quest/m2/group-drops-wire.md), which starts now and
-  gates the freeze; the public `Ordered` API waits for the model.
+  was its own quest, settled without a wire-format change in
+  [moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774); the public
+  `Ordered` API waits for the model.
   [Catalog at timestamp](/quest/m2/catalog-at-timestamp.md) no longer waits
   for `@moq/net` by start, and [the bindings](/quest/m2/time-addressing/bindings.md)
   shrink to a rename, since the model already fills each field with the start.

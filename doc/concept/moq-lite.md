@@ -102,8 +102,8 @@ announced for late readers is the application's retention policy, such as the
 
 ### Publisher instances
 
-Every route carries an instance: any non-empty text naming one continuous run
-of group numbers at its path, plus an epoch, a counter within that instance,
+Every route carries an instance: any non-empty text naming one continuous
+timeline of groups at its path, plus an epoch, a counter within that instance,
 like a cloud instance ID that survives a reboot and a count of its boots. A
 path and an instance name one stream. The path never changes, so authorization and
 hidden names work exactly as before.
@@ -133,9 +133,9 @@ hidden names work exactly as before.
   announced as a restart. Subscriptions already answered stay on the old
   stream until dropped or none of its routes remain, which ends them with an
   error, while new requests get the new one, so a player follows the restart
-  by requesting the path again. That is how a restarted encoder, whose group
-  numbers start over, takes the name instead of stalling viewers on the old
-  sequence. A relay drops its copy of the old stream, so a new subscriber never
+  by requesting the path again. That is how a restarted encoder, whose
+  timestamps start over, takes the name instead of stalling viewers on the old
+  timeline. A relay drops its copy of the old stream, so a new subscriber never
   sees its cached groups.
 
 The instance, the epoch, and the restart message travel on moq-lite 07, which
@@ -262,7 +262,7 @@ it can still use, which at the default budget is the latest one, so every group
 must begin at a point a fresh subscriber can decode from (a keyframe, a full
 JSON snapshot). A moq-lite 05 or moq-transport publisher starts at the latest
 group whatever the budget, so a subscription there reads older groups only from
-a starting group it names. Groups can also be fetched by sequence number, which is how the
+a starting group it names. Groups can also be fetched by start, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
@@ -283,7 +283,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's max age alone to bound it. |
-| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
+| **Ranges** | Which groups to ask for: from the oldest group, a number of groups back from the latest, or the group containing a time, through an end that includes its group. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
@@ -308,19 +308,22 @@ no handler it is reported as dropped once the feed stops waiting for it. One
 evicted after the subscriber saw it cached, but before it read it, is asked the same
 way, once: evicted again before it is read, it is reported as dropped. A relay merges its subscribers' ranges into one upstream request, which
 moq-lite-07 carries range by range and older wire versions as the single span
-covering them. A relative or time anchor resolves on the hop that publishes the
-track, and over moq-lite-07, which carries a relative or time start upstream and
-reports the live edge and media time, so a copy resolves the ends itself. A Rust
-moq-transport copy resolves a relative anchor from the Largest Object its live join
-reports, accepts time anchors its cache can already resolve, and sends group bounds
-upstream; it refuses any other time anchor. A JavaScript one refuses every time
-anchor. Older
-moq-lite versions accept absolute anchors but refuse time anchors and relative anchors other
-than the live and default starts. An untimed track refuses a time anchor. At the live
-edge, a time end
-may let one group through before its first frame shows it starts past the end:
-the first group that has yet to start is handed out without waiting for that
-frame, and the next one waits on it.
+covering them.
+
+A group is addressed by its start: where it starts in the track's timescale,
+or a bare number that grows with each group on a track without one. A time
+start is the group containing that time, the newest starting at or before it,
+and a time end includes the group containing it, so neither waits on a frame.
+A relative anchor counts the groups the hop holds back from the latest one. It
+resolves on the hop that publishes the track, and over moq-lite-07, which
+carries it upstream and reports the live edge, so a copy resolves the ends
+itself. A Rust moq-transport copy resolves a relative anchor from the Largest
+Object its live join reports. Older moq-lite versions refuse relative anchors
+other than the live and default starts. Older moq-lite versions and
+moq-transport carry a group ID equal to the start, so a time anchor goes
+upstream as that ID, where a start selects the first group at or after it
+rather than the one containing it. moq-lite 01 and 02 carry no start, so every
+subscription there starts at the live group.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
@@ -422,8 +425,8 @@ on the bytes that joiner downloads.
 The publisher drives the track's `Demand::wanted`: when it passes the largest
 group written, open a new group with a keyframe or complete snapshot. A Rust
 moq-json snapshot producer answers this by driving its `refresh()` alongside
-updates. It restates the current value at its newest source timestamp, with a
-new group number. Existing readers continue into that group too.
+updates. It restates the current value in a new group at its newest source
+timestamp. Existing readers continue into that group too.
 
 Each relay judges a join from its own cache and forwards fresh-group demand
 upstream when needed, all the way to the publisher. Preserving the ratio across

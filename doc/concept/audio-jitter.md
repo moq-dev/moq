@@ -38,8 +38,9 @@ frame:
 
 Both sit below the decoder and above nothing: no reordering, no gap handling, no
 age budget. Except one skip: both consumers close a group below where delivery
-stands unread, so a join's backlog they skip is never observed, and a join
-delayed only by it is measured as lateness.
+stands unread, so its frames are never observed. When it is
+[backlog](#the-joins-backlog), they report its arrival instead, which ends the
+join as late as its observed backlog would.
 
 Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
@@ -125,8 +126,8 @@ observe(arrival, media):
 
     if oldest + fastest < joined:       # the join, not the path: folds nothing
         pending += 1
-    else:
-        close(bucket of peak)
+    else:                               # open starts true
+        open = false; close(bucket of peak)
     if resumed:                         # a declared silence folds nothing
         settle(); origin = arrival; index = 0
     else:                               # held until this interval closes
@@ -152,6 +153,10 @@ close(bucket):                          # pending starts at 0 and is spent here
 settle():                               # a stall is one observation
     if a stall is open:
         fold(stall.bucket); fold(nothing) min(stall.span, IDLE_MAX) times; close it
+
+backlog(arrival):                       # a backlog group skipped unread arrived
+    if not first observation and open:
+        joined = max(joined, arrival)
 
 end():                                  # a declared end precedes the next observation
     if not first observation: ended = true
@@ -323,6 +328,22 @@ produced after the subscription began, and a publisher flushing seconds at once
 is measured from its first flush past the backlog. A first frame slower than the
 path after it is itself backlog, so most subscriptions skip their first interval,
 which leaves the prior 500 ms later.
+
+A group the consumer skips unread carries no timestamp to test, so the consumer
+tells backlog by its sequence instead: one at or below the publisher's largest
+group when the subscription began, the largest the subscriber knows once the
+publisher answered (moq-lite's subscribe answer carries it, and without one the
+groups that landed stand in), was produced before it. It is read as the answer
+arrives, not when the first group does: any earlier, a cached group racing the
+answer would set it, and any later, live groups landing meanwhile would. Only such a group's arrival is reported,
+with `backlog`, so a path that drops late groups from the start, all produced
+since, holds no join open. A report extends the join only while the join is
+**open**, before any interval has measured the path: after that, a skipped group
+is an outage's, whose frames queued behind it belong to the stall rule. On
+`relay-mic-rtt40` the browser closes 267 groups 5 to 6 s old, arriving 1.0 to
+1.3 s in, and the live frames queued behind them are up to 300 ms late; observed
+or reported, they fold nothing, where unreported they hold the target at 320 ms
+for a 20 s half-life.
 
 ### The histogram
 
@@ -764,8 +785,10 @@ directly, so neither is graded against the other.
 `arrival` and `media` are parallel arrays in **delivery order**, the order the
 receiver observes them, so `media` is deliberately out of order in the
 `reorder` and `backlog` cases. `advertised` and `delay` are present only where the case uses
-them, as is `ends`: the indices, ascending, of the frames observed right after a
-[declared end](#declared-silence), each of which calls `end()` before it is observed. `target` lists `[frame index, target]` at every frame where the target
+them, as are `ends`: the indices, ascending, of the frames observed right after a
+[declared end](#declared-silence), each of which calls `end()` before it is observed,
+and `skipped`: the indices, ascending, of the frames a consumer closed unread, each
+reported with `backlog(arrival)` instead of observed. `target` lists `[frame index, target]` at every frame where the target
 differs from the previous frame's, starting at frame 0, so an implementation
 folds the trace one frame at a time and compares its target at each listed
 index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
@@ -779,6 +802,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `reorder` | A run delivered after a newer one is measured against the frames before it, so the target covers waiting for it |
 | `backlog` | A backlog delivered newest first behind the live edge is not measured, so its media span never reaches the target |
 | `join` | A recorded join whose backlog arrives interleaved with the live edge, and delays the live frames queued behind it, folds nothing, so the target leaves the prior for the path's own |
+| `skipped` | The `join` recording with the stale backlog a consumer closes below its cursor reported rather than observed still folds nothing for the join, so the target follows `join`'s |
 | `idle` | A 30 s gap relaxes the histogram toward the prior |
 | `silence` | A declared 60 s silence and a declared pause leave the target where it was, and a later undeclared gap still relaxes it |
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
@@ -952,7 +976,8 @@ read once on the clock, its threshold both ways is one hop, so the backlog a
 subscription opens on is skipped and playback starts on the clock. Only those
 skips and a ring overflowing its fixed capacity drop received audio; each
 counts as a skip in the player's stats. A finite tail before a declared end
-plays as received, and a playhead behind the clock skips a declared silence by
+is never skipped, though one ahead of the clock still waits for it in silence,
+and a playhead behind the clock skips a declared silence by
 its lag rather than stretching across it, which drops no audio.
 
 After an underrun the player resumes on a cushion of one window and one read,

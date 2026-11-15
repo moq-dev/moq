@@ -11,8 +11,11 @@ import type { Scope } from "./scope.ts";
 
 /** A grouped frame whose signature verified. */
 export interface Frame {
-	/** Presentation timestamp at the track's timescale, or `undefined` when untimed. Signed. */
-	timestamp?: Time.Timestamp;
+	/**
+	 * Presentation timestamp at the track's timescale, or on a scale-less track
+	 * {@link Time.Timestamp.unscaled} at the group's key. Signed.
+	 */
+	timestamp: Time.Timestamp;
 	/** The application bytes, without the signature. */
 	payload: Uint8Array;
 }
@@ -64,14 +67,15 @@ export class Producer {
 	/**
 	 * Sign `payload` at the next frame index and write it with the signature appended.
 	 *
-	 * The bytes are copied, so the caller may reuse its buffer. Rejects with the net error if
-	 * the group is closed, the timestamp does not match the track, or the frame is too large.
+	 * On a scale-less track `timestamp` is {@link Time.Timestamp.unscaled} at the group's key. The
+	 * bytes are copied, so the caller may reuse its buffer. Rejects with the net error if the group
+	 * is closed, the timestamp does not match the track, or the frame is too large.
 	 */
-	async writeFrame(timestamp: Time.Timestamp | undefined, payload: Uint8Array): Promise<void> {
+	async writeFrame(timestamp: Time.Timestamp, payload: Uint8Array): Promise<void> {
 		if (this.#closed || this.#writer.closed) throw this.#writer.aborted ?? new Error("group is closed");
 		const owned = payload.slice();
 		// Signed at the track's timescale, and written that way so a local reader sees the signed value too.
-		const at = NetDatagram.rescale(this.#writer.track, timestamp);
+		const at = NetDatagram.rescaleIn(this.#writer.track, timestamp, this.sequence);
 		return this.#writer.pump.run(async () => {
 			this.#check();
 			const body = await this.#writer.scope.sign(this.#writer.key, this.sequence, this.#next, at, owned);

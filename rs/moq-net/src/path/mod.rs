@@ -105,7 +105,7 @@ fn is_escaped(s: &str, end: usize) -> bool {
 /// This type wraps a string but provides path-aware operations that respect
 /// delimiter boundaries, preventing issues like "foo" matching "foobar".
 ///
-/// A path is a sequence of non-empty segments joined by `/`, so it has one spelling:
+/// A path is a key of non-empty segments joined by `/`, so it has one spelling:
 /// [`Path::new`] refuses a leading, trailing, or doubled `/` rather than collapsing it.
 /// A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
 /// either one is spelled, and any other `\` is refused. Segments still split at every `/`.
@@ -1145,6 +1145,7 @@ mod tests {
 			broadcast: Path::new(&longest).unwrap(),
 			instance: None,
 			node: 0,
+			depth: 0,
 		};
 		let buf = tracks.encode_bytes(Version::Lite07).unwrap();
 		let (decoded, _) = crate::lite::Tracks::decode_slice(&buf, Version::Lite07).unwrap();

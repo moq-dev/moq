@@ -26,6 +26,8 @@ client = [
     "dep:tracing",
     "dep:rand",
 ]
+# Exposes the `fuzz/` harness's target bodies and seeds through the `fuzz` module.
+fuzz = []
 # The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
 serve = ["async", "dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
 
@@ -62,6 +64,13 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 tracing-test = { workspace = true }
 wiremock = "0.6"
 workspace-hack = { path = "../workspace-hack" }
+
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# build skips it.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
 
 [[bench]]
 name = "verify"

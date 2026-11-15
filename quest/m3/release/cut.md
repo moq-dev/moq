@@ -15,9 +15,10 @@ minor up per later API or wire cut, following
 [Versions](/RELEASE.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
 exempt from that version (`version.json`), so check each against its
 registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
-from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
+from moq-dev/web-transport, and 0.3.5 follows for
+[the release line's credit fix](/quest/m0/release-qmux-credit.md), while `js/qmux` is at 0.3.3. Publishing 0.3.3
 fails, and `workspace:^` would resolve `@moq/net`'s dependency to
-web-transport's 0.3.4, a different API. `js/qmux` must publish above 0.3.4;
+web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that;
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
 Recommended 2026-11-12 (/quest-audit): 0.4.0, so a consumer of
 web-transport's `^0.3` never resolves to the new API.
@@ -33,7 +34,11 @@ compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
 After publication, check Release remeasure and its pin-update PR, as
-RELEASE.md describes. The pipeline re-measures changed planned-break pins
+RELEASE.md describes. Also check that the first release-plz PR after the cut
+gets the regenerated `nix/Cargo.nix` commit
+([moq-dev/moq#8684](https://github.com/moq-dev/moq/pull/8684)) and passes
+Check: that step has never run (found by the
+[feature review](/quest/m3/release/feature-review.md), 2026-11-14). The pipeline re-measures changed planned-break pins
 and requests landing through the main merge queue.
 
 This cut carries stats epochs, so it drops

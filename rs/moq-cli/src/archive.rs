@@ -408,9 +408,9 @@ mod tests {
 		for path in ["live/a", "live/b", "other"] {
 			let broadcast = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 			let track = broadcast.broadcast().create_track("video", info.clone()).unwrap();
-			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			broadcast.announce().unwrap();
 			instances.push(broadcast.instance());
 			broadcasts.push((broadcast, track));
@@ -496,10 +496,10 @@ mod tests {
 			.with_max_age(None);
 		let video = source.create_track("video", info).unwrap();
 		for sequence in 0..2 {
-			let mut group = video.create_group(group::Info { sequence }).unwrap();
+			let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 			group.write_frame(pts, format!("frame {sequence}")).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		let _video = video.finish().unwrap();
 		let recording =

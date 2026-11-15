@@ -4,7 +4,7 @@ import { type Fill, fillChanged, wantedRuns } from "../fill.ts";
 import type * as group from "../group.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
-import type { Timescale } from "../time.ts";
+import { received, type Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { decodeFetchObject, EndOfRange } from "./object.ts";
@@ -184,7 +184,11 @@ export class RangeFetch {
 					});
 				const producer = this.#current?.producer;
 				if (producer) {
-					if (object.payload) producer.writeFrame({ payload: object.payload, timestamp: object.timestamp });
+					if (object.payload)
+						producer.writeFrame({
+							payload: object.payload,
+							timestamp: received(object.timestamp, producer.sequence),
+						});
 					else if (!(await untilAborted(receiveFrame(stream, producer, object), this.#stop.signal)))
 						throw new Error("FETCH group was abandoned");
 				} else if (!object.payload) await untilAborted(skipPayload(stream, object.size), this.#stop.signal);

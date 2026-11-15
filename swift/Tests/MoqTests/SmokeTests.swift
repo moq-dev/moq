@@ -38,10 +38,14 @@ final class SmokeTests: XCTestCase {
         let producer = try request.accept()
         XCTAssertEqual(try producer.priority(), 12)
         XCTAssertNil(try stream.demand().wanted)
-        try producer.insert(Datagram(sequence: 7, timestamp: nil, payload: Data("seven".utf8)))
+        try producer.insert(Datagram(sequence: 7, timestamp: .unscaled(7), payload: Data("seven".utf8)))
         let datagram = try await consumer.recv()
         XCTAssertEqual(datagram?.sequence, 7)
         XCTAssertEqual(datagram?.payload, Data("seven".utf8))
+        // A scale-less datagram's unscaled timestamp names the sequence it writes at.
+        XCTAssertEqual(try producer.append(Data("nine".utf8), timestamp: .unscaled(9)), 9)
+        let nine = try await consumer.recv()
+        XCTAssertEqual(nine?.timestamp, .unscaled(9))
         consumer.cancel()
         let priority = try await producer.priorityChanged(last: 12)
         XCTAssertNil(priority)
@@ -730,16 +734,26 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
-    func testRawTrackWithoutTimestampStaysUntimed() async throws {
+    func testScaleLessTrackCarriesGroupKey() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "untimed")
         let consumer = try track.consume()
-        try track.writeFrame(Data("payload".utf8))
+        // A scale-less track has no time, so a frame names its group's key instead.
+        XCTAssertThrowsError(try track.writeFrame(Data("timed".utf8), timestamp: micros(0)))
+        try track.writeFrame(Data("payload".utf8), timestamp: .unscaled(0))
         let received = try await consumer.readFrame()
         let frame = try XCTUnwrap(received)
         XCTAssertEqual(frame.payload, Data("payload".utf8))
-        XCTAssertNil(frame.timestamp)
+        XCTAssertEqual(frame.timestamp, .unscaled(0))
+        XCTAssertNil(frame.timestamp.scale)
         XCTAssertNil(consumer.info().timescale)
+        // A group's frames carry that group's key, and only it.
+        let group = try track.createGroup(sequence: 1)
+        XCTAssertThrowsError(try group.writeFrame(Data("other".utf8), timestamp: .unscaled(2)))
+        try group.writeFrame(Data("grouped".utf8), timestamp: .unscaled(group.sequence))
+        try group.finish()
+        let grouped = try await consumer.readFrame()
+        XCTAssertEqual(grouped?.timestamp, .unscaled(1))
         try track.finish()
         try broadcast.close()
     }
@@ -835,6 +849,8 @@ final class SmokeTests: XCTestCase {
             Timestamp(value: 0, scale: 0),
             Timestamp(value: 0, scale: 1 << 62),
             Timestamp(value: 1 << 61, scale: 90_000),
+            // A scale-less timestamp has no time to convert.
+            .unscaled(5),
         ] {
             assertTimeOverflow(try invalid.duration)
         }

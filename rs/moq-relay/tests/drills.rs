@@ -346,11 +346,13 @@ fn dial() -> moq_tokio::connect::Config {
 
 /// Append one finished group carrying `payload`.
 fn write_group(track: &mut moq_net::track::Producer, payload: &[u8]) {
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, payload)
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 		.expect("write frame");
-	group.finish().expect("finish group");
+	group.close().expect("finish group");
 }
 
 /// Read the next group's first frame, failing the drill on a timeout, a clean
@@ -361,7 +363,7 @@ async fn read_group(reader: &mut Reader, what: &str) -> (u64, Vec<u8>) {
 		.unwrap_or_else(|_| panic!("{what}: no group within {TIMEOUT:?}"))
 		.unwrap_or_else(|err| panic!("{what}: track aborted: {err}"))
 		.unwrap_or_else(|| panic!("{what}: track finished instead of delivering a group"));
-	let sequence = group.sequence;
+	let sequence = group.start;
 
 	let mut group = group;
 	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
@@ -609,8 +611,10 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	// a second: the kill lands mid-group rather than in the quiet between them.
 	// Nothing more is written, so what the reader is waiting for cannot arrive
 	// ahead of the kill and turn this into a race.
-	let mut open = track.append_group().expect("append group");
-	open.write_frame(moq_net::Timestamp::ZERO, b"read".as_ref())
+	let mut open = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
+	open.write_frame(moq_net::Timestamp::from_millis(open.start).unwrap(), b"read".as_ref())
 		.expect("write frame");
 	let mut open_reader = kio::clock::timeout(TIMEOUT, reader.groups.recv_group())
 		.await
@@ -660,7 +664,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 
 	// Resumed delivery through the same subscriber origin: the reconnected
 	// publisher re-announced, and a fresh subscribe rides the new session.
-	open.finish().expect("finish the interrupted group");
+	open.close().expect("finish the interrupted group");
 	write_group(&mut track, b"after");
 	let mut reader = subscribe(&subscribed, "live").await;
 	read_until(&mut reader, b"after", "after the restart").await;
@@ -1258,7 +1262,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 					Err(err) => panic!("the subscription aborted: {err}"),
 					Ok(None) => panic!("the subscription finished"),
 				};
-				let sequence = group.sequence;
+				let sequence = group.start;
 
 				// Every unclaimed group below this one is a gap the subscription
 				// skipped: FETCH it now rather than wait.
@@ -1529,18 +1533,22 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	assert!(path.overflowed() > 0, "the finite queue did not drop overflow");
 	// 5.12Mb/s of media behind a 64kb/s link, for a second.
 	for sequence in 2..22 {
-		let mut group = track.append_group().unwrap();
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(sequence * 50).unwrap(), payload.clone())
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
-	let mut newest = track.append_group().unwrap();
+	let mut newest = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.unwrap();
 	newest
 		.write_frame(moq_net::Timestamp::from_millis(1100).unwrap(), b"snapshot")
 		.unwrap();
-	newest.finish().unwrap();
+	newest.close().unwrap();
 	// No successor means this snapshot must survive even after its budget elapsed.
 	kio::clock::sleep(Duration::from_millis(500)).await;
 	let sequence = kio::clock::timeout(TIMEOUT, async {
@@ -1549,7 +1557,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 			if let Ok(Some(frame)) = group.read_frame().await
 				&& frame.payload == b"snapshot".as_slice()
 			{
-				break group.sequence;
+				break group.start;
 			}
 		}
 	})

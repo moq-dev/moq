@@ -101,7 +101,7 @@ async fn opus_roundtrip(case: Case) {
 		let expected = 123_000 + pcm.len() as u128 / channels as u128 * 1_000_000 / case.rate as u128;
 		// Microsecond stamping rounds each chunk independently.
 		assert!(
-			frame.timestamp.as_micros().abs_diff(expected) <= 1,
+			frame.timestamp.as_micros().unwrap().abs_diff(expected) <= 1,
 			"{:?} versus {expected}us",
 			frame.timestamp
 		);

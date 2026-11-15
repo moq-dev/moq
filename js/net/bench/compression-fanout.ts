@@ -1,5 +1,6 @@
 import type { Producer as Group } from "../src/group.ts";
 import { hooks } from "../src/internal.ts";
+import { Timestamp } from "../src/time.ts";
 import { Producer as Track } from "../src/track.ts";
 
 /** Sweep compressed publishers and public group readers, sharing one inflated copy per group. */
@@ -22,7 +23,8 @@ export function fanout() {
 				const consumers = groups.map((group) => Array.from({ length: readers }, () => group.consume()));
 				let started = performance.now();
 				for (const group of groups) {
-					for (let index = 0; index < frames; index++) group.writeFrame({ payload });
+					for (let index = 0; index < frames; index++)
+						group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 					group.finish();
 				}
 				publish += performance.now() - started;
@@ -81,7 +83,7 @@ export function tails() {
 					const started = performance.now();
 					for (let index = 0; index < frames; index++) {
 						for (const [publisher, group] of groups.entries()) {
-							group.writeFrame({ payload });
+							group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
 							for (const consumer of consumers[publisher]) {
 								const frame = consumer.tryReadFrameSequence();
 								if (

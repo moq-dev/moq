@@ -711,16 +711,7 @@ fn deserialize_base64url<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
 	D: Deserializer<'de>,
 {
-	let s = String::deserialize(deserializer)?;
-
-	// Try to decode as unpadded base64url first (preferred format)
-	base64::engine::general_purpose::URL_SAFE_NO_PAD
-		.decode(&s)
-		.or_else(|_| {
-			// Fall back to padded base64url for backwards compatibility
-			base64::engine::general_purpose::URL_SAFE.decode(&s)
-		})
-		.map_err(serde::de::Error::custom)
+	decode_base64url(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
 }
 
 fn deserialize_base64url_optional<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
@@ -728,16 +719,21 @@ where
 	D: Deserializer<'de>,
 {
 	let s: Option<String> = Option::deserialize(deserializer)?;
-	match s {
-		Some(s) => {
-			let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-				.decode(&s)
-				.or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&s))
-				.map_err(serde::de::Error::custom)?;
-			Ok(Some(decoded))
-		}
-		None => Ok(None),
+	s.map(|s| decode_base64url(&s))
+		.transpose()
+		.map_err(serde::de::Error::custom)
+}
+
+/// A key field: unpadded base64url, or padded for backwards compatibility. Empty is refused,
+/// as `@moq/auth` does, since no key material is empty.
+fn decode_base64url(s: &str) -> Result<Vec<u8>, String> {
+	if s.is_empty() {
+		return Err("empty key field".to_string());
 	}
+	base64::engine::general_purpose::URL_SAFE_NO_PAD
+		.decode(s)
+		.or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(s))
+		.map_err(|err| err.to_string())
 }
 
 #[cfg(test)]

@@ -232,8 +232,9 @@ async fn consumer_preserves_reference_samples_and_timeline() {
 			if let decode::Read::Frame(frame) = read {
 				let start = *first.get_or_insert(frame.timestamp);
 				let elapsed = Duration::from_secs_f64(pcm.len() as f64 / vector.channels as f64 / vector.rate as f64);
-				let actual = Duration::from(frame.timestamp)
-					.checked_sub(Duration::from(start))
+				let actual = Duration::try_from(frame.timestamp)
+					.unwrap()
+					.checked_sub(Duration::try_from(start).unwrap())
 					.expect("monotonic PCM");
 				assert!(
 					actual.abs_diff(elapsed) <= Duration::from_micros(1),
