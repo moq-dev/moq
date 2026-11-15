@@ -31,8 +31,11 @@ class QueryTests(unittest.TestCase):
         (self.repo / "sh").mkdir(parents=True)
         for script in ("dispatch.sh", "changed.sh", "local.sh", "quest.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
-        # The stub belongs in the base so it does not widen every test's diff.
-        (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 0\n")
+        # The stubs belong in the base so they do not widen every test's diff.
+        for script in ("kvm.sh", "markdown.sh", "shell.sh", "large-files.sh", "migrate.sh", "text.sh"):
+            path = self.repo / "sh" / script
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep", "cat", "sed", "tr", "xargs", "sleep"):
@@ -320,10 +323,6 @@ class QueryTests(unittest.TestCase):
         quest.write_text('#!/usr/bin/env bash\nprintf "pinned quest %s\\n" "$*" >>"$CALLS"\n')
         self.env.update(IN_MOQ_DEV_SHELL="1", DEV_SHELL_QUEST=str(quest), CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
-        for script in ("markdown.sh", "shell.sh", "large-files.sh", "migrate.sh", "text.sh"):
-            path = self.repo / "sh" / script
-            path.write_text("#!/bin/sh\nexit 0\n")
-            path.chmod(0o755)
 
     def run_ci(self, base="origin/main"):
         self.stub_ci()
@@ -408,6 +407,7 @@ class QueryTests(unittest.TestCase):
         self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\n    "go check") {releases} ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
         self.change("js/net/src/index.ts")
+        self.change("sh/example.sh")
         result = subprocess.run(
             ["bash", "sh/dispatch.sh", "ci", "origin/main"],
             cwd=self.repo,
@@ -417,8 +417,8 @@ class QueryTests(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("ci: test gh failed", result.stderr)
-        self.assertRegex(result.stderr, r"\d+  test gh \(failed\)")
+        self.assertIn("ci: check tooling failed", result.stderr)
+        self.assertRegex(result.stderr, r"\d+  check tooling \(failed\)")
         self.assertNotIn("(cancelled)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
         self.assertIn("go check", calls)
@@ -442,6 +442,7 @@ class QueryTests(unittest.TestCase):
         self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
         self.change("js/net/src/index.ts")
+        self.change("sh/example.sh")
         result = subprocess.run(
             ["bash", "sh/dispatch.sh", "ci", "origin/main"],
             cwd=self.repo,
@@ -451,7 +452,7 @@ class QueryTests(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("ci: test gh failed", result.stderr)
+        self.assertIn("ci: check tooling failed", result.stderr)
         self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
         self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
         self.assertNotIn("ci: test rs failed", result.stderr)
@@ -753,6 +754,34 @@ esac
         self.change("rs/kio/src/clock/mod.rs")
         calls = [call.split()[1] for call in self.run_ci() if call.startswith("rs ")]
         self.assertEqual(calls, ["lint-changed", "test-changed"])
+
+    def test_tooling_tests_follow_what_they_read(self):
+        for path, expected in (
+            ("sh/rs/select.sh", True),
+            ("bench/compare.py", True),
+            ("test/smoke/runner.py", True),
+            (".github/workflows/check.yml", True),
+            (".cargo/config.toml", True),
+            ("go/wrapper/VERSION", True),
+            ("rs/moq-net/Cargo.toml", True),
+            ("rs/moq-net/verify/route/Early.cfg", True),
+            ("js/net/bench/fills.ts", True),
+            ("js/justfile", True),
+            ("flake.lock", True),
+            ("rs/moq-net/src/lib.rs", False),
+            ("js/net/src/index.ts", False),
+            ("doc/concept/example.md", False),
+            ("test/interop/example.ts", False),
+            ("quest/m1/example.md", False),
+        ):
+            with self.subTest(path=path):
+                self.change(path)
+                calls = self.run_ci()
+                (self.repo / path).unlink()
+                self.assertEqual("gh test" in calls, expected)
+                # The workflow lints and repository-wide policy still gate every diff.
+                self.assertIn("gh check", calls)
+        self.assertIn("gh test", self.run_ci("--all"))
 
     def test_module_filter_splits_the_gate(self):
         modules = {"rs": ["rs lint-changed --all", "rs test-changed --all"], "-rs": []}

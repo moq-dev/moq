@@ -59,7 +59,7 @@ check:
     python3 sh/gh/test-inventory.py
     python3 bench/relay.test.py
 
-# Repository tooling tests; run every ordinary test file whole in the merge gate.
+# Repository tooling tests; the merge gate runs every ordinary test file whole when tooling changes.
 test:
     python3 sh/version.test.py
     python3 sh/local.test.py
