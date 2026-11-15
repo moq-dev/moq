@@ -4932,11 +4932,16 @@ impl Producer {
 
 	/// Abort an unwanted track, returning the producer unchanged if consumers remain.
 	///
+	/// This is how an on-demand publisher ends a track once [`Demand::poll_wanted_changed`]
+	/// reports nobody wants it. Dropping the producer instead races a reader joining in
+	/// between, which then reads [`Error::Dropped`].
+	///
 	/// Consumer creation and the unwanted check share a lock, so demand returning
 	/// after [`Demand::wanted`] went to `None` prevents the abort. `Ok(())` means
 	/// the track is closed, including when it was already closed; existing handles
-	/// may still observe its final state. `Err(producer)` leaves the track unchanged
-	/// so the caller can continue serving and wait for the next unwanted wake.
+	/// may still observe its final state, and a later lookup requests the track afresh.
+	/// `Err(producer)` leaves the track unchanged so the caller can continue serving and
+	/// wait for the next unwanted wake.
 	///
 	/// The abort is the same as [`Self::abort`]. A reader still in a group it was handed
 	/// counts as a consumer until it reads the group's end.
@@ -4947,8 +4952,7 @@ impl Producer {
 			reason = "return the owned producer without allocating on an idle check"
 		)
 	)]
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
+	pub fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
 		let wanted = match self.state.write_unwanted() {
 			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err, None).abort();
@@ -5693,6 +5697,8 @@ impl Demand {
 	///
 	/// So `while let Some(n) = demand.wanted_changed().await?` runs while anyone wants the
 	/// track, and `while demand.wanted_changed().await?.is_none()` waits for someone to.
+	/// End a track nobody wants with [`Producer::abort_unwanted`], which keeps it for a
+	/// reader that joined since.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
 		let active = match self.poll_state(waiter) {
