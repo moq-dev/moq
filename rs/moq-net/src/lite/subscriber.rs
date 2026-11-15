@@ -2050,17 +2050,10 @@ impl FrameIngest {
 
 	/// Where the frame `header` opens goes: a new frame of the group, or on a continuation,
 	/// one the group holds already, skipped, or the one a YIELDED reset cut short, completed.
-	fn dispatch(&mut self, group: &mut crate::recv::Group, header: frame::Header) -> Result<IngestPhase, Error> {
+	fn dispatch(&mut self, group: &crate::recv::Group, header: frame::Header) -> Result<IngestPhase, Error> {
 		let index = self.index;
 		// The peer's Frame Start can number a frame past any count.
 		self.index = index.checked_add(1).ok_or(Error::ProtocolViolation)?;
-		// A response from a byte: the header states the frame's full size, and only the rest
-		// of it follows.
-		if group.lead_at(index).is_some() {
-			return Ok(IngestPhase::Payload {
-				frame: group.create_lead(header)?,
-			});
-		}
 		let held = group.frame_count() as u64;
 		if index >= held {
 			return Ok(IngestPhase::Admit { header });
@@ -2111,12 +2104,9 @@ impl FrameIngest {
 				let lite::ietf::Decoded { properties, gap } =
 					lite::ietf::decode_properties(&block, self.framing, true)?;
 				group.mark_gap(id, gap)?;
-				// The rest of a frame the copy starts partway into is numbered below its count.
 				// A plain group's frames are numbered by index, so a continuation re-sending
-				// frames its group holds finds them below its count too.
-				let next = id == group.frame_count() as u64
-					|| group.lead_at(id).is_some()
-					|| (!records.relayed && id == self.index);
+				// frames its group holds finds them below its count.
+				let next = id == group.frame_count() as u64 || (!records.relayed && id == self.index);
 				let plain = next && properties.is_empty();
 				if !plain && !records.relayed {
 					return Err(Error::ProtocolViolation);
@@ -14327,7 +14317,6 @@ enum FetchRunState {
 		request: Option<track::GroupFill>,
 		stream: Stream<Transport, Version>,
 		frame_start: u64,
-		byte_start: u64,
 		frame_end: Option<u64>,
 	},
 	/// Flushed; waiting for the publisher to answer before accepting.
@@ -14335,7 +14324,6 @@ enum FetchRunState {
 		request: Option<track::GroupFill>,
 		stream: Stream<Transport, Version>,
 		frame_start: u64,
-		byte_start: u64,
 		frame_end: Option<u64>,
 	},
 	Ingest {
@@ -14505,15 +14493,6 @@ impl kio::Task for FetchServeRun {
 						false => 0,
 					};
 
-					// Only the rest of a frame a reader got partway through, which a compressed
-					// frame cannot start at: it inflates only from its first byte. Nor can a
-					// moq-transport track's, whose object records name whole objects.
-					let whole_objects = matches!(self.info.peek(), Some(Ok(info)) if info.ietf().is_some());
-					let byte_start = match self.serve.subscriber.version.has_byte_start() {
-						true if plain && !whole_objects && frame_start == request.frame_start() => request.byte_start(),
-						_ => 0,
-					};
-
 					let frame_end = if self.serve.subscriber.version.has_frame_bounds() && plain {
 						request.frame_end()
 					} else {
@@ -14533,7 +14512,6 @@ impl kio::Task for FetchServeRun {
 							.filter(|_| self.serve.subscriber.version.has_fetch_max_delay()),
 						group: self.group,
 						start_frame: frame_start,
-						start_byte: byte_start,
 						// A bounded plain copy keeps this provenance in the cache; older wires
 						// and compressed groups widen to a complete representation.
 						end_frame: frame_end.and_then(|end| end.checked_sub(1)),
@@ -14553,7 +14531,6 @@ impl kio::Task for FetchServeRun {
 						request: Some(request),
 						stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					};
 				}
@@ -14572,7 +14549,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						mut stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					} = std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {
@@ -14585,7 +14561,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					};
 				}
@@ -14622,7 +14597,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						mut stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					} = std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {
@@ -14654,7 +14628,6 @@ impl kio::Task for FetchServeRun {
 						group_info,
 						group::Bounds {
 							start: frame_start,
-							byte: byte_start,
 							end: frame_end,
 						},
 					) {

@@ -160,7 +160,6 @@ would need a breaking release had it landed right after the cut:
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - removes WARM_* and SUBSCRIBE's `Warm` byte from lite-07
-- [FETCH Start Byte](/quest/m2/fetch-start-byte.md) - removes FETCH's byte offset into a half-read frame
 - [Subscriber Min Age](/quest/m2/subscriber-min-age.md) - removes SUBSCRIBE's minimum age, which nothing reads
 
 ## Related
