@@ -834,7 +834,10 @@ async fn a_covered_bounded_subscription_stays_open() {
 /// or skipped, so the read ends with the track instead of waiting on a hole.
 #[kio::test]
 async fn a_relay_with_holes_answers_a_wide_past_range_plus_live() {
-	holes_through_a_relay("moq-lite-07-wip").await;
+	// With no budget only SUBSCRIBE_DROP settles the holes, so that path is tested on its own.
+	for budget in [None, Some(BUDGET)] {
+		holes_through_a_relay("moq-lite-07-wip", budget).await;
+	}
 }
 
 /// [`a_relay_with_holes_answers_a_wide_past_range_plus_live`] over moq-transport, which marks
@@ -843,22 +846,24 @@ async fn a_relay_with_holes_answers_a_wide_past_range_plus_live() {
 #[ignore = "stalls on a hole until /quest/m3/ietf-hole-stall.md"]
 async fn a_relay_with_holes_answers_a_wide_past_range_plus_live_over_moq_transport() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
-		holes_through_a_relay(version).await;
+		holes_through_a_relay(version, Some(BUDGET)).await;
 	}
 }
 
-async fn holes_through_a_relay(version: &str) {
+/// A budget the past range stays inside while it's read, and the live group then leaves behind.
+const BUDGET: Duration = Duration::from_secs(60);
+
+async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 	// The publisher drops group 4 and never produces group 7. Group 8 lies outside both ranges.
 	const DROPPED: u64 = 4;
 	const ABSENT: u64 = 7;
 	const WANT: [u64; 8] = [0, 1, 2, 3, 5, 6, 9, 10];
 	// History is stamped within a second, so the whole past range is fresh when read. The
 	// live group lands far past the budget, which then rules both holes out.
-	const BUDGET: Duration = Duration::from_secs(60);
 	const LIVE_MILLIS: u64 = 100_000;
 	let mut failures = Vec::new();
 	for order in [Order::Ascending, Order::Descending] {
-		let name = format!("{version} {order:?}");
+		let name = format!("{version} {order:?} budget={budget:?}");
 		let fixture = range_fixture_history(version, true, 0).await;
 		for sequence in (0..=9).filter(|sequence| *sequence != ABSENT) {
 			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
@@ -893,7 +898,7 @@ async fn holes_through_a_relay(version: &str) {
 		let mut reader = subscribe(
 			&fixture.remote,
 			Subscription::default()
-				.with_delay(Delay::default().with_max(BUDGET))
+				.with_delay(Delay::default().with_max(budget))
 				.with_order(order)
 				.with_ranges([Range::groups(0..8), Range::live()]),
 		)
