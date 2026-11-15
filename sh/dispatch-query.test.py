@@ -762,6 +762,8 @@ esac
             ("test/smoke/runner.py", True),
             (".github/workflows/check.yml", True),
             (".cargo/config.toml", True),
+            (".release-plz.toml", True),
+            ("rs/moq-ffi/build.sh", True),
             ("go/wrapper/VERSION", True),
             ("rs/moq-net/Cargo.toml", True),
             ("rs/moq-net/verify/route/Early.cfg", True),
