@@ -512,9 +512,10 @@ keep_builds() {
 }
 
 # List the base's kept executables in OUT, as criterion_build would, from the base checkout's
-# packages. Fails when BENCH_BASE_BUILDS holds no builds of BASE covering every current target.
+# packages. Fails when BENCH_BASE_BUILDS holds no builds of BASE covering every current target
+# that can load on this host.
 kept_base() {
-    local out=$1 current=$2 dir=${BENCH_BASE_BUILDS:-} key package file
+    local out=$1 current=$2 dir=${BENCH_BASE_BUILDS:-} key package file loaded
     [[ -n $dir && -s $dir/targets.tsv && -f $dir/commit && $(<"$dir/commit") == "$BASE" ]] || return 1
     dir=$(cd "$dir" && pwd -P)
     while IFS=$'\t' read -r key _; do
@@ -524,6 +525,16 @@ kept_base() {
     while IFS=$'\t' read -r key package file; do
         # An artifact download drops the executable bit.
         chmod +x "$dir/$file"
+        # The executables link against the store paths of the shell that built them, which a
+        # fresh runner lacks after a toolchain or library bump. The loader alone, never main,
+        # resolves the interpreter and every library: anything missing builds the base instead.
+        if ! loaded=$(LD_TRACE_LOADED_OBJECTS=1 "$dir/$file" 2>&1); then
+            printf 'Kept base executable %s has no loader here\n' "$key" >&2
+            return 1
+        elif [[ $loaded == *"not found"* ]]; then
+            printf 'Kept base executable %s lacks a library here:\n%s\n' "$key" "$loaded" >&2
+            return 1
+        fi
         printf '%s\t%s\t%s\n' "$key" "$WORKTREE/$package" "$dir/$file" >>"$out"
     done <"$dir/targets.tsv"
 }
