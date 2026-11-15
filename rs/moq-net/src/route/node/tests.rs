@@ -518,7 +518,11 @@ fn the_doubt_timer_fires_on_the_origins_clock() {
 #[test]
 fn a_route_at_the_hop_limit_is_not_forwarded() {
 	use crate::route::MAX_HOPS;
-	for (hops, forwarded) in [(MAX_HOPS - 2, Some(MAX_HOPS - 1)), (MAX_HOPS - 1, None), (MAX_HOPS, None)] {
+	for (hops, forwarded) in [
+		(MAX_HOPS - 2, Some(MAX_HOPS - 1)),
+		(MAX_HOPS - 1, None),
+		(MAX_HOPS, None),
+	] {
 		let relay = Node::new(2, 2, clock());
 		let from_a = relay.receive(peer(1, 100 + hops as Id - 1), Link::default()).unwrap();
 		let to_b = relay.answer(peer(2, 3), Link::default(), Path::empty()).unwrap();

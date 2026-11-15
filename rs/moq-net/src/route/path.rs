@@ -1384,14 +1384,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// [`Router::batch`] for the route filed as `id` at `prefix`.
-	fn batch_at(
-		&mut self,
-		from: N,
-		id: Id,
-		prefix: Path,
-		changes: Vec<(Path, Option<A>)>,
-		floor: Option<Rev>,
-	) {
+	fn batch_at(&mut self, from: N, id: Id, prefix: Path, changes: Vec<(Path, Option<A>)>, floor: Option<Rev>) {
 		let key = (id, prefix.clone());
 		let Some(heard) = self.rx.get_mut(&key).and_then(|routes| routes.get_mut(&from)) else {
 			return;
@@ -2774,8 +2767,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					Want::Keep => {
 						// The neighbour takes a first DEAD to mean this node holds every route it
 						// did not learn from the neighbour, so what was sent says so too.
-						if first && !sent.held() && !child(&sent.offer().expect("sent").path, self.hop_of(peer))
-						{
+						if first && !sent.held() && !child(&sent.offer().expect("sent").path, self.hop_of(peer)) {
 							let sent = self
 								.answering
 								.get_mut(&peer)
