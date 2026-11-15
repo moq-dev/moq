@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 
 use super::*;
-use moq_congestion::{Acked, Lost};
+use crate::{Acked, Lost};
 
 const MTU: u16 = 1200;
 /// One-way propagation delay, each way

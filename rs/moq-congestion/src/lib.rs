@@ -14,13 +14,12 @@ use std::sync::Arc;
 pub mod bbr3;
 /// CUBIC congestion control.
 pub mod cubic;
-/// Test support, enabled by the `lab` feature: the token-bucket pacer the candidate controllers
-/// share.
 #[cfg(feature = "lab")]
-pub mod pacer;
-#[cfg(not(feature = "lab"))]
+pub mod gcc;
 mod pacer;
 mod rate;
+#[cfg(feature = "lab")]
+pub mod scream;
 mod unlimited;
 
 pub use rate::Packet;
@@ -283,10 +282,14 @@ mod tests {
     /// The largest UDP payload (RFC 9000), whose two datagrams outgrow every 1200-based default
     const MTU: u16 = 65527;
 
-    fn factories() -> [(&'static str, Arc<dyn Factory>); 3] {
-        [
+    fn factories() -> Vec<(&'static str, Arc<dyn Factory>)> {
+        vec![
             ("bbr3", Arc::new(bbr3::Config::default())),
             ("cubic", Arc::new(cubic::Config::default())),
+            #[cfg(feature = "lab")]
+            ("gcc", Arc::new(gcc::Config::default())),
+            #[cfg(feature = "lab")]
+            ("scream", Arc::new(scream::Config::default())),
             ("unlimited", Arc::new(Unlimited)),
         ]
     }

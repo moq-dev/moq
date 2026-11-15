@@ -36,21 +36,7 @@ pub struct Packet {
     /// fields above. GoogCC's clusters and the prober's restarts each wrap within half of them,
     /// far more than either starts in the two seconds a cluster is kept.
     #[cfg(feature = "lab")]
-    probe_cluster: Option<NonZeroU16>,
-}
-
-/// Test support, enabled by the `lab` feature, for the GCC candidate in moq-congestion-lab.
-#[cfg(feature = "lab")]
-impl Packet {
-    /// The GCC probe cluster the packet was sent in, if any.
-    pub fn probe_cluster(&self) -> Option<NonZeroU16> {
-        self.probe_cluster
-    }
-
-    /// Records the GCC probe cluster the packet was sent in.
-    pub fn set_probe_cluster(&mut self, cluster: Option<NonZeroU16>) {
-        self.probe_cluster = cluster;
-    }
+    pub(crate) probe_cluster: Option<NonZeroU16>,
 }
 
 /// An empty state, for a controller that keeps none.

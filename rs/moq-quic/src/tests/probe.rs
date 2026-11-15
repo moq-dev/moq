@@ -18,8 +18,7 @@ use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg32;
 
 use super::*;
-use crate::congestion::{bbr3, cubic};
-use moq_congestion_lab::gcc;
+use crate::congestion::{bbr3, cubic, gcc};
 
 /// The media's usual bitrate, 2 Mbit/s, which the probe has to see past
 const MEDIA: u64 = 250_000;

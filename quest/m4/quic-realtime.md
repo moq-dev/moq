@@ -36,9 +36,9 @@ spike assumed no consumer; teleoperation uplinks are one):
   scheduler's grants. So the candidates group arrivals into bursts before
   fitting a trend, as GoogCC does. Reproduce it with `just rs quic-sim`.
 - Bake-off: all three candidates in parallel, each a controller
-  in the workspace-only `moq-congestion-lab` (the delay bound stays in
-  `moq-congestion`'s `bbr3/`, its setter behind the `lab` test-support
-  feature); a winner moves into `moq-congestion`. The moq-shaper presets `cellular-step`,
+  in `moq-congestion` compiled only behind its `lab` test-support feature
+  (for the delay bound, only its setter); a winner leaves the feature. The
+  moq-shaper presets `cellular-step`,
   `cellular-bursty` and `cellular-deep` decide it. The report states the
   shaper's timing jitter, measured over `near-zero`, as the noise floor of the
   delay signal. The BBR3 delay bound (`bbr3::Config::delay_bound`) brought
@@ -70,7 +70,7 @@ spike assumed no consumer; teleoperation uplinks are one):
   than upgrading `Delay`, so current users see no behavior change.
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
-- SCReAMv2 landed as `moq_congestion_lab::scream::Scream`
+- SCReAMv2 landed as `moq_congestion::scream::Scream`
   ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)). moq-quic's
   `tests::scream` measures it on the sim beside BBR3, and moq-tokio's
   `scream` integration tests over the real presets. Its estimate is a window
@@ -181,7 +181,14 @@ the candidates would publish unselectable with moq-congestion's first
 release. Decided 2026-11-14 (maintainer, pick on
 [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ the cut ships
 BBR through the existing selector and keeps GCC, SCReAM, and the BBR3 delay
-bound off the published API.
+bound off the published API. Decided 2026-11-15 (maintainer, /quest-complete,
+on [moq-dev/moq#8850](https://github.com/moq-dev/moq/pull/8850)), in the
+maintainer's words: "wait why a new crate? put them behind a feature then
+definitely not a new crate". ✅ GCC and SCReAMv2 stay modules of
+moq-congestion, compiled only behind its `lab` test-support feature, which
+also gates the delay bound's setter (rejected: a separate workspace-only
+crate). This supersedes the earlier record of the #8764 pick as rejecting "an
+unstable feature", which paraphrased the pick rather than quoting it.
 This bake-off tests them, and each winner joins `CongestionControl` as a
 variant named after its algorithm, or, for the delay bound, a `bbr3::Config`
 option; losers stay out of the published API.

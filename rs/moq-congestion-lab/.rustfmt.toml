@@ -1,2 +1,0 @@
-# rustfmt defaults rather than the root .rustfmt.toml, as in moq-congestion, so a candidate
-# moves between the two crates without whitespace churn.

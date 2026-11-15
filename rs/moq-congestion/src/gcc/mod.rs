@@ -1,5 +1,8 @@
 //! libwebrtc's Google Congestion Control (GoogCC), driven by QUIC receive timestamps.
 //!
+//! A candidate under test, compiled only with the `lab` test-support feature: no session can
+//! select it until the realtime bake-off picks it.
+//!
 //! The submodules are a Rust port of WebRTC's `modules/congestion_controller/goog_cc`, with the
 //! parts of `api/transport`, `api/units`, `modules/pacing` and `modules/remote_bitrate_estimator`
 //! it uses. They began as [goog_cc](https://github.com/kixelated/goog_cc) 0.1.4, a port of WebRTC
@@ -77,6 +80,10 @@ use std::{collections::VecDeque, num::NonZeroU16, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
 
+use crate::{
+    Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent,
+    pacer::{self, Pacer, Rate},
+};
 use api::{
     transport::{
         NetworkAvailability, NetworkControlUpdate, PacedPacketInfo, PacerConfig, PacketResult,
@@ -84,10 +91,6 @@ use api::{
         TransportPacketsFeedback,
     },
     units::{DataRate, DataSize, TimeDelta, Timestamp},
-};
-use moq_congestion::{
-    Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent,
-    pacer::{self, Pacer, Rate},
 };
 use pacing::BitrateProber;
 
@@ -279,7 +282,7 @@ impl Gcc {
     /// GoogCC runs on the round-trip delay. Once it reports one, a packet without one, as when
     /// the ACK carrying its time was lost, still counts as received for the loss-based estimate,
     /// but not toward delay, rather than mix the two clocks.
-    fn acked(&mut self, packet: &moq_congestion::Acked, now: Instant) -> PacketResult {
+    fn acked(&mut self, packet: &crate::Acked, now: Instant) -> PacketResult {
         let (receive_time, ambiguous_receive_time) = match packet.received {
             Some(received) => (self.receive_time(received, now), false),
             None => (timestamp(now), self.receive_basis.is_some()),
@@ -288,7 +291,7 @@ impl Gcc {
             sent_packet: SentPacket {
                 send_time: timestamp(packet.sent),
                 size: DataSize::from_bytes(packet.bytes.into()),
-                pacing_info: self.cluster(packet.packet.probe_cluster()),
+                pacing_info: self.cluster(packet.packet.probe_cluster),
                 data_in_flight: DataSize::zero(),
             },
             receive_time,
@@ -383,9 +386,10 @@ impl Controller for Gcc {
             data_in_flight: size(sent.in_flight),
         });
         self.apply(update);
-        let mut packet = Packet::default();
-        packet.set_probe_cluster(probe_cluster);
-        packet
+        Packet {
+            probe_cluster,
+            ..Default::default()
+        }
     }
 
     fn on_ack(&mut self, ack: Ack<'_>) {
@@ -421,7 +425,7 @@ impl Controller for Gcc {
                 sent_packet: SentPacket {
                     send_time: timestamp(packet.sent),
                     size: DataSize::from_bytes(packet.bytes.into()),
-                    pacing_info: self.cluster(packet.packet.probe_cluster()),
+                    pacing_info: self.cluster(packet.packet.probe_cluster),
                     data_in_flight: DataSize::zero(),
                 },
                 receive_time: Timestamp::plus_infinity(),

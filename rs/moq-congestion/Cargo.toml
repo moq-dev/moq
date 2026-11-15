@@ -5,18 +5,18 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 repository = "https://github.com/moq-dev/moq"
-license = "MIT OR Apache-2.0"
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
 
 [features]
-# Test support for the workspace-only moq-congestion-lab and the comparisons that run its
-# candidates: the pacer, a packet's GCC probe cluster, and BBR3's delay bound. Meant for
-# dev-dependencies; not for applications.
-lab = []
+# Test support for the candidates under test and the comparisons that run them: the `gcc` and
+# `scream` controllers and BBR3's delay bound. Meant for dev-dependencies; not for applications.
+lab = ["dep:tracing"]
 
 [dependencies]
 kio = { workspace = true }
 rand = { workspace = true }
 rand_pcg = { workspace = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 cpu-time = "1.0.0"

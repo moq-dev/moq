@@ -4313,16 +4313,6 @@ dependencies = [
  "rand 0.10.3",
  "rand_pcg",
  "stats_alloc",
- "workspace-hack",
-]
-
-[[package]]
-name = "moq-congestion-lab"
-version = "0.0.0"
-dependencies = [
- "cpu-time",
- "kio",
- "moq-congestion",
  "tracing",
  "workspace-hack",
 ]
@@ -4622,7 +4612,6 @@ dependencies = [
  "kio",
  "lru-slab",
  "moq-congestion",
- "moq-congestion-lab",
  "moq-crypto",
  "moq-quic",
  "proptest",
@@ -4875,7 +4864,6 @@ dependencies = [
  "libc",
  "mdns-sd",
  "moq-congestion",
- "moq-congestion-lab",
  "moq-crypto",
  "moq-net",
  "moq-quic",

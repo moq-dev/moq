@@ -180,16 +180,6 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
-    "moq-congestion-lab" = rec {
-      packageId = "moq-congestion-lab";
-      build = internal.buildRustCrateWithFeatures {
-        packageId = "moq-congestion-lab";
-      };
-
-      # Debug support which might change between releases.
-      # File a bug if you depend on any for non-debug work!
-      debug = internal.debugCrate { inherit packageId; };
-    };
     "moq-crypto" = rec {
       packageId = "moq-crypto";
       build = internal.buildRustCrateWithFeatures {
@@ -18591,6 +18581,11 @@ rec {
             name = "rand_pcg";
             packageId = "rand_pcg";
           }
+          {
+            name = "tracing";
+            packageId = "tracing";
+            optional = true;
+          }
         ];
         devDependencies = [
           {
@@ -18612,49 +18607,9 @@ rec {
           }
         ];
         features = {
+          "lab" = [ "dep:tracing" ];
         };
         resolvedDefaultFeatures = [ "lab" ];
-      };
-      "moq-congestion-lab" = rec {
-        crateName = "moq-congestion-lab";
-        version = "0.0.0";
-        edition = "2024";
-        src = lib.cleanSourceWith {
-          filter = sourceFilter;
-          src = ../rs/moq-congestion-lab;
-        };
-        libName = "moq_congestion_lab";
-        dependencies = [
-          {
-            name = "kio";
-            packageId = "kio";
-          }
-          {
-            name = "moq-congestion";
-            packageId = "moq-congestion";
-            features = [ "lab" ];
-          }
-          {
-            name = "tracing";
-            packageId = "tracing";
-          }
-        ];
-        devDependencies = [
-          {
-            name = "cpu-time";
-            packageId = "cpu-time";
-          }
-          {
-            name = "kio";
-            packageId = "kio";
-            features = [ "runtime" ];
-          }
-          {
-            name = "workspace-hack";
-            packageId = "workspace-hack";
-          }
-        ];
-
       };
       "moq-crypto" = rec {
         crateName = "moq-crypto";
@@ -20234,8 +20189,9 @@ rec {
             ];
           }
           {
-            name = "moq-congestion-lab";
-            packageId = "moq-congestion-lab";
+            name = "moq-congestion";
+            packageId = "moq-congestion";
+            features = [ "lab" ];
           }
           {
             name = "moq-quic";
@@ -21752,10 +21708,7 @@ rec {
           {
             name = "moq-congestion";
             packageId = "moq-congestion";
-          }
-          {
-            name = "moq-congestion-lab";
-            packageId = "moq-congestion-lab";
+            features = [ "lab" ];
           }
           {
             name = "moq-shaper";

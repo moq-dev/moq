@@ -1,6 +1,9 @@
 //! SCReAMv2's delay-based congestion control, ported from draft-ietf-ccwg-rfc8298bis-screamv2-01.
 //! <https://www.ietf.org/archive/id/draft-ietf-ccwg-rfc8298bis-screamv2-01.html>
 //!
+//! A candidate under test, compiled only with the `lab` test-support feature: no session can
+//! select it until the realtime bake-off picks it.
+//!
 //! A reference window caps the bytes in flight. It grows with every byte acknowledged, and shrinks
 //! on loss, on classic ECN-CE, and as the averaged queue delay passes half the target, in
 //! proportion to how far past it is ("virtual L4S" marking). The queue delay is each packet's
@@ -16,10 +19,9 @@
 
 use std::sync::Arc;
 
-use kio::clock::Instant;
-use moq_congestion::pacer::{Pacer, Rate};
-use moq_congestion::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
-use std::time::Duration;
+use crate::pacer::{Pacer, Rate};
+use crate::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
+use crate::{Duration, Instant};
 
 /// equivalent to MIN_REF_WND: the smallest reference window, in bytes
 const MIN_REF_WND: f64 = 3000.0;
@@ -579,7 +581,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use moq_congestion::{Acked, Lost};
+    use crate::{Acked, Lost};
 
     const MTU: u16 = 1200;
     const PROPAGATION: Duration = Duration::from_millis(20);
