@@ -1544,6 +1544,10 @@ enum UniState {
 		reader: Reader<crate::transport::boxed::RecvStream, Version>,
 	},
 	Group(GroupRecv),
+	/// The peer's lite-07 Announce Stream, which the route layer reads. The stream
+	/// lasts as long as the session, and so does this task: its place stays taken, so
+	/// the group streams accepted after it are read in the order they arrived.
+	Announce,
 	Done,
 }
 
@@ -1570,7 +1574,7 @@ impl UniServe {
 		match &mut self.state {
 			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader } => reader.abort(err),
 			UniState::Group(recv) => recv.reader.abort(err),
-			UniState::Done => {}
+			UniState::Announce | UniState::Done => {}
 		}
 	}
 
@@ -1605,7 +1609,7 @@ impl UniServe {
 							// The route layer reads it, and closes the session on a second.
 							reader.set_priority(crate::priority::RECV_CONTROL);
 							let _ = self.subscriber.announce_streams.try_push(reader);
-							return Poll::Ready(Ok(()));
+							UniState::Announce
 						}
 					};
 				}
@@ -1644,6 +1648,10 @@ impl UniServe {
 					if let Err(err) = res {
 						self.abort(&err);
 					}
+					return Poll::Ready(Ok(()));
+				}
+				UniState::Announce => {
+					let _ = ready!(self.subscriber.session.poll_closed(waiter));
 					return Poll::Ready(Ok(()));
 				}
 				UniState::Done => return Poll::Ready(Ok(())),

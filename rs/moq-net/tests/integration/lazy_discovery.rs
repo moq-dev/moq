@@ -3,6 +3,7 @@
 //! A client session asks its peer to announce only the prefixes its origin's readers
 //! watch, keeps a request open while anything at or beneath it is watched, and lets
 //! it go once nothing has been for a linger. A relay's link still asks for everything.
+//! Lite-07 asks on the session's one Announce Stream, an edit for each change.
 
 use std::time::Duration;
 
@@ -22,6 +23,44 @@ const LINGERED: Duration = Duration::from_secs(3);
 
 /// The first byte of a moq-lite ANNOUNCE stream.
 const ANNOUNCE: u8 = 1;
+
+/// The first byte of a lite-07 Announce Stream, and its ANNOUNCE_REQUEST message.
+const ANNOUNCE_STREAM: u8 = 3;
+const ANNOUNCE_REQUEST: u64 = 16;
+
+/// A lite-07 varint off the front of `buf`: as many leading ones as bytes follow.
+fn varint(buf: &mut &[u8]) -> Option<u64> {
+	let first = *buf.first()?;
+	let more = first.leading_ones() as usize;
+	let rest = buf.get(1..1 + more)?;
+	let lead = match more {
+		8 => 0,
+		more => u64::from(first & (0xff >> (more + 1))),
+	};
+	let value = rest.iter().fold(lead, |value, byte| (value << 8) | u64::from(*byte));
+	*buf = &buf[1 + more..];
+	Some(value)
+}
+
+/// How many requests `transport`'s side has made of its peer: the announce streams it
+/// opened, or on lite-07 the edits it sent on its one Announce Stream.
+fn requests(transport: &support::mock::MockSession) -> usize {
+	let streams = (transport.bidi_types().into_iter())
+		.filter(|kind| *kind == ANNOUNCE)
+		.count();
+	let mut edits = 0;
+	for stream in transport.uni_writes(ANNOUNCE_STREAM) {
+		let mut buf = stream.as_slice();
+		while let (Some(kind), Some(size)) = (varint(&mut buf), varint(&mut buf)) {
+			let Some(rest) = buf.get(size as usize..) else {
+				break;
+			};
+			buf = rest;
+			edits += usize::from(kind == ANNOUNCE_REQUEST);
+		}
+	}
+	streams + edits
+}
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
@@ -66,14 +105,9 @@ impl Lazy {
 		}
 	}
 
-	/// How many announce requests the client has opened.
+	/// How many announce requests the client has made.
 	fn requests(&self) -> usize {
-		self.pair
-			.client_transport
-			.bidi_types()
-			.into_iter()
-			.filter(|kind| *kind == ANNOUNCE)
-			.count()
+		requests(&self.pair.client_transport)
 	}
 
 	/// Watch everything under `prefix`.
@@ -362,22 +396,14 @@ async fn serving_the_peer_asks_nothing() {
 		let pair = connect_mock(options).await;
 		kio::clock::sleep(SETTLE).await;
 
-		let requests = pair
-			.client_transport
-			.bidi_types()
-			.into_iter()
-			.filter(|kind| *kind == ANNOUNCE)
-			.count();
-		assert_eq!(requests, 0, "{version}");
+		assert_eq!(requests(&pair.client_transport), 0, "{version}");
 		// An application request is a reader, unlike the peer's serving view.
 		let _read = local.consume().request("a/x", None).await.unwrap();
-		let requests = pair
-			.client_transport
-			.bidi_types()
-			.into_iter()
-			.filter(|kind| *kind == ANNOUNCE)
-			.count();
-		assert_eq!(requests, 1, "{version}: only the application request starts discovery");
+		assert_eq!(
+			requests(&pair.client_transport),
+			1,
+			"{version}: only the application request starts discovery"
+		);
 	}
 }
 
