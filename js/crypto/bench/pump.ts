@@ -24,8 +24,10 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 		// The first round warms the JIT and key imports and is discarded.
 		for (let round = 0; round < 6; round++) {
 			const generation = credential.produce();
+			// No publisher limit: every group is sealed before the first is read.
 			const net = new Broadcast.Producer().createTrack(await generation.name("video"), {
 				timescale: Time.Timescale.MILLI,
+				maxAge: null,
 			});
 			const consumer = credential
 				.consume(generation.epoch)

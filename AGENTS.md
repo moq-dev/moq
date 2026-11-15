@@ -38,6 +38,7 @@ PRs target `main`, where breaking API changes are allowed.
 Wire changes stay backwards compatible with *published* drafts/versions; an unpublished `-wip` version changes freely.
 moq.pro rolls out with relays on the newest and previous release side by side, so those two versions must interoperate as relays. A temporary migration for that is fine when it is clearly marked and easy to delete at the next version migration.
 Our libraries prefer moq-lite, so moq-transport compatibility only matters against third-party implementations.
+Ask before planning or building work that a large live-media platform would not use, such as mesh networking, robotics, AI agents, P2P, or TCP tunnels: it belongs to Kixel (kixel-ai/kixel.ai), which builds on moq rather than waiting on it.
 
 Build output may live outside the checkout and gets wiped, so scratch never goes in `target/`.
 

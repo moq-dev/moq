@@ -13,11 +13,11 @@ use moq_tokio::quic::driver::sim::{Link, Network, Path};
 
 use crate::memory;
 
-const PORT: u16 = 443;
+pub(crate) const PORT: u16 = 443;
 /// Where each client binds, on its own host
 const CLIENT_PORT: u16 = 4433;
-const PUBLISHER: IpAddr = ip(2);
-const SUBSCRIBER: IpAddr = ip(3);
+pub(crate) const PUBLISHER: IpAddr = ip(2);
+pub(crate) const SUBSCRIBER: IpAddr = ip(3);
 
 /// The groups the publisher writes, one every [`INTERVAL`]
 const GROUPS: u64 = 20;
@@ -27,7 +27,7 @@ const FRAME: usize = 4_000;
 /// How long a run may take before it counts as stalled, in simulated time
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-const fn ip(last: u8) -> IpAddr {
+pub(crate) const fn ip(last: u8) -> IpAddr {
 	IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
 }
 
@@ -92,14 +92,14 @@ fn two_relays() {
 }
 
 /// A relay serving on a simulated host
-struct Relay {
-	addr: SocketAddr,
-	fingerprints: Vec<String>,
+pub(crate) struct Relay {
+	pub(crate) addr: SocketAddr,
+	pub(crate) fingerprints: Vec<String>,
 }
 
 /// Serve `cluster` on `addr` through `auth`: each session the server accepts runs a relay
 /// [`Connection`] on its own simulator task.
-async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
+pub(crate) async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
 	serve_versions(network, addr, cluster, auth, Vec::new()).await
 }
 

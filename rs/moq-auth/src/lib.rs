@@ -44,7 +44,6 @@ mod set;
 mod wire;
 
 pub mod lease;
-pub mod mesh;
 pub mod refusal;
 pub use refusal::Refusal;
 #[cfg(feature = "serve")]
