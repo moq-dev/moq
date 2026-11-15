@@ -152,20 +152,42 @@ pub struct RsaPrivateKey {
 	pub oth: Option<Vec<RsaAdditionalPrime>>,
 }
 
+const RSA_PRIVATE_FIELDS: [&str; 6] = ["d", "p", "q", "dp", "dq", "qi"];
+
 // Flattening Option<RsaPrivateKey> otherwise swallows missing-field errors and turns
 // malformed private keys into public keys. Decide whether private material exists first.
 fn deserialize_rsa_private<'de, D>(deserializer: D) -> Result<Option<RsaPrivateKey>, D::Error>
 where
 	D: Deserializer<'de>,
 {
-	let fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+	// The leftover members, refusing a repeated private one as every other field does, so its
+	// value never depends on which copy a parser keeps. Unread members may repeat.
+	struct Fields;
+
+	impl<'de> serde::de::Visitor<'de> for Fields {
+		type Value = serde_json::Map<String, serde_json::Value>;
+
+		fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			f.write_str("a JWK object")
+		}
+
+		fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+			let mut fields = serde_json::Map::new();
+			while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+				if RSA_PRIVATE_FIELDS.contains(&key.as_str()) && fields.contains_key(&key) {
+					return Err(serde::de::Error::custom(format!("duplicate field `{key}`")));
+				}
+				fields.insert(key, value);
+			}
+			Ok(fields)
+		}
+	}
+
+	let fields = deserializer.deserialize_map(Fields)?;
 	if fields.contains_key("oth") {
 		return Err(serde::de::Error::custom("multi-prime RSA (oth) is unsupported"));
 	}
-	if ["d", "p", "q", "dp", "dq", "qi"]
-		.iter()
-		.any(|field| fields.contains_key(*field))
-	{
+	if RSA_PRIVATE_FIELDS.iter().any(|field| fields.contains_key(*field)) {
 		serde_json::from_value(serde_json::Value::Object(fields))
 			.map(Some)
 			.map_err(serde::de::Error::custom)
@@ -1536,6 +1558,18 @@ mod tests {
 			incomplete["key_ops"] = serde_json::json!(["verify"]);
 			let error = serde_json::from_value::<Key>(incomplete).expect_err(field);
 			assert!(error.to_string().contains(field), "{field}: {error}");
+		}
+	}
+
+	#[test]
+	fn private_rsa_refuses_a_repeated_member() {
+		let key = Key::generate(Algorithm::RS256, None).unwrap();
+		let json = serde_json::to_string(&key).unwrap();
+		for field in RSA_PRIVATE_FIELDS {
+			// The flattened private fields are read apart from the rest, so check each one.
+			let repeated = format!("{{\"{field}\":\"AQ\",{}", &json[1..]);
+			let error = Key::from_str(&repeated).expect_err(field);
+			assert!(error.to_string().contains("duplicate field"), "{field}: {error}");
 		}
 	}
 
