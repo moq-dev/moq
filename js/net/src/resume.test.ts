@@ -1236,20 +1236,32 @@ test("a copy that fails mid-serve on a route still serving is subscribed afresh"
 	close();
 });
 
-// Mirrors `a_copy_verdict_aborts_without_querying_again` in rs/moq-net/src/model/front.rs.
-test("a copy that loses its route mid-serve on a route still serving ends the read", async () => {
-	const { a, active, close } = await setup();
-	const ta = copy(a);
-	const sub = active.track("seq").subscribe();
-	ta.write(0n);
-	expect(drain(sub)).toEqual([0n]);
+// Mirrors `an_unroutable_route_strands_the_track_until_the_table_moves` in rs/moq-net/src/model/front.rs.
+for (const delivered of [true, false]) {
+	test(`a copy that loses its route ${delivered ? "mid-serve" : "before delivering"} waits for the next route`, async () => {
+		const { a, b, active, swap, close } = await setup();
+		const ta = copy(a);
+		const sub = active.track("seq").subscribe();
+		if (delivered) {
+			ta.write(0n);
+			expect(drain(sub)).toEqual([0n]);
+		}
 
-	ta.producer.abort(new StreamError(StreamCode.Unroutable));
-	await expect(sub.recvGroup()).rejects.toMatchObject({ code: StreamCode.Unroutable });
+		ta.producer.abort(new StreamError(StreamCode.Unroutable));
+		await settle();
+		expect(sub.tryRecvGroup()).toBeUndefined();
+		expect(sub.closed.peek()).toBeUndefined();
 
-	sub.close();
-	close();
-});
+		const tb = copy(b);
+		const disposeB = await swap();
+		tb.write(1n);
+		expect(drain(sub)).toEqual([1n]);
+
+		sub.close();
+		disposeB();
+		close();
+	});
+}
 
 test("between routes a reader keeps reading the copy it has", async () => {
 	const { origin, a, b, active, request, disposeA, close } = await setup();

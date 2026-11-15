@@ -1015,15 +1015,17 @@ class Reader implements ResumeSource {
 			if (!routeFailed(ended)) return this.#fail(ended);
 			if (route.refusal) return this.#fail(route.refusal);
 			// The route that failed it still serves and is not going away, so no move replaces
-			// the copy. As in the Rust front, one that delivered nothing is the route refusing
-			// the track, and one that did is subscribed afresh, unless its source lost the route:
-			// asking it again could only replace the withdrawal's cause with a refusal.
+			// the copy. As in the Rust front, a source that lost the route judged the route, not
+			// the track: the read waits for the next route, since asking the same one again could
+			// only replace the withdrawal's cause with a refusal, and that route's news follows
+			// on the same session. Otherwise one that delivered nothing is the route refusing the
+			// track, and one that did is subscribed afresh.
 			if (serving && route.source === serving.source && !closing(ended)) {
+				if (unroutable(ended)) return { kind: "idle" };
 				if (!serving.delivered) {
 					route.refuse(ended);
 					return this.#fail(ended);
 				}
-				if (unroutable(ended)) return this.#fail(ended);
 				route.resubscribe();
 			}
 		}
