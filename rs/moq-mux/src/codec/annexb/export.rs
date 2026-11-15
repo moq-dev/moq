@@ -88,7 +88,7 @@ impl<S: Stream, C: Codec> Export<S, C> {
 
 			match ready!(track.source.poll_read(waiter))? {
 				Some(frame) => {
-					let timestamp = std::time::Duration::from(frame.timestamp);
+					let timestamp = std::time::Duration::try_from(frame.timestamp)?;
 					if track.joining {
 						if !frame.keyframe || self.playhead.is_some_and(|playhead| timestamp <= playhead) {
 							continue;

@@ -60,6 +60,11 @@ fn timed() -> track::Info {
 		.with_timescale(moq_net::Timescale::MILLI)
 }
 
+/// Where the group at `key` starts on a [`timed`] track: groups start strictly in key order.
+fn at(key: u64) -> Timestamp {
+	Timestamp::from_millis(key).unwrap()
+}
+
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
 
@@ -188,12 +193,12 @@ fn bench_pending_churn(c: &mut Criterion) {
 					})
 					.collect();
 				let mut cursors: Vec<_> = (0..readers).map(|_| producer.consume().routes()).collect();
-				let mut sequence = 0u64;
+				let mut key = 0u64;
 				b.iter(|| {
-					sequence += 1;
+					key += 1;
 					drop(
 						producer
-							.route(format!("a/{sequence}"), moq_net::origin::RouteOptions::default())
+							.route(format!("a/{key}"), moq_net::origin::RouteOptions::default())
 							.unwrap(),
 					);
 				});
@@ -1110,9 +1115,9 @@ fn bench_handoff(c: &mut Criterion) {
 							.route("room/live", moq_net::origin::RouteOptions::default())
 							.unwrap();
 						let track = incumbent.broadcast().create_track("video", timed()).unwrap();
-						let mut first = track.append_group().unwrap();
+						let mut first = track.append_group(0).unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
-						first.finish().unwrap();
+						first.close().unwrap();
 
 						let resolved = consumer.request("room/live", None).await.unwrap();
 						let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
@@ -1123,9 +1128,9 @@ fn bench_handoff(c: &mut Criterion) {
 							.route("room/live", moq_net::origin::RouteOptions::hidden())
 							.unwrap();
 						let track = standby.broadcast().create_track("video", timed()).unwrap();
-						let mut second = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
-						second.write_frame(Timestamp::ZERO, b"two".as_ref()).unwrap();
-						second.finish().unwrap();
+						let mut second = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
+						second.write_frame(at(1), b"two".as_ref()).unwrap();
+						second.close().unwrap();
 						// Announcing is what makes the standby a route the front can take.
 						standby.announce().unwrap();
 						let replaced = consumer.request("room/live", None).await.unwrap();
@@ -1133,7 +1138,7 @@ fn bench_handoff(c: &mut Criterion) {
 						let group = replacement.recv_group().await.unwrap().expect("standby group");
 						total += started.elapsed();
 						// Rejoining the incumbent would replay its cached group 0 instead.
-						assert_eq!(group.sequence, 1, "standby group");
+						assert_eq!(group.start, 1, "standby group");
 
 						drop(subscription);
 						drop(replacement);
@@ -1162,6 +1167,8 @@ struct Watching {
 	pair: MockPair,
 	tracks: Vec<track::Producer>,
 	subscriptions: Vec<track::Subscriber>,
+	/// The next group's key on every track.
+	next: u64,
 	_broadcasts: Vec<origin::Route>,
 	_origins: [origin::Producer; 2],
 }
@@ -1215,6 +1222,7 @@ async fn watching(routes: usize, subscribers: usize) -> Watching {
 		pair,
 		tracks,
 		subscriptions,
+		next: 0,
 		_broadcasts: broadcasts,
 		_origins: [relay, received],
 	};
@@ -1225,10 +1233,12 @@ async fn watching(routes: usize, subscribers: usize) -> Watching {
 impl Watching {
 	/// Every subscribed track writes a group, and every subscription reads it.
 	async fn round(&mut self) {
+		let key = self.next;
+		self.next += 1;
 		for track in &self.tracks[..self.subscriptions.len()] {
-			let mut group = track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
-			group.finish().unwrap();
+			let mut group = track.append_group(key).unwrap();
+			group.write_frame(at(key), b"frame".as_ref()).unwrap();
+			group.close().unwrap();
 		}
 		for subscription in &mut self.subscriptions {
 			subscription.recv_group().await.unwrap().expect("track ended");
@@ -1344,16 +1354,19 @@ fn bench_relay(c: &mut Criterion) {
 				subscriptions
 			});
 
+			let mut next = 0;
 			b.iter_custom(|iterations| {
 				runtime.block_on(async {
 					let started = std::time::Instant::now();
 					for _ in 0..iterations {
+						let key = next;
+						next += 1;
 						for source in &sources {
-							let mut group = source.append_group().unwrap();
+							let mut group = source.append_group(key).unwrap();
 							for _ in 0..RELAY_FRAMES {
-								group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
+								group.write_frame(at(key), b"frame".as_ref()).unwrap();
 							}
-							group.finish().unwrap();
+							group.close().unwrap();
 						}
 						for subscription in &mut subscriptions {
 							let mut group = subscription.recv_group().await.unwrap().expect("group");
@@ -1403,15 +1416,18 @@ fn bench_passthrough(c: &mut Criterion) {
 			});
 			let mut held: Vec<Vec<moq_net::group::Consumer>> = (0..readers).map(|_| Vec::with_capacity(open)).collect();
 
+			let mut next = 0;
 			b.iter_custom(|iterations| {
 				runtime.block_on(async {
 					let started = std::time::Instant::now();
 					for _ in 0..iterations {
 						// Received as each is written: a reader behind the live edge skips ahead.
 						for _ in 0..open {
-							let mut group = source.append_group().unwrap();
-							group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
-							group.finish().unwrap();
+							let key = next;
+							next += 1;
+							let mut group = source.append_group(key).unwrap();
+							group.write_frame(at(key), b"frame".as_ref()).unwrap();
+							group.close().unwrap();
 							for (subscription, held) in subscriptions.iter_mut().zip(&mut held) {
 								held.push(subscription.recv_group().await.unwrap().expect("group"));
 							}
@@ -1456,7 +1472,7 @@ fn bench_parked(c: &mut Criterion) {
 							.unwrap()
 					})
 					.collect();
-				let _writers: Vec<_> = sources.iter().map(|source| source.append_group().unwrap()).collect();
+				let _writers: Vec<_> = sources.iter().map(|source| source.append_group(0).unwrap()).collect();
 				let (subscriptions, mut groups) = runtime.block_on(async {
 					let resolved = producer.consume().request("room/live", None).await.unwrap();
 					let mut subscriptions = Vec::new();
@@ -1514,9 +1530,9 @@ impl Generation {
 		let mut held = Vec::with_capacity(tracks);
 		for i in 0..tracks {
 			let track = broadcast.broadcast().create_track(format!("{i}"), timed()).unwrap();
-			let mut written = track.append_group().unwrap();
+			let mut written = track.append_group(0).unwrap();
 			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
-			written.finish().unwrap();
+			written.close().unwrap();
 			held.push(track);
 		}
 		Self {
@@ -1681,14 +1697,14 @@ impl ResumeOverlap {
 
 enum ResumeReader {
 	Arrival(track::Subscriber),
-	Sequence(track::Ordered),
+	Key(track::Ordered),
 }
 
 impl ResumeReader {
 	fn poll_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
 		match self {
 			Self::Arrival(reader) => reader.poll_recv_group(waiter),
-			Self::Sequence(reader) => reader.poll_next_group(waiter),
+			Self::Key(reader) => reader.poll_next_group(waiter),
 		}
 	}
 }
@@ -1718,14 +1734,10 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			)
 			.unwrap();
 		let track = broadcast.broadcast().create_track("0", timed()).unwrap();
-		for sequence in order {
-			let mut group = track
-				.create_group(moq_net::group::Info {
-					sequence: sequence as u64,
-				})
-				.unwrap();
-			group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
-			group.finish().unwrap();
+		for key in order {
+			let mut group = track.create_group(moq_net::group::Info { start: key as u64 }).unwrap();
+			group.write_frame(at(key as u64), b"f".as_ref()).unwrap();
+			group.close().unwrap();
 		}
 		broadcast.announce().unwrap();
 		(broadcast, track)
@@ -1775,7 +1787,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 		.into_iter()
 		.map(|subscriber| subscriber.with_range(..))
 		.map(|subscriber| match ordered {
-			true => ResumeReader::Sequence(subscriber.ordered()),
+			true => ResumeReader::Key(subscriber.ordered()),
 			false => ResumeReader::Arrival(subscriber),
 		})
 		.collect();
@@ -1794,9 +1806,9 @@ fn bench_resume_overlap(c: &mut Criterion) {
 	group.sample_size(10);
 	for (order, ordered, waiting) in [
 		("arrival", false, false),
-		("sequence", true, false),
+		("key", true, false),
 		("arrival_waiting", false, true),
-		("sequence_waiting", true, true),
+		("key_waiting", true, true),
 	] {
 		for (readers, retained, routes) in RESUME_OVERLAP {
 			if waiting && !(readers == 1 && retained == 64 && routes >= 2) {

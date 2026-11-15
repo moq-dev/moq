@@ -365,7 +365,13 @@ export class Game {
 
 		// One command per group, so a late one never holds up the next.
 		const value = { ...command.cmd, timestamps: command.timestamps };
-		open.producer.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
+		// The socket track is scale-less, so the frame carries its group's key.
+		const group = open.producer.appendGroup();
+		group.writeFrame({
+			payload: new TextEncoder().encode(JSON.stringify(value)),
+			timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+		});
+		group.finish();
 		this.#command.set(undefined);
 	}
 

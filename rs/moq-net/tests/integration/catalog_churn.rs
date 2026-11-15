@@ -10,6 +10,7 @@
 //! shrunk to the ops it needs, which the report names.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -165,7 +166,7 @@ impl Reader {
 							return;
 						}
 					};
-					let frame = format!("{}:{}", group.sequence, String::from_utf8_lossy(&frame.payload));
+					let frame = format!("{}:{}", group.start, String::from_utf8_lossy(&frame.payload));
 					if tx.unbounded_send(Ok(frame)).is_err() {
 						return;
 					}
@@ -202,14 +203,14 @@ impl Reader {
 		let joined = self.expected.first().map(group);
 		let mut seen = self.seen.as_slice();
 		while let (Some(first), Some(joined)) = (seen.first(), joined) {
-			let sequence = group(first);
-			if sequence >= joined {
+			let key = group(first);
+			if key >= joined {
 				break;
 			}
 			if !first.ends_with(":snapshot") {
 				return Verdict::Wrong;
 			}
-			let older = seen.iter().take_while(|frame| group(frame) == sequence).count();
+			let older = seen.iter().take_while(|frame| group(frame) == key).count();
 			seen = &seen[older..];
 		}
 		let mut expected = self.expected.as_slice();
@@ -302,7 +303,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		_upstream: upstream,
 	};
 
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	// The open group as written so far, as `group:payload`.
 	let mut written: Vec<String> = Vec::new();
 	let mut readers: Vec<Reader> = Vec::new();
@@ -314,7 +315,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 			group
 				.write_frame(Timestamp::from_millis(clock).unwrap(), payload.as_bytes())
 				.unwrap();
-			let frame = format!("{}:{payload}", group.sequence);
+			let frame = format!("{}:{payload}", group.start);
 			for reader in readers {
 				reader.expected.push(frame.clone());
 			}
@@ -326,8 +327,8 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		match *op {
 			Op::Write => write(&mut group, &mut written, &mut readers, &format!("d{step}")),
 			Op::NewGroup => {
-				group.finish().unwrap();
-				group = track.append_group().unwrap();
+				group.close().unwrap();
+				group = track.append_next().unwrap();
 				written.clear();
 				write(&mut group, &mut written, &mut readers, "snapshot");
 				// Let it reach `R`, so the newest group at the next join is unambiguous.
@@ -349,7 +350,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 				let Some(remote) = topology.request(step).await? else {
 					continue;
 				};
-				let fetch = remote.track("catalog.json").unwrap().fetch_group(group.sequence, None);
+				let fetch = remote.track("catalog.json").unwrap().fetch_group(group.start, None);
 				let mut fetched = match kio::clock::timeout(READ_TIMEOUT, fetch).await {
 					Ok(Ok(fetched)) => fetched,
 					Ok(Err(_)) => continue,
@@ -358,11 +359,9 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 				let mut got = Vec::new();
 				while got.len() < written.len() {
 					match kio::clock::timeout(READ_TIMEOUT, fetched.read_frame()).await {
-						Ok(Ok(Some(frame))) => got.push(format!(
-							"{}:{}",
-							fetched.sequence,
-							String::from_utf8_lossy(&frame.payload)
-						)),
+						Ok(Ok(Some(frame))) => {
+							got.push(format!("{}:{}", fetched.start, String::from_utf8_lossy(&frame.payload)))
+						}
 						Ok(Ok(None)) => return Err(wrong(format!("{step}: fetch ended at {got:?}"))),
 						Ok(Err(_)) => break,
 						Err(_) => return Err(stuck(format!("{step}: fetched {got:?}, then hung"))),

@@ -172,13 +172,22 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Data types.
-/** A datagram payload with its own sequence and optional timestamp. */
+/**
+ * A datagram payload with its own sequence and timestamp, the [unscaled] sequence on a scale-less
+ * track.
+ */
 typealias Datagram = uniffi.moq.MoqDatagram
 
-/** A payload plus the timestamp it should be presented at. */
+/**
+ * A payload plus the timestamp it should be presented at, or its group's [unscaled] key on a
+ * scale-less track.
+ */
 typealias Frame = uniffi.moq.MoqFrame
 
-/** An exact media timestamp: `value` units at `scale` units per second. */
+/**
+ * An exact timestamp: `value` units at `scale` units per second, or on a scale-less track a null
+ * `scale` and the group key (a datagram's sequence) as `value`; see [unscaled].
+ */
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
@@ -238,7 +247,10 @@ typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 
-/** The group containing `timestamp`, a presentation time. */
+/**
+ * The group containing `timestamp`, an unscaled time in the track's timescale; a scaled one is
+ * refused.
+ */
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */

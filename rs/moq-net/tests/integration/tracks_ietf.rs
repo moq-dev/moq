@@ -8,6 +8,7 @@
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -90,7 +91,7 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 		.await
 		.expect("frame timeout")
 		.ok()??;
-	Some((group.sequence, frame.payload.to_vec()))
+	Some((group.start, frame.payload.to_vec()))
 }
 
 /// SUBSCRIBE_TRACKS goes out only for a listing, since many peers do not answer it:
@@ -116,9 +117,11 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 			.await
 			.expect("never subscribed")
 			.unwrap();
-		let mut group = video.append_group().unwrap();
-		group.write_frame(None, &b"before"[..]).unwrap();
-		group.finish().unwrap();
+		let mut group = video.append_next().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"before"[..])
+			.unwrap();
+		group.close().unwrap();
 		assert_eq!(read(&mut sub).await, Some((0, b"before".to_vec())), "{version}");
 		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 0, "{version}: listed unasked");
 
@@ -128,9 +131,11 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 		assert!(failed.starts_with("error:"), "{version}: {failed}");
 		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 1, "{version}");
 
-		let mut group = video.append_group().unwrap();
-		group.write_frame(None, &b"after"[..]).unwrap();
-		group.finish().unwrap();
+		let mut group = video.append_next().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"after"[..])
+			.unwrap();
+		group.close().unwrap();
 		assert_eq!(read(&mut sub).await, Some((1, b"after".to_vec())), "{version}");
 		assert_eq!(subscribes(&pair), 1, "{version}");
 	}

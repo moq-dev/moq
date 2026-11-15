@@ -1185,7 +1185,7 @@ async fn laced_opus_frames() {
 			for (index, packet) in packets.iter().enumerate() {
 				let frame = reader.read_frame().await.unwrap().expect("one frame per packet");
 				assert_eq!(frame.payload.as_ref(), *packet, "{lacing:?}, grouped={grouped}");
-				assert_eq!(frame.timestamp.as_micros(), 107_000 + index as u128 * 20_000);
+				assert_eq!(frame.timestamp.as_micros().unwrap(), 107_000 + index as u128 * 20_000);
 			}
 			assert!(reader.read_frame().await.unwrap().is_none());
 		}
@@ -1298,7 +1298,7 @@ async fn unlaced_block_duration_does_not_use_track_default() {
 	while let Some(mut group) = track.recv_group().await.unwrap() {
 		while let Some(frame) = group.read_frame().await.unwrap() {
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
-			last = Some((frame.timestamp.as_micros(), frame.payload.len()));
+			last = Some((frame.timestamp.as_micros().unwrap(), frame.payload.len()));
 		}
 	}
 	assert_eq!(last, Some((80_000, 0)));
@@ -1887,7 +1887,7 @@ async fn a_seek_mid_block_waits_for_the_block() {
 		while group.read_frame().await.unwrap().is_some() {
 			frames += 1;
 		}
-		groups.push((group.sequence, frames));
+		groups.push((group.start, frames));
 	}
 	assert_eq!(groups, [(0, 2), (100, 1)]);
 }

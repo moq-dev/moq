@@ -30,7 +30,7 @@ track's timescale, as the wire carries it). Announce the broadcast with that ins
 
 ```ts
 import { Sign } from "@moq/crypto";
-import { Path } from "@moq/net";
+import { Path, Time } from "@moq/net";
 
 const { Broadcast, SecretKey } = Sign;
 
@@ -42,8 +42,9 @@ const signed = new Broadcast.Producer(route.broadcast, key, { path, instance: ro
 const messages = signed.createTrack("messages");
 route.announce();
 
+// A scale-less track, so each frame carries its group's key.
 const group = messages.appendGroup();
-await group.writeFrame(undefined, payload);
+await group.writeFrame(Time.Timestamp.unscaled(group.sequence), payload);
 group.finish();
 ```
 

@@ -128,12 +128,14 @@ pub(crate) fn tag(track: &str, config: &[u8]) -> String {
 	hash.as_ref()[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The tag of a segment under `tag` cut short before group `groups_end`, ending at `end`.
+/// The tag of a segment under `tag` cut short after its group starting at `last`, ending at
+/// `end`; `None` for a cut that holds no group.
 ///
 /// A retired rendition cuts its last segment where its edge stopped reading, which another edge
 /// may place elsewhere, so a cut is named by where it ends rather than by its number alone.
-pub(crate) fn cut(tag: &str, groups_end: u64, end: Duration) -> String {
-	self::tag(&format!("{tag}/{groups_end}/{}", end.as_nanos()), b"")
+pub(crate) fn cut(tag: &str, last: Option<u64>, end: Duration) -> String {
+	let last = last.map(|last| last.to_string()).unwrap_or_default();
+	self::tag(&format!("{tag}/{last}/{}", end.as_nanos()), b"")
 }
 
 /// One playlist segment: its number, timing, and the groups it holds.
@@ -146,8 +148,8 @@ pub(crate) struct Row {
 	pub segment: u64,
 	/// The [tag](tag) of the track numbering the segment.
 	pub tag: Arc<str>,
-	/// The groups the segment holds: from its first up to the next segment's.
-	pub groups: std::ops::Range<u64>,
+	/// The groups the segment holds, by start.
+	pub groups: super::grid::Groups,
 	/// Presentation duration.
 	pub duration: Duration,
 	/// The segment's starting presentation timestamp.
@@ -269,7 +271,7 @@ impl Producer {
 		if let Some(back) = state.rows.back() {
 			// A backward jump in pts or segment number means the publisher restarted its timeline;
 			// the old window can't be stitched onto the new one, so start over.
-			if Duration::from(row.pts) < Duration::from(back.pts) || row.segment <= back.segment {
+			if super::span(row.pts) < super::span(back.pts) || row.segment <= back.segment {
 				tracing::warn!("HLS segments jumped backwards; resetting the playlist window");
 				state.rows.clear();
 				state.resets += 1;
@@ -282,7 +284,7 @@ impl Producer {
 
 		loop {
 			let rest = match state.rows.get(1) {
-				Some(second) => state.rows.back().unwrap().end.saturating_sub(second.pts.into()),
+				Some(second) => state.rows.back().unwrap().end.saturating_sub(super::span(second.pts)),
 				None => Duration::ZERO,
 			};
 			if !evicts(window, state.rows.len(), rest) {
@@ -394,7 +396,7 @@ impl Producer {
 		state
 			.rows
 			.iter()
-			.find(|row| !row.stop && row.pts.as_millis() == time as u128 && &*row.tag == tag)
+			.find(|row| !row.stop && row.pts.as_millis() == Ok(time as u128) && &*row.tag == tag)
 			.map(|row| row.segment)
 	}
 
@@ -404,16 +406,16 @@ impl Producer {
 	/// newest when its group may still be open.
 	pub fn init_groups(&self) -> Vec<u64> {
 		let state = self.state.read();
-		let complete = |row: &Row| row.complete || row.groups.end > row.groups.start + 1;
+		let complete = |row: &Row| row.complete || row.groups.len() > 1;
 		let mut media = state.rows.iter().rev().filter(|row| !row.stop);
-		let Some(newest) = media.next() else {
+		let Some(newest) = media.next().and_then(|row| Some((row, row.groups.first()?))) else {
 			return Vec::new();
 		};
-		if complete(newest) {
-			return vec![newest.groups.start];
+		if complete(newest.0) {
+			return vec![newest.1];
 		}
-		let older = media.find(|row| complete(row)).map(|row| row.groups.start);
-		older.into_iter().chain([newest.groups.start]).collect()
+		let older = media.find(|row| complete(row)).and_then(|row| row.groups.first());
+		older.into_iter().chain([newest.1]).collect()
 	}
 
 	/// Poll until the window lists a row, ends, fails, or closes.
@@ -717,10 +719,10 @@ mod tests {
 			index: segment,
 			segment,
 			tag: Arc::from(tag("video.hls", b"")),
-			groups: group..group + 1,
+			groups: super::super::grid::Groups::one(group),
 			duration: Duration::from_millis(duration_ms),
 			pts,
-			end: Duration::from(pts) + Duration::from_millis(duration_ms),
+			end: Duration::try_from(pts).unwrap() + Duration::from_millis(duration_ms),
 			discontinuity: 0,
 			stop: false,
 			complete: true,
@@ -736,7 +738,7 @@ mod tests {
 		let window = Duration::from_secs(30);
 		live.push(row(0, 0, 0, 4_000), window);
 		let mut stop = row(1, 1, 4_000, 0);
-		stop.groups = 1..1;
+		stop.groups = Default::default();
 		stop.stop = true;
 		live.push(stop, window);
 		live.push(row(2, 1, 4_000, 4_000), window);
@@ -862,7 +864,7 @@ mod tests {
 		);
 
 		let tag = tag("video.hls", b"");
-		assert_eq!(live.row(&tag, 0).unwrap().groups, 0..1);
+		assert_eq!(live.row(&tag, 0).unwrap().groups, super::super::grid::Groups::one(0));
 		assert_eq!(live.row(&tag, 7), None, "unknown segments miss");
 		assert_eq!(live.row("00000000", 0), None, "another record track's numbering misses");
 		assert_eq!(live.init_groups(), [0], "a stop holds no media");

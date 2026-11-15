@@ -54,20 +54,23 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 			// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
 			let timestamp = moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			let mut got = kio::clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.unwrap_or_else(|_| panic!("{alpn} sequence={sequence} hung"))
 				.unwrap()
 				.unwrap();
-			assert_eq!(got.sequence, sequence, "{alpn}");
+			assert_eq!(got.start, sequence, "{alpn}");
 			let frame = got.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, b"ladder".as_ref());
-			// Lite-02 carries no timestamps.
-			let timed = alpn != "moq-lite-02";
-			assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn}");
+			// Lite-02 carries no timestamps, so its frames arrive scale-less at their group key.
+			let expected = match alpn {
+				"moq-lite-02" => moq_net::Timestamp::unscaled(sequence),
+				_ => timestamp,
+			};
+			assert_eq!(frame.timestamp, expected, "{alpn}");
 		}
 	}
 }
@@ -86,11 +89,13 @@ fn publish(
 		.expect("create broadcast");
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let track = broadcast.broadcast().create_track("video", info).expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, name.as_bytes())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), name.as_bytes())
 		.expect("write frame");
-	group.finish().expect("finish group");
+	group.close().expect("finish group");
 	(origin, broadcast, track)
 }
 

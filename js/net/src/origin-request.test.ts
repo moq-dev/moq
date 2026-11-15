@@ -5,6 +5,7 @@ import { WireRoute } from "./hop";
 import * as Instance from "./instance.ts";
 import { type Following, Producer, type Requesting } from "./origin";
 import * as Path from "./path";
+import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire";
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -402,7 +403,9 @@ test("an application serves held content without an exact route", async () => {
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const source = new BroadcastProducer();
-	source.createTrack("data").writeFrame({ payload: new TextEncoder().encode("held") });
+	source
+		.createTrack("data")
+		.writeFrame({ payload: new TextEncoder().encode("held"), timestamp: Timestamp.unscaled(0n) });
 	pending.serve(source.consume());
 	await settle();
 	const reader = request.active.peek()?.track("data").subscribe().ordered();
@@ -558,7 +561,9 @@ test("announcing a job route again keeps it answering under one instance", async
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const job = pending.route({ hidden: true });
-	job.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode("published") });
+	job.broadcast
+		.createTrack("data")
+		.writeFrame({ payload: new TextEncoder().encode("published"), timestamp: Timestamp.unscaled(0n) });
 	job.announce();
 	job.announce();
 	await settle();
@@ -595,7 +600,9 @@ for (const cleanup of ["close", "dispose", "broadcast", "announce"] as const) {
 		await settle();
 		expect(later.closed.peek()).toBeUndefined();
 		using job = next.route({ hidden: true });
-		job.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode(cleanup) });
+		job.broadcast
+			.createTrack("data")
+			.writeFrame({ payload: new TextEncoder().encode(cleanup), timestamp: Timestamp.unscaled(0n) });
 		job.announce();
 		await settle();
 		expect(later.active.peek()?.instance).toBe(job.instance);
@@ -990,7 +997,7 @@ test.each(["request", "follow"] as const)("a %s through a claim continues on its
 	if (!pending) throw new Error("expected a request");
 	const job = pending.route({ hidden: true });
 	const data = job.broadcast.createTrack("data");
-	data.writeFrame({ payload: new TextEncoder().encode("first") });
+	data.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.unscaled(0n) });
 	expect(job.instance).toBe(minted);
 	job.announce();
 	await settle();
@@ -1000,7 +1007,7 @@ test.each(["request", "follow"] as const)("a %s through a claim continues on its
 	expect(active?.instance).toBe(minted);
 	const track = active?.track("data").subscribe().ordered();
 	expect(await track?.readString()).toBe("first");
-	data.writeFrame({ payload: new TextEncoder().encode("second") });
+	data.writeFrame({ payload: new TextEncoder().encode("second"), timestamp: Timestamp.unscaled(1n) });
 	expect(await track?.readString()).toBe("second");
 	expect(handed).toEqual([active]);
 	expect(reader.closed.peek()).toBeUndefined();
@@ -1188,7 +1195,10 @@ test("a claim moving on keeps its held answers", async () => {
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const held = new BroadcastProducer();
-	held.createTrack("data").writeFrame({ payload: new TextEncoder().encode("held") });
+	held.createTrack("data").writeFrame({
+		payload: new TextEncoder().encode("held"),
+		timestamp: Timestamp.unscaled(0n),
+	});
 	const reader = origin.request(Path.from("room/held"));
 	const asked = (await requests.next()).value;
 	if (!asked) throw new Error("expected a request");

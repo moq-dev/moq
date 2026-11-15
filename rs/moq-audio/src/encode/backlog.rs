@@ -3,9 +3,17 @@ use std::time::Duration;
 
 use moq_net::Timestamp;
 
+/// Where one codec frame's packet starts and ends, its codec priming folded in.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Stamp {
+	pub start: Timestamp,
+	pub end: Timestamp,
+}
+
 pub(super) struct Raw {
 	pub samples: Vec<f32>,
-	pub timestamp: Timestamp,
+	pub stamp: Stamp,
+	/// Where the frame's input ends, which retention ages from.
 	pub end: Timestamp,
 	pub reset: bool,
 	pub discontinuity: bool,
@@ -56,7 +64,7 @@ impl Backlog {
 		while self
 			.frames
 			.front()
-			.is_some_and(|first| Duration::from(first.end).saturating_add(age) <= Duration::from(now))
+			.is_some_and(|first| time(first.end).saturating_add(age) <= time(now))
 		{
 			self.evict();
 		}
@@ -65,12 +73,12 @@ impl Backlog {
 	/// Whether audio ending at `end` is past retention at `now`.
 	#[cfg(any(feature = "capture", test))]
 	pub fn expired(&self, end: Timestamp, now: Timestamp) -> bool {
-		Duration::from(end).saturating_add(self.retention) <= Duration::from(now)
+		time(end).saturating_add(self.retention) <= time(now)
 	}
 
 	#[cfg(any(feature = "capture", test))]
 	pub fn deadline(&self) -> Option<Duration> {
-		Some(Duration::from(self.frames.front()?.end).saturating_add(self.retention))
+		Some(time(self.frames.front()?.end).saturating_add(self.retention))
 	}
 
 	fn evict(&mut self) {
@@ -98,6 +106,11 @@ impl Backlog {
 	}
 }
 
+/// A stamp the producer made itself, always in microseconds, or its broadcast clock's now.
+fn time(timestamp: Timestamp) -> Duration {
+	Duration::try_from(timestamp).expect("the producer stamps at a scale")
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -108,7 +121,10 @@ mod tests {
 		for index in 0..200 {
 			backlog.push(Raw {
 				samples: vec![index as f32; 1920],
-				timestamp: Timestamp::ZERO,
+				stamp: Stamp {
+					start: Timestamp::ZERO,
+					end: Timestamp::ZERO,
+				},
 				end: Timestamp::from_micros(20_000).unwrap(),
 				reset: false,
 				discontinuity: false,

@@ -45,7 +45,9 @@ The package uses `Future` for asynchronous operations and `Stream` for
 announcements, and `connect` / `listen` take an options struct like Rust does.
 Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
 `Backoff`). Spans cross as a `Duration` (`stats.rtt`), and media times as an
-exact `Timestamp` with `toDuration()`. The lower-level generated API
+exact `Timestamp` with `toDuration()`; a track without a timescale has no
+time, so its frames carry `Timestamp.unscaled(groupKey)` instead (a datagram,
+its sequence). The lower-level generated API
 remains available through the re-exported `moq_ffi` package.
 
 Flutter Web is not supported. Browser applications should use the TypeScript

@@ -449,7 +449,7 @@ impl Fmp4Track {
 		self.buffer
 			.first()
 			.or(self.pending.as_ref())
-			.map(|frame| Duration::from(frame.timestamp))
+			.and_then(|frame| crate::container::time(frame.timestamp))
 	}
 
 	/// The subscription, while the rendition is in the catalog.
@@ -884,9 +884,8 @@ impl<S: Stream> Export<S> {
 				.tracks
 				.iter()
 				.filter_map(|(name, t)| {
-					t.pending
-						.as_ref()
-						.map(|f| (Duration::from(f.timestamp), !t.is_video, name.clone()))
+					let f = t.pending.as_ref()?;
+					Some((crate::container::time(f.timestamp)?, !t.is_video, name.clone()))
 				})
 				.min()
 				.map(|(_, _, name)| name);
@@ -897,8 +896,9 @@ impl<S: Stream> Export<S> {
 				let frame = track.pending.take().unwrap();
 				// Everything a track reads before the init is queued or buffered behind it.
 				if !self.init.written() {
-					let start = *track.backlog.get_or_insert(frame.timestamp.into());
-					if Duration::from(frame.timestamp).saturating_sub(start) > INIT_QUEUE {
+					let at = Duration::try_from(frame.timestamp)?;
+					let start = *track.backlog.get_or_insert(at);
+					if at.saturating_sub(start) > INIT_QUEUE {
 						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
 					}
 				}
@@ -946,9 +946,8 @@ impl<S: Stream> Export<S> {
 				.tracks
 				.iter()
 				.filter_map(|(name, t)| {
-					let first = t.buffer.first()?;
-					(t.finished() || t.buffer.is_closed())
-						.then(|| (Duration::from(first.timestamp), !t.is_video, name.clone()))
+					let first = crate::container::time(t.buffer.first()?.timestamp)?;
+					(t.finished() || t.buffer.is_closed()).then(|| (first, !t.is_video, name.clone()))
 				})
 				.min()
 				.map(|(_, _, name)| name);
@@ -1005,13 +1004,13 @@ impl<S: Stream> Export<S> {
 		self.tracks
 			.iter()
 			.filter_map(|(name, track)| {
-				let first = track.buffer.first()?;
+				let first = crate::container::time(track.buffer.first()?.timestamp)?;
 				// A stopped track's pending frame joins its buffer first.
 				let complete = (track.finished() && track.pending.is_none())
 					|| track.buffer.is_closed()
 					|| (self.fragment_duration == Some(Duration::ZERO)
 						&& track.buffer.last().is_some_and(|frame| frame.duration.is_some()));
-				complete.then(|| (Duration::from(first.timestamp), !track.is_video, name))
+				complete.then_some((first, !track.is_video, name))
 			})
 			.filter(|(start, _, _)| *start <= earliest)
 			.min()
@@ -1226,13 +1225,13 @@ fn should_flush(buffer: &Buffer, frame: &Frame, fragment_duration: Option<Durati
 	};
 	// Frames within a track are in *decode* order; B-frames have non-monotonic
 	// PTS, so the span of the buffer is min..max of all PTS.
-	let mut min = Duration::from(frame.timestamp);
-	let mut max = min;
-	for f in &batch.frames {
-		let pts = Duration::from(f.timestamp);
-		min = min.min(pts);
-		max = max.max(pts);
-	}
+	let mut ptss = std::iter::once(frame)
+		.chain(&batch.frames)
+		.filter_map(|f| crate::container::time(f.timestamp));
+	let Some(first) = ptss.next() else {
+		return false;
+	};
+	let (min, max) = ptss.fold((first, first), |(min, max), pts| (min.min(pts), max.max(pts)));
 	max.saturating_sub(min) >= cap
 }
 
@@ -1296,7 +1295,7 @@ fn emit_fragment(
 	// independent; video is only when its buffer opened on a keyframe (a GOP boundary).
 	let independent = !track.is_video || independent;
 	if let (Some(first), Some(written)) = (frames.first(), track.written) {
-		let start = Duration::from(first.timestamp);
+		let start = Duration::try_from(first.timestamp)?;
 		if independent && start <= written {
 			return Err(Error::TrackRewound {
 				track: name.to_string(),
@@ -1306,8 +1305,9 @@ fn emit_fragment(
 			.into());
 		}
 	}
-	let latest = frames.iter().map(|frame| Duration::from(frame.timestamp)).max();
-	track.written = track.written.max(latest);
+	for frame in &frames {
+		track.written = track.written.max(Some(Duration::try_from(frame.timestamp)?));
+	}
 	let timescale = moq_net::Timescale::new(track.timescale)?;
 	let run = if partial && track.config.may_reorder() {
 		Run::PartialGop
@@ -1344,12 +1344,12 @@ fn fragment_duration(frames: &[Frame], default_frame: Duration, timescale: moq_n
 			sum.checked_add(u64::from(ticks))
 				.ok_or_else(|| moq_net::TimeOverflow.into())
 		})?;
-		return Ok(Timestamp::new(ticks, timescale)?.into());
+		return Ok(Timestamp::new(ticks, timescale)?.try_into()?);
 	}
 	let mut min = Duration::MAX;
 	let mut max = Duration::ZERO;
 	for f in frames {
-		let pts = Duration::from(f.timestamp);
+		let pts = Duration::try_from(f.timestamp)?;
 		min = min.min(pts);
 		max = max.max(pts);
 	}
@@ -1422,7 +1422,8 @@ pub(crate) fn infer_missing_durations(
 		if run == Run::PartialGop
 			&& !stated
 			&& let (Some(inferred), Some(cadence)) = (frames[i].duration, cadence)
-			&& Duration::from(inferred) > Duration::from(cadence)
+			&& let (Some(longer), Some(shorter)) = (crate::container::time(inferred), crate::container::time(cadence))
+			&& longer > shorter
 		{
 			frames[i].duration = Some(cadence);
 		}
@@ -1556,7 +1557,7 @@ mod tests {
 	}
 
 	fn duration_micros(frame: &Frame) -> u128 {
-		frame.duration.unwrap().as_micros()
+		frame.duration.unwrap().as_micros().unwrap()
 	}
 
 	fn frame(timestamp_us: u64, duration_us: Option<u64>) -> Frame {
@@ -1604,7 +1605,12 @@ mod tests {
 		assert_eq!(frames[1].duration, Some(ts(41_667)));
 		assert_eq!(frames[2].duration, Some(ts(33_000)));
 		assert_eq!(
-			fragment_duration(&frames, Duration::from_millis(33), frames[0].duration.unwrap().scale()).unwrap(),
+			fragment_duration(
+				&frames,
+				Duration::from_millis(33),
+				frames[0].duration.unwrap().scale().unwrap()
+			)
+			.unwrap(),
 			Duration::from_micros(116_334)
 		);
 	}
@@ -1623,7 +1629,12 @@ mod tests {
 
 		assert_eq!(frames[0].duration, Some(ts(40_000)));
 		assert_eq!(
-			fragment_duration(&frames, Duration::from_millis(40), frames[0].duration.unwrap().scale()).unwrap(),
+			fragment_duration(
+				&frames,
+				Duration::from_millis(40),
+				frames[0].duration.unwrap().scale().unwrap()
+			)
+			.unwrap(),
 			Duration::from_millis(40)
 		);
 	}
@@ -1646,7 +1657,12 @@ mod tests {
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 		assert_eq!(
-			fragment_duration(&frames, Duration::from_millis(33), frames[0].duration.unwrap().scale()).unwrap(),
+			fragment_duration(
+				&frames,
+				Duration::from_millis(33),
+				frames[0].duration.unwrap().scale().unwrap()
+			)
+			.unwrap(),
 			Duration::from_micros(41_667)
 		);
 	}
@@ -1699,7 +1715,7 @@ mod tests {
 				(duration.value(), duration.scale())
 			})
 			.collect();
-		assert_eq!(durations, vec![(1_000, timescale); 4]);
+		assert_eq!(durations, vec![(1_000, Some(timescale)); 4]);
 	}
 
 	/// The regression for the stalled HLS player: a subscriber that got a stale cached group
@@ -1721,7 +1737,12 @@ mod tests {
 
 		assert_eq!(frames[0].duration, Some(ts(33_000)));
 		assert_eq!(
-			fragment_duration(&frames, Duration::from_millis(33), frames[0].duration.unwrap().scale()).unwrap(),
+			fragment_duration(
+				&frames,
+				Duration::from_millis(33),
+				frames[0].duration.unwrap().scale().unwrap()
+			)
+			.unwrap(),
 			Duration::from_millis(33)
 		);
 	}
@@ -1773,7 +1794,7 @@ mod tests {
 
 		for f in &frames {
 			assert_eq!(
-				f.duration.unwrap().as_micros(),
+				f.duration.unwrap().as_micros().unwrap(),
 				20_000,
 				"TOC duration, not the fallback"
 			);
@@ -1820,7 +1841,12 @@ mod tests {
 		assert_eq!(frames[1].duration, Some(ts(33_000)));
 		assert_eq!(frames[2].duration, Some(ts(33_000)));
 		assert_eq!(
-			fragment_duration(&frames, Duration::from_millis(33), frames[0].duration.unwrap().scale()).unwrap(),
+			fragment_duration(
+				&frames,
+				Duration::from_millis(33),
+				frames[0].duration.unwrap().scale().unwrap()
+			)
+			.unwrap(),
 			Duration::from_micros(99_000)
 		);
 	}

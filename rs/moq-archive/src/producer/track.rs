@@ -14,7 +14,6 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 
 use super::Shared;
-use super::ordered::Ordered;
 use super::resume::Stored;
 use crate::layout::{self, End, Entry, Frame, Object};
 use crate::{Error, Info, Result};
@@ -71,7 +70,7 @@ struct Building {
 
 enum Event {
 	Frame(u64, moq_net::Result<Option<moq_net::frame::Frame>>),
-	Next(Option<Box<group::Consumer>>),
+	Next(moq_net::Result<Option<group::Consumer>>),
 	Timer,
 }
 
@@ -162,13 +161,13 @@ impl<S: ObjectStore> Track<S> {
 		let config = &shared.config;
 		let range = match self.next {
 			Some(next) => Range {
-				start: Anchor::Absolute(next.group),
+				start: Anchor::Time(next.group),
 				end: None,
 			},
 			None => Range::oldest(),
 		};
 		// The cap, since `info` may describe an older instance than the one subscribed, and a
-		// backlog a smaller budget skipped is not sent again. The wait for a gap is narrowed below.
+		// backlog a smaller budget skipped is not sent again. The budget is narrowed below.
 		let subscription = Subscription::default()
 			.with_order(Order::Ascending)
 			.with_delay(Delay::default().with_max(config.max_delay))
@@ -191,9 +190,15 @@ impl<S: ObjectStore> Track<S> {
 		self.properties(subscriber.info()).await?;
 		let max_delay = delay(config, subscriber.info());
 
-		let mut ordered = Ordered::new(subscriber, max_delay, self.next.map(|next| next.group));
+		// Groups in key order: one the track still owes is waited for until the budget gives up on
+		// it, and one it skipped or dropped costs nothing.
+		let mut ordered = subscriber.ordered();
+		let narrowed = ordered.subscription().with_delay(Delay::default().with_max(max_delay));
+		ordered.update(narrowed)?;
 		// The group being stored, frame by frame.
 		let mut current: Option<Box<group::Consumer>> = None;
+		// The error the groups ended with, if they did.
+		let mut failed = None;
 		loop {
 			self.flush_due(kio::clock::now())?;
 			self.write().await?;
@@ -211,11 +216,9 @@ impl<S: ObjectStore> Track<S> {
 						if let Poll::Ready(frame) = current.poll_read_frame(waiter) {
 							return Poll::Ready(Event::Frame(index, frame));
 						}
-						// Arrival times decide the waits, so arrivals are taken meanwhile.
-						ordered.poll_arrivals(waiter);
 					}
 					None => {
-						if let Poll::Ready(next) = ordered.poll_next(waiter) {
+						if let Poll::Ready(next) = ordered.poll_next_group(waiter) {
 							return Poll::Ready(Event::Next(next));
 						}
 					}
@@ -227,8 +230,11 @@ impl<S: ObjectStore> Track<S> {
 			let now = kio::clock::now();
 			match event {
 				Event::Frame(index, read) => self.frame(&mut current, index, read, now)?,
-				Event::Next(Some(group)) => {
-					let sequence = group.sequence;
+				// A time start names the containing group, so a resumed read can hand back the group
+				// it last stored whole, keyed below where it resumes: that group is already stored.
+				Event::Next(Ok(Some(group))) if self.next.is_some_and(|next| group.start < next.group) => {}
+				Event::Next(Ok(Some(group))) => {
+					let sequence = group.start;
 					// A resumed group continues after its stored frames. The clamp also starts a
 					// group whose head is held elsewhere at its first frame, rather than lagging
 					// behind it.
@@ -237,20 +243,25 @@ impl<S: ObjectStore> Track<S> {
 						.filter(|next| next.group == sequence)
 						.map_or(0, |next| next.frame);
 					let group = Box::new(group.with_range(stored..));
-					self.next = Some(Position {
-						group: sequence,
-						frame: group.index(),
-					});
+					self.next = Some(Position::new(sequence, group.index()));
 					current = Some(group);
 				}
-				Event::Next(None) => break,
+				Event::Next(Ok(None)) => break,
+				// An end declared with an error reads as that error once its groups are read.
+				Event::Next(Err(err)) => {
+					failed = Some(err);
+					break;
+				}
 				Event::Timer => {}
 			}
 		}
 
-		let end = match kio::wait(|waiter| ordered.poll_finished(waiter)).await {
-			Ok(end) => End::Finish(end.into()),
-			Err(err) => error(&err),
+		let end = match failed {
+			Some(err) => error(&err),
+			None => match kio::wait(|waiter| ordered.poll_finished(waiter)).await {
+				Ok(end) => End::Finish(end.into()),
+				Err(err) => error(&err),
+			},
 		};
 		self.close()?;
 		self.write().await?;
@@ -266,7 +277,7 @@ impl<S: ObjectStore> Track<S> {
 		read: moq_net::Result<Option<moq_net::frame::Frame>>,
 		now: Instant,
 	) -> Result<()> {
-		let sequence = current.as_ref().expect("reading a group").sequence;
+		let sequence = current.as_ref().expect("reading a group").start;
 		match read {
 			Ok(Some(frame)) => {
 				let frame = Frame {
@@ -274,10 +285,7 @@ impl<S: ObjectStore> Track<S> {
 					payload: frame.payload,
 				};
 				self.push(sequence, index, frame, now)?;
-				self.next = Some(Position {
-					group: sequence,
-					frame: index + 1,
-				});
+				self.next = Some(Position::new(sequence, index + 1));
 			}
 			ended => {
 				if let Err(err) = ended {
@@ -291,11 +299,10 @@ impl<S: ObjectStore> Track<S> {
 	}
 
 	/// A frame's timestamp in the track's timescale, which it carries exactly when timed.
-	fn stamp(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<u64>> {
-		match (timestamp, self.timescale) {
-			(Some(timestamp), Some(timescale)) => {
-				Ok(Some(timestamp.convert(timescale).map_err(|_| Error::Timing)?.value()))
-			}
+	fn stamp(&self, timestamp: moq_net::Timestamp) -> Result<Option<u64>> {
+		match (timestamp.scale(), self.timescale) {
+			(Some(_), Some(timescale)) => Ok(Some(timestamp.convert(timescale).map_err(|_| Error::Timing)?.value())),
+			// A scale-less frame's timestamp is its group's key, which the entry already stores.
 			(None, None) => Ok(None),
 			_ => Err(Error::Timing),
 		}

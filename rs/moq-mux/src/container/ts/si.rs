@@ -447,11 +447,14 @@ impl Entry {
 				)
 			}
 		};
-		let mut group = track.append_group()?;
+		// A cut can land on the same millisecond as the last one (a retraction cuts at once, and SI
+		// without media PTS cuts at zero), so it is stamped a unit later instead of refused.
+		let (start, pts) = crate::start::next(track, pts)?;
+		let mut group = track.append_group(start)?;
 		for payload in frames {
 			group.write_frame(pts, payload)?;
 		}
-		group.finish()?;
+		group.close()?;
 		self.last_cut = Some(now);
 		Ok(())
 	}
@@ -800,9 +803,10 @@ mod tests {
 	/// budget: at moq-net's zero default the superseded revision would be skipped at once.
 	#[test]
 	fn a_superseded_si_revision_stays_readable_within_the_export_budget() {
+		// Each revision's group starts at its time, in the track's milliseconds.
 		for (info, expected) in [
-			(track_info(Some(hang::container::MAX_AGE)), vec![0, 1]),
-			(track_info(Some(Duration::ZERO)), vec![1]),
+			(track_info(Some(hang::container::MAX_AGE)), vec![0, 100]),
+			(track_info(Some(Duration::ZERO)), vec![100]),
 		] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let mut track = broadcast.create_track("0x0014-0x70.si", info).unwrap();
@@ -819,7 +823,7 @@ mod tests {
 			let waiter = kio::Waiter::noop();
 			let mut read = Vec::new();
 			while let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) {
-				read.push(group.sequence);
+				read.push(group.start);
 			}
 			assert_eq!(read, expected);
 		}

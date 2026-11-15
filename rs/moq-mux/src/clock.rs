@@ -176,7 +176,11 @@ impl Clock {
 	/// Refuses a wall that is no whole number of those units (some 90 kHz values).
 	pub(crate) fn exact(wall: hang::catalog::Clock) -> crate::Result<hang::catalog::Clock> {
 		let unmappable = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {wall:?} {why}"));
-		let scale = wall.wall.scale().as_u64() as u128;
+		let scale = wall
+			.wall
+			.scale()
+			.ok_or_else(|| unmappable("has no timescale"))?
+			.as_u64() as u128;
 		let scaled = wall.wall.value() as u128 * Self::TIMESCALE.as_u64() as u128;
 		if !scaled.is_multiple_of(scale) {
 			return Err(unmappable("is no whole microsecond"));
@@ -203,8 +207,9 @@ impl Clock {
 		let instant = self.source.now();
 		let now = set(self.source.wall()).ok_or_else(|| unmappable("needs the host wall clock, which is unset"))?;
 		// Saturating would stamp everything early by the skew without saying so.
-		let reading = u64::try_from(moq_micros(now) - zero.wall.as_micros() as i128)
-			.map_err(|_| unmappable("puts PTS zero after now"))?;
+		let zero_micros = zero.wall.as_micros().map_err(|_| unmappable("has no timescale"))?;
+		let reading =
+			u64::try_from(moq_micros(now) - zero_micros as i128).map_err(|_| unmappable("puts PTS zero after now"))?;
 		Ok(Self {
 			source: self.source.clone(),
 			instant,
@@ -217,7 +222,7 @@ impl Clock {
 	///
 	/// Pure in the stored mapping, like [`wall_clock`](Self::wall_clock), and refused without one.
 	pub(crate) fn reading(&self, wall: Wall) -> crate::Result<i128> {
-		Ok(moq_micros(wall) - self.mapping()?.wall.as_micros() as i128)
+		Ok(moq_micros(wall) - self.mapping()?.wall.as_micros()? as i128)
 	}
 
 	/// The wall mapping, refused when the host's wall clock was unset.
@@ -328,7 +333,10 @@ mod tests {
 
 		kio::clock::sleep(Duration::from_secs(3)).await;
 		assert_eq!(clock.now(), us(3_000_000));
-		assert_eq!(fresh.now().as_micros() - before.as_micros(), 3_000_000);
+		assert_eq!(
+			fresh.now().as_micros().unwrap() - before.as_micros().unwrap(),
+			3_000_000
+		);
 		assert_eq!(clock.wall(), wall);
 		assert_eq!(
 			clock.wall_clock(clock.now()).unwrap(),
@@ -361,7 +369,7 @@ mod tests {
 		// PTS zero at exactly the moq epoch advertises 0.
 		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		assert_eq!(clock.wall().unwrap().wall.value(), 0);
-		assert_eq!(clock.wall().unwrap().wall.scale(), Clock::TIMESCALE);
+		assert_eq!(clock.wall().unwrap().wall.scale(), Some(Clock::TIMESCALE));
 
 		// A second later is a second's worth of clock units.
 		let clock = Clock::at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
@@ -385,7 +393,7 @@ mod tests {
 		let clock = Clock::new();
 		// PTS zero sits before construction, so a frame stamped a little before now still maps,
 		// and the mapping still names the current wall time.
-		assert!(clock.now().as_micros() >= Clock::LEAD.as_micros());
+		assert!(clock.now().as_micros().unwrap() >= Clock::LEAD.as_micros());
 		let now = clock.wall_clock(clock.now()).unwrap();
 		let host = kio::clock::wall();
 		let drift = now.max(host).saturating_duration_since(now.min(host));
@@ -399,7 +407,7 @@ mod tests {
 		let since = Duration::from_secs(10 * 3600);
 		let clock = Clock::new().arrival(since).unwrap();
 		let now = clock.now();
-		assert!(now.as_micros() >= since.as_micros());
+		assert!(now.as_micros().unwrap() >= since.as_micros());
 		let actual = clock.wall_clock(now).unwrap();
 		let host = kio::clock::wall();
 		let drift = actual.max(host).saturating_duration_since(actual.min(host));
@@ -409,7 +417,7 @@ mod tests {
 		let earlier = clock
 			.capture(kio::clock::now().saturating_sub(Duration::from_secs(1)))
 			.unwrap();
-		assert!(earlier.as_micros() < now.as_micros());
+		assert!(earlier.as_micros().unwrap() < now.as_micros().unwrap());
 
 		// PTS zero before 2020 cannot be named on the wire.
 		assert!(matches!(
@@ -426,7 +434,7 @@ mod tests {
 
 		let clock = Clock::new();
 		assert_eq!(clock.wall(), None);
-		assert!(clock.now().as_micros() >= Clock::LEAD.as_micros());
+		assert!(clock.now().as_micros().unwrap() >= Clock::LEAD.as_micros());
 		assert!(matches!(
 			clock.wall_clock(clock.now()),
 			Err(crate::Error::UnmappableTimestamp(_))

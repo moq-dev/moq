@@ -1042,8 +1042,12 @@ int main()
 			CHECK(publisher.WriteUntil([&] { return g_output_audio >= audio + 3; }));
 		} else {
 			uint64_t timestamp_us = 2'000'000;
+			// The scale-less track carries the time in its payload, so each frame's timestamp
+			// is the unscaled key of the group it opens.
+			uint64_t key = 0;
 			CHECK(WaitFor([&] {
-				TestOk(pcm->write_frame(moq::Frame{PcmFrame(timestamp_us, channels), std::nullopt}),
+				TestOk(pcm->write_frame(moq::Frame{PcmFrame(timestamp_us, channels),
+								   moq::Timestamp{key++, std::nullopt}}),
 				       "write pcm");
 				timestamp_us += 20'000;
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1476,10 +1480,12 @@ int main()
 			g_candidate = {candidate, false};
 			return true;
 		}));
+		// Each cut opens a group, so each retry starts later than the last.
+		uint64_t bad_us = 1'000'000'000;
 		CHECK(publisher.WriteUntil([&] {
-			TestOk(replacement->write_frame(moq::Frame{BAD_OPUS, Micros(1'000'000'000)}),
-			       "replacement frame");
+			TestOk(replacement->write_frame(moq::Frame{BAD_OPUS, Micros(bad_us)}), "replacement frame");
 			TestOk(replacement->cut(), "replacement audio cut");
+			bad_us += 20'000;
 			std::lock_guard<std::mutex> lock(g_candidate_mutex);
 			return g_candidate.failed && candidate.expired();
 		}));

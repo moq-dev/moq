@@ -67,7 +67,7 @@ type (
 	AnchorAbsolute = ffi.MoqAnchorAbsolute
 	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
 	AnchorRelative = ffi.MoqAnchorRelative
-	// AnchorTime is the group containing a presentation Timestamp.
+	// AnchorTime is the group containing a time, an Unscaled Timestamp in the track's timescale; a scaled one is refused.
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder

@@ -130,7 +130,8 @@ of records a reader can join at any point; the catalog has no window mode, so th
 takes only the track. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
 `Update` / `Append` / `Push` / `Pop` take a final `moq.Timestamp` on the broadcast clock, so their track needs a timescale.
-Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
+Raw tracks with a nil timescale are scale-less: each frame's timestamp is `moq.Unscaled` at its group's key.
+Timed tracks require matching timestamps; build one with `moq.TimestampFromScale` or `moq.TimestampFromDuration`.
 `media.CatalogProducer.Now()` samples and fixes the broadcast clock, the epoch every track in the broadcast shares; stamp media and JSON from it.
 Opaque bytes go on a plain `TrackProducer`.
 
@@ -177,7 +178,7 @@ See the package doc for details.
 
 Create a separate live track with `BroadcastProducer.CreateDatagrams(name, info)` and
 subscribe with `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)`
-assigns a sequence, `Insert(Datagram)` preserves one, and `DatagramConsumer.Recv(ctx)` or
+assigns a sequence (on a scale-less track, the one `moq.Unscaled(sequence)` names), `Insert(Datagram)` preserves one, and `DatagramConsumer.Recv(ctx)` or
 `All(ctx)` reads in arrival order. Stream tracks of the same name are independent.
 Watch aggregate subscriber demand with `Priority()` / `PriorityChanged(ctx, last)`, and
 serve on-demand datagram tracks with `BroadcastRequests.Datagrams()`.

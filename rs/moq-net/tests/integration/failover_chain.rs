@@ -14,9 +14,11 @@ use crate::support::harness::MockPair;
 
 use std::time::Duration;
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use futures::StreamExt;
 use futures::channel::mpsc;
-use moq_net::{Error, Timestamp, Version, group, origin, track};
+use moq_net::{Error, Version, group, origin, track};
 
 /// Within the subscriber's one-minute budget, so a group that never continues is a hang
 /// rather than a group given up as too old.
@@ -69,20 +71,20 @@ impl Chain {
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
-		let mut group0 = track.append_group().unwrap();
-		group0.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
+		let mut group0 = track.append_next().unwrap();
+		group0.write_frame(group0.at_start(), payload(0, 0)).unwrap();
 		let mut read0 = sub.recv_group().await.unwrap().unwrap();
-		assert_eq!(read0.sequence, 0);
+		assert_eq!(read0.start, 0);
 		assert_eq!(
 			read0.read_frame().await.unwrap().unwrap().payload.to_vec(),
 			payload(0, 0)
 		);
 
-		let mut group1 = track.append_group().unwrap();
-		group1.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
-		group1.finish().unwrap();
+		let mut group1 = track.append_next().unwrap();
+		group1.write_frame(group1.at_start(), payload(1, 0)).unwrap();
+		group1.close().unwrap();
 		let mut read1 = sub.recv_group().await.unwrap().unwrap();
-		assert_eq!(read1.sequence, 1);
+		assert_eq!(read1.start, 1);
 		assert_eq!(
 			read1.read_frame().await.unwrap().unwrap().payload.to_vec(),
 			payload(1, 0)
@@ -128,8 +130,8 @@ impl Chain {
 	/// The publisher writes the rest of group 0, which every relay can still reach.
 	fn finish_group0(&mut self) {
 		let mut group0 = self.group0.take().expect("finished once");
-		group0.write_frame(Timestamp::ZERO, payload(0, 1)).unwrap();
-		group0.finish().unwrap();
+		group0.write_frame(group0.at_start(), payload(0, 1)).unwrap();
+		group0.close().unwrap();
 	}
 }
 

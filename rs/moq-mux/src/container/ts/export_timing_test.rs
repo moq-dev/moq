@@ -282,12 +282,13 @@ impl Live {
 					match std::mem::take(&mut self.stalling) {
 						true => self.stalled.push(group),
 						false => {
-							group.finish().unwrap();
+							group.close().unwrap();
 						}
 					}
 				}
 				if keyframe {
-					self.group = Some(self.video.append_group().unwrap());
+					let start = video.strict_add_signed(self.offset);
+					self.group = Some(self.video.append_group(start).unwrap());
 				}
 				if stall(tick) {
 					self.stalling = true;
@@ -379,7 +380,7 @@ impl Live {
 	/// End the media tracks while the catalog can still announce more.
 	fn finish_media(&mut self) {
 		if let Some(group) = self.group.take() {
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 		self.stalled.clear();
 		drop(self.video.clone().finish().unwrap());
@@ -519,7 +520,7 @@ async fn end_waits_for_catalog_and_media() {
 			// Catalog EOF fixes the layout, but the named tracks can still publish media.
 			live.run(3 * GOP, &mut [&mut leg], |_| false);
 			// Close the groups so their tails flush, leaving both tracks open for more.
-			live.group.take().unwrap().finish().unwrap();
+			live.group.take().unwrap().close().unwrap();
 			live.audio.cut(None).unwrap();
 			3 * GOP as usize
 		} else {
@@ -979,15 +980,14 @@ async fn a_successor_settles_held_video_across_a_skip_or_restart() {
 			live.run(8 * GOP + tail, &mut [&mut leg], |_| false);
 			live.fall_silent(Duration::from_secs(3), &mut [&mut leg]);
 			if restart {
-				live.group.take().unwrap().finish().unwrap();
-				let mut marker = live.video.append_group().unwrap();
+				live.group.take().unwrap().close().unwrap();
+				// A microsecond before the keyframe that resumes: group starts strictly increase.
+				let at = live.tick * VIDEO_US - 1;
+				let mut marker = live.video.append_group(at).unwrap();
 				HangContainer::Legacy(crate::container::Kind::Video)
-					.write(
-						&mut marker,
-						&[crate::container::test_util::raw_frame(live.tick * VIDEO_US, b"", true)],
-					)
+					.write(&mut marker, &[crate::container::test_util::raw_frame(at, b"", true)])
 					.unwrap();
-				marker.finish().unwrap();
+				marker.close().unwrap();
 			} else {
 				// Leave the old group blocked so the successor makes the consumer skip it.
 				live.stalling = true;
@@ -1016,7 +1016,7 @@ async fn a_clean_group_end_settles_held_video_before_a_silence() {
 		let mut leg = live.join(Duration::ZERO).await;
 		let tail = if declared { 2 } else { 8 };
 		live.run(8 * GOP + tail, &mut [&mut leg], |_| false);
-		live.group.take().unwrap().finish().unwrap();
+		live.group.take().unwrap().close().unwrap();
 		leg.poll_now();
 		live.fall_silent(Duration::from_secs(3), &mut [&mut leg]);
 		live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false);
@@ -1086,12 +1086,12 @@ async fn on_a_scaled_clock(scale: f64, ticks: u64) -> (Duration, u64, Stats) {
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(ticks, &mut [&mut leg], |_| false);
 
-	let first = leg.out.first().expect("output").1.timestamp.as_micros() as u64;
+	let first = leg.out.first().expect("output").1.timestamp.as_micros().unwrap() as u64;
 	let held: Vec<Duration> = leg
 		.out
 		.iter()
-		.filter(|(_, frame)| frame.timestamp.as_micros() as u64 >= first + 10_000_000)
-		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros() as u64)))
+		.filter(|(_, frame)| frame.timestamp.as_micros().unwrap() as u64 >= first + 10_000_000)
+		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros().unwrap() as u64)))
 		.collect();
 	assert!(held.len() > 1_000, "too little output to judge: {}", held.len());
 	let spread = *held.iter().max().unwrap() - *held.iter().min().unwrap();
@@ -1153,7 +1153,7 @@ fn holds(live: &Live, leg: &Leg, from: Instant) -> Vec<Duration> {
 	leg.out
 		.iter()
 		.filter(|(sent, _)| *sent >= from)
-		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros() as u64)))
+		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros().unwrap() as u64)))
 		.collect()
 }
 
@@ -1245,7 +1245,7 @@ fn assert_same_packets(a: &Leg, b: &Leg, from: u64) {
 		leg.out
 			.iter()
 			.map(|(_, frame)| frame.clone())
-			.filter(|frame| frame.timestamp.as_micros() as u64 >= from)
+			.filter(|frame| frame.timestamp.as_micros().unwrap() as u64 >= from)
 			.collect()
 	};
 	let (a, b) = (pick(a), pick(b));
@@ -1292,7 +1292,14 @@ async fn pair_at(rate: u64, scale: f64, lag: i64, ticks: u64, stall: impl Fn(u64
 	let mut b = live.join(Duration::from_millis(100)).await;
 	live.run(ticks, &mut [&mut a, &mut b], stall);
 	live.finish(&mut [&mut a, &mut b]);
-	let joined = b.out.first().expect("the joiner rendered").1.timestamp.as_micros() as u64;
+	let joined = b
+		.out
+		.first()
+		.expect("the joiner rendered")
+		.1
+		.timestamp
+		.as_micros()
+		.unwrap() as u64;
 	(a, b, joined + 2_000_000)
 }
 
@@ -1340,7 +1347,9 @@ async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 	// The instant each slot first went out, by its PCR time.
 	let mut first = std::collections::BTreeMap::new();
 	for (sent, frame) in &leg.out {
-		first.entry(frame.timestamp.as_micros() as u64).or_insert(*sent);
+		first
+			.entry(frame.timestamp.as_micros().unwrap() as u64)
+			.or_insert(*sent);
 	}
 	let slots: Vec<(u64, Instant)> = first.into_iter().collect();
 	// (window end in seconds of PCR time, the system clock's offset in ppm)
@@ -1389,7 +1398,7 @@ async fn a_joiner_runs_at_the_delay_from_its_first_output() {
 		.out
 		.iter()
 		.map(|(sent, frame)| {
-			let media = frame.timestamp.as_micros() as u64;
+			let media = frame.timestamp.as_micros().unwrap() as u64;
 			sent.saturating_duration_since(live.send_times(media, media).1)
 		})
 		.collect();

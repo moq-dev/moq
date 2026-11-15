@@ -140,22 +140,22 @@ struct Publisher {
 	track: track::Producer,
 }
 
+/// Milliseconds since the Unix epoch: the track's timescale, on this host's clock.
+fn millis(time: DateTime<Utc>) -> anyhow::Result<u64> {
+	Ok(u64::try_from(time.timestamp_millis())?)
+}
+
 impl Publisher {
 	fn new(track: track::Producer) -> Self {
 		Self { track }
 	}
 
 	async fn run(self) -> anyhow::Result<()> {
-		let start = Utc::now();
-		let mut now = start;
-
-		// Just for fun, don't start at zero.
-		let mut sequence = start.minute();
+		let mut now = Utc::now();
 
 		loop {
-			let segment = self.track.create_group(sequence.into()).unwrap();
-
-			sequence += 1;
+			// A group starts at its first frame: the minute, in the track's milliseconds.
+			let segment = self.track.append_group(millis(now)?)?;
 
 			tokio::spawn(async move {
 				if let Err(err) = Self::send_segment(segment, now).await {
@@ -177,11 +177,11 @@ impl Publisher {
 		// Everything but the second.
 		let base = now.format("%Y-%m-%d %H:%M:").to_string();
 
-		segment.write_frame(moq_net::Timestamp::now(), base.clone())?;
+		segment.write_frame(moq_net::Timestamp::from_millis(millis(now)?)?, base.clone())?;
 
 		loop {
 			let delta = now.format("%S").to_string();
-			segment.write_frame(moq_net::Timestamp::now(), delta.clone())?;
+			segment.write_frame(moq_net::Timestamp::from_millis(millis(now)?)?, delta.clone())?;
 
 			let next = now + chrono::Duration::try_seconds(1).unwrap();
 			let next = next.with_nanosecond(0).unwrap();
@@ -198,7 +198,7 @@ impl Publisher {
 			now = actual;
 		}
 
-		segment.finish()?;
+		segment.close()?;
 
 		Ok(())
 	}
