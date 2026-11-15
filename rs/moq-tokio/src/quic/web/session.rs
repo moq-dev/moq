@@ -1385,6 +1385,43 @@ mod tests {
 		}
 	}
 
+	/// A peer that stops the stream after acknowledging its payload leaves that payload
+	/// acknowledged: the stop fails only the bytes it had not.
+	#[tokio::test]
+	async fn an_offset_stays_acknowledged_through_a_stop() {
+		use moq_net::transport::poll::{Acked, SendStream};
+
+		for framed in [false, true] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, server) = sessions(framed, client, server).await;
+			let mut send = client.open_uni(Default::default()).await.unwrap();
+			send.write_all(&b"payload"[..]).await.unwrap();
+			let payload = SendStream::offset(&send);
+			let recv = async {
+				let mut recv = server.accept_uni().await.unwrap();
+				let mut read = Vec::new();
+				while read.len() < 7 {
+					read.extend_from_slice(&recv.read_chunk(usize::MAX).await.unwrap().unwrap());
+				}
+				recv
+			};
+			let (acked, recv) = tokio::join!(kio::wait(|waiter| send.poll_acked(waiter, &payload)), recv);
+			assert!(matches!(acked, Ok(Acked::Delivered)), "framed: {framed}: {acked:?}");
+
+			recv.stop(3);
+			let stopped = kio::wait(|waiter| SendStream::poll_closed(&send, waiter)).await;
+			assert!(
+				matches!(stopped, Err(crate::quic::web::send::Error::Stopped(3))),
+				"framed: {framed}: {stopped:?}"
+			);
+			let acked = SendStream::poll_acked(&send, &Waiter::noop(), &payload);
+			assert!(
+				matches!(acked, Poll::Ready(Ok(Acked::Delivered))),
+				"framed: {framed}: the stop forgot it: {acked:?}"
+			);
+		}
+	}
+
 	/// Both ends of a session export the same keying material as soon as it starts. A
 	/// WebTransport session derives its own from the connection's, so it differs from what
 	/// raw QUIC on the same connection would export.

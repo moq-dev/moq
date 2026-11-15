@@ -726,9 +726,10 @@ pub mod poll {
 		/// Poll until the peer acknowledged every byte below `offset`.
 		///
 		/// Errors once those bytes can never be acknowledged: the stream was reset by either
-		/// side or the session closed. A transport that cannot see acknowledgments is ready
-		/// with [`Acked::Unsupported`] immediately, the default, on every stream, so a caller
-		/// can decide once per session. An offset minted by another stream may panic.
+		/// side or the session closed. Bytes already acknowledged stay so after a reset or stop.
+		/// A transport that cannot see acknowledgments is ready with [`Acked::Unsupported`]
+		/// immediately, the default, on every stream, so a caller can decide once per session. An
+		/// offset minted by another stream may panic.
 		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<Acked, Self::Error>> {
 			let _ = (waiter, offset);
 			Poll::Ready(Ok(Acked::Unsupported))

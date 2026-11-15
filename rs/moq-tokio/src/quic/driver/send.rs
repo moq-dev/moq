@@ -197,7 +197,8 @@ impl Stream {
 
 	/// Wait for the peer to acknowledge every byte before `offset`
 	///
-	/// Fails with the peer's stop code once it stopped the stream, or the connection's loss.
+	/// Fails with the peer's stop code once it stopped the stream before acknowledging them, or the
+	/// connection's loss.
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
@@ -411,7 +412,8 @@ impl Half {
 		self.own(&offset);
 		let mut conn = self.stream.conn.state.lock();
 		let mut stream = conn.inner.send_stream(self.stream.id);
-		if ready!(stream.poll_acked(waiter, offset.inner)).is_ok() {
+		// A stop fails the wait even for bytes the peer already acknowledged, which still count.
+		if ready!(stream.poll_acked(waiter, offset.inner)).is_ok() || stream.acked_len() >= u64::from(offset) {
 			return Poll::Ready(Ok(()));
 		}
 		// A held stream is never released, and a reset consumes its handle, so only the peer's
