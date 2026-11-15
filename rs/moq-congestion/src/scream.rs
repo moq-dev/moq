@@ -865,7 +865,6 @@ mod tests {
             sent,
             bytes: MTU,
             packet: Packet::default(),
-            new_burst: true,
         }];
         scream.on_loss(Loss {
             now,

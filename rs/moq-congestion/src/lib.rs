@@ -221,8 +221,6 @@ pub struct Lost {
     pub bytes: u16,
     /// The state [`Controller::on_sent`] returned for it.
     pub packet: Packet,
-    /// Whether the packet sent just before it was delivered, so it starts a new run of losses.
-    pub new_burst: bool,
 }
 
 /// An ACK whose ECN counts reported newly CE-marked packets.
