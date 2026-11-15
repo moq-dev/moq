@@ -11,8 +11,9 @@ global view, or single point of failure, on CDN tiers and on a self-forming
 mesh alike.
 
 Non-goals: choosing, dialing, and pricing links from measured quality, which
-is Kixel's; browsers as transit; stitching different Instances together; and
-moq-transport routing parity beyond each node using its nearest publisher.
+is Kixel's; browsers as transit; stitching different Instances together;
+moq-transport routing parity beyond each node using its nearest publisher;
+and a moq-transport node between two of our relays.
 
 ## Plan
 
@@ -26,7 +27,8 @@ The maintainer's requirements, which every child is judged against:
 
 1. A subscription resumes only onto equal identity.
 2. A publisher may hold two connections (a GOAWAY handover, redundant
-   ingest), and routes switch between them seamlessly.
+   ingest), and routes switch between them seamlessly. Both serve one
+   Instance, so redundant encoders are synchronized.
 3. Some connections do not proxy: an edge passes its clients to its cores
    and its cores' routes to its clients, never one core's routes to another,
    and a leaf, such as a relay on a camera, advertises only what its host
@@ -35,17 +37,19 @@ The maintainer's requirements, which every child is judged against:
 5. Traffic grows as little as possible with the cluster.
 6. No single point of failure.
 7. It is proven to work.
-8. Routing prefers warm caches: a route has a cold cost and a warm cost, and
-   routes coalesce onto a node that says it carries a broadcast, so no link
-   carries the same data twice.
+8. Routing prefers warm nodes: a route has a cold cost and a warm cost, and
+   routes coalesce onto a node that already has demand for a broadcast, so
+   no link carries the same data twice. A CDN join stops at no pop without
+   demand, and drones with an uplink each settle on one that reaches the CDN.
 9. Messages scale with the cluster: streams of messages, never one blob.
 10. One stream carries what must stay ordered.
 11. moq-transport is supported to a degree: identity does not carry, but two
-    publishers announcing one name on opposite sides of the network work.
+    publishers announcing one name on opposite sides of the network work. A
+    moq-transport node is always an endpoint.
 12. No global view. With competing claims each node uses its closest, and
     nothing elects a leader.
 13. A secondary route may carry metadata only, so a stalled primary is found
-    without waiting on QUIC keep-alives.
+    without waiting on QUIC keep-alives, where a node opts in.
 14. No approach is assumed: earlier attempts are evidence, not constraints.
 
 What the audit found of today's layer: 6 and 12 hold, and 1 holds with no
@@ -125,6 +129,41 @@ Settled:
    message; a stall is found by comparing the two routes, never by silence;
    and a demoted route never takes a track back while the working one
    delivers.
+
+Decided 2026-11-15 (maintainer, answering the requirements the plan's review
+flagged as costly, on
+[moq-dev/moq#8873](https://github.com/moq-dev/moq/pull/8873)):
+
+9. ✅ **Warm means demand, and two cases define requirement 8.** A node is
+   warm for an Instance while something downstream of it asks for it, not
+   because groups sit in its cache: "downstream demand instead of a yes/no
+   cache state". Pop skipping: a join stops at no pop without demand. Drones
+   that "self-elect who is the one who reaches out to the CDN": with an
+   uplink each, "the warm cost to a drone beats the cold cost to the CDN"
+   and one uplink carries the broadcast (rejected: narrowing 8 to joins that
+   stop at a carrier already on the path, which delivers neither case).
+   [Warmth](/quest/m2/multicast/warmth.md) measures both.
+10. ✅ **A moq-transport session is an endpoint, never transit.** Its wire
+    has no path, chain, or Instance, so a moq-transport relay announcing
+    back a name it learned from us cannot be told from a nearer publisher.
+    That is unsupported: it must cost bounded work and touch no other
+    broadcast ([requests](/quest/m2/multicast/requests.md)), and nothing
+    detects it (rejected: ignoring a claim for a name already announced to
+    that session, which also hides a real second publisher behind it).
+11. ✅ **Redundant ingest is one Instance from synchronized encoders.** Two
+    connections claiming one Instance serve the same frames under the same
+    group and frame numbers, and a publisher that restarts hard mints a new
+    Instance, as the draft already requires. Nothing checks it: a pair that
+    breaks it hurts its own broadcast. Encoders that are not synchronized
+    use two Instances, and a move between them is a restart the reader sees;
+    our importers are that case, since same-epoch importers were dropped
+    2026-10-19. moq-transport never gets redundant ingest: it has no way to
+    flag an encoder restart, so every claim over it is a minted Instance.
+12. ✅ **The metadata secondary is opt in**
+    ([route health](/quest/m3/route-health/README.md)): a mesh on links that
+    stall wants it, and the CDN's own tiers run without one (rejected: a
+    standby wherever a second route exists, which about doubles a track's
+    subscription state across the cluster).
 
 The shape those decisions give, for the children to confirm or improve; each
 departure is a decision to list in its PR:

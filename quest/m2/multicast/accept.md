@@ -9,11 +9,13 @@ PR reports the measured interruption for each kind of failure:
 - two publishers claiming one path from opposite sides of a mesh, where
   each relay uses its nearest and none loops;
 - one publisher ingesting on two relays under one Instance, losing either,
-  with readers across the mesh reading on;
+  with readers across the mesh reading on, and a pair under two Instances,
+  where the move is a restart and nothing is spliced;
 - a publisher handed over by GOAWAY to another relay, with no group missed
   or repeated;
 - moq-transport and lite-06 publishers through the route layer, including
-  two announcing one namespace on different relays;
+  two announcing one namespace on different relays, each a minted Instance
+  that no reader is moved between mid-stream;
 - three meshes joined by scoped links, in a chain and in a ring, where no
   claim circles and a claim ended at its source ends everywhere;
 - an edge that marks its core links and a leaf that marks every link, each

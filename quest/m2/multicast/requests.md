@@ -60,6 +60,12 @@ fixtures:
   again.
 - Two route entries for one claim through one session send two SUBSCRIBEs
   that differ only in depth.
+- A moq-transport peer that announces back a name it learned from this
+  relay looks like a nearer publisher, and a request sent to it comes
+  straight back. Unsupported
+  ([epic](/quest/m2/multicast/README.md) item 10): pin that the pair of
+  requests stays pending without retrying in a loop, and that other
+  broadcasts on both sessions read on.
 
 The loop fixture: form the loop the churn sweeps found (two unrelated
 failures at once, so two relays briefly route a publisher through each
@@ -68,9 +74,10 @@ subscribers receive the next group and no upstream request is left pending.
 Cover a request answered before the loop and one still unanswered when it
 forms.
 
-Fix in the layer that survives
-[the resume redesign](/quest/m4/resume-redesign.md), and run the
-`verify-failover` and `verify-resume` skills on what they cover.
+Fix in the per-reader path, which stays: the producer-replacement redesign
+that would have deleted it was dropped 2026-11-15 (maintainer,
+/quest-complete). Run the `verify-failover` and `verify-resume` skills on
+what they cover.
 
 Public API: none. Wire: none expected. If a refusal must tell "this route is
 gone" from "no such track", that is a lite-07 wire change to report, which is
@@ -79,4 +86,3 @@ why this sits in m2.
 ## Related
 
 - [moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734) - its doubt rule lets a publisher leaving three or more relays at once loop a request until the news arrives
-- [Resume as producer replacement](/quest/m4/resume-redesign.md) - rewrites the per-reader path some of these hazards live in

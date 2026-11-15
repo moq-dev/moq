@@ -2,12 +2,12 @@
 
 ## Goal
 
-A relay or endpoint that demands a track over one route watches a second
-route to the same Instance with a metadata-only subscription, and moves the
-track when the first stalls, without waiting on a QUIC keep-alive or idle
-timeout. Today a route that dies without a close starves its readers until
-the 10 s idle timeout fires, and a session that stays up while its payload
-stalls is never recovered
+A relay or endpoint that opts in and demands a track over one route watches
+a second route to the same Instance with a metadata-only subscription, and
+moves the track when the first stalls, without waiting on a QUIC keep-alive
+or idle timeout. Today a route that dies without a close starves its readers
+until the 10 s idle timeout fires, and a session that stays up while its
+payload stalls is never recovered
 (`rs/moq-net/tests/integration/route_health.rs`).
 
 ## Plan
@@ -38,6 +38,18 @@ made by the maintainer on 2026-10-13 and 2026-11-02 from the stalls
 - ✅ Only between claims of one Instance the publisher named. A minted
   Instance, as an older version or moq-transport gets, never resumes.
 
+Decided 2026-11-15 (maintainer, on
+[moq-dev/moq#8873](https://github.com/moq-dev/moq/pull/8873)): ✅ opt in,
+off by default: "We wouldn't do standbys inside our CDN". A standby about
+doubles a track's subscription state and sends its headers down a second
+path, which a mesh on links that stall wants and a CDN tier does not. The
+node that would hold the standby turns it on, a relay in its configuration
+and an endpoint on its client (rejected: a standby wherever a second route
+exists). Turning it on for one broadcast, so an operator can offer it there,
+is a later decision that [failover](/quest/m3/route-health/failover.md)
+leaves room for. A node that has not opted in still finds a silent death by
+the idle timeout alone and never recovers a stall on a live session.
+
 New on 2026-11-15, from the prior art this is closest to:
 
 - The standby is a route whose path does not name this node, and one that
@@ -57,5 +69,5 @@ track back, two quiet routes stay unknown, a bottleneck shared by both routes
 does not hide a working third, and relays deciding at once do not swap.
 Report media overlap, control traffic, wakes, switches, and memory across
 tracks, candidates, and readers. Revisit the relay's 10 s default QUIC idle
-timeout with the result, and add a route-health section to the routing
-concept page.
+timeout with the result, since it stays the only detector wherever the
+standby is off, and add a route-health section to the routing concept page.

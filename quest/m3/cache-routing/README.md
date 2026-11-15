@@ -2,12 +2,13 @@
 
 ## Goal
 
-A relay pulls each broadcast from the cheapest copy: a neighbour already
-carrying its Instance when that costs less than a fresh copy from the source.
-A LAN of relays with their own uplinks pulls one copy over one uplink, edges
-that prefer different cores share one copy between regions, and no link
-carries a group twice. Routing converges once demand and topology stop
-changing, and a broadcast nobody reads costs no message of its own.
+A relay pulls each broadcast from the cheapest copy: a neighbour that
+already has demand for its Instance when that costs less than a fresh copy
+from the source. A join stops at no pop without demand, drones with their
+own uplinks pull one copy over one uplink, edges that prefer different cores
+share one copy between regions, and no link carries a group twice. Routing
+converges once demand and topology stop changing, and a broadcast nobody
+reads costs no message of its own.
 
 Non-goals: steering clients to the relay that holds a broadcast; decisions
 from measured load or RTT; browsers serving copies they receive; and creating
@@ -29,6 +30,9 @@ a node that says it carries a broadcast). What stands and what goes:
 - ✅ A warm cost is strictly positive and summed from the source along the
   path the data takes. This replaces item 14's rule below, under which a
   carrier offered its copy at no cost and a hash ranked carriers.
+- ✅ Warm means demand, not cache contents, and pop skipping and one uplink
+  per group of drones are the two cases that must work (maintainer,
+  2026-11-15, [epic](/quest/m2/multicast/README.md) item 9).
 - The non-goal of "one copy across a multi-hop sparse overlay rather than
   among direct neighbors" is dropped: a mesh is the product this serves.
 
@@ -53,7 +57,8 @@ This README's own work, once its child lands:
   plus a skip link: a cold broadcast takes the skip, a reader on the skipped
   relay makes the far relay join it, and that reader leaving sends it back.
   Two LAN relays with their own uplinks and readers on both pull one copy
-  over one uplink.
+  over one uplink, whether the readers arrive in turn or at once, and the
+  other uplink takes over when that one is lost.
 - Docs: warm and cold costs in `doc/bin/relay/cluster.md`, and a section on
   the routing concept page once the
   [routing guide](/quest/m3/routing-guide.md) has added it.
