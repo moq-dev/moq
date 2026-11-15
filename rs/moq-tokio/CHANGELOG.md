@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.37](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.36...moq-tokio-v0.19.37) - 2026-11-15
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.19.36](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.35...moq-tokio-v0.19.36) - 2026-11-11
 
 ### Fixed
