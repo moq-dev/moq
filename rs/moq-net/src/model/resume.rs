@@ -577,6 +577,16 @@ impl Copy {
 		self.send(wire);
 	}
 
+	/// Take nothing past `until` from this replaced copy, superseded from now. A bound only
+	/// narrows what it may deliver, so a copy that ran out stays out: reopened, it would be
+	/// waited on with nothing left to wake the reader.
+	fn bound(&mut self, until: Option<u64>, reader: &Subscription) {
+		self.until = Some(until);
+		self.since = Some(self.track.now());
+		let wire = self.wire(reader);
+		self.send(wire);
+	}
+
 	/// Read this copy again: one that ran out under the reader's old ranges, budget, or
 	/// bounds may hold a group the new ones admit, and runs out again at once otherwise. A
 	/// copy that failed stays failed.
@@ -1134,17 +1144,23 @@ impl Reader {
 				break;
 			}
 			let copy = &mut self.copies[index];
-			let capped = copy.end().is_some();
+			let cap = copy.end();
 			let resolved = match &mut copy.sub {
 				Sub::Ready(sub) => sub.resolved_ranges(),
 				Sub::Pending(_) => continue,
 			};
 			// A failover cap at or below where a range starts empties the copy's range, which
-			// then says nothing of where the reader's own range starts.
+			// then says nothing of where the reader's own range starts. One at or below where
+			// it ends cut that end short, so it says nothing of where the reader's range ends.
 			let resolved: Vec<_> = resolved
 				.into_iter()
 				.map(|resolved| {
-					resolved.filter(|resolved| !capped || resolved.end.is_none_or(|end| end > resolved.start))
+					let resolved = resolved
+						.filter(|resolved| cap.is_none() || resolved.end.is_none_or(|end| end > resolved.start))?;
+					Some(Resolved {
+						end: resolved.end.filter(|end| cap.is_none_or(|cap| *end < cap)),
+						..resolved
+					})
 				})
 				.collect();
 			self.resolve(&resolved);
@@ -1435,12 +1451,9 @@ impl Reader {
 			Some(end) => end.checked_sub(1),
 			None => self.newest.max(serving.track.latest_key()),
 		};
-		let mirrored = &self.mirrored;
 		for copy in &mut self.copies {
 			if copy.replaced && copy.until.is_none() {
-				copy.until = Some(until);
-				copy.since = Some(copy.track.now());
-				copy.update(mirrored);
+				copy.bound(until, &self.mirrored);
 			}
 		}
 		true
@@ -1458,9 +1471,7 @@ impl Reader {
 		let bound = self.newest.max(key.checked_sub(1));
 		for copy in &mut self.copies[..index] {
 			if copy.replaced && copy.until.is_none() {
-				copy.until = Some(bound);
-				copy.since = Some(copy.track.now());
-				copy.update(&self.mirrored);
+				copy.bound(bound, &self.mirrored);
 			}
 		}
 	}
