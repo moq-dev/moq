@@ -61,7 +61,6 @@ test("FETCH and FETCH_OK round trip on every draft", async () => {
 			type,
 			subscriberPriority: 3,
 			groupOrder: "descending",
-			fillTimeout: 250,
 		});
 		const decoded = await Fetch.decode(await encode(msg, version), version);
 		expect(decoded).toEqual(msg);

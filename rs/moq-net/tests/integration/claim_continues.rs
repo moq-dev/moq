@@ -42,20 +42,20 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 }
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
-async fn settle() {
+pub(super) async fn settle() {
 	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// A worker claiming `claim`, answering each request with an output whose `video` track
 /// carries the worker's name and how many outputs it made before.
-struct Worker {
-	claim: Rc<origin::Claim>,
+pub(super) struct Worker {
+	pub(super) claim: Rc<origin::Claim>,
 	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
-	origin: origin::Producer,
+	pub(super) origin: origin::Producer,
 }
 
 impl Worker {
-	fn new(hop: u64, claim: &str, name: &'static str) -> Self {
+	pub(super) fn new(hop: u64, claim: &str, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
 		let claim = Rc::new(origin.claim(claim, origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
@@ -82,7 +82,7 @@ impl Worker {
 	}
 
 	/// How many outputs the worker was asked for.
-	fn served(&self) -> usize {
+	pub(super) fn served(&self) -> usize {
 		self.outputs.borrow().len()
 	}
 
@@ -94,7 +94,7 @@ impl Worker {
 }
 
 /// Every announce event already delivered, as `(kind, prefix, instance)`.
-async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, String, Instance)> {
+pub(super) async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, String, Instance)> {
 	let mut events = Vec::new();
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		let (kind, announce) = match event.expect("announce ended") {
@@ -125,7 +125,7 @@ async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, String, Ins
 }
 
 /// The events without their instances.
-fn kinds(events: &[(&'static str, String, Instance)]) -> Vec<(&'static str, String)> {
+pub(super) fn kinds(events: &[(&'static str, String, Instance)]) -> Vec<(&'static str, String)> {
 	events.iter().map(|(kind, prefix, _)| (*kind, prefix.clone())).collect()
 }
 
@@ -144,7 +144,7 @@ async fn first(origin: &origin::Producer, path: &str) -> Option<String> {
 
 /// The first frame at `path` through `origin`. Unless the first subscription through the
 /// claim `continues`, it resets, and the next one reads.
-async fn watch(continues: bool, origin: &origin::Producer, path: &str) -> String {
+pub(super) async fn watch(continues: bool, origin: &origin::Producer, path: &str) -> String {
 	if !continues {
 		assert_eq!(first(origin, path).await, None, "the first subscription continued");
 		settle().await;

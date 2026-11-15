@@ -8,6 +8,10 @@ import (
 	"moq.dev/moq/internal/bridge"
 )
 
+// IsEndpoint reports whether path is an endpoint's broadcast, which only routes sessions and
+// carries no media.
+func IsEndpoint(path string) (bool, error) { return ffi.MoqSocketIsEndpoint(path) }
+
 // Endpoint is a server, a client, or both, and dials and accepts track sessions.
 type Endpoint struct{ inner *ffi.MoqSocketEndpoint }
 

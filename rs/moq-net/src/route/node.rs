@@ -24,7 +24,6 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	sync::{Arc, Mutex, MutexGuard},
 	task::{Poll, ready},
-	time::Duration,
 };
 
 use kio::clock::{Deadlines, Instant};
@@ -84,8 +83,6 @@ pub(crate) struct Served {
 	pub claim: Claim,
 	/// The route's metric: a path through the claim costs the Announce Cost plus this.
 	pub metric: Metric,
-	/// The round trip to the route's publisher, informational.
-	pub rtt: Option<Duration>,
 	/// Whether a usable route serves it; a held one leaves it shown but unavailable.
 	pub available: bool,
 	/// A node on the route's path sent GOAWAY: it ranks below every route avoiding one.
@@ -1178,11 +1175,6 @@ impl Stream {
 		self.with(|router, key, now| router.goaway(key, now));
 	}
 
-	/// The link to the peer has `rtt`, or `None` unmeasured.
-	pub fn rtt(&self, rtt: Option<Duration>) {
-		self.with(|router, key, _| router.rtt(key, rtt));
-	}
-
 	/// This stream's session now serves `claim` of `id` along its route covering `prefix`
 	/// at `served`'s instance, so the other streams are sent that instance, and a slot
 	/// that no longer carries a live route to it lets go.
@@ -1456,7 +1448,6 @@ impl State {
 						let served = Served {
 							claim: item.clone(),
 							metric: offer.metric,
-							rtt: offer.rtt,
 							available,
 							draining: offer.draining,
 							priority: offer.priority,

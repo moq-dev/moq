@@ -36,7 +36,7 @@ import {
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { readSize, sendPayload, sendPayloadFrom } from "../payload.ts";
+import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
@@ -276,10 +276,7 @@ type ServeGroup = {
 };
 
 /** What serving fetched frames needs beyond the group and destination stream. */
-type ServeFetch = Omit<ServeGroup, "sub"> & {
-	/** The byte frame `start` is served from: only its rest follows its full-size header. */
-	byte: number;
-};
+type ServeFetch = Omit<ServeGroup, "sub">;
 
 /** What the serving loop takes from the subscribe stream instead of serving a group. */
 type Control =
@@ -927,7 +924,6 @@ export class Publisher {
 			priority: 127,
 			metric: 0n,
 			downOnly: false,
-			rtt: 0n,
 		});
 		// What the peer decodes for a claim: lite-07 carries its instance, epoch, cost, and how far above its path it is.
 		const onWire = (route: WireRoute): WireRoute => ({ ...route, auth: undefined });
@@ -1392,7 +1388,6 @@ export class Publisher {
 					stamp: stamping(this.version, info),
 					compress: info.compress,
 					start: msg.startFrame,
-					byte: msg.startByte,
 					end: msg.endFrame,
 				});
 				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
@@ -1661,17 +1656,13 @@ export class Publisher {
 					skipped.length = 0;
 				}
 				if (pendingDrops.length > 0) {
-					for (const { start, end, error: failed } of pendingDrops.splice(0)) {
-						let error = failed;
+					for (const { start, end, error } of pendingDrops.splice(0)) {
 						const old = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-						// The pool folded the run while its stream was open, which is final for this
-						// reader: no update would re-offer a stale drop on it. Mirrors the Rust `TrackRun`.
-						if (old && record?.folded(end - 1n)) error = new StreamError(StreamCode.Evicted);
 						// A stream expired under this subscription's budget is a stale verdict, which
 						// a later verdict or group replaces as any stale drop sent, and each update drops
 						// again. A re-offer an update owed again is given up now, so the end sweep never
 						// names it.
-						else if (old) toldStale(start, end);
+						if (old) toldStale(start, end);
 						else record?.tell(start, end, reportOf({ error }));
 						const msg = SubscribeDrop.given(start, end, error, this.version, updateNumber);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
@@ -1945,22 +1936,6 @@ export class Publisher {
 				// A lite-07 stale drop is no final verdict, and a Group Stream wins over it, so a group
 				// handed out after one is served, as one a route the front switched to delivers: the
 				// update that reopens the drop would never re-offer it.
-				// The pool folded a re-offered group while it waited, which is final for this reader:
-				// tell the wire it is gone, since an update re-offered it. Mirrors the Rust `TrackRun`.
-				if (again && record?.folded(group.sequence)) {
-					group.close();
-					const evicted = new StreamError(StreamCode.Evicted);
-					const msg = SubscribeDrop.given(
-						group.sequence,
-						group.sequence + 1n,
-						evicted,
-						this.version,
-						updateNumber,
-					);
-					if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
-						return false;
-					continue;
-				}
 				if (record?.toldStale(group.sequence)) {
 					record.replaceDrops(group.sequence, group.sequence + 1n);
 				} else if (record?.told(group.sequence)) {
@@ -2454,10 +2429,8 @@ export class Publisher {
 	async #runFetchGroup(
 		group: group.Consumer,
 		stream: Writer,
-		{ stamp, compress, start: startFrame, byte, end: endFrame }: ServeFetch,
+		{ stamp, compress, start: startFrame, end: endFrame }: ServeFetch,
 	) {
-		// A compressed frame inflates only from its first byte; no subscriber asks for less.
-		if (byte > 0 && compress) throw new Error("a compressed frame is served whole");
 		// The response carries no header, so the receiver numbers the first frame it gets
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
@@ -2482,14 +2455,11 @@ export class Publisher {
 				prevTs = ts;
 			}
 
-			// The first frame states its full size, then carries only the bytes from `byte`.
-			const skip = index === startFrame ? byte : 0;
-			const size = readSize(read);
-			// A non-zero start byte names a byte of the frame, so the rest is never empty.
-			if (skip > 0 && skip >= size) throw new Error(`fetch start byte ${skip} not within the frame's ${size}`);
-			await stream.write(frameHeader(stream.version, delta, read.inflated, size, hasLengthFirst(this.version)));
-			if (read.chunks) await sendPayloadFrom(read.chunks, skip, (chunk) => stream.write(chunk), stream.closed);
-			else if (frame.payload.length > skip) await stream.write(frame.payload.subarray(skip));
+			await stream.write(
+				frameHeader(stream.version, delta, read.inflated, readSize(read), hasLengthFirst(this.version)),
+			);
+			if (read.chunks) await sendPayload(read.chunks, (chunk) => stream.write(chunk), stream.closed);
+			else if (frame.payload.length > 0) await stream.write(frame.payload);
 		}
 	}
 

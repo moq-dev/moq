@@ -10,5 +10,9 @@ typedef Endpoint = MoqSocketEndpoint;
 /// An incoming track dial, consumed by accepting or rejecting it.
 typedef IncomingTrack = MoqSocketIncomingTrack;
 
+/// Whether [path] is an endpoint's broadcast, which only routes sessions and
+/// carries no media.
+bool isEndpoint(String path) => moqSocketIsEndpoint(path: path);
+
 /// A track session with producer and reliably subscribed consumer halves.
 typedef TrackStream = MoqSocketTrackStream;

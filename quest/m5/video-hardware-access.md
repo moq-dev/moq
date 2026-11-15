@@ -33,8 +33,9 @@ Record the device, OS image, and driver when one is on hand.
 Checked 2026-11-12 (/quest-audit): part of the Windows condition holds. The
 maintainer's `windows` host (Windows 11, NVIDIA RTX 2070) has hosted agents
 natively since 2026-11-10, so the Windows GPU probes and the Media Foundation
-encode of a GPU export can run there. It has no camera, so the MJPEG and YUY2
-camera items still wait. Whether the maintainer's macOS laptop is Apple Silicon
+encode of a GPU export were split out to run there, as
+[Windows GPU tests](/quest/m4/windows-gpu-tests.md) (2026-11-15). It has no
+camera, so the MJPEG and YUY2 camera items still wait. Whether the maintainer's macOS laptop is Apple Silicon
 is not recorded; ask.
 
 The validation can start with whatever subset is available; split the rest

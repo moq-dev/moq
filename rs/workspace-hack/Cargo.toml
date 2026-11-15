@@ -94,6 +94,7 @@ toml = { version = "1" }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tower = { version = "0.5", default-features = false, features = ["make", "util"] }
+tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
 tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls", "handshake"] }
@@ -183,6 +184,7 @@ toml = { version = "1" }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tower = { version = "0.5", default-features = false, features = ["make", "util"] }
+tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
 tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls", "handshake"] }

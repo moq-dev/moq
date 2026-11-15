@@ -65,15 +65,14 @@ export interface RouteHop {
 
 /** How a lite-07 publisher reaches a publisher node: the `path` it crossed, the publisher first and
  * the sender last, whether a node on it sent GOAWAY, the lowest link priority on it, the sender's
- * metric to the publisher, whether it may only travel away from an upstream, and its informational
- * RTT in milliseconds, `undefined` when unmeasured. Mirrors `route::path::Offer` in rs/moq-net. */
+ * metric to the publisher, and whether it may only travel away from an upstream. Mirrors
+ * `route::path::Offer` in rs/moq-net. */
 export interface Offer {
 	path: RouteHop[];
 	draining: boolean;
 	priority: number;
 	metric: bigint;
 	downOnly: boolean;
-	rtt: bigint | undefined;
 }
 
 /** A Route Offer this node refuses: the path it still names, which a later DEAD may match, and why. */
@@ -105,8 +104,7 @@ export const ROUTE_MAX_HOPS = 32;
 
 // Route Offer flags.
 const DOWN_ONLY = 0x1;
-const RTT = 0x2;
-const DRAINING = 0x4;
+const DRAINING = 0x2;
 
 /**
  * A message on the publisher's side of the Announce Stream.
@@ -321,7 +319,7 @@ async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | unde
 	return cost;
 }
 
-/** Encode a Route Offer: the path, then flags, priority, metric, and RTT. No node offers an empty
+/** Encode a Route Offer: the path, then flags, priority, and metric. No node offers an empty
  * path or one past {@link ROUTE_MAX_HOPS}, nor names Node ID 0 in one. */
 async function encodeOffer(w: Writer, offer: Offer) {
 	if (offer.path.length === 0 || offer.path.length > ROUTE_MAX_HOPS || offer.path.some((hop) => hop.node === 0n))
@@ -331,12 +329,9 @@ async function encodeOffer(w: Writer, offer: Offer) {
 		await w.u62(hop.node);
 		await w.u62(hop.session);
 	}
-	await w.u8(
-		(offer.downOnly ? DOWN_ONLY : 0) | (offer.rtt === undefined ? 0 : RTT) | (offer.draining ? DRAINING : 0),
-	);
+	await w.u8((offer.downOnly ? DOWN_ONLY : 0) | (offer.draining ? DRAINING : 0));
 	await w.u8(toWire(offer.priority));
 	await w.u62(offer.metric);
-	if (offer.rtt !== undefined) await w.u62(offer.rtt);
 }
 
 /** Decode a Route Offer. Its path comes first, so a node refusing the rest still learns the path a
@@ -361,11 +356,10 @@ async function decodeOffer(r: Reader): Promise<Offer | Unusable> {
 	if (count > BigInt(ROUTE_MAX_HOPS)) return refuse("hops");
 	if (path.some((hop) => hop.node === 0n)) return refuse("node");
 	const flags = await r.u8();
-	if (flags & ~(DOWN_ONLY | RTT | DRAINING)) return refuse("flags");
+	if (flags & ~(DOWN_ONLY | DRAINING)) return refuse("flags");
 	const priority = fromWire(await r.u8());
 	const metric = await r.u62();
-	const rtt = flags & RTT ? await r.u62() : undefined;
-	return { path, draining: (flags & DRAINING) !== 0, priority, metric, downOnly: (flags & DOWN_ONLY) !== 0, rtt };
+	return { path, draining: (flags & DRAINING) !== 0, priority, metric, downOnly: (flags & DOWN_ONLY) !== 0 };
 }
 
 async function encodeDead(w: Writer, dead: Dead) {

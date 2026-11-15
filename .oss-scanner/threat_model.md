@@ -25,7 +25,7 @@ The relay is deployed on the public internet as shared infrastructure: one proce
 - **Cache integrity.** The relay caches and forwards groups by broadcast, track, and group. A publisher must not be able to overwrite or inject into a broadcast it was not granted, and a subscriber must never receive one tenant's data under another tenant's name.
 - **Cluster trust.** Peer relays authenticate with tokens or mTLS and get broader rights than clients. A relay dials only configured or discovered peers, never a URL learned from an announcement. LAN discovery over mDNS (`[cluster.lan]`) is open to anyone on the network unless `secret` is set, which is documented; with `secret` set, an unkeyed host must not be able to join.
 - **Amplification and reflection.** QUIC's anti-amplification limit and address validation, and ICE in the WebRTC gateway, answer unauthenticated UDP. A response larger than the request toward a spoofed source is a finding.
-- **End-to-end encryption and signing.** `moq-crypto` encrypts groups, datagrams, and track names so a relay cannot read them, and signs frames so a relay cannot forge them. A flaw in either construction (nonce reuse, a key or name leaking to the relay, a forgeable group or signature) is in scope.
+- **End-to-end encryption.** `moq-crypto` encrypts groups, datagrams, and track names so a relay cannot read them. A flaw in the construction (nonce reuse, a key or name leaking to the relay, a forgeable group) is in scope.
 
 ## Components that matter most / least
 

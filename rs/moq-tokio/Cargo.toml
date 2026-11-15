@@ -130,8 +130,9 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 # be driven with synthetic daemon events.
 flume = "0.12"
 kio = { path = "../kio", features = ["sim"] }
-# The integration tests build congestion controllers directly.
-moq-congestion = { path = "../moq-congestion" }
+# The integration tests build congestion controllers directly, including the candidates the
+# real-socket comparisons run.
+moq-congestion = { path = "../moq-congestion", features = ["lab"] }
 # A bufferbloated path for the receive-credit tests and benchmark.
 moq-shaper = { path = "../moq-shaper" }
 # The tests run QUIC sessions on the simulator. Only `sim`, so a test build keeps the
