@@ -159,7 +159,7 @@ impl Feed {
 	async fn run(&mut self, count: u64) {
 		for _ in 0..count {
 			let index = self.written.len() as u64;
-			if index % FRAMES == 0 {
+			if index.is_multiple_of(FRAMES) {
 				if let Some(group) = self.group.take() {
 					group.close().unwrap();
 				}
