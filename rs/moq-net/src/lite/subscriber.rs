@@ -6972,6 +6972,79 @@ mod tests {
 		}
 	}
 
+	/// A finished copy still serving fetches while our FIN waits for the publisher ends once
+	/// the session no longer allows the broadcast, rather than outliving the grant.
+	#[kio::test]
+	async fn a_revoked_grant_ends_a_finished_copy_awaiting_its_fin() {
+		let (session, _peer) = crate::transport::memory::pair(Default::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::all());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: auth.clone(),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			node: 0,
+			depth: 0,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let serve_loop = ServeLoop::new(
+			&serve,
+			broadcast.reserve_track("video").unwrap(),
+			crate::track::Info::timed(),
+		);
+		let track = serve_loop.serving.clone();
+		let finished = FinishedServe {
+			serving: Some(serve_loop.serving),
+			demand: serve_loop.demand,
+			dynamic: serve_loop.dynamic.fetches_only(),
+			fetches: serve_loop.fetches,
+			closed: serve_loop.closed,
+		};
+		// A reader holds the finished copy.
+		let _reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let gate = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Finish {
+				writer: None,
+				reader: None,
+				_working: crate::session::Work::default().start(),
+			},
+			gate,
+			datagrams: None,
+			finished: Some(finished),
+		};
+
+		auth.handle().authorize(&crate::auth::Grant::default());
+		let waiter = kio::Waiter::noop();
+		let _ = kio::Task::poll(&mut running, &waiter);
+		assert!(running.finished.is_none(), "the finished copy outlived its grant");
+		let closed = track.poll_closed(&waiter);
+		assert!(matches!(closed, Poll::Ready(Err(Error::Unauthorized))), "{closed:?}");
+	}
+
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
 	async fn check_subscription_fin(version: Version, responses: Vec<u8>, clean: bool) {
 		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
@@ -12553,11 +12626,7 @@ impl TrackServeRun {
 		if let Some(datagrams) = &mut self.datagrams {
 			datagrams.end(Err(Error::Unauthorized));
 		}
-		tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "subscription no longer authorized");
-		// Each fetch in flight resets itself as it drops, seeing the denial.
-		if let Some(serving) = self.finished.take().and_then(|finished| finished.serving) {
-			let _ = serving.abort(Error::Unauthorized);
-		}
+		self.revoke_finished();
 		match std::mem::replace(&mut self.state, TrackRunState::Done) {
 			TrackRunState::Info {
 				request,
@@ -12589,6 +12658,15 @@ impl TrackServeRun {
 				// Each fetch in flight resets itself as it drops, seeing the same denial.
 			}
 			TrackRunState::Ending { .. } | TrackRunState::Finish { .. } | TrackRunState::Done => {}
+		}
+	}
+
+	/// The session no longer allows the broadcast: end the finished copy and its fetches.
+	fn revoke_finished(&mut self) {
+		tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "subscription no longer authorized");
+		// Each fetch in flight resets itself as it drops, seeing the denial.
+		if let Some(serving) = self.finished.take().and_then(|finished| finished.serving) {
+			let _ = serving.abort(Error::Unauthorized);
 		}
 	}
 }
@@ -12660,15 +12738,19 @@ impl TrackServeRun {
 			return Poll::Ready(());
 		}
 		ready!(self.gate.poll_ready(waiter));
-		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
-		// Nor on a closed session, whose grants end with it: the session's end decides how
-		// its tracks end.
-		if !matches!(self.state, TrackRunState::Ending { .. } | TrackRunState::Finish { .. })
+		// A finished track only waits for its FIN to be acknowledged: only its finished copy,
+		// still serving fetches, is left to revoke. Nothing is on a closed session, whose grants
+		// end with it: the session's end decides how its tracks end.
+		let ended = matches!(self.state, TrackRunState::Ending { .. } | TrackRunState::Finish { .. });
+		if (!ended || self.finished.is_some())
 			&& self.gate.poll_denied(waiter).is_ready()
 			&& self.serve.subscriber.session.poll_ending(waiter).is_pending()
 		{
-			self.revoke();
-			return Poll::Ready(());
+			if !ended {
+				self.revoke();
+				return Poll::Ready(());
+			}
+			self.revoke_finished();
 		}
 		loop {
 			match &mut self.state {
