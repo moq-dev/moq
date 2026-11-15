@@ -2,6 +2,13 @@
 #include "moq-service.h"
 #include "moq-encoder-latency.h"
 #include "moq-settings.h"
+#include "logger.h"
+
+#ifdef MOQ_FRONTEND_API
+#include <obs-frontend-api.h>
+#include <util/config-file.h>
+#endif
+#include <cstring>
 
 // TODO: Define supported codecs.
 const char *audio_codecs[] = {"aac", "opus", nullptr};
@@ -38,14 +45,35 @@ void MoQService::Defaults(obs_data_t *settings)
 	MoQSettings::Defaults(settings);
 }
 
+// The stream encoder the profile configures. OBS never says which encoder the settings it
+// hands a service are for; its stream outputs, the only callers that encode with them on a
+// MoQ service, build them for this one.
+static std::string ProfileStreamEncoderId()
+{
+#ifndef MOQ_FRONTEND_API
+	return {};
+#else
+	config_t *config = obs_frontend_get_profile_config();
+	if (!config)
+		return {};
+	const char *mode = config_get_string(config, "Output", "Mode");
+	if (mode && strcmp(mode, "Advanced") == 0) {
+		const char *id = config_get_string(config, "AdvOut", "Encoder");
+		return id ? id : "";
+	}
+	return SimpleVideoEncoderId(config_get_string(config, "SimpleOutput", "StreamEncoder"));
+#endif
+}
+
 void MoQService::ApplyEncoderSettings(obs_data_t *video_settings, obs_data_t *)
 {
+	if (!video_settings)
+		return;
+	obs_data_set_bool(video_settings, "repeat_headers", true);
 	// A MoQ group starts at a keyframe, so a viewer joins only as fast as the
 	// keyframe interval, and B-frames or lookahead hold every frame back.
-	if (video_settings) {
-		obs_data_set_bool(video_settings, "repeat_headers", true);
-		ApplyEncoderLatency(video_settings);
-	}
+	const std::string id = ProfileStreamEncoderId();
+	LOG_INFO("Service encoder %s: %s", id.c_str(), ApplyEncoderLatency(id, video_settings));
 }
 
 const char *MoQService::GetConnectInfo(enum obs_service_connect_info type)
