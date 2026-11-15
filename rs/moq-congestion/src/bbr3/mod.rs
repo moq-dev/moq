@@ -861,21 +861,35 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRCheckFullBWReached <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.2>
+    ///
+    /// The draft checks only the ACK that starts a round, so under ACK aggregation a plateau can
+    /// be three low samples that happened to land on round starts while the ACKs between them
+    /// still grew. As Linux BBRv3 does, any ACK whose sample grew 25% resets the baseline, and
+    /// only round starts count plateau rounds. An application-limited sample neither resets nor
+    /// counts, and only round starts count it toward `app_limited_rounds`.
+    /// <https://github.com/google/bbr/blob/90210de4b779d40496dee0b89081780eeddf2a60/net/ipv4/tcp_bbr.c#L1924-L1948>
     fn check_full_bw_reached(&mut self) {
-        if self.full_bw_now || !self.round_start {
+        if self.full_bw_now {
             return;
         }
         if let Some(rate_sample) = self.rs {
             if rate_sample.is_app_limited {
-                self.app_limited_rounds += 1;
+                if self.round_start {
+                    self.app_limited_rounds += 1;
+                }
                 return;
             }
-            self.app_limited_rounds = 0;
+            if self.round_start {
+                self.app_limited_rounds = 0;
+            }
             if rate_sample.delivery_rate >= self.full_bw * FULL_BW_GROWTH {
                 self.reset_full_bw();
                 self.full_bw = rate_sample.delivery_rate;
                 return;
             }
+        }
+        if !self.round_start {
+            return;
         }
         self.full_bw_count += 1;
         self.full_bw_now = self.full_bw_count >= MAX_FULL_BW_COUNT;
@@ -2361,6 +2375,12 @@ mod test {
         timestamps: bool,
         /// each packet's queueing delay at the bottleneck, by when it reached it
         queues: Vec<(u64, u64)>,
+        /// ACK aggregation, as on Wi-Fi and cellular links: the receiver releases ACKs in bursts,
+        /// the gaps between them drawn uniformly from the range by the seeded generator. `None`
+        /// acknowledges each packet as it leaves the bottleneck.
+        aggregation: Option<(std::ops::Range<u64>, Pcg32)>,
+        /// when the receiver next releases its held ACKs
+        release_ns: u64,
     }
 
     impl Sim {
@@ -2382,7 +2402,21 @@ mod test {
                 max_queue_ns: 0,
                 timestamps: false,
                 queues: Vec::new(),
+                aggregation: None,
+                release_ns: 0,
             }
+        }
+
+        /// Aggregate ACKs into bursts released every `gap_ns` on average, varying by half either
+        /// way, drawn from `seed`.
+        fn aggregate(&mut self, gap_ns: u64, seed: u64) {
+            let range = gap_ns / 2..gap_ns * 3 / 2;
+            self.aggregation = Some((range, Pcg32::seed_from_u64(seed)));
+        }
+
+        /// Change the bottleneck's bandwidth for packets that reach it from now on.
+        fn set_bw(&mut self, bw: f64) {
+            self.btl_service_ns = (self.mss as f64 / bw * 1e9).round() as u64;
         }
 
         /// Convert a simulator-nanosecond offset into an `Instant`.
@@ -2505,7 +2539,13 @@ mod test {
                     let service_start = arrival.max(self.btl_free_ns);
                     let finish = service_start + self.btl_service_ns;
                     self.btl_free_ns = finish;
-                    let ack_ns = finish + self.ret_ns;
+                    let mut ack_ns = finish + self.ret_ns;
+                    if let Some((range, rng)) = &mut self.aggregation {
+                        while self.release_ns < finish {
+                            self.release_ns += rng.random_range(range.clone());
+                        }
+                        ack_ns = self.release_ns + self.ret_ns;
+                    }
                     let queue_ns = service_start - arrival;
                     self.max_queue_ns = self.max_queue_ns.max(queue_ns);
                     self.queues.push((arrival, queue_ns));
@@ -2533,24 +2573,34 @@ mod test {
                     if on_send(&mut self.bbr).is_break() {
                         return;
                     }
-                } else if let Some(p) = self.flight.pop_front() {
-                    self.now_ns = self.now_ns.max(p.ack_ns);
-                    self.inflight -= self.mss;
+                } else if let Some(first) = self.flight.pop_front() {
+                    self.now_ns = self.now_ns.max(first.ack_ns);
                     let now_at = self.base.saturating_add(Duration::from_nanos(self.now_ns));
-                    let send_at = self.base.saturating_add(Duration::from_nanos(p.send_ns));
-                    let received = self.timestamps.then(|| Duration::from_nanos(p.recv_ns));
-                    self.bbr
-                        .ack_received(now_at, send_at, self.mss, p.pn, received);
+                    // One ACK covers every packet released at this instant.
+                    let mut burst = vec![first];
+                    while self.flight.front().is_some_and(|p| p.ack_ns == self.now_ns) {
+                        burst.extend(self.flight.pop_front());
+                    }
+                    let mut ce = None;
+                    for p in &burst {
+                        self.inflight -= self.mss;
+                        let send_at = self.base.saturating_add(Duration::from_nanos(p.send_ns));
+                        let received = self.timestamps.then(|| Duration::from_nanos(p.recv_ns));
+                        self.bbr
+                            .ack_received(now_at, send_at, self.mss, p.pn, received);
+                        if p.ce {
+                            ce = Some(send_at);
+                        }
+                    }
                     self.bbr.end_acks(now_at, self.inflight, false);
-                    // Each ACK covers one packet, so a marked one raises the CE count.
-                    if p.ce {
-                        self.bbr.on_ce(Ce {
-                            now: now_at,
-                            sent: send_at,
-                        });
+                    // The ACK's ECN counts report new CE marks, so the transport reports one
+                    // congestion event for the newest marked packet.
+                    if let Some(sent) = ce {
+                        self.bbr.on_ce(Ce { now: now_at, sent });
                     }
 
-                    if on_ack(&mut self.bbr, self.now_ns, self.inflight, p.pn).is_break() {
+                    let last = burst.last().unwrap().pn;
+                    if on_ack(&mut self.bbr, self.now_ns, self.inflight, last).is_break() {
                         return;
                     }
                 } else {
@@ -4584,6 +4634,47 @@ mod test {
             err < 0.05,
             "max_bw {max_bw} not within 5% of simulated {BW} (rel err {err})"
         );
+    }
+
+    /// Startup finds a capacity that rises tenfold mid-Startup on a path whose receiver releases
+    /// ACKs in bursts half an RTT apart on average, as Wi-Fi and cellular links do, and still ends
+    /// on the plateau rather than chasing the bursts' noise.
+    #[test]
+    fn startup_finds_capacity_rise_with_ack_aggregation() {
+        const MSS: u64 = 1200;
+        const LOW: f64 = 1_250_000.0;
+        const HIGH: f64 = 12_500_000.0;
+        const RTT_NS: u64 = 40 * MS;
+
+        for seed in 0..4 {
+            let mut sim = Sim::new(Config::default(), MSS, LOW, RTT_NS);
+            sim.aggregate(RTT_NS / 2, seed);
+            sim.run(
+                100_000,
+                |_| ControlFlow::Continue(()),
+                |bbr, _, _, _| match bbr.round_count {
+                    3.. => ControlFlow::Break(()),
+                    _ => ControlFlow::Continue(()),
+                },
+            );
+            assert!(!sim.bbr.full_bw_reached, "seed {seed} ended Startup early");
+
+            sim.set_bw(HIGH);
+            sim.run(
+                1_000_000,
+                |_| ControlFlow::Continue(()),
+                |bbr, _, _, _| match bbr.full_bw_reached {
+                    true => ControlFlow::Break(()),
+                    false => ControlFlow::Continue(()),
+                },
+            );
+            let err = (sim.bbr.max_bw - HIGH).abs() / HIGH;
+            assert!(
+                err < 0.05,
+                "seed {seed}: max_bw {} not near {HIGH}",
+                sim.bbr.max_bw
+            );
+        }
     }
 
     /// A.13: Achieving expected cruise bandwidth on a link with ACK aggregation.
@@ -7501,6 +7592,53 @@ mod test {
         sim.bbr.start_probe_bw_up();
         sim.fill_probe();
         assert!(!sim.bbr.rate.is_app_limited());
+    }
+
+    /// Run a round each 20ms that sends `count` packets, doubling each round, whose ACKs arrive
+    /// aggregated: the first packet's alone 10ms later, starting the round with a one-packet
+    /// sample, and the rest 1ms after, carrying the round's growth. Packets after the first are
+    /// sent once the application ran dry when `app_limited`. Returns the round the plateau check
+    /// finished on, if any.
+    fn aggregated_rounds(sim: &mut Sim, mut count: u64, app_limited: bool) -> Option<u64> {
+        for round in 0..6 {
+            let start = sim.now_ns + round * 20 * MS;
+            let first = sim.pn;
+            sim.send(start, 1);
+            if app_limited {
+                sim.starve();
+            }
+            sim.send(start, count - 1);
+            sim.ack(start + 10 * MS, [first], false);
+            sim.ack(start + 11 * MS, first + 1..sim.pn, false);
+            if sim.bbr.full_bw_now {
+                return Some(round);
+            }
+            count *= 2;
+        }
+        None
+    }
+
+    /// Growth on any ACK keeps Startup going, though every round starts on the same one-packet
+    /// sample. An application-limited ACK's growth does not, as it measures the application.
+    #[test]
+    fn startup_grows_between_round_starts() {
+        let mut sim = scripted();
+        assert_eq!(aggregated_rounds(&mut sim, 4, false), None);
+        assert_eq!(sim.bbr.state, BbrState::Startup);
+
+        let mut sim = scripted();
+        assert_eq!(aggregated_rounds(&mut sim, 4, true), Some(3));
+        assert_ne!(sim.bbr.state, BbrState::Startup);
+    }
+
+    /// ProbeBW_UP keeps probing while ACKs between its round starts grow.
+    #[test]
+    fn probe_up_grows_between_round_starts() {
+        let mut sim = probed();
+        sim.now_ns = 10 * MS;
+        sim.bbr.start_probe_bw_up();
+        assert_eq!(aggregated_rounds(&mut sim, 100, false), None);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
     }
 
     /// Finishing a probe ages the max-bw window once, so cruise rounds keep the probe's maximum,
